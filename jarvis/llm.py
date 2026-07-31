@@ -14,6 +14,24 @@ import httpx
 
 from . import config
 
+# One keep-alive connection pool for every OpenRouter call (Client is
+# thread-safe). Bare httpx.post reconnected per request, which taxed every
+# agent step and — audibly — every streamed TTS sentence with a fresh
+# TCP+TLS handshake. With the pool, the chat call that produced the reply
+# leaves a warm connection for the TTS that speaks it.
+# keepalive_expiry is raised from the 5s default: voice turns are minutes
+# apart, and an expired pool means the first call of every turn pays
+# DNS+TCP+TLS again — on this machine that setup path is usually ~60ms but
+# has stalled for seconds when the resolver/route misbehaves (Tailscale DNS
+# interception is a suspect). transport retries=2 retries the *connect*
+# phase quickly on exactly those blips.
+_client = httpx.Client(
+    timeout=120.0,
+    limits=httpx.Limits(max_connections=20, max_keepalive_connections=10,
+                        keepalive_expiry=300.0),
+    transport=httpx.HTTPTransport(retries=2),
+)
+
 
 @dataclass
 class Reply:
@@ -72,7 +90,7 @@ def chat(
     for attempt in range(max_retries):
         started = time.monotonic()
         try:
-            response = httpx.post(
+            response = _client.post(
                 config.OPENROUTER_URL, json=payload, headers=headers, timeout=timeout
             )
         except httpx.HTTPError as exc:
@@ -113,3 +131,117 @@ def chat(
         )
 
     raise LLMError(f"{model} failed after {max_retries} attempts: {last_error}")
+
+
+def speech(
+    text: str,
+    model: str,
+    voice: str | None = None,
+    instructions: str | None = None,
+    speed: float | None = None,
+    response_format: str = "mp3",
+    provider: str | None = None,
+    timeout: float = 60.0,
+    max_retries: int = 3,
+) -> bytes:
+    """Text-to-speech via OpenRouter's audio endpoint. Returns raw audio bytes.
+
+    voice, instructions, and speed are provider-specific; omit them to get
+    the model's defaults. `provider` PINS routing — no fallbacks: the same
+    model can be orders of magnitude slower on another host, and OpenRouter
+    falls back on transient blips, which is how "prefer the fast provider"
+    still produced 11s chunks. Transient errors on the pinned host are
+    covered by this function's own retry loop instead.
+    """
+    payload: dict[str, Any] = {
+        "model": model,
+        "input": text,
+        "response_format": response_format,
+    }
+    if voice:
+        payload["voice"] = voice
+    if instructions:
+        payload["instructions"] = instructions
+    if speed and speed != 1.0:
+        payload["speed"] = speed
+    if provider:
+        payload["provider"] = {"order": [provider], "allow_fallbacks": False}
+
+    headers = {
+        "Authorization": f"Bearer {config.api_key()}",
+        "Content-Type": "application/json",
+        "X-Title": "Jarvis",
+    }
+
+    last_error: Exception | None = None
+    for attempt in range(max_retries):
+        try:
+            response = _client.post(
+                config.OPENROUTER_SPEECH_URL, json=payload, headers=headers, timeout=timeout
+            )
+        except httpx.HTTPError as exc:
+            last_error = exc
+            time.sleep(2**attempt)
+            continue
+
+        if response.status_code in (408, 429) or response.status_code >= 500:
+            last_error = LLMError(f"HTTP {response.status_code}: {response.text[:300]}")
+            time.sleep(2**attempt)
+            continue
+        if response.status_code >= 400:
+            raise LLMError(f"HTTP {response.status_code}: {response.text[:500]}")
+
+        if not response.content:
+            raise LLMError("speech endpoint returned an empty body")
+        return response.content
+
+    raise LLMError(f"{model} speech failed after {max_retries} attempts: {last_error}")
+
+
+def transcribe(
+    audio: bytes,
+    model: str,
+    filename: str = "audio.webm",
+    mime: str = "audio/webm",
+    language: str | None = None,
+    timeout: float = 60.0,
+    max_retries: int = 3,
+) -> str:
+    """Speech-to-text via OpenRouter's transcription endpoint. Returns the text."""
+    data: dict[str, Any] = {"model": model}
+    if language:
+        data["language"] = language
+
+    headers = {
+        "Authorization": f"Bearer {config.api_key()}",
+        "X-Title": "Jarvis",
+    }
+
+    last_error: Exception | None = None
+    for attempt in range(max_retries):
+        try:
+            response = _client.post(
+                config.OPENROUTER_TRANSCRIPTION_URL,
+                data=data,
+                files={"file": (filename, audio, mime)},
+                headers=headers,
+                timeout=timeout,
+            )
+        except httpx.HTTPError as exc:
+            last_error = exc
+            time.sleep(2**attempt)
+            continue
+
+        if response.status_code in (408, 429) or response.status_code >= 500:
+            last_error = LLMError(f"HTTP {response.status_code}: {response.text[:300]}")
+            time.sleep(2**attempt)
+            continue
+        if response.status_code >= 400:
+            raise LLMError(f"HTTP {response.status_code}: {response.text[:500]}")
+
+        body = response.json()
+        if "text" not in body:
+            raise LLMError(f"Malformed transcription response: {str(body)[:300]}")
+        return (body["text"] or "").strip()
+
+    raise LLMError(f"{model} transcription failed after {max_retries} attempts: {last_error}")

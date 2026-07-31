@@ -23,6 +23,7 @@ class Turn:
     cost_usd: float = 0.0
     latency_s: float = 0.0
     stopped_early: bool = False
+    cancelled: bool = False
     tokens_saved: int = 0
 
 
@@ -36,13 +37,24 @@ class Agent:
         approve: Callable[[tools.Tool, dict], bool] | None = None,
         on_event: Callable[[str, Any], None] | None = None,
         policy: context.ContextPolicy | None = None,
+        should_stop: Callable[[], bool] | None = None,
     ):
         self.model = model or config.TIERS["orchestrator"]
         self.tool_specs = tools.specs(tool_names)
         self.max_steps = max_steps
         self.approve = approve
         self.on_event = on_event or (lambda kind, data: None)
+        # Asked between steps only — see run_turn. A surface that can start a
+        # turn should be able to abandon one.
+        self.should_stop = should_stop or (lambda: False)
         self.policy = policy or context.ContextPolicy()
+        self._base_system = system
+        # Agents with skill tools get the always-visible skills index appended
+        # to their system message; agents without them (designer, benches)
+        # must not see references to tools they cannot call.
+        self._has_skills = any(
+            spec["function"]["name"] == "skill_read" for spec in self.tool_specs
+        )
         self.messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
 
     def _summarize(self, transcript: str) -> str:
@@ -63,11 +75,48 @@ class Agent:
             max_tokens=1024,
         ).text
 
-    def run_turn(self, user_input: str) -> Turn:
-        self.messages.append({"role": "user", "content": user_input})
+    def run_turn(self, user_input: str, images: list[str] | None = None) -> Turn:
+        """`images`: base64 PNGs supplied by the owner (a whiteboard sketch,
+        a screenshot), attached to this user message so a vision model sees
+        them alongside the text. Same multimodal shape the context manager
+        already evicts by age."""
+        # Refresh the skills index every turn: messages[0] is re-sent with
+        # each request anyway, pruning and compaction never touch it, and a
+        # skill saved mid-conversation is visible on the very next turn.
+        if self._has_skills:
+            block = tools.skills.index()
+            self.messages[0]["content"] = (
+                self._base_system + ("\n\n" + block if block else "")
+            )
+        if images:
+            self.messages.append(
+                {
+                    "role": "user",
+                    "content": [{"type": "text", "text": user_input}]
+                    + [
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:image/png;base64,{b64}"},
+                        }
+                        for b64 in images
+                    ],
+                }
+            )
+        else:
+            self.messages.append({"role": "user", "content": user_input})
         turn = Turn()
 
         for step in range(self.max_steps):
+            # Cancellation is checked *here and nowhere else*. Between steps
+            # the transcript is always whole — either nothing is pending, or
+            # every assistant tool_call already has its result behind it.
+            # Bailing out inside the tool loop would leave a tool_call with no
+            # result, and the next request would 400 (invariant 3).
+            if self.should_stop():
+                turn.cancelled = True
+                self.on_event("cancelled", step)
+                return turn
+
             reply = llm.chat(self.model, self.messages, tools=self.tool_specs)
             turn.steps = step + 1
             turn.cost_usd += reply.cost_usd
@@ -88,8 +137,11 @@ class Agent:
                 self.on_event("text", reply.text)
                 return turn
 
+            # Distinct from "text": this is what the model said on its way to
+            # calling a tool, so a surface can show it without mistaking it
+            # for the finished reply.
             if reply.text:
-                self.on_event("text", reply.text)
+                self.on_event("interim_text", reply.text)
 
             # All results from one assistant turn go back together, each keyed to
             # its call id. Splitting them across messages teaches the model to

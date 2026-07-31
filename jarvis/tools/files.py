@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Annotated
 
 from . import tool
+from .secrets import is_protected, refusal
 
 _seen: dict[str, float] = {}
 MAX_READ_CHARS = 40_000
@@ -26,6 +27,10 @@ def read_file(
 ) -> str:
     """Read a UTF-8 text file from disk."""
     target = _resolve(path)
+    # Checked before .exists() so the refusal is the same whether or not the
+    # file is there, and against both spellings so a symlink cannot launder it.
+    if is_protected(path) or is_protected(target):
+        return refusal(target.name)
     if not target.exists():
         return f"Error: {target} does not exist."
     if target.is_dir():

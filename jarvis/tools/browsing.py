@@ -23,7 +23,8 @@ from . import ToolResult, tool
 def browser_goto(
     url: Annotated[str, "Full URL including http:// or https://"],
 ) -> str:
-    """Open a URL in the browser. Blocked for hosts outside the allowlist."""
+    """Open a URL in the browser. Public sites and localhost work; private/LAN
+    addresses and Jarvis's own HUD are blocked."""
     try:
         return SESSION.goto(url)
     except BrowserError as exc:
@@ -74,10 +75,20 @@ def browser_type(
 @tool
 def browser_screenshot(
     full_page: Annotated[bool, "Capture the whole scrollable page"] = False,
+    marked: Annotated[
+        bool, "Overlay each interactive element's ref (e0, e1…) as a badge on the image"
+    ] = True,
 ) -> ToolResult:
-    """Take a screenshot of the current page. Requires a vision-capable model."""
+    """Take a screenshot of the current page. Requires a vision-capable model.
+
+    With marked=True (the default) every interactive element is labeled with a
+    small ref badge; pass that ref to browser_click / browser_type. Refs are
+    reassigned whenever the page changes, so take a fresh screenshot after
+    every action. Use marked=False for a clean shot when only layout matters.
+    """
     try:
-        image, size = SESSION.screenshot_b64(full_page)
+        image, size, marks = SESSION.screenshot_b64(full_page, marked)
     except BrowserError as exc:
         return ToolResult(f"Error: {exc}")
-    return ToolResult(f"Screenshot captured ({size:,} bytes).", image_b64=image)
+    note = f" {marks} interactive element(s) marked." if marked else ""
+    return ToolResult(f"Screenshot captured ({size:,} bytes).{note}", image_b64=image)

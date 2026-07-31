@@ -230,6 +230,7 @@ class TaskResult:
     cost_usd: float = 0.0
     latency_s: float = 0.0
     error: str = ""
+    detail: str = ""  # optional summary for the results table, e.g. "5/6 correct"
 
 
 def run_task(model: str, task: Task) -> TaskResult:

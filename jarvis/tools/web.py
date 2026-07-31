@@ -15,6 +15,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 import httpx
 from bs4 import BeautifulSoup
 
+from .. import config
 from . import tool
 
 UA = (
@@ -148,6 +149,14 @@ def fetch_page(
     """
     if not url.startswith(("http://", "https://")):
         return "Error: url must start with http:// or https://"
+    if config.is_face_origin(url):
+        return "Error: that is Jarvis's own control plane, not a web page."
+    if config.is_lan_host(urlparse(url).hostname or ""):
+        return (
+            "Error: that address is on the private network (or does not "
+            "resolve). Public sites and localhost are reachable; LAN hosts "
+            "are not."
+        )
 
     try:
         response = httpx.get(
@@ -155,6 +164,11 @@ def fetch_page(
         )
     except httpx.HTTPError as exc:
         return f"Error: could not fetch {url} ({exc})"
+
+    # follow_redirects means the final URL may not be the one just vetted.
+    final_host = response.url.host or ""
+    if config.is_face_origin(str(response.url)) or config.is_lan_host(final_host):
+        return f"Error: {url} redirected to {final_host!r}, which is blocked."
 
     if response.status_code >= 400:
         return f"Error: {url} returned HTTP {response.status_code}."

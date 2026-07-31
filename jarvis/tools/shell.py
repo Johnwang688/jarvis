@@ -13,11 +13,12 @@ import subprocess
 from typing import Annotated
 
 from . import tool
+from .secrets import protected_in_command, refusal
 
 READ_ONLY = {
     "ls", "cat", "head", "tail", "wc", "grep", "rg", "find", "file", "stat",
     "du", "df", "date", "whoami", "hostname", "uname", "pwd", "which", "env",
-    "ps", "uptime", "git", "tree", "echo",
+    "ps", "uptime", "git", "tree", "echo", "ss",
 }
 
 GIT_WRITE = {"push", "commit", "reset", "clean", "rebase", "merge", "checkout"}
@@ -57,6 +58,10 @@ def run_readonly(
     if not tokens:
         return "Error: empty command."
 
+    protected = protected_in_command(command)
+    if protected:
+        return refusal(protected)
+
     binary = tokens[0].rsplit("/", 1)[-1]
     if binary not in READ_ONLY:
         return (
@@ -80,4 +85,11 @@ def run_command(
 
     Use for anything that installs, modifies, deletes, or sends.
     """
+    # Not overridable by approval. The prompt shows the command, not what it
+    # will print, so approving `grep -R key ~/projects` is not consent to put
+    # a live credential in the transcript.
+    protected = protected_in_command(command)
+    if protected:
+        return refusal(protected)
+
     return _run(command)

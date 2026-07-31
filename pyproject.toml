@@ -10,6 +10,11 @@ dependencies = [
     "prompt-toolkit>=3.0",
 ]
 
+[project.optional-dependencies]
+# Local TTS (the default backend when installed): `uv pip install -e .[voice]`
+# plus the model files in ~/.cache/jarvis-tts/ — see CLAUDE.md.
+voice = ["kokoro-onnx>=0.4"]
+
 [project.scripts]
 jarvis = "jarvis.__main__:main"
 

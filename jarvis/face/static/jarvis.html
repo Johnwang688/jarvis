@@ -1,0 +1,974 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>J.A.R.V.I.S.</title>
+<link rel="icon" href="/static/favicon.ico" sizes="16x16 32x32 48x48 64x64 128x128 256x256">
+<link rel="manifest" href="/static/manifest.json">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --cyan: #38bdf8;
+    --cyan-dim: rgba(56,189,248,.28);
+    --cyan-faint: rgba(56,189,248,.10);
+    --amber: #fbbf24;
+    --text: #b8cbe8;
+    --mono: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  }
+  html, body { height: 100%; overflow: hidden; }
+  body {
+    font-family: "Segoe UI", system-ui, sans-serif;
+    background:
+      radial-gradient(ellipse at 50% 42%, rgba(30,74,104,.20) 0%, transparent 55%),
+      repeating-linear-gradient(0deg, transparent 0 39px, rgba(56,189,248,.035) 39px 40px),
+      repeating-linear-gradient(90deg, transparent 0 39px, rgba(56,189,248,.035) 39px 40px),
+      #04070c;
+    color: var(--text);
+    position: relative;
+  }
+
+  /* ---- status banner ---- */
+  #banner {
+    position: absolute; top: 18px; left: 50%; transform: translateX(-50%);
+    text-align: center; z-index: 5;
+  }
+  #banner .title { font-size: 14px; letter-spacing: .55em; color: var(--cyan); font-weight: 600; text-indent: .55em; }
+  #status {
+    margin-top: 8px; font: 11px var(--mono); letter-spacing: .3em; text-indent: .3em;
+    color: #6b8db3; text-transform: uppercase; min-height: 14px;
+  }
+  #status.active { color: var(--cyan); text-shadow: 0 0 12px rgba(56,189,248,.7); }
+  #status.tool { color: var(--amber); text-shadow: 0 0 12px rgba(251,191,36,.5); }
+
+  /* ---- orb ---- */
+  #orb {
+    position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+    cursor: pointer; touch-action: none; user-select: none; z-index: 4;
+  }
+
+  /* ---- angular panels ---- */
+  .panel {
+    position: absolute; z-index: 5;
+    background: linear-gradient(160deg, rgba(10,20,34,.85), rgba(5,10,18,.85));
+    border: 1px solid var(--cyan-dim);
+    clip-path: polygon(0 14px, 14px 0, 100% 0, 100% calc(100% - 14px), calc(100% - 14px) 100%, 0 100%);
+    padding: 14px;
+  }
+  .panel h2 {
+    font-size: 10px; letter-spacing: .35em; color: var(--cyan); font-weight: 600;
+    border-bottom: 1px solid var(--cyan-faint); padding-bottom: 7px; margin-bottom: 9px;
+  }
+  #comms { left: 22px; top: 76px; bottom: 60px; width: 305px; display: flex; flex-direction: column; }
+  #systems { right: 22px; top: 76px; width: 285px; }
+  #ops { right: 22px; top: 388px; bottom: 60px; width: 285px; display: flex; flex-direction: column; }
+
+  /* comms log */
+  #transcript { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; scrollbar-width: thin; }
+  .msg { font-size: 13px; line-height: 1.5; }
+  .msg .who { font: 9.5px var(--mono); letter-spacing: .25em; display: block; margin-bottom: 3px; }
+  .msg.you .who { color: #64748b; }
+  .msg.jarvis .who { color: var(--cyan); }
+  .msg.jarvis { border-left: 2px solid var(--cyan-dim); padding-left: 9px; }
+  .msg.you { border-left: 2px solid #24344d; padding-left: 9px; }
+  .msg .meta { font: 10px var(--mono); color: #46586f; margin-top: 4px; }
+
+  /* systems readouts */
+  #clock { font: 600 34px var(--mono); color: #dceafe; text-shadow: 0 0 14px rgba(56,189,248,.35); }
+  #date { font: 11px var(--mono); color: #6b8db3; letter-spacing: .18em; margin-top: 2px; }
+  .rows { margin-top: 12px; }
+  .row { display: flex; justify-content: space-between; font: 11px var(--mono); padding: 3.5px 0; border-bottom: 1px solid rgba(56,189,248,.06); }
+  .row .k { color: #52667f; letter-spacing: .08em; }
+  .row .v { color: #9fc3e8; text-align: right; max-width: 170px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  /* operations feed */
+  #opslist { flex: 1; overflow-y: auto; font: 10.5px var(--mono); display: flex; flex-direction: column; gap: 6px; scrollbar-width: thin; }
+  .op { color: #5e7690; border-left: 2px solid #23405a; padding-left: 8px; word-break: break-all; }
+  .op.fresh { color: var(--amber); border-left-color: var(--amber); }
+  .op .nm { color: #9fc3e8; }
+  .op.fresh .nm { color: #fde68a; }
+  .op .took { color: #4c657f; }
+  .op.running { border-left-color: var(--amber); }
+  .op.running .nm::after { content: " ⟩"; animation: opblink 1s steps(2, end) infinite; }
+  @keyframes opblink { 50% { opacity: .25; } }
+  .op.failed { border-left-color: #f87171; }
+  .op.failed .nm { color: #fca5a5; }
+
+  /* ---- authorization cards ---- */
+  #authveil {
+    position: absolute; inset: 0; z-index: 18; display: none;
+    background: radial-gradient(ellipse at 50% 50%, rgba(4,7,12,.55) 0%, rgba(4,7,12,.85) 70%);
+    backdrop-filter: blur(1.5px);
+  }
+  #authveil.on { display: block; }
+  #approvals {
+    position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+    z-index: 20; width: 470px; max-width: calc(100vw - 60px);
+    display: flex; flex-direction: column; gap: 12px;
+  }
+  .auth {
+    background: linear-gradient(160deg, rgba(34,24,4,.97), rgba(12,9,2,.97));
+    border: 1px solid rgba(251,191,36,.55);
+    clip-path: polygon(0 14px, 14px 0, 100% 0, 100% calc(100% - 14px), calc(100% - 14px) 100%, 0 100%);
+    padding: 16px 18px; box-shadow: 0 0 46px rgba(251,191,36,.16);
+    animation: authin .18s ease-out;
+  }
+  @keyframes authin { from { opacity: 0; transform: translateY(6px); } }
+  .auth h3 {
+    font: 600 10px var(--mono); letter-spacing: .35em; color: var(--amber);
+    border-bottom: 1px solid rgba(251,191,36,.18); padding-bottom: 7px;
+  }
+  .auth .tool { font: 600 15px var(--mono); color: #fde68a; margin: 11px 0 9px; }
+  .auth .arg {
+    font: 11.5px var(--mono); color: #d6dee9; background: rgba(0,0,0,.4);
+    border-left: 2px solid rgba(251,191,36,.4); padding: 6px 9px; margin-bottom: 6px;
+    white-space: pre-wrap; word-break: break-all; max-height: 132px; overflow-y: auto;
+  }
+  .auth .arg .k { color: #8a6d3b; }
+  .auth .btns { display: flex; gap: 10px; margin-top: 14px; }
+  .auth button {
+    flex: 1; font: 600 11px var(--mono); letter-spacing: .22em; padding: 11px 0;
+    background: transparent; color: var(--amber); border: 1px solid rgba(251,191,36,.5);
+    cursor: pointer; text-indent: .22em;
+  }
+  .auth button:hover { background: rgba(251,191,36,.13); }
+  .auth button.deny { color: #8fa3bb; border-color: #33465e; }
+  .auth button.deny:hover { background: rgba(143,163,187,.1); }
+  .auth button[disabled] { opacity: .4; cursor: default; }
+  .auth .foot {
+    font: 10px var(--mono); color: #7a6233; letter-spacing: .18em;
+    margin-top: 10px; text-align: center;
+  }
+
+  #hint {
+    position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%);
+    font: 10px var(--mono); letter-spacing: .3em; color: #3b4f68; z-index: 5;
+  }
+
+  /* corner accents */
+  .corner { position: absolute; width: 26px; height: 26px; border-color: var(--cyan-dim); border-style: solid; border-width: 0; z-index: 2; }
+  #c-tl { top: 10px; left: 10px; border-top-width: 1px; border-left-width: 1px; }
+  #c-tr { top: 10px; right: 10px; border-top-width: 1px; border-right-width: 1px; }
+  #c-bl { bottom: 10px; left: 10px; border-bottom-width: 1px; border-left-width: 1px; }
+  #c-br { bottom: 10px; right: 10px; border-bottom-width: 1px; border-right-width: 1px; }
+</style>
+</head>
+<body>
+<div class="corner" id="c-tl"></div><div class="corner" id="c-tr"></div>
+<div class="corner" id="c-bl"></div><div class="corner" id="c-br"></div>
+
+<div id="banner">
+  <div class="title">J A R V I S</div>
+  <div id="status">INITIALIZING</div>
+</div>
+
+<canvas id="orb" width="480" height="480"></canvas>
+
+<div class="panel" id="comms">
+  <h2>COMMS LOG</h2>
+  <div id="transcript"></div>
+</div>
+
+<div class="panel" id="systems">
+  <h2>SYSTEMS</h2>
+  <div id="clock">--:--:--</div>
+  <div id="date"></div>
+  <div class="rows">
+    <div class="row"><span class="k">CORE</span><span class="v" id="cfg-llm">—</span></div>
+    <div class="row"><span class="k">EARS</span><span class="v" id="cfg-stt">—</span></div>
+    <div class="row"><span class="k">VOICE</span><span class="v" id="cfg-tts">—</span></div>
+    <div class="row"><span class="k">TURNS</span><span class="v" id="stat-turns">0</span></div>
+    <div class="row"><span class="k">SESSION COST</span><span class="v" id="stat-cost">$0.0000</span></div>
+    <div class="row"><span class="k">LAST TURN</span><span class="v" id="stat-last">—</span></div>
+    <div class="row" id="wake-row" style="cursor:pointer" title="toggle the wake word">
+      <span class="k">WAKE WORD</span><span class="v" id="wake-state">OFF</span>
+    </div>
+    <div class="row" id="mute-row" style="cursor:pointer" title="mute/unmute Jarvis's voice">
+      <span class="k">VOICE OUT</span><span class="v" id="mute-state">ON</span>
+    </div>
+    <div class="row"><span class="k">PERMISSIONS</span><span class="v" id="perm-state">—</span></div>
+  </div>
+</div>
+
+<div class="panel" id="ops">
+  <h2>OPERATIONS</h2>
+  <div id="opslist"></div>
+</div>
+
+<div id="authveil"></div>
+<div id="approvals"></div>
+
+<div id="hint">HOLD ORB · OR SPACE · TO SPEAK</div>
+
+<script>
+"use strict";
+
+// ============================== state =======================================
+
+const S = { state: "idle", level: 0, busy: false, label: "", clock: 0, tools: 0, booted: false };
+let stream = null, recorder = null, chunks = [];
+let audioCtx = null, micAnalyser = null, outAnalyser = null;
+let sessionCost = 0, turns = 0;
+
+const $ = (id) => document.getElementById(id);
+
+const STATUS_TEXT = {
+  idle: "ALL SYSTEMS NOMINAL",
+  listening: "LISTENING",
+  transcribing: "TRANSCRIBING",
+  thinking: "THINKING",
+  tool: "RUNNING",
+  composing: "SYNTHESIZING VOICE",
+  speaking: "RESPONDING",
+  approval: "AUTHORIZATION REQUIRED",
+  error: "FAULT DETECTED",
+};
+
+// States where the wait is the user's to sit through, so the elapsed clock
+// runs. Once Jarvis is talking the wait is over and it stops.
+const TIMED = new Set(["listening", "transcribing", "thinking", "tool", "composing"]);
+const AMBER = new Set(["tool", "approval"]);
+
+function setState(state, extra) {
+  S.state = state;
+  S.label = extra || STATUS_TEXT[state] || state.toUpperCase();
+  if (!TIMED.has(state)) S.clock = 0;
+  renderStatus();
+}
+
+// The clock spans the whole wait, not each phase — "THINKING · 6.2s" is what
+// tells you the turn is alive and roughly how long it has been.
+function startClock() { S.clock = performance.now(); }
+
+// getUserMedia resolves whenever it resolves, which can be after a turn has
+// already started. Boot may only write the status if nothing else has.
+function booted() {
+  if (S.booted || S.state !== "idle") return false;
+  S.booted = true;
+  setState("idle");
+  return true;
+}
+
+function renderStatus() {
+  const el = $("status");
+  const secs = S.clock ? ((performance.now() - S.clock) / 1000).toFixed(1) : null;
+  el.textContent = secs && TIMED.has(S.state) ? `${S.label} · ${secs}s` : S.label;
+  el.className = S.state === "idle" ? "" : AMBER.has(S.state) ? "tool" : "active";
+  refreshHint();
+}
+setInterval(() => { if (S.clock && TIMED.has(S.state)) renderStatus(); }, 100);
+
+// expose for synthetic screenshot tests only
+window.__hud = {
+  setState, setLevel: (v) => { S.level = v; }, addMsg, addOp,
+  startOp: (n, a) => startOp(n, a), endOp: (n, ok) => endOp(n, ok),
+  state: () => S.state, status: () => $("status").textContent,
+  showApproval: (d) => showApproval(d), closeApproval: (id, r) => closeApproval(id, r),
+  pendingAuth: () => authCards.size,
+};
+
+// ============================== orb =========================================
+
+const canvas = $("orb");
+const ctx = canvas.getContext("2d");
+const DPR = Math.min(window.devicePixelRatio || 1, 2);
+const CSS_SIZE = 480;
+canvas.style.width = canvas.style.height = CSS_SIZE + "px";
+canvas.width = canvas.height = CSS_SIZE * DPR;
+
+const RINGS = [
+  { r: .985, ticks: 144, len: .022, w: 1,   speed: .04,  alpha: .40 },
+  { r: .905, ticks: 72,  len: .060, w: 2,   speed: -.10, alpha: .60 },
+  { r: .800, arcs: [[0, 1.1], [1.4, 2.6], [3.1, 4.4], [4.8, 5.9]], w: 2.5, speed: .16, alpha: .55 },
+  { r: .690, ticks: 36,  len: .045, w: 1.5, speed: .22,  alpha: .50 },
+  { r: .600, arcs: [[0, 2.4], [2.9, 5.6]], w: 1, speed: -.30, alpha: .45 },
+];
+
+let t0 = performance.now();
+let smoothLevel = 0;
+
+function statePalette() {
+  switch (S.state) {
+    case "listening": return { hue: "56,189,248", boost: 1.35, spin: 1.6 };
+    case "transcribing": return { hue: "103,232,249", boost: 1.2, spin: 2.2 };
+    case "thinking":  return { hue: "125,211,252", boost: 1.15, spin: 3.4 };
+    case "composing": return { hue: "94,234,212", boost: 1.3, spin: 1.8 };
+    case "tool":      return { hue: "251,191,36", boost: 1.2, spin: 3.4 };
+    case "approval":  return { hue: "251,191,36", boost: 1.45, spin: .35 };
+    case "speaking":  return { hue: "56,189,248", boost: 1.5, spin: 1.2 };
+    case "error":     return { hue: "248,113,113", boost: 1.3, spin: .6 };
+    default:          return { hue: "56,189,248", boost: 1.0, spin: 1.0 };
+  }
+}
+
+function drawOrb(now) {
+  const t = (now - t0) / 1000;
+  const P = statePalette();
+  smoothLevel += (S.level - smoothLevel) * 0.25;
+  const breath = 0.5 + 0.5 * Math.sin(t * 1.4);
+  const energy = Math.min(1, smoothLevel * 2.2 + (S.state === "idle" ? breath * 0.18 : 0.28));
+
+  const c = CSS_SIZE / 2, R = CSS_SIZE / 2 - 6;
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.clearRect(0, 0, CSS_SIZE, CSS_SIZE);
+
+  // rings
+  for (const ring of RINGS) {
+    const rot = t * ring.speed * P.spin * Math.PI * 2 / 8;
+    const alpha = ring.alpha * P.boost * (0.75 + energy * 0.45);
+    ctx.strokeStyle = `rgba(${P.hue},${Math.min(1, alpha)})`;
+    ctx.lineWidth = ring.w;
+    if (ring.ticks) {
+      const inner = R * ring.r * (1 - ring.len);
+      const outer = R * ring.r;
+      ctx.beginPath();
+      for (let i = 0; i < ring.ticks; i++) {
+        const a = rot + (i / ring.ticks) * Math.PI * 2;
+        ctx.moveTo(c + Math.cos(a) * inner, c + Math.sin(a) * inner);
+        ctx.lineTo(c + Math.cos(a) * outer, c + Math.sin(a) * outer);
+      }
+      ctx.stroke();
+    } else {
+      for (const [a1, a2] of ring.arcs) {
+        ctx.beginPath();
+        ctx.arc(c, c, R * ring.r, rot + a1, rot + a2);
+        ctx.stroke();
+      }
+    }
+  }
+
+  // core glow
+  const coreR = R * (0.30 + energy * 0.10);
+  const glow = ctx.createRadialGradient(c, c, 0, c, c, coreR * 1.9);
+  glow.addColorStop(0, `rgba(224,242,254,${0.85 * P.boost * (0.55 + energy * 0.5)})`);
+  glow.addColorStop(0.25, `rgba(${P.hue},${0.5 * (0.5 + energy * 0.6)})`);
+  glow.addColorStop(1, "rgba(0,0,0,0)");
+  ctx.fillStyle = glow;
+  ctx.beginPath();
+  ctx.arc(c, c, coreR * 1.9, 0, Math.PI * 2);
+  ctx.fill();
+
+  // triangle emblem
+  const triR = R * 0.21;
+  const rot3 = -t * 0.15 * P.spin;
+  ctx.strokeStyle = `rgba(224,242,254,${0.5 + energy * 0.5})`;
+  ctx.lineWidth = 2;
+  ctx.shadowColor = `rgb(${P.hue})`;
+  ctx.shadowBlur = 18 * (0.6 + energy);
+  ctx.beginPath();
+  for (let i = 0; i <= 3; i++) {
+    const a = rot3 + Math.PI / 2 + (i / 3) * Math.PI * 2;
+    const x = c + Math.cos(a) * triR, y = c - Math.sin(a) * triR;
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+  ctx.shadowBlur = 0;
+
+  requestAnimationFrame(drawOrb);
+}
+requestAnimationFrame(drawOrb);
+
+// ============================== audio =======================================
+
+function ensureCtx() {
+  if (!audioCtx) audioCtx = new AudioContext();
+  if (audioCtx.state === "suspended") audioCtx.resume();
+  return audioCtx;
+}
+
+function analyserLevel(analyser, buf) {
+  analyser.getByteTimeDomainData(buf);
+  let peak = 0;
+  for (const v of buf) peak = Math.max(peak, Math.abs(v - 128) / 128);
+  return peak;
+}
+
+let micBuf = null, outBuf = null;
+function levelLoop() {
+  if (S.state === "listening" && micAnalyser) S.level = analyserLevel(micAnalyser, micBuf);
+  else if (S.state === "speaking" && outAnalyser) S.level = analyserLevel(outAnalyser, outBuf);
+  else S.level = 0;
+  requestAnimationFrame(levelLoop);
+}
+requestAnimationFrame(levelLoop);
+
+// Streamed playback: sentence chunks arrive mid-turn, get scheduled
+// back-to-back on the audio clock, and can all be killed at once (barge-in).
+let abortCtl = null;
+const activeSources = new Set();
+let nextStart = 0, streamDone = true;
+
+function stopSpeaking() {
+  if (abortCtl) { abortCtl.abort(); abortCtl = null; }
+  for (const s of [...activeSources]) { try { s.onended = null; s.stop(); } catch {} }
+  activeSources.clear();
+  streamDone = true;
+  nextStart = 0;
+  if (S.state === "speaking") setState("idle");
+}
+
+async function queueAudio(b64) {
+  const c = ensureCtx();
+  const bin = Uint8Array.from(atob(b64), (ch) => ch.charCodeAt(0));
+  const buf = await c.decodeAudioData(bin.buffer);
+  if (!outAnalyser) {
+    outAnalyser = c.createAnalyser();
+    outAnalyser.fftSize = 512;
+    outBuf = new Uint8Array(outAnalyser.frequencyBinCount);
+    outAnalyser.connect(c.destination);
+  }
+  const src = c.createBufferSource();
+  src.buffer = buf;
+  src.connect(outAnalyser);
+  const at = Math.max(c.currentTime + 0.06, nextStart);
+  nextStart = at + buf.duration;
+  activeSources.add(src);
+  src.onended = () => {
+    activeSources.delete(src);
+    if (streamDone && activeSources.size === 0 && S.state === "speaking") setState("idle");
+  };
+  if (S.state !== "speaking") setState("speaking");
+  src.start(at);
+}
+
+// ============================== transcript & ops ============================
+
+function addMsg(cls, text, meta) {
+  const el = document.createElement("div");
+  el.className = "msg " + cls;
+  const who = document.createElement("span");
+  who.className = "who";
+  who.textContent = cls === "you" ? "YOU" : "J.A.R.V.I.S.";
+  el.appendChild(who);
+  el.appendChild(document.createTextNode(text));
+  if (meta) {
+    const m = document.createElement("div");
+    m.className = "meta";
+    m.textContent = meta;
+    el.appendChild(m);
+  }
+  const tr = $("transcript");
+  tr.appendChild(el);
+  tr.scrollTop = tr.scrollHeight;
+}
+
+function addOp(name, args) {
+  const list = $("opslist");
+  list.querySelectorAll(".op.fresh").forEach((o) => o.classList.remove("fresh"));
+  const el = document.createElement("div");
+  el.className = "op fresh";
+  const nm = document.createElement("span");
+  nm.className = "nm";
+  nm.textContent = name;
+  el.appendChild(nm);
+  el.appendChild(document.createTextNode(" " + (args || "")));
+  const took = document.createElement("span");
+  took.className = "took";
+  el.appendChild(took);
+  list.prepend(el);
+  while (list.children.length > 14) list.lastChild.remove();
+  return el;
+}
+
+// A tool is "running" from its start event until its end event, so the feed
+// shows what is happening now rather than only what happened.
+function startOp(name, args) {
+  const el = addOp(name, args);
+  el.classList.add("running");
+  el.dataset.tool = name;
+  el.dataset.started = String(performance.now());
+  return el;
+}
+
+function endOp(name, ok) {
+  // Newest running op with that name: with parallel calls of the same tool
+  // the pairing is arbitrary, but the count and the timings still add up.
+  const el = $("opslist").querySelector(`.op.running[data-tool="${CSS.escape(name)}"]`);
+  if (!el) return;
+  el.classList.remove("running");
+  if (!ok) el.classList.add("failed");
+  const ms = Math.round(performance.now() - Number(el.dataset.started || 0));
+  el.querySelector(".took").textContent =
+    ms >= 1000 ? ` · ${(ms / 1000).toFixed(1)}s` : ` · ${ms}ms`;
+}
+
+// ============================== authorization ===============================
+// A dangerous tool blocks the agent thread server-side until this answers.
+// Deny is the cheap action (Escape, or the button); approving takes a
+// deliberate click. Nothing here is keyboard-defaulted — an accidental Enter
+// must never run a command.
+
+const authCards = new Map(); // id -> { el, timer }
+
+function showApproval(d) {
+  if (authCards.has(d.id)) return;
+  const card = document.createElement("div");
+  card.className = "auth";
+
+  const h = document.createElement("h3");
+  h.textContent = "AUTHORIZATION REQUIRED";
+  card.appendChild(h);
+
+  const tool = document.createElement("div");
+  tool.className = "tool";
+  tool.textContent = d.tool;
+  card.appendChild(tool);
+
+  // textContent everywhere: these strings are written by the model, and this
+  // window is the owner's own trusted UI. Never innerHTML here.
+  for (const [key, value] of Object.entries(d.args || {})) {
+    const arg = document.createElement("div");
+    arg.className = "arg";
+    const k = document.createElement("span");
+    k.className = "k";
+    k.textContent = key + " ";
+    arg.appendChild(k);
+    arg.appendChild(document.createTextNode(value));
+    card.appendChild(arg);
+  }
+
+  const btns = document.createElement("div");
+  btns.className = "btns";
+  const deny = document.createElement("button");
+  deny.className = "deny";
+  deny.textContent = "DENY";
+  const always = document.createElement("button");
+  always.className = "always";
+  always.textContent = "ALWAYS";
+  always.title = "authorize AND allowlist this, so it stops asking (persists across restarts)";
+  const allow = document.createElement("button");
+  allow.textContent = "AUTHORIZE";
+  deny.onclick = () => decide(d.id, false);
+  always.onclick = () => decide(d.id, true, true);
+  allow.onclick = () => decide(d.id, true);
+  btns.appendChild(deny);
+  btns.appendChild(always);
+  btns.appendChild(allow);
+  card.appendChild(btns);
+
+  const foot = document.createElement("div");
+  foot.className = "foot";
+  card.appendChild(foot);
+
+  let left = d.timeout_s || 120;
+  const tick = () => {
+    foot.textContent = `DENIES AUTOMATICALLY IN ${left}s · ESC TO DENY`;
+    if (left-- <= 0) closeApproval(d.id, "timeout");
+  };
+  tick();
+  const timer = setInterval(tick, 1000);
+
+  authCards.set(d.id, { el: card, timer });
+  $("approvals").appendChild(card);
+  $("authveil").classList.add("on");
+  setState("approval");
+}
+
+function closeApproval(id, resolution) {
+  const entry = authCards.get(id);
+  if (!entry) return;
+  clearInterval(entry.timer);
+  entry.el.remove();
+  authCards.delete(id);
+  if (authCards.size === 0) {
+    $("authveil").classList.remove("on");
+    if (S.state === "approval") {
+      // The turn resumes; restart the clock rather than counting the time
+      // spent waiting on a human against it.
+      if (S.busy) startClock();
+      setState(S.busy ? "thinking" : "idle");
+    }
+  }
+  if (resolution) addOp("approval", resolution);
+}
+
+async function decide(id, allow, always = false) {
+  const entry = authCards.get(id);
+  if (entry) entry.el.querySelectorAll("button").forEach((b) => (b.disabled = true));
+  try {
+    const res = await fetch("/approve", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id, allow, always }),
+    });
+    if (!res.ok) closeApproval(id, "stale"); // already timed out server-side
+  } catch {
+    closeApproval(id, "unreachable");
+  }
+  // On success the server broadcasts approval_closed, which removes the card.
+}
+
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && authCards.size) {
+    e.preventDefault();
+    decide([...authCards.keys()].pop(), false);
+  }
+});
+
+// ============================== voice mute ==================================
+// Server state is the truth: the button POSTs /mute, the "mute yourself"
+// voice command flips it tool-side, and both come back through one SSE
+// broadcast so every window agrees.
+
+let muted = false;
+function setMuteUI(on) {
+  muted = !!on;
+  $("mute-state").textContent = muted ? "MUTED" : "ON";
+  $("mute-state").style.color = muted ? "#f87171" : "";
+}
+
+// ============================== events (SSE) ================================
+
+const events = new EventSource("/events");
+events.onmessage = (e) => {
+  const { kind, data } = JSON.parse(e.data);
+  if (kind === "tool") {
+    startOp(data.name, data.args);
+    S.tools += 1;
+    // Only while thinking: a tool event is on a different connection than the
+    // turn stream, so it must never be able to overwrite a later phase.
+    if (S.state === "thinking" || S.state === "tool") {
+      setState("tool", "RUNNING · " + data.name.toUpperCase());
+    }
+  } else if (kind === "tool_done") {
+    endOp(data.name, data.ok);
+    S.tools = Math.max(0, S.tools - 1);
+    if (S.state === "tool" && S.tools === 0) setState("thinking");
+  } else if (kind === "cancelled") {
+    addOp("interrupted", "turn abandoned");
+  } else if (kind === "note") {
+    addOp("note", data.text);
+  } else if (kind === "context") {
+    addOp("context", `freed ~${data.saved.toLocaleString()} tokens`);
+  } else if (kind === "approval") {
+    showApproval(data);
+  } else if (kind === "approval_closed") {
+    closeApproval(data.id, data.resolution);
+  } else if (kind === "mute") {
+    setMuteUI(data.muted);
+    addOp("voice", data.muted ? "muted" : "unmuted");
+  }
+  // "wb_close" is deliberately unhandled here: the HUD is the approval
+  // surface, and the agent must not hold a lever that closes the window
+  // gating him. Only whiteboard.html opts in to the close signal.
+};
+
+// ============================== conversation ================================
+
+async function converse(blob) {
+  S.busy = true;
+  S.tools = 0;
+  startClock();
+  // The upload itself is a phase — on a slow link this is the only honest
+  // thing to show until the server's first line comes back.
+  setState("transcribing", "SENDING");
+  abortCtl = new AbortController();
+  streamDone = false;
+  nextStart = 0;
+  try {
+    const res = await fetch("/converse", {
+      method: "POST",
+      headers: { "Content-Type": "audio/webm" },
+      body: blob,
+      signal: abortCtl.signal,
+    });
+    // Success is application/x-ndjson (which contains "json"!) — only a
+    // non-2xx status means the server sent a plain-JSON error instead.
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || "HTTP " + res.status);
+    }
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "";
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let nl;
+      while ((nl = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, nl);
+        buf = buf.slice(nl + 1);
+        if (!line.trim()) continue;
+        const msg = JSON.parse(line);
+
+        if (msg.type === "phase") {
+          // The server says what it just started doing. Phases arrive in
+          // order on this stream, so they always win over a stale tool event.
+          setState(msg.phase);
+        } else if (msg.type === "heard") {
+          // Your words go up the moment STT lands, not after the whole turn.
+          addMsg("you", msg.text);
+        } else if (msg.type === "meta") {
+          if (!msg.heard) {
+            setState("idle");
+            $("status").textContent = "NO SIGNAL — TRY AGAIN";
+            return;
+          }
+          S.busy = false; // agent is done — there is no longer a turn to cancel
+          turns += 1;
+          sessionCost += msg.cost_usd || 0;
+          $("stat-turns").textContent = turns;
+          $("stat-cost").textContent = "$" + sessionCost.toFixed(4);
+          $("stat-last").textContent =
+            `${((msg.ms.stt + msg.ms.agent) / 1000).toFixed(1)}s · ${msg.steps} step${msg.steps === 1 ? "" : "s"}`;
+          addMsg("jarvis", msg.reply,
+            `stt ${msg.ms.stt}ms · core ${msg.ms.agent}ms · $${msg.cost_usd}`);
+        } else if (msg.type === "audio") {
+          await queueAudio(msg.b64);
+        } else if (msg.type === "cancelled") {
+          setState("idle");
+          return;
+        } else if (msg.type === "error") {
+          throw new Error(msg.message);
+        } else if (msg.type === "done") {
+          streamDone = true;
+          if (activeSources.size === 0 && S.state === "speaking") setState("idle");
+        }
+      }
+    }
+    streamDone = true;
+    // Nothing left to play and nothing left to wait for: any non-terminal
+    // state here (a reply with no audio, an empty turn) settles to idle.
+    if (activeSources.size === 0 && S.state !== "approval" && S.state !== "listening") {
+      setState("idle");
+    }
+  } catch (err) {
+    if (err.name === "AbortError") return; // barge-in — new turn already starting
+    setState("error");
+    addMsg("jarvis", "Fault: " + err.message);
+    setTimeout(() => { if (S.state === "error") setState("idle"); }, 2500);
+  } finally {
+    S.busy = false;
+    abortCtl = null;
+  }
+}
+
+// ============================== push-to-talk ================================
+
+let vadTimer = null;
+
+function startRec(auto = false) {
+  if (!stream || S.busy || recorder) return;
+  ensureCtx();
+  chunks = [];
+  recorder = new MediaRecorder(stream, { mimeType: "audio/webm;codecs=opus" });
+  recorder.ondataavailable = (e) => chunks.push(e.data);
+  recorder.start();
+  startClock();
+  setState("listening", auto ? "LISTENING · SPEAK NOW" : undefined);
+
+  if (auto) {
+    // wake-word recordings stop themselves on ~1.4s of silence (or 15s cap)
+    const started = performance.now();
+    let lastLoud = started;
+    vadTimer = setInterval(() => {
+      if (!recorder) { clearInterval(vadTimer); vadTimer = null; return; }
+      const now = performance.now();
+      if (S.level > 0.045) lastLoud = now;
+      if ((now - lastLoud > 1400 && now - started > 900) || now - started > 15000) {
+        clearInterval(vadTimer);
+        vadTimer = null;
+        stopRec();
+      }
+    }, 100);
+  }
+}
+
+async function stopRec() {
+  if (!recorder) return;
+  if (vadTimer) { clearInterval(vadTimer); vadTimer = null; }
+  const rec = recorder;
+  recorder = null;
+  await new Promise((res) => { rec.onstop = res; rec.stop(); });
+  const blob = new Blob(chunks, { type: "audio/webm" });
+  if (blob.size < 2000) { setState("idle"); $("status").textContent = "TOO SHORT"; return; }
+  converse(blob);
+}
+
+// Abandon a turn that is still being thought about. The point is correcting a
+// bad transcription: you see what he heard the moment STT lands, and you have
+// until he answers to take it back. The server stops at its next clean step
+// boundary and never synthesizes the reply.
+function cancelTurn() {
+  if (!S.busy) return false;
+  if (abortCtl) { abortCtl.abort(); abortCtl = null; }
+  S.busy = false;
+  S.tools = 0;
+  streamDone = true;
+  setState("idle");
+  // keepalive: this has to survive the fetch we just aborted
+  fetch("/cancel", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: "{}", keepalive: true,
+  }).catch(() => {});
+  return true;
+}
+
+// Pressing to talk cuts him off whatever he is doing — mid-sentence (barge-in)
+// or mid-thought (cancel).
+function pressToTalk() {
+  if (authCards.size) return; // answer the authorization first
+  if (S.state === "speaking") stopSpeaking();
+  cancelTurn();
+  startRec(false);
+}
+
+canvas.addEventListener("pointerdown", (e) => { e.preventDefault(); pressToTalk(); });
+canvas.addEventListener("pointerup", stopRec);
+canvas.addEventListener("pointerleave", () => { if (recorder && !vadTimer) stopRec(); });
+document.addEventListener("keydown", (e) => {
+  if (e.code === "Space" && !e.repeat) { e.preventDefault(); pressToTalk(); }
+});
+document.addEventListener("keyup", (e) => {
+  if (e.code === "Space" && !vadTimer) { e.preventDefault(); stopRec(); }
+});
+
+// ============================== wake word ===================================
+// Chrome's built-in SpeechRecognition is the detector — zero dependencies.
+// Armed: continuous recognition watches for "jarvis"; on a hit, a chime plays
+// and a VAD-terminated recording starts. Saying "Jarvis" while he is speaking
+// barges in.
+
+let wakeMode = false;
+let recog = null;
+
+function chime() {
+  const c = ensureCtx();
+  [[880, 0], [1318, 0.09]].forEach(([f, dt]) => {
+    const o = c.createOscillator(), g = c.createGain();
+    o.frequency.value = f;
+    g.gain.setValueAtTime(0.0001, c.currentTime + dt);
+    g.gain.exponentialRampToValueAtTime(0.16, c.currentTime + dt + 0.02);
+    g.gain.exponentialRampToValueAtTime(0.0001, c.currentTime + dt + 0.12);
+    o.connect(g).connect(c.destination);
+    o.start(c.currentTime + dt);
+    o.stop(c.currentTime + dt + 0.14);
+  });
+}
+
+function onWake() {
+  if (authCards.size) return; // never talk over a pending authorization
+  if (S.state === "speaking") stopSpeaking();
+  cancelTurn(); // saying his name mid-thought interrupts, same as the orb
+  if (recorder || S.busy) return;
+  chime();
+  startRec(true);
+}
+
+function armRecognition() {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) { $("wake-state").textContent = "UNSUPPORTED"; wakeMode = false; return; }
+  if (recog) return;
+  recog = new SR();
+  recog.continuous = true;
+  recog.interimResults = true;
+  recog.lang = "en-US";
+  recog.onresult = (e) => {
+    let text = "";
+    for (let i = e.resultIndex; i < e.results.length; i++) text += e.results[i][0].transcript;
+    if (/\bjarvis\b/i.test(text)) onWake();
+  };
+  recog.onend = () => {
+    if (wakeMode && recog) setTimeout(() => { try { recog.start(); } catch {} }, 300);
+  };
+  recog.onerror = (e) => {
+    if (e.error === "not-allowed" || e.error === "service-not-allowed") {
+      setWake(false);
+      $("wake-state").textContent = "BLOCKED";
+    }
+  };
+  try { recog.start(); } catch {}
+}
+
+function disarmRecognition() {
+  if (!recog) return;
+  const r = recog;
+  recog = null;
+  try { r.onend = null; r.stop(); } catch {}
+}
+
+function refreshHint() {
+  // While a turn is in flight the useful thing to know is that you can take
+  // it back — that is the window for fixing a misheard transcript.
+  if (S.busy || S.state === "speaking") {
+    $("hint").textContent = wakeMode
+      ? "SAY “JARVIS” · OR HOLD ORB · TO INTERRUPT"
+      : "HOLD ORB · OR SPACE · TO INTERRUPT";
+    return;
+  }
+  $("hint").textContent = wakeMode
+    ? "SAY “JARVIS” · OR HOLD ORB · TO SPEAK"
+    : "HOLD ORB · OR SPACE · TO SPEAK";
+}
+
+function setWake(on) {
+  wakeMode = on;
+  localStorage.setItem("wake", on ? "1" : "0");
+  $("wake-state").textContent = on ? "ARMED" : "OFF";
+  $("wake-state").style.color = on ? "var(--cyan)" : "";
+  refreshHint();
+  on ? armRecognition() : disarmRecognition();
+}
+
+// ============================== boot ========================================
+
+function tickClock() {
+  const now = new Date();
+  $("clock").textContent = now.toTimeString().slice(0, 8);
+  $("date").textContent = now.toDateString().toUpperCase();
+}
+setInterval(tickClock, 1000);
+tickClock();
+
+async function init() {
+  try {
+    const cfg = await (await fetch("/config")).json();
+    $("cfg-llm").textContent = cfg.llm.split("/").pop();
+    $("cfg-stt").textContent = cfg.stt.split("/").pop();
+    $("cfg-tts").textContent = `${cfg.tts.split("/").pop()} · ${cfg.voice} · ${cfg.speed}x`;
+    setMuteUI(cfg.muted);
+    if (cfg.permissions === "all") {
+      $("perm-state").textContent = "SKIP ⚠";
+      $("perm-state").style.color = "#f87171";
+    } else {
+      $("perm-state").textContent = `ASK · ${cfg.allowlist || 0} ALLOWED`;
+    }
+  } catch { /* readouts stay dashed */ }
+
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true },
+    });
+    const ctx2 = ensureCtx();
+    const src = ctx2.createMediaStreamSource(stream);
+    micAnalyser = ctx2.createAnalyser();
+    micAnalyser.fftSize = 512;
+    micBuf = new Uint8Array(micAnalyser.frequencyBinCount);
+    src.connect(micAnalyser);
+    booted();
+  } catch (err) {
+    if (booted()) {
+      setState("error");
+      $("status").textContent = "MICROPHONE OFFLINE — " + err.name.toUpperCase();
+    }
+  }
+
+  $("wake-row").onclick = () => setWake(!wakeMode);
+  $("mute-row").onclick = () => {
+    fetch("/mute", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ muted: !muted }),
+    }).catch(() => {}); // UI updates via the SSE broadcast
+  };
+  refreshHint();
+  if (localStorage.getItem("wake") === "1") setWake(true);
+
+  // A page loaded with wake already armed has had no user gesture yet, so the
+  // AudioContext may be suspended — any first click on the page unlocks it.
+  document.addEventListener("pointerdown", () => ensureCtx(), { once: true });
+}
+init();
+</script>
+</body>
+</html>

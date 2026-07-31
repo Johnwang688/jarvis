@@ -1,0 +1,433 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>JARVIS — Design Board</title>
+<style>
+  :root {
+    --bg: #05080a; --panel: #0a1116; --line: rgba(64, 214, 255, .25);
+    --cyan: #40d6ff; --dim: #3a7a8c; --text: #bfeaf5; --amber: #ffb454;
+    --paper: #f7f5f0;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    background: var(--bg); color: var(--text); height: 100vh; overflow: hidden;
+    font: 13px/1.5 "Cascadia Mono", "Consolas", monospace; display: flex; flex-direction: column;
+  }
+  header {
+    display: flex; align-items: center; gap: 14px; padding: 8px 14px;
+    border-bottom: 1px solid var(--line); flex: 0 0 auto;
+  }
+  header .logo { color: var(--cyan); letter-spacing: .25em; font-weight: 700; }
+  header .sub { color: var(--dim); letter-spacing: .15em; }
+  #status { margin-left: auto; color: var(--dim); }
+  #status.busy { color: var(--amber); }
+  #status.err { color: #ff5a5a; }
+
+  main { flex: 1 1 auto; display: grid; grid-template-columns: 1fr 440px; gap: 10px; padding: 10px; min-height: 0; }
+  .col { display: flex; flex-direction: column; gap: 10px; min-height: 0; }
+
+  .panel { background: var(--panel); border: 1px solid var(--line); position: relative; }
+  .panel .tag {
+    position: absolute; top: -1px; left: -1px; padding: 1px 10px; font-size: 10px;
+    letter-spacing: .2em; color: var(--bg); background: var(--cyan); z-index: 2;
+  }
+
+  #toolbar { display: flex; align-items: center; gap: 6px; padding: 8px 10px 8px 90px; flex: 0 0 auto; }
+  .tool {
+    background: none; border: 1px solid var(--line); color: var(--text); cursor: pointer;
+    font: inherit; font-size: 11px; letter-spacing: .1em; padding: 4px 10px;
+  }
+  .tool:hover { border-color: var(--cyan); }
+  .tool.on { background: var(--cyan); color: var(--bg); border-color: var(--cyan); }
+  .swatch { width: 22px; height: 22px; padding: 0; border-radius: 50%; border: 2px solid transparent; }
+  .swatch.on { border-color: var(--cyan); }
+  .sep { width: 1px; align-self: stretch; background: var(--line); margin: 0 4px; }
+
+  #board-wrap { flex: 1 1 auto; min-height: 0; padding: 10px; display: flex; }
+  #board { background: var(--paper); width: 100%; height: 100%; object-fit: contain; cursor: crosshair; touch-action: none; }
+  #textbox {
+    position: absolute; display: none; background: #fff; color: #111; border: 1px dashed #888;
+    font-family: inherit; padding: 2px 4px; outline: none; z-index: 5;
+  }
+
+  #promptbar { display: flex; gap: 8px; padding: 10px 10px 10px 90px; align-items: flex-end; flex: 0 0 auto; }
+  #prompt {
+    flex: 1; background: #06121a; color: var(--text); border: 1px solid var(--line);
+    font: inherit; padding: 8px; resize: none; height: 58px;
+  }
+  #prompt:focus { outline: 1px solid var(--cyan); }
+  label.chk { display: flex; gap: 6px; align-items: center; color: var(--dim); font-size: 11px; white-space: nowrap; }
+  #send {
+    background: var(--cyan); border: none; color: var(--bg); font: inherit; font-weight: 700;
+    letter-spacing: .15em; padding: 10px 22px; cursor: pointer;
+  }
+  #send:disabled { background: var(--dim); cursor: wait; }
+
+  #preview-panel { flex: 1 1 55%; display: flex; flex-direction: column; min-height: 0; }
+  #preview-head { display: flex; gap: 8px; align-items: center; padding: 8px 10px 4px 90px; font-size: 11px; color: var(--dim); }
+  #preview-head a { color: var(--cyan); text-decoration: none; margin-left: auto; letter-spacing: .1em; }
+  #preview { flex: 1; border: none; background: #fff; margin: 8px; margin-top: 4px; display: none; }
+  #preview-empty { flex: 1; display: flex; align-items: center; justify-content: center; color: var(--dim); letter-spacing: .15em; }
+
+  #reply-panel { flex: 1 1 30%; min-height: 90px; overflow-y: auto; padding: 26px 12px 10px; white-space: pre-wrap; }
+  #ops-panel { flex: 0 0 110px; overflow-y: auto; padding: 24px 12px 8px; color: var(--dim); font-size: 11px; }
+  #ops-panel div { border-left: 2px solid var(--line); padding-left: 8px; margin-bottom: 2px; }
+</style>
+</head>
+<body>
+<header>
+  <span class="logo">JARVIS</span><span class="sub">// DESIGN BOARD</span>
+  <span id="status">READY</span>
+</header>
+<main>
+  <div class="col">
+    <div class="panel" style="flex:1;display:flex;flex-direction:column;min-height:0">
+      <span class="tag">BOARD</span>
+      <div id="toolbar">
+        <button class="tool swatch on" data-color="#1a1a1a" style="background:#1a1a1a"></button>
+        <button class="tool swatch" data-color="#d33030" style="background:#d33030"></button>
+        <button class="tool swatch" data-color="#2563eb" style="background:#2563eb"></button>
+        <button class="tool swatch" data-color="#16a34a" style="background:#16a34a"></button>
+        <button class="tool swatch" data-color="#d97706" style="background:#d97706"></button>
+        <span class="sep"></span>
+        <button class="tool" data-size="3">S</button>
+        <button class="tool on" data-size="6">M</button>
+        <button class="tool" data-size="12">L</button>
+        <span class="sep"></span>
+        <button class="tool on" id="t-pen">PEN</button>
+        <button class="tool" id="t-line" title="Shift: snap to 45°">LINE</button>
+        <button class="tool" id="t-rect" title="Shift: square">RECT</button>
+        <button class="tool" id="t-circ" title="Shift: circle">CIRC</button>
+        <button class="tool" id="t-text">TEXT</button>
+        <button class="tool" id="t-erase">ERASE</button>
+        <span class="sep"></span>
+        <button class="tool" id="t-undo">UNDO</button>
+        <button class="tool" id="t-clear">CLEAR</button>
+      </div>
+      <div id="board-wrap">
+        <canvas id="board" width="1400" height="900"></canvas>
+        <input id="textbox" placeholder="type, then Enter">
+      </div>
+      <div id="promptbar">
+        <textarea id="prompt" placeholder="What should this become? e.g. 'landing hero for my study app, dark theme'"></textarea>
+        <label class="chk"><input type="checkbox" id="attach" checked> ATTACH<br>SKETCH</label>
+        <button id="send">SEND</button>
+      </div>
+    </div>
+  </div>
+  <div class="col">
+    <div class="panel" id="preview-panel">
+      <span class="tag">PREVIEW</span>
+      <div id="preview-head"><span id="preview-file">no design yet</span><a id="preview-open" target="_blank" style="display:none">OPEN ↗</a></div>
+      <iframe id="preview"></iframe>
+      <div id="preview-empty">AWAITING DESIGN</div>
+    </div>
+    <div class="panel" id="reply-panel"><span class="tag">JARVIS</span></div>
+    <div class="panel" id="ops-panel"><span class="tag">OPERATIONS</span></div>
+  </div>
+</main>
+<script>
+"use strict";
+const board = document.getElementById("board");
+const ctx = board.getContext("2d");
+const textbox = document.getElementById("textbox");
+const statusEl = document.getElementById("status");
+
+const S = { tool: "pen", color: "#1a1a1a", size: 6, ops: [], busy: false };
+
+/* ---- drawing model: an ops list, redrawn in full (undo = pop) ---------- */
+
+function redraw() {
+  ctx.fillStyle = "#f7f5f0";
+  ctx.fillRect(0, 0, board.width, board.height);
+  ctx.lineCap = ctx.lineJoin = "round";
+  for (const op of S.ops) {
+    if (op.t === "s") {
+      ctx.strokeStyle = op.c; ctx.lineWidth = op.w;
+      ctx.beginPath();
+      op.pts.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
+      ctx.stroke();
+    } else if (op.t === "t") {
+      ctx.fillStyle = op.c;
+      ctx.font = `${op.s}px "Segoe UI", sans-serif`;
+      ctx.fillText(op.text, op.x, op.y);
+    } else {
+      drawShape(op);
+    }
+  }
+}
+
+function drawShape(op) {
+  ctx.strokeStyle = op.c; ctx.lineWidth = op.lw;
+  ctx.lineCap = ctx.lineJoin = "round";
+  ctx.beginPath();
+  if (op.t === "r") ctx.rect(op.x, op.y, op.w, op.h);
+  else if (op.t === "e") ctx.ellipse(op.cx, op.cy, op.rx, op.ry, 0, 0, Math.PI * 2);
+  else if (op.t === "l") { ctx.moveTo(op.ax, op.ay); ctx.lineTo(op.bx, op.by); }
+  ctx.stroke();
+}
+redraw();
+
+function boardXY(e) {
+  const r = board.getBoundingClientRect();
+  // object-fit:contain — account for letterboxing inside the element box
+  const scale = Math.min(r.width / board.width, r.height / board.height);
+  const ox = (r.width - board.width * scale) / 2;
+  const oy = (r.height - board.height * scale) / 2;
+  return [(e.clientX - r.left - ox) / scale, (e.clientY - r.top - oy) / scale];
+}
+
+const SHAPE_TOOLS = ["line", "rect", "circ"];
+let live = null;   // freehand stroke in progress
+let shape = null;  // rubber-band shape in progress: {x0, y0, x1, y1, shift}
+
+function shapeOp() {
+  const { x0, y0, shift } = shape;
+  let { x1, y1 } = shape;
+  if (S.tool === "rect") {
+    let w = x1 - x0, h = y1 - y0;
+    if (shift) { // square
+      const side = Math.max(Math.abs(w), Math.abs(h));
+      w = Math.sign(w || 1) * side; h = Math.sign(h || 1) * side;
+    }
+    return { t: "r", x: x0, y: y0, w, h, c: S.color, lw: S.size };
+  }
+  if (S.tool === "circ") {
+    let rx = Math.abs(x1 - x0) / 2, ry = Math.abs(y1 - y0) / 2;
+    if (shift) rx = ry = Math.max(rx, ry); // circle
+    return {
+      t: "e",
+      cx: x0 + Math.sign(x1 - x0 || 1) * rx,
+      cy: y0 + Math.sign(y1 - y0 || 1) * ry,
+      rx, ry, c: S.color, lw: S.size,
+    };
+  }
+  if (shift) { // snap line to 45° steps
+    const angle = Math.round(Math.atan2(y1 - y0, x1 - x0) / (Math.PI / 4)) * (Math.PI / 4);
+    const len = Math.hypot(x1 - x0, y1 - y0);
+    x1 = x0 + Math.cos(angle) * len; y1 = y0 + Math.sin(angle) * len;
+  }
+  return { t: "l", ax: x0, ay: y0, bx: x1, by: y1, c: S.color, lw: S.size };
+}
+
+function shapeIsReal(op) {
+  if (op.t === "r") return Math.abs(op.w) > 3 || Math.abs(op.h) > 3;
+  if (op.t === "e") return op.rx > 2 || op.ry > 2;
+  return Math.hypot(op.bx - op.ax, op.by - op.ay) > 3;
+}
+
+board.addEventListener("pointerdown", (e) => {
+  if (S.busy) return;
+  if (S.tool === "text") { placeTextbox(e); return; }
+  board.setPointerCapture(e.pointerId);
+  if (SHAPE_TOOLS.includes(S.tool)) {
+    const [x, y] = boardXY(e);
+    shape = { x0: x, y0: y, x1: x, y1: y, shift: e.shiftKey };
+    return;
+  }
+  const erase = S.tool === "erase";
+  live = { t: "s", c: erase ? "#f7f5f0" : S.color, w: erase ? S.size * 5 : S.size, pts: [boardXY(e)] };
+});
+board.addEventListener("pointermove", (e) => {
+  if (shape) {
+    [shape.x1, shape.y1] = boardXY(e);
+    shape.shift = e.shiftKey;
+    redraw();          // rubber band: full redraw plus the shape in progress
+    drawShape(shapeOp());
+    return;
+  }
+  if (!live) return;
+  live.pts.push(boardXY(e));
+  ctx.strokeStyle = live.c; ctx.lineWidth = live.w;
+  ctx.lineCap = ctx.lineJoin = "round";
+  const n = live.pts.length;
+  ctx.beginPath();
+  ctx.moveTo(...live.pts[n - 2]); ctx.lineTo(...live.pts[n - 1]);
+  ctx.stroke();
+});
+board.addEventListener("pointerup", () => {
+  if (shape) {
+    const op = shapeOp();
+    if (shapeIsReal(op)) S.ops.push(op);
+    shape = null;
+    redraw();
+    return;
+  }
+  if (live && live.pts.length > 1) S.ops.push(live);
+  live = null;
+});
+
+function placeTextbox(e) {
+  const [x, y] = boardXY(e);
+  textbox.dataset.x = x; textbox.dataset.y = y;
+  const wrap = document.getElementById("board-wrap").getBoundingClientRect();
+  textbox.style.left = e.clientX - wrap.left + "px";
+  textbox.style.top = e.clientY - wrap.top + "px";
+  textbox.style.display = "block";
+  textbox.style.fontSize = textSize() * 0.6 + "px";
+  textbox.value = "";
+  textbox.focus();
+}
+function textSize() { return { 3: 22, 6: 32, 12: 48 }[S.size]; }
+function commitText() {
+  if (textbox.value.trim()) {
+    S.ops.push({ t: "t", x: +textbox.dataset.x, y: +textbox.dataset.y,
+                 text: textbox.value, c: S.color, s: textSize() });
+    redraw();
+  }
+  textbox.style.display = "none";
+}
+textbox.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") commitText();
+  if (e.key === "Escape") textbox.style.display = "none";
+});
+textbox.addEventListener("blur", commitText);
+
+/* ---- toolbar ----------------------------------------------------------- */
+
+document.querySelectorAll(".swatch").forEach((b) =>
+  b.addEventListener("click", () => {
+    document.querySelectorAll(".swatch").forEach((x) => x.classList.remove("on"));
+    b.classList.add("on");
+    S.color = b.dataset.color;
+    if (S.tool === "erase") setTool("pen");
+  })
+);
+document.querySelectorAll("[data-size]").forEach((b) =>
+  b.addEventListener("click", () => {
+    document.querySelectorAll("[data-size]").forEach((x) => x.classList.remove("on"));
+    b.classList.add("on");
+    S.size = +b.dataset.size;
+  })
+);
+function setTool(t) {
+  S.tool = t;
+  for (const id of ["pen", "line", "rect", "circ", "text", "erase"])
+    document.getElementById("t-" + id).classList.toggle("on", id === t);
+}
+for (const id of ["pen", "line", "rect", "circ", "text", "erase"])
+  document.getElementById("t-" + id).onclick = () => setTool(id);
+document.getElementById("t-undo").onclick = () => { S.ops.pop(); redraw(); };
+document.getElementById("t-clear").onclick = () => { S.ops = []; redraw(); };
+document.addEventListener("keydown", (e) => {
+  if (e.ctrlKey && e.key === "z" && document.activeElement !== textbox) {
+    S.ops.pop(); redraw();
+  }
+});
+
+/* ---- send to Jarvis ---------------------------------------------------- */
+
+function exportPng() { return board.toDataURL("image/png").split(",")[1]; }
+
+let timer = null;
+function setStatus(text, cls) { statusEl.textContent = text; statusEl.className = cls || ""; }
+
+async function send() {
+  const prompt = document.getElementById("prompt").value.trim();
+  if (!prompt || S.busy) return;
+  S.busy = true;
+  document.getElementById("send").disabled = true;
+  const t0 = Date.now();
+  timer = setInterval(() =>
+    setStatus("DESIGNING " + Math.round((Date.now() - t0) / 1000) + "s", "busy"), 500);
+
+  const body = { prompt };
+  if (document.getElementById("attach").checked) body.image_b64 = exportPng();
+
+  try {
+    const res = await fetch("/design", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || "HTTP " + res.status);
+    }
+    const out = await res.json();
+    reply(out.reply || "(no reply)");
+    if (out.preview_url) showPreview(out.preview_url, out.files || []);
+    setStatus(`DONE ${out.steps} steps · $${(out.cost_usd || 0).toFixed(4)}`, "");
+  } catch (e) {
+    reply("Fault: " + e.message);
+    setStatus("ERROR", "err");
+  } finally {
+    clearInterval(timer);
+    S.busy = false;
+    document.getElementById("send").disabled = false;
+  }
+}
+document.getElementById("send").onclick = send;
+document.getElementById("prompt").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && e.ctrlKey) send();
+});
+
+function reply(text) {
+  const panel = document.getElementById("reply-panel");
+  panel.textContent = text;
+  panel.prepend(Object.assign(document.createElement("span"), { className: "tag", textContent: "JARVIS" }));
+}
+
+function showPreview(url, files) {
+  const iframe = document.getElementById("preview");
+  iframe.style.display = "block";
+  document.getElementById("preview-empty").style.display = "none";
+  iframe.src = url + (url.includes("?") ? "&" : "?") + "t=" + Date.now();
+  document.getElementById("preview-file").textContent = files.join("  ·  ") || url;
+  const open = document.getElementById("preview-open");
+  open.href = url;
+  open.style.display = "inline";
+}
+
+/* ---- live tool ticker --------------------------------------------------- */
+
+try {
+  const es = new EventSource("/events");
+  es.onmessage = (e) => {
+    const msg = JSON.parse(e.data);
+    if (msg.kind === "wb_close") { selfClose(); return; }
+    const panel = document.getElementById("ops-panel");
+    if (msg.kind === "tool") {
+      const row = document.createElement("div");
+      row.dataset.tool = msg.data.name;
+      row.textContent = "· " + msg.data.name + " " + (msg.data.args || "");
+      panel.appendChild(row);
+    } else if (msg.kind === "tool_done") {
+      const rows = panel.querySelectorAll(`[data-tool="${msg.data.name}"]`);
+      const row = rows[rows.length - 1];
+      if (row && row.textContent.startsWith("· "))
+        row.textContent = (msg.data.ok ? "✓ " : "✗ ") + row.textContent.slice(2);
+    } else {
+      return;
+    }
+    while (panel.children.length > 40) panel.removeChild(panel.children[1]);
+    panel.scrollTop = panel.scrollHeight;
+  };
+} catch (e) { /* ticker is decoration */ }
+
+function selfClose() {
+  // Jarvis asked us to close (whiteboard_close -> SSE "wb_close"). An
+  // app-mode window has a single history entry, so window.close() is
+  // honored; if a browser refuses anyway, leave nothing usable behind.
+  window.close();
+  setTimeout(() => {
+    document.body.innerHTML =
+      "<div style='display:flex;height:100vh;align-items:center;justify-content:center;" +
+      "color:#3a7a8c;letter-spacing:.3em;font:13px monospace'>" +
+      "WHITEBOARD CLOSED — SAFE TO DISMISS THIS WINDOW</div>";
+  }, 300);
+}
+
+/* ---- test hooks --------------------------------------------------------- */
+window.__wb = {
+  S, redraw, exportPng, send, setTool,
+  addStroke: (pts, c = "#1a1a1a", w = 6) => { S.ops.push({ t: "s", c, w, pts }); redraw(); },
+  addText: (x, y, text, s = 32, c = "#1a1a1a") => { S.ops.push({ t: "t", x, y, text, c, s }); redraw(); },
+  addRect: (x, y, w, h, c = "#1a1a1a", lw = 6) => { S.ops.push({ t: "r", x, y, w, h, c, lw }); redraw(); },
+  addEllipse: (cx, cy, rx, ry, c = "#1a1a1a", lw = 6) => { S.ops.push({ t: "e", cx, cy, rx, ry, c, lw }); redraw(); },
+  addLine: (ax, ay, bx, by, c = "#1a1a1a", lw = 6) => { S.ops.push({ t: "l", ax, ay, bx, by, c, lw }); redraw(); },
+};
+</script>
+</body>
+</html>

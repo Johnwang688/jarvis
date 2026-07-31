@@ -21,6 +21,8 @@ import typing
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from .secrets import scrub
+
 _PY_TO_JSON = {
     str: "string",
     int: "integer",
@@ -150,7 +152,20 @@ def dispatch(
     Failures come back as text rather than raised exceptions: the model sees
     them as a tool result and gets a chance to correct itself, which is the
     whole point of an agent loop.
+
+    Every result is scrubbed of `.env` content on the way out. This is the last
+    point before a string becomes a `tool` message, so it is the only place
+    that catches a leak from a tool that never names the file — a recursive
+    grep, a fetched page, a browser snapshot. See tools/secrets.py.
     """
+    result = _dispatch(name, raw_arguments, approve)
+    result.text = scrub(result.text)
+    return result
+
+
+def _dispatch(
+    name: str, raw_arguments: str, approve: Callable[[Tool, dict], bool] | None = None
+) -> ToolResult:
     entry = REGISTRY.get(name)
     if entry is None:
         return ToolResult(f"Error: no tool named {name!r}. Available: {', '.join(sorted(REGISTRY))}")
@@ -186,4 +201,17 @@ def dispatch(
     return ToolResult(json.dumps(result, default=str, indent=2))
 
 
-from . import browsing, clock, files, memory, shell, web  # noqa: E402,F401  (registers the tools)
+from . import (  # noqa: E402,F401  (registers the tools)
+    browsing,
+    clock,
+    files,
+    gmail,
+    memory,
+    onshape,
+    shell,
+    skills,
+    voicectl,
+    web,
+    whiteboardctl,
+    workflows,
+)
