@@ -144,6 +144,34 @@
     font: 10px var(--mono); letter-spacing: .3em; color: #3b4f68; z-index: 5;
   }
 
+  /* typed input + staged attachments */
+  #inputbar {
+    position: absolute; bottom: 42px; left: 50%; transform: translateX(-50%);
+    width: 560px; max-width: calc(100vw - 340px); z-index: 6;
+    display: flex; flex-direction: column; gap: 6px;
+  }
+  #chips { display: flex; flex-wrap: wrap; gap: 6px; justify-content: center; }
+  .chip {
+    font: 10px var(--mono); letter-spacing: .08em; color: var(--cyan);
+    border: 1px solid var(--cyan-dim); background: rgba(8,14,22,.85);
+    padding: 3px 9px; cursor: pointer; max-width: 220px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .chip:hover { border-color: #f87171; color: #f87171; } /* click removes */
+  #inputrow { display: flex; gap: 8px; }
+  #textin {
+    flex: 1; font: 12px var(--mono); letter-spacing: .04em; color: #d6dee9;
+    background: rgba(8,14,22,.85); border: 1px solid var(--cyan-dim);
+    padding: 8px 11px; outline: none;
+  }
+  #textin::placeholder { color: #3b4f68; letter-spacing: .12em; }
+  #textin:focus { border-color: var(--cyan); box-shadow: 0 0 12px rgba(56,189,248,.12); }
+  #attach-btn {
+    font: 600 14px var(--mono); color: var(--cyan); background: rgba(8,14,22,.85);
+    border: 1px solid var(--cyan-dim); width: 36px; cursor: pointer;
+  }
+  #attach-btn:hover { border-color: var(--cyan); }
+
   /* corner accents */
   .corner { position: absolute; width: 26px; height: 26px; border-color: var(--cyan-dim); border-style: solid; border-width: 0; z-index: 2; }
   #c-tl { top: 10px; left: 10px; border-top-width: 1px; border-left-width: 1px; }
@@ -196,6 +224,16 @@
 
 <div id="authveil"></div>
 <div id="approvals"></div>
+
+<div id="inputbar">
+  <div id="chips"></div>
+  <div id="inputrow">
+    <input id="textin" type="text" autocomplete="off" spellcheck="false"
+           placeholder="TYPE · @PATH ATTACHES A FILE · ENTER SENDS" />
+    <button id="attach-btn" title="attach files (or drop / paste them anywhere)">+</button>
+    <input id="filein" type="file" multiple style="display:none" />
+  </div>
+</div>
 
 <div id="hint">HOLD ORB · OR SPACE · TO SPEAK</div>
 
@@ -264,6 +302,8 @@ window.__hud = {
   state: () => S.state, status: () => $("status").textContent,
   showApproval: (d) => showApproval(d), closeApproval: (id, r) => closeApproval(id, r),
   pendingAuth: () => authCards.size,
+  stage: (n, m, b64, bytes) => stageFile(n, m, b64, bytes || 0),
+  stagedCount: () => staged.length, sendTyped: () => sendTyped(),
 };
 
 // ============================== orb =========================================
@@ -655,6 +695,12 @@ events.onmessage = (e) => {
 // ============================== conversation ================================
 
 async function converse(blob) {
+  // Whatever is staged in the input bar rides this turn — that is the
+  // contract: finish speaking (or hit Enter) and it all goes together.
+  const { text, files } = takeStaged();
+  if (!blob && !text && !files.length) return;
+  if (text) addMsg("you", text); // typed words go up now; speech lands with STT
+  files.forEach((f) => addOp("attach", f.name));
   S.busy = true;
   S.tools = 0;
   startClock();
@@ -665,10 +711,18 @@ async function converse(blob) {
   streamDone = false;
   nextStart = 0;
   try {
+    const payload = {
+      text,
+      attachments: files.map((f) => ({ name: f.name, mime: f.mime, data_b64: f.b64 })),
+    };
+    if (blob) {
+      payload.audio_b64 = await blobB64(blob);
+      payload.audio_mime = "audio/webm";
+    }
     const res = await fetch("/converse", {
       method: "POST",
-      headers: { "Content-Type": "audio/webm" },
-      body: blob,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
       signal: abortCtl.signal,
     });
     // Success is application/x-ndjson (which contains "json"!) — only a
@@ -742,6 +796,85 @@ async function converse(blob) {
     abortCtl = null;
   }
 }
+
+// ====================== typed input & attachments ===========================
+// The bar at the bottom: type a message, stage files (picker, drop, paste, or
+// @path references resolved server-side), Enter sends. Anything staged when a
+// *voice* turn ends rides along with the speech automatically.
+
+const staged = [];
+const MAX_STAGED = 8, MAX_FILE_BYTES = 4 * 1024 * 1024;
+const textin = $("textin");
+
+function renderChips() {
+  const box = $("chips");
+  box.textContent = "";
+  staged.forEach((att, i) => {
+    const chip = document.createElement("span");
+    chip.className = "chip";
+    // trusted-UI rule: file names are outside data — textContent only
+    chip.textContent = (att.mime.startsWith("image/") ? "IMG · " : "FILE · ") + att.name;
+    chip.title = "remove " + att.name;
+    chip.onclick = () => { staged.splice(i, 1); renderChips(); };
+    box.appendChild(chip);
+  });
+}
+
+function stageFile(name, mime, b64, bytes) {
+  if (staged.length >= MAX_STAGED) { addOp("attach", `max ${MAX_STAGED} files — ${name} skipped`); return; }
+  if (bytes > MAX_FILE_BYTES) { addOp("attach", name + " over 4MB — skipped"); return; }
+  staged.push({ name, mime: mime || "text/plain", b64 });
+  renderChips();
+}
+
+function stageBrowserFile(file) {
+  const reader = new FileReader();
+  reader.onload = () => stageFile(file.name, file.type, String(reader.result).split(",", 2)[1] || "", file.size);
+  reader.readAsDataURL(file);
+}
+
+function blobB64(blob) {
+  return new Promise((res, rej) => {
+    const reader = new FileReader();
+    reader.onload = () => res(String(reader.result).split(",", 2)[1] || "");
+    reader.onerror = rej;
+    reader.readAsDataURL(blob);
+  });
+}
+
+function takeStaged() {
+  const text = textin.value.trim();
+  const files = staged.splice(0);
+  textin.value = "";
+  renderChips();
+  return { text, files };
+}
+
+// Enter sends. A turn in flight is cut off first, same rules as push-to-talk:
+// barge-in while he speaks, cancel while he thinks, inert while a card is up.
+function sendTyped() {
+  if (authCards.size) return; // answer the authorization first
+  if (!textin.value.trim() && !staged.length) return;
+  if (S.state === "speaking") stopSpeaking();
+  cancelTurn();
+  converse(null);
+}
+
+textin.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); sendTyped(); }
+  if (e.code === "Space") e.stopPropagation(); // typing a space, not push-to-talk
+});
+
+$("attach-btn").onclick = () => $("filein").click();
+$("filein").onchange = () => { [...$("filein").files].forEach(stageBrowserFile); $("filein").value = ""; };
+document.addEventListener("dragover", (e) => e.preventDefault());
+document.addEventListener("drop", (e) => {
+  e.preventDefault();
+  [...((e.dataTransfer && e.dataTransfer.files) || [])].forEach(stageBrowserFile);
+});
+document.addEventListener("paste", (e) => {
+  [...((e.clipboardData && e.clipboardData.files) || [])].forEach(stageBrowserFile);
+});
 
 // ============================== push-to-talk ================================
 

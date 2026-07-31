@@ -241,6 +241,17 @@ jarvis/
   the loop. The one that matters: cancelling while a tool is running must
   still return every tool result (invariant 3). Run it after touching
   `run_turn`.
+- `tests/face/attach_check.py` — free checks for typed input + attachments
+  on `/converse`: message assembly (speech+typed+files into one user
+  message, @path resolution, images as multimodal parts, caps surfacing as
+  notes), protected-file refusal and credential-value scrubbing, typed-only
+  turns skipping STT, and the legacy raw-webm body still working. Run after
+  touching `_assemble_turn`, `_converse`, or `run_turn(images=…)`.
+- `tests/face/hud_input_check.py` — free headless checks of the input bar
+  in the real `jarvis.html` (hud_state_check's puppet pattern): Enter sends
+  the JSON envelope and the words render at send time, staged files ride
+  the next send and clear after, empty Enter is inert, and Space typed in
+  the box does not trigger push-to-talk.
 - `tests/face/hud_state_check.py` — **free** checks for the HUD turn state
   machine, and the pattern to copy for anything else in the window: a
   *scripted* `/converse` and `/events` on `queue.Queue` puppet strings serve
@@ -634,6 +645,27 @@ SYSTEMS panel, `set_voice_mute` tool for "jarvis, mute yourself", one SSE
 broadcast keeps them in sync; muted turns skip TTS synthesis entirely (text
 still renders). HUD SYSTEMS also shows PERMISSIONS state (SKIP ⚠ in red
 under the flag).
+
+**Typed input + attachments in the HUD (2026-07-31).** An input bar at the
+bottom of jarvis.html: type + Enter sends a text turn (same cut-off rules
+as push-to-talk — barge-in while speaking, cancel while thinking, inert
+while an authorization card is up); files stage as removable chips via the
+picker, drag-drop, or paste; `@path` in the text attaches server-side
+files. The staging contract: whatever is staged when a turn goes out —
+typed *or spoken* — rides that turn, so you can stage context and just
+start talking. `/converse` now also takes an application/json envelope
+`{audio_b64?, audio_mime?, text?, attachments: [{name, mime, data_b64}]}`
+(the legacy raw-webm body still works); `_assemble_turn` folds it all into
+one user message — images become multimodal parts via `run_turn(images=…)`,
+which now accepts `{b64, mime}` dicts alongside plain PNG strings, and text
+files inline as fenced blocks. Limits: 8 files/turn, 4MB/file, 100k chars
+inlined — every refusal becomes a bracketed note in the message, never a
+silent drop. Secrets rules carry over: protected credential files are
+refused at @path by name, and inlined text is scrubbed. Typing Space must
+not trigger push-to-talk — the input stops propagation, and
+hud_input_check pins that. Typed words hit the COMMS log at send time;
+`meta.heard` is non-empty for typed turns so the client's no-signal path
+stays voice-only.
 
 **Voice latency work (2026-07-31).** The owner heard a multi-second gap
 between reply text appearing and speech starting. Root cause: `llm.py` used

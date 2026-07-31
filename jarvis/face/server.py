@@ -10,8 +10,12 @@ profile lives in ~/.cache/jarvis-face for the same reason — do not delete it.
 Routes:
   GET  /<file>   static HUD assets (jarvis.html, whiteboard.html, …)
   POST /say      {"text": ..., "voice"?: ..., "instructions"?: ...} -> audio/mpeg
-  POST /converse raw audio body (Content-Type audio/webm) -> JSON with the
-                 transcript, Jarvis's reply, and the reply audio as base64
+  POST /converse one turn -> NDJSON stream. Body is raw audio (Content-Type
+                 audio/webm), or application/json {"audio_b64"?, "audio_mime"?,
+                 "text"?, "attachments"?: [{"name","mime","data_b64"}]} — the
+                 HUD's typed input and staged files ride the same turn as the
+                 speech. @path references in the text attach server-side files
+                 (protected credential files refused, content scrubbed)
   POST /approve  {"id": ..., "allow": bool} -> answers a dangerous-tool card
   POST /design   {"prompt": ..., "image_b64"?: ...} -> design-mode turn; the
                  sketch goes to a separate designer agent, output files are
@@ -43,6 +47,7 @@ from pathlib import Path
 
 from .. import agent as agent_mod
 from .. import config, permissions, voice
+from ..tools import secrets as secrets_mod
 from ..tools import voicectl, whiteboardctl
 from .approvals import ApprovalBroker
 
@@ -92,6 +97,98 @@ PORT = config.FACE_PORT
 
 
 MAX_SAY_CHARS = 2000  # one spoken reply, not an audiobook
+
+# ---- typed input + attachments ---------------------------------------------
+# The HUD's input bar stages files (picker / drop / paste) and @path
+# references; both arrive on /converse and are folded into the same user
+# message as the speech. Owner-supplied context, so it is inlined rather than
+# left for tool round-trips — but the secrets rules still apply: protected
+# credential files are refused by name and every inlined text is scrubbed.
+
+MAX_ATTACHMENTS = 8
+MAX_ATTACH_BYTES = 4 * 1024 * 1024  # per file, decoded
+MAX_INLINE_CHARS = 100_000  # per text file, after decode
+
+_IMAGE_EXT = {
+    ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+    ".webp": "image/webp", ".gif": "image/gif",
+}
+# An @path token: start-of-text or whitespace, then @, then the path.
+_AT_PATH = re.compile(r"(?:(?<=\s)|^)@(\S+)")
+
+
+def _resolve_at_paths(text: str) -> tuple[list[dict], list[str]]:
+    """Owner-typed @path references -> attachment dicts + notes.
+
+    Tokens that do not exist are left alone unless they look like a path
+    (contain a slash) — "user@host.com" must not produce noise."""
+    attachments: list[dict] = []
+    notes: list[str] = []
+    for token in _AT_PATH.findall(text or ""):
+        raw = token.rstrip(".,;:!?)\"'")
+        path = Path(raw).expanduser()
+        if secrets_mod.is_protected(path):
+            notes.append(f"[{raw} holds live credentials — not attached]")
+            continue
+        if not path.is_file():
+            if "/" in raw:
+                notes.append(f"[{raw} not found — not attached]")
+            continue
+        try:
+            data = path.read_bytes()
+        except OSError as exc:
+            notes.append(f"[{raw}: {exc} — not attached]")
+            continue
+        attachments.append(
+            {
+                "name": str(path),
+                "mime": _IMAGE_EXT.get(path.suffix.lower(), "text/plain"),
+                "data_b64": base64.b64encode(data).decode(),
+            }
+        )
+    return attachments, notes
+
+
+def _assemble_turn(
+    spoken: str, typed: str, attachments: list[dict]
+) -> tuple[str, list[dict]]:
+    """Fold speech, typed text, and attachments into one user message.
+
+    Returns (user_input, images) for run_turn: images ride the message as
+    multimodal parts, text files are inlined as fenced blocks, and every
+    problem becomes a bracketed note the model can read and relay."""
+    at_attachments, notes = _resolve_at_paths(typed)
+    combined = list(attachments) + at_attachments
+    images: list[dict] = []
+    blocks: list[str] = []
+    for attachment in combined[:MAX_ATTACHMENTS]:
+        name = str(attachment.get("name") or "attachment")[:200]
+        mime = str(attachment.get("mime") or "text/plain")
+        try:
+            data = base64.b64decode(attachment.get("data_b64") or "")
+        except Exception:
+            notes.append(f"[{name}: unreadable attachment data]")
+            continue
+        if len(data) > MAX_ATTACH_BYTES:
+            notes.append(
+                f"[{name} is over {MAX_ATTACH_BYTES // (1024 * 1024)}MB — not attached]"
+            )
+            continue
+        if mime.startswith("image/"):
+            images.append({"b64": base64.b64encode(data).decode(), "mime": mime})
+            blocks.append(f"[attached image: {name}]")
+        else:
+            text = data.decode("utf-8", errors="replace")
+            truncated = "\n[truncated]" if len(text) > MAX_INLINE_CHARS else ""
+            text = secrets_mod.scrub(text[:MAX_INLINE_CHARS])
+            blocks.append(f"[attached file: {name}]\n```\n{text}\n```{truncated}")
+    if len(combined) > MAX_ATTACHMENTS:
+        notes.append(
+            f"[{len(combined) - MAX_ATTACHMENTS} attachment(s) over the "
+            f"{MAX_ATTACHMENTS}-per-turn cap were dropped]"
+        )
+    parts = [p for p in (spoken.strip(), typed.strip()) if p]
+    return "\n\n".join(parts + blocks + notes), images
 
 VOICE_SYSTEM = config.SYSTEM_PROMPT + (
     "\n\nYou are in voice mode: your replies are spoken aloud. Keep them short "
@@ -481,13 +578,27 @@ class FaceHandler(SimpleHTTPRequestHandler):
         """
         try:
             length = int(self.headers.get("Content-Length", "0"))
-            if length == 0:
-                self._json_error(400, "no audio")
+            content_type = self.headers.get("Content-Type", "audio/webm")
+            body = self.rfile.read(length) if length else b""
+            if "application/json" in content_type:
+                data = json.loads(body or b"{}")
+                audio_in = base64.b64decode(data.get("audio_b64") or "") or None
+                audio_mime = str(data.get("audio_mime") or "audio/webm")
+                typed = str(data.get("text") or "")
+                attachments = data.get("attachments") or []
+                if not isinstance(attachments, list):
+                    attachments = []
+            else:
+                # Legacy shape: the whole body is the recording.
+                if not body:
+                    self._json_error(400, "no audio")
+                    return
+                audio_in, audio_mime, typed, attachments = body, content_type, "", []
+            if not audio_in and not typed.strip() and not attachments:
+                self._json_error(400, "empty turn")
                 return
-            audio_in = self.rfile.read(length)
-            mime = self.headers.get("Content-Type", "audio/webm")
         except Exception as exc:
-            self._json_error(500, f"{type(exc).__name__}: {exc}")
+            self._json_error(400, f"{type(exc).__name__}: {exc}")
             return
 
         self.send_response(200)
@@ -496,16 +607,23 @@ class FaceHandler(SimpleHTTPRequestHandler):
         self.end_headers()
 
         try:
-            self._nd({"type": "phase", "phase": "transcribing"})
-            t0 = time.monotonic()
-            heard = voice.stt(audio_in, mime=mime)
-            stt_ms = round((time.monotonic() - t0) * 1000)
+            heard, stt_ms = "", 0
+            if audio_in:
+                self._nd({"type": "phase", "phase": "transcribing"})
+                t0 = time.monotonic()
+                heard = voice.stt(audio_in, mime=audio_mime)
+                stt_ms = round((time.monotonic() - t0) * 1000)
 
-            if not heard:
-                self._nd({"type": "meta", "heard": "", "ms": {"stt": stt_ms}})
-                return
-            # Your own words land in the log now, not after the whole turn.
-            self._nd({"type": "heard", "text": heard, "ms": {"stt": stt_ms}})
+                if not heard and not typed.strip() and not attachments:
+                    self._nd({"type": "meta", "heard": "", "ms": {"stt": stt_ms}})
+                    return
+                if heard:
+                    # Your own words land in the log now, not after the whole
+                    # turn. Typed text is not echoed back — the window already
+                    # showed it the moment it was sent.
+                    self._nd({"type": "heard", "text": heard, "ms": {"stt": stt_ms}})
+
+            user_input, images = _assemble_turn(heard, typed, attachments)
 
             self._nd({"type": "phase", "phase": "thinking"})
             t0 = time.monotonic()
@@ -513,7 +631,7 @@ class FaceHandler(SimpleHTTPRequestHandler):
                 # Cleared here, under the lock: a cancel aimed at the previous
                 # turn must not carry over and kill this one before it starts.
                 _cancel.clear()
-                turn = _get_agent().run_turn(heard)
+                turn = _get_agent().run_turn(user_input, images=images or None)
             agent_ms = round((time.monotonic() - t0) * 1000)
 
             if turn.cancelled:
@@ -527,7 +645,9 @@ class FaceHandler(SimpleHTTPRequestHandler):
             self._nd(
                 {
                     "type": "meta",
-                    "heard": heard,
+                    # Non-empty for typed/attachment turns too — an empty
+                    # heard is the client's "nothing arrived" signal.
+                    "heard": heard or typed.strip() or "[attachments]",
                     "reply": reply,
                     "ms": {"stt": stt_ms, "agent": agent_ms},
                     "steps": turn.steps,

@@ -13,6 +13,13 @@ from typing import Any, Callable
 from . import config, context, llm, tools
 
 
+def _image_url(image) -> str:
+    """A data: URL from either image shape run_turn accepts."""
+    if isinstance(image, dict):
+        return f"data:{image.get('mime') or 'image/png'};base64,{image.get('b64', '')}"
+    return f"data:image/png;base64,{image}"
+
+
 @dataclass
 class Turn:
     """What one user message cost and did."""
@@ -75,11 +82,12 @@ class Agent:
             max_tokens=1024,
         ).text
 
-    def run_turn(self, user_input: str, images: list[str] | None = None) -> Turn:
-        """`images`: base64 PNGs supplied by the owner (a whiteboard sketch,
-        a screenshot), attached to this user message so a vision model sees
-        them alongside the text. Same multimodal shape the context manager
-        already evicts by age."""
+    def run_turn(self, user_input: str, images: list | None = None) -> Turn:
+        """`images`: pictures supplied by the owner (a whiteboard sketch, a
+        screenshot, an attached photo), attached to this user message so a
+        vision model sees them alongside the text. Each entry is a base64 PNG
+        string, or {"b64": ..., "mime": ...} for other image types. Same
+        multimodal shape the context manager already evicts by age."""
         # Refresh the skills index every turn: messages[0] is re-sent with
         # each request anyway, pruning and compaction never touch it, and a
         # skill saved mid-conversation is visible on the very next turn.
@@ -94,11 +102,8 @@ class Agent:
                     "role": "user",
                     "content": [{"type": "text", "text": user_input}]
                     + [
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": f"data:image/png;base64,{b64}"},
-                        }
-                        for b64 in images
+                        {"type": "image_url", "image_url": {"url": _image_url(img)}}
+                        for img in images
                     ],
                 }
             )
