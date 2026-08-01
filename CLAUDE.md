@@ -179,6 +179,13 @@ jarvis/
   nothing dangerous and `longhorizon_check.py` asserts that stays true — if you
   add one, the inherited approver is what gates it, and think hard about
   whether the owner can judge a request they never saw framed.
+  Caveat found in review, not a correctness bug but worth knowing: `SESSION` is
+  a module-level singleton, so a browsing child drives the **same page** the
+  parent may be mid-task on and spends the **same 120-action budget**. Nothing
+  interleaves (the call is synchronous), but a parent that browsed before
+  delegating must re-snapshot afterwards rather than trusting its old refs —
+  which the snapshot→act→re-snapshot discipline already does. If sub-agents
+  ever become concurrent, this is the first thing that breaks.
 - **Background workflows cannot ask, so they cannot do** (`workflows.py`):
   workflow agents get SAFE_TOOLS (no browser — one shared Playwright page —
   and nothing dangerous) plus a deny-all approver. Monitoring is via
