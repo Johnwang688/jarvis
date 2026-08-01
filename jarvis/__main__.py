@@ -215,6 +215,10 @@ def cmd_auth(args) -> int:
         from . import onshape_auth
 
         return onshape_auth.connect(redo=args.redo)
+    if args.service == "discord":
+        from .tools import discord
+
+        return discord.connect()
     from . import google_auth
 
     return google_auth.connect(args.client_json)
@@ -276,7 +280,9 @@ def main() -> int:
     face.set_defaults(func=cmd_face)
 
     auth = sub.add_parser("auth", help="connect an external account (one-time, human-only)")
-    auth.add_argument("service", choices=["google", "onshape"], help="which service to connect")
+    auth.add_argument(
+        "service", choices=["google", "onshape", "discord"], help="which service to connect"
+    )
     auth.add_argument(
         "client_json",
         nargs="?",

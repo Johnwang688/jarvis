@@ -38,7 +38,7 @@ import shlex
 from .. import config
 
 PROTECTED_NAMES = frozenset(
-    {".env", ".env.local", "google_token.json", "onshape_keys.json"}
+    {".env", ".env.local", "google_token.json", "onshape_keys.json", "discord_token.json"}
 )
 
 # Values shorter than this are things like `DEBUG=1` or `PORT=8080`. Redacting
@@ -206,6 +206,7 @@ def secret_values() -> list[str]:
             values.update(_values_in(directory / name))
     values.update(_json_values(config.GOOGLE_TOKEN_PATH))
     values.update(_json_values(config.ONSHAPE_TOKEN_PATH))
+    values.update(_json_values(config.DISCORD_TOKEN_PATH))
     return sorted(values, key=len, reverse=True)
 
 

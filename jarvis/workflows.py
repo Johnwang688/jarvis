@@ -41,6 +41,9 @@ SAFE_TOOLS = [
     "run_readonly",
     "skill_list",
     "skill_read",
+    # Safe despite being outward-facing: the recipient is pinned to the
+    # owner, so a workflow can ping their phone when it finishes.
+    "discord_dm_owner",
 ]
 
 WORKFLOW_SYSTEM = config.SYSTEM_PROMPT + (
