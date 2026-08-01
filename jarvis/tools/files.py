@@ -10,11 +10,36 @@ import os
 from pathlib import Path
 from typing import Annotated
 
+from .. import config
 from . import tool
 from .secrets import is_protected, refusal
 
 _seen: dict[str, float] = {}
 MAX_READ_CHARS = 40_000
+
+# Jarvis may improve his own code (see skills/self-improve.md), but not the
+# layers that gate him: rewriting the approval broker, the permission gate,
+# the secrets scrubber, dispatch, or this guard would let a bad edit (or an
+# injected instruction) disarm the harness from inside. These change only by
+# the owner's hand — including an *approved* run_command, which is the owner
+# consenting per edit.
+SELF_PROTECTED = frozenset(
+    {
+        "jarvis/tools/secrets.py",
+        "jarvis/tools/files.py",
+        "jarvis/tools/__init__.py",
+        "jarvis/face/approvals.py",
+        "jarvis/permissions.py",
+    }
+)
+
+
+def _self_protected(target: Path) -> bool:
+    try:
+        rel = target.resolve().relative_to(config.REPO_ROOT)
+    except ValueError:
+        return False
+    return str(rel) in SELF_PROTECTED
 
 
 def _resolve(path: str) -> Path:
@@ -53,6 +78,12 @@ def write_file(
     An existing file must be read with read_file first.
     """
     target = _resolve(path)
+    if _self_protected(target):
+        return (
+            f"Error: {target.name} is part of Jarvis's safety layer and can "
+            "only be changed by the owner by hand. Explain what you wanted "
+            "changed and why instead."
+        )
     if target.exists():
         stamp = _seen.get(str(target))
         current = target.stat().st_mtime
