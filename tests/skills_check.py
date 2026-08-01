@@ -69,6 +69,8 @@ def starter_checks() -> None:
         "morning-briefing",
         "skill-creator",
         "whiteboard",
+        "self-improve",
+        "vercel-deploy",
     } <= names, names
     for path in REPO_SKILLS.glob("*.md"):
         description, body = skills_mod._parse(path.read_text(encoding="utf-8"))
