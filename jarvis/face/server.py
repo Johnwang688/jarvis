@@ -319,6 +319,9 @@ DESIGNER_TOOLS = [
     "browser_click",
     "web_search",
     "fetch_page",
+    # 24 steps of building is long enough to lose the thread; the plan is the
+    # part of the transcript pruning cannot reach.
+    "plan_write",
 ]
 
 _designer: agent_mod.Agent | None = None

@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from . import config, context, llm, tools
+from . import config, context, llm, runtime, tools
 
 
 def _image_url(image) -> str:
@@ -45,6 +45,7 @@ class Agent:
         on_event: Callable[[str, Any], None] | None = None,
         policy: context.ContextPolicy | None = None,
         should_stop: Callable[[], bool] | None = None,
+        depth: int = 0,
     ):
         self.model = model or config.TIERS["orchestrator"]
         self.tool_specs = tools.specs(tool_names)
@@ -56,13 +57,39 @@ class Agent:
         self.should_stop = should_stop or (lambda: False)
         self.policy = policy or context.ContextPolicy()
         self._base_system = system
+        # How many sub-agents deep this one is; bound into runtime so a child
+        # can refuse to spawn past MAX_DEPTH.
+        self.depth = depth
+        # This agent's working plan. Owned per-agent rather than globally: two
+        # agents can be running at once (a workflow thread, the face's request
+        # threads), and they must not share a checklist.
+        self.plan: dict[str, str] = {"text": ""}
         # Agents with skill tools get the always-visible skills index appended
         # to their system message; agents without them (designer, benches)
-        # must not see references to tools they cannot call.
-        self._has_skills = any(
-            spec["function"]["name"] == "skill_read" for spec in self.tool_specs
-        )
+        # must not see references to tools they cannot call. Same rule for the
+        # plan block — an agent with no plan_write must not be told to use it.
+        names = {spec["function"]["name"] for spec in self.tool_specs}
+        self._has_skills = "skill_read" in names
+        self._has_plan = "plan_write" in names
         self.messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
+
+    def _refresh_system(self) -> None:
+        """Rebuild messages[0] from source: base prompt + skills index + plan.
+
+        Called at the top of every *step*, not just every turn. The plan is the
+        one thing that has to stay visible on step 40 of a long run, and a turn
+        that runs 40 steps only passes the top of run_turn once.
+
+        Safe by construction: index 0 is re-sent with every request anyway, and
+        neither pruning nor compaction ever touches it.
+        """
+        blocks = []
+        if self._has_skills:
+            blocks.append(tools.skills.index())
+        if self._has_plan:
+            blocks.append(tools.plan.block())
+        extra = "\n\n".join(b for b in blocks if b)
+        self.messages[0]["content"] = self._base_system + ("\n\n" + extra if extra else "")
 
     def _summarize(self, transcript: str) -> str:
         """Compress old history using the cheap tier — this is bulk text work."""
@@ -88,14 +115,19 @@ class Agent:
         vision model sees them alongside the text. Each entry is a base64 PNG
         string, or {"b64": ..., "mime": ...} for other image types. Same
         multimodal shape the context manager already evicts by age."""
-        # Refresh the skills index every turn: messages[0] is re-sent with
-        # each request anyway, pruning and compaction never touch it, and a
-        # skill saved mid-conversation is visible on the very next turn.
-        if self._has_skills:
-            block = tools.skills.index()
-            self.messages[0]["content"] = (
-                self._base_system + ("\n\n" + block if block else "")
-            )
+        # Bind this agent's per-run state where the tools can reach it. Done
+        # here rather than in __init__ because ContextVars are per-thread and
+        # the thread that constructs an agent is not always the one that runs
+        # it — the face keeps one persistent agent and drives it from whichever
+        # request thread took the turn.
+        runtime.bind(
+            plan=self.plan,
+            approve=self.approve if self.approve is not None else (lambda *a, **k: False),
+            should_stop=self.should_stop,
+            depth=self.depth,
+            tool_names={spec["function"]["name"] for spec in self.tool_specs},
+        )
+        self._refresh_system()
         if images:
             self.messages.append(
                 {
@@ -121,6 +153,11 @@ class Agent:
                 turn.cancelled = True
                 self.on_event("cancelled", step)
                 return turn
+
+            # Re-render the plan into messages[0] before every request, not
+            # just once a turn: a long turn is exactly the case the plan exists
+            # for, and a plan written at step 3 has to still be there at step 40.
+            self._refresh_system()
 
             reply = llm.chat(self.model, self.messages, tools=self.tool_specs)
             turn.steps = step + 1
