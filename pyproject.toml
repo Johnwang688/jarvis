@@ -8,6 +8,7 @@ dependencies = [
     "rich>=13.0",
     "beautifulsoup4>=4.12",
     "prompt-toolkit>=3.0",
+    "websocket-client>=1.8",
 ]
 
 [project.optional-dependencies]
