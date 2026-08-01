@@ -42,8 +42,8 @@ def roster() -> dict[str, dict[str, str]]:
     until a restart — and returning to the model the process started on
     cannot itself be a policy violation.
     """
-    entries: dict[str, dict[str, str]] = {
-        DEFAULT_ALIAS: {"id": config.TIERS["orchestrator"], "note": ""}
+    entries: dict[str, dict] = {
+        DEFAULT_ALIAS: {"id": config.TIERS["orchestrator"], "note": "", "providers": []}
     }
     for alias, entry in config.SWITCHABLE.items():
         # A roster entry that just re-names the default would give the menu
@@ -90,6 +90,8 @@ def describe(alias: str, entry: dict[str, str]) -> str:
         if not caps["tools"]:
             bits.append("NO TOOL CALLING")
         line += f"  [{', '.join(bits)}]"
+    if entry.get("providers"):
+        line += f"  via {' → '.join(entry['providers'])}"
     if entry.get("note"):
         line += f"  ⚠ {entry['note']}"
     return line

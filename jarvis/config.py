@@ -217,18 +217,28 @@ TIERS: dict[str, str] = {
 # here. A table of model facts in the repo goes stale silently, and this
 # project has already been burned by a written-down model id that did not
 # exist — llm.catalog() reads them from OpenRouter at switch time instead.
-SWITCHABLE: dict[str, dict[str, str]] = {
-    "opus": {"id": "anthropic/claude-opus-5", "note": ""},
-    "grok": {"id": "x-ai/grok-4.5", "note": ""},
+SWITCHABLE: dict[str, dict] = {
+    "opus": {"id": "anthropic/claude-opus-5", "note": "", "providers": []},
+    "grok": {"id": "x-ai/grok-4.5", "note": "", "providers": []},
     "kimi": {
         "id": "moonshotai/kimi-k3",
-        # Moonshot is China-hosted, which cuts against the standing routing
-        # policy (2026-07-30: no personal data to Chinese-hosted models). The
-        # owner put it on the manual roster anyway on 2026-08-01, so the
-        # switch is allowed but never silent — every surface repeats this
-        # note. Blast radius is the orchestrator only: compaction summaries
-        # and delegate() still run on the "cheap" tier, which is unchanged.
-        "note": "China-hosted (Moonshot) — chat and transcripts leave the default routing policy",
+        # K3 is open-weight, so *who serves it* is a routing choice rather
+        # than a property of the model — several US hosts serve the same
+        # weights. `providers` is an ordered allowlist with fallbacks off
+        # (llm.chat), so the request is bounded to these hosts instead of
+        # merely preferring them.
+        #
+        # Moonshot leads only to spend down the owner's own BYOK credit at
+        # OpenRouter; when that runs dry those calls fail and the request
+        # falls through to Together, which is where this is meant to settle.
+        # Drop "moonshotai" from the list to finish the move — that one edit
+        # is the whole migration, and it is also the switch that brings this
+        # entry back inside the routing policy below.
+        "providers": ["moonshotai", "together"],
+        "note": (
+            "open-weight model; served by Moonshot while BYOK credit lasts, "
+            "then Together — Chinese hosts are best avoided for personal data"
+        ),
     },
 }
 

@@ -15,13 +15,18 @@ What must hold:
   6. an unreachable catalog degrades to "switch anyway", never to "refuse"
   7. set_model is registered non-dangerous, and is NOT reachable from a
      background workflow agent
-  8. a roster note (kimi's off-policy hosting) reaches every surface
+  8. a roster note reaches every surface
+  9. an open-weight model's provider pin is set from the roster, replaced
+     (never merged) on the next switch, and reaches the wire as an ordered
+     order[] with allow_fallbacks off — a pin that can silently reroute off
+     the allowlist is not a pin
 
 Run:  .venv/bin/python tests/models_check.py
 """
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -103,6 +108,61 @@ def switch_checks() -> None:
     print("ok  switch: same-model is a no-op; default returns to the boot model")
 
 
+def provider_pin_checks() -> None:
+    """An open-weight model's host is a routing choice, so it is pinned."""
+    fake_catalog(CATALOG)
+    a = agent_mod.Agent()
+    assert a.providers == [], "a configured tier must not carry a pin"
+
+    report = a.set_model("kimi")
+    assert a.providers == config.SWITCHABLE["kimi"]["providers"], a.providers
+    assert "moonshotai" in report and "together" in report, report
+
+    # Switching away must *replace* the pin, not keep it: a host that serves
+    # kimi does not necessarily serve opus at all.
+    a.set_model("opus")
+    assert a.providers == [], f"a stale pin followed the switch: {a.providers}"
+    print("ok  pin: set from the roster entry, replaced (not merged) on switch")
+
+    # And it has to reach the wire in the shape OpenRouter expects.
+    import jarvis.llm as real_llm
+
+    sent = {}
+
+    class Capture:
+        def post(self, url, json=None, headers=None, timeout=None):
+            sent.update(json or {})
+
+            class R:
+                status_code = 200
+
+                @staticmethod
+                def json():
+                    return {
+                        "choices": [{"message": {"content": "hi"}, "finish_reason": "stop"}],
+                        "usage": {},
+                    }
+
+            return R()
+
+    saved_client, real_llm._client = real_llm._client, Capture()
+    # chat() builds an auth header before it posts; nothing leaves the process.
+    os.environ.setdefault("OPENROUTER_API_KEY", "test-key-not-real")
+    try:
+        real_llm.chat("moonshotai/kimi-k3", [], providers=["moonshotai", "together"])
+        assert sent["provider"] == {
+            "order": ["moonshotai", "together"],
+            "allow_fallbacks": False,
+        }, sent.get("provider")
+
+        sent.clear()
+        real_llm.chat("openai/gpt-5.6-luna", [], providers=[])
+        assert "provider" not in sent, "an unpinned model must route normally"
+    finally:
+        real_llm._client = saved_client
+    print("ok  pin: reaches the wire as an ordered order[] with fallbacks off")
+
+
 def capability_checks() -> None:
     fake_catalog(CATALOG)
     a = agent_mod.Agent()
@@ -165,7 +225,9 @@ def failsoft_checks() -> None:
     a = agent_mod.Agent()
     report = a.set_model("kimi")
     assert a.model == "moonshotai/kimi-k3", "an unreachable catalog vetoed the owner's switch"
-    assert "China-hosted" in report, "the roster note must survive an unknown catalog"
+    # Assert the roster's own text, not a copy of it — the note is prose the
+    # owner edits, and a test that hardcodes the wording just breaks on rewrite.
+    assert config.SWITCHABLE["kimi"]["note"] in report, "the note must survive an unknown catalog"
     print("ok  fail-soft: an unreachable catalog does not block a switch")
 
     # And the real catalog() must swallow a dead transport rather than raise.
@@ -234,7 +296,8 @@ def registration_checks() -> None:
     assert a.model == "moonshotai/kimi-k3"
     assert modelctl.current() == a.model
     assert seen and seen[-1]["model"] == a.model, "on_change did not fire"
-    assert "China-hosted" in seen[-1]["report"], "the HUD is not told about the policy note"
+    note = config.SWITCHABLE["kimi"]["note"]
+    assert note in seen[-1]["report"], "the HUD is not told about the roster note"
     print("ok  modelctl: bind/switch/current/on_change, note carried to the window")
 
 
@@ -244,6 +307,7 @@ def main() -> int:
         roster_checks()
         resolve_checks()
         switch_checks()
+        provider_pin_checks()
         capability_checks()
         failsoft_checks()
         registration_checks()

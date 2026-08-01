@@ -48,6 +48,10 @@ class Agent:
         depth: int = 0,
     ):
         self.model = model or config.TIERS["orchestrator"]
+        # Ordered host allowlist for `self.model`, or empty for normal routing.
+        # Set by set_model from the roster entry; the configured tiers carry no
+        # pin, so this only ever applies to a model the owner switched onto.
+        self.providers: list[str] = []
         self.tool_specs = tools.specs(tool_names)
         self.max_steps = max_steps
         self.approve = approve
@@ -115,6 +119,12 @@ class Agent:
 
         previous = self.model
         self.model = target
+        # Replaced, never merged: the pin belongs to the model being switched
+        # to, so leaving the old one in place could bound the new model to a
+        # host that does not serve it at all.
+        self.providers = list(entry.get("providers") or [])
+        if self.providers:
+            notes.append("served by " + " → ".join(self.providers))
         if entry.get("note"):
             notes.append(entry["note"])
 
@@ -207,7 +217,9 @@ class Agent:
             # for, and a plan written at step 3 has to still be there at step 40.
             self._refresh_system()
 
-            reply = llm.chat(self.model, self.messages, tools=self.tool_specs)
+            reply = llm.chat(
+                self.model, self.messages, tools=self.tool_specs, providers=self.providers
+            )
             turn.steps = step + 1
             turn.cost_usd += reply.cost_usd
             turn.latency_s += reply.latency_s

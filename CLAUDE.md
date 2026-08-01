@@ -430,12 +430,15 @@ Two findings worth keeping:
   comparisons remain opt-in by naming models explicitly on `jarvis bench`.
   If Luna hits a capability wall, escalate the orchestrator to GPT-5.6 Terra
   or Claude Sonnet 5. **Amended 2026-08-01:** the escalation is now a live
-  switch rather than a restart, and the owner put `moonshotai/kimi-k3` on the
-  switchable roster knowingly — a deliberate, per-session exception to the
-  no-Chinese-hosted-models rule, not a repeal of it. The default tiers are
-  unchanged, so compaction summaries and `delegate()` never go there; only
-  the orchestrator moves, only when asked, and every surface repeats the
-  hosting note when it does.
+  switch rather than a restart, and `moonshotai/kimi-k3` is on the switchable
+  roster. That is not a repeal — the rule is about **who hosts the model, not
+  who trained it**, and K3 is open-weight, so the host is a routing choice.
+  The roster entry pins an ordered provider allowlist with fallbacks off
+  (`config.SWITCHABLE`, `llm.chat(providers=…)`), currently
+  `moonshotai → together`: Moonshot leads only to spend down the owner's own
+  BYOK credit at OpenRouter, and dropping it from the list finishes the move
+  to a US host. Default tiers are unchanged either way, so compaction
+  summaries and `delegate()` never touch it.
 - **Semantic/RAG memory deferred.** Memory is one markdown file per fact, pulled
   on demand via tools, so nothing is auto-injected. The upgrade ladder is
   substring → SQLite FTS5/BM25 → embeddings, and the tool interface
@@ -889,6 +892,22 @@ transcript rewrite. Three things needed care:
 A model that cannot call tools is refused outright: it would not error, it
 would quietly stop using tools and read as Jarvis having gone stupid, which is
 the worse failure.
+
+**Provider pinning for open-weight models (2026-08-01).** A roster entry may
+carry `providers`, an ordered host allowlist that `llm.chat()` sends as
+`{"order": [...], "allow_fallbacks": False}` — the same mechanism
+`llm.speech()` uses for TTS, for a different reason: there it was latency,
+here it is *which company serves the weights*. Open-weight models are hosted
+by several companies in several countries, so hosting is a routing decision
+rather than a property of the model, and the routing policy is about hosting.
+Fallbacks are off by design: OpenRouter treats a preference as a preference
+and will reroute on a transient blip (the 2026-07-31 TTS saga), which for a
+policy pin means silently landing somewhere off the allowlist. The list falls
+through in order and hard-fails past it — which is also how a spent BYOK
+balance auto-advances to the next host without ever leaving the allowlist.
+Pins are **replaced, not merged**, on the next switch: a host that serves one
+model may not serve another at all. `tests/models_check.py` covers the wire
+shape, the replacement, and that unpinned models still route normally.
 **Long-horizon work, part 1 (2026-08-01).** Three changes aimed at the same
 failure — a run that goes long enough to forget what it was doing.
 

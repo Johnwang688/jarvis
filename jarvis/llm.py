@@ -124,7 +124,17 @@ def chat(
     max_tokens: int = 4096,
     timeout: float = 120.0,
     max_retries: int = 3,
+    providers: list[str] | None = None,
 ) -> Reply:
+    """`providers` PINS routing to an ordered allowlist of hosts, no fallbacks.
+
+    Same mechanism `speech()` uses, for a different reason: there it was
+    latency, here it is *who is serving the model*. An open-weight model can be
+    hosted by several companies in several countries, and which one answers is
+    a routing decision — so the list is ordered (first choice first) and
+    `allow_fallbacks` is off, which bounds the request to these hosts rather
+    than merely preferring them. A model with no pin routes normally.
+    """
     payload: dict[str, Any] = {
         "model": model,
         "messages": messages,
@@ -136,6 +146,10 @@ def chat(
     if tools:
         payload["tools"] = tools
         payload["tool_choice"] = "auto"
+    if providers:
+        # Falls through the list in order and hard-fails past it. That is the
+        # point: a pin that silently reroutes off the allowlist is not a pin.
+        payload["provider"] = {"order": list(providers), "allow_fallbacks": False}
 
     headers = {
         "Authorization": f"Bearer {config.api_key()}",
