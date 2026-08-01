@@ -41,6 +41,13 @@ SAFE_TOOLS = [
     "run_readonly",
     "skill_list",
     "skill_read",
+    # A workflow is the long-horizon surface by definition — nobody is watching,
+    # so losing the thread is silent. The plan keeps it honest; sub-agents keep
+    # its context from filling with material it only needs the conclusion of.
+    # Both are safe here: run_subagent inherits this agent's deny-all approver,
+    # and its own toolset excludes everything dangerous.
+    "plan_write",
+    "run_subagent",
 ]
 
 WORKFLOW_SYSTEM = config.SYSTEM_PROMPT + (

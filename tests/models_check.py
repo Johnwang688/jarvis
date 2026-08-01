@@ -29,7 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from jarvis import agent as agent_mod
 from jarvis import config, context, llm, models, workflows
-from jarvis.tools import modelctl
+from jarvis.tools import modelctl, subagent
 from jarvis.tools import REGISTRY
 
 CATALOG = {
@@ -208,9 +208,14 @@ def registration_checks() -> None:
     assert not entry.dangerous, "set_model must not need an approval card"
     assert "list_models" in REGISTRY
 
+    # Two toolsets must stay clear of it, for different reasons: a workflow
+    # agent could re-point itself unwatched, and a sub-agent would re-point
+    # its *parent* mid-turn — modelctl is bound to the orchestrator, not to
+    # whoever calls the tool.
     for name in ("set_model", "list_models"):
         assert name not in workflows.SAFE_TOOLS, f"{name} reachable from a background workflow"
-    print("ok  registration: non-dangerous, and out of reach of workflow agents")
+        assert name not in subagent.SUBAGENT_TOOLS, f"{name} reachable from a sub-agent"
+    print("ok  registration: non-dangerous, out of reach of workflow and sub-agents")
 
     fake_catalog(CATALOG)
     seen = []
