@@ -205,6 +205,37 @@ TIERS: dict[str, str] = {
     "cheap": os.environ.get("JARVIS_CHEAP", "openai/gpt-oss-20b"),
 }
 
+# Models the owner can move the *running* orchestrator onto mid-session
+# (see models.py and tools/modelctl.py). A named roster rather than a
+# free-form model string on purpose: an open parameter would let a single
+# prompt-injected turn move the conversation — transcript and all — onto any
+# model OpenRouter serves, which is exactly what the routing policy below
+# exists to prevent. Aliases are what the owner says out loud; the full
+# OpenRouter id is accepted too.
+#
+# Capabilities (vision, tool calling, context) are deliberately NOT recorded
+# here. A table of model facts in the repo goes stale silently, and this
+# project has already been burned by a written-down model id that did not
+# exist — llm.catalog() reads them from OpenRouter at switch time instead.
+SWITCHABLE: dict[str, dict[str, str]] = {
+    "opus": {"id": "anthropic/claude-opus-5", "note": ""},
+    "grok": {"id": "x-ai/grok-4.5", "note": ""},
+    "kimi": {
+        "id": "moonshotai/kimi-k3",
+        # Moonshot is China-hosted, which cuts against the standing routing
+        # policy (2026-07-30: no personal data to Chinese-hosted models). The
+        # owner put it on the manual roster anyway on 2026-08-01, so the
+        # switch is allowed but never silent — every surface repeats this
+        # note. Blast radius is the orchestrator only: compaction summaries
+        # and delegate() still run on the "cheap" tier, which is unchanged.
+        "note": "China-hosted (Moonshot) — chat and transcripts leave the default routing policy",
+    },
+}
+
+# OpenRouter's public model catalog (no auth required). Used to read a
+# model's real capabilities at switch time.
+OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
+
 SYSTEM_PROMPT = """You are Jarvis, a personal assistant agent running on the user's machine.
 
 You live in WSL2 (Ubuntu) on a Windows 11 machine. Your shell and filesystem

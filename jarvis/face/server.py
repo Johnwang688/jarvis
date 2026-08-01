@@ -17,6 +17,9 @@ Routes:
                  speech. @path references in the text attach server-side files
                  (protected credential files refused, content scrubbed)
   POST /approve  {"id": ..., "allow": bool} -> answers a dangerous-tool card
+  POST /model    {"model": alias|id} -> re-points the live orchestrator at
+                 another model from config.SWITCHABLE, keeping the
+                 conversation. Same-origin only
   POST /design   {"prompt": ..., "image_b64"?: ...} -> design-mode turn; the
                  sketch goes to a separate designer agent, output files are
                  served by the workshop server on WORKSHOP_PORT (its own
@@ -46,8 +49,8 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from .. import agent as agent_mod
-from .. import config, permissions, voice
-from ..tools import secrets as secrets_mod
+from .. import config, models as models_mod, permissions, voice
+from ..tools import modelctl, secrets as secrets_mod
 from ..tools import voicectl, whiteboardctl
 from .approvals import ApprovalBroker
 
@@ -261,6 +264,12 @@ APPROVALS = ApprovalBroker(
 # broadcast keeps every open window's toggle in sync with reality.
 voicectl.on_change(lambda muted: broadcast("mute", {"muted": muted}))
 
+# Same contract for the model: the CORE row, "switch to Opus", and `/model` at
+# the CLI all land on modelctl, and one broadcast keeps the readout honest.
+# Without this the HUD would keep showing the boot-time model — /config is
+# fetched once at init.
+modelctl.on_change(lambda info: broadcast("model", info))
+
 # whiteboard_close broadcasts a self-close signal. Only whiteboard.html
 # handles it; jarvis.html ignores it on purpose (see whiteboardctl).
 whiteboardctl.on_close(lambda: broadcast("wb_close", {}))
@@ -275,6 +284,8 @@ def _get_agent() -> agent_mod.Agent:
             on_event=_agent_event,
             should_stop=_cancel.is_set,
         )
+        # This is the agent "switch to Opus" and the CORE row re-point.
+        modelctl.bind(_agent)
     return _agent
 
 
@@ -374,7 +385,15 @@ class FaceHandler(SimpleHTTPRequestHandler):
         if self.path == "/config":
             self._json_reply(
                 {
-                    "llm": config.TIERS["orchestrator"],
+                    # The *live* orchestrator, not the configured default —
+                    # it can be switched mid-session, and a readout that
+                    # lies about which model is answering is worse than none.
+                    # Read via modelctl so a GET does not construct an agent.
+                    "llm": modelctl.current() or config.TIERS["orchestrator"],
+                    "roster": [
+                        {"alias": alias, "id": entry["id"], "note": entry.get("note", "")}
+                        for alias, entry in models_mod.roster().items()
+                    ],
                     "stt": config.STT_MODEL,
                     "tts": config.TTS_MODEL,
                     "voice": config.TTS_VOICE,
@@ -445,6 +464,26 @@ class FaceHandler(SimpleHTTPRequestHandler):
             _cancel.set()
             broadcast("cancelled", {})
             self._json_reply({"ok": True})
+            return
+        if self.path == "/model":
+            # Same-origin like /mute and /cancel. Switching is not
+            # destructive, but nothing outside the window should be able to
+            # move the owner's conversation onto another model.
+            origin = self.headers.get("Origin")
+            host = self.headers.get("Host", "")
+            if origin and origin not in (f"http://{host}", f"https://{host}"):
+                self._json_error(403, "cross-origin model switch refused")
+                return
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                data = json.loads(self.rfile.read(length) or b"{}")
+                _get_agent()  # bind the live agent before switching it
+                report = modelctl.switch(str(data.get("model", "")))
+                self._json_reply({"ok": True, "model": modelctl.current(), "report": report})
+            except ValueError as exc:  # off-roster, or cannot call tools
+                self._json_error(400, str(exc))
+            except Exception as exc:
+                self._json_error(400, f"{type(exc).__name__}: {exc}")
             return
         if self.path == "/mute":
             try:

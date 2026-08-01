@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from . import config, context, llm, tools
+from . import config, context, llm, models, tools
 
 
 def _image_url(image) -> str:
@@ -63,6 +63,54 @@ class Agent:
             spec["function"]["name"] == "skill_read" for spec in self.tool_specs
         )
         self.messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
+
+    def set_model(self, name: str) -> str:
+        """Point this agent at another model from the roster. Returns a report.
+
+        Effective on the *next step*, including the rest of the turn this was
+        called in — so when the switch comes from a tool call, the reply
+        confirming it is already spoken by the new model, which is the fastest
+        possible way to hear whether it worked.
+
+        Scoped to this instance, never `config.TIERS`. Mutating the tier dict
+        would silently re-route compaction summaries, `delegate()`, and any
+        workflow started afterwards — agents nobody is watching.
+
+        Raises ValueError if the target is off-roster or cannot call tools.
+        """
+        alias, entry = models.resolve(name)  # ValueError names the roster
+        target = entry["id"]
+        if target == self.model:
+            return f"Already running {target}."
+
+        caps = models.capabilities(target)
+        # Only refuse on a *positive* "no tools" — an unknown capability means
+        # the catalog was unreachable, and that must not veto the owner.
+        if caps and not caps["tools"]:
+            raise ValueError(
+                f"{target} does not support tool calling, so it cannot run the "
+                "agent loop. It would stop using tools rather than fail loudly."
+            )
+
+        notes: list[str] = []
+        # The retroactive half of the vision problem: images already in the
+        # transcript go out with the next request too, so a text-only target
+        # needs them gone, not just avoided. evict_images swaps each for a
+        # placeholder — it never deletes a message, so invariant 1 holds.
+        if caps and not caps["vision"]:
+            evicted = context.evict_images(self.messages, context.ContextPolicy(keep_images=0))
+            if evicted:
+                notes.append(f"dropped {evicted} image(s) from context — {alias} is text-only")
+            else:
+                notes.append(f"{alias} is text-only; screenshots will not work")
+
+        previous = self.model
+        self.model = target
+        if entry.get("note"):
+            notes.append(entry["note"])
+
+        report = f"Switched from {previous} to {target}."
+        return report + (" (" + "; ".join(notes) + ")" if notes else "")
 
     def _summarize(self, transcript: str) -> str:
         """Compress old history using the cheap tier — this is bulk text work."""

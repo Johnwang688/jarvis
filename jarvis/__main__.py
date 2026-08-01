@@ -10,8 +10,9 @@ from rich.table import Table
 
 from . import agent as agent_mod
 from . import bench as bench_mod
-from . import config, permissions, tools
+from . import config, models as models_mod, permissions, tools
 from . import vocabbench as vocab_mod
+from .tools import modelctl
 
 console = Console()
 
@@ -78,9 +79,12 @@ def _make_agent(model: str | None) -> agent_mod.Agent:
             # said on the way to a tool call, not the finished reply
             console.print(f"\n[cyan]jarvis[/cyan] [dim]{data}[/dim]")
 
-    return agent_mod.Agent(
+    jarvis = agent_mod.Agent(
         model=model, approve=permissions.gate(_approve), on_event=on_event
     )
+    # Lets "switch to opus" work as a tool call, and /model as a CLI command.
+    modelctl.bind(jarvis)
+    return jarvis
 
 
 def cmd_chat(args) -> int:
@@ -101,6 +105,19 @@ def cmd_chat(args) -> int:
             if user_input in ("exit", "quit"):
                 console.print(f"[dim]session cost: ${session_cost:.4f}[/dim]")
                 return 0
+
+            # /model swaps the brain without dropping the conversation — the
+            # reason it is a command and not a restart.
+            if user_input.split(" ")[0] in ("/model", "/models"):
+                _, _, wanted = user_input.partition(" ")
+                if not wanted.strip():
+                    console.print(f"[dim]running: {jarvis.model}[/dim]\n{models_mod.menu()}")
+                else:
+                    try:
+                        console.print(f"[dim]{modelctl.switch(wanted.strip())}[/dim]")
+                    except ValueError as exc:
+                        console.print(f"[red]{exc}[/red]")
+                continue
 
             try:
                 turn = jarvis.run_turn(user_input)
@@ -242,6 +259,19 @@ def cmd_config(args) -> int:
     return 0
 
 
+def cmd_models(args) -> int:
+    """The switchable roster, with live capabilities where we can get them."""
+    console.print(models_mod.menu())
+    console.print(
+        "\n[dim]switch mid-session with /model <name> in chat, the CORE row in "
+        "the HUD, or by asking Jarvis. Process-only — a restart returns to "
+        f"{config.TIERS['orchestrator']}.[/dim]"
+    )
+    if not models_mod.llm.catalog():
+        console.print("[dim]capabilities unavailable — could not reach the OpenRouter catalog[/dim]")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(prog="jarvis", description="Your personal agent.")
     sub = parser.add_subparsers(dest="command")
@@ -291,6 +321,9 @@ def main() -> int:
 
     sub.add_parser("tools", help="list registered tools").set_defaults(func=cmd_tools)
     sub.add_parser("config", help="show configured model tiers").set_defaults(func=cmd_config)
+    sub.add_parser("models", help="list the models Jarvis can switch to").set_defaults(
+        func=cmd_models
+    )
 
     args = parser.parse_args()
     if not getattr(args, "func", None):

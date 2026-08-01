@@ -41,6 +41,7 @@ jarvis/
   agent.py      the loop — ~50 lines, read it first
   llm.py        OpenRouter client; the only file that knows about HTTP
   context.py    image eviction / result truncation / compaction
+  models.py     the switchable roster + capability checks for a live switch
   browser.py    Playwright session on its own thread, allowlist, budget, tracing
   config.py     model tiers, paths, system prompt
   bench.py      tool-calling stress test
@@ -50,7 +51,8 @@ jarvis/
   permissions.py  modes (ask/all) + the persistent dangerous-tool allowlist
   workflows.py  background agents on their own threads (safe tools only)
   tools/        clock, files, memory, shell, web, browsing, gmail,
-                onshape (CAD), skills, voicectl (mute), workflows
+                onshape (CAD), skills, voicectl (mute), modelctl (model
+                switching), workflows
   skills/       one markdown file per skill — see tools/skills.py
   face/         server.py (HUD + speech + design routes), approvals.py (the
                 gate), static/jarvis.html (the HUD), static/whiteboard.html
@@ -129,6 +131,16 @@ jarvis/
   allowlist by first word only ("git" ≠ "gitfoo"). Tests must point
   `config.ALLOWLIST_PATH` at a temp file — a UI test once wrote `apt` onto
   the real allowlist by clicking the wrong button.
+- **Model switching is roster-bounded** (`models.py`, 2026-08-01). `set_model`
+  takes an alias, never a free-form model id: an open parameter would let one
+  prompt-injected turn move the conversation — transcript and all — onto any
+  model OpenRouter serves, which is the routing policy's whole blast radius.
+  A switch is scoped to one `Agent` instance and never `config.TIERS`, so
+  compaction, `delegate()`, and later workflows stay put. Not `dangerous=True`
+  (it cannot reach the approval gate, and the owner usually just said it out
+  loud), but every switch is announced to the HUD. Only chat and the face
+  register the tools; workflow agents get SAFE_TOOLS, so a background agent
+  cannot re-point itself.
 - **Background workflows cannot ask, so they cannot do** (`workflows.py`):
   workflow agents get SAFE_TOOLS (no browser — one shared Playwright page —
   and nothing dangerous) plus a deny-all approver. Monitoring is via
@@ -192,6 +204,21 @@ jarvis/
   write pin (every write URL targets the pinned document), and the key
   bundle refused/scrubbed by all three secrets layers. Run after touching
   `onshape_auth.py`, `tools/onshape.py`, or `secrets.py`.
+- `tests/models_check.py` — free synthetic checks for runtime model
+  switching against a faked catalog: roster shape (`default` always present,
+  no duplicate ids), alias/id/bare-name resolution and off-roster refusal,
+  a switch scoped to one agent with `config.TIERS` untouched, the
+  capability gates (no tool calling → refused; text-only → images already in
+  the transcript evicted, with invariant 1 re-asserted afterwards), the
+  fail-soft catalog (unreachable never vetoes a switch, never caches data,
+  never re-dials per lookup), and modelctl's bind/switch/on_change.
+- `tests/face/hud_model_check.py` — free headless check of the CORE row in
+  the real `jarvis.html` (hud_state_check's puppet pattern): the readout
+  renders the live model, clicking cycles the roster, the readout moves
+  **only** on the SSE broadcast (so a spoken switch and a click behave
+  identically), a roster note colors the row, and a 400 surfaces in
+  OPERATIONS without moving the readout. Exists because `/config` is fetched
+  once at boot — a route test cannot see the readout go stale.
 - `tests/permissions_check.py` — free checks for modes and the allowlist:
   gate ordering, prefix vs whole-tool matching, persistence without
   duplicates, mode "all" bypass, and the broker's ALWAYS path writing an
@@ -205,8 +232,10 @@ jarvis/
   background lifecycle, status/log tools, deny-all approver, safe toolset,
   concurrency cap. Run after touching `workflows.py`.
 - `tests/face/controls_check.py` — free server-level checks: /mute flips and
-  broadcasts, /config reports mute+permissions, and /approve with
-  always=true both unblocks the agent and persists the entry.
+  broadcasts, /config reports mute+permissions+the live model+the roster,
+  /model re-points the live agent and broadcasts (off-roster 400,
+  cross-origin 403), and /approve with always=true both unblocks the agent
+  and persists the entry.
 - `tests/face/approval_check.py` — free synthetic checks for the approval
   gate: the broker (approve/deny/timeout/no-window/replay/window-closed), the
   `/approve` route against a real server with a real SSE subscriber, that
@@ -322,7 +351,13 @@ Two findings worth keeping:
   qwen3.7-flash → gpt-oss-20b for exactly this reason. Multi-model
   comparisons remain opt-in by naming models explicitly on `jarvis bench`.
   If Luna hits a capability wall, escalate the orchestrator to GPT-5.6 Terra
-  or Claude Sonnet 5.
+  or Claude Sonnet 5. **Amended 2026-08-01:** the escalation is now a live
+  switch rather than a restart, and the owner put `moonshotai/kimi-k3` on the
+  switchable roster knowingly — a deliberate, per-session exception to the
+  no-Chinese-hosted-models rule, not a repeal of it. The default tiers are
+  unchanged, so compaction summaries and `delegate()` never go there; only
+  the orchestrator moves, only when asked, and every surface repeats the
+  hosting note when it does.
 - **Semantic/RAG memory deferred.** Memory is one markdown file per fact, pulled
   on demand via tools, so nothing is auto-injected. The upgrade ladder is
   substring → SQLite FTS5/BM25 → embeddings, and the tool interface
@@ -741,6 +776,41 @@ docs), whiteboard→CAD wiring, and a cad-bench scored by assembly
 readback. API-key note: keys live under My account → Developer → API
 keys (the dev-portal URL is OAuth-apps only now); individual accounts cap
 at 2 active keys.
+
+**Runtime model switching shipped (2026-08-01).** The orchestrator can now be
+changed mid-session without dropping the conversation: `set_model` /
+`list_models` tools ("switch to Opus"), `/model <name>` in `jarvis chat`,
+`jarvis models` to list, and a click-to-cycle CORE row in the HUD SYSTEMS
+panel. Roster: `opus` (anthropic/claude-opus-5), `grok` (x-ai/grok-4.5),
+`kimi` (moonshotai/kimi-k3), plus `default` — which `models.roster()` always
+injects, because without it the control is one-way until a restart.
+Process-only, like permission mode "all": a restart is always back to the
+configured tier.
+
+It is small because the loop was already shaped for it — `Agent.model` is a
+plain string read fresh on every step and every OpenRouter model speaks the
+same wire shape, so the switch is one assignment with no reconstruction or
+transcript rewrite. Three things needed care:
+
+- **Vision is retroactive, and that is the trap.** Switching to a text-only
+  model does not only affect future screenshots; image parts already in the
+  transcript (cad_render, browser_screenshot) go out with the very next
+  request. `set_model` evicts them via `context.evict_images(keep_images=0)`,
+  which rewrites in place, so invariant 1 still holds.
+- **Capabilities come from `llm.catalog()`, not a table in the repo.** A
+  written-down model fact rots silently and this project has already shipped
+  a model id that did not exist. The fetch **fails soft** — unknown is never
+  read as "no", so a network blip cannot veto a switch the owner asked for —
+  and remembers failure for `CATALOG_RETRY_S` so an unreachable catalog costs
+  one timeout for the whole menu, not one per roster entry.
+- **The HUD readout had to stop lying.** `/config` is fetched exactly once at
+  boot, so `/config` now reports the *live* model and every switch broadcasts
+  over SSE — same contract as MUTE, so a spoken switch and a click land
+  identically.
+
+A model that cannot call tools is refused outright: it would not error, it
+would quietly stop using tools and read as Jarvis having gone stupid, which is
+the worse failure.
 
 Later: real integrations (calendar/email), scheduled proactive runs, and a
 Windows-side bridge (`windows/bridge.py`) for desktop GUI automation — only
