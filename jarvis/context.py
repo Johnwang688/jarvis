@@ -136,16 +136,47 @@ def truncate_old_results(messages: list[dict[str, Any]], policy: ContextPolicy) 
 def find_cut_point(messages: list[dict[str, Any]], keep_recent: int) -> int:
     """Index of the newest safe compaction boundary, or 0 if there is none.
 
-    Only a genuine user turn is safe: cutting anywhere inside an assistant's
-    tool_calls and their matching tool results would orphan a tool_call_id.
+    Two things make an index safe, and "looks like a user message" is only the
+    first of them.
+
+    The subtle one: an assistant's tool group is *not* a contiguous run of
+    `tool` messages. An image-producing tool returns its picture as a separate
+    `user` message wedged in behind its `tool` message (invariant 5), so a turn
+    with two parallel renders lays out as
+
+        assistant(call_1, call_2) · tool(call_1) · user(image) · tool(call_2)
+
+    and that inner `user(image)` is, on the face of it, a perfectly good cut
+    point — no `tool_call_id`, right role. Cutting there deletes the assistant
+    message and `call_1`'s result while leaving `call_2`'s behind, pointing at
+    an id nothing declares any more, and the next request 400s. It only fires
+    past `compact_at_tokens`, so it is invisible until a run is long enough to
+    matter.
+
+    So the real test is whether every tool_call declared so far has already been
+    answered. We walk forward tracking the outstanding ids and only accept a
+    boundary where none are pending.
+
+    Index 1 is never a candidate: that is the session's opening request, the one
+    statement of what all this work is *for*, and compaction used to eat it
+    first — leaving the model taking direction from a cheap-tier paraphrase of
+    its own goal. `compact()` keeps it.
     """
     limit = len(messages) - keep_recent
+    pending: set[str] = set()
     cut = 0
     for i, message in enumerate(messages):
-        if i == 0 or i >= limit:
-            continue
-        if message.get("role") == "user" and "tool_call_id" not in message:
+        role = message.get("role")
+        # Judged *before* this message is folded in: the boundary sits in front
+        # of it, so what matters is whether everything earlier is settled.
+        if 1 < i < limit and not pending and role == "user" and "tool_call_id" not in message:
             cut = i
+        if role == "assistant":
+            for call in message.get("tool_calls") or []:
+                if call.get("id"):
+                    pending.add(call["id"])
+        elif role == "tool":
+            pending.discard(message.get("tool_call_id", ""))
     return cut
 
 
@@ -154,13 +185,17 @@ def compact(
     policy: ContextPolicy,
     summarize: Callable[[str], str],
 ) -> int:
-    """Replace the oldest stretch of history with a summary. Returns messages removed."""
+    """Replace the oldest stretch of history with a summary. Returns messages removed.
+
+    Compacts `messages[2:cut]`, not `[1:cut]`: index 0 is the system message and
+    index 1 is the original request. Both are pinned — see `find_cut_point`.
+    """
     cut = find_cut_point(messages, policy.keep_recent_messages)
-    if cut < 2:
+    if cut < 3:  # nothing between the pinned goal and the boundary
         return 0
 
     transcript = []
-    for message in messages[1:cut]:
+    for message in messages[2:cut]:
         role = message.get("role", "?")
         content = message.get("content")
         if isinstance(content, list):
@@ -177,10 +212,10 @@ def compact(
         return 0
 
     summary = summarize("\n".join(transcript))
-    removed = cut - 1
+    removed = cut - 2
     # A plain user message, not a system one: mid-conversation system messages
     # are not supported across every model OpenRouter serves.
-    messages[1:cut] = [{"role": "user", "content": SUMMARY_PREFIX + summary}]
+    messages[2:cut] = [{"role": "user", "content": SUMMARY_PREFIX + summary}]
     return removed
 
 

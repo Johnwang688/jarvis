@@ -41,6 +41,8 @@ jarvis/
   agent.py      the loop — ~50 lines, read it first
   llm.py        OpenRouter client; the only file that knows about HTTP
   context.py    image eviction / result truncation / compaction
+  runtime.py    per-run ContextVars (plan slot, approver, cancel, depth,
+                toolset) — the channel dispatch() cannot give a tool
   browser.py    Playwright session on its own thread, allowlist, budget, tracing
   config.py     model tiers, paths, system prompt
   bench.py      tool-calling stress test
@@ -50,7 +52,8 @@ jarvis/
   permissions.py  modes (ask/all) + the persistent dangerous-tool allowlist
   workflows.py  background agents on their own threads (safe tools only)
   tools/        clock, files, memory, shell, web, browsing, gmail,
-                onshape (CAD), skills, voicectl (mute), workflows
+                onshape (CAD), skills, voicectl (mute), workflows,
+                plan (the working checklist), subagent (context isolation)
   skills/       one markdown file per skill — see tools/skills.py
   face/         server.py (HUD + speech + design routes), approvals.py (the
                 gate), static/jarvis.html (the HUD), static/whiteboard.html
@@ -63,8 +66,24 @@ jarvis/
 1. **Context pruning never deletes a message** (`context.py`). Every `tool`
    message must keep the `tool_call_id` its assistant message declared, or the
    next request 400s. Rewrite content in place. Compaction *does* delete, so it
-   only cuts at a genuine `user` boundary — never inside an assistant/tool
-   group. `find_cut_point()` enforces this; there is a synthetic test for it.
+   only cuts where **no tool_call is outstanding** — `find_cut_point()` walks
+   the transcript tracking pending ids, and "is a user message" is *not*
+   sufficient on its own. An image result is a bare `user` message wedged in
+   behind its `tool` message (invariant 5), so a turn with two parallel renders
+   lays out as `assistant(c1,c2) · tool(c1) · user(image) · tool(c2)` and that
+   inner user message used to look like a legal boundary — cutting there
+   orphaned `c2`. Fixed 2026-08-01; `tests/context_check.py` is the regression
+   test (and is verified to fail against the old rule).
+
+   Also pinned: **`messages[1]`, the original request, is never compacted
+   away.** Compaction takes `messages[2:cut]`. It used to take `[1:cut]`, so
+   the first casualty of a long run was the statement of what the run was for,
+   leaving the model working from a cheap-tier paraphrase of its own goal.
+
+   Consequence worth knowing: a cut point must be a `user` message, and a
+   single turn contains none after the one that started it — so **inside one
+   long turn, pruning is eviction and truncation only.** Compaction can only
+   fire across turns (or at an image-carrier boundary).
 
 2. **The assistant turn goes back verbatim.** Append `response.content` plus
    `tool_calls` unchanged. Reconstructing it loses the ids.
@@ -85,7 +104,26 @@ jarvis/
    `Annotated[str, "description"]`; never hand-write JSON schema. Defaults make
    a parameter optional.
 
-7. **All Playwright work happens on the browser's own thread.** The sync API
+7. **`messages[0]` is the durable slot, and only agents that can use a block
+   get it.** It is rebuilt from source (base prompt + skills index + working
+   plan) at the top of **every step**, not every turn — a 40-step turn passes
+   the top of `run_turn` once, and step 40 is exactly when the plan matters.
+   Nothing in `context.py` touches index 0, which is what makes it the one
+   place a long run cannot lose. An agent without `skill_read` never sees the
+   skills index and one without `plan_write` never sees the plan block: never
+   describe a tool the model cannot call.
+
+8. **Per-run state reaches tools through `runtime.py`, and fails closed.**
+   `dispatch()` calls `func(**arguments)` with no agent reference, so the plan
+   slot, the approver, the cancel check, the depth counter and the parent's
+   toolset live in ContextVars bound by `run_turn`. They are per-thread, which
+   is what keeps two concurrent agents (a workflow, the face's request threads)
+   from sharing a checklist. An unbound approver **denies**. A sub-agent runs
+   inside `contextvars.copy_context()` — it binds the same vars, so calling it
+   directly would leave the parent holding the *child's* empty plan and the
+   child's depth when the call returns.
+
+9. **All Playwright work happens on the browser's own thread.** The sync API
    is thread-affine and parks a *running* asyncio loop on whichever thread
    starts it — which crashed the chat REPL's prompt (2026-07-31) and would
    reject the face's per-request threads. Public `Session` methods marshal
@@ -129,6 +167,18 @@ jarvis/
   allowlist by first word only ("git" ≠ "gitfoo"). Tests must point
   `config.ALLOWLIST_PATH` at a temp file — a UI test once wrote `apt` onto
   the real allowlist by clicking the wrong button.
+- **A sub-agent can never exceed its parent** (`tools/subagent.py`,
+  2026-08-01). `run_subagent` is synchronous — the parent blocks — which is
+  what makes it safe to give a child browser tools where a background workflow
+  cannot have them. Three limits, all tested: the child's toolset is
+  `SUBAGENT_TOOLS` **intersected with the parent's own**, so a workflow (denied
+  the browser because workflows share one Playwright page) cannot reach the
+  browser by spawning a child that has it; the child dispatches with the
+  *parent's* approver, so a deny-all workflow yields a deny-all child; and
+  depth is capped at `runtime.MAX_DEPTH`. `SUBAGENT_TOOLS` currently contains
+  nothing dangerous and `longhorizon_check.py` asserts that stays true — if you
+  add one, the inherited approver is what gates it, and think hard about
+  whether the owner can judge a request they never saw framed.
 - **Background workflows cannot ask, so they cannot do** (`workflows.py`):
   workflow agents get SAFE_TOOLS (no browser — one shared Playwright page —
   and nothing dangerous) plus a deny-all approver. Monitoring is via
@@ -174,6 +224,27 @@ jarvis/
   6-model sweep). Use `-t <task>` and a single model while iterating.
 - Context-management tests are synthetic and free — no API, fully repeatable.
   Prefer that pattern for new logic.
+- `tests/context_check.py` — free synthetic checks for `context.py`, and the
+  one CLAUDE.md claimed existed for months but did not, which is how the
+  cut-point orphan bug survived in the compaction path (it only fires past
+  `compact_at_tokens`, so nothing short ever reached it). Covers: parallel
+  image results never orphaning a tool_call, cuts only at settled user
+  boundaries, the original request pinned through compaction, eviction and
+  truncation being in-place and idempotent, and `manage()` end-to-end leaving
+  a wire-valid transcript. Run after touching anything in `context.py`.
+  **Write new cases so they fail against the old code** — the first draft of
+  the orphan case passed against the bug, because the split tool group was not
+  the *newest* candidate and both rules picked the same safe boundary.
+- `tests/longhorizon_check.py` — free checks with a faked `llm.chat` for the
+  plan slot and sub-agents: plan written through dispatch and injected into
+  `messages[0]`, still present on step 26 of a *single* turn (the per-step
+  refresh — a per-turn refresh passes a 2-step test and fails the real case),
+  surviving compaction, absent for agents without `plan_write`, and not shared
+  between concurrent agents; sub-agent returning only its answer with the bulk
+  left behind, inheriting the parent's approver, toolset intersected with the
+  parent's, depth capped, cancellation reaching through, and the parent's plan
+  surviving the call. Run after touching `agent.run_turn`, `runtime.py`,
+  `tools/plan.py`, or `tools/subagent.py`.
 - Browser smoke tests should use a **local HTTP server**, not a live site.
 - `tests/secrets_check.py` — free synthetic checks for the `.env` protection,
   against a throwaway dir holding a fake key. Includes a replay of the actual
@@ -741,6 +812,76 @@ docs), whiteboard→CAD wiring, and a cad-bench scored by assembly
 readback. API-key note: keys live under My account → Developer → API
 keys (the dev-portal URL is OAuth-apps only now); individual accounts cap
 at 2 active keys.
+
+**Long-horizon work, part 1 (2026-08-01).** Three changes aimed at the same
+failure — a run that goes long enough to forget what it was doing.
+
+- **The cut-point orphan bug** (invariant 1) — found by inspection, reproduced,
+  fixed, and now covered by the `context.py` test suite that this file had been
+  claiming existed. Worth internalizing: it lived in a code path that *only*
+  executes past 60k tokens, so every short test in the repo ran straight past
+  it. Long-horizon code needs long-horizon tests.
+- **The working plan** (`tools/plan.py`). One tool, `plan_write`, holding a
+  markdown checklist rewritten whole each time. It renders into `messages[0]`,
+  which nothing in `context.py` touches, so it is the one part of a long run
+  that cannot be pruned away — and it is re-rendered every *step*, not every
+  turn. The skills index proved the mechanism; this reuses it. Wired into the
+  main agent (all tools), workflows, and the designer.
+- **Sub-agents** (`tools/subagent.py`). `delegate()` was the cost lever; this
+  is the *context* lever, which is a different problem. Every tool result a run
+  produces lives in the orchestrator's transcript forever — fetch four pages to
+  answer one question and 40k tokens of page dump outlive the answer by the
+  whole session. `run_subagent` does the job on its own transcript and returns
+  only its final text. Safety in "Safety design"; it is synchronous, which is
+  what lets it hold the browser when a background workflow cannot.
+
+Not done, in the order I would do them next (the full list came out of a review
+on 2026-08-01): step-budget awareness and a resumable handoff instead of
+`"[stopped after N steps]"` throwing the work away; spill-don't-drop truncation
+(write the full result to `traces/` and truncate to a pointer the model can
+`read_file`, making truncation recoverable); real `prompt_tokens` from
+`llm.Reply` driving compaction instead of the chars÷4 estimate; structured
+compaction sections (goal / done / open / failed) instead of free prose on the
+cheap tier; repetition detection (the gpt-oss-20b vocab-bench failure — 16
+rounds of no valid action — is invisible to the loop today); durable workflow
+journals; and **`long-bench`**, without which none of this is measurable —
+vocab-bench at ~33 steps never crosses the compaction threshold.
+
+### PENDING LIVE VALIDATION — needs API keys (delete this section once done)
+
+Everything above was built and tested in a sandbox with **no `OPENROUTER_API_KEY`**,
+so every check is synthetic. The free suites all pass (`context_check`,
+`longhorizon_check`, plus `secrets`, `permissions`, `skills`, `workflows`,
+`gmail`, `onshape`, `face/approval_check`, `face/controls_check`). What a
+human with keys still has to confirm — **and this list should be deleted from
+CLAUDE.md once it has been, with the results folded into the notes above:**
+
+1. **Playwright suites never ran here** — not installed in the sandbox. Run
+   `tests/browser/policy_check.py`, `tests/browser/thread_check.py`, and the
+   `tests/face/` HUD suites (`hud_state_check`, `hud_approval_check`,
+   `whiteboard_check`, `attach_check`, `hud_input_check`). They are free; they
+   just need the browser. Nothing in this change touches them, so a failure
+   means a genuine regression.
+2. **Does the model actually use `plan_write`?** The mechanism is tested; the
+   *prompting* is not. Give Luna a genuinely long task (a multi-file refactor,
+   a 10-part research job) via `jarvis chat` and watch whether it writes a plan
+   unprompted and keeps it current, or ignores the tool. If it ignores it, the
+   system-prompt paragraph in `config.py` is what needs work, not the tool.
+3. **Does `run_subagent` earn its cost?** Same task twice, once with the tool
+   available and once without, comparing total `$` and whether the answer holds
+   up. The bet is that isolation pays for the extra model call; that bet is
+   unverified. Watch for the failure mode where the model delegates something
+   it should have done itself and pays twice for a worse answer.
+4. **A real run past the compaction threshold.** Nothing has yet exercised
+   compaction against a live model — the orphan fix is proven synthetically
+   only. A long browser or CAD session (parallel `cad_render` calls are the
+   exact shape that triggered the bug) crossing 60k tokens would confirm no
+   400s and that the pinned goal reads sensibly after a summary lands.
+5. **Stale plans across turns.** The plan persists for the life of the agent,
+   which is the point for long work but means a finished checklist can linger
+   in the face's persistent agent into an unrelated conversation. The model can
+   clear it with `plan_write("")`. Check in live use whether it does, or
+   whether the plan needs to expire.
 
 Later: real integrations (calendar/email), scheduled proactive runs, and a
 Windows-side bridge (`windows/bridge.py`) for desktop GUI automation — only
