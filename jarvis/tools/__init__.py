@@ -209,6 +209,7 @@ from . import (  # noqa: E402,F401  (registers the tools)
     files,
     gmail,
     drive,
+    google_workspace,
     memory,
     onshape,
     sessions,
