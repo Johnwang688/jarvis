@@ -205,6 +205,47 @@ TIERS: dict[str, str] = {
     "cheap": os.environ.get("JARVIS_CHEAP", "openai/gpt-oss-20b"),
 }
 
+# Models the owner can move the *running* orchestrator onto mid-session
+# (see models.py and tools/modelctl.py). A named roster rather than a
+# free-form model string on purpose: an open parameter would let a single
+# prompt-injected turn move the conversation — transcript and all — onto any
+# model OpenRouter serves, which is exactly what the routing policy below
+# exists to prevent. Aliases are what the owner says out loud; the full
+# OpenRouter id is accepted too.
+#
+# Capabilities (vision, tool calling, context) are deliberately NOT recorded
+# here. A table of model facts in the repo goes stale silently, and this
+# project has already been burned by a written-down model id that did not
+# exist — llm.catalog() reads them from OpenRouter at switch time instead.
+SWITCHABLE: dict[str, dict] = {
+    "opus": {"id": "anthropic/claude-opus-5", "note": "", "providers": []},
+    "grok": {"id": "x-ai/grok-4.5", "note": "", "providers": []},
+    "kimi": {
+        "id": "moonshotai/kimi-k3",
+        # K3 is open-weight, so *who serves it* is a routing choice rather
+        # than a property of the model — several US hosts serve the same
+        # weights. `providers` is an ordered allowlist with fallbacks off
+        # (llm.chat), so the request is bounded to these hosts instead of
+        # merely preferring them.
+        #
+        # Moonshot leads only to spend down the owner's own BYOK credit at
+        # OpenRouter; when that runs dry those calls fail and the request
+        # falls through to Together, which is where this is meant to settle.
+        # Drop "moonshotai" from the list to finish the move — that one edit
+        # is the whole migration, and it is also the switch that brings this
+        # entry back inside the routing policy below.
+        "providers": ["moonshotai", "together"],
+        "note": (
+            "open-weight model; served by Moonshot while BYOK credit lasts, "
+            "then Together — Chinese hosts are best avoided for personal data"
+        ),
+    },
+}
+
+# OpenRouter's public model catalog (no auth required). Used to read a
+# model's real capabilities at switch time.
+OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
+
 SYSTEM_PROMPT = """You are Jarvis, a personal assistant agent running on the user's machine.
 
 You live in WSL2 (Ubuntu) on a Windows 11 machine. Your shell and filesystem

@@ -1,9 +1,11 @@
 """Face-server checks for mute and permission controls. Free — no API.
 
 Against a real threaded server: /config reports mute + permissions state,
-POST /mute flips voicectl and broadcasts to SSE subscribers, and POST
-/approve with always=true both unblocks the waiting agent thread and writes
-the allowlist entry.
+POST /mute flips voicectl and broadcasts to SSE subscribers, POST /model
+re-points the live agent and broadcasts so the CORE readout stays honest
+(/config is fetched once at boot, so the broadcast is the only thing keeping
+it true), and POST /approve with always=true both unblocks the waiting agent
+thread and writes the allowlist entry.
 
 Run:  .venv/bin/python tests/face/controls_check.py
 """
@@ -21,18 +23,28 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from jarvis import config, permissions
+from jarvis import config, llm, permissions
 from jarvis.tools import voicectl
 
 PORT = 8441
 
+# Pin the capability lookup: these checks are about the route, and a real
+# catalog fetch would put the network on the critical path of a free test.
+llm.catalog = lambda refresh=False: {  # type: ignore[assignment]
+    entry["id"]: {"context_length": 200_000, "vision": True, "tools": True}
+    for entry in config.SWITCHABLE.values()
+} | {config.TIERS["orchestrator"]: {"context_length": 1_000_000, "vision": True, "tools": True}}
 
-def _post(path: str, payload: dict) -> tuple[int, dict]:
+
+def _post(path: str, payload: dict, origin: str | None = None) -> tuple[int, dict]:
     conn = http.client.HTTPConnection("localhost", PORT, timeout=5)
     body = json.dumps(payload)
     conn.request(
         "POST", path, body,
-        {"Content-Type": "application/json", "Origin": f"http://localhost:{PORT}"},
+        {
+            "Content-Type": "application/json",
+            "Origin": origin or f"http://localhost:{PORT}",
+        },
     )
     response = conn.getresponse()
     data = json.loads(response.read() or b"{}")
@@ -72,6 +84,32 @@ def main() -> int:
             sse.get(timeout=2)
             assert voicectl.is_muted() is False
             print("ok  mute: /mute flips voicectl, broadcasts, and shows in /config")
+
+            assert cfg["llm"] == config.TIERS["orchestrator"], cfg
+            aliases = [entry["alias"] for entry in cfg["roster"]]
+            assert aliases[0] == "default" and "opus" in aliases, aliases
+            assert any(e["note"] for e in cfg["roster"]), "roster notes must reach the window"
+
+            target = config.SWITCHABLE["opus"]["id"]
+            status, data = _post("/model", {"model": target})
+            assert status == 200 and data["model"] == target, (status, data)
+            msg = json.loads(sse.get(timeout=2))
+            assert msg["kind"] == "model" and msg["data"]["model"] == target, msg
+            assert server._get_agent().model == target, "the live agent did not move"
+            assert _get_config()["llm"] == target, "/config still reports the boot model"
+
+            status, data = _post("/model", {"model": "gpt-4"})
+            assert status == 400 and "roster" in data["error"], (status, data)
+            assert server._get_agent().model == target, "a refused switch moved the agent"
+
+            status, _ = _post("/model", {"model": "default"}, origin="http://evil.example")
+            assert status == 403, f"cross-origin switch was accepted ({status})"
+            assert server._get_agent().model == target, "cross-origin switch moved the agent"
+
+            _post("/model", {"model": "default"})
+            sse.get(timeout=2)
+            assert server._get_agent().model == config.TIERS["orchestrator"]
+            print("ok  model: /model switches + broadcasts; off-roster 400, cross-origin 403")
 
             result = {}
 

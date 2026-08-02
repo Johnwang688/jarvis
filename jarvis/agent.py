@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from . import config, context, llm, runtime, tools
+from . import config, context, llm, models, runtime, tools
 
 
 def _image_url(image) -> str:
@@ -48,6 +48,10 @@ class Agent:
         depth: int = 0,
     ):
         self.model = model or config.TIERS["orchestrator"]
+        # Ordered host allowlist for `self.model`, or empty for normal routing.
+        # Set by set_model from the roster entry; the configured tiers carry no
+        # pin, so this only ever applies to a model the owner switched onto.
+        self.providers: list[str] = []
         self.tool_specs = tools.specs(tool_names)
         self.max_steps = max_steps
         self.approve = approve
@@ -72,6 +76,60 @@ class Agent:
         self._has_skills = "skill_read" in names
         self._has_plan = "plan_write" in names
         self.messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
+
+    def set_model(self, name: str) -> str:
+        """Point this agent at another model from the roster. Returns a report.
+
+        Effective on the *next step*, including the rest of the turn this was
+        called in — so when the switch comes from a tool call, the reply
+        confirming it is already spoken by the new model, which is the fastest
+        possible way to hear whether it worked.
+
+        Scoped to this instance, never `config.TIERS`. Mutating the tier dict
+        would silently re-route compaction summaries, `delegate()`, and any
+        workflow started afterwards — agents nobody is watching.
+
+        Raises ValueError if the target is off-roster or cannot call tools.
+        """
+        alias, entry = models.resolve(name)  # ValueError names the roster
+        target = entry["id"]
+        if target == self.model:
+            return f"Already running {target}."
+
+        caps = models.capabilities(target)
+        # Only refuse on a *positive* "no tools" — an unknown capability means
+        # the catalog was unreachable, and that must not veto the owner.
+        if caps and not caps["tools"]:
+            raise ValueError(
+                f"{target} does not support tool calling, so it cannot run the "
+                "agent loop. It would stop using tools rather than fail loudly."
+            )
+
+        notes: list[str] = []
+        # The retroactive half of the vision problem: images already in the
+        # transcript go out with the next request too, so a text-only target
+        # needs them gone, not just avoided. evict_images swaps each for a
+        # placeholder — it never deletes a message, so invariant 1 holds.
+        if caps and not caps["vision"]:
+            evicted = context.evict_images(self.messages, context.ContextPolicy(keep_images=0))
+            if evicted:
+                notes.append(f"dropped {evicted} image(s) from context — {alias} is text-only")
+            else:
+                notes.append(f"{alias} is text-only; screenshots will not work")
+
+        previous = self.model
+        self.model = target
+        # Replaced, never merged: the pin belongs to the model being switched
+        # to, so leaving the old one in place could bound the new model to a
+        # host that does not serve it at all.
+        self.providers = list(entry.get("providers") or [])
+        if self.providers:
+            notes.append("served by " + " → ".join(self.providers))
+        if entry.get("note"):
+            notes.append(entry["note"])
+
+        report = f"Switched from {previous} to {target}."
+        return report + (" (" + "; ".join(notes) + ")" if notes else "")
 
     def _refresh_system(self) -> None:
         """Rebuild messages[0] from source: base prompt + skills index + plan.
@@ -159,7 +217,9 @@ class Agent:
             # for, and a plan written at step 3 has to still be there at step 40.
             self._refresh_system()
 
-            reply = llm.chat(self.model, self.messages, tools=self.tool_specs)
+            reply = llm.chat(
+                self.model, self.messages, tools=self.tool_specs, providers=self.providers
+            )
             turn.steps = step + 1
             turn.cost_usd += reply.cost_usd
             turn.latency_s += reply.latency_s

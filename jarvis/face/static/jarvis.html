@@ -201,7 +201,9 @@
   <div id="clock">--:--:--</div>
   <div id="date"></div>
   <div class="rows">
-    <div class="row"><span class="k">CORE</span><span class="v" id="cfg-llm">—</span></div>
+    <div class="row" id="model-row" style="cursor:pointer" title="switch the model running this conversation">
+      <span class="k">CORE</span><span class="v" id="cfg-llm">—</span>
+    </div>
     <div class="row"><span class="k">EARS</span><span class="v" id="cfg-stt">—</span></div>
     <div class="row"><span class="k">VOICE</span><span class="v" id="cfg-tts">—</span></div>
     <div class="row"><span class="k">TURNS</span><span class="v" id="stat-turns">0</span></div>
@@ -656,6 +658,24 @@ function setMuteUI(on) {
   $("mute-state").style.color = muted ? "#f87171" : "";
 }
 
+// ============================== model switching =============================
+// Same contract as mute: the row POSTs, the spoken "switch to Opus" goes
+// through the tool, and both come back on one SSE broadcast — so the readout
+// is the live model, never the one the page booted on. Clicking cycles the
+// roster the server hands us; the server is the authority on what is allowed.
+
+let roster = [];
+function setModelUI(id) {
+  const entry = roster.find((m) => m.id === id);
+  $("cfg-llm").textContent = (id || "—").split("/").pop();
+  // A roster note is a standing caveat (e.g. off-policy hosting), so it stays
+  // visible on the readout rather than scrolling away in the ops feed.
+  $("cfg-llm").style.color = entry && entry.note ? "#fbbf24" : "";
+  $("model-row").title = entry && entry.note
+    ? entry.note
+    : "switch the model running this conversation";
+}
+
 // ============================== events (SSE) ================================
 
 const events = new EventSource("/events");
@@ -686,6 +706,9 @@ events.onmessage = (e) => {
   } else if (kind === "mute") {
     setMuteUI(data.muted);
     addOp("voice", data.muted ? "muted" : "unmuted");
+  } else if (kind === "model") {
+    setModelUI(data.model);
+    addOp("model", data.report);
   }
   // "wb_close" is deliberately unhandled here: the HUD is the approval
   // surface, and the agent must not hold a lever that closes the window
@@ -1056,7 +1079,8 @@ tickClock();
 async function init() {
   try {
     const cfg = await (await fetch("/config")).json();
-    $("cfg-llm").textContent = cfg.llm.split("/").pop();
+    roster = cfg.roster || [];
+    setModelUI(cfg.llm);
     $("cfg-stt").textContent = cfg.stt.split("/").pop();
     $("cfg-tts").textContent = `${cfg.tts.split("/").pop()} · ${cfg.voice} · ${cfg.speed}x`;
     setMuteUI(cfg.muted);
@@ -1087,6 +1111,22 @@ async function init() {
   }
 
   $("wake-row").onclick = () => setWake(!wakeMode);
+  $("model-row").onclick = () => {
+    if (!roster.length) return;
+    const now = $("cfg-llm").textContent;
+    const at = roster.findIndex((m) => m.id.split("/").pop() === now);
+    const next = roster[(at + 1) % roster.length];
+    fetch("/model", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: next.id }),
+    })
+      .then(async (r) => {
+        // UI updates via the SSE broadcast; only refusals need saying here.
+        if (!r.ok) addOp("model", (await r.json().catch(() => ({}))).error || "switch refused");
+      })
+      .catch(() => {});
+  };
   $("mute-row").onclick = () => {
     fetch("/mute", {
       method: "POST",
