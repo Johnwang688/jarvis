@@ -188,6 +188,7 @@ def manage(
     messages: list[dict[str, Any]],
     policy: ContextPolicy,
     summarize: Callable[[str], str] | None = None,
+    force: bool = False,
 ) -> ContextStats:
     """Apply the whole policy in order: evict, truncate, then compact if needed."""
     stats = ContextStats()
@@ -198,7 +199,7 @@ def manage(
     stats.images_evicted = evict_images(messages, policy)
     stats.results_truncated = truncate_old_results(messages, policy)
 
-    if summarize is not None and estimate_tokens(messages, policy) > policy.compact_at_tokens:
+    if summarize is not None and (force or estimate_tokens(messages, policy) > policy.compact_at_tokens):
         stats.messages_compacted = compact(messages, policy, summarize)
 
     stats.tokens_after = estimate_tokens(messages, policy)

@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from . import config, context, llm, sessions, tools
+from .tools import contextctl
 
 
 def _image_url(image) -> str:
@@ -116,13 +117,37 @@ class Agent:
 
     def run_turn(self, user_input: str, images: list | None = None) -> Turn:
         """One user message through the loop, saved to the session if bound."""
-        turn = self._run_turn(user_input, images)
+        if not images and self._is_compact_request(user_input):
+            self._refresh_system()
+            self.messages.append({"role": "user", "content": user_input})
+            active = contextctl.ActiveContext(
+                self.messages, self.policy, self._summarize, self.on_event
+            )
+            token = contextctl.bind(active)
+            try:
+                compacted = contextctl.compact_now()
+            finally:
+                contextctl.reset(token)
+            turn = Turn(text=compacted)
+            self.on_event("text", turn.text)
+        else:
+            turn = self._run_turn(user_input, images)
         if self.session is not None:
             try:
                 self.session.record(user_input, turn, self.messages)
             except Exception as exc:  # persistence must never break a turn
                 self.on_event("interim_text", f"[session not saved: {exc}]")
         return turn
+
+    @staticmethod
+    def _is_compact_request(user_input: str) -> bool:
+        normalized = " ".join(user_input.strip().lower().split())
+        return normalized in {
+            "/compact",
+            "compact context",
+            "shorten the context",
+            "summarize so we can continue",
+        }
 
     def _run_turn(self, user_input: str, images: list | None = None) -> Turn:
         """`images`: pictures supplied by the owner (a whiteboard sketch, a
@@ -191,7 +216,14 @@ class Agent:
                 arguments = call.get("function", {}).get("arguments", "") or "{}"
                 self.on_event("tool_start", (name, arguments))
 
-                result = tools.dispatch(name, arguments, approve=self.approve)
+                active = contextctl.ActiveContext(
+                    self.messages, self.policy, self._summarize, self.on_event
+                )
+                token = contextctl.bind(active)
+                try:
+                    result = tools.dispatch(name, arguments, approve=self.approve)
+                finally:
+                    contextctl.reset(token)
 
                 turn.tool_calls.append((name, arguments))
                 self.on_event("tool_end", (name, result.text))

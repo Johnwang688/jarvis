@@ -204,6 +204,7 @@ def _dispatch(
 from . import (  # noqa: E402,F401  (registers the tools)
     browsing,
     clock,
+    contextctl,
     desktop,
     files,
     gmail,
