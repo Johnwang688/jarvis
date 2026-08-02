@@ -53,10 +53,18 @@ jarvis/
   voice.py      tts()/stt() — swappable contract, HTTP stays in llm.py
   google_auth.py  one-time OAuth consent (human-only) + silent token refresh
   onshape_auth.py Onshape API keys + the pinned CAD sandbox/libraries
+  desktop.py    WSL half of the desktop bridge (listener, session, allowlist)
+  discord_approvals.py  the approval gate, asked in the owner's DMs
   permissions.py  modes (ask/all) + the persistent dangerous-tool allowlist
   workflows.py  background agents on their own threads (safe tools only)
+  sessions.py   saved conversations: transcript, log, meta, titles, summaries
   tools/        clock, files, memory, shell, web, browsing, gmail,
-                onshape (CAD), skills, voicectl (mute), workflows
+                onshape (CAD), skills, sessions (read past conversations),
+                voicectl (mute), workflows,
+                desktop (drives Windows apps via the bridge)
+  windows/      bridge.py — runs on Windows Python, owns all UI Automation;
+                uiatree.py — tree rendering + refs, no Windows imports so the
+                tests drive it on Linux
   skills/       one markdown file per skill — see tools/skills.py
   face/         server.py (HUD + speech + design routes), approvals.py (the
                 gate), static/jarvis.html (the HUD), static/whiteboard.html
@@ -122,9 +130,10 @@ jarvis/
   instructions found inside fetched pages.
 - **Dangerous tools are approved by a human in whichever surface is running**
   — a y/N prompt in the CLI, an authorization card in the face
-  (`face/approvals.py`). Both default to deny on every failure path. The face
-  server is the only place that could accidentally pass `approve=None`, which
-  would run them unguarded; don't.
+  (`face/approvals.py`), or a Discord DM when the owner is away from the desk
+  (`discord_approvals.py`, below). All of them default to deny on every
+  failure path. The face server is the only place that could accidentally
+  pass `approve=None`, which would run them unguarded; don't.
 - **Permission modes wrap that gate** (`permissions.py`, 2026-07-31). Every
   Agent's approver is `permissions.gate(surface_approver)`: mode "all"
   approves everything but is reachable ONLY via
@@ -135,6 +144,29 @@ jarvis/
   allowlist by first word only ("git" ≠ "gitfoo"). Tests must point
   `config.ALLOWLIST_PATH` at a temp file — a UI test once wrote `apt` onto
   the real allowlist by clicking the wrong button.
+- **Desktop control is confined to an app allowlist** (2026-07-31).
+  `config.DESKTOP_APPS` is the whole door: no desktop tool accepts a window
+  title, handle, or executable path, only a registered app name, so the model
+  cannot widen its own reach by argument — the same structural confinement as
+  the Onshape sandbox pin. Two categories stay out of the registry on
+  purpose: **no terminal/shell/file manager**, because keystrokes into one
+  are arbitrary code execution and would route straight around
+  `run_command`'s approval gate; and **no browser**, because the face HUD
+  renders the approval card and an agent that could drive a browser window
+  could authorize itself (the desktop version of the hole
+  `is_face_origin()` closes). The bridge additionally refuses any window
+  titled like the HUD or the design board, whatever the server asks for.
+  Desktop tools are absent from `workflows.SAFE_TOOLS`: driving an app means
+  taking the Windows foreground, so a background workflow would fight the
+  owner for their own screen. Provisioning is human-only
+  (`jarvis desktop setup`), and the bridge is a process the owner starts —
+  the agent has no way to install or launch its own.
+- **Session tools read, never switch.** Jarvis can summarize, search, and
+  read past conversations (all four tools are safe and non-dangerous), but
+  which session is live is the owner's, set in the HUD or on the command
+  line. Session files hold what already went through a transcript, so they
+  inherit the scrub — `dispatch()` cleans a result before it becomes a
+  message, and nothing kept out of context can arrive here later.
 - **Background workflows cannot ask, so they cannot do** (`workflows.py`):
   workflow agents get SAFE_TOOLS (no browser — one shared Playwright page —
   and nothing dangerous) plus a deny-all approver. Monitoring is via
@@ -210,9 +242,32 @@ jarvis/
 - `tests/workflows_check.py` — free checks with a faked `llm.chat`:
   background lifecycle, status/log tools, deny-all approver, safe toolset,
   concurrency cap. Run after touching `workflows.py`.
+- `tests/discord_approvals_check.py` — free checks for remote approval, with
+  the DM sender injected (no network): yes/no/always resolve the exact
+  request, a "yes" in a guild channel is not an authorization, two open asks
+  refuse a bare yes and need the code, unparseable replies resolve nothing, a
+  spent code is dead, and every failure mode (no channel, timeout,
+  window-closed, shutdown) denies. Run after touching `discord_approvals.py`
+  or `ApprovalBroker.request`.
+- `tests/sessions_check.py` — free checks for session memory: record→reload
+  round-trip (and that the system message is never persisted), image payloads
+  stripped on save, the append-only log surviving compaction of the
+  transcript, the recent-sessions index (renders, marks the current one, empty
+  store → ""), the four read tools with a stubbed summarizer (including that
+  the summary cache invalidates on a new turn), the Agent binding (a second
+  Agent resumes the first's transcript; the index only reaches session-armed
+  agents), and that a cancelled turn is still saved. Run after touching
+  `sessions.py`, `tools/sessions.py`, or `Agent.run_turn`.
+- `tests/face/hud_session_check.py` — free headless check of the session
+  picker in the real `jarvis.html` (hud_state_check's puppet pattern): boot
+  onto a resumed conversation redraws its log and counters, the picker lists
+  and marks the current one, PTT is inert while it is open, switching redraws
+  from the joined session, NEW clears everything, Escape switches nothing, and
+  an SSE `session` broadcast relabels without touching the log.
 - `tests/face/controls_check.py` — free server-level checks: /mute flips and
-  broadcasts, /config reports mute+permissions, and /approve with
-  always=true both unblocks the agent and persists the entry.
+  broadcasts, /config reports mute+permissions, /approve with always=true
+  both unblocks the agent and persists the entry, and /session switches the
+  bound conversation (rebuilding the agent) with 403/404/400 on the bad paths.
 - `tests/face/approval_check.py` — free synthetic checks for the approval
   gate: the broker (approve/deny/timeout/no-window/replay/window-closed), the
   `/approve` route against a real server with a real SSE subscriber, that
@@ -265,6 +320,15 @@ jarvis/
   API calls and no timing luck. Covers phase order, the mid-turn transcript,
   tool start/finish, the elapsed clock, and that a late SSE tool event cannot
   rewind a later phase.
+- `tests/desktop_check.py` — free synthetic checks for desktop control, no
+  Windows needed: snapshot rendering and ref staleness against a dict-tree
+  fake backend (this is why `windows/uiatree.py` has no Windows imports), the
+  app allowlist including that a shell/browser/file-manager is never
+  registered, the wire protocol against a fake bridge on a real loopback
+  socket (error propagation, mid-request death, no-bridge message), and that
+  no desktop tool takes a title/handle/path or reaches background workflows.
+  Run after touching `desktop.py`, `tools/desktop.py`, `windows/bridge.py`,
+  or `windows/uiatree.py`.
 - `tests/browser/math_drill_smoke.py` — headed end-to-end browser test: serves
   a local JS-rendered form wizard (`tests/browser/pages/math-drill/`) and has
   the agent complete it. Real API calls (~$0.001/run); the window stays open
@@ -799,6 +863,168 @@ tools/__init__.py, approvals.py, permissions.py) — the layers that gate him
 change only by the owner's hand or per-approved run_command.
 `tests/self_improve_check.py` guards the guard.
 
-Later: real integrations (calendar/email), scheduled proactive runs, and a
-Windows-side bridge (`windows/bridge.py`) for desktop GUI automation — only
-needed for non-browser apps, since Playwright already runs natively in WSL.
+**Desktop control shipped (2026-07-31)** — Jarvis can drive Windows apps.
+`jarvis desktop setup` (human-only) builds a Windows-Python venv at
+`C:\Users\johnw\.jarvis-bridge` and writes `run-bridge.cmd`; the owner
+starts that, and `windows/bridge.py` **dials into** WSL on port 8404. It
+dials out rather than listening because WSL2 forwards `localhost` from
+Windows inward, so that direction needs no firewall exception and no address
+discovery — the WSL gateway IP changes every boot. Tools mirror the browser's
+discipline exactly: `desktop_open` / `desktop_snapshot` give a ref-tagged
+accessibility tree, `desktop_click` / `desktop_type` / `desktop_key` act by
+ref, `desktop_screenshot` is the vision channel. Confinement is the app
+allowlist (see *Safety design*). Validated live on both registered apps:
+Settings navigated by ref with readback, Claude Desktop read in full, and
+`jarvis ask` completing a real question end-to-end (7 steps, $0.0010).
+
+Five findings from getting there, each of which cost a debugging round:
+
+- **Chromium/Electron publishes its tree over MSAA, not UIA.** Over UIA a
+  Claude Desktop window bottoms out at an empty `DocumentControl` next to a
+  "Chrome Legacy Window" stub; the same window over MSAA/IAccessible yields
+  the entire UI. It *also* needs `--force-renderer-accessibility` at launch
+  or the renderer tree stays off whichever API you ask with. Both halves are
+  required. Claude is an MSIX/Store package, so the flag has to go through
+  `IApplicationActivationManager::ActivateApplication` — the exe under
+  WindowsApps is ACL'd and `explorer.exe shell:AppsFolder\…` silently drops
+  arguments.
+- **Chromium invalidates that MSAA root as it rebuilds its tree**, and the
+  dead pointer does not raise — it reports zero children forever. Anything
+  that polls has to re-fetch the root each time; `take_snapshot` also retries
+  once on an empty result, because the failure mode is a *short* snapshot,
+  not an error.
+- **UWP suspends when it loses the foreground** and its tree collapses to
+  nothing, so every read activates the window first. `SetForegroundWindow`
+  alone is a silent no-op from a background process — it needs the
+  `AttachThreadInput` dance — and believing it worked produced a screenshot
+  of Settings that was actually a picture of Claude Desktop with Settings'
+  ref badges drawn on it. Screenshots, synthetic keys, and coordinate clicks
+  now hard-require a verified foreground; pattern-based reads and clicks do
+  not need one.
+- **"Has children" is not readiness.** A suspended UWP window still reports
+  its frame children, so the first readiness check passed instantly and
+  captured six lines of window chrome. Readiness now means a tree that
+  clears a floor *and* stops changing. Relatedly, Settings is responsive and
+  at a small width **removes** the nav list rather than reflowing it, so the
+  window is maximized for a predictable tree — the desktop equivalent of
+  pinning a browser viewport. And a UWP app is two windows: the
+  ApplicationFrameWindow owns position and z-order while a
+  `Windows.UI.Core.CoreWindow` owns the content, and Windows moves the
+  second between nested and top-level *while the app runs* — so the window
+  we activate and the window we read are resolved separately.
+- **Snapshot wording changes answers.** Windows 11 switches are Buttons
+  carrying TogglePattern, so reading toggle state only from checkboxes left
+  every switch stateless and Jarvis answered "Bluetooth: off" about a radio
+  that was on. Exposing it as `button "Bluetooth" checked=true` was still
+  misread — "checked" on a button reads as "pressed". Rendering it as
+  `switch "Bluetooth" ON` fixed the answer with no prompt change. Selection
+  is now a separate word from checkedness, and only printed when true.
+
+**Remote approval over Discord DM (2026-08-01).** A Discord-triggered turn
+used to be read-only in practice: every dangerous tool denied for want of a
+human at the HUD. Now the same one-shot request can be put to the owner in
+their DMs — `discord_approvals.DiscordApprovals` is a *remote channel* the
+broker holds (`ask(item) -> delivered?` / `close(id, resolution)`), so
+`face/approvals.py` still knows nothing about Discord. The DM echoes the tool
+and its full arguments plus a 4-character code; the owner replies **yes** /
+**no** / **always** (always writes the persistent allowlist entry, same as the
+card's ALWAYS button).
+
+The rules, in the order they matter:
+
+- **Only the owner is ever heard**: `should_respond()` drops everything else
+  before this code runs. On top of that an answer counts only in the *same DM
+  channel the question was asked in* — a "yes" typed in a server channel, even
+  by the owner, authorizes nothing.
+- **One-shot, per-request**: the code maps to a broker id that resolves
+  exactly once. With two asks open, a bare "yes" is refused rather than
+  guessed; an answered code is dead.
+- **Anything that is not a clear answer denies**: the parser takes one word
+  (plus an optional code), so "no wait actually yes" resolves nothing and gets
+  asked again. Timeout is 10 minutes (vs the HUD's 120s — you have to get your
+  phone out), and Discord being unreachable falls through to the old denial,
+  now called `nowhere-to-ask`.
+- **Who gets asked**: the Discord agent's approver is
+  `APPROVALS.approver(remote=True)` — its owner is on a phone by definition —
+  so its questions always DM, *and* still raise a card if a window is open
+  (either surface can answer; first one wins). Face turns only DM if no window
+  is connected, so sitting at the desk generates no DM traffic. Workflows are
+  unchanged: still a deny-all approver, because nobody is watching them at
+  all.
+- The HUD card now carries the real deadline and says ALSO ASKED ON DISCORD,
+  and a window closing no longer denies a question that went out remotely
+  (`deny_all(..., include_remote=False)`) — the owner not being at the HUD is
+  the whole premise.
+
+**The trade, stated plainly:** approval used to require physical access to
+this machine, and now it also accepts whoever holds the owner's Discord
+account. That is the owner's deliberate call (asked for 2026-08-01), and it is
+why the DM echoes the entire command rather than just naming the tool. Undoing
+it is one constructor argument: drop `remote=` from the `ApprovalBroker` in
+`face/server.py`.
+
+**Session memory (2026-07-31).** Conversations now survive a restart, and
+Jarvis can look into the ones before this one. `sessions.py` keeps three
+things per session under `~/.local/share/jarvis/sessions/<id>/` — outside the
+repo, unlike memory/ and skills/, because transcripts are bulk, personal, and
+rewritten every turn:
+
+- `messages.json` — the live transcript *as the context manager left it*, so
+  resuming inherits the pruned history rather than re-inflating it. Live
+  image payloads are swapped for the eviction placeholder on the way to disk
+  (a screenshot is 1.5MB of base64 no future turn will look at), and
+  `messages[0]` is never persisted — the system message is rebuilt on load, so
+  a resumed conversation gets today's prompt and today's indexes.
+- `log.jsonl` — append-only user/reply text. This is the durable record:
+  compaction *deletes* from the transcript, and the log still has it. It is
+  what `session_search` greps and what a summary is built from.
+- `meta.json` — title, timestamps, turns, cost, and the cached summary.
+
+`Agent(session=…)` is the whole integration: it restores on construction and
+calls `session.record()` after every `run_turn`, so all three surfaces persist
+for free (a save that fails is caught — persistence must never break a turn).
+A **cancelled turn is saved too**: the transcript really does end at that user
+message, which is what makes an interrupted conversation immediately
+reusable.
+
+Cross-session recall follows the skills two-tier design: recent session
+**titles** are rebuilt into `messages[0]` every turn (only for agents armed
+with `session_summary` — same rule as skills), and the content of one loads
+only when Jarvis calls a tool. `session_summary` is the "inject that
+conversation" path — its result lands in the transcript as a tool message,
+which is what injection *is* in a chat loop; the summary is cheap-tier,
+generated on demand and cached until the session gains a turn.
+`session_search` greps every log, `session_read` returns exact wording. All
+four are read-only, none is dangerous, and all four are in
+`workflows.SAFE_TOOLS`.
+
+Decisions worth not relitigating:
+
+- **New session by default, resume explicitly** (`jarvis chat -c` / `-r <id>`,
+  `jarvis face -c`, or the SESSION row in the HUD). Silently resuming is how
+  you end up talking into a transcript you have forgotten. Discord is the one
+  exception — it continues its own last session, because it is the
+  away-from-desk channel with no UI out there to pick one.
+- **Jarvis can read sessions but not switch them.** Which conversation is live
+  is the owner's choice; a tool that swapped the transcript mid-turn would
+  also have to decide where its own tool result belongs.
+- **A session with nothing said in it never touches disk** (`sessions.new()`
+  builds the object; `record()` creates the files). Every chat invocation and
+  every window launch mints one, and empty directories would flood the index
+  and the picker with conversations that never happened.
+- **The titler and summarizer wrap their input in delimiters and label it
+  data.** A conversation is full of imperatives, and the first version of the
+  title prompt produced the title "Acknowledged" — the cheap tier answered the
+  message instead of describing it. Related: gpt-oss-20b is a reasoning model
+  and returns *empty content* if the token budget is spent thinking, so a
+  6-word title needs `max_tokens=200`, not 24.
+
+Verified live: two CLI turns across a restart (`-c` recalled a codeword from
+the saved transcript), and a third, fresh session that answered "what codeword
+did I give you earlier" by calling `session_search` off the injected index and
+citing both session ids.
+
+Later: real integrations (calendar/email), scheduled proactive runs, and
+more registered desktop apps as they earn their place (each is one entry in
+`config.DESKTOP_APPS`, plus a backend choice — `uia` for native/UWP, `msaa`
+for anything Chromium-based).
