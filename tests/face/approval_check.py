@@ -3,7 +3,7 @@
 Covers, in three layers:
 
   1. the broker (jarvis/face/approvals.py) with a fake window — approve, deny,
-     timeout, no-window, replay, double-answer, window-closed
+     timeout, nowhere-to-ask, replay, double-answer, window-closed
   2. the HTTP route against a real server on a spare port — a real SSE
      subscriber receives the card, POSTs the answer, and the blocked thread
      wakes with it; plus the same-origin and content-type refusals
@@ -62,7 +62,7 @@ def broker_checks() -> None:
     broker = ApprovalBroker(win.broadcast, win.viewers, announce=lambda m: None)
     assert broker.request("run_command", {"command": "rm -rf /"}) is False
     assert win.sent == [], "nothing to broadcast with no window open"
-    assert broker.decisions[-1]["resolution"] == "no-window"
+    assert broker.decisions[-1]["resolution"] == "nowhere-to-ask"
     print("ok  broker: no window connected -> denied immediately, nothing broadcast")
 
     # -- approve and deny, answered from another thread

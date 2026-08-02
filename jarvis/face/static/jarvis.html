@@ -634,8 +634,13 @@ function showApproval(d) {
   card.appendChild(foot);
 
   let left = d.timeout_s || 120;
+  // `remote` means the same question is sitting in the owner's Discord DMs;
+  // whichever surface answers first wins, so say so rather than letting the
+  // window look like the only way through.
+  const also = d.remote ? " · ALSO ASKED ON DISCORD" : "";
   const tick = () => {
-    foot.textContent = `DENIES AUTOMATICALLY IN ${left}s · ESC TO DENY`;
+    const shown = left > 120 ? `${Math.ceil(left / 60)}m` : `${left}s`;
+    foot.textContent = `DENIES AUTOMATICALLY IN ${shown} · ESC TO DENY${also}`;
     if (left-- <= 0) closeApproval(d.id, "timeout");
   };
   tick();

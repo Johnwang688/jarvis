@@ -149,6 +149,36 @@ def discord_send(
         return f"Error: {exc}"
 
 
+def owner_dm_channel() -> str:
+    """The id of the private channel between the bot and the owner.
+
+    Opening a DM channel is idempotent, so this is safe to call per message.
+    """
+    bundle = _load_bundle()
+    owner_id = bundle.get("owner_id")
+    if not owner_id:
+        raise DiscordError("no owner_id in the token bundle — re-run `jarvis auth discord`.")
+    channel = _api("POST", "/users/@me/channels", json={"recipient_id": owner_id})
+    if channel.status_code != 200:
+        raise DiscordError(_fail(channel))
+    return str(channel.json()["id"])
+
+
+def dm_owner(message: str) -> str:
+    """Send the owner a DM; returns the channel id it landed in.
+
+    The plain-Python half of discord_dm_owner, so callers that are not tools
+    (the approval channel) can use it without going through dispatch.
+    """
+    channel_id = owner_dm_channel()
+    response = _api(
+        "POST", f"/channels/{channel_id}/messages", json={"content": message[:2000]}
+    )
+    if response.status_code not in (200, 201):
+        raise DiscordError(_fail(response))
+    return channel_id
+
+
 @tool
 def discord_dm_owner(
     message: Annotated[str, "The message to send to the owner"],
@@ -160,20 +190,7 @@ def discord_dm_owner(
     workflow, something urgent in email, a long task completing.
     """
     try:
-        bundle = _load_bundle()
-        owner_id = bundle.get("owner_id")
-        if not owner_id:
-            return "Error: no owner_id in the token bundle — re-run `jarvis auth discord`."
-        channel = _api("POST", "/users/@me/channels", json={"recipient_id": owner_id})
-        if channel.status_code != 200:
-            return _fail(channel)
-        response = _api(
-            "POST",
-            f"/channels/{channel.json()['id']}/messages",
-            json={"content": message[:2000]},
-        )
-        if response.status_code not in (200, 201):
-            return _fail(response)
+        dm_owner(message)
         return "DM sent to the owner."
     except (DiscordError, httpx.HTTPError) as exc:
         return f"Error: {exc}"

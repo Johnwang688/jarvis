@@ -12,11 +12,18 @@ threaded, so the deciding request runs on a different thread than the one it
 unblocks — that is the whole trick, and it is why the face server must stay a
 ThreadingHTTPServer.
 
+A request can also be put to the owner *remotely* — see discord_approvals.py,
+which DMs the same question and resolves it the same way. The broker stays
+ignorant of Discord: it holds a `remote` channel with ask/close, and whichever
+surface answers first wins, because the id can only be resolved once.
+
 Every failure mode denies:
 
-  - no window connected      -> deny immediately; there is nothing to ask on
+  - nowhere to ask it        -> deny immediately (no window, no remote)
   - nobody answers in time   -> deny on timeout
-  - window closed while up   -> deny when the last viewer goes
+  - window closed while up   -> deny when the last viewer goes, unless the
+                                question also went out remotely (the owner is
+                                not at the window by definition)
   - shutdown                 -> deny
 
 The request id is a one-shot 72-bit token. An approval therefore cannot be
@@ -53,6 +60,8 @@ class Pending:
     event: threading.Event = field(default_factory=threading.Event)
     allowed: bool = False
     resolution: str = "timeout"
+    remote: bool = False
+    """The question also went out over the remote channel (a Discord DM)."""
 
 
 def _for_display(args: dict[str, Any]) -> dict[str, str]:
@@ -75,26 +84,35 @@ class ApprovalBroker:
         timeout_s: float = TIMEOUT_S,
         announce: Callable[[str], None] = print,
         on_always: Callable[[str, dict], None] | None = None,
+        remote: Any = None,
     ):
         self._broadcast = broadcast
         self._viewers = viewers
         self.timeout_s = timeout_s
         self._announce = announce
         self._on_always = on_always
+        # Optional away-from-desk channel: .ask(item) -> delivered?,
+        # .close(id, resolution), .timeout_s. See discord_approvals.py.
+        self._remote = remote
         self._pending: dict[str, Pending] = {}
         self._lock = threading.Lock()
         self.decisions: list[dict[str, Any]] = []
 
     # -- the agent side ----------------------------------------------------
 
-    def approver(self) -> Callable[[Any, dict], bool]:
-        """The callable to hand to `Agent(approve=...)`."""
-        return lambda tool, args: self.request(tool.name, args)
+    def approver(self, remote: bool = False) -> Callable[[Any, dict], bool]:
+        """The callable to hand to `Agent(approve=...)`.
 
-    def request(self, tool_name: str, args: dict[str, Any]) -> bool:
-        if self._viewers() == 0:
-            return self._record(tool_name, args, False, "no-window", 0.0)
+        `remote=True` marks an agent whose owner is, by construction, not at
+        the window — the Discord agent. Its questions always go out over the
+        remote channel as well, because a card in a HUD nobody is looking at
+        is just a slower denial.
+        """
+        return lambda tool, args: self.request(tool.name, args, prefer_remote=remote)
 
+    def request(
+        self, tool_name: str, args: dict[str, Any], prefer_remote: bool = False
+    ) -> bool:
         item = Pending(
             id=secrets.token_urlsafe(9),
             tool=tool_name,
@@ -104,16 +122,34 @@ class ApprovalBroker:
         with self._lock:
             self._pending[item.id] = item
 
-        self._broadcast(
-            "approval",
-            {
-                "id": item.id,
-                "tool": item.tool,
-                "args": _for_display(item.args),
-                "timeout_s": round(self.timeout_s),
-            },
-        )
-        item.event.wait(self.timeout_s)
+        watching = self._viewers() > 0
+        # Ask remotely *first* so the card can carry the real deadline: a
+        # window that withdraws its buttons at 120s while the DM is still
+        # live would leave the owner unable to answer from either place.
+        if self._remote is not None and (prefer_remote or not watching):
+            try:
+                item.remote = bool(self._remote.ask(item))
+            except Exception as exc:  # a broken channel must not grant anything
+                self._announce(f"[approval] remote ask failed: {type(exc).__name__}: {exc}")
+
+        if not watching and not item.remote:
+            with self._lock:
+                self._pending.pop(item.id, None)
+            return self._record(tool_name, args, False, "nowhere-to-ask", 0.0)
+
+        timeout = self._remote.timeout_s if item.remote else self.timeout_s
+        if watching:
+            self._broadcast(
+                "approval",
+                {
+                    "id": item.id,
+                    "tool": item.tool,
+                    "args": _for_display(item.args),
+                    "timeout_s": round(timeout),
+                    "remote": item.remote,
+                },
+            )
+        item.event.wait(timeout)
 
         with self._lock:
             self._pending.pop(item.id, None)
@@ -122,6 +158,11 @@ class ApprovalBroker:
             # Nobody answered. Take the card down so the window does not keep
             # offering a button that no longer decides anything.
             self._broadcast("approval_closed", {"id": item.id, "resolution": "timeout"})
+        if item.remote and self._remote is not None:
+            try:
+                self._remote.close(item.id, item.resolution)
+            except Exception:
+                pass  # closing is courtesy; the decision already stands
         return self._record(item.tool, item.args, item.allowed, item.resolution, waited)
 
     # -- the window side ---------------------------------------------------
@@ -151,10 +192,20 @@ class ApprovalBroker:
         )
         return True
 
-    def deny_all(self, resolution: str = "cancelled") -> int:
-        """Release every waiter with a denial — window gone, or shutting down."""
+    def deny_all(self, resolution: str = "cancelled", include_remote: bool = True) -> int:
+        """Release every waiter with a denial — window gone, or shutting down.
+
+        `include_remote=False` spares questions that also went out as a DM:
+        the window closing says nothing about whether the owner is going to
+        answer on their phone, and denying there would make the remote path
+        useless the moment the HUD is shut.
+        """
         with self._lock:
-            items = [i for i in self._pending.values() if not i.event.is_set()]
+            items = [
+                i
+                for i in self._pending.values()
+                if not i.event.is_set() and (include_remote or not i.remote)
+            ]
             for item in items:
                 item.allowed = False
                 item.resolution = resolution
