@@ -9,6 +9,9 @@ in later via the workflow tools. Design constraints, deliberate:
     the foreground", and the workflow reports that instead of stalling.
   - No browser tools: the Playwright session is one shared page; two agents
     interleaving on it would corrupt both.
+  - No desktop tools, for a sharper version of the same reason: driving an app
+    means taking the Windows foreground, so a background workflow would fight
+    the owner for their own screen and type into whatever they had focused.
   - The registry is in-memory. A restart forgets finished workflows — the
     lasting output is whatever the workflow wrote to files or memory.
 """

@@ -224,6 +224,26 @@ def cmd_auth(args) -> int:
     return google_auth.connect(args.client_json)
 
 
+def cmd_desktop(args) -> int:
+    # Human-only, like `jarvis auth`: installing and starting the bridge is
+    # how the owner hands over the desktop, so it is never a tool.
+    if args.action == "setup":
+        from . import desktop_setup
+
+        return desktop_setup.setup()
+
+    from .desktop import SESSION
+
+    SESSION.start()
+    if args.action == "status":
+        if args.wait:
+            console.print(f"Waiting up to {args.wait}s for the bridge to connect…")
+            SESSION.wait_for_bridge(args.wait)
+        console.print(SESSION.status())
+        return 0 if SESSION.connected else 1
+    return 0
+
+
 def cmd_tools(args) -> int:
     table = Table(header_style="dim")
     table.add_column("tool")
@@ -294,6 +314,13 @@ def main() -> int:
         help="onshape only: redo the setup (keys, sandbox, libraries) even if connected",
     )
     auth.set_defaults(func=cmd_auth)
+
+    desktop = sub.add_parser(
+        "desktop", help="set up or check the Windows desktop bridge (human-only)")
+    desktop.add_argument("action", choices=["setup", "status"], nargs="?", default="status")
+    desktop.add_argument("--wait", type=float, default=0.0,
+                         help="seconds to wait for the bridge to connect")
+    desktop.set_defaults(func=cmd_desktop)
 
     sub.add_parser("tools", help="list registered tools").set_defaults(func=cmd_tools)
     sub.add_parser("config", help="show configured model tiers").set_defaults(func=cmd_config)
