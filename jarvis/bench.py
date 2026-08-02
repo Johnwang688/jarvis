@@ -231,6 +231,9 @@ class TaskResult:
     latency_s: float = 0.0
     error: str = ""
     detail: str = ""  # optional summary for the results table, e.g. "5/6 correct"
+    # Per-check results, for families that grade several properties per task
+    # (agentbench.Check). Empty for pass/fail families.
+    checks: list = field(default_factory=list)
 
 
 def run_task(model: str, task: Task) -> TaskResult:

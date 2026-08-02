@@ -9,6 +9,7 @@ from rich.console import Console
 from rich.table import Table
 
 from . import agent as agent_mod
+from . import agentbench as agentbench_mod
 from . import bench as bench_mod
 from . import config, permissions, sessions, tools
 from . import vocabbench as vocab_mod
@@ -163,8 +164,11 @@ def cmd_ask(args) -> int:
     return 0
 
 
+FAMILIES = {"tools": bench_mod, "vocab": vocab_mod, "agent": agentbench_mod}
+
+
 def cmd_bench(args) -> int:
-    mod = vocab_mod if getattr(args, "family", "tools") == "vocab" else bench_mod
+    mod = FAMILIES[getattr(args, "family", "tools")]
     roster = args.models or mod.DEFAULT_ROSTER
     tasks = mod.TASKS
     if args.task:
@@ -176,6 +180,7 @@ def cmd_bench(args) -> int:
     console.print(f"[dim]{len(roster)} model(s) × {len(tasks)} task(s)[/dim]\n")
 
     summary = []
+    graded: dict[str, list] = {}
     for model in roster:
         table = Table(title=model, title_style="bold cyan", header_style="dim")
         table.add_column("task")
@@ -186,9 +191,11 @@ def cmd_bench(args) -> int:
         table.add_column("$", justify="right")
 
         passed = cost = latency = 0.0
+        results = []
         for task in tasks:
             with console.status(f"{model} · {task.name}"):
                 result = mod.run_task(model, task)
+            results.append(result)
             passed += result.passed
             cost += result.cost_usd
             latency += result.latency_s
@@ -205,7 +212,17 @@ def cmd_bench(args) -> int:
             )
 
         console.print(table)
+        # A graded family's value is in *which* checks failed, and the table
+        # column is too narrow for that.
+        for result in results:
+            for check in result.checks:
+                if not check.ok:
+                    console.print(
+                        f"  [dim]{result.task}[/dim] [red]✗[/red] "
+                        f"[dim]{check.category}[/dim] {check.name}"
+                    )
         console.print()
+        graded[model] = results
         summary.append((model, int(passed), len(tasks), latency, cost))
 
     board = Table(title="summary", title_style="bold", header_style="dim")
@@ -217,6 +234,12 @@ def cmd_bench(args) -> int:
         color = "green" if ok == total else "yellow" if ok >= total * 0.6 else "red"
         board.add_row(model, f"[{color}]{ok}/{total}[/{color}]", f"{latency:.1f}", f"{cost:.5f}")
     console.print(board)
+
+    # "passed" is all-or-nothing per task; a graded family also reports how
+    # much of each category it earned.
+    if hasattr(mod, "score_report"):
+        console.print()
+        mod.score_report(console, graded)
     return 0
 
 
@@ -347,9 +370,12 @@ def main() -> int:
     bench.add_argument("-t", "--task", action="append", help="run only these tasks")
     bench.add_argument(
         "--family",
-        choices=["tools", "vocab"],
+        choices=["tools", "vocab", "agent"],
         default="tools",
-        help="task family: canned tool-calling tasks, or the real-browser vocab drill",
+        help=(
+            "task family: canned tool-calling tasks, the real-browser vocab "
+            "drill, or agent-bench (whole-Jarvis, sandboxed, category-rated)"
+        ),
     )
     bench.set_defaults(func=cmd_bench)
 
