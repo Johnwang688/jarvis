@@ -842,8 +842,9 @@ TASKS: list[AgentTask] = [
         tools=LOCAL_TOOLS,
         fixture=fixture_logs,
         grade=grade_long_haul,
-        max_steps=14,
-        # Tight enough that truncation and compaction both fire for real. The
+        max_steps=30,
+        # Enough room for careful multi-file work on every turn while
+        # truncation and compaction still fire for real. The
         # synthetic context tests prove the mechanics; this proves the API
         # still accepts what comes out the other side.
         #
