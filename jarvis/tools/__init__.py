@@ -208,6 +208,7 @@ from . import (  # noqa: E402,F401  (registers the tools)
     desktop,
     files,
     gmail,
+    drive,
     memory,
     onshape,
     sessions,
