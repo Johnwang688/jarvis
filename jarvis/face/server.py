@@ -770,6 +770,11 @@ class FaceHandler(SimpleHTTPRequestHandler):
                     self._nd({"type": "heard", "text": heard, "ms": {"stt": stt_ms}})
 
             user_input, images = _assemble_turn(heard, typed, attachments)
+            if heard:
+                user_input = (
+                    "[Voice transcription notice: this message was transcribed from speech and may contain errors. If it does not make sense, use prior context to infer the intended meaning when possible; otherwise ask the owner for clarification.]\n\n"
+                    + user_input
+                )
 
             self._nd({"type": "phase", "phase": "thinking"})
             t0 = time.monotonic()
