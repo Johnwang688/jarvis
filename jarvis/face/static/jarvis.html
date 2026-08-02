@@ -139,6 +139,38 @@
     margin-top: 10px; text-align: center;
   }
 
+  /* ---- session picker ---- */
+  #sessions {
+    position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+    z-index: 20; width: 520px; max-width: calc(100vw - 60px); display: none;
+    background: linear-gradient(160deg, rgba(8,17,28,.98), rgba(4,8,14,.98));
+    border: 1px solid rgba(34,211,238,.45);
+    clip-path: polygon(0 14px, 14px 0, 100% 0, 100% calc(100% - 14px), calc(100% - 14px) 100%, 0 100%);
+    padding: 16px 18px; box-shadow: 0 0 46px rgba(34,211,238,.14);
+  }
+  #sessions.on { display: block; }
+  #sessions h3 {
+    font: 600 10px var(--mono); letter-spacing: .35em; color: var(--cyan);
+    border-bottom: 1px solid rgba(34,211,238,.18); padding-bottom: 7px;
+  }
+  #sesslist { max-height: 46vh; overflow-y: auto; margin: 12px 0 4px; scrollbar-width: thin; }
+  .sess {
+    display: flex; justify-content: space-between; gap: 12px; align-items: baseline;
+    padding: 8px 10px; cursor: pointer; border-left: 2px solid transparent;
+    font: 12px var(--mono); color: #cbd7e6;
+  }
+  .sess:hover { background: rgba(34,211,238,.09); border-left-color: rgba(34,211,238,.55); }
+  .sess.here { color: var(--cyan); border-left-color: var(--cyan); }
+  .sess .when { font-size: 10.5px; color: #5f7590; letter-spacing: .1em; white-space: nowrap; }
+  #sessions .btns { display: flex; gap: 10px; margin-top: 12px; }
+  #sessions button {
+    flex: 1; font: 600 11px var(--mono); letter-spacing: .22em; padding: 10px 0;
+    background: transparent; color: var(--cyan); border: 1px solid rgba(34,211,238,.5);
+    cursor: pointer; text-indent: .22em;
+  }
+  #sessions button:hover { background: rgba(34,211,238,.13); }
+  #sessions button.close { color: #8fa3bb; border-color: #33465e; }
+
   #hint {
     position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%);
     font: 10px var(--mono); letter-spacing: .3em; color: #3b4f68; z-index: 5;
@@ -214,6 +246,9 @@
       <span class="k">VOICE OUT</span><span class="v" id="mute-state">ON</span>
     </div>
     <div class="row"><span class="k">PERMISSIONS</span><span class="v" id="perm-state">—</span></div>
+    <div class="row" id="session-row" style="cursor:pointer" title="switch or start a conversation">
+      <span class="k">SESSION</span><span class="v" id="session-title">—</span>
+    </div>
   </div>
 </div>
 
@@ -224,6 +259,15 @@
 
 <div id="authveil"></div>
 <div id="approvals"></div>
+
+<div id="sessions">
+  <h3>CONVERSATIONS</h3>
+  <div id="sesslist"></div>
+  <div class="btns">
+    <button id="sess-new">NEW SESSION</button>
+    <button id="sess-close" class="close">CLOSE</button>
+  </div>
+</div>
 
 <div id="inputbar">
   <div id="chips"></div>
@@ -638,9 +682,13 @@ async function decide(id, allow, always = false) {
 }
 
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape" && authCards.size) {
+  if (e.key !== "Escape") return;
+  if (authCards.size) {
     e.preventDefault();
     decide([...authCards.keys()].pop(), false);
+  } else if ($("sessions").classList.contains("on")) {
+    e.preventDefault();
+    closeSessions();
   }
 });
 
@@ -654,6 +702,84 @@ function setMuteUI(on) {
   muted = !!on;
   $("mute-state").textContent = muted ? "MUTED" : "ON";
   $("mute-state").style.color = muted ? "#f87171" : "";
+}
+
+// ============================== sessions ====================================
+// Which conversation this window is talking into. The server owns it (the
+// agent's message list is the session), so every change round-trips through
+// POST /session and comes back as one description both this window and the
+// SSE broadcast render.
+
+let currentSession = null;
+
+function setSessionUI(desc) {
+  if (!desc) return;
+  currentSession = desc;
+  $("session-title").textContent = (desc.title || "UNTITLED").toUpperCase();
+  $("session-row").title = `${desc.id} · ${desc.turns} turn(s) · click to switch`;
+}
+
+async function openSessions() {
+  if (authCards.size) return; // answer the authorization first
+  let data;
+  try {
+    data = await (await fetch("/sessions")).json();
+  } catch {
+    return;
+  }
+  const here = (data.current && data.current.id) || null;
+  const list = $("sesslist");
+  list.textContent = "";
+  (data.sessions || []).forEach((s) => {
+    const row = document.createElement("div");
+    row.className = "sess" + (s.id === here ? " here" : "");
+    const left = document.createElement("span");
+    // textContent, never innerHTML: titles are model-written strings.
+    left.textContent = (s.title || "untitled") + (s.turns ? ` · ${s.turns} turns` : "");
+    const right = document.createElement("span");
+    right.className = "when";
+    right.textContent = (s.surface === "discord" ? "DISCORD · " : "") + s.when;
+    row.append(left, right);
+    row.onclick = () => (s.id === here ? closeSessions() : switchSession({ id: s.id }));
+    list.appendChild(row);
+  });
+  if (!list.childElementCount) {
+    const empty = document.createElement("div");
+    empty.className = "sess";
+    empty.textContent = "no saved conversations yet";
+    list.appendChild(empty);
+  }
+  $("sessions").classList.add("on");
+}
+
+function closeSessions() {
+  $("sessions").classList.remove("on");
+}
+
+async function switchSession(body) {
+  closeSessions();
+  let desc;
+  try {
+    const res = await fetch("/session", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) return addOp("session", "switch refused");
+    desc = await res.json();
+  } catch {
+    return addOp("session", "unreachable");
+  }
+  setSessionUI(desc);
+  // The log belongs to the conversation: redraw it from the one just joined
+  // rather than leaving the previous conversation's words on screen.
+  $("transcript").textContent = "";
+  (desc.tail || []).forEach((m) => addMsg(m.role === "you" ? "you" : "jarvis", m.text));
+  turns = desc.turns || 0;
+  sessionCost = desc.cost_usd || 0;
+  $("stat-turns").textContent = turns;
+  $("stat-cost").textContent = "$" + sessionCost.toFixed(4);
+  addOp("session", desc.title || desc.id);
 }
 
 // ============================== events (SSE) ================================
@@ -686,6 +812,9 @@ events.onmessage = (e) => {
   } else if (kind === "mute") {
     setMuteUI(data.muted);
     addOp("voice", data.muted ? "muted" : "unmuted");
+  } else if (kind === "session") {
+    // Label only — the window that made the switch redraws its own log.
+    setSessionUI(data);
   }
   // "wb_close" is deliberately unhandled here: the HUD is the approval
   // surface, and the agent must not hold a lever that closes the window
@@ -941,6 +1070,9 @@ function cancelTurn() {
 // or mid-thought (cancel).
 function pressToTalk() {
   if (authCards.size) return; // answer the authorization first
+  // Talking into a conversation you are in the middle of leaving is a way to
+  // lose a turn — pick the session first.
+  if ($("sessions").classList.contains("on")) return;
   if (S.state === "speaking") stopSpeaking();
   cancelTurn();
   startRec(false);
@@ -1060,6 +1192,18 @@ async function init() {
     $("cfg-stt").textContent = cfg.stt.split("/").pop();
     $("cfg-tts").textContent = `${cfg.tts.split("/").pop()} · ${cfg.voice} · ${cfg.speed}x`;
     setMuteUI(cfg.muted);
+    setSessionUI(cfg.session);
+    if (cfg.session && cfg.session.turns) {
+      // Resumed (jarvis face -c, or a reopened window): the conversation
+      // already has history, so the log should not open blank.
+      (cfg.session.tail || []).forEach((m) =>
+        addMsg(m.role === "you" ? "you" : "jarvis", m.text)
+      );
+      turns = cfg.session.turns;
+      sessionCost = cfg.session.cost_usd || 0;
+      $("stat-turns").textContent = turns;
+      $("stat-cost").textContent = "$" + sessionCost.toFixed(4);
+    }
     if (cfg.permissions === "all") {
       $("perm-state").textContent = "SKIP ⚠";
       $("perm-state").style.color = "#f87171";
@@ -1086,6 +1230,9 @@ async function init() {
     }
   }
 
+  $("session-row").onclick = () => openSessions();
+  $("sess-new").onclick = () => switchSession({ new: true });
+  $("sess-close").onclick = () => closeSessions();
   $("wake-row").onclick = () => setWake(!wakeMode);
   $("mute-row").onclick = () => {
     fetch("/mute", {

@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from . import config, context, llm, tools
+from . import config, context, llm, sessions, tools
 
 
 def _image_url(image) -> str:
@@ -45,6 +45,7 @@ class Agent:
         on_event: Callable[[str, Any], None] | None = None,
         policy: context.ContextPolicy | None = None,
         should_stop: Callable[[], bool] | None = None,
+        session: sessions.Session | None = None,
     ):
         self.model = model or config.TIERS["orchestrator"]
         self.tool_specs = tools.specs(tool_names)
@@ -62,7 +63,19 @@ class Agent:
         self._has_skills = any(
             spec["function"]["name"] == "skill_read" for spec in self.tool_specs
         )
+        # Same rule for the recent-sessions index: only agents that can act on
+        # it (session_summary is the tool it tells them to call) are shown it.
+        self._has_sessions = any(
+            spec["function"]["name"] == "session_summary" for spec in self.tool_specs
+        )
         self.messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
+        # A bound session makes this conversation durable: its saved transcript
+        # is restored here, and every turn is written back after it completes.
+        # The system message is *not* restored — it is rebuilt above, so a
+        # resumed conversation gets today's prompt and today's indexes.
+        self.session = session
+        if session is not None:
+            self.messages.extend(session.restore_messages())
 
     def _summarize(self, transcript: str) -> str:
         """Compress old history using the cheap tier — this is bulk text work."""
@@ -82,20 +95,42 @@ class Agent:
             max_tokens=1024,
         ).text
 
+    def _refresh_system(self) -> None:
+        """Rebuild messages[0] from the base prompt plus the live indexes.
+
+        Done every turn because messages[0] is re-sent with each request
+        anyway, pruning and compaction never touch it, and a skill saved (or a
+        session started) mid-conversation is then visible on the very next
+        turn.
+        """
+        blocks = []
+        if self._has_skills:
+            blocks.append(tools.skills.index())
+        if self._has_sessions:
+            blocks.append(sessions.index(current=self.session.id if self.session else None))
+        if not blocks:
+            return
+        self.messages[0]["content"] = "\n\n".join(
+            [self._base_system, *(b for b in blocks if b)]
+        )
+
     def run_turn(self, user_input: str, images: list | None = None) -> Turn:
+        """One user message through the loop, saved to the session if bound."""
+        turn = self._run_turn(user_input, images)
+        if self.session is not None:
+            try:
+                self.session.record(user_input, turn, self.messages)
+            except Exception as exc:  # persistence must never break a turn
+                self.on_event("interim_text", f"[session not saved: {exc}]")
+        return turn
+
+    def _run_turn(self, user_input: str, images: list | None = None) -> Turn:
         """`images`: pictures supplied by the owner (a whiteboard sketch, a
         screenshot, an attached photo), attached to this user message so a
         vision model sees them alongside the text. Each entry is a base64 PNG
         string, or {"b64": ..., "mime": ...} for other image types. Same
         multimodal shape the context manager already evicts by age."""
-        # Refresh the skills index every turn: messages[0] is re-sent with
-        # each request anyway, pruning and compaction never touch it, and a
-        # skill saved mid-conversation is visible on the very next turn.
-        if self._has_skills:
-            block = tools.skills.index()
-            self.messages[0]["content"] = (
-                self._base_system + ("\n\n" + block if block else "")
-            )
+        self._refresh_system()
         if images:
             self.messages.append(
                 {

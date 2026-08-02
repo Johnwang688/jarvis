@@ -209,6 +209,7 @@ from . import (  # noqa: E402,F401  (registers the tools)
     gmail,
     memory,
     onshape,
+    sessions,
     shell,
     skills,
     discord,

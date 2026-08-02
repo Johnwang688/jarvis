@@ -22,11 +22,16 @@ Routes:
                  served by the workshop server on WORKSHOP_PORT (its own
                  origin — agent-written pages must never share the face's
                  origin, which owns /approve)
+  GET  /sessions the saved conversations, current one first
+  POST /session  {"new": true} | {"id": ...} -> switch conversations
 
 One Agent lives for the whole server process, so a voice session is a real
-conversation with memory. Dangerous tools are gated in the window rather than
-hard-denied (see approvals.py): dispatch() runs them *unguarded* when approve
-is None, so the agent here is always constructed with a real approver.
+conversation with memory — and it is bound to a session on disk, so that
+memory now survives a restart (see sessions.py). Switching sessions rebuilds
+the agent around the other transcript. Dangerous tools are gated in the window
+rather than hard-denied (see approvals.py): dispatch() runs them *unguarded*
+when approve is None, so the agent here is always constructed with a real
+approver.
 """
 
 from __future__ import annotations
@@ -46,7 +51,7 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from .. import agent as agent_mod
-from .. import config, permissions, voice
+from .. import config, permissions, sessions, voice
 from ..tools import secrets as secrets_mod
 from ..tools import voicectl, whiteboardctl
 from .approvals import ApprovalBroker
@@ -203,6 +208,11 @@ VOICE_SYSTEM = config.SYSTEM_PROMPT + (
 _agent: agent_mod.Agent | None = None
 _agent_lock = threading.Lock()
 
+# The conversation on disk this window is talking into. main() sets it; the
+# HUD switches it through POST /session. None means an unsaved conversation,
+# which only happens if a caller runs the server without picking one.
+_session: sessions.Session | None = None
+
 # Set by POST /cancel, cleared at the start of each turn. The agent reads it
 # between steps, so an abandoned turn stops at the next clean boundary instead
 # of running to completion and talking over the correction.
@@ -274,8 +284,24 @@ def _get_agent() -> agent_mod.Agent:
             approve=permissions.gate(APPROVALS.approver()),
             on_event=_agent_event,
             should_stop=_cancel.is_set,
+            session=_session,
         )
     return _agent
+
+
+def set_session(session: sessions.Session) -> sessions.Session:
+    """Point the conversation at another session, dropping the live agent.
+
+    Rebuilding rather than mutating is the honest move: the Agent's message
+    list *is* the conversation, so the new one starts from the saved
+    transcript with today's system prompt on top. Callers hold `_agent_lock`
+    so this can never land mid-turn.
+    """
+    global _agent, _session
+    _session = session
+    _agent = None
+    broadcast("session", session.describe())
+    return session
 
 
 # ---- discord mode (the gateway listener) -----------------------------------
@@ -300,6 +326,11 @@ def _get_discord_agent() -> agent_mod.Agent:
             system=DISCORD_SYSTEM,
             approve=permissions.gate(APPROVALS.approver()),
             on_event=_agent_event,
+            # Discord continues its own last session rather than starting
+            # fresh: it is the away-from-desk channel, there is no UI out
+            # there to pick a conversation, and a phone reply that has
+            # forgotten this morning's thread is the wrong behavior.
+            session=sessions.resume_or_new("discord"),
         )
     return _discord_agent
 
@@ -415,8 +446,25 @@ class FaceHandler(SimpleHTTPRequestHandler):
                     "muted": voicectl.is_muted(),
                     "permissions": permissions.mode(),
                     "allowlist": len(permissions.load_allowlist()),
+                    # Includes the tail so a window opening onto a resumed
+                    # conversation can redraw its log instead of starting blank.
+                    "session": (
+                        {**_session.describe(), "tail": _session.tail(8)}
+                        if _session
+                        else None
+                    ),
                 }
             )
+            return
+        if self.path == "/sessions":
+            recent = [s.describe() for s in sessions.recent(12)]
+            current = _session.describe() if _session else None
+            # A conversation with nothing said in it is not on disk yet, so
+            # put the live one in the list explicitly — the picker should
+            # always show where you are.
+            if current and all(s["id"] != current["id"] for s in recent):
+                recent.insert(0, current)
+            self._json_reply({"current": current, "sessions": recent})
             return
         super().do_GET()
 
@@ -465,6 +513,9 @@ class FaceHandler(SimpleHTTPRequestHandler):
             return
         if self.path == "/design":
             self._design()
+            return
+        if self.path == "/session":
+            self._switch_session()
             return
         if self.path == "/cancel":
             # Abandon the turn in flight. Same-origin like /approve: it is not
@@ -551,6 +602,49 @@ class FaceHandler(SimpleHTTPRequestHandler):
             self._json_error(409, "unknown, expired, or already-answered request")
             return
         self._json_reply({"ok": True, "allowed": allow})
+
+    def _switch_session(self):
+        """Change conversations: {"new": true} or {"id": "<session id>"}.
+
+        Same-origin like /approve and /cancel. Nothing here is destructive —
+        a switch never deletes a transcript — but which conversation the
+        window is talking into is the owner's call, not another page's.
+
+        Takes `_agent_lock`, so a switch requested mid-turn waits for that
+        turn to finish and be saved rather than swapping the transcript out
+        from under it.
+        """
+        origin = self.headers.get("Origin")
+        host = self.headers.get("Host", "")
+        if origin and origin not in (f"http://{host}", f"https://{host}"):
+            self._json_error(403, "cross-origin session switch refused")
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            data = json.loads(self.rfile.read(length) or b"{}")
+        except Exception as exc:
+            self._json_error(400, f"{type(exc).__name__}: {exc}")
+            return
+
+        session_id = str(data.get("id") or "").strip()
+        if not session_id and not data.get("new"):
+            self._json_error(400, 'expected {"new": true} or {"id": ...}')
+            return
+
+        with _agent_lock:
+            if session_id:
+                target = sessions.load(session_id)
+                if target is None:
+                    self._json_error(404, f"no session {session_id!r}")
+                    return
+            else:
+                target = sessions.new("face")
+            set_session(target)
+            reply = target.describe()
+            # The window redraws its log from this, so a resumed conversation
+            # looks resumed instead of blank.
+            reply["tail"] = target.tail(8)
+        self._json_reply(reply)
 
     def _design(self):
         """One whiteboard turn: {"prompt": ..., "image_b64"?: ...} -> JSON.
@@ -852,7 +946,13 @@ def _face_already_running(port: int) -> bool:
         return False
 
 
-def main(page: str = "jarvis.html", port: int = PORT) -> int:
+def main(
+    page: str = "jarvis.html",
+    port: int = PORT,
+    session: sessions.Session | None = None,
+) -> int:
+    global _session
+    _session = session or sessions.new("face")
     url = f"http://localhost:{port}/{page}"
     try:
         server = create_server(port)

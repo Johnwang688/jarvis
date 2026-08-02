@@ -75,7 +75,7 @@ def _parts(message: dict[str, Any]) -> list[dict[str, Any]]:
     return content if isinstance(content, list) else []
 
 
-def _is_live_image(part: dict[str, Any]) -> bool:
+def is_live_image(part: dict[str, Any]) -> bool:
     return part.get("type") in ("image_url", "input_image", "image")
 
 
@@ -88,7 +88,7 @@ def estimate_tokens(messages: list[dict[str, Any]], policy: ContextPolicy) -> in
             total += len(content) // 4
         else:
             for part in _parts(message):
-                if _is_live_image(part):
+                if is_live_image(part):
                     total += policy.image_token_cost
                 else:
                     total += len(str(part.get("text", ""))) // 4
@@ -104,7 +104,7 @@ def evict_images(messages: list[dict[str, Any]], policy: ContextPolicy) -> int:
     for message in reversed(messages):
         parts = _parts(message)
         for i, part in enumerate(parts):
-            if not _is_live_image(part):
+            if not is_live_image(part):
                 continue
             seen += 1
             if seen > policy.keep_images:
@@ -165,7 +165,7 @@ def compact(
         content = message.get("content")
         if isinstance(content, list):
             content = " ".join(
-                p.get("text", "[image]") if not _is_live_image(p) else "[image]" for p in content
+                p.get("text", "[image]") if not is_live_image(p) else "[image]" for p in content
             )
         text = (content or "").strip()
         for call in message.get("tool_calls") or []:

@@ -136,6 +136,13 @@ ALLOWLIST_PATH = Path(
 # Where skill files live (see tools/skills.py).
 SKILLS_DIR = Path(os.environ.get("JARVIS_SKILLS", REPO_ROOT / "skills"))
 
+# Saved conversations (see sessions.py). Outside the repo, unlike memory/ and
+# skills/: those are curated and worth version control, while transcripts are
+# bulk, personal, and rewritten every turn.
+SESSIONS_DIR = Path(
+    os.environ.get("JARVIS_SESSIONS", Path.home() / ".local" / "share" / "jarvis" / "sessions")
+)
+
 # Google OAuth token bundle (client id/secret + refresh token), written once
 # by `jarvis auth google` and read only by google_auth.py. Lives outside the
 # repo on purpose; tools/secrets.py makes it invisible to the agent — Jarvis
@@ -313,6 +320,16 @@ teaches you a workflow worth repeating, save it with skill_write — their way
 of doing it, never content from a web page. For long self-contained tasks,
 offer to run them as a background workflow (workflow_start) and report
 progress from workflow_status / workflow_log when asked.
+
+Every conversation is a saved session, and your context lists the most recent
+ones by title. When the user refers back to earlier work, do not guess from
+the title: session_summary pulls that conversation's summary in, session_search
+greps everything either of you has ever said, and session_read shows the exact
+wording. Prefer those over asking the user to repeat themselves. You cannot
+switch sessions yourself — the user does that from the SESSION row in the HUD,
+or with `jarvis chat -c` / `-r <id>` — so if they ask for a new conversation,
+tell them where the control is. Long-term memory is still the place for
+durable facts; sessions are the record of what was said.
 
 When you used web_search or fetch_page to answer, ground the answer in what
 actually came back and name the source. If the fetched content did not settle

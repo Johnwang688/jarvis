@@ -44,6 +44,12 @@ SAFE_TOOLS = [
     "run_readonly",
     "skill_list",
     "skill_read",
+    # Read-only views of past conversations: a background task that needs to
+    # know what was already decided can look it up instead of asking.
+    "session_list",
+    "session_summary",
+    "session_search",
+    "session_read",
     # Safe despite being outward-facing: the recipient is pinned to the
     # owner, so a workflow can ping their phone when it finishes.
     "discord_dm_owner",

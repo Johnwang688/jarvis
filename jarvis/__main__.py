@@ -10,7 +10,7 @@ from rich.table import Table
 
 from . import agent as agent_mod
 from . import bench as bench_mod
-from . import config, permissions, tools
+from . import config, permissions, sessions, tools
 from . import vocabbench as vocab_mod
 
 console = Console()
@@ -58,7 +58,29 @@ def _approve(tool: tools.Tool, args: dict) -> bool:
     return answer in ("y", "yes")
 
 
-def _make_agent(model: str | None) -> agent_mod.Agent:
+def _pick_session(args, surface: str) -> sessions.Session | None:
+    """Which conversation this invocation continues, if any.
+
+    Default is a fresh session, not the last one: resuming silently is how you
+    end up talking into a transcript you have forgotten the contents of. The
+    recent-session titles are in Jarvis's context either way, so a new session
+    still knows the old ones exist.
+    """
+    chosen = getattr(args, "resume", None)
+    if chosen:
+        session = sessions.load(chosen)
+        if session is None:
+            raise RuntimeError(f"no session {chosen!r} — try: jarvis sessions")
+        return session
+    if getattr(args, "continue_", False):
+        session = sessions.latest()
+        if session is None:
+            console.print("[dim]no earlier session to continue — starting a new one[/dim]")
+        return session or sessions.new(surface)
+    return sessions.new(surface)
+
+
+def _make_agent(model: str | None, session: sessions.Session | None = None) -> agent_mod.Agent:
     def on_event(kind: str, data) -> None:
         if kind == "tool_start":
             name, raw = data
@@ -79,13 +101,17 @@ def _make_agent(model: str | None) -> agent_mod.Agent:
             console.print(f"\n[cyan]jarvis[/cyan] [dim]{data}[/dim]")
 
     return agent_mod.Agent(
-        model=model, approve=permissions.gate(_approve), on_event=on_event
+        model=model, approve=permissions.gate(_approve), on_event=on_event, session=session
     )
 
 
 def cmd_chat(args) -> int:
-    jarvis = _make_agent(args.model)
+    session = _pick_session(args, "chat")
+    jarvis = _make_agent(args.model, session)
     console.print(f"[dim]model: {jarvis.model} · {len(jarvis.tool_specs)} tools · Ctrl-D to exit[/dim]")
+    if session is not None:
+        resumed = f" · resuming {session.turns} turn(s)" if session.turns else ""
+        console.print(f"[dim]session: {session.id} {session.title!r}{resumed}[/dim]")
 
     read_input = _make_reader()
     session_cost = 0.0
@@ -115,6 +141,7 @@ def cmd_chat(args) -> int:
             )
     finally:
         _stop_browser("chat")
+        sessions.drain_titles()
 
 
 def _stop_browser(trace_name: str) -> None:
@@ -205,7 +232,9 @@ def cmd_face(args) -> int:
             "[bold red]⚠ PERMISSIONS OFF — every dangerous tool runs without "
             "asking until this process exits.[/bold red]"
         )
-    return face_server.main(args.page)
+    session = _pick_session(args, "face")
+    console.print(f"session: {session.id} {session.title!r} ({session.turns} turn(s))")
+    return face_server.main(args.page, session=session)
 
 
 def cmd_auth(args) -> int:
@@ -244,6 +273,32 @@ def cmd_desktop(args) -> int:
     return 0
 
 
+def cmd_sessions(args) -> int:
+    found = sessions.recent(args.limit)
+    if not found:
+        console.print(f"[dim]no saved sessions yet ({config.SESSIONS_DIR})[/dim]")
+        return 0
+    table = Table(header_style="dim")
+    table.add_column("id")
+    table.add_column("title")
+    table.add_column("where", style="dim")
+    table.add_column("last", style="dim")
+    table.add_column("turns", justify="right")
+    table.add_column("$", justify="right")
+    for item in found:
+        table.add_row(
+            item.id,
+            item.title[:44],
+            item.meta.get("surface", ""),
+            sessions.when(item.meta.get("updated", 0)),
+            str(item.turns),
+            f"{float(item.meta.get('cost_usd', 0.0)):.4f}",
+        )
+    console.print(table)
+    console.print(f"\n[dim]resume one: jarvis chat -r <id>   ·   {config.SESSIONS_DIR}[/dim]")
+    return 0
+
+
 def cmd_tools(args) -> int:
     table = Table(header_style="dim")
     table.add_column("tool")
@@ -272,6 +327,14 @@ def main() -> int:
 
     chat = sub.add_parser("chat", help="interactive session (default)")
     chat.add_argument("-m", "--model", help="override the orchestrator model")
+    chat.add_argument(
+        "-c",
+        "--continue",
+        dest="continue_",
+        action="store_true",
+        help="continue the most recent session instead of starting a new one",
+    )
+    chat.add_argument("-r", "--resume", metavar="ID", help="resume a specific session id")
     chat.set_defaults(func=cmd_chat)
 
     ask = sub.add_parser("ask", help="run one prompt and exit")
@@ -292,6 +355,14 @@ def main() -> int:
 
     face = sub.add_parser("face", help="open the Jarvis HUD window (voice mode)")
     face.add_argument("page", nargs="?", default="jarvis.html", help="HUD page to open")
+    face.add_argument(
+        "-c",
+        "--continue",
+        dest="continue_",
+        action="store_true",
+        help="continue the most recent session instead of starting a new one",
+    )
+    face.add_argument("-r", "--resume", metavar="ID", help="resume a specific session id")
     face.add_argument(
         "--dangerously-skip-permissions",
         action="store_true",
@@ -321,6 +392,10 @@ def main() -> int:
     desktop.add_argument("--wait", type=float, default=0.0,
                          help="seconds to wait for the bridge to connect")
     desktop.set_defaults(func=cmd_desktop)
+
+    saved = sub.add_parser("sessions", help="list saved conversations")
+    saved.add_argument("-n", "--limit", type=int, default=20, help="how many to show")
+    saved.set_defaults(func=cmd_sessions)
 
     sub.add_parser("tools", help="list registered tools").set_defaults(func=cmd_tools)
     sub.add_parser("config", help="show configured model tiers").set_defaults(func=cmd_config)
