@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import io
-import json
 from typing import Annotated
 
 import httpx
@@ -17,13 +15,9 @@ API = "https://www.googleapis.com/drive/v3"
 def _request(method: str, url: str, **kwargs) -> httpx.Response:
     """One authed API call, retried once on 401."""
     for attempt in (1, 2):
-        response = httpx.request(
-            method,
-            url,
-            headers={"Authorization": f"Bearer {google_auth.access_token()}"},
-            timeout=30,
-            **kwargs,
-        )
+        headers = {"Authorization": f"Bearer {google_auth.access_token()}"}
+        headers.update(kwargs.pop("headers", {}))
+        response = httpx.request(method, url, headers=headers, timeout=30, **kwargs)
         if response.status_code == 401 and attempt == 1:
             google_auth.invalidate()
             continue
@@ -90,3 +84,50 @@ def drive_read(
     if response.status_code != 200:
         return _fail(response)
     return f"{item.get('name', file_id)}\n\n{response.text}"
+
+@tool(dangerous=True)
+def drive_create_text(
+    name: Annotated[str, "Name for the new text file"],
+    content: Annotated[str, "Text content to write into the new file"],
+    parent_id: Annotated[str, "Optional Drive folder ID; leave empty for My Drive root"] = "",
+) -> str:
+    """Create a plain-text file in Google Drive. Requires owner approval."""
+    metadata = {"name": name, "mimeType": "text/plain"}
+    if parent_id:
+        metadata["parents"] = [parent_id]
+    body = f"--jarvis-boundary\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n" \
+        f"{__import__('json').dumps(metadata)}\r\n--jarvis-boundary\r\n" \
+        "Content-Type: text/plain\r\n\r\n" + content + "\r\n--jarvis-boundary--\r\n"
+    response = _request(
+        "POST", f"{API}/files", params={"uploadType": "multipart", "fields": "id,name,mimeType"},
+        content=body.encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {google_auth.access_token()}",
+            "Content-Type": "multipart/related; boundary=jarvis-boundary",
+        },
+    )
+    if response.status_code not in (200, 201):
+        return _fail(response)
+    item = response.json()
+    return f"Created Drive file {item.get('name', name)} ({item.get('id', '')})."
+
+
+@tool(dangerous=True)
+def drive_update_text(
+    file_id: Annotated[str, "The Google Drive file ID to replace"],
+    content: Annotated[str, "The complete replacement text content"],
+) -> str:
+    """Replace the contents of an existing plain-text Drive file. Requires owner approval."""
+    response = _request(
+        "PATCH", f"{API}/files/{file_id}",
+        params={"uploadType": "media", "fields": "id,name,mimeType"},
+        content=content.encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {google_auth.access_token()}",
+            "Content-Type": "text/plain; charset=utf-8",
+        },
+    )
+    if response.status_code != 200:
+        return _fail(response)
+    item = response.json()
+    return f"Updated Drive file {item.get('name', file_id)} ({item.get('id', file_id)})."
