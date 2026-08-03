@@ -13,6 +13,16 @@ discord_dm_owner: it answers the owner, in the place the owner asked. Any
 the owner is away from the HUD simply gets denied, and Jarvis says so in
 the reply.
 
+Voice notes (2026-08-03): a Discord voice message from the owner — the
+IS_VOICE_MESSAGE flag plus one audio/ogg attachment — is transcribed with
+voice.stt() (parakeet takes ogg/opus as-is, probed at 1.000 similarity) and
+the reply comes back as text *plus* synthesized speech attached to the same
+message. The transcript is handed to run_turn with spoken=True so the server
+keeps it away from the approval parser: a transcription is one mishearing
+away from "yes", so only typed replies can resolve an authorization. Every
+failure on the voice path (too large, download, STT) becomes a text reply,
+and a TTS failure degrades to text-only — never a silent drop.
+
 Protocol notes (v10): HELLO (op 10) -> IDENTIFY (op 2) -> READY; heartbeat
 (op 1) every heartbeat_interval ms and immediately when the server asks;
 reconnect with a fresh IDENTIFY on any drop (resume is more protocol than
@@ -30,6 +40,8 @@ GATEWAY_URL = "wss://gateway.discord.gg/?v=10&encoding=json"
 # guild messages + message content + DMs
 INTENTS = (1 << 9) | (1 << 15) | (1 << 12)
 MAX_DISCORD_CHARS = 2000
+VOICE_MESSAGE_FLAG = 1 << 13  # IS_VOICE_MESSAGE on the message
+MAX_VOICE_BYTES = 8 * 1024 * 1024  # refuse absurd attachments before download
 
 
 class GatewayClosed(RuntimeError):
@@ -53,8 +65,29 @@ def _recv_json(ws) -> dict[str, Any]:
     return json.loads(data)
 
 
+def voice_attachment(message: dict[str, Any]) -> dict[str, Any] | None:
+    """The voice-note attachment on a message, or None.
+
+    A voice message is the IS_VOICE_MESSAGE flag plus one audio attachment
+    carrying waveform metadata; either signal qualifies an audio attachment.
+    A music file dragged into the chat has neither, so it is never fed to
+    STT as if someone had spoken it.
+    """
+    flagged = bool(int(message.get("flags") or 0) & VOICE_MESSAGE_FLAG)
+    for attachment in message.get("attachments") or []:
+        mime = (attachment.get("content_type") or "").split(";")[0]
+        if mime.startswith("audio/") and (flagged or "waveform" in attachment):
+            return attachment
+    return None
+
+
 def should_respond(message: dict[str, Any], bot_id: str, owner_id: str) -> bool:
-    """Only the owner, only by mention or DM, never bots, never empty."""
+    """Only the owner, only by mention or DM, never bots, never empty.
+
+    A voice note counts as content. In practice that means DMs only: a
+    voice message cannot carry an @mention, so a guild voice note never
+    qualifies — which keeps the trigger rule exactly as strict as text.
+    """
     author = message.get("author") or {}
     if author.get("bot") or author.get("id") != owner_id:
         return False
@@ -62,6 +95,8 @@ def should_respond(message: dict[str, Any], bot_id: str, owner_id: str) -> bool:
     mentioned = any(m.get("id") == bot_id for m in message.get("mentions") or [])
     if not (is_dm or mentioned):
         return False
+    if voice_attachment(message) is not None:
+        return True
     return bool(strip_mention(message.get("content") or "", bot_id).strip())
 
 
@@ -72,16 +107,35 @@ def strip_mention(content: str, bot_id: str) -> str:
     return content.strip()
 
 
+def _download(url: str) -> bytes:
+    """Fetch an attachment from Discord's CDN. Module-level so tests stub it."""
+    import httpx
+
+    response = httpx.get(url, timeout=30, follow_redirects=True)
+    response.raise_for_status()
+    return response.content
+
+
+def _audio_filename(audio: bytes) -> tuple[str, str]:
+    """Name reply audio by what it is — local TTS emits WAV, cloud MP3, and
+    voice.py's contract is sniff, never trust a label."""
+    if audio[:4] == b"RIFF":
+        return "jarvis-reply.wav", "audio/wav"
+    return "jarvis-reply.mp3", "audio/mpeg"
+
+
 class GatewayListener:
     """Owns the websocket; hands qualifying messages to `run_turn`.
 
-    run_turn(text, channel_id) -> reply text. It is called on a worker
-    thread so a long agent turn never stalls heartbeats.
+    run_turn(text, channel_id, spoken) -> reply text. spoken is True when
+    the text came out of STT rather than the owner's keyboard — the server
+    uses it to keep transcriptions away from the approval parser. It is
+    called on a worker thread so a long agent turn never stalls heartbeats.
     """
 
     def __init__(
         self,
-        run_turn: Callable[[str, str], str],
+        run_turn: Callable[[str, str, bool], str],
         announce: Callable[[str], None] = print,
     ):
         self.run_turn = run_turn
@@ -186,14 +240,57 @@ class GatewayListener:
 
         channel_id = str(message["channel_id"])
         text = strip_mention(message.get("content") or "", self.bot_id)
+        voice_note = voice_attachment(message)
         try:
             _api("POST", f"/channels/{channel_id}/typing")
-            reply = (self.run_turn(text, channel_id) or "").strip()
+            if voice_note is not None:
+                try:
+                    text = self._hear(voice_note)
+                except Exception as exc:
+                    self._post(channel_id, f"I couldn't make out that voice message ({exc}).")
+                    return
+            reply = (self.run_turn(text, channel_id, voice_note is not None) or "").strip()
             if reply:
-                _api(
-                    "POST",
-                    f"/channels/{channel_id}/messages",
-                    json={"content": reply[:MAX_DISCORD_CHARS]},
-                )
+                audio = self._speak(reply) if voice_note is not None else None
+                self._post(channel_id, reply[:MAX_DISCORD_CHARS], audio)
         except Exception as exc:
             self.announce(f"[discord] turn failed: {type(exc).__name__}: {exc}")
+
+    def _hear(self, attachment: dict[str, Any]) -> str:
+        """Voice note -> transcript. Raises with a human-readable reason."""
+        from . import voice
+
+        size = int(attachment.get("size") or 0)
+        if size > MAX_VOICE_BYTES:
+            raise ValueError(f"it is too large — {size // (1024 * 1024)}MB")
+        audio = _download(attachment["url"])
+        mime = (attachment.get("content_type") or "audio/ogg").split(";")[0]
+        text = voice.stt(audio, mime=mime).strip()
+        if not text:
+            raise ValueError("the transcription came back empty")
+        return text
+
+    def _speak(self, reply: str) -> bytes | None:
+        """Synthesize a voice-note reply; a TTS failure degrades to text-only."""
+        from . import voice
+
+        try:
+            return voice.tts(reply)
+        except Exception as exc:
+            self.announce(f"[discord] tts failed ({type(exc).__name__}: {exc}); text-only reply")
+            return None
+
+    def _post(self, channel_id: str, content: str, audio: bytes | None = None) -> None:
+        from .tools.discord import _api
+
+        path = f"/channels/{channel_id}/messages"
+        if audio is None:
+            _api("POST", path, json={"content": content})
+            return
+        name, mime = _audio_filename(audio)
+        _api(
+            "POST",
+            path,
+            data={"payload_json": json.dumps({"content": content})},
+            files={"files[0]": (name, audio, mime)},
+        )

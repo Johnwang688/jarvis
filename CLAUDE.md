@@ -1051,6 +1051,29 @@ Message Content Intent off in the portal: the listener explains and stops
 rather than retry-looping (found live; `tests/discord_gateway_check.py`
 covers rules synthetically + a live handshake that skips on 4014).
 
+**Discord voice messages (2026-08-03)** — the owner can voice-chat with
+Jarvis in his DMs, walkie-talkie style: send a voice note, get the reply as
+text plus synthesized speech attached to the same message (a plain
+`jarvis-reply.wav`/`.mp3` attachment — Discord renders an inline player;
+container named by sniffing, per voice.py's contract). No transcoding
+anywhere: parakeet accepts Discord's ogg/opus as-is (probed live 2026-08-03:
+1.000 similarity, 0.57s), so the attachment goes straight to `voice.stt()`.
+A voice note is recognized by the IS_VOICE_MESSAGE flag (1<<13) or waveform
+metadata on an audio attachment — a dragged-in mp3 has neither and is never
+transcribed as if spoken. The trigger rule is unchanged in effect: a voice
+note cannot carry an @mention, so voice only works in DMs, owner-only as
+always. **The safety line: a transcription can never resolve an
+authorization.** The gateway passes `spoken=True` to `run_turn`, and
+`_discord_turn` skips `DISCORD_APPROVALS.handle_reply` for spoken turns — a
+mishearing must not become a "yes", so approval replies stay typed-only.
+Spoken turns reach the agent prefixed `[voice note]` (the prompt explains:
+expect mishearings, reply speakably). Every voice-path failure (oversize >8MB,
+download, STT) becomes a text reply and a TTS failure degrades to text-only —
+never a silent drop. All of it covered in `tests/discord_gateway_check.py`
+(voice rules, the stubbed pipeline, failure degradation, and the
+approval-isolation check against the real face server); the multipart
+attachment upload was validated live against the owner's real DM.
+
 **vercel-deploy skill (2026-08-01).** Build → verify locally in his own
 browser → private GitHub repo (`gh repo create --private --source --push`)
 → **stop and ask the owner for the Vercel project name** (it decides
