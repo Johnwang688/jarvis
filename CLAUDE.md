@@ -399,6 +399,17 @@ jarvis/
   notes), protected-file refusal and credential-value scrubbing, typed-only
   turns skipping STT, and the legacy raw-webm body still working. Run after
   touching `_assemble_turn`, `_converse`, or `run_turn(images=…)`.
+- `tests/voice_speakable_check.py` — free checks for `voice.speakable()`, the
+  markdown→speech strip: 16 constructs lose their syntax and stay idempotent,
+  6 lookalikes (`snake_case`, `2 * 3 * 4`, prose) come back byte-identical,
+  fences are dropped rather than read aloud, and `tts()` applies the strip
+  itself so no speech path can forget. Run after touching `voice.py`.
+- `tests/face/hud_markdown_check.py` — free headless checks that the HUD
+  *renders* his markdown in the real `jarvis.html`: 13 constructs become
+  elements, `textContent` still holds the words (what the other HUD suites
+  assert against), the owner's own message is left verbatim, and a reply
+  cannot inject markup or a `javascript:` href into the surface that gates
+  approvals. Run after touching `renderMarkdown`/`addMsg`.
 - `tests/face/hud_input_check.py` — free headless checks of the input bar
   in the real `jarvis.html` (hud_state_check's puppet pattern): Enter sends
   the JSON envelope and the words render at send time, staged files ride
@@ -940,6 +951,33 @@ thewh1teagle/kokoro-onnx releases, ~340MB); dep via `uv pip install -e
 .[voice]`. The face pre-warms the model at startup (~3s ONNX load, off the
 critical path). `tests/voice_local_check.py` is the free suite. STT remains
 cloud (parakeet); local whisper stays the next swap if it ever needs to be.
+
+**Markdown: rendered in the HUD, stripped for speech (2026-08-03).** The
+model writes markdown and both surfaces were taking it literally — the COMMS
+log printed `**Done.**` as source, and TTS read the asterisks aloud.
+
+- **The HUD renders it** (`renderMarkdown` in `jarvis.html`): headings,
+  lists (one level of nesting), fenced code, blockquotes, tables, rules,
+  inline code/emphasis/strike/links. Hand-rolled into **DOM nodes, never
+  `innerHTML`** — same rule as the authorization card, and it matters more
+  here: a reply that could inject markup into the window that gates approvals
+  could draw its own AUTHORIZE button. Link hrefs are scheme-checked
+  (http/https/mailto only, `target=_blank` so the HUD itself never
+  navigates); anything else renders as plain text. Only *his* messages are
+  rendered — the owner's own line goes up verbatim, because typing `*foo*`
+  means `*foo*`.
+- **TTS strips it** (`voice.speakable()`), and the strip lives inside
+  `voice.tts()` so no speech path — face, Discord voice notes, `/say` — can
+  forget it. Code fences are dropped whole rather than read aloud; a reply
+  that was *only* a fence yields `""`, which the face treats as text-only.
+  The face also strips before `_sentences()`, because the first-chunk clamp
+  measures length and counting asterisks cuts speech in the wrong place —
+  and `_sentences()` now splits on newlines too, so a de-bulleted list gets
+  a pause per item instead of synthesizing as one long chunk.
+
+Not done: `whiteboard.html`'s reply panel still shows raw text. Sharing the
+renderer means lifting it out of `jarvis.html` into a static JS file both
+pages load.
 
 **Onshape CAD shipped (2026-07-31), live validation pending.** The second
 use-but-never-see integration (see Safety design). `jarvis auth onshape`

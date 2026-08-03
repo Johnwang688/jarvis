@@ -101,6 +101,39 @@
   .msg.you { border-left: 2px solid #24344d; padding-left: 9px; }
   .msg .meta { font: 10px var(--mono); color: #46586f; margin-top: 4px; }
 
+  /* rendered markdown (jarvis replies only — see renderMarkdown) */
+  .md > *:first-child { margin-top: 0; }
+  .md > *:last-child { margin-bottom: 0; }
+  .md p { margin: 6px 0; }
+  .md .md-h { color: #dceafe; font-weight: 600; letter-spacing: .03em; margin: 9px 0 4px; }
+  .md .md-h1 { font-size: 14.5px; }
+  .md .md-h2 { font-size: 13.5px; }
+  .md .md-h3, .md .md-h4, .md .md-h5, .md .md-h6 { font-size: 13px; color: var(--cyan); }
+  .md ul, .md ol { margin: 5px 0 5px 17px; }
+  .md li { margin: 2.5px 0; }
+  .md li > p { margin: 0; }
+  .md li::marker { color: var(--cyan-dim); }
+  .md strong { color: #dceafe; font-weight: 600; }
+  .md em { color: #cfe2f8; }
+  .md code {
+    font: 11.5px var(--mono); color: #9fe0ff; padding: 0 4px; border-radius: 3px;
+    background: rgba(56,189,248,.09); border: 1px solid var(--cyan-faint);
+  }
+  .md pre {
+    font: 11.5px/1.55 var(--mono); color: #a8d8f5; margin: 7px 0; padding: 7px 9px;
+    background: rgba(4,10,18,.75); border: 1px solid var(--cyan-faint);
+    border-left: 2px solid var(--cyan-dim); overflow-x: auto; scrollbar-width: thin;
+  }
+  .md blockquote {
+    border-left: 2px solid var(--cyan-faint); padding-left: 9px; margin: 6px 0; color: #8ea7c5;
+  }
+  .md a { color: var(--cyan); text-decoration: none; border-bottom: 1px dotted var(--cyan-dim); }
+  .md a:hover { text-shadow: 0 0 8px rgba(56,189,248,.55); }
+  .md hr { border: 0; border-top: 1px solid var(--cyan-faint); margin: 9px 0; }
+  .md table { border-collapse: collapse; margin: 7px 0; font-size: 11.5px; display: block; overflow-x: auto; scrollbar-width: thin; }
+  .md th, .md td { border: 1px solid var(--cyan-faint); padding: 3px 7px; text-align: left; }
+  .md th { color: var(--cyan); font: 10px var(--mono); letter-spacing: .12em; text-transform: uppercase; }
+
   /* systems readouts */
   #clock { font: 600 34px var(--mono); color: #dceafe; text-shadow: 0 0 14px rgba(56,189,248,.35); }
   #date { font: 11px var(--mono); color: #6b8db3; letter-spacing: .18em; margin-top: 2px; }
@@ -576,6 +609,173 @@ async function queueAudio(b64) {
   src.start(at);
 }
 
+// ============================== markdown =====================================
+// He writes markdown; the log used to show the source. Rendered by hand into
+// DOM nodes and never through innerHTML — the reply is a model-written string
+// and this window is the surface that gates approvals, so nothing he writes
+// may become markup this page did not build itself. Same rule as the
+// authorization card. Link hrefs are scheme-checked for the same reason.
+
+const MD_INLINE = /`([^`]+)`|(!?)\[([^\]]*)\]\(\s*([^)\s]*)(?:\s+"[^"]*")?\s*\)/;
+const MD_EM = /(\*\*\*)(?=\S)([\s\S]*?\S)\*\*\*|(\*\*|__)(?=\S)([\s\S]*?\S)\3|(\*|_)(?=\S)([\s\S]*?\S)\5|~~(?=\S)([\s\S]*?\S)~~/;
+const MD_BULLET = /^\s*([-*+]|\d+[.)])\s+(.*)$/;
+const MD_BLOCK = /^\s{0,3}(?:```|~~~|#{1,6}\s|>|(?:[-*+]|\d+[.)])\s|(?:-{3,}|\*{3,}|_{3,})\s*$)/;
+
+function mdEmphasis(text, into) {
+  for (let m; text && (m = MD_EM.exec(text)); ) {
+    const end = m.index + m[0].length;
+    const delim = m[3] || m[5];
+    // snake_case and 2 * 3 are not emphasis: an underscore glued to a word
+    // character on either side stays literal.
+    if ((delim === "_" || delim === "__") &&
+        (/\w/.test(text[m.index - 1] || "") || /\w/.test(text[end] || ""))) {
+      into.appendChild(document.createTextNode(text.slice(0, end)));
+      text = text.slice(end);
+      continue;
+    }
+    if (m.index) into.appendChild(document.createTextNode(text.slice(0, m.index)));
+    let el = document.createElement(m[1] || m[3] ? "strong" : m[5] ? "em" : "s");
+    into.appendChild(el);
+    if (m[1]) el = el.appendChild(document.createElement("em"));  // ***both***
+    mdEmphasis(m[2] !== undefined ? m[2] : m[4] !== undefined ? m[4]
+               : m[6] !== undefined ? m[6] : m[7], el);
+    text = text.slice(end);
+  }
+  if (text) into.appendChild(document.createTextNode(text));
+}
+
+function mdInline(text, into) {
+  for (let m; text && (m = MD_INLINE.exec(text)); ) {
+    if (m.index) mdEmphasis(text.slice(0, m.index), into);
+    if (m[1] !== undefined) {
+      const code = document.createElement("code");
+      code.textContent = m[1];
+      into.appendChild(code);
+    } else if (m[2]) {
+      // Images: alt text only. The HUD never loads a remote resource a reply
+      // names — that would be an outbound request the owner did not make.
+      into.appendChild(document.createTextNode(m[3] || m[4]));
+    } else if (/^(https?:|mailto:)/i.test(m[4])) {
+      const a = document.createElement("a");
+      a.textContent = m[3] || m[4];
+      a.href = m[4];
+      a.target = "_blank";       // never navigate the HUD itself away
+      a.rel = "noopener noreferrer";
+      into.appendChild(a);
+    } else {
+      // javascript:, data:, relative — shown, not clickable.
+      into.appendChild(document.createTextNode(m[3] ? m[3] + " (" + m[4] + ")" : m[4]));
+    }
+    text = text.slice(m.index + m[0].length);
+  }
+  if (text) mdEmphasis(text, into);
+}
+
+function renderMarkdown(text) {
+  const frag = document.createDocumentFragment();
+  const lines = String(text == null ? "" : text).split(/\r?\n/);
+  const indent = (s) => /^\s*/.exec(s)[0].length;
+  let i = 0, m;
+
+  while (i < lines.length) {
+    const line = lines[i];
+    if (!line.trim()) { i++; continue; }
+
+    if ((m = /^\s{0,3}(```|~~~)/.exec(line))) {           // fenced code
+      const close = new RegExp("^\\s{0,3}" + m[1][0] + "{3,}\\s*$");
+      const body = [];
+      for (i++; i < lines.length && !close.test(lines[i]); i++) body.push(lines[i]);
+      i++;                                                // the closing fence
+      const pre = document.createElement("pre");
+      pre.textContent = body.join("\n");
+      frag.appendChild(pre);
+      continue;
+    }
+    if ((m = /^\s{0,3}(#{1,6})\s+(.*)$/.exec(line))) {    // heading
+      const h = document.createElement("div");
+      h.className = "md-h md-h" + m[1].length;
+      mdInline(m[2].replace(/\s+#+\s*$/, ""), h);
+      frag.appendChild(h); i++;
+      continue;
+    }
+    if (/^\s{0,3}(?:-{3,}|\*{3,}|_{3,})\s*$/.test(line)) { // rule
+      frag.appendChild(document.createElement("hr")); i++;
+      continue;
+    }
+    if (/^\s{0,3}>/.test(line)) {                         // blockquote
+      const body = [];
+      while (i < lines.length && /^\s{0,3}>/.test(lines[i]))
+        body.push(lines[i++].replace(/^\s{0,3}>\s?/, ""));
+      const q = document.createElement("blockquote");
+      q.appendChild(renderMarkdown(body.join("\n")));
+      frag.appendChild(q);
+      continue;
+    }
+    if (line.includes("|") && i + 1 < lines.length &&
+        /^\s*\|?[\s:|-]*-[\s:|-]*\|?\s*$/.test(lines[i + 1])) {   // table
+      const cells = (s) => s.trim().replace(/^\||\|$/g, "").split("|").map((c) => c.trim());
+      const table = document.createElement("table");
+      const head = document.createElement("tr");
+      cells(line).forEach((c) => {
+        const th = document.createElement("th");
+        mdInline(c, th); head.appendChild(th);
+      });
+      table.appendChild(head);
+      for (i += 2; i < lines.length && lines[i].includes("|"); i++) {
+        const tr = document.createElement("tr");
+        cells(lines[i]).forEach((c) => {
+          const td = document.createElement("td");
+          mdInline(c, td); tr.appendChild(td);
+        });
+        table.appendChild(tr);
+      }
+      frag.appendChild(table);
+      continue;
+    }
+    if ((m = MD_BULLET.exec(line))) {                     // list
+      const ordered = /\d/.test(m[1]);
+      const base = indent(line);
+      const list = document.createElement(ordered ? "ol" : "ul");
+      while (i < lines.length) {
+        const item = MD_BULLET.exec(lines[i]);
+        if (!lines[i].trim()) {                           // loose list: one
+          if (i + 1 < lines.length && MD_BULLET.test(lines[i + 1])) { i++; continue; }
+          break;                                          // blank line ends it
+        }
+        if (indent(lines[i]) >= base + 2 && list.lastChild) {
+          // Deeper than the marker we opened with: a nested list, or a
+          // wrapped continuation line. Dedent and let the recursion decide.
+          const sub = [];
+          while (i < lines.length && lines[i].trim() && indent(lines[i]) >= base + 2)
+            sub.push(lines[i++].slice(base + 2));
+          list.lastChild.appendChild(renderMarkdown(sub.join("\n")));
+          continue;
+        }
+        if (!item || indent(lines[i]) < base || /\d/.test(item[1]) !== ordered) break;
+        const li = document.createElement("li");
+        mdInline(item[2], li);
+        list.appendChild(li);
+        i++;
+      }
+      frag.appendChild(list);
+      continue;
+    }
+
+    const para = [];                                      // paragraph
+    while (i < lines.length && lines[i].trim() && !MD_BLOCK.test(lines[i]) &&
+           !(lines[i].includes("|") && i + 1 < lines.length &&
+             /^\s*\|?[\s:|-]*-[\s:|-]*\|?\s*$/.test(lines[i + 1])))
+      para.push(lines[i++].trim());
+    const p = document.createElement("p");
+    para.forEach((l, n) => {
+      if (n) p.appendChild(document.createElement("br"));  // GFM: newline is a break
+      mdInline(l, p);
+    });
+    frag.appendChild(p);
+  }
+  return frag;
+}
+
 // ============================== transcript & ops ============================
 
 function addMsg(cls, text, meta) {
@@ -585,7 +785,15 @@ function addMsg(cls, text, meta) {
   who.className = "who";
   who.textContent = cls === "you" ? "YOU" : "J.A.R.V.I.S.";
   el.appendChild(who);
-  el.appendChild(document.createTextNode(text));
+  if (cls === "you") {
+    // The owner's own words go up verbatim — typing *foo* means *foo*.
+    el.appendChild(document.createTextNode(text));
+  } else {
+    const md = document.createElement("div");
+    md.className = "md";
+    md.appendChild(renderMarkdown(text));
+    el.appendChild(md);
+  }
   if (meta) {
     const m = document.createElement("div");
     m.className = "meta";

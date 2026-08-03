@@ -13,6 +13,7 @@ by trusting a label.
 from __future__ import annotations
 
 import io
+import re
 import threading
 import wave
 
@@ -21,6 +22,64 @@ from . import config, llm
 _kokoro = None
 _kokoro_lock = threading.Lock()
 _local_warned = False
+
+
+# ---- markdown -> speech ------------------------------------------------------
+# The model writes markdown because the HUD renders it. TTS reads the source,
+# so "**done**" came out as "asterisk asterisk done asterisk asterisk". These
+# strip the syntax and drop what has no spoken form at all (code blocks,
+# horizontal rules, table rules). Deliberately lossy in one direction only:
+# never invent words, only remove punctuation the owner was never meant to
+# hear. `speakable()` is idempotent — plain prose passes through unchanged.
+
+_MD_FENCE = re.compile(r"^\s{0,3}(?:```|~~~)")
+_MD_RULE = re.compile(r"^\s{0,3}(?:-{3,}|\*{3,}|_{3,}|={3,})\s*$")
+_MD_TABLE_RULE = re.compile(r"^\s*\|?[\s:|-]*-[\s:|-]*\|?\s*$")
+_MD_HEADING = re.compile(r"^\s{0,3}#{1,6}\s+")
+_MD_QUOTE = re.compile(r"^\s{0,3}>\s?")
+_MD_BULLET = re.compile(r"^(\s*)(?:[-*+]|\d+[.)])\s+")
+_MD_IMAGE = re.compile(r"!\[([^\]]*)\]\([^)]*\)")
+_MD_LINK = re.compile(r"\[([^\]]+)\]\([^)]*\)")
+_MD_AUTOLINK = re.compile(r"<(https?://[^>\s]+)>")
+_MD_CODE = re.compile(r"`+([^`]+)`+")
+_MD_STRONG = re.compile(r"(\*\*|__|~~)(\S(?:.*?\S)?)\1", re.S)
+# Single-delimiter emphasis, with the guard that keeps snake_case and
+# 2 * 3 * 4 intact: a `_` flanked by word characters is not emphasis.
+_MD_EM = re.compile(r"(?<![*\w])\*(\S(?:[^*]*?\S)?)\*(?!\*)|(?<![_\w])_(\S(?:[^_]*?\S)?)_(?!\w)")
+_MD_ESCAPE = re.compile(r"\\([\\`*_{}\[\]()#+\-.!~>|])")
+
+
+def speakable(text: str) -> str:
+    """Strip markdown so TTS reads the words, not the syntax.
+
+    Returns "" when nothing is left worth saying (a reply that was only a
+    code block) — callers skip synthesis rather than speak punctuation.
+    """
+    lines: list[str] = []
+    in_fence = False
+    for line in (text or "").splitlines():
+        if _MD_FENCE.match(line):
+            in_fence = not in_fence
+            continue
+        if in_fence or _MD_RULE.match(line):
+            continue
+        if "|" in line and _MD_TABLE_RULE.match(line):
+            continue  # the |---|---| under a table header
+        line = _MD_HEADING.sub("", line)
+        line = _MD_QUOTE.sub("", line)
+        line = _MD_BULLET.sub(r"\1", line)
+        if line.strip().startswith("|") or line.count("|") >= 2:
+            # A table row reads as a list: "name, 12, ready".
+            line = re.sub(r"\s*\|\s*", ", ", line.strip().strip("|")).strip(", ")
+        line = _MD_IMAGE.sub(r"\1", line)
+        line = _MD_LINK.sub(r"\1", line)
+        line = _MD_AUTOLINK.sub(r"\1", line)
+        line = _MD_CODE.sub(r"\1", line)
+        line = _MD_STRONG.sub(r"\2", line)
+        line = _MD_EM.sub(lambda m: m.group(1) or m.group(2), line)
+        line = _MD_ESCAPE.sub(r"\1", line)
+        lines.append(line.rstrip())
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
 
 
 def _local_tts(text: str, voice: str, speed: float) -> bytes:
@@ -52,6 +111,9 @@ def tts(
 ) -> bytes:
     """Synthesize speech for `text`. Returns audio bytes (WAV local, MP3 cloud)."""
     global _local_warned
+    # Applied here, not only at the call sites, so no speech path can forget
+    # it. Idempotent, so a caller that already stripped pays nothing.
+    text = speakable(text)
     if not text.strip():
         raise ValueError("nothing to say")
     # The cloud provider silently truncates audio above ~1.3x (verified

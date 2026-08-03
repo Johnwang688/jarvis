@@ -66,7 +66,11 @@ def _sentences(text: str, max_len: int = 300, first_max: int = 90) -> list[str]:
     the owner is waiting on, so it gets clamped extra short at a clause
     boundary — "Sure," starts playing while the rest of the sentence renders.
     """
-    parts = re.split(r"(?<=[.!?…])\s+", text.strip())
+    # Line breaks split too, not just sentence enders: a stripped-down markdown
+    # list ("Fixed the bug\nRan 2 tests") carries no terminal punctuation, and
+    # without this the whole list synthesizes as one long chunk with no pause
+    # between the items.
+    parts = re.split(r"(?<=[.!?…])\s+|\n+", text.strip())
     out: list[str] = []
     for part in parts:
         part = part.strip()
@@ -815,6 +819,15 @@ class FaceHandler(SimpleHTTPRequestHandler):
                 self._nd({"type": "done", "tts_ms": 0, "muted": True})
                 return
 
+            # Markdown comes off before chunking, not just inside voice.tts():
+            # _sentences() clamps the first chunk by length, and counting
+            # asterisks would cut speech in the wrong place. A reply with
+            # nothing speakable left (a bare code block) is text-only.
+            speech = voice.speakable(reply[:MAX_SAY_CHARS])
+            if not speech:
+                self._nd({"type": "done", "tts_ms": 0})
+                return
+
             # The first sentence takes ~0.5-1s to synthesize. Without this the
             # window sat on the last tool's label through all of it.
             self._nd({"type": "phase", "phase": "composing"})
@@ -824,7 +837,7 @@ class FaceHandler(SimpleHTTPRequestHandler):
             # currently being written out.
             pool = ThreadPoolExecutor(max_workers=2)
             try:
-                sentences = _sentences(reply[:MAX_SAY_CHARS])
+                sentences = _sentences(speech)
                 futures = [pool.submit(voice.tts, s) for s in sentences]
                 t0 = time.monotonic()
                 for seq, future in enumerate(futures):
