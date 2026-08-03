@@ -680,6 +680,29 @@ Worst-case latency is one in-flight model call: the OpenRouter request cannot
 be aborted, so the loop stops at the next step boundary. In practice the owner
 is still talking when it unwinds.
 
+**Step budget, and admitting when it runs out (2026-08-02).** `Agent`'s
+default `max_steps` is **30** (was 12). Only the conversation surfaces take
+the default — the HUD/voice agent and `jarvis chat`/`ask` both construct
+`Agent` without the argument; designer (24), workflows (20) and every bench
+set their own. 12 was too tight for real work: a self-improve turn spends most
+of it on checkpoint + edit + test runs before any misstep, and the observed
+failure was a completed, committed UI change reported to the owner as a bare
+`[stopped after 12 steps without finishing]`.
+
+The bug underneath it is the one worth remembering: **exhausting the budget
+used to be invisible to the model.** Every other exit path appends its
+assistant message inside the loop, but the `stopped_early` tail set only
+`turn.text` — so the transcript ended on a pile of tool results with no sign
+of the cut, and the *next* turn's model had nothing to explain itself with.
+Asked why he had stopped, Jarvis confidently answered "there isn't a
+twelve-step limit" while the window showed exactly that message: not a lie, a
+confabulation from a transcript that never mentioned the truncation. The
+notice is now appended to `self.messages` before returning (safe — the loop
+only exits at a step boundary, so invariant 3 holds). Generalizes: **any state
+the surface shows the owner but never writes into the transcript is state the
+model will invent a story about.** Covered by `tests/face/cancel_check.py`,
+which owns both no-reply exit paths now.
+
 **Gmail shipped (2026-07-31)** — the first real integration, and the
 template for the rest: `jarvis auth google <client.json>` runs the one-time
 OAuth consent (PKCE + state, loopback redirect, human-only CLI command),

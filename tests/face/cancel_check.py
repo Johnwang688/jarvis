@@ -14,6 +14,11 @@ over where the cancel lands.
   3. a cancel never fires mid-tool-loop, even when set while a tool is running
   4. the /cancel route sets the flag, and refuses cross-origin
 
+The other way a turn ends without a reply is the step budget running out, so
+5 covers that exit path from the same stub harness: it must leave the notice
+*in the transcript*, not only in the returned Turn, or the next turn's model
+has no idea it was cut off and confabulates an explanation.
+
 Run:  .venv/bin/python tests/face/cancel_check.py
 """
 
@@ -54,9 +59,11 @@ class StubLLM:
     def __init__(self, script):
         self.script = list(script)
         self.calls = 0
+        self.last_messages: list[dict] = []
 
     def __call__(self, model, messages, **kwargs):
         self.calls += 1
+        self.last_messages = list(messages)
         return self.script.pop(0) if self.script else reply("done")
 
 
@@ -130,6 +137,35 @@ def agent_checks() -> None:
         assert len(turn.tool_calls) == 2, "both parallel calls must finish"
         check_transcript(jarvis)
         print("ok  cancel: raised mid-tool-loop, both parallel results still returned")
+
+        # 5. the step budget running out is announced in the transcript, not
+        #    just in the returned Turn — the model must be able to see it
+        stub = StubLLM([])
+        stub.script = [reply(tool_calls=[call(f"t{i}", "get_datetime", "{}")])
+                       for i in range(3)]
+        llm.chat = agent_mod.llm.chat = stub
+        jarvis = agent_mod.Agent(max_steps=3, tool_names=["get_datetime"])
+        turn = jarvis.run_turn("keep going")
+        assert turn.stopped_early and turn.steps == 3, turn
+        assert "stopped after 3 steps" in turn.text, turn.text
+        last = jarvis.messages[-1]
+        assert last["role"] == "assistant" and last["content"] == turn.text, last
+        assert not last.get("tool_calls"), "the stop notice asks for nothing"
+        check_transcript(jarvis)
+        print("ok  budget: exhausted — the stop notice lands in the transcript")
+
+        # ...and the model can then answer for itself on the next turn
+        stub.script = [reply("I ran out of steps before I could reply.")]
+        turn = jarvis.run_turn("why did you stop?")
+        seen = stub.last_messages
+        assert any(m.get("content") == "[stopped after 3 steps without finishing]"
+                   for m in seen), "the next request must carry the stop notice"
+        check_transcript(jarvis)
+        print("ok  budget: the next turn is sent the notice, so it can say why")
+
+        # the conversation surfaces take the default; only they rely on it
+        assert agent_mod.Agent(tool_names=["get_datetime"]).max_steps == 30
+        print("ok  budget: default step budget is 30")
     finally:
         llm.chat = agent_mod.llm.chat = original
 

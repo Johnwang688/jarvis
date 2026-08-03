@@ -41,7 +41,12 @@ class Agent:
         model: str | None = None,
         system: str = config.SYSTEM_PROMPT,
         tool_names: list[str] | None = None,
-        max_steps: int = 12,
+        # The conversation surfaces (HUD, chat, ask) take this default; every
+        # other agent sets its own. 12 was too tight for real work: a
+        # self-improve turn spends most of it on checkpoint + edit + test runs
+        # before any misstep, and running out mid-task is expensive — the work
+        # is done but unreported, and the owner sees a bare stop notice.
+        max_steps: int = 30,
         approve: Callable[[tools.Tool, dict], bool] | None = None,
         on_event: Callable[[str, Any], None] | None = None,
         policy: context.ContextPolicy | None = None,
@@ -259,6 +264,14 @@ class Agent:
 
         turn.stopped_early = True
         turn.text = f"[stopped after {self.max_steps} steps without finishing]"
+        # The transcript has to say so too. Without this it ends on a tail of
+        # tool results with no sign the loop was cut off, so the next turn's
+        # model cannot know it ran out and will invent a reason for its own
+        # silence — asked why he stopped, Jarvis once answered "there isn't a
+        # twelve-step limit" while the window showed exactly that message.
+        # Safe to append here: the loop only exits at a step boundary, so
+        # every tool_call already has its result (invariant 3).
+        self.messages.append({"role": "assistant", "content": turn.text})
         return turn
 
 

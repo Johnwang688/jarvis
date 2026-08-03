@@ -167,7 +167,11 @@ def route_checks() -> None:
         heard = next(line for line in lines if line["type"] == "heard")
         assert heard["text"] == "spoken words" and len(stt_calls) == 1
         sent, images = fake.calls[-1]
-        assert sent.startswith("spoken words\n\nalso this") and "alpha beta" in sent
+        # A turn carrying speech is prefixed with the transcription notice, so
+        # pin the order of the parts rather than the head of the string.
+        assert "transcribed from speech" in sent, sent
+        assert "spoken words\n\nalso this" in sent and "alpha beta" in sent
+        assert sent.index("spoken words") < sent.index("alpha beta"), sent
         assert images is None
 
         # Image attachment reaches run_turn as a multimodal part.
