@@ -212,10 +212,13 @@ from . import (  # noqa: E402,F401  (registers the tools)
     google_workspace,
     memory,
     onshape,
+    plan,
     sessions,
     shell,
     skills,
+    subagent,
     discord,
+
     voicectl,
     web,
     whiteboardctl,

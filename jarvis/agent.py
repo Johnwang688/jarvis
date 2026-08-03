@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from . import config, context, llm, sessions, tools
+from . import config, context, llm, runtime, sessions, tools
 from .tools import contextctl
 
 
@@ -52,6 +52,7 @@ class Agent:
         policy: context.ContextPolicy | None = None,
         should_stop: Callable[[], bool] | None = None,
         session: sessions.Session | None = None,
+        depth: int = 0,
     ):
         self.model = model or config.TIERS["orchestrator"]
         self.tool_specs = tools.specs(tool_names)
@@ -63,17 +64,23 @@ class Agent:
         self.should_stop = should_stop or (lambda: False)
         self.policy = policy or context.ContextPolicy()
         self._base_system = system
+        # How many sub-agents deep this one is; bound into runtime so a child
+        # can refuse to spawn past MAX_DEPTH.
+        self.depth = depth
+        # This agent's working plan. Owned per-agent rather than globally: two
+        # agents can be running at once (a workflow thread, the face's request
+        # threads), and they must not share a checklist.
+        self.plan: dict[str, str] = {"text": ""}
         # Agents with skill tools get the always-visible skills index appended
         # to their system message; agents without them (designer, benches)
-        # must not see references to tools they cannot call.
-        self._has_skills = any(
-            spec["function"]["name"] == "skill_read" for spec in self.tool_specs
-        )
-        # Same rule for the recent-sessions index: only agents that can act on
-        # it (session_summary is the tool it tells them to call) are shown it.
-        self._has_sessions = any(
-            spec["function"]["name"] == "session_summary" for spec in self.tool_specs
-        )
+        # must not see references to tools they cannot call. Same rule for the
+        # plan block — an agent with no plan_write must not be told to use it —
+        # and for the recent-sessions index, whose whole point is to tell the
+        # model to call session_summary.
+        names = {spec["function"]["name"] for spec in self.tool_specs}
+        self._has_skills = "skill_read" in names
+        self._has_plan = "plan_write" in names
+        self._has_sessions = "session_summary" in names
         self.messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
         # A bound session makes this conversation durable: its saved transcript
         # is restored here, and every turn is written back after it completes.
@@ -82,6 +89,27 @@ class Agent:
         self.session = session
         if session is not None:
             self.messages.extend(session.restore_messages())
+
+    def _refresh_system(self) -> None:
+        """Rebuild messages[0] from source: base prompt + skills index + plan
+        + recent-session titles.
+
+        Called at the top of every *step*, not just every turn. The plan is the
+        one thing that has to stay visible on step 40 of a long run, and a turn
+        that runs 40 steps only passes the top of run_turn once.
+
+        Safe by construction: index 0 is re-sent with every request anyway, and
+        neither pruning nor compaction ever touches it.
+        """
+        blocks = []
+        if self._has_skills:
+            blocks.append(tools.skills.index())
+        if self._has_plan:
+            blocks.append(tools.plan.block())
+        if self._has_sessions:
+            blocks.append(sessions.index(current=self.session.id if self.session else None))
+        extra = "\n\n".join(b for b in blocks if b)
+        self.messages[0]["content"] = self._base_system + ("\n\n" + extra if extra else "")
 
     def _summarize(self, transcript: str) -> str:
         """Compress old history using the cheap tier — this is bulk text work."""
@@ -100,25 +128,6 @@ class Agent:
             ],
             max_tokens=1024,
         ).text
-
-    def _refresh_system(self) -> None:
-        """Rebuild messages[0] from the base prompt plus the live indexes.
-
-        Done every turn because messages[0] is re-sent with each request
-        anyway, pruning and compaction never touch it, and a skill saved (or a
-        session started) mid-conversation is then visible on the very next
-        turn.
-        """
-        blocks = []
-        if self._has_skills:
-            blocks.append(tools.skills.index())
-        if self._has_sessions:
-            blocks.append(sessions.index(current=self.session.id if self.session else None))
-        if not blocks:
-            return
-        self.messages[0]["content"] = "\n\n".join(
-            [self._base_system, *(b for b in blocks if b)]
-        )
 
     def run_turn(self, user_input: str, images: list | None = None) -> Turn:
         """One user message through the loop, saved to the session if bound."""
@@ -160,6 +169,18 @@ class Agent:
         vision model sees them alongside the text. Each entry is a base64 PNG
         string, or {"b64": ..., "mime": ...} for other image types. Same
         multimodal shape the context manager already evicts by age."""
+        # Bind this agent's per-run state where the tools can reach it. Done
+        # here rather than in __init__ because ContextVars are per-thread and
+        # the thread that constructs an agent is not always the one that runs
+        # it — the face keeps one persistent agent and drives it from whichever
+        # request thread took the turn.
+        runtime.bind(
+            plan=self.plan,
+            approve=self.approve if self.approve is not None else (lambda *a, **k: False),
+            should_stop=self.should_stop,
+            depth=self.depth,
+            tool_names={spec["function"]["name"] for spec in self.tool_specs},
+        )
         self._refresh_system()
         if images:
             self.messages.append(
@@ -186,6 +207,11 @@ class Agent:
                 turn.cancelled = True
                 self.on_event("cancelled", step)
                 return turn
+
+            # Re-render the plan into messages[0] before every request, not
+            # just once a turn: a long turn is exactly the case the plan exists
+            # for, and a plan written at step 3 has to still be there at step 40.
+            self._refresh_system()
 
             reply = llm.chat(self.model, self.messages, tools=self.tool_specs)
             turn.steps = step + 1
