@@ -192,6 +192,18 @@ class ApprovalBroker:
         )
         return True
 
+    def detach_remote(self) -> None:
+        """Forget the remote channel.
+
+        Used when another process (the daemon) owns the Discord gateway: this
+        broker could still *send* a DM over REST, but the owner's reply would
+        arrive at the other process and resolve nothing here — a question that
+        can only time out is worse than not asking. Questions then live and
+        die on the window, which is correct for the surface that implies the
+        owner is at the desk.
+        """
+        self._remote = None
+
     def deny_all(self, resolution: str = "cancelled", include_remote: bool = True) -> int:
         """Release every waiter with a denial — window gone, or shutting down.
 

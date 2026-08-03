@@ -15,6 +15,10 @@ OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 # that the browser and web tools can refuse to touch it without importing the
 # face (which would drag Playwright and the agent into every import).
 FACE_PORT = int(os.environ.get("JARVIS_FACE_PORT", "8402"))
+# The headless daemon's health/status endpoint (`jarvis daemon`). Read-only —
+# it exists as the single-instance lock and so the face can tell that another
+# process already owns the Discord gateway.
+DAEMON_PORT = int(os.environ.get("JARVIS_DAEMON_PORT", "8405"))
 LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "0.0.0.0", ""})
 
 

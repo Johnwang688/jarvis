@@ -58,6 +58,10 @@ jarvis/
   onshape_auth.py Onshape API keys + the pinned CAD sandbox/libraries
   desktop.py    WSL half of the desktop bridge (listener, session, allowlist)
   discord_approvals.py  the approval gate, asked in the owner's DMs
+  discord_agent.py  the Discord conversation core (persistent agent + the
+                spoken-turns-never-authorize rule), shared by face and daemon
+  daemon.py     `jarvis daemon` — headless always-on service: gateway + DM-only
+                approvals + health/lock endpoint on port 8405
   permissions.py  modes (ask/all) + the persistent dangerous-tool allowlist
   workflows.py  background agents on their own threads (safe tools only)
   sessions.py   saved conversations: transcript, log, meta, titles, summaries
@@ -340,6 +344,15 @@ jarvis/
   spent code is dead, and every failure mode (no channel, timeout,
   window-closed, shutdown) denies. Run after touching `discord_approvals.py`
   or `ApprovalBroker.request`.
+- `tests/daemon_check.py` — free synthetic checks for the headless daemon
+  (fake listener + stub DM channel, loopback HTTP only): the shared
+  DiscordResponder keeps spoken turns away from the approval parser, a
+  windowless broker denies nowhere-to-ask / on remote timeout, and
+  `detach_remote()` stops remote asks entirely; the health endpoint is the
+  single-instance lock, the daemon refuses to start over a running face, and
+  `stop()` releases blocked approval waiters with a denial. Hermetic against
+  a real face running on 8402 (probes point at dead ports). Run after
+  touching `daemon.py`, `discord_agent.py`, or `ApprovalBroker`.
 - `tests/sessions_check.py` — free checks for session memory: record→reload
   round-trip (and that the system message is never persisted), image payloads
   stripped on save, the append-only log surviving compaction of the
@@ -1073,6 +1086,31 @@ never a silent drop. All of it covered in `tests/discord_gateway_check.py`
 (voice rules, the stubbed pipeline, failure degradation, and the
 approval-isolation check against the real face server); the multipart
 attachment upload was validated live against the owner's real DM.
+
+**`jarvis daemon` shipped (2026-08-03) — away-agent phase 1** (the plan:
+`docs/away-agent-roadmap.md`; the Discord core moved to `discord_agent.py`
+so face and daemon share one implementation of the spoken-turns-never-
+authorize rule). The daemon is the always-on half of the face with the
+window cut away: Discord gateway + an ApprovalBroker whose `viewers` is
+pinned to 0, so every dangerous-tool question DMs the owner or denies
+`nowhere-to-ask`. No HUD, no workshop, no browser window, no TTS pre-warm
+(voice notes load Kokoro lazily). **Exactly one process owns the gateway:**
+the daemon refuses to start while a face is serving (double-IDENTIFY would
+double every reply), and a face started while the daemon runs skips the
+gateway AND calls `APPROVALS.detach_remote()` — DM answers land in the
+*daemon's* broker, so a face-made DM could only ever time out; its
+questions stay on the card, correct for the at-the-desk surface. The
+read-only `/status` endpoint on `DAEMON_PORT` (8405) is both the
+single-instance lock and how the face detects the daemon. Provisioning is
+human-only: `jarvis daemon install` prints the systemd user unit
+(`WorkingDirectory=%h` — tool-relative paths must not resolve against `/`),
+the `loginctl enable-linger` step, and the WSL keepalive options (Task
+Scheduler `wsl --exec sleep infinity`, or `.wslconfig` `vmIdleTimeout=-1`);
+it writes nothing. `tests/daemon_check.py` is the free suite (responder
+approval isolation, nowhere-to-ask/timeout/detach denial paths, health
+lock + single instance, refusing to start over a face, shutdown releasing
+blocked waiters). Still pending from phase 1's exit gate: the 72-hour soak
+under systemd with real sleep/wake cycles.
 
 **vercel-deploy skill (2026-08-01).** Build → verify locally in his own
 browser → private GitHub repo (`gh repo create --private --source --push`)

@@ -221,11 +221,13 @@ def approval_isolation_check() -> None:
     fake_agent = types.SimpleNamespace(
         run_turn=lambda text: types.SimpleNamespace(text=f"agent saw: {text}")
     )
-    real_agent = server._get_discord_agent
+    # The core moved to discord_agent.DiscordResponder (shared with the
+    # daemon); this still drives it through the face's own wiring.
+    real_agent = server.RESPONDER._agent
     server.DISCORD_APPROVALS.handle_reply = (
         lambda ch, text: hits.append((ch, text)) or "authorized"
     )
-    server._get_discord_agent = lambda: fake_agent
+    server.RESPONDER._agent = fake_agent
     try:
         assert server._discord_turn("yes", "c9") == "authorized"
         assert hits == [("c9", "yes")]
@@ -234,7 +236,7 @@ def approval_isolation_check() -> None:
         assert spoken == "agent saw: [voice note] yes", spoken
     finally:
         del server.DISCORD_APPROVALS.handle_reply  # un-shadow the real method
-        server._get_discord_agent = real_agent
+        server.RESPONDER._agent = real_agent
     print("ok  approvals: typed replies resolve them, voice notes never do")
 
 

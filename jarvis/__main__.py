@@ -296,6 +296,14 @@ def cmd_desktop(args) -> int:
     return 0
 
 
+def cmd_daemon(args) -> int:
+    from . import daemon
+
+    if args.action == "install":
+        return daemon.install()
+    return daemon.run()
+
+
 def cmd_sessions(args) -> int:
     found = sessions.recent(args.limit)
     if not found:
@@ -418,6 +426,13 @@ def main() -> int:
     desktop.add_argument("--wait", type=float, default=0.0,
                          help="seconds to wait for the bridge to connect")
     desktop.set_defaults(func=cmd_desktop)
+
+    daemon = sub.add_parser(
+        "daemon",
+        help="headless always-on service: Discord gateway + DM approvals, no window",
+    )
+    daemon.add_argument("action", choices=["run", "install"], nargs="?", default="run")
+    daemon.set_defaults(func=cmd_daemon)
 
     saved = sub.add_parser("sessions", help="list saved conversations")
     saved.add_argument("-n", "--limit", type=int, default=20, help="how many to show")
