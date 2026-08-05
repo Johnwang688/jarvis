@@ -262,6 +262,28 @@ def runner_steering_checks(tmp: Path) -> None:
         parked.set("parked", "blocked: waiting on the owner")
         ack = runner.handle_dm("goal resume")
         assert parked.id in ack and goals.load(parked.id).status == "queued"
+
+        # steer: on a parked goal requeues it AND delivers the steering as the
+        # first message when it resumes — one DM unblocks and aims.
+        stuck = goals.create("needs an answer")
+        stuck.slices = 2  # past the plan/implement directives
+        stuck.set("parked", "blocked: which origin?")
+        ack = runner.handle_dm("steer: origin is field center, estimates are fine")
+        assert "Requeued" in ack and stuck.id in ack
+        assert goals.load(stuck.id).status == "queued"
+
+        def steered_resume(message):
+            assert message == "[owner steering] origin is field center, estimates are fine", message
+            goalctl._report = {"status": "done", "summary": "unblocked"}
+            return FakeTurn()
+
+        def steered_verify(message):
+            goalctl._report = {"status": "done", "summary": "unblocked"}
+            return FakeTurn()
+
+        runner._agent_factory = lambda g: ScriptedAgent([steered_resume, steered_verify])
+        runner._run_goal(goals.load(stuck.id))
+        assert goals.load(stuck.id).status == "done"
     finally:
         config.GOALS_DIR = real
     print("ok  steering: interrupt + next-slice injection, journaled, verbs fall through")

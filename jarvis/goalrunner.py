@@ -139,6 +139,9 @@ class GoalRunner:
         self._interrupt = threading.Event()  # the goal agent's should_stop
         self._cancel_requested = False
         self._steering: list[str] = []
+        # Steering sent while a goal is parked or queued, delivered as its
+        # first message when it (re)starts — one DM both unblocks and aims.
+        self._pending_steering: dict[str, list[str]] = {}
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
         self.current: goals.Goal | None = None
@@ -195,12 +198,27 @@ class GoalRunner:
                 return "Give me the redirection after the colon: `steer: focus on X`"
             with self._lock:
                 goal = self.current
-                if goal is None:
-                    return "No goal is running to steer. `goal: …` starts one."
-                self._steering.append(steering)
-            self._interrupt.set()  # stop the in-flight turn at a step boundary
+                if goal is not None:
+                    self._steering.append(steering)
+            if goal is not None:
+                self._interrupt.set()  # stop the in-flight turn at a step boundary
+                goal.journal("steering", text=steering)
+                return f"Steering `{goal.id}` — it takes effect within a step."
+            # Nothing running: aim the steering at the newest parked or queued
+            # goal instead, requeueing a parked one — a blocked goal usually
+            # parks precisely because it needs the owner's answer, and that
+            # answer should not require a resume-then-race-to-type second DM.
+            waiting = [g for g in goals.all_goals() if g.status in ("parked", "queued")]
+            if not waiting:
+                return "No goal is running to steer. `goal: …` starts one."
+            goal = max(waiting, key=lambda g: g.updated)
+            with self._lock:
+                self._pending_steering.setdefault(goal.id, []).append(steering)
             goal.journal("steering", text=steering)
-            return f"Steering `{goal.id}` — it takes effect within a step."
+            if goal.status == "parked":
+                goal.set("queued")
+                return f"Requeued `{goal.id}` with your steering — it resumes within seconds."
+            return f"Steering queued for `{goal.id}` — it starts with it."
 
         if lowered in {"goal status", "goals", "goal?"}:
             return self.status_text()
@@ -253,7 +271,7 @@ class GoalRunner:
         with self._lock:
             self.current = goal
             self._cancel_requested = False
-            self._steering.clear()
+            self._steering[:] = self._pending_steering.pop(goal.id, [])
         self._last_activity = ""
         self._last_update = time.monotonic()
         # Per-run verification state. In-memory on purpose: a goal resumed
