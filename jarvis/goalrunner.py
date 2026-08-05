@@ -65,6 +65,32 @@ GOAL_SYSTEM = config.SYSTEM_PROMPT + (
 # runner is serial — is available, gated exactly as at the desk.
 _EXCLUDED_TOOLS = {"set_voice_mute", "whiteboard_close"}
 
+# The scripted turn directives. Slice 0 plans, slice 1 starts implementing,
+# later slices continue; the first done triggers one verification pass.
+PLAN_DIRECTIVE = (
+    "[plan first] Do not implement anything in this turn. Write a detailed "
+    "working plan with plan_write: every deliverable, the acceptance "
+    "criteria you will hold each one to, and the order you will work. When "
+    "the plan is written, reply with a one-paragraph summary and stop."
+)
+IMPLEMENT_DIRECTIVE = (
+    "Your plan has been sent to the owner. Implement it now, keeping the "
+    "plan current as you go. When everything is complete, call goal_report "
+    "with status 'done'; if you are stuck, status 'blocked'."
+)
+CONTINUE_DIRECTIVE = (
+    "Continue working the goal. If it is complete, call goal_report; "
+    "if you are stuck, call goal_report with status 'blocked'."
+)
+VERIFY_DIRECTIVE = (
+    "Verification pass — your 'done' is not accepted yet. Re-read every "
+    "deliverable file and check it against the original statement and each "
+    "acceptance criterion in your plan: no vague or placeholder "
+    "implementations, no missing pieces, no stale cross-references. Fix "
+    "whatever falls short. Then call goal_report again — 'done' only if it "
+    "genuinely holds up."
+)
+
 
 def goal_tool_names() -> list[str]:
     return [
@@ -215,6 +241,11 @@ class GoalRunner:
             self._steering.clear()
         self._last_activity = ""
         self._last_update = time.monotonic()
+        # Per-run verification state. In-memory on purpose: a goal resumed
+        # after a restart earns a fresh verification pass, which errs toward
+        # checking twice rather than never.
+        self._did_verify = False
+        self._verify_pending = False
         resumed = goal.slices > 0
         goal.set("running")
         goal.journal("resume" if resumed else "start")
@@ -236,7 +267,6 @@ class GoalRunner:
         # (invariant 8), so this is the one reference the runner keeps.
         self._live_agent = agent
 
-        first = not resumed
         try:
             while True:
                 if self._stop.is_set():
@@ -256,8 +286,7 @@ class GoalRunner:
                     )
                     return
 
-                message = self._next_message(goal, first)
-                first = False
+                message = self._next_message(goal)
                 self._interrupt.clear()
                 goalctl.arm()
                 try:
@@ -279,20 +308,40 @@ class GoalRunner:
                 )
 
                 if report is not None:
-                    if report["status"] == "done":
-                        goal.set("done", report["summary"][:500])
-                        self._notify(
-                            f"Goal `{goal.id}` done — {report['summary']}\n"
-                            f"{self._spent_line(goal)}"
-                        )
-                    else:
+                    if report["status"] == "blocked":
                         goal.set("parked", f"blocked: {report['summary'][:500]}")
                         self._notify(
                             f"Goal `{goal.id}` is blocked: {report['summary']}\n"
                             f"{self._spent_line(goal)} — `steer: …` to unblock or "
                             "`goal cancel`."
                         )
-                    return
+                        return
+                    if self._did_verify:
+                        goal.set("done", report["summary"][:500])
+                        self._notify(
+                            f"Goal `{goal.id}` done — {report['summary']}\n"
+                            f"{self._spent_line(goal)}"
+                        )
+                        return
+                    # A first "done" buys a verification slice, not the exit.
+                    # Aimed at the one-slice victory declaration: a plan the
+                    # model wrote for itself carries no acceptance pressure,
+                    # so acceptance gets its own turn.
+                    self._did_verify = True
+                    self._verify_pending = True
+                    goal.journal("verify", claimed=report["summary"][:300])
+                    self._notify(
+                        f"Goal `{goal.id}` reported done — running a "
+                        "verification pass before accepting."
+                    )
+                    continue
+
+                if goal.slices == 1:
+                    plan = self._current_plan()
+                    self._notify(
+                        f"Plan for `{goal.id}`:\n"
+                        f"{plan or '(no plan was written — proceeding anyway)'}"
+                    )
 
                 self._maybe_update(goal)
         except Exception as exc:
@@ -309,22 +358,24 @@ class GoalRunner:
             self._steering.clear()
         self._live_agent = None
 
-    def _next_message(self, goal: goals.Goal, first: bool) -> str:
+    def _next_message(self, goal: goals.Goal) -> str:
         with self._lock:
             steering, self._steering[:] = list(self._steering), []
         if steering:
             joined = "\n".join(steering)
             return f"[owner steering] {joined}"
-        if first:
-            return goal.statement
+        if self._verify_pending:
+            self._verify_pending = False
+            return VERIFY_DIRECTIVE
+        if goal.slices == 0:
+            return f"{goal.statement}\n\n{PLAN_DIRECTIVE}"
+        if goal.slices == 1:
+            return IMPLEMENT_DIRECTIVE
         # Covers both "the last slice ran out of steps" (its notice is already
         # in the transcript) and "resuming after a restart" (the session came
         # back with the whole history) — in each case the transcript itself
         # says where things stand, so the nudge only has to say "go on".
-        return (
-            "Continue working the goal. If it is complete, call goal_report; "
-            "if you are stuck, call goal_report with status 'blocked'."
-        )
+        return CONTINUE_DIRECTIVE
 
     # -- the default agent ---------------------------------------------------
 

@@ -170,24 +170,35 @@ def runner_done_checks(tmp: Path) -> None:
     try:
         goal = goals.create("write the report")
 
-        def slice1(message):
-            assert message == "write the report", message
+        def plan_slice(message):
+            # Slice 0 carries the statement AND asks for a plan, nothing else.
+            assert "write the report" in message and "[plan first]" in message
+            agents[-1].plan["text"] = "- [ ] draft\n- [ ] polish"
             return FakeTurn(cost=0.02)
 
-        def slice2(message):
-            assert "Continue" in message
+        def implement_slice(message):
+            assert "Implement it now" in message, message
             goalctl._report = {"status": "done", "summary": "report written"}
-            return FakeTurn(cost=0.03)
+            return FakeTurn(cost=0.02)
 
-        runner, dms, agents = _runner(tmp, [slice1, slice2])
+        def verify_slice(message):
+            # The first done buys a verification pass, not the exit.
+            assert "Verification pass" in message, message
+            goalctl._report = {"status": "done", "summary": "report written"}
+            return FakeTurn(cost=0.01)
+
+        runner, dms, agents = _runner(tmp, [plan_slice, implement_slice, verify_slice])
         runner._run_goal(goal)
 
         final = goals.load(goal.id)
         assert final.status == "done" and "report written" in final.reason
-        assert abs(final.spent_usd - 0.05) < 1e-9 and final.slices == 2
-        assert len(dms) == 2, dms  # start + done, no spam between
+        assert abs(final.spent_usd - 0.05) < 1e-9 and final.slices == 3
+        # start, the plan, the verify notice, done — and nothing else.
+        assert len(dms) == 4, dms
         assert "Working on goal" in dms[0] and "steer:" in dms[0]
-        assert "done — report written" in dms[1] and "$0.05" in dms[1]
+        assert "Plan for" in dms[1] and "draft" in dms[1]
+        assert "verification pass" in dms[2]
+        assert "done — report written" in dms[3] and "$0.05" in dms[3]
         assert runner.current is None
         # The tool slot is disarmed between goals: a stray call now refuses.
         from jarvis import tools
@@ -196,7 +207,7 @@ def runner_done_checks(tmp: Path) -> None:
         assert "no background goal" in stray.text
     finally:
         config.GOALS_DIR = real
-    print("ok  runner: slices until goal_report(done), costs tallied, start+done DMs")
+    print("ok  runner: plan slice, implement, verify pass gates done, DMs in order")
 
 
 def runner_steering_checks(tmp: Path) -> None:
@@ -218,11 +229,17 @@ def runner_steering_checks(tmp: Path) -> None:
             return FakeTurn(cancelled=True)
 
         def slice2(message):
+            # Steering preempts the implement directive entirely.
             assert message == "[owner steering] only options A and B", message
             goalctl._report = {"status": "done", "summary": "A wins"}
             return FakeTurn()
 
-        runner, dms, agents = _runner(tmp, [slice1, slice2])
+        def slice3(message):
+            assert "Verification pass" in message
+            goalctl._report = {"status": "done", "summary": "A wins"}
+            return FakeTurn()
+
+        runner, dms, agents = _runner(tmp, [slice1, slice2, slice3])
         runner_holder["runner"] = runner
         runner._run_goal(goal)
 
@@ -303,11 +320,19 @@ def runner_cancel_and_resume_checks(tmp: Path) -> None:
         assert goals.active()[0].id == survivor.id, "interrupted work resumes first"
 
         def resume_slice(message):
-            assert "Continue" in message, f"resume must not re-send the statement: {message}"
+            # Resumed at slices==1: the implement directive, never the
+            # statement again (the transcript already holds it).
+            assert "Implement it now" in message, message
+            assert "survive a restart" not in message
             goalctl._report = {"status": "done", "summary": "finished after restart"}
             return FakeTurn()
 
-        runner3, dms3, _ = _runner(tmp, [resume_slice])
+        def resume_verify(message):
+            assert "Verification pass" in message
+            goalctl._report = {"status": "done", "summary": "finished after restart"}
+            return FakeTurn()
+
+        runner3, dms3, _ = _runner(tmp, [resume_slice, resume_verify])
         runner3._run_goal(goals.active()[0])
         assert goals.load(survivor.id).status == "done"
         assert any("Resuming" in dm for dm in dms3), dms3
@@ -332,7 +357,11 @@ def runner_update_checks(tmp: Path) -> None:
             goalctl._report = {"status": "done", "summary": "ok"}
             return FakeTurn()
 
-        runner, dms, agents = _runner(tmp, [slice1, slice2], update_minutes=0.0)
+        def slice3(message):
+            goalctl._report = {"status": "done", "summary": "ok"}
+            return FakeTurn()
+
+        runner, dms, agents = _runner(tmp, [slice1, slice2, slice3], update_minutes=0.0)
         # update_minutes=0: every boundary is past the interval, so the digest
         # fires between slice1 and slice2.
         runner._run_goal(goal)
@@ -352,7 +381,13 @@ def runner_update_checks(tmp: Path) -> None:
             goalctl._report = {"status": "done", "summary": "ok"}
             return FakeTurn()
 
-        runner2, dms2, agents = _runner(tmp, [planned_slice, finish], update_minutes=0.0)
+        def finish_verify(message):
+            goalctl._report = {"status": "done", "summary": "ok"}
+            return FakeTurn()
+
+        runner2, dms2, agents = _runner(
+            tmp, [planned_slice, finish, finish_verify], update_minutes=0.0
+        )
         runner2._run_goal(goal2)
         time.sleep(0.3)  # digests go out on a side thread
         assert any("write summary" in dm for dm in dms2), dms2
