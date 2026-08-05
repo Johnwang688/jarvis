@@ -217,6 +217,7 @@ from . import (  # noqa: E402,F401  (registers the tools)
     sessions,
     shell,
     skills,
+    sqlite,
     subagent,
     discord,
 

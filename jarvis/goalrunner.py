@@ -367,9 +367,10 @@ class GoalRunner:
         digest = self._digest(goal)
         goal.journal("update-dm", text=digest[:300])
         # Off the loop thread: a DM is a REST call, and progress reporting
-        # must never add latency to the work it reports on.
+        # must never add latency to the work it reports on. Through _notify,
+        # so a Discord hiccup is announced instead of a thread dying noisily.
         threading.Thread(
-            target=self._notify_impl, args=(digest,), daemon=True, name="goal-dm"
+            target=self._notify, args=(digest,), daemon=True, name="goal-dm"
         ).start()
 
     def _digest(self, goal: goals.Goal) -> str:
