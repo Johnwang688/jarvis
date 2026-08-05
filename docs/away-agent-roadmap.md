@@ -91,6 +91,16 @@ zero orphaned Chromium/Node processes, Discord DM round-trip works at hour 72.
 
 ## Phase 2 — Goal store + goal runner (size: L, the heart of the project)
 
+> **Status 2026-08-03: built**, plus two items pulled forward at the
+> owner's request: interval progress DMs (cost, last activity, live plan)
+> and mid-goal steering (`steer: …` interrupts the in-flight turn at a
+> step boundary and lands as the next slice's `[owner steering]` message).
+> `goal status` / `goal cancel` verbs came with them (phase 5's `pause`
+> and `log` remain). Ceilings (dollars/hours/slices) shipped with the
+> runner per the interleave rule. `tests/goals_check.py` green. Remaining
+> for the exit gate: the real multi-hour goal with a daemon restart
+> mid-run.
+
 A goal is not a turn; it is a loop of turns with budgets and a lifecycle.
 
 Build:

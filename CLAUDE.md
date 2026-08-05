@@ -62,6 +62,8 @@ jarvis/
                 spoken-turns-never-authorize rule), shared by face and daemon
   daemon.py     `jarvis daemon` — headless always-on service: gateway + DM-only
                 approvals + health/lock endpoint on port 8405
+  goals.py      the durable goal store: goal.json + runner-written journal
+  goalrunner.py works goals in slices: steering, budgets, progress DMs
   permissions.py  modes (ask/all) + the persistent dangerous-tool allowlist
   workflows.py  background agents on their own threads (safe tools only)
   sessions.py   saved conversations: transcript, log, meta, titles, summaries
@@ -353,6 +355,17 @@ jarvis/
   `stop()` releases blocked approval waiters with a denial. Hermetic against
   a real face running on 8402 (probes point at dead ports). Run after
   touching `daemon.py`, `discord_agent.py`, or `ApprovalBroker`.
+- `tests/goals_check.py` — free synthetic checks for background goals
+  (scripted fake agent, DMs into a list, store on a temp dir): store
+  round-trip + runner-written journal + active() ordering; `goal_report`
+  through real dispatch (armed-only, one-shot, validated); slices until
+  done with costs tallied and start/done DMs; steering interrupting the
+  in-flight turn and landing as the next slice's `[owner steering]`
+  message; every budget ceiling parking with spend in the DM; cancel at
+  the boundary; shutdown leaving `running` for restart-resume; interval
+  digests carrying cost + the live plan; and the daemon router keeping
+  verbs typed-only (a spoken "goal cancel" is conversation). Run after
+  touching `goals.py`, `goalrunner.py`, `tools/goalctl.py`, or `_route`.
 - `tests/sessions_check.py` — free checks for session memory: record→reload
   round-trip (and that the system message is never persisted), image payloads
   stripped on save, the append-only log surviving compaction of the
@@ -478,6 +491,9 @@ jarvis/
 | `mistralai/mistral-nemo` | 6/8 (fails multi-step) | no | 131k |
 | `meta-llama/llama-3.1-8b-instruct` | 6/8, flails | no | 131k |
 | `google/gemma-3-12b-it` | 2/8 — emits ` ```tool_code ` text, not native calls | yes | 131k |
+| `inclusionai/ling-2.6-flash` | 8/8 | no | 262k |
+| `deepseek/deepseek-v4-flash-0731` | not run | **no** | 1.05M |
+| `deepseek/deepseek-v4-pro` | not run | **no** | 1.05M |
 
 Two findings worth keeping:
 
@@ -574,6 +590,45 @@ double the cost to fail, the same "cheap per token ≠ cheap per task" finding
 the canned bench produced, now reproduced on whole-agent work. Run-to-run
 variance is real (an earlier Luna sweep scored 93%, missing line counts on
 `project`); treat a single run as a sample, not a verdict.
+
+**Challenger sweep 2026-08-05 — Luna held.** Three models were run against
+agent-bench and vocab-bench looking for a replacement or backup; none beat it:
+
+| model | agent-bench | cost | vocab-snap | cost |
+|---|---|---|---|---|
+| `openai/gpt-5.6-luna` | **100%** | **$0.0065** | 6/6 (33 steps) | **$0.0023** |
+| `deepseek/deepseek-v4-flash-0731` | 93% | $0.0085 | 6/6 (26 steps) | $0.0020 |
+| `deepseek/deepseek-v4-pro` | 96% | $0.0526 | 6/6 (34 steps) | $0.0147 |
+| `inclusionai/ling-2.6-flash` | 70% | $0.0062 | not run | — |
+
+Luna scored highest *and* cost least — the decision stands, and the burden is
+on any future challenger to beat both columns at once. What the sweep taught:
+
+- **Every non-Luna model gave ground in the same place: `multiagent`.** Both
+  DeepSeek models scored 82% and ling 27% (gpt-oss-20b: 0%), all failing the
+  same check — *delegated instead of doing it inline*. Background-workflow
+  orchestration is this project's discriminating task; a model can be perfect
+  on safety and long-horizon and still refuse to delegate.
+- **Both DeepSeek V4 models are text-only.** That alone disqualifies them as
+  orchestrator: `cad_render`, `browser_screenshot`, `desktop_screenshot` and
+  the whiteboard's `run_turn(images=…)` all go blind. Check
+  `architecture.input_modalities` before benching anything, not after.
+- **"Cheap per token" failed a third time, hardest yet.** v4-pro lists at ~4x
+  Luna's input price and cost **8x** per task — lower-quality steps mean more
+  steps, and every step re-sends the transcript. ling-2.6-flash lists at 1/30th
+  Luna's price and cost the *same* per run.
+- **The listed price may not be reachable.** OpenRouter's training opt-out
+  refuses to route to providers that train on prompts, so DeepSeek's own
+  first-party endpoint 404s from this account — v4-pro's headline $0.435/$0.87
+  and $0.0036 cache reads are unobtainable, and the real floor is StreamLake at
+  $0.652/$1.305. Check reachability by pinning with `allow_fallbacks: false`
+  before quoting a price.
+- **Pin by lowercase provider *tag*, and never with fallbacks on.**
+  `{"order": ["DeepSeek"]}` (display name) silently routed to DeepInfra
+  instead of erroring; the tag is `deepseek`. With fallbacks enabled a wrong
+  pin is invisible. Related: these runs landed on **DeepInfra fp4** and
+  **StreamLake fp8** — `llm.chat()` has no provider pin (only `llm.speech()`
+  does), so quantization varies run to run and so does answer quality.
 
 Three things learned building it, each worth keeping:
 
@@ -1111,6 +1166,39 @@ approval isolation, nowhere-to-ask/timeout/detach denial paths, health
 lock + single instance, refusing to start over a face, shutdown releasing
 blocked waiters). Still pending from phase 1's exit gate: the 72-hour soak
 under systemd with real sleep/wake cycles.
+
+**Background goals shipped (2026-08-03) — away-agent phase 2.** A goal is a
+loop of turns, not a turn: `goals.py` is the durable store
+(`~/.local/share/jarvis/goals/<id>/` — `goal.json` plus an append-only
+`journal.jsonl` written by the *runner*, never the model, so "what did you
+do while I was gone" is answered from disk), and `goalrunner.py` is one
+serial worker thread — one goal at a time on purpose (singleton browser,
+predictable spend) — running slices of `run_turn` on the goal's own
+session, which is what makes daemon-restart resume free. Between slices it
+checks shutdown, cancel, then ceilings (dollars / hours / slices, defaults
+in config, per-goal overrides on `jarvis goal`); any ceiling parks the goal
+with a DM saying what was spent. **Ending is a tool call**: the goal agent
+carries `goal_report(done|blocked)` (`tools/goalctl.py`, armed only inside
+a slice — the step-budget lesson: state outside the transcript gets
+confabulated, so completion must be an act *in* it). **Steering is barge-in
+for goals**: a `steer:` DM queues text, sets the interrupt Event behind the
+agent's `should_stop` (turn ends whole at the next step boundary, invariant
+3), and the text arrives as the next slice's `[owner steering]` message.
+Progress DMs: start, terminal states, and an interval digest
+(`GOAL_UPDATE_MINUTES`, default 10) with slices/spend/elapsed/last
+activity/the live plan slot — assembled from the runner's records, never
+asked of the model. DM verbs (`goal: …`, `steer:`/`redirect:`,
+`goal status`, `goal cancel`) are parsed in the daemon's `_route` ahead of
+the conversation agent, **typed messages only** — a misheard voice note
+must not steer or cancel, same isolation as approvals. Intake: `goal:` DM
+or `jarvis goal "…" [--dollars --hours --slices]`; `jarvis goals` lists.
+The goal toolset is the full registry minus desktop (foreground-stealing is
+a desk feature) and window controls; the approver is the daemon broker's
+remote gate, so dangerous calls DM the owner exactly as at the desk, and a
+deny is handled by the model (park-and-continue and per-goal scopes are
+phase 3). Free suite: `tests/goals_check.py`; `daemon_check` now pins
+GOALS_DIR to a temp dir for the daemon's whole lifetime — a test daemon
+must never pick up real queued goals with a stubbed approval channel.
 
 **vercel-deploy skill (2026-08-01).** Build → verify locally in his own
 browser → private GitHub repo (`gh repo create --private --source --push`)

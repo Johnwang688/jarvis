@@ -94,6 +94,7 @@ class Daemon:
         self.broker = None
         self.responder = None
         self.listener = None
+        self.runner = None
         self._health: ThreadingHTTPServer | None = None
         self.started_at: float | None = None
 
@@ -156,13 +157,26 @@ class Daemon:
             on_note=lambda text: self._announce(f"[daemon] {text}"),
         )
 
+        # The goal runner: background goals worked in slices, gated by the
+        # same remote broker, progress DMed to the owner. Its DM verbs
+        # (goal:/steer:/goal status/goal cancel) are parsed in _route ahead
+        # of the conversation agent — typed messages only, so a mishearing
+        # can never steer or cancel a goal.
+        from . import goalrunner
+
+        self.runner = goalrunner.GoalRunner(
+            approver=permissions.gate(self.broker.approver(remote=True)),
+            announce=self._announce,
+        )
+        self.runner.start()
+
         if self._listener_factory is not None:
-            self.listener = self._listener_factory(self.responder.turn)
+            self.listener = self._listener_factory(self._route)
         else:
             from . import discord_gateway
 
             self.listener = discord_gateway.GatewayListener(
-                run_turn=self.responder.turn, announce=self._announce
+                run_turn=self._route, announce=self._announce
             )
         self.listener.start()
         self.started_at = time.time()
@@ -170,10 +184,24 @@ class Daemon:
             f"jarvis daemon up — status on http://localhost:{self.port}/status"
         )
 
+    def _route(self, text: str, channel_id: str, spoken: bool = False) -> str:
+        """Goal verbs first (typed only), then the conversation agent."""
+        if not spoken and self.runner is not None:
+            handled = self.runner.handle_dm(text)
+            if handled is not None:
+                return handled
+        return self.responder.turn(text, channel_id, spoken)
+
     def stop(self) -> None:
-        """Mirror of the face's shutdown: never leave a waiter blocked."""
+        """Mirror of the face's shutdown: never leave a waiter blocked.
+
+        Broker first, runner second — a goal slice blocked on an approval DM
+        is released by deny_all, which is what lets the runner's join finish
+        inside its timeout."""
         if self.broker is not None:
             self.broker.deny_all("shutdown")
+        if self.runner is not None:
+            self.runner.stop()
         if self.listener is not None:
             self.listener.stop()
         if self._health is not None:
@@ -191,7 +219,7 @@ class Daemon:
 
     def status(self) -> dict:
         listener = self.listener
-        return {
+        payload = {
             "jarvis-daemon": True,
             "pid": os.getpid(),
             "started": self.started_at,
@@ -199,6 +227,20 @@ class Daemon:
             "pending_approvals": self.broker.pending_count if self.broker else 0,
             "model": config.TIERS["orchestrator"],
         }
+        runner = self.runner
+        if runner is not None:
+            goal = runner.current
+            payload["goal"] = (
+                {
+                    "id": goal.id,
+                    "status": goal.status,
+                    "slices": goal.slices,
+                    "spent_usd": round(goal.spent_usd, 4),
+                }
+                if goal is not None
+                else None
+            )
+        return payload
 
 
 def _health_server(daemon: Daemon) -> ThreadingHTTPServer:

@@ -19,6 +19,21 @@ FACE_PORT = int(os.environ.get("JARVIS_FACE_PORT", "8402"))
 # it exists as the single-instance lock and so the face can tell that another
 # process already owns the Discord gateway.
 DAEMON_PORT = int(os.environ.get("JARVIS_DAEMON_PORT", "8405"))
+
+# Background goals (`jarvis goal`, the daemon's goal runner). Outside the
+# repo like sessions: bulk, personal, rewritten as work progresses. The
+# budget defaults are per-goal ceilings — the runner parks the goal and DMs
+# the owner when one is hit, so a runaway goal costs a bounded amount.
+GOALS_DIR = Path(
+    os.environ.get(
+        "JARVIS_GOALS", Path.home() / ".local" / "share" / "jarvis" / "goals"
+    )
+)
+GOAL_MAX_DOLLARS = float(os.environ.get("JARVIS_GOAL_MAX_DOLLARS", "2.00"))
+GOAL_MAX_HOURS = float(os.environ.get("JARVIS_GOAL_MAX_HOURS", "4"))
+GOAL_MAX_SLICES = int(os.environ.get("JARVIS_GOAL_MAX_SLICES", "40"))
+# How often the runner DMs a progress digest while a goal works.
+GOAL_UPDATE_MINUTES = float(os.environ.get("JARVIS_GOAL_UPDATE_MINUTES", "10"))
 LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "0.0.0.0", ""})
 
 

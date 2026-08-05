@@ -304,6 +304,44 @@ def cmd_daemon(args) -> int:
     return daemon.run()
 
 
+def cmd_goal(args) -> int:
+    from . import daemon, goals
+
+    goal = goals.create(
+        " ".join(args.statement),
+        dollars=args.dollars,
+        hours=args.hours,
+        slices=args.slices,
+    )
+    console.print(f"goal [bold]{goal.id}[/bold] queued: {goal.statement}")
+    console.print(
+        f"caps: ${goal.budgets['dollars']:.2f} / {goal.budgets['hours']:g}h / "
+        f"{goal.budgets['slices']} slices"
+    )
+    if not daemon.is_running():
+        console.print(
+            "[yellow]no daemon is running — the goal waits until "
+            "`jarvis daemon` starts.[/yellow]"
+        )
+    return 0
+
+
+def cmd_goals(args) -> int:
+    from . import goals
+
+    found = goals.all_goals()
+    if not found:
+        console.print(f"[dim]no goals yet ({config.GOALS_DIR})[/dim]")
+        return 0
+    for goal in found:
+        reason = f" ({goal.reason})" if goal.reason else ""
+        console.print(
+            f"{goal.id}  [bold]{goal.status}[/bold]{reason}  "
+            f"{goal.slices} slices  ${goal.spent_usd:.2f}  {goal.statement[:80]}"
+        )
+    return 0
+
+
 def cmd_sessions(args) -> int:
     found = sessions.recent(args.limit)
     if not found:
@@ -433,6 +471,15 @@ def main() -> int:
     )
     daemon.add_argument("action", choices=["run", "install"], nargs="?", default="run")
     daemon.set_defaults(func=cmd_daemon)
+
+    goal = sub.add_parser("goal", help="queue a background goal for the daemon")
+    goal.add_argument("statement", nargs="+", help="what to accomplish")
+    goal.add_argument("--dollars", type=float, default=None, help="spend ceiling")
+    goal.add_argument("--hours", type=float, default=None, help="wall-clock ceiling")
+    goal.add_argument("--slices", type=int, default=None, help="turn-slice ceiling")
+    goal.set_defaults(func=cmd_goal)
+
+    sub.add_parser("goals", help="list background goals").set_defaults(func=cmd_goals)
 
     saved = sub.add_parser("sessions", help="list saved conversations")
     saved.add_argument("-n", "--limit", type=int, default=20, help="how many to show")

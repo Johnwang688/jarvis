@@ -156,9 +156,16 @@ def _dead_port() -> int:
 def _start_daemon(token_path: Path, channel=None) -> daemon_mod.Daemon:
     # Point the face probe at a dead port: a real `jarvis face` running on
     # this machine (entirely likely on the owner's box) must not fail the test.
+    # And point the goal store at a temp dir: the daemon now starts a real
+    # GoalRunner, and a test daemon must never pick up the owner's real
+    # queued goals with a stubbed approval channel.
+    # NOTE: config.GOALS_DIR is NOT restored here — the runner reads it at
+    # every poll, so it must stay patched for the daemon's lifetime. The
+    # caller owns restoring it after daemon.stop().
     real_token, real_face = config.DISCORD_TOKEN_PATH, config.FACE_PORT
     config.DISCORD_TOKEN_PATH = token_path
     config.FACE_PORT = _dead_port()
+    config.GOALS_DIR = token_path.parent / "goals"
     try:
         d = daemon_mod.Daemon(
             port=0,
@@ -190,8 +197,9 @@ def lifecycle_check(tmp: Path) -> None:
         config.DISCORD_TOKEN_PATH = real_token
 
     # ALWAYS answers write the allowlist; make sure a test can never touch
-    # the real one (the `apt` incident rule).
-    real_allow = config.ALLOWLIST_PATH
+    # the real one (the `apt` incident rule). GOALS_DIR likewise stays on a
+    # temp dir for the whole daemon lifetime (see _start_daemon's note).
+    real_allow, real_goals = config.ALLOWLIST_PATH, config.GOALS_DIR
     config.ALLOWLIST_PATH = tmp / "allowlist.json"
     channel = StubChannel(delivered=True)
     channel.timeout_s = 30  # long: the waiter is released by stop(), not time
@@ -239,7 +247,7 @@ def lifecycle_check(tmp: Path) -> None:
         assert not daemon_mod.is_running(daemon.port)
     finally:
         daemon.stop()  # idempotent-enough: health already gone, listener stopped
-        config.ALLOWLIST_PATH = real_allow
+        config.ALLOWLIST_PATH, config.GOALS_DIR = real_allow, real_goals
     print("ok  daemon: health lock, single instance, shutdown releases waiters")
 
 
