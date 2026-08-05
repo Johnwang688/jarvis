@@ -69,6 +69,8 @@ jarvis/
   sessions.py   saved conversations: transcript, log, meta, titles, summaries
   tools/        clock, files, memory, shell, web, browsing, gmail,
                 onshape (CAD), skills, sessions (read past conversations),
+                sqlite (read-only .db queries, mode=ro enforced by the
+                engine), goalctl (goal_report — how a goal run ends),
                 voicectl (mute), workflows,
                 plan (the working checklist), subagent (context isolation),
                 desktop (drives Windows apps via the bridge)
@@ -109,6 +111,19 @@ jarvis/
 
 2. **The assistant turn goes back verbatim.** Append `response.content` plus
    `tool_calls` unchanged. Reconstructing it loses the ids.
+
+   **One exception, and only one** (`agent.py`, 2026-08-05): a turn with **no
+   tool_calls and null content** is rewritten to `""`. Some providers reject
+   that shape outright — Alibaba answers "The content field is a required
+   field" — so appending it verbatim **poisons the transcript permanently**:
+   every later request in that session 400s, and the failure surfaces a step
+   after its cause. Found benching `qwen/qwen3.7-flash`, which returns
+   `content: None` as a completion. Null content *with* tool_calls is legal
+   everywhere and stays untouched, so the exception costs no ids and no
+   parallel calls. `tests/context_check.py` covers both halves and is verified
+   to fail against the old code. The general lesson is the same one the
+   step-budget bug taught: **a transcript state the loop can create but cannot
+   recover from is a bug, however rare the model that produces it.**
 
 3. **All tool results for one assistant turn go back together**, each keyed to
    its call id. Splitting them across messages trains models out of parallel
@@ -285,8 +300,11 @@ jarvis/
   `compact_at_tokens`, so nothing short ever reached it). Covers: parallel
   image results never orphaning a tool_call, cuts only at settled user
   boundaries, the original request pinned through compaction, eviction and
-  truncation being in-place and idempotent, and `manage()` end-to-end leaving
-  a wire-valid transcript. Run after touching anything in `context.py`.
+  truncation being in-place and idempotent, `manage()` end-to-end leaving
+  a wire-valid transcript, and **invariant 2's one exception** — `run_turn`
+  never appending a null-content assistant turn that has no tool_calls, while
+  leaving the legal null-content-with-tool_calls shape verbatim. Run after
+  touching anything in `context.py` **or the append in `agent.run_turn`**.
   **Write new cases so they fail against the old code** — the first draft of
   the orphan case passed against the bug, because the split tool group was not
   the *newest* candidate and both rules picked the same safe boundary.
@@ -307,9 +325,12 @@ jarvis/
   `workflows.SAFE_TOOLS`; each grader scores a hand-built correct world 100%
   and catches its specific failure (clobbered changelog, unloaded skill, leaked
   credential, inline work instead of delegation, forgotten codename); fixture
-  facts match what is actually on disk; and **every task scores near zero on an
+  facts match what is actually on disk; **every task scores near zero on an
   empty run** — the check that caught the safety grader paying 56% for doing
-  nothing. Run after touching `agentbench.py`.
+  nothing; and **every task survives a run cut short** (0 and 1 recorded
+  turns), because an empty run is *fully shaped* while a run killed by a
+  provider error is **short**, and only the second crashed a grader. Run after
+  touching `agentbench.py`.
 - `tests/secrets_check.py` — free synthetic checks for the `.env` protection,
   against a throwaway dir holding a fake key. Includes a replay of the actual
   leak (a recursive grep that never names `.env`). Run it after touching
@@ -599,6 +620,7 @@ agent-bench and vocab-bench looking for a replacement or backup; none beat it:
 | `openai/gpt-5.6-luna` | **100%** | **$0.0065** | 6/6 (33 steps) | **$0.0023** |
 | `deepseek/deepseek-v4-flash-0731` | 93% | $0.0085 | 6/6 (26 steps) | $0.0020 |
 | `deepseek/deepseek-v4-pro` | 96% | $0.0526 | 6/6 (34 steps) | $0.0147 |
+| `qwen/qwen3.7-flash` | ~91% | $0.0086 | 6/6 (30 steps, 2026-07-30) | $0.0021 |
 | `inclusionai/ling-2.6-flash` | 70% | $0.0062 | not run | — |
 
 Luna scored highest *and* cost least — the decision stands, and the burden is
@@ -623,12 +645,30 @@ on any future challenger to beat both columns at once. What the sweep taught:
   and $0.0036 cache reads are unobtainable, and the real floor is StreamLake at
   $0.652/$1.305. Check reachability by pinning with `allow_fallbacks: false`
   before quoting a price.
+- **`qwen3.7-flash` is the best *backup* tested, and still not an upgrade.**
+  ~91% at $0.0086 (32% dearer than Luna despite listing at 1/3 the price), and
+  it **lost the planted codename across compaction** — the one thing both
+  DeepSeek models kept. But it is the only challenger with **vision and 1M
+  context**, so it is the fallback that leaves `cad_render` and
+  `browser_screenshot` working. Its score is a composite: `orchestrate` died
+  on a provider 400 and was re-run clean (13/15, same as both DeepSeeks).
+- **A provider error mid-run used to read as a capability failure.** That 400
+  crashed the `recall` grader with IndexError (`run.called(turn=N)` indexed
+  `per_turn_calls` unguarded), so the task reported one bogus "grader crashed"
+  check instead of scoring zero. The existing empty-run checks never caught it
+  because they pad every per-turn list to full length — an empty run is
+  *fully shaped*, a killed run is **short**. Both fixed 2026-08-05;
+  `tests/agentbench_check.py` now grades every task at 0 and 1 recorded turns.
 - **Pin by lowercase provider *tag*, and never with fallbacks on.**
   `{"order": ["DeepSeek"]}` (display name) silently routed to DeepInfra
   instead of erroring; the tag is `deepseek`. With fallbacks enabled a wrong
   pin is invisible. Related: these runs landed on **DeepInfra fp4** and
-  **StreamLake fp8** — `llm.chat()` has no provider pin (only `llm.speech()`
-  does), so quantization varies run to run and so does answer quality.
+  **StreamLake fp8**, so quantization — and therefore answer quality — varied
+  by whoever answered. `llm.chat()` gained an **opt-in** pin for this
+  (`config.CHAT_PROVIDER` / `JARVIS_CHAT_PROVIDER`, 2026-08-05, empty by
+  default so routing is unchanged; `llm.speech()` has had one since
+  2026-07-31). Like the TTS pin it allows **no fallbacks**, which is what
+  turns a wrong tag into a loud 404 instead of a silent reroute.
 
 Three things learned building it, each worth keeping:
 
@@ -1199,6 +1239,27 @@ deny is handled by the model (park-and-continue and per-goal scopes are
 phase 3). Free suite: `tests/goals_check.py`; `daemon_check` now pins
 GOALS_DIR to a temp dir for the daemon's whole lifetime — a test daemon
 must never pick up real queued goals with a stubbed approval channel.
+
+**Goal protocol upgrades from the first live runs (2026-08-05), all
+committed same-day:** slice 0 is **planning only** (plan DMed to the owner
+before implementation; steer within a step); the first `goal_report(done)`
+buys a **verification slice**, not the exit — and a verify slice that keeps
+working instead of confirming **re-arms the gate**, because the first live
+run reported done after phase 1 of 7 and the real completion must not sail
+through on the spent pass. `goal_report` is documented as ENTIRE-goal-only.
+`goal resume` requeues the newest parked goal, and `steer:` with nothing
+running targets the newest parked/queued goal — parked requeues immediately
+with the steering as its first resumed message (one DM unblocks and aims).
+Live validation on a real 7-phase VEX strategy goal (11 slices, $0.42,
+~35min, daemon killed and restarted mid-goal with clean session resume —
+phase 2's exit gate): the verify pass caught real defects both times it ran
+(a missed 8-point scoring rule; stale docs + malformed coordinates), the
+model used plan_write throughout (PENDING #2 answered for goal runs),
+delegated verification reads to run_subagent, and honestly blocked on data
+the game db doesn't contain rather than inventing it. Lesson worth keeping:
+**write acceptance criteria into the goal statement** — the first VEX run
+produced a complete-looking skeleton in one slice because nothing pinned
+what "done" meant; the surgical follow-up produced correct code.
 
 **vercel-deploy skill (2026-08-01).** Build → verify locally in his own
 browser → private GitHub repo (`gh repo create --private --source --push`)
