@@ -255,9 +255,62 @@ def runner_steering_checks(tmp: Path) -> None:
         # And non-verbs fall through to conversation (None).
         assert runner.handle_dm("how was your day") is None
         assert runner.handle_dm("yes") is None  # approval replies are not verbs
+
+        # goal resume: requeues the most recently parked goal, refuses on none.
+        assert "No parked goal" in runner.handle_dm("goal resume")
+        parked = goals.create("stuck thing")
+        parked.set("parked", "blocked: waiting on the owner")
+        ack = runner.handle_dm("goal resume")
+        assert parked.id in ack and goals.load(parked.id).status == "queued"
     finally:
         config.GOALS_DIR = real
     print("ok  steering: interrupt + next-slice injection, journaled, verbs fall through")
+
+
+def runner_verify_rearm_checks(tmp: Path) -> None:
+    """The live-run lesson: a premature done at phase 1 must not spend the
+    verification that the real completion deserves."""
+    from jarvis import goals
+    from jarvis.tools import goalctl
+
+    real = _patch_goals_dir(tmp)
+    try:
+        goal = goals.create("seven phases")
+
+        def plan_slice(message):
+            return FakeTurn()
+
+        def premature_done(message):
+            goalctl._report = {"status": "done", "summary": "phase 1 done"}
+            return FakeTurn()
+
+        def honest_verify(message):
+            # Finds phases missing, keeps working, reports nothing.
+            assert "Verification pass" in message
+            assert "do NOT call goal_report" in message
+            return FakeTurn()
+
+        def real_done(message):
+            assert "Continue" in message
+            goalctl._report = {"status": "done", "summary": "all phases done"}
+            return FakeTurn()
+
+        def second_verify(message):
+            # The withdrawn done re-armed the gate: this must be a verify.
+            assert "Verification pass" in message, message
+            goalctl._report = {"status": "done", "summary": "all phases done"}
+            return FakeTurn()
+
+        runner, dms, agents = _runner(
+            tmp, [plan_slice, premature_done, honest_verify, real_done, second_verify]
+        )
+        runner._run_goal(goal)
+        assert goals.load(goal.id).status == "done"
+        verifies = [dm for dm in dms if "verification pass" in dm]
+        assert len(verifies) == 2, dms
+    finally:
+        config.GOALS_DIR = real
+    print("ok  re-arm: a withdrawn done re-arms verification for the real completion")
 
 
 def runner_budget_checks(tmp: Path) -> None:
@@ -434,6 +487,7 @@ def main() -> int:
     for check in (
         runner_done_checks,
         runner_steering_checks,
+        runner_verify_rearm_checks,
         runner_budget_checks,
         runner_cancel_and_resume_checks,
         runner_update_checks,

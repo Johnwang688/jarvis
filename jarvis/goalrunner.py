@@ -56,7 +56,9 @@ GOAL_SYSTEM = config.SYSTEM_PROMPT + (
     "rather than asking again. When the goal is complete, call "
     "goal_report(status='done', ...); if you cannot proceed without the "
     "owner, call goal_report(status='blocked', ...). Never claim completion "
-    "in prose without calling goal_report."
+    "in prose without calling goal_report — and goal_report always refers "
+    "to the ENTIRE goal: never call it for a finished phase, milestone, or "
+    "partial deliverable."
 )
 
 # Desk-only tools stay out: driving a desktop app steals the Windows
@@ -86,9 +88,11 @@ VERIFY_DIRECTIVE = (
     "Verification pass — your 'done' is not accepted yet. Re-read every "
     "deliverable file and check it against the original statement and each "
     "acceptance criterion in your plan: no vague or placeholder "
-    "implementations, no missing pieces, no stale cross-references. Fix "
-    "whatever falls short. Then call goal_report again — 'done' only if it "
-    "genuinely holds up."
+    "implementations, no missing pieces, no stale cross-references. If "
+    "everything genuinely holds up, call goal_report with status 'done' "
+    "again. If anything is missing or falls short, do NOT call goal_report "
+    "— fix it and keep working; the goal simply continues. 'blocked' stays "
+    "reserved for things you truly cannot do without the owner."
 )
 
 
@@ -201,6 +205,17 @@ class GoalRunner:
         if lowered in {"goal status", "goals", "goal?"}:
             return self.status_text()
 
+        if lowered in {"goal resume", "resume goal"}:
+            parked = [g for g in goals.all_goals() if g.status == "parked"]
+            if not parked:
+                return "No parked goal to resume."
+            goal = max(parked, key=lambda g: g.updated)
+            goal.set("queued")
+            return (
+                f"Requeued `{goal.id}` ({goal.reason or 'parked'}) — the runner "
+                "picks it up within seconds. `steer: …` if it should change course."
+            )
+
         if lowered in {"goal cancel", "cancel goal"}:
             with self._lock:
                 goal = self.current
@@ -287,6 +302,7 @@ class GoalRunner:
                     return
 
                 message = self._next_message(goal)
+                was_verify_slice = message == VERIFY_DIRECTIVE
                 self._interrupt.clear()
                 goalctl.arm()
                 try:
@@ -294,6 +310,13 @@ class GoalRunner:
                 finally:
                     report = goalctl.consume()
                     goalctl.disarm()
+
+                # A verify slice that keeps working instead of confirming has
+                # withdrawn the earlier 'done' — the eventual real completion
+                # must earn a fresh verification, or a premature done at
+                # phase 1 of 7 would let the final done sail through unchecked.
+                if was_verify_slice and report is None:
+                    self._did_verify = False
 
                 goal.spent_usd += turn.cost_usd
                 goal.slices += 1
