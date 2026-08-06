@@ -36,9 +36,12 @@ twice before in exactly this area.
 from __future__ import annotations
 
 import json
+import os
 import re
+import tempfile
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable
 
 import httpx
@@ -682,6 +685,19 @@ def run_task(model: str, task: CadTask) -> TaskResult:
 
     result.text = run.turns[-1].text if run.turns else ""
     result.calls = list(run.calls)
+
+    # A failed check is only worth acting on once you have seen what the
+    # agent actually did. JARVIS_CADBENCH_TRACE=1 keeps the whole exchange.
+    if os.environ.get("JARVIS_CADBENCH_TRACE") == "1":
+        trace = Path(tempfile.gettempdir()) / f"cadbench-{task.name}-{runid}.log"
+        lines = []
+        for i, turn_calls in enumerate(run.per_turn_calls):
+            lines.append(f"== turn {i + 1} calls ==")
+            lines += [f"  {name} {json.dumps(args)}" for name, args in turn_calls]
+        lines.append("== transcript ==")
+        lines.append(run.transcript)
+        trace.write_text("\n".join(lines), encoding="utf-8")
+        print(f"[cad-bench] trace kept at {trace}")
 
     try:
         checks = task.grade(run)

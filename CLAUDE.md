@@ -1151,8 +1151,25 @@ bench has measured whether 1–3 absorbed the failure.
   pin is untouched. Costs OpenRouter *and* Onshape quota — the graders make
   API calls too. `pair` is the recorded c-channel regression (a stated gap
   that requires knowing the part is 17.5" long); `revise`/`repair` are the
-  tasks predicted to discriminate until mates exist. **No live sweep has
-  been run yet** — the baseline numbers are the next human-run step.
+  tasks predicted to discriminate until mates exist.
+  `JARVIS_CADBENCH_TRACE=1` keeps each task's full call sequence and
+  transcript under /tmp. Cleanup is verified live: deleting the assembly
+  cascades to the BOM element Onshape auto-creates beside it, so a bench
+  sweep leaves the sandbox exactly as it found it.
+
+  **Baseline (Luna, 2026-08-05/06):** place ✓ · pair ✓ · frame ✓ ·
+  revise ✓ · repair ✗ (2/11, hit the 18-step cap) — 83% overall, $0.0076,
+  130s. **The readback upgrade absorbed most of the predicted failure**:
+  `pair` — the recorded 12-inch c-channel regression — passed because the
+  model computed the gap from the new extents. The `repair` failure did
+  not reproduce: an immediate re-run passed 11/11 in 10.7s with the
+  textbook sequence (status → readback → one absolute cad_move restating
+  position with zeroed rotation → readback → render). Same lesson as
+  agent-bench: a single run is a sample, not a verdict. Consequence for
+  item 4 (mates): the ladder as it stands no longer demands them — build
+  them when a real task does, or when the bench gains a task where a
+  moved rail must carry attached parts (which is what mates actually
+  solve).
 - **Readback fidelity** (`tools/onshape.py`): `cad_assembly` now reports
   actual rotation via `_angles()` — the exact inverse of `_rotation`, same
   fixed-frame X→Y→Z degrees `cad_insert`/`cad_move` accept, gimbal lock
