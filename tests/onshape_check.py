@@ -124,6 +124,32 @@ def matrix_checks() -> None:
     assert abs(m[2] - 1) < 1e-9 or abs(m[6] - 1) < 1e-9 or abs(m[10]) < 1e-9
     print("ok  transforms: inches->meters, rotation entries, round-trip")
 
+    # _angles is _rotation's inverse: what reads back is what types back in.
+    for angles in [(0, 0, 0), (90, 0, 0), (0, 0, 90), (30, 40, 50),
+                   (-45, 10, 120), (0, -60, 0), (180, 0, 0)]:
+        m = cad._matrix(0, 0, 0, *angles)
+        back = cad._angles(m)
+        m2 = cad._matrix(0, 0, 0, *back)
+        assert all(abs(a - b) < 1e-6 for a, b in zip(m[:12], m2[:12])), (
+            f"{angles} -> {back} does not reproduce the rotation"
+        )
+    assert cad._angles(cad._matrix(0, 0, 0, 30, 40, 50)) == (30, 40, 50)
+    # Gimbal lock: |ry| = 90 collapses rx/rz onto one axis; the convention is
+    # everything in rx, rz = 0 — and it must still round-trip.
+    m = cad._matrix(0, 0, 0, 25, 90, 0)
+    back = cad._angles(m)
+    assert back[2] == 0.0
+    m2 = cad._matrix(0, 0, 0, *back)
+    assert all(abs(a - b) < 1e-6 for a, b in zip(m[:12], m2[:12]))
+    print("ok  transforms: _angles inverts _rotation, gimbal lock handled")
+
+    # World boxes: the c-channel local box, translated and rotated.
+    local = {"lo": (-0.5, 0.0, 0.0), "hi": (0.5, 17.5, 0.55)}
+    box = cad._world_aabb(local, cad._matrix(10, 0, 0, 0, 0, 90))
+    assert abs(box["lo"][0] + 7.5) < 1e-6 and abs(box["hi"][0] - 10) < 1e-6
+    assert abs(box["lo"][1] + 0.5) < 1e-6 and abs(box["hi"][1] - 0.5) < 1e-6
+    print("ok  transforms: world boxes from local box + transform")
+
 
 def tool_checks(bundle_path: Path) -> None:
     config.ONSHAPE_TOKEN_PATH = bundle_path
@@ -157,6 +183,14 @@ def tool_checks(bundle_path: Path) -> None:
             ])
         if path == f"/assemblies/d/{SB_DID}/w/{SB_WID}" and method == "POST":
             return _Response(200, {"id": ASM_EID, "name": kwargs["json"]["name"]})
+        if path.endswith("/boundingboxes"):
+            # The measured 35-hole c-channel: X centered, long axis Y,
+            # origin at one end. Meters, flat payload — verified live.
+            return _Response(200, {
+                "lowX": -0.0127, "highX": 0.0127,
+                "lowY": 0.0, "highY": 0.4445,
+                "lowZ": 0.0, "highZ": 0.0139725,
+            })
         if path.endswith("/transformedinstances"):
             return _Response(200, {})
         if path.endswith("/occurrencetransforms"):
@@ -164,11 +198,25 @@ def tool_checks(bundle_path: Path) -> None:
         if path == f"/assemblies/d/{SB_DID}/w/{SB_WID}/e/{ASM_EID}" and method == "GET":
             return _Response(200, {
                 "rootAssembly": {
-                    "instances": [{"id": "i1", "name": "C-Channel 1x2x1x25 <1>"}],
-                    "occurrences": [{
-                        "path": ["i1"],
-                        "transform": cad._matrix(10, 0, 0, 0, 0, 90),
+                    "instances": [{
+                        "id": "i1", "name": "C-Channel 1x2x1x25 <1>",
+                        # The definition's version key is documentVersion,
+                        # not versionId — verified live 2026-08-05.
+                        "documentId": LIB_DID, "documentVersion": LIB_VID,
+                        "elementId": PART_EID, "partId": "JHD",
                     }],
+                    "occurrences": [
+                        {
+                            "path": ["i1"],
+                            "transform": cad._matrix(10, 0, 0, 0, 0, 90),
+                        },
+                        # An occurrence with no matching instance info: the
+                        # readback must degrade to bare position, not error.
+                        {
+                            "path": ["i9"],
+                            "transform": cad._matrix(1, 2, 3, 0, 0, 0),
+                        },
+                    ],
                 },
                 "subAssemblies": [],
             })
@@ -189,10 +237,27 @@ def tool_checks(bundle_path: Path) -> None:
         ref = f"{LIB_DID}:{LIB_VID}:{PART_EID}:JHD"
         assert ref in out.text, out.text
         assert "276-2289" in out.text and "Shaft" not in out.text
+        # Extents ride along with the match, converted to inches.
+        assert "spans X -0.50..0.50, Y 0.00..17.50, Z 0.00..0.55 in" in out.text, out.text
+
+        def library_reads():
+            return [c for c in calls
+                    if "/versions" in c["path"]
+                    or (c["path"].startswith("/parts/")
+                        and not c["path"].endswith("/boundingboxes"))]
+
+        n_library = len(library_reads())
         n_calls = len(calls)
         out = tools.dispatch("cad_find_part", json.dumps({"query": "shaft"}))
         assert "276-2011" in out.text, out.text
-        assert len(calls) == n_calls, "second search must hit the cache, not the API"
+        assert len(library_reads()) == n_library, (
+            "second search must hit the library cache, not the API"
+        )
+        n_calls = len(calls)
+        tools.dispatch("cad_find_part", json.dumps({"query": "shaft"}))
+        assert len(calls) == n_calls, (
+            "a repeated search must be free — boxes cache per part"
+        )
 
         out = tools.dispatch("cad_create_assembly", json.dumps({"name": "drive"}))
         assert ASM_EID in out.text, out.text
@@ -225,7 +290,15 @@ def tool_checks(bundle_path: Path) -> None:
 
         out = tools.dispatch("cad_assembly", json.dumps({"assembly_eid": ASM_EID}))
         assert "id i1" in out.text and "C-Channel" in out.text, out.text
-        assert "(10.00, 0.00, 0.00)" in out.text and "rotated" in out.text
+        assert "(10.00, 0.00, 0.00)" in out.text, out.text
+        # Not a bare "rotated" — the actual angles, in insert/move convention.
+        assert "rotated (0, 0, 90)°" in out.text, out.text
+        # World extents: Rz(90) swings the 17.5" length into -X from x=10.
+        assert "spans X -7.50..10.00, Y -0.50..0.50, Z 0.00..0.55 in" in out.text, out.text
+        # The orphan occurrence degrades to bare position — no angles, no box.
+        assert "id i9" in out.text and "(1.00, 2.00, 3.00)" in out.text, out.text
+        i9_line = next(l for l in out.text.splitlines() if "id i9" in l)
+        assert "spans" not in i9_line and "rotated" not in i9_line, i9_line
 
         out = tools.dispatch("cad_move", json.dumps({
             "assembly_eid": ASM_EID, "instance_id": "i1",
@@ -274,6 +347,7 @@ def tool_checks(bundle_path: Path) -> None:
     finally:
         httpx.request = real_request
         cad._library_cache.clear()
+        cad._bbox_cache.clear()
 
 
 def registration_checks() -> None:

@@ -10,6 +10,7 @@ from rich.table import Table
 
 from . import agent as agent_mod
 from . import agentbench as agentbench_mod
+from . import cadbench as cadbench_mod
 from . import bench as bench_mod
 from . import config, permissions, sessions, tools
 from . import vocabbench as vocab_mod
@@ -164,7 +165,8 @@ def cmd_ask(args) -> int:
     return 0
 
 
-FAMILIES = {"tools": bench_mod, "vocab": vocab_mod, "agent": agentbench_mod}
+FAMILIES = {"tools": bench_mod, "vocab": vocab_mod, "agent": agentbench_mod,
+            "cad": cadbench_mod}
 
 
 def cmd_bench(args) -> int:
@@ -416,11 +418,13 @@ def main() -> int:
     bench.add_argument("-t", "--task", action="append", help="run only these tasks")
     bench.add_argument(
         "--family",
-        choices=["tools", "vocab", "agent"],
+        choices=["tools", "vocab", "agent", "cad"],
         default="tools",
         help=(
             "task family: canned tool-calling tasks, the real-browser vocab "
-            "drill, or agent-bench (whole-Jarvis, sandboxed, category-rated)"
+            "drill, agent-bench (whole-Jarvis, sandboxed, category-rated), or "
+            "cad-bench (live Onshape — costs real API calls AND Onshape "
+            "quota; builds and deletes cadbench-* assemblies in the sandbox)"
         ),
     )
     bench.set_defaults(func=cmd_bench)

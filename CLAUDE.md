@@ -331,6 +331,16 @@ jarvis/
   turns), because an empty run is *fully shaped* while a run killed by a
   provider error is **short**, and only the second crashed a grader. Run after
   touching `agentbench.py`.
+- `tests/cadbench_check.py` — free synthetic checks for the cad-bench
+  *harness* (the shape of `agentbench_check`): geometry helpers (world boxes
+  from transforms, penetration with touching = 0, the recorded 12-inch
+  c-channel overlap detected), every grader scoring a hand-built correct
+  world 100% and catching its specific failure, every task ~0 on an empty
+  run AND on a do-nothing run (`repair`'s fixture pre-builds the world — the
+  fixture's own work must earn the agent nothing), every task surviving a
+  run cut short (0/1 turns), the bench assembly deleted even when the run
+  blows up, and part resolution stripping Onshape's invisible LRM marks.
+  Run after touching `jarvis/cadbench.py`.
 - `tests/secrets_check.py` — free synthetic checks for the `.env` protection,
   against a throwaway dir holding a fake key. Includes a replay of the actual
   leak (a recursive grep that never names `.env`). Run it after touching
@@ -1122,10 +1132,46 @@ Y-offset overlapped the 17.5"-long rails (channels run lengthwise along Y
 in their local frame), which the readback stated and the render made
 obvious; one cad_move fixed it. Still to build: mates via mate
 connectors, configurable cut-to-length (the "(Configurable)" library
-docs), whiteboard→CAD wiring, and a cad-bench scored by assembly
-readback. API-key note: keys live under My account → Developer → API
-keys (the dev-portal URL is OAuth-apps only now); individual accounts cap
-at 2 active keys.
+docs), and whiteboard→CAD wiring. API-key note: keys live under My
+account → Developer → API keys (the dev-portal URL is OAuth-apps only
+now); individual accounts cap at 2 active keys.
+
+**CAD improvement round 1 shipped (2026-08-05)** — items 1–3 of
+`docs/cad-improvement-plan.md`; mates (item 4) deliberately wait until the
+bench has measured whether 1–3 absorbed the failure.
+
+- **cad-bench** (`jarvis/cadbench.py`, `jarvis bench --family cad`) — the
+  fourth family. Five tasks (place / pair / frame / revise / repair) graded
+  the agent-bench way: the assembly is read back from Onshape afterwards and
+  scored on instance count, positions, rotations, and clearances computed
+  from real part bounding boxes — never the prose. Categories: placement,
+  clearance, revision, discipline. Each run builds its own
+  `cadbench-<task>-<runid>` assembly in the pinned sandbox and deletes it in
+  a `finally:` (a failed cleanup prints the assembly name loudly). The write
+  pin is untouched. Costs OpenRouter *and* Onshape quota — the graders make
+  API calls too. `pair` is the recorded c-channel regression (a stated gap
+  that requires knowing the part is 17.5" long); `revise`/`repair` are the
+  tasks predicted to discriminate until mates exist. **No live sweep has
+  been run yet** — the baseline numbers are the next human-run step.
+- **Readback fidelity** (`tools/onshape.py`): `cad_assembly` now reports
+  actual rotation via `_angles()` — the exact inverse of `_rotation`, same
+  fixed-frame X→Y→Z degrees `cad_insert`/`cad_move` accept, gimbal lock
+  collapses into rx with rz=0 — plus each instance's **world-frame extents**
+  from its source part's bounding box, so overlap is computable from the
+  text channel. `cad_find_part` carries each match's local-frame extents
+  (which axis is long, and how long) so offsets can be computed before
+  placing. Boxes degrade silently to the old output when unavailable.
+- **`skills/cad.md`** — the CAD discipline as instructions (absolute
+  placement / no solver, local-frame axes, insert→readback→render, the
+  half-inch grid, incremental verification, read-only libraries).
+- **API facts verified live 2026-08-05** (probes under `tests/probe_*.py`):
+  part bounding boxes at
+  `GET /parts/d/{did}/v/{vid}/e/{eid}/partid/{pid}/boundingboxes` — flat
+  `lowX..highZ` payload, meters; the assembly definition's version key is
+  **`documentVersion`**, not `versionId`; element delete is
+  `DELETE /elements/d/{did}/w/{wid}/e/{eid}`; part names carry invisible
+  LRM marks (`‎`) that must be stripped before matching; the 35-hole
+  c-channel measures 17.5" along local Y, origin at one end, X centered.
 
 **Discord shipped (2026-07-31)** — as a *bot*, never the owner's account
 (self-botting is a ToS ban; decision of the same kind as declining Membean).

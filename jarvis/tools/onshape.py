@@ -108,6 +108,86 @@ def _position_inches(transform: list[float]) -> tuple[float, float, float]:
     )
 
 
+def _angles(transform: list[float]) -> tuple[float, float, float]:
+    """Fixed-frame X→Y→Z angles in degrees from a 16-float transform — the
+    exact inverse of _rotation, so the numbers read back out of an assembly
+    are the numbers cad_insert and cad_move accept going in.
+
+    For R = Rz·Ry·Rx: R20 = -sin(ry), R21 = cy·sx, R22 = cy·cx,
+    R10 = sz·cy, R00 = cz·cy. At the gimbal singularity (|ry| = 90°) rx and
+    rz describe the same axis; the whole angle is reported as rx, rz as 0."""
+    sy = max(-1.0, min(1.0, -transform[8]))
+    ry = math.asin(sy)
+    if abs(sy) < 0.999999:
+        rx = math.atan2(transform[9], transform[10])
+        rz = math.atan2(transform[4], transform[0])
+    else:
+        rx = math.atan2(-transform[6], transform[5])
+        rz = 0.0
+    return tuple(round(math.degrees(a), 1) + 0.0 for a in (rx, ry, rz))
+
+
+def _span_text(bbox: dict) -> str:
+    lo, hi = bbox["lo"], bbox["hi"]
+    return (
+        f"spans X {lo[0]:.2f}..{hi[0]:.2f}, Y {lo[1]:.2f}..{hi[1]:.2f}, "
+        f"Z {lo[2]:.2f}..{hi[2]:.2f} in"
+    )
+
+
+# (did, vid, eid, partId) -> {"lo": (x,y,z), "hi": (x,y,z)} in inches.
+# Process-lifetime; a part's box in its own version never changes.
+_bbox_cache: dict[tuple, dict] = {}
+
+
+def _part_bbox(did: str, vid: str, eid: str, part_id: str) -> dict | None:
+    """A part's local-frame bounding box in inches, or None — a readback must
+    degrade to the old output, never fail, when a box cannot be fetched.
+    Endpoint verified live 2026-08-05: flat lowX..highZ payload, meters."""
+    key = (did, vid, eid, part_id)
+    if key in _bbox_cache:
+        return _bbox_cache[key]
+    try:
+        response = _request(
+            "GET", f"/parts/d/{did}/v/{vid}/e/{eid}/partid/{part_id}/boundingboxes"
+        )
+        if response.status_code != 200:
+            return None
+        data = response.json()
+        box = {
+            "lo": tuple(data[k] / _INCH for k in ("lowX", "lowY", "lowZ")),
+            "hi": tuple(data[k] / _INCH for k in ("highX", "highY", "highZ")),
+        }
+    except (_CadError, httpx.HTTPError, KeyError, TypeError, ValueError):
+        return None
+    _bbox_cache[key] = box
+    return box
+
+
+def _world_aabb(local: dict, transform: list[float]) -> dict:
+    """A local-frame box pushed through a 16-float row-major transform
+    (meters translation) into a world-frame AABB, inches throughout."""
+    corners = [
+        (x, y, z)
+        for x in (local["lo"][0], local["hi"][0])
+        for y in (local["lo"][1], local["hi"][1])
+        for z in (local["lo"][2], local["hi"][2])
+    ]
+    t = transform
+    world = [
+        (
+            t[0] * x + t[1] * y + t[2] * z + t[3] / _INCH,
+            t[4] * x + t[5] * y + t[6] * z + t[7] / _INCH,
+            t[8] * x + t[9] * y + t[10] * z + t[11] / _INCH,
+        )
+        for (x, y, z) in corners
+    ]
+    return {
+        "lo": tuple(min(p[i] for p in world) for i in range(3)),
+        "hi": tuple(max(p[i] for p in world) for i in range(3)),
+    }
+
+
 def _is_rotated(transform: list[float]) -> bool:
     identity = (1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
     block = (
@@ -230,7 +310,18 @@ def cad_find_part(
                     if len(matches) < max_results:
                         number = f" [{part['partNumber']}]" if part.get("partNumber") else ""
                         ref = f"{lib['did']}:{entry['vid']}:{part['elementId']}:{part['partId']}"
-                        matches.append(f"- {part.get('name')}{number} · ref {ref} · {lib['name']}")
+                        # Size up front is what lets a model pick an offset
+                        # instead of guessing one — the local-frame extents
+                        # say which axis is long, and how long.
+                        bbox = _part_bbox(
+                            lib["did"], entry["vid"],
+                            part["elementId"], part["partId"],
+                        )
+                        size = f" · {_span_text(bbox)} (local)" if bbox else ""
+                        matches.append(
+                            f"- {part.get('name')}{number} · ref {ref} · "
+                            f"{lib['name']}{size}"
+                        )
         if not matches:
             body = f"No parts match {query!r}. Try fewer or shorter words."
         else:
@@ -328,8 +419,10 @@ def cad_assembly(
     assembly_eid: Annotated[str, "Assembly eid in the sandbox"],
 ) -> str:
     """List a sandbox assembly's instances: id, part name, position in inches
-    (assembly coordinates), and whether it is rotated. The ids are what
-    cad_move and cad_delete take."""
+    (assembly coordinates), rotation in the same X→Y→Z degrees cad_insert and
+    cad_move accept, and each part's world-frame extents — so clearance
+    between parts can be computed from the text, not eyeballed. The ids are
+    what cad_move and cad_delete take."""
     try:
         sb = onshape_auth.sandbox()
         response = _request(
@@ -339,10 +432,10 @@ def cad_assembly(
             return _fail(response)
         data = response.json()
         root = data.get("rootAssembly", {})
-        names: dict[str, str] = {}
+        infos: dict[str, dict] = {}
         for source in [root, *data.get("subAssemblies", [])]:
             for instance in source.get("instances", []):
-                names[instance.get("id", "")] = instance.get("name", "?")
+                infos[instance.get("id", "")] = instance
         occurrences = root.get("occurrences", [])
         if not occurrences:
             return "The assembly is empty. cad_insert adds parts."
@@ -351,12 +444,26 @@ def cad_assembly(
             path = occurrence.get("path", [])
             transform = occurrence.get("transform", [])
             label = "/".join(path)
-            name = names.get(path[-1] if path else "", "?")
+            info = infos.get(path[-1] if path else "", {})
+            name = info.get("name", "?")
             if len(transform) == 16:
                 x, y, z = _position_inches(transform)
                 where = f"at ({x:.2f}, {y:.2f}, {z:.2f})"
                 if _is_rotated(transform):
-                    where += ", rotated"
+                    rx, ry, rz = _angles(transform)
+                    where += f", rotated ({rx:g}, {ry:g}, {rz:g})°"
+                # World extents from the actual inserted part's measured box.
+                # The definition names the version key `documentVersion`
+                # (verified live 2026-08-05). Missing pieces degrade to the
+                # bare position — never an error.
+                source_ids = (
+                    info.get("documentId"), info.get("documentVersion"),
+                    info.get("elementId"), info.get("partId"),
+                )
+                if all(source_ids):
+                    local = _part_bbox(*source_ids)
+                    if local:
+                        where += f" · {_span_text(_world_aabb(local, transform))}"
             else:
                 where = "(no transform)"
             lines.append(f"- id {label} · {name} · {where}")
