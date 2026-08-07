@@ -20,6 +20,12 @@ FACE_PORT = int(os.environ.get("JARVIS_FACE_PORT", "8402"))
 # process already owns the Discord gateway.
 DAEMON_PORT = int(os.environ.get("JARVIS_DAEMON_PORT", "8405"))
 
+# Step budget for the face's conversation agent. The Agent default (30) is a
+# runaway guard sized for chat-scale work; a researched CAD build legitimately
+# runs 40+ steps (found live 2026-08-06: a four-bar lift turn hit the cap
+# mid-rebuild). Each step is one model call, so the cost ceiling stays small.
+FACE_MAX_STEPS = int(os.environ.get("JARVIS_FACE_MAX_STEPS", "60"))
+
 # Background goals (`jarvis goal`, the daemon's goal runner). Outside the
 # repo like sessions: bulk, personal, rewritten as work progresses. The
 # budget defaults are per-goal ceilings — the runner parks the goal and DMs
@@ -135,6 +141,23 @@ KOKORO_VOICES = Path(
 # Together itself degrades, flip this env var or go local (voice.tts is a
 # swappable contract).
 TTS_PROVIDER = os.environ.get("JARVIS_TTS_PROVIDER", "Together")
+
+# Pinned provider for chat routing (empty = today's behaviour, OpenRouter
+# picks). Off by default because the default tier is first-party OpenAI, where
+# routing is not in question; set it when running a model many resellers serve.
+# Measured 2026-08-05 across deepseek-v4-pro's endpoints: input price ranged
+# $0.435 -> $1.740 (4x) and cache reads $0.0036 -> $0.145 (40x) depending on who
+# answered, and quantization varied fp4 / fp8 / unknown between hosts — so an
+# unpinned run measures neither a stable price nor a stable model.
+#
+# Use OpenRouter's lowercase provider *tag* ("deepseek", "deepinfra"), not the
+# display name: a name that matches nothing is silently ignored. The pin allows
+# NO fallbacks for exactly that reason — a bad tag must fail loudly (HTTP 404,
+# "No endpoints found") instead of quietly routing somewhere else. Note some
+# endpoints are unreachable by account policy: OpenRouter's training opt-out
+# refuses providers that train on prompts, which is why deepseek's own
+# first-party endpoint 404s here.
+CHAT_PROVIDER = os.environ.get("JARVIS_CHAT_PROVIDER", "")
 
 # The workshop: where design-mode output lives, and the port that serves it.
 # A separate origin from the face on purpose — agent-written pages can run

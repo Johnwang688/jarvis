@@ -292,6 +292,7 @@ def _get_agent() -> agent_mod.Agent:
     if _agent is None:
         _agent = agent_mod.Agent(
             system=VOICE_SYSTEM,
+            max_steps=config.FACE_MAX_STEPS,
             approve=permissions.gate(APPROVALS.approver()),
             on_event=_agent_event,
             should_stop=_cancel.is_set,
