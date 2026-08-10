@@ -55,6 +55,12 @@ SELF_PROTECTED = frozenset(
         "jarvis/tools/__init__.py",
         "jarvis/face/approvals.py",
         "jarvis/permissions.py",
+        # Decides which commands run with no human in the loop, and which are
+        # refused outright. An agent that could edit these could widen its own
+        # reach without anyone being asked — the same reasoning as the gate
+        # itself, which is why they join the list rather than sitting beside it.
+        "jarvis/rules.py",
+        "jarvis/command_review.py",
     }
 )
 

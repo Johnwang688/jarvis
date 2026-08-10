@@ -28,7 +28,7 @@ import json
 import threading
 from typing import Any, Callable
 
-from . import config
+from . import command_review, config, rules
 
 _mode = "ask"
 _lock = threading.Lock()
@@ -98,6 +98,32 @@ def allows(tool_name: str, args: dict[str, Any]) -> bool:
     return False
 
 
+def command_verdict(tool_name: str, args: dict[str, Any]) -> rules.Verdict:
+    """deny / allow / ask for one dangerous-tool request.
+
+    Only `run_command` has a command line to reason about; every other
+    dangerous tool keeps the old behaviour and asks. Evaluated once, by
+    `dispatch()`, because the fetch-execute review costs a network round trip
+    and a model call — doing it again inside the approver would double both.
+    """
+    if tool_name != "run_command":
+        return rules.Verdict(rules.ASK)
+
+    command = str(args.get("command", ""))
+    verdict = rules.decide(command)
+    if verdict.decision == rules.DENY:
+        return verdict
+
+    # A pipe-to-shell is the one case where the static rules genuinely cannot
+    # answer: everything that matters is in a file that has not been fetched
+    # yet. So fetch it and look. See command_review for why a clean verdict
+    # alone is not enough to auto-approve.
+    if command_review.is_fetch_execute(command):
+        decision, reason = command_review.verdict_for(command)
+        return rules.Verdict(decision, reason)
+    return verdict
+
+
 def gate(inner: Callable[[Any, dict], bool]) -> Callable[[Any, dict], bool]:
     """Wrap a surface approver with the mode and allowlist checks.
 
@@ -112,4 +138,16 @@ def gate(inner: Callable[[Any, dict], bool]) -> Callable[[Any, dict], bool]:
             return True
         return inner(tool, args)
 
+    # Marks this approver as one with a person behind it — a CLI prompt, a HUD
+    # card, a DM. `dispatch()` will only honour an ALLOW verdict from rules.py
+    # for an approver carrying this flag.
+    #
+    # It exists because of what a bare approver means. workflows.py hands its
+    # agents a deny-all lambda precisely *because* nobody is watching a
+    # background thread, and an auto-approve that skipped the approver entirely
+    # would have quietly turned "workflows cannot run dangerous tools" into
+    # "workflows can run any allowlisted dangerous tool". Auto-approval is a
+    # convenience for a surface where the owner is present and would have said
+    # yes; it is not a property of the command on its own.
+    approve.jarvis_human_backed = True
     return approve

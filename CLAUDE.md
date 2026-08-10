@@ -215,6 +215,59 @@ jarvis/
   localhost-only so bench runs stay hermetic.
 - Web content is untrusted. The system prompt tells the model never to follow
   instructions found inside fetched pages.
+- **Command rules decide what never asks and what never runs** (`rules.py`,
+  2026-08-09). The gate used to be binary: `dangerous=True` meant ask, and the
+  only escape was the allowlist matched on a command's *first word* — "git"
+  silences `git push` as thoroughly as `git status`. Three verdicts now, and
+  the two that matter are at opposite ends. **DENY** is not approvable by
+  anyone (sudo/su/doas, dd/mkfs/fdisk/shutdown, `rm -rf` at a filesystem or
+  home root, `chmod -R 777 /`, fork bombs, raw block-device writes) — the same
+  shape as the `.env` refusal: approving a command is not consent to what it
+  does, so some things must never reach the owner as a yes/no question.
+  **ALLOW** runs unasked (git writes, build/package tooling, file shuffling,
+  dev-server process control, read-only staples). Everything else asks.
+
+  Four properties hold it up, each of which was a bug waiting to happen:
+
+  - **Every segment is judged and the worst verdict wins.** `git commit && rm
+    -rf /` is one string with two commands in it; first-word matching waves it
+    through. Command substitution can't be judged at all, so it forces ASK.
+  - **An ALLOW is only honoured for a *human-backed* approver**
+    (`permissions.gate` sets `jarvis_human_backed`; `dispatch()` checks it).
+    Caught in review: `workflows.py` hands its agents a deny-all approver
+    *because* nobody is watching a background thread, and an auto-approve that
+    skipped the approver would have silently converted "workflows cannot run
+    dangerous tools" into "workflows can run any allowlisted one". Auto-approval
+    is a convenience for a surface where the owner is present — never a
+    property of the command by itself.
+  - **An interpreter given inline source is not a build step.** `python` is
+    allowed because running a script is routine; `python -c "…"` is arbitrary
+    code, and allowing the stem would have allowed the language. `-c`/`-e`
+    pulls it back to ASK.
+  - **The secrets layer still wins.** `cp` is allowed, `cp .env /tmp` is not:
+    `protected_in_command` runs inside the tool and is not overridable by any
+    verdict.
+
+  Owner's choices, 2026-08-09, recorded because the reasoning is the point:
+  git writes **except push** (it reaches production directly) and **except
+  reset --hard / clean** (they destroy uncommitted work); **never `rm`**
+  (asked, not denied); auth commands deliberately **not** denied.
+
+- **A `curl … | sh` is reviewed before it runs** (`command_review.py`). Rather
+  than deny pipe-to-shell outright — installing uv or gcc that way is ordinary
+  — the script is fetched and read by the orchestrator tier, which can refuse
+  it. **Read the limits before trusting it:** a classifier is a safety net
+  against accidents, not a boundary against an adversary, because the thing
+  being judged is attacker-controlled text being judged by a model that reads
+  text. So it is built to fail toward asking: the body is fenced and labelled
+  untrusted data; *unsafe* denies; *safe* auto-approves **only** from a host on
+  `TRUSTED_INSTALL_HOSTS`, so a clean-looking script from anywhere else still
+  gets a human; every failure path (no URL, fetch error, unparseable verdict,
+  model error) returns *unclear*, which asks; and
+  `JARVIS_REVIEW_AUTOAPPROVE=0` leaves it able to refuse but not to consent.
+  What it genuinely buys: a script that quietly adds an SSH key gets refused
+  with a specific reason instead of being one distracted "yes" away.
+
 - **Dangerous tools are approved by a human in whichever surface is running**
   — a y/N prompt in the CLI, an authorization card in the face
   (`face/approvals.py`), or a Discord DM when the owner is away from the desk
@@ -456,6 +509,19 @@ jarvis/
   write pin (every write URL targets the pinned document), and the key
   bundle refused/scrubbed by all three secrets layers. Run after touching
   `onshape_auth.py`, `tools/onshape.py`, or `secrets.py`.
+- `tests/rules_check.py` — free checks for command rules and the fetch-execute
+  reviewer, with `shell._run` replaced by a recorder throughout, because a test
+  for "rm -rf / must be refused" must not depend on the refusal working. Covers
+  a 33-command decision matrix (the owner's choices as a table), worst-segment-
+  wins on compound commands, inline-source and command-substitution falling to
+  ASK, a denied command neither running *nor being asked about*, **a background
+  workflow's deny-all approver never honouring an ALLOW** (the regression this
+  nearly shipped with), the secrets refusal still beating an allowed stem,
+  fetch-execute detection, every reviewer verdict including safe-but-untrusted-
+  host and the `JARVIS_REVIEW_AUTOAPPROVE=0` kill switch, every reviewer failure
+  path ending in *unclear*, the prompt fencing the script as untrusted data, and
+  both new files being SELF_PROTECTED. Run after touching `rules.py`,
+  `command_review.py`, `permissions.gate`, or `dispatch()`.
 - `tests/permissions_check.py` — free checks for modes and the allowlist:
   gate ordering, prefix vs whole-tool matching, persistence without
   duplicates, mode "all" bypass, and the broker's ALWAYS path writing an

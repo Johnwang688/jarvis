@@ -230,8 +230,28 @@ def _dispatch(
     if missing:
         return ToolResult(f"Error: missing required argument(s): {', '.join(missing)}")
 
-    if entry.dangerous and approve is not None and not approve(entry, arguments):
-        return ToolResult("The user declined to run this. Ask what they would like instead.")
+    if entry.dangerous and approve is not None:
+        # Three verdicts, decided here rather than inside the approver so the
+        # fetch-execute review runs exactly once (it costs a network round trip
+        # and a model call). See jarvis/rules.py.
+        from .. import permissions
+
+        verdict = permissions.command_verdict(entry.name, arguments)
+        if verdict.decision == "deny":
+            # Not approvable, by anyone — the same shape as the .env refusal.
+            # Approving a command is not consent to what it does, so some
+            # things must not reach the owner as a yes/no question at all.
+            return ToolResult(
+                f"Refused: {verdict.reason}. This is blocked outright, not "
+                "pending approval — do not look for another way to run it. "
+                "Say what you were trying to achieve and let the user decide."
+            )
+        # An ALLOW is only honoured for an approver with a person behind it.
+        # A background workflow's deny-all approver must keep denying: nobody
+        # is watching it, which is the entire reason it has one.
+        auto = verdict.decision == "allow" and getattr(approve, "jarvis_human_backed", False)
+        if not auto and not approve(entry, arguments):
+            return ToolResult("The user declined to run this. Ask what they would like instead.")
 
     try:
         result = entry.func(**arguments)

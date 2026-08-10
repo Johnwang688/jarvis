@@ -355,6 +355,12 @@ TIERS: dict[str, str] = {
     "subagent": os.environ.get(
         "JARVIS_SUBAGENT", os.environ.get("JARVIS_ORCHESTRATOR", "openai/gpt-5.6-luna")
     ),
+    # Judges a script a `curl … | sh` would run (command_review.py). The
+    # orchestrator tier on purpose: this decides whether arbitrary remote code
+    # executes on the owner's machine, which is the last place to save money.
+    "review": os.environ.get(
+        "JARVIS_REVIEW_MODEL", os.environ.get("JARVIS_ORCHESTRATOR", "openai/gpt-5.6-luna")
+    ),
     # Handles delegated single-shot work (drafting, summarizing, extracting).
     # Bench 2026-07-30: 8/8 on tool tasks at half Luna's cost.
     "worker": os.environ.get("JARVIS_WORKER", "openai/gpt-oss-20b"),
