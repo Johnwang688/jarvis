@@ -345,6 +345,16 @@ def api_key() -> str:
 # the loop now notices the cut, but the ceiling was still the wrong size.
 MAX_TOKENS = int(os.environ.get("JARVIS_MAX_TOKENS", "8192"))
 
+# Stream chat completions rather than waiting for the whole reply.
+#
+# The win is not speed on paper — it is that `should_stop` becomes answerable
+# *during* a model call instead of only between steps. Cancellation used to
+# cost one full in-flight request no matter how early the owner spoke, which is
+# the wrong window: the interesting moment is exactly when a long answer has
+# started going wrong. Set JARVIS_STREAM=0 to fall back; llm.chat degrades to
+# the non-streaming path on its own if streaming fails before the first token.
+STREAM = os.environ.get("JARVIS_STREAM", "1") not in ("0", "false", "no")
+
 TIERS: dict[str, str] = {
     # Runs the agent loop: plans, picks tools, recovers from errors.
     "orchestrator": os.environ.get("JARVIS_ORCHESTRATOR", "openai/gpt-5.6-luna"),

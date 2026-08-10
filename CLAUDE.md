@@ -615,6 +615,14 @@ jarvis/
   parent's approver being what a child dispatches with, and `run_fleet` staying
   out of `workflows.SAFE_TOOLS`. Run after touching `agents.py` or
   `tools/subagent.py`.
+- `tests/stream_check.py` — free checks for streamed completions, the HTTP
+  layer faked: content and split tool calls reassembling by index, usage/model/
+  finish_reason surviving, **a mid-stream cancel raising `Cancelled` and
+  leaving the transcript wire-valid** (no assistant turn, nothing outstanding),
+  retry allowed before the first token and refused after one, the fallback to a
+  non-streaming call when streaming never starts, and `stream=False` taking the
+  old path. Run after touching `llm.chat`, `_stream_once`, or the cancel path
+  in `run_turn`.
 - `tests/rules_check.py` — free checks for command rules and the fetch-execute
   reviewer, with `shell._run` replaced by a recorder throughout, because a test
   for "rm -rf / must be refused" must not depend on the refusal working. Covers
@@ -1287,9 +1295,23 @@ under `_agent_lock` right before `run_turn`, so a cancel aimed at the previous
 turn cannot kill the replacement. A cancelled turn returns no reply and
 synthesizes no speech.
 
-Worst-case latency is one in-flight model call: the OpenRouter request cannot
-be aborted, so the loop stops at the next step boundary. In practice the owner
-is still talking when it unwinds.
+**Since 2026-08-10 that is no longer worst-case latency.** Completions stream
+(`config.STREAM`, on by default), and `should_stop` is checked per SSE line, so
+a cancel lands *during* generation instead of after it. This is safe precisely
+where it happens: nothing has been dispatched at that point, so no `tool_call`
+is outstanding and the assistant turn is simply never appended — the transcript
+stays whole, which is all invariant 3 asks. `llm.Cancelled` is the signal.
+
+Two properties keep streaming honest. A failure **before** the first token is
+retried, and a failure **after** one is not — once bytes have reached a surface,
+replaying the call would duplicate what the owner already saw. And if streaming
+never starts at all (a provider that cannot), `chat()` falls back to the
+non-streaming path once: degrade to a slower answer, never to no answer.
+
+`on_delta` also carries the text out as it arrives, surfaced as an `on_event`
+**`delta`**. Nothing renders it yet — the HUD still shows the reply when the
+turn completes — so progressive display in `jarvis.html` is the obvious next
+step, and it needs no server work.
 
 **Step budget, and admitting when it runs out (2026-08-02).** `Agent`'s
 default `max_steps` is **30** (was 12). Only the conversation surfaces take

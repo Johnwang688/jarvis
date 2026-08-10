@@ -447,7 +447,23 @@ class Agent:
             # for, and a plan written at step 3 has to still be there at step 40.
             self._refresh_system()
 
-            reply = llm.chat(self.model, self.messages, tools=self.tool_specs)
+            try:
+                reply = llm.chat(
+                    self.model,
+                    self.messages,
+                    tools=self.tool_specs,
+                    # Streaming makes cancellation answerable *during* the call.
+                    # Safe precisely here: nothing has been dispatched yet, so
+                    # no tool_call is outstanding and the assistant turn is
+                    # simply never appended — the transcript stays whole, which
+                    # is what invariant 3 asks for.
+                    on_delta=lambda piece: self.on_event("delta", piece),
+                    should_stop=self.should_stop,
+                )
+            except llm.Cancelled:
+                turn.cancelled = True
+                self.on_event("cancelled", step)
+                return turn
             # Measured against exactly what went over the wire: nothing has been
             # appended yet, so `self.messages` is still the request. This is
             # what lets compaction be judged in real tokens — the estimate is
