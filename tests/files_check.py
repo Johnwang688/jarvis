@@ -233,7 +233,9 @@ def grep_checks(tmp: Path) -> None:
         ), label
         assert "mode must be one of" in call("grep_files", pattern="x", path=str(root), mode="wat")
 
-    check("ripgrep" if search_mod.shutil.which("rg") else "fallback")
+    have_rg = search_mod.shutil.which("rg") is not None
+    if have_rg:
+        check("ripgrep")
 
     # The fallback is not decoration — it is what runs on a machine without
     # ripgrep, and a shape mismatch there would only ever show up in the wild.
@@ -243,7 +245,111 @@ def grep_checks(tmp: Path) -> None:
         check("forced fallback")
     finally:
         search_mod.shutil.which = real_which
-    print("ok  grep_files: modes/glob/case/cap/context, skips .env, both backends")
+    ran = "ripgrep + fallback" if have_rg else "fallback only (rg not installed)"
+    print(f"ok  grep_files: modes/glob/case/cap/context, skips .env — {ran}")
+
+
+def rg_args_checks() -> None:
+    """The ripgrep command line, asserted directly.
+
+    This runs whether or not ripgrep is installed, which is the point: the
+    machine this was written on has no `rg`, so every "both backends" claim in
+    the suite below was really the fallback twice. Checking the argument list
+    covers the half that cannot otherwise be reached here.
+    """
+    args = search_mod._rg_args("NEEDLE", "/tmp/x", "", "content", 0, False)
+
+    # The flag the bug was about. ripgrep respects .gitignore by default, and
+    # this repo gitignores memory/*.md — so with rg installed, searching
+    # Jarvis's own long-term memory silently returned nothing.
+    assert "--no-ignore" in args, args
+
+    # Skipping is explicit and shared with the fallback, not inherited from
+    # whatever ignore files happen to be lying around.
+    for name in search_mod.SKIP_DIRS:
+        assert f"!{name}/" in args, f"{name} not excluded from the rg run: {args}"
+    assert "--max-filesize" in args
+    assert args[args.index("--max-filesize") + 1] == str(search_mod.MAX_FILE_BYTES)
+
+    assert search_mod._rg_args("x", ".", "", "files", 0, False).count("--files-with-matches") == 1
+    assert "--count" in search_mod._rg_args("x", ".", "", "count", 0, False)
+    assert "--ignore-case" in search_mod._rg_args("x", ".", "", "content", 0, True)
+    assert "--context" in search_mod._rg_args("x", ".", "", "content", 2, False)
+    # The caller's own glob survives alongside the skip globs.
+    assert "*.py" in search_mod._rg_args("x", ".", "*.py", "content", 0, False)
+    print(f"ok  grep_files: rg invocation disables ignore files and skips {len(search_mod.SKIP_DIRS)} dirs")
+
+
+def gitignore_checks(tmp: Path) -> None:
+    """A gitignored file must still be searchable.
+
+    Built as a real git repo because that is the only shape that reproduces it:
+    ripgrep applies .gitignore rules only inside one. This is the case that was
+    broken in the wild and green in the suite — memory/*.md is gitignored, so
+    `grep_files` over Jarvis's own memory found nothing once rg was installed.
+    """
+    import subprocess
+
+    root = tmp / "repo"
+    (root / "memory").mkdir(parents=True)
+    (root / ".gitignore").write_text("memory/*.md\nbuilt/\n", encoding="utf-8")
+    (root / "memory" / "fact.md").write_text("the owner prefers KEEPSAKE\n", encoding="utf-8")
+    (root / "tracked.py").write_text("KEEPSAKE = 1\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(root)], check=False, capture_output=True)
+
+    def assert_found(label: str) -> None:
+        out = call("grep_files", pattern="KEEPSAKE", path=str(root), mode="files")
+        assert "tracked.py" in out, f"{label}: {out}"
+        assert "fact.md" in out, (
+            f"{label}: a gitignored file was invisible to search — this is the "
+            f"memory/*.md case: {out}"
+        )
+
+    if search_mod.shutil.which("rg"):
+        assert_found("ripgrep")
+    real_which = search_mod.shutil.which
+    search_mod.shutil.which = lambda name: None
+    try:
+        assert_found("fallback")
+    finally:
+        search_mod.shutil.which = real_which
+    print("ok  grep_files: gitignored files are still searchable (memory/*.md)")
+
+
+def backend_parity_checks(tmp: Path) -> None:
+    """Both backends must answer identically, or the tool has two behaviours.
+
+    Skipped loudly rather than silently when ripgrep is absent: a suite that
+    quietly proves half of what its name claims is how this bug survived.
+    """
+    if not search_mod.shutil.which("rg"):
+        print("--  grep_files: PARITY NOT VERIFIED — ripgrep is not installed here.")
+        print("    Install it and re-run to check both backends agree:")
+        print("      sudo apt install ripgrep")
+        return
+
+    root = tmp / "parity"
+    (root / "sub" / "node_modules").mkdir(parents=True)
+    (root / "sub" / "deep.py").write_text("TARGET = 1\n", encoding="utf-8")
+    (root / "top.txt").write_text("TARGET here\nand TARGET again\n", encoding="utf-8")
+    (root / "sub" / "node_modules" / "junk.js").write_text("TARGET\n", encoding="utf-8")
+    (root / ".hidden.txt").write_text("TARGET\n", encoding="utf-8")
+
+    real_which = search_mod.shutil.which
+    for mode in ("files", "count", "content"):
+        with_rg = call("grep_files", pattern="TARGET", path=str(root), mode=mode)
+        search_mod.shutil.which = lambda name: None
+        try:
+            with_py = call("grep_files", pattern="TARGET", path=str(root), mode=mode)
+        finally:
+            search_mod.shutil.which = real_which
+        assert sorted(with_rg.split("\n")) == sorted(with_py.split("\n")), (
+            f"backends disagree in mode={mode}:\n"
+            f"--- ripgrep ---\n{with_rg}\n--- python ---\n{with_py}"
+        )
+        assert "node_modules" not in with_rg, f"skip list not applied in mode={mode}"
+        assert ".hidden.txt" not in with_rg, f"hidden file surfaced in mode={mode}"
+    print("ok  grep_files: ripgrep and the Python fallback agree in all three modes")
 
 
 def main() -> int:
@@ -254,6 +360,9 @@ def main() -> int:
         protection_checks(tmp)
         numbering_guard_checks(tmp)
         grep_checks(tmp)
+        rg_args_checks()
+        gitignore_checks(tmp)
+        backend_parity_checks(tmp)
     print("\nall file/search checks passed")
     return 0
 

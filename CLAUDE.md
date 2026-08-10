@@ -251,6 +251,21 @@ jarvis/
   localhost-only so bench runs stay hermetic.
 - Web content is untrusted. The system prompt tells the model never to follow
   instructions found inside fetched pages.
+- **`grep_files` does not respect `.gitignore`, deliberately** (fixed
+  2026-08-10, one day after it shipped). ripgrep applies gitignore rules by
+  default and this repo gitignores `memory/*.md`, `avatars/`, `designs/` and
+  `traces/` — so **searching Jarvis's own long-term memory returned nothing**
+  the moment `rg` was installed, while the pure-Python fallback found it. Two
+  backends, two answers, no error, and the failure depended on which binaries
+  happened to be on the machine.
+
+  `--no-ignore` is now passed and the skipping is explicit: one `SKIP_DIRS`
+  set, walked by the fallback and turned into `--glob !dir/` for ripgrep, plus
+  a shared `--max-filesize`. The principle worth keeping: **version control is
+  not a relevance filter for an agent.** What is worth committing and what is
+  worth searching are different questions, and memory is the case that proves
+  it.
+
 - **Command rules decide what never asks and what never runs** (`rules.py`,
   2026-08-09). The gate used to be binary: `dangerous=True` meant ask, and the
   only escape was the allowlist matched on a command's *first word* — "git"
@@ -512,9 +527,15 @@ jarvis/
   **edit_file refusing every SELF_PROTECTED file and `.env`** (verified to bite:
   with the guard stubbed out, the edit lands), write_file stripping read_file's
   numbering while leaving a numeric TSV column alone, and grep_files across all
-  three modes, glob, case, cap, context lines, skipping `.env` — run twice,
-  once through ripgrep and once through the forced Python fallback, because a
-  shape mismatch there would only ever surface on a machine without `rg`.
+  three modes, glob, case, cap, context lines and skipping `.env`.
+
+  **The two backends must agree, and proving that needs `rg` installed.** This
+  machine has none, so the "run it twice" claim was really the fallback twice —
+  which is how the gitignore bug (below) stayed green. The suite now asserts
+  the **rg argument list** directly (that runs anywhere), reproduces the bug in
+  a real temp git repo, and prints `PARITY NOT VERIFIED` in capitals when `rg`
+  is missing rather than passing quietly. Install ripgrep and re-run to get the
+  full-parity comparison across all three modes.
 - `tests/longhorizon_check.py` — free checks with a faked `llm.chat` for the
   plan slot and sub-agents: plan written through dispatch and injected into
   `messages[0]`, still present on step 26 of a *single* turn (the per-step

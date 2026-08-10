@@ -36,15 +36,43 @@ TIMEOUT_S = 30
 # a hit inside a 50MB artifact is not what anybody is looking for.
 MAX_FILE_BYTES = 2_000_000
 
+# Directories neither backend descends into. **One list, used by both**, which
+# is the whole point: this tool had two implementations with two different
+# ideas of what to skip, so the answer depended on whether `rg` happened to be
+# installed on the machine.
+SKIP_DIRS = frozenset(
+    {
+        "node_modules", "__pycache__", ".venv", "venv", ".git", "site-packages",
+        ".mypy_cache", ".pytest_cache", ".ruff_cache", ".tox",
+    }
+)
+
 
 def _skip_dir(name: str) -> bool:
-    return name.startswith(".") or name in {"node_modules", "__pycache__", ".venv"}
+    # Hidden directories are skipped by both backends — ripgrep does it by
+    # default, and the fallback matches it here rather than inventing its own
+    # rule.
+    return name.startswith(".") or name in SKIP_DIRS
 
 
 def _rg_args(
     pattern: str, path: str, glob: str, mode: str, context_lines: int, case_insensitive: bool
 ) -> list[str]:
-    args = ["rg", "--color", "never", "--no-messages"]
+    """The ripgrep invocation, built to match `_python_search` exactly.
+
+    **`--no-ignore` is the load-bearing flag.** ripgrep respects `.gitignore`
+    by default, and this repo gitignores `memory/*.md`, `avatars/`, `designs/`
+    and `traces/` — so with ripgrep installed, searching Jarvis's own long-term
+    memory silently returned nothing, while the pure-Python fallback found it.
+    A tool whose answer depends on which binaries happen to be on the machine
+    is worse than a slow one.
+
+    Version control is not a relevance filter for an agent: what is worth
+    committing and what is worth searching are different questions, and memory
+    is the case that proves it. So ignore files are disabled and the skipping
+    is done explicitly, by the same `SKIP_DIRS` the fallback walks with.
+    """
+    args = ["rg", "--color", "never", "--no-messages", "--no-ignore"]
     if mode == "files":
         args.append("--files-with-matches")
     elif mode == "count":
@@ -55,6 +83,11 @@ def _rg_args(
             args += ["--context", str(context_lines)]
     if case_insensitive:
         args.append("--ignore-case")
+    # Matches the fallback's own ceiling, so one backend cannot surface a hit
+    # inside a huge artifact that the other skipped.
+    args += ["--max-filesize", str(MAX_FILE_BYTES)]
+    for name in sorted(SKIP_DIRS):
+        args += ["--glob", f"!{name}/"]
     if glob:
         args += ["--glob", glob]
     args += ["--regexp", pattern, "--", path]
