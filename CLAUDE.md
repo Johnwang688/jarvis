@@ -284,6 +284,21 @@ jarvis/
     `protected_in_command` runs inside the tool and is not overridable by any
     verdict.
 
+  **The bug this shipped with, found a day later (2026-08-10) and worth more
+  than the feature.** `rules._READONLY` was copied from `shell.READ_ONLY` —
+  and that set is safe *in its own context*, because `run_readonly` separately
+  refuses every shell operator, so `tee` has nothing to write through and
+  `echo` has no redirect. Lifted into a rule that **auto-approves**, the same
+  names became `echo pwned > ~/.bashrc`, `sed -i` on any file, `tee
+  /etc/hosts` and `find / -delete`, all running with nobody asked. Three fixes:
+  a segment containing a redirect token is never auto-approved; `find`/`sed`
+  fall to ASK in their writing forms (`-delete`, `-exec`, `-i`) while staying
+  allowed as reads; and command **wrappers** are unwrapped before judging, so
+  `env sh -c …`, `nohup sh -c …` and `timeout 5 python -c …` are judged as the
+  inner command instead of as `env`/`nohup`/`timeout`. Generalises:
+  **an allowlist is only valid together with the constraints it was written
+  under** — moving one somewhere more permissive silently widens it.
+
   Owner's choices, 2026-08-09, recorded because the reasoning is the point:
   git writes **except push** (it reaches production directly) and **except
   reset --hard / clean** (they destroy uncommitted work); **never `rm`**

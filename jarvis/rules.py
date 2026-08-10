@@ -104,14 +104,46 @@ _BUILD = {
 _FILES = {"mkdir", "cp", "mv", "touch", "ln", "chmod", "chown", "rmdir", "install"}
 _PROCESS = {"nohup", "kill", "pkill", "pgrep", "lsof", "systemctl", "timeout", "setsid"}
 
-# Read-only staples. run_readonly already covers these, but they turn up as
-# segments of a compound command, and one `ls` should not drag the whole line
-# into an approval prompt.
+# Read-only staples. They turn up as segments of a compound command, and one
+# `ls` should not drag the whole line into an approval prompt.
+#
+# **This list is not shell.py's READ_ONLY, and copying that one here was a bug**
+# (found 2026-08-10, a day after shipping). That set is safe *in its own
+# context*: `run_readonly` separately refuses every shell operator, so `tee`
+# has nothing to write through and `echo` has no redirect. Lifted out of that
+# context into a rule that auto-approves, the same names became
+# `echo pwned > ~/.bashrc` and `tee /etc/hosts` running with nobody asked.
+#
+# So: no binary whose ordinary use writes. `tee` and `awk` are gone (awk has
+# `system()` and `print > file`); `sed` and `find` stay but only in their
+# read-only forms — see `_WRITES_ANYWAY`.
 _READONLY = {
-    "ls", "cat", "head", "tail", "wc", "grep", "rg", "find", "file", "stat",
-    "echo", "pwd", "which", "true", "test", "sort", "uniq", "cut", "sed", "awk",
-    "date", "printf", "dirname", "basename", "env", "tee",
+    "ls", "cat", "head", "tail", "wc", "grep", "rg", "file", "stat",
+    "echo", "pwd", "which", "true", "test", "sort", "uniq", "cut",
+    "date", "printf", "dirname", "basename", "sed", "find",
 }
+
+# Flags that turn a read-only staple into a write. Checked per stem, because
+# the destructive form is the flag, not the binary.
+_WRITES_ANYWAY: dict[str, tuple[str, ...]] = {
+    "find": ("-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint",
+             "-fprintf", "-fls"),
+    "sed": ("-i", "--in-place"),
+}
+
+# Wrappers that run *another* command. Judging the wrapper is judging nothing:
+# `env sh -c '…'` and `nohup rm -rf /` are the inner command wearing a hat, and
+# the allow list would have waved both through on the strength of `env` and
+# `nohup`.
+_WRAPPERS = {
+    "env", "nohup", "timeout", "setsid", "stdbuf", "nice", "ionice",
+    "command", "exec", "xargs", "time", "watch",
+}
+
+# Redirection writes to a path no allow list ever looked at, so a segment
+# containing one is never auto-approved. Matched as a *token* after shlex
+# splitting, so a `>` inside a quoted commit message does not trip it.
+_REDIRECTS = {">", ">>", "&>", "&>>", "2>", "2>>", ">|", "1>", "1>>"}
 
 _ALLOW_STEMS = _BUILD | _FILES | _PROCESS | _READONLY
 
@@ -148,15 +180,34 @@ def _tokens(segment: str) -> list[str]:
         return segment.split()
 
 
+def _basename(token: str) -> str:
+    return token.rsplit("/", 1)[-1].lower()
+
+
+def _unwrap(tokens: list[str]) -> list[str]:
+    """Strip leading assignments and command wrappers to reach the real command.
+
+    `FOO=1 nohup timeout 5 python -c '…'` has to be judged as the python run it
+    is, not as an assignment, a nohup or a timeout. Bounded so a pathological
+    line cannot loop.
+    """
+    for _ in range(5):
+        while tokens and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", tokens[0]):
+            tokens = tokens[1:]
+        if not tokens or _basename(tokens[0]) not in _WRAPPERS:
+            return tokens
+        rest = tokens[1:]
+        # Drop the wrapper's own flags and bare durations (`timeout 5 …`).
+        while rest and (rest[0].startswith("-") or re.fullmatch(r"[\d.]+[smhd]?", rest[0])):
+            rest = rest[1:]
+        if not rest:
+            return tokens
+        tokens = rest
+    return tokens
+
+
 def _stem(tokens: list[str]) -> str:
-    if not tokens:
-        return ""
-    # Skip leading VAR=value assignments — `FOO=1 python x.py` is a python run.
-    for token in tokens:
-        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", token):
-            continue
-        return token.rsplit("/", 1)[-1].lower()
-    return ""
+    return _basename(tokens[0]) if tokens else ""
 
 
 def _first_word_arg(tokens: list[str]) -> str:
@@ -168,15 +219,16 @@ def _first_word_arg(tokens: list[str]) -> str:
 
 
 def _judge_segment(segment: str) -> Verdict:
-    tokens = _tokens(segment)
+    raw = _tokens(segment)
+    tokens = _unwrap(list(raw))
     stem = _stem(tokens)
     if not stem:
         return Verdict(ASK, "could not parse the command")
 
     # Escalation is checked across every token, not just the stem: `echo x |
     # sudo tee /etc/hosts` puts sudo in the middle of the line.
-    for token in tokens:
-        base = token.rsplit("/", 1)[-1].lower()
+    for token in raw:
+        base = _basename(token)
         if base in _ESCALATION:
             return Verdict(DENY, f"{base} runs as another user, outside every gate here")
         if base in _DESTRUCTION or base.startswith("mkfs."):
@@ -185,6 +237,16 @@ def _judge_segment(segment: str) -> Verdict:
     for pattern, why in _DENY_PATTERNS:
         if pattern.search(segment):
             return Verdict(DENY, why)
+
+    # A redirect writes to a path nothing in the allow list ever examined, so
+    # the stem stops being a useful thing to judge: `echo` is harmless right up
+    # until `echo pwned > ~/.bashrc`.
+    if any(token in _REDIRECTS or token.startswith(">") for token in raw):
+        return Verdict(ASK, "redirects output to a file")
+
+    flags = _WRITES_ANYWAY.get(stem, ())
+    if flags and any(t == f or t.startswith(f) for t in tokens[1:] for f in flags):
+        return Verdict(ASK, f"{stem} with {flags[0]} writes, and is not a read")
 
     if stem == "git":
         sub = _first_word_arg(tokens)
