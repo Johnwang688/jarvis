@@ -156,14 +156,50 @@ jarvis/
    `Annotated[str, "description"]`; never hand-write JSON schema. Defaults make
    a parameter optional.
 
-7. **`messages[0]` is the durable slot, and only agents that can use a block
-   get it.** It is rebuilt from source (base prompt + skills index + working
-   plan) at the top of **every step**, not every turn — a 40-step turn passes
-   the top of `run_turn` once, and step 40 is exactly when the plan matters.
-   Nothing in `context.py` touches index 0, which is what makes it the one
-   place a long run cannot lose. An agent without `skill_read` never sees the
-   skills index and one without `plan_write` never sees the plan block: never
-   describe a tool the model cannot call.
+7. **Durable state is rebuilt from source every step, and it lives in two
+   places for two different reasons** (split 2026-08-09; it was all
+   `messages[0]` before).
+
+   `messages[0]` holds the **stable** half: the base prompt with the avatar
+   rename applied. It changes only when the owner changes avatar.
+
+   The **volatile** half — skills index, working plan, recent-session titles —
+   is a `user` message carrying `CONTEXT_BLOCK_PREFIX`, lifted to the **tail**
+   of the transcript before every request. `agent.working_context(messages)`
+   finds it; `agent.durable_state(messages)` is both halves together, and is
+   what tests should assert against rather than an index.
+
+   **Why it moved: prompt caching.** Providers cache on a shared prefix, so a
+   single `plan_write` at step 3 rewrote byte 0 and made every later step
+   re-pay for the entire transcript. At the tail, the same write invalidates
+   only what follows it — which is nothing. This is exactly why Claude Code
+   puts its volatile state in `<system-reminder>` blocks on the latest user
+   message rather than in the system prompt.
+
+   **It is still prune-proof, for a better reason.** Index 0 was safe because
+   nothing in `context.py` touches it; the block is safe because it is *rebuilt
+   from source every step*, so a compaction that eats it costs nothing — the
+   next step writes it again. Rebuilt per **step**, not per turn: a 40-step
+   turn passes the top of `run_turn` once, and step 40 is exactly when the plan
+   matters.
+
+   Three things that fall out and are pinned by `tests/longhorizon_check.py`:
+   the block is matched by **identity**, not equality, when it is lifted (two
+   agents can hold blocks with identical text, and `list.remove` would take the
+   wrong one); there is never more than **one** of it, within a turn or across
+   turns; and it is **dropped before `session.record()`**, because persisting
+   it would freeze one run's plan and skills index into the file and resume
+   into a stale copy of both — the same reasoning that already kept
+   `messages[0]` out of the save.
+
+   Unchanged: an agent without `skill_read` never sees the skills index and one
+   without `plan_write` never sees the plan block. Never describe a tool the
+   model cannot call.
+
+   Consequence worth knowing: the block is a real message, so **anything
+   counting messages must exclude it** — `tests/longhorizon_check.py` has a
+   `_n()` helper for exactly this, because scripts branching on
+   `len(messages)` silently took the wrong branch when it appeared.
 
 8. **Per-run state reaches tools through `runtime.py`, and fails closed.**
    `dispatch()` calls `func(**arguments)` with no agent reference, so the plan
@@ -1947,24 +1983,19 @@ defaulting to the same model so behaviour is unchanged but movable.
 Deliberately **not** done in this round, because they are decisions rather than
 defects and are the owner's to make:
 
-- **Hooks and permission rule matchers.** Jarvis gates on a binary `dangerous`
-  flag plus an allowlist matched on a command's first word; Claude Code matches
-  rules like `Bash(npm run test:*)` and runs user programs at PreToolUse. That
-  is a new subsystem, and it lands in `permissions.py`, which is
-  SELF_PROTECTED precisely so it does not change casually.
-- **A typed sub-agent fleet.** One synchronous shape versus agent types with
-  their own prompts, tools and models running in the background. The blocker is
-  known and written down: `SESSION` is a module-level singleton, so concurrent
-  children would interleave on one Playwright page and share one 120-action
-  budget.
-- **Moving the durable slot off `messages[0]`.** Invariant 7 puts volatile
-  state (plan, skills index, session titles) at position 0 because nothing in
-  `context.py` can reach it. That is prune-proof and **cache-hostile**: a
-  change at position 0 invalidates the whole prefix cache, so every
-  `plan_write` makes the next step re-pay for the entire transcript. Claude
-  Code's `<system-reminder>` blocks ride the *latest* user message for exactly
-  this reason — worse for durability, better for caching. Both are coherent;
-  picking between them is an architecture call, not a bug fix.
+- ~~Permission rule matchers.~~ **Done 2026-08-09** — see *Command rules* in
+  Safety design. Still not done: **hooks**, i.e. running the owner's own
+  programs at PreToolUse/PostToolUse. The rules engine covers the cases hooks
+  were wanted for here; a general hook runner is a bigger idea and wants its
+  own conversation.
+- ~~A typed sub-agent fleet.~~ **Done 2026-08-09** — see *Sub-agents are typed*
+  in Safety design. The known blocker was handled rather than dodged: the
+  browser type is `concurrent_safe=False`, so the fleet serialises exactly the
+  children that share the Playwright singleton and runs everything else
+  together.
+- ~~Moving the durable slot off `messages[0]`.~~ **Done 2026-08-09** — see
+  invariant 7. The volatile blocks ride a rebuilt-every-step block at the tail
+  now, so a `plan_write` no longer invalidates the whole prefix cache.
 
 ### PENDING LIVE VALIDATION — needs API keys (delete this section once done)
 

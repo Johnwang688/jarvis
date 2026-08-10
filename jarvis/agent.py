@@ -25,6 +25,12 @@ MAX_PARALLEL_TOOLS = 4
 # and short enough that a model stuck in a loop cannot spend much.
 MAX_CONTINUATIONS = 2
 
+CONTEXT_BLOCK_PREFIX = (
+    "[Working context — your skills index, your plan, and recent conversations. "
+    "Rewritten fresh every step, so it is always current. This is your own "
+    "state, not a new request from the user.]\n\n"
+)
+
 COMPACTION_PROMPT = """You are compacting the earlier part of your own agent \
 transcript so the run can continue. What you write replaces those messages \
 permanently — anything you leave out is gone, and you are the one who will need \
@@ -53,6 +59,31 @@ CONTINUE_NUDGE = (
     "Continue from exactly where it stopped — do not repeat what you already said. "
     "If it was going to be very long, finish it briefly instead.]"
 )
+
+
+def working_context(messages: list[dict[str, Any]]) -> str:
+    """The working-context block's text, or "" — wherever it currently sits.
+
+    One place to ask, because the block moves: it is lifted to the tail before
+    every request, so its index is not something a caller should be reasoning
+    about.
+    """
+    for message in messages:
+        content = message.get("content")
+        if isinstance(content, str) and content.startswith(CONTEXT_BLOCK_PREFIX):
+            return content
+    return ""
+
+
+def durable_state(messages: list[dict[str, Any]]) -> str:
+    """Everything the model is told that pruning cannot take away.
+
+    The stable system prompt plus the working-context block. Split across two
+    messages since 2026-08-09 for prompt-cache reasons; this is the view that
+    does not care where either half lives.
+    """
+    head = messages[0].get("content") if messages else ""
+    return (head if isinstance(head, str) else "") + "\n\n" + working_context(messages)
 
 
 def _call_name(call: dict) -> str:
@@ -150,6 +181,9 @@ class Agent:
         # agents can be running at once (a workflow thread, the face's request
         # threads), and they must not share a checklist.
         self.plan: dict[str, str] = {"text": ""}
+        # The working-context block currently in `messages`, tracked by identity
+        # so it can be lifted back to the tail each step. See _refresh_system.
+        self._context_block: dict[str, Any] | None = None
         # Agents with skill tools get the always-visible skills index appended
         # to their system message; agents without them (designer, benches)
         # must not see references to tools they cannot call. Same rule for the
@@ -170,16 +204,37 @@ class Agent:
             self.messages.extend(session.restore_messages())
 
     def _refresh_system(self) -> None:
-        """Rebuild messages[0] from source: base prompt + skills index + plan
-        + recent-session titles.
+        """Rebuild the durable state from source, at the top of every *step*.
 
-        Called at the top of every *step*, not just every turn. The plan is the
-        one thing that has to stay visible on step 40 of a long run, and a turn
-        that runs 40 steps only passes the top of run_turn once.
+        Two places, for two different reasons.
 
-        Safe by construction: index 0 is re-sent with every request anyway, and
-        neither pruning nor compaction ever touches it.
+        `messages[0]` holds the **stable** part: the base prompt with the avatar
+        rename applied. It changes only when the owner changes avatar, so the
+        prefix every request shares stays byte-identical almost always.
+
+        The **volatile** part — skills index, working plan, recent-session
+        titles — rides a block at the *tail* instead (moved off index 0 on
+        2026-08-09). It used to live at index 0 because nothing in `context.py`
+        touches index 0, which made it prune-proof. It is still prune-proof, for
+        a better reason: it is rebuilt from source every step, so compaction
+        eating it costs nothing — the next step writes it again.
+
+        What index 0 cost was **prompt caching**. Providers cache on a shared
+        prefix, so a single `plan_write` at step 3 rewrote byte 0 and made every
+        later step re-pay for the entire transcript. At the tail, the same write
+        invalidates only what follows it, which is nothing. This is why Claude
+        Code puts its volatile state on the latest user message rather than in
+        the system prompt, and it is the same trade read the other way round.
+
+        Called per *step*, not per turn: a plan written at step 3 has to still
+        be there at step 40, and a 40-step turn passes the top of run_turn once.
         """
+        # The identity rename goes on the *base*: the avatar can change
+        # mid-session (HUD picker, `jarvis avatar`, set_avatar), and rebuilding
+        # from source is what makes that land immediately and survive
+        # compaction. A no-op on the default avatar.
+        self.messages[0]["content"] = avatars.rename(self._base_system)
+
         blocks = []
         if self._has_skills:
             blocks.append(tools.skills.index())
@@ -187,13 +242,32 @@ class Agent:
             blocks.append(tools.plan.block())
         if self._has_sessions:
             blocks.append(sessions.index(current=self.session.id if self.session else None))
-        extra = "\n\n".join(b for b in blocks if b)
-        # The identity rename goes on the *base*, not the blocks: the avatar
-        # can change mid-session (HUD picker, `jarvis avatar`, set_avatar), and
-        # rebuilding from source every step is what makes that land immediately
-        # and survive compaction. It is a no-op on the default avatar.
-        base = avatars.rename(self._base_system)
-        self.messages[0]["content"] = base + ("\n\n" + extra if extra else "")
+        text = "\n\n".join(b for b in blocks if b)
+
+        self._drop_context_block()
+        if text:
+            # A plain user message: mid-conversation system messages are not
+            # supported across every model OpenRouter serves, the same reason
+            # compaction's summary is one.
+            self._context_block = {"role": "user", "content": CONTEXT_BLOCK_PREFIX + text}
+            self.messages.append(self._context_block)
+
+    def _drop_context_block(self) -> None:
+        """Remove the working-context block, wherever it drifted to.
+
+        Matched by **identity**, not equality: two agents can hold blocks with
+        identical text, and `list.remove` would take the wrong one. If
+        compaction already absorbed it there is simply nothing to find, which
+        is fine — the next `_refresh_system` writes a fresh one.
+        """
+        block = self._context_block
+        self._context_block = None
+        if block is None:
+            return
+        for index, message in enumerate(self.messages):
+            if message is block:
+                del self.messages[index]
+                return
 
     def _summarize(self, transcript: str) -> str:
         """Compress old history into fixed sections, on the orchestrator tier.
@@ -299,6 +373,11 @@ class Agent:
             turn = self._run_turn(user_input, images)
         if self.session is not None:
             try:
+                # Never persist the working-context block: it is regenerated
+                # from source every step, so saving it would freeze one run's
+                # plan and skills index into the file and resume into a stale
+                # copy of both. Same reasoning that keeps messages[0] out.
+                self._drop_context_block()
                 self.session.record(user_input, turn, self.messages)
             except Exception as exc:  # persistence must never break a turn
                 self.on_event("interim_text", f"[session not saved: {exc}]")

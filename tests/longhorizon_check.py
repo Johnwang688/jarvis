@@ -4,10 +4,11 @@ Two things are under test, both aimed at the same failure: a run that goes long
 enough to forget what it was doing.
 
 The plan (jarvis/tools/plan.py) must hold:
-  1. plan_write stores through dispatch, and renders into messages[0]
+  1. plan_write stores through dispatch, and reaches the model's durable state
   2. it is refreshed every *step*, not every turn — a 40-step turn only passes
      the top of run_turn once, and step 40 is exactly when it matters
-  3. it survives compaction, because messages[0] is never pruned
+  3. it survives compaction — it is rebuilt from source every step, so even
+     a compaction that ate the block costs nothing
   4. an agent without plan_write is never told about a plan it cannot write
   5. two agents running at once do not share a checklist
 
@@ -53,6 +54,23 @@ def _reply(text="", calls=None):
     )
 
 
+def _n(messages) -> int:
+    """Message count ignoring the working-context block.
+
+    The block is appended to the tail before every request (see
+    `agent._refresh_system`), so a script branching on `len(messages)` would
+    see one extra and take the wrong branch. It is state, not conversation.
+    """
+    return sum(
+        1
+        for m in messages
+        if not (
+            isinstance(m.get("content"), str)
+            and m["content"].startswith(agent_mod.CONTEXT_BLOCK_PREFIX)
+        )
+    )
+
+
 def _call(cid, name, **args):
     return {"id": cid, "function": {"name": name, "arguments": json.dumps(args)}}
 
@@ -66,7 +84,7 @@ class Script:
         self.calls = 0
 
     def __call__(self, model, messages, **kwargs):
-        self.systems.append(messages[0]["content"])
+        self.systems.append(agent_mod.durable_state(messages))
         self.calls += 1
         if self.replies:
             step = self.replies.pop(0)
@@ -102,7 +120,7 @@ def plan_basic_checks() -> None:
     assert "Working plan" not in script.systems[0], "plan appeared before it was written"
     assert "Working plan" in script.systems[1], "plan never reached the system message"
     assert "write tests" in script.systems[1]
-    print("ok  plan: written through dispatch and injected into messages[0]")
+    print("ok  plan: written through dispatch and injected into the durable state")
 
 
 def plan_per_step_checks() -> None:
@@ -126,11 +144,11 @@ def plan_per_step_checks() -> None:
     assert all("the one thing that matters" in s for s in script.systems[1:]), (
         "plan flickered out of the system message mid-turn"
     )
-    print(f"ok  plan: still in messages[0] on step {script.calls} of one turn")
+    print(f"ok  plan: still in the durable state on step {script.calls} of one turn")
 
 
 def plan_survives_compaction_checks() -> None:
-    """Compaction is what eats a transcript; messages[0] is out of its reach.
+    """Compaction is what eats a transcript; the durable state outlives it.
 
     Driven across several turns rather than in one long one, because that is
     the only shape where compaction can actually fire: a cut point has to be a
@@ -162,12 +180,81 @@ def plan_survives_compaction_checks() -> None:
         for m in agent.messages
     )
     assert compacted, "compaction never ran, so this proves nothing"
-    assert "survive compaction" in agent.messages[0]["content"], "plan lost to compaction"
+    assert "survive compaction" in agent_mod.durable_state(agent.messages), "plan lost to compaction"
     assert "survive compaction" in last_systems[-1], "plan missing from the final request"
     assert agent.messages[1]["content"] == "the original request", (
         f"the original request was compacted away: {agent.messages[1]}"
     )
     print("ok  plan: survives compaction, and so does the original request")
+
+
+def stable_prefix_checks() -> None:
+    """The reason the volatile blocks moved off messages[0]: prompt caching.
+
+    Providers cache on a shared prefix, so a plan written at step 3 used to
+    rewrite byte 0 and make every later step re-pay for the whole transcript.
+    With the block at the tail, writing a plan changes only what follows the
+    last thing the model said — and index 0 is byte-identical all the way
+    through.
+    """
+    agent = Agent(tool_names=["plan_write", "get_datetime"], max_steps=6)
+
+    heads: list[str] = []
+    tails: list[str] = []
+
+    def script(model, messages, **kwargs):
+        heads.append(messages[0]["content"])
+        tails.append(agent_mod.working_context(messages))
+        if len(heads) == 1:
+            return _reply("", [_call("c1", "plan_write", plan="- [ ] step one")])
+        if len(heads) == 2:
+            return _reply("", [_call("c2", "plan_write", plan="- [x] step one\n- [ ] two")])
+        return _reply("done")
+
+    _run(agent, script)
+
+    assert len(set(heads)) == 1, (
+        "messages[0] changed between steps — that invalidates the whole prompt "
+        f"cache, which is exactly what this move was for: {len(set(heads))} variants"
+    )
+    assert heads[0].startswith("You are Jarvis"), heads[0][:60]
+    assert "Working plan" not in heads[0], "a volatile block leaked back into messages[0]"
+
+    # ...while the tail block did change, which is where the churn belongs.
+    assert tails[0] == "", tails[0]
+    assert "step one" in tails[1] and "- [x] step one" in tails[2], tails
+
+    # And it is always the last message, so nothing after it can be invalidated.
+    assert agent.messages[-2]["content"].startswith(agent_mod.CONTEXT_BLOCK_PREFIX) or \
+        agent.messages[-1]["content"].startswith(agent_mod.CONTEXT_BLOCK_PREFIX), \
+        [m["role"] for m in agent.messages]
+    print("ok  prefix: messages[0] byte-identical across steps, churn confined to the tail")
+
+
+def context_block_hygiene_checks() -> None:
+    """The block is state, not conversation: exactly one, never persisted."""
+    agent = Agent(tool_names=["plan_write", "get_datetime"], max_steps=8)
+    replies = [_reply("", [_call("c0", "plan_write", plan="- [ ] a")])]
+    replies += [_reply("", [_call(f"c{i}", "get_datetime")]) for i in range(1, 5)]
+    replies.append(_reply("done"))
+    _run(agent, Script(*replies))
+
+    blocks = [
+        m for m in agent.messages
+        if isinstance(m.get("content"), str)
+        and m["content"].startswith(agent_mod.CONTEXT_BLOCK_PREFIX)
+    ]
+    assert len(blocks) == 1, f"{len(blocks)} context blocks accumulated in one turn"
+
+    # A second turn must not leave the first turn's block behind either.
+    _run(agent, Script(_reply("again")), text="next")
+    blocks = [
+        m for m in agent.messages
+        if isinstance(m.get("content"), str)
+        and m["content"].startswith(agent_mod.CONTEXT_BLOCK_PREFIX)
+    ]
+    assert len(blocks) == 1, f"{len(blocks)} context blocks after a second turn"
+    print("ok  block: exactly one, lifted to the tail rather than accumulating")
 
 
 def plan_absent_checks() -> None:
@@ -191,10 +278,10 @@ def plan_isolation_checks() -> None:
     # leaking between threads. Route on the transcript instead.
     def script(model, messages, **kwargs):
         tag = messages[1]["content"]
-        if f"- [ ] {tag}" not in messages[0]["content"]:
+        if f"- [ ] {tag}" not in agent_mod.durable_state(messages):
             return _reply("", [_call("c1", "plan_write", plan=f"- [ ] {tag}")])
         barrier.wait(timeout=5)  # both plans written before either is read
-        results[tag] = messages[0]["content"]
+        results[tag] = agent_mod.durable_state(messages)
         return _reply("done")
 
     def drive(tag: str) -> None:
@@ -228,12 +315,12 @@ def subagent_isolation_checks() -> None:
     def script(model, messages, **kwargs):
         system = messages[0]["content"]
         if system.startswith("You are a sub-agent"):
-            if len(messages) <= 2:
+            if _n(messages) <= 2:
                 return _reply("", [_call("k1", "get_datetime")])
             # The child saw the dump; it reports only the conclusion drawn from it.
             assert bulk in json.dumps(messages), "the child never actually saw the bulk"
             return _reply("the answer is 42")
-        if len(messages) <= 2:
+        if _n(messages) <= 2:
             return _reply("", [_call("p1", "run_subagent", task="go read the thing")])
         return _reply("relayed")
 
@@ -279,7 +366,7 @@ def subagent_approval_checks() -> None:
     def script(model, messages, **kwargs):
         if messages[0]["content"].startswith("You are a sub-agent"):
             return _reply("nothing to report")
-        if len(messages) <= 2:
+        if _n(messages) <= 2:
             return _reply("", [_call("p1", "run_subagent", task="have a look")])
         return _reply("done")
 
@@ -331,7 +418,7 @@ def subagent_toolset_checks() -> None:
     def script(model, messages, **kwargs):
         if messages[0]["content"].startswith("You are a sub-agent"):
             return _reply("nothing to report")
-        if len(messages) <= 2:
+        if _n(messages) <= 2:
             return _reply("", [_call("p1", "run_subagent", task="look around")])
         return _reply("done")
 
@@ -380,7 +467,7 @@ def subagent_cancel_checks() -> None:
 
 
 def subagent_plan_survival_checks() -> None:
-    """The parent's plan must still be in messages[0] after a sub-agent runs.
+    """The parent's plan must survive a sub-agent call.
 
     The child binds the same ContextVars. Run it in this context rather than a
     copy and the parent comes back holding the child's empty plan — the plan
@@ -390,11 +477,13 @@ def subagent_plan_survival_checks() -> None:
         system = messages[0]["content"]
         if system.startswith("You are a sub-agent"):
             return _reply("child done")
-        if len(messages) <= 2:
+        if _n(messages) <= 2:
             return _reply("", [_call("p1", "plan_write", plan="- [ ] parent's own plan")])
-        if len(messages) <= 5:
+        if _n(messages) <= 5:
             return _reply("", [_call("p2", "run_subagent", task="go")])
-        assert "parent's own plan" in system, "the plan was lost across the sub-agent call"
+        assert "parent's own plan" in agent_mod.durable_state(messages), (
+            "the plan was lost across the sub-agent call"
+        )
         assert runtime.depth() == 0, f"parent's depth was clobbered: {runtime.depth()}"
         return _reply("still on plan")
 
@@ -409,6 +498,8 @@ def main() -> int:
     plan_basic_checks()
     plan_per_step_checks()
     plan_survives_compaction_checks()
+    stable_prefix_checks()
+    context_block_hygiene_checks()
     plan_absent_checks()
     plan_isolation_checks()
     subagent_isolation_checks()

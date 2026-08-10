@@ -49,10 +49,18 @@ def agent_image_check() -> None:
         assert isinstance(user["content"], list), user
         assert user["content"][0] == {"type": "text", "text": "make this"}
         assert user["content"][1]["image_url"]["url"] == "data:image/png;base64,QUJD"
-        assert agent.messages[2]["role"] == "assistant"
+        # Indexed by role rather than position: the working-context block rides
+        # the tail of the transcript (agent._refresh_system, 2026-08-09), so a
+        # fixed index no longer lands where it used to.
+        assert agent.messages[-1]["role"] == "assistant", [m["role"] for m in agent.messages]
 
         agent.run_turn("plain text")
-        assert isinstance(agent.messages[3]["content"], str)
+        typed = [
+            m for m in agent.messages
+            if m["role"] == "user" and isinstance(m.get("content"), str)
+            and not m["content"].startswith(agent_mod.CONTEXT_BLOCK_PREFIX)
+        ]
+        assert typed and typed[-1]["content"] == "plain text", typed
     finally:
         agent_mod.llm.chat = real
     print("ok  agent: images ride the user message as image_url parts")

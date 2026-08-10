@@ -109,7 +109,7 @@ def injection_checks() -> None:
     seen: list[str] = []
 
     def fake_chat(model, messages, tools=None, **kwargs):
-        seen.append(messages[0]["content"])
+        seen.append(agent_mod.durable_state(messages))
         return types.SimpleNamespace(
             message={"content": "ok"}, tool_calls=[], text="ok", cost_usd=0.0, latency_s=0.0
         )

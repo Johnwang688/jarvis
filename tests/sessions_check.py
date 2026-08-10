@@ -181,13 +181,13 @@ def agent_checks() -> None:
         assert [m["role"] for m in resumed.messages] == ["system", "user", "assistant"]
         resumed.run_turn("what did I say?")
         assert seen[-1][1]["content"] == "remember the sandbox pin"
-        assert "RECENT SESSIONS" in seen[-1][0]["content"], "index missing for a session agent"
-        assert "← this conversation" in seen[-1][0]["content"]
+        assert "RECENT SESSIONS" in agent_mod.durable_state(seen[-1]), "index missing for a session agent"
+        assert "← this conversation" in agent_mod.durable_state(seen[-1])
 
         # An agent without the session tools must not be shown the index.
         blind = agent_mod.Agent(approve=lambda t, a: False, tool_names=["read_file"])
         blind.run_turn("hi")
-        assert "RECENT SESSIONS" not in seen[-1][0]["content"]
+        assert "RECENT SESSIONS" not in agent_mod.durable_state(seen[-1])
 
         # No session bound: nothing is written, and the loop still runs.
         before = len(sessions.all_sessions())
