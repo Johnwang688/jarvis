@@ -249,7 +249,11 @@ def subagent_isolation_checks() -> None:
     transcript = json.dumps(agent.messages)
     assert "PAGE-DUMP" not in transcript, "the child's tool output leaked into the parent"
     assert "the answer is 42" in transcript, "the child's answer never came back"
-    assert "sub-agent: 2 step(s)" in transcript, transcript[-400:]
+    # The footer names the type that ran and what it cost, so the parent can
+    # see it delegated and to whom. Format changed with typed sub-agents
+    # (2026-08-09); what matters is that both facts are still there.
+    assert "2 step(s)" in transcript, transcript[-400:]
+    assert "generalist" in transcript, transcript[-400:]
     print("ok  subagent: only the answer comes back, not the material")
 
 
@@ -348,9 +352,14 @@ def subagent_toolset_checks() -> None:
         f"child exceeded its parent's toolset: {set(child_tools) - set(workflows.SAFE_TOOLS)}"
     )
     # A parent that does have the browser passes it down — the intersection
-    # narrows, it does not blanket-ban.
+    # narrows, it does not blanket-ban. Asked of the browser *type* since
+    # sub-agents became typed (2026-08-09): it is the only one carrying them.
+    from jarvis import agents
+
     runtime.bind(tool_names=set(subagent.SUBAGENT_TOOLS))
-    assert "browser_snapshot" in subagent._child_tools(), "the intersection over-narrowed"
+    assert "browser_snapshot" in subagent._child_tools(
+        agents.get("browser")
+    ), "the intersection over-narrowed"
     print(f"ok  subagent: toolset intersected with the parent ({len(child_tools)} tools, no browser)")
 
 

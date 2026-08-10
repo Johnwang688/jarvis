@@ -326,6 +326,30 @@ jarvis/
   line. Session files hold what already went through a transcript, so they
   inherit the scrub — `dispatch()` cleans a result before it becomes a
   message, and nothing kept out of context can arrive here later.
+- **Sub-agents are typed, and a fleet runs them together** (`agents.py` +
+  `tools/subagent.py`, 2026-08-09). A type is a brief, a toolset and a step
+  budget named together — explorer / researcher / reviewer / scribe / browser /
+  generalist — so the caller picks a *kind* of worker instead of describing one
+  from scratch. `run_subagent` sends one and blocks; `run_fleet` sends up to
+  six at once. **A type never carries a model: every child is the orchestrator
+  tier** (owner's call — all Luna). The cost lever here is `delegate()` and the
+  context lever is the sub-agent; a cheap child that returns a confidently
+  wrong answer costs the parent more than it saved, because the parent cannot
+  see the work behind it.
+
+  **The browser type is `concurrent_safe=False`, and that is what makes the
+  fleet legal.** `browser.SESSION` is a module-level singleton with one page
+  and one shared 120-action budget — the caveat this file has carried since
+  sub-agents were introduced ("if sub-agents ever become concurrent, this is
+  the first thing that breaks"). `run_fleet` runs concurrent-unsafe jobs one
+  at a time and everything else together, so the thing that would break never
+  happens; `tests/fleet_check.py` asserts peak browser concurrency is exactly
+  1 while explorers overlap. **`run_fleet` is deliberately not in
+  `workflows.SAFE_TOOLS`**: `run_subagent` is there because it is synchronous
+  and inherits the deny-all approver, but six concurrent children from a
+  thread nobody is watching is a spend amplifier, which is a different
+  question.
+
 - **A sub-agent can never exceed its parent** (`tools/subagent.py`,
   2026-08-01). `run_subagent` is synchronous — the parent blocks — which is
   what makes it safe to give a child browser tools where a background workflow
@@ -509,6 +533,16 @@ jarvis/
   write pin (every write URL targets the pinned document), and the key
   bundle refused/scrubbed by all three secrets layers. Run after touching
   `onshape_auth.py`, `tools/onshape.py`, or `secrets.py`.
+- `tests/fleet_check.py` — free checks for typed sub-agents, `llm.chat`
+  stubbed: every type's tools exist and none is dangerous, **every child on the
+  orchestrator model** (and no type carrying one), the toolset intersected with
+  the parent so the browser stays unreachable to a workflow, four children
+  finishing in the time of one, **peak browser concurrency of exactly 1 while
+  explorers overlap**, reporting in call order, bad/empty/oversized job lists
+  refused, a raising child still reported, depth cap and cancellation, the
+  parent's approver being what a child dispatches with, and `run_fleet` staying
+  out of `workflows.SAFE_TOOLS`. Run after touching `agents.py` or
+  `tools/subagent.py`.
 - `tests/rules_check.py` — free checks for command rules and the fetch-execute
   reviewer, with `shell._run` replaced by a recorder throughout, because a test
   for "rm -rf / must be refused" must not depend on the refusal working. Covers
