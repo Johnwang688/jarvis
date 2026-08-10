@@ -355,6 +355,15 @@ TIERS: dict[str, str] = {
     "subagent": os.environ.get(
         "JARVIS_SUBAGENT", os.environ.get("JARVIS_ORCHESTRATOR", "openai/gpt-5.6-luna")
     ),
+    # Compacts a transcript when it outgrows the window. Luna, not the cheap
+    # tier (2026-08-09): compaction is the one summarization whose output the
+    # model then *works from* for the rest of the run. Everything the summary
+    # drops is gone — gpt-oss-20b's paraphrases lost which of several attempts
+    # had actually worked, and a run that forgets that repeats it. The cheap
+    # tier is right for bulk text nobody acts on; this is not that.
+    "compaction": os.environ.get(
+        "JARVIS_COMPACTION", os.environ.get("JARVIS_ORCHESTRATOR", "openai/gpt-5.6-luna")
+    ),
     # Judges a script a `curl … | sh` would run (command_review.py). The
     # orchestrator tier on purpose: this decides whether arbitrary remote code
     # executes on the owner's machine, which is the last place to save money.
