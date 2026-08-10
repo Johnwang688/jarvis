@@ -49,9 +49,10 @@ from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 from .. import agent as agent_mod
-from .. import config, discord_agent, discord_approvals, permissions, sessions, voice
+from .. import avatars, config, discord_agent, discord_approvals, permissions, sessions, voice
 from ..tools import secrets as secrets_mod
 from ..tools import voicectl, whiteboardctl
 from .approvals import ApprovalBroker
@@ -282,6 +283,10 @@ DISCORD_APPROVALS.bind(APPROVALS)
 # broadcast keeps every open window's toggle in sync with reality.
 voicectl.on_change(lambda muted: broadcast("mute", {"muted": muted}))
 
+# Switching avatars from anywhere — the HUD picker, `jarvis avatar`, or the
+# set_avatar tool — redraws every open window: name, wake phrases, and face.
+avatars.on_change(lambda av: broadcast("avatar", av.describe()))
+
 # whiteboard_close broadcasts a self-close signal. Only whiteboard.html
 # handles it; jarvis.html ignores it on purpose (see whiteboardctl).
 whiteboardctl.on_close(lambda: broadcast("wb_close", {}))
@@ -437,6 +442,10 @@ class FaceHandler(SimpleHTTPRequestHandler):
                     "tts": config.TTS_MODEL,
                     "voice": config.TTS_VOICE,
                     "speed": config.TTS_SPEED,
+                    # Who he is presenting as: name, wake phrases, accent, and
+                    # whether there is a face to draw. The art itself is a
+                    # separate resource (see /avatar.svg).
+                    "avatar": avatars.active().describe(),
                     "muted": voicectl.is_muted(),
                     "permissions": permissions.mode(),
                     "allowlist": len(permissions.load_allowlist()),
@@ -447,6 +456,17 @@ class FaceHandler(SimpleHTTPRequestHandler):
                         if _session
                         else None
                     ),
+                }
+            )
+            return
+        if self.path.split("?", 1)[0] == "/avatar.svg":
+            self._avatar_svg()
+            return
+        if self.path == "/avatars":
+            self._json_reply(
+                {
+                    "current": avatars.active().slug,
+                    "avatars": [a.describe() for a in avatars.available()],
                 }
             )
             return
@@ -461,6 +481,58 @@ class FaceHandler(SimpleHTTPRequestHandler):
             self._json_reply({"current": current, "sessions": recent})
             return
         super().do_GET()
+
+    def _avatar_svg(self):
+        """One avatar's art, sanitized, as its own resource.
+
+        Served rather than inlined so the HUD can render it in an `<img>`,
+        which cannot run script or fetch anything however the file is written.
+        `avatars.sanitize_svg` has already stripped it; the CSP is the belt to
+        that suspenders, and the reason this file never goes near innerHTML.
+
+        `?slug=` picks one — the picker draws every avatar's face at thumbnail
+        size — and defaults to the active one. `avatars.load()` validates the
+        slug against its own pattern, so this is not a path into the
+        filesystem: a slug with a slash or a dot in it resolves to nothing.
+        """
+        query = parse_qs(urlparse(self.path).query)
+        slug = (query.get("slug") or [""])[0]
+        av = avatars.load(slug) if slug else avatars.active()
+        art = avatars.svg(av) if av else None
+        if not art:
+            self._json_error(404, "no avatar art")
+            return
+        body = art.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "image/svg+xml")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _switch_avatar(self):
+        """Change who he is presenting as. Same-origin, like /approve.
+
+        Not destructive, but it moves the wake word and the name — nothing
+        outside the window should be able to reach in and do that.
+        """
+        origin = self.headers.get("Origin")
+        host = self.headers.get("Host", "")
+        if origin and origin not in (f"http://{host}", f"https://{host}"):
+            self._json_error(403, "cross-origin avatar switch refused")
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            data = json.loads(self.rfile.read(length) or b"{}")
+            av = avatars.set_active(str(data.get("slug", "")))
+        except LookupError as exc:
+            self._json_error(404, str(exc))
+            return
+        except Exception as exc:
+            self._json_error(400, f"{type(exc).__name__}: {exc}")
+            return
+        self._json_reply(av.describe())
 
     def _events(self):
         """Server-sent events: one long-lived response per HUD window."""
@@ -511,6 +583,9 @@ class FaceHandler(SimpleHTTPRequestHandler):
             return
         if self.path == "/session":
             self._switch_session()
+            return
+        if self.path == "/avatar":
+            self._switch_avatar()
             return
         if self.path == "/cancel":
             # Abandon the turn in flight. Same-origin like /approve: it is not

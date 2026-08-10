@@ -74,6 +74,20 @@
     position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
     cursor: pointer; touch-action: none; user-select: none; z-index: 4;
   }
+  /* The avatar's face, where the triangle emblem would be. An <img>, never
+     inline markup: the file is owner-authored but `write_file` can reach
+     avatars/, and this is the window that gates approvals — an <img> cannot
+     run script or fetch anything whatever the SVG says. Fixed size and
+     pointer-events:none keep it mechanically confined to the orb: it cannot
+     grow to cover the authorization card or intercept a click meant for it. */
+  #avatar {
+    position: absolute; left: 50%; top: 50%; z-index: 5; display: none;
+    width: 186px; height: 186px; pointer-events: none; user-select: none;
+    transform: translate(-50%, -50%) scale(1);
+    filter: drop-shadow(0 0 14px rgba(56,189,248,.55));
+    transition: filter .25s linear;
+  }
+  #avatar.on { display: block; }
 
   /* ---- angular panels ---- */
   .panel {
@@ -88,8 +102,19 @@
     border-bottom: 1px solid var(--cyan-faint); padding-bottom: 7px; margin-bottom: 9px;
   }
   #comms { left: 22px; top: 76px; bottom: 60px; width: 305px; display: flex; flex-direction: column; }
-  #systems { right: 22px; top: 76px; width: 285px; }
-  #ops { right: 22px; top: 388px; bottom: 60px; width: 285px; display: flex; flex-direction: column; }
+
+  /* The right-hand column is a flex stack, not two absolutely-positioned
+     panels: SYSTEMS grows a row at a time (WAKE WORD, PERMISSIONS, SESSION,
+     AVATAR…) and a hard-coded `top` for OPERATIONS meant each new row ate
+     into it until it covered the row above. SYSTEMS takes the height it
+     needs; OPERATIONS takes the rest. */
+  #rail {
+    position: absolute; right: 22px; top: 76px; bottom: 60px; width: 285px;
+    z-index: 5; display: flex; flex-direction: column; gap: 14px;
+  }
+  #rail .panel { position: relative; }
+  #systems { flex: 0 0 auto; }
+  #ops { flex: 1 1 auto; min-height: 130px; display: flex; flex-direction: column; }
 
   /* comms log */
   #transcript { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; scrollbar-width: thin; }
@@ -202,7 +227,9 @@
   }
 
   /* ---- session picker ---- */
-  #sessions {
+  /* modal pickers — conversations, avatars. Same skin, same rules: while one
+     is open PTT is inert, and Escape closes without choosing. */
+  .picker {
     position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
     z-index: 20; width: 520px; max-width: calc(100vw - 60px); display: none;
     background: linear-gradient(160deg, rgba(8,17,28,.98), rgba(4,8,14,.98));
@@ -210,12 +237,12 @@
     clip-path: polygon(0 14px, 14px 0, 100% 0, 100% calc(100% - 14px), calc(100% - 14px) 100%, 0 100%);
     padding: 16px 18px; box-shadow: 0 0 46px rgba(34,211,238,.14);
   }
-  #sessions.on { display: block; }
-  #sessions h3 {
+  .picker.on { display: block; }
+  .picker h3 {
     font: 600 10px var(--mono); letter-spacing: .35em; color: var(--cyan);
     border-bottom: 1px solid rgba(34,211,238,.18); padding-bottom: 7px;
   }
-  #sesslist { max-height: 46vh; overflow-y: auto; margin: 12px 0 4px; scrollbar-width: thin; }
+  #sesslist, #avatarlist { max-height: 46vh; overflow-y: auto; margin: 12px 0 4px; scrollbar-width: thin; }
   .sess {
     display: flex; justify-content: space-between; gap: 12px; align-items: baseline;
     padding: 8px 10px; cursor: pointer; border-left: 2px solid transparent;
@@ -224,14 +251,17 @@
   .sess:hover { background: rgba(34,211,238,.09); border-left-color: rgba(34,211,238,.55); }
   .sess.here { color: var(--cyan); border-left-color: var(--cyan); }
   .sess .when { font-size: 10.5px; color: #5f7590; letter-spacing: .1em; white-space: nowrap; }
-  #sessions .btns { display: flex; gap: 10px; margin-top: 12px; }
-  #sessions button {
+  .picker .btns { display: flex; gap: 10px; margin-top: 12px; }
+  .picker button {
     flex: 1; font: 600 11px var(--mono); letter-spacing: .22em; padding: 10px 0;
     background: transparent; color: var(--cyan); border: 1px solid rgba(34,211,238,.5);
     cursor: pointer; text-indent: .22em;
   }
-  #sessions button:hover { background: rgba(34,211,238,.13); }
-  #sessions button.close { color: #8fa3bb; border-color: #33465e; }
+  .picker button:hover { background: rgba(34,211,238,.13); }
+  .picker button.close { color: #8fa3bb; border-color: #33465e; }
+  /* avatar rows carry their own face at thumbnail size */
+  .sess .facethumb { width: 26px; height: 26px; flex: none; opacity: .85; }
+  .sess .avname { display: flex; align-items: center; gap: 10px; }
 
   #hint {
     position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%);
@@ -281,17 +311,19 @@
 <div class="corner" id="c-bl"></div><div class="corner" id="c-br"></div>
 
 <div id="banner">
-  <div class="title">J A R V I S</div>
+  <div class="title" id="banner-title">J A R V I S</div>
   <div id="status">INITIALIZING</div>
 </div>
 
 <canvas id="orb" width="480" height="480"></canvas>
+<img id="avatar" alt="" aria-hidden="true" />
 
 <div class="panel" id="comms">
   <h2>COMMS LOG</h2>
   <div id="transcript"></div>
 </div>
 
+<div id="rail">
 <div class="panel" id="systems">
   <h2>SYSTEMS</h2>
   <div id="clock">--:--:--</div>
@@ -305,6 +337,9 @@
     <div class="row"><span class="k">LAST TURN</span><span class="v" id="stat-last">—</span></div>
     <div class="row" id="wake-row" style="cursor:pointer" title="toggle the wake word">
       <span class="k">WAKE WORD</span><span class="v" id="wake-state">OFF</span>
+    </div>
+    <div class="row" id="avatar-row" style="cursor:pointer" title="change who he presents as">
+      <span class="k">AVATAR</span><span class="v" id="avatar-name">—</span>
     </div>
     <div class="row" id="mute-row" style="cursor:pointer" title="mute/unmute Jarvis's voice">
       <span class="k">VOICE OUT</span><span class="v" id="mute-state">ON</span>
@@ -320,16 +355,25 @@
   <h2>OPERATIONS</h2>
   <div id="opslist"></div>
 </div>
+</div><!-- /rail -->
 
 <div id="authveil"></div>
 <div id="approvals"></div>
 
-<div id="sessions">
+<div id="sessions" class="picker">
   <h3>CONVERSATIONS</h3>
   <div id="sesslist"></div>
   <div class="btns">
     <button id="sess-new">NEW SESSION</button>
     <button id="sess-close" class="close">CLOSE</button>
+  </div>
+</div>
+
+<div id="avatars" class="picker">
+  <h3>AVATAR</h3>
+  <div id="avatarlist"></div>
+  <div class="btns">
+    <button id="avatar-close" class="close">CLOSE</button>
   </div>
 </div>
 
@@ -412,6 +456,11 @@ window.__hud = {
   pendingAuth: () => authCards.size,
   stage: (n, m, b64, bytes) => stageFile(n, m, b64, bytes || 0),
   stagedCount: () => staged.length, sendTyped: () => sendTyped(),
+  matchesWake: (t) => matchesWake(t),
+  applyAvatar: (d) => applyAvatar(d), avatar: () => avatar,
+  openAvatars: () => openAvatars(), avatarShown: () => avatarShown,
+  rings: () => RINGS.map((r) => (r.poly ? `poly${r.poly}x${r.copies || 1}` :
+                                 r.ticks ? `ticks${r.ticks}` : `arcs${r.arcs.length}`)),
 };
 
 // ============================== ambient field ===============================
@@ -445,6 +494,118 @@ function drawParticles(now) {
 window.addEventListener("resize", resizeParticles);
 resizeParticles(); requestAnimationFrame(drawParticles);
 
+// ============================== avatar ======================================
+// Who he is presenting as: the name across the banner and in the COMMS log,
+// the wake phrases, the accent the orb burns, and the face drawn where the
+// triangle emblem would be. The server owns the choice (config.AVATAR_STATE,
+// or `jarvis face -a`), so every change round-trips through POST /avatar and
+// comes back as one description this window and the SSE broadcast both render.
+
+const DEFAULT_AVATAR = {
+  slug: "jarvis", name: "Jarvis", banner: "J A R V I S", label: "J.A.R.V.I.S.",
+  wake: ["JARVIS"], accent: "", has_svg: false,
+};
+
+let avatar = DEFAULT_AVATAR;
+let avatarAccent = "";   // "r,g,b" — recolours the cyan-family orb states
+let avatarShown = false; // true once the face is drawn, which retires the triangle
+
+function applyAvatar(desc) {
+  if (!desc) return;
+  avatar = { ...DEFAULT_AVATAR, ...desc };
+  $("banner-title").textContent = avatar.banner || avatar.name.toUpperCase();
+  $("avatar-name").textContent = (avatar.name || "").toUpperCase();
+  $("avatar-row").title = (avatar.description || "change who he presents as");
+
+  // Wake phrases come over the wire as regex *source*, compiled here. A
+  // pattern that will not compile is dropped rather than throwing: a bad
+  // avatar must not be able to disarm the wake word entirely, so an empty
+  // result falls back to the built-ins.
+  const compiled = [];
+  for (const src of desc.wake_regex || []) {
+    try { compiled.push(new RegExp(src, "i")); } catch { /* skip */ }
+  }
+  wakePatterns = compiled.length ? compiled : WAKE_PATTERNS.slice();
+
+  // Which outer ring the orb turns. An unknown name keeps the default — the
+  // orb is the PTT button, and an avatar must not be able to blank it.
+  RINGS = RING_SETS[desc.rings] || RING_SETS.default;
+
+  avatarAccent = /^\d{1,3},\d{1,3},\d{1,3}$/.test(desc.accent || "") ? desc.accent : "";
+  const img = $("avatar");
+  if (desc.has_svg) {
+    // The slug busts the cache; the art is served no-store anyway, but a
+    // switch must never leave the previous face on screen.
+    img.src = "/avatar.svg?slug=" + encodeURIComponent(avatar.slug);
+    img.classList.add("on");
+    avatarShown = true;
+  } else {
+    img.classList.remove("on");
+    img.removeAttribute("src");
+    avatarShown = false;
+  }
+  // A face that fails to load is a missing face, not a broken orb — fall
+  // back to the triangle rather than leaving a blank hole in the middle.
+  img.onerror = () => { img.classList.remove("on"); avatarShown = false; };
+  refreshHint();
+}
+
+async function openAvatars() {
+  if (authCards.size) return; // answer the authorization first
+  let data;
+  try {
+    data = await (await fetch("/avatars")).json();
+  } catch {
+    return;
+  }
+  const list = $("avatarlist");
+  list.textContent = "";
+  (data.avatars || []).forEach((a) => {
+    const row = document.createElement("div");
+    row.className = "sess" + (a.slug === data.current ? " here" : "");
+    const left = document.createElement("span");
+    left.className = "avname";
+    if (a.has_svg) {
+      const thumb = document.createElement("img");
+      thumb.className = "facethumb";
+      thumb.alt = "";
+      thumb.src = "/avatar.svg?slug=" + encodeURIComponent(a.slug);
+      left.appendChild(thumb);
+    }
+    const words = document.createElement("span");
+    // textContent, never innerHTML: every field here comes off disk.
+    words.textContent = a.name + " · " + (a.wake || []).join(" / ").toLowerCase();
+    left.appendChild(words);
+    const right = document.createElement("span");
+    right.className = "when";
+    right.textContent = a.slug;
+    row.append(left, right);
+    row.onclick = () => (a.slug === data.current ? closeAvatars() : switchAvatar(a.slug));
+    list.appendChild(row);
+  });
+  $("avatars").classList.add("on");
+}
+
+function closeAvatars() {
+  $("avatars").classList.remove("on");
+}
+
+async function switchAvatar(slug) {
+  closeAvatars();
+  try {
+    const res = await fetch("/avatar", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ slug }),
+    });
+    if (!res.ok) return addOp("avatar", "switch refused");
+    applyAvatar(await res.json());
+  } catch {
+    return addOp("avatar", "unreachable");
+  }
+  addOp("avatar", avatar.name);
+}
+
 // ============================== orb =========================================
 
 const canvas = $("orb");
@@ -454,29 +615,61 @@ const CSS_SIZE = 480;
 canvas.style.width = canvas.style.height = CSS_SIZE + "px";
 canvas.width = canvas.height = CSS_SIZE * DPR;
 
-const RINGS = [
-  { r: .985, ticks: 144, len: .022, w: 1,   speed: .04,  alpha: .40 },
+// The rings, outermost first. `ticks` draws radial marks, `arcs` draws circle
+// segments, `poly`/`copies` draws rotating regular polygons — an avatar can
+// ask for a different outer ring via `"rings"` in its avatar.json, and an
+// unknown name falls back to the default rather than drawing nothing.
+const INNER_RINGS = [
   { r: .905, ticks: 72,  len: .060, w: 2,   speed: -.10, alpha: .60 },
   { r: .800, arcs: [[0, 1.1], [1.4, 2.6], [3.1, 4.4], [4.8, 5.9]], w: 2.5, speed: .16, alpha: .55 },
   { r: .690, ticks: 36,  len: .045, w: 1.5, speed: .22,  alpha: .50 },
   { r: .600, arcs: [[0, 2.4], [2.9, 5.6]], w: 1, speed: -.30, alpha: .45 },
 ];
 
+const RING_SETS = {
+  default: [
+    { r: .985, ticks: 144, len: .022, w: 1, speed: .04, alpha: .40 },
+    ...INNER_RINGS,
+  ],
+  // Two equilateral triangles, offset by half a step so they interlock,
+  // turning as one figure. `r` is past 1 deliberately — the vertices sit
+  // outside the tick ring's radius — and this is within a hair of the
+  // ceiling: R insets the canvas by 6px, so at 1.02 the points already put
+  // ink on the outermost pixel row and get cut off. A bigger figure than
+  // this needs a bigger canvas, which is also a bigger PTT hit area.
+  triangles: [
+    { r: 1.008, poly: 3, copies: 2, w: 1.6, speed: .04, alpha: .45 },
+    ...INNER_RINGS,
+  ],
+};
+
+let RINGS = RING_SETS.default;
+
 let t0 = performance.now();
 let smoothLevel = 0;
 
+// The avatar's accent recolours the cyan family only. Amber (tool, pending
+// authorization) and red (error) are *meanings*, not decoration — an avatar
+// that could repaint them could make a running command look idle.
+const ACCENTABLE = new Set(["idle", "listening", "transcribing", "thinking",
+                            "composing", "speaking"]);
+
 function statePalette() {
-  switch (S.state) {
-    case "listening": return { hue: "56,189,248", boost: 1.35, spin: 1.6 };
-    case "transcribing": return { hue: "103,232,249", boost: 1.2, spin: 2.2 };
-    case "thinking":  return { hue: "125,211,252", boost: 1.15, spin: 3.4 };
-    case "composing": return { hue: "94,234,212", boost: 1.3, spin: 1.8 };
-    case "tool":      return { hue: "251,191,36", boost: 1.2, spin: 3.4 };
-    case "approval":  return { hue: "251,191,36", boost: 1.45, spin: .35 };
-    case "speaking":  return { hue: "56,189,248", boost: 1.5, spin: 1.2 };
-    case "error":     return { hue: "248,113,113", boost: 1.3, spin: .6 };
-    default:          return { hue: "56,189,248", boost: 1.0, spin: 1.0 };
-  }
+  const p = (() => {
+    switch (S.state) {
+      case "listening": return { hue: "56,189,248", boost: 1.35, spin: 1.6 };
+      case "transcribing": return { hue: "103,232,249", boost: 1.2, spin: 2.2 };
+      case "thinking":  return { hue: "125,211,252", boost: 1.15, spin: 3.4 };
+      case "composing": return { hue: "94,234,212", boost: 1.3, spin: 1.8 };
+      case "tool":      return { hue: "251,191,36", boost: 1.2, spin: 3.4 };
+      case "approval":  return { hue: "251,191,36", boost: 1.45, spin: .35 };
+      case "speaking":  return { hue: "56,189,248", boost: 1.5, spin: 1.2 };
+      case "error":     return { hue: "248,113,113", boost: 1.3, spin: .6 };
+      default:          return { hue: "56,189,248", boost: 1.0, spin: 1.0 };
+    }
+  })();
+  if (avatarAccent && ACCENTABLE.has(S.state)) p.hue = avatarAccent;
+  return p;
 }
 
 function drawOrb(now) {
@@ -496,7 +689,23 @@ function drawOrb(now) {
     const alpha = ring.alpha * P.boost * (0.75 + energy * 0.45);
     ctx.strokeStyle = `rgba(${P.hue},${Math.min(1, alpha)})`;
     ctx.lineWidth = ring.w;
-    if (ring.ticks) {
+    if (ring.poly) {
+      // `copies` evenly-offset regular polygons sharing one rotation: at
+      // poly 3 / copies 2 the offset is 60°, so the two triangles interlock.
+      const copies = ring.copies || 1;
+      for (let k = 0; k < copies; k++) {
+        const spin = rot + (k / copies) * (Math.PI * 2 / ring.poly);
+        ctx.beginPath();
+        for (let i = 0; i < ring.poly; i++) {
+          const a = spin + Math.PI / 2 + (i / ring.poly) * Math.PI * 2;
+          const x = c + Math.cos(a) * R * ring.r;
+          const y = c - Math.sin(a) * R * ring.r;
+          i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+        }
+        ctx.closePath();
+        ctx.stroke();
+      }
+    } else if (ring.ticks) {
       const inner = R * ring.r * (1 - ring.len);
       const outer = R * ring.r;
       ctx.beginPath();
@@ -525,6 +734,19 @@ function drawOrb(now) {
   ctx.beginPath();
   ctx.arc(c, c, coreR * 1.9, 0, Math.PI * 2);
   ctx.fill();
+
+  // The avatar's face lives here, in the DOM above the canvas — so it takes
+  // the emblem's place rather than sitting on top of it. It still breathes
+  // with the orb: same energy term, same glow colour.
+  if (avatarShown) {
+    const img = $("avatar");
+    img.style.transform =
+      `translate(-50%, -50%) scale(${(0.94 + energy * 0.09).toFixed(3)})`;
+    img.style.filter =
+      `drop-shadow(0 0 ${(10 + energy * 16).toFixed(1)}px rgba(${P.hue},${(0.35 + energy * 0.45).toFixed(2)}))`;
+    requestAnimationFrame(drawOrb);
+    return;
+  }
 
   // triangle emblem
   const triR = R * 0.21;
@@ -783,7 +1005,7 @@ function addMsg(cls, text, meta) {
   el.className = "msg " + cls;
   const who = document.createElement("span");
   who.className = "who";
-  who.textContent = cls === "you" ? "YOU" : "J.A.R.V.I.S.";
+  who.textContent = cls === "you" ? "YOU" : avatar.label || "J.A.R.V.I.S.";
   el.appendChild(who);
   if (cls === "you") {
     // The owner's own words go up verbatim — typing *foo* means *foo*.
@@ -964,6 +1186,9 @@ document.addEventListener("keydown", (e) => {
   } else if ($("sessions").classList.contains("on")) {
     e.preventDefault();
     closeSessions();
+  } else if ($("avatars").classList.contains("on")) {
+    e.preventDefault();
+    closeAvatars();
   }
 });
 
@@ -1090,6 +1315,11 @@ events.onmessage = (e) => {
   } else if (kind === "session") {
     // Label only — the window that made the switch redraws its own log.
     setSessionUI(data);
+  } else if (kind === "avatar") {
+    // `jarvis avatar <slug>`, the set_avatar tool, or another window's
+    // picker. Cosmetic plus the wake phrases — no effect on the transcript.
+    applyAvatar(data);
+    addOp("avatar", data.name);
   }
   // "wb_close" is deliberately unhandled here: the HUD is the approval
   // surface, and the agent must not hold a lever that closes the window
@@ -1346,8 +1576,9 @@ function cancelTurn() {
 function pressToTalk() {
   if (authCards.size) return; // answer the authorization first
   // Talking into a conversation you are in the middle of leaving is a way to
-  // lose a turn — pick the session first.
-  if ($("sessions").classList.contains("on")) return;
+  // lose a turn — pick the session first. Same for the avatar picker: the
+  // wake phrases are about to change under you.
+  if (document.querySelector(".picker.on")) return;
   if (S.state === "speaking") stopSpeaking();
   cancelTurn();
   startRec(false);
@@ -1365,9 +1596,33 @@ document.addEventListener("keyup", (e) => {
 
 // ============================== wake word ===================================
 // Chrome's built-in SpeechRecognition is the detector — zero dependencies.
-// Armed: continuous recognition watches for "jarvis"; on a hit, a chime plays
-// and a VAD-terminated recording starts. Saying "Jarvis" while he is speaking
+// Armed: continuous recognition watches for any wake phrase; on a hit, a chime
+// plays and a VAD-terminated recording starts. Saying one while he is speaking
 // barges in.
+//
+// The built-in Jarvis wake phrase, used until /config says otherwise (and
+// still the fallback if it never answers — losing the wake word to a config
+// hiccup would be worse than a stale name). Duplicated from avatars.DEFAULT
+// in Python; tests/avatars_check.py asserts the two copies stay identical.
+// Every other phrase now arrives from the active avatar as regex source over
+// /config ("big yahoo" lives on the `bibi` avatar since 2026-08-06).
+//
+// Two rules for any pattern that lands here, from either side. It is matched
+// against a *live interim* transcript of a phrase the recognizer may never
+// have heard, so it has to tolerate the spellings Chrome guesses ("big yahoo"
+// comes back as "big ya hoo", "big yoohoo", "big yahu" and friends). And it is
+// `\b`-anchored at both ends, because a wake hit cancels the turn in flight and
+// starts recording — an unanchored pattern fires on a substring of ordinary
+// conversation and takes the owner's words mid-sentence.
+const WAKE_PATTERNS = [
+  /\bjarvis\b/i,
+];
+
+let wakePatterns = WAKE_PATTERNS.slice();
+
+function matchesWake(text) {
+  return wakePatterns.some((re) => re.test(text));
+}
 
 let wakeMode = false;
 let recog = null;
@@ -1388,6 +1643,7 @@ function chime() {
 
 function onWake() {
   if (authCards.size) return; // never talk over a pending authorization
+  if (document.querySelector(".picker.on")) return; // finish choosing first
   if (S.state === "speaking") stopSpeaking();
   cancelTurn(); // saying his name mid-thought interrupts, same as the orb
   if (recorder || S.busy) return;
@@ -1406,7 +1662,7 @@ function armRecognition() {
   recog.onresult = (e) => {
     let text = "";
     for (let i = e.resultIndex; i < e.results.length; i++) text += e.results[i][0].transcript;
-    if (/\bjarvis\b/i.test(text)) onWake();
+    if (matchesWake(text)) onWake();
   };
   recog.onend = () => {
     if (wakeMode && recog) setTimeout(() => { try { recog.start(); } catch {} }, 300);
@@ -1428,17 +1684,16 @@ function disarmRecognition() {
 }
 
 function refreshHint() {
+  // The hint names the avatar's own phrases: an undiscoverable wake word is
+  // one nobody says, and after a rename "SAY JARVIS" would be a lie.
+  const said = (avatar.wake || DEFAULT_AVATAR.wake)
+    .map((w) => `“${w}”`).join(" / ");
   // While a turn is in flight the useful thing to know is that you can take
   // it back — that is the window for fixing a misheard transcript.
-  if (S.busy || S.state === "speaking") {
-    $("hint").textContent = wakeMode
-      ? "SAY “JARVIS” · OR HOLD ORB · TO INTERRUPT"
-      : "HOLD ORB · OR SPACE · TO INTERRUPT";
-    return;
-  }
+  const verb = S.busy || S.state === "speaking" ? "INTERRUPT" : "SPEAK";
   $("hint").textContent = wakeMode
-    ? "SAY “JARVIS” · OR HOLD ORB · TO SPEAK"
-    : "HOLD ORB · OR SPACE · TO SPEAK";
+    ? `SAY ${said} · OR HOLD ORB · TO ${verb}`
+    : `HOLD ORB · OR SPACE · TO ${verb}`;
 }
 
 function setWake(on) {
@@ -1467,6 +1722,7 @@ async function init() {
     $("cfg-stt").textContent = cfg.stt.split("/").pop();
     $("cfg-tts").textContent = `${cfg.tts.split("/").pop()} · ${cfg.voice} · ${cfg.speed}x`;
     setMuteUI(cfg.muted);
+    applyAvatar(cfg.avatar || DEFAULT_AVATAR);
     setSessionUI(cfg.session);
     if (cfg.session && cfg.session.turns) {
       // Resumed (jarvis face -c, or a reopened window): the conversation
@@ -1506,6 +1762,8 @@ async function init() {
   }
 
   $("session-row").onclick = () => openSessions();
+  $("avatar-row").onclick = () => openAvatars();
+  $("avatar-close").onclick = () => closeAvatars();
   $("sess-new").onclick = () => switchSession({ new: true });
   $("sess-close").onclick = () => closeSessions();
   $("wake-row").onclick = () => setWake(!wakeMode);

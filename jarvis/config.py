@@ -178,6 +178,20 @@ ALLOWLIST_PATH = Path(
 # Where skill files live (see tools/skills.py).
 SKILLS_DIR = Path(os.environ.get("JARVIS_SKILLS", REPO_ROOT / "skills"))
 
+# Avatars: who he is presenting as — name, wake phrases, and the face drawn in
+# the orb (see avatars.py). Gitignored, like memory/*.md: an avatar is the
+# owner's, and the SVGs are bulk. Which one is active is machine-local state,
+# so the pointer lives beside the allowlist rather than in the repo.
+AVATARS_DIR = Path(os.environ.get("JARVIS_AVATARS", REPO_ROOT / "avatars"))
+AVATAR_STATE_PATH = Path(
+    os.environ.get(
+        "JARVIS_AVATAR_STATE", Path.home() / ".config" / "jarvis" / "avatar.json"
+    )
+)
+# Set this to pin an avatar for one process (a bench, a second window) without
+# disturbing the owner's saved choice.
+AVATAR_ENV = os.environ.get("JARVIS_AVATAR", "")
+
 # Saved conversations (see sessions.py). Outside the repo, unlike memory/ and
 # skills/: those are curated and worth version control, while transcripts are
 # bulk, personal, and rewritten every turn.

@@ -7,3 +7,8 @@ memory/*.md
 .jarvis_history
 traces/
 designs/
+
+# Avatars are the owner's, not the project's — one directory each
+# (avatar.svg + avatar.json). See jarvis/avatars.py; scaffold with
+# `jarvis avatar new <slug>`.
+avatars/

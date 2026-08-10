@@ -207,6 +207,7 @@ from . import (  # noqa: E402,F401  (registers the tools)
     contextctl,
     desktop,
     files,
+    avatarctl,
     gmail,
     goalctl,
     drive,

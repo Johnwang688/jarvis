@@ -67,11 +67,14 @@ jarvis/
   permissions.py  modes (ask/all) + the persistent dangerous-tool allowlist
   workflows.py  background agents on their own threads (safe tools only)
   sessions.py   saved conversations: transcript, log, meta, titles, summaries
+  avatars.py    who he presents as: name, wake phrases, SVG face + sanitizer
+  avatar_templates.py  starter art for `jarvis avatar new` (avatars/ is
+                gitignored, so a clone has nothing to look at otherwise)
   tools/        clock, files, memory, shell, web, browsing, gmail,
                 onshape (CAD), skills, sessions (read past conversations),
                 sqlite (read-only .db queries, mode=ro enforced by the
                 engine), goalctl (goal_report — how a goal run ends),
-                voicectl (mute), workflows,
+                voicectl (mute), avatarctl (which avatar), workflows,
                 plan (the working checklist), subagent (context isolation),
                 desktop (drives Windows apps via the bridge)
   runtime.py    per-run state (plan, approver, depth) over ContextVars
@@ -222,6 +225,25 @@ jarvis/
   owner for their own screen. Provisioning is human-only
   (`jarvis desktop setup`), and the bridge is a process the owner starts —
   the agent has no way to install or launch its own.
+- **An avatar's SVG is untrusted input** (`avatars.py`, 2026-08-06). The art
+  is drawn inside `jarvis.html`, the window that gates approvals, and
+  `write_file` can reach `avatars/` — so a hand-written SVG could otherwise
+  script the surface `is_face_origin()` exists to protect. Two layers, and
+  the second is the real one: `sanitize_svg()` rebuilds the file from an
+  element/attribute **allowlist** (no script, no `on*`, no `href` that is not
+  a local fragment, no entities/DOCTYPE, no `url()` in a style, 512KB cap),
+  and the HUD renders it in an **`<img>`** fed by `GET /avatar.svg`, which
+  cannot run script or fetch anything whatever the file says. It is also
+  mechanically confined: fixed 186px, `pointer-events: none`, so it can
+  neither cover the authorization card nor eat a click meant for it. The
+  accent colour recolours only the cyan-family orb states — amber (tool
+  running, pending authorization) and red (error) are *meanings*, and an
+  avatar that could repaint them could make a running command look idle.
+  `set_avatar` is safe/non-dangerous (it selects an avatar already on disk;
+  it cannot create one) and is excluded from goal runs alongside
+  `set_voice_mute`. **The HUD's `<title>` stays `J.A.R.V.I.S.` whatever the
+  avatar** — `windows/uiatree.py:FORBIDDEN_TITLES` matches on it, and that is
+  the bridge's backstop against driving the approval window.
 - **Session tools read, never switch.** Jarvis can summarize, search, and
   read past conversations (all four tools are safe and non-dangerous), but
   which session is live is the owner's, set in the HUD or on the command
@@ -341,6 +363,25 @@ jarvis/
   run cut short (0/1 turns), the bench assembly deleted even when the run
   blows up, and part resolution stripping Onshape's invisible LRM marks.
   Run after touching `jarvis/cadbench.py`.
+- `tests/avatars_check.py` — free synthetic checks for avatars: the SVG
+  sanitizer against a hostile file (script, `onload`, `foreignObject` drawing
+  its own AUTHORIZE button, `javascript:` href, external `<image>`) with the
+  geometry surviving and `<a>` *unwrapped* rather than dropped; every
+  generated wake regex `\b`-anchored at both ends and a raw one anchored on
+  the way through; **the HUD's hard-coded fallback patterns matching
+  `avatars.DEFAULT`** (the two copies must not drift); every degradation path
+  leaving him summonable (missing slug, uncompilable regex, no stated phrase,
+  unparseable SVG); the env pin vs an explicit switch; and the identity
+  rename hitting `You are Jarvis` without renaming `jarvis chat -c`.
+- `tests/face/hud_avatar_check.py` — free headless checks in the real
+  `jarvis.html`: no avatar in `/config` leaves the window byte-for-byte as it
+  was (banner, both wake phrases, the triangle emblem — every other HUD suite
+  depends on that); an avatar renames banner/byline/SYSTEMS row/armed hint and
+  **moves the wake word** (new phrase fires, old one does not, still
+  anchored); the face is an `<img>` that replaces the emblem and falls back to
+  it on a load failure; a hostile SVG's `onload` never runs; the picker lists,
+  marks, keeps PTT inert, closes on Escape without switching, and round-trips
+  through POST /avatar; and an SSE `avatar` broadcast relabels live.
 - `tests/secrets_check.py` — free synthetic checks for the `.env` protection,
   against a throwaway dir holding a fake key. Includes a replay of the actual
   leak (a recursive grep that never names `.env`). Run it after touching
@@ -472,6 +513,13 @@ jarvis/
   the JSON envelope and the words render at send time, staged files ride
   the next send and clear after, empty Enter is inert, and Space typed in
   the box does not trigger push-to-talk.
+- `tests/face/hud_wake_check.py` — free headless checks of the wake phrases
+  in the real `jarvis.html`: "jarvis" fires, ordinary speech never does, the
+  `bibi` avatar's phrases ("big yahu", "netanyahu", "bibi") are silence on
+  the default and all 20 spellings fire once that avatar is applied — in the
+  spellings Chrome's recognizer actually returns for a phrase it has never
+  heard — and the armed hint names whatever is live. Run after touching
+  `WAKE_PATTERNS` or `matchesWake`.
 - `tests/face/hud_state_check.py` — **free** checks for the HUD turn state
   machine, and the pattern to copy for anything else in the window: a
   *scripted* `/converse` and `/events` on `queue.Queue` puppet strings serve
@@ -803,10 +851,136 @@ only honored in the speaking state, never mid-think. **Wake word** — Chrome's
 built-in SpeechRecognition (webkitSpeechRecognition, zero dependencies,
 audio goes to Google's speech service — owner OK with that) runs
 continuously when armed via the WAKE WORD row in the SYSTEMS panel
-(persisted in localStorage); hearing "jarvis" chimes and starts a recording
-that self-stops on ~1.4s of silence. Saying "Jarvis" while he speaks barges
-in. `talk.html` was retired — it spoke the old single-JSON `/converse`
-shape.
+(persisted in localStorage); hearing a wake phrase chimes and starts a
+recording that self-stops on ~1.4s of silence. Saying one while he speaks
+barges in. `talk.html` was retired — it spoke the old single-JSON
+`/converse` shape.
+
+**Wake phrases.** The default answers to **"jarvis"** and nothing else; every
+other phrase belongs to an avatar and arrives over `/config` as regex source
+(**"big yahu" is the `bibi` avatar's**, moved off the default 2026-08-06 —
+see *Avatars* below). The built-in lives in `WAKE_PATTERNS` in `jarvis.html`
+(duplicated from `avatars.DEFAULT`, and the fallback if `/config` never
+answers); `matchesWake()` is what `recog.onresult` calls. Two rules for any
+new phrase, wherever it is written. It is matched against a *live interim*
+transcript of a phrase the recognizer has never heard, so it has to tolerate
+the spellings Chrome guesses ("big ya hoo", "big yoohoo", "big yahu", "big
+yawho" all resolve to the same intent) — a literal string match would miss
+most real utterances. And **every pattern is `\b`-anchored at both ends**,
+because a wake hit cancels the turn in flight and starts recording: an
+unanchored pattern fires on a substring of ordinary conversation and takes
+the owner's words mid-sentence. `tests/face/hud_wake_check.py` is the free
+suite (the built-in firing, 11 utterances that must stay silent — "yahoo
+finance", "big yacht", "jarvisson" — the bibi phrasings being silence on the
+default and firing once that avatar is applied, and the armed hint naming
+whatever is live, since an undiscoverable wake word is one nobody says). Run
+it after touching the patterns.
+
+**A wake phrase belongs to exactly one avatar.** Leaving "big yahoo" on the
+default *and* giving it to `bibi` would mean the owner cannot tell which one
+they just summoned — the window and the prompt would disagree about who
+answered. Both `avatars_check` and `hud_wake_check` assert the default no
+longer fires on it.
+
+`bibi` wakes on **"big yahu"**, **"netanyahu"** (whole — "benjamin
+netanyahu" — or on its own) and **"bibi"**. Two things decided while adding
+the name, both instances of the anchoring rule rather than new ones:
+**bare "benjamin" is deliberately not a phrase**, because it is a common
+name and a wake hit takes the owner's words mid-sentence, and the name's
+regex tolerates what the recognizer actually returns ("netan yahoo",
+"nathan yahoo", "netanyaho", "netanya who") while staying clear of
+"nathan is on the call" and "netanya beach". The near-misses are in
+`hud_wake_check`'s QUIET list, which is the half of that suite that matters.
+
+**Avatars shipped (2026-08-06).** Who he presents as is now data, not
+hard-coded: an avatar is `avatars/<slug>/avatar.svg` + `avatar.json`
+(`{name, wake, voice, rings, accent, banner, label, description}`), and switching
+one changes four things at once — the **name** (an identity rename applied to
+`config.SYSTEM_PROMPT` in `Agent._refresh_system`, so it reaches every
+surface at once and survives compaction), the **wake phrases**, the **face**
+drawn where the triangle emblem was, and the **voice** he answers in. `avatars/` is gitignored, so
+`jarvis avatar new <slug> --template fox|owl|bust|reactor|bibi` scaffolds one
+from art checked into `avatar_templates.py` (`bibi` is the one template that
+is a specific face rather than an archetype — it is checked in *because*
+`avatars/` is not, so a reclone still has somewhere for "big yahu" to live;
+a template carries art only, so the phrase itself goes in the scaffolded
+`avatar.json`). Controls: `jarvis avatar` to
+list, `jarvis avatar <slug>` to switch persistently, `jarvis face -a <slug>`
+to run one window as an avatar without touching the saved choice, the AVATAR
+row in the HUD's SYSTEMS panel, and the `set_avatar` / `avatar_list` tools
+("Jarvis, become the fox"). All of them land on `avatars.set_active`, which
+broadcasts SSE `avatar` so every open window relabels live.
+
+**An avatar can change the orb's outer ring (2026-08-06).** `"rings"` in
+`avatar.json` picks a set from `RING_SETS` in `jarvis.html`; `"triangles"`
+(bibi's) replaces the outermost 144-tick ring with **two interlocking
+equilateral triangles turning as one figure** — the ring drawer gained a
+`poly`/`copies` shape alongside `ticks` and `arcs`, so a new figure is a data
+entry, not new drawing code. Only the outer ring is swappable; the four inner
+rings are shared (`INNER_RINGS`) so a variant cannot quietly restyle the
+whole orb. **An unknown name falls back to the default set** — the orb *is*
+the push-to-talk button, so an avatar that could blank it would take the
+surface's main control with it, and `hud_avatar_check` pins that.
+
+**An avatar has a voice too (2026-08-06).** `avatar.json` takes `voice` (a
+Kokoro voice name — `voice.available_voices()` lists the 54 already in the
+local bundle, so this costs no download and no latency: same model, different
+style vector) and an optional `speed`. Resolution lives in **`voice.tts()`**,
+not the call sites — the same rule as `speakable()`, because three surfaces
+synthesize speech (face, `/say`, Discord voice notes) and a fourth will. It
+reads the active avatar per call, so a switch moves the voice on the next
+sentence with no restart. Current: Jarvis `bm_george`, bibi `am_michael`,
+hoot `bf_emma`, vex `am_puck`; `jarvis avatar` lists what each will *actually*
+speak in, which is not always what its file asks for. Four notes:
+
+- **The degradation rule is "leave him audible."** A voice that is not
+  installed falls back to `config.TTS_VOICE` with a **once-per-process**
+  warning (the face synthesizes a chunk at a time, so per-sentence would
+  scroll), an unparseable `speed` falls back without losing the voice, and a
+  vanished slug still speaks. Same shape as the wake-regex degradations.
+- **The clamp is the last word, not the avatar.** `speed` still passes
+  through the 0.5–1.3 clamp, because above ~1.3 the cloud provider silently
+  truncates its own audio — an avatar must not be able to cut itself off.
+- **Validation is what makes the cloud fallback safe.** The name is checked
+  against the local bundle for the same model both paths run, so a
+  local→cloud fallback cannot send a voice name the provider will reject.
+  With no bundle installed, `available_voices()` is empty and every avatar
+  speaks in the configured default — never an error.
+- **The language heuristic was quietly wrong** and is fixed in the same
+  change: `_local_tts` derived language from the voice prefix as `"en-gb" if
+  voice.startswith("b") else "en-us"`, which was right for the two English
+  families and made the other thirty voices (`jf_`, `zm_`, `ff_`, …) read as
+  American English. `voice._LANGS` maps all nine prefixes now.
+
+Four things worth keeping from building it:
+
+- **The default has to be byte-identical to no-avatar.** `avatars.DEFAULT` is
+  a built-in with the two existing wake regexes, and `jarvis.html` keeps its
+  own hard-coded copy as the fallback for a `/config` that never answers —
+  losing the wake word to a config hiccup is worse than a stale name. A test
+  asserts the two copies have not drifted, because there is now a Python and
+  a JS spelling of the same rule.
+- **Every degradation path has to leave him summonable.** A missing slug, an
+  avatar with no stated phrase, a regex that will not compile, an SVG that
+  will not parse: each falls back rather than raising, because the failure
+  mode of getting this wrong is a HUD that cannot be spoken to.
+- **The rename is case-sensitive**, because the prompt also names shell
+  commands (`jarvis chat -c`) and renaming those sends the owner to a command
+  that does not exist. Only capital-J `Jarvis` moves.
+- **An explicit switch beats the `-a` pin.** Without that, the picker would
+  save the new avatar and redraw the window while the server went on serving
+  the pinned one — the window and the server disagreeing about who he is,
+  which is the same class of bug as the invisible step budget.
+
+Also fixed on the way: the right-hand HUD column is a **flex stack** now
+(`#rail`), not two absolutely-positioned panels. The AVATAR row pushed
+SYSTEMS past OPERATIONS' hard-coded `top: 388px` and OPERATIONS silently
+covered the SESSION row — a click-through bug that only `hud_session_check`
+caught. And `tests/longhorizon_check.py`'s concurrency check was flaky
+(~40%) for an unrelated reason: `_run` monkeypatches the module-global
+`llm.chat`, so two threads each installing their own closure raced and the
+loser's agent ran the winner's script. One shared script dispatching on the
+calling agent's own user message fixes it.
 
 **Phase 5 shipped the approval gate (2026-07-31)** — the face is no longer
 read-only. `jarvis/face/approvals.py` turns a dangerous tool call into a card
@@ -1067,8 +1241,12 @@ emits WAV, cloud MP3 — consumers sniff (`RIFF`), never trust a label. Model
 files: ~/.cache/jarvis-tts/{kokoro-v1.0.onnx,voices-v1.0.bin} (github
 thewh1teagle/kokoro-onnx releases, ~340MB); dep via `uv pip install -e
 .[voice]`. The face pre-warms the model at startup (~3s ONNX load, off the
-critical path). `tests/voice_local_check.py` is the free suite. STT remains
-cloud (parakeet); local whisper stays the next swap if it ever needs to be.
+critical path). `tests/voice_local_check.py` is the free suite — synthesis
+shape and speed, the cloud fallback, and (2026-08-06) **which** voice speaks:
+the avatar's, its every degradation path, and the voice→language map. It
+pins `AVATAR_ENV` to the default first, because otherwise the owner's saved
+avatar decides what the suite asserts. STT remains cloud (parakeet); local
+whisper stays the next swap if it ever needs to be.
 
 **Markdown: rendered in the HUD, stripped for speech (2026-08-03).** The
 model writes markdown and both surfaces were taking it literally — the COMMS

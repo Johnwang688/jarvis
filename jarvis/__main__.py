@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 
 from rich.console import Console
@@ -247,7 +248,20 @@ def cmd_bench(args) -> int:
 
 def cmd_face(args) -> int:
     # Imported lazily so `jarvis tools` etc. don't pay for the voice stack.
+    from . import avatars
     from .face import server as face_server
+
+    if getattr(args, "avatar", None):
+        # Process-scoped, like --dangerously-skip-permissions: this window runs
+        # as that avatar without touching the owner's saved choice, so opening
+        # a second face is not a way to silently change the first.
+        if avatars.load(args.avatar) is None:
+            console.print(
+                f"[red]no avatar named {args.avatar!r}[/red] — "
+                + ", ".join(a.slug for a in avatars.available())
+            )
+            return 1
+        config.AVATAR_ENV = args.avatar.lower()
 
     if getattr(args, "dangerously_skip_permissions", False):
         # The ONLY way into approve-everything mode, by design. It is a
@@ -370,6 +384,97 @@ def cmd_sessions(args) -> int:
     return 0
 
 
+def cmd_avatar(args) -> int:
+    """List, switch, or scaffold an avatar (name + wake phrases + face)."""
+    from . import avatar_templates, avatars, voice
+
+    here = avatars.active()
+
+    if args.action == "new":
+        if not args.slug:
+            console.print("[red]usage: jarvis avatar new <slug> [--template fox][/red]")
+            return 1
+        slug = args.slug.lower()
+        if not avatars.SLUG_RE.match(slug):
+            console.print(f"[red]{slug!r} is not a usable name (a-z 0-9 - _)[/red]")
+            return 1
+        template = args.template or "bust"
+        if template not in avatar_templates.TEMPLATES:
+            console.print(
+                f"[red]no template {template!r}[/red] — "
+                + ", ".join(sorted(avatar_templates.TEMPLATES))
+            )
+            return 1
+        desc, accent, svg = avatar_templates.TEMPLATES[template]
+        path = config.AVATARS_DIR / slug
+        if path.exists():
+            console.print(f"[red]{path} already exists[/red]")
+            return 1
+        path.mkdir(parents=True)
+        name = args.name or slug.replace("-", " ").replace("_", " ").title()
+        (path / "avatar.svg").write_text(svg, encoding="utf-8")
+        (path / "avatar.json").write_text(
+            json.dumps(
+                {
+                    "name": name,
+                    "wake": [name.lower()],
+                    "accent": accent,
+                    "description": desc,
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        console.print(f"created [bold]{path}[/bold] from the {template} template")
+        console.print(
+            f"[dim]edit avatar.svg / avatar.json, then: jarvis avatar {slug}[/dim]"
+        )
+        return 0
+
+    if args.action:  # `jarvis avatar fox` — switch, persistently
+        try:
+            av = avatars.set_active(args.action)
+        except LookupError as exc:
+            console.print(f"[red]{exc}[/red]")
+            return 1
+        console.print(
+            f"avatar is now [bold]{av.name}[/bold] "
+            f"(wake: {', '.join(av.wake_labels())})"
+        )
+        console.print("[dim]a running face picks it up on its next window load[/dim]")
+        return 0
+
+    table = Table(header_style="dim")
+    table.add_column("")
+    table.add_column("slug")
+    table.add_column("name")
+    table.add_column("wake phrases")
+    table.add_column("voice", style="dim")
+    table.add_column("face", style="dim")
+    for av in avatars.available():
+        table.add_row(
+            "→" if av.slug == here.slug else "",
+            av.slug,
+            av.name,
+            ", ".join(av.wake_labels()).lower(),
+            # What he will actually speak in, not what the file asks for — a
+            # voice that is not installed falls back, and the list is where
+            # the owner should be able to see that.
+            voice.voice_for(av),
+            "svg" if av.svg_path else "built-in",
+        )
+    console.print(table)
+    console.print(f"\n[dim]{config.AVATARS_DIR}[/dim]")
+    console.print(
+        "[dim]switch: jarvis avatar <slug>   ·   "
+        "new: jarvis avatar new <slug> --template "
+        + "|".join(sorted(avatar_templates.TEMPLATES))
+        + "[/dim]"
+    )
+    return 0
+
+
 def cmd_tools(args) -> int:
     table = Table(header_style="dim")
     table.add_column("tool")
@@ -440,6 +545,12 @@ def main() -> int:
     )
     face.add_argument("-r", "--resume", metavar="ID", help="resume a specific session id")
     face.add_argument(
+        "-a",
+        "--avatar",
+        metavar="SLUG",
+        help="run this window as a specific avatar (see `jarvis avatar`)",
+    )
+    face.add_argument(
         "--dangerously-skip-permissions",
         action="store_true",
         help="approve every dangerous tool without asking, until this process exits",
@@ -488,6 +599,17 @@ def main() -> int:
     saved = sub.add_parser("sessions", help="list saved conversations")
     saved.add_argument("-n", "--limit", type=int, default=20, help="how many to show")
     saved.set_defaults(func=cmd_sessions)
+
+    avatar = sub.add_parser(
+        "avatar", help="list, switch, or create an avatar (name + wake word + face)"
+    )
+    avatar.add_argument(
+        "action", nargs="?", default="", help="a slug to switch to, or 'new'"
+    )
+    avatar.add_argument("slug", nargs="?", default="", help="slug for 'new'")
+    avatar.add_argument("--template", help="starter art for 'new'")
+    avatar.add_argument("--name", help="display name for 'new' (default: the slug)")
+    avatar.set_defaults(func=cmd_avatar)
 
     sub.add_parser("tools", help="list registered tools").set_defaults(func=cmd_tools)
     sub.add_parser("config", help="show configured model tiers").set_defaults(func=cmd_config)

@@ -65,7 +65,10 @@ GOAL_SYSTEM = config.SYSTEM_PROMPT + (
 # foreground from whoever is at the machine, and the window controls are
 # meaningless with no window. Everything else — browser included, since the
 # runner is serial — is available, gated exactly as at the desk.
-_EXCLUDED_TOOLS = {"set_voice_mute", "whiteboard_close"}
+# set_avatar joins them for the same reason: it is a lever on a window nobody
+# is watching, and a goal that renames him mid-run would confuse the owner
+# reading its progress DMs.
+_EXCLUDED_TOOLS = {"set_voice_mute", "whiteboard_close", "set_avatar"}
 
 # The scripted turn directives. Slice 0 plans, slice 1 starts implementing,
 # later slices continue; the first done triggers one verification pass.

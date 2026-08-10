@@ -17,11 +17,20 @@ import re
 import threading
 import wave
 
-from . import config, llm
+from . import avatars, config, llm
 
 _kokoro = None
 _kokoro_lock = threading.Lock()
 _local_warned = False
+_warned: set[str] = set()
+
+
+def _warn_once(message: str) -> None:
+    """A misconfigured avatar should say so once, not once per sentence —
+    the face synthesizes a chunk at a time."""
+    if message not in _warned:
+        _warned.add(message)
+        print(message)
 
 
 # ---- markdown -> speech ------------------------------------------------------
@@ -82,6 +91,69 @@ def speakable(text: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
 
 
+# ---- which voice -------------------------------------------------------------
+# An avatar changes the name, the wake phrase and the face; the voice is the
+# fourth thing, and the one the owner notices first — an avatar that renames
+# the window and then answers in the previous voice is the same kind of
+# mismatch as the window and the server disagreeing about who he is.
+#
+# Resolution lives here rather than at the call sites for exactly the reason
+# speakable() does: three surfaces synthesize speech today (the face, /say,
+# Discord voice notes) and a fourth will, and none of them should have to
+# remember. It is read per call, so switching avatars mid-conversation moves
+# the voice on the next sentence with no restart.
+
+_voices: set[str] | None = None
+
+# Kokoro tags each voice with the language it was trained on, in the first
+# letter of its name. The old rule — "b" is British, everything else is
+# American — was right for the two English families and silently wrong for
+# the other thirty voices, which would have been synthesized as US English.
+_LANGS = {
+    "a": "en-us", "b": "en-gb", "e": "es", "f": "fr-fr", "h": "hi",
+    "i": "it", "j": "ja", "p": "pt-br", "z": "cmn",
+}
+
+
+def available_voices() -> set[str]:
+    """Every voice in the local Kokoro bundle; empty if it is not installed.
+
+    Cached — this is consulted on every synthesized chunk.
+    """
+    global _voices
+    if _voices is None:
+        try:
+            import numpy as np
+
+            with np.load(str(config.KOKORO_VOICES)) as bundle:
+                _voices = set(bundle.files)
+        except Exception:
+            _voices = set()
+    return _voices
+
+
+def voice_for(av: "avatars.Avatar | None" = None) -> str:
+    """The voice to speak in: the active avatar's, or the configured default.
+
+    An avatar's voice is honored only when it is a name this machine can
+    actually synthesize. A typo in an avatar.json has to leave him *audible*
+    — the same degradation rule that keeps a broken wake regex from leaving
+    him unsummonable. It also means the cloud fallback is safe: the name was
+    validated against the bundle for the model both paths run.
+    """
+    av = av or avatars.active()
+    wanted = (av.voice or "").strip()
+    if not wanted:
+        return config.TTS_VOICE
+    if wanted in available_voices():
+        return wanted
+    _warn_once(
+        f"[voice] avatar {av.slug!r} asks for voice {wanted!r}, which is not "
+        f"installed; speaking as {config.TTS_VOICE}"
+    )
+    return config.TTS_VOICE
+
+
 def _local_tts(text: str, voice: str, speed: float) -> bytes:
     """Kokoro on this machine. Raises if deps/models are missing."""
     global _kokoro
@@ -90,7 +162,7 @@ def _local_tts(text: str, voice: str, speed: float) -> bytes:
             from kokoro_onnx import Kokoro
 
             _kokoro = Kokoro(str(config.KOKORO_MODEL), str(config.KOKORO_VOICES))
-        lang = "en-gb" if voice.startswith("b") else "en-us"
+        lang = _LANGS.get(voice[:1], "en-us")
         samples, sample_rate = _kokoro.create(text, voice=voice, speed=speed, lang=lang)
 
     pcm = (samples.clip(-1.0, 1.0) * 32767).astype("<i2").tobytes()
@@ -116,11 +188,16 @@ def tts(
     text = speakable(text)
     if not text.strip():
         raise ValueError("nothing to say")
+    # Who is speaking, unless the caller named a voice explicitly (a probe or
+    # a bench pinning one). The avatar is read fresh per call — a switch lands
+    # on the next sentence.
+    av = avatars.active()
     # The cloud provider silently truncates audio above ~1.3x (verified
     # 2026-07-30); local Kokoro is fine with it, but one consistent pace
-    # beats a backend-dependent one.
-    speed = min(max(speed or config.TTS_SPEED, 0.5), 1.3)
-    voice = voice or config.TTS_VOICE
+    # beats a backend-dependent one. The clamp is the last word, so an avatar
+    # cannot ask for a pace that gets its own speech cut off.
+    speed = min(max(speed or av.speed or config.TTS_SPEED, 0.5), 1.3)
+    voice = voice or voice_for(av)
 
     if config.TTS_BACKEND == "local":
         try:
