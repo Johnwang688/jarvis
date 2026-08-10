@@ -7,11 +7,58 @@ tools it asked for, hand the results back, repeat until it stops asking. Read
 
 from __future__ import annotations
 
+import contextvars
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from . import avatars, config, context, llm, runtime, sessions, tools
 from .tools import contextctl
+
+# Most a turn will run at once. The cap is about being a good citizen to the
+# things on the other end — OpenRouter, Onshape, whatever host a fetch lands on
+# — not about safety, which `tools.parallelizable` already settled.
+MAX_PARALLEL_TOOLS = 4
+
+# How many times a reply cut off at the token ceiling may be continued before
+# the loop gives up and says so. Two is enough for a long answer that overran
+# and short enough that a model stuck in a loop cannot spend much.
+MAX_CONTINUATIONS = 2
+
+CONTINUE_NUDGE = (
+    "[your previous message was cut off at the token limit before you finished it. "
+    "Continue from exactly where it stopped — do not repeat what you already said. "
+    "If it was going to be very long, finish it briefly instead.]"
+)
+
+
+def _call_name(call: dict) -> str:
+    return call.get("function", {}).get("name", "")
+
+
+def _call_args(call: dict) -> str:
+    return call.get("function", {}).get("arguments", "") or "{}"
+
+
+def _call_groups(calls: list[dict]) -> list[list[tuple[int, dict]]]:
+    """Split one turn's calls into batches that may run together.
+
+    Consecutive parallel-safe calls share a batch; anything else gets a batch
+    of its own **in place**. Grouping by adjacency rather than sorting the safe
+    ones to the front is what keeps meaning intact: in
+    `[write_file(x), read_file(x)]` the read must still see the write, so the
+    write runs alone and the read follows it.
+    """
+    groups: list[list[tuple[int, dict]]] = []
+    safe_run = False
+    for index, call in enumerate(calls):
+        safe = tools.parallelizable(_call_name(call))
+        if safe and safe_run:
+            groups[-1].append((index, call))
+        else:
+            groups.append([(index, call)])
+        safe_run = safe
+    return groups
 
 
 def _image_url(image) -> str:
@@ -33,6 +80,11 @@ class Turn:
     stopped_early: bool = False
     cancelled: bool = False
     tokens_saved: int = 0
+    # The model hit its output ceiling at least once this turn. Distinct from
+    # stopped_early: the *step* budget was fine, an individual reply was too
+    # long for max_tokens. Left true even when a continuation recovered it, so
+    # a surface can tell that the answer was stitched together.
+    truncated: bool = False
 
 
 class Agent:
@@ -63,6 +115,10 @@ class Agent:
         # turn should be able to abandon one.
         self.should_stop = should_stop or (lambda: False)
         self.policy = policy or context.ContextPolicy()
+        # Turns the provider's reported prompt_tokens into the number the
+        # compaction threshold is judged against, so the threshold means what
+        # it says. Per-agent, because it describes one transcript.
+        self.meter = context.TokenMeter()
         self._base_system = system
         # How many sub-agents deep this one is; bound into runtime so a child
         # can refuse to spawn past MAX_DEPTH.
@@ -134,6 +190,60 @@ class Agent:
             max_tokens=1024,
         ).text
 
+    def _dispatch_one(self, call: dict) -> tools.ToolResult:
+        return tools.dispatch(_call_name(call), _call_args(call), approve=self.approve)
+
+    def _dispatch_calls(self, calls: list[dict]) -> list[tools.ToolResult]:
+        """Run one assistant turn's tool calls; results come back in call order.
+
+        Independent calls run together. The model has always been able to ask
+        for several at once — invariant 3 exists to keep it doing so — and the
+        loop then ran them strictly one after another, so the only thing
+        parallel calls bought was fewer round trips. Four renders now cost the
+        slowest one rather than the sum.
+        """
+        results: list[tools.ToolResult | None] = [None] * len(calls)
+        for group in _call_groups(calls):
+            for _, call in group:
+                self.on_event("tool_start", (_call_name(call), _call_args(call)))
+
+            if len(group) == 1:
+                index, call = group[0]
+                results[index] = self._dispatch_one(call)
+            else:
+                # One fresh Context copy per worker. ContextVars are per-thread,
+                # so a bare pool thread starts with nothing bound — and
+                # runtime.py fails closed, meaning an unbound approver *denies*.
+                # Without this, a gated tool would start refusing itself purely
+                # because it ran beside another one. Copies share the plan dict
+                # by reference, so a write through one is seen by its owner.
+                #
+                # copy_context() is called per worker rather than reused: a
+                # single Context cannot be entered by two threads at once.
+                contexts = [contextvars.copy_context() for _ in group]
+                with ThreadPoolExecutor(
+                    max_workers=min(len(group), MAX_PARALLEL_TOOLS),
+                    thread_name_prefix="jarvis-tool",
+                ) as pool:
+                    futures = [
+                        pool.submit(ctx.run, self._dispatch_one, call)
+                        for ctx, (_, call) in zip(contexts, group)
+                    ]
+                    for (index, call), future in zip(group, futures):
+                        try:
+                            results[index] = future.result()
+                        except Exception as exc:  # dispatch catches its own, but a
+                            # thread must never come back without a result: a
+                            # missing one would leave a tool_call unanswered and
+                            # 400 the next request.
+                            results[index] = tools.ToolResult(
+                                f"Error: {type(exc).__name__}: {exc}"
+                            )
+
+            for index, call in group:
+                self.on_event("tool_end", (_call_name(call), results[index].text))
+        return results
+
     def run_turn(self, user_input: str, images: list | None = None) -> Turn:
         """One user message through the loop, saved to the session if bound."""
         if not images and self._is_compact_request(user_input):
@@ -201,6 +311,10 @@ class Agent:
         else:
             self.messages.append({"role": "user", "content": user_input})
         turn = Turn()
+        # Fragments of a reply the provider cut off at max_tokens, kept so the
+        # text handed to the surface is the whole answer and not just its tail.
+        carried: list[str] = []
+        continuations = 0
 
         for step in range(self.max_steps):
             # Cancellation is checked *here and nowhere else*. Between steps
@@ -219,6 +333,17 @@ class Agent:
             self._refresh_system()
 
             reply = llm.chat(self.model, self.messages, tools=self.tool_specs)
+            # Measured against exactly what went over the wire: nothing has been
+            # appended yet, so `self.messages` is still the request. This is
+            # what lets compaction be judged in real tokens — the estimate is
+            # chars/4 and counts no tool schemas, so it read low by whatever
+            # the schemas weigh, which on a full toolset is thousands.
+            # getattr, not attribute access: llm.Reply always carries these, but
+            # a provider that reports no usage gives 0, and every stubbed reply
+            # in the test suites is a bare namespace. Neither is a reason for
+            # the loop to raise — a missing measurement just means falling back
+            # to the estimate, and a missing finish_reason means "it finished".
+            self.meter.observe(self.messages, getattr(reply, "prompt_tokens", 0) or 0)
             turn.steps = step + 1
             turn.cost_usd += reply.cost_usd
             turn.latency_s += reply.latency_s
@@ -244,9 +369,31 @@ class Agent:
                 }
             )
 
+            # A reply the provider cut off at max_tokens used to be
+            # indistinguishable from a finished one: `finish_reason` was
+            # captured in llm.Reply and read nowhere, so a sentence that
+            # stopped mid-word was appended and returned as the answer. Same
+            # family as the step-budget bug — a state the harness produces that
+            # the model has no way to see — so the fix is the same shape: put
+            # it in the transcript, then act on it.
+            cut_off = getattr(reply, "finish_reason", "stop") == "length"
+            if cut_off:
+                turn.truncated = True
+                self.on_event("truncated", step)
+
             if not reply.tool_calls:
-                turn.text = reply.text
-                self.on_event("text", reply.text)
+                if cut_off and continuations < MAX_CONTINUATIONS:
+                    continuations += 1
+                    carried.append(reply.text)
+                    self.on_event("interim_text", reply.text)
+                    self.messages.append({"role": "user", "content": CONTINUE_NUDGE})
+                    continue
+                # Joined with no separator: the model was asked to resume from
+                # exactly where it stopped, which is usually mid-sentence.
+                turn.text = "".join(carried) + reply.text
+                if cut_off:
+                    turn.text += "\n\n[cut off at the token limit]"
+                self.on_event("text", turn.text)
                 return turn
 
             # Distinct from "text": this is what the model said on its way to
@@ -258,22 +405,18 @@ class Agent:
             # All results from one assistant turn go back together, each keyed to
             # its call id. Splitting them across messages teaches the model to
             # stop making parallel calls.
-            for call in reply.tool_calls:
-                name = call.get("function", {}).get("name", "")
-                arguments = call.get("function", {}).get("arguments", "") or "{}"
-                self.on_event("tool_start", (name, arguments))
+            active = contextctl.ActiveContext(
+                self.messages, self.policy, self._summarize, self.on_event
+            )
+            token = contextctl.bind(active)
+            try:
+                results = self._dispatch_calls(reply.tool_calls)
+            finally:
+                contextctl.reset(token)
 
-                active = contextctl.ActiveContext(
-                    self.messages, self.policy, self._summarize, self.on_event
-                )
-                token = contextctl.bind(active)
-                try:
-                    result = tools.dispatch(name, arguments, approve=self.approve)
-                finally:
-                    contextctl.reset(token)
-
-                turn.tool_calls.append((name, arguments))
-                self.on_event("tool_end", (name, result.text))
+            for call, result in zip(reply.tool_calls, results):
+                name = _call_name(call)
+                turn.tool_calls.append((name, _call_args(call)))
                 self.messages.append(
                     {
                         "role": "tool",
@@ -299,7 +442,23 @@ class Agent:
                         }
                     )
 
-            stats = context.manage(self.messages, self.policy, summarize=self._summarize)
+            # Safe here and not a step earlier: every tool_call now has its
+            # result, so this is a settled boundary (invariant 3).
+            if cut_off:
+                self.messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "[your previous message hit the token limit, so the last "
+                            "tool call in it may have been cut off mid-argument. Check "
+                            "the results above and reissue anything that failed to parse.]"
+                        ),
+                    }
+                )
+
+            stats = context.manage(
+                self.messages, self.policy, summarize=self._summarize, meter=self.meter
+            )
             if stats:
                 turn.tokens_saved += stats.saved
                 self.on_event("context", stats)

@@ -21,13 +21,14 @@ Run:  .venv/bin/python tests/context_check.py
 from __future__ import annotations
 
 import sys
+import tempfile
 import types
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from jarvis import agent as agent_mod
-from jarvis import context
+from jarvis import context, llm
 from jarvis.agent import Agent
 
 
@@ -193,17 +194,148 @@ def eviction_checks() -> None:
 
 
 def truncation_checks() -> None:
-    policy = context.ContextPolicy(keep_full_results=2, max_old_result_chars=100)
-    messages = [{"role": "system", "content": "sys"}]
-    for i in range(5):
-        messages.append({"role": "tool", "tool_call_id": f"c{i}", "name": "t", "content": "y" * 500})
+    with tempfile.TemporaryDirectory() as raw:
+        spill = Path(raw) / "spill"
+        policy = context.ContextPolicy(
+            keep_full_results=2, max_old_result_chars=100, spill_dir=spill
+        )
+        messages = [{"role": "system", "content": "sys"}]
+        for i in range(5):
+            messages.append(
+                {"role": "tool", "tool_call_id": f"c{i}", "name": "t", "content": f"y{i}" * 250}
+            )
+        bodies = [m["content"] for m in messages[1:]]
 
-    n = context.truncate_old_results(messages, policy)
-    assert n == 3, n
-    assert len(messages[-1]["content"]) == 500, "a recent result was truncated"
-    assert messages[1]["content"].endswith(context.TRUNCATED)
-    assert context.truncate_old_results(messages, policy) == 0, "not idempotent"
-    print("ok  context: old results truncated, recent ones intact, idempotent")
+        n = context.truncate_old_results(messages, policy)
+        assert n == 3, n
+        assert len(messages[-1]["content"]) == 500, "a recent result was truncated"
+        # The marker has to stay the last thing in the message: that suffix is
+        # how the next pass recognises its own work, so idempotence rides on it.
+        assert messages[1]["content"].endswith(context.TRUNCATED)
+        assert context.truncate_old_results(messages, policy) == 0, "not idempotent"
+
+        # Truncation used to be the one context operation with no way back —
+        # eviction leaves a placeholder, compaction leaves a summary, a cut
+        # result left nothing. Now it leaves a path.
+        pointer = messages[1]["content"]
+        assert "full result" in pointer and str(spill) in pointer, pointer
+        path = Path(pointer.split("saved to ")[1].split(";")[0])
+        assert path.read_text(encoding="utf-8") == bodies[0], "spill lost the result"
+
+        # Content-addressed, so an identical result spills to the same file
+        # rather than accumulating a copy per truncation.
+        messages.append({"role": "tool", "tool_call_id": "dup", "name": "t", "content": bodies[0]})
+        messages.append({"role": "tool", "tool_call_id": "pad1", "name": "t", "content": "z"})
+        messages.append({"role": "tool", "tool_call_id": "pad2", "name": "t", "content": "z"})
+        context.truncate_old_results(messages, policy)
+        dup = next(m for m in messages if m.get("tool_call_id") == "dup")
+        assert str(path) in dup["content"], f"duplicate body spilled twice: {dup['content']}"
+    print("ok  context: old results truncated, recent intact, idempotent, spilled to disk")
+
+
+def spill_failure_checks() -> None:
+    """A spill that cannot be written degrades to a plain cut, never an error."""
+    with tempfile.TemporaryDirectory() as raw:
+        blocker = Path(raw) / "afile"
+        blocker.write_text("not a directory", encoding="utf-8")
+        policy = context.ContextPolicy(
+            keep_full_results=0, max_old_result_chars=10, spill_dir=blocker / "spill"
+        )
+        messages = [
+            {"role": "system", "content": "sys"},
+            {"role": "tool", "tool_call_id": "c0", "name": "t", "content": "y" * 500},
+        ]
+        assert context.truncate_old_results(messages, policy) == 1
+        assert messages[1]["content"].endswith(context.TRUNCATED)
+        assert "full result" not in messages[1]["content"], messages[1]["content"]
+    print("ok  context: an unwritable spill degrades to plain truncation")
+
+
+def token_meter_checks() -> None:
+    """Compaction is judged on what the provider actually charged for."""
+    policy = context.ContextPolicy()
+    meter = context.TokenMeter()
+    messages = [{"role": "system", "content": "s"}, {"role": "user", "content": "hello"}]
+
+    assert meter.count(messages, policy) == context.estimate_tokens(messages, policy)
+
+    meter.observe(messages, 50_000)
+    assert meter.count(messages, policy) == 50_000, "measured prefix must be used as-is"
+
+    messages.append({"role": "assistant", "content": "x" * 400})
+    assert meter.count(messages, policy) == 50_100, meter.count(messages, policy)
+
+    meter.discount(10_000)
+    assert meter.count(messages, policy) == 40_100
+
+    meter.invalidate()
+    assert meter.count(messages, policy) == context.estimate_tokens(messages, policy)
+
+    # A shrunken transcript no longer matches the measurement, so it is ignored
+    # rather than applied to messages that are not there any more.
+    meter.observe(messages, 50_000)
+    del messages[-1]
+    assert meter.count(messages, policy) == context.estimate_tokens(messages, policy)
+    print("ok  meter: measured prefix + estimated tail, discount/invalidate/shrink")
+
+
+def meter_drives_compaction_checks() -> None:
+    """The behavioural difference: schemas and framing the estimate cannot see.
+
+    chars/4 counts no tool schemas at all, so a transcript sitting well over the
+    threshold on the wire can read as comfortably under it. The estimate says
+    keep going; the real number says compact.
+    """
+    with tempfile.TemporaryDirectory() as raw:
+        policy = context.ContextPolicy(
+            compact_at_tokens=20_000, keep_recent_messages=4, spill_dir=Path(raw)
+        )
+        messages = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "the goal"},
+        ]
+        for i in range(20):
+            messages.append({"role": "user", "content": f"turn {i}"})
+            messages.append({"role": "assistant", "content": f"reply {i}"})
+
+        assert context.estimate_tokens(messages, policy) < policy.compact_at_tokens
+
+        without = context.manage(list(messages), policy, summarize=lambda t: "SUMMARY")
+        assert not without.messages_compacted, "the estimate alone should not trigger"
+
+        meter = context.TokenMeter()
+        meter.observe(messages, 25_000)
+        stats = context.manage(messages, policy, summarize=lambda t: "SUMMARY", meter=meter)
+        assert stats.messages_compacted, "the real count should have triggered compaction"
+        assert meter.measured == 0, "a measurement covering deleted messages must be dropped"
+    print("ok  meter: real tokens trigger compaction the estimate would have missed")
+
+
+def agent_meter_checks() -> None:
+    """The agent measures the request it actually sent, before appending to it."""
+    agent = Agent(tool_names=["get_datetime"])
+    sent: list[int] = []
+
+    def fake(model, messages, tools=None, **kwargs):
+        sent.append(len(messages))
+        return llm.Reply(
+            message={"content": "hi"},
+            finish_reason="stop",
+            model="stub",
+            latency_s=0.0,
+            prompt_tokens=1234,
+        )
+
+    real = llm.chat
+    llm.chat = fake
+    try:
+        agent.run_turn("hello")
+    finally:
+        llm.chat = real
+
+    assert agent.meter.measured == 1234, agent.meter
+    assert agent.meter.measured_len == sent[0], "measured against the wrong message list"
+    print("ok  meter: the agent records prompt_tokens against exactly what it sent")
 
 
 def manage_checks() -> None:
@@ -228,8 +360,13 @@ def manage_checks() -> None:
         messages.append({"role": "tool", "tool_call_id": f"b{i}", "name": "fetch_page", "content": "z" * 4000})
         messages.append({"role": "user", "content": f"carry on {i}"})
 
-    policy = context.ContextPolicy(compact_at_tokens=5_000, keep_recent_messages=10)
-    stats = context.manage(messages, policy, summarize=lambda t: "SUMMARY")
+    # spill_dir into a temp dir, not the owner's real one: a suite that writes
+    # into live machine state is how `apt` once landed on the real allowlist.
+    with tempfile.TemporaryDirectory() as raw:
+        policy = context.ContextPolicy(
+            compact_at_tokens=5_000, keep_recent_messages=10, spill_dir=Path(raw)
+        )
+        stats = context.manage(messages, policy, summarize=lambda t: "SUMMARY")
     assert stats.images_evicted and stats.results_truncated and stats.messages_compacted, stats
     assert stats.saved > 0, stats
     assert messages[1]["content"] == "the goal"
@@ -296,6 +433,10 @@ def main() -> int:
     goal_anchor_checks()
     eviction_checks()
     truncation_checks()
+    spill_failure_checks()
+    token_meter_checks()
+    meter_drives_compaction_checks()
+    agent_meter_checks()
     manage_checks()
     empty_turn_checks()
     print("\nall context checks passed")

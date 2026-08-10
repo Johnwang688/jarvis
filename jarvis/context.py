@@ -23,12 +23,23 @@ no assistant/tool group can be split in half.
 
 from __future__ import annotations
 
+import hashlib
+import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable
+
+from . import config
 
 EVICTED_IMAGE = "[screenshot from an earlier step — evicted to save context]"
 TRUNCATED = "\n[...truncated to save context]"
 SUMMARY_PREFIX = "[Summary of earlier conversation — context, not a new request]\n"
+
+# Spilled results older than this are deleted the first time anything spills in
+# a given process. They exist to make one run's truncation recoverable, not to
+# be an archive.
+SPILL_MAX_AGE_DAYS = 7
+_pruned = False
 
 
 @dataclass
@@ -53,6 +64,9 @@ class ContextPolicy:
 
     enabled: bool = True
 
+    spill_dir: Path | None = None
+    """Where truncated results are written whole. None means config.SPILL_DIR."""
+
 
 @dataclass
 class ContextStats:
@@ -68,6 +82,82 @@ class ContextStats:
 
     def __bool__(self) -> bool:
         return bool(self.images_evicted or self.results_truncated or self.messages_compacted)
+
+
+@dataclass
+class TokenMeter:
+    """Real prompt tokens for the measured prefix; an estimate only for the rest.
+
+    `estimate_tokens` is chars/4 and counts no tool schemas at all, so it reads
+    low by however much the schemas weigh — thousands of tokens on a full
+    toolset. Judging `compact_at_tokens` against it means the threshold does not
+    mean what it says, and the error grows with the number of tools an agent
+    carries. The provider reports the true number with every reply, so the fix
+    is to hold on to it and estimate only what has been appended since.
+
+    Every measurement is provisional: it describes a prefix that later gets
+    mutated in place (eviction, truncation) or cut (compaction). `discount()`
+    covers the first, `invalidate()` the second, and both only have to hold
+    until the next reply re-measures.
+    """
+
+    measured: int = 0
+    measured_len: int = 0
+
+    def observe(self, messages: list[dict[str, Any]], prompt_tokens: int) -> None:
+        """Record the true size of `messages`, which must be exactly what was sent."""
+        if prompt_tokens > 0:
+            self.measured = prompt_tokens
+            self.measured_len = len(messages)
+
+    def discount(self, tokens: int) -> None:
+        """Shrink the measured prefix after messages were rewritten in place."""
+        self.measured = max(0, self.measured - max(0, tokens))
+
+    def invalidate(self) -> None:
+        """Forget the measurement — messages it covered have been deleted."""
+        self.measured = 0
+        self.measured_len = 0
+
+    def count(self, messages: list[dict[str, Any]], policy: ContextPolicy) -> int:
+        if self.measured and len(messages) >= self.measured_len:
+            return self.measured + estimate_tokens(messages[self.measured_len :], policy)
+        return estimate_tokens(messages, policy)
+
+
+def _spill(body: str, policy: ContextPolicy) -> str | None:
+    """Write a result somewhere `read_file` can reach it. None if that failed.
+
+    Truncation used to simply drop the tail, which makes it the one context
+    operation with no way back: eviction leaves a placeholder saying what it
+    was, compaction leaves a summary, but a cut result left nothing at all — so
+    a page fetched at step 4 was unrecoverable at step 20 except by fetching it
+    again. Writing it out first turns the cut into a pointer.
+
+    Named by content hash, so re-truncating the same result is idempotent and
+    two identical results share one file. The body has already been through
+    `dispatch()`'s scrub by the time it is a tool message, so nothing spilled
+    here carries a credential the transcript would not have carried anyway.
+    """
+    global _pruned
+    try:
+        directory = policy.spill_dir or config.SPILL_DIR
+        directory.mkdir(parents=True, exist_ok=True)
+        if not _pruned:
+            _pruned = True
+            cutoff = time.time() - SPILL_MAX_AGE_DAYS * 86400
+            for stale in directory.glob("*.txt"):
+                try:
+                    if stale.stat().st_mtime < cutoff:
+                        stale.unlink()
+                except OSError:
+                    pass
+        target = directory / (hashlib.sha256(body.encode("utf-8", "replace")).hexdigest()[:16] + ".txt")
+        if not target.exists():
+            target.write_text(body, encoding="utf-8")
+        return str(target)
+    except OSError:
+        return None  # spilling is a bonus, never a reason for a turn to fail
 
 
 def _parts(message: dict[str, Any]) -> list[dict[str, Any]]:
@@ -128,7 +218,17 @@ def truncate_old_results(messages: list[dict[str, Any]], policy: ContextPolicy) 
             continue
         if body.endswith(TRUNCATED):  # already handled on an earlier pass
             continue
-        message["content"] = body[: policy.max_old_result_chars] + TRUNCATED
+        # The pointer goes *before* TRUNCATED so the marker stays the last
+        # thing in the message — that suffix is how this pass recognises its
+        # own earlier work, and idempotence depends on it.
+        spilled = _spill(body, policy)
+        pointer = (
+            f"\n[full result — {len(body):,} chars — saved to {spilled};"
+            " read_file it if you need the rest]"
+            if spilled
+            else ""
+        )
+        message["content"] = body[: policy.max_old_result_chars] + pointer + TRUNCATED
         truncated += 1
     return truncated
 
@@ -224,18 +324,40 @@ def manage(
     policy: ContextPolicy,
     summarize: Callable[[str], str] | None = None,
     force: bool = False,
+    meter: TokenMeter | None = None,
 ) -> ContextStats:
-    """Apply the whole policy in order: evict, truncate, then compact if needed."""
+    """Apply the whole policy in order: evict, truncate, then compact if needed.
+
+    `meter` carries the provider's real token counts. Without one this falls
+    back to the chars/4 estimate throughout, which is what every synthetic test
+    and every caller that has no reply to measure gets.
+    """
     stats = ContextStats()
     if not policy.enabled:
         return stats
 
-    stats.tokens_before = estimate_tokens(messages, policy)
+    def budget() -> int:
+        return meter.count(messages, policy) if meter else estimate_tokens(messages, policy)
+
+    estimated_before = estimate_tokens(messages, policy)
+    stats.tokens_before = budget()
     stats.images_evicted = evict_images(messages, policy)
     stats.results_truncated = truncate_old_results(messages, policy)
 
-    if summarize is not None and (force or estimate_tokens(messages, policy) > policy.compact_at_tokens):
-        stats.messages_compacted = compact(messages, policy, summarize)
+    # Both of those rewrote messages the measurement already counted, so the
+    # measured prefix is now too big by roughly what they saved. Estimated
+    # savings are the right correction: the two numbers are being compared to
+    # each other, not to the wire.
+    if meter is not None:
+        meter.discount(estimated_before - estimate_tokens(messages, policy))
 
-    stats.tokens_after = estimate_tokens(messages, policy)
+    if summarize is not None and (force or budget() > policy.compact_at_tokens):
+        stats.messages_compacted = compact(messages, policy, summarize)
+        # Compaction *deletes*. Whatever was measured no longer describes this
+        # transcript at all, and unlike a discount there is no honest way to
+        # adjust it — so drop it and estimate until the next reply re-measures.
+        if meter is not None and stats.messages_compacted:
+            meter.invalidate()
+
+    stats.tokens_after = budget()
     return stats

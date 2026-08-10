@@ -64,7 +64,7 @@ def chat(
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]] | None = None,
     temperature: float = 0.2,
-    max_tokens: int = 4096,
+    max_tokens: int | None = None,
     timeout: float = 120.0,
     max_retries: int = 3,
     provider: str | None = None,
@@ -73,7 +73,7 @@ def chat(
         "model": model,
         "messages": messages,
         "temperature": temperature,
-        "max_tokens": max_tokens,
+        "max_tokens": config.MAX_TOKENS if max_tokens is None else max_tokens,
         # Ask OpenRouter to bill-report each call so the bench can compare cost.
         "usage": {"include": True},
     }

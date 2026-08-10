@@ -34,7 +34,7 @@ from __future__ import annotations
 import contextvars
 from typing import Annotated
 
-from .. import runtime
+from .. import config, runtime
 from . import REGISTRY, tool
 
 # What a sub-agent may use. Everything read-heavy — the whole point is that
@@ -46,8 +46,10 @@ from . import REGISTRY, tool
 SUBAGENT_TOOLS = [
     "read_file",
     "write_file",
+    "edit_file",
     "list_dir",
     "find_files",
+    "grep_files",
     "get_datetime",
     "web_search",
     "fetch_page",
@@ -128,6 +130,7 @@ def run_subagent(
         return "Cancelled before the sub-agent started."
 
     child = agent_mod.Agent(
+        model=config.TIERS["subagent"],
         system=SUBAGENT_SYSTEM,
         tool_names=_child_tools(),
         max_steps=max(1, min(int(max_steps), 30)),

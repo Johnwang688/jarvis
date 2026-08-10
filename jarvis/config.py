@@ -199,6 +199,14 @@ SESSIONS_DIR = Path(
     os.environ.get("JARVIS_SESSIONS", Path.home() / ".local" / "share" / "jarvis" / "sessions")
 )
 
+# Where context.py writes a tool result whole before truncating it in the
+# transcript, so the cut leaves a read_file-able pointer instead of a hole.
+# Beside sessions rather than in the repo: same character — bulk, machine-local,
+# and rewritten constantly.
+SPILL_DIR = Path(
+    os.environ.get("JARVIS_SPILL", Path.home() / ".local" / "share" / "jarvis" / "spill")
+)
+
 # Google OAuth token bundle (client id/secret + refresh token), written once
 # by `jarvis auth google` and read only by google_auth.py. Lives outside the
 # repo on purpose; tools/secrets.py makes it invisible to the agent — Jarvis
@@ -330,9 +338,23 @@ def api_key() -> str:
 
 # Tiers, not model names, are what the rest of the code refers to. Swapping a
 # provider is a one-line change here.
+# Output ceiling for one model call. 4096 was low enough to be a real hazard:
+# it is roughly 16k characters, so a single whole-file write_file of anything
+# substantial hit it — and until finish_reason was checked (2026-08-09) that
+# came back looking like a finished reply. edit_file makes big writes rare and
+# the loop now notices the cut, but the ceiling was still the wrong size.
+MAX_TOKENS = int(os.environ.get("JARVIS_MAX_TOKENS", "8192"))
+
 TIERS: dict[str, str] = {
     # Runs the agent loop: plans, picks tools, recovers from errors.
     "orchestrator": os.environ.get("JARVIS_ORCHESTRATOR", "openai/gpt-5.6-luna"),
+    # Runs run_subagent's children. Defaults to the orchestrator — a delegated
+    # job is still real work — but sub-agents were pinned to it by omission
+    # rather than by choice, and on a delegating run they are the largest line
+    # item, so it is worth being movable without an edit.
+    "subagent": os.environ.get(
+        "JARVIS_SUBAGENT", os.environ.get("JARVIS_ORCHESTRATOR", "openai/gpt-5.6-luna")
+    ),
     # Handles delegated single-shot work (drafting, summarizing, extracting).
     # Bench 2026-07-30: 8/8 on tool tasks at half Luna's cost.
     "worker": os.environ.get("JARVIS_WORKER", "openai/gpt-oss-20b"),
@@ -356,6 +378,20 @@ how you open something on the user's screen.
 
 Use tools to find things out rather than guessing. When a task needs several
 steps, take them one at a time and check the result of each before continuing.
+When several of those steps do not depend on each other — reading four files,
+checking three pages — ask for them in one go rather than one per turn; they
+run at the same time.
+
+To change a file that already exists, use edit_file: give it the exact text to
+replace and what to put there. Reserve write_file for creating a file or
+genuinely replacing all of it — rewriting a long file to change a few lines is
+slow and risks losing the parts you were not changing. read_file numbers the
+lines it shows you; those numbers are for reading, so leave them out of the
+text you hand to edit_file. A long file arrives one page at a time and says so
+at the bottom — call read_file again with the offset it names to go on.
+
+To find something in a codebase, use grep_files rather than a grep command. Ask
+with mode='files' first to see where the thing lives, then read those files.
 
 For anything that will take more than a handful of steps, write the checklist
 with plan_write before you start, and rewrite it as steps finish or the plan
