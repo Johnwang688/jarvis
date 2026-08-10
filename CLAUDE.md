@@ -261,7 +261,11 @@ jarvis/
 
   `--no-ignore` is now passed and the skipping is explicit: one `SKIP_DIRS`
   set, walked by the fallback and turned into `--glob !dir/` for ripgrep, plus
-  a shared `--max-filesize`. The principle worth keeping: **version control is
+  a shared `--max-filesize`. Measured on the real repo once ripgrep was
+  installed (2026-08-10), which is the whole argument in one line:
+
+      rg --files-with-matches '.' memory              ->  0 files
+      rg --no-ignore --files-with-matches '.' memory  -> 18 files The principle worth keeping: **version control is
   not a relevance filter for an agent.** What is worth committing and what is
   worth searching are different questions, and memory is the case that proves
   it.
@@ -529,13 +533,14 @@ jarvis/
   numbering while leaving a numeric TSV column alone, and grep_files across all
   three modes, glob, case, cap, context lines and skipping `.env`.
 
-  **The two backends must agree, and proving that needs `rg` installed.** This
-  machine has none, so the "run it twice" claim was really the fallback twice —
-  which is how the gitignore bug (below) stayed green. The suite now asserts
-  the **rg argument list** directly (that runs anywhere), reproduces the bug in
-  a real temp git repo, and prints `PARITY NOT VERIFIED` in capitals when `rg`
-  is missing rather than passing quietly. Install ripgrep and re-run to get the
-  full-parity comparison across all three modes.
+  **The two backends must agree, and proving that needs `rg` installed.** It
+  was not, so the original "run it twice" claim was really the fallback twice —
+  which is how the gitignore bug (below) stayed green. The suite asserts the
+  **rg argument list** directly (that runs anywhere), reproduces the bug in a
+  real temp git repo, and prints `PARITY NOT VERIFIED` in capitals when `rg` is
+  missing rather than passing quietly. **ripgrep 15.1.0 was installed
+  2026-08-10 and the full parity comparison now runs**: both backends agree in
+  all three modes, and all 45 free suites pass with rg live.
 - `tests/longhorizon_check.py` — free checks with a faked `llm.chat` for the
   plan slot and sub-agents: plan written through dispatch and injected into
   `messages[0]`, still present on step 26 of a *single* turn (the per-step
