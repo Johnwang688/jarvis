@@ -12,3 +12,6 @@ designs/
 # (avatar.svg + avatar.json). See jarvis/avatars.py; scaffold with
 # `jarvis avatar new <slug>`.
 avatars/
+
+# Scratch output from tests/browser/marks_check.py.
+marks_*.png

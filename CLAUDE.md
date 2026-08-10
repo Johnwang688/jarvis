@@ -70,8 +70,10 @@ jarvis/
   avatars.py    who he presents as: name, wake phrases, SVG face + sanitizer
   avatar_templates.py  starter art for `jarvis avatar new` (avatars/ is
                 gitignored, so a clone has nothing to look at otherwise)
-  tools/        clock, files, memory, shell, web, browsing, gmail,
-                onshape (CAD), skills, sessions (read past conversations),
+  tools/        clock, files (read paged + line-numbered, write whole,
+                edit by anchored replacement), search (grep_files — bounded,
+                ripgrep with a Python fallback), memory, shell, web, browsing,
+                gmail, onshape (CAD), skills, sessions (read past conversations),
                 sqlite (read-only .db queries, mode=ro enforced by the
                 engine), goalctl (goal_report — how a goal run ends),
                 voicectl (mute), avatarctl (which avatar), workflows,
@@ -132,6 +134,16 @@ jarvis/
    its call id. Splitting them across messages trains models out of parallel
    calls.
 
+   Since 2026-08-09 those calls also *execute* in parallel, and two things hold
+   it together. **Results are appended in call order, never completion order** —
+   `_dispatch_calls` returns a list indexed by call position, so a fast third
+   tool cannot land ahead of a slow first one. And **only an allowlist runs
+   concurrently** (`tools.PARALLEL_SAFE`, plus a hard refusal for anything
+   `dangerous`): the batches are maximal runs of *consecutive* safe calls, so a
+   write between two reads splits them and the second read still sees the
+   write. A worker that raises still yields a result string — a missing one
+   would leave a `tool_call` unanswered and 400 the next request.
+
 4. **Tool failures are returned as text, never raised.** `dispatch()` catches
    everything and returns an error string so the model can self-correct. The
    `recovery` bench task measures exactly this.
@@ -162,6 +174,17 @@ jarvis/
    inside `contextvars.copy_context()` — it binds the same vars, so calling it
    directly would leave the parent holding the *child's* empty plan and the
    child's depth when the call returns.
+
+   **Per-thread cuts both ways, and parallel dispatch (2026-08-09) is where it
+   bites.** A tool running on a pool thread starts with an *empty* context, so
+   it would hold an unbound approver — and unbound denies. A gated tool would
+   begin refusing itself purely because it ran beside another one, which is a
+   failure that never shows up in a single-tool test. `_dispatch_calls` takes a
+   fresh `contextvars.copy_context()` **per worker** (one Context cannot be
+   entered by two threads at once) and submits `ctx.run(...)`. The copies share
+   the plan dict by reference, so a write through one is seen by the agent that
+   owns it. `tests/loop_check.py` fails against a version that submits the bare
+   function.
 
 9. **All Playwright work happens on the browser's own thread.** The sync API
    is thread-affine and parks a *running* asyncio loop on whichever thread
@@ -325,11 +348,45 @@ jarvis/
   truncation being in-place and idempotent, `manage()` end-to-end leaving
   a wire-valid transcript, and **invariant 2's one exception** — `run_turn`
   never appending a null-content assistant turn that has no tool_calls, while
-  leaving the legal null-content-with-tool_calls shape verbatim. Run after
-  touching anything in `context.py` **or the append in `agent.run_turn`**.
+  leaving the legal null-content-with-tool_calls shape verbatim. Since
+  2026-08-09 it also covers the **TokenMeter** (measured prefix + estimated
+  tail, discount/invalidate/shrink, the agent measuring against exactly what it
+  sent, and a real count triggering a compaction the estimate would have
+  missed) and **spill-on-truncate** (the pointer resolves to a file holding the
+  whole result, identical bodies share one file, an unwritable spill degrades
+  to a plain cut). Run after touching anything in `context.py` **or the append
+  in `agent.run_turn`**.
   **Write new cases so they fail against the old code** — the first draft of
   the orphan case passed against the bug, because the split tool group was not
   the *newest* candidate and both rules picked the same safe boundary.
+  Second rule, learned the same day: **point `spill_dir` at a temp directory**.
+  The default is the owner's real `~/.local/share/jarvis/spill`, and a suite
+  that writes into live machine state is how `apt` once landed on the real
+  allowlist.
+- `tests/loop_check.py` — free checks for the agent loop's dispatch and stop
+  handling, `llm.chat` stubbed so any reply shape can be produced on cue.
+  Parallel dispatch: batching (consecutive safe runs group, a write splits
+  them, indices stay in call order), the allowlist not drifting from the
+  registry and never containing a dangerous/browser/desktop/subagent tool,
+  three 0.3s tools finishing in 0.3s, results ordered by *call* even when they
+  complete out of order, a raising worker still answering its call id, parallel
+  image results each keeping their carrier message — and **the ContextVar
+  propagation check, which is the one that matters**: it fails against a
+  version that submits the bare function to the pool. Token-cap handling: a
+  cut-off reply continued and rejoined, the continuation capped and the cut
+  stated in the reply, the mid-tool-call note landing *after* the results, and
+  an ordinary reply gaining nothing. Run after touching `run_turn`,
+  `_dispatch_calls`, or `PARALLEL_SAFE`.
+- `tests/files_check.py` — free checks for the file and search tools:
+  read_file numbered and paged (a 5000-line file reassembled byte-exact by
+  paging, which is the `CLAUDE.md` case), edit_file across unique / ambiguous /
+  missing / stale / replace_all / deletion and the numbered-paste salvage,
+  **edit_file refusing every SELF_PROTECTED file and `.env`** (verified to bite:
+  with the guard stubbed out, the edit lands), write_file stripping read_file's
+  numbering while leaving a numeric TSV column alone, and grep_files across all
+  three modes, glob, case, cap, context lines, skipping `.env` — run twice,
+  once through ripgrep and once through the forced Python fallback, because a
+  shape mismatch there would only ever surface on a machine without `rg`.
 - `tests/longhorizon_check.py` — free checks with a faked `llm.chat` for the
   plan slot and sub-agents: plan written through dispatch and injected into
   `messages[0]`, still present on step 26 of a *single* turn (the per-step
@@ -1705,16 +1762,109 @@ failure — a run that goes long enough to forget what it was doing.
   what lets it hold the browser when a background workflow cannot.
 
 Not done, in the order I would do them next (the full list came out of a review
-on 2026-08-01): step-budget awareness and a resumable handoff instead of
-`"[stopped after N steps]"` throwing the work away; spill-don't-drop truncation
-(write the full result to `traces/` and truncate to a pointer the model can
-`read_file`, making truncation recoverable); real `prompt_tokens` from
-`llm.Reply` driving compaction instead of the chars÷4 estimate; structured
-compaction sections (goal / done / open / failed) instead of free prose on the
-cheap tier; repetition detection (the gpt-oss-20b vocab-bench failure — 16
-rounds of no valid action — is invisible to the loop today); durable workflow
-journals; and **`long-bench`**, without which none of this is measurable —
-vocab-bench at ~33 steps never crosses the compaction threshold.
+on 2026-08-01; **spill-don't-drop truncation and real `prompt_tokens` were done
+2026-08-09** — see *Harness round 2* below): step-budget awareness and a
+resumable handoff instead of `"[stopped after N steps]"` throwing the work away;
+structured compaction sections (goal / done / open / failed) instead of free
+prose on the cheap tier; repetition detection (the gpt-oss-20b vocab-bench
+failure — 16 rounds of no valid action — is invisible to the loop today);
+durable workflow journals; and **`long-bench`**, without which none of this is
+measurable — vocab-bench at ~33 steps never crosses the compaction threshold.
+
+**Harness round 2 (2026-08-09) — the gaps a Claude Code comparison exposed.**
+Six defects, all found by reading Jarvis's loop against a harness built for the
+same job, all fixed together. All 42 free suites pass. (`tests/browser/
+audio_check.py` matches the `*_check.py` glob but is **not** one — it opens the
+HUD window and serves until Ctrl-C, so it hangs a sweep by design.)
+
+- **There was no edit primitive.** `write_file` took the whole file, so changing
+  three lines in a long one cost the model the entire file — and models drop
+  content when re-emitting at length, which the read-before-write stamp cannot
+  catch (it detects *staleness*, never *truncation*). `edit_file` does anchored
+  replacement: exact match, unique unless `replace_all`, refuses ambiguity
+  rather than guessing. **It honours SELF_PROTECTED, and that is the part to
+  never lose** — a one-line replacement in `permissions.py` disarms the gate as
+  thoroughly as overwriting it and looks like far less, so any future write
+  tool has to be added to `self_improve_check.py` too.
+- **`read_file` was capped at 40k characters with no way to ask for the rest.**
+  CLAUDE.md is 116KB, so `skills/self-improve.md`'s first instruction ("read
+  CLAUDE.md first") had been reading 34% of the file and reporting no problem.
+  Reads are paged now (`offset`/`limit`, footer names where to resume) and
+  line-numbered. The numbering has a matching hazard in each direction, and
+  both are handled: `edit_file` retries once with the prefixes stripped when a
+  quoted excerpt fails to match, and `write_file` strips them when a whole-file
+  rewrite carries them back in — the strip only fires on read_file's own
+  6-wide right-aligned field, so a TSV counting 1, 2, 3 survives.
+- **Search was unbounded.** `run_readonly` allows grep but forbids pipes, so
+  there was no `| head`: the model took the whole dump and it lived in the
+  transcript forever. `grep_files` bounds its own output (`mode` =
+  content/files/count, `max_results`, glob, context lines), ripgrep with a
+  pure-Python fallback that the suite exercises by forcing it. It lives in
+  `tools/search.py` rather than `files.py` on purpose — SELF_PROTECTED exists
+  to freeze the *write* guard, and freezing a read-only search tool beside it
+  buys nothing.
+- **Tool calls ran one at a time.** Invariant 3 exists to keep models emitting
+  parallel calls, and the loop then executed them serially — so the only thing
+  parallelism bought was fewer round trips. Now consecutive parallel-safe calls
+  run together (measured: 3×0.3s tools in 0.30s). See invariants 3 and 8 for
+  the two things that make it safe: call-order results, and one fresh
+  `copy_context()` per worker.
+- **`finish_reason` was captured and never read.** `llm.Reply` has carried it
+  since the beginning; nothing in the codebase looked at it, so a reply the
+  provider cut off at `max_tokens` was appended and returned as the finished
+  answer — a sentence stopping mid-word, indistinguishable from a completed
+  one. This is the **same bug as the invisible step budget**, and the third
+  time that shape has appeared: *a state the harness can produce that the model
+  cannot see is a state the model will confabulate around.* The loop now flags
+  it (`Turn.truncated`), continues up to `MAX_CONTINUATIONS` times joining the
+  halves, and says `[cut off at the token limit]` if it still cannot finish. A
+  cut that landed mid-tool-call gets a note **after** the results, never
+  before — invariant 3 again. `max_tokens` also went 4096 → 8192
+  (`config.MAX_TOKENS`): 4096 is ~16k characters, which any substantial
+  whole-file write exceeded.
+- **Compaction was judged on chars÷4.** The estimate counts no tool schemas at
+  all, so it reads low by thousands on a full toolset and the threshold did not
+  mean what it said. `context.TokenMeter` keeps the provider's real
+  `prompt_tokens` for the measured prefix and estimates only what was appended
+  since — measured immediately after `llm.chat` returns, when `self.messages`
+  is still exactly the request. Every measurement is provisional, so
+  `discount()` covers in-place rewrites (eviction, truncation) and
+  `invalidate()` covers compaction, which deletes messages the measurement
+  counted and has no honest adjustment.
+- **Truncation was the one context operation with no way back.** Eviction
+  leaves a placeholder, compaction leaves a summary; a cut result left nothing,
+  so a page fetched at step 4 was gone by step 20. It now spills the full body
+  to `config.SPILL_DIR` (content-hashed, so identical results share a file and
+  re-truncating is idempotent) and leaves a `read_file`-able pointer. The
+  pointer goes *before* the `TRUNCATED` marker, because that suffix is how the
+  next pass recognises its own work. A spill that cannot be written degrades to
+  a plain cut — it is a bonus, never a reason for a turn to fail.
+
+Also: `run_subagent` was pinned to the orchestrator tier **by omission** (it
+constructed its child with no `model`), now `config.TIERS["subagent"]`,
+defaulting to the same model so behaviour is unchanged but movable.
+
+Deliberately **not** done in this round, because they are decisions rather than
+defects and are the owner's to make:
+
+- **Hooks and permission rule matchers.** Jarvis gates on a binary `dangerous`
+  flag plus an allowlist matched on a command's first word; Claude Code matches
+  rules like `Bash(npm run test:*)` and runs user programs at PreToolUse. That
+  is a new subsystem, and it lands in `permissions.py`, which is
+  SELF_PROTECTED precisely so it does not change casually.
+- **A typed sub-agent fleet.** One synchronous shape versus agent types with
+  their own prompts, tools and models running in the background. The blocker is
+  known and written down: `SESSION` is a module-level singleton, so concurrent
+  children would interleave on one Playwright page and share one 120-action
+  budget.
+- **Moving the durable slot off `messages[0]`.** Invariant 7 puts volatile
+  state (plan, skills index, session titles) at position 0 because nothing in
+  `context.py` can reach it. That is prune-proof and **cache-hostile**: a
+  change at position 0 invalidates the whole prefix cache, so every
+  `plan_write` makes the next step re-pay for the entire transcript. Claude
+  Code's `<system-reminder>` blocks ride the *latest* user message for exactly
+  this reason — worse for durability, better for caching. Both are coherent;
+  picking between them is an architecture call, not a bug fix.
 
 ### PENDING LIVE VALIDATION — needs API keys (delete this section once done)
 
@@ -1746,6 +1896,16 @@ CLAUDE.md once it has been, with the results folded into the notes above:**
    only. A long browser or CAD session (parallel `cad_render` calls are the
    exact shape that triggered the bug) crossing 60k tokens would confirm no
    400s and that the pinned goal reads sensibly after a summary lands.
+4b. **Does the model actually use `edit_file` and `grep_files`?** (Added
+   2026-08-09.) Both are mechanically tested; the *prompting* is not. Watch a
+   real self-improve or CAD session for three things: whether it reaches for
+   `edit_file` instead of rewriting whole files, whether it pages past the
+   first `read_file` footer on CLAUDE.md rather than stopping there, and
+   whether it starts a search with `mode='files'`. If it ignores them, the
+   system-prompt paragraph in `config.py` needs work, not the tools. Also
+   worth measuring on agent-bench: `project` is the task these should move,
+   and the baseline to beat is Luna's 100% at $0.0065 / 115s — the interesting
+   number is **cost**, not score.
 5. **Stale plans across turns.** The plan persists for the life of the agent,
    which is the point for long work but means a finished checklist can linger
    in the face's persistent agent into an unrelated conversation. The model can
