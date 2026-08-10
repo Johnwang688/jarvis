@@ -25,6 +25,13 @@ MAX_PARALLEL_TOOLS = 4
 # and short enough that a model stuck in a loop cannot spend much.
 MAX_CONTINUATIONS = 2
 
+BRIEFER_PREFACE = (
+    "Your previous attempt at this ran past the length limit and was cut off, "
+    "losing its final sections. Write the same sections again, much shorter — "
+    "one terse line each, keeping only what could not be re-derived. Reaching "
+    "the end matters more than the detail.\n\n"
+)
+
 CONTEXT_BLOCK_PREFIX = (
     "[Working context — your skills index, your plan, and recent conversations. "
     "Rewritten fresh every step, so it is always current. This is your own "
@@ -289,16 +296,41 @@ class Agent:
         imperatives — the same mistake that once produced the session title
         "Acknowledged".
         """
-        return llm.chat(
-            config.TIERS["compaction"],
-            [
-                {
-                    "role": "user",
-                    "content": COMPACTION_PROMPT + transcript + "\n<<<END TRANSCRIPT>>>",
-                }
-            ],
-            max_tokens=1600,
-        ).text
+        def ask(preface: str = "") -> llm.Reply:
+            return llm.chat(
+                config.TIERS["compaction"],
+                [
+                    {
+                        "role": "user",
+                        "content": preface
+                        + COMPACTION_PROMPT
+                        + transcript
+                        + "\n<<<END TRANSCRIPT>>>",
+                    }
+                ],
+                max_tokens=config.COMPACTION_MAX_TOKENS,
+                stream=False,
+            )
+
+        # A summary cut off at the token ceiling is worse than any other
+        # truncation in this codebase, because it *becomes the record* — the
+        # messages it replaced are gone. And the sections it loses are the last
+        # ones, which is where OPEN and FILES live: exactly what the next step
+        # needs. Half the detail is strictly better than a missing tail, so a
+        # cut summary is re-asked once, much tighter, rather than kept.
+        reply = ask()
+        if reply.finish_reason == "length":
+            reply = ask(BRIEFER_PREFACE)
+            if reply.finish_reason == "length":
+                # Still too long. Say so in the summary itself rather than
+                # handing the model a document that stops mid-sentence and
+                # looks complete — the confabulation lesson, third time.
+                return (reply.text or "") + (
+                    "\n\n[this summary was cut off at the token limit; sections "
+                    "after this point are missing, so treat the earlier "
+                    "transcript as only partly recorded]"
+                )
+        return reply.text
 
     def _dispatch_one(self, call: dict) -> tools.ToolResult:
         return tools.dispatch(_call_name(call), _call_args(call), approve=self.approve)
@@ -478,6 +510,11 @@ class Agent:
             turn.steps = step + 1
             turn.cost_usd += reply.cost_usd
             turn.latency_s += reply.latency_s
+            # Running spend, per step. A surface that enforces a budget has to
+            # be able to see it *during* a turn: a ceiling checked only between
+            # turns is a ceiling a single long turn can walk straight through,
+            # and `run_fleet` made that a much shorter walk.
+            self.on_event("cost", turn.cost_usd)
 
             # Keep the assistant turn verbatim — the tool_call ids in it are what
             # the next round of tool results are matched against.

@@ -10,6 +10,16 @@ Three verdicts now, decided per command:
   DENY   never runs, and is never even put to the owner. The same shape as the
          `.env` refusal: approving a command is not consent to what it does, so
          some things should not be approvable at all.
+
+         **DENY is a guardrail against accidents, not a sandbox.** It is string
+         and token matching over a shell line, and a shell has more ways to
+         spell a thing than any matcher has patterns: `rm -rf "/"` and `rm -rf
+         / --no-preserve-root` both fall through to ASK rather than DENY, which
+         is safe but is not the same as being caught. The value is that the
+         obvious catastrophic typo cannot be approved by a tired owner at
+         11pm — not that a determined agent could not get past it. The real
+         boundary is still filesystem permissions and the fact that `sudo`
+         cannot be answered from a tool call at all.
   ALLOW  runs without asking.
   ASK    the default, and what anything unrecognised falls back to.
 
@@ -80,6 +90,7 @@ _DENY_PATTERNS: list[tuple[re.Pattern, str]] = [
         "a recursive delete of a system directory",
     ),
     (re.compile(r"\bchmod\b[^|;&]*\s-[a-zA-Z]*R[^|;&]*\s+/\s*$"), "chmod -R on the filesystem root"),
+    (re.compile(r"\bchown\b[^|;&]*\s-[a-zA-Z]*R[^|;&]*\s+/\s*$"), "chown -R on the filesystem root"),
     (re.compile(r":\s*\(\s*\)\s*\{.*\|.*&\s*\}\s*;"), "a fork bomb"),
     (re.compile(r">\s*/dev/(sd|nvme|hd|vd)[a-z0-9]*"), "a raw write to a block device"),
 ]
@@ -161,6 +172,11 @@ _INTERPRETERS = {"python", "python3", "node", "deno", "bun", "perl", "ruby", "ph
                  "sh", "bash", "zsh", "ksh", "dash"}
 
 _URL = re.compile(r"https?://[^\s'\"|;&)]+")
+
+# Directories where loosening permissions is never routine.
+_SENSITIVE_PERM_PATH = re.compile(
+    r"(^|/)\.(ssh|gnupg|aws|config/jarvis)(/|$)|(^|/)\.env(\.|$)|authorized_keys|id_(rsa|ed25519)"
+)
 
 
 def urls(command: str) -> list[str]:
@@ -247,6 +263,17 @@ def _judge_segment(segment: str) -> Verdict:
     flags = _WRITES_ANYWAY.get(stem, ())
     if flags and any(t == f or t.startswith(f) for t in tokens[1:] for f in flags):
         return Verdict(ASK, f"{stem} with {flags[0]} writes, and is not a read")
+
+    # chmod/chown are on the allow list because moving files around is ordinary
+    # work, but two shapes are not ordinary and are silent when they go wrong:
+    # world-readable permissions on a key directory, and a recursive 777. ssh
+    # in particular *fails closed* on loose permissions, so the damage shows up
+    # later and somewhere else.
+    if stem in ("chmod", "chown"):
+        if any(_SENSITIVE_PERM_PATH.search(t) for t in tokens[1:]):
+            return Verdict(ASK, f"{stem} on a credential directory")
+        if any(t in ("777", "666", "a+rwx", "a=rwx") for t in tokens[1:]):
+            return Verdict(ASK, "world-writable permissions")
 
     if stem == "git":
         sub = _first_word_arg(tokens)

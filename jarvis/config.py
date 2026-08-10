@@ -355,6 +355,12 @@ MAX_TOKENS = int(os.environ.get("JARVIS_MAX_TOKENS", "8192"))
 # the non-streaming path on its own if streaming fails before the first token.
 STREAM = os.environ.get("JARVIS_STREAM", "1") not in ("0", "false", "no")
 
+# Output ceiling for a compaction summary. Higher than the old 1600, because a
+# summary that runs out of room loses its *last* sections — OPEN and FILES,
+# which is precisely what the next step needs. agent._summarize also re-asks
+# once, tighter, if it still overruns.
+COMPACTION_MAX_TOKENS = int(os.environ.get("JARVIS_COMPACTION_MAX_TOKENS", "2400"))
+
 TIERS: dict[str, str] = {
     # Runs the agent loop: plans, picks tools, recovers from errors.
     "orchestrator": os.environ.get("JARVIS_ORCHESTRATOR", "openai/gpt-5.6-luna"),

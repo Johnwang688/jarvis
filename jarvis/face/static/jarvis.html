@@ -125,6 +125,14 @@
   .msg.jarvis { border-left: 2px solid var(--cyan-dim); padding-left: 9px; }
   .msg.you { border-left: 2px solid #24344d; padding-left: 9px; }
   .msg .meta { font: 10px var(--mono); color: #46586f; margin-top: 4px; }
+  /* Still being written: dimmed, with a blinking caret, so a half-finished
+     thought never reads as a finished one. */
+  .msg.live .md { color: #93b4cc; white-space: pre-wrap; }
+  .msg.live .md::after {
+    content: "▌"; color: var(--cyan); margin-left: 1px;
+    animation: caret 1s steps(1) infinite;
+  }
+  @keyframes caret { 50% { opacity: 0; } }
 
   /* rendered markdown (jarvis replies only — see renderMarkdown) */
   .md > *:first-child { margin-top: 0; }
@@ -1027,6 +1035,51 @@ function addMsg(cls, text, meta) {
   tr.scrollTop = tr.scrollHeight;
 }
 
+// --- live reply ------------------------------------------------------------
+//
+// Text arrives token by token on the turn stream while the model is still
+// writing. It goes up as PLAIN TEXT, deliberately: half a markdown document is
+// not markdown, and running the renderer over a partial `**bold` or an unclosed
+// fence produces flicker at best and mangled markup at worst. The finished
+// reply replaces this element and is rendered properly, so the streamed
+// version only ever has to be readable, not right.
+//
+// textContent, never innerHTML — this is model-written text landing in the
+// window that gates approvals, and that rule does not relax because the text
+// is arriving in pieces.
+let liveEl = null;
+let liveText = "";
+
+function liveDelta(text) {
+  if (!liveEl) {
+    liveText = "";
+    liveEl = document.createElement("div");
+    liveEl.className = "msg jarvis live";
+    const who = document.createElement("span");
+    who.className = "who";
+    who.textContent = avatar.label || "J.A.R.V.I.S.";
+    liveEl.appendChild(who);
+    const body = document.createElement("div");
+    body.className = "md";
+    liveEl.appendChild(body);
+    const tr = $("transcript");
+    tr.appendChild(liveEl);
+  }
+  liveText += text;
+  liveEl.querySelector(".md").textContent = liveText;
+  const tr = $("transcript");
+  tr.scrollTop = tr.scrollHeight;
+}
+
+// Drop the streaming element. Called before the final reply is appended, and
+// on any path that ends the turn without one (cancel, error) — leaving a
+// half-written bubble in the log would misrepresent what he actually said.
+function liveClear() {
+  if (liveEl && liveEl.parentNode) liveEl.parentNode.removeChild(liveEl);
+  liveEl = null;
+  liveText = "";
+}
+
 function addOp(name, args) {
   const list = $("opslist");
   list.querySelectorAll(".op.fresh").forEach((o) => o.classList.remove("fresh"));
@@ -1386,7 +1439,11 @@ async function converse(blob) {
         } else if (msg.type === "heard") {
           // Your words go up the moment STT lands, not after the whole turn.
           addMsg("you", msg.text);
+        } else if (msg.type === "delta") {
+          // He is still writing. Show it as it comes.
+          liveDelta(msg.text);
         } else if (msg.type === "meta") {
+          liveClear(); // the finished reply replaces the streamed draft
           if (!msg.heard) {
             setState("idle");
             $("status").textContent = "NO SIGNAL — TRY AGAIN";
@@ -1404,9 +1461,13 @@ async function converse(blob) {
         } else if (msg.type === "audio") {
           await queueAudio(msg.b64);
         } else if (msg.type === "cancelled") {
+          // Interrupted mid-sentence: drop the partial rather than leaving
+          // words in the log he never finished saying.
+          liveClear();
           setState("idle");
           return;
         } else if (msg.type === "error") {
+          liveClear();
           throw new Error(msg.message);
         } else if (msg.type === "done") {
           streamDone = true;
@@ -1421,7 +1482,8 @@ async function converse(blob) {
       setState("idle");
     }
   } catch (err) {
-    if (err.name === "AbortError") return; // barge-in — new turn already starting
+    if (err.name === "AbortError") { liveClear(); return; } // barge-in — new turn starting
+    liveClear();
     setState("error");
     addMsg("jarvis", "Fault: " + err.message);
     setTimeout(() => { if (S.state === "error") setState("idle"); }, 2500);

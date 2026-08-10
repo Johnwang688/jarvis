@@ -443,6 +443,8 @@ class GoalRunner:
     # -- progress ------------------------------------------------------------
 
     def _on_event(self, kind: str, data) -> None:
+        if kind == "cost":
+            self._check_live_spend(data)
         if kind == "tool_start":
             name, arguments = data
             self._last_activity = f"{name} {str(arguments)[:80]}"
@@ -467,6 +469,37 @@ class GoalRunner:
         threading.Thread(
             target=self._notify, args=(digest,), daemon=True, name="goal-dm"
         ).start()
+
+    def _check_live_spend(self, turn_cost: float) -> None:
+        """Stop a slice that is spending past the goal's ceiling, mid-turn.
+
+        The dollar ceiling used to be checked only *between* slices, which
+        assumed a slice costs about one slice's worth. `run_fleet` broke that
+        assumption — six children, each with its own step budget, all inside a
+        single turn — but the assumption was already thin: a 40-step turn that
+        goes in circles overspends the same way, just more slowly.
+
+        Setting the interrupt is enough. It is what `should_stop` reads, so the
+        turn ends whole at the next step boundary (invariant 3) and the normal
+        between-slices ceiling check then parks the goal and DMs the owner with
+        what was spent. Nothing here has to know how parking works.
+        """
+        goal = self.current
+        if goal is None or self._interrupt.is_set():
+            return
+        cap = goal.budgets.get("dollars", config.GOAL_MAX_DOLLARS)
+        if goal.spent_usd + float(turn_cost or 0.0) < cap:
+            return
+        self._last_activity = (
+            f"stopped mid-slice at ${goal.spent_usd + turn_cost:.2f} of ${cap:.2f}"
+        )
+        goal.journal(
+            "budget",
+            reason="dollar ceiling reached mid-slice",
+            spent_usd=round(goal.spent_usd + turn_cost, 6),
+            cap_usd=cap,
+        )
+        self._interrupt.set()
 
     def _digest(self, goal: goals.Goal) -> str:
         cap = goal.budgets.get("dollars", config.GOAL_MAX_DOLLARS)

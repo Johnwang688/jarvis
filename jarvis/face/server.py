@@ -241,7 +241,23 @@ def broadcast(kind: str, data) -> None:
                 pass
 
 
+# Where a turn's streamed text goes while that turn is running. Set under
+# `_agent_lock` for the life of one /converse request and cleared afterwards,
+# which is safe because the lock already serialises turns.
+#
+# Deltas ride the **turn stream**, not SSE, and that is not an accident: SSE is
+# a separate connection with no ordering guarantee against it, so a delta could
+# arrive after the `meta` line that carries the finished reply and append stale
+# text underneath it. Phases live on the turn stream for the same reason.
+_delta_sink = None
+
+
 def _agent_event(kind: str, data) -> None:
+    if kind == "delta":
+        sink = _delta_sink
+        if sink is not None:
+            sink(str(data))
+        return
     if kind == "tool_start":
         name, raw = data
         broadcast("tool", {"name": name, "args": str(raw)[:100]})
@@ -829,11 +845,25 @@ class FaceHandler(SimpleHTTPRequestHandler):
 
             self._nd({"type": "phase", "phase": "thinking"})
             t0 = time.monotonic()
+            global _delta_sink
             with _agent_lock:
                 # Cleared here, under the lock: a cancel aimed at the previous
                 # turn must not carry over and kill this one before it starts.
                 _cancel.clear()
-                turn = _get_agent().run_turn(user_input, images=images or None)
+
+                def _sink(text: str) -> None:
+                    # A dead client mid-generation is normal (barge-in aborts
+                    # the fetch), and must not take the turn down with it.
+                    try:
+                        self._nd({"type": "delta", "text": text})
+                    except Exception:
+                        pass
+
+                _delta_sink = _sink
+                try:
+                    turn = _get_agent().run_turn(user_input, images=images or None)
+                finally:
+                    _delta_sink = None
             agent_ms = round((time.monotonic() - t0) * 1000)
 
             if turn.cancelled:

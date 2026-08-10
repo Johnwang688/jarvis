@@ -29,6 +29,19 @@ built to fail toward asking:
     JARVIS_REVIEW_AUTOAPPROVE=0, leaving the reviewer as a summariser that can
     still refuse but can no longer consent.
 
+**The gap that cannot be closed here: this fetches the URL, and then `curl`
+fetches it again.** Nothing guarantees the two responses match. A server can
+serve a clean script to whoever asks first and a different one to the second
+request — by IP, by User-Agent, by timing, or simply by changing between the
+two. So the review describes *a* script from that URL, not necessarily the one
+that will run. That is the main reason auto-approval additionally requires a
+host on TRUSTED_INSTALL_HOSTS: the trust is doing the load-bearing work, and
+the review is what catches a trusted host having a bad day. Closing it properly
+means fetching once and executing *that* copy — piping the reviewed bytes into
+the shell instead of re-fetching — which is a change to how the command runs,
+not to how it is judged, and is worth doing if this ever guards anything
+valuable.
+
 What it genuinely buys: a `curl … | sh` whose script quietly adds an SSH key or
 posts your environment somewhere gets refused with a specific reason, instead
 of being one distracted "yes" away from running.

@@ -620,6 +620,15 @@ jarvis/
   parent's approver being what a child dispatches with, and `run_fleet` staying
   out of `workflows.SAFE_TOOLS`. Run after touching `agents.py` or
   `tools/subagent.py`.
+- `tests/face/hud_delta_check.py` — free headless checks that the HUD renders a
+  reply *while it is being written*: text appears mid-turn, the draft is plain
+  text (half a markdown document is not markdown — rendering `**bold` mid-word
+  flickers), the finished reply replaces the draft and is rendered once, a
+  cancel mid-sentence removes the draft rather than leaving words he never
+  finished saying, and streamed text cannot inject markup into the window that
+  gates approvals. Harness note worth copying: **close each turn's `/converse`
+  response with a `None`**, or the previous handler is still blocked on the
+  queue and the next turn's lines are delivered to a dead connection.
 - `tests/stream_check.py` — free checks for streamed completions, the HTTP
   layer faked: content and split tool calls reassembling by index, usage/model/
   finish_reason surviving, **a mid-stream cancel raising `Cancelled` and
@@ -2038,6 +2047,34 @@ HUD window and serves until Ctrl-C, so it hangs a sweep by design.)
   pointer goes *before* the `TRUNCATED` marker, because that suffix is how the
   next pass recognises its own work. A spill that cannot be written degrades to
   a plain cut — it is a bonus, never a reason for a turn to fail.
+
+**Follow-ups closed 2026-08-10**, each one a smaller version of a lesson
+already in this file:
+
+- **A compaction summary that overran was silently cut.** `_summarize` had its
+  own `max_tokens` and never looked at `finish_reason` — the exact bug the loop
+  had just been fixed for, one function away. It matters more here than
+  anywhere else: the summary *becomes the record*, and the sections it loses
+  are the last ones, which is where OPEN and FILES live. It now re-asks once,
+  much tighter, and if that still overruns it says so inside the summary.
+- **The goal dollar ceiling is checked mid-turn.** It was checked only between
+  slices, which assumed a slice costs roughly one slice. `run_fleet` broke that
+  (six children, each with its own step budget, inside one turn) but the
+  assumption was always thin — a 40-step turn that goes in circles overspends
+  the same way, slower. `Agent` emits an `on_event("cost", …)` per step and the
+  goal runner sets its interrupt, so the turn ends whole at the next step
+  boundary and the existing between-slices check parks it.
+- **`chmod`/`chown` narrowed.** Still allowed for ordinary work, but a
+  credential directory (`~/.ssh`, `.gnupg`, `.aws`, the jarvis config dir) or a
+  world-writable mode falls to ASK. ssh *fails closed* on loose permissions, so
+  the damage shows up later and somewhere else.
+- **Two honesty corrections.** `command_review`'s docstring now states the
+  TOCTOU gap plainly — it fetches the URL and then `curl` fetches it again, so
+  the review describes *a* script from that URL, not necessarily the one that
+  runs; that is why a trusted host is also required. And `rules.py` no longer
+  implies DENY is a boundary: it is token matching over a shell line, `rm -rf
+  "/"` falls through to ASK, and the real boundary is still filesystem
+  permissions.
 
 Also: `run_subagent` was pinned to the orchestrator tier **by omission** (it
 constructed its child with no `model`), now `config.TIERS["subagent"]`,
