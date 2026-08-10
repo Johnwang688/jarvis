@@ -67,6 +67,7 @@ def chat(
     max_tokens: int = 4096,
     timeout: float = 120.0,
     max_retries: int = 3,
+    provider: str | None = None,
 ) -> Reply:
     payload: dict[str, Any] = {
         "model": model,
@@ -79,6 +80,13 @@ def chat(
     if tools:
         payload["tools"] = tools
         payload["tool_choice"] = "auto"
+
+    # Optional routing pin — see config.CHAT_PROVIDER for why this exists and
+    # why it refuses fallbacks. Off unless asked for, so default behaviour is
+    # unchanged: OpenRouter picks.
+    pinned = provider if provider is not None else config.CHAT_PROVIDER
+    if pinned:
+        payload["provider"] = {"order": [pinned], "allow_fallbacks": False}
 
     headers = {
         "Authorization": f"Bearer {config.api_key()}",

@@ -444,6 +444,33 @@ def test_tasks_are_wellformed() -> None:
         check("every declared category is graded somewhere",
               covered == set(ab.CATEGORIES), f"covered: {sorted(covered)}")
 
+        # A run the provider killed part-way through: fewer recorded turns than
+        # the task declares. The empty-run case above pads every per-turn list
+        # to full length, so it never exercised a *short* one — which is how
+        # run.called(turn=N) kept an unguarded index until a real 400 mid-run
+        # (qwen3.7-flash, 2026-08-05) crashed the recall grader with IndexError.
+        # A crashed grader reports one bogus check instead of scoring zero, so
+        # an infrastructure failure reads as a capability result.
+        for task in ab.TASKS:
+            facts = task.fixture(workspace) or {}
+            for recorded in (0, 1):
+                run = make_run(workspace, facts=facts)
+                run.turns = [FakeTurn()] * recorded
+                run.per_turn_calls = [[] for _ in range(recorded)]
+                run.per_turn_approvals = [[] for _ in range(recorded)]
+                run.error = "LLMError: HTTP 400"
+                try:
+                    graded = task.grade(run)
+                except Exception as exc:
+                    check(f"{task.name} grader survives a run cut short "
+                          f"({recorded} turns)", False, f"{type(exc).__name__}: {exc}")
+                    continue
+                check(f"{task.name} grader survives a run cut short "
+                      f"({recorded} turns)", True)
+                check(f"{task.name} scores near zero when cut short ({recorded} turns)",
+                      ab.overall(graded) < 0.35,
+                      f"scored {ab.overall(graded):.0%} for a run that died")
+
 
 def main() -> int:
     print("agent-bench harness checks (free, no API)")

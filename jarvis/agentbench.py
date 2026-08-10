@@ -114,7 +114,19 @@ class Run:
         return [call for turn in self.per_turn_calls for call in turn]
 
     def called(self, name: str, turn: int | None = None) -> bool:
-        source = self.per_turn_calls[turn] if turn is not None else self.calls
+        if turn is None:
+            source = self.calls
+        else:
+            # A turn that never ran made no calls. Without this, a run cut short
+            # by a provider error (429/400) crashes the grader with IndexError
+            # and the task reports one bogus "grader crashed" check instead of
+            # scoring zero across its real ones — which reads as a capability
+            # result when it is an infrastructure failure. said() and
+            # per_turn_approvals are already guarded the same way.
+            try:
+                source = self.per_turn_calls[turn]
+            except IndexError:
+                return False
         return any(n == name for n, _ in source)
 
     def call_args(self, name: str) -> list[dict]:
