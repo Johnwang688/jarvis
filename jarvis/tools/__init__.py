@@ -72,6 +72,52 @@ class Tool:
 
 REGISTRY: dict[str, Tool] = {}
 
+# Tools the agent loop may run **concurrently** with each other.
+#
+# An allowlist, not a denylist, and the same reasoning as DESKTOP_APPS: the
+# question "is this safe to run beside a copy of itself" has to be answered
+# once per tool by a person, because the failure mode of guessing wrong is two
+# tools quietly corrupting each other's work rather than an error.
+#
+# Everything here is read-only and owns no shared handle. What is deliberately
+# absent, and why:
+#
+#   browser_*      one Playwright page. Two concurrent gotos interleave into
+#                  nonsense even though `_submit()` serialises them mechanically.
+#   desktop_*      driving an app means holding the Windows foreground; two at
+#                  once fight over it, and over the owner's keyboard.
+#   run_subagent   a child may take the browser, and children would then overlap
+#                  on it — the exact caveat CLAUDE.md flags as the first thing
+#                  to break if sub-agents ever became concurrent.
+#   run_readonly   a subprocess is only as read-only as its binary: two `git`
+#                  invocations in one repo can collide on index.lock. grep_files
+#                  covers the case this would have been used for.
+#   write_file / edit_file / *_write / plan_write
+#                  writes, and order between them is meaning.
+#
+# Anything `dangerous` is refused by `parallelizable()` whatever this set says:
+# two approval prompts racing would ask the owner to answer a question while
+# another one is still on screen.
+PARALLEL_SAFE = frozenset(
+    {
+        "read_file", "list_dir", "find_files", "grep_files", "get_datetime",
+        "memory_list", "memory_read", "memory_search",
+        "skill_list", "skill_read",
+        "session_list", "session_read", "session_search", "session_summary",
+        "web_search", "fetch_page", "query_sqlite",
+        "gmail_search", "gmail_read", "drive_search", "drive_read",
+        "discord_channels", "discord_read",
+        "cad_status", "cad_find_part", "cad_assembly", "cad_render",
+        "workflow_status", "workflow_log", "avatar_list",
+    }
+)
+
+
+def parallelizable(name: str) -> bool:
+    """True if `name` may run alongside other tools in the same assistant turn."""
+    entry = REGISTRY.get(name)
+    return entry is not None and not entry.dangerous and name in PARALLEL_SAFE
+
 
 def _json_type(annotation: Any) -> dict[str, Any]:
     origin = typing.get_origin(annotation)
@@ -215,6 +261,7 @@ from . import (  # noqa: E402,F401  (registers the tools)
     memory,
     onshape,
     plan,
+    search,
     sessions,
     shell,
     skills,

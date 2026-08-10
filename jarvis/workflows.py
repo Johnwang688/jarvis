@@ -32,8 +32,10 @@ MAX_LOG_LINES = 400
 SAFE_TOOLS = [
     "read_file",
     "write_file",
+    "edit_file",
     "list_dir",
     "find_files",
+    "grep_files",
     "get_datetime",
     "web_search",
     "fetch_page",

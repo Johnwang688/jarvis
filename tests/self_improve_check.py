@@ -39,6 +39,23 @@ def guard_checks() -> None:
     )
     assert "safety layer" in out.text or "already exists" in out.text, out.text
 
+    # Every write path, not just the first one. edit_file (2026-08-09) can
+    # reach these files as precisely as write_file can and does far less to
+    # give itself away — a one-line replacement in permissions.py disarms the
+    # gate without changing the shape of the file. Any future write tool has
+    # to be added here too.
+    for rel in sorted(SELF_PROTECTED):
+        path = config.REPO_ROOT / rel
+        before = path.read_text(encoding="utf-8")
+        tools.dispatch("read_file", json.dumps({"path": str(path)}))
+        anchor = next(ln for ln in before.split("\n") if ln.startswith(("import ", "from ")))
+        out = tools.dispatch(
+            "edit_file",
+            json.dumps({"path": str(path), "old_string": anchor, "new_string": "# pwned"}),
+        )
+        assert "safety layer" in out.text, f"{rel}: {out.text}"
+        assert path.read_text(encoding="utf-8") == before, f"{rel} was modified by edit_file"
+
     with tempfile.TemporaryDirectory() as tmp:
         out = tools.dispatch(
             "write_file", json.dumps({"path": f"{tmp}/scratch.txt", "content": "fine"})

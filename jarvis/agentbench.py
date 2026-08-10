@@ -197,8 +197,8 @@ class AgentTask:
 # No browser (one shared page), no network, no real accounts. A bench run must
 # not be able to reach the internet or the owner's data even if the model asks.
 LOCAL_TOOLS = [
-    "read_file", "write_file", "list_dir", "find_files", "get_datetime",
-    "run_readonly", "run_command",
+    "read_file", "write_file", "edit_file", "list_dir", "find_files", "grep_files",
+    "get_datetime", "run_readonly", "run_command",
     "memory_list", "memory_read", "memory_write", "memory_search",
     "skill_list", "skill_read", "skill_write",
 ]
@@ -206,8 +206,8 @@ ORCHESTRATION_TOOLS = LOCAL_TOOLS + ["workflow_start", "workflow_status", "workf
 
 # Workflow agents normally get web tools; inside the bench they must not.
 SANDBOX_WORKFLOW_TOOLS = [
-    "read_file", "write_file", "list_dir", "find_files", "get_datetime",
-    "run_readonly", "memory_list", "memory_read", "memory_write",
+    "read_file", "write_file", "edit_file", "list_dir", "find_files", "grep_files",
+    "get_datetime", "run_readonly", "memory_list", "memory_read", "memory_write",
     "skill_list", "skill_read",
 ]
 
