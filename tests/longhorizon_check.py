@@ -184,19 +184,25 @@ def plan_isolation_checks() -> None:
     results: dict[str, str] = {}
     barrier = threading.Barrier(2)
 
+    # ONE script, shared, dispatching on the calling agent's own user message.
+    # `llm.chat` is a module global: two threads each installing their own
+    # closure is a race, and the loser's agent silently runs the winner's
+    # script — which made this check flaky in a way that looked like the plan
+    # leaking between threads. Route on the transcript instead.
+    def script(model, messages, **kwargs):
+        tag = messages[1]["content"]
+        if f"- [ ] {tag}" not in messages[0]["content"]:
+            return _reply("", [_call("c1", "plan_write", plan=f"- [ ] {tag}")])
+        barrier.wait(timeout=5)  # both plans written before either is read
+        results[tag] = messages[0]["content"]
+        return _reply("done")
+
     def drive(tag: str) -> None:
         agent = Agent(tool_names=["plan_write", "get_datetime"], max_steps=4)
-
-        def script(model, messages, **kwargs):
-            if not agent.plan["text"]:
-                return _reply("", [_call("c1", "plan_write", plan=f"- [ ] {tag}")])
-            barrier.wait(timeout=5)  # both plans written before either is read
-            results[tag] = messages[0]["content"]
-            return _reply("done")
-
-        _run(agent, script)
+        agent.run_turn(tag)
 
     real = agent_mod.llm.chat
+    agent_mod.llm.chat = script
     threads = [threading.Thread(target=drive, args=(t,)) for t in ("alpha", "beta")]
     for t in threads:
         t.start()

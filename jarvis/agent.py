@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from . import config, context, llm, runtime, sessions, tools
+from . import avatars, config, context, llm, runtime, sessions, tools
 from .tools import contextctl
 
 
@@ -109,7 +109,12 @@ class Agent:
         if self._has_sessions:
             blocks.append(sessions.index(current=self.session.id if self.session else None))
         extra = "\n\n".join(b for b in blocks if b)
-        self.messages[0]["content"] = self._base_system + ("\n\n" + extra if extra else "")
+        # The identity rename goes on the *base*, not the blocks: the avatar
+        # can change mid-session (HUD picker, `jarvis avatar`, set_avatar), and
+        # rebuilding from source every step is what makes that land immediately
+        # and survive compaction. It is a no-op on the default avatar.
+        base = avatars.rename(self._base_system)
+        self.messages[0]["content"] = base + ("\n\n" + extra if extra else "")
 
     def _summarize(self, transcript: str) -> str:
         """Compress old history using the cheap tier — this is bulk text work."""
@@ -220,10 +225,21 @@ class Agent:
 
             # Keep the assistant turn verbatim — the tool_call ids in it are what
             # the next round of tool results are matched against.
+            #
+            # The one rewrite: a turn with no tool_calls AND null content is a
+            # shape some providers reject outright ("The content field is a
+            # required field" — Alibaba, found via qwen3.7-flash 2026-08-05,
+            # which emits it). Appending it verbatim poisons the transcript
+            # permanently: every later request in the session 400s. Null content
+            # *with* tool_calls is accepted everywhere and stays untouched, so
+            # this costs no ids and no parallel calls.
+            content = reply.message.get("content")
+            if content is None and not reply.tool_calls:
+                content = ""
             self.messages.append(
                 {
                     "role": "assistant",
-                    "content": reply.message.get("content"),
+                    "content": content,
                     **({"tool_calls": reply.tool_calls} if reply.tool_calls else {}),
                 }
             )

@@ -13,6 +13,7 @@ What must hold:
   4. image eviction keeps the newest N and replaces the rest in place
   5. truncation shortens old results only, and is idempotent
   6. manage() leaves a transcript that is still wire-valid
+  7. run_turn never appends an assistant message that a provider would reject
 
 Run:  .venv/bin/python tests/context_check.py
 """
@@ -20,11 +21,14 @@ Run:  .venv/bin/python tests/context_check.py
 from __future__ import annotations
 
 import sys
+import types
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from jarvis import agent as agent_mod
 from jarvis import context
+from jarvis.agent import Agent
 
 
 def _image_msg(tag: str = "AAA") -> dict:
@@ -236,6 +240,56 @@ def manage_checks() -> None:
     )
 
 
+def empty_turn_checks() -> None:
+    """A null-content assistant turn with no tool_calls must never be appended.
+
+    Found live 2026-08-05 benching qwen/qwen3.7-flash, which returns
+    `content: None` as a completion. Alibaba's endpoint then rejects the *next*
+    request with "The content field is a required field" — so one empty turn
+    bricks the conversation permanently, and the failure surfaces a step later
+    than its cause. Null content *with* tool_calls is legal everywhere and must
+    stay verbatim (invariant 2), so that case is pinned here too.
+    """
+
+    def _reply(content, calls=None):
+        message = {"content": content}
+        if calls:
+            message["tool_calls"] = calls
+        return types.SimpleNamespace(
+            message=message, tool_calls=calls or [], text=content or "",
+            cost_usd=0.0, latency_s=0.0,
+        )
+
+    def _run(agent, reply):
+        real = agent_mod.llm.chat
+        agent_mod.llm.chat = lambda model, messages, **kw: reply
+        try:
+            return agent.run_turn("go")
+        finally:
+            agent_mod.llm.chat = real
+
+    agent = Agent(tool_names=["get_datetime"], max_steps=2)
+    _run(agent, _reply(None))
+    assistants = [m for m in agent.messages if m.get("role") == "assistant"]
+    assert assistants, "no assistant message was appended"
+    bad = [m for m in assistants if m.get("content") is None and not m.get("tool_calls")]
+    assert not bad, f"null-content turn with no tool_calls would 400 next request: {bad}"
+    print("ok  context: empty assistant turn normalized, not left null")
+
+    # The legal shape is untouched: content stays None when tool_calls carry the
+    # turn, because that is what every provider accepts and what invariant 2 pins.
+    call = {"id": "c1", "function": {"name": "get_datetime", "arguments": "{}"}}
+    agent = Agent(tool_names=["get_datetime"], max_steps=1)
+    _run(agent, _reply(None, calls=[call]))
+    tool_turn = next(
+        m for m in agent.messages if m.get("role") == "assistant" and m.get("tool_calls")
+    )
+    assert tool_turn["content"] is None, "null content with tool_calls must stay verbatim"
+    assert tool_turn["tool_calls"][0]["id"] == "c1", "tool_call id must survive"
+    _assert_wire_valid(agent.messages)
+    print("ok  context: null content with tool_calls left verbatim, ids intact")
+
+
 def main() -> int:
     orphan_checks()
     cut_point_checks()
@@ -243,6 +297,7 @@ def main() -> int:
     eviction_checks()
     truncation_checks()
     manage_checks()
+    empty_turn_checks()
     print("\nall context checks passed")
     return 0
 
