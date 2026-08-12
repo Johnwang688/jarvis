@@ -1162,6 +1162,23 @@ row in the HUD's SYSTEMS panel, and the `set_avatar` / `avatar_list` tools
 ("Jarvis, become the fox"). All of them land on `avatars.set_active`, which
 broadcasts SSE `avatar` so every open window relabels live.
 
+**A window boots as the default (2026-08-12, owner's call).** `jarvis face`
+with no `-a` and no `JARVIS_AVATAR` is now exactly `jarvis face -a jarvis`:
+`cmd_face` calls `avatars.pin_for_window()`, which pins the built-in for the
+process instead of reading the saved pointer. The reason is that the pointer
+is writable *by Jarvis himself* — `set_avatar` persists, so one "become the
+fox" renamed the desk window for every launch afterwards, and the owner would
+have to know which command undid it. An avatar now lasts as long as the window
+that chose it. Three things deliberately unchanged: it is a **pin**, so
+`set_active` clears it and switching in the HUD works and persists as before
+(it just no longer decides how the *next* window boots); an explicit
+`JARVIS_AVATAR` in the environment is still honoured, because it is a
+deliberate pin and not a leftover; and every other surface — `jarvis chat`,
+the daemon, Discord — still reads the saved slug, so this is a statement about
+the desk window, not about who he is. An unknown `-a` slug refuses to start
+rather than falling back to the default: booting as somebody the owner did not
+ask for is worse than not booting. Covered in `tests/avatars_check.py`.
+
 **An avatar can change the orb's outer ring (2026-08-06).** `"rings"` in
 `avatar.json` picks a set from `RING_SETS` in `jarvis.html`; `"triangles"`
 (bibi's) replaces the outermost 144-tick ring with **two interlocking

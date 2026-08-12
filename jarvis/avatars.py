@@ -418,6 +418,37 @@ def set_active(slug: str) -> Avatar:
     return av
 
 
+def pin_for_window(requested: str = "") -> Avatar:
+    """Decide who *this process* presents as, without touching the saved choice.
+
+    `requested` is `jarvis face -a <slug>`. The part worth stating: with
+    nothing requested and no `JARVIS_AVATAR` in the environment, the window
+    boots as the **built-in default**, not as whichever avatar was saved last
+    (owner's call, 2026-08-12) — so `jarvis face` means `jarvis face -a jarvis`.
+
+    The reason is that the saved pointer can be moved by Jarvis himself:
+    `set_avatar` ("become the fox") persists, so one aside would have renamed
+    the desk window for every launch afterwards. Booting from the pin makes an
+    avatar last as long as the window that chose it.
+
+    This is still only a *pin*: `set_active` clears it, so switching in the HUD
+    (or by tool) works exactly as before and outlives nothing but the process.
+    Raises LookupError if there is no such avatar — the caller reports it,
+    because starting up as somebody the owner did not ask for is worse than
+    refusing to start.
+    """
+    slug = (requested or "").strip().lower()
+    if not slug:
+        if config.AVATAR_ENV.strip():
+            return active()  # JARVIS_AVATAR is an explicit pin; leave it alone
+        slug = DEFAULT.slug
+    av = load(slug)
+    if av is None:
+        raise LookupError(f"no avatar named {slug!r}")
+    config.AVATAR_ENV = av.slug
+    return av
+
+
 _listeners: list = []
 
 

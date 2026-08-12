@@ -277,6 +277,36 @@ def check_store() -> None:
     avatars.set_active("mute-face")
     check("an explicit switch beats the pin rather than being shadowed by it",
           avatars.active().slug == "mute-face" and config.AVATAR_ENV == "")
+
+    # How a window *boots*. The saved pointer is writable by Jarvis himself
+    # (`set_avatar`), so one "become the fox" used to rename the desk window
+    # for every launch afterwards. A bare `jarvis face` now starts as the
+    # built-in and the saved slug is left exactly where it was.
+    avatars.set_active("vex")
+    config.AVATAR_ENV = ""
+    saved = lambda: json.loads(config.AVATAR_STATE_PATH.read_text())["slug"]  # noqa: E731
+    check("a bare `jarvis face` boots as the default, whatever was saved last",
+          avatars.pin_for_window().slug == "jarvis"
+          and avatars.active().slug == "jarvis"
+          and saved() == "vex", saved())
+    check("-a still names the avatar for that window only",
+          avatars.pin_for_window("vex").slug == "vex"
+          and avatars.active().slug == "vex" and saved() == "vex")
+
+    config.AVATAR_ENV = "mute-face"
+    check("JARVIS_AVATAR is an explicit pin and is not overridden by the boot "
+          "default", avatars.pin_for_window().slug == "mute-face"
+          and config.AVATAR_ENV == "mute-face")
+
+    config.AVATAR_ENV = ""
+    check("an unknown -a raises rather than booting as somebody else",
+          _raises(lambda: avatars.pin_for_window("nope"), LookupError)
+          and config.AVATAR_ENV == "")
+
+    avatars.pin_for_window()  # boot as the default...
+    avatars.set_active("vex")  # ...then switch in the window
+    check("switching in the window still beats the boot pin",
+          avatars.active().slug == "vex" and config.AVATAR_ENV == "")
     avatars.set_active("jarvis")
 
 

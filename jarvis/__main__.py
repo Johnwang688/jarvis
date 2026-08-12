@@ -251,17 +251,20 @@ def cmd_face(args) -> int:
     from . import avatars
     from .face import server as face_server
 
-    if getattr(args, "avatar", None):
-        # Process-scoped, like --dangerously-skip-permissions: this window runs
-        # as that avatar without touching the owner's saved choice, so opening
-        # a second face is not a way to silently change the first.
-        if avatars.load(args.avatar) is None:
-            console.print(
-                f"[red]no avatar named {args.avatar!r}[/red] — "
-                + ", ".join(a.slug for a in avatars.available())
-            )
-            return 1
-        config.AVATAR_ENV = args.avatar.lower()
+    # Process-scoped, like --dangerously-skip-permissions: this window runs as
+    # one avatar without touching the owner's saved choice, so opening a second
+    # face is not a way to silently change the first. With no -a and no
+    # JARVIS_AVATAR, that avatar is the built-in default — `jarvis face` is
+    # `jarvis face -a jarvis`. Switching in the HUD still works and still
+    # persists; it just does not decide how the *next* window boots.
+    try:
+        avatars.pin_for_window(getattr(args, "avatar", "") or "")
+    except LookupError:
+        console.print(
+            f"[red]no avatar named {args.avatar!r}[/red] — "
+            + ", ".join(a.slug for a in avatars.available())
+        )
+        return 1
 
     if getattr(args, "dangerously_skip_permissions", False):
         # The ONLY way into approve-everything mode, by design. It is a
