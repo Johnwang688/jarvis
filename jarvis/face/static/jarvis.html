@@ -1196,8 +1196,30 @@ function endOp(name, ok) {
 
 const authCards = new Map(); // id -> { el, timer }
 
+function approvalChime() {
+  try {
+    const c = ensureCtx();
+    const now = c.currentTime;
+    for (const [offset, frequency] of [[0, 660], [.12, 880]]) {
+      const osc = c.createOscillator();
+      const gain = c.createGain();
+      osc.type = "sine";
+      osc.frequency.value = frequency;
+      gain.gain.setValueAtTime(.0001, now + offset);
+      gain.gain.exponentialRampToValueAtTime(.12, now + offset + .012);
+      gain.gain.exponentialRampToValueAtTime(.0001, now + offset + .16);
+      osc.connect(gain).connect(c.destination);
+      osc.start(now + offset);
+      osc.stop(now + offset + .17);
+    }
+  } catch {
+    // A browser may block audio until the owner interacts with the window.
+  }
+}
+
 function showApproval(d) {
   if (authCards.has(d.id)) return;
+  approvalChime();
   const card = document.createElement("div");
   card.className = "auth";
 

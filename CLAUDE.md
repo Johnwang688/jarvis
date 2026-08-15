@@ -1287,7 +1287,7 @@ on another port still approves). In the HUD, deny is the cheap action
 (Escape, or the button) and authorize takes a deliberate click — nothing is
 keyboard-defaulted, and PTT/wake are inert while a card is up. Card contents
 are built with `textContent`; the args are model-written strings and the HUD
-is trusted UI, so never `innerHTML` there.
+is trusted UI, so never `innerHTML` there. When a card appears, the HUD also plays a short two-tone Web Audio chime so an owner who is not watching the window notices the prompt; the chime is best-effort because browsers may block audio before user interaction.
 
 **The gate is only real if Jarvis cannot reach it.** He has browser tools and
 the allowlist is `localhost` — so he could have opened his own HUD and
