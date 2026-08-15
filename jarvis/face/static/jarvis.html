@@ -244,13 +244,16 @@
     border: 1px solid rgba(34,211,238,.45);
     clip-path: polygon(0 14px, 14px 0, 100% 0, 100% calc(100% - 14px), calc(100% - 14px) 100%, 0 100%);
     padding: 16px 18px; box-shadow: 0 0 46px rgba(34,211,238,.14);
+    max-height: calc(100vh - 48px); box-sizing: border-box; overflow: hidden;
   }
   .picker.on { display: block; }
   .picker h3 {
     font: 600 10px var(--mono); letter-spacing: .35em; color: var(--cyan);
     border-bottom: 1px solid rgba(34,211,238,.18); padding-bottom: 7px;
   }
-  #sesslist, #avatarlist { max-height: 46vh; overflow-y: auto; margin: 12px 0 4px; scrollbar-width: thin; }
+  #sesslist, #avatarlist, #voicelist {
+    max-height: 46vh; overflow-y: auto; margin: 12px 0 4px; scrollbar-width: thin;
+  }
   .sess {
     display: flex; justify-content: space-between; gap: 12px; align-items: baseline;
     padding: 8px 10px; cursor: pointer; border-left: 2px solid transparent;
@@ -1307,6 +1310,9 @@ document.addEventListener("keydown", (e) => {
   } else if ($("avatars").classList.contains("on")) {
     e.preventDefault();
     closeAvatars();
+  } else if ($("voices").classList.contains("on")) {
+    e.preventDefault();
+    closeVoices();
   }
 });
 
