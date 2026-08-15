@@ -104,6 +104,7 @@ def speakable(text: str) -> str:
 # the voice on the next sentence with no restart.
 
 _voices: set[str] | None = None
+_voice_override: str | None = None
 
 # Kokoro tags each voice with the language it was trained on, in the first
 # letter of its name. The old rule — "b" is British, everything else is
@@ -130,6 +131,21 @@ def available_voices() -> set[str]:
         except Exception:
             _voices = set()
     return _voices
+
+
+def selected_voice() -> str:
+    """Return the voice selected in the HUD, or the normal resolved voice."""
+    return _voice_override or voice_for()
+
+
+def set_voice(name: str) -> str:
+    """Select an installed Kokoro voice for subsequent speech."""
+    global _voice_override
+    name = name.strip()
+    if name not in available_voices():
+        raise LookupError(f"voice {name!r} is not installed")
+    _voice_override = name
+    return name
 
 
 def voice_for(av: "avatars.Avatar | None" = None) -> str:
@@ -197,7 +213,7 @@ def tts(
     # beats a backend-dependent one. The clamp is the last word, so an avatar
     # cannot ask for a pace that gets its own speech cut off.
     speed = min(max(speed or av.speed or config.TTS_SPEED, 0.5), 1.3)
-    voice = voice or voice_for(av)
+    voice = voice or _voice_override or voice_for(av)
 
     if config.TTS_BACKEND == "local":
         try:

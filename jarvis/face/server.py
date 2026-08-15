@@ -456,7 +456,7 @@ class FaceHandler(SimpleHTTPRequestHandler):
                     "llm": config.TIERS["orchestrator"],
                     "stt": config.STT_MODEL,
                     "tts": config.TTS_MODEL,
-                    "voice": config.TTS_VOICE,
+                    "voice": voice.selected_voice(),
                     "speed": config.TTS_SPEED,
                     # Who he is presenting as: name, wake phrases, accent, and
                     # whether there is a face to draw. The art itself is a
@@ -485,6 +485,10 @@ class FaceHandler(SimpleHTTPRequestHandler):
                     "avatars": [a.describe() for a in avatars.available()],
                 }
             )
+            return
+        if self.path == "/voices":
+            current = voice.selected_voice()
+            self._json_reply({"current": current, "voices": sorted(voice.available_voices())})
             return
         if self.path == "/sessions":
             recent = [s.describe() for s in sessions.recent(12)]
@@ -526,6 +530,26 @@ class FaceHandler(SimpleHTTPRequestHandler):
         self.send_header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'")
         self.end_headers()
         self.wfile.write(body)
+
+    def _switch_voice(self):
+        """Change the active local Kokoro voice for subsequent speech."""
+        origin = self.headers.get("Origin")
+        host = self.headers.get("Host", "")
+        if origin and origin not in (f"http://{host}", f"https://{host}"):
+            self._json_error(403, "cross-origin voice switch refused")
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            data = json.loads(self.rfile.read(length) or b"{}")
+            selected = voice.set_voice(str(data.get("voice", "")))
+        except LookupError as exc:
+            self._json_error(404, str(exc))
+            return
+        except Exception as exc:
+            self._json_error(400, f"{type(exc).__name__}: {exc}")
+            return
+        broadcast("voice", {"voice": selected})
+        self._json_reply({"voice": selected})
 
     def _switch_avatar(self):
         """Change who he is presenting as. Same-origin, like /approve.
@@ -602,6 +626,9 @@ class FaceHandler(SimpleHTTPRequestHandler):
             return
         if self.path == "/avatar":
             self._switch_avatar()
+            return
+        if self.path == "/voice":
+            self._switch_voice()
             return
         if self.path == "/cancel":
             # Abandon the turn in flight. Same-origin like /approve: it is not

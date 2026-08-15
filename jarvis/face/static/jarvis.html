@@ -349,6 +349,9 @@
     <div class="row" id="avatar-row" style="cursor:pointer" title="change who he presents as">
       <span class="k">AVATAR</span><span class="v" id="avatar-name">—</span>
     </div>
+    <div class="row" id="voice-row" style="cursor:pointer" title="choose a Kokoro voice">
+      <span class="k">VOICE</span><span class="v" id="voice-name">—</span>
+    </div>
     <div class="row" id="mute-row" style="cursor:pointer" title="mute/unmute Jarvis's voice">
       <span class="k">VOICE OUT</span><span class="v" id="mute-state">ON</span>
     </div>
@@ -382,6 +385,14 @@
   <div id="avatarlist"></div>
   <div class="btns">
     <button id="avatar-close" class="close">CLOSE</button>
+  </div>
+</div>
+
+<div id="voices" class="picker">
+  <h3>KOKORO VOICE</h3>
+  <div id="voicelist"></div>
+  <div class="btns">
+    <button id="voice-close" class="close">CLOSE</button>
   </div>
 </div>
 
@@ -596,6 +607,60 @@ async function openAvatars() {
 
 function closeAvatars() {
   $("avatars").classList.remove("on");
+}
+
+async function openVoices() {
+  if (authCards.size) return;
+  let data;
+  try {
+    data = await (await fetch("/voices")).json();
+  } catch {
+    return addOp("voice", "unreachable");
+  }
+  const list = $("voicelist");
+  list.textContent = "";
+  (data.voices || []).forEach((name) => {
+    const row = document.createElement("div");
+    row.className = "sess" + (name === data.current ? " here" : "");
+    const label = document.createElement("span");
+    label.textContent = name;
+    const note = document.createElement("span");
+    note.className = "when";
+    note.textContent = name === data.current ? "ACTIVE" : "KOKORO";
+    row.append(label, note);
+    row.onclick = () => (name === data.current ? closeVoices() : switchVoice(name));
+    list.appendChild(row);
+  });
+  if (!list.childElementCount) {
+    const empty = document.createElement("div");
+    empty.className = "sess";
+    empty.textContent = "no local Kokoro voices found";
+    list.appendChild(empty);
+  }
+  $("voices").classList.add("on");
+}
+
+function closeVoices() {
+  $("voices").classList.remove("on");
+}
+
+async function switchVoice(name) {
+  closeVoices();
+  try {
+    const res = await fetch("/voice", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ voice: name }),
+    });
+    if (!res.ok) return addOp("voice", "switch refused");
+    const data = await res.json();
+    $("voice-name").textContent = data.voice;
+    const cfg = $("cfg-tts").textContent.split(" · ");
+    if (cfg.length >= 3) $("cfg-tts").textContent = `${cfg[0]} · ${data.voice} · ${cfg[2]}`;
+    addOp("voice", data.voice);
+  } catch {
+    addOp("voice", "unreachable");
+  }
 }
 
 async function switchAvatar(slug) {
@@ -1365,6 +1430,9 @@ events.onmessage = (e) => {
   } else if (kind === "mute") {
     setMuteUI(data.muted);
     addOp("voice", data.muted ? "muted" : "unmuted");
+  } else if (kind === "voice") {
+    $("voice-name").textContent = data.voice;
+    addOp("voice", data.voice);
   } else if (kind === "session") {
     // Label only — the window that made the switch redraws its own log.
     setSessionUI(data);
@@ -1783,6 +1851,7 @@ async function init() {
     $("cfg-llm").textContent = cfg.llm.split("/").pop();
     $("cfg-stt").textContent = cfg.stt.split("/").pop();
     $("cfg-tts").textContent = `${cfg.tts.split("/").pop()} · ${cfg.voice} · ${cfg.speed}x`;
+    $("voice-name").textContent = cfg.voice;
     setMuteUI(cfg.muted);
     applyAvatar(cfg.avatar || DEFAULT_AVATAR);
     setSessionUI(cfg.session);
@@ -1826,6 +1895,8 @@ async function init() {
   $("session-row").onclick = () => openSessions();
   $("avatar-row").onclick = () => openAvatars();
   $("avatar-close").onclick = () => closeAvatars();
+  $("voice-row").onclick = () => openVoices();
+  $("voice-close").onclick = () => closeVoices();
   $("sess-new").onclick = () => switchSession({ new: true });
   $("sess-close").onclick = () => closeSessions();
   $("wake-row").onclick = () => setWake(!wakeMode);
