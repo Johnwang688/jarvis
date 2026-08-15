@@ -15,3 +15,6 @@ avatars/
 
 # Scratch output from tests/browser/marks_check.py.
 marks_*.png
+
+# long-bench run output: whole synthetic worlds plus per-run results.
+longbench/runs/

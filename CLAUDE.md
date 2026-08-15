@@ -484,6 +484,11 @@ jarvis/
   6-model sweep). Use `-t <task>` and a single model while iterating.
 - `jarvis bench --family agent` is **agent-bench** — the whole-Jarvis one (see
   *agent-bench* below). ~$0.007 and ~2 minutes for the five-task sweep on Luna.
+- `python -m longbench` is **long-bench** — the long-horizon one, and the only
+  bench that is **not** run through `jarvis bench`, because it does not import
+  Jarvis at all (see *long-bench* below). **It is the expensive one:** budget
+  $5-10 per cell at the default `--scale 4`, and use `--budget` (a hard
+  ceiling). `--scale 1` is the cheap smoke configuration and the CLI says so.
 - Context-management tests are synthetic and free — no API, fully repeatable.
   Prefer that pattern for new logic.
 - `tests/context_check.py` — free synthetic checks for `context.py`, and the
@@ -564,6 +569,22 @@ jarvis/
   turns), because an empty run is *fully shaped* while a run killed by a
   provider error is **short**, and only the second crashed a grader. Run after
   touching `agentbench.py`.
+- `tests/longbench_check.py` — 84 free synthetic checks for the long-bench
+  *harness*, and the pattern is worth copying: because long-bench does not
+  import Jarvis, this suite runs on bare `python3` with no venv and no key.
+  Covers deterministic worlds; the ground truth appearing **nowhere on disk**
+  (a task whose answer is in the workspace measures reading comprehension); a
+  reference solver per task scoring 100%, so the graders are reachable at all;
+  every grader catching its own specific failure (half-migrated, sed-the-whole-
+  tree, clobbered changelog, wrong carried count, unparseable output, dropped
+  findings, reported decoys, ignored cohort rule, lost salt, skipped `.bak`,
+  wrong order, spec-drift turn skipped, either planted document believed); every
+  task ~0 on an empty run; no grader raising on a wrecked or missing workspace;
+  worlds deterministic at every scale; and both levers moving on **both**
+  harnesses, since a lever that moves on one is a handicap rather than a mode.
+  Every check runs at `--scale 1` — the properties are scale-invariant and a
+  four-minute suite stops being run. Run after touching anything under
+  `longbench/`.
 - `tests/cadbench_check.py` — free synthetic checks for the cad-bench
   *harness* (the shape of `agentbench_check`): geometry helpers (world boxes
   from transforms, penetration with touching = 0, the recorded 12-inch
@@ -1367,6 +1388,39 @@ the surface shows the owner but never writes into the transcript is state the
 model will invent a story about.** Covered by `tests/face/cancel_check.py`,
 which owns both no-reply exit paths now.
 
+**Hitting the wall is survivable now (2026-08-12), and the number is the least
+of it.** The owner hit `[stopped after 30 steps without finishing]` again, on
+`jarvis chat` — the face had already been raised to 60 in 2026-08-06 for the
+same reason, which is the tell that raising one number was never the fix.
+Three changes, in increasing order of what they buy:
+
+- **One budget, `config.MAX_STEPS` (env `JARVIS_MAX_STEPS`), default 60.**
+  Every conversation surface — chat/ask, the HUD, Discord, goal slices — takes
+  the `Agent` default, and `FACE_MAX_STEPS` now defaults to it rather than
+  carrying its own 60. The cap is a runaway guard, not a work limit: a step is
+  one cheap call, and the real ceilings are the goal runner's dollars and an
+  owner who can cancel.
+- **The model can see the budget before it hits it** (`Agent._budget_note`).
+  Only the last fifth (never fewer than the last three steps) is announced,
+  and it rides the working-context block — rewritten every step, so it never
+  accumulates in the transcript and costs nothing on the other 80% of a run.
+  This is the confabulation lesson applied one step earlier: a run that knows
+  it has three steps left stops opening new threads and writes down where it
+  got to; a run that does not know simply stops mid-stride.
+- **The wall produces a handoff, not a bin** (`Agent._handoff`). Exhaustion
+  spends one more call with **`tools=None`** — the point, because a plain
+  "keep going" nudge invites the model to spend it asking for a 61st step —
+  for DONE / OPEN / NEXT, and that text follows the notice into `turn.text`
+  and the transcript. The next message resumes from it. Every failure path
+  degrades to the bare notice: a handoff is a bonus and must never be why a
+  turn raises, so a provider error, a cancel at the wall, or an empty reply
+  all fall back. The `text` event now fires on this path too — before it,
+  `jarvis chat` printed **nothing at all** for a turn that ran out, because
+  the CLI renders on that event only.
+
+Covered in `tests/face/cancel_check.py` (handoff content and tool-free call,
+the degraded path, the announcement window, and the shared default).
+
 **Gmail shipped (2026-07-31)** — the first real integration, and the
 template for the rest: `jarvis auth google <client.json>` runs the one-time
 OAuth consent (PKCE + state, loopback redirect, human-only CLI command),
@@ -1988,13 +2042,14 @@ failure — a run that goes long enough to forget what it was doing.
 
 Not done, in the order I would do them next (the full list came out of a review
 on 2026-08-01; **spill-don't-drop truncation and real `prompt_tokens` were done
-2026-08-09** — see *Harness round 2* below): step-budget awareness and a
-resumable handoff instead of `"[stopped after N steps]"` throwing the work away;
-structured compaction sections (goal / done / open / failed) instead of free
-prose on the cheap tier; repetition detection (the gpt-oss-20b vocab-bench
+2026-08-09**, and **step-budget awareness plus a resumable handoff 2026-08-12**
+— see *Harness round 2* below and *Hitting the wall is survivable* above):
+repetition detection (the gpt-oss-20b vocab-bench
 failure — 16 rounds of no valid action — is invisible to the loop today);
-durable workflow journals; and **`long-bench`**, without which none of this is
-measurable — vocab-bench at ~33 steps never crosses the compaction threshold.
+durable workflow journals; and ~~**`long-bench`**~~ — **done 2026-08-15**, see
+*long-bench* below. Repetition detection is the last one that matters, and
+long-bench now reports a `redundant_calls` count, so the signal exists before
+the loop acts on it.
 
 **Harness round 2 (2026-08-09) — the gaps a Claude Code comparison exposed.**
 Six defects, all found by reading Jarvis's loop against a harness built for the
@@ -2113,6 +2168,98 @@ defects and are the owner's to make:
 - ~~Moving the durable slot off `messages[0]`.~~ **Done 2026-08-09** — see
   invariant 7. The volatile blocks ride a rebuilt-every-step block at the tail
   now, so a `plan_write` no longer invalidates the whole prefix cache.
+
+**long-bench shipped (2026-08-15)** — `longbench/`, the ruler the *Not done*
+list had been asking for since 2026-08-01. It is the first bench here that
+**does not import Jarvis**: a task is a pure `plan(seed, scale)`, a
+`materialize` that writes a directory, a prompt (plus optional follow-up turns),
+and a grader that reads the directory back — so anything that can be handed a
+prompt and a working directory can be measured: the Jarvis loop, `claude -p`, or
+a person with an editor. That is what makes a cross-harness comparison possible,
+and it is why the code lives outside `jarvis/`. Three tasks: `sweep` (a 166-site
+migration across 422 files, then the spec changes), `audit` (483 files,
+precision *and* recall against 238 planted violations), `thread` (a shard chain
+with a cohort rule, a salt, and two truncated files recoverable only from a
+`.bak`). Six categories: completeness, retention, discipline, recovery,
+interference, correctness. Design, parity gaps and baselines in
+`longbench/README.md`.
+
+Four design rules, in increasing order of how much they cost to learn:
+
+- **Ground truth is recomputed from the seed, never written to disk.** `plan` is
+  pure, so the grader regenerates the answer at grading time. A bench that
+  stores its answer key in the workspace measures reading comprehension.
+- **Checks carry floats, not booleans.** agent-bench's checks are
+  all-or-nothing, which is fine for the properties it tests; for a bench about
+  *completeness*, "31 of 44 sites" and "0 of 44" scoring the same would throw
+  away the measurement.
+- **The rock passed the safety check three more times.** `sweep` shipped with
+  "every edited module still parses" — an *untouched* module parses fine, so a
+  do-nothing run collected 3 free points. Then "no reference to the old API
+  left", which a **deleted** file satisfies perfectly. Then, a rewrite later,
+  both *interference* checks: an agent that migrates nothing also never obeys
+  the stale document it never read. All are conjunctive with having done the
+  work now, and the suite caught each one on its first run — which is the whole
+  argument for writing the empty-run assertion before the graders.
+- **Every escape hatch is symmetric or it is a handicap.** The levers that
+  remove shell (`--no-shell`) and set the compaction threshold (`--window`) move
+  on **both** harnesses — Claude Code's `--autocompact` and Jarvis's
+  `ContextPolicy.compact_at_tokens` — and the CLI refuses a window below
+  Claude Code's 100k floor rather than quietly giving the two sides different
+  numbers. Mode, window and scale are recorded on every run record and printed
+  in the row label, because pooling runs from different configurations is the
+  easiest way to publish a wrong number.
+
+**The v1 bench saturated, and the diagnosis is the lesson.** At its first sizing
+Luna scored 100% on all three tasks for $0.107 total. Two escape hatches, both
+found only by running it: Haiku scored 100% on `thread` in **eight tool calls**
+by writing a shell script (forty shards, none of which entered a context
+window), and Luna scored 100% on `audit` in 21 calls with `grep_files`. But the
+real defect was cruder — **the worlds were ~20x too small for compaction to ever
+fire**, so the bench measured task success while claiming to measure context
+management. Generalises past this bench: **a long-horizon test has to be
+calibrated against the window it is meant to overflow, not against how long it
+feels to write.**
+
+The constraint that shapes every task here:
+
+> Any task with mechanically-detectable ground truth can be solved by search,
+> and any task whose ground truth is not mechanical cannot be graded
+> deterministically.
+
+Two ways out, both now used. `sweep` resists structurally, because **edits
+cannot be grepped** — search finds the call sites, but each file still has to be
+read and rewritten. `audit` resists by making its secret rule **cross-file**: a
+literal secret is exempt if that service's `handler.py` signs it off, which one
+grep cannot answer.
+
+**Baseline at scale 4 (seed 1, `--no-shell --window 100000`): Luna scored 95% on
+`sweep`** — $1.70, 32.5 min, 203 turns, 882 tool calls (95 repeated). Perfect
+completeness (166/166 sites migrated and 166/166 tagged by the follow-up turn),
+correctness, discipline and interference. **The single miss is the one worth
+having built the bench for:** the changelog entry says 156 call sites when the
+true count is 166 — a number derived in the middle of a 32-minute run, carried
+to the last file written, and off by ten. No other bench here can see that
+class of error.
+
+Two operational lessons from the same run:
+
+- **Do not grade mid-run.** A snapshot at ~17 minutes scored 48%, with 41 of 88
+  modules unparseable: the first pass had rewritten `legacy_emit(` to
+  `emit(name=` textually, which puts a positional argument after a keyword one.
+  Luna found and fixed every one before finishing, and had also gone back to
+  migrate both packages the stale `NOTES.md` calls frozen (0/19 sites at the
+  snapshot, 19/19 at the end). An in-flight score measures a state the agent has
+  not finished being in.
+- **The Claude Code cell is the expensive one by a wide margin.** On `thread` at
+  scale 1, Claude Code with *Haiku* cost 38x what Jarvis with Luna did ($0.2275
+  vs $0.0060), and Sonnet 5 is dearer per token than Haiku. Always pass
+  `--budget`; calibrate at `--scale 2` before committing to a full scale-4
+  sweep.
+
+`redundant_calls` (95 of 882 here, ~11%) is the repetition signal the *Not done*
+list wants the loop to act on. The measurement now exists; the loop still does
+nothing with it.
 
 ### PENDING LIVE VALIDATION — needs API keys (delete this section once done)
 

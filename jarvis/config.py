@@ -20,11 +20,19 @@ FACE_PORT = int(os.environ.get("JARVIS_FACE_PORT", "8402"))
 # process already owns the Discord gateway.
 DAEMON_PORT = int(os.environ.get("JARVIS_DAEMON_PORT", "8405"))
 
-# Step budget for the face's conversation agent. The Agent default (30) is a
-# runaway guard sized for chat-scale work; a researched CAD build legitimately
-# runs 40+ steps (found live 2026-08-06: a four-bar lift turn hit the cap
-# mid-rebuild). Each step is one model call, so the cost ceiling stays small.
-FACE_MAX_STEPS = int(os.environ.get("JARVIS_FACE_MAX_STEPS", "60"))
+# How many model calls one user message may spend before the loop stops. This
+# is a runaway guard, not a work limit: each step is one cheap call, and the
+# real ceilings are elsewhere (the goal runner's dollars, the owner watching a
+# turn they can cancel). 12 then 30 were both set as chat-scale numbers and
+# both turned out to cut real work in half — a self-improve turn spends most of
+# a small budget on checkpoint + edit + test before any misstep, and a
+# researched CAD build legitimately runs 40+ (found live 2026-08-06, which is
+# why the face already ran at 60). The conversation surfaces share one number
+# now, so raising it is one edit and not five.
+MAX_STEPS = int(os.environ.get("JARVIS_MAX_STEPS", "60"))
+# The face used to carry its own number because the Agent default was too low
+# for it; it keeps its own env knob and defaults to the shared budget.
+FACE_MAX_STEPS = int(os.environ.get("JARVIS_FACE_MAX_STEPS", str(MAX_STEPS)))
 
 # Background goals (`jarvis goal`, the daemon's goal runner). Outside the
 # repo like sessions: bulk, personal, rewritten as work progresses. The

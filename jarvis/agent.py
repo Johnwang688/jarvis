@@ -67,6 +67,23 @@ CONTINUE_NUDGE = (
     "If it was going to be very long, finish it briefly instead.]"
 )
 
+# When the step budget starts being announced: the last fifth of it, but never
+# fewer than the last three steps. Announcing it from step 1 would spend tokens
+# on every request to say something that only matters at the end, and would
+# invite the model to hurry work that has plenty of room.
+BUDGET_WARN_FRACTION = 0.2
+BUDGET_WARN_FLOOR = 3
+
+HANDOFF_PROMPT = (
+    "[you have used every step of your budget for this turn, so no further tool "
+    "call will run — do not attempt one. Reply now with a handoff the next turn "
+    "can pick up from, in three short parts: DONE (what you actually finished, "
+    "with the specifics that would be expensive to re-derive — paths, values, "
+    "ids, commands that worked), OPEN (what is left), NEXT (the single exact "
+    "step to take first). If the work is essentially finished, give the answer "
+    "instead and say so.]"
+)
+
 
 def working_context(messages: list[dict[str, Any]]) -> str:
     """The working-context block's text, or "" — wherever it currently sits.
@@ -154,12 +171,11 @@ class Agent:
         model: str | None = None,
         system: str = config.SYSTEM_PROMPT,
         tool_names: list[str] | None = None,
-        # The conversation surfaces (HUD, chat, ask) take this default; every
-        # other agent sets its own. 12 was too tight for real work: a
-        # self-improve turn spends most of it on checkpoint + edit + test runs
-        # before any misstep, and running out mid-task is expensive — the work
-        # is done but unreported, and the owner sees a bare stop notice.
-        max_steps: int = 30,
+        # The conversation surfaces (HUD, chat, ask, Discord, goal slices) take
+        # this default; every other agent sets its own. See config.MAX_STEPS for
+        # why it is the size it is, and _budget_note/_handoff for the two things
+        # that make running out survivable rather than a thrown-away turn.
+        max_steps: int = config.MAX_STEPS,
         approve: Callable[[tools.Tool, dict], bool] | None = None,
         on_event: Callable[[str, Any], None] | None = None,
         policy: context.ContextPolicy | None = None,
@@ -210,7 +226,38 @@ class Agent:
         if session is not None:
             self.messages.extend(session.restore_messages())
 
-    def _refresh_system(self) -> None:
+    def _budget_note(self, step_number: int) -> str:
+        """What the model is told about its own step budget, or "".
+
+        The step budget is a state the harness produces that the model has no
+        way to see, which is the same shape as the token cut-off and the goal
+        report: left invisible, it does not get worked around, it gets
+        confabulated around. Worse here than elsewhere, because the model can
+        actually *act* on it — a run that knows it has three steps left can
+        stop opening new threads and write down where it got to, and a run that
+        does not know simply stops mid-stride.
+
+        Only the tail of the budget is announced (see BUDGET_WARN_FRACTION).
+        It rides the working-context block, so it is rewritten every step and
+        never accumulates in the transcript.
+        """
+        remaining = self.max_steps - step_number + 1
+        if remaining > max(BUDGET_WARN_FLOOR, int(self.max_steps * BUDGET_WARN_FRACTION)):
+            return ""
+        if remaining <= 1:
+            return (
+                f"STEP BUDGET: this is your LAST step of {self.max_steps} for this "
+                "turn. Do not start anything new and do not call another tool — "
+                "answer now, or say what you finished and what remains."
+            )
+        record = " Record anything unfinished with plan_write." if self._has_plan else ""
+        return (
+            f"STEP BUDGET: {step_number - 1} of {self.max_steps} steps used, "
+            f"{remaining} left in this turn (one per tool round). Bring the most "
+            f"valuable thread to a stopping point and reply.{record}"
+        )
+
+    def _refresh_system(self, step_number: int = 0) -> None:
         """Rebuild the durable state from source, at the top of every *step*.
 
         Two places, for two different reasons.
@@ -243,6 +290,10 @@ class Agent:
         self.messages[0]["content"] = avatars.rename(self._base_system)
 
         blocks = []
+        # First in the block, because it is the one line that changes what the
+        # model should do *next* rather than describing state it already has.
+        if step_number:
+            blocks.append(self._budget_note(step_number))
         if self._has_skills:
             blocks.append(tools.skills.index())
         if self._has_plan:
@@ -477,7 +528,9 @@ class Agent:
             # Re-render the plan into messages[0] before every request, not
             # just once a turn: a long turn is exactly the case the plan exists
             # for, and a plan written at step 3 has to still be there at step 40.
-            self._refresh_system()
+            # The step number goes in too, so the tail of the budget is spent
+            # wrapping up rather than walking into the wall (see _budget_note).
+            self._refresh_system(step + 1)
 
             try:
                 reply = llm.chat(
@@ -632,7 +685,9 @@ class Agent:
                 self.on_event("context", stats)
 
         turn.stopped_early = True
-        turn.text = f"[stopped after {self.max_steps} steps without finishing]"
+        notice = f"[stopped after {self.max_steps} steps without finishing]"
+        handoff = self._handoff(turn)
+        turn.text = f"{notice}\n\n{handoff}" if handoff else notice
         # The transcript has to say so too. Without this it ends on a tail of
         # tool results with no sign the loop was cut off, so the next turn's
         # model cannot know it ran out and will invent a reason for its own
@@ -641,7 +696,38 @@ class Agent:
         # Safe to append here: the loop only exits at a step boundary, so
         # every tool_call already has its result (invariant 3).
         self.messages.append({"role": "assistant", "content": turn.text})
+        self.on_event("text", turn.text)
         return turn
+
+    def _handoff(self, turn: Turn) -> str:
+        """One tool-free call at the wall, so the work is resumable.
+
+        Exhausting the budget used to throw the turn away: the loop returned a
+        bare stop notice, and everything the run had learned was left in a
+        transcript nobody would read — the owner saw a completed, committed
+        change reported as `[stopped after 12 steps]`. The step is cheap
+        (one call, no tools) and it converts a dead end into a state the next
+        message continues from.
+
+        `tools=None` is the point: the model cannot spend this call asking for
+        a 61st step, which is what a plain "keep going" nudge would invite.
+        Everything here degrades to the bare notice — a handoff is a bonus, and
+        must never be the reason a turn raises. The question stays in the
+        transcript either way, so the next turn's model can see what it was
+        asked and that it is now past the wall.
+        """
+        if self.should_stop():  # cancelled at the wall — do not spend a call
+            return ""
+        self.messages.append({"role": "user", "content": HANDOFF_PROMPT})
+        try:
+            reply = llm.chat(self.model, self.messages, stream=False)
+        except Exception as exc:  # provider error, cancellation, anything
+            self.on_event("interim_text", f"[no handoff: {type(exc).__name__}: {exc}]")
+            return ""
+        turn.cost_usd += reply.cost_usd
+        turn.latency_s += reply.latency_s
+        self.on_event("cost", turn.cost_usd)
+        return (reply.text or "").strip()
 
 
 def delegate(prompt: str, tier: str = "worker", system: str | None = None) -> str:

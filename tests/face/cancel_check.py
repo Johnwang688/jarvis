@@ -34,7 +34,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from jarvis import agent as agent_mod  # noqa: E402
-from jarvis import llm  # noqa: E402
+from jarvis import config, llm  # noqa: E402
 from jarvis.face import server as face_server  # noqa: E402
 
 PORT = 8476
@@ -60,10 +60,12 @@ class StubLLM:
         self.script = list(script)
         self.calls = 0
         self.last_messages: list[dict] = []
+        self.last_kwargs: dict = {}
 
     def __call__(self, model, messages, **kwargs):
         self.calls += 1
         self.last_messages = list(messages)
+        self.last_kwargs = dict(kwargs)
         return self.script.pop(0) if self.script else reply("done")
 
 
@@ -142,9 +144,12 @@ def agent_checks() -> None:
         #    just in the returned Turn — the model must be able to see it
         stub = StubLLM([])
         stub.script = [reply(tool_calls=[call(f"t{i}", "get_datetime", "{}")])
-                       for i in range(3)]
+                       for i in range(3)] + [reply("DONE: read the clock. NEXT: reply.")]
         llm.chat = agent_mod.llm.chat = stub
-        jarvis = agent_mod.Agent(max_steps=3, tool_names=["get_datetime"])
+        said: list[str] = []
+        jarvis = agent_mod.Agent(max_steps=3, tool_names=["get_datetime"],
+                                 on_event=lambda kind, data: said.append(data)
+                                 if kind == "text" else None)
         turn = jarvis.run_turn("keep going")
         assert turn.stopped_early and turn.steps == 3, turn
         assert "stopped after 3 steps" in turn.text, turn.text
@@ -154,18 +159,65 @@ def agent_checks() -> None:
         check_transcript(jarvis)
         print("ok  budget: exhausted — the stop notice lands in the transcript")
 
+        # ...and the work is handed off rather than thrown away: the wall costs
+        # one tool-free call whose answer is what the next turn resumes from.
+        assert "DONE: read the clock" in turn.text, turn.text
+        handoff_request = stub.last_messages[-1]
+        assert handoff_request["content"] == agent_mod.HANDOFF_PROMPT, handoff_request
+        assert stub.last_kwargs.get("tools") is None, (
+            "the handoff call must offer no tools — otherwise the model spends "
+            "it asking for a step it cannot have"
+        )
+        # The surface hears about it. Before this, a chat/ask turn that ran out
+        # printed nothing at all: the CLI renders on the `text` event only.
+        assert said == [turn.text], said
+        print("ok  budget: the wall produces a resumable handoff, announced once")
+
         # ...and the model can then answer for itself on the next turn
         stub.script = [reply("I ran out of steps before I could reply.")]
         turn = jarvis.run_turn("why did you stop?")
         seen = stub.last_messages
-        assert any(m.get("content") == "[stopped after 3 steps without finishing]"
+        assert any(str(m.get("content", "")).startswith("[stopped after 3 steps")
                    for m in seen), "the next request must carry the stop notice"
         check_transcript(jarvis)
         print("ok  budget: the next turn is sent the notice, so it can say why")
 
+        # a handoff is a bonus, never a reason a turn raises
+        def explode(model, messages, **kwargs):
+            if messages[-1]["content"] == agent_mod.HANDOFF_PROMPT:
+                raise RuntimeError("provider down")
+            return reply(tool_calls=[call("t", "get_datetime", "{}")])
+
+        llm.chat = agent_mod.llm.chat = explode
+        jarvis = agent_mod.Agent(max_steps=2, tool_names=["get_datetime"])
+        turn = jarvis.run_turn("keep going")
+        assert turn.stopped_early and turn.text == "[stopped after 2 steps without finishing]"
+        check_transcript(jarvis)
+        print("ok  budget: a failed handoff degrades to the bare notice")
+
+        # 6. the budget is visible to the model before it hits the wall — a run
+        #    that knows it has two steps left can stop opening new threads.
+        notes: list[str] = []
+
+        def watcher(model, messages, **kwargs):
+            notes.append(agent_mod.working_context(messages))
+            return reply(tool_calls=[call("t", "get_datetime", "{}")])
+
+        llm.chat = agent_mod.llm.chat = watcher
+        jarvis = agent_mod.Agent(max_steps=8, tool_names=["get_datetime"])
+        jarvis.run_turn("keep going")
+        assert all("STEP BUDGET" not in n for n in notes[:5]), (
+            "the budget is announced from the start — that spends tokens every "
+            f"request to say something that only matters at the end: {notes[0]!r}"
+        )
+        assert "5 of 8 steps used, 3 left" in notes[5], notes[5]
+        assert "LAST step of 8" in notes[7], notes[7]
+        print("ok  budget: the last of it is announced, the rest of it is not")
+
         # the conversation surfaces take the default; only they rely on it
-        assert agent_mod.Agent(tool_names=["get_datetime"]).max_steps == 30
-        print("ok  budget: default step budget is 30")
+        assert agent_mod.Agent(tool_names=["get_datetime"]).max_steps == config.MAX_STEPS
+        assert config.MAX_STEPS >= 60, config.MAX_STEPS
+        print(f"ok  budget: default step budget is {config.MAX_STEPS}")
     finally:
         llm.chat = agent_mod.llm.chat = original
 
