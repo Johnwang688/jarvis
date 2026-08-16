@@ -83,9 +83,10 @@ def record_from_session(path: Path, model: str = "unknown",
 
         kind = entry.get("type")
         if kind == "user" and not entry.get("isSidechain"):
-            # promptSource marks a real human turn; tool results are also
-            # "user" entries and must not be counted as prompts.
-            if entry.get("promptSource") or entry.get("promptId"):
+            # `promptSource` alone marks a real human turn. Tool results are
+            # also "user" entries and they carry a `promptId`, so accepting
+            # that too counted 26 prompts in a session that had 2.
+            if entry.get("promptSource"):
                 prompts += 1
         if kind != "assistant":
             continue

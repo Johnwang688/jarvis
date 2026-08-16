@@ -64,6 +64,7 @@ DEFAULT_TIMEOUT_S = 3600
 def run_claude(prompts: list[str], workspace: Path, model: str, max_turns: int,
                budget_usd: float | None = None, bare: bool = False,
                no_shell: bool = False, window: int | None = None,
+               effort: str | None = None,
                timeout_s: int = DEFAULT_TIMEOUT_S) -> RunRecord:
     binary = shutil.which("claude")
     record = RunRecord(harness="claude", model=model, window=window)
@@ -80,6 +81,8 @@ def run_claude(prompts: list[str], workspace: Path, model: str, max_turns: int,
         "--max-turns", str(max_turns),
         "--disallowedTools", *disallowed,
     ]
+    if effort:
+        base += ["--effort", effort]
     if window:
         # The symmetric half of Jarvis's ContextPolicy(compact_at_tokens=…).
         # Claude Code accepts 100k–1M here, which is why the CLI refuses a
@@ -145,8 +148,13 @@ def _absorb_claude_stream(record: RunRecord, stdout: str, index: int) -> None:
                 "subtype": message.get("subtype"),
             }
             if message.get("is_error"):
-                record.error = (f"turn {index + 1}: claude reported an error "
-                                f"({message.get('subtype')})")
+                # The useful text is in `result`, not `subtype` — an autocompact
+                # thrash abort arrives as subtype "success" with is_error set,
+                # so reporting the subtype alone printed "an error (success)"
+                # and buried the one sentence that explained the run.
+                reason = (str(message.get("result", "")).strip().replace("\n", " ")
+                          or str(message.get("subtype")))
+                record.error = f"turn {index + 1}: {reason[:300]}"
 
 
 # ---------------------------------------------------------------------------
@@ -276,12 +284,13 @@ def run_manual(prompts: list[str], workspace: Path, model: str, **_) -> RunRecor
 
 def run(harness: str, prompts: list[str], workspace: Path, model: str, max_turns: int,
         budget_usd: float | None = None, bare: bool = False,
-        no_shell: bool = False, window: int | None = None) -> RunRecord:
+        no_shell: bool = False, window: int | None = None,
+        effort: str | None = None) -> RunRecord:
     if isinstance(prompts, str):  # a single prompt is still a run of one turn
         prompts = [prompts]
     if harness == "claude":
         record = run_claude(prompts, workspace, model, max_turns, budget_usd,
-                            bare, no_shell, window)
+                            bare, no_shell, window, effort)
     elif harness == "jarvis":
         record = run_jarvis(prompts, workspace, model, max_turns, budget_usd,
                             no_shell, window)

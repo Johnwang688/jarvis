@@ -524,6 +524,10 @@ def test_tasks_are_wellformed() -> None:
     transcript = "\n".join([
         entry(type="user", promptSource="cli", timestamp="2026-08-15T10:00:00Z",
               message={"role": "user", "content": "go"}),
+        # A tool result: also a "user" entry, and it carries a promptId. Counting
+        # those as prompts read 26 in a real session that had 2.
+        entry(type="user", promptId="p1", timestamp="2026-08-15T10:00:06Z",
+              message={"role": "user", "content": [{"type": "tool_result"}]}),
         entry(type="assistant", timestamp="2026-08-15T10:00:05Z", message={
             "model": "claude-sonnet-5", "usage": {
                 "input_tokens": 10, "output_tokens": 4,
