@@ -489,6 +489,13 @@ jarvis/
   Jarvis at all (see *long-bench* below). **It is the expensive one:** budget
   $5-10 per cell at the default `--scale 4`, and use `--budget` (a hard
   ceiling). `--scale 1` is the cheap smoke configuration and the CLI says so.
+- `python -m swecompare` is **SWE-bench Verified**, run against the Jarvis loop
+  and against `claude -p` and graded by each project's own test suite. It exists
+  because long-bench answers a *different* question — long-bench measures what a
+  harness does to a transcript under context pressure and **contains no test
+  suite**, so it cannot say anything about agentic programming. Do not pool the
+  two sets of numbers. Needs Docker; the whole procedure, including every gotcha
+  already paid for, is in `swecompare/RUNBOOK.md`.
 - Context-management tests are synthetic and free — no API, fully repeatable.
   Prefer that pattern for new logic.
 - `tests/context_check.py` — free synthetic checks for `context.py`, and the

@@ -18,3 +18,9 @@ marks_*.png
 
 # long-bench run output: whole synthetic worlds plus per-run results.
 longbench/runs/
+
+# swecompare run output: per-instance checkouts and predictions.
+swecompare/runs/
+
+# swebench harness build/eval logs.
+logs/
