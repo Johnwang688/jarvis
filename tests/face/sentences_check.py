@@ -14,7 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from jarvis.face.server import _sentences
+from jarvis.face.server import _BINDING, _sentences
 
 
 def _rejoin_equals(text: str) -> None:
@@ -59,6 +59,52 @@ def main() -> int:
         "Third — and this matters — the deploy is still red. A tiny one. Done."
     )
     print("ok  sentences: clamped opener, clean cuts, lossless rejoin")
+
+    # --- the opener must not be absorbed (2026-08-18) -----------------------
+    # The merge rule that keeps a stray fragment from becoming its own chunk
+    # ("A tiny one." glued onto the sentence before it) also fired when the
+    # *previous* chunk was short — which is exactly the opener. So a perfect
+    # 20-char first chunk was swallowed into a 98-char one, and the clamp
+    # below then hacked that apart at the last space, between "is" and
+    # "complete.". Measured against local Kokoro: 607ms -> 1633ms to first
+    # audio, plus an audible break mid-phrase. A short *first* sentence is the
+    # best possible first chunk; it is the whole thing this function optimizes.
+    absorbed = (
+        "Sure, I can do that. I checked the three files you asked about and "
+        "found the migration is complete. The changelog now lists one hundred "
+        "and sixty six call sites."
+    )
+    chunks = _sentences(absorbed)
+    assert chunks[0] == "Sure, I can do that.", chunks[0]
+    assert "complete." not in chunks[0], chunks
+    _rejoin_equals(absorbed)
+
+    # A stray fragment is still glued back on — the rule this narrows, not
+    # removes. "Done." is under the opener floor, so it does not stand alone.
+    assert _sentences("Done. The tests pass.") == ["Done. The tests pass."]
+    assert _sentences("Yes. No. Maybe.") == ["Yes. No. Maybe."]
+
+    # An opener at the floor stands on its own rather than doubling in length.
+    stands = "That worked. The seventeen configuration files were regenerated without complaint."
+    assert _sentences(stands)[0] == "That worked.", _sentences(stands)
+    _rejoin_equals(stands)
+
+    # --- the word-cut fallback backs off past a binding word ----------------
+    # With no clause boundary inside the first 90 characters the split falls
+    # back to the last space, which lands wherever it lands — including
+    # between an auxiliary or article and the word it governs. The cut is
+    # permanent and audible; backing off a word or two is not.
+    binding = (
+        "The migration across every single package in the monorepo turned out "
+        "to be entirely straightforward in the end."
+    )
+    chunks = _sentences(binding)
+    assert len(chunks[0]) <= 90, chunks[0]
+    assert chunks[0].split()[-1].lower().strip(",;:") not in _BINDING, chunks[0]
+    _rejoin_equals(binding)
+
+    print("ok  sentences: opener kept short, fragments still merged, no binding-word cuts")
+
     print("\nall sentence checks passed")
     return 0
 

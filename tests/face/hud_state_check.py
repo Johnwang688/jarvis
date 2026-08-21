@@ -241,9 +241,10 @@ def cancel_checks(page) -> None:
     assert page.evaluate("() => S.busy") is True
     assert "INTERRUPT" in page.text_content("#hint"), page.text_content("#hint")
 
-    # take it back: press-to-talk mid-thought. The recorder is cleared by hand
-    # so this does not turn into a second /converse.
-    page.evaluate("() => { pressToTalk(); if (recorder) { recorder.stop(); recorder = null; } }")
+    # take it back: press-to-talk mid-thought. The hold is abandoned by hand so
+    # this does not turn into a second /converse — the mic is open either way
+    # now, so pressing only marks a position in the ring.
+    page.evaluate("() => { pressToTalk(); window.__hud.mic.reset(); }")
     wait_for(lambda: CANCELS, "the window to POST /cancel")
     assert page.evaluate("() => S.busy") is False, "the turn must be released"
     print("ok  interrupt: press-to-talk mid-THINKING cancels the turn server-side")

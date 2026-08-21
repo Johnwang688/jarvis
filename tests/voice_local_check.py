@@ -201,9 +201,65 @@ def language_checks() -> None:
         voice._kokoro = real
 
 
+def boundary_checks() -> None:
+    """The pause between chunks is deliberate, not whatever Kokoro padded.
+
+    A streamed reply is several chunks scheduled back-to-back on the browser's
+    audio clock, so each chunk's own silence *becomes* the gap between them.
+    Measured 2026-08-18: ~30ms lead and ~85-105ms tail per chunk, and the same
+    gap whether the boundary fell between two sentences or in the middle of
+    one — and `_sentences()` splits a long opener at a clause or at a word, so
+    a mid-phrase boundary is routine. Padding that like a full stop is heard
+    as a stumble.
+    """
+    import numpy as np
+
+    assert voice._boundary("That is done.") == "sentence"
+    assert voice._boundary("Are you sure?") == "sentence"
+    assert voice._boundary("Wait...") == "sentence"
+    assert voice._boundary('He said "go."') == "sentence"   # trailing quote
+    assert voice._boundary("I checked the files,") == "clause"
+    assert voice._boundary("Here is the list:") == "clause"
+    assert voice._boundary("the migration turned out") == "mid"
+    assert voice._boundary("and every single") == "mid"
+    print("ok  boundary: a full stop, a clause and a bare word cut are told apart")
+
+    rate = 24000
+    speech = np.concatenate([
+        np.zeros(int(rate * 0.4)),                              # Kokoro's lead-in
+        np.sin(np.linspace(0, 400, int(rate * 0.5))) * 0.5,     # the words
+        np.zeros(int(rate * 0.3)),                              # Kokoro's tail
+    ]).astype("float32")
+
+    pads = {}
+    for kind in ("sentence", "clause", "mid"):
+        out = voice._repad(speech, rate, kind)
+        lead = int(np.flatnonzero(np.abs(out) > 0.01)[0]) / rate
+        tail = (len(out) - 1 - int(np.flatnonzero(np.abs(out) > 0.01)[-1])) / rate
+        pads[kind] = tail
+        assert abs(lead - voice._LEAD_MS / 1000) < 0.005, (kind, lead)
+        # The margin is kept at both ends — it protects the attack of the
+        # first phoneme and the decay of the last — so the tail is the
+        # deliberate pause plus that margin.
+        want = (voice._TAIL_MS[kind] + voice._LEAD_MS) / 1000
+        assert abs(tail - want) < 0.005, (kind, tail, want)
+        # Nothing spoken may be lost to the trim.
+        assert len(out) < len(speech), "padding was not trimmed at all"
+    assert pads["sentence"] > pads["clause"] > pads["mid"], pads
+    print(f"ok  boundary: tails are {pads['sentence']*1000:.0f}ms after a sentence, "
+          f"{pads['clause']*1000:.0f}ms after a clause, {pads['mid']*1000:.0f}ms mid-phrase")
+
+    # A chunk that never rises above the floor comes back untouched: a quiet
+    # chunk is recoverable, an empty one is a dropped sentence.
+    silence = np.zeros(int(rate * 0.5), dtype="float32")
+    assert len(voice._repad(silence, rate, "sentence")) == len(silence)
+    print("ok  boundary: a silent chunk is passed through rather than emptied")
+
+
 def main() -> int:
     avatar_voice_checks()
     language_checks()
+    boundary_checks()
     synth_checks()
     fallback_checks()
     print("\nall local-voice checks passed")

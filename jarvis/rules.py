@@ -168,6 +168,12 @@ _NEVER_AUTO_STEMS = {"rm", "shred", "truncate", "curl", "wget", "ssh", "scp", "r
 # routine, and auto-approving the stem would auto-approve the language. So the
 # inline-code flags pull it back to ASK.
 _INLINE_CODE_FLAGS = {"-c", "-e", "--eval", "--command", "-"}
+# The same flags in their *attached* spelling. shlex merges the quoted argument
+# into the flag token — `python -c"import os"` becomes `['python', '-cimport
+# os']` — so an exact-token test saw no `-c` at all and the stem's ALLOW stood.
+# The comment above says allowing the stem must not allow the language; without
+# this, one deleted space allowed the language.
+_INLINE_ATTACHED = ("-c", "-e")
 _INTERPRETERS = {"python", "python3", "node", "deno", "bun", "perl", "ruby", "php",
                  "sh", "bash", "zsh", "ksh", "dash"}
 
@@ -179,14 +185,269 @@ _SENSITIVE_PERM_PATH = re.compile(
 )
 
 
+# Longest first: `||` must beat `|`, and `&&` must beat `&`.
+_SEPARATORS = ("||", "&&", ";", "|", "\n", "&")
+
+
 def urls(command: str) -> list[str]:
     return _URL.findall(command)
 
 
 def segments(command: str) -> list[str]:
-    """Split a command line into the individual commands it will actually run."""
-    parts = re.split(r"\|\||&&|;|\||\n", command)
+    """Split a command line into the individual commands it will actually run.
+
+    **A bare `&` separates two commands exactly as `;` does**, and this used to
+    miss it — so `ls & rm -rf ~/work` came back as *one* segment, `rm -rf
+    ~/work` was read as arguments to `ls`, and the whole line was judged ALLOW
+    on the strength of the stem `ls`. That is the module's headline invariant
+    ("every segment is judged, and the worst verdict wins") failing on the
+    cheapest possible spelling. `&&` is tried before `&` so it still splits as
+    one token.
+
+    **`&` is only a separator when it is not part of a redirect** (fixed
+    2026-08-17). `2>&1` was being cut into `2>` and `1`, which made the first
+    half look like a redirect to a file and the second half like a command
+    named `1` — so `make build 2>&1` asked for approval twice over. A `&`
+    immediately after a `>` belongs to that redirect, and a `&` immediately
+    before one is the `&>` operator; neither starts a new command.
+
+    The split is **quote-aware**, which it had to become in the same change.
+    Splitting the raw string on `&` turns `git commit -m 'fix A & B'` into two
+    segments and drags an ordinary commit into an approval prompt — and the
+    same flaw was already there for `;` and `|`, just rarer. A separator inside
+    quotes is text the shell will never treat as a separator, so judging it as
+    one is wrong in both directions. If the quotes do not balance the scan is
+    not trustworthy, so it falls back to the naive split, which over-segments
+    rather than under-segments.
+    """
+    parts: list[str] = []
+    buf: list[str] = []
+    quote = ""
+    escaped = False
+    i = 0
+    while i < len(command):
+        ch = command[i]
+        if escaped:
+            buf.append(ch)
+            escaped = False
+        elif ch == "\\" and quote != "'":
+            buf.append(ch)
+            escaped = True
+        elif quote:
+            buf.append(ch)
+            if ch == quote:
+                quote = ""
+        elif ch in "'\"":
+            quote = ch
+            buf.append(ch)
+        else:
+            hit = next((s for s in _SEPARATORS if command.startswith(s, i)), "")
+            if hit == "&" and (
+                "".join(buf).rstrip().endswith(">") or command.startswith("&>", i)
+            ):
+                hit = ""  # part of `2>&1` / `&>file`, not a command separator
+            if hit:
+                parts.append("".join(buf))
+                buf = []
+                i += len(hit)
+                continue
+            buf.append(ch)
+        i += 1
+    parts.append("".join(buf))
+    if quote:
+        parts = re.split(r"\|\||&&|;|\||\n|&", command)
     return [p.strip() for p in parts if p.strip()]
+
+
+def unquoted_indices(text: str, *, double_is_quote: bool = True) -> list[int]:
+    """Indices of the characters the shell will read as syntax, not as text.
+
+    shlex tokens cannot answer this. `echo pwned>~/.bashrc` splits into
+    `['echo', 'pwned>~/.bashrc']`, so a check that looked for a token that *is*
+    or *starts with* a redirect saw nothing — and the 2026-08-10 fix that
+    stopped `echo pwned > ~/.bashrc` running unasked was reachable again by
+    deleting one space. Scanning the raw text with quote state is the only way
+    to tell a redirect from a `>` inside a commit message.
+
+    **Public, and deliberately the only implementation of this idea in the
+    codebase.** `tools/shell.py` needs exactly the same answer for its own
+    operator check, and a second hand-written copy is how `run_readonly` ended
+    up refusing `grep 'a&b' f.txt` on the same day `segments()` learned not to
+    (2026-08-17). One scanner, two callers.
+
+    `double_is_quote=False` **reports** what is inside double quotes instead of
+    skipping it. That is not a loosening — it is for the things a double quote
+    does *not* protect: the shell still expands `$(...)` and backticks in
+    there, so "inside quotes" is not a reason to stop looking for them.
+
+    It is emphatically **not** "treat `"` as an ordinary character", which is
+    how it was first written (2026-08-17) and which opened a live hole in the
+    ungated `run_readonly` the same day. A `'` inside a double-quoted string is
+    an apostrophe, not a quote — but that spelling let it open a single-quote
+    region that ran to the end of the line, so
+
+        grep "it's $(touch /tmp/PWNED)" f
+        echo "don't `touch /tmp/PWNED`"
+
+    hid their substitution from the scan and *executed it*, with no approval
+    asked, on a tool that is `dangerous=False`. The lesson is the one this file
+    already carries about `_READONLY`: **a scanner is only correct together
+    with the quoting rules it models.** So both quote kinds are always tracked
+    with real nesting (a `'` inside `"…"` is text, and a `"` inside `'…'` is
+    text); `double_is_quote` decides only whether the *contents* of a
+    double-quoted run are reported, never whether `"` still delimits one.
+    """
+    out: list[int] = []
+    quote = ""
+    escaped = False
+    for i, ch in enumerate(text):
+        if escaped:
+            escaped = False
+            continue
+        if ch == "\\" and quote != "'":
+            escaped = True
+            continue
+        if quote:
+            if ch == quote:
+                quote = ""
+            elif quote == '"' and not double_is_quote:
+                out.append(i)
+            continue
+        if ch in "'\"":
+            quote = ch
+            continue
+        out.append(i)
+    return out
+
+
+def first_unquoted(
+    text: str, needles: tuple[str, ...], *, double_is_quote: bool = True
+) -> str:
+    """The first of `needles` that appears outside quotes, or ''."""
+    ordered = sorted(needles, key=len, reverse=True)
+    for i in unquoted_indices(text, double_is_quote=double_is_quote):
+        for needle in ordered:
+            if text.startswith(needle, i):
+                return needle
+    return ""
+
+
+def _unquoted_positions(segment: str, chars: str) -> bool:
+    """True if any of `chars` appears in `segment` outside quotes."""
+    return bool(first_unquoted(segment, tuple(chars)))
+
+
+def redirects_to_file(segment: str) -> bool:
+    """True if this segment sends output to a *path*.
+
+    A real redirect is never auto-approved, and that is deliberate: it writes
+    somewhere no allow list ever looked at, so the stem stops being a useful
+    thing to judge — `echo` is harmless right up until `echo pwned >
+    ~/.bashrc`. Both the spaced and the unspaced spelling must keep asking.
+
+    But a bare scan for `>` is not that check, and it was the one shipped
+    (2026-08-17). Two shapes carry a `>` and redirect nothing to any file:
+
+      * **file-descriptor duplication** — `2>&1`, `1>&2`, `2>&-`. These aim one
+        descriptor at another, or close it; no path is named and nothing is
+        created. `make build 2>&1`, `npm run build 2>&1` and `pytest -x 2>&1`
+        are about as ordinary as commands get, and all three had started
+        asking. "A fix that makes ordinary work ask is a different bug, not a
+        smaller one."
+      * **a `>` inside quotes** — `git commit -m 'fix a > b'`, `echo 'a > b'`.
+        The shell will never treat that as syntax, so neither should this.
+
+    `&>file` and `&>>file` are *not* excluded: the `&` there precedes the `>`
+    and a filename still follows, so they are real redirects. Nor is
+    `2>/dev/null` — it names a path, and this function answers a syntactic
+    question rather than guessing which paths are harmless.
+    """
+    syntax = set(unquoted_indices(segment))
+    i = 0
+    while i < len(segment):
+        if i not in syntax or segment[i] != ">":
+            i += 1
+            continue
+        j = i + 1
+        if segment[j : j + 1] == ">":  # `>>`
+            j += 1
+        if segment[j : j + 1] == "|":  # `>|`, the noclobber override
+            j += 1
+        while segment[j : j + 1] in (" ", "\t"):
+            j += 1
+        # `>&1` / `>&-`: a descriptor number or a close, not a filename. Note
+        # that bash's `>&word` with a *non*-numeric word is `&>word` — a real
+        # redirect of both streams to a file — so only digits and `-` count.
+        if segment[j : j + 1] == "&":
+            k = j + 1
+            while segment[k : k + 1].isdigit():
+                k += 1
+            if k > j + 1:
+                # Resume *at* k, not past it: `2>&1>out.log` puts a real
+                # redirect immediately after the duplication, and skipping one
+                # more character stepped straight over it.
+                i = k
+                continue
+            if segment[k : k + 1] == "-":
+                i = k + 1
+                continue
+        return True
+    return False
+
+
+def unwrap(tokens: list[str]) -> list[str]:
+    """Public `_unwrap`: the real command inside its wrappers and assignments.
+
+    Exported because `tools/shell.py` needs the same answer this module needs —
+    an allowlist that judges `env` instead of the `sh -c '…'` it is wrapping is
+    judging nothing, and two copies of that idea is how they drifted apart.
+    """
+    return _unwrap(list(tokens))
+
+
+def command_targets(command: str) -> list[tuple[str, str]]:
+    """Per segment, the command that runs — as a stem *and* as written.
+
+    Both spellings come back because two callers want different ones. Judging a
+    command wants the stem: `/usr/bin/git push` is a `git push` however it was
+    spelled, and a rule that missed that would be trivially dodged. Matching
+    an allowlist the **owner wrote by hand** wants the text they wrote.
+
+    Basenaming everything (2026-08-17) quietly killed every full-path entry in
+    the owner's real allowlist — `{"prefix": "/usr/local/bin/mytool"}` stopped
+    covering `/usr/local/bin/mytool run`, and the owner's live file carries a
+    full-path `powershell.exe` entry. An allowlist that silently stops matching
+    is worse than one that never matched: the owner does not find out from the
+    file, they find out from being asked again about something they settled
+    months ago.
+
+    Returns an **empty list** when the line contains command substitution: a
+    `$(...)` runs something this function never sees, so there is no honest
+    enumeration of what the line does. Callers treat empty as "cannot be
+    covered by any allowlist", which is why it must not be confused with "no
+    commands here".
+    """
+    if not command or not command.strip():
+        return []
+    if "$(" in command or "`" in command:
+        return []
+    targets: list[tuple[str, str]] = []
+    for segment in segments(command):
+        tokens = _unwrap(_tokens(segment))
+        if not tokens:
+            return []
+        targets.append((_basename(tokens[0]), tokens[0]))
+    return targets if targets and all(stem for stem, _ in targets) else []
+
+
+def command_stems(command: str) -> list[str]:
+    """The resolved stem of every command a line will run, or [] if unknowable.
+
+    "Resolved" means wrappers and leading assignments are stripped and the path
+    is reduced to a basename, so `FOO=1 nohup /usr/bin/git push` answers `git`
+    — the command that actually runs, not the costume it arrived in.
+    """
+    return [stem for stem, _ in command_targets(command)]
 
 
 def _tokens(segment: str) -> list[str]:
@@ -234,6 +495,35 @@ def _first_word_arg(tokens: list[str]) -> str:
     return ""
 
 
+def writes_anyway(tokens: list[str]) -> str:
+    """The flag that turns a read-only staple into a write, or ''.
+
+    Public because `run_readonly` needs the same answer (2026-08-17) and a
+    second copy of this list is how the two files disagree. `find` is on that
+    tool's allowlist because searching is a read — and `find . -exec rm -rf {}
+    \\;` is on the same allowlist, wearing the same name. The `\\;` had been
+    caught only by accident, as a raw `;` in an operator scan; the moment that
+    scan became quote- and escape-aware (correctly — the shell does not treat
+    an escaped `;` as a separator either) the accident stopped happening, and
+    `-delete` and `-exec … +` had never been caught at all.
+    """
+    stem = _stem(tokens)
+    for flag in _WRITES_ANYWAY.get(stem, ()):
+        if any(t == flag or t.startswith(flag) for t in tokens[1:]):
+            return flag
+    return ""
+
+
+def _has_inline_source(tokens: list[str]) -> bool:
+    """True if an interpreter was handed source on the command line."""
+    for token in tokens[1:]:
+        if token in _INLINE_CODE_FLAGS:
+            return True
+        if any(token.startswith(f) and len(token) > len(f) for f in _INLINE_ATTACHED):
+            return True
+    return False
+
+
 def _judge_segment(segment: str) -> Verdict:
     raw = _tokens(segment)
     tokens = _unwrap(list(raw))
@@ -256,13 +546,14 @@ def _judge_segment(segment: str) -> Verdict:
 
     # A redirect writes to a path nothing in the allow list ever examined, so
     # the stem stops being a useful thing to judge: `echo` is harmless right up
-    # until `echo pwned > ~/.bashrc`.
-    if any(token in _REDIRECTS or token.startswith(">") for token in raw):
+    # until `echo pwned > ~/.bashrc`. See `redirects_to_file` for the two
+    # shapes that carry a `>` and redirect nothing.
+    if redirects_to_file(segment):
         return Verdict(ASK, "redirects output to a file")
 
-    flags = _WRITES_ANYWAY.get(stem, ())
-    if flags and any(t == f or t.startswith(f) for t in tokens[1:] for f in flags):
-        return Verdict(ASK, f"{stem} with {flags[0]} writes, and is not a read")
+    writing = writes_anyway(tokens)
+    if writing:
+        return Verdict(ASK, f"{stem} with {writing} writes, and is not a read")
 
     # chmod/chown are on the allow list because moving files around is ordinary
     # work, but two shapes are not ordinary and are silent when they go wrong:
@@ -285,7 +576,7 @@ def _judge_segment(segment: str) -> Verdict:
             return Verdict(ASK, f"git {sub} needs a look before it runs")
         return Verdict(ALLOW) if sub in _GIT_ALLOWED else Verdict(ASK)
 
-    if stem in _INTERPRETERS and any(t in _INLINE_CODE_FLAGS for t in tokens[1:]):
+    if stem in _INTERPRETERS and _has_inline_source(tokens):
         return Verdict(ASK, f"{stem} with inline source is arbitrary code, not a build step")
 
     if stem == "systemctl" and "--user" not in tokens:

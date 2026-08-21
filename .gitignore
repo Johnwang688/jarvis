@@ -13,6 +13,11 @@ designs/
 # `jarvis avatar new <slug>`.
 avatars/
 
+# Cloned/hybrid voices never enter git. The real store is outside the repo
+# (~/.local/share/jarvis/voices — see jarvis/pocket.py); this is the backstop
+# for a JARVIS_VOICES pointed inside the checkout.
+voices/
+
 # Scratch output from tests/browser/marks_check.py.
 marks_*.png
 

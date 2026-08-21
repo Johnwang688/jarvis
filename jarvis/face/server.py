@@ -45,7 +45,7 @@ import re
 import subprocess
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -53,12 +53,83 @@ from urllib.parse import parse_qs, urlparse
 
 from .. import agent as agent_mod
 from .. import avatars, config, discord_agent, discord_approvals, permissions, sessions, voice
+from .. import tasks as tasks_mod
 from ..tools import secrets as secrets_mod
 from ..tools import voicectl, whiteboardctl
 from .approvals import ApprovalBroker
 
 
-def _sentences(text: str, max_len: int = 300, first_max: int = 90) -> list[str]:
+# Words that cannot end a spoken phrase. Articles, auxiliaries, prepositions,
+# conjunctions, determiners and degree adverbs all bind forward to whatever
+# follows them, so a chunk boundary landing after one is heard as a stumble
+# rather than a pause. The first-chunk clamp below falls back to the last
+# space when it finds no clause boundary, and that space lands wherever it
+# lands: "...and found the migration is" / "complete." is a split this really
+# produced. Backing off a word or two costs nothing; the cut is permanent.
+_BINDING = frozenset("""
+a an the this that these those my your his her its our their
+every each some any no all both another such
+is are was were be been being am
+do does did have has had will would shall should can could may might must
+of to in on at by for with from into onto over under about across through
+and or but nor so yet as than if while when where because although though
+very quite rather entirely completely fairly really extremely
+""".split())
+
+
+def _word_cut(head: str, limit: int, floor: int = 20) -> int:
+    """Last space before `limit` that does not strand a binding word.
+
+    Walks back a word at a time while the chunk would end on something that
+    binds to what comes next, and gives up rather than cutting the opener
+    below `floor` — an opener too short to be worth speaking is its own
+    defect. Falling back to the plain last space is always available, so this
+    can only improve the cut, never fail to make one.
+    """
+    space = head.rfind(" ", 0, limit)
+    if space < floor:
+        return 0
+    at = space
+    while at >= floor:
+        last = head[:at].rsplit(" ", 1)[-1].lower().strip(",;:.—-")
+        if last not in _BINDING:
+            return at
+        nxt = head.rfind(" ", 0, at)
+        if nxt < floor:
+            break
+        at = nxt
+    return space
+
+
+def _merges(out: list[str], part: str, max_len: int, first_min: int) -> bool:
+    """Should `part` be glued onto the chunk before it?
+
+    There are two reasons to merge and they are *not* symmetric, which is the
+    bug this function exists to hold apart (2026-08-18). A tiny **incoming**
+    part ("Done.", "A tiny one.") should never be synthesized as its own
+    chunk. A tiny **preceding** chunk normally should absorb what follows —
+    except when it is the opener, which is the one chunk that wants to stay
+    short, because it is the only one time-to-first-speech is measured on.
+
+    Treating those two as one rule swallowed a perfect 20-character opener
+    into a 98-character chunk, which the clamp then split between "is" and
+    "complete." Measured against local Kokoro: 607ms -> 1633ms to first audio,
+    and an audible break mid-phrase.
+    """
+    if len(out[-1]) + len(part) + 1 >= max_len:
+        return False
+    if len(part) < 25:
+        return True  # a stray fragment: glue it back
+    if len(out[-1]) < 25:
+        # The previous chunk is tiny. Absorb what follows — unless it is the
+        # opener and already long enough to stand on its own.
+        return not (len(out) == 1 and len(out[-1]) >= first_min)
+    return False
+
+
+def _sentences(
+    text: str, max_len: int = 300, first_max: int = 90, first_min: int = 12
+) -> list[str]:
     """Split a reply into speakable chunks: sentences, tiny ones merged.
 
     This is what makes streaming TTS work — the first chunk synthesizes in
@@ -82,7 +153,7 @@ def _sentences(text: str, max_len: int = 300, first_max: int = 90) -> list[str]:
             cut = cut if cut > 0 else max_len
             out.append(part[:cut])
             part = part[cut:].strip()
-        if out and (len(part) < 25 or len(out[-1]) < 25) and len(out[-1]) + len(part) < max_len:
+        if out and _merges(out, part, max_len, first_min):
             out[-1] = out[-1] + " " + part
         else:
             out.append(part)
@@ -92,14 +163,106 @@ def _sentences(text: str, max_len: int = 300, first_max: int = 90) -> list[str]:
     if len(out[0]) > first_max:
         head = out[0]
         cut = max(head.rfind(", ", 0, first_max), head.rfind("; ", 0, first_max),
-                  head.rfind(" — ", 0, first_max))
+                  head.rfind(": ", 0, first_max), head.rfind(" — ", 0, first_max))
         take = cut + 1 if cut >= 20 else 0  # keep the comma, drop the space
         if take == 0:
-            space = head.rfind(" ", 0, first_max)
-            take = space if space >= 20 else 0
+            take = _word_cut(head, first_max)
         if take:
             out[:1] = [head[:take].strip(), head[take:].strip()]
     return out
+
+
+# ---- speaking ahead of the turn --------------------------------------------
+
+SPECULATION_LIMIT = 6  # chunks rendered ahead; the opening of a reply, not all of it
+
+
+def _stable_chunks(partial: str) -> list[str]:
+    """The chunks of a half-written reply that appending cannot still change.
+
+    `_sentences()` merges a stray fragment backwards, so the last chunk of a
+    growing buffer is never safe to trust: "Done." becomes "Done. The tests
+    pass." the moment the next sentence arrives. A chunk is settled once the
+    one after it exists *and* is long enough that it will not be merged back
+    into it — which is the same 25-character rule `_merges` applies, read from
+    the other side.
+    """
+    chunks = _sentences(partial)
+    stable: list[str] = []
+    for i in range(len(chunks) - 1):
+        if len(chunks[i + 1]) < 25:
+            break
+        stable.append(chunks[i])
+    return stable
+
+
+class _Speculator:
+    """Synthesize sentences while the model is still writing them.
+
+    Time-to-first-speech was the full synthesis of the first chunk — measured
+    at 607ms to 1633ms against local Kokoro — and all of it was spent *after*
+    the turn had already finished, with the owner listening to silence. The
+    text has been streaming the whole time (it is what draws the HUD's live
+    draft), so the chunks can be built as they appear and simply be waiting.
+
+    This changes nothing about what is spoken or when. Audio still goes out
+    only once `run_turn` has returned, in order, exactly as before — the
+    owner's call, and the safe one: a sentence spoken early is a sentence a
+    later tool call can contradict. It is a cache, keyed on the chunk **text**
+    rather than its position, so a guess that does not match the finished
+    reply is thrown away and resynthesized. Being wrong costs CPU, never
+    correctness.
+
+    It is deliberately cautious about being wrong, because local Kokoro
+    serializes on one model instance: a wasted synthesis holds the lock the
+    chunk actually being waited on needs. Hence `_stable_chunks`, the limit,
+    and the reset on `interim_text`. Pocket TTS voices serialize on their own
+    lock the same way (jarvis/pocket.py), so the caution applies per backend.
+    """
+
+    def __init__(self, pool: ThreadPoolExecutor):
+        self.pool = pool
+        self.buf = ""
+        self.ready: dict[str, Future] = {}
+        self.hits = 0
+
+    def feed(self, piece: str) -> None:
+        # The whole body is guarded, not just the synthesis. This runs inside
+        # `llm.chat`'s streaming loop by way of on_delta, so anything raised
+        # here comes out of the middle of the model call — a turn must never
+        # fail because a guess about it did, and "the part I thought could
+        # fail" is not the same promise.
+        try:
+            self.buf += piece
+            if len(self.ready) >= SPECULATION_LIMIT:
+                return
+            speech = voice.speakable(self.buf)
+            for chunk in _stable_chunks(speech):
+                if chunk in self.ready:
+                    continue
+                if len(self.ready) >= SPECULATION_LIMIT:
+                    break
+                self.ready[chunk] = self.pool.submit(voice.tts, chunk)
+        except Exception:
+            pass
+
+    def restart(self) -> None:
+        """A step that ended in a tool call: what was said was thinking out
+        loud on the way to it, not the answer, so none of it will be spoken."""
+        self.buf = ""
+        self.discard()
+
+    def take(self, chunk: str) -> Future | None:
+        future = self.ready.pop(chunk, None)
+        if future is not None:
+            self.hits += 1
+        return future
+
+    def discard(self) -> None:
+        for future in self.ready.values():
+            future.cancel()
+        self.ready.clear()
+
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 PROFILE_DIR = Path.home() / ".cache" / "jarvis-face"
@@ -250,6 +413,7 @@ def broadcast(kind: str, data) -> None:
 # arrive after the `meta` line that carries the finished reply and append stale
 # text underneath it. Phases live on the turn stream for the same reason.
 _delta_sink = None
+_speculator: "_Speculator | None" = None
 
 
 def _agent_event(kind: str, data) -> None:
@@ -270,6 +434,12 @@ def _agent_event(kind: str, data) -> None:
         # What Jarvis said on his way to using a tool — the reason the next
         # few seconds of silence are about to happen.
         broadcast("note", {"text": str(data)[:200]})
+        # It is also the signal that everything streamed so far belongs to a
+        # step that is not the answer, so anything synthesized from it is
+        # wrong and is holding the TTS lock the real chunks will want.
+        spec = _speculator
+        if spec is not None:
+            spec.restart()
     elif kind == "context" and getattr(data, "saved", 0) > 500:
         broadcast("context", {"saved": data.saved})
 
@@ -306,6 +476,10 @@ avatars.on_change(lambda av: broadcast("avatar", av.describe()))
 # whiteboard_close broadcasts a self-close signal. Only whiteboard.html
 # handles it; jarvis.html ignores it on purpose (see whiteboardctl).
 whiteboardctl.on_close(lambda: broadcast("wb_close", {}))
+
+# Background-task lifecycle (started / done / failed / cancelled) shows in the
+# OPERATIONS ticker, so delegated work is visible without asking about it.
+tasks_mod.set_notify(broadcast)
 
 
 def _get_agent() -> agent_mod.Agent:
@@ -487,8 +661,15 @@ class FaceHandler(SimpleHTTPRequestHandler):
             )
             return
         if self.path == "/voices":
-            current = voice.selected_voice()
-            self._json_reply({"current": current, "voices": sorted(voice.available_voices())})
+            # `override` is null when the avatar/config voice is speaking —
+            # the picker's AVATAR DEFAULT row marks itself active off it.
+            self._json_reply(
+                {
+                    "current": voice.selected_voice(),
+                    "override": voice._voice_override,
+                    "voices": voice.catalog(),
+                }
+            )
             return
         if self.path == "/sessions":
             recent = [s.describe() for s in sessions.recent(12)]
@@ -532,7 +713,8 @@ class FaceHandler(SimpleHTTPRequestHandler):
         self.wfile.write(body)
 
     def _switch_voice(self):
-        """Change the active local Kokoro voice for subsequent speech."""
+        """Change the active voice for subsequent speech (any catalog name;
+        an empty voice clears the override back to the avatar's)."""
         origin = self.headers.get("Origin")
         host = self.headers.get("Host", "")
         if origin and origin not in (f"http://{host}", f"https://{host}"):
@@ -872,13 +1054,22 @@ class FaceHandler(SimpleHTTPRequestHandler):
 
             self._nd({"type": "phase", "phase": "thinking"})
             t0 = time.monotonic()
-            global _delta_sink
+            global _delta_sink, _speculator
+            # Started before the turn rather than after it: the chunks of the
+            # reply are synthesized as the model writes them, so the first one
+            # is already waiting when `run_turn` returns instead of costing
+            # another 600-1600ms of silence. Muted turns synthesize nothing at
+            # all, so they speculate nothing either.
+            pool = ThreadPoolExecutor(max_workers=2)
+            spec = None if voicectl.is_muted() else _Speculator(pool)
             with _agent_lock:
                 # Cleared here, under the lock: a cancel aimed at the previous
                 # turn must not carry over and kill this one before it starts.
                 _cancel.clear()
 
                 def _sink(text: str) -> None:
+                    if spec is not None:
+                        spec.feed(text)
                     # A dead client mid-generation is normal (barge-in aborts
                     # the fetch), and must not take the turn down with it.
                     try:
@@ -887,15 +1078,20 @@ class FaceHandler(SimpleHTTPRequestHandler):
                         pass
 
                 _delta_sink = _sink
+                _speculator = spec
                 try:
                     turn = _get_agent().run_turn(user_input, images=images or None)
                 finally:
                     _delta_sink = None
+                    _speculator = None
             agent_ms = round((time.monotonic() - t0) * 1000)
 
             if turn.cancelled:
                 # Interrupted mid-thought. No reply, and above all no speech —
                 # the whole point was to stop him talking over the correction.
+                if spec is not None:
+                    spec.discard()
+                pool.shutdown(wait=False, cancel_futures=True)
                 self._nd({"type": "cancelled", "ms": {"stt": stt_ms, "agent": agent_ms}})
                 return
 
@@ -916,7 +1112,12 @@ class FaceHandler(SimpleHTTPRequestHandler):
 
             if voicectl.is_muted():
                 # Muted: the transcript still renders; no audio is synthesized
-                # (which also means muted turns cost no TTS).
+                # (which also means muted turns cost no TTS). Mute can be
+                # flipped mid-turn, so anything speculated before it was is
+                # thrown away here rather than spoken.
+                if spec is not None:
+                    spec.discard()
+                pool.shutdown(wait=False, cancel_futures=True)
                 self._nd({"type": "done", "tts_ms": 0, "muted": True})
                 return
 
@@ -926,6 +1127,9 @@ class FaceHandler(SimpleHTTPRequestHandler):
             # nothing speakable left (a bare code block) is text-only.
             speech = voice.speakable(reply[:MAX_SAY_CHARS])
             if not speech:
+                if spec is not None:
+                    spec.discard()
+                pool.shutdown(wait=False, cancel_futures=True)
                 self._nd({"type": "done", "tts_ms": 0})
                 return
 
@@ -933,13 +1137,18 @@ class FaceHandler(SimpleHTTPRequestHandler):
             # window sat on the last tool's label through all of it.
             self._nd({"type": "phase", "phase": "composing"})
             tts_total = 0
-            # Pipeline: chunks synthesize concurrently (two in flight) and
-            # stream in order, so later sentences never stall behind the one
-            # currently being written out.
-            pool = ThreadPoolExecutor(max_workers=2)
+            # Chunks stream in order. Anything the speculator already built
+            # while the model was writing is claimed by its exact text; a guess
+            # that does not match the finished reply is simply a miss, and is
+            # synthesized here exactly as it always was.
             try:
                 sentences = _sentences(speech)
-                futures = [pool.submit(voice.tts, s) for s in sentences]
+                futures = [
+                    (spec.take(s) if spec is not None else None) or pool.submit(voice.tts, s)
+                    for s in sentences
+                ]
+                if spec is not None:
+                    spec.discard()  # guesses the reply did not use
                 t0 = time.monotonic()
                 for seq, future in enumerate(futures):
                     chunk = future.result()
@@ -963,7 +1172,18 @@ class FaceHandler(SimpleHTTPRequestHandler):
                             "ms": ms,
                         }
                     )
-                self._nd({"type": "done", "tts_ms": tts_total})
+                self._nd(
+                    {
+                        "type": "done",
+                        "tts_ms": tts_total,
+                        # How much of the reply was already spoken-ready when
+                        # the turn ended. Worth reporting: it is the whole
+                        # point of the speculator, and a number that quietly
+                        # goes to zero is how you find out it stopped working.
+                        "prerendered": (spec.hits if spec is not None else 0),
+                        "chunks": len(sentences),
+                    }
+                )
             finally:
                 # Barge-in aborts mid-stream; don't keep synthesizing speech
                 # nobody will hear.

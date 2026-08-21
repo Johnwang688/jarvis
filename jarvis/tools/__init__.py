@@ -108,7 +108,8 @@ PARALLEL_SAFE = frozenset(
         "gmail_search", "gmail_read", "drive_search", "drive_read",
         "discord_channels", "discord_read",
         "cad_status", "cad_find_part", "cad_assembly", "cad_render",
-        "workflow_status", "workflow_log", "avatar_list",
+        "workflow_status", "workflow_log", "task_status", "task_log",
+        "avatar_list",
     }
 )
 
@@ -288,7 +289,7 @@ from . import (  # noqa: E402,F401  (registers the tools)
     sqlite,
     subagent,
     discord,
-
+    tasks,
     voicectl,
     web,
     whiteboardctl,

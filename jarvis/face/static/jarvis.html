@@ -213,6 +213,10 @@
     border-bottom: 1px solid rgba(251,191,36,.18); padding-bottom: 7px;
   }
   .auth .tool { font: 600 15px var(--mono); color: #fde68a; margin: 11px 0 9px; }
+  .auth .origin {
+    font: 10.5px var(--mono); color: #b08d3f; letter-spacing: .12em;
+    margin: 9px 0 -3px;
+  }
   .auth .arg {
     font: 11.5px var(--mono); color: #d6dee9; background: rgba(0,0,0,.4);
     border-left: 2px solid rgba(251,191,36,.4); padding: 6px 9px; margin-bottom: 6px;
@@ -349,10 +353,14 @@
     <div class="row" id="wake-row" style="cursor:pointer" title="toggle the wake word">
       <span class="k">WAKE WORD</span><span class="v" id="wake-state">OFF</span>
     </div>
+    <div class="row" id="mic-row" style="cursor:pointer"
+         title="mute your microphone — muted, nothing you say is captured or sent">
+      <span class="k">MIC</span><span class="v" id="mic-state">OPEN</span>
+    </div>
     <div class="row" id="avatar-row" style="cursor:pointer" title="change who he presents as">
       <span class="k">AVATAR</span><span class="v" id="avatar-name">—</span>
     </div>
-    <div class="row" id="voice-row" style="cursor:pointer" title="choose a Kokoro voice">
+    <div class="row" id="voice-row" style="cursor:pointer" title="choose a voice">
       <span class="k">VOICE</span><span class="v" id="voice-name">—</span>
     </div>
     <div class="row" id="mute-row" style="cursor:pointer" title="mute/unmute Jarvis's voice">
@@ -392,7 +400,7 @@
 </div>
 
 <div id="voices" class="picker">
-  <h3>KOKORO VOICE</h3>
+  <h3>VOICE</h3>
   <div id="voicelist"></div>
   <div class="btns">
     <button id="voice-close" class="close">CLOSE</button>
@@ -417,8 +425,8 @@
 // ============================== state =======================================
 
 const S = { state: "idle", level: 0, busy: false, label: "", clock: 0, tools: 0, booted: false };
-let stream = null, recorder = null, chunks = [];
-let audioCtx = null, micAnalyser = null, outAnalyser = null;
+let stream = null;
+let audioCtx = null, outAnalyser = null;
 let sessionCost = 0, turns = 0;
 
 const $ = (id) => document.getElementById(id);
@@ -478,6 +486,39 @@ window.__hud = {
   pendingAuth: () => authCards.size,
   stage: (n, m, b64, bytes) => stageFile(n, m, b64, bytes || 0),
   stagedCount: () => staged.length, sendTyped: () => sendTyped(),
+  // The capture path, drivable without a microphone: a frame of `n` samples at
+  // a constant amplitude has exactly that RMS, so a test can script a room —
+  // quiet, chatter, speech — and assert what the detector does with it. This
+  // runs the real onCaptureFrame, so the ring, the segmentation and the send
+  // are all the shipping code.
+  mic: {
+    feed: (rms, n) => onCaptureFrame(new Float32Array(n || 1024).fill(rms)),
+    feedMs: (rms, ms) => {
+      // Split into the 1024-sample frames the worklet actually posts, so a
+      // scripted room exercises the same cadence the microphone does.
+      let left = msToSamples(ms);
+      while (left > 0) {
+        const n = Math.min(1024, left);
+        onCaptureFrame(new Float32Array(n).fill(rms));
+        left -= n;
+      }
+    },
+    vad: () => ({ open: VAD.open, floor: VAD.floor, thresh: VAD.thresh,
+                  peak: VAD.peak, run: VAD.run, quiet: VAD.quiet }),
+    claimed: () => segClaimed,
+    written: () => ringWritten,
+    followUp: () => conversing(),
+    openFollowUp: () => openFollowUp(),
+    closeFollowUp: () => closeFollowUp(),
+    wake: () => onWake(),
+    press: () => pressToTalk(), release: () => releaseToTalk(),
+    ptt: () => !!ptt,
+    muted: () => micMuted,
+    setMute: (on) => setMicMute(on),
+    reset: () => { VAD.reset(); segClaimed = false; ptt = null; closeFollowUp(); },
+    consts: () => ({ CAP_RATE, PREROLL_MS, ONSET_MS, HANGOVER_MS,
+                     MIN_UTTER_MS, MAX_UTTER_MS, FOLLOWUP_MS, WAKE_GRACE_MS }),
+  },
   matchesWake: (t) => matchesWake(t),
   applyAvatar: (d) => applyAvatar(d), avatar: () => avatar,
   openAvatars: () => openAvatars(), avatarShown: () => avatarShown,
@@ -622,22 +663,40 @@ async function openVoices() {
   }
   const list = $("voicelist");
   list.textContent = "";
-  (data.voices || []).forEach((name) => {
+  // Following the avatar is the resting state, so it is the first row — it
+  // clears the override rather than naming a voice (POST /voice with "").
+  const def = document.createElement("div");
+  def.className = "sess" + (data.override ? "" : " here");
+  const defLabel = document.createElement("span");
+  defLabel.textContent = "AVATAR DEFAULT";
+  const defNote = document.createElement("span");
+  defNote.className = "when";
+  defNote.textContent = data.override ? "" : "ACTIVE";
+  def.append(defLabel, defNote);
+  def.onclick = () => (data.override ? switchVoice("") : closeVoices());
+  list.appendChild(def);
+  (data.voices || []).forEach((entry) => {
+    const name = entry.name; // {name, backend, kind} — see /voices
     const row = document.createElement("div");
-    row.className = "sess" + (name === data.current ? " here" : "");
+    const active = name === data.current && !!data.override;
+    row.className = "sess" + (active ? " here" : "");
     const label = document.createElement("span");
     label.textContent = name;
     const note = document.createElement("span");
     note.className = "when";
-    note.textContent = name === data.current ? "ACTIVE" : "KOKORO";
+    // Badge: ACTIVE on the picked one; otherwise the backend for builtins
+    // (KOKORO / POCKET) and the kind for custom ones (CLONE / HYBRID).
+    note.textContent = active
+      ? "ACTIVE"
+      : ((entry.kind === "builtin" ? entry.backend : entry.kind) || "").toUpperCase();
     row.append(label, note);
-    row.onclick = () => (name === data.current ? closeVoices() : switchVoice(name));
+    row.onclick = () => (active ? closeVoices() : switchVoice(name));
     list.appendChild(row);
   });
-  if (!list.childElementCount) {
+  if (list.childElementCount <= 1) {
     const empty = document.createElement("div");
     empty.className = "sess";
-    empty.textContent = "no local Kokoro voices found";
+    empty.textContent = "no local voices found";
     list.appendChild(empty);
   }
   $("voices").classList.add("on");
@@ -859,11 +918,13 @@ function analyserLevel(analyser, buf) {
   return peak;
 }
 
-let micBuf = null, outBuf = null;
+let outBuf = null;
 function levelLoop() {
-  if (S.state === "listening" && micAnalyser) S.level = analyserLevel(micAnalyser, micBuf);
-  else if (S.state === "speaking" && outAnalyser) S.level = analyserLevel(outAnalyser, outBuf);
-  else S.level = 0;
+  // The mic half is written by onCaptureFrame — the detector and the orb read
+  // one measurement, so the orb cannot look deaf while the detector is hearing
+  // speech. Only the output half is sampled here.
+  if (S.state === "speaking" && outAnalyser) S.level = analyserLevel(outAnalyser, outBuf);
+  else if (S.state !== "listening") S.level = 0;
   requestAnimationFrame(levelLoop);
 }
 requestAnimationFrame(levelLoop);
@@ -881,6 +942,16 @@ function stopSpeaking() {
   streamDone = true;
   nextStart = 0;
   if (S.state === "speaking") setState("idle");
+}
+
+// He has stopped talking, so the next thing the owner says is for him: the
+// follow-up window opens and the wake word is not needed again. Barge-in does
+// *not* come through here — `stopSpeaking()` is the owner taking the turn, and
+// they are about to speak into it anyway.
+function doneSpeaking() {
+  if (S.state !== "speaking") return;
+  setState("idle");
+  openFollowUp();
 }
 
 async function queueAudio(b64) {
@@ -901,7 +972,7 @@ async function queueAudio(b64) {
   activeSources.add(src);
   src.onended = () => {
     activeSources.delete(src);
-    if (streamDone && activeSources.size === 0 && S.state === "speaking") setState("idle");
+    if (streamDone && activeSources.size === 0) doneSpeaking();
   };
   if (S.state !== "speaking") setState("speaking");
   src.start(at);
@@ -1227,6 +1298,16 @@ function showApproval(d) {
   h.textContent = "AUTHORIZATION REQUIRED";
   card.appendChild(h);
 
+  if (d.origin) {
+    // Which background task is asking. textContent, like everything on this
+    // card — the label passes through the server's sanitizer, but this window
+    // must not trust that.
+    const who = document.createElement("div");
+    who.className = "origin";
+    who.textContent = "REQUESTED BY " + d.origin;
+    card.appendChild(who);
+  }
+
   const tool = document.createElement("div");
   tool.className = "tool";
   tool.textContent = d.tool;
@@ -1449,6 +1530,8 @@ events.onmessage = (e) => {
     addOp("interrupted", "turn abandoned");
   } else if (kind === "note") {
     addOp("note", data.text);
+  } else if (kind === "task") {
+    addOp("task", data.id + " " + data.status);
   } else if (kind === "context") {
     addOp("context", `freed ~${data.saved.toLocaleString()} tokens`);
   } else if (kind === "approval") {
@@ -1478,6 +1561,7 @@ events.onmessage = (e) => {
 // ============================== conversation ================================
 
 async function converse(blob) {
+  const spoken = !!blob;
   // Whatever is staged in the input bar rides this turn — that is the
   // contract: finish speaking (or hit Enter) and it all goes together.
   const { text, files } = takeStaged();
@@ -1500,7 +1584,7 @@ async function converse(blob) {
     };
     if (blob) {
       payload.audio_b64 = await blobB64(blob);
-      payload.audio_mime = "audio/webm";
+      payload.audio_mime = blob.type || "audio/wav";
     }
     const res = await fetch("/converse", {
       method: "POST",
@@ -1567,7 +1651,15 @@ async function converse(blob) {
           throw new Error(msg.message);
         } else if (msg.type === "done") {
           streamDone = true;
-          if (activeSources.size === 0 && S.state === "speaking") setState("idle");
+          if (activeSources.size === 0) {
+            // A muted or text-only reply never enters the speaking state, so
+            // there is no doneSpeaking() to hand the turn back. A voice turn
+            // still earns its follow-up window — the owner spoke, and got an
+            // answer; needing his name again to continue is the complaint
+            // this whole path exists to fix.
+            if (S.state === "speaking") doneSpeaking();
+            else if (spoken) openFollowUp();
+          }
         }
       }
     }
@@ -1575,7 +1667,8 @@ async function converse(blob) {
     // Nothing left to play and nothing left to wait for: any non-terminal
     // state here (a reply with no audio, an empty turn) settles to idle.
     if (activeSources.size === 0 && S.state !== "approval" && S.state !== "listening") {
-      setState("idle");
+      if (S.state === "speaking") doneSpeaking();
+      else setState("idle");
     }
   } catch (err) {
     if (err.name === "AbortError") { liveClear(); return; } // barge-in — new turn starting
@@ -1668,47 +1761,335 @@ document.addEventListener("paste", (e) => {
   [...((e.clipboardData && e.clipboardData.files) || [])].forEach(stageBrowserFile);
 });
 
-// ============================== push-to-talk ================================
+// ========================= continuous capture ===============================
+// The microphone is open from boot and never closes. Audio flows constantly
+// into a ring buffer and utterances are carved out of it afterwards, so
+// nothing here has to call `MediaRecorder.start()` at the instant the owner
+// begins speaking — which is what the old design did, and why the first word
+// went missing on every wake-word turn: Chrome's recognizer reports a phrase
+// several hundred milliseconds after it was said, so recording began somewhere
+// inside "what's the weather".
+//
+// Three complaints, all of them the same defect from different sides:
+//
+//   "I have to wake jarvis each time by saying his name" — a follow-up window
+//   opens the moment he stops speaking, so the next thing said is simply the
+//   next turn. The mic was never closed, so there is nothing to reopen.
+//
+//   "sometimes the recording gets cut" — the old detector compared a raw peak
+//   against a hard-coded 0.045 and ended the turn after 1.4s below it. On a
+//   quiet mic ordinary speech barely cleared that, so a breath mid-sentence
+//   ended the utterance. The threshold is derived from the room now.
+//
+//   "somebody is talking in the background and it just doesn't send" — the
+//   same constant failing the other way. Background chatter held the level
+//   above 0.045 indefinitely, so the end of the utterance was never detected
+//   and the recording ran to its 15-second cap. A floor that rises to meet
+//   sustained noise stops that.
+//
+// Everything is measured in samples rather than wall-clock milliseconds: the
+// audio thread is the only clock that cannot drift against the buffer we are
+// actually going to send.
 
-let vadTimer = null;
+const CAP_RATE = 16000;      // parakeet's own rate — resampling here costs nothing
+const RING_SEC = 40;
+const PREROLL_MS = 800;      // rewound from before speech was detected
+const ONSET_MS = 60;         // sustained speech this long opens an utterance
+const HANGOVER_MS = 1500;    // silence this long closes one
+const MIN_UTTER_MS = 350;    // shorter is a cough, not a turn
+const MAX_UTTER_MS = 30000;  // a hard stop, never a normal ending
+const FOLLOWUP_MS = 9000;    // speak again after he answers, no wake word
+const WAKE_GRACE_MS = 1200;  // recognizer lag: a wake hit claims a slightly older utterance
 
-function startRec(auto = false) {
-  if (!stream || S.busy || recorder) return;
-  ensureCtx();
-  chunks = [];
-  recorder = new MediaRecorder(stream, { mimeType: "audio/webm;codecs=opus" });
-  recorder.ondataavailable = (e) => chunks.push(e.data);
-  recorder.start();
-  startClock();
-  setState("listening", auto ? "LISTENING · SPEAK NOW" : undefined);
+const CAPTURE_WORKLET = `
+class Cap extends AudioWorkletProcessor {
+  constructor() { super(); this.buf = new Float32Array(1024); this.n = 0; }
+  process(inputs) {
+    const ch = inputs[0] && inputs[0][0];
+    if (!ch) return true;
+    for (let i = 0; i < ch.length; i++) {
+      this.buf[this.n++] = ch[i];
+      if (this.n === this.buf.length) { this.port.postMessage(this.buf.slice(0)); this.n = 0; }
+    }
+    return true;
+  }
+}
+registerProcessor('cap', Cap);
+`;
 
-  if (auto) {
-    // wake-word recordings stop themselves on ~1.4s of silence (or 15s cap)
-    const started = performance.now();
-    let lastLoud = started;
-    vadTimer = setInterval(() => {
-      if (!recorder) { clearInterval(vadTimer); vadTimer = null; return; }
-      const now = performance.now();
-      if (S.level > 0.045) lastLoud = now;
-      if ((now - lastLoud > 1400 && now - started > 900) || now - started > 15000) {
-        clearInterval(vadTimer);
-        vadTimer = null;
-        stopRec();
+const ring = new Float32Array(CAP_RATE * RING_SEC);
+let ringWritten = 0;               // total samples ever captured; the clock
+let capNode = null, capSource = null;
+
+const msToSamples = (ms) => Math.round((ms * CAP_RATE) / 1000);
+const samplesToMs = (n) => (n * 1000) / CAP_RATE;
+
+function ringPush(frame) {
+  const len = ring.length;
+  for (let i = 0; i < frame.length; i++) ring[(ringWritten + i) % len] = frame[i];
+  ringWritten += frame.length;
+}
+
+// Anything older than the ring has been overwritten; asking for it yields
+// whatever is still there rather than silence or an error. A turn long enough
+// to fall off a 40-second buffer has other problems.
+function ringSlice(from, to) {
+  const first = Math.max(from, ringWritten - ring.length, 0);
+  const last = Math.min(to, ringWritten);
+  const out = new Float32Array(Math.max(0, last - first));
+  for (let i = 0; i < out.length; i++) out[i] = ring[(first + i) % ring.length];
+  return out;
+}
+
+// ---- voice activity --------------------------------------------------------
+// Kept as a plain object fed one frame at a time so the tests can drive it
+// with a synthetic level sequence — no microphone, no timing luck, and the
+// thing under test is the same code the mic runs.
+
+// How fast the floor chases the room, in seconds rather than in frames. Frames
+// are whatever the audio thread hands over — 1024 samples today — so a
+// per-frame coefficient silently means a different amount of time on a
+// different buffer size, and a test feeding one large frame would measure
+// something the microphone never does.
+const FLOOR_FALL_TC = 0.20;   // a room going quiet is tracked within a breath
+const FLOOR_RISE_IDLE_TC = 8; // sustained background noise has to be sustained
+const FLOOR_RISE_OPEN_TC = 25;
+
+const VAD = {
+  floor: 0.02, thresh: 0.02, rms: 0,
+  run: 0, quiet: 0, voiced: 0, open: false, openedAt: 0, peak: 0,
+
+  reset() {
+    this.floor = 0.02; this.thresh = 0.02; this.rms = 0;
+    this.run = 0; this.quiet = 0; this.voiced = 0;
+    this.open = false; this.openedAt = 0; this.peak = 0;
+  },
+
+  // Returns "open", "close", "cap", or null. `n` is the frame length in
+  // samples, which is what turns the ratios below into times.
+  feed(rms, n) {
+    this.rms = rms;
+    // The floor falls fast and rises slowly, so a room that goes quiet is
+    // tracked within a breath while a passing conversation has to be
+    // sustained to raise it. While an utterance is open it rises slower
+    // still: the owner's own voice must not walk the threshold up underneath
+    // itself and cut the sentence off, which is exactly the "recording gets
+    // cut" report.
+    const tc = rms < this.floor ? FLOOR_FALL_TC
+             : this.open ? FLOOR_RISE_OPEN_TC : FLOOR_RISE_IDLE_TC;
+    this.floor += (rms - this.floor) * (1 - Math.exp(-(n / CAP_RATE) / tc));
+    this.floor = Math.max(this.floor, 0.0008);
+    this.thresh = Math.max(this.floor * 3.0, 0.006);
+
+    const loud = rms > this.thresh;
+    if (loud) { this.run += n; this.quiet = 0; } else { this.quiet += n; this.run = 0; }
+    // How much of this utterance was actually speech. The segment that gets
+    // sent is padded at both ends — pre-roll in front, a little of the
+    // hangover behind — so measuring *it* against a minimum length would let
+    // a 90ms cough clear the bar on padding alone.
+    if (this.open && loud) this.voiced += n;
+
+    if (!this.open) {
+      if (this.run >= msToSamples(ONSET_MS)) {
+        this.open = true;
+        this.peak = rms;
+        this.voiced = this.run;
+        // Back-date the start: the onset was confirmed only after ONSET_MS of
+        // speech had already happened, and the pre-roll reaches further back
+        // still, to whatever was said before the detector agreed it was speech.
+        this.openedAt = ringWritten
+          - Math.min(this.run, msToSamples(ONSET_MS * 4))
+          - msToSamples(PREROLL_MS);
+        return "open";
       }
-    }, 100);
+      return null;
+    }
+
+    this.peak = Math.max(this.peak, rms);
+    if (ringWritten - this.openedAt >= msToSamples(MAX_UTTER_MS)) { this.open = false; return "cap"; }
+    if (this.quiet >= msToSamples(HANGOVER_MS)) { this.open = false; return "close"; }
+    return null;
+  },
+};
+
+// ---- utterance segmentation ------------------------------------------------
+// The detector says where speech is; this decides whether a given stretch of
+// speech was addressed to Jarvis. Three ways it can be: the orb (or space) was
+// held, a wake phrase was heard around it, or it landed inside the follow-up
+// window that opens when he stops speaking.
+
+let followUpUntil = 0;     // performance.now() deadline for a wake-word-free turn
+let wakeHitAt = -1e9;      // when a wake phrase was last recognized
+let segClaimed = false;    // the open utterance is addressed to him
+let ptt = null;            // { from } while the orb or space is held
+
+// The owner's own mute — the input-side counterpart of VOICE OUT. While on,
+// nothing is claimed, nothing is uploaded, the wake recognizer is stopped
+// (it streams audio to Google's speech service — muted means that stops too)
+// and push-to-talk records nothing, though pressing the orb still interrupts
+// him. The ring keeps filling *locally* so the room threshold is current the
+// moment the mic reopens; micFloorSample marks the unmute point so audio
+// captured while muted can never ride out as pre-roll or wake back-dating.
+let micMuted = false;
+let micFloorSample = 0;
+
+function conversing() { return performance.now() < followUpUntil; }
+
+let followUpTimer = null;
+
+function openFollowUp() {
+  if (micMuted) return;  // a muted mic must not promise "just speak"
+  followUpUntil = performance.now() + FOLLOWUP_MS;
+  // Nothing else redraws while the window is idle, so the hint would go on
+  // promising a free follow-up long after it had lapsed.
+  clearTimeout(followUpTimer);
+  followUpTimer = setTimeout(() => { followUpUntil = 0; refreshHint(); }, FOLLOWUP_MS);
+  refreshHint();
+}
+
+function closeFollowUp() {
+  followUpUntil = 0;
+  clearTimeout(followUpTimer);
+  refreshHint();
+}
+
+// Suppressed whenever it would be listening to him rather than to the owner,
+// or when the answer to something else is what is wanted first. Barge-in stays
+// deliberate — the orb, space, or his name — because an open mic that
+// interrupts on any sound interrupts on the wrong ones.
+function vadSuppressed() {
+  return S.state === "speaking" || S.busy || authCards.size > 0 ||
+         !!document.querySelector(".picker.on");
+}
+
+function onVadEvent(event) {
+  if (event === "open") {
+    segClaimed = conversing() || performance.now() - wakeHitAt < WAKE_GRACE_MS;
+    if (segClaimed) {
+      // Saying his name claims exactly one utterance. Leaving the hit live
+      // for the rest of its grace window let the *next* thing said — an aside
+      // to someone else, a sentence finished after he had already started —
+      // be picked up as a second turn nobody addressed to him.
+      wakeHitAt = -1e9;
+      closeFollowUp();
+      setState("listening", "LISTENING · SPEAK NOW");
+      startClock();
+    }
+    return;
+  }
+  // "close" or "cap"
+  // The utterance ended a full hangover ago; everything since is the silence
+  // that proved it ended. Sending that is a second of nothing for the
+  // transcriber to chew on, so it is trimmed back to a natural tail.
+  const from = VAD.openedAt;
+  const to = event === "cap" ? ringWritten
+           : Math.max(from, ringWritten - VAD.quiet + msToSamples(200));
+  const claimed = segClaimed;
+  segClaimed = false;
+  if (!claimed) return;
+  if (S.state === "listening") setState("idle");
+  const ms = samplesToMs(VAD.voiced);
+  // A claimed utterance that never rose meaningfully clear of the room is
+  // background noise that happened to land in the follow-up window, not
+  // something said to him.
+  if (ms < MIN_UTTER_MS || VAD.peak < VAD.thresh * 1.6) {
+    VAD.voiced = 0;
+    openFollowUp();  // he was addressed; give the owner the window back
+    $("status").textContent = "DIDN'T CATCH THAT";
+    return;
+  }
+  sendUtterance(from, to);
+}
+
+function sendUtterance(from, to) {
+  // Audio captured while the mic was muted is never uploaded — not even as
+  // the pre-roll or wake back-dating of an utterance begun after unmuting.
+  from = Math.max(from, micFloorSample);
+  const samples = ringSlice(from, to);
+  if (!samples.length) return;
+  VAD.voiced = 0;
+  converse(wavBlob(samples, CAP_RATE));
+}
+
+// ---- wiring ----------------------------------------------------------------
+
+let resAcc = 0, resN = 0, resPos = 0;
+function downsample(frame, ratio) {
+  const out = new Float32Array(Math.ceil(frame.length / ratio) + 1);
+  let n = 0;
+  for (let i = 0; i < frame.length; i++) {
+    resAcc += frame[i]; resN++; resPos += 1;
+    if (resPos >= ratio) { out[n++] = resAcc / resN; resPos -= ratio; resAcc = 0; resN = 0; }
+  }
+  return out.subarray(0, n);
+}
+
+function onCaptureFrame(frame) {
+  ringPush(frame);
+  let sum = 0;
+  for (let i = 0; i < frame.length; i++) sum += frame[i] * frame[i];
+  const rms = Math.sqrt(sum / Math.max(1, frame.length));
+  // The orb reads the same number the detector does — one measurement of "how
+  // loud is it right now", not two that can disagree about whether he is
+  // hearing you. Muted, the orb shows nothing: a level meter on a muted mic
+  // reads as "he is listening", which is exactly the wrong promise.
+  S.level = S.state === "speaking" ? S.level : micMuted ? 0 : Math.min(1, rms * 4);
+  if (micMuted || vadSuppressed()) {
+    // Still track the room while he talks, so the threshold is current the
+    // moment the follow-up window opens; just never open an utterance.
+    if (VAD.open) { VAD.open = false; segClaimed = false; }
+    VAD.feed(rms, frame.length);
+    return;
+  }
+  const event = VAD.feed(rms, frame.length);
+  if (event) onVadEvent(event);
+}
+
+async function startCapture(mediaStream) {
+  const ctx = ensureCtx();
+  const ratio = ctx.sampleRate / CAP_RATE;
+  capSource = ctx.createMediaStreamSource(mediaStream);
+  try {
+    const url = URL.createObjectURL(
+      new Blob([CAPTURE_WORKLET], { type: "application/javascript" }));
+    await ctx.audioWorklet.addModule(url);
+    URL.revokeObjectURL(url);
+    capNode = new AudioWorkletNode(ctx, "cap");
+    capNode.port.onmessage = (e) => onCaptureFrame(downsample(e.data, ratio));
+    capSource.connect(capNode);
+    // A worklet with nothing downstream is not pulled in every browser; a
+    // zeroed gain keeps it running without routing the mic to the speakers.
+    const mute = ctx.createGain();
+    mute.gain.value = 0;
+    capNode.connect(mute).connect(ctx.destination);
+  } catch {
+    // Deprecated, main-thread, and glitches under canvas load — but a HUD that
+    // cannot hear is worse than one that hears imperfectly.
+    capNode = ctx.createScriptProcessor(2048, 1, 1);
+    capNode.onaudioprocess = (e) =>
+      onCaptureFrame(downsample(e.inputBuffer.getChannelData(0), ratio));
+    capSource.connect(capNode);
+    capNode.connect(ctx.destination);
   }
 }
 
-async function stopRec() {
-  if (!recorder) return;
-  if (vadTimer) { clearInterval(vadTimer); vadTimer = null; }
-  const rec = recorder;
-  recorder = null;
-  await new Promise((res) => { rec.onstop = res; rec.stop(); });
-  const blob = new Blob(chunks, { type: "audio/webm" });
-  if (blob.size < 2000) { setState("idle"); $("status").textContent = "TOO SHORT"; return; }
-  converse(blob);
+function wavBlob(samples, rate) {
+  const buf = new ArrayBuffer(44 + samples.length * 2);
+  const v = new DataView(buf);
+  const tag = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+  tag(0, "RIFF"); v.setUint32(4, 36 + samples.length * 2, true); tag(8, "WAVE");
+  tag(12, "fmt "); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, rate, true); v.setUint32(28, rate * 2, true);
+  v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+  tag(36, "data"); v.setUint32(40, samples.length * 2, true);
+  for (let i = 0; i < samples.length; i++) {
+    const s = Math.max(-1, Math.min(1, samples[i]));
+    v.setInt16(44 + i * 2, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+  }
+  return new Blob([buf], { type: "audio/wav" });
 }
+
+// ---- taking a turn back ----------------------------------------------------
 
 // Abandon a turn that is still being thought about. The point is correcting a
 // bad transcription: you see what he heard the moment STT lands, and you have
@@ -1729,27 +2110,51 @@ function cancelTurn() {
   return true;
 }
 
-// Pressing to talk cuts him off whatever he is doing — mid-sentence (barge-in)
-// or mid-thought (cancel).
+// ---- push to talk ----------------------------------------------------------
+// Still the deliberate path, and still exact: holding the orb bounds the
+// utterance by hand rather than by detector. It gets the same pre-roll, so
+// talking the instant you press no longer loses the first syllable.
+
 function pressToTalk() {
-  if (authCards.size) return; // answer the authorization first
-  // Talking into a conversation you are in the middle of leaving is a way to
-  // lose a turn — pick the session first. Same for the avatar picker: the
-  // wake phrases are about to change under you.
-  if (document.querySelector(".picker.on")) return;
+  if (authCards.size) return;            // answer the authorization first
+  if (document.querySelector(".picker.on")) return;  // finish choosing first
   if (S.state === "speaking") stopSpeaking();
   cancelTurn();
-  startRec(false);
+  closeFollowUp();
+  // After the interrupt half, not before: muting yourself must not take away
+  // the orb as the way to shut him up — it only stops anything being recorded.
+  if (micMuted) { $("status").textContent = "MIC MUTED"; return; }
+  if (ptt) return;
+  ensureCtx();
+  ptt = { from: Math.max(0, ringWritten - msToSamples(PREROLL_MS)) };
+  startClock();
+  setState("listening");
+}
+
+function releaseToTalk() {
+  if (!ptt) return;
+  const { from } = ptt;
+  ptt = null;
+  const to = ringWritten;
+  if (samplesToMs(to - from) < MIN_UTTER_MS + PREROLL_MS) {
+    setState("idle");
+    $("status").textContent = "TOO SHORT";
+    return;
+  }
+  // The detector must not immediately re-open on the tail of what was just
+  // sent, and the room may have changed while the owner held the orb.
+  VAD.quiet = 0; VAD.run = 0; VAD.open = false; segClaimed = false;
+  sendUtterance(from, to);
 }
 
 canvas.addEventListener("pointerdown", (e) => { e.preventDefault(); pressToTalk(); });
-canvas.addEventListener("pointerup", stopRec);
-canvas.addEventListener("pointerleave", () => { if (recorder && !vadTimer) stopRec(); });
+canvas.addEventListener("pointerup", releaseToTalk);
+canvas.addEventListener("pointerleave", releaseToTalk);
 document.addEventListener("keydown", (e) => {
   if (e.code === "Space" && !e.repeat) { e.preventDefault(); pressToTalk(); }
 });
 document.addEventListener("keyup", (e) => {
-  if (e.code === "Space" && !vadTimer) { e.preventDefault(); stopRec(); }
+  if (e.code === "Space") { e.preventDefault(); releaseToTalk(); }
 });
 
 // ============================== wake word ===================================
@@ -1800,13 +2205,31 @@ function chime() {
 }
 
 function onWake() {
+  if (micMuted) return;       // the recognizer stops on mute, but a result
+                              // already in flight can still land here late
   if (authCards.size) return; // never talk over a pending authorization
   if (document.querySelector(".picker.on")) return; // finish choosing first
   if (S.state === "speaking") stopSpeaking();
   cancelTurn(); // saying his name mid-thought interrupts, same as the orb
-  if (recorder || S.busy) return;
   chime();
-  startRec(true);
+  wakeHitAt = performance.now();
+  // Nothing starts recording here — the mic has been running all along. The
+  // recognizer reports a phrase several hundred milliseconds after it was
+  // said, so by now the owner is usually mid-sentence and the detector
+  // already has an utterance open: claim that one, and back-date its start
+  // far enough to cover the lag. The old code called startRec() at this
+  // point, which is precisely why the first word was missing.
+  if (VAD.open && !segClaimed) {
+    segClaimed = true;
+    wakeHitAt = -1e9;  // spent: this hit claims this utterance and no other
+    VAD.openedAt = Math.min(
+      VAD.openedAt, ringWritten - msToSamples(WAKE_GRACE_MS + PREROLL_MS));
+    closeFollowUp();
+    setState("listening", "LISTENING · SPEAK NOW");
+    startClock();
+  }
+  // If no utterance is open yet the wake phrase arrived early; WAKE_GRACE_MS
+  // lets the next one claim itself.
 }
 
 function armRecognition() {
@@ -1842,6 +2265,12 @@ function disarmRecognition() {
 }
 
 function refreshHint() {
+  // Muted wins over everything: every other hint is an invitation to speak,
+  // and each would be a lie while nothing said can arrive.
+  if (micMuted) {
+    $("hint").textContent = "MIC MUTED · TYPE · OR UNMUTE IN SYSTEMS";
+    return;
+  }
   // The hint names the avatar's own phrases: an undiscoverable wake word is
   // one nobody says, and after a rename "SAY JARVIS" would be a lie.
   const said = (avatar.wake || DEFAULT_AVATAR.wake)
@@ -1849,6 +2278,13 @@ function refreshHint() {
   // While a turn is in flight the useful thing to know is that you can take
   // it back — that is the window for fixing a misheard transcript.
   const verb = S.busy || S.state === "speaking" ? "INTERRUPT" : "SPEAK";
+  // While the follow-up window is open his name is not needed, and saying so
+  // is the whole point of having one — an affordance nobody knows about is an
+  // affordance nobody uses.
+  if (conversing() && !S.busy && S.state !== "speaking") {
+    $("hint").textContent = "JUST SPEAK · STILL LISTENING";
+    return;
+  }
   $("hint").textContent = wakeMode
     ? `SAY ${said} · OR HOLD ORB · TO ${verb}`
     : `HOLD ORB · OR SPACE · TO ${verb}`;
@@ -1860,7 +2296,35 @@ function setWake(on) {
   $("wake-state").textContent = on ? "ARMED" : "OFF";
   $("wake-state").style.color = on ? "var(--cyan)" : "";
   refreshHint();
-  on ? armRecognition() : disarmRecognition();
+  // Arming while muted only records the intent — the recognizer itself
+  // starts when the mic reopens (setMicMute re-arms from wakeMode).
+  if (on) { if (!micMuted) armRecognition(); }
+  else disarmRecognition();
+}
+
+function setMicMute(on) {
+  micMuted = !!on;
+  // Persisted, and deliberately failing toward muted: a window that reboots
+  // into a hot mic the owner turned off would be the wrong surprise.
+  localStorage.setItem("micmute", micMuted ? "1" : "0");
+  $("mic-state").textContent = micMuted ? "MUTED" : "OPEN";
+  $("mic-state").style.color = micMuted ? "#f87171" : "";
+  if (micMuted) {
+    // Take back everything input-shaped that is live right now. The ring
+    // keeps filling — locally, nothing is sent — so the room threshold is
+    // current the moment the mic reopens.
+    ptt = null;
+    VAD.open = false;
+    segClaimed = false;
+    closeFollowUp();
+    disarmRecognition();
+    if (S.state === "listening") setState("idle");
+  } else {
+    // Nothing captured while muted may leave the machine after unmuting.
+    micFloorSample = ringWritten;
+    if (wakeMode) armRecognition();
+  }
+  refreshHint();
 }
 
 // ============================== boot ========================================
@@ -1904,14 +2368,11 @@ async function init() {
 
   try {
     stream = await navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation: true, noiseSuppression: true },
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
     });
-    const ctx2 = ensureCtx();
-    const src = ctx2.createMediaStreamSource(stream);
-    micAnalyser = ctx2.createAnalyser();
-    micAnalyser.fftSize = 512;
-    micBuf = new Uint8Array(micAnalyser.frequencyBinCount);
-    src.connect(micAnalyser);
+    // Opened once and left open for the life of the window. Everything that
+    // used to start and stop a recorder now just marks positions in the ring.
+    await startCapture(stream);
     booted();
   } catch (err) {
     if (booted()) {
@@ -1928,6 +2389,7 @@ async function init() {
   $("sess-new").onclick = () => switchSession({ new: true });
   $("sess-close").onclick = () => closeSessions();
   $("wake-row").onclick = () => setWake(!wakeMode);
+  $("mic-row").onclick = () => setMicMute(!micMuted);
   $("mute-row").onclick = () => {
     fetch("/mute", {
       method: "POST",
@@ -1936,6 +2398,9 @@ async function init() {
     }).catch(() => {}); // UI updates via the SSE broadcast
   };
   refreshHint();
+  // Mic mute restores before the wake word, so a saved mute is already in
+  // force when setWake decides whether to start the recognizer.
+  if (localStorage.getItem("micmute") === "1") setMicMute(true);
   if (localStorage.getItem("wake") === "1") setWake(true);
 
   // A page loaded with wake already armed has had no user gesture yet, so the

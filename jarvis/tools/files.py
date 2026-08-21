@@ -76,9 +76,43 @@ _NUMBERED = re.compile(r"^( *\d+)\t")
 _NUMBER_FIELD = 6
 
 
+# SELF_PROTECTED freezes the gate's *code*. Nothing froze the gate's **data**,
+# and that was a hole straight through it (found 2026-08-17).
+#
+# `config.ALLOWLIST_PATH` lives at ~/.config/jarvis/allowlist.json — deliberately
+# outside the repo, because it is machine-local safety config. But the check
+# above is `relative_to(config.REPO_ROOT)`, so *outside the repo* meant
+# *unprotected by construction*; `allowlist.json` is not a credential name, so
+# secrets.py did not cover it either; and neither write tool is `dangerous`. So
+# `read_file` (to satisfy read-before-write) plus one ungated `edit_file` could
+# put `{"tool": "run_command"}` in that file, and `permissions.load_allowlist()`
+# re-reads it on every check — blanket auto-approval of every dangerous tool, on
+# every surface, no restart, nobody asked, and indistinguishable afterwards from
+# an entry the owner created by answering "always". Every agent has a write tool:
+# both are in workflows.SAFE_TOOLS and SUBAGENT_TOOLS, so a background workflow
+# that cannot itself run a dangerous tool could still unlock the owner's surfaces.
+#
+# The fix keys on the **identity of the file**, not its position relative to the
+# repo, because that is what the protection was always about. A path set, rather
+# than adding the name to secrets.PROTECTED_NAMES: this file is not a credential,
+# it must stay *readable* (the HUD and the owner both inspect it), and borrowing
+# the credential refusal would tell the model something untrue about why. Read
+# from `config` per call, not captured at import, so a test that repoints
+# ALLOWLIST_PATH at a temp file protects the temp file — the real one must never
+# be what a suite exercises.
+#
+# Still reachable by an *approved* run_command, which is the same deliberate
+# exception SELF_PROTECTED makes: that is the owner consenting per edit.
+def _protected_state() -> set[Path]:
+    return {config.ALLOWLIST_PATH.expanduser().resolve()}
+
+
 def _self_protected(target: Path) -> bool:
+    resolved = target.resolve()
+    if resolved in _protected_state():
+        return True
     try:
-        rel = target.resolve().relative_to(config.REPO_ROOT)
+        rel = resolved.relative_to(config.REPO_ROOT)
     except ValueError:
         return False
     return str(rel) in SELF_PROTECTED

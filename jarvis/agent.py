@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from . import avatars, config, context, llm, runtime, sessions, tools
+from . import avatars, config, context, llm, runtime, sessions, tasks, tools
 from .tools import contextctl
 
 # Most a turn will run at once. The cap is about being a good citizen to the
@@ -33,9 +33,9 @@ BRIEFER_PREFACE = (
 )
 
 CONTEXT_BLOCK_PREFIX = (
-    "[Working context — your skills index, your plan, and recent conversations. "
-    "Rewritten fresh every step, so it is always current. This is your own "
-    "state, not a new request from the user.]\n\n"
+    "[Working context — your skills index, your plan, background tasks, and "
+    "recent conversations. Rewritten fresh every step, so it is always "
+    "current. This is your own state, not a new request from the user.]\n\n"
 )
 
 COMPACTION_PROMPT = """You are compacting the earlier part of your own agent \
@@ -217,6 +217,7 @@ class Agent:
         self._has_skills = "skill_read" in names
         self._has_plan = "plan_write" in names
         self._has_sessions = "session_summary" in names
+        self._has_tasks = "task_start" in names
         self.messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
         # A bound session makes this conversation durable: its saved transcript
         # is restored here, and every turn is written back after it completes.
@@ -298,6 +299,8 @@ class Agent:
             blocks.append(tools.skills.index())
         if self._has_plan:
             blocks.append(tools.plan.block())
+        if self._has_tasks:
+            blocks.append(tasks.block())
         if self._has_sessions:
             blocks.append(sessions.index(current=self.session.id if self.session else None))
         text = "\n\n".join(b for b in blocks if b)

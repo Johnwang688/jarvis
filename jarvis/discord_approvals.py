@@ -119,9 +119,13 @@ class DiscordApprovals:
     def ask(self, item) -> bool:
         """DM the owner the request. False if it could not be delivered."""
         code = self._new_code()
+        # getattr, not item.origin: tests (and any older caller) hand this
+        # channel bare namespaces without the field, and they must keep working.
+        origin = getattr(item, "origin", "")
+        who = f"for {origin}\n" if origin else ""
         body = (
             f"**AUTHORIZATION NEEDED** · code `{code}`\n"
-            f"`{item.tool}`\n```\n{_describe(item)}\n```\n"
+            f"{who}`{item.tool}`\n```\n{_describe(item)}\n```\n"
             f"Reply **yes** to allow, **no** to deny, **always** to allow this "
             f"and stop asking. Expires in {self._minutes} minutes, and anything "
             f"else I hear counts as neither."
@@ -136,6 +140,7 @@ class DiscordApprovals:
                 "code": code,
                 "channel_id": str(channel_id),
                 "tool": item.tool,
+                "origin": origin,
             }
         self._announce(f"[approval] asked the owner on Discord (code {code}): {item.tool}")
         return True
@@ -146,9 +151,10 @@ class DiscordApprovals:
             record = self._open.pop(request_id, None)
         if record is None or resolution in ("approved", "approved-always", "denied"):
             return  # the answering reply already said what happened
+        who = f" for {record['origin']}" if record.get("origin") else ""
         try:
             self._dm(
-                f"That authorization for `{record['tool']}` (code "
+                f"That authorization for `{record['tool']}`{who} (code "
                 f"`{record['code']}`) is closed — {resolution}. Nothing ran."
             )
         except Exception:
@@ -173,7 +179,12 @@ class DiscordApprovals:
             return None
 
         verdict, code = _parse(text)
-        pending = ", ".join(f"`{rec['code']}` ({rec['tool']})" for _, rec in mine)
+        pending = ", ".join(
+            f"`{rec['code']}` ({rec['tool']}"
+            + (f", {rec['origin']}" if rec.get("origin") else "")
+            + ")"
+            for _, rec in mine
+        )
         if verdict is None:
             return (
                 f"Still waiting on: {pending}. Reply **yes**, **no**, or "

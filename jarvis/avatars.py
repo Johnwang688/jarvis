@@ -55,11 +55,12 @@ class Avatar:
     # Escape hatch for a phrase the recognizer mangles — raw JS-compatible
     # regex source. Anchoring is enforced, not assumed (see wake_patterns).
     wake_regex: list[str] = field(default_factory=list)
-    # How he sounds. A Kokoro voice name (`voice.available_voices()` lists
-    # what this machine can actually say); empty means config.TTS_VOICE.
-    # Resolution and validation live in voice.py — an avatar naming a voice
-    # that is not installed must leave him *audible*, the same rule that keeps
-    # a broken wake regex from leaving him unsummonable.
+    # How he sounds. A name from `voice.catalog()` — a Kokoro bundle voice,
+    # or `pocket:<name>` for a Pocket TTS builtin/clone/hybrid; empty means
+    # config.TTS_VOICE. Resolution and validation live in voice.py — an
+    # avatar naming a voice that is not installed must leave him *audible*,
+    # the same rule that keeps a broken wake regex from leaving him
+    # unsummonable.
     voice: str = ""
     # Speech-rate multiplier, 0 = "use config.TTS_SPEED".
     speed: float = 0.0

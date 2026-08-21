@@ -168,6 +168,50 @@ def protection_checks(tmp: Path) -> None:
     print("ok  guard: edit_file refuses every safety-layer file and .env")
 
 
+def gate_state_checks(tmp: Path) -> None:
+    """SELF_PROTECTED froze the gate's code. Nothing froze the gate's *data*.
+
+    `_self_protected()` asked `relative_to(config.REPO_ROOT)` and returned
+    False on ValueError, so anything outside the checkout was unprotected by
+    construction — and `config.ALLOWLIST_PATH` is deliberately outside it, at
+    ~/.config/jarvis/allowlist.json. `allowlist.json` is not a credential name,
+    so secrets.py did not cover it, and neither write tool is `dangerous`. So:
+    read_file it (satisfying read-before-write), edit_file it to
+    `[{"tool": "run_command"}]`, and because `permissions.load_allowlist()`
+    re-reads the file on every check, the very next dangerous call was
+    auto-approved — every surface, no restart, nobody asked, and afterwards
+    indistinguishable from an entry the owner created by answering "always".
+
+    Both write tools are in workflows.SAFE_TOOLS and SUBAGENT_TOOLS, so a
+    background workflow that cannot run a dangerous tool itself could still
+    unlock the owner's surfaces. `config.ALLOWLIST_PATH` is pointed at a temp
+    file for this suite, and the protection is read from `config` per call, so
+    this exercises the temp file and never the owner's real one.
+    """
+    target = config.ALLOWLIST_PATH
+    target.parent.mkdir(parents=True, exist_ok=True)
+    original = json.dumps([{"tool": "run_readonly", "prefix": "git"}])
+    target.write_text(original, encoding="utf-8")
+
+    seen = call("read_file", path=str(target))
+    assert "run_readonly" in seen, seen  # readable: it is config, not a credential
+
+    out = call("edit_file", path=str(target),
+               old_string='"run_readonly", "prefix": "git"', new_string='"run_command"')
+    assert "safety layer" in out, out
+    out = call("write_file", path=str(target), content='[{"tool": "run_command"}]')
+    assert "safety layer" in out, out
+    assert target.read_text(encoding="utf-8") == original, "the allowlist was rewritten"
+
+    # And the same refusal when the file does not exist yet — write_file
+    # creates parents, so "not there" was the easier version of the attack.
+    target.unlink()
+    out = call("write_file", path=str(target), content='[{"tool": "run_command"}]')
+    assert "safety layer" in out, out
+    assert not target.exists(), "the allowlist was created from nothing"
+    print("ok  guard: the approval gate's state file is refused by both write tools")
+
+
 def numbering_guard_checks(tmp: Path) -> None:
     """write_file strips read_file's numbering — and only read_file's."""
     target = tmp / "roundtrip.txt"
@@ -316,6 +360,104 @@ def gitignore_checks(tmp: Path) -> None:
     print("ok  grep_files: gitignored files are still searchable (memory/*.md)")
 
 
+def grep_protected_checks(tmp: Path) -> None:
+    """The three ways ripgrep's output escaped the protected-file filter.
+
+    The filter was `is_protected(ln.split(":", 1)[0])` — the first
+    colon-delimited field of each output *line*. That only ever recognises one
+    of rg's output shapes, and the fallback never had the bug at all because it
+    filters whole *files* before reading them. Two backends, two answers, which
+    is the same failure as the gitignore bug.
+
+      * **context lines** are attributed with `-`, not `:`, so with
+        `context_lines>0` every non-matching line of a credential file inside
+        the window came back (`google_token.json-3-  "refresh_token": …`);
+      * given a **single file** as `path`, rg prints no filename at all, so the
+        field being tested was a line number — `grep_files('KEY', '.env')`
+        returned the file verbatim at the default `context_lines=0`;
+      * in **count** mode on a single file the output is a bare number, which
+        makes a protected file a match oracle: `^OPENROUTER_API_KEY=sk-or-v1-F`
+        answers 1 or 0, one character at a time, and dispatch()'s value-scrub
+        cannot help because no secret value is ever in the output.
+
+    Every case is asserted against **both** backends, and their answers must be
+    identical — that agreement is the actual invariant.
+    """
+    root = tmp / "protected"
+    root.mkdir()
+    (root / ".env").write_text(
+        "APP=demo\nOPENROUTER_API_KEY=sk-or-v1-FAKELEAKVALUE00000\nDEBUG=1\n", encoding="utf-8"
+    )
+    (root / "google_token.json").write_text(
+        '{\n  "client_id": "abc",\n  "refresh_token": "1//FAKEREFRESHTOKEN"\n}\n', encoding="utf-8"
+    )
+    (root / "notes.txt").write_text("a token lives elsewhere\n", encoding="utf-8")
+
+    secret_bits = ("sk-or-v1-FAKELEAKVALUE", "1//FAKEREFRESHTOKEN", "refresh_token",
+                   "OPENROUTER_API_KEY")
+
+    cases = [
+        dict(pattern="token", path=str(root), context_lines=2),
+        dict(pattern="token", path=str(root), context_lines=2, mode="files"),
+        dict(pattern="client", path=str(root / "google_token.json"), context_lines=1),
+        dict(pattern="KEY", path=str(root / ".env")),
+        dict(pattern="APP", path=str(root / ".env"), mode="count"),
+        dict(pattern="^OPENROUTER_API_KEY=sk-or-v1-F", path=str(root / ".env"), mode="count"),
+        dict(pattern="refresh", path=str(root / "google_token.json"), mode="files"),
+    ]
+
+    real_which = search_mod.shutil.which
+    have_rg = real_which("rg") is not None
+    for kwargs in cases:
+        with_rg = call("grep_files", **kwargs) if have_rg else None
+        search_mod.shutil.which = lambda name: None
+        try:
+            with_py = call("grep_files", **kwargs)
+        finally:
+            search_mod.shutil.which = real_which
+
+        for out, label in ((with_rg, "ripgrep"), (with_py, "fallback")):
+            if out is None:
+                continue
+            # The "No matches for <pattern> under <path>" footer echoes only
+            # the caller's own arguments back, and is the correct answer for a
+            # protected target — so it is exempt from both checks. Everything
+            # else is output derived from the file.
+            body = "" if out.startswith("No matches") else out
+            for bit in secret_bits:
+                assert bit not in body, f"{label} leaked {bit!r} for {kwargs}:\n{out}"
+            # A protected file must never be *attributed* a result either —
+            # naming it is how mode='files' and the count oracle leak.
+            assert ".env" not in body and "google_token.json" not in body, (
+                f"{label} returned a result attributed to a protected file for "
+                f"{kwargs}:\n{out}"
+            )
+        if have_rg:
+            assert with_rg == with_py, (
+                f"backends disagree for {kwargs}:\n--- rg ---\n{with_rg}\n--- py ---\n{with_py}"
+            )
+
+    # The count oracle specifically: a right guess and a wrong guess must be
+    # indistinguishable, because neither file is searched at all.
+    if have_rg:
+        right = call("grep_files", pattern="^OPENROUTER_API_KEY=sk-or-v1-F",
+                     path=str(root / ".env"), mode="count")
+        wrong = call("grep_files", pattern="^OPENROUTER_API_KEY=sk-or-v1-Z",
+                     path=str(root / ".env"), mode="count")
+        # The outputs differ only in the pattern they echo back, so compare the
+        # answer rather than the sentence: both must be "nothing was searched".
+        assert right.startswith("No matches") and wrong.startswith("No matches"), (
+            f"count mode is a match oracle: {right!r} vs {wrong!r}"
+        )
+
+    # Unprotected neighbours are still found, so this is a filter and not an
+    # outage — the check that stops a do-nothing implementation from passing.
+    found = call("grep_files", pattern="token", path=str(root))
+    assert "notes.txt" in found, found
+    ran = "both backends" if have_rg else "fallback only (rg not installed)"
+    print(f"ok  grep_files: context lines, single-file paths and count mode all filtered — {ran}")
+
+
 def backend_parity_checks(tmp: Path) -> None:
     """Both backends must answer identically, or the tool has two behaviours.
 
@@ -355,11 +497,17 @@ def backend_parity_checks(tmp: Path) -> None:
 def main() -> int:
     with tempfile.TemporaryDirectory() as raw:
         tmp = Path(raw)
+        # The gate's state file is now write-protected by resolved path, so it
+        # has to point somewhere disposable before anything here runs — a suite
+        # once wrote `apt` onto the owner's real allowlist.
+        config.ALLOWLIST_PATH = tmp / "config" / "jarvis" / "allowlist.json"
         read_checks(tmp)
         edit_checks(tmp)
         protection_checks(tmp)
+        gate_state_checks(tmp)
         numbering_guard_checks(tmp)
         grep_checks(tmp)
+        grep_protected_checks(tmp)
         rg_args_checks()
         gitignore_checks(tmp)
         backend_parity_checks(tmp)

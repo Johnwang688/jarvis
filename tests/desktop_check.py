@@ -18,6 +18,7 @@ windows/uiatree.py:
 from __future__ import annotations
 
 import json
+import re
 import socket
 import sys
 import threading
@@ -84,6 +85,29 @@ check("case and padding do not evade it",
 check("the design board is forbidden",
       uiatree.forbidden_title("JARVIS — Design Board"))
 check("an ordinary window is allowed", not uiatree.forbidden_title("Settings"))
+
+# The backstop must not be narrower than the thing it backs up. bridge.py finds
+# a registered app's window with `want_title not in title.lower()` — a
+# substring — while this was exact equality, so any window-manager suffix
+# defeated it and the HUD opened in an ordinary browser tab rather than app
+# mode was attachable. An agent that can drive the window holding the
+# authorization card can approve itself.
+check("a suffixed HUD title is still forbidden",
+      uiatree.forbidden_title("J.A.R.V.I.S. - Google Chrome"))
+check("a suffixed design board is still forbidden",
+      uiatree.forbidden_title("JARVIS — Design Board - Google Chrome"))
+check("a prefixed HUD title is still forbidden",
+      uiatree.forbidden_title("(2) J.A.R.V.I.S."))
+
+# ...and the literals have to be the titles the pages actually carry. Nothing
+# pinned them, so renaming either <title> silently disarmed the check — the
+# same drift hud_avatar_check guards against for WAKE_PATTERNS.
+_STATIC = Path(__file__).resolve().parents[1] / "jarvis" / "face" / "static"
+for page in ("jarvis.html", "whiteboard.html"):
+    html = (_STATIC / page).read_text(encoding="utf-8")
+    title = re.search(r"<title>(.*?)</title>", html, re.S).group(1).strip()
+    check(f"{page}'s real <title> is refused by the bridge",
+          uiatree.forbidden_title(title), title)
 
 # ---------------------------------------------------------------------------
 print("\nuiatree — snapshot rendering")

@@ -31,7 +31,21 @@ STRUCTURAL_ROLES = frozenset({
 
 
 def forbidden_title(title: str) -> bool:
-    return (title or "").strip().lower() in FORBIDDEN_TITLES
+    """True if this window is one of Jarvis's own control surfaces.
+
+    Matched as a **substring**, because that is how the thing it backstops
+    matches: `bridge.py` resolves a registered app's window with `want_title not
+    in title.lower()`. Exact equality made the backstop strictly narrower than
+    the attack surface — any window-manager suffix defeated it, so
+    `forbidden_title("J.A.R.V.I.S.")` was True while
+    `forbidden_title("J.A.R.V.I.S. - Google Chrome")` was False, and the HUD
+    opened in an ordinary browser tab rather than app mode became attachable.
+    An agent that can drive the window holding the authorization card can
+    approve itself, which is the desktop spelling of the hole
+    `config.is_face_origin()` closes for the browser.
+    """
+    lowered = (title or "").strip().lower()
+    return any(forbidden in lowered for forbidden in FORBIDDEN_TITLES)
 
 
 def clean(text: str | None) -> str:

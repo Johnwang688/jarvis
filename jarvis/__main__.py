@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import threading
 
 from rich.console import Console
 from rich.table import Table
@@ -44,6 +45,23 @@ def _make_reader():
 
 
 def _approve(tool: tools.Tool, args: dict) -> bool:
+    # A background task's approval lands here on the task's own thread — but
+    # stdin belongs to the REPL, and two threads reading one terminal
+    # interleave into nonsense. Deny with a note instead of prompting; the
+    # face and daemon are the surfaces that can answer background questions.
+    # (Foreground work is untouched: everything else calls this on the main
+    # thread — run_subagent is synchronous and parallel dispatch never runs a
+    # dangerous tool.)
+    if threading.current_thread() is not threading.main_thread():
+        from . import runtime
+
+        who = f" from {runtime.origin()}" if runtime.origin() else ""
+        console.print(
+            f"[dim]background request{who} for {tool.name} denied — the "
+            f"terminal prompt cannot be shared; use the face or daemon for "
+            f"approvable background tasks[/dim]"
+        )
+        return False
     console.print()
     console.print(f"[yellow]{tool.name}[/yellow] wants to run:")
     for key, value in args.items():
@@ -55,8 +73,14 @@ def _approve(tool: tools.Tool, args: dict) -> bool:
     except (EOFError, KeyboardInterrupt):
         return False
     if answer in ("a", "always"):
-        entry = permissions.add_allow(tool.name, args)
-        console.print(f"[dim]  allowlisted: {entry} ({config.ALLOWLIST_PATH})[/dim]")
+        try:
+            entry = permissions.add_allow(tool.name, args)
+        except permissions.NotAllowlistable as exc:
+            # Approved this once, but not turned into a standing rule — say so
+            # rather than letting the owner believe they will stop being asked.
+            console.print(f"[dim]  approved once; not allowlisted: {exc}[/dim]")
+        else:
+            console.print(f"[dim]  allowlisted: {entry} ({config.ALLOWLIST_PATH})[/dim]")
         return True
     return answer in ("y", "yes")
 
@@ -478,6 +502,187 @@ def cmd_avatar(args) -> int:
     return 0
 
 
+def cmd_voice(args) -> int:
+    """List, clone, mix, audition, or remove local voices (human-only).
+
+    Creation lives here and not in a tool on purpose — the `jarvis auth`
+    reasoning: cloning a voice needs the speaker's lawful consent (the
+    pocket-tts license says so explicitly), so making one is the owner's
+    act, never the agent's. Using a voice that already exists is the cheap
+    part and stays where it was: the HUD picker and avatar.json.
+    """
+    import os
+    import shutil
+    import subprocess
+    import tempfile
+    from pathlib import Path
+
+    from . import pocket, voice
+
+    action = args.action or "list"
+    rest = list(args.rest or [])
+
+    if action == "list":
+        created = {
+            v["name"]: v["created"]
+            for v in (pocket.custom_voices() if pocket.available() else [])
+        }
+        table = Table(header_style="dim")
+        table.add_column("voice")
+        table.add_column("backend", style="dim")
+        table.add_column("kind", style="dim")
+        table.add_column("created", style="dim")
+        for entry in voice.catalog():
+            bare = entry["name"].removeprefix("pocket:")
+            table.add_row(
+                entry["name"],
+                entry["backend"],
+                entry["kind"],
+                created.get(bare, "") if entry["backend"] == "pocket" else "",
+            )
+        console.print(table)
+        if pocket.available():
+            console.print(f"\n[dim]custom voices: {config.VOICES_DIR}[/dim]")
+        else:
+            console.print(
+                "\n[dim]pocket-tts is not installed, so only Kokoro voices are "
+                'listed — install with: uv pip install -e ".[pocketvoice]"[/dim]'
+            )
+        console.print(
+            "[dim]clone: jarvis voice clone <name> <audio...>   ·   "
+            "mix: jarvis voice mix <name> <voice>=<w> <voice>=<w>   ·   "
+            "hear one: jarvis voice say <name> [text][/dim]"
+        )
+        return 0
+
+    if action == "clone":
+        if len(rest) < 2:
+            console.print(
+                "[red]usage: jarvis voice clone <name> <audio.wav> [more.wav ...][/red]"
+            )
+            return 1
+        name = rest[0].lower().removeprefix("pocket:")
+        sources = [Path(p).expanduser() for p in rest[1:]]
+        if not args.yes:
+            console.print(
+                "Cloning a voice requires the speaker's lawful consent "
+                "(pocket-tts license). Only clone a voice you have the right to use."
+            )
+            if input("Continue? [y/N] ").strip().lower() not in ("y", "yes"):
+                console.print("aborted")
+                return 1
+        try:
+            path = pocket.clone(name, sources)
+        except Exception as exc:
+            console.print(f"[red]{exc}[/red]")
+            return 1
+        console.print(f"cloned [bold]pocket:{name}[/bold] -> {path}")
+        console.print(f"[dim]hear it: jarvis voice say {name}[/dim]")
+        return 0
+
+    if action == "mix":
+        if len(rest) < 3:
+            console.print(
+                "[red]usage: jarvis voice mix <name> <voice>=<weight> "
+                "<voice>=<weight> [...][/red]"
+            )
+            return 1
+        name = rest[0].lower().removeprefix("pocket:")
+        weights: dict[str, float] = {}
+        for pair in rest[1:]:
+            component, _, weight = pair.partition("=")
+            component = component.strip().removeprefix("pocket:")
+            try:
+                weights[component] = float(weight)
+            except ValueError:
+                console.print(f"[red]{pair!r} is not <voice>=<weight>[/red]")
+                return 1
+        try:
+            path = pocket.mix(name, weights)
+        except Exception as exc:
+            console.print(f"[red]{exc}[/red]")
+            return 1
+        console.print(f"mixed [bold]pocket:{name}[/bold] -> {path}")
+        console.print(
+            "[dim]hybrid blending is experimental — it interpolates the voice "
+            "states. If it sounds wrong, clone from several files instead: "
+            "jarvis voice clone <name> <a.wav> <b.wav>[/dim]"
+        )
+        console.print(f"[dim]hear it: jarvis voice say {name}[/dim]")
+        return 0
+
+    if action == "say":
+        if not rest:
+            console.print("[red]usage: jarvis voice say <name> [text...][/red]")
+            return 1
+        name = rest[0]
+        text = " ".join(rest[1:]) or "Systems online. All diagnostics green."
+        # A bare Kokoro name auditions as itself; everything else is pocket's.
+        if name not in voice.available_voices():
+            name = "pocket:" + name.removeprefix("pocket:")
+        try:
+            audio = voice.tts(text, voice=name)
+        except Exception as exc:
+            console.print(f"[red]{exc}[/red]")
+            return 1
+        suffix = ".wav" if audio.startswith(b"RIFF") else ".mp3"
+        fd, out = tempfile.mkstemp(prefix="jarvis-voice-", suffix=suffix)
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(audio)
+        played = False
+        if suffix == ".wav":  # paplay/aplay speak WAV; MP3 just gets a path
+            for player in ("paplay", "aplay"):
+                exe = shutil.which(player)
+                if not exe:
+                    continue
+                try:
+                    subprocess.run([exe, out], check=True, capture_output=True)
+                    played = True
+                    break
+                except Exception:
+                    continue
+        console.print(f"[dim]{'played' if played else 'saved'}:[/dim] {out}")
+        return 0
+
+    if action == "rename":
+        if len(rest) != 2:
+            console.print("[red]usage: jarvis voice rename <old> <new>[/red]")
+            return 1
+        old = rest[0].lower().removeprefix("pocket:")
+        new = rest[1].lower().removeprefix("pocket:")
+        try:
+            pocket.rename(old, new)
+        except Exception as exc:
+            console.print(f"[red]{exc}[/red]")
+            return 1
+        console.print(f"renamed pocket:{old} -> [bold]pocket:{new}[/bold]")
+        console.print(
+            "[dim]anything still pointing at the old name (an avatar.json, the "
+            "HUD picker) falls back audibly — reselect the new name there[/dim]"
+        )
+        return 0
+
+    if action == "rm":
+        if len(rest) != 1:
+            console.print("[red]usage: jarvis voice rm <name>[/red]")
+            return 1
+        try:
+            pocket.remove(rest[0].lower().removeprefix("pocket:"))
+        except Exception as exc:
+            console.print(f"[red]{exc}[/red]")
+            return 1
+        console.print(f"removed pocket:{rest[0]}")
+        console.print(
+            "[dim]a running face keeps a removed voice cached until restart[/dim]"
+        )
+        return 0
+
+    console.print(
+        f"[red]unknown action {action!r}[/red] — list, clone, mix, say, rename, rm"
+    )
+    return 1
+
+
 def cmd_tools(args) -> int:
     table = Table(header_style="dim")
     table.add_column("tool")
@@ -613,6 +818,18 @@ def main() -> int:
     avatar.add_argument("--template", help="starter art for 'new'")
     avatar.add_argument("--name", help="display name for 'new' (default: the slug)")
     avatar.set_defaults(func=cmd_avatar)
+
+    voicecmd = sub.add_parser(
+        "voice", help="local voices: list, clone, mix, audition (human-only)"
+    )
+    voicecmd.add_argument(
+        "action", nargs="?", default="", help="list, clone, mix, say, rename, or rm"
+    )
+    voicecmd.add_argument("rest", nargs="*", help="arguments for the action")
+    voicecmd.add_argument(
+        "--yes", action="store_true", help="skip the consent confirmation (scripts)"
+    )
+    voicecmd.set_defaults(func=cmd_voice)
 
     sub.add_parser("tools", help="list registered tools").set_defaults(func=cmd_tools)
     sub.add_parser("config", help="show configured model tiers").set_defaults(func=cmd_config)

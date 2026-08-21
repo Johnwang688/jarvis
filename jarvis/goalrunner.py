@@ -68,7 +68,18 @@ GOAL_SYSTEM = config.SYSTEM_PROMPT + (
 # set_avatar joins them for the same reason: it is a lever on a window nobody
 # is watching, and a goal that renames him mid-run would confuse the owner
 # reading its progress DMs.
-_EXCLUDED_TOOLS = {"set_voice_mute", "whiteboard_close", "set_avatar"}
+# The attended-task tools stay out too: the goal runner is one serial worker
+# *on purpose* (singleton browser, predictable spend), and a goal fanning out
+# into concurrent gated agents while nobody is at the desk breaks both.
+_EXCLUDED_TOOLS = {
+    "set_voice_mute",
+    "whiteboard_close",
+    "set_avatar",
+    "task_start",
+    "task_status",
+    "task_log",
+    "task_cancel",
+}
 
 # The scripted turn directives. Slice 0 plans, slice 1 starts implementing,
 # later slices continue; the first done triggers one verification pass.

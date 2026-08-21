@@ -71,8 +71,21 @@ def _rg_args(
     committing and what is worth searching are different questions, and memory
     is the case that proves it. So ignore files are disabled and the skipping
     is done explicitly, by the same `SKIP_DIRS` the fallback walks with.
+
+    **`--null` and `--with-filename` are the other two load-bearing flags**, and
+    they are here for the protected-file filter rather than for output. ripgrep
+    normally separates the path from the rest of a line with `:` for a match and
+    `-` for a *context* line, and omits the path entirely when it was handed a
+    single file — so a filter that split each line on its first `:` was reading
+    a line number, or half a path, whenever either of those applied. `--null`
+    puts a NUL between the path and everything after it, which no path can
+    contain, and `--with-filename` guarantees the path is there at all. See
+    `_rg_lines`.
     """
-    args = ["rg", "--color", "never", "--no-messages", "--no-ignore"]
+    args = [
+        "rg", "--color", "never", "--no-messages", "--no-ignore",
+        "--null", "--with-filename",
+    ]
     if mode == "files":
         args.append("--files-with-matches")
     elif mode == "count":
@@ -92,6 +105,60 @@ def _rg_args(
         args += ["--glob", glob]
     args += ["--regexp", pattern, "--", path]
     return args
+
+
+def _rg_lines(stdout: str, mode: str) -> list[str]:
+    """ripgrep's NUL-separated output, filtered per *file* and re-rendered.
+
+    This is the half of the tool that has to agree with `_python_search`, and it
+    used to disagree in three separate ways — all of them the same mistake, of
+    filtering by the first colon-delimited field of a line instead of by which
+    file the line came from:
+
+      * a **context** line is attributed with `-`, not `:`, so every
+        `google_token.json-3-  "refresh_token": …` inside a `context_lines`
+        window sailed through the filter;
+      * given a **single file** as `path`, rg prints no filename at all, so the
+        field being checked was a *line number* and `grep_files('KEY', '.env')`
+        returned the file verbatim;
+      * in **count** mode on a single file the whole output is a bare number,
+        which turned a protected file into a working match oracle: ask for
+        `^OPENROUTER_API_KEY=sk-or-v1-FAKEL` and the count says whether the
+        guess is right, one character at a time, with no secret value ever in
+        the output for `dispatch()`'s scrub to catch.
+
+    The fallback never had any of these, because it filters whole files before
+    reading them (`is_protected(target)`), which is the only check that is
+    actually about the thing being protected. So this now does the same: take
+    the path off each record, decide once, and re-render the shape the fallback
+    produces. A record we cannot attribute to a file is dropped — this is a
+    credential filter, so "unrecognised" has to mean "withheld".
+    """
+    if mode == "files":
+        # `--files-with-matches --null` NUL-*terminates* each path and emits no
+        # newlines at all, so this stream is split differently from the others.
+        return [p for p in stdout.split("\0") if p.strip() and not is_protected(p)]
+
+    out: list[str] = []
+    for record in stdout.splitlines():
+        if not record.strip():
+            continue
+        path, sep, rest = record.partition("\0")
+        if not sep or is_protected(path):
+            continue
+        if mode == "count":
+            out.append(f"{path}:{rest}")
+            continue
+        # `rest` is `<lineno><sep><text>`; that separator is `:` for a match and
+        # `-` for a context line, and it is also what joined the path before
+        # --null replaced it. Reuse it so the rendered shape is byte-identical
+        # to the fallback's.
+        digits = 0
+        while digits < len(rest) and rest[digits].isdigit():
+            digits += 1
+        join = rest[digits] if digits and digits < len(rest) and rest[digits] in ":-" else ":"
+        out.append(f"{path}{join}{rest}")
+    return out
 
 
 def _python_search(
@@ -189,8 +256,7 @@ def grep_files(
         # rg exits 1 for "no matches", which is an answer rather than a failure.
         if proc.returncode not in (0, 1):
             return f"Error: search failed: {(proc.stderr or '').strip()[:300]}"
-        lines = [ln for ln in proc.stdout.splitlines() if ln.strip()]
-        lines = [ln for ln in lines if not is_protected(ln.split(":", 1)[0])]
+        lines = _rg_lines(proc.stdout, mode)
     else:
         try:
             lines = _python_search(pattern, root, glob, mode, context_lines, case_insensitive)

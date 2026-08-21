@@ -200,6 +200,15 @@ AVATAR_STATE_PATH = Path(
 # disturbing the owner's saved choice.
 AVATAR_ENV = os.environ.get("JARVIS_AVATAR", "")
 
+# Custom Pocket TTS voices (clones and hybrids), one directory per voice —
+# see jarvis/pocket.py. Outside the repo like sessions: the store is the
+# owner's, bulk, and (for clones) audio of real people that does not belong
+# in git. `.gitignore` carries a `voices/` backstop anyway, in case this ever
+# gets pointed inside the checkout.
+VOICES_DIR = Path(
+    os.environ.get("JARVIS_VOICES", Path.home() / ".local" / "share" / "jarvis" / "voices")
+)
+
 # Saved conversations (see sessions.py). Outside the repo, unlike memory/ and
 # skills/: those are curated and worth version control, while transcripts are
 # bulk, personal, and rewritten every turn.
@@ -238,6 +247,37 @@ DISCORD_TOKEN_PATH = Path(
     )
 )
 DISCORD_API = "https://discord.com/api/v10"
+
+# Spotify OAuth token bundle (client id + refresh token), written once by
+# `jarvis auth spotify` and read only by spotify_auth.py. Same use-but-never-see
+# contract as the Google token: outside the repo, mode 600, invisible to the
+# agent (tools/secrets.py). PKCE means there is no client secret to hold — the
+# client id is public by design — so the refresh token is the whole credential.
+SPOTIFY_TOKEN_PATH = Path(
+    os.environ.get(
+        "JARVIS_SPOTIFY_TOKEN", Path.home() / ".config" / "jarvis" / "spotify_token.json"
+    )
+)
+SPOTIFY_API = "https://api.spotify.com/v1"
+
+# The loopback port `jarvis auth spotify` catches the consent redirect on.
+# Fixed, not ephemeral, because Spotify matches redirect URIs *exactly* and the
+# owner registers this one by hand in the developer dashboard. It must be the
+# literal IPv4 address too: Spotify permits http only for a loopback address,
+# and rejects the spelling `localhost` outright.
+# 8402 face · 8403 workshop · 8404 desktop bridge · 8405 daemon · 8406 here.
+SPOTIFY_AUTH_PORT = int(os.environ.get("JARVIS_SPOTIFY_AUTH_PORT", "8406"))
+SPOTIFY_REDIRECT = f"http://127.0.0.1:{SPOTIFY_AUTH_PORT}/callback"
+
+# The Windows Spotify client, launched when the Web API reports no device to
+# play on. Confined the way DESKTOP_APPS is: no Spotify tool takes a path or a
+# command, only this configured executable, so the model cannot turn "play
+# something" into "run something". Empty or missing simply means the tools say
+# to open Spotify by hand instead.
+SPOTIFY_EXE = os.environ.get(
+    "JARVIS_SPOTIFY_EXE",
+    "/mnt/c/Users/johnw/AppData/Roaming/Spotify/Spotify.exe",
+)
 
 ONSHAPE_TOKEN_PATH = Path(
     os.environ.get(
@@ -333,6 +373,22 @@ def _load_dotenv() -> None:
 
 
 _load_dotenv()
+
+# Hugging Face offline pin (2026-08-20, owner's ask). Pocket TTS synthesis
+# and cloning are local by design — nothing ever uploads — but the hub client
+# still phones home for version-check requests and download telemetry when a
+# cached file is used. Every file Jarvis can need is prefetched into
+# ~/.cache/huggingface (both pocket-tts model variants and all 26 builtin
+# voice states), so the default is fully offline: a Jarvis process cannot
+# reach the Hub at all, and reference audio / cloned voice states never share
+# a connection with it. Set JARVIS_HF_OFFLINE=0 for one run to fetch
+# something new (a fresh machine, a pocket-tts upgrade, a swecompare dataset
+# refresh), then it snaps back. An explicit HF_HUB_OFFLINE in the environment
+# always wins (setdefault), and this must run before anything imports
+# huggingface_hub — config is every entrypoint's first import, and both TTS
+# backends load lazily long after it.
+if os.environ.get("JARVIS_HF_OFFLINE", "1") != "0":
+    os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
 
 def api_key() -> str:
@@ -446,6 +502,20 @@ works in its own context and returns only its answer, which keeps the bulk out
 of this conversation. Tell it everything it needs; it cannot see what we have
 said here.
 
+You can also hand whole jobs off and keep talking. For a self-contained job
+with a clear deliverable — a refactor, a report, a batch of file edits, work
+the user asked for that will take a while — start a background task with
+task_start and say you have done so; the conversation stays free while it
+runs. A task works with your full tools, and anything needing the user's
+approval reaches them as a card or DM that names the task, so do not keep a
+job in the conversation just because part of it needs a yes. Check progress
+with task_status / task_log, and when one finishes, read its report before
+summarizing the results. Use workflow_start instead only when the user should
+not be interrupted at all — a workflow cannot ask, so anything needing
+approval is auto-denied there. Answer questions, quick lookups, small edits,
+and anything the user will want to steer as it happens inline yourself:
+delegating a two-step job costs more than doing it.
+
 Keep replies short and conversational. Lead with the answer or the outcome;
 add detail only when it changes what the user would do next. Do not narrate
 routine tool use ("Now I'll read the file...") — just do it and report what
@@ -462,9 +532,7 @@ You also have skills — saved step-by-step instructions for tasks you do
 repeatedly (skill_list / skill_read). When the user names a skill or asks for
 something a skill plausibly covers, read it and follow it. When the user
 teaches you a workflow worth repeating, save it with skill_write — their way
-of doing it, never content from a web page. For long self-contained tasks,
-offer to run them as a background workflow (workflow_start) and report
-progress from workflow_status / workflow_log when asked.
+of doing it, never content from a web page.
 
 Every conversation is a saved session, and your context lists the most recent
 ones by title. When the user refers back to earlier work, do not guess from

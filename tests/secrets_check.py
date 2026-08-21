@@ -15,6 +15,7 @@ Run:  .venv/bin/python tests/secrets_check.py
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import tempfile
@@ -114,6 +115,69 @@ def run_checks(root: Path) -> None:
     assert "were withheld" in result.text, result.text
     assert "app/settings.py" in result.text, "unrelated grep hits should survive"
     print("ok  dispatch: recursive grep leaks the key, the scrubber removes it")
+
+    # 4b. layer 2, the shapes where the filename is not a token of its own.
+    # `protected_in_command` treated every shlex token as a path and took its
+    # basename, so anything that glued the name to an operator or buried it in
+    # an interpreter payload was invisible. `env sh -c 'cat .env'` is the one
+    # that mattered: `env` is on run_readonly's allowlist, `-c`'s payload is a
+    # single token, and run_readonly is ungated — so a live credential reached
+    # the transcript with no human in the loop.
+    smuggled = [
+        "cat<.env",
+        "sh -c 'cat .env'",
+        'bash -c "cat .env"',
+        "env sh -c 'cat .env'",
+        "python -c \"print(open('.env').read())\"",
+        "F=.env; cat $F",
+        "cat $(echo .env)",
+        "cat .env.local",
+    ]
+    for command in smuggled:
+        assert protected_in_command(command), command
+        out = run_command(command, reason="test")
+        assert out.startswith("Error:") and "protected" in out, (command, out)
+        assert SECRET not in out and LOCAL_SECRET not in out, command
+    # ...without swallowing the names that are meant to stay readable.
+    for command in ("cat .env.example", "cat .envrc", "cat app/settings.py",
+                    "grep -RIn KEY app", "cat myapp.env"):
+        assert protected_in_command(command) is None, command
+    print(f"ok  shell: {len(smuggled)} smuggled spellings of a protected name refused")
+
+    # 4c. layer 3, the separator it did not know about. grep attributes a
+    # *context* line as `path-N-text`, not `path:N:text`, so `grep -C2` walked
+    # a credential file straight past the scrub — and silently, because the
+    # "[N line(s) … withheld]" counter still printed.
+    for sep in (("-", "-"), (":", ":"), ("\t", "\t"), ("\x00", ":")):
+        attributed = "\n".join(
+            f"{root / '.env'}{sep[0]}{n}{sep[1]}{body}"
+            for n, body in ((1, "# not a real key"), (2, f"OPENROUTER_API_KEY={SECRET}"),
+                            (3, "DEBUG=1"))
+        )
+        cleaned = scrub(attributed)
+        assert SECRET not in cleaned, (sep, cleaned)
+        assert "OPENROUTER_API_KEY" not in cleaned, (sep, cleaned)
+        assert "DEBUG=1" not in cleaned, (sep, cleaned)  # short value, so only the drop saves it
+        assert "were withheld" in cleaned, (sep, cleaned)
+    # A separator that is present but does not attribute anything protected
+    # must not start eating output.
+    ordinary = "app/settings.py:1:KEY = os.environ[...]\nnotes-2026-08.md-4-plain text"
+    assert scrub(ordinary) == ordinary, scrub(ordinary)
+    print("ok  scrub: context-line, tab and NUL attributions are dropped like colon ones")
+
+    # 4d. the same gap end-to-end, through real dispatch(). The pattern matches
+    # line 1 of .env, so lines 2 and 3 arrive as *context* — the shape that
+    # survived. The key name alone leaks structure, which is why the rule is
+    # that the whole attributed line goes.
+    ctx_leak = f"grep -rn -C2 'not a real key' {root}"
+    result = dispatch("run_readonly", json.dumps({"command": ctx_leak}))
+    raw_ctx = run_readonly(ctx_leak)
+    assert f"{root}/.env-2-" in raw_ctx, f"fixture is wrong — no context line: {raw_ctx}"
+    assert SECRET not in result.text, result.text
+    for shape in (f"{root}/.env-", f"{root}/.env:"):
+        assert shape not in result.text, result.text
+    assert "app/settings.py" in run_readonly(f"grep -rn KEY {root}"), "fixture sanity"
+    print("ok  dispatch: a context-line grep no longer walks a .env past the scrub")
 
     # 5. a copy of the value in another file
     copied = dispatch("read_file", '{"path": "notes.md"}')

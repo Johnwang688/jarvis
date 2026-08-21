@@ -132,7 +132,8 @@ def run_checks(page) -> None:
     #    you are halfway out of loses the turn.
     if page.evaluate("() => !!stream"):
         page.evaluate("() => pressToTalk()")
-        assert page.evaluate("() => recorder === null"), "PTT started with the picker open"
+        assert not page.evaluate("() => window.__hud.mic.ptt()"), \
+            "PTT started with the picker open"
         print("ok  picker: push-to-talk is inert while it is open")
 
     # 4. Switching redraws the log from the session joined, not the one left.

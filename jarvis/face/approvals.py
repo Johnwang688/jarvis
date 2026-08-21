@@ -47,6 +47,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from .. import runtime
+
 TIMEOUT_S = 120.0
 MAX_ARG_CHARS = 600  # what the card shows; the tool still gets the full value
 
@@ -62,6 +64,8 @@ class Pending:
     resolution: str = "timeout"
     remote: bool = False
     """The question also went out over the remote channel (a Discord DM)."""
+    origin: str = ""
+    """Which background task is asking; "" for the conversation agent."""
 
 
 def _for_display(args: dict[str, Any]) -> dict[str, str]:
@@ -113,11 +117,16 @@ class ApprovalBroker:
     def request(
         self, tool_name: str, args: dict[str, Any], prefer_remote: bool = False
     ) -> bool:
+        # Attribution rides a ContextVar rather than the approver's signature:
+        # request() runs on the thread of whichever agent is blocked on it, so
+        # a background task's label (bound once on its own thread) is read here
+        # without the surface that built the approver knowing tasks exist.
         item = Pending(
             id=secrets.token_urlsafe(9),
             tool=tool_name,
             args=dict(args),
             asked_at=time.monotonic(),
+            origin=runtime.origin(),
         )
         with self._lock:
             self._pending[item.id] = item
@@ -135,20 +144,22 @@ class ApprovalBroker:
         if not watching and not item.remote:
             with self._lock:
                 self._pending.pop(item.id, None)
-            return self._record(tool_name, args, False, "nowhere-to-ask", 0.0)
+            return self._record(
+                tool_name, args, False, "nowhere-to-ask", 0.0, origin=item.origin
+            )
 
         timeout = self._remote.timeout_s if item.remote else self.timeout_s
         if watching:
-            self._broadcast(
-                "approval",
-                {
-                    "id": item.id,
-                    "tool": item.tool,
-                    "args": _for_display(item.args),
-                    "timeout_s": round(timeout),
-                    "remote": item.remote,
-                },
-            )
+            payload = {
+                "id": item.id,
+                "tool": item.tool,
+                "args": _for_display(item.args),
+                "timeout_s": round(timeout),
+                "remote": item.remote,
+            }
+            if item.origin:  # only when set — conversation asks stay unchanged
+                payload["origin"] = item.origin
+            self._broadcast("approval", payload)
         item.event.wait(timeout)
 
         with self._lock:
@@ -163,7 +174,10 @@ class ApprovalBroker:
                 self._remote.close(item.id, item.resolution)
             except Exception:
                 pass  # closing is courtesy; the decision already stands
-        return self._record(item.tool, item.args, item.allowed, item.resolution, waited)
+        return self._record(
+            item.tool, item.args, item.allowed, item.resolution, waited,
+            origin=item.origin,
+        )
 
     # -- the window side ---------------------------------------------------
 
@@ -236,7 +250,13 @@ class ApprovalBroker:
     # -- record ------------------------------------------------------------
 
     def _record(
-        self, tool: str, args: dict, allowed: bool, resolution: str, waited: float
+        self,
+        tool: str,
+        args: dict,
+        allowed: bool,
+        resolution: str,
+        waited: float,
+        origin: str = "",
     ) -> bool:
         entry = {
             "tool": tool,
@@ -245,7 +265,10 @@ class ApprovalBroker:
             "resolution": resolution,
             "waited_s": round(waited, 1),
         }
+        if origin:
+            entry["origin"] = origin
         self.decisions.append(entry)
         summary = " ".join(f"{k}={v!r}" for k, v in entry["args"].items())
-        self._announce(f"[approval] {resolution}: {tool} {summary[:200]}")
+        who = f" (for {origin})" if origin else ""
+        self._announce(f"[approval] {resolution}: {tool}{who} {summary[:200]}")
         return allowed

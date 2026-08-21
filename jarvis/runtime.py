@@ -44,6 +44,13 @@ _DEPTH: ContextVar[int] = ContextVar("jarvis_depth", default=0)
 # spawning a child that has them.
 _TOOLS: ContextVar[frozenset[str] | None] = ContextVar("jarvis_tools", default=None)
 
+# Who is asking, shown on the approval surfaces (HUD card, Discord DM). Bound
+# once by the surface that owns the thread — a background task's runner binds
+# its label before run_turn — and inherited by children through copy_context,
+# so a sub-agent spawned by a task attributes its asks to the task. "" (the
+# default, and the conversation agent's value) renders nothing anywhere.
+_ORIGIN: ContextVar[str] = ContextVar("jarvis_origin", default="")
+
 MAX_DEPTH = 2
 
 
@@ -53,6 +60,7 @@ def bind(
     should_stop: Callable[[], bool] | None = None,
     depth: int | None = None,
     tool_names: frozenset[str] | set[str] | None = None,
+    origin: str | None = None,
 ) -> None:
     """Bind the current agent's per-run state. Called by `Agent.run_turn`."""
     if plan is not None:
@@ -65,6 +73,8 @@ def bind(
         _DEPTH.set(depth)
     if tool_names is not None:
         _TOOLS.set(frozenset(tool_names))
+    if origin is not None:
+        _ORIGIN.set(origin)
 
 
 def plan_slot() -> dict[str, str] | None:
@@ -91,10 +101,16 @@ def parent_tools() -> frozenset[str] | None:
     return _TOOLS.get()
 
 
+def origin() -> str:
+    """Who is asking, for the approval surfaces. "" when nothing bound one."""
+    return _ORIGIN.get()
+
+
 def describe() -> dict[str, Any]:
     """For tests and debugging — what is bound right now."""
     return {
         "plan": (_PLAN.get() or {}).get("text", ""),
         "approve_bound": _APPROVE.get() is not None,
         "depth": _DEPTH.get(),
+        "origin": _ORIGIN.get(),
     }

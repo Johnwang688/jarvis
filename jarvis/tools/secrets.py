@@ -65,6 +65,37 @@ def is_protected(path: str | Path) -> bool:
     return PurePosixPath(str(path)).name in PROTECTED_NAMES
 
 
+# Each protected name as it appears in a raw command line, bounded so it is a
+# filename rather than a fragment of a longer one.
+#
+# The token loop below treats every shlex token as a path and takes its
+# basename, which misses every shape where the filename is not a token of its
+# own — and there are a lot of them:
+#
+#     cat<.env                       an operator glued to the name
+#     sh -c 'cat .env'               the payload is one token
+#     env sh -c 'cat .env'           ditto, wearing a wrapper
+#     python -c "open('.env')"       ditto, in another language
+#     F=.env; cat $F                 the name never touches the binary
+#     cat $(echo .env)               nor does it here
+#
+# So the raw line is scanned too. The boundaries are what keep `.env.example`
+# and `.envrc` readable: a match may not be preceded or followed by a name
+# character, and `.` counts as one — `.env.local` matches its own entry, and
+# `.env` inside `.env.example` matches nothing.
+#
+# It does cost a false positive: `git commit -m "ignore .env"` is now refused
+# for naming a file it only mentions. That is the deliberate direction. This
+# layer's stated job is that approving a command is not consent to what it
+# prints, and a clear refusal the model can rephrase past is cheaper than a
+# credential in the transcript, which is only fixable by rotating the key.
+_NAME_CHAR = r"A-Za-z0-9_.\-"
+_RAW_NAMES = [
+    (name, re.compile(rf"(?<![{_NAME_CHAR}]){re.escape(name)}(?![{_NAME_CHAR}])"))
+    for name in sorted(PROTECTED_NAMES)
+]
+
+
 def protected_in_command(command: str) -> str | None:
     """The protected filename a shell command references, if any."""
     try:
@@ -83,6 +114,10 @@ def protected_in_command(command: str) -> str | None:
             literal = re.sub(r"[*?\[\]]", "", name)
             if literal and any(fnmatch(protected, name) for protected in PROTECTED_NAMES):
                 return name
+
+    for name, pattern in _RAW_NAMES:
+        if pattern.search(command):
+            return name
     return None
 
 
@@ -210,12 +245,39 @@ def secret_values() -> list[str]:
     return sorted(values, key=len, reverse=True)
 
 
+# Separators a tool can put between a path and the rest of an output line.
+# **`-` is the one that was missing, and it is the common case**: grep's and
+# ripgrep's *context* lines (`-A/-B/-C`, and `grep_files(context_lines=N)`) are
+# attributed `path-N-text`, not `path:N:text`. Layer 3 only understood `:`, so
+# `run_readonly("grep -rn -i -C2 openrouter <dir>")` returned
+# `/x/.env.local-2-STRIPE_KEY=…` intact — and silently, because the trailing
+# "[N line(s) … withheld]" counter still printed, so the output looked filtered.
+# NUL (`grep -Z`) and tab are here for the same reason: any separator this
+# parser does not know is a separator that hides the attribution.
+#
+# `:` is tried first so a path containing a `-` is not cut short, and the whole
+# scan only fires when the separator is actually present — a bare `.env` line
+# (from `ls -a`, say) is not an attribution and stays.
+_SEPARATORS = (":", "\x00", "\t", "-")
+
+
+def _attributed_to_protected(line: str) -> bool:
+    """True if this output line names a protected file as its source."""
+    for sep in _SEPARATORS:
+        if sep not in line:
+            continue
+        head = line.split(sep, 1)[0].strip()
+        if head and is_protected(head):
+            return True
+    return False
+
+
 def _drop_attributed_lines(text: str) -> str:
     """Remove output lines a tool attributed to a protected file.
 
-    Covers `grep -R` (`path:n:match`) and multi-file `head`/`tail`
-    (`==> path <==` followed by contents). The key names leak structure even
-    once the values are gone, so the whole line goes.
+    Covers `grep -R` (`path:n:match`), grep's context lines (`path-n-text`) and
+    multi-file `head`/`tail` (`==> path <==` followed by contents). The key
+    names leak structure even once the values are gone, so the whole line goes.
     """
     kept: list[str] = []
     dropped = 0
@@ -233,11 +295,9 @@ def _drop_attributed_lines(text: str) -> str:
         if in_protected_block:
             dropped += 1
             continue
-        if ":" in line:
-            head = line.split(":", 1)[0].strip()
-            if head and is_protected(head):
-                dropped += 1
-                continue
+        if _attributed_to_protected(line):
+            dropped += 1
+            continue
         kept.append(line)
 
     if dropped:

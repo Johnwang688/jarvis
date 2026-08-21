@@ -15,6 +15,11 @@ dependencies = [
 # Local TTS (the default backend when installed): `uv pip install -e .[voice]`
 # plus the model files in ~/.cache/jarvis-tts/ — see CLAUDE.md.
 voice = ["kokoro-onnx>=0.4"]
+# Second local TTS backend + voice cloning/hybrids (jarvis/pocket.py).
+# pocket-tts pulls CPU PyTorch — heavyweight; install with a CPU torch index
+# (e.g. UV_TORCH_BACKEND=cpu) so a multi-GB CUDA wheel doesn't ride along.
+# Model weights download from Hugging Face on first use. See CLAUDE.md.
+pocketvoice = ["pocket-tts>=0.1"]
 
 [project.scripts]
 jarvis = "jarvis.__main__:main"

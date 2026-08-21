@@ -157,6 +157,12 @@ class Daemon:
             on_note=lambda text: self._announce(f"[daemon] {text}"),
         )
 
+        # No window here — task lifecycle goes to the daemon's own log so the
+        # record of what ran in the background stays honest.
+        from . import tasks as tasks_mod
+
+        tasks_mod.set_notify(lambda kind, data: self._announce(f"[task] {data}"))
+
         # The goal runner: background goals worked in slices, gated by the
         # same remote broker, progress DMed to the owner. Its DM verbs
         # (goal:/steer:/goal status/goal cancel) are parsed in _route ahead
