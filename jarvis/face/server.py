@@ -808,14 +808,24 @@ class FaceHandler(SimpleHTTPRequestHandler):
             return
         add_id = str(data.get("add") or "").strip()
         remove_id = str(data.get("remove") or "").strip()
-        if bool(add_id) == bool(remove_id):
-            self._json_error(400, 'expected exactly one of {"add": id} / {"remove": id}')
+        effort_id = str(data.get("model") or "").strip()
+        given = [x for x in (add_id, remove_id, effort_id) if x]
+        if len(given) != 1:
+            self._json_error(
+                400,
+                'expected exactly one of {"add": id} / {"remove": id} / '
+                '{"model": id, "effort": level}',
+            )
             return
         try:
             if add_id:
                 models_mod.add(add_id)
-            else:
+            elif remove_id:
                 models_mod.remove(remove_id)
+            else:
+                # "" clears the pin and hands the model back to the global
+                # default, which is the way out of any choice made here.
+                models_mod.set_effort(effort_id, str(data.get("effort") or ""))
         except models_mod.NotEligible as exc:
             self._json_error(400, str(exc))
             return

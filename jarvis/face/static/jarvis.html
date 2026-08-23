@@ -285,6 +285,16 @@
   .sess .tag.iq { color: #7fd7e8; }
   .sess .tag.free { color: #86efac; }
   .sess .tag.on { color: var(--cyan); }
+  /* the per-row reasoning-effort control. Sits in the badge strip beside the
+     remove ×, and like it, must not select the model when clicked. */
+  .sess .effort {
+    font: 10px var(--mono); letter-spacing: .08em; padding: 1px 4px;
+    background: rgba(4,10,18,.9); color: #7fd7e8;
+    border: 1px solid rgba(34,211,238,.3); outline: none; cursor: pointer;
+  }
+  .sess .effort:hover, .sess .effort:focus-visible { border-color: var(--cyan); }
+  .sess .effort.pinned { color: var(--cyan); border-color: rgba(34,211,238,.6); }
+  .sess .effort option { background: #061019; color: #cbd7e6; }
   .sess .drop {
     font: 12px var(--mono); color: #5f7590; padding: 0 4px; cursor: pointer;
   }
@@ -924,6 +934,37 @@ function drawModels() {
       here: active,
       badge: active ? { text: "ACTIVE", cls: "on" } : null,
     });
+    // How hard to think, for this model. Only for models that publish a
+    // ladder — a control on a model with no reasoning knob would promise
+    // something the request cannot ask for.
+    if ((m.efforts || []).length) {
+      const sel = document.createElement("select");
+      sel.className = "effort" + (m.effort ? " pinned" : "");
+      const auto = document.createElement("option");
+      auto.value = "";
+      // The default is named, not just called "default": what it resolves to
+      // on this model is the number that matters, and it is not always the
+      // configured one (a model that stops at high never sees max).
+      auto.textContent = "AUTO" + (m.effective_effort && !m.effort
+        ? " · " + m.effective_effort.toUpperCase() : "");
+      sel.appendChild(auto);
+      m.efforts.forEach((level) => {
+        const opt = document.createElement("option");
+        opt.value = level;
+        opt.textContent = level.toUpperCase();
+        sel.appendChild(opt);
+      });
+      sel.value = m.effort || "";
+      sel.title = "reasoning effort for " + m.id;
+      // The row selects the model; this must not, in either phase.
+      sel.onclick = (e) => e.stopPropagation();
+      sel.onchange = (e) => {
+        e.stopPropagation();
+        editRoster({ model: m.id, effort: sel.value });
+      };
+      row.querySelector(".tags").appendChild(sel);
+    }
+
     // Removing is a deliberate, separate target: the row itself switches him
     // onto the model, and a mis-click there should never delete the entry.
     const drop = document.createElement("span");
@@ -980,7 +1021,11 @@ async function editRoster(body) {
     const data = await res.json();
     if (!res.ok) return addOp("model", data.error || "refused");
     applyModel(data);
-    addOp("model", (body.add ? "added " : "removed ") + (body.add || body.remove));
+    if (body.model) {
+      addOp("model", `${body.model} effort: ${body.effort || "auto"}`);
+    } else {
+      addOp("model", (body.add ? "added " : "removed ") + (body.add || body.remove));
+    }
   } catch {
     addOp("model", "unreachable");
   }

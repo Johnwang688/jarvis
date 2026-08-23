@@ -17,6 +17,7 @@ from __future__ import annotations
 import contextlib
 import json
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -298,6 +299,12 @@ def workflow_exclusion_checks() -> None:
 
 
 def main() -> int:
+    # The owner's real model selection must not decide what this suite
+    # asserts. `models.tier()` resolves through ~/.config/jarvis/models.json,
+    # so a model picked in the HUD would otherwise change these expectations —
+    # the same reason every suite that touches the allowlist points it at a
+    # temp file first.
+    config.MODELS_PATH = Path(tempfile.mkdtemp()) / "models.json"
     catalogue_checks()
     model_checks()
     narrowing_checks()

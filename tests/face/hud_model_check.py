@@ -37,11 +37,11 @@ POSTS: list[tuple[str, dict]] = []  # what the window POSTed, in order
 DEFAULT = "openai/gpt-5.6-luna"
 
 
-def model(model_id, name, iq=None, out=4.0, vision=False, ctx=128000):
+def model(model_id, name, iq=None, out=4.0, vision=False, ctx=128000, efforts=()):
     return {
         "id": model_id, "name": name, "context": ctx,
         "prompt_usd": round(out / 4, 3), "completion_usd": out,
-        "vision": vision, "reasoning": False,
+        "vision": vision, "reasoning": bool(efforts), "efforts": list(efforts),
         "intelligence": iq, "agentic": None, "free": out == 0,
         "description": "",
     }
@@ -49,8 +49,10 @@ def model(model_id, name, iq=None, out=4.0, vision=False, ctx=128000):
 
 CATALOG = [
     model("anthropic/claude-opus-5", "Anthropic: Opus 5", iq=63.1, out=25.0, vision=True),
-    model(DEFAULT, "OpenAI: Luna", iq=58, out=4.0, vision=True),
-    model("google/gemini-3.7-flash", "Google: Gemini 3.7 Flash", iq=51, out=0.6),
+    model(DEFAULT, "OpenAI: Luna", iq=58, out=4.0, vision=True,
+          efforts=["max", "high", "medium", "low"]),
+    model("google/gemini-3.7-flash", "Google: Gemini 3.7 Flash", iq=51, out=0.6,
+          efforts=["max", "high", "low"]),
     model("tiny/free-model", "Tiny: Free", iq=31, out=0.0),
     model("mid/unrated", "Mid: Unrated", iq=None, out=0.5),
     # A name written by whoever publishes the model. It reaches the window
@@ -63,15 +65,26 @@ ROSTER = [DEFAULT]
 
 def roster_payload():
     by_id = {m["id"]: m for m in CATALOG}
+    rows = []
+    for model_id in ROSTER:
+        row = dict(by_id[model_id])
+        pinned = STATE["efforts"].get(model_id, "")
+        row["effort"] = pinned
+        # What the server would compute: the pin, else the global default
+        # clamped to this model's ladder.
+        ladder = row.get("efforts") or []
+        row["effective_effort"] = pinned or ("max" if "max" in ladder else "")
+        rows.append(row)
     return {
-        "models": [by_id[m] for m in ROSTER],
+        "models": rows,
         "selected": STATE["selected"],
         "default": DEFAULT,
         "current": STATE["selected"] or DEFAULT,
+        "default_effort": "max",
     }
 
 
-STATE = {"selected": ""}
+STATE = {"selected": "", "efforts": {}}
 
 
 class ScriptedHandler(SimpleHTTPRequestHandler):
@@ -115,6 +128,12 @@ class ScriptedHandler(SimpleHTTPRequestHandler):
         if self.path == "/model":
             STATE["selected"] = data.get("model", "")
         elif self.path == "/models":
+            if data.get("model"):
+                level = data.get("effort") or ""
+                if level:
+                    STATE["efforts"][data["model"]] = level
+                else:
+                    STATE["efforts"].pop(data["model"], None)
             if data.get("add") and data["add"] not in ROSTER:
                 ROSTER.append(data["add"])
             if data.get("remove"):
@@ -243,7 +262,55 @@ def run_checks(page) -> None:
     assert not page.is_visible("#models"), "picker stayed open after a switch"
     print("ok  select: POSTs /model, relabels CORE, closes the picker")
 
-    # 11. The × on a roster row removes without selecting.
+    # 11. Reasoning effort is set per model, from the row, on the models that
+    #     publish a ladder — and setting it must not also switch him onto that
+    #     model, which is what the row itself does.
+    page.click("#model-row")
+    page.wait_for_selector("#models.on")
+    page.click("#model-add")
+    page.wait_for_selector("#modelcatalog.on")
+    page.click('#cataloglist .sess[data-model="google/gemini-3.7-flash"]')
+    page.wait_for_function(
+        "() => document.querySelectorAll('#cataloglist .sess.here').length >= 3")
+    page.click("#catalog-back")
+    page.wait_for_selector("#models.on")
+
+    # One control per model with a ladder, and none for the one without.
+    ladders = page.eval_on_selector_all(
+        "#modellist .sess",
+        "els => els.map(e => [e.dataset.model || '', !!e.querySelector('.effort')])")
+    have = {m: yes for m, yes in ladders if m}
+    assert have.get(DEFAULT) is True, have
+    assert have.get("google/gemini-3.7-flash") is True, have
+    assert have.get("anthropic/claude-opus-5") is False, "a model with no ladder got a control"
+    # The options are that model's own levels, not one shared list.
+    opts = page.eval_on_selector_all(
+        f'#modellist .sess[data-model="google/gemini-3.7-flash"] .effort option',
+        "els => els.map(e => e.value)")
+    assert opts == ["", "max", "high", "low"], opts
+    auto = page.text_content(f'#modellist .sess[data-model="{DEFAULT}"] .effort option')
+    assert "AUTO" in auto and "MAX" in auto, auto  # names what the default resolves to
+
+    before = len(POSTS)
+    selected_before = page.inner_text("#cfg-llm")
+    page.select_option(f'#modellist .sess[data-model="{DEFAULT}"] .effort', "low")
+    page.wait_for_function(
+        "() => document.querySelectorAll('#modellist .effort.pinned').length === 1")
+    assert POSTS[-1] == ("/models", {"model": DEFAULT, "effort": "low"}), POSTS[-1]
+    assert len(POSTS) == before + 1, "setting effort did something else as well"
+    assert page.inner_text("#cfg-llm") == selected_before, "setting effort switched models"
+    assert page.is_visible("#models"), "setting effort closed the picker"
+
+    # Back to AUTO clears the pin — the way out of any choice made here.
+    page.select_option(f'#modellist .sess[data-model="{DEFAULT}"] .effort', "")
+    page.wait_for_function(
+        "() => document.querySelectorAll('#modellist .effort.pinned').length === 0")
+    assert POSTS[-1] == ("/models", {"model": DEFAULT, "effort": ""}), POSTS[-1]
+    print("ok  effort: a per-model control, its own ladder, and it does not select the model")
+    page.evaluate("() => editRoster({ remove: 'google/gemini-3.7-flash' })")
+    page.wait_for_function("() => document.querySelectorAll('#modellist .sess').length === 3")
+
+    # 12. The × on a roster row removes without selecting.
     page.click("#model-row")
     page.wait_for_selector("#models.on")
     page.click("#modellist .sess.here .drop")
@@ -255,7 +322,7 @@ def run_checks(page) -> None:
     page.keyboard.press("Escape")
     print("ok  remove: × drops the row without selecting it, selection falls back")
 
-    # 12. Another window's switch relabels this one.
+    # 13. Another window's switch relabels this one.
     SSE.put({"kind": "model", "data": {**roster_payload(), "current": "google/gemini-3.7-flash"}})
     page.wait_for_function(
         "() => document.getElementById('cfg-llm').textContent === 'gemini-3.7-flash'",

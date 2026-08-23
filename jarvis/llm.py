@@ -56,6 +56,32 @@ class Reply:
         return self.message.get("tool_calls") or []
 
 
+def _cost(usage: dict[str, Any]) -> float:
+    """What one call actually cost, in dollars.
+
+    `usage.cost` is what OpenRouter billed **to your credits**, and on a BYOK
+    call — a model served through your own provider key, which OpenRouter
+    routes to automatically once the key is added — that number is **0**. The
+    money was still spent; it was spent on the provider account instead, and
+    it shows up as `cost_details.upstream_inference_cost`.
+
+    Reading `cost` alone therefore makes every dollar budget in this system
+    stop counting the moment a model routes to your own key: the goal runner's
+    ceiling (which parks a runaway goal on spend), the HUD's SESSION COST, and
+    every bench cost column would all read zero while real money moved. A goal
+    on a BYOK model would only ever park on slices or hours.
+
+    Measured 2026-08-23, which is why this is a max() and not a sum: on a
+    credit-billed call the two fields are the *same* number (Luna, both
+    9e-06), so adding them would double count; on a BYOK call they are 0 and
+    the real figure (kimi-k3, 0 and 0.0006264).
+    """
+    billed = float(usage.get("cost") or 0.0)
+    details = usage.get("cost_details") or {}
+    upstream = float(details.get("upstream_inference_cost") or 0.0)
+    return max(billed, upstream)
+
+
 class LLMError(RuntimeError):
     pass
 
@@ -178,7 +204,7 @@ def _stream_once(
             latency_s=time.monotonic() - started,
             prompt_tokens=usage.get("prompt_tokens", 0),
             completion_tokens=usage.get("completion_tokens", 0),
-            cost_usd=float(usage.get("cost") or 0.0),
+            cost_usd=_cost(usage),
             raw={"streamed": True, "usage": usage},
         ),
         None,
@@ -298,7 +324,7 @@ def chat(
             latency_s=elapsed,
             prompt_tokens=usage.get("prompt_tokens", 0),
             completion_tokens=usage.get("completion_tokens", 0),
-            cost_usd=float(usage.get("cost") or 0.0),
+            cost_usd=_cost(usage),
             raw=body,
         )
 

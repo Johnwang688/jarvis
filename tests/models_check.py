@@ -67,7 +67,8 @@ def _entry(model_id, **kw):
 
 
 FIXTURE = [
-    _entry("openai/gpt-5.6-luna", name="OpenAI: Luna", intelligence=58, vision=True),
+    _entry("openai/gpt-5.6-luna", name="OpenAI: Luna", intelligence=58, vision=True,
+           reasoning={"supported_efforts": ["max", "high", "medium", "low"]}),
     _entry("anthropic/claude-opus-5", name="Anthropic: Opus 5", intelligence=63.1,
            vision=True, prompt="0.000005", completion="0.000025"),
     _entry("tiny/free-model", name="Tiny: Free", prompt="0", completion="0"),
@@ -312,6 +313,61 @@ def effort_checks() -> None:
     config.REASONING_EFFORT = "max"
     print("ok  effort: clamped to the model's own ladder, absent when it has none")
 
+    # A pin made about one model beats the global default, and clearing it
+    # hands that model back — the way out of any choice made in the picker.
+    models.add("cheap/short-ladder")
+    models.add("plain/no-reasoning")
+    assert models.effort_for("cheap/short-ladder") == "high"  # global, clamped
+    models.set_effort("cheap/short-ladder", "low")
+    assert models.effort_for("cheap/short-ladder") == "low"
+    assert models.effort_for("openai/gpt-5.6-luna") == "max", "the pin leaked"
+    assert json.loads(config.MODELS_PATH.read_text())["efforts"] == {"cheap/short-ladder": "low"}
+    models.set_effort("cheap/short-ladder", "")
+    assert models.effort_for("cheap/short-ladder") == "high"
+
+    # A level this model does not offer is refused rather than clamped: the
+    # picker would otherwise show a level nobody chose.
+    models.set_effort("cheap/short-ladder", "high")
+    try:
+        models.set_effort("plain/no-reasoning", "high")
+    except models.NotEligible:
+        pass
+    else:
+        raise AssertionError("pinned an effort on a model with no reasoning control")
+    for bad in ("max", "turbo"):
+        try:
+            models.set_effort("cheap/short-ladder", bad)
+        except models.NotEligible:
+            pass
+        else:
+            raise AssertionError(f"accepted {bad!r} on a model that does not offer it")
+    assert models.effort_for("cheap/short-ladder") == "high", "a refusal changed the pin"
+    try:
+        models.set_effort("never/heard-of-it", "high")
+    except LookupError:
+        pass
+    else:
+        raise AssertionError("pinned effort on a model that is not on the roster")
+
+    # An override for a removed model does not survive to haunt a re-add.
+    models.remove("cheap/short-ladder")
+    models.add("cheap/short-ladder")
+    assert models.roster().efforts == {}, models.roster().efforts
+    assert models.effort_for("cheap/short-ladder") == "high"  # back to the global
+
+    # describe() carries both the setting and its consequence, which are not
+    # the same number on a model whose ladder stops short of the default.
+    models.set_effort("cheap/short-ladder", "low")
+    rows = {m["id"]: m for m in models.describe()["models"]}
+    assert rows["cheap/short-ladder"]["effort"] == "low"
+    assert rows["cheap/short-ladder"]["effective_effort"] == "low"
+    assert rows["openai/gpt-5.6-luna"]["effort"] == ""
+    assert rows["openai/gpt-5.6-luna"]["effective_effort"] == "max"
+    assert models.describe()["default_effort"] == "max"
+    models.remove("cheap/short-ladder")
+    print("ok  effort: a per-model pin beats the global, is refused off-ladder, "
+          "and does not outlive the model")
+
     # And it reaches the wire only when a caller asks for it.
     sent: list[dict] = []
     real_post = llm._client.post
@@ -350,6 +406,52 @@ def effort_checks() -> None:
         config.STREAM = was_streaming
         config.MODEL_CACHE_PATH = shared_cache
         _reset_catalog()
+
+
+def byok_cost_checks() -> None:
+    """A BYOK call costs real money and reports zero credits — count it anyway.
+
+    Every dollar budget here is denominated in dollars: the goal runner parks
+    a runaway goal on spend, the HUD shows session cost, benches print cost
+    columns. Reading `usage.cost` alone makes all of them stop counting the
+    moment a model routes to the owner's own provider key.
+    """
+    # Measured shapes, 2026-08-23. Credit-billed: the two fields are the same
+    # number, so this must not be a sum. BYOK: credits 0, upstream real.
+    assert llm._cost({"cost": 9e-06, "is_byok": False,
+                      "cost_details": {"upstream_inference_cost": 9e-06}}) == 9e-06
+    assert llm._cost({"cost": 0, "is_byok": True,
+                      "cost_details": {"upstream_inference_cost": 0.0006264}}) == 0.0006264
+    # Degradations: no details, no usage at all, junk.
+    assert llm._cost({"cost": 0.002}) == 0.002
+    assert llm._cost({}) == 0.0
+    assert llm._cost({"cost": None, "cost_details": None}) == 0.0
+
+    # And it reaches Reply.cost_usd, which is what every budget reads.
+    real_post = llm._client.post
+
+    class Body:
+        status_code = 200
+
+        def json(self):
+            return {
+                "choices": [{"message": {"role": "assistant", "content": "ok"},
+                             "finish_reason": "stop"}],
+                "model": "moonshotai/kimi-k3",
+                "usage": {"prompt_tokens": 88, "completion_tokens": 50, "cost": 0,
+                          "is_byok": True,
+                          "cost_details": {"upstream_inference_cost": 0.001014}},
+            }
+
+    llm._client.post = lambda *a, **kw: Body()
+    was_streaming, config.STREAM = config.STREAM, False
+    try:
+        reply = llm.chat("moonshotai/kimi-k3", [{"role": "user", "content": "hi"}])
+        assert reply.cost_usd == 0.001014, reply.cost_usd
+    finally:
+        llm._client.post = real_post
+        config.STREAM = was_streaming
+    print("ok  byok: a call billed to the owner's own key still reports its cost")
 
 
 def _request(method: str, path: str, payload=None, origin: str | None = None):
@@ -391,6 +493,7 @@ def route_checks() -> None:
         assert _request("POST", "/models", {})[0] == 400
         assert _request("POST", "/models", {"add": "x", "remove": "y"})[0] == 400
         assert _request("POST", "/models", {"remove": "not/listed"})[0] == 404
+        assert _request("POST", "/models", {"model": "x", "add": "y"})[0] == 400
 
         status, data = _request("POST", "/models", {"add": "anthropic/claude-opus-5"})
         assert status == 200 and "anthropic/claude-opus-5" in [m["id"] for m in data["models"]]
@@ -406,6 +509,19 @@ def route_checks() -> None:
         assert agent.model == "anthropic/claude-opus-5"
         assert server._get_agent() is agent, "the transcript was thrown away"
         assert _request("GET", "/config")[1]["llm"] == "anthropic/claude-opus-5"
+
+        # Per-model effort rides the same route.
+        status, data = _request("POST", "/models", {"model": default, "effort": "low"})
+        assert status == 200
+        row = next(m for m in data["models"] if m["id"] == default)
+        assert row["effort"] == "low" and row["effective_effort"] == "low", row
+        assert _request("POST", "/models", {"model": default, "effort": "turbo"})[0] == 400
+        # opus carries no reasoning block in this fixture, so there is nothing
+        # to pin — refused rather than stored and ignored.
+        assert _request(
+            "POST", "/models", {"model": "anthropic/claude-opus-5", "effort": "low"})[0] == 400
+        _request("POST", "/models", {"model": default, "effort": ""})
+        assert _request("POST", "/models", {"model": "not/listed", "effort": "low"})[0] == 404
 
         # Removing the selected model puts the live agent back on the default.
         _request("POST", "/models", {"remove": "anthropic/claude-opus-5"})
@@ -436,6 +552,7 @@ def main() -> int:
             roster_checks()
             tier_checks()
             effort_checks()
+            byok_cost_checks()
             route_checks()
         finally:
             llm.catalog = real_catalog

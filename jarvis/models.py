@@ -287,7 +287,10 @@ def effort_for(model_id: str) -> str | None:
     did something.
     """
     global _effort_warned
-    wanted = (config.REASONING_EFFORT or "").strip().lower()
+    # A pin made about this model wins over the global default — it is the
+    # more specific statement, and the only reason to make one.
+    pinned = roster().efforts.get(model_id, "")
+    wanted = (pinned or config.REASONING_EFFORT or "").strip().lower()
     if not wanted or wanted == "default":
         return None
     if wanted not in EFFORT_LADDER:
@@ -340,6 +343,10 @@ class NotEligible(ValueError):
 class Roster:
     models: list[str] = field(default_factory=list)
     selected: str = ""
+    # Per-model reasoning effort, by model id. An id absent from here follows
+    # `config.REASONING_EFFORT`; the levels are the model's own, because the
+    # ladder is not the same everywhere.
+    efforts: dict[str, str] = field(default_factory=dict)
 
 
 _roster_lock = threading.Lock()
@@ -365,13 +372,32 @@ def _load() -> Roster:
         models.insert(0, default)
     selected = payload.get("selected")
     selected = selected if isinstance(selected, str) and selected in models else ""
-    return Roster(models=models, selected=selected)
+
+    saved_efforts = payload.get("efforts")
+    efforts = {}
+    if isinstance(saved_efforts, dict):
+        for model_id, level in saved_efforts.items():
+            # Kept only for models still on the roster and only for levels that
+            # are still on the ladder — an override left behind by a removed
+            # model would come back to life if that model were re-added, which
+            # is a setting the owner did not make twice.
+            if model_id in models and isinstance(level, str) and level in EFFORT_LADDER:
+                efforts[model_id] = level
+    return Roster(models=models, selected=selected, efforts=efforts)
 
 
 def _save(roster: Roster) -> None:
     config.MODELS_PATH.parent.mkdir(parents=True, exist_ok=True)
     config.MODELS_PATH.write_text(
-        json.dumps({"models": roster.models, "selected": roster.selected}, indent=2) + "\n",
+        json.dumps(
+            {
+                "models": roster.models,
+                "selected": roster.selected,
+                "efforts": roster.efforts,
+            },
+            indent=2,
+        )
+        + "\n",
         encoding="utf-8",
     )
 
@@ -443,6 +469,42 @@ def select(model_id: str) -> Roster:
         return current
 
 
+def set_effort(model_id: str, level: str) -> Roster:
+    """Pin how hard one model is asked to think; "" follows the global default.
+
+    The level is checked against that model's own advertised ladder rather
+    than clamped down to it. Clamping is right when a *global* default meets a
+    model that cannot reach it — see effort_for — but this is a choice made
+    about one named model, and silently storing something other than what was
+    asked for would leave the picker showing a level nobody selected.
+    """
+    level = (level or "").strip().lower()
+    with _roster_lock:
+        current = _load()
+        if model_id not in current.models:
+            raise LookupError(f"{model_id!r} is not on the roster")
+        if not level:
+            current.efforts.pop(model_id, None)
+            _save(current)
+            return current
+        if level not in EFFORT_LADDER:
+            raise NotEligible(f"{level!r} is not a reasoning effort")
+        info = cached_info(model_id)
+        if info is not None and not info.efforts:
+            # No reasoning control at all. Storing a pin that effort_for would
+            # then ignore is the worst of both: the picker would show a level
+            # that never reaches a request.
+            raise NotEligible(f"{model_id} has no reasoning effort to set")
+        if info is not None and level not in info.efforts:
+            raise NotEligible(
+                f"{model_id} does not offer {level!r} "
+                f"(it offers {', '.join(info.efforts)})"
+            )
+        current.efforts[model_id] = level
+        _save(current)
+        return current
+
+
 def selected() -> str:
     """The owner's chosen model, or '' when following the configuration."""
     try:
@@ -478,7 +540,7 @@ def describe() -> dict[str, Any]:
     entries = []
     for model_id in current.models:
         info = find(model_id)
-        entries.append(
+        entry = (
             info.describe()
             if info
             # Not in the catalog *right now* — an outage, or a model that was
@@ -486,9 +548,16 @@ def describe() -> dict[str, Any]:
             # silently drops rows is worse than one that shows a bare id.
             else {"id": model_id, "name": model_id, "unlisted": True}
         )
+        # What this model is pinned to, and what it will actually be asked for
+        # once the global default has been clamped to its ladder. The picker
+        # needs both: one is the setting, the other is the consequence.
+        entry["effort"] = current.efforts.get(model_id, "")
+        entry["effective_effort"] = effort_for(model_id) or ""
+        entries.append(entry)
     return {
         "models": entries,
         "selected": current.selected,
         "default": config.TIERS["orchestrator"],
         "current": tier("orchestrator"),
+        "default_effort": (config.REASONING_EFFORT or "").strip().lower(),
     }

@@ -1173,16 +1173,25 @@ jarvis/
   reasoning block, the requested level on a cold cache, `""`/`default`/a typo
   all sending nothing, and — the one that matters — the agent loop putting
   `reasoning: {effort}` on the wire while `delegate(tier="cheap")` does not.
-  Run after touching `models.py`, `config.TIERS`, `config.REASONING_EFFORT`,
-  or the `/model*` routes.
+  Since 2026-08-23 it also owns the **per-model effort pin** (beating the
+  global, refused off-ladder and on a model with no reasoning control, not
+  outliving its model, and both the setting and its consequence in
+  `describe()`) and **BYOK cost accounting** — the measured credit-billed and
+  BYOK usage shapes, and `Reply.cost_usd` carrying the upstream figure when
+  the credit line reads zero. Run after touching `models.py`, `config.TIERS`,
+  `config.REASONING_EFFORT`, `llm._cost`, or the `/model*` routes.
 - `tests/face/hud_model_check.py` — free headless checks of the picker in the
   real `jarvis.html`: CORE opens the shortlist with the default marked, ADD
   MODEL browses the catalog, search matches name and id, the price and
   intelligence filters narrow it (and the unrated exclusion is stated), a row
   toggles roster membership, Escape backs out of the catalog to the shortlist
   before closing, selecting relabels CORE, the × removes without selecting,
-  and an SSE `model` broadcast relabels live. Two that are not cosmetic: **a
-  model name carrying markup renders as text** (names come off the network and
+  and an SSE `model` broadcast relabels live. The effort control is covered
+  too: drawn only for models that publish a ladder, offering that model's own
+  levels rather than one shared list, AUTO naming what the default resolves
+  to, and — the one worth having — **setting it does not also switch him onto
+  that model**, which is what clicking the row does. Two that are not
+  cosmetic: **a model name carrying markup renders as text** (names come off the network and
   this window draws authorization cards), and **a space typed in the search box
   does not trigger push-to-talk**.
 - `tests/browser/math_drill_smoke.py` — headed end-to-end browser test: serves
@@ -3282,6 +3291,55 @@ rather than assumed:
   thinking less because a cache is cold is the worse failure. A *typo* is the
   opposite case and is dropped with a one-time warning, since a garbage enum
   value is the shape that could 400 every request for the rest of the run.
+
+**Effort is settable per model, from the picker (2026-08-23).** Each roster row
+carries a control listing that model's *own* advertised levels, plus AUTO —
+which names what the global default resolves to on that model, because on a
+model whose ladder stops short of `max` those are different numbers. The pin
+lives in `models.json` beside the roster and beats `config.REASONING_EFFORT`;
+AUTO clears it, which is the way out of any choice made there.
+
+Three rules, each the opposite of what a global default does:
+
+- **A pin is refused off-ladder rather than clamped.** Clamping is right when a
+  global default meets a model that cannot reach it; this is a choice made
+  about one named model, and storing something other than what was asked would
+  leave the picker showing a level nobody selected.
+- **A model with no reasoning control cannot be pinned at all**, and gets no
+  control drawn. Storing a pin `effort_for` would then ignore is the worst of
+  both.
+- **A pin does not outlive its model.** Removing a model drops its override, so
+  re-adding it later starts from the default rather than resurrecting a setting
+  the owner made once, months ago.
+
+**BYOK routing is automatic, and it broke every dollar budget (found and fixed
+2026-08-23).** The owner added a Moonshot key to OpenRouter and asked whether
+requests route to it. They do, with no code change — verified live on
+`moonshotai/kimi-k3`: `is_byok: true`. But the same response carried `cost: 0`,
+because `usage.cost` is what OpenRouter billed **to your credits**, and a BYOK
+call spends on the provider account instead. `llm.Reply.cost_usd` read that
+field directly, so on a BYOK model the goal runner's dollar ceiling (which
+parks a runaway goal on *spend*), the HUD's SESSION COST and every bench cost
+column would all have read zero while real money moved — a goal could only ever
+park on slices or hours.
+
+`llm._cost()` now takes `max(usage.cost, cost_details.upstream_inference_cost)`.
+A **max, not a sum**, and the measurement is the reason: on a credit-billed call
+the two fields are *the same number* (Luna: both 9e-06), so adding them would
+double count; on a BYOK call they are 0 and the real figure (kimi-k3: 0 and
+0.0006264). Generalises past this one field — **a number that arrives as zero
+is not the same as a number that is zero**, and every ceiling in this system is
+denominated in the one that was wrong.
+
+**And the fix to the model selector that the owner's own first use exposed.**
+`models.tier()` reads `~/.config/jarvis/models.json`, so the moment a real
+selection existed, `tests/context_check.py` and `tests/fleet_check.py` — which
+assert that children run on `config.TIERS[...]` — started failing against
+whatever was picked in the HUD. Both point `config.MODELS_PATH` at a temp file
+now. The lesson is the allowlist lesson with the arrow reversed: a suite must
+not **read** live machine state any more than it may write it, and adding a
+resolution layer under a value silently hands every test that asserts on it a
+new dependency.
 
 **The trade, stated plainly: this buys quality with latency.** A/B on the same
 two-step task, same tools (2026-08-22): default 2.8s / $0.00169, max 5.5s /
