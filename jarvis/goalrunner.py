@@ -113,7 +113,7 @@ VERIFY_DIRECTIVE = (
 def goal_tool_names() -> list[str]:
     return [
         name
-        for name in tools.REGISTRY
+        for name in tools.default_names()
         if not name.startswith("desktop_") and name not in _EXCLUDED_TOOLS
     ]
 

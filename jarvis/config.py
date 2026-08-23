@@ -9,6 +9,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 MEMORY_DIR = Path(os.environ.get("JARVIS_MEMORY", REPO_ROOT / "memory"))
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+# The public model catalog — what the model picker browses (see models.py).
+OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
 
 # The face's HTTP control plane. Fixed on purpose — the browser mic grant is
 # scoped to the origin — and declared here rather than in face/server.py so
@@ -182,6 +184,26 @@ ALLOWLIST_PATH = Path(
         "JARVIS_ALLOWLIST", Path.home() / ".config" / "jarvis" / "allowlist.json"
     )
 )
+
+# The model roster (see models.py): the owner's shortlist of OpenRouter models
+# and which one is selected. Machine-local state chosen through the HUD, so it
+# lives beside the allowlist and the avatar pointer rather than in the repo.
+MODELS_PATH = Path(
+    os.environ.get(
+        "JARVIS_MODELS", Path.home() / ".config" / "jarvis" / "models.json"
+    )
+)
+# Where the fetched OpenRouter catalog is cached. A cache, not state: deleting
+# it costs one HTTP request. TTL is generous because the catalog changes on the
+# order of days, and a stale copy is served indefinitely when the fetch fails —
+# a picker that draws yesterday's list beats one that draws nothing.
+MODEL_CACHE_PATH = Path(
+    os.environ.get(
+        "JARVIS_MODEL_CACHE",
+        Path.home() / ".cache" / "jarvis" / "openrouter-models.json",
+    )
+)
+MODEL_CACHE_HOURS = float(os.environ.get("JARVIS_MODEL_CACHE_HOURS", "12"))
 
 # Where skill files live (see tools/skills.py).
 SKILLS_DIR = Path(os.environ.get("JARVIS_SKILLS", REPO_ROOT / "skills"))
@@ -424,6 +446,23 @@ STREAM = os.environ.get("JARVIS_STREAM", "1") not in ("0", "false", "no")
 # which is precisely what the next step needs. agent._summarize also re-asks
 # once, tighter, if it still overruns.
 COMPACTION_MAX_TOKENS = int(os.environ.get("JARVIS_COMPACTION_MAX_TOKENS", "2400"))
+
+# How hard the model running the loop is asked to think, sent as OpenRouter's
+# unified `reasoning.effort`. Luna's own default is **medium**; this asks for
+# the top of its ladder, because the orchestrator is the call that plans, picks
+# tools and recovers from errors — the one place in this system where a better
+# answer is worth more than a faster one. Set JARVIS_REASONING_EFFORT to
+# medium/low, or to "" / "default", to hand the decision back to the provider.
+#
+# Scope is deliberate: only the agent loop sends it. The cheap and worker tiers
+# do bulk text work nobody reasons about, and a reasoning budget there is spend
+# with nothing to show for it — measured on gpt-oss-20b, asking for effort at
+# all took a 5-token completion to 80.
+#
+# It costs money and latency, which is the honest trade: max reasoning on a
+# voice turn is thinking tokens the owner waits through. models.effort_for()
+# clamps it to whatever the model actually advertises.
+REASONING_EFFORT = os.environ.get("JARVIS_REASONING_EFFORT", "max")
 
 TIERS: dict[str, str] = {
     # Runs the agent loop: plans, picks tools, recovers from errors.

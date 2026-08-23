@@ -198,6 +198,7 @@ def chat(
     on_delta: Any = None,
     should_stop: Any = None,
     stream: bool | None = None,
+    effort: str | None = None,
 ) -> Reply:
     """One chat completion.
 
@@ -218,6 +219,14 @@ def chat(
     if tools:
         payload["tools"] = tools
         payload["tool_choice"] = "auto"
+
+    # Reasoning effort, when the caller asked for one. Sent in OpenRouter's
+    # unified `reasoning` form rather than as `reasoning_effort`, because the
+    # unified field is the one they normalize across providers. Nothing is sent
+    # by default — see config.REASONING_EFFORT for who asks and why the cheap
+    # tiers do not.
+    if effort:
+        payload["reasoning"] = {"effort": effort}
 
     # Optional routing pin — see config.CHAT_PROVIDER for why this exists and
     # why it refuses fallbacks. Off unless asked for, so default behaviour is
@@ -408,3 +417,29 @@ def transcribe(
         return (body["text"] or "").strip()
 
     raise LLMError(f"{model} transcription failed after {max_retries} attempts: {last_error}")
+
+
+def catalog(timeout: float = 20.0) -> list[dict[str, Any]]:
+    """Every model OpenRouter currently serves, raw.
+
+    Deliberately unauthenticated: `/api/v1/models` is public, and the model
+    picker has to be able to draw a list on a machine where the key is absent
+    or expired — a browsing surface that needs a credential to *look* is one
+    the owner cannot use to fix their credential problem.
+
+    No retry loop and no caching here. This file's job is the request; which
+    of these models can actually run the loop, and how long an answer stays
+    fresh, are policy questions and live in models.py.
+    """
+    response = _client.get(
+        config.OPENROUTER_MODELS_URL,
+        headers={"X-Title": "Jarvis"},
+        timeout=timeout,
+    )
+    if response.status_code >= 400:
+        raise LLMError(f"HTTP {response.status_code}: {response.text[:300]}")
+    body = response.json()
+    entries = body.get("data")
+    if not isinstance(entries, list):
+        raise LLMError(f"Malformed model catalog: {str(body)[:300]}")
+    return entries

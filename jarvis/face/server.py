@@ -52,7 +52,16 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from .. import agent as agent_mod
-from .. import avatars, config, discord_agent, discord_approvals, permissions, sessions, voice
+from .. import (
+    avatars,
+    config,
+    discord_agent,
+    discord_approvals,
+    models as models_mod,
+    permissions,
+    sessions,
+    voice,
+)
 from .. import tasks as tasks_mod
 from ..tools import secrets as secrets_mod
 from ..tools import voicectl, whiteboardctl
@@ -627,7 +636,8 @@ class FaceHandler(SimpleHTTPRequestHandler):
         if self.path == "/config":
             self._json_reply(
                 {
-                    "llm": config.TIERS["orchestrator"],
+                    "llm": models_mod.tier("orchestrator"),
+                    "effort": models_mod.effort_for(models_mod.tier("orchestrator")),
                     "stt": config.STT_MODEL,
                     "tts": config.TTS_MODEL,
                     "voice": voice.selected_voice(),
@@ -668,6 +678,26 @@ class FaceHandler(SimpleHTTPRequestHandler):
                     "current": voice.selected_voice(),
                     "override": voice._voice_override,
                     "voices": voice.catalog(),
+                }
+            )
+            return
+        if self.path == "/models":
+            self._json_reply(models_mod.describe())
+            return
+        if self.path == "/models/catalog":
+            # Every eligible model on OpenRouter, filtered in the window: 290
+            # entries is small enough to send whole, and a search box that
+            # round-trips per keystroke is a search box nobody uses.
+            try:
+                entries = [m.describe() for m in models_mod.catalog()]
+            except LookupError as exc:
+                self._json_error(503, str(exc))
+                return
+            self._json_reply(
+                {
+                    "models": entries,
+                    "roster": models_mod.roster().models,
+                    "stale": models_mod.stale_reason(),
                 }
             )
             return
@@ -732,6 +762,87 @@ class FaceHandler(SimpleHTTPRequestHandler):
             return
         broadcast("voice", {"voice": selected})
         self._json_reply({"voice": selected})
+
+    def _switch_model(self):
+        """Choose which model the loop runs on; "" returns to the default.
+
+        Same-origin like every other control. Takes `_agent_lock`, so a switch
+        requested mid-turn lands *after* that turn rather than changing models
+        under a transcript halfway through — the reason /session takes it too.
+
+        The live agent is mutated rather than rebuilt: the model is a property
+        of the next request, not of the conversation, so switching must not
+        cost the transcript the way switching sessions deliberately does.
+        """
+        if not self._same_origin("model switch"):
+            return
+        try:
+            data = self._read_json()
+            chosen = models_mod.select(str(data.get("model", "")))
+        except LookupError as exc:
+            self._json_error(404, str(exc))
+            return
+        except Exception as exc:
+            self._json_error(400, f"{type(exc).__name__}: {exc}")
+            return
+        with _agent_lock:
+            if _agent is not None:
+                _agent.model = models_mod.tier("orchestrator")
+        payload = models_mod.describe()
+        broadcast("model", payload)
+        self._json_reply(payload)
+
+    def _edit_roster(self):
+        """Add or remove one model on the owner's shortlist: {"add"|"remove": id}.
+
+        `add` is validated against the catalog inside models.add — a roster
+        entry is something the owner can then select, and a selection that
+        cannot call tools fails every later turn far from this decision.
+        """
+        if not self._same_origin("roster edit"):
+            return
+        try:
+            data = self._read_json()
+        except Exception as exc:
+            self._json_error(400, f"{type(exc).__name__}: {exc}")
+            return
+        add_id = str(data.get("add") or "").strip()
+        remove_id = str(data.get("remove") or "").strip()
+        if bool(add_id) == bool(remove_id):
+            self._json_error(400, 'expected exactly one of {"add": id} / {"remove": id}')
+            return
+        try:
+            if add_id:
+                models_mod.add(add_id)
+            else:
+                models_mod.remove(remove_id)
+        except models_mod.NotEligible as exc:
+            self._json_error(400, str(exc))
+            return
+        except LookupError as exc:
+            self._json_error(404, str(exc))
+            return
+        payload = models_mod.describe()
+        # Removing the selected model clears the selection, so the live agent
+        # can fall back here as well — the same reason the switch mutates it.
+        with _agent_lock:
+            if _agent is not None:
+                _agent.model = models_mod.tier("orchestrator")
+        broadcast("model", payload)
+        self._json_reply(payload)
+
+    def _same_origin(self, what: str) -> bool:
+        """True when this request came from the window, not another page."""
+        origin = self.headers.get("Origin")
+        host = self.headers.get("Host", "")
+        if origin and origin not in (f"http://{host}", f"https://{host}"):
+            self._json_error(403, f"cross-origin {what} refused")
+            return False
+        return True
+
+    def _read_json(self) -> dict:
+        length = int(self.headers.get("Content-Length", "0"))
+        return json.loads(self.rfile.read(length) or b"{}")
 
     def _switch_avatar(self):
         """Change who he is presenting as. Same-origin, like /approve.
@@ -808,6 +919,12 @@ class FaceHandler(SimpleHTTPRequestHandler):
             return
         if self.path == "/avatar":
             self._switch_avatar()
+            return
+        if self.path == "/model":
+            self._switch_model()
+            return
+        if self.path == "/models":
+            self._edit_roster()
             return
         if self.path == "/voice":
             self._switch_voice()

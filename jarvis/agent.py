@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from . import avatars, config, context, llm, runtime, sessions, tasks, tools
+from . import avatars, config, context, llm, models, runtime, sessions, tasks, tools
 from .tools import contextctl
 
 # Most a turn will run at once. The cap is about being a good citizen to the
@@ -183,8 +183,22 @@ class Agent:
         session: sessions.Session | None = None,
         depth: int = 0,
     ):
-        self.model = model or config.TIERS["orchestrator"]
-        self.tool_specs = tools.specs(tool_names)
+        # Resolved through models.tier, not config.TIERS, so the model the
+        # owner picked in the HUD reaches every surface that builds an Agent.
+        self.model = model or models.tier("orchestrator")
+        # `None` means "everything worth sending", not literally everything:
+        # a deferred tool group (tools.ToolGroup) keeps its bulk out of the
+        # request until `load_tools` asks for it, and keeps it out entirely on a
+        # machine where that service was never connected.
+        self._base_tool_names = list(tool_names) if tool_names is not None else tools.default_names()
+        self.tool_specs = tools.specs(self._base_tool_names)
+        # Groups pulled in by `load_tools` this conversation. A mutable set the
+        # tool writes into through runtime, read back by `_sync_tools` on the
+        # next step — the working plan's mechanism, for the same reason.
+        self.loaded_groups: set[str] = set()
+        # What `_sync_tools` has already folded in, so the per-step check is a
+        # set comparison and not a rebuild.
+        self._synced_groups: set[str] = set()
         self.max_steps = max_steps
         self.approve = approve
         self.on_event = on_event or (lambda kind, data: None)
@@ -214,6 +228,7 @@ class Agent:
         # and for the recent-sessions index, whose whole point is to tell the
         # model to call session_summary.
         names = {spec["function"]["name"] for spec in self.tool_specs}
+        self._has_groups = "load_tools" in names
         self._has_skills = "skill_read" in names
         self._has_plan = "plan_write" in names
         self._has_sessions = "session_summary" in names
@@ -303,6 +318,8 @@ class Agent:
             blocks.append(tasks.block())
         if self._has_sessions:
             blocks.append(sessions.index(current=self.session.id if self.session else None))
+        if self._has_groups:
+            blocks.append(self._groups_block())
         text = "\n\n".join(b for b in blocks if b)
 
         self._drop_context_block()
@@ -312,6 +329,53 @@ class Agent:
             # compaction's summary is one.
             self._context_block = {"role": "user", "content": CONTEXT_BLOCK_PREFIX + text}
             self.messages.append(self._context_block)
+
+    def _groups_block(self) -> str:
+        """The pointer half of a deferred tool group — a line, not a schema.
+
+        Same two-tier shape as the skills index: this is the *only* thing that
+        makes an unloaded group discoverable, so leaving it out would hide the
+        tools entirely rather than defer them. Groups already loaded are not
+        listed — their schemas are in the request, which says it better.
+        """
+        pending = tools.loadable({spec["function"]["name"] for spec in self.tool_specs})
+        if not pending:
+            return ""
+        lines = [f"- {group.name}: {group.summary}" for group in pending]
+        return (
+            "## More tools, on request\n"
+            "These are not loaded — call load_tools with the name to get them.\n"
+            + "\n".join(lines)
+        )
+
+    def _sync_tools(self) -> None:
+        """Fold any newly-loaded tool group into this agent's specs.
+
+        Cheap and idempotent: it compares a set of group names and returns
+        immediately on the overwhelmingly common no-change path, so the per-step
+        cost is one set comparison rather than a schema rebuild.
+
+        Re-binding `tool_names` matters as much as the specs themselves — it is
+        what a sub-agent's toolset is intersected against, so a child spawned
+        after an expansion inherits the expansion, and a child spawned before it
+        does not retroactively gain it.
+        """
+        if self._synced_groups == self.loaded_groups:
+            return
+        self._synced_groups = set(self.loaded_groups)
+
+        names = list(self._base_tool_names)
+        seen = set(names)
+        for group_name in self.loaded_groups:
+            group = tools.GROUPS.get(group_name)
+            if group is None:
+                continue
+            for name in group.extra:
+                if name in tools.REGISTRY and name not in seen:
+                    seen.add(name)
+                    names.append(name)
+        self.tool_specs = tools.specs(names)
+        runtime.bind(tool_names=set(names))
 
     def _drop_context_block(self) -> None:
         """Remove the working-context block, wherever it drifted to.
@@ -352,7 +416,7 @@ class Agent:
         """
         def ask(preface: str = "") -> llm.Reply:
             return llm.chat(
-                config.TIERS["compaction"],
+                models.tier("compaction"),
                 [
                     {
                         "role": "user",
@@ -496,6 +560,7 @@ class Agent:
             should_stop=self.should_stop,
             depth=self.depth,
             tool_names={spec["function"]["name"] for spec in self.tool_specs},
+            loaded_groups=self.loaded_groups,
         )
         self._refresh_system()
         if images:
@@ -533,6 +598,10 @@ class Agent:
             # for, and a plan written at step 3 has to still be there at step 40.
             # The step number goes in too, so the tail of the budget is spent
             # wrapping up rather than walking into the wall (see _budget_note).
+            # Before the block is built, so a group loaded on the previous
+            # step both reaches the request and stops being advertised as
+            # loadable in the same step.
+            self._sync_tools()
             self._refresh_system(step + 1)
 
             try:
@@ -547,6 +616,10 @@ class Agent:
                     # is what invariant 3 asks for.
                     on_delta=lambda piece: self.on_event("delta", piece),
                     should_stop=self.should_stop,
+                    # Resolved per call rather than once at construction: the
+                    # HUD's model picker can move `self.model` mid-conversation,
+                    # and the ladder is not the same on every model.
+                    effort=models.effort_for(self.model),
                 )
             except llm.Cancelled:
                 turn.cancelled = True
@@ -723,7 +796,10 @@ class Agent:
             return ""
         self.messages.append({"role": "user", "content": HANDOFF_PROMPT})
         try:
-            reply = llm.chat(self.model, self.messages, stream=False)
+            reply = llm.chat(
+                self.model, self.messages, stream=False,
+                effort=models.effort_for(self.model),
+            )
         except Exception as exc:  # provider error, cancellation, anything
             self.on_event("interim_text", f"[no handoff: {type(exc).__name__}: {exc}]")
             return ""
@@ -741,4 +817,4 @@ def delegate(prompt: str, tier: str = "worker", system: str | None = None) -> st
     """
     messages = [{"role": "system", "content": system}] if system else []
     messages.append({"role": "user", "content": prompt})
-    return llm.chat(config.TIERS[tier], messages, temperature=0.4).text
+    return llm.chat(models.tier(tier), messages, temperature=0.4).text

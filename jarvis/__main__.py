@@ -314,6 +314,12 @@ def cmd_auth(args) -> int:
         from .tools import discord
 
         return discord.connect()
+    if args.service == "spotify":
+        from . import spotify_auth
+
+        # The positional doubles as the Spotify client id — PKCE needs no
+        # secret, so there is no file to point at, just the public id.
+        return spotify_auth.connect(args.client_json)
     from . import google_auth
 
     return google_auth.connect(args.client_json)
@@ -767,12 +773,16 @@ def main() -> int:
 
     auth = sub.add_parser("auth", help="connect an external account (one-time, human-only)")
     auth.add_argument(
-        "service", choices=["google", "onshape", "discord"], help="which service to connect"
+        "service",
+        choices=["google", "onshape", "discord", "spotify"],
+        help="which service to connect",
     )
     auth.add_argument(
         "client_json",
         nargs="?",
-        help="google only: path to the OAuth client JSON (omit to show status)",
+        metavar="CREDENTIAL",
+        help="google: path to the OAuth client JSON · spotify: the app's client id "
+        "(omit either to show status and setup steps)",
     )
     auth.add_argument(
         "--redo",

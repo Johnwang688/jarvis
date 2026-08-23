@@ -23,8 +23,9 @@ per line). The real boundary is filesystem permissions on the key itself; this
 buys the time to notice.
 
 Coverage is deliberate and narrow: `.env`, `.env.local`, and the
-use-but-never-see credential bundles — `google_token.json` (Gmail) and
-`onshape_keys.json` (CAD). `.env.example` and friends are meant to be read.
+use-but-never-see credential bundles — `google_token.json` (Gmail),
+`onshape_keys.json` (CAD), `discord_token.json`, and `spotify_token.json`.
+`.env.example` and friends are meant to be read.
 """
 
 from __future__ import annotations
@@ -38,7 +39,14 @@ import shlex
 from .. import config
 
 PROTECTED_NAMES = frozenset(
-    {".env", ".env.local", "google_token.json", "onshape_keys.json", "discord_token.json"}
+    {
+        ".env",
+        ".env.local",
+        "google_token.json",
+        "onshape_keys.json",
+        "discord_token.json",
+        "spotify_token.json",
+    }
 )
 
 # Values shorter than this are things like `DEBUG=1` or `PORT=8080`. Redacting
@@ -242,6 +250,7 @@ def secret_values() -> list[str]:
     values.update(_json_values(config.GOOGLE_TOKEN_PATH))
     values.update(_json_values(config.ONSHAPE_TOKEN_PATH))
     values.update(_json_values(config.DISCORD_TOKEN_PATH))
+    values.update(_json_values(config.SPOTIFY_TOKEN_PATH))
     return sorted(values, key=len, reverse=True)
 
 

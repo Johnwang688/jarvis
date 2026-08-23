@@ -54,7 +54,6 @@ import os
 import re
 from dataclasses import dataclass, field
 
-from . import config
 
 # Hosts whose install scripts the owner is willing to have auto-approved when
 # the review comes back clean. Deliberately short and specific: this is the
@@ -175,11 +174,11 @@ Script fetched from %s, between the markers:
 
 
 def _ask_model(url: str, body: str) -> Review:
-    from . import llm
+    from . import llm, models
 
     try:
         raw = llm.chat(
-            config.TIERS["review"],
+            models.tier("review"),
             [{"role": "user", "content": PROMPT % (url, body)}],
             temperature=0.0,
             max_tokens=600,

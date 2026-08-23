@@ -43,7 +43,7 @@ import json
 from concurrent.futures import ThreadPoolExecutor
 from typing import Annotated
 
-from .. import agents, config, runtime
+from .. import agents, models, runtime
 from . import REGISTRY, tool
 
 # Every tool any type can reach. Kept as a module-level name because it is what
@@ -81,7 +81,7 @@ def _run_one(job: agents.Job) -> agents.Job:
     agent_type = agents.get(job.type)
     try:
         child = agent_mod.Agent(
-            model=config.TIERS["subagent"],
+            model=models.tier("subagent"),
             system=agent_type.prompt(),
             tool_names=_child_tools(agent_type),
             max_steps=job.extras.get("max_steps") or agent_type.max_steps,

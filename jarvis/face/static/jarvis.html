@@ -255,9 +255,44 @@
     font: 600 10px var(--mono); letter-spacing: .35em; color: var(--cyan);
     border-bottom: 1px solid rgba(34,211,238,.18); padding-bottom: 7px;
   }
-  #sesslist, #avatarlist, #voicelist {
+  #sesslist, #avatarlist, #voicelist, #modellist, #cataloglist {
     max-height: 46vh; overflow-y: auto; margin: 12px 0 4px; scrollbar-width: thin;
   }
+  /* the model catalogue is a browse list, not a shortlist: wider rows, more of
+     them on screen, and a search box that has to clear the filters below it. */
+  .picker.wide { width: 760px; }
+  #cataloglist { max-height: 52vh; }
+  .findbar { display: flex; gap: 8px; margin-top: 12px; }
+  .findbar input, .findbar select {
+    font: 11px var(--mono); letter-spacing: .1em; padding: 8px 10px;
+    background: rgba(4,10,18,.9); color: #cbd7e6;
+    border: 1px solid rgba(34,211,238,.32); outline: none;
+  }
+  .findbar input { flex: 1; }
+  .findbar input:focus, .findbar select:focus { border-color: var(--cyan); }
+  .findbar select { cursor: pointer; }
+  .findbar option { background: #061019; }
+  /* one catalogue/roster row: name and id on the left, badges on the right.
+     The left cell truncates rather than wrapping — a wrapped model id pushes
+     the badges out of line and turns a scannable list into a paragraph. */
+  .sess.mrow > span:first-child {
+    flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .sess .mid { color: #5f7590; font-size: 10.5px; letter-spacing: .06em; }
+  .sess .tags { display: flex; gap: 8px; align-items: baseline; white-space: nowrap; }
+  .sess .tag { font-size: 10px; letter-spacing: .1em; color: #5f7590; }
+  .sess .tag.iq { color: #7fd7e8; }
+  .sess .tag.free { color: #86efac; }
+  .sess .tag.on { color: var(--cyan); }
+  .sess .drop {
+    font: 12px var(--mono); color: #5f7590; padding: 0 4px; cursor: pointer;
+  }
+  .sess .drop:hover { color: #f87171; }
+  .picker .note {
+    font: 10px var(--mono); letter-spacing: .12em; color: #5f7590; margin-top: 8px;
+  }
+  .picker .note.warn { color: #fbbf24; }
   .sess {
     display: flex; justify-content: space-between; gap: 12px; align-items: baseline;
     padding: 8px 10px; cursor: pointer; border-left: 2px solid transparent;
@@ -281,6 +316,25 @@
   #hint {
     position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%);
     font: 10px var(--mono); letter-spacing: .3em; color: #3b4f68; z-index: 5;
+  }
+  #mic-toggle {
+    position: fixed; left: 24px; bottom: 18px; z-index: 8;
+    min-width: 150px; min-height: 44px; padding: 0 16px;
+    font: 700 12px var(--mono); letter-spacing: .12em;
+    color: var(--cyan); background: rgba(8,14,22,.92);
+    border: 1px solid var(--cyan-dim); border-radius: 4px;
+    box-shadow: 0 0 16px rgba(56,189,248,.10); cursor: pointer;
+  }
+  #mic-toggle:hover, #mic-toggle:focus-visible {
+    border-color: var(--cyan); box-shadow: 0 0 18px rgba(56,189,248,.24);
+    outline: none;
+  }
+  #mic-toggle[aria-pressed="true"] {
+    color: #fca5a5; border-color: rgba(248,113,113,.72);
+    box-shadow: 0 0 18px rgba(248,113,113,.16);
+  }
+  @media (max-width: 700px) {
+    #mic-toggle { left: 12px; bottom: 12px; min-width: 136px; }
   }
 
   /* typed input + staged attachments */
@@ -344,7 +398,9 @@
   <div id="clock">--:--:--</div>
   <div id="date"></div>
   <div class="rows">
-    <div class="row"><span class="k">CORE</span><span class="v" id="cfg-llm">—</span></div>
+    <div class="row" id="model-row" style="cursor:pointer" title="choose the model he runs on">
+      <span class="k">CORE</span><span class="v" id="cfg-llm">—</span>
+    </div>
     <div class="row"><span class="k">EARS</span><span class="v" id="cfg-stt">—</span></div>
     <div class="row"><span class="k">VOICE</span><span class="v" id="cfg-tts">—</span></div>
     <div class="row"><span class="k">TURNS</span><span class="v" id="stat-turns">0</span></div>
@@ -407,6 +463,42 @@
   </div>
 </div>
 
+<div id="models" class="picker wide">
+  <h3>MODEL</h3>
+  <div id="modellist"></div>
+  <div class="btns">
+    <button id="model-add">ADD MODEL</button>
+    <button id="model-close" class="close">CLOSE</button>
+  </div>
+</div>
+
+<div id="modelcatalog" class="picker wide">
+  <h3>ADD MODEL · OPENROUTER</h3>
+  <div class="findbar">
+    <input id="model-search" type="text" autocomplete="off" spellcheck="false"
+           placeholder="SEARCH BY NAME OR ID" />
+    <select id="model-price" title="price per million output tokens">
+      <option value="">ANY PRICE</option>
+      <option value="0">FREE</option>
+      <option value="1">≤ $1 / M OUT</option>
+      <option value="5">≤ $5 / M OUT</option>
+      <option value="20">≤ $20 / M OUT</option>
+    </select>
+    <select id="model-iq" title="Artificial Analysis intelligence index, as published by OpenRouter">
+      <option value="">ANY LEVEL</option>
+      <option value="30">IQ 30+</option>
+      <option value="40">IQ 40+</option>
+      <option value="50">IQ 50+</option>
+      <option value="60">IQ 60+</option>
+    </select>
+  </div>
+  <div id="cataloglist"></div>
+  <div id="catalog-note" class="note"></div>
+  <div class="btns">
+    <button id="catalog-back" class="close">DONE</button>
+  </div>
+</div>
+
 <div id="inputbar">
   <div id="chips"></div>
   <div id="inputrow">
@@ -417,6 +509,9 @@
   </div>
 </div>
 
+<button id="mic-toggle" type="button" aria-pressed="false" aria-label="Mute microphone">
+  MIC OPEN
+</button>
 <div id="hint">HOLD ORB · OR SPACE · TO SPEAK</div>
 
 <script>
@@ -723,6 +818,252 @@ async function switchVoice(name) {
   } catch {
     addOp("voice", "unreachable");
   }
+}
+
+// ============================== model picker ================================
+// Two pickers, one job. The first is the owner's shortlist — every model on it
+// can run the loop, and clicking one switches him onto it. The second browses
+// everything OpenRouter serves that is *eligible* (tool calling is the whole
+// test — see models.py) so a model can be added to that shortlist.
+//
+// The catalogue is fetched once per window and filtered here rather than
+// per-keystroke over the wire: ~290 entries is a small payload and a search
+// box that waits on the network is a search box nobody types into.
+
+let modelState = null;   // last /models payload — roster + selection
+let modelCatalog = null; // last /models/catalog payload, cached for the window
+
+// How many catalogue rows are drawn at once. Capped for the DOM's sake, and
+// the count is always stated: a list silently cut at 80 reads as "that is
+// everything", which is how a model the owner is looking for goes missing.
+const CATALOG_ROWS = 80;
+
+function priceTag(m) {
+  if (m.free) return "FREE";
+  const fmt = (n) => (n >= 1 ? n.toFixed(n >= 10 ? 0 : 1) : n.toFixed(2));
+  return `$${fmt(m.prompt_usd)}/$${fmt(m.completion_usd)}`;
+}
+
+function modelTags(m, extra) {
+  const tags = document.createElement("span");
+  tags.className = "tags";
+  const add = (text, cls) => {
+    if (!text) return;
+    const el = document.createElement("span");
+    el.className = "tag" + (cls ? " " + cls : "");
+    el.textContent = text;       // textContent: every field here is off the wire
+    tags.appendChild(el);
+  };
+  if (extra) add(extra.text, extra.cls);
+  // Unrated is unrated, never zero — the number comes from Artificial
+  // Analysis via OpenRouter, and inventing one for the models they have not
+  // scored would read exactly like a measured score.
+  if (typeof m.intelligence === "number") add("IQ " + m.intelligence.toFixed(0), "iq");
+  if (m.vision) add("VISION");
+  if (m.context) add(Math.round(m.context / 1000) + "K");
+  if (!m.unlisted) add(priceTag(m), m.free ? "free" : "");
+  else add("UNLISTED");
+  return tags;
+}
+
+function modelRow(m, opts) {
+  const row = document.createElement("div");
+  row.className = "sess mrow" + (opts.here ? " here" : "");
+  row.dataset.model = m.id;
+  const left = document.createElement("span");
+  const name = document.createElement("span");
+  name.textContent = m.name || m.id;
+  left.appendChild(name);
+  if (m.id !== (m.name || m.id)) {
+    const mid = document.createElement("span");
+    mid.className = "mid";
+    mid.textContent = "  " + m.id;
+    left.appendChild(mid);
+  }
+  row.append(left, modelTags(m, opts.badge));
+  return row;
+}
+
+async function openModels() {
+  if (authCards.size) return; // answer the authorization first
+  try {
+    modelState = await (await fetch("/models")).json();
+  } catch {
+    return addOp("model", "unreachable");
+  }
+  drawModels();
+  $("models").classList.add("on");
+}
+
+function drawModels() {
+  const data = modelState || { models: [] };
+  const list = $("modellist");
+  list.textContent = "";
+
+  // Following the configuration is the resting state, so it leads — and it is
+  // the way back from any choice made here, the same role AVATAR DEFAULT
+  // plays in the voice picker.
+  const def = document.createElement("div");
+  def.className = "sess mrow" + (data.selected ? "" : " here");
+  const defLabel = document.createElement("span");
+  defLabel.textContent = "CONFIG DEFAULT";
+  const defId = document.createElement("span");
+  defId.className = "mid";
+  defId.textContent = "  " + (data.default || "");
+  defLabel.appendChild(defId);
+  const defNote = document.createElement("span");
+  defNote.className = "when";
+  defNote.textContent = data.selected ? "" : "ACTIVE";
+  def.append(defLabel, defNote);
+  def.onclick = () => (data.selected ? selectModel("") : closeModels());
+  list.appendChild(def);
+
+  (data.models || []).forEach((m) => {
+    const active = m.id === data.selected;
+    const row = modelRow(m, {
+      here: active,
+      badge: active ? { text: "ACTIVE", cls: "on" } : null,
+    });
+    // Removing is a deliberate, separate target: the row itself switches him
+    // onto the model, and a mis-click there should never delete the entry.
+    const drop = document.createElement("span");
+    drop.className = "drop";
+    drop.textContent = "×";
+    drop.title = "remove from your list";
+    drop.onclick = (e) => {
+      e.stopPropagation();
+      editRoster({ remove: m.id });
+    };
+    row.querySelector(".tags").appendChild(drop);
+    row.onclick = () => (active ? closeModels() : selectModel(m.id));
+    list.appendChild(row);
+  });
+}
+
+function closeModels() {
+  $("models").classList.remove("on");
+}
+
+async function selectModel(id) {
+  closeModels();
+  try {
+    const res = await fetch("/model", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: id }),
+    });
+    if (!res.ok) return addOp("model", "switch refused");
+    applyModel(await res.json());
+  } catch {
+    addOp("model", "unreachable");
+  }
+}
+
+function applyModel(data) {
+  modelState = data;
+  $("cfg-llm").textContent = (data.current || "").split("/").pop();
+  $("model-row").title = data.current || "choose the model he runs on";
+  if ($("models").classList.contains("on")) drawModels();
+  if (modelCatalog) {
+    modelCatalog.roster = (data.models || []).map((m) => m.id);
+    if ($("modelcatalog").classList.contains("on")) drawCatalog();
+  }
+}
+
+async function editRoster(body) {
+  try {
+    const res = await fetch("/models", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json();
+    if (!res.ok) return addOp("model", data.error || "refused");
+    applyModel(data);
+    addOp("model", (body.add ? "added " : "removed ") + (body.add || body.remove));
+  } catch {
+    addOp("model", "unreachable");
+  }
+}
+
+async function openCatalog() {
+  closeModels();
+  $("modelcatalog").classList.add("on");
+  const note = $("catalog-note");
+  if (!modelCatalog) {
+    $("cataloglist").textContent = "";
+    note.className = "note";
+    note.textContent = "LOADING OPENROUTER CATALOG…";
+    try {
+      const res = await fetch("/models/catalog");
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "catalog unavailable");
+      modelCatalog = data;
+    } catch (err) {
+      note.className = "note warn";
+      note.textContent = String(err.message || err).toUpperCase();
+      return;
+    }
+  }
+  drawCatalog();
+  $("model-search").focus();
+}
+
+function catalogMatches() {
+  const all = (modelCatalog && modelCatalog.models) || [];
+  const query = $("model-search").value.trim().toLowerCase();
+  const maxPrice = $("model-price").value;
+  const minIq = $("model-iq").value;
+  return all.filter((m) => {
+    if (query && !(m.id + " " + m.name).toLowerCase().includes(query)) return false;
+    if (maxPrice !== "") {
+      const cap = parseFloat(maxPrice);
+      // Judged on output price: it is the larger half of an agent turn's bill
+      // and the number OpenRouter's own listing leads with.
+      if (cap === 0 ? !m.free : m.completion_usd > cap) return false;
+    }
+    // An unrated model cannot clear a minimum, so a floor hides it. Said out
+    // loud in the note rather than left to be discovered.
+    if (minIq !== "" && !(m.intelligence >= parseFloat(minIq))) return false;
+    return true;
+  });
+}
+
+function drawCatalog() {
+  const onRoster = new Set((modelCatalog && modelCatalog.roster) || []);
+  const matches = catalogMatches();
+  const list = $("cataloglist");
+  list.textContent = "";
+  matches.slice(0, CATALOG_ROWS).forEach((m) => {
+    const listed = onRoster.has(m.id);
+    const row = modelRow(m, {
+      here: listed,
+      badge: listed ? { text: "ON LIST", cls: "on" } : null,
+    });
+    row.onclick = () => editRoster(listed ? { remove: m.id } : { add: m.id });
+    list.appendChild(row);
+  });
+  const note = $("catalog-note");
+  note.className = "note";
+  if (!matches.length) {
+    note.textContent = "NO MODEL MATCHES · " +
+      ((modelCatalog && modelCatalog.models.length) || 0) + " ELIGIBLE";
+  } else {
+    note.textContent =
+      (matches.length > CATALOG_ROWS
+        ? `SHOWING ${CATALOG_ROWS} OF ${matches.length}`
+        : `${matches.length} MATCH${matches.length === 1 ? "" : "ES"}`) +
+      ` · ${(modelCatalog && modelCatalog.models.length) || 0} ELIGIBLE` +
+      ($("model-iq").value ? " · UNRATED MODELS HIDDEN BY THE IQ FILTER" : "");
+  }
+  if (modelCatalog && modelCatalog.stale) {
+    note.className = "note warn";
+    note.textContent += " · CACHED LIST (" + modelCatalog.stale.toUpperCase() + ")";
+  }
+}
+
+function closeCatalog() {
+  $("modelcatalog").classList.remove("on");
 }
 
 async function switchAvatar(slug) {
@@ -1416,6 +1757,15 @@ document.addEventListener("keydown", (e) => {
   } else if ($("voices").classList.contains("on")) {
     e.preventDefault();
     closeVoices();
+  } else if ($("modelcatalog").classList.contains("on")) {
+    // Browsing sits on top of the shortlist, so Escape backs out one level
+    // rather than dropping the owner out of the flow entirely.
+    e.preventDefault();
+    closeCatalog();
+    openModels();
+  } else if ($("models").classList.contains("on")) {
+    e.preventDefault();
+    closeModels();
   }
 });
 
@@ -1547,6 +1897,11 @@ events.onmessage = (e) => {
   } else if (kind === "session") {
     // Label only — the window that made the switch redraws its own log.
     setSessionUI(data);
+  } else if (kind === "model") {
+    // Another window's picker, or a roster edit. Relabels; the transcript is
+    // untouched — which model answers is a property of the next request.
+    applyModel(data);
+    addOp("model", (data.current || "").split("/").pop());
   } else if (kind === "avatar") {
     // `jarvis avatar <slug>`, the set_avatar tool, or another window's
     // picker. Cosmetic plus the wake phrases — no effect on the transcript.
@@ -2190,6 +2545,31 @@ function matchesWake(text) {
 let wakeMode = false;
 let recog = null;
 
+// A wake phrase fires once per thing said — not once per recognizer update.
+//
+// The bug this exists for (2026-08-22, both halves reported by the owner):
+// `onresult` is *level*-triggered by nature. Chrome delivers the phrase being
+// spoken as a **growing interim transcript** — one event per revision — and
+// then delivers the very same words once more as the final result, so a
+// handler that asks "does this transcript contain his name?" answers yes
+// every time. Saying just "jarvis" chimed twice (interim, then final), and
+// carrying on talking chimed again for every word after it, because the
+// transcript being revised still began with his name. Each of those also ran
+// `cancelTurn()` and re-armed the claim, so the noise was the audible half of
+// a handler firing over and over.
+//
+// Two gates, for two different failure modes. The **segment index** is the
+// real rule: one decision per result index, so a phrase that has already been
+// answered cannot be answered again however many times it is re-reported. The
+// **time floor** is the backstop for what an index cannot see — Chrome may
+// revise an earlier segment and re-deliver an old "jarvis" underneath a lower
+// index. Neither gate can wedge the wake word off: indices restart with each
+// recognition session (onend restarts it every few seconds), so an index
+// *lower* than the last one fired means a new session and resets the rule.
+const WAKE_REFIRE_MS = 1500;
+let wakeFiredSegment = -1;
+let wakeFiredAt = -1e9;
+
 function chime() {
   const c = ensureCtx();
   [[880, 0], [1318, 0.09]].forEach(([f, dt]) => {
@@ -2240,13 +2620,28 @@ function armRecognition() {
   recog.continuous = true;
   recog.interimResults = true;
   recog.lang = "en-US";
+  recog.onstart = () => { wakeFiredSegment = -1; };
   recog.onresult = (e) => {
     let text = "";
+    // Concatenated from resultIndex, deliberately: a two-word phrase can
+    // straddle a segment boundary, and matching the pieces separately would
+    // miss it.
     for (let i = e.resultIndex; i < e.results.length; i++) text += e.results[i][0].transcript;
-    if (matchesWake(text)) onWake();
+    if (!matchesWake(text)) return;
+    const newest = e.results.length - 1;
+    if (newest < wakeFiredSegment) wakeFiredSegment = -1;  // a restarted session
+    if (newest <= wakeFiredSegment) return;  // the same phrase, re-reported
+    // Decided once per segment, whichever way it goes: a hit suppressed by
+    // the time floor must not fire late when that same segment is revised.
+    wakeFiredSegment = newest;
+    if (performance.now() - wakeFiredAt < WAKE_REFIRE_MS) return;
+    wakeFiredAt = performance.now();
+    onWake();
   };
   recog.onend = () => {
-    if (wakeMode && recog) setTimeout(() => { try { recog.start(); } catch {} }, 300);
+    if (wakeMode && recog) {
+      setTimeout(() => { wakeFiredSegment = -1; try { recog.start(); } catch {} }, 300);
+    }
   };
   recog.onerror = (e) => {
     if (e.error === "not-allowed" || e.error === "service-not-allowed") {
@@ -2304,6 +2699,10 @@ function setWake(on) {
 
 function setMicMute(on) {
   micMuted = !!on;
+  const toggle = $("mic-toggle");
+  toggle.textContent = micMuted ? "MIC MUTED" : "MIC OPEN";
+  toggle.setAttribute("aria-pressed", micMuted ? "true" : "false");
+  toggle.setAttribute("aria-label", micMuted ? "Unmute microphone" : "Mute microphone");
   // Persisted, and deliberately failing toward muted: a window that reboots
   // into a hot mic the owner turned off would be the wrong surprise.
   localStorage.setItem("micmute", micMuted ? "1" : "0");
@@ -2341,6 +2740,7 @@ async function init() {
   try {
     const cfg = await (await fetch("/config")).json();
     $("cfg-llm").textContent = cfg.llm.split("/").pop();
+    $("model-row").title = cfg.llm + (cfg.effort ? ` · reasoning effort: ${cfg.effort}` : "");
     $("cfg-stt").textContent = cfg.stt.split("/").pop();
     $("cfg-tts").textContent = `${cfg.tts.split("/").pop()} · ${cfg.voice} · ${cfg.speed}x`;
     $("voice-name").textContent = cfg.voice;
@@ -2386,10 +2786,26 @@ async function init() {
   $("avatar-close").onclick = () => closeAvatars();
   $("voice-row").onclick = () => openVoices();
   $("voice-close").onclick = () => closeVoices();
+  $("model-row").onclick = () => openModels();
+  $("model-close").onclick = () => closeModels();
+  $("model-add").onclick = () => openCatalog();
+  $("catalog-back").onclick = () => { closeCatalog(); openModels(); };
+  ["input", "change"].forEach((ev) => {
+    $("model-search").addEventListener(ev, () => drawCatalog());
+    $("model-price").addEventListener(ev, () => drawCatalog());
+    $("model-iq").addEventListener(ev, () => drawCatalog());
+  });
+  // Space is push-to-talk at the document level, and the global handler
+  // preventDefault()s it — so a search box has to stop the event the way the
+  // message input does, or typing a space would grab the microphone instead.
+  ["keydown", "keyup"].forEach((ev) =>
+    $("model-search").addEventListener(ev, (e) => e.stopPropagation())
+  );
   $("sess-new").onclick = () => switchSession({ new: true });
   $("sess-close").onclick = () => closeSessions();
   $("wake-row").onclick = () => setWake(!wakeMode);
   $("mic-row").onclick = () => setMicMute(!micMuted);
+  $("mic-toggle").onclick = () => setMicMute(!micMuted);
   $("mute-row").onclick = () => {
     fetch("/mute", {
       method: "POST",

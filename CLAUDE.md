@@ -46,6 +46,9 @@ the point of the project, not an accident.
 jarvis/
   agent.py      the loop — ~50 lines, read it first
   llm.py        OpenRouter client; the only file that knows about HTTP
+  models.py     the model roster: the eligible OpenRouter catalog, the
+                owner's shortlist, and tier() — which every model call
+                resolves through instead of reading config.TIERS
   context.py    image eviction / result truncation / compaction
   runtime.py    per-run ContextVars (plan slot, approver, cancel, depth,
                 toolset) — the channel dispatch() cannot give a tool
@@ -55,6 +58,7 @@ jarvis/
   agentbench.py agent-bench — whole-Jarvis, sandboxed, category-rated
   voice.py      tts()/stt() — swappable contract, HTTP stays in llm.py
   google_auth.py  one-time OAuth consent (human-only) + silent token refresh
+  spotify_auth.py Spotify OAuth (PKCE, no client secret) + rotating refresh
   onshape_auth.py Onshape API keys + the pinned CAD sandbox/libraries
   desktop.py    WSL half of the desktop bridge (listener, session, allowlist)
   discord_approvals.py  the approval gate, asked in the owner's DMs
@@ -77,7 +81,9 @@ jarvis/
                 ripgrep with a Python fallback), memory, shell, web, browsing,
                 gmail, onshape (CAD), skills, sessions (read past conversations),
                 sqlite (read-only .db queries, mode=ro enforced by the
-                engine), goalctl (goal_report — how a goal run ends),
+                engine), spotify (music: search, playlists, playback — a
+                deferred tool group, see invariant 10), toolgroups
+                (load_tools), goalctl (goal_report — how a goal run ends),
                 voicectl (mute), avatarctl (which avatar), workflows,
                 tasks (attended background delegation), plan (the working
                 checklist), subagent (context isolation),
@@ -233,6 +239,56 @@ jarvis/
    (tests/benches use `Session.eval_js()`). Every surface stops the session
    on exit — a browser left running EPIPEs the Node driver when the process
    dies under it; `stop()` is a safe no-op if nothing started.
+
+10. **A deferred tool group is absent from the request, and `tool_names=None`
+   no longer means the whole registry** (`tools.ToolGroup`, 2026-08-21).
+
+   Every registered tool's JSON schema is sent on **every** request, and the
+   registry costs ~11k tokens before a word of conversation. That is the right
+   trade for tools any turn might need and the wrong one for an integration
+   that is idle in most conversations and *absent entirely* on a machine that
+   never connected it. So a group is the skills index moved down a level: a
+   one-line pointer in the working-context block, and the bulk on `load_tools`.
+
+   Three states, and the first is the one that pays. **Unavailable** — the
+   owner never ran the auth command — costs nothing at all: no schemas, and no
+   pointer advertising a service that would only answer with a setup error.
+   **Available** offers `core` only, which must be small but not empty: a round
+   trip spent expanding a toolset is a round trip the owner waits through, and
+   on the voice surface that is the whole latency budget. **Loaded** is
+   everything, for the life of that agent. Measured on Spotify: 0 / 525 / 1318
+   tokens per request, against 1318 unconditionally.
+
+   `Agent.__init__` is where this binds: `tool_names=None` now resolves to
+   `tools.default_names()`, not `REGISTRY`. **Anything that builds a toolset by
+   iterating `tools.REGISTRY` silently re-includes the deferred half** —
+   `tasks.task_tool_names` and `goalrunner.goal_tool_names` were both doing
+   exactly that and were changed with it. That is the failure mode to watch
+   for: it is not an error, it is the mechanism quietly not working.
+
+   Two properties hold it together, and one deliberate non-property:
+
+   - **The set is mutable and per-agent, reached through `runtime.py`** — the
+     working plan's mechanism, for the working plan's reason. `load_tools`
+     writes into a set the agent owns; `_sync_tools` folds it in on the next
+     step and **re-binds `tool_names`**, so a sub-agent spawned after an
+     expansion inherits it and one spawned before does not retroactively gain
+     it. Expanding costs a one-time prefix-cache miss (tools are part of the
+     cached prefix — invariant 7's reasoning, applied to the other end of the
+     request), which is why `core` exists at all.
+   - **An agent handed an explicit toolset cannot widen itself.** `loadable()`
+     requires the group's core tools to already be in the agent's own set, the
+     same intersection rule that stops a workflow reaching the browser through
+     a child.
+   - **It is not a boundary, and the code says so.** A deferred tool stays in
+     `REGISTRY`, so `dispatch` refuses it with a pointer to `load_tools`
+     rather than running it — but that guard **fails open** when no agent
+     context is bound, unlike everything else in `runtime.py`. The reason is
+     correctness, not security: dispatch has always let any agent call any
+     registered tool by name (the approver is the actual gate), and what is
+     genuinely new is that a model guessing a deferred tool's *name* has
+     guessed its *arguments* too. An unbound context is a script or a test,
+     not an agent reaching past its toolset.
 
 ## Safety design (deliberate, do not loosen without asking)
 
@@ -579,6 +635,34 @@ jarvis/
   myaccount.google.com, and outward actions (`gmail_send`) are
   `dangerous=True` so every send needs the owner's approval. The token file
   is covered by all three secrets layers below.
+- **Spotify follows the same template, and is the first integration that is
+  deliberately *not* gated** (2026-08-21). Credential: a scoped OAuth refresh
+  token at `~/.config/jarvis/spotify_token.json` (600, all three secrets
+  layers), consented once via `jarvis auth spotify` (human-only CLI), revocable
+  at spotify.com/account/apps. PKCE, so there is **no client secret** — the
+  client id is public by design and the refresh token is the whole credential.
+  It also **rotates**: Spotify hands back a new refresh token and retires the
+  old one, so `access_token()` persists the replacement (atomically, mode 600)
+  *before* returning — not writing it is a bug that hides for an hour and then
+  reads as a revoked grant.
+
+  **No spotify_ tool is `dangerous=True`, and that is a judgement.** The gate
+  is for actions that are outward-facing or hard to undo; `gmail_send` puts
+  words in the owner's name in someone else's inbox. Starting a song is
+  audible, immediately obvious, and undone by saying "stop" — and a card per
+  track would teach the owner to approve without reading, which is the failure
+  the gate exists to prevent.
+
+  Two confinements instead. The tools may **launch the Spotify client** when
+  the Web API reports no device to play on, and that is confined the way
+  `DESKTOP_APPS` is: the executable is `config.SPOTIFY_EXE` and nothing else —
+  no tool takes a path, a command or a window, so the model cannot turn "play
+  something" into "run something". And they are **absent from
+  `workflows.SAFE_TOOLS`**: a workflow runs where nobody is watching, so music
+  starting from an unattended thread is a surprise in the owner's room rather
+  than a line in a log. Attended tasks and goals do get them — someone is
+  reachable there by definition.
+
 - **Onshape follows the same template with a sharper write boundary**
   (2026-07-31): API keys — never the password — live in
   `~/.config/jarvis/onshape_keys.json` (600, all three secrets layers),
@@ -772,6 +856,19 @@ jarvis/
   registered dangerous with a denial never touching the network, and the
   token file refused by name/glob/read_file with values scrubbed. Run after
   touching `google_auth.py`, `tools/gmail.py`, or `secrets.py`.
+- `tests/spotify_check.py` — free synthetic checks for the music integration,
+  fake transport throughout: the PKCE refresh carrying no client secret, **a
+  rotated refresh token persisted at mode 600** (the failure that would
+  otherwise surface an hour later as a revoked grant), every tool's request
+  shape, a 401 refreshing and retrying exactly once, volume clamping rather
+  than sending 300, and the market read from `/me` instead of guessed. The
+  three that are about judgement rather than plumbing: **the owner's own
+  playlist beats an identically-named one in the global catalogue** (which is
+  what "play my deep focus" means), **a Premium refusal names the plan** rather
+  than surfacing a 403 that reads as a Jarvis bug, and **no device launches the
+  client and transfers playback to it** with the launcher stubbed, because a
+  test must not open Spotify. Plus the group mechanism end-to-end (below) and
+  the bundle refused by all three secrets layers.
 - `tests/onshape_check.py` — free synthetic checks for the CAD integration:
   key-bundle load and document-URL parsing, inch/degree → meter/row-major
   matrix transforms and readback, every cad_ tool's request shape against a
@@ -1033,8 +1130,13 @@ jarvis/
   `bibi` avatar's phrases ("big yahu", "netanyahu", "bibi") are silence on
   the default and all 20 spellings fire once that avatar is applied — in the
   spellings Chrome's recognizer actually returns for a phrase it has never
-  heard — and the armed hint names whatever is live. Run after touching
-  `WAKE_PATTERNS` or `matchesWake`.
+  heard — and the armed hint names whatever is live. Since 2026-08-22 it also drives
+  the real `recog.onresult` through a scripted `SpeechRecognition`: a bare
+  phrase fires **once** rather than once per delivery, carrying on talking does
+  not re-fire, a new phrase in a later segment does, ordinary speech in a new
+  segment stays silent, and a restarted recognition session (indices back to 0)
+  fires again. Run after touching `WAKE_PATTERNS`, `matchesWake`, or
+  `armRecognition`.
 - `tests/face/hud_state_check.py` — **free** checks for the HUD turn state
   machine, and the pattern to copy for anything else in the window: a
   *scripted* `/converse` and `/events` on `queue.Queue` puppet strings serve
@@ -1056,6 +1158,33 @@ jarvis/
   renaming a page used to disarm the check silently. Run after touching
   `desktop.py`, `tools/desktop.py`, `windows/bridge.py`, or
   `windows/uiatree.py`.
+- `tests/models_check.py` — free synthetic checks for the model roster, with
+  `llm.catalog` replaced by a fixture and both state files in a temp dir. The
+  headline is the refusal: a model that cannot call tools, an invented id, an
+  image-only model, `openrouter/auto` and a `:batch` variant all fail to reach
+  the roster. Plus prices converted to dollars-per-million, unrated staying
+  `None` rather than 0, the cache fetched once and surviving an outage with a
+  stated reason, a corrupt roster file degrading to the default, removing the
+  selected model clearing the selection, `tier()` moving the followers while
+  `worker`/`cheap` stay, `Agent()` with no `model=` picking up the selection,
+  and the routes end-to-end (`/model` moving the **live** agent without
+  rebuilding it, 400/403/404). Since the same day it also owns **reasoning
+  effort**: clamped down to the model's own ladder, absent for a model with no
+  reasoning block, the requested level on a cold cache, `""`/`default`/a typo
+  all sending nothing, and — the one that matters — the agent loop putting
+  `reasoning: {effort}` on the wire while `delegate(tier="cheap")` does not.
+  Run after touching `models.py`, `config.TIERS`, `config.REASONING_EFFORT`,
+  or the `/model*` routes.
+- `tests/face/hud_model_check.py` — free headless checks of the picker in the
+  real `jarvis.html`: CORE opens the shortlist with the default marked, ADD
+  MODEL browses the catalog, search matches name and id, the price and
+  intelligence filters narrow it (and the unrated exclusion is stated), a row
+  toggles roster membership, Escape backs out of the catalog to the shortlist
+  before closing, selecting relabels CORE, the × removes without selecting,
+  and an SSE `model` broadcast relabels live. Two that are not cosmetic: **a
+  model name carrying markup renders as text** (names come off the network and
+  this window draws authorization cards), and **a space typed in the search box
+  does not trigger push-to-talk**.
 - `tests/browser/math_drill_smoke.py` — headed end-to-end browser test: serves
   a local JS-rendered form wizard (`tests/browser/pages/math-drill/`) and has
   the agent complete it. Real API calls (~$0.001/run); the window stays open
@@ -3079,6 +3208,211 @@ replying, `workflow_start` only when the owner must not be pinged.
 `tests/tasks_check.py` is the free suite (16 suites re-run green after the
 change, including every approval, workflow, goal, daemon and HUD suite).
 
+**Spotify shipped (2026-08-21) — and with it, deferred tool groups.** Ten tools
+(`tools/spotify.py`): `spotify_play` (a plain-words query, an exact URI, or a
+list of them; resumes when called bare), `spotify_status`, `spotify_search`,
+`spotify_playlists`, `spotify_pause`, `spotify_skip`, `spotify_queue`,
+`spotify_settings` (volume/shuffle/repeat), `spotify_library` (liked, top,
+recent) and `spotify_artist_tracks`. Setup, credential handling and the two
+confinements are in *Safety design* above; `jarvis auth spotify` with no
+argument prints the whole dashboard walkthrough.
+
+Four API facts this is built around, each checked against Spotify's current
+documentation rather than remembered, because three of them are places a
+reasonable guess is wrong:
+
+- **The redirect URI must be `http://127.0.0.1:8406/callback`, literally.**
+  Spotify requires HTTPS except for a loopback address and **rejects the
+  spelling `localhost`** outright. The port is therefore fixed rather than
+  ephemeral like the Google flow's, because the owner registers this exact
+  string by hand.
+- **Playback control is Premium-only.** Every `/me/player/*` write 403s on a
+  free account, so `_fail` names the plan — a bare "403 Forbidden" reads as a
+  Jarvis bug and sends the owner to the wrong place entirely.
+- **Spotify's recommendation endpoints are gone for new apps.**
+  `/recommendations`, `/related-artists`, `/audio-features` and the editorial
+  playlist endpoints were retired on 2024-11-27 for apps registered after that
+  date, which ours is; they 403 with no deprecation notice. So "play something
+  like X" is `spotify_artist_tracks` blended with the owner's own top and saved
+  tracks, and the tool text says that is what it is rather than passing it off
+  as Spotify's recommender. Tutorials still reference the old endpoints because
+  pre-2024 apps kept access.
+- **A device must exist before anything can play**, and a freshly-launched
+  client takes seconds to register with Spotify Connect. `_pick_device` launches
+  and polls rather than returning an error the owner has to act on, and names
+  the device it chose, because "playing on the desktop because your phone was
+  the only other option" otherwise reads as picking at random.
+
+**The tool-group mechanism is the more reusable half** (invariant 10). Ten more
+tools would have cost ~1,318 tokens of JSON schema on *every* request forever —
+11% of a registry that already weighs ~11k before anything is said. It now
+costs 0 when Spotify was never connected, 525 when it is, and the full 1,318
+only in a conversation that actually turned into one about music. Nothing else
+uses groups yet; `gmail`, `onshape`/`cad_*` and `desktop_*` are the obvious
+candidates and are left alone until someone measures whether the round trip is
+worth it for them.
+
+**Reasoning effort is set explicitly, and clamped per model (2026-08-22).**
+Luna's own default effort is **medium**; the orchestrator now asks for `max`
+(`config.REASONING_EFFORT`, env `JARVIS_REASONING_EFFORT`, `""`/`default` hands
+the decision back to the provider). The orchestrator is the call that plans,
+picks tools and recovers from errors — the one place in this system where a
+better answer is worth more than a faster one.
+
+Three things decide how it behaves, and each was checked against the live API
+rather than assumed:
+
+- **Scope is the agent loop, not every call.** `llm.chat` sends nothing unless
+  a caller passes `effort=`, and the only caller that does is `run_turn` (plus
+  the exhaustion handoff). The cheap and worker tiers do bulk text nobody
+  reasons about — measured on gpt-oss-20b, asking for effort at all took a
+  5-token completion to 80 — so `delegate("…", tier="cheap")` stays untouched.
+  Sub-agents inherit it for free, because they are Agents.
+- **The ladder is not the same on every model**, so `models.effort_for()`
+  clamps to what the model publishes in `reasoning.supported_efforts`: Luna
+  goes to `max`, gpt-oss-20b stops at `high`, and a model with no reasoning
+  block gets nothing at all rather than a parameter that reads as though it did
+  something. It reads the **already-cached** catalog and never fetches —
+  `cached_info()` exists precisely so a model call cannot block on the catalog
+  endpoint to find out how hard to think.
+- **A cold cache still thinks hard.** An effort a model does not publish is
+  accepted and clamped upstream, not refused — verified live: `max` on
+  gpt-oss-20b returned 200 and spent *fewer* reasoning tokens than `high` did.
+  So an unknown model gets the requested effort rather than none, because
+  thinking less because a cache is cold is the worse failure. A *typo* is the
+  opposite case and is dropped with a one-time warning, since a garbage enum
+  value is the shape that could 400 every request for the rest of the run.
+
+**The trade, stated plainly: this buys quality with latency.** A/B on the same
+two-step task, same tools (2026-08-22): default 2.8s / $0.00169, max 5.5s /
+$0.00144 — roughly **2x the wall clock**, with cost a wash on that sample
+(one sample is not a verdict). On the voice surface that is time the owner
+waits through, so `JARVIS_REASONING_EFFORT=medium` is the knob if the HUD
+starts to feel slow. It also means **bench numbers taken before this change
+are not comparable to numbers taken after it** — pin the variable when
+re-running agent-bench or long-bench against the older baselines above.
+
+**The wake chime fired once per recognizer update, not once per phrase**
+(fixed 2026-08-22). Two owner reports, one cause: saying just "jarvis" chimed
+**twice**, and carrying on talking after he replied chimed **again and again**.
+
+`recog.onresult` is level-triggered by nature — Chrome delivers the phrase
+being spoken as a *growing interim transcript*, one event per revision, then
+delivers the same words once more as the final result. So "does this
+transcript contain his name?" answers yes on every one of them: twice for a
+bare "jarvis" (interim, then final), and once more for every word spoken after
+it while that segment stayed open, because the transcript being revised still
+began with his name. The chime was only the audible half — each of those
+firings also ran `cancelTurn()` and re-armed the claim.
+
+The 2026-08-18 rewrite had already fixed the *claim* side of exactly this
+("a wake phrase claims exactly one utterance"), by spending `wakeHitAt` inside
+`onWake`. What it missed is that `chime()` and `cancelTurn()` sit **above**
+that guard, so the half of `onWake` that is audible was never covered by it.
+The lesson generalises past this handler: **guarding what an event *does* is
+not guarding how often it fires**, and a de-duplication rule belongs at the
+edge that produces the events, not partway down the function that consumes
+them.
+
+Two gates now, for two different failure modes, and neither can wedge the wake
+word off — which is the property that matters, because a silent wake word is a
+worse bug than a loud one:
+
+- **One decision per result segment.** A segment index that has already been
+  answered cannot be answered again, however many times it is re-reported —
+  and the decision is recorded even when the second gate suppresses it, so a
+  suppressed hit cannot fire late when that segment is revised.
+- **A 1500ms floor** (`WAKE_REFIRE_MS`), the backstop for what an index cannot
+  see: Chrome may revise an earlier segment and re-deliver an old "jarvis"
+  under a lower index.
+- **An index below the last one fired means a new session, not an old phrase.**
+  `onend` restarts recognition every few seconds and indices restart with it;
+  without that rule the wake word would go silent until as many segments had
+  accumulated again. Reset in `onstart` as well, and the recovery is
+  self-healing either way.
+
+Matching still concatenates from `resultIndex` on purpose — a two-word phrase
+can straddle a segment boundary, and matching the pieces separately would miss
+it. `tests/face/hud_wake_check.py` gained a `recognizer_checks` section that
+drives the real handler through a scripted `SpeechRecognition` (the event
+sequences Chrome actually produces, chimes counted rather than played); it is
+verified to fail against the old handler with "the final result chimed again".
+
+**Model selector shipped (2026-08-22)** — which model Jarvis runs on is now a
+choice made in the window, not an edit to `config.py`. `models.py` holds both
+halves: the **catalog** (every OpenRouter model that can run this loop, fetched
+from the public `/api/v1/models` listing and cached at
+`~/.cache/jarvis/openrouter-models.json`) and the **roster** (the owner's
+shortlist plus which entry is selected, at `~/.config/jarvis/models.json` —
+machine-local state chosen through the HUD, so it lives beside the allowlist
+and the avatar pointer). In the HUD the **CORE row opens it**: the shortlist,
+with ADD MODEL opening the full catalog behind a search box and two filters.
+
+**`models.tier(name)` is the new resolution point, and that is the thing to
+remember.** `config.TIERS` is still where the defaults live, but anything that
+reads it *directly* silently ignores the owner's selection — the same shape of
+failure as iterating `tools.REGISTRY` after deferred groups shipped (invariant
+10): not an error, just the mechanism quietly not working. `agent.Agent`,
+`delegate`, `_summarize`, `run_subagent`, `command_review`, the face's
+`/config` and the daemon's `/status` were all moved onto it.
+
+Which tiers move is decided by the configuration itself: **a tier whose
+configured model *is* the configured orchestrator follows the selection**, and
+one pointed somewhere else stays put. That is exactly the set that was already
+following it — subagent, compaction, review — so "every child is the
+orchestrator tier" stays true after a switch, while `worker` and `cheap` keep
+their own model. The selection also beats an explicit `JARVIS_ORCHESTRATOR`,
+on the avatar precedent: an environment variable is a default and a click made
+a moment ago is not. Anything that must not move passes `model=` explicitly.
+
+Four decisions worth not relitigating:
+
+- **Eligibility is a refusal, not a badge.** The catalog keeps only models
+  whose `supported_parameters` include `tools` — this is a tool-calling loop,
+  and a model that cannot emit `tool_calls` cannot read a file or ask for an
+  approval; it can only talk. So `models.add` validates against the catalog and
+  refuses, because an id that reaches the roster is one the owner can select,
+  and the resulting failure would surface a turn later with nothing pointing
+  back at the picker. A catalog that cannot be reached is a refusal too, not a
+  shrug. Also dropped: models with no text output, `openrouter/auto` (a router
+  priced at -1 — the readout would name a model that is not the one answering),
+  and **`<model>:batch`**, which is the same model addressed through the
+  asynchronous batch endpoint and cannot be waited on by a turn. The tell for
+  batch is the price: 55 of the 60 variants with a base model are listed at
+  *exactly* half its completion price (checked live 2026-08-22). 290 of 421
+  catalog entries survive all of that.
+- **The intelligence numbers are reported, never computed.** OpenRouter
+  republishes Artificial Analysis's `intelligence_index` inside its own catalog
+  for 117 of the 290 eligible models, and that is what the IQ badge and filter
+  read. An invented score in a picker reads exactly like a measured one. The
+  corollary is that **unrated is `None`, never 0** — a zero would sort and
+  render as "measured and terrible" — so unrated models sort last, and a
+  minimum-IQ filter *hides* them, which the note under the list says out loud.
+- **The agent has no tool for this.** He can change his avatar and his voice,
+  but not the model he thinks with: it is the one setting that changes his own
+  judgement and his own cost, and a model that could switch itself could switch
+  itself cheap. Same reasoning as the MIC mute having no tool.
+- **A switch mutates the live agent rather than rebuilding it.** Which model
+  answers is a property of the *next request*, not of the conversation, so
+  unlike `/session` it must not cost the transcript. `/model` takes
+  `_agent_lock` for the same reason `/session` does — a switch requested
+  mid-turn lands after that turn instead of changing models underneath one.
+
+Degradation is one-directional, toward showing something: a failed fetch serves
+the disk cache however old it is and the picker prints why it is stale (a list
+drawn from a two-week-old cache with no sign of it is how a missing model
+becomes a mystery), a 200 that parses to nothing eligible keeps the previous
+list, and only an empty cache becomes an error the picker has to render. The
+catalog is sent whole (~129KB for 290 entries) and filtered in the window,
+because a search box that round-trips per keystroke is one nobody types into;
+the row cap states what it dropped, per the no-silent-caps rule.
+
+Known gap: the roster and the selection are reachable only from the HUD, so an
+owner who picks a bad model and closes the window changes it back by reopening
+the window (CONFIG DEFAULT is the first row) or by editing
+`~/.config/jarvis/models.json`. A `jarvis model` CLI is the obvious follow-up
+and was left out rather than guessed at.
+
 ### PENDING LIVE VALIDATION — needs API keys (delete this section once done)
 
 Everything above was built and tested in a sandbox with **no `OPENROUTER_API_KEY`**,
@@ -3133,6 +3467,30 @@ CLAUDE.md once it has been, with the results folded into the notes above:**
    results instead of inventing them? And the inverse failure: does he
    delegate two-step jobs that were cheaper inline? If the judgment is off,
    the delegation paragraph in `config.py` is what needs work, not the tools.
+
+7. **Spotify, end to end.** (Added 2026-08-21.) Everything is synthetic —
+   there is no account connected here. Run `jarvis auth spotify`, then check
+   the three things a fake transport cannot: that the **consent redirect
+   actually lands** on 127.0.0.1:8406 (a redirect URI that differs by one
+   character fails at the *token exchange*, not at consent, so the browser says
+   success and the CLI says no refresh token); that a **refresh an hour later
+   still works**, which is the rotation path; and that `spotify_play("my <x>
+   playlist")` picks the owner's playlist rather than a stranger's. Then the
+   judgement question, the same one `plan_write` and `task_start` have open:
+   with only `spotify_play`/`spotify_status` visible, does the model call
+   `load_tools('spotify')` when it needs to pause or queue, or does it flounder
+   with the two it has? If it flounders, the pointer wording in
+   `Agent._groups_block` is what needs work, not the mechanism.
+
+8. **A real turn on a switched model.** (Added 2026-08-22.) Every model check
+   is synthetic — the roster, the catalog and the routes are all exercised
+   against a fixture. What a fixture cannot answer: pick a non-default model in
+   the HUD, run a real turn, and confirm the tool calls actually land (the
+   eligibility filter says the model *advertises* `tools`, which is not the
+   same as being good at them — the 2026-07-30 bench found tool-calling quality
+   varies by provider, not just by model), that the SYSTEMS CORE row and the
+   cost readout agree with what was billed, and that a sub-agent spawned during
+   that turn ran on the same model rather than the configured default.
 
 Later: real integrations (calendar/email), scheduled proactive runs, and
 more registered desktop apps as they earn their place (each is one entry in

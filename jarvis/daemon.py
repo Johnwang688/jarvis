@@ -30,7 +30,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from . import config
+from . import config, models
 
 
 class DaemonError(RuntimeError):
@@ -231,7 +231,7 @@ class Daemon:
             "started": self.started_at,
             "identified": bool(getattr(listener, "bot_id", "")),
             "pending_approvals": self.broker.pending_count if self.broker else 0,
-            "model": config.TIERS["orchestrator"],
+            "model": models.tier("orchestrator"),
         }
         runner = self.runner
         if runner is not None:

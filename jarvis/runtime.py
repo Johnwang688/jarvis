@@ -51,6 +51,11 @@ _TOOLS: ContextVar[frozenset[str] | None] = ContextVar("jarvis_tools", default=N
 # default, and the conversation agent's value) renders nothing anywhere.
 _ORIGIN: ContextVar[str] = ContextVar("jarvis_origin", default="")
 
+# Tool groups this agent has pulled in, as a mutable set so `load_tools` can
+# add to it in place and the agent that owns it rebuilds its tool specs on the
+# next step — the working plan's mechanism, for the same reason.
+_LOADED: ContextVar[set[str] | None] = ContextVar("jarvis_loaded_groups", default=None)
+
 MAX_DEPTH = 2
 
 
@@ -61,6 +66,7 @@ def bind(
     depth: int | None = None,
     tool_names: frozenset[str] | set[str] | None = None,
     origin: str | None = None,
+    loaded_groups: set[str] | None = None,
 ) -> None:
     """Bind the current agent's per-run state. Called by `Agent.run_turn`."""
     if plan is not None:
@@ -75,6 +81,8 @@ def bind(
         _TOOLS.set(frozenset(tool_names))
     if origin is not None:
         _ORIGIN.set(origin)
+    if loaded_groups is not None:
+        _LOADED.set(loaded_groups)
 
 
 def plan_slot() -> dict[str, str] | None:
@@ -104,6 +112,16 @@ def parent_tools() -> frozenset[str] | None:
 def origin() -> str:
     """Who is asking, for the approval surfaces. "" when nothing bound one."""
     return _ORIGIN.get()
+
+
+def loaded_groups() -> set[str] | None:
+    """The running agent's loaded tool groups, or None if nothing is bound.
+
+    None means "there is no agent to load into", which `load_tools` reports
+    rather than papering over — a tool group loaded into nothing would look
+    like it worked and then not be there.
+    """
+    return _LOADED.get()
 
 
 def describe() -> dict[str, Any]:

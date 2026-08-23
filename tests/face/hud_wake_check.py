@@ -17,6 +17,11 @@ What it pins down:
      heard ("big ya hoo", "big yoohoo", "big yahu", ...).
   5. the armed hint names the live phrases — an undiscoverable wake word is a
      wake word nobody says.
+  6. **a phrase fires once per thing said**, driven through the real
+     `recog.onresult` with a scripted recognizer. Chrome re-delivers the
+     transcript being spoken on every revision and once more as final, so the
+     level-triggered handler this replaced chimed twice for a bare "jarvis"
+     and again for every word spoken after it (reported 2026-08-22).
 
 Run:  .venv/bin/python tests/face/hud_wake_check.py
 """
@@ -139,6 +144,31 @@ class StaticHandler(SimpleHTTPRequestHandler):
 
 SHUTDOWN = threading.Event()
 
+# A scripted SpeechRecognition, installed before `jarvis.html` runs so that
+# `armRecognition` picks it up instead of the real one (which needs a network
+# service and a microphone). It records nothing and decides nothing — the test
+# hands it exactly the event sequence Chrome produces, and the window's own
+# handler is what is under test.
+FAKE_RECOGNIZER = """
+window.SpeechRecognition = class {
+  constructor() { window.__sr = this; }
+  start() { if (this.onstart) this.onstart(); }
+  stop() { if (this.onend) this.onend(); }
+};
+window.__chimes = 0;
+"""
+
+# One recognizer event. `segments` is [text, ...] oldest-first — the whole
+# results list as Chrome would hand it over, with `index` the first entry
+# revised by this event.
+SAY = """(spec) => {
+  window.__sr.onresult({
+    resultIndex: spec.index,
+    results: spec.segments.map((t) => [{ transcript: t }]),
+  });
+  return window.__chimes;
+}"""
+
 
 def run_checks(page) -> None:
     match = lambda t: page.evaluate("(t) => window.__hud.matchesWake(t)", t)  # noqa: E731
@@ -181,6 +211,51 @@ def run_checks(page) -> None:
     print(f"ok  wake: the hint follows the avatar — {hint!r}")
 
 
+def recognizer_checks(page) -> None:
+    """The handler, driven with the event sequences Chrome actually produces."""
+    # Count chimes instead of playing them: the real one needs an AudioContext
+    # a headless page has had no gesture to unlock, and the question here is
+    # how many times it was *asked* to sound.
+    page.evaluate("() => { window.__chimes = 0; window.chime = () => window.__chimes++; }")
+    # run_checks leaves the bibi avatar applied and the wake word armed; this
+    # section is about the default phrase, from a known state.
+    page.evaluate("() => { applyAvatar(DEFAULT_AVATAR); setWake(false); setWake(true); }")
+    assert page.evaluate("() => !!window.__sr"), "the recognizer was never constructed"
+    say = lambda spec: page.evaluate(SAY, spec)  # noqa: E731
+
+    # 1. A bare "jarvis": one interim revision, then the same words as final.
+    #    The old handler chimed on both.
+    assert say({"index": 0, "segments": ["jarvis"]}) == 1
+    assert say({"index": 0, "segments": ["jarvis"]}) == 1, "the final result chimed again"
+    print("ok  onresult: a bare wake phrase fires once, not once per delivery")
+
+    # 2. Talking on: the transcript grows and still begins with his name.
+    for text in ("jarvis what's", "jarvis what's the", "jarvis what's the weather"):
+        assert say({"index": 0, "segments": [text]}) == 1, f"re-fired on {text!r}"
+    print("ok  onresult: carrying on talking does not fire again")
+
+    # 3. A genuinely new phrase, in a later segment, does fire — the gates
+    #    must not be able to wedge the wake word off.
+    page.wait_for_timeout(1600)  # past WAKE_REFIRE_MS
+    assert say({"index": 1, "segments": ["jarvis what's the weather", "jarvis"]}) == 2
+    assert say({"index": 1, "segments": ["jarvis what's the weather", "jarvis stop"]}) == 2
+    print("ok  onresult: a new phrase in a later segment fires once more")
+
+    # 4. Ordinary speech in a new segment is silence.
+    assert say({"index": 2, "segments": ["jarvis", "jarvis stop", "the big one"]}) == 2
+    print("ok  onresult: ordinary speech in a new segment stays silent")
+
+    # 5. The recognizer restarts every few seconds (onend -> start), and
+    #    indices restart with it. An index *below* the last one fired is a new
+    #    session, not an older phrase — getting this wrong would silence the
+    #    wake word until as many segments had accumulated again.
+    page.wait_for_timeout(1600)
+    assert say({"index": 0, "segments": ["jarvis"]}) == 3, "a restarted session was ignored"
+    print("ok  onresult: a restarted recognition session fires again")
+
+    page.evaluate("() => setWake(false)")
+
+
 def main() -> int:
     server = ThreadingHTTPServer(
         ("127.0.0.1", PORT), partial(StaticHandler, directory=str(STATIC_DIR))
@@ -196,9 +271,12 @@ def main() -> int:
             page = browser.new_page()
             errors: list[str] = []
             page.on("pageerror", lambda e: errors.append(str(e)))
+            # Before the page's own script, so `armRecognition` finds it.
+            page.add_init_script(FAKE_RECOGNIZER)
             page.goto(f"{BASE}/jarvis.html", wait_until="load")
             page.wait_for_function("() => window.__hud && window.__hud.matchesWake")
             run_checks(page)
+            recognizer_checks(page)
             assert not errors, f"page errors: {errors}"
             browser.close()
     finally:
