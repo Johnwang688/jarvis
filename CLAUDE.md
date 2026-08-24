@@ -3471,6 +3471,33 @@ the window (CONFIG DEFAULT is the first row) or by editing
 `~/.config/jarvis/models.json`. A `jarvis model` CLI is the obvious follow-up
 and was left out rather than guessed at.
 
+**Schoolwork integration shipped (2026-08-23).** The owner's Windows-side
+schoolwork dashboard (`C:\myday\schoolwork` — Canvas + MySchoolApp merged into
+one local SQLite board, read-only toward the school systems, with an agent
+surface of its own: `sw review --json`, `sw prep --json`, a triage contract and
+an AGENTS.md) is reachable from Jarvis via `skills/schoolwork.md` plus a WSL
+wrapper at `~/.local/bin/sw`. Decisions, so they are not relitigated:
+
+- **A skill driving the existing CLI, not a tool group.** The module already
+  speaks agent — typed tools would re-describe a surface that exists. Same call
+  as the wharton skill; revisit as a deferred group (invariant 10) only if
+  measured usage says the round trips are worth it.
+- **The wrapper exists for the approval gate, not convenience.** The raw
+  invocation is `cmd.exe /c sw.cmd …`, and an ALWAYS on that mints a `cmd.exe`
+  allowlist entry — arbitrary Windows execution, the `git -c` shape again. The
+  wrapper's stem is `sw`, so the allowlistable unit is exactly this tool. First
+  use asks; one ALWAYS covers it.
+- **The DB is unreachable from WSL, verified by execution**: it is WAL-mode
+  SQLite, and over the 9p mount even a `mode=ro` open fails with
+  `disk I/O error` (WAL's shared-memory sidecar does not survive 9p). The CLI
+  is the only channel — do not point the sqlite tool at it.
+- **Network-touching subcommands stay owner-triggered** (`sync`, `login-msa`,
+  `msa-probe`) — the module's own rule, carried into the skill. Sync already
+  runs on a Windows scheduled task.
+- **This is not the Membean case.** The dashboard tracks work and never
+  submits; Jarvis plans, reports and builds study materials on request, and
+  doing or submitting the schoolwork itself stays declined.
+
 ### PENDING LIVE VALIDATION — needs API keys (delete this section once done)
 
 Everything above was built and tested in a sandbox with **no `OPENROUTER_API_KEY`**,
