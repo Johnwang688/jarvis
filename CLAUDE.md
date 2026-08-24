@@ -1424,9 +1424,29 @@ Jarvis ran an approved `grep -RIn 'provider|openrouter' ~/projects/Jarvis` and
 printed the live `OPENROUTER_API_KEY` from `.env` into the transcript — so the
 key went to OpenRouter as context and landed in `traces/` and
 `.jarvis_history`. **Key rotated 2026-07-30; protection added** (*Safety
-design*). The leaked key is dead but still sits verbatim in the older
-`traces/` files and `.jarvis_history` — those predate the scrubber, which only
-protects what is in `.env` now. The lesson worth keeping: **the
+design*). **The residue is gone, verified 2026-08-23** — this file used to say
+the dead key still sat verbatim in the older `traces/` files and
+`.jarvis_history`, and that is no longer true: `.jarvis_history` is a readline
+file that has been rewritten many times since, and `traces/` now holds only
+Playwright archives. Searched and confirmed clean at zero occurrences:
+`.jarvis_history`, the *contents* of all 16 `traces/*.zip` (a plain grep cannot
+see inside a zip — that is why an earlier pass came up empty for the wrong
+reason), `~/.local/share/jarvis/` including spill and sessions,
+`~/.config/jarvis/`, the shell histories, and the entire git history across
+every ref. The key never entered version control at all, which matters because
+this repo is public.
+
+Two things worth keeping from the re-check rather than the incident. **A stale
+security note is its own small hazard**: a file saying "a live-format
+credential is sitting here" sends a future reader hunting for something that is
+not there, and teaches them to treat disposable debug output as sensitive. And
+**grep found `sk-or-v1-F` in a spill file and it was not a key** — it was this
+document's own example of the count-mode match oracle, quoted back through a
+truncated tool result. A scanner that cannot tell a credential from a
+description of one produces exactly the false positive that gets a real alert
+ignored later.
+
+The lesson worth keeping: **the
 dangerous read was the one that never named the file.** A path denylist alone
 would have waved this through, which is why the scrub sits at `dispatch()` —
 the last point before a string becomes a `tool` message — and not in
