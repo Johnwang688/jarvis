@@ -309,6 +309,34 @@ def opt_out_checks() -> None:
     print("ok  stream: stream=False and JARVIS_STREAM=0 take the old path")
 
 
+def provider_pin_checks() -> None:
+    """A pin is one tag or an ordered comma list; fallbacks never leave it."""
+    assert llm.provider_order("") == [] and llm.provider_order(None) == []
+    assert llm.provider_order("deepinfra") == ["deepinfra"]
+    assert llm.provider_order("deepinfra, novita ,z-ai,") == ["deepinfra", "novita", "z-ai"]
+
+    chunks = [{"choices": [{"delta": {"content": "x"}}]},
+              {"choices": [{"finish_reason": "stop", "delta": {}}]}]
+    # explicit argument beats the config default, and an ordered list goes out as `order`
+    with no_post(), streaming(FakeStream(sse(chunks))) as sent:
+        llm.chat("m", [{"role": "user", "content": "hi"}], provider="deepinfra,novita,z-ai")
+    assert sent[0]["provider"] == {"order": ["deepinfra", "novita", "z-ai"], "allow_fallbacks": False}, sent[0].get("provider")
+    # the config default is used when no argument is given, and "" sends nothing
+    real = llm.config.CHAT_PROVIDER
+    try:
+        llm.config.CHAT_PROVIDER = "novita"
+        with no_post(), streaming(FakeStream(sse(chunks))) as sent:
+            llm.chat("m", [{"role": "user", "content": "hi"}])
+        assert sent[0]["provider"] == {"order": ["novita"], "allow_fallbacks": False}
+        llm.config.CHAT_PROVIDER = ""
+        with no_post(), streaming(FakeStream(sse(chunks))) as sent:
+            llm.chat("m", [{"role": "user", "content": "hi"}])
+        assert "provider" not in sent[0], sent[0].get("provider")
+    finally:
+        llm.config.CHAT_PROVIDER = real
+    print("ok  provider pin: single tag, ordered list, config default, and no pin")
+
+
 def main() -> int:
     assembly_checks()
     tool_call_checks()
@@ -317,6 +345,7 @@ def main() -> int:
     retry_checks()
     fallback_checks()
     opt_out_checks()
+    provider_pin_checks()
     print("\nall streaming checks passed")
     return 0
 

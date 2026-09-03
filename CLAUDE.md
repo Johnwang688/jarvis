@@ -1385,6 +1385,14 @@ on any future challenger to beat both columns at once. What the sweep taught:
   default so routing is unchanged; `llm.speech()` has had one since
   2026-07-31). Like the TTS pin it allows **no fallbacks**, which is what
   turns a wrong tag into a loud 404 instead of a silent reroute.
+  **Since 2026-09-03 the pin may be an ordered comma list**
+  (`deepinfra,novita,z-ai` → OpenRouter's `order` array, `allow_fallbacks`
+  still false), added for the trading firm and verified live: with
+  DeepInfra 429ing upstream the list fell through to Novita, and a
+  single-tag `deepinfra` pin failed outright. Fallback *within* the list is
+  the point; fallback *outside* it is still refused. The tag is the bare
+  provider slug — `novita`, not the endpoint's `novita/fp8`, which routes
+  nowhere. `tests/stream_check.py` owns it (`provider_pin_checks`).
 
 Three things learned building it, each worth keeping:
 

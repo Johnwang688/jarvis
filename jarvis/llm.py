@@ -212,6 +212,22 @@ def _stream_once(
     )
 
 
+def provider_order(pin: str | None) -> list[str]:
+    """Turn a provider pin into OpenRouter's ordered `order` list.
+
+    A pin is one lowercase provider tag, or several separated by commas —
+    ``"deepinfra,novita,z-ai"`` means try DeepInfra first, then Novita, then
+    Z.AI, and **nobody else**: `allow_fallbacks` stays False, which limits
+    fallback to the listed providers in the listed order rather than
+    disabling it. Whitespace and empty entries are dropped, so a stray
+    trailing comma pins nothing extra. An empty pin returns [] (no routing
+    constraint at all).
+    """
+    if not pin:
+        return []
+    return [tag.strip() for tag in pin.split(",") if tag.strip()]
+
+
 def chat(
     model: str,
     messages: list[dict[str, Any]],
@@ -258,8 +274,9 @@ def chat(
     # why it refuses fallbacks. Off unless asked for, so default behaviour is
     # unchanged: OpenRouter picks.
     pinned = provider if provider is not None else config.CHAT_PROVIDER
-    if pinned:
-        payload["provider"] = {"order": [pinned], "allow_fallbacks": False}
+    order = provider_order(pinned)
+    if order:
+        payload["provider"] = {"order": order, "allow_fallbacks": False}
 
     headers = {
         "Authorization": f"Bearer {config.api_key()}",

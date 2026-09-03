@@ -161,9 +161,12 @@ TTS_PROVIDER = os.environ.get("JARVIS_TTS_PROVIDER", "Together")
 # unpinned run measures neither a stable price nor a stable model.
 #
 # Use OpenRouter's lowercase provider *tag* ("deepseek", "deepinfra"), not the
-# display name: a name that matches nothing is silently ignored. The pin allows
-# NO fallbacks for exactly that reason — a bad tag must fail loudly (HTTP 404,
-# "No endpoints found") instead of quietly routing somewhere else. Note some
+# display name: a name that matches nothing is silently ignored. Several tags
+# separated by commas are an *ordered* preference ("deepinfra,novita,z-ai":
+# try each in turn) — since 2026-09-03, for the trading firm. The pin allows
+# NO fallbacks outside that list for exactly this reason — a bad tag must fail
+# loudly (HTTP 404, "No endpoints found") instead of quietly routing somewhere
+# else. Note some
 # endpoints are unreachable by account policy: OpenRouter's training opt-out
 # refuses providers that train on prompts, which is why deepseek's own
 # first-party endpoint 404s here.
