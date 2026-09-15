@@ -358,6 +358,19 @@ is an owner override carried into 8.2.
 There is no path in the other direction: a CLI task never answers voice, and
 a task thread's messages never reach the fast path.
 
+*Settled by WP2 (2026-09-15):* the fast path's toolset is `FAST_TOOLS` in
+`jarvis/v2/providers/fastpath.py`, validated at import so it cannot shrink
+silently. v1's `task_*` tools are excluded (they are the v1 attended-task
+mechanism, not the v2 task model); the v2 `task_status` read tool joins the
+set when the daemon (WP7) provides it. Three `Brief` fields have no v1
+counterpart and are ignored by this provider — `effort` (v1 resolves it per
+model), `max_turns` (the budget here is steps) and **`cwd`** (v1 file tools
+resolve against the process directory, so a chat thread reads the daemon's
+tree, never a task worktree; read-only, so the cost is a wrong answer, not
+a wrong write). `usage()` reports dollars only: v1 keeps no token total, and
+a wrong count is worse than none (the BYOK lesson). WP9's ledger must
+therefore not require tokens from the fast path.
+
 ### 8.2 Stage two: which provider runs each role
 
 When a task starts, and again whenever it needs a new worker thread, the
