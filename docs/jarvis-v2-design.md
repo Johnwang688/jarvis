@@ -704,11 +704,22 @@ for everything not under `jarvis/v2/`.
   2026-09-15:** under `auto`, `can_use_tool` was consulted for nothing and
   the `PreToolUse` hook fired for every call (spike output: callback NONE,
   hook `['Bash']`). The hook is the gate on the Claude side; see §5.3.
-  Open sub-question for WP3: whether a hook may block for minutes while an
-  owner is asked, or whether the provider must deny-and-requeue instead.
-- **R3** Claude Code's bubblewrap sandbox in headless mode under WSL2.
-  Fallback: rely on auto mode without the sandbox on Claude workers, and
-  prefer Codex (Landlock, default on) for tasks that need confinement.
+  Sub-question closed by WP3: the hook matcher's timeout is the entire
+  budget (the SDK applies none of its own), so the provider sets 660 s and
+  a hook may block while the owner is asked; no deny-and-requeue.
+- **R3** ~~Claude Code's bubblewrap sandbox in headless mode under WSL2.~~
+  **Answered 2026-09-15, negatively**, by `tests/spikes/r3_claude_live.py`
+  on CLI 2.1.273: with the SDK's `sandbox` setting enabled, a turn still
+  wrote a file outside the workspace, so the flag confined nothing here.
+  The fallback is now the rule: **Claude workers run under auto mode
+  without a sandbox; a task that needs confinement routes to Codex**
+  (Landlock, `workspace-write`, on by default — §8.2 capability filter).
+  The live run confirmed the rest of the provider: the `PreToolUse` hook
+  fired for all three commands, `approval_requested`/`approval_resolved`
+  surfaced, and usage arrived with the equivalent cost. Left open as a
+  follow-up, not a blocker: `bwrap` is installed but `socat` is not, and
+  the docs name both for Linux — worth one more run after installing it
+  before treating the negative as final.
 - **R4** ~~Codex app-server approval requests answered by our client end to
   end, including `requestUserInput` as a clarification question, on
   0.153.4.~~ **Answered 2026-09-15** by `tests/spikes/r4_codex_live.py` on
