@@ -345,6 +345,12 @@ def cmd_desktop(args) -> int:
     return 0
 
 
+def cmd_daemon2(args) -> int:
+    from .v2 import daemon
+
+    return daemon.main()
+
+
 def cmd_daemon(args) -> int:
     from . import daemon
 
@@ -797,6 +803,8 @@ def main() -> int:
     desktop.add_argument("--wait", type=float, default=0.0,
                          help="seconds to wait for the bridge to connect")
     desktop.set_defaults(func=cmd_desktop)
+
+    sub.add_parser("daemon2", help="v2 daemon and local API").set_defaults(func=cmd_daemon2)
 
     daemon = sub.add_parser(
         "daemon",
