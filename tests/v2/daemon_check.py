@@ -434,7 +434,12 @@ class DaemonChecks(unittest.TestCase):
         with patch.object(mod, "STOP_TIMEOUT", 0.15), self.assertLogs(mod.LOG, level="WARNING"):
             self.d.stop()
         self.assertLess(time.monotonic() - start, 0.5)
-        self.assertEqual(stream.next(), {"kind": "shutdown"})
+        # The subscription opened after send(), so turn_started may or may not
+        # precede it on this stream; only the shutdown record is guaranteed.
+        event = stream.next()
+        while event.get("kind") != "shutdown":
+            event = stream.next()
+        self.assertEqual(event, {"kind": "shutdown"})
         before = self.stores.threads.read_log(thread.id)
         native["release"].set()
         worker.join(1)
