@@ -669,7 +669,14 @@ for everything not under `jarvis/v2/`.
   host-managed auth to a child process. Two consequences already: the daemon
   must run where a valid `claude login` exists, and `ClaudeProvider.health()`
   must detect an expired login and report it as *unavailable* rather than
-  letting every task fail one turn in.
+  letting every task fail one turn in. **Answered after `claude login`
+  (same day): the SDK works on the subscription login with no API key.**
+  Two more facts from that run: `ResultMessage.total_cost_usd` is reported
+  (0.28 for a 3-tool turn) even though nothing is billed on a subscription,
+  so the ledger records Claude's figure as *equivalent* cost, never as
+  spend; and passing `allowed_tools` auto-approves those tools **before**
+  `can_use_tool` is consulted (the SDK warns), so the provider must not use
+  `allowed_tools` for anything it wants gated — R2 is re-run without it.
 - **R2** Whether `can_use_tool` is consulted under `--permission-mode auto`,
   or whether always-ask has to be a `PreToolUse` hook returning `ask`.
 - **R3** Claude Code's bubblewrap sandbox in headless mode under WSL2.
