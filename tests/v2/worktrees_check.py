@@ -74,11 +74,11 @@ def create_adopt(root: Path) -> None:
     assert exclude.read_bytes() == b"# no trailing newline\n.jarvis/\n"
     assert (repo / ".gitignore").read_bytes() == before
     assert git(repo, "status", "--porcelain") == ""
-    # A separately started interpreter must find the journal, without default Stores.
+    # A separately started interpreter reads the base ref back from the journal.
     script = ("import sys; from pathlib import Path; from jarvis.v2.stores import Stores; "
               "from jarvis.v2.worktrees import status; "
               "s=Stores(Path(sys.argv[1])); t=s.tasks.get(sys.argv[2]); "
-              "assert status(t).ahead == status(t).behind == 0")
+              "assert status(t, s).ahead == status(t, s).behind == 0")
     result = subprocess.run([sys.executable, "-c", script, str(stores.root), task.id],
                             capture_output=True, text=True, check=False)
     assert result.returncode == 0, result.stderr
@@ -114,26 +114,26 @@ def slugs_and_isolation(root: Path) -> None:
 def status_checks(root: Path) -> None:
     repo, stores, project = fixture(root)
     task = stores.tasks.create(project.id, "Status")
-    assert w.status(task) == w.WorktreeStatus(False, None)
+    assert w.status(task, stores) == w.WorktreeStatus(False, None)
     w.ensure(task, project, stores)
     path = Path(task.worktree)
-    state = w.status(task)
+    state = w.status(task, stores)
     assert state.exists and not state.dirty and state.ahead == state.behind == 0
     assert state.last_commit == git(path, "log", "-1", "--format=%h %s")
     (path / "new.txt").write_text("change")
-    assert w.status(task).dirty
+    assert w.status(task, stores).dirty
     git(path, "add", "new.txt")
-    assert w.status(task).dirty
+    assert w.status(task, stores).dirty
     git(path, "commit", "-m", "Task change")
-    state = w.status(task)
+    state = w.status(task, stores)
     assert not state.dirty and state.ahead == 1 and state.behind == 0
     git(repo, "commit", "--allow-empty", "-m", "Owner change")
-    assert w.status(task).ahead == w.status(task).behind == 1
+    assert w.status(task, stores).ahead == w.status(task, stores).behind == 1
     # Adoption after the project switches branches must preserve the original base.
     git(repo, "checkout", "-b", "different-base")
     git(repo, "commit", "--allow-empty", "-m", "Different base change")
     w.ensure(task, project, stores)
-    assert w.status(task).behind == 1
+    assert w.status(task, stores).behind == 1
     assert stores.tasks.read_journal(task.id)[-1]["base_ref"] == "refs/heads/main"
     print("ok  status: clean, untracked/staged dirty, ahead/behind, last commit, original base retained")
 
@@ -147,7 +147,7 @@ def removal(root: Path) -> None:
     assert path.exists() and stores.tasks.get(task.id).worktree == str(path)
     w.remove(task, stores, force=True)
     assert not path.exists() and task.worktree is None and task.branch == branch
-    assert not w.status(task).exists
+    assert not w.status(task, stores).exists
     assert branch not in git(repo, "branch", "--format=%(refname:short)").splitlines()
     assert stores.tasks.read_journal(task.id)[-1]["force"] is True
     assert stores.tasks.get(task.id) == task
@@ -166,10 +166,11 @@ def removal(root: Path) -> None:
     w.remove(task, stores)
     assert not path.exists() and stores.tasks.read_journal(task.id)[-1]["force"] is False
     task = w.ensure(stores.tasks.create(project.id, "Ignored data"), project, stores)
-    (Path(task.worktree) / "precious.ignored").write_text("still owner data")
-    refused(lambda: w.remove(task, stores), "precious.ignored")
-    w.remove(task, stores, force=True)
-    print("ok  remove: dirty files/unique commits named and retained; force and merged cleanup succeed")
+    (Path(task.worktree) / "cache.ignored").write_text("build output")
+    assert not w.status(task, stores).dirty
+    w.remove(task, stores)  # ignored files never make a worktree need force
+    assert not Path(task.worktree or "/nonexistent").exists()
+    print("ok  remove: dirty files/unique commits named and retained; force and merged cleanup succeed; ignored files never block")
 
 
 def deleted_directory(root: Path) -> None:
@@ -180,7 +181,7 @@ def deleted_directory(root: Path) -> None:
         if unique:
             git(path, "commit", "--allow-empty", "-m", "Still precious after deletion")
         shutil.rmtree(path)
-        assert not w.status(task).exists
+        assert not w.status(task, stores).exists
         if unique:
             refused(lambda: w.remove(task, stores), "Still precious after deletion")
         w.remove(task, stores, force=unique)
@@ -201,11 +202,11 @@ def non_git(root: Path) -> None:
     task = w.ensure(stores.tasks.create(project.id, "Plain directory"), project, stores)
     path = Path(task.worktree)
     assert path == root / ".jarvis" / "tasks" / task.id and task.branch is None
-    assert w.status(task) == w.WorktreeStatus(True, None)
+    assert w.status(task, stores) == w.WorktreeStatus(True, None)
     assert w.ensure(task, project, stores) is task
     assert stores.tasks.read_journal(task.id)[-1]["event"] == "worktree_adopted"
     (path / "keep.txt").write_text("plain work")
-    assert w.status(task).dirty
+    assert w.status(task, stores).dirty
     refused(lambda: w.remove(task, stores), "non-empty", "lose files")
     w.remove(task, stores, force=True)
     assert not path.exists() and task.worktree is None
@@ -228,7 +229,7 @@ def nested_project(root: Path) -> None:
     assert (repo / ".git" / "info" / "exclude").read_text().splitlines().count(".jarvis/") == 1
     assert (checkout / ".gitignore").read_bytes() == before
     assert git(checkout, "status", "--porcelain") == ""
-    assert not w.status(task).dirty
+    assert not w.status(task, stores).dirty
     assert stores.tasks.read_journal(task.id)[0]["base_ref"] == "refs/heads/owner-work"
     w.remove(task, stores)
     assert checkout.exists()
@@ -238,14 +239,14 @@ def nested_project(root: Path) -> None:
     project = stores.projects.create("Subdir", str(subdir))
     task = w.ensure(stores.tasks.create(project.id, "Subdirectory root"), project, stores)
     assert Path(task.worktree).is_relative_to(subdir)
-    assert not w.status(task).dirty
+    assert not w.status(task, stores).dirty
     w.remove(task, stores)
     # A detached project HEAD uses its immutable commit as the base.
     git(checkout, "checkout", "--detach")
     project = stores.projects.create("Detached", str(checkout))
     task = w.ensure(stores.tasks.create(project.id, "Detached base"), project, stores)
     assert stores.tasks.read_journal(task.id)[0]["base_ref"] == git(checkout, "rev-parse", "HEAD")
-    assert w.status(task).ahead == 0
+    assert w.status(task, stores).ahead == 0
     # Even a project rooted in a linked checkout's subdirectory must never
     # adopt or remove the owner's surrounding checkout.
     nested = checkout / "nested"
@@ -283,7 +284,7 @@ def failures(root: Path) -> None:
 
     with patch.object(w.subprocess, "run", side_effect=checked_run):
         task = w.ensure(stores.tasks.create(project.id, "Explicit argv"), project, stores)
-        w.status(task)
+        w.status(task, stores)
         w.remove(task, stores)
     print("ok  failures: real/mocked stderr, missing git, explicit argv and subprocess flags")
 

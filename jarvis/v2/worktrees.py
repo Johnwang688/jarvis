@@ -1,7 +1,7 @@
 """Per-task checkouts. Only Git metadata and .jarvis directories are written.
 
-The private worktree gitdir holds a store locator so status(task) can read the
-journal without a Stores parameter, including after a daemon restart.
+The base ref a worktree was cut from lives in the task's journal, so status()
+takes the Stores it was recorded in; nothing is written into the gitdir.
 """
 from __future__ import annotations
 
@@ -135,8 +135,6 @@ def ensure(task: Task, project: Project, stores: Stores) -> Task:
                 base_ref = _base(root)
                 path.parent.mkdir(parents=True, exist_ok=True)
                 _git(root, "worktree", "add", "-b", branch, str(path), "HEAD")
-            locator = _gitdir(path, "--git-dir") / "jarvis-store"
-            locator.write_text(str(stores.root.resolve()), encoding="utf-8")
         else:
             path = root / ".jarvis" / "tasks" / task.id
             event = "worktree_adopted" if path.is_dir() else "worktree_created"
@@ -149,11 +147,12 @@ def ensure(task: Task, project: Project, stores: Stores) -> Task:
 
 
 def _changes(path: Path) -> str:
-    # Ignored files can also contain work the owner would lose on removal.
-    return _git(path, "status", "--porcelain", "--untracked-files=all", "--ignored=matching").strip()
+    # Ignored files (caches, build output) do not count: a worktree that ran
+    # its tests must still be removable without force, or force becomes routine.
+    return _git(path, "status", "--porcelain", "--untracked-files=all").strip()
 
 
-def status(task: Task) -> WorktreeStatus:
+def status(task: Task, stores: Stores) -> WorktreeStatus:
     with _lock:
         path = Path(task.worktree) if task.worktree else None
         if path is None or not path.is_dir():
@@ -161,11 +160,6 @@ def status(task: Task) -> WorktreeStatus:
         if task.branch is None:
             return WorktreeStatus(True, None, any(path.iterdir()))
         branch = _git(path, "rev-parse", "--abbrev-ref", "HEAD").strip()
-        locator = _gitdir(path, "--git-dir") / "jarvis-store"
-        try:
-            stores = Stores(Path(locator.read_text(encoding="utf-8")))
-        except OSError as exc:
-            raise WorktreeError(f"Cannot locate worktree journal: {locator}: {exc}") from exc
         base_ref = _entry(task, stores).get("base_ref")
         if not base_ref:
             raise WorktreeError(f"Task {task.id}: no base ref recorded in worktree journal")
@@ -209,7 +203,7 @@ def remove(task: Task, stores: Stores, *, force: bool = False) -> None:
             if path.exists():
                 changes = _changes(path)
                 if changes:
-                    losses.append(f"uncommitted or untracked changes (including ignored files):\n{changes}")
+                    losses.append(f"uncommitted or untracked changes:\n{changes}")
             commits = _unique_commits(root, task.branch)
             if commits:
                 losses.append(f"commits not on any other branch:\n{commits}")
