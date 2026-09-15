@@ -56,6 +56,17 @@ _ORIGIN: ContextVar[str] = ContextVar("jarvis_origin", default="")
 # next step — the working plan's mechanism, for the same reason.
 _LOADED: ContextVar[set[str] | None] = ContextVar("jarvis_loaded_groups", default=None)
 
+# Where `task_propose` (jarvis/v2/tools/propose.py) puts the task the fast path
+# wants opened — a one-key mutable dict, the working plan's mechanism for the
+# working plan's reason. The v2 FastPathProvider binds a slot it owns before
+# `run_turn` and reads it back after, so the proposal rides the turn's own
+# thread and two concurrent chat handles cannot see each other's.
+#
+# It is deliberately *not* set by `Agent.run_turn`: the v1 loop knows nothing
+# about proposals, and `bind()` only writes what it is passed, so a slot bound
+# by the provider survives the loop's own bind on the same thread.
+_PROPOSAL: ContextVar[dict | None] = ContextVar("jarvis_proposal", default=None)
+
 MAX_DEPTH = 2
 
 
@@ -67,6 +78,7 @@ def bind(
     tool_names: frozenset[str] | set[str] | None = None,
     origin: str | None = None,
     loaded_groups: set[str] | None = None,
+    proposal: dict | None = None,
 ) -> None:
     """Bind the current agent's per-run state. Called by `Agent.run_turn`."""
     if plan is not None:
@@ -83,6 +95,8 @@ def bind(
         _ORIGIN.set(origin)
     if loaded_groups is not None:
         _LOADED.set(loaded_groups)
+    if proposal is not None:
+        _PROPOSAL.set(proposal)
 
 
 def plan_slot() -> dict[str, str] | None:
@@ -122,6 +136,16 @@ def loaded_groups() -> set[str] | None:
     like it worked and then not be there.
     """
     return _LOADED.get()
+
+
+def proposal_slot() -> dict | None:
+    """The fast path's task-proposal slot, or None if no provider bound one.
+
+    None means "nothing here can open a task", which `task_propose` reports
+    rather than papering over — a proposal written into nothing would look
+    like it worked and then not exist.
+    """
+    return _PROPOSAL.get()
 
 
 def describe() -> dict[str, Any]:
