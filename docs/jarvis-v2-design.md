@@ -251,7 +251,8 @@ The first layer to answer wins.
 3. **CLI reviewer** — Claude auto mode / Codex auto_review. Decides the grey
    zone. An approval: runs. A decline: emits `reviewer_declined`. On Claude,
    layers 1, 2 and 4 run in a `PreToolUse` hook *before* the classifier sees
-   the call (R2); on Codex they run in the app-server approval handler.
+   the call (R2); on Codex they run in the app-server approval handler
+   for layers 1 and 4, and layer 2 is open — see R8.
 4. **Jarvis ALLOW** — v1 rules' ALLOW verdicts and the owner's persistent
    allowlist, honoured only for a human-backed approver (v1 invariant kept;
    a strict-profile task has a deny-all approver and nothing auto-runs).
@@ -719,6 +720,17 @@ for everything not under `jarvis/v2/`.
   daemon is not a Claude Code session, so this does not affect v2 at runtime,
   but it is the D7 case in miniature and it is why the escape hatch shows the
   whole command to the owner rather than trying to get around the reviewer.
+- **R8** (from WP4, 2026-09-15) **Codex has no universal pre-tool callback
+  under `auto_review`.** The provider only sees the approval requests the
+  reviewer chooses to escalate, so §6 layer 2 (always-ask) cannot be
+  enforced from those alone; `CodexProvider` refuses a brief with a
+  non-empty `always_ask` rather than claim an enforcement it lacks. WP5 must
+  find the Codex analogue of Claude's `PreToolUse` hook (0.153.4 ships a
+  hooks mechanism — `--dangerously-bypass-hook-trust` exists — so a
+  pre-execution hook is the first thing to verify) or gate always-ask
+  tools structurally (a `jarvis-mcp` tool that asks, with the native
+  equivalent removed from the toolset). Until then, a project with
+  always-ask additions routes its tasks to Claude.
 - **R6** Both subscriptions' *actual* headless limits. The firm's ledger
   counts local admission, not quota; the visible window on Claude is what the
   routing threshold reads, and it has to come from somewhere real.
