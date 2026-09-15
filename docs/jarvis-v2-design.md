@@ -172,8 +172,14 @@ looks like. `reviewer_declined` is the event D7 hangs on.
   `resume=`. The raw CLI's `--permission-prompt-tool` no longer exists in
   2.1.233, so the SDK is the only supported path for headless permission
   routing.
-- Permission mode `auto`. The SDK's `can_use_tool` and a `PreToolUse` hook are
-  where Jarvis's rules (§6) sit.
+- Permission mode `auto`. **Jarvis's rules (§6) live in a `PreToolUse`
+  hook, not in `can_use_tool`** — verified 2026-09-15 (R2): under `auto`
+  the classifier settles every call and the callback is never consulted,
+  while the hook fires for each tool use. The hook evaluates layers 1, 2 and
+  4 of §6 and returns `permissionDecision: deny` (with the reason the model
+  sees) or `allow`; for an always-ask tool it blocks on the broker and
+  returns the owner's answer. The hook's timeout must therefore be at least
+  the broker's (10 minutes remote), or a slow owner reads as a deny.
 - One session per thread, `resume` across daemon restarts.
 - Worktree via the SDK's `cwd` pointed at the task worktree (Jarvis creates
   it, §7), not the CLI's `--worktree`, so the path is the same on both
@@ -243,7 +249,9 @@ The first layer to answer wins.
    rotation, outward-facing sends (`gmail_send`, `discord_send` to non-owner
    channels). Per project, additions allowed, removals not.
 3. **CLI reviewer** — Claude auto mode / Codex auto_review. Decides the grey
-   zone. An approval: runs. A decline: emits `reviewer_declined`.
+   zone. An approval: runs. A decline: emits `reviewer_declined`. On Claude,
+   layers 1, 2 and 4 run in a `PreToolUse` hook *before* the classifier sees
+   the call (R2); on Codex they run in the app-server approval handler.
 4. **Jarvis ALLOW** — v1 rules' ALLOW verdicts and the owner's persistent
    allowlist, honoured only for a human-backed approver (v1 invariant kept;
    a strict-profile task has a deny-all approver and nothing auto-runs).
@@ -677,8 +685,13 @@ for everything not under `jarvis/v2/`.
   spend; and passing `allowed_tools` auto-approves those tools **before**
   `can_use_tool` is consulted (the SDK warns), so the provider must not use
   `allowed_tools` for anything it wants gated — R2 is re-run without it.
-- **R2** Whether `can_use_tool` is consulted under `--permission-mode auto`,
-  or whether always-ask has to be a `PreToolUse` hook returning `ask`.
+- **R2** ~~Whether `can_use_tool` is consulted under `--permission-mode
+  auto`, or whether always-ask has to be a `PreToolUse` hook.~~ **Answered
+  2026-09-15:** under `auto`, `can_use_tool` was consulted for nothing and
+  the `PreToolUse` hook fired for every call (spike output: callback NONE,
+  hook `['Bash']`). The hook is the gate on the Claude side; see §5.3.
+  Open sub-question for WP3: whether a hook may block for minutes while an
+  owner is asked, or whether the provider must deny-and-requeue instead.
 - **R3** Claude Code's bubblewrap sandbox in headless mode under WSL2.
   Fallback: rely on auto mode without the sandbox on Claude workers, and
   prefer Codex (Landlock, default on) for tasks that need confinement.
