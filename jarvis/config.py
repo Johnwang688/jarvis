@@ -240,6 +240,9 @@ VOICES_DIR = Path(
 SESSIONS_DIR = Path(
     os.environ.get("JARVIS_SESSIONS", Path.home() / ".local" / "share" / "jarvis" / "sessions")
 )
+V2_DATA_DIR = Path(
+    os.environ.get("JARVIS_V2_DATA", Path.home() / ".local" / "share" / "jarvis" / "v2")
+)
 
 # Where context.py writes a tool result whole before truncating it in the
 # transcript, so the cut leaves a read_file-able pointer instead of a hole.
