@@ -709,8 +709,16 @@ for everything not under `jarvis/v2/`.
 - **R3** Claude Code's bubblewrap sandbox in headless mode under WSL2.
   Fallback: rely on auto mode without the sandbox on Claude workers, and
   prefer Codex (Landlock, default on) for tasks that need confinement.
-- **R4** Codex app-server approval requests answered by our client end to
-  end, including `requestUserInput` as a clarification question, on 0.153.4.
+- **R4** ~~Codex app-server approval requests answered by our client end to
+  end, including `requestUserInput` as a clarification question, on
+  0.153.4.~~ **Answered 2026-09-15** by `tests/spikes/r4_codex_live.py` on
+  the owner's ChatGPT login: health ok, one real turn, two tool calls
+  (`tool_started`/`tool_finished` pairs), the written file verified, usage
+  31129 in / 115 out / 27392 cached with `cost_usd=None`. **No approval
+  request reached the callback**: `auto_review` approved the shell command
+  itself, which is R8 observed live. The approval and `requestUserInput`
+  paths remain covered only by the fake-server suite until a turn provokes
+  an escalation.
 - **R5** Discord: thread creation and message editing under the bot's current
   permissions and intents; auto-archive reopen behaviour.
 - **R7** Launching a CLI worker is itself an action a classifier may
