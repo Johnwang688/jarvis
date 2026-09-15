@@ -205,6 +205,9 @@ looks like. `reviewer_declined` is the event D7 hangs on.
 - Sandbox `workspace-write`, approval policy `on-request`, and Codex's own
   automatic reviewer (`--approve-for-me` / `approvals_reviewer =
   "auto_review"`, already in the owner's config) as the auto-mode analogue.
+  On the CLI, `--approve-for-me` *implies* the workspace-write sandbox and
+  refuses an explicit `-s` beside it (verified 0.153.4); over the app-server
+  the two are separate fields and the provider sets both.
 - Native shell, file, web and MCP tools **enabled** (the firm disables them).
 - Thread per Jarvis thread; resume with `excludeTurns=true`.
 - Shared-login serialization and the daily admission allowance carried over as
