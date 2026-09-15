@@ -659,7 +659,14 @@ for everything not under `jarvis/v2/`.
 
 - **R1** Agent SDK on the subscription login, no API key. If not: workers on
   Claude are API-billed, and the routing policy defaults flip to Codex for
-  more roles.
+  more roles. *Partial finding 2026-09-15:* the SDK (0.2.153) spawns the
+  installed CLI and inherits its login; the spike (`tests/spikes/r1_sdk_login.py`)
+  could not complete because the CLI's stored OAuth session had expired and
+  a session run from inside the Claude desktop app cannot lend its own
+  host-managed auth to a child process. Two consequences already: the daemon
+  must run where a valid `claude login` exists, and `ClaudeProvider.health()`
+  must detect an expired login and report it as *unavailable* rather than
+  letting every task fail one turn in.
 - **R2** Whether `can_use_tool` is consulted under `--permission-mode auto`,
   or whether always-ask has to be a `PreToolUse` hook returning `ask`.
 - **R3** Claude Code's bubblewrap sandbox in headless mode under WSL2.
@@ -669,6 +676,13 @@ for everything not under `jarvis/v2/`.
   end, including `requestUserInput` as a clarification question, on 0.153.4.
 - **R5** Discord: thread creation and message editing under the bot's current
   permissions and intents; auto-archive reopen behaviour.
+- **R7** Launching a CLI worker is itself an action a classifier may
+  refuse. Verified 2026-09-15: from a Claude Code session in auto mode, the
+  command that starts `codex exec --approve-for-me` on the WP1 brief was
+  blocked by the auto-mode classifier as spawning an autonomous agent. The
+  daemon is not a Claude Code session, so this does not affect v2 at runtime,
+  but it is the D7 case in miniature and it is why the escape hatch shows the
+  whole command to the owner rather than trying to get around the reviewer.
 - **R6** Both subscriptions' *actual* headless limits. The firm's ledger
   counts local admission, not quota; the visible window on Claude is what the
   routing threshold reads, and it has to come from somewhere real.
