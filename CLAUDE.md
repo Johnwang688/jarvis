@@ -28,9 +28,9 @@ task runner with the intake gate (WP11 — `TaskControl` in
 `jarvis/v2/control.py` is the verb interface every surface uses). **The
 backend ran one real task end to end on 2026-09-16** (design §17): Claude
 orchestrated, Codex implemented in a worktree, a fresh Claude reviewer
-failed it once and passed it second time, DONE in 198 s. Remaining: the HUD
-rebuild (WP12, waiting on the owner's elaboration) and the long-bench
-comparison (WP13). Briefs for every package, including the ones in flight, are in
+failed it once and passed it second time, DONE in 198 s. **The HUD v2 landed the same
+day** (WP12a backend + WP12b frontend under `hud/`, `jarvis hud` opens it;
+design §12 and §18). Remaining: the long-bench comparison (WP13). Briefs for every package, including the ones in flight, are in
 `docs/codex-briefs/`; each merged package left a `*-notes.md` beside its
 brief with what its implementer verified and what it proposes.
 

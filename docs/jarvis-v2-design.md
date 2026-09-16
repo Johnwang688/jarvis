@@ -874,3 +874,25 @@ formatting nit rather than an acceptance criterion; both are prompt work in
 `roles.py`, not mechanism. And **the fast path is currently selected onto
 `deepseek-v4-flash` in the HUD roster**, which the v1 routing policy keeps
 personal chat off; the owner should reset that selection.
+
+## 18. HUD v2 landed (2026-09-16)
+
+WP12a (Codex) and WP12b (Opus) merged the same day, built against
+`docs/hud-api.md` in parallel and joined at the end: the built HUD served
+by `jarvis daemon2` on 8402 passed all 14 live checks against the real
+backend on the first run, and `jarvis hud` opened it in the owner's Windows
+browser. Two contract gaps the frontend found were closed in the backend
+the same hour (`timeout_s` and `allowlistable` on the approval wire,
+`task_id` on `proposal_reply`). The frontend's own suite found two real
+bugs before merge — the wake recognizer surviving the OFF mode, and the
+schedules form seeding from an unloaded list — and the backend's early
+runs reset the live fast-path selection once, which is the allowlist
+lesson again and is now isolated. R6's Codex half is answered by
+`account/rateLimits/updated`.
+
+Remaining: WP13 (the long-bench comparison, the owner's call on cost), a
+native Windows worker, the R8 hook on Codex, and prompt tuning in
+`roles.py` (§17's over-planning note). The daemon started by hand for the
+live check runs under a 30-minute timeout; a durable instance is
+`jarvis hud` from a terminal, or the systemd unit `jarvis daemon install`
+prints, re-pointed at `daemon2`.
