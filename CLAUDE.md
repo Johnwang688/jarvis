@@ -6,6 +6,33 @@ Notes for agents working on this codebase. Read before changing anything.
 make a decision worth not relitigating, update the relevant section in the same
 session — especially *Current state* and *Decisions already made*.
 
+## Jarvis v2 is underway (2026-09-15) — read `docs/jarvis-v2-design.md` first
+
+The v1 notes below remain the truth for everything **not** under
+`jarvis/v2/`. v2 turns Jarvis into a control plane: Claude Code and Codex are
+the brains for real work, the v1 loop survives only as the chat/voice fast
+path, and the design document holds every decision, the work-package table,
+and the live findings (R1–R8). Do not relitigate what its §2 table settles.
+
+Merged on `main` so far, each with a free suite under `tests/v2/`: stores +
+v1 session migration (WP1), the fast-path provider with `FAST_TOOLS` and
+`task_propose` (WP2), the Claude provider over the Agent SDK (WP3 — the
+`PreToolUse` hook is the gate; the SDK sandbox does **not** confine on this
+WSL2, so Claude workers run unsandboxed and confinement routes to Codex),
+the Codex provider over the app-server (WP4 — lifted from the trading firm's
+transport; its reviewer escalates nothing to us, design R8), a worktree per
+task (WP6), the daemon and local API (WP7, `jarvis daemon2`), one skills
+folder for three consumers plus `jarvis-mcp` (WP8), and Discord rendering
+(WP10a). Briefs for every package, including the ones in flight, are in
+`docs/codex-briefs/`; each merged package left a `*-notes.md` beside its
+brief with what its implementer verified and what it proposes.
+
+Two v1 facts the v2 work already changed: **skills live at
+`skills/<name>/SKILL.md`** (the Agent Skills format; `jarvis skills link`
+symlinks them into `~/.claude/skills` and `~/.codex/skills`, skipping the
+`jarvis-only` ones), and `jarvis/runtime.py` carries a `proposal` slot
+beside the plan slot.
+
 ## What this is
 
 A personal agent ("Jarvis") with a **hand-rolled** tool-calling loop, routed
