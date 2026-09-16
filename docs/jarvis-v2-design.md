@@ -890,6 +890,17 @@ runs reset the live fast-path selection once, which is the allowlist
 lesson again and is now isolated. R6's Codex half is answered by
 `account/rateLimits/updated`.
 
+**WP12c (same day, from the owner's first use):** a real New Project
+button with a directory picker (`GET /fs/dirs`, home and `/mnt/<drive>`
+only), chat threads draggable between projects (`PATCH /threads/{id}`;
+task threads stay with their task), quota drawn as bars per reported
+window beside a thinner local-allowance bar, and schedules as a dialog
+with presets and a live preview (`POST /schedules/preview`) — plus
+`schedule_create/list/delete` tools so "schedule a morning briefing at 8
+on weekdays" works from chat and both CLIs, with plain-English `when`
+parsing that refuses rather than guesses. One contract assumption the
+frontend made (no path means home) was met in the backend on merge.
+
 Remaining: WP13 (the long-bench comparison, the owner's call on cost), a
 native Windows worker, the R8 hook on Codex, and prompt tuning in
 `roles.py` (§17's over-planning note). The daemon started by hand for the
