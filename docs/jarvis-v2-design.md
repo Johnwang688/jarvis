@@ -804,6 +804,12 @@ for everything not under `jarvis/v2/`.
   tools structurally (a `jarvis-mcp` tool that asks, with the native
   equivalent removed from the toolset). Until then, a project with
   always-ask additions routes its tasks to Claude.
+- **R6, Codex half answered (WP12a, 2026-09-16):** the app-server protocol
+  on 0.153.4 declares `account/rateLimits/updated` with `usedPercent`,
+  `windowDurationMins` and `resetsAt` per window (primary/secondary,
+  sparse-merged). `CodexProvider` surfaces it as
+  `USAGE.provider_reported.rate_limits`; `/usage` shows it as `quota`. The
+  Claude half stays open: no documented quota endpoint, `quota: null`.
 - **R6** Both subscriptions' *actual* headless limits. The firm's ledger
   counts local admission, not quota; the visible window on Claude is what the
   routing threshold reads, and it has to come from somewhere real.
