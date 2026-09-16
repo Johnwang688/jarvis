@@ -35,8 +35,9 @@ class TaskControl(Protocol):
         window is withdrawn before any CLI session starts."""
 
     def resume(self, task_id: str, *, provider: ProviderName | None = None) -> Task:
-        """Requeue a BLOCKED/FAILED task; with `provider`, restart the
-        orchestrator there from durable state (design §8.4)."""
+        """Requeue a BLOCKED task; with `provider`, restart the orchestrator
+        there from durable state (design §8.4). FAILED is terminal in
+        `model.TRANSITIONS` and is refused with a sentence."""
 
     def status(self, task_id: str) -> Task:
         """The task as the runner sees it, status record current."""
