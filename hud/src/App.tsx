@@ -103,17 +103,25 @@ export default function App() {
 
   const send = useCallback(
     async (text: string, attachments: Attachment[]) => {
-      const threadId = live.current.threadId;
-      if (!threadId) {
-        dispatch({ type: "patch", patch: { error: "No thread selected." } });
-        return;
-      }
+      let threadId = live.current.threadId;
       dispatch({ type: "message", message: { role: "user", text } });
-      dispatch({ type: "patch", patch: { busy: true, orb: "thinking", status: "THINKING", draft: "" } });
+      dispatch({ type: "patch", patch: { busy: true, orb: "thinking", status: "SENDING", draft: "", error: "" } });
       try {
+        if (!threadId) {
+          // No thread yet: open a chat thread in the current project so
+          // "type and send" always works. The failure is shown, never swallowed.
+          const projectId = live.current.projectId;
+          if (!projectId) throw new Error("Pick or create a project first.");
+          dispatch({ type: "patch", patch: { status: "OPENING THREAD" } });
+          const t = await api.openThread({ project_id: projectId, role: "chat" });
+          threadId = t.id;
+          await refreshThreads();
+          patch({ threadId: t.id, tab: "chat" });
+        }
         await api.send(threadId, { text, attachments: attachments.length ? attachments : undefined });
+        dispatch({ type: "patch", patch: { status: "THINKING" } });
       } catch (e: any) {
-        dispatch({ type: "patch", patch: { busy: false, orb: "error", error: e.message } });
+        dispatch({ type: "patch", patch: { busy: false, orb: "error", status: "FAILED", error: `Could not send: ${e.message}` } });
       }
     },
     [dispatch],
@@ -131,12 +139,14 @@ export default function App() {
           if (mine) dispatch({ type: "patch", patch: { busy: true, orb: "thinking", draft: "" } });
           break;
         case "text_delta":
+          if (mine) dispatch({ type: "patch", patch: { status: "RESPONDING" } });
           if (mine) dispatch({ type: "delta", text: data.text || "" });
           break;
         case "text":
           if (mine) dispatch({ type: "settle", text: data.text || "" });
           break;
         case "tool_started":
+          if (mine) dispatch({ type: "patch", patch: { status: `RUNNING · ${data.name || "tool"}`, orb: "tool" } });
           if (mine)
             dispatch({
               type: "op_start",
@@ -144,6 +154,7 @@ export default function App() {
             });
           break;
         case "tool_finished":
+          if (mine) dispatch({ type: "patch", patch: { status: "THINKING", orb: "thinking" } });
           if (mine)
             dispatch({
               type: "op_done",
@@ -582,10 +593,12 @@ export default function App() {
           onNewProject={() => patch({ picker: "newProject" })}
           onNewThread={async () => {
             if (!state.projectId) return;
-            const t = await api.openThread({ project_id: state.projectId, role: "chat" }).catch(() => null);
-            if (t) {
+            try {
+              const t = await api.openThread({ project_id: state.projectId, role: "chat" });
               await refreshThreads();
-              patch({ threadId: t.id, tab: "chat" });
+              patch({ threadId: t.id, tab: "chat", error: "" });
+            } catch (e: any) {
+              patch({ error: `Could not open a thread: ${e.message}` });
             }
           }}
           onNewTask={() => patch({ picker: "newTask" })}

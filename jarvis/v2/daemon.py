@@ -12,6 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import importlib
 import json
 import logging
+import sys
 from pathlib import Path
 import queue
 import re
@@ -594,6 +595,7 @@ def _handler(daemon):
                     return
                 if isinstance(exc, APIError):
                     status = exc.status
+                    LOG.warning("%s %s -> %d %s", self.command, self.path, status, exc)
                 elif isinstance(exc, (DaemonError, BriefRefused, worktrees.WorktreeError)):
                     status = 409
                 elif isinstance(exc, (FileNotFoundError, LookupError)) and not isinstance(exc, KeyError):
@@ -696,8 +698,17 @@ def _handler(daemon):
                         filters["project_id"] = query["project"]
                     return 200, [to_json(obj) for obj in safe_list(store, **filters)]
                 if method == "POST" and parts[0] == "threads":
+                    # provider and brief are optional: a chat thread defaults to
+                    # the fast path with an empty brief (the HUD's New Thread
+                    # sent only project_id + role and got a silent 400 — found
+                    # live 2026-09-16). Other roles still need a provider.
                     body = _object(self._body(), ("project_id", "role", "provider", "brief"),
-                                   ("project_id", "role", "provider", "brief"))
+                                   ("project_id", "role"))
+                    body.setdefault("brief", {})
+                    if "provider" not in body:
+                        if body["role"] != "chat":
+                            raise APIError(400, "missing fields: provider")
+                        body["provider"] = "fast"
                     return 201, to_json(daemon.open_thread(**body))
                 if method == "POST":
                     body = _object(self._body(), ("project_id", "brief"), ("project_id", "brief"))
@@ -935,6 +946,12 @@ def main() -> int:
     # keeps `import jarvis.v2.daemon` free of the subprocess machinery.
     from .hatch import EscapeHatch
     from .runner import TaskRunner
+
+    # A daemon that logs nowhere is one whose failures are invisible: the
+    # first owner message that silently did nothing (2026-09-16) left no trace.
+    if not logging.getLogger().handlers:
+        logging.basicConfig(level=logging.INFO, stream=sys.stderr,
+                            format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
     remote = discord_connected()
     approvals = None

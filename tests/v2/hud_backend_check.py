@@ -202,6 +202,14 @@ class Backend(unittest.TestCase):
         body = self.request("GET", "/fs/dirs")
         self.assertEqual(body["path"], str(Path.home()))
 
+    def test_chat_thread_opens_with_project_and_role_only(self):
+        # The HUD's New Thread sends only these two; the daemon defaults the
+        # rest (found live 2026-09-16: a silent 400 and nothing on screen).
+        body = self.request("POST", "/threads", {"project_id": self.project.id, "role": "chat"}, status=201)
+        self.assertEqual(body["provider"], "fast")
+        self.assertEqual(body["role"], "chat")
+        self.request("POST", "/threads", {"project_id": self.project.id, "role": "implementer"}, status=400)
+
     def test_listeners_static_and_preview_origin(self):
         for port in (self.daemon.port, self.daemon.face_port):
             self.assertEqual(self.request("GET", "/status", port=port)["version"], 2)
