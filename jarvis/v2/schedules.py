@@ -76,6 +76,102 @@ class Cron:
         raise ValueError("cron has no occurrence in the next eight years")
 
 
+ACCEPTED_WHEN = ("a five-field cron; every day at 9; weekdays at 8:30; "
+                 "weekends at 10am; mondays at 10; every 15 minutes; every 2 hours")
+_DAYS = ("sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday")
+_PERIODS = {"every day": "*", "daily": "*", "weekdays": "1-5", "weekends": "0,6"}
+_PERIODS.update({form: str(i) for i, day in enumerate(_DAYS)
+                 for form in (day, day + "s", "every " + day)})
+_UNITS = {"second": 1, "minute": 60, "hour": 3600, "day": 86400, "week": 604800}
+_WHEN_RULES = (
+    (re.compile(r"every (?:(\d+) )?(second|minute|hour|day|week)s?"), "interval"),
+    (re.compile(r"(.+) at (\d{1,2})(?::([0-9]{2}))?\s*(am|pm)?"), "clock"),
+)
+
+
+def parse_when(text: str) -> dict | None:
+    """Return exactly one of {cron: str}/{every_s: int}, or refuse to guess."""
+    if not isinstance(text, str) or len(text) > 512:
+        return None
+    text = " ".join(text.lower().split())
+    try:
+        cron = Cron(text)
+        cron.next(time.time())
+        return {"cron": text}
+    except ValueError:
+        pass
+    for pattern, kind in _WHEN_RULES:
+        match = pattern.fullmatch(text)
+        if not match:
+            continue
+        if kind == "interval":
+            count, unit = match.groups()
+            seconds = int(count or 1) * _UNITS[unit]
+            return {"every_s": seconds} if seconds > 0 else None
+        period, hour, minute, meridiem = match.groups()
+        hour, minute = int(hour), int(minute or 0)
+        if period not in _PERIODS or minute > 59:
+            return None
+        if meridiem:
+            if not 1 <= hour <= 12:
+                return None
+            hour = hour % 12 + (12 if meridiem == "pm" else 0)
+        elif hour > 23:
+            return None
+        return {"cron": f"{minute} {hour} * * {_PERIODS[period]}"}
+    return None
+
+
+def _timing(cron=None, every_s=None):
+    if (cron is None) == (every_s is None):
+        raise ValueError("provide exactly one of cron or every_s")
+    if cron is not None:
+        return Cron(cron)
+    if type(every_s) is not int or every_s <= 0:
+        raise ValueError("every_s must be a positive integer")
+    return None
+
+
+def describe(cron=None, every_s=None) -> str:
+    """Read schedule timing in English, including arbitrary supported cron fields."""
+    parsed = _timing(cron, every_s)
+    if parsed is None:
+        for unit, seconds in reversed(tuple(_UNITS.items())):
+            if every_s % seconds == 0:
+                count = every_s // seconds
+                return f"every {count} {unit}{'s' if count != 1 else ''}"
+    minute, hour, dom, month, dow = parsed.parts
+    if dom == month == "*" and minute.isdecimal() and hour.isdecimal():
+        days = parsed.values[4]
+        period = ("every day" if days == set(range(7)) else
+                  "weekdays" if days == set(range(1, 6)) else
+                  "weekends" if days == {0, 6} else
+                  ", ".join(_DAYS[d] + "s" for d in sorted(days)))
+        return f"{period} at {int(hour):02d}:{int(minute):02d}"
+
+    def reading(part, values, noun):
+        if part == "*":
+            return f"every {noun}"
+        return f"{noun} " + ", ".join(str(n) for n in sorted(values))
+
+    day_join = " or " if not dom.startswith("*") and not dow.startswith("*") else "; "
+    weekdays = "every day of the week" if dow == "*" else "on " + ", ".join(_DAYS[d] for d in sorted(parsed.values[4]))
+    return (f"{reading(minute, parsed.values[0], 'minute')}; "
+            f"{reading(hour, parsed.values[1], 'hour')}; "
+            f"{reading(month, parsed.values[3], 'month')}; "
+            f"({reading(dom, parsed.values[2], 'day of month')}{day_join}{weekdays})")
+
+
+def preview(*, cron=None, every_s=None, now=None):
+    parsed = _timing(cron, every_s)
+    stamp = time.time() if now is None else now
+    upcoming = []
+    for _ in range(3):
+        stamp = parsed.next(stamp) if parsed else stamp + every_s
+        upcoming.append(datetime.fromtimestamp(stamp, ZONE).isoformat())
+    return {"next": upcoming, "describe": describe(cron, every_s)}
+
+
 def _iso(stamp):
     return datetime.fromtimestamp(stamp, timezone.utc).isoformat()
 
@@ -141,12 +237,18 @@ class Schedules:
             if not schedule_id or any(k in body for k in ("cron", "every_s", "enabled")):
                 record["next_run_at"] = self._next(record, now)
             self._save(record)
+            self._changed("schedule_updated" if schedule_id else "schedule_created", record)
             return record
 
     def delete(self, schedule_id):
         with self.lock:
-            self.get(schedule_id)
+            record = self.get(schedule_id)
             self._path(schedule_id).unlink()
+            self._changed("schedule_deleted", record)
+
+    def _changed(self, kind, record):
+        self.daemon.bus.publish({"kind": kind, "project_id": record["project_id"],
+                                 "data": {"schedule_id": record["id"]}})
 
     def fire(self, schedule_id, *, manual=False):
         from .daemon import APIError

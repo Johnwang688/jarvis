@@ -14,6 +14,7 @@ import sys
 import threading
 
 from jarvis import config, tools
+from .tools import schedules as _schedules  # noqa: F401  (registers schedule_*)
 from jarvis.tools.secrets import scrub
 
 PROTOCOL_VERSION = "2025-06-18"
@@ -28,6 +29,7 @@ MCP_TOOLS = frozenset({
     "get_datetime", "gmail_search", "gmail_read", "gmail_send", "discord_dm_owner",
     "spotify_play", "spotify_status", "spotify_search", "spotify_pause",
     "cad_status", "cad_find_part",
+    "schedule_create", "schedule_list", "schedule_delete",
 })
 _missing = MCP_TOOLS - tools.REGISTRY.keys()
 if _missing:

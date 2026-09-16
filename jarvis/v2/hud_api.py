@@ -14,7 +14,7 @@ from urllib.parse import unquote, urlsplit
 from jarvis.tools.secrets import is_protected, scrub
 from jarvis.tools.search import SKIP_DIRS as SEARCH_SKIP_DIRS
 from .ledger import UsageLedger
-from .model import ProviderName
+from .model import ProviderName, Role, to_json
 from .permissions import denied_file
 from .provider import UserMessage
 from .stores import _write_bytes
@@ -102,6 +102,41 @@ def tree(project, name, depth):
                 walk(child, remaining - 1, ancestors | {actual})
     walk(directory, depth, {directory})
     return {"path": name, "entries": entries}
+
+
+def _picker_allowed(path):
+    return (path.is_relative_to(Path.home().resolve())
+            or bool(re.match(r"^/mnt/[a-zA-Z](?:/|$)", str(path))))
+
+
+def directories(name):
+    """List only directories whose lexical and resolved paths are in scope."""
+    if not isinstance(name, str) or "\x00" in name:
+        fail(400, "invalid path")
+    raw = Path(name)
+    if not raw.is_absolute() or ".." in raw.parts or not _picker_allowed(raw):
+        fail(403, "directory outside allowed roots")
+    try:
+        directory = raw.resolve()
+    except (OSError, RuntimeError):
+        fail(403, "directory cannot be resolved safely")
+    if not _picker_allowed(directory):
+        fail(403, "directory outside allowed roots")
+    if not directory.is_dir():
+        fail(404, "directory not found")
+    names = []
+    for child in directory.iterdir():
+        if child.name.startswith("."):
+            continue
+        try:
+            actual = child.resolve()
+            if _picker_allowed(actual) and actual.is_dir():
+                names.append(child.name)
+        except (OSError, RuntimeError):
+            continue
+    parent = directory.parent
+    return {"path": str(directory), "parent": str(parent) if _picker_allowed(parent) else None,
+            "dirs": sorted(names)}
 
 
 def assemble_turn(project, body):
@@ -483,9 +518,16 @@ def route(handler, daemon, parts, query):
     if parts == ["usage"] and method == "GET":
         _object(query, ())
         return 200, usage(daemon)
+    if parts == ["fs", "dirs"] and method == "GET":
+        _object(query, ("path",), ("path",))
+        return 200, directories(query["path"])
     if parts[0] == "schedules":
         _object(query, ())
         schedules = daemon.schedules
+        if parts == ["schedules", "preview"] and method == "POST":
+            from .schedules import preview
+            body = _object(handler._body(), ("cron", "every_s"))
+            return 200, preview(**body, now=schedules.clock())
         if len(parts) == 1:
             if method == "GET":
                 return 200, schedules.list()
@@ -544,6 +586,30 @@ def route(handler, daemon, parts, query):
                 if mode is not None:
                     target.chmod(mode)
                 return 200, {"mtime": target.stat().st_mtime}
+    if len(parts) == 2 and parts[0] == "threads" and method == "PATCH":
+        _object(query, ())
+        body = _object(handler._body(), ("project_id",), ("project_id",))
+        with daemon._lock:
+            daemon._active()
+            thread = daemon.require(stores.threads, parts[1])
+            if thread.task_id is not None:
+                fail(409, "task threads move with their task")
+            if thread.role != Role.CHAT:
+                fail(409, "only chat threads can move")
+            target = daemon.require(stores.projects, body["project_id"])
+            previous = thread.project_id
+            thread.project_id = target.id
+            stores.threads.save(thread)
+            # The live session writes its own Thread on usage/finish. Keep its
+            # identity (also held by the provider) while updating its project.
+            session = daemon._sessions.get(thread.id)
+            if session is not None:
+                session.thread.project_id = target.id
+            daemon.bus.publish({"kind": "thread_moved", "thread_id": thread.id,
+                                "project_id": target.id, "data": {
+                                    "thread_id": thread.id, "from_project_id": previous,
+                                    "to_project_id": target.id}})
+            return 200, to_json(thread)
     if len(parts) == 3 and parts[0] == "threads" and parts[2] in ("transcript", "send"):
         thread = daemon.require(stores.threads, parts[1])
         if parts[2] == "send" and method == "POST":

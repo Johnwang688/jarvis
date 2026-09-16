@@ -49,6 +49,7 @@ from ..provider import (
     UserMessage,
 )
 from ..tools import propose as _propose  # noqa: F401  (registers task_propose)
+from ..tools import schedules as _schedules  # noqa: F401  (registers schedule_*)
 
 # Eight steps, per §8.1. Not a work limit — a *definition*: anything that needs
 # more than eight rounds of read-and-think is work, and work goes to a task.
@@ -130,6 +131,9 @@ FAST_TOOLS: frozenset[str] = frozenset(
         "spotify_status",
         # the door out
         "task_propose",
+        "schedule_create",
+        "schedule_list",
+        "schedule_delete",
     }
 )
 
