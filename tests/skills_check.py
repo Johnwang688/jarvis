@@ -63,7 +63,7 @@ def crud_checks() -> None:
 
 def starter_checks() -> None:
     """The checked-in starter skills must parse and carry descriptions."""
-    names = {p.stem for p in REPO_SKILLS.glob("*.md")}
+    names = {p.parent.name for p in REPO_SKILLS.glob("*/SKILL.md")}
     assert {
         "email-triage",
         "morning-briefing",
@@ -72,7 +72,7 @@ def starter_checks() -> None:
         "self-improve",
         "vercel-deploy",
     } <= names, names
-    for path in REPO_SKILLS.glob("*.md"):
+    for path in REPO_SKILLS.glob("*/SKILL.md"):
         description, body = skills_mod._parse(path.read_text(encoding="utf-8"))
         assert description, f"{path.name} has no description"
         assert body, f"{path.name} has no instructions"

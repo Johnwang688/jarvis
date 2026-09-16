@@ -1,7 +1,7 @@
 """Skills: reusable how-to instructions Jarvis loads on demand.
 
 Same design as memory (one markdown file per item, pulled via tools, nothing
-auto-injected): a skill is skills/<name>.md with a one-line description in
+auto-injected): a skill is skills/<name>/SKILL.md with a one-line description in
 frontmatter and the instructions as the body. The owner writes them by hand,
 or Jarvis records one with skill_write when taught a workflow.
 
@@ -13,7 +13,10 @@ content, which covers laundering them into a skill.
 
 from __future__ import annotations
 
+import json
 import re
+import warnings
+from pathlib import Path
 from typing import Annotated
 
 from .. import config
@@ -27,6 +30,21 @@ _INDEX_MAX_SKILLS = 30
 _INDEX_MAX_CHARS = 2000
 
 _index_cache: tuple[tuple, str] | None = None  # (freshness key, rendered)
+_warned_flat: set[Path] = set()
+
+
+def _paths() -> dict[str, Path]:
+    """New layout wins during the one-release flat-file compatibility period."""
+    paths = {}
+    for path in sorted(config.SKILLS_DIR.glob("*.md")):
+        absolute = path.absolute()
+        if absolute not in _warned_flat:
+            warnings.warn(f"Legacy flat skill {path}; migrate to {path.stem}/SKILL.md",
+                          FutureWarning, stacklevel=2)
+            _warned_flat.add(absolute)
+        paths[path.stem] = path
+    paths.update({p.parent.name: p for p in config.SKILLS_DIR.glob("*/SKILL.md")})
+    return dict(sorted(paths.items()))
 
 
 def _index_key() -> tuple:
@@ -41,8 +59,8 @@ def _index_key() -> tuple:
         return (
             str(config.SKILLS_DIR),
             tuple(
-                (p.name, p.stat().st_mtime_ns, p.stat().st_size)
-                for p in sorted(config.SKILLS_DIR.glob("*.md"))
+                (str(p), p.stat().st_mtime_ns, p.stat().st_size)
+                for p in _paths().values()
             ),
         )
     except OSError:
@@ -63,9 +81,9 @@ def index() -> str:
         return _index_cache[1]
 
     entries = []
-    for path in sorted(config.SKILLS_DIR.glob("*.md")) if config.SKILLS_DIR.exists() else []:
+    for name, path in _paths().items():
         description, _ = _parse(path.read_text(encoding="utf-8"))
-        entries.append(f"- {path.stem}: {description or '(no description)'}")
+        entries.append(f"- {name}: {description or '(no description)'}")
 
     rendered = ""
     if entries:
@@ -88,17 +106,33 @@ def index() -> str:
     return rendered
 
 
+def _scalar(value: str) -> str:
+    value = value.strip()
+    if value.startswith('"'):
+        try:
+            return json.loads(value)
+        except ValueError:
+            pass
+    if len(value) >= 2 and value.startswith("'") and value.endswith("'"):
+        return value[1:-1].replace("''", "'")
+    return value
+
+
+def metadata(text: str) -> dict[str, str]:
+    """Read the simple, one-line frontmatter fields used by Jarvis skills."""
+    match = re.match(r"^---\s*\n(.*?)\n---\s*\n", text, re.DOTALL)
+    if not match:
+        return {}
+    return {key.strip(): _scalar(value) for line in match[1].splitlines()
+            for key, sep, value in [line.partition(":")] if sep}
+
+
 def _parse(text: str) -> tuple[str, str]:
     """-> (description, body) from a skill file with simple frontmatter."""
     match = re.match(r"^---\s*\n(.*?)\n---\s*\n(.*)$", text, re.DOTALL)
     if not match:
         return "", text.strip()
-    description = ""
-    for line in match.group(1).splitlines():
-        key, _, value = line.partition(":")
-        if key.strip() == "description":
-            description = value.strip()
-    return description, match.group(2).strip()
+    return metadata(text).get("description", ""), match.group(2).strip()
 
 
 @tool
@@ -110,17 +144,17 @@ def skill_list() -> str:
     """
     config.SKILLS_DIR.mkdir(parents=True, exist_ok=True)
     lines = []
-    for path in sorted(config.SKILLS_DIR.glob("*.md")):
+    for name, path in _paths().items():
         description, _ = _parse(path.read_text(encoding="utf-8"))
-        lines.append(f"- {path.stem}: {description or '(no description)'}")
+        lines.append(f"- {name}: {description or '(no description)'}")
     return "\n".join(lines) or "No skills saved yet."
 
 
 @tool
 def skill_read(name: Annotated[str, "Skill name from skill_list"]) -> str:
     """Load a skill's full instructions. Follow them for the current task."""
-    path = config.SKILLS_DIR / f"{name}.md"
-    if not path.exists():
+    path = _paths().get(name)
+    if path is None:
         return f"Error: no skill named {name!r}. Check skill_list."
     description, body = _parse(path.read_text(encoding="utf-8"))
     return f"Skill: {name} — {description}\n\n{body}"
@@ -145,10 +179,20 @@ def skill_write(
     if not _NAME.match(name):
         return "Error: name must be short kebab-case (letters, digits, dashes)."
     config.SKILLS_DIR.mkdir(parents=True, exist_ok=True)
-    path = config.SKILLS_DIR / f"{name}.md"
-    existed = path.exists()
+    path = config.SKILLS_DIR / name / "SKILL.md"
+    previous = _paths().get(name)
+    existed = previous is not None
+    extra = ""
+    if previous is not None:
+        header = re.match(r"^---\s*\n(.*?)\n---\s*\n",
+                          previous.read_text(encoding="utf-8"), re.DOTALL)
+        if header:
+            extra = "".join(line + "\n" for line in header[1].splitlines()
+                            if line.partition(":")[0].strip() not in {"name", "description"})
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        f"---\ndescription: {description.strip()}\n---\n\n{instructions.strip()}\n",
+        f"---\nname: {name}\ndescription: {json.dumps(description.strip(), ensure_ascii=False)}\n"
+        f"{extra}---\n\n{instructions.strip()}\n",
         encoding="utf-8",
     )
     global _index_cache

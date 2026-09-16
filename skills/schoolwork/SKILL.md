@@ -1,4 +1,5 @@
 ---
+name: schoolwork
 description: Use when the owner asks about schoolwork or assignments — what's due, "review my schoolwork", preparing for the next school day, Canvas or MySchoolApp
 ---
 

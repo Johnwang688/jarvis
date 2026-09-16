@@ -1,4 +1,5 @@
 ---
+name: cad
 description: Use when the owner asks to build, modify, or inspect a CAD assembly in Onshape — inserting parts, moving them, fixing placements, or checking what an assembly looks like
 ---
 

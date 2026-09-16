@@ -351,6 +351,18 @@ def cmd_daemon2(args) -> int:
     return daemon.main()
 
 
+def cmd_skills(args) -> int:
+    from .v2 import skills_link
+
+    return skills_link.main(unlink=args.unlink, dry_run=args.dry_run)
+
+
+def cmd_mcp(args) -> int:
+    from .v2 import mcp
+
+    return mcp.print_config() if args.action == "config" else mcp.main()
+
+
 def cmd_daemon(args) -> int:
     from . import daemon
 
@@ -720,6 +732,17 @@ def cmd_config(args) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(prog="jarvis", description="Your personal agent.")
     sub = parser.add_subparsers(dest="command")
+
+    skills = sub.add_parser("skills", help="share skills with local CLIs")
+    skills_sub = skills.add_subparsers(dest="action", required=True)
+    link = skills_sub.add_parser("link", help="link repo skills into Claude Code and Codex")
+    link.add_argument("--unlink", action="store_true", help="remove only links into this repo")
+    link.add_argument("--dry-run", action="store_true", help="print the plan without changing files")
+    link.set_defaults(func=cmd_skills)
+
+    mcp = sub.add_parser("mcp", help="run the Jarvis MCP stdio server")
+    mcp.add_argument("action", nargs="?", choices=["config"], help="print CLI registration snippets")
+    mcp.set_defaults(func=cmd_mcp)
 
     chat = sub.add_parser("chat", help="interactive session (default)")
     chat.add_argument("-m", "--model", help="override the orchestrator model")

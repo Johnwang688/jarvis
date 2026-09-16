@@ -1,4 +1,6 @@
 ---
+name: permission-allowlist
+jarvis-only: true
 description: Use when the owner asks to add, remove, or inspect a command in Jarvis’s persistent permissions allowlist.
 ---
 
