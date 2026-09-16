@@ -1,4 +1,6 @@
 ---
+name: manual-compaction
+jarvis-only: true
 description: Use when the owner says "/compact", "compact context", "shorten the context", or "summarize so we can continue"
 ---
 

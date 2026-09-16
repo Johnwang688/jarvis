@@ -1,4 +1,5 @@
 ---
+name: morning-briefing
 description: Use when the owner asks for a briefing, "what's up today", or what they should know — time, mail, and ongoing work in one short report
 ---
 

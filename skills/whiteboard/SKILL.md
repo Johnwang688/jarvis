@@ -1,4 +1,6 @@
 ---
+name: whiteboard
+jarvis-only: true
 description: Use when the owner asks to open or close the whiteboard / design board / sketch pad
 ---
 

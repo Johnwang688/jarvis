@@ -1,4 +1,6 @@
 ---
+name: self-improve
+jarvis-only: true
 description: Use when the owner asks you to improve, fix, or extend your own code — "improve yourself", "add a tool for X", "fix that bug in your harness"
 ---
 

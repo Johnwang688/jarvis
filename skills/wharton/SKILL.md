@@ -1,4 +1,5 @@
 ---
+name: wharton
 description: Use when the owner mentions Wharton — the vault, its docs/briefs/index, IC meetings ("what did we say about X"), or preparing an analysis doc for the team
 ---
 

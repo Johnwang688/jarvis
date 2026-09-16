@@ -1,4 +1,5 @@
 ---
+name: vercel-deploy
 description: Use when the owner asks you to build AND ship something to the web — "make a game and deploy it", "put this on vercel", "ship it"
 ---
 

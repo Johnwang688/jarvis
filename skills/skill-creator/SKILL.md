@@ -1,4 +1,5 @@
 ---
+name: skill-creator
 description: Use when the owner wants to create, improve, or rework a skill — "make a skill for X", "help me build a skill", "that should be a skill"
 ---
 

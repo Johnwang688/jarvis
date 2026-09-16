@@ -1,4 +1,5 @@
 ---
+name: email-triage
 description: Use when the owner asks about their email — "check my email", "anything important?", "any mail from X?"
 ---
 
