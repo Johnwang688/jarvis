@@ -599,31 +599,85 @@ characters on Discord; the HUD shows the full version.
 
 ---
 
-## 12. HUD v2 (G3) — placeholder pending the owner's elaboration
+## 12. HUD v2 (G3) — specified 2026-09-16 from the owner's elaboration
 
-Settled so far:
+**What to take from each app, in the owner's words, mapped onto v2.**
+From Codex: the built-in browser/preview pane, the diff viewer, editing
+markdown in place with a rendered preview, reading docs rendered rather
+than as source. From Claude Code: WSL and Windows projects side by side
+without restarting, scheduled tasks, orchestration made visible, and the
+project organization. From both: Codex's per-project access folders inside
+Claude's project tree. Plus: auto permissions by default, usage for both
+providers, and dictation with an adjustable send mode.
 
-- **Rebuilt** as a real frontend served by the daemon, still opened in the
-  owner's Windows Chrome in app mode on the fixed port so the mic grant
-  survives. Stack to be chosen in the HUD work package; the requirement is a
-  component model and a test harness equal to v1's headless suites.
-- **Layout** in the shape of the Claude Code / Codex desktop apps: left rail
-  of projects → threads/tasks; main pane the active thread (rendered
-  markdown, tool stream, diff view for file changes); right pane the task's
-  plan, status record and approval queue. The orb stays as the push-to-talk
-  control and state indicator.
-- **Carried over as components:** orb + ring sets, avatar face, wake word and
-  the always-open mic capture pipeline, TTS speculation, markdown renderer
-  (DOM-built, never `innerHTML`), approval card semantics (deny cheap,
-  authorize deliberate, nothing keyboard-defaulted), model and voice pickers.
-- **Invariants that do not move:** the HUD is the approval surface, so no
-  agent-reachable lever closes it, drives it or navigates it
-  (`is_face_origin`, `FORBIDDEN_TITLES`, avatar SVG sanitizer); `<title>`
-  stays `J.A.R.V.I.S.`.
-- **To be specified by the owner:** which Claude Code app behaviours and which
-  Codex app behaviours to take, and what the sci-fi theme must keep.
+### 12.1 Decisions
 
----
+- **Stack:** Vite + React + TypeScript under `hud/`, built to static files
+  the daemon serves; opened in the owner's Windows Chrome in app mode on
+  **`FACE_PORT` 8402** (a second listener on the daemon, same origin as v1,
+  so the mic grant survives). Monaco for the editor and the diff view; a
+  sanitized markdown renderer (markdown-it + DOMPurify, links `_blank`,
+  no raw HTML) for docs and replies. Headless Playwright suites as v1.
+- **Windows projects are `/mnt/c` paths worked from WSL** for now, shown
+  with a Windows badge in the sidebar and a one-line caution about git on
+  9p. A native Windows worker over a bridge is a later package, not this
+  one.
+- **Two sub-packages in parallel against one contract** (`docs/hud-api.md`):
+  WP12a backend routes (Codex), WP12b the frontend (Opus). The frontend
+  develops against a mock of the contract and is verified against the real
+  daemon at the end.
+- **The model picker chooses the fast path's model only.** Provider and
+  model per role come from the routing table (§8), shown read-only beside
+  it with a link to the routing editor. The picker can never touch Claude
+  or Codex settings.
+- **Permissions default to `auto`** (D6); the project header carries the
+  profile switch (auto / ask / strict) and the always-ask additions.
+- **Previews and agent-written pages are a separate origin**
+  (`WORKSHOP_PORT` 8403, v1's rule): the HUD is the approval surface, and
+  an iframe that could reach `/approvals` would let an agent approve
+  itself. The preview pane is an iframe onto that origin or onto a
+  `localhost` dev server the owner names; never onto the HUD's own origin.
+- **Dictation send mode is a three-position control in the input bar:**
+  AUTO (send when speech ends), REVIEW (transcript lands in the box, the
+  owner clicks send), OFF (v1's mic mute). Persisted; a fresh window boots
+  into **REVIEW**, the mic-fails-toward-muted reasoning applied to sending.
+  The v1 capture pipeline (always-open mic, ring buffer, adaptive
+  threshold, wake word, pre-roll, his-own-speech suppression) carries over
+  as a component unchanged in behaviour; the mode only decides what
+  happens to a finished utterance.
+- **Usage panel:** per provider, the ledger's state and today's tokens /
+  equivalent dollars, plus the provider's own quota where one exists —
+  Codex's app-server rate-limit windows (verify on 0.153.4; R6), and for
+  Claude nothing invented: the ledger figures, labelled equivalent.
+- **Scheduled tasks** are a backend feature the HUD manages: a schedule is
+  a project, a brief, a cron or interval, enabled or not; the daemon's
+  scheduler creates and starts a task when due, through the same intake
+  gate, so a scheduled task can still stop and ask.
+
+### 12.2 Layout
+
+```
+┌ sidebar ──────┬ main ──────────────────────────────┬ right ────────────┐
+│ projects       │ tabs: Chat · Task · File · Diff ·   │ Task: plan, status│
+│  ▸ threads     │       Preview · Doc                 │ record, routing   │
+│  ▸ tasks       │ chat: rendered replies, tool stream,│ line, threads     │
+│    ▸ threads   │       live draft, input bar with    │ Approvals queue   │
+│ schedules      │       dictation mode + attachments  │ Usage (both)      │
+│ usage · route  │ orb (PTT + state) docked bottom-left│ Schedules         │
+└────────────────┴─────────────────────────────────────┴───────────────────┘
+```
+
+Sci-fi skin kept: the orb with its ring sets and avatar face, the cyan
+palette, angular panels; but the information architecture above is the
+desktop apps'. Carried over as components: orb, avatar face, wake word,
+capture pipeline, TTS speculation, approval card semantics (deny cheap,
+authorize deliberate, nothing keyboard-defaulted, `textContent` only),
+model / voice / avatar pickers, session (now thread) picker.
+
+**Invariants that do not move:** no agent-reachable lever closes, drives
+or navigates the HUD; `<title>` stays `J.A.R.V.I.S.`; `is_face_origin`
+and `FORBIDDEN_TITLES` still refuse it; avatar SVGs still go through the
+sanitizer and an `<img>`.
 
 ## 13. What carries over, migrates, retires
 
