@@ -272,3 +272,52 @@ h2.bar {
 table.plain { width: 100%; border-collapse: collapse; font: 11px var(--mono); }
 table.plain th, table.plain td { border-bottom: 1px solid var(--cyan-faint); padding: 4px 6px; text-align: left; }
 table.plain th { color: var(--cyan); font-weight: 600; }
+
+/* ---- quota bars ----
+   Two kinds, deliberately unlike each other: a provider's reported window is
+   the thick bar, the local allowance the thin one. Colour steps at 70% and 90%
+   (lib/quota.ts owns the numbers; this owns only what they look like). */
+.qbar { margin: 4px 0 6px; }
+.qbar .qhead { display: flex; font: 10px var(--mono); color: var(--dim); }
+.qbar .qname { text-transform: uppercase; letter-spacing: 0.12em; }
+.qbar .qpct { margin-left: auto; color: var(--text); }
+.qbar .qtrack { height: 7px; background: rgba(56, 189, 248, 0.10); border: 1px solid var(--cyan-faint); }
+.qbar .qtrack.thin { height: 3px; }
+.qbar .qfill { display: block; height: 100%; background: var(--cyan); transition: width 0.2s linear; }
+.qbar .qfill.warn { background: var(--amber); }
+.qbar .qfill.high { background: var(--red); }
+.qbar .qnote { font: 10px var(--mono); color: var(--dim); margin-top: 2px; }
+
+/* ---- sidebar: the new-project button, drag and the thread menu ---- */
+#newproject {
+  display: block; width: calc(100% - 16px); margin: 8px; padding: 8px 10px;
+  border-color: var(--cyan); color: var(--cyan); letter-spacing: 0.16em;
+  background: rgba(56, 189, 248, 0.14); flex: 0 0 auto;
+}
+#newproject:hover { background: rgba(56, 189, 248, 0.26); color: #e0f2fe; }
+
+.tree-row[draggable="true"] { cursor: grab; }
+.tree-row.dragging { opacity: 0.45; }
+/* The drop target lights up only when the drop would do something — a row that
+   lit up for a no-op would be a promise the PATCH then breaks. */
+.tree-row.droptarget { outline: 1px dashed var(--cyan); background: rgba(56, 189, 248, 0.22); }
+.tree-row .menu {
+  margin-left: auto; flex: 0 0 auto; font: 11px var(--mono); color: var(--dim);
+  padding: 0 4px; border: none; background: none; letter-spacing: 0;
+}
+.tree-row:hover .menu { color: var(--cyan); }
+
+.threadmenu {
+  position: fixed; z-index: 96; background: var(--panel-bg);
+  border: 1px solid var(--cyan-dim); min-width: 190px; padding: 4px 0;
+  box-shadow: 0 6px 24px rgba(2, 5, 10, 0.7);
+}
+.threadmenu .mrow { padding: 5px 12px; cursor: pointer; font-size: 12px; white-space: nowrap; }
+.threadmenu .mrow:hover { background: rgba(56, 189, 248, 0.16); }
+.threadmenu .mhead {
+  padding: 5px 12px; font: 9px var(--mono); letter-spacing: 0.2em;
+  color: var(--cyan); text-transform: uppercase;
+}
+.threadmenu .mwhy { padding: 5px 12px; font-size: 11px; color: var(--dim); max-width: 230px; white-space: normal; }
+
+.movenote { padding: 4px 12px; }

@@ -707,13 +707,13 @@ def panels_checks(page, mock):
     until(lambda: len(mock.sent("POST", "/schedules/s1/run-now")) > n)
     check("run now calls run-now", len(mock.sent("POST", "/schedules/s1/run-now")) > n)
 
-    page.locator('[data-testid="schedule-brief"]').fill("weekly sweep")
-    page.locator('[data-testid="schedule-cron"]').fill("0 9 * * 1")
-    page.locator('[data-testid="schedule-create"]').click()
-    body = until(lambda: mock.sent("POST", "/schedules") or None)
-    check("creating a schedule sends the brief and the cron",
-          bool(body) and body[-1].get("cron") == "0 9 * * 1"
-          and body[-1].get("brief") == "weekly sweep", str(body[-1] if body else None))
+    # Creating one is a dialog now (schedule_dialog_checks): the inline form was
+    # three boxes that quietly required the owner to know cron.
+    check("creating a schedule is a dialog, not an inline cron box",
+          page.locator('[data-testid="schedule-new"]').count() == 1
+          and page.locator('[data-testid="schedule-cron"]').count() == 0)
+    check("and the panel says he can be asked in chat instead",
+          "chat" in page.locator('[data-testid="schedules-chat-note"]').inner_text().lower())
 
     route = page.locator('[data-testid="route"]').first
     check("the routing table is shown", "orchestrator" in route.inner_text())
@@ -798,6 +798,415 @@ def window_checks(page, mock):
     _ = mock
 
 
+
+
+# ---------------------------------------------------------------------------
+# WP12c — the owner's first-use feedback
+# ---------------------------------------------------------------------------
+
+# HTML5 drag and drop, dispatched a step at a time so React can flush between
+# them: `dragstart` sets the state that `dragover` reads, and firing all four
+# inside one evaluate would test a component that never re-rendered.
+#
+# The harness note from WP12b applies — an evaluate whose **last expression is
+# a function** is called by Playwright — so this ends in a plain value.
+DND = """
+window.__dnd = {
+  dt: null, src: null,
+  start(sel) {
+    this.dt = new DataTransfer();
+    this.src = document.querySelector(sel);
+    this.src.dispatchEvent(new DragEvent('dragstart', {bubbles: true, dataTransfer: this.dt}));
+    return this.dt.getData('text/plain');
+  },
+  over(sel) {
+    const e = new DragEvent('dragover', {bubbles: true, cancelable: true, dataTransfer: this.dt});
+    document.querySelector(sel).dispatchEvent(e);
+    return e.defaultPrevented;
+  },
+  drop(sel) {
+    document.querySelector(sel).dispatchEvent(
+      new DragEvent('drop', {bubbles: true, cancelable: true, dataTransfer: this.dt}));
+    return true;
+  },
+  end() {
+    this.src.dispatchEvent(new DragEvent('dragend', {bubbles: true, dataTransfer: this.dt}));
+    return true;
+  },
+};
+true;
+"""
+
+
+def expand(page, project_id: str, child: str, tries: int = 4):
+    """Click a project row until the child row is on screen.
+
+    A project row toggles, and by this point in the suite earlier sections have
+    toggled several of them — so "click it once" is a coin flip, not a step.
+    """
+    for _ in range(tries):
+        if page.locator(f'[data-testid="{child}"]').count() > 0:
+            return True
+        page.locator(f'[data-testid="project-{project_id}"]').click()
+        until(lambda: page.locator(f'[data-testid="{child}"]').count() > 0, timeout=1.0)
+    return page.locator(f'[data-testid="{child}"]').count() > 0
+
+
+def newproject_checks(page, mock):
+    print("\nnew project: the button, the picker, the dialog")
+    # The owner's complaint was that creating a project was not obvious. At the
+    # window's real size it has to be visible without scrolling anything.
+    page.set_viewport_size({"width": 1280, "height": 800})
+    time.sleep(0.2)
+    btn = page.locator('[data-testid="new-project"]')
+    check("the new-project control is a button, not a tree row",
+          btn.evaluate("el => el.tagName") == "BUTTON",
+          btn.evaluate("el => el.tagName"))
+    box = btn.bounding_box()
+    check("it is visible without scrolling at 1280x800",
+          bool(box) and box["y"] >= 0 and box["y"] + box["height"] <= 800, str(box))
+    tree = page.locator('[data-testid="project-p1"]').bounding_box()
+    check("and it is above the project tree, not below it",
+          bool(tree) and box["y"] < tree["y"], f"{box['y']} vs {tree['y'] if tree else None}")
+
+    btn.click()
+    page.wait_for_selector('[data-testid="project-name"]')
+
+    # The directory picker lists what the mock serves, and only that.
+    page.locator('[data-testid="browse-root"]').click()
+    page.wait_for_selector('[data-testid="dirpicker"]')
+    until(lambda: page.locator('[data-testid="dir-projects"]').count() > 0)
+    listing = page.locator('[data-testid="dir-list"]').inner_text()
+    check("the picker lists the folders the backend named",
+          "projects" in listing and "notes" in listing, listing)
+    check("and lists nothing else — it is a directory route, not a file one",
+          "calc.py" not in listing and ".env" not in listing, listing)
+
+    # Double-click descends; the breadcrumb comes back.
+    page.locator('[data-testid="dir-projects"]').dblclick()
+    until(lambda: page.locator('[data-testid="dir-Jarvis"]').count() > 0)
+    check("double-click descends", page.locator('[data-testid="dir-Jarvis"]').count() == 1)
+    check("the breadcrumb names the path",
+          page.locator('[data-testid="crumb-/home/johnw"]').count() == 1)
+    check("and `..` goes back up", page.locator('[data-testid="dir-up"]').count() == 1)
+    page.locator('[data-testid="dir-up"]').click()
+    until(lambda: page.locator('[data-testid="dir-projects"]').count() > 0)
+    check("`..` really went up", page.locator('[data-testid="dir-notes"]').count() == 1)
+
+    # A path outside the roots is refused **by the backend**, and the window
+    # shows the refusal rather than carrying its own copy of the rule.
+    typed = page.locator('[data-testid="dir-typed"]')
+    typed.fill("/etc")
+    typed.press("Enter")
+    until(lambda: page.locator('[data-testid="dir-error"]').count() > 0)
+    err = page.locator('[data-testid="dir-error"]').inner_text()
+    check("a path outside the roots is refused", "$HOME" in err or "outside" in err, err)
+    check("and nothing outside is listed",
+          "passwd" not in page.locator('[data-testid="dir-list"]').inner_text())
+
+    # A Windows root is badged *before* the project exists: the 9p caution is
+    # advice about a decision, not a label on one already made.
+    typed.fill("/mnt/c/myday")
+    typed.press("Enter")
+    until(lambda: page.locator('[data-testid="dir-schoolwork"]').count() > 0)
+    page.locator('[data-testid="dir-choose"]').click()
+    until(lambda: page.locator('[data-testid="dirpicker"]').count() == 0)
+    until(lambda: page.locator('[data-testid="project-win-preview"]').count() > 0)
+    preview = page.locator('[data-testid="project-win-preview"]').inner_text()
+    check("a /mnt/ root previews the Windows badge", "WIN" in preview, preview)
+    check("with the 9p caution", "9p" in preview, preview)
+
+    # Back to a real root, then create — Enter submits from the name box.
+    page.locator('[data-testid="project-root"]').fill("/home/johnw/projects/jarvis-trading-firm")
+    check("the Windows preview goes with the /mnt/ root",
+          page.locator('[data-testid="project-win-preview"]').count() == 0)
+    name = page.locator('[data-testid="project-name"]')
+    name.fill("trading firm")
+    name.press("Enter")
+    body = until(lambda: mock.posted("/projects") or None)
+    check("Enter submits the dialog", bool(body))
+    check("with the name, the root and the profile",
+          bool(body) and body[-1].get("name") == "trading firm"
+          and body[-1].get("root") == "/home/johnw/projects/jarvis-trading-firm"
+          and body[-1].get("profile") == "auto", str(body[-1] if body else None))
+    until(lambda: page.locator('[data-testid="picker"]').count() == 0)
+    until(lambda: page.locator('[data-testid="project-p3"]').count() > 0)
+    check("the created project appears in the sidebar",
+          "trading firm" in page.locator('[data-testid="project-p3"]').inner_text())
+
+    # Escape cancels without creating anything.
+    n = len(mock.posted("/projects"))
+    page.locator('[data-testid="new-project"]').click()
+    page.wait_for_selector('[data-testid="project-name"]')
+    page.locator('[data-testid="project-name"]').fill("never")
+    page.locator('[data-testid="project-name"]').press("Escape")
+    until(lambda: page.locator('[data-testid="picker"]').count() == 0)
+    time.sleep(0.2)
+    check("Escape cancels and creates nothing",
+          page.locator('[data-testid="picker"]').count() == 0
+          and len(mock.posted("/projects")) == n)
+
+
+def move_checks(page, mock):
+    print("\nmoving a chat thread between projects")
+    page.evaluate(DND)
+    check("the thread to move is on screen", expand(page, "p1", "thread-t1"))
+    row = page.locator('[data-testid="thread-t1"]')
+    check("a chat thread is draggable", row.get_attribute("draggable") == "true")
+
+    carried = page.evaluate("window.__dnd.start('[data-testid=\"thread-t1\"]')")
+    check("the drag carries the thread id", carried == "t1", str(carried))
+    accepted = page.evaluate("window.__dnd.over('[data-testid=\"project-p2\"]')")
+    check("another project accepts the drop", accepted is True)
+    check("and says so while the drag is over it",
+          "droptarget" in (page.locator('[data-testid="project-p2"]').get_attribute("class") or ""))
+    # Its own project is not a drop target: a row that lit up for a no-op is a
+    # promise the PATCH would then break.
+    check("its own project does not accept it",
+          page.evaluate("window.__dnd.over('[data-testid=\"project-p1\"]')") is False)
+
+    before = len(mock.sent("PATCH", "/threads/t1"))
+    page.evaluate("window.__dnd.drop('[data-testid=\"project-p2\"]')")
+    page.evaluate("window.__dnd.end()")
+    body = until(lambda: mock.sent("PATCH", "/threads/t1")[before:] or None)
+    check("dropping PATCHes the thread", bool(body))
+    check("with the new project", bool(body) and body[-1].get("project_id") == "p2",
+          str(body[-1] if body else None))
+    until(lambda: mock.world["threads"][0]["project_id"] == "p2")
+    check("and the thread is re-parented",
+          mock.world["threads"][0]["project_id"] == "p2"
+          and page.evaluate("window.__hud.state().threads[0].project_id") == "p2",
+          page.evaluate("window.__hud.state().threads[0].project_id"))
+    check("under the project it was dropped on", expand(page, "p2", "thread-t1"))
+
+    # A refusal reverts the row. The backend's rule is the one that decides, so
+    # the world is made to refuse it — a thread the HUD still believes is a
+    # chat thread, that the backend says belongs to a task.
+    mock.world["threads"][0]["task_id"] = "k1"
+    page.evaluate("window.__dnd.start('[data-testid=\"thread-t1\"]')")
+    page.evaluate("window.__dnd.over('[data-testid=\"project-p1\"]')")
+    n = len(mock.sent("PATCH", "/threads/t1"))
+    page.evaluate("window.__dnd.drop('[data-testid=\"project-p1\"]')")
+    page.evaluate("window.__dnd.end()")
+    until(lambda: len(mock.sent("PATCH", "/threads/t1")) > n)
+    until(lambda: page.locator('[data-testid="move-error"]').count() > 0)
+    msg = page.locator('[data-testid="move-error"]').inner_text()
+    check("a refused move says why, in the backend's words",
+          "move with their task" in msg, msg)
+    check("and the row goes back where it was",
+          page.evaluate("window.__hud.state().threads[0].project_id") == "p2",
+          page.evaluate("window.__hud.state().threads[0].project_id"))
+    mock.world["threads"][0]["task_id"] = None
+
+    # A task's thread is not draggable at all, and its menu says why rather
+    # than letting the owner find out from a 409.
+    expand(page, "p1", "task-k1")
+    if page.locator('[data-testid="taskthread-kt1"]').count() == 0:
+        page.locator('[data-testid="task-k1"]').click()
+        until(lambda: page.locator('[data-testid="taskthread-kt1"]').count() > 0)
+    kt = page.locator('[data-testid="taskthread-kt1"]')
+    check("a task thread is not draggable", kt.get_attribute("draggable") in (None, "false"),
+          str(kt.get_attribute("draggable")))
+    page.locator('[data-testid="thread-menu-kt1"]').click()
+    until(lambda: page.locator('[data-testid="thread-menu"]').count() > 0)
+    check("its menu offers no destination",
+          page.locator('[data-testid="move-to-p1"]').count() == 0)
+    why = page.locator('[data-testid="move-refused"]').inner_text()
+    check("and states the rule", "move with their task" in why, why)
+    page.keyboard.press("Escape")
+    until(lambda: page.locator('[data-testid="thread-menu"]').count() == 0)
+
+    # The keyboard alternative: a drag is not reachable without a mouse, so
+    # "the only way to do X is a gesture" would be the same problem as the
+    # button nobody found.
+    expand(page, "p2", "thread-menu-t1")
+    page.locator('[data-testid="thread-menu-t1"]').focus()
+    page.keyboard.press("Enter")
+    until(lambda: page.locator('[data-testid="thread-menu"]').count() > 0)
+    check("the menu opens from the keyboard",
+          page.locator('[data-testid="move-to-p1"]').count() == 1)
+    n = len(mock.sent("PATCH", "/threads/t1"))
+    page.locator('[data-testid="move-to-p1"]').focus()
+    page.keyboard.press("Enter")
+    body = until(lambda: mock.sent("PATCH", "/threads/t1")[n:] or None)
+    check("choosing a project moves it", bool(body) and body[-1].get("project_id") == "p1",
+          str(body[-1] if body else None))
+    until(lambda: mock.world["threads"][0]["project_id"] == "p1")
+    check("the thread is back under its original project",
+          mock.world["threads"][0]["project_id"] == "p1")
+
+
+def quota_checks(page, mock):
+    print("\nquota bars")
+    until(lambda: page.locator('[data-testid="quota-bar-codex-5h"]').count() > 0)
+    for name, pct in (("5h", 41), ("weekly", 82)):
+        bar = page.locator(f'[data-testid="quota-bar-codex-{name}"]')
+        check(f"codex's {name} window is a bar", bar.count() == 1)
+        check(f"at the reported {pct}%",
+              bar.get_attribute("data-percent") == str(pct), bar.get_attribute("data-percent"))
+        width = bar.locator(".qfill").evaluate("el => el.style.width")
+        check(f"drawn {pct}% wide", width == f"{pct}%", width)
+        text = bar.inner_text()
+        # The fixture's reset times are fixed, so one of them is in the past by
+        # the time this runs — which is the ordinary case a second before the
+        # next poll, and must read as rolled over rather than as a negative.
+        check(f"labelled {name} with its reset state",
+              name in text.lower() and "resets" in text.lower(), text)
+
+    check("the 82% window is amber, not red",
+          "warn" in (page.locator('[data-testid="quota-bar-codex-weekly"] .qfill')
+                     .get_attribute("class") or ""))
+    check("and the 41% one is neither",
+          "ok" in (page.locator('[data-testid="quota-bar-codex-5h"] .qfill')
+                   .get_attribute("class") or ""))
+
+    # Never computed: a provider that reported no quota gets no bar at all.
+    check("an unreported quota still says so, rather than drawing an empty bar",
+          page.locator('[data-testid="quota-claude"]').inner_text().strip() == "not reported",
+          page.locator('[data-testid="quota-claude"]').inner_text())
+    check("and draws no bar", page.locator('[data-testid="quota-claude"] .qbar').count() == 0)
+
+    # The local allowance is a second, thinner bar and is labelled apart.
+    local = page.locator('[data-testid="allowance-claude"]')
+    check("the local allowance is its own bar", local.count() == 1)
+    check("labelled so the two are never confused",
+          "local allowance" in local.inner_text().lower(), local.inner_text())
+    check("at today / allowance",
+          local.get_attribute("data-percent") in ("20.6", "20.599999999999998"),
+          local.get_attribute("data-percent"))
+    check("and is the thinner of the two",
+          "thin" in (local.locator(".qtrack").get_attribute("class") or ""))
+    check("a provider with no allowance gets no second bar",
+          page.locator('[data-testid="allowance-fast"]').count() == 0)
+
+    # A window that has not rolled over yet counts down.
+    soon = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + 3 * 3600 + 12 * 60))
+    mock.world["usage"]["providers"]["codex"]["quota"]["windows"][0]["resets_at"] = soon
+    mock.emit("usage_updated", {"provider": "codex"})
+    until(lambda: "resets in"
+          in page.locator('[data-testid="quota-bar-codex-5h"]').inner_text().lower())
+    note = page.locator('[data-testid="quota-bar-codex-5h"]').inner_text()
+    check("a future reset counts down", "resets in 3h" in note.lower(), note)
+
+    # It follows usage_updated rather than a reload.
+    mock.world["usage"]["providers"]["codex"]["quota"]["windows"][1]["used_percent"] = 95
+    mock.emit("usage_updated", {"provider": "codex"})
+    until(lambda: page.locator('[data-testid="quota-bar-codex-weekly"]')
+          .get_attribute("data-percent") == "95")
+    check("usage_updated redraws the bars",
+          page.locator('[data-testid="quota-bar-codex-weekly"]').get_attribute("data-percent") == "95")
+    check("and 95% steps to red",
+          "high" in (page.locator('[data-testid="quota-bar-codex-weekly"] .qfill')
+                     .get_attribute("class") or ""))
+
+
+def schedule_dialog_checks(page, mock):
+    print("\nschedule dialog")
+    check("the empty-state note says he can be asked in chat",
+          "schedule a morning briefing"
+          in page.locator('[data-testid="schedules-chat-note"]').inner_text().lower(),
+          page.locator('[data-testid="schedules-chat-note"]').inner_text())
+
+    page.locator('[data-testid="schedule-new"]').click()
+    page.wait_for_selector('[data-testid="schedule-dialog"]')
+    page.locator('[data-testid="sched-brief"]').fill("weekly sweep")
+
+    # Every preset, and what the backend reads it back as.
+    page.locator('[data-testid="preset-daily"]').click()
+    page.locator('[data-testid="sched-time"]').fill("08:00")
+    until(lambda: page.locator('[data-testid="sched-expression"]').inner_text() == "0 8 * * *")
+    check("Daily at 08:00 is a daily cron",
+          page.locator('[data-testid="sched-expression"]').inner_text() == "0 8 * * *")
+    until(lambda: "every day at 08:00" in page.locator('[data-testid="sched-describe"]').inner_text())
+    check("and the reading comes from the backend, not from the window",
+          "every day at 08:00" in page.locator('[data-testid="sched-describe"]').inner_text(),
+          page.locator('[data-testid="sched-describe"]').inner_text())
+    check("with the next three fire times",
+          page.locator('[data-testid="sched-next"]').count() == 3,
+          str(page.locator('[data-testid="sched-next"]').count()))
+
+    page.locator('[data-testid="preset-weekdays"]').click()
+    page.locator('[data-testid="sched-time"]').fill("09:30")
+    until(lambda: page.locator('[data-testid="sched-expression"]').inner_text() == "30 9 * * 1-5")
+    check("Weekdays is 1-5",
+          page.locator('[data-testid="sched-expression"]').inner_text() == "30 9 * * 1-5")
+    until(lambda: "weekdays at 09:30" in page.locator('[data-testid="sched-describe"]').inner_text())
+    check("read back as weekdays",
+          "weekdays at 09:30" in page.locator('[data-testid="sched-describe"]').inner_text())
+
+    page.locator('[data-testid="preset-weekly"]').click()
+    page.locator('[data-testid="sched-weekday"]').select_option("1")
+    page.locator('[data-testid="sched-time"]').fill("10:00")
+    until(lambda: page.locator('[data-testid="sched-expression"]').inner_text() == "0 10 * * 1")
+    check("Weekly names the day",
+          page.locator('[data-testid="sched-expression"]').inner_text() == "0 10 * * 1")
+    until(lambda: "Monday" in page.locator('[data-testid="sched-describe"]').inner_text())
+    check("read back by name",
+          "Monday" in page.locator('[data-testid="sched-describe"]').inner_text(),
+          page.locator('[data-testid="sched-describe"]').inner_text())
+
+    page.locator('[data-testid="preset-interval"]').click()
+    page.locator('[data-testid="sched-every"]').fill("15")
+    until(lambda: "900" in page.locator('[data-testid="sched-expression"]').inner_text())
+    check("Every 15 minutes is an interval, never a cron",
+          page.locator('[data-testid="sched-expression"]').inner_text() == "every 900s",
+          page.locator('[data-testid="sched-expression"]').inner_text())
+    page.locator('[data-testid="sched-unit"]').select_option("hours")
+    until(lambda: page.locator('[data-testid="sched-expression"]').inner_text() == "every 54000s")
+
+    # Advanced takes a raw cron, and refuses one that is not a cron rather than
+    # guessing the missing field.
+    page.locator('[data-testid="preset-advanced"]').click()
+    page.locator('[data-testid="sched-cron"]').fill("0 9 * *")
+    until(lambda: page.locator('[data-testid="sched-error"]').count() > 0)
+    check("four fields is refused, not completed",
+          "5 fields" in page.locator('[data-testid="sched-error"]').inner_text(),
+          page.locator('[data-testid="sched-error"]').inner_text())
+    check("and cannot be saved", page.locator('[data-testid="sched-save"]').is_disabled())
+
+    page.locator('[data-testid="sched-cron"]').fill("0 9 * * 1")
+    until(lambda: page.locator('[data-testid="sched-error"]').count() == 0)
+    n = len(mock.posted("/schedules"))
+    page.locator('[data-testid="sched-save"]').click()
+    body = until(lambda: mock.posted("/schedules")[n:] or None)
+    check("saving creates the schedule", bool(body))
+    check("with the brief and the cron the presets produced",
+          bool(body) and body[-1].get("cron") == "0 9 * * 1"
+          and body[-1].get("brief") == "weekly sweep", str(body[-1] if body else None))
+    until(lambda: page.locator('[data-testid="schedule-dialog"]').count() == 0)
+    check("and closes", page.locator('[data-testid="schedule-dialog"]').count() == 0)
+
+    # The same dialog edits an existing one, opening on the preset that made it.
+    page.locator('[data-testid="schedule-edit-s1"]').click()
+    page.wait_for_selector('[data-testid="schedule-dialog"]')
+    check("editing opens on the preset the cron came from",
+          page.locator('[data-testid="preset-daily"]').get_attribute("aria-pressed") == "true",
+          page.locator('[data-testid="preset-daily"]').get_attribute("aria-pressed"))
+    check("with its time",
+          page.locator('[data-testid="sched-time"]').input_value() == "07:00",
+          page.locator('[data-testid="sched-time"]').input_value())
+    check("and its brief",
+          "morning briefing" in page.locator('[data-testid="sched-brief"]').input_value())
+    page.locator('[data-testid="sched-time"]').fill("07:30")
+    until(lambda: page.locator('[data-testid="sched-expression"]').inner_text() == "30 7 * * *")
+    n = len(mock.sent("PATCH", "/schedules/s1"))
+    page.locator('[data-testid="sched-save"]').click()
+    body = until(lambda: mock.sent("PATCH", "/schedules/s1")[n:] or None)
+    check("saving an edit PATCHes rather than creating a second one",
+          bool(body) and body[-1].get("cron") == "30 7 * * *", str(body[-1] if body else None))
+
+    # Escape closes without saving.
+    page.locator('[data-testid="schedule-edit-s1"]').click()
+    page.wait_for_selector('[data-testid="schedule-dialog"]')
+    n = len(mock.sent("PATCH", "/schedules/s1"))
+    page.locator('[data-testid="sched-brief"]').press("Escape")
+    until(lambda: page.locator('[data-testid="schedule-dialog"]').count() == 0)
+    time.sleep(0.2)
+    check("Escape closes the dialog and saves nothing",
+          page.locator('[data-testid="schedule-dialog"]').count() == 0
+          and len(mock.sent("PATCH", "/schedules/s1")) == n)
+
+
 # ---------------------------------------------------------------------------
 
 def main():
@@ -832,6 +1241,12 @@ def main():
             preview_checks(page, mock)
             panels_checks(page, mock)
             picker_checks(page, mock)
+            # WP12c last: these add a project and re-parent a thread, so they
+            # rearrange the very tree the earlier sections navigate.
+            quota_checks(page, mock)
+            schedule_dialog_checks(page, mock)
+            newproject_checks(page, mock)
+            move_checks(page, mock)
 
             ctx.close()
             browser.close()

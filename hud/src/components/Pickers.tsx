@@ -10,6 +10,7 @@
 
 import { useState } from "react";
 import type { AvatarDesc, ModelRow, RouteView, VoiceEntry } from "../types";
+import { DirPicker } from "./DirPicker";
 
 function Shell(props: { title: string; onClose: () => void; children: React.ReactNode; foot?: React.ReactNode }) {
   return (
@@ -144,51 +145,123 @@ export function AvatarPicker(props: {
   );
 }
 
+/**
+ * New project. The owner's first-use complaint was that creating one was not
+ * obvious; this is the other half of that fix (the first is the button, in
+ * `Sidebar`). Three things it will not do: guess a root, accept a path the
+ * backend refuses, or close on an error the owner never saw.
+ *
+ * The root and each access folder are chosen with `DirPicker`, so a typo is
+ * not a project pointed at a folder that does not exist — and a `/mnt/<drive>/`
+ * root is badged **before** it is created, because the 9p caution is advice
+ * about a decision, not a label on one already made.
+ */
 export function NewProject(props: {
-  onCreate: (body: { name: string; root: string; extra_dirs: string[]; profile: string }) => void;
+  onCreate: (body: { name: string; root: string; extra_dirs: string[]; profile: string }) => Promise<unknown>;
   onClose: () => void;
 }) {
   const [name, setName] = useState("");
   const [root, setRoot] = useState("");
-  const [extra, setExtra] = useState("");
+  const [extra, setExtra] = useState<string[]>([]);
   const [profile, setProfile] = useState("auto");
+  const [browsing, setBrowsing] = useState<null | "root" | "extra">(null);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const windows = root.startsWith("/mnt/");
+  const ready = !!name.trim() && !!root.trim() && !busy;
+
+  const submit = () => {
+    if (!name.trim()) return setError("Give the project a name.");
+    if (!root.trim()) return setError("Choose a root folder.");
+    if (busy) return;
+    setBusy(true);
+    setError("");
+    Promise.resolve(
+      props.onCreate({ name: name.trim(), root: root.trim(), extra_dirs: extra, profile }),
+    )
+      // The dialog stays open on a refusal with the backend's own words: a
+      // dialog that closes on an error is a project the owner believes exists.
+      .catch((e) => setError(e?.message || "could not create the project"))
+      .finally(() => setBusy(false));
+  };
+
+  const keys = (e: React.KeyboardEvent) => {
+    e.stopPropagation();
+    if (e.key === "Enter") submit();
+    if (e.key === "Escape") props.onClose();
+  };
+
   return (
-    <Shell
-      title="New project"
-      onClose={props.onClose}
-      foot={
-        <button
-          type="button"
-          data-testid="create-project"
-          onClick={() =>
-            name.trim() &&
-            root.trim() &&
-            props.onCreate({
-              name: name.trim(),
-              root: root.trim(),
-              extra_dirs: extra.split(",").map((s) => s.trim()).filter(Boolean),
-              profile,
-            })
-          }
-        >
-          Create
-        </button>
-      }
-    >
-      <div className="pad col">
-        <input data-testid="project-name" placeholder="name" value={name}
-               onKeyDown={(e) => e.stopPropagation()} onChange={(e) => setName(e.target.value)} />
-        <input data-testid="project-root" placeholder="absolute root path" value={root}
-               onKeyDown={(e) => e.stopPropagation()} onChange={(e) => setRoot(e.target.value)} />
-        <input data-testid="project-extra" placeholder="access folders, comma separated" value={extra}
-               onKeyDown={(e) => e.stopPropagation()} onChange={(e) => setExtra(e.target.value)} />
-        <select data-testid="project-profile" value={profile} onChange={(e) => setProfile(e.target.value)}>
-          <option value="auto">auto (default)</option>
-          <option value="ask">ask — every dangerous call reaches you</option>
-          <option value="strict">strict — no network, deny-all</option>
-        </select>
-      </div>
-    </Shell>
+    <>
+      <Shell
+        title="New project"
+        onClose={props.onClose}
+        foot={
+          <button type="button" data-testid="create-project" disabled={!ready} onClick={submit}>
+            Create
+          </button>
+        }
+      >
+        <div className="pad col" onKeyDown={(e) => { if (e.key === "Escape") props.onClose(); }}>
+          <label className="muted small">Name</label>
+          <input data-testid="project-name" placeholder="what to call it" value={name}
+                 autoFocus onKeyDown={keys} onChange={(e) => setName(e.target.value)} />
+
+          <label className="muted small">Root folder</label>
+          <div className="row">
+            <input data-testid="project-root" placeholder="choose or type an absolute path"
+                   value={root} onKeyDown={keys} onChange={(e) => setRoot(e.target.value)} />
+            <button type="button" data-testid="browse-root" onClick={() => setBrowsing("root")}>
+              Browse
+            </button>
+          </div>
+          {windows ? (
+            <div className="row" data-testid="project-win-preview">
+              <span className="badge win">WIN</span>
+              <span className="muted small">
+                A Windows path worked from WSL over 9p: git is slow and line endings are mangled.
+              </span>
+            </div>
+          ) : null}
+
+          <label className="muted small">Access folders (beyond the root)</label>
+          {extra.map((d) => (
+            <div className="row" key={d} data-testid={`extra-${d}`}>
+              <span className="small" style={{ flex: "1 1 auto", overflowWrap: "anywhere" }}>{d}</span>
+              <button type="button" onClick={() => setExtra(extra.filter((x) => x !== d))}>
+                Remove
+              </button>
+            </div>
+          ))}
+          <button type="button" data-testid="browse-extra" onClick={() => setBrowsing("extra")}>
+            Add access folder
+          </button>
+
+          <label className="muted small">Profile</label>
+          <select data-testid="project-profile" value={profile} onChange={(e) => setProfile(e.target.value)}>
+            <option value="auto">auto (default)</option>
+            <option value="ask">ask — every dangerous call reaches you</option>
+            <option value="strict">strict — no network, deny-all</option>
+          </select>
+
+          {error ? <div className="err" data-testid="project-error">{error}</div> : null}
+        </div>
+      </Shell>
+      {browsing ? (
+        <DirPicker
+          title={browsing === "root" ? "Project root" : "Access folder"}
+          confirm="Use this folder"
+          start={browsing === "root" ? root : root || ""}
+          onChoose={(p) => {
+            if (browsing === "root") setRoot(p);
+            else if (!extra.includes(p)) setExtra([...extra, p]);
+            setBrowsing(null);
+          }}
+          onClose={() => setBrowsing(null)}
+        />
+      ) : null}
+    </>
   );
 }
 

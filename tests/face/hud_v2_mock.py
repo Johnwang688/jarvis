@@ -226,8 +226,55 @@ def _world() -> dict:
                  "efforts": [], "effort": None},
             ],
         },
+        # `GET /fs/dirs` — names only, and only under $HOME or /mnt/<drive>/.
+        # Anything else is 403, which is the picker's whole boundary: the
+        # window does not re-implement the rule, it shows the refusal.
+        "dirs": {
+            "/home/johnw": ["projects", "notes"],
+            "/home/johnw/projects": ["Jarvis", "jarvis-trading-firm"],
+            "/home/johnw/projects/Jarvis": ["docs", "hud", "jarvis", "tests"],
+            "/home/johnw/projects/Jarvis/docs": [],
+            "/home/johnw/notes": ["2026"],
+            "/mnt/c": ["myday"],
+            "/mnt/c/myday": ["schoolwork"],
+        },
+        "home": "/home/johnw",
         "stt_text": "what is the weather",
     }
+
+
+_DAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
+
+
+def _preview(cron, every_s) -> dict:
+    """What the real backend answers, in the shapes the HUD reads.
+
+    Deterministic rather than clock-driven: a test that asserted on "the next
+    three real fire times" would be asserting on the minute it ran in.
+    """
+    if every_s:
+        unit, n = ("hours", every_s // 3600) if every_s % 3600 == 0 else ("minutes", every_s // 60)
+        describe = f"every {n} {unit}" if n != 1 else f"every {unit[:-1]}"
+        return {"describe": describe,
+                "next": ["2026-09-15T12:%02d:00-05:00" % (m * 5) for m in (1, 2, 3)]}
+    fields = (cron or "").split()
+    if len(fields) != 5:
+        return {"describe": "", "next": []}
+    minute, hour, _dom, _mon, dow = fields
+    try:
+        at = "%02d:%02d" % (int(hour), int(minute))
+    except ValueError:
+        at = f"{hour}:{minute}"
+    if dow == "*":
+        describe = f"every day at {at}"
+    elif dow == "1-5":
+        describe = f"weekdays at {at}"
+    elif dow.isdigit():
+        describe = f"{_DAYS[int(dow) % 7]}s at {at}"
+    else:
+        describe = f"cron {cron} (America/Chicago)"
+    return {"describe": describe,
+            "next": [f"2026-09-{d}T{at}:00-05:00" for d in ("16", "17", "18")]}
 
 
 class MockDaemon:
@@ -326,6 +373,26 @@ class MockDaemon:
                     return self._json(w["schedules"])
                 if path == "/route":
                     return self._json(w["route"])
+                if path == "/fs/dirs":
+                    want = q.get("path", [""])[0] or w["home"]
+                    want = want.rstrip("/") or "/"
+                    inside = (want == w["home"] or want.startswith(w["home"] + "/")
+                              or want == "/mnt" or want.startswith("/mnt/"))
+                    if not inside:
+                        return self._err(403, "outside $HOME and /mnt/<drive>/")
+                    if want == "/mnt":
+                        dirs, parent = ["c"], None
+                    else:
+                        entry = w["dirs"].get(want)
+                        if entry is None:
+                            return self._err(404, "no such directory")
+                        dirs = entry
+                        parent = want.rsplit("/", 1)[0] or None
+                        if parent and not (parent == w["home"]
+                                           or parent.startswith(w["home"] + "/")
+                                           or parent.startswith("/mnt")):
+                            parent = None
+                    return self._json({"path": want, "parent": parent, "dirs": dirs})
                 if path == "/avatars":
                     return self._json(w["avatars"])
                 if path == "/voices":
@@ -442,6 +509,8 @@ class MockDaemon:
                                 "brief": body.get("brief", "")})
                     w["tasks"].append(rec)
                     return self._json(rec, 201)
+                if path == "/schedules/preview":
+                    return self._json(_preview(body.get("cron"), body.get("every_s")))
                 if path == "/schedules":
                     rec = {"id": f"s{len(w['schedules']) + 1}", "enabled": True,
                            "cron": body.get("cron"), "every_s": body.get("every_s"),
@@ -490,6 +559,20 @@ class MockDaemon:
                             p.update({k: v for k, v in body.items() if k in p})
                             return self._json(p)
                     return self._err(404, "no such project")
+                if len(parts) == 2 and parts[0] == "threads":
+                    for t in w["threads"]:
+                        if t["id"] == parts[1]:
+                            # A task's threads move with their task: the rule is
+                            # the backend's, and this is where the HUD learns it
+                            # if it ever stops asking first.
+                            if t.get("task_id"):
+                                return self._err(409, "task threads move with their task")
+                            pid = body.get("project_id", "")
+                            if not any(p["id"] == pid for p in w["projects"]):
+                                return self._err(404, "no such project")
+                            t["project_id"] = pid
+                            return self._json(t)
+                    return self._err(404, "no such thread")
                 if len(parts) == 2 and parts[0] == "schedules":
                     for s in w["schedules"]:
                         if s["id"] == parts[1]:

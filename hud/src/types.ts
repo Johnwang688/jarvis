@@ -186,6 +186,19 @@ export interface Schedule {
   created: string;
 }
 
+/** `POST /schedules/preview` — the backend owns the timezone and the calendar. */
+export interface SchedulePreview {
+  next: string[];
+  describe: string;
+}
+
+/** `GET /fs/dirs` — directories only, under $HOME or /mnt/<drive>/ only. */
+export interface DirListing {
+  path: string;
+  parent: string | null;
+  dirs: string[];
+}
+
 export interface RouteView {
   table: Record<string, any>;
   states: Record<string, string>;

@@ -8,8 +8,8 @@
 
 import type {
   ApprovalRequest, AvatarDesc, ChatMessage, Diff, FileRead, ModelRow, Platform,
-  Project, RouteView, Schedule, Task, TaskThread, Thread, Tree, Usage, VoiceEntry,
-  Attachment,
+  Project, RouteView, Schedule, SchedulePreview, Task, TaskThread, Thread, Tree, Usage,
+  VoiceEntry, Attachment, DirListing,
 } from "./types";
 
 export class ApiError extends Error {
@@ -70,6 +70,12 @@ export const api = {
   send: (id: string, body: { text: string; images?: string[]; attachments?: Attachment[] }) =>
     req<{ turn_id: string }>(`/threads/${id}/send`, json(body)),
   interrupt: (id: string) => req<any>(`/threads/${id}/interrupt`, json({})),
+  /** Re-parent a **chat** thread; a task's threads 409 (they move with the task). */
+  moveThread: (id: string, projectId: string) =>
+    req<Thread>(`/threads/${id}`, patch({ project_id: projectId })),
+
+  // --- filesystem (directory picker only: names, never contents) -----------
+  dirs: (path = "") => req<DirListing>(`/fs/dirs?path=${encodeURIComponent(path)}`),
 
   // --- tasks --------------------------------------------------------------
   tasks: (projectId?: string) =>
@@ -120,6 +126,9 @@ export const api = {
     req<Schedule>(`/schedules/${id}`, patch(body)),
   deleteSchedule: (id: string) => req<any>(`/schedules/${id}`, { method: "DELETE" }),
   runSchedule: (id: string) => req<any>(`/schedules/${id}/run-now`, json({})),
+  /** What this schedule will actually do, read back rather than guessed. */
+  previewSchedule: (body: { cron?: string; every_s?: number }) =>
+    req<SchedulePreview>("/schedules/preview", json(body)),
 
   // --- v1-semantics surfaces ---------------------------------------------
   avatars: () => req<{ avatars: AvatarDesc[]; active?: string }>("/avatars"),
