@@ -19,10 +19,10 @@ from jarvis import config, models, avatars, voice
 from jarvis.tools import voicectl
 from jarvis.v2 import hud_api as H, worktrees
 from jarvis.v2.daemon import Daemon, DaemonError
-from jarvis.v2.model import ProviderName as P, Role, TaskState
+from jarvis.v2.model import ProviderName as P, Role, TaskState, to_json
 from jarvis.v2.provider import Brief, Decision, Event, EventKind as K, SessionHandle, Usage
 from jarvis.v2.providers.codex import CodexProvider
-from jarvis.v2.schedules import Cron, Schedules, ZONE
+from jarvis.v2.schedules import Cron, Schedules, ZONE, parse_when, describe
 from jarvis.v2.stores import Stores
 
 
@@ -77,6 +77,30 @@ class FakeControl:
     def start(self, task_id):
         self.started.append(task_id)
         return self.stores.tasks.transition(task_id, TaskState.CLARIFYING)
+
+
+WHEN_CASES = [
+    ("every day at 9", {"cron": "0 9 * * *"}, "every day at 09:00"),
+    ("daily at 09:15", {"cron": "15 9 * * *"}, "every day at 09:15"),
+    ("weekdays at 8:30", {"cron": "30 8 * * 1-5"}, "weekdays at 08:30"),
+    ("weekends at 10am", {"cron": "0 10 * * 0,6"}, "weekends at 10:00"),
+    ("mondays at 10", {"cron": "0 10 * * 1"}, "mondays at 10:00"),
+    ("every tuesday at 6 pm", {"cron": "0 18 * * 2"}, "tuesdays at 18:00"),
+    ("wednesday at 12am", {"cron": "0 0 * * 3"}, "wednesdays at 00:00"),
+    ("thursdays at 12 pm", {"cron": "0 12 * * 4"}, "thursdays at 12:00"),
+    ("  FRIDAYS  at  23:59 ", {"cron": "59 23 * * 5"}, "fridays at 23:59"),
+    ("saturdays at 7:05am", {"cron": "5 7 * * 6"}, "saturdays at 07:05"),
+    ("sundays at 1", {"cron": "0 1 * * 0"}, "sundays at 01:00"),
+    ("every 2 hours", {"every_s": 7200}, "every 2 hours"),
+    ("every 15 minutes", {"every_s": 900}, "every 15 minutes"),
+    ("every minute", {"every_s": 60}, "every 1 minute"),
+    ("every 30 seconds", {"every_s": 30}, "every 30 seconds"),
+    ("every 3 days", {"every_s": 259200}, "every 3 days"),
+    ("every 2 weeks", {"every_s": 1209600}, "every 2 weeks"),
+    ("0 9 * * 1-5", {"cron": "0 9 * * 1-5"}, "weekdays at 09:00"),
+]
+WHEN_REFUSALS = ("tomorrow morning", "every few hours", "weekdays at 25:00", "every 0 minutes",
+                 "every day at 9:99", "mondays at 0pm", "9 * * *", "0 9 31 2 *")
 
 
 class Backend(unittest.TestCase):
@@ -433,6 +457,7 @@ class Backend(unittest.TestCase):
         self.assertEqual(len(self.daemon.runner.started), 1)
         events = self.events_all()
         self.assertEqual(sum(e["kind"] == "schedule_fired" for e in events), 1)
+        self.assertEqual(sum(e["kind"] == "schedule_created" for e in events), 1)
         disabled = self.request("PATCH", path, {"enabled": False})
         self.assertIsNone(disabled["next_run_at"])
         self.request("POST", path + "/run-now", {}, status=409)
@@ -445,11 +470,122 @@ class Backend(unittest.TestCase):
         self.daemon.schedules.tick()
         self.assertEqual(len(self.daemon.runner.started), 2)
         self.request("DELETE", path)
+        changes = [e for e in self.events_all() if e["kind"] in {"schedule_updated", "schedule_deleted"}]
+        self.assertEqual([e["kind"] for e in changes], ["schedule_updated", "schedule_updated", "schedule_deleted"])
+        self.assertTrue(all(e["data"] == {"schedule_id": schedule["id"]} for e in changes))
         self.assertEqual(self.request("GET", "/schedules"), [])
         self.request("PATCH", path, {"brief": "missing"}, status=404)
         self.request("DELETE", path, status=404)
         self.request("POST", path + "/run-now", {}, status=404)
         self.request("POST", "/schedules/bad/run-now", {}, status=400)
+
+    def test_move_chat_preserves_record_log_session_and_subsequent_turn(self):
+        thread = self.thread()
+        path = f"/threads/{thread.id}"
+        self.request("POST", path + "/send", {"text": "before"}, status=202)
+        self.settled(thread)
+        session = self.daemon._sessions[thread.id]
+        session.thread.title = "Travelling conversation"
+        self.stores.threads.save(session.thread)
+        before = to_json(self.stores.threads.get(thread.id))
+        log_path = self.stores.threads.path(thread.id).with_name("log.jsonl")
+        log = log_path.read_bytes()
+        handle = session.handle
+        result = self.request("PATCH", path, {"project_id": self.second.id})
+        self.assertEqual(result, before | {"project_id": self.second.id})
+        self.assertEqual(log_path.read_bytes(), log)
+        self.assertIs(session.handle, handle)
+        self.assertEqual(session.thread.project_id, self.second.id)
+        moved = [e for e in self.events_all() if e["kind"] == "thread_moved"]
+        self.assertEqual(len(moved), 1)
+        self.assertEqual(moved[0]["data"], dict(thread_id=thread.id, from_project_id=self.project.id,
+                                             to_project_id=self.second.id))
+        self.request("POST", path + "/send", {"text": "after"}, status=202)
+        self.settled(thread)
+        saved = self.stores.threads.get(thread.id)
+        self.assertEqual(saved.project_id, self.second.id)
+        self.assertEqual(saved.provider_session_id, before["provider_session_id"])
+        self.daemon.close_thread(thread.id)
+        self.request("PATCH", path, {"project_id": self.project.id})
+        self.request("POST", path + "/send", {"text": "resumed"}, status=202)
+        self.settled(thread)
+        self.assertEqual(self.stores.threads.get(thread.id).project_id, self.project.id)
+        self.request("PATCH", path, {"project_id": "deadbeef"}, status=404)
+        self.request("PATCH", path, {"project_id": self.second.id, "title": "no"}, status=400)
+        self.request("PATCH", "/threads/deadbeef", {"project_id": self.second.id}, status=404)
+
+    def test_move_task_thread_refused(self):
+        task = self.stores.tasks.create(self.project.id, "owned thread")
+        thread = self.thread(task_id=task.id)
+        before = to_json(self.stores.threads.get(thread.id))
+        result = self.request("PATCH", f"/threads/{thread.id}", {"project_id": self.second.id}, status=409)
+        self.assertEqual(result, {"error": "task threads move with their task"})
+        self.assertEqual(to_json(self.stores.threads.get(thread.id)), before)
+        self.assertFalse(any(e["kind"] == "thread_moved" for e in self.events_all()))
+
+    def test_directory_picker_scope_and_symlinks(self):
+        home = self.root / "home"
+        home.mkdir()
+        for name in ("Alpha", "zeta", ".hidden"):
+            (home / name).mkdir()
+        (home / "file.txt").write_text("not a directory")
+        (home / "escape").symlink_to(self.other, target_is_directory=True)
+        (home / "inside").symlink_to(home / "Alpha", target_is_directory=True)
+        (self.other / "back-in").symlink_to(home, target_is_directory=True)
+        with patch.object(Path, "home", return_value=home):
+            def get(path, status=200):
+                return self.request("GET", "/fs/dirs?" + urlencode({"path": str(path)}), status=status)
+            self.assertEqual(get(home), dict(path=str(home), parent=None, dirs=["Alpha", "inside", "zeta"]))
+            self.assertEqual(get(home / "Alpha")["parent"], str(home))
+            for forbidden in (self.other, home / "escape", self.other / "back-in", "/etc", "/mnt", "/mnt/cc", "relative", home / ".."):
+                get(forbidden, 403)
+            get(home / "missing", 404)
+            get(home / "file.txt", 404)
+            self.request("GET", "/fs/dirs", status=400)
+            # Drive roots need no real mount in the test environment.
+            with patch.object(Path, "is_dir", return_value=True), patch.object(Path, "iterdir", return_value=iter([])):
+                self.assertEqual(get("/mnt/c"), dict(path="/mnt/c", parent=None, dirs=[]))
+                self.assertEqual(get("/mnt/D/work")["parent"], "/mnt/D")
+
+    def test_schedule_preview_and_when_table(self):
+        now = datetime(2026, 9, 15, 9, 30, tzinfo=ZONE).timestamp()
+        self.daemon.schedules.clock = lambda: now
+        for phrase, timing, reading in WHEN_CASES:
+            with self.subTest(phrase=phrase):
+                self.assertEqual(parse_when(phrase), timing)
+                self.assertEqual(describe(**timing), reading)
+                response = self.request("POST", "/schedules/preview", timing)
+                self.assertEqual(response["describe"], reading)
+                self.assertEqual(len(response["next"]), 3)
+                previous = now
+                for value in response["next"]:
+                    at = datetime.fromisoformat(value)
+                    self.assertGreater(at.timestamp(), previous)
+                    self.assertEqual(at.utcoffset(), at.astimezone(ZONE).utcoffset())
+                    if "cron" in timing:
+                        self.assertTrue(Cron(timing["cron"]).matches(at))
+                        self.assertEqual(at.timestamp(), Cron(timing["cron"]).next(previous))
+                    else:
+                        self.assertEqual(at.timestamp() - previous, timing["every_s"])
+                    previous = at.timestamp()
+        for phrase in WHEN_REFUSALS:
+            self.assertIsNone(parse_when(phrase), phrase)
+        for bad in ({}, {"cron": "bad"}, {"cron": "* * * * *", "every_s": 1}, {"every_s": True},
+                    {"every_s": 0}, {"every_s": 1.5}, {"when": "daily"}, {"cron": "0 9 31 2 *"}):
+            self.request("POST", "/schedules/preview", bad, status=400)
+        self.assertEqual(self.request("GET", "/schedules"), [])
+
+    def test_schedule_preview_dst_and_general_cron_reading(self):
+        self.daemon.schedules.clock = lambda: datetime(2026, 3, 7, 3, tzinfo=ZONE).timestamp()
+        self.assertEqual(self.request("POST", "/schedules/preview", {"cron": "30 2 * * *"}), {
+            "next": ["2026-03-09T02:30:00-05:00", "2026-03-10T02:30:00-05:00", "2026-03-11T02:30:00-05:00"],
+            "describe": "every day at 02:30"})
+        self.daemon.schedules.clock = lambda: datetime(2026, 11, 1, 0, tzinfo=ZONE).timestamp()
+        self.assertEqual(self.request("POST", "/schedules/preview", {"cron": "30 1 * * *"})["next"],
+                         ["2026-11-01T01:30:00-05:00", "2026-11-02T01:30:00-06:00", "2026-11-03T01:30:00-06:00"])
+        self.assertEqual(describe(cron="*/15 * * * *"),
+                         "minute 0, 15, 30, 45; every hour; every month; (every day of month; every day of the week)")
+        self.assertIn("day of month 15 or on monday", describe(cron="0 9 15 * 1"))
 
     def test_schedule_validation(self):
         for update in ({"every_s": 0}, {"every_s": True}, {"cron": "bad"}, {"cron": "* * * * *", "every_s": 5},
