@@ -337,7 +337,14 @@ class CodexProvider:
             raise RpcError("Codex substituted the requested model")
         if method == "account/updated" and p.get("authMode") not in (None, "chatgpt"):
             raise RpcError("Codex changed away from ChatGPT authentication")
-        if method == "item/agentMessage/delta":
+        if method == "account/rateLimits/updated":
+            # Verified from 0.153.4 generate-ts: AccountRateLimitsUpdatedNotification
+            # carries a sparse RateLimitSnapshot, independent of any turn id.
+            u = s.accounting.usage()
+            yield self._event(h, EventKind.USAGE, input=u.input_tokens, output=u.output_tokens,
+                              cached=u.cached_tokens, cost_usd=None,
+                              provider_reported={"rate_limits": p["rateLimits"]})
+        elif method == "item/agentMessage/delta":
             yield self._event(h, EventKind.TEXT_DELTA, text=p["delta"])
         elif method in ("item/reasoning/summaryTextDelta", "item/reasoning/textDelta"):
             yield self._event(h, EventKind.THINKING, text=p["delta"])

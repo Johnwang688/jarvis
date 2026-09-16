@@ -93,6 +93,12 @@ def peer(script_path, log_path, thread_name):
                 continue
             count += 1
             turn = f"turn-{count}"
+            if mode == "rate_limits":
+                # Account updates have no thread/turn identity, and can arrive
+                # before the turn/start response.
+                emit({"method": "account/rateLimits/updated", "params": {"rateLimits": {
+                    "limitId": "codex", "primary": {"usedPercent": 42,
+                    "windowDurationMins": 300, "resetsAt": 1900000000}, "secondary": None}}})
             if mode == "early_approval":
                 approval()
                 reply = json.loads(sys.stdin.readline())
@@ -289,6 +295,16 @@ class Checks(unittest.TestCase):
         with self.assertRaises(BriefRefused):
             self.start()
         self.assertFalse(self.brain.calls("thread/start"))
+
+    def test_account_rate_limits_before_turn_response(self):
+        h = self.start("rate_limits")
+        events = self.send(h)
+        reports = [e for e in events if "rate_limits" in e.data.get("provider_reported", {})]
+        self.assertEqual(len(reports), 1)
+        self.assertEqual(reports[0].kind, K.USAGE)
+        self.assertEqual(reports[0].data["provider_reported"]["rate_limits"]["primary"]["usedPercent"], 42)
+        self.assertEqual(events[-1].data["stop"], "end")
+        self.assertEqual(self.provider.usage(h).work_tokens, 80)
 
     def test_full_exact_events(self):
         h = self.start("full")
