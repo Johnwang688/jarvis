@@ -176,7 +176,10 @@ class Backend(unittest.TestCase):
     def test_listeners_static_and_preview_origin(self):
         for port in (self.daemon.port, self.daemon.face_port):
             self.assertEqual(self.request("GET", "/status", port=port)["version"], 2)
-            self.assertIn(b"hud/dist", self.request("GET", "/", port=port))
+            # Either the built HUD (title pinned for FORBIDDEN_TITLES) or, with no
+        # build present, the placeholder naming hud/dist.
+        page = self.request("GET", "/", port=port)
+        self.assertTrue(b"<title>J.A.R.V.I.S.</title>" in page or b"hud/dist" in page)
         # Simulate a separately built HUD without writing hud/dist.
         dist = self.root / "dist"
         (dist / "assets").mkdir(parents=True)

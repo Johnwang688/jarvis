@@ -327,13 +327,14 @@ class TaskRunner(TaskControl):
         turn_id = record.get("turn_id")
         if turn_id:
             self.proposal_replies[turn_id] = reply
+        match = re.search(r"\btask ([0-9a-f]{8})\b", reply)
+        task_id = match.group(1) if match else None
         self.bus.publish({"kind": "proposal_reply", "thread_id": record.get("thread_id"),
                           "project_id": record.get("project_id"),
-                          "data": {"turn_id": turn_id, "reply": reply}})
-        match = re.search(r"\btask ([0-9a-f]{8})\b", reply)
-        if match:
+                          "data": {"turn_id": turn_id, "reply": reply, "task_id": task_id}})
+        if task_id:
             with self._lock:
-                self._proposed.add(match.group(1))
+                self._proposed.add(task_id)
         return reply
 
     def _admit_ready(self) -> None:

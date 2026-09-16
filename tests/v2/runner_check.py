@@ -651,8 +651,9 @@ class Proposals(Fixture):
         self.assertIn("Opened task", reply)
         self.assertEqual(self.runner.proposal_replies["turn-1"], reply)
         published = [r for r in self.drain() if r.get("kind") == "proposal_reply"]
-        self.assertEqual(published[-1]["data"], {"turn_id": "turn-1", "reply": reply})
         task_id = [t.id for t in self.stores.tasks.list()][0]
+        self.assertEqual(published[-1]["data"],
+                         {"turn_id": "turn-1", "reply": reply, "task_id": task_id})
         self.assertEqual(self.task(task_id).state, S.INTAKE)
 
         self.runner._admit_ready()

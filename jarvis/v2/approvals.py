@@ -105,6 +105,7 @@ class ApprovalRequest:
     provider: str | None = None
     origin: str = ""                    # sanitized attribution (see `label`)
     allowlistable: bool = True          # False from the escape hatch (§6.1)
+    timeout_s: float | None = None      # set by the broker when asked; the card shows it
     req_id: str = ""
     code: str = ""
     asked_at: str = ""
@@ -116,6 +117,7 @@ class ApprovalRequest:
             "layer": self.layer, "thread_id": self.thread_id,
             "task_id": self.task_id, "provider": self.provider,
             "origin": self.origin, "asked_at": self.asked_at,
+            "allowlistable": self.allowlistable, "timeout_s": self.timeout_s,
         }
 
 
@@ -189,6 +191,7 @@ class PendingApprovals:
 
         if self._on_request is not None:
             try:
+                request.timeout_s = self.timeout_s
                 self._on_request(request)
             except Exception:       # a surface that cannot be told must not grant
                 LOG.exception("Cannot announce approval %s", request.req_id)
