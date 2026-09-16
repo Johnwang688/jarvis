@@ -501,6 +501,16 @@ def _handler(daemon):
             query = {k: v[0] for k, v in query.items()}
             method = self.command
             stores = daemon.stores
+            if parts == ["route"] and method in ("GET", "POST"):
+                from .router import daemon_router
+                router = daemon_router(daemon)
+                if method == "GET":
+                    _object(query, ("project",))
+                    return 200, router.view(query.get("project"))
+                _object(query, ())
+                with daemon._lock:
+                    daemon._active()
+                    return 200, router.configure(self._body())
             if method == "GET" and parts == ["status"]:
                 return 200, daemon.status()
             if method == "GET" and parts == ["events"]:

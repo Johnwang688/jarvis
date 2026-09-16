@@ -188,6 +188,8 @@ ALLOWLIST_PATH = Path(
     )
 )
 
+ROUTING_PATH = Path(os.environ.get("JARVIS_ROUTING", Path.home() / ".config" / "jarvis" / "routing.json"))
+
 # The model roster (see models.py): the owner's shortlist of OpenRouter models
 # and which one is selected. Machine-local state chosen through the HUD, so it
 # lives beside the allowlist and the avatar pointer rather than in the repo.
