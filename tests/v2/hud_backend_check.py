@@ -197,6 +197,11 @@ class Backend(unittest.TestCase):
         return self.request("POST", "/schedules", dict(project_id=self.project.id,
                             brief="scheduled work", every_s=60, **extra), status=201)
 
+    def test_fs_dirs_defaults_to_home(self):
+        # The picker opens with no path and expects $HOME (WP12c frontend).
+        body = self.request("GET", "/fs/dirs")
+        self.assertEqual(body["path"], str(Path.home()))
+
     def test_listeners_static_and_preview_origin(self):
         for port in (self.daemon.port, self.daemon.face_port):
             self.assertEqual(self.request("GET", "/status", port=port)["version"], 2)
@@ -541,7 +546,7 @@ class Backend(unittest.TestCase):
                 get(forbidden, 403)
             get(home / "missing", 404)
             get(home / "file.txt", 404)
-            self.request("GET", "/fs/dirs", status=400)
+            self.assertIn("dirs", self.request("GET", "/fs/dirs"))  # no path -> home
             # Drive roots need no real mount in the test environment.
             with patch.object(Path, "is_dir", return_value=True), patch.object(Path, "iterdir", return_value=iter([])):
                 self.assertEqual(get("/mnt/c"), dict(path="/mnt/c", parent=None, dirs=[]))

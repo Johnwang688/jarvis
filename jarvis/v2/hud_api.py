@@ -519,8 +519,9 @@ def route(handler, daemon, parts, query):
         _object(query, ())
         return 200, usage(daemon)
     if parts == ["fs", "dirs"] and method == "GET":
-        _object(query, ("path",), ("path",))
-        return 200, directories(query["path"])
+        # No path means "start at home": the picker opens there (WP12c frontend).
+        _object(query, ("path",))
+        return 200, directories(query.get("path") or str(Path.home()))
     if parts[0] == "schedules":
         _object(query, ())
         schedules = daemon.schedules
