@@ -73,7 +73,7 @@ class LedgerChecks(unittest.TestCase):
 
     def test_actual_wp7_published_counters_are_cumulative(self):
         daemon = Daemon(self.stores, {}, lambda *_: None, 0)
-        subscription = daemon.bus.subscribe()
+        subscription = daemon.bus.subscribe({"kind": "usage"})
         thread = self.threads[P.CODEX]
         session = SimpleNamespace(retired=False, thread=thread, token_baseline=0,
                                   cost_baseline=0, turn_id="turn")

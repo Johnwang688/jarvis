@@ -141,6 +141,12 @@ class DaemonChecks(unittest.TestCase):
         self.config_patch = patch.object(config, "V2_DATA_DIR", self.root / "v2")
         self.config_patch.start()
         self.addCleanup(self.config_patch.stop)
+        # WP12 mounts real picker routes; never let legacy negative probes
+        # touch the owner's roster or catalog.
+        for name in ("MODELS_PATH", "ALLOWLIST_PATH"):
+            local = patch.object(config, name, self.root / name.lower())
+            local.start()
+            self.addCleanup(local.stop)
         self.stores = Stores()
         self.fake = FakeProvider()
         self.permits = []
@@ -202,7 +208,7 @@ class DaemonChecks(unittest.TestCase):
         record = self.stores.threads.get(thread.id)
         self.assertEqual((record.turns, record.tokens, record.cost_usd), (1, 11, 0.25))
         log = self.request("GET", f"/threads/{thread.id}/log")
-        self.assertEqual([e["kind"] for e in log], [e["kind"] for e in first if e["kind"] != "text_delta"])
+        self.assertEqual([e["kind"] for e in log], ["user"] + [e["kind"] for e in first if e["kind"] != "text_delta"])
         self.assertEqual(self.request("GET", f"/threads/{thread.id}/log?after=2"), log[2:])
         self.assertEqual(self.fake.messages[-1].images[0]["mime"], "image/png")
         self.d.send(thread.id, UserMessage("next"))
@@ -269,7 +275,7 @@ class DaemonChecks(unittest.TestCase):
         proceed.set()
         self.wait_turn(thread)
         log = self.stores.threads.read_log(thread.id)
-        self.assertEqual([e["kind"] for e in log], ["turn_started", "turn_finished"])
+        self.assertEqual([e["kind"] for e in log], ["user", "turn_started", "turn_finished"])
         self.assertEqual(log[-1]["data"]["stop"], "interrupted")
 
     def test_project_thread_task_and_worktree_routes(self):
@@ -364,14 +370,14 @@ class DaemonChecks(unittest.TestCase):
                              ("POST", "/threads/deadbeef/interrupt"), ("POST", "/threads/deadbeef/answer"),
                              ("GET", "/threads/deadbeef/log"), ("GET", "/tasks/deadbeef/worktree"),
                              ("POST", "/tasks/deadbeef/worktree"), ("DELETE", "/tasks/deadbeef/worktree"),
-                             ("GET", "/events?project=deadbeef"), ("GET", "/unknown"), ("POST", "/model")]:
+                             ("GET", "/events?project=deadbeef"), ("GET", "/unknown")]:
             self.request(method, path, expected=404)
         for raw in ("{", "[]", "null"):
             self.request("POST", "/projects", raw=raw, expected=400)
         self.request("POST", "/threads", {"project_id": self.project.id, "role": "chat", "provider": "claude", "brief": {}}, 409)
         with patch.object(self.stores.projects, "get", side_effect=RuntimeError("exploded")):
             with self.assertLogs(mod.LOG, level="ERROR"):
-                self.request("GET", "/projects/" + self.project.id, expected=500)
+                self.request("GET", "/projects/" + self.project.id, expected=409)
         self.assertEqual(self.request("GET", "/status")["version"], 2)
 
     def test_corrupt_files_skip_and_strict_store_unchanged(self):

@@ -350,6 +350,26 @@ def cmd_route(args) -> int:
     return cli(args)
 
 
+def cmd_hud(args) -> int:
+    """Start the v2 service once, then open the owner's app-mode browser."""
+    import subprocess
+    import time
+    from .v2.daemon import is_running
+    if not is_running(config.DAEMON_PORT):
+        child = subprocess.Popen([sys.executable, "-m", "jarvis", "daemon2"],
+                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL, start_new_session=True)
+        deadline = time.monotonic() + 15
+        while not is_running(config.DAEMON_PORT):
+            if child.poll() is not None or time.monotonic() >= deadline:
+                raise RuntimeError("the v2 daemon could not start; run jarvis daemon2 for details")
+            time.sleep(0.1)
+    if not args.no_window:
+        from .face.server import launch_window
+        launch_window(f"http://localhost:{config.FACE_PORT}/")
+    return 0
+
+
 def cmd_daemon2(args) -> int:
     from .v2 import daemon
 
@@ -831,6 +851,10 @@ def main() -> int:
     desktop.add_argument("--wait", type=float, default=0.0,
                          help="seconds to wait for the bridge to connect")
     desktop.set_defaults(func=cmd_desktop)
+
+    hud = sub.add_parser("hud", help="open the v2 HUD (starts the daemon if needed)")
+    hud.add_argument("--no-window", action="store_true", help="start the daemon without opening a browser")
+    hud.set_defaults(func=cmd_hud)
 
     sub.add_parser("daemon2", help="v2 daemon and local API").set_defaults(func=cmd_daemon2)
 

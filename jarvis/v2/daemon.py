@@ -100,7 +100,8 @@ class _Session:
 class Daemon:
     def __init__(self, stores: Stores, providers: dict[ProviderName, Provider],
                  permit_factory: Callable[[str, Brief], PermissionCallback] | None,
-                 port: int, approvals: PendingApprovals | None = None):
+                 port: int, approvals: PendingApprovals | None = None, *,
+                 face_port: int | None = None, workshop_port: int | None = None):
         self.stores = stores
         self.providers = {ProviderName(k): v for k, v in providers.items()}
         self.port = port
@@ -126,6 +127,15 @@ class Daemon:
         self._stopping = False
         self._server = None
         self._server_thread = None
+        # Port zero is an isolated embedded/test daemon on three ephemeral ports.
+        self.face_port = face_port if face_port is not None else (0 if port == 0 else config.FACE_PORT)
+        self.workshop_port = workshop_port if workshop_port is not None else (0 if port == 0 else config.WORKSHOP_PORT)
+        self._listeners = []
+        from .hud_api import HUDLedger
+        from .router import Router
+        from .schedules import Schedules
+        self.router = Router(stores, self.providers, ledger=HUDLedger(stores))
+        self.schedules = Schedules(self)
         self.started_at = time.monotonic()
 
     def start(self) -> None:
@@ -139,13 +149,32 @@ class Daemon:
                     raise
                 reason = "another daemon is already running" if is_running(self.port) else "port is already in use"
                 raise DaemonError(f"{reason} on port {self.port}") from exc
-            server.daemon_threads = True
+            servers = [server]
+            try:
+                # Use the identical handler class on both API listeners. The
+                # third server is marked preview-only before accepting requests.
+                face = ThreadingHTTPServer(("127.0.0.1", self.face_port), server.RequestHandlerClass)
+                servers.append(face)
+                preview = ThreadingHTTPServer(("127.0.0.1", self.workshop_port), server.RequestHandlerClass)
+                preview.preview_only = True
+                servers.append(preview)
+            except OSError as exc:
+                for listener in servers:
+                    listener.server_close()
+                raise DaemonError("HUD or preview port is already in use") from exc
             self._server = server
-            self.port = server.server_address[1]
+            self.port, self.face_port, self.workshop_port = [s.server_address[1] for s in servers]
             self.started_at = time.monotonic()
-            self._server_thread = threading.Thread(target=lambda: server.serve_forever(0.05),
-                                                   name="jarvis-v2-http", daemon=True)
-            self._server_thread.start()
+            for listener in servers:
+                listener.daemon_threads = True
+                worker = threading.Thread(target=lambda s=listener: s.serve_forever(0.05),
+                                          name="jarvis-v2-http", daemon=True)
+                self._listeners.append((listener, worker))
+                worker.start()
+            self._server_thread = self._listeners[0][1]
+            from .hud_api import connect_controls
+            connect_controls(self)
+            self.schedules.start()
 
     def status(self) -> dict:
         providers = {}
@@ -263,8 +292,12 @@ class Daemon:
             session.turn_id = uuid.uuid4().hex
             worker = threading.Thread(target=self._turn, args=(session, message),
                                       name=f"jarvis-turn-{thread_id}", daemon=True)
-            session.worker = worker
             turn_id = session.turn_id
+            self.stores.threads._append(thread_id, "log.jsonl",
+                                        {"kind": "user", "at": utcnow(), "turn_id": turn_id,
+                                         "thread_id": thread_id,
+                                         "data": {"text": message.text}})
+            session.worker = worker
             worker.start()
             return turn_id
 
@@ -335,11 +368,24 @@ class Daemon:
                     thread.cost_usd += usage.cost_usd or 0
                 thread.updated = utcnow()
                 self.stores.threads.save(thread)
-            record = {**to_json(event), "project_id": thread.project_id, "turn_id": session.turn_id}
+            record = {**to_json(event), "project_id": thread.project_id, "turn_id": session.turn_id,
+                      "at": utcnow(), "event_id": uuid.uuid4().hex}
             if event.kind != EventKind.TEXT_DELTA:
                 # WP1 log() accepts text only; preserve full structured events
                 # through its serialized append primitive, in the same log.
                 self.stores.threads._append(thread.id, "log.jsonl", record)
+            if event.kind in (EventKind.USAGE, EventKind.ERROR):
+                # Durable and synchronous, including chat. The stable id makes
+                # the runner's subsequent ledger delivery idempotent.
+                ledger = self.router.ledger
+                before = ledger.totals(provider=thread.provider.value)
+                old_quota = ledger.quota(thread.provider.value) if hasattr(ledger, "quota") else None
+                rows = len(ledger._rows)
+                ledger.on_event(record)
+                new_quota = ledger.quota(thread.provider.value) if hasattr(ledger, "quota") else None
+                if (before != ledger.totals(provider=thread.provider.value) or old_quota != new_quota
+                        or (event.kind == EventKind.ERROR and len(ledger._rows) != rows)):
+                    self.bus.publish({"kind": "usage_updated", "data": {"provider": thread.provider.value}})
             self.bus.publish(record)
 
     def _finish(self, session, event):
@@ -446,6 +492,7 @@ class Daemon:
         self.bus.publish(record)
 
     def stop(self):
+        self.schedules.stop()
         deadline = time.monotonic() + STOP_TIMEOUT
         with self._lock:
             if self._stopping:
@@ -467,11 +514,12 @@ class Daemon:
                 session.retired = True
             self._sessions.clear()
         self.bus.close()
-        if self._server is not None:
-            self._server.shutdown()
-            self._server.server_close()
-            self._server_thread.join(max(0, deadline - time.monotonic()))
-            self._server = None
+        for server, worker in self._listeners:
+            server.shutdown()
+            server.server_close()
+            worker.join(max(0, deadline - time.monotonic()))
+        self._listeners.clear()
+        self._server = None
         if any(job.is_alive() for job in jobs):
             LOG.warning("Shutdown bound reached; provider work remains on daemon threads")
 
@@ -494,8 +542,7 @@ def _text(value, name):
 
 def _handler(daemon):
     class Handler(BaseHTTPRequestHandler):
-        # WP12 must add same-origin/Host checks before introducing a browser
-        # surface. This API currently serves loopback clients only; no CORS.
+        # No CORS: the preview origin must never invoke this approval surface.
         def log_message(self, *args):
             pass
 
@@ -515,20 +562,28 @@ def _handler(daemon):
             self.end_headers()
             self.wfile.write(data)
 
-        def _body(self):
+        def _raw_body(self):
             if self.headers.get("Transfer-Encoding"):
                 raise APIError(400, "chunked bodies are not supported")
             length = int(self.headers.get("Content-Length", "0"))
-            if length < 0 or length > 16 * 1024 * 1024:
-                raise APIError(400, "invalid body length (limit 16 MiB)")
+            if length < 0:
+                raise APIError(400, "invalid body length")
+            if length > 48 * 1024 * 1024:
+                raise APIError(413, "request body exceeds 48 MiB")
             data = self.rfile.read(length)
             if len(data) != length:
                 raise APIError(400, "incomplete request body")
+            return data
+
+        def _body(self):
+            data = self._raw_body()
             value = json.loads(data) if data else {}
             return _object(value, value.keys() if isinstance(value, dict) else ())
 
         def _dispatch(self):
             try:
+                from .hud_api import check_origin
+                check_origin(self, preview=getattr(self.server, "preview_only", False))
                 status, payload = self._route()
                 if not self._streaming:
                     self._json(status, payload)
@@ -541,13 +596,21 @@ def _handler(daemon):
                     status = exc.status
                 elif isinstance(exc, (DaemonError, BriefRefused, worktrees.WorktreeError)):
                     status = 409
+                elif isinstance(exc, (FileNotFoundError, LookupError)) and not isinstance(exc, KeyError):
+                    status = 404
+                elif isinstance(exc, PermissionError):
+                    status = 403
                 elif isinstance(exc, (ValueError, TypeError, KeyError, TimeoutError)):
                     status = 400
                 else:
-                    status = 500
+                    status = 409
                     LOG.exception("HTTP %s %s failed", self.command, self.path)
                 try:
-                    self._json(status, {"error": str(exc) or type(exc).__name__})
+                    from jarvis.tools.secrets import scrub
+                    # Only intentional, bounded API errors are reflected. JSON
+                    # decoder/provider exceptions may contain request secrets.
+                    message = str(exc) if isinstance(exc, (APIError, DaemonError, BriefRefused, ControlError)) else "request failed (" + type(exc).__name__ + ")"
+                    self._json(status, {"error": scrub(message)})
                 except OSError:
                     pass
 
@@ -562,6 +625,12 @@ def _handler(daemon):
             query = {k: v[0] for k, v in query.items()}
             method = self.command
             stores = daemon.stores
+            from . import hud_api
+            if getattr(self.server, "preview_only", False):
+                return hud_api.preview_route(self, daemon, parts, query)
+            mounted = hud_api.route(self, daemon, parts, query)
+            if mounted is not None:
+                return mounted
             if parts == ["route"] and method in ("GET", "POST"):
                 from .router import daemon_router
                 router = daemon_router(daemon)
@@ -650,16 +719,6 @@ def _handler(daemon):
                         raise APIError(400, "after must be nonnegative")
                     # after=N skips N records (zero-based resume offset).
                     return 200, stores.threads.read_log(thread_id)[after:]
-                if method == "POST" and action == "send":
-                    body = _object(self._body(), ("text", "images"), ("text",))
-                    _text(body["text"], "text")
-                    message = UserMessage(**body)
-                    _validate(message, UserMessage)
-                    for img in message.images:
-                        _object(img, ("b64", "mime"), ("b64", "mime"))
-                        _text(img["b64"], "b64")
-                        _text(img["mime"], "mime")
-                    return 202, {"turn_id": daemon.send(thread_id, message)}
                 if method == "POST" and action == "interrupt":
                     _object(self._body(), ())
                     daemon.interrupt(thread_id)
@@ -875,7 +934,6 @@ def main() -> int:
     # given and nothing in the daemon needs it, so keeping the edge one-way
     # keeps `import jarvis.v2.daemon` free of the subprocess machinery.
     from .hatch import EscapeHatch
-    from .router import Router
     from .runner import TaskRunner
 
     remote = discord_connected()
@@ -895,7 +953,6 @@ def main() -> int:
         holder["daemon"] = daemon
     hatch = EscapeHatch(daemon, daemon.approvals)
     discord = None
-    daemon.router = Router(daemon.stores, daemon.providers)
     daemon.runner = TaskRunner(daemon, daemon.router)
     done = threading.Event()
     previous = signal.signal(signal.SIGTERM, lambda *_: done.set())

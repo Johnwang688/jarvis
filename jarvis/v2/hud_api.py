@@ -1,0 +1,605 @@
+"""HUD routes mounted on the daemon, plus an isolated read-only preview origin."""
+from __future__ import annotations
+
+import base64
+import copy
+import difflib
+import math
+import mimetypes
+import os
+from pathlib import Path
+import re
+from urllib.parse import unquote, urlsplit
+
+from jarvis.tools.secrets import is_protected, scrub
+from jarvis.tools.search import SKIP_DIRS as SEARCH_SKIP_DIRS
+from .ledger import UsageLedger
+from .model import ProviderName
+from .permissions import denied_file
+from .provider import UserMessage
+from .stores import _write_bytes
+from . import worktrees
+
+SKIP_DIRS = SEARCH_SKIP_DIRS | {".jarvis"}
+FILE_CAP = 2 * 1024 * 1024
+PATCH_CAP = 1024 * 1024
+ATTACH_CAP = 4 * 1024 * 1024
+HUD_DIST = Path(__file__).resolve().parents[2] / "hud" / "dist"
+
+
+def fail(status, text):
+    from .daemon import APIError
+    raise APIError(status, text)
+
+
+def scope(project, name, *, root=None):
+    """Resolve both the lexical and actual target; URL input is never proxied."""
+    if not isinstance(name, str) or "\x00" in name:
+        fail(400, "invalid path")
+    if "://" in name or "\\" in name or ".." in Path(name).parts:
+        fail(403, "path outside project scope")
+    roots = [Path(root or project.root).resolve()]
+    if root is None:
+        roots += [Path(p).expanduser().resolve() for p in project.extra_dirs]
+    raw = Path(name).expanduser()
+    raw = raw if raw.is_absolute() else roots[0] / raw
+    try:
+        resolved = raw.resolve()
+    except (OSError, RuntimeError):
+        fail(403, "path cannot be resolved safely")
+    for candidate in (raw, resolved):
+        relative = next((candidate.relative_to(r) for r in roots if candidate.is_relative_to(r)), None)
+        if relative is None or any(p in SKIP_DIRS for p in relative.parts):
+            fail(403, "path outside project scope or in an excluded directory")
+    return raw, resolved
+
+
+def protected(raw, resolved):
+    return is_protected(raw) or is_protected(resolved)
+
+
+def read_file(path, limit=FILE_CAP):
+    if not path.is_file():
+        fail(404, "file not found")
+    with path.open("rb") as handle:
+        data = handle.read(limit + 1)
+        stat = os.fstat(handle.fileno())
+    if len(data) > limit:
+        fail(413, "file exceeds size limit")
+    return data, stat
+
+
+def tree(project, name, depth):
+    if not 0 <= depth <= 20:
+        fail(400, "depth must be between 0 and 20")
+    _, directory = scope(project, name)
+    if not directory.is_dir():
+        fail(404, "directory not found")
+    entries = []
+
+    def walk(parent, remaining, ancestors):
+        if not remaining:
+            return
+        for child in sorted(parent.iterdir(), key=lambda p: p.name):
+            if child.name in SKIP_DIRS:
+                continue
+            try:
+                _, actual = scope(project, str(child))
+            except Exception as exc:
+                from .daemon import APIError
+                if isinstance(exc, APIError):
+                    continue
+                raise
+            if not actual.exists():
+                continue
+            stat = actual.stat()
+            is_dir = actual.is_dir()
+            if not is_dir and not actual.is_file():
+                continue
+            entries.append(dict(name=str(child.relative_to(directory)), kind="dir" if is_dir else "file",
+                                size=stat.st_size, mtime=stat.st_mtime))
+            if is_dir and actual not in ancestors:
+                walk(child, remaining - 1, ancestors | {actual})
+    walk(directory, depth, {directory})
+    return {"path": name, "entries": entries}
+
+
+def assemble_turn(project, body):
+    """v1 fences/notes/caps, with project-scoped @paths and credential names refused."""
+    from .daemon import _object
+    _object(body, ("text", "images", "attachments"), ("text",))
+    typed = body["text"]
+    if not isinstance(typed, str):
+        fail(400, "text must be a string")
+    attachments, images = body.get("attachments", []), body.get("images", [])
+    if not isinstance(attachments, list) or not isinstance(images, list):
+        fail(400, "images and attachments must be lists")
+    combined = []
+    for img in images:
+        _object(img, ("b64", "mime"), ("b64", "mime"))
+        if not isinstance(img["mime"], str) or not img["mime"].startswith("image/"):
+            fail(400, "image mime must be image/*")
+        combined.append(dict(name="image", mime=img["mime"], data_b64=img["b64"], direct=True))
+    for item in attachments:
+        _object(item, ("name", "mime", "data_b64"), ("name", "mime", "data_b64"))
+        combined.append(item)
+    notes = []
+    for token in re.findall(r"(?:(?<=\s)|^)@(\S+)", typed):
+        name = token.rstrip(".,;:!?)\"'")
+        try:
+            raw, target = scope(project, name)
+            if protected(raw, target):
+                notes.append(f"[{name} holds live credentials — not attached]")
+                continue
+            if not target.is_file():
+                if "/" in name:
+                    notes.append(f"[{name} not found — not attached]")
+                continue
+            # Bound reads even for dropped attachments.
+            data, _ = read_file(target, ATTACH_CAP)
+            mime = mimetypes.guess_type(name)[0] or "text/plain"
+            combined.append(dict(name=name, mime=mime, data_b64=base64.b64encode(data).decode()))
+        except Exception as exc:
+            from .daemon import APIError
+            if not isinstance(exc, (APIError, OSError)):
+                raise
+            notes.append(f"[{name}: unavailable or outside scope — not attached]")
+    result_images, blocks = [], []
+    for item in combined[:8]:
+        if any(not isinstance(item.get(k), str) for k in ("name", "mime", "data_b64")):
+            fail(400, "attachment fields must be strings")
+        name, mime = (item["name"] or "attachment")[:200], item["mime"] or "text/plain"
+        if is_protected(item["name"].replace("\\", "/")):
+            notes.append(f"[{name} holds live credentials — not attached]")
+            continue
+        try:
+            data = base64.b64decode(item["data_b64"], validate=True)
+        except ValueError:
+            notes.append(f"[{name}: unreadable attachment data]")
+            continue
+        if len(data) > ATTACH_CAP:
+            notes.append(f"[{name} is over 4MB — not attached]")
+            continue
+        if mime.startswith("image/"):
+            result_images.append({"b64": base64.b64encode(data).decode(), "mime": mime})
+            if not item.get("direct"):
+                blocks.append(f"[attached image: {name}]")
+        else:
+            text = data.decode("utf-8", errors="replace")
+            suffix = "\n[truncated]" if len(text) > 100_000 else ""
+            blocks.append(f"[attached file: {name}]\n```\n{scrub(text[:100_000])}\n```{suffix}")
+    if len(combined) > 8:
+        notes.append(f"[{len(combined) - 8} attachment(s) over the 8-per-turn cap were dropped]")
+    text = "\n\n".join(([typed.strip()] if typed.strip() else []) + blocks + notes)
+    if not text:
+        fail(400, "text or attachments required")
+    return UserMessage(text, result_images)
+
+
+class HUDLedger(UsageLedger):
+    """Keep sparse provider reports in ledger rows without changing its interface."""
+    def __init__(self, *args, **kwargs):
+        self.rate_limits = {}
+        self._reported = None
+        super().__init__(*args, **kwargs)
+
+    def _apply(self, row):
+        super()._apply(row)
+        if isinstance(row.get("rate_limits"), dict):
+            # Notifications are sparse; null metadata never clears known values.
+            key = row["rate_limits"].get("limitId") or "codex"
+            previous = self.rate_limits.setdefault(key, {})
+            for k, v in row["rate_limits"].items():
+                if v is not None:
+                    if isinstance(v, dict) and isinstance(previous.get(k), dict):
+                        previous[k].update({a: b for a, b in v.items() if b is not None})
+                    else:
+                        previous[k] = copy.deepcopy(v)
+
+    def _append(self, row):
+        if self._reported is not None and row["provider"] == "codex":
+            row["rate_limits"] = self._reported
+        super()._append(row)
+
+    def on_event(self, event, **kwargs):
+        from .model import to_json
+        from .provider import Event
+        record = to_json(event) if isinstance(event, Event) else event
+        with self._lock:
+            self._reported = (record.get("data", {}).get("provider_reported") or {}).get("rate_limits")
+            try:
+                return super().on_event(record, **kwargs)
+            finally:
+                self._reported = None
+
+    def quota(self, provider):
+        if provider != "codex":
+            return None
+        windows = []
+        with self._lock:
+            for limit_id, report in self.rate_limits.items():
+                for key in ("primary", "secondary"):
+                    window = report.get(key)
+                    if not isinstance(window, dict):
+                        continue
+                    used = window.get("usedPercent")
+                    if type(used) not in (float, int) or not math.isfinite(used) or used < 0:
+                        continue
+                    minutes = window.get("windowDurationMins")
+                    label = {300: "5h", 10080: "weekly"}.get(minutes, key)
+                    if limit_id != "codex":
+                        label = f"{report.get('limitName') or limit_id}: {label}"
+                    windows.append(dict(name=label, used_percent=used, resets_at=window.get("resetsAt")))
+        return {"windows": windows} if windows else None
+
+
+def usage(daemon):
+    from .router import daemon_router, load_routing
+    router = daemon_router(daemon)
+    settings = load_routing()
+    result = {}
+    for provider in ProviderName:
+        instance = daemon.providers.get(provider)
+        ok, reason = router.health.check(instance) if instance else (False, "provider not in roster")
+        router.ledger.set_health(provider.value, ok, reason)
+        state = router.ledger.state(provider.value, no_new_work=settings["no_new_work"],
+                                    allowances=settings["allowances"])
+        quota = router.ledger.quota(provider.value) if isinstance(router.ledger, HUDLedger) else None
+        result[provider.value] = dict(state=state["state"], reason=state["reason"], today=state["totals"],
+                                      allowance=settings["allowances"][provider.value], quota=quota)
+    return {"providers": result}
+
+
+def _scrub_source(text):
+    # v1 scrub normalizes lines and removes the final newline; restore it so
+    # the diff editor does not invent a missing-newline change.
+    return scrub(text) + ("\n" if text.endswith("\n") else "")
+
+
+def _git(root, *args):
+    return worktrees._git(root, "--literal-pathspecs", *args)
+
+
+def _diff_context(daemon, task):
+    if not task.worktree or not Path(task.worktree).is_dir() or not task.branch:
+        fail(409, "task has no git worktree")
+    root = Path(task.worktree).resolve()
+    base = worktrees._entry(task, daemon.stores).get("base_ref")
+    if not base:
+        fail(409, "task has no recorded base ref")
+    ancestor = _git(root, "merge-base", base, "HEAD").strip()
+    head = _git(root, "rev-parse", "HEAD").strip()
+    project = daemon.require(daemon.stores.projects, task.project_id)
+    return root, base, ancestor, head, project
+
+
+def _diff_paths(root, ancestor):
+    tokens = _git(root, "diff", "--no-ext-diff", "--no-textconv", "--name-status", "-z", "-M", ancestor, "--").split("\0")
+    rows = []
+    while tokens and tokens[0]:
+        status, old = tokens.pop(0), tokens.pop(0)
+        name = tokens.pop(0) if status.startswith(("R", "C")) else old
+        rows.append(("R" if status.startswith(("R", "C")) else status[0], old, name))
+    rows += [("A", name, name) for name in _git(root, "ls-files", "--others", "--exclude-standard", "-z").split("\0") if name]
+    return rows
+
+
+def diff(daemon, task, name=None):
+    root, base, ancestor, head, project = _diff_context(daemon, task)
+    rows = _diff_paths(root, ancestor)
+    def allowed(path):
+        raw, actual = scope(project, path, root=root)
+        if protected(raw, actual):
+            fail(403, "protected file")
+        return actual
+    if name is not None:
+        actual = allowed(name)
+        raw, _ = scope(project, name, root=root)
+        rel = str(raw.relative_to(root))
+        old = next((old for _, old, new in rows if new == rel), rel)
+        allowed(old)
+        # Symlinks are displayed as link text, never followed into another file.
+        exists = _git(root, "ls-tree", "-z", ancestor, "--", old)
+        before = _git(root, "show", f"{ancestor}:{old}") if exists else ""
+        raw = root / rel
+        if raw.is_symlink():
+            after = str(raw.readlink())
+        elif actual.exists():
+            data, _ = read_file(actual)
+            after = data.decode("utf-8", errors="replace")
+        else:
+            after = ""
+            if not exists:
+                fail(404, "file not found in diff")
+        return {"before": _scrub_source(before), "after": _scrub_source(after)}
+    files, patches = [], []
+    for status, old, path in rows:
+        try:
+            actual = allowed(path)
+            allowed(old)
+        except Exception as exc:
+            from .daemon import APIError
+            if isinstance(exc, APIError) and exc.status == 403:
+                continue
+            raise
+        if status not in ("A", "M", "D", "R"):
+            status = "M"
+        patch = _git(root, "diff", "--no-ext-diff", "--no-textconv", "-M", ancestor, "--", old, path)
+        nums = _git(root, "diff", "--no-ext-diff", "--no-textconv", "--numstat", ancestor, "--", old, path)
+        additions = deletions = 0
+        for line in nums.splitlines():
+            a, d, _ = line.split("\t", 2)
+            additions += int(a) if a.isdecimal() else 0
+            deletions += int(d) if d.isdecimal() else 0
+        if not patch and status == "A":
+            if (root / path).is_symlink():
+                data = str((root / path).readlink()).encode()
+            else:
+                data, _ = read_file(actual)
+            lines = data.decode("utf-8", errors="replace").splitlines(keepends=True)
+            additions = len(lines)
+            patch = "".join(difflib.unified_diff([], lines, fromfile="/dev/null", tofile=f"b/{path}"))
+        files.append(dict(path=path, status=status, additions=additions, deletions=deletions))
+        patches.append(patch)
+    encoded = _scrub_source("".join(patches)).encode()
+    result = dict(base=base, head=head, files=files, patch=encoded[:PATCH_CAP].decode("utf-8", errors="ignore"))
+    if len(encoded) > PATCH_CAP:
+        result["truncated"] = True
+    return result
+
+
+def binary(handler, data, mime, *, csp=None):
+    handler.send_response(200)
+    handler.send_header("Content-Type", mime)
+    handler.send_header("Content-Length", str(len(data)))
+    handler.send_header("Cache-Control", "no-store")
+    handler.send_header("X-Content-Type-Options", "nosniff")
+    if csp:
+        handler.send_header("Content-Security-Policy", csp)
+    handler.end_headers()
+    handler._streaming = True
+    handler.wfile.write(data)
+    return 200, None
+
+
+def check_origin(handler, *, preview=False):
+    host = handler.headers.get("Host", "")
+    port = handler.server.server_address[1]
+    if host not in (f"127.0.0.1:{port}", f"localhost:{port}"):
+        fail(403, "untrusted Host")
+    if not preview:
+        origin = handler.headers.get("Origin")
+        if origin and origin != f"http://{host}":
+            fail(403, "cross-origin request refused")
+        if handler.headers.get("Sec-Fetch-Site") == "cross-site":
+            fail(403, "cross-site request refused")
+        if handler.command in ("POST", "PUT", "PATCH") and urlsplit(handler.path).path != "/stt":
+            # CLI clients omit Content-Type in older tests; browsers' simple
+            # form/text types must never reach a mutation without preflight.
+            content_type = handler.headers.get("Content-Type", "").split(";", 1)[0]
+            if content_type and content_type != "application/json":
+                fail(400, "expected application/json")
+
+
+def preview_route(handler, daemon, parts, query):
+    if handler.command != "GET" or len(parts) < 2 or parts[0] != "p":
+        fail(404, "preview route not found")
+    project = daemon.require(daemon.stores.projects, parts[1])
+    name = unquote("/".join(parts[2:]))
+    raw, target = scope(project, name)
+    if target.is_dir():
+        raw, target = scope(project, str(target / "index.html"))
+    if protected(raw, target):
+        fail(403, "protected file")
+    data, _ = read_file(target, 32 * 1024 * 1024)
+    return binary(handler, data, mimetypes.guess_type(target.name)[0] or "application/octet-stream")
+
+
+def pickers(handler, daemon, parts, query):
+    from jarvis import avatars, models, voice
+    from jarvis.tools import voicectl
+    from .daemon import _object
+    name = "/".join(parts)
+    if handler.command == "GET":
+        if name == "avatars":
+            return 200, {"current": avatars.active().slug, "avatars": [a.describe() for a in avatars.available()]}
+        if name == "avatar.svg":
+            _object(query, ("slug",))
+            av = avatars.load(query["slug"]) if query.get("slug") else avatars.active()
+            art = avatars.svg(av) if av else None
+            if not art:
+                fail(404, "no avatar art")
+            return binary(handler, art.encode(), "image/svg+xml", csp="default-src 'none'; style-src 'unsafe-inline'")
+        if name == "voices":
+            return 200, {"current": voice.selected_voice(), "override": voice._voice_override, "voices": voice.catalog()}
+        if name == "models":
+            return 200, models.describe()
+        if name == "models/catalog":
+            return 200, {"models": [m.describe() for m in models.catalog()],
+                         "roster": models.roster().models, "stale": models.stale_reason()}
+    if handler.command != "POST":
+        return None
+    if name == "stt":
+        mime = handler.headers.get("Content-Type", "").split(";", 1)[0]
+        if not mime.startswith("audio/"):
+            fail(400, "expected audio/*")
+        data = handler._raw_body()
+        if not data:
+            fail(400, "audio is empty")
+        return 200, {"text": voice.stt(data, mime=mime)}
+    body = handler._body()
+    if name == "say":
+        text = str(body.get("text", "")).strip()
+        if not text:
+            fail(400, "no text to say")
+        audio = voice.tts(text[:2000], voice=body.get("voice"), instructions=body.get("instructions"))
+        return binary(handler, audio, "audio/wav" if audio.startswith(b"RIFF") else "audio/mpeg")
+    if name == "mute":
+        voicectl.set_muted(bool(body.get("muted")))
+        return 200, {"ok": True, "muted": voicectl.is_muted()}
+    if name == "avatar":
+        return 200, avatars.set_active(str(body.get("slug", ""))).describe()
+    if name == "voice":
+        payload = {"voice": voice.set_voice(str(body.get("voice", "")))}
+        daemon.bus.publish({"kind": "voice", "data": payload})
+        return 200, payload
+    if name == "model":
+        models.select(str(body.get("model", "")))
+    elif name == "models":
+        add, remove, model = (str(body.get(k) or "").strip() for k in ("add", "remove", "model"))
+        if sum(bool(v) for v in (add, remove, model)) != 1:
+            fail(400, "expected exactly one of add, remove, or model with effort")
+        if add:
+            models.add(add)
+        elif remove:
+            models.remove(remove)
+        else:
+            models.set_effort(model, str(body.get("effort") or ""))
+    else:
+        return None
+    payload = models.describe()
+    daemon.bus.publish({"kind": "model", "data": payload})
+    return 200, payload
+
+
+def route(handler, daemon, parts, query):
+    """Return None for the existing daemon routes; never consume their bodies."""
+    from .daemon import _object, safe_list
+    method, stores = handler.command, daemon.stores
+    if method == "GET" and (parts == [""] or parts[0] == "assets"):
+        if parts == [""]:
+            path = HUD_DIST / "index.html"
+            if not path.is_file():
+                return binary(handler, b"<!doctype html><title>J.A.R.V.I.S.</title>hud/dist is absent; build the HUD first.\n", "text/html; charset=utf-8")
+        else:
+            name = unquote("/".join(parts))
+            path = (HUD_DIST / name).resolve()
+            if ".." in Path(name).parts or not path.is_relative_to(HUD_DIST.resolve()) or path.is_symlink():
+                fail(403, "asset outside HUD")
+        data, _ = read_file(path, 32 * 1024 * 1024)
+        return binary(handler, data, mimetypes.guess_type(path.name)[0] or "application/octet-stream")
+    if "/".join(parts) in ("avatar.svg", "avatars", "avatar", "voices", "voice", "models", "models/catalog", "model", "mute", "say", "stt"):
+        return pickers(handler, daemon, parts, query)
+    if parts == ["usage"] and method == "GET":
+        _object(query, ())
+        return 200, usage(daemon)
+    if parts[0] == "schedules":
+        _object(query, ())
+        schedules = daemon.schedules
+        if len(parts) == 1:
+            if method == "GET":
+                return 200, schedules.list()
+            if method == "POST":
+                return 201, schedules.save(handler._body())
+        if len(parts) == 2:
+            if method == "PATCH":
+                return 200, schedules.save(handler._body(), parts[1])
+            if method == "DELETE":
+                schedules.delete(parts[1])
+                return 200, {"ok": True}
+        if len(parts) == 3 and parts[2] == "run-now" and method == "POST":
+            _object(handler._body(), ())
+            return 200, schedules.fire(parts[1], manual=True)
+    if len(parts) == 3 and parts[0] == "projects" and parts[2] in ("tree", "file", "platform"):
+        project = daemon.require(stores.projects, parts[1])
+        action = parts[2]
+        if action == "platform" and method == "GET":
+            windows = bool(re.match(r"^/mnt/[a-zA-Z]/", project.root + "/"))
+            return 200, {"platform": "windows" if windows else "wsl",
+                         "note": "Git on WSL's 9p-mounted Windows filesystem can be slower than on Linux." if windows else None}
+        if action == "tree" and method == "GET":
+            _object(query, ("path", "depth"))
+            return 200, tree(project, query.get("path", ""), int(query.get("depth", "2")))
+        if action == "file" and method == "GET":
+            _object(query, ("path",), ("path",))
+            raw, target = scope(project, query["path"])
+            if protected(raw, target):
+                return 200, {"protected": True}
+            data, stat = read_file(target)
+            return 200, dict(path=query["path"], content=data.decode("utf-8", errors="replace"),
+                             mtime=stat.st_mtime, size=stat.st_size, protected=False)
+        if action == "file" and method == "PUT":
+            _object(query, ())
+            body = _object(handler._body(), ("path", "content", "expected_mtime"), ("path", "content", "expected_mtime"))
+            if not isinstance(body["content"], str):
+                fail(400, "content must be a string")
+            expected = body["expected_mtime"]
+            if expected is not None and (type(expected) not in (int, float) or not math.isfinite(expected)):
+                fail(400, "expected_mtime must be a number or null")
+            data = body["content"].encode()
+            if len(data) > FILE_CAP:
+                fail(413, "file exceeds 2 MB")
+            with daemon._lock:
+                daemon._active()
+                raw, target = scope(project, body["path"])
+                if protected(raw, target) or denied_file(str(raw)) or denied_file(str(target)):
+                    fail(403, "protected file cannot be written")
+                if target.exists() and not target.is_file():
+                    fail(400, "target is not a regular file")
+                mtime = target.stat().st_mtime if target.exists() else None
+                if mtime != expected:
+                    fail(409, "file changed since it was read")
+                mode = target.stat().st_mode & 0o777 if target.exists() else None
+                _write_bytes(target, data)
+                if mode is not None:
+                    target.chmod(mode)
+                return 200, {"mtime": target.stat().st_mtime}
+    if len(parts) == 3 and parts[0] == "threads" and parts[2] in ("transcript", "send"):
+        thread = daemon.require(stores.threads, parts[1])
+        if parts[2] == "send" and method == "POST":
+            project = daemon.require(stores.projects, thread.project_id)
+            message = assemble_turn(project, handler._body())
+            return 202, {"turn_id": daemon.send(thread.id, message)}
+        if parts[2] == "transcript" and method == "GET":
+            _object(query, ())
+            messages = []
+            for row in stores.threads.read_log(thread.id):
+                kind = row.get("kind")
+                if kind not in (None, "text", "user"):
+                    continue
+                data = row.get("data", row)
+                text = data.get("text")
+                if isinstance(text, str):
+                    role = "assistant" if kind == "text" else "user" if kind == "user" else row.get("role", "assistant")
+                    messages.append(dict(role=role, text=text, at=row.get("at", row.get("t"))))
+            return 200, {"messages": messages}
+    if len(parts) in (3, 4) and parts[0] == "tasks" and method == "GET":
+        task = daemon.require(stores.tasks, parts[1])
+        if parts[2:] == ["journal"]:
+            _object(query, ("after",))
+            after = int(query.get("after", "0"))
+            if after < 0:
+                fail(400, "after must be nonnegative")
+            return 200, stores.tasks.read_journal(task.id)[after:]
+        if parts[2:] == ["threads"]:
+            _object(query, ())
+            threads = {t.id: t for t in safe_list(stores.threads, task_id=task.id)}
+            for thread_id in task.thread_ids:
+                thread = stores.threads.get(thread_id)
+                if thread and thread.project_id == task.project_id:
+                    threads[thread_id] = thread
+            with daemon._lock:
+                return 200, [dict(thread_id=t.id, role=t.role.value, provider=t.provider.value, model=t.model,
+                                  state="open" if t.id in daemon._sessions else "closed", turns=t.turns,
+                                  cost_usd=t.cost_usd) for t in threads.values()]
+        if parts[2:] == ["diff"]:
+            _object(query, ())
+            return 200, diff(daemon, task)
+        if parts[2:] == ["diff", "file"]:
+            _object(query, ("path",), ("path",))
+            return 200, diff(daemon, task, query["path"])
+    return None
+
+
+def connect_controls(daemon):
+    """The same bus also hears tool-originated mute and avatar changes."""
+    import weakref
+    from jarvis import avatars
+    from jarvis.tools import voicectl
+    reference = weakref.ref(daemon)
+    def publish(kind, data):
+        owner = reference()
+        if owner and not owner._stopping:
+            owner.bus.publish({"kind": kind, "data": data})
+    voicectl.on_change(lambda muted: publish("mute", {"muted": muted}))
+    avatars.on_change(lambda av: publish("avatar", av.describe()))
