@@ -213,6 +213,12 @@ def model_settings(role, provider, project=None, settings=None):
     value = (project.routing.models.get(role, {}).get(provider) if project else None)
     model, effort = _model(value or settings["models"][role][provider])
     if model == "roster":
+        if provider in ("claude", getattr(provider, "value", None)) or str(provider) == "claude":
+            # The v1 roster holds OpenRouter ids; Claude Code takes Anthropic
+            # names. "roster/default" on Claude means "no model argument" — the
+            # CLI's own configured default — and effort from routing.json only.
+            # (Found live: the first e2e task handed deepseek to claude.)
+            return None, (effort if effort and effort != "default" else None)
         from jarvis import models
         model = models.tier("orchestrator")
         effort = effort or models.effort_for(model)

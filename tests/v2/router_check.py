@@ -160,7 +160,9 @@ class Ladder(Fixture):
         self.assertEqual(len(saved.status.routing), 4)
         rows = self.stores.tasks.read_journal(self.task.id)
         self.assertEqual(len([r for r in rows if r["event"] == "routing_decision"]), 4)
-        self.assertEqual(rows[0]["model"], "anthropic/claude-test")
+        # "roster/default" on Claude means no model argument: the v1 roster holds
+        # OpenRouter ids, and the first live task handed one to Claude Code.
+        self.assertIsNone(rows[0]["model"])
         self.assertEqual(rows[1]["model"], "gpt-5.6-sol")
         self.assertEqual(rows[1]["effort"], "high")
         self.assertEqual(self.providers["claude"].calls, 1)
