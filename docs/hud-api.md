@@ -114,3 +114,27 @@ window relabels).
 
 Every error is `{"error": str}` with 400/403/404/409/413; never a stack
 trace; never a credential value.
+
+## Additions 2026-09-16 (WP12c — owner's first-use feedback)
+
+- `PATCH /threads/{id}` `{"project_id"}` → the thread record. Moves a
+  **chat** thread to another project (its log, provider session and title
+  travel with it). A thread that belongs to a task (`task_id` set) → 409
+  `{"error": "task threads move with their task"}`. Publishes
+  `thread_moved {thread_id, from_project_id, to_project_id}` on the bus.
+- `GET /fs/dirs?path=<abs>` → `{"path", "parent", "dirs": [names]}`, for a
+  directory picker when creating a project or adding an access folder.
+  Lists directories only, under `$HOME` or `/mnt/<drive>/` only, hidden
+  dirs omitted, no file contents. 403 elsewhere.
+- `POST /schedules/preview` `{"cron"?, "every_s"?}` → `{"next": [iso × 3],
+  "describe": str}` — the next three fire times in America/Chicago and a
+  plain-English reading ("weekdays at 09:00"), for the manual popup.
+- **Agentic schedules:** tools `schedule_create(brief, when, project="")`,
+  `schedule_list()`, `schedule_delete(id)` in the v1 registry
+  (`jarvis/v2/tools/schedules.py`), where `when` is either a 5-field cron
+  or plain English the backend parses for the common shapes ("every day at
+  9", "weekdays at 8:30", "every 2 hours", "mondays at 10", "every 15
+  minutes"); unparseable → an error string listing the accepted forms,
+  never a guess. Present in `FAST_TOOLS` and `MCP_TOOLS`. The tools write
+  through the same store the scheduler reads and publish the same events,
+  so the HUD list updates live.
