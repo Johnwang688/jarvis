@@ -25,6 +25,7 @@ import uuid
 from jarvis import config
 from .approvals import ApprovalRequest, PendingApprovals
 from .bus import EventBus
+from .control import ControlError
 from .permissions import PermitContext, build_permit
 from .model import (PermissionProfile, Project, ProviderName, Role, Thread,
                     from_json, to_json, utcnow)
@@ -35,6 +36,7 @@ from . import worktrees
 
 LOG = logging.getLogger(__name__)
 STOP_TIMEOUT = 2.0
+_TASK_VERBS = ("start", "steer", "cancel", "resume", "answer")
 
 
 class DaemonError(RuntimeError):
@@ -114,6 +116,10 @@ class Daemon:
         # An injected factory (the tests, a future strict-profile runner) wins,
         # so nothing here decides policy on its own.
         self.permit_factory = permit_factory if permit_factory is not None else self._permit
+        # WP11 attaches its TaskRunner here (control.TaskControl). None means
+        # this daemon serves state only and the /tasks verbs answer 409, which
+        # is what every pre-WP11 test and every embedded use already expects.
+        self.runner = None
         self._lock = threading.RLock()
         self._worktree_lock = threading.Lock()
         self._sessions: dict[str, _Session] = {}
@@ -682,7 +688,45 @@ def _handler(daemon):
                     return 200, to_json(task)
                 if len(parts) == 3 and parts[2] == "worktree":
                     return self._worktree(parts[1], query)
+                if len(parts) == 3 and method == "POST" and parts[2] in _TASK_VERBS:
+                    return self._task_verb(task.id, parts[2])
             raise APIError(404, "route not found")
+
+        def _task_verb(self, task_id, verb):
+            """The TaskControl verbs (§11.2). Every one is synchronous and quick:
+            a steer queues, a cancel lands at the next boundary, a resume
+            requeues — none of them waits on a model."""
+            runner = daemon.runner
+            if runner is None:
+                raise DaemonError("no task runner is attached to this daemon")
+            body = self._body()
+            try:
+                if verb == "start":
+                    _object(body, ())
+                    return 200, to_json(runner.start(task_id))
+                if verb == "steer":
+                    _object(body, ("text", "spoken"), ("text",))
+                    spoken = body.get("spoken", False)
+                    if not isinstance(spoken, bool):
+                        raise APIError(400, "spoken must be a boolean")
+                    runner.steer(task_id, _text(body["text"], "text"), spoken=spoken)
+                    return 200, {"ok": True}
+                if verb == "cancel":
+                    _object(body, ())
+                    return 200, to_json(runner.cancel(task_id))
+                if verb == "resume":
+                    _object(body, ("provider",))
+                    provider = body.get("provider")
+                    return 200, to_json(runner.resume(
+                        task_id, provider=ProviderName(provider) if provider else None))
+                _object(body, ("index", "text"), ("index", "text"))
+                index = body["index"]
+                if not isinstance(index, int) or isinstance(index, bool):
+                    raise APIError(400, "index must be an integer")
+                return 200, to_json(runner.answer_question(task_id, index,
+                                                           _text(body["text"], "text")))
+            except ControlError as exc:
+                raise APIError(409, str(exc)) from exc
 
         def _worktree(self, task_id, query):
             # Include the read in the lock: two HTTP requests must not operate
@@ -814,8 +858,10 @@ def start_discord(daemon, control=None):
     from .router import daemon_router
 
     try:
-        surface = DiscordRouter(daemon, daemon.stores, daemon_router(daemon),
-                                daemon.approvals, control or _NoControl(), DiscordRest())
+        router = getattr(daemon, "router", None) or daemon_router(daemon)
+        control = control or getattr(daemon, "runner", None) or _NoControl()
+        surface = DiscordRouter(daemon, daemon.stores, router,
+                                daemon.approvals, control, DiscordRest())
         surface.start()
         return surface
     except Exception as exc:
@@ -829,6 +875,8 @@ def main() -> int:
     # given and nothing in the daemon needs it, so keeping the edge one-way
     # keeps `import jarvis.v2.daemon` free of the subprocess machinery.
     from .hatch import EscapeHatch
+    from .router import Router
+    from .runner import TaskRunner
 
     remote = discord_connected()
     approvals = None
@@ -847,11 +895,14 @@ def main() -> int:
         holder["daemon"] = daemon
     hatch = EscapeHatch(daemon, daemon.approvals)
     discord = None
+    daemon.router = Router(daemon.stores, daemon.providers)
+    daemon.runner = TaskRunner(daemon, daemon.router)
     done = threading.Event()
     previous = signal.signal(signal.SIGTERM, lambda *_: done.set())
     try:
         daemon.start()
         hatch.start()
+        daemon.runner.serve()
         if remote:
             discord = start_discord(daemon)
         LOG.info("Jarvis v2 listening on 127.0.0.1:%s", daemon.port)
@@ -862,8 +913,13 @@ def main() -> int:
         print(f"jarvis daemon2: {exc}")
         return 1
     finally:
+        # Discord first, so no verb arrives at a runner that is stopping; then
+        # the runner, so its workers see interrupted turns rather than a dead
+        # daemon. Nothing is cancelled — a task left RUNNING is re-admitted by
+        # `serve()`'s recovery next boot.
         if discord is not None:
             discord.stop()
+        daemon.runner.stop()
         hatch.stop()
         daemon.stop()
         signal.signal(signal.SIGTERM, previous)
