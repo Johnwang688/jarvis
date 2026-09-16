@@ -29,3 +29,8 @@ swecompare/runs/
 
 # swebench harness build/eval logs.
 logs/
+
+# HUD v2 build output (Vite). The source is hud/src; dist is rebuilt by
+# `cd hud && npm ci && npm run build` and served by the v2 daemon.
+hud/dist/
+hud/node_modules/
