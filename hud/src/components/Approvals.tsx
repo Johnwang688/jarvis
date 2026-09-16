@@ -1,0 +1,161 @@
+// The authorization card, with v1's semantics intact
+// (tests/face/hud_approval_check.py is the spec):
+//
+//   - deny is the cheap action (Escape, or the button); authorize takes a
+//     deliberate click, and **nothing is keyboard-defaulted** — Enter must do
+//     nothing at all on this card;
+//   - every string on it is text, never markup: the args are model-written and
+//     this is the window that gates approvals;
+//   - the **whole command** is shown, never a summary (§6.1) — approving a
+//     command is not consent to what it does, so the owner has to be able to
+//     read what it does;
+//   - PTT and the wake word are inert while a card is up (enforced by the
+//     caller, which checks `approvals.length`);
+//   - a chime, best-effort: a browser may block audio before the owner has
+//     interacted with the window.
+
+import { useEffect, useRef, useState } from "react";
+import type { ApprovalRequest } from "../types";
+
+export function approvalChime(ctx?: AudioContext | null) {
+  try {
+    const c = ctx || new AudioContext();
+    const now = c.currentTime;
+    for (const [offset, frequency] of [[0, 660], [0.12, 880]] as [number, number][]) {
+      const osc = c.createOscillator();
+      const gain = c.createGain();
+      osc.type = "sine";
+      osc.frequency.value = frequency;
+      gain.gain.setValueAtTime(0.0001, now + offset);
+      gain.gain.exponentialRampToValueAtTime(0.12, now + offset + 0.012);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + offset + 0.16);
+      osc.connect(gain).connect(c.destination);
+      osc.start(now + offset);
+      osc.stop(now + offset + 0.17);
+    }
+  } catch {
+    /* audio may be blocked until the owner interacts with the window */
+  }
+}
+
+export function ApprovalCard(props: {
+  request: ApprovalRequest;
+  onDecide: (reqId: string, allow: boolean, always?: boolean) => void;
+}) {
+  const r = props.request;
+  const [left, setLeft] = useState(r.timeout_s || 120);
+  const [busy, setBusy] = useState(false);
+  const chimed = useRef(false);
+
+  useEffect(() => {
+    if (!chimed.current) {
+      chimed.current = true;
+      approvalChime();
+    }
+    const t = setInterval(() => setLeft((n) => n - 1), 1000);
+    return () => clearInterval(t);
+  }, []);
+
+  const decide = (allow: boolean, always = false) => {
+    setBusy(true);
+    props.onDecide(r.req_id, allow, always);
+  };
+
+  const shown = left > 120 ? `${Math.ceil(left / 60)}m` : `${Math.max(0, left)}s`;
+  const also = r.remote ? " · ALSO ASKED ON DISCORD" : "";
+  // `args` is a dict of model-written strings; each is rendered as text.
+  const args = Object.entries(r.args || {});
+
+  return (
+    <div className="auth" data-testid="approval-card" data-req={r.req_id}>
+      <h3>AUTHORIZATION REQUIRED</h3>
+      {r.origin ? (
+        <div className="origin" data-testid="approval-origin">REQUESTED BY {r.origin}</div>
+      ) : null}
+      <div className="tool" data-testid="approval-tool">{r.tool}</div>
+      {/* The entire command, never a summary. */}
+      {r.command ? (
+        <div className="arg" data-testid="approval-command">
+          <span className="k">command </span>
+          {r.command}
+        </div>
+      ) : null}
+      {args.map(([k, v]) => (
+        <div className="arg" key={k}>
+          <span className="k">{k} </span>
+          {typeof v === "string" ? v : JSON.stringify(v)}
+        </div>
+      ))}
+      {r.reason ? <div className="reason">{r.layer ? `[${r.layer}] ` : ""}{r.reason}</div> : null}
+      <div className="btns">
+        {/* type="button" on every one: nothing on this card is a form default,
+            so Enter submits nothing. */}
+        <button type="button" className="deny" disabled={busy} onClick={() => decide(false)}>
+          DENY
+        </button>
+        {r.allowlistable === false ? null : (
+          <button
+            type="button"
+            className="always"
+            disabled={busy}
+            title="authorize AND allowlist this, so it stops asking (persists across restarts)"
+            onClick={() => decide(true, true)}
+          >
+            ALWAYS
+          </button>
+        )}
+        <button type="button" disabled={busy} onClick={() => decide(true)} data-testid="approval-allow">
+          AUTHORIZE
+        </button>
+      </div>
+      <div className="foot">
+        DENIES AUTOMATICALLY IN {shown} · ESC TO DENY{also}
+      </div>
+    </div>
+  );
+}
+
+/** The veil holds the newest card; the rest are listed in the right pane. */
+export function ApprovalVeil(props: {
+  requests: ApprovalRequest[];
+  onDecide: (reqId: string, allow: boolean, always?: boolean) => void;
+}) {
+  const top = props.requests[0];
+  useEffect(() => {
+    if (!top) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        props.onDecide(top.req_id, false);
+      }
+      // Enter is deliberately not handled: authorize takes a click.
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [top, props]);
+
+  if (!top) return null;
+  return (
+    <div id="authveil" data-testid="authveil">
+      <ApprovalCard request={top} onDecide={props.onDecide} />
+    </div>
+  );
+}
+
+export function ApprovalQueue(props: {
+  requests: ApprovalRequest[];
+}) {
+  if (props.requests.length < 2) return null;
+  return (
+    <div className="block" data-testid="approval-queue">
+      <h3>Approvals queue ({props.requests.length})</h3>
+      {props.requests.map((r) => (
+        <div className="queue-row" key={r.req_id}>
+          {r.origin ? `${r.origin} · ` : ""}
+          {r.tool}
+          {r.command ? ` · ${r.command}` : ""}
+        </div>
+      ))}
+    </div>
+  );
+}
