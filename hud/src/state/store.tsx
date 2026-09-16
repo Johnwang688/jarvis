@@ -42,6 +42,8 @@ export interface State {
   /** Set by REVIEW dictation: text handed to the input box, never sent. */
   pendingTranscript: string;
   error: string;
+  /** A refused thread move, shown beside the tree it was reverted in. */
+  moveError: string;
   picker: null | "model" | "voice" | "avatar" | "route" | "newProject" | "newTask" | "schedule";
 }
 
@@ -51,7 +53,7 @@ export const initialState: State = {
   messages: [], draft: "", ops: [], approvals: [], usage: null, schedules: [],
   route: null, avatar: null, wakePatterns: [], dictation: DEFAULT_MODE,
   level: 0, orb: "idle", status: "", busy: false, pendingTranscript: "",
-  error: "", picker: null,
+  error: "", moveError: "", picker: null,
 };
 
 export type Action =

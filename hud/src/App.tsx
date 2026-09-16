@@ -15,11 +15,13 @@ import { PreviewTab } from "./components/PreviewTab";
 import { ApprovalQueue, ApprovalVeil } from "./components/Approvals";
 import { RoutePanel, SchedulesPanel, UsagePanel } from "./components/Panels";
 import { AvatarPicker, ModelPicker, NewProject, NewTask, VoicePicker } from "./components/Pickers";
+import { ScheduleDialog } from "./components/ScheduleDialog";
 import { Orb } from "./components/Orb";
 import { Capture } from "./lib/capture";
 import { HINTS, isMuted, loadMode, outcomeFor, saveMode, type DictationMode } from "./lib/dictation";
 import { WakeGate, compileWake, matchesWake, WAKE_PATTERNS } from "./lib/wake";
-import type { Attachment, AvatarDesc, ModelRow, VoiceEntry } from "./types";
+import type { Attachment, AvatarDesc, ModelRow, Schedule, VoiceEntry } from "./types";
+import { moveThreadTo } from "./lib/threads";
 
 const TABS: Tab[] = ["chat", "task", "file", "diff", "preview"];
 const PROPOSAL_WINDOW_MS = 60_000;
@@ -32,6 +34,7 @@ export default function App() {
   const [voices, setVoices] = useState<VoiceEntry[]>([]);
   const [voiceOverride, setVoiceOverride] = useState("");
   const [avatarCacheBust, setAvatarCacheBust] = useState(0);
+  const [editingSchedule, setEditingSchedule] = useState<Schedule | null>(null);
 
   // `live` gives the capture callbacks — which run on the audio thread's
   // cadence, not React's — the current state without stale closures.
@@ -186,6 +189,7 @@ export default function App() {
           break;
         case "thread_opened":
         case "thread_closed":
+        case "thread_moved":
           void refreshThreads();
           break;
         case "usage_updated":
@@ -236,6 +240,39 @@ export default function App() {
       /* keep what we had */
     }
   }, [dispatch]);
+
+  /**
+   * Move a chat thread to another project. Optimistic — the row follows the
+   * drop immediately — and **reverted from the list captured before it**, with
+   * the backend's own words, because the two refusals that matter (a task
+   * thread, 409; a project that went away, 404) are exactly the cases where a
+   * row left in the wrong place would be believed.
+   */
+  const moveThread = useCallback(
+    (threadId: string, projectId: string) => {
+      const before = live.current.threads;
+      const after = moveThreadTo(before, threadId, projectId);
+      if (after === before) return; // nothing to do: no PATCH, no flash
+      dispatch({ type: "patch", patch: { threads: after, moveError: "" } });
+      api
+        .moveThread(threadId, projectId)
+        .then(() => refreshThreads())
+        .catch((e) =>
+          dispatch({ type: "patch", patch: { threads: before, moveError: e.message } }),
+        );
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [dispatch],
+  );
+
+  const refreshSchedules = useCallback(
+    () =>
+      api
+        .schedules()
+        .then((schedules) => dispatch({ type: "patch", patch: { schedules } }))
+        .catch(() => {}),
+    [dispatch],
+  );
 
   const loadAvatar = useCallback(async () => {
     try {
@@ -552,6 +589,8 @@ export default function App() {
             }
           }}
           onNewTask={() => patch({ picker: "newTask" })}
+          moveError={state.moveError}
+          onMoveThread={moveThread}
           onOpen={(what) => patch({ tab: what === "schedules" ? state.tab : state.tab, picker: what === "route" ? "route" : state.picker })}
         />
 
@@ -658,14 +697,19 @@ export default function App() {
             <SchedulesPanel
               schedules={state.schedules}
               projects={state.projects}
-              onCreate={(b) => api.createSchedule(b).then(() => api.schedules()).then((s) => patch({ schedules: s })).catch(() => {})}
+              onNew={() => {
+                setEditingSchedule(null);
+                patch({ picker: "schedule" });
+              }}
+              onEdit={(s) => {
+                setEditingSchedule(s);
+                patch({ picker: "schedule" });
+              }}
               onToggle={(id, enabled) =>
-                api.patchSchedule(id, { enabled }).then(() => api.schedules()).then((s) => patch({ schedules: s })).catch(() => {})
+                api.patchSchedule(id, { enabled }).then(refreshSchedules).catch(() => {})
               }
               onRunNow={(id) => api.runSchedule(id).catch(() => {})}
-              onDelete={(id) =>
-                api.deleteSchedule(id).then(() => api.schedules()).then((s) => patch({ schedules: s })).catch(() => {})
-              }
+              onDelete={(id) => api.deleteSchedule(id).then(refreshSchedules).catch(() => {})}
             />
             <RoutePanel route={state.route} />
             {state.error ? <div className="block err" data-testid="error">{state.error}</div> : null}
@@ -731,11 +775,38 @@ export default function App() {
           onCreate={(b) =>
             api
               .createProject(b)
-              .then(() => api.projects())
-              .then((projects) => patch({ projects, picker: null }))
-              .catch((e) => patch({ error: e.message }))
+              .then(async (created) => {
+                const projects = await api.projects();
+                const platform = await api
+                  .platform(created.id)
+                  .catch(() => ({ platform: "wsl", note: null }));
+                patch({
+                  projects,
+                  platforms: { ...live.current.platforms, [created.id]: platform },
+                  projectId: created.id,
+                  picker: null,
+                });
+              })
           }
           onClose={() => patch({ picker: null })}
+        />
+      ) : null}
+      {state.picker === "schedule" ? (
+        <ScheduleDialog
+          projects={state.projects}
+          editing={editingSchedule}
+          defaultProject={state.projectId || ""}
+          onSave={(body, id) =>
+            (id ? api.patchSchedule(id, body) : api.createSchedule(body)).then(async () => {
+              await refreshSchedules();
+              setEditingSchedule(null);
+              patch({ picker: null });
+            })
+          }
+          onClose={() => {
+            setEditingSchedule(null);
+            patch({ picker: null });
+          }}
         />
       ) : null}
       {state.picker === "newTask" ? (
