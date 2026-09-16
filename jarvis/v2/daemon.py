@@ -766,19 +766,94 @@ def load_providers(roster=None):
     return providers
 
 
+# -- the Discord surface (WP10b) -------------------------------------------
+# Startup only. Everything about placement, verbs and thread-scoped approvals
+# lives in discord/gateway.py; nothing below decides policy.
+
+
+def discord_connected() -> bool:
+    """True once `jarvis auth discord` has been run. The token value is never
+    read out of the bundle here, logged, or passed anywhere by this function."""
+    try:
+        from jarvis.tools.discord import _load_bundle
+
+        return bool(_load_bundle().get("bot_token"))
+    except Exception:
+        return False
+
+
+class _NoControl:
+    """TaskControl before WP11's runner exists: every verb answers, none acts.
+
+    A surface that raises AttributeError at the owner is worse than one that
+    says what it cannot do yet, and `ControlError` is the sentence a surface is
+    already required to show.
+    """
+
+    _MESSAGE = "The task runner is not running yet, so I cannot do that."
+
+    def _refuse(self, *_args, **_kwargs):
+        from .control import ControlError
+
+        raise ControlError(self._MESSAGE)
+
+    start = steer = answer_question = cancel = resume = status = _refuse
+
+    def list_tasks(self, project_id=None, *, active_only=True):
+        return []
+
+
+def start_discord(daemon, control=None):
+    """Attach the Discord router, or None if it is not connected/cannot start.
+
+    A 4014 close (Message Content Intent off) is v1's job and stays v1's: the
+    listener prints the explanation and stops rather than retry-looping.
+    """
+    from .discord.gateway import DiscordRouter
+    from .discord.rest import DiscordRest
+    from .router import daemon_router
+
+    try:
+        surface = DiscordRouter(daemon, daemon.stores, daemon_router(daemon),
+                                daemon.approvals, control or _NoControl(), DiscordRest())
+        surface.start()
+        return surface
+    except Exception as exc:
+        # Class only: this path is one frame away from the credential bundle.
+        LOG.warning("Discord surface not started (%s)", type(exc).__name__)
+        return None
+
+
 def main() -> int:
     # Imported here, not at module scope: the hatch reads the daemon it is
     # given and nothing in the daemon needs it, so keeping the edge one-way
     # keeps `import jarvis.v2.daemon` free of the subprocess machinery.
     from .hatch import EscapeHatch
 
-    daemon = Daemon(Stores(), load_providers(), None, config.DAEMON_PORT)
+    remote = discord_connected()
+    approvals = None
+    if remote:
+        # A DM takes longer to answer than a card in front of you, so an
+        # attached remote surface gets WP5's long timeout (v1's ten minutes).
+        # The callbacks are the daemon's own, bound once it exists.
+        holder = {}
+        approvals = PendingApprovals(
+            remote=True,
+            on_request=lambda request: holder["daemon"]._approval_requested(request),
+            on_resolve=lambda request, decision, resolution:
+                holder["daemon"]._approval_resolved(request, decision, resolution))
+    daemon = Daemon(Stores(), load_providers(), None, config.DAEMON_PORT, approvals)
+    if approvals is not None:
+        holder["daemon"] = daemon
     hatch = EscapeHatch(daemon, daemon.approvals)
+    discord = None
     done = threading.Event()
     previous = signal.signal(signal.SIGTERM, lambda *_: done.set())
     try:
         daemon.start()
         hatch.start()
+        if remote:
+            discord = start_discord(daemon)
         LOG.info("Jarvis v2 listening on 127.0.0.1:%s", daemon.port)
         done.wait()
     except KeyboardInterrupt:
@@ -787,6 +862,8 @@ def main() -> int:
         print(f"jarvis daemon2: {exc}")
         return 1
     finally:
+        if discord is not None:
+            discord.stop()
         hatch.stop()
         daemon.stop()
         signal.signal(signal.SIGTERM, previous)
