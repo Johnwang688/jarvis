@@ -901,6 +901,17 @@ on weekdays" works from chat and both CLIs, with plain-English `when`
 parsing that refuses rather than guesses. One contract assumption the
 frontend made (no path means home) was met in the backend on merge.
 
+**First-use failure, same day:** the owner's first two chat messages did
+nothing. New Thread sent `{project_id, role}`, the daemon required
+`provider` and `brief` too, the 400 was swallowed by a `.catch(() => null)`,
+and the daemon logged nothing. Three fixes: chat threads default to the
+fast path server-side; the HUD opens a thread on first send and shows
+every failure (`Could not send: …`) and every phase (SENDING · OPENING
+THREAD · THINKING · RUNNING · tool · RESPONDING · FAILED); the daemon logs
+its startup and every 4xx. Verified live: thread opened with the minimal
+body, a message answered by the fast path in ~1 s. The lesson is old —
+**a surface that can fail silently will, on the owner's first message.**
+
 Remaining: WP13 (the long-bench comparison, the owner's call on cost), a
 native Windows worker, the R8 hook on Codex, and prompt tuning in
 `roles.py` (§17's over-planning note). The daemon started by hand for the
