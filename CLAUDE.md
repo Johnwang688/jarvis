@@ -23,7 +23,14 @@ the Codex provider over the app-server (WP4 — lifted from the trading firm's
 transport; its reviewer escalates nothing to us, design R8), a worktree per
 task (WP6), the daemon and local API (WP7, `jarvis daemon2`), one skills
 folder for three consumers plus `jarvis-mcp` (WP8), and Discord rendering
-(WP10a). Briefs for every package, including the ones in flight, are in
+(WP10a), Discord routing with thread-scoped approvals (WP10b), and the
+task runner with the intake gate (WP11 — `TaskControl` in
+`jarvis/v2/control.py` is the verb interface every surface uses). **The
+backend ran one real task end to end on 2026-09-16** (design §17): Claude
+orchestrated, Codex implemented in a worktree, a fresh Claude reviewer
+failed it once and passed it second time, DONE in 198 s. Remaining: the HUD
+rebuild (WP12, waiting on the owner's elaboration) and the long-bench
+comparison (WP13). Briefs for every package, including the ones in flight, are in
 `docs/codex-briefs/`; each merged package left a `*-notes.md` beside its
 brief with what its implementer verified and what it proposes.
 

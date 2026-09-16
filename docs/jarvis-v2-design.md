@@ -764,3 +764,53 @@ for everything not under `jarvis/v2/`.
    Codex, given Claude is at 89% today. Or the reverse while it is.
 4. Should the inbox project's chat threads also live on Discord (a `#jarvis`
    channel), or DM only.
+
+---
+
+## 17. First live task (2026-09-16) — the backend works end to end
+
+Every package from WP1 to WP11 merged, all fourteen `tests/v2/*_check.py`
+green, and then the check no suite can make: one real task through
+`jarvis daemon2` on the live providers, in a throwaway git repo holding a
+two-line `calc.py`. Brief: add `multiply`, write unittest tests for both
+functions, make them pass, commit as `add multiply`.
+
+**Result: DONE in 198 s**, one commit on the task branch in the task
+worktree, both tests passing when run by hand afterwards. What happened,
+from the status record and journal:
+
+- **Orchestrator on Claude** returned a valid SPEC (goal, deliverable, five
+  acceptance criteria, no blocking questions — the brief said to assume) in
+  ~9 s, then a five-step PLAN with the verification step last.
+- **Implementer on Codex** worked in the worktree: `shell` and `apply_patch`
+  tool events, steps 1–5 relayed by the orchestrator's `{next, done}`
+  instructions, ~130 s.
+- **Reviewer on Claude, a fresh thread**, ran the acceptance commands and
+  **failed the first review**; the findings went back to the implementer as
+  the next instruction, a second fresh reviewer passed, and the orchestrator
+  produced the §10.4 REPORT. The verify loop worked as designed on its first
+  real outing.
+- **Routing line**: `orchestrator: claude · implementer: codex · reviewer:
+  claude`, each with its seven-step reason journaled.
+- **Cost as recorded: $2.06**, almost all of it Claude's *equivalent* figure
+  (not billed on the subscription); Codex reports tokens only. That number
+  is what the ledger will show, so it is worth knowing it overstates spend.
+
+**The first attempt blocked in 3 s, and that was a real bug.** The router's
+`roster/default` for Claude resolved `models.tier("orchestrator")` — the v1
+HUD roster, which holds **OpenRouter ids** — and handed
+`deepseek/deepseek-v4-flash-0731` to Claude Code as its model. The
+orchestrator answered "there's an issue with the selected model" twice and
+the runner blocked the task with that reason quoted, which is exactly the
+behaviour the intake gate specifies. Fixed in `router.model_settings`:
+`roster/default` on Claude now means *no model argument* (the CLI's own
+default), with effort from `routing.json` only. The §8.2 table's "Claude:
+the roster selection" was wrong and this section supersedes it.
+
+Two observations for later rounds: **a five-step plan for a two-function
+change is over-planned** — the orchestrator's brief should say plans have as
+few steps as the work has, and the reviewer's first failure was on a
+formatting nit rather than an acceptance criterion; both are prompt work in
+`roles.py`, not mechanism. And **the fast path is currently selected onto
+`deepseek-v4-flash` in the HUD roster**, which the v1 routing policy keeps
+personal chat off; the owner should reset that selection.
