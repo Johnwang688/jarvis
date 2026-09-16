@@ -345,6 +345,11 @@ def cmd_desktop(args) -> int:
     return 0
 
 
+def cmd_route(args) -> int:
+    from .v2.router import cli
+    return cli(args)
+
+
 def cmd_daemon2(args) -> int:
     from .v2 import daemon
 
@@ -828,6 +833,14 @@ def main() -> int:
     desktop.set_defaults(func=cmd_desktop)
 
     sub.add_parser("daemon2", help="v2 daemon and local API").set_defaults(func=cmd_daemon2)
+
+    route = sub.add_parser("route", help="show or configure v2 provider routing")
+    route.add_argument("action", nargs="?", choices=["set", "models"])
+    route.add_argument("role", nargs="?")
+    route.add_argument("value", nargs="?", help="provider chain or provider for models")
+    route.add_argument("model", nargs="?", help="model/effort for models")
+    route.add_argument("--project", help="project routing table (set or view)")
+    route.set_defaults(func=cmd_route)
 
     daemon = sub.add_parser(
         "daemon",
