@@ -23,7 +23,9 @@ from urllib.parse import parse_qs, urlsplit
 import uuid
 
 from jarvis import config
+from .approvals import ApprovalRequest, PendingApprovals
 from .bus import EventBus
+from .permissions import PermitContext, build_permit
 from .model import (PermissionProfile, Project, ProviderName, Role, Thread,
                     from_json, to_json, utcnow)
 from .provider import (Brief, BriefRefused, Decision, Event, EventKind,
@@ -95,12 +97,23 @@ class _Session:
 
 class Daemon:
     def __init__(self, stores: Stores, providers: dict[ProviderName, Provider],
-                 permit_factory: Callable[[str, Brief], PermissionCallback], port: int):
+                 permit_factory: Callable[[str, Brief], PermissionCallback] | None,
+                 port: int, approvals: PendingApprovals | None = None):
         self.stores = stores
         self.providers = {ProviderName(k): v for k, v in providers.items()}
-        self.permit_factory = permit_factory
         self.port = port
         self.bus = EventBus()
+        # The daemon owns the broker (design §6 layer 5). Its two callbacks
+        # publish on the same bus every surface already reads, so a HUD, a
+        # Discord thread and the escape hatch all learn about a pending
+        # approval the same way they learn about a tool call — and the
+        # *entire* command travels with it, never a summary.
+        self.approvals = approvals if approvals is not None else PendingApprovals(
+            on_request=self._approval_requested, on_resolve=self._approval_resolved)
+        # `permit_factory=None` means the WP5 policy over this daemon's broker.
+        # An injected factory (the tests, a future strict-profile runner) wins,
+        # so nothing here decides policy on its own.
+        self.permit_factory = permit_factory if permit_factory is not None else self._permit
         self._lock = threading.RLock()
         self._worktree_lock = threading.Lock()
         self._sessions: dict[str, _Session] = {}
@@ -248,6 +261,48 @@ class Daemon:
             turn_id = session.turn_id
             worker.start()
             return turn_id
+
+    # -- approvals (design §6) ---------------------------------------------
+
+    def _permit(self, thread_id: str, brief: Brief) -> PermissionCallback:
+        thread = self.stores.threads.get(thread_id)
+        project = None
+        task = None
+        try:
+            if thread is not None:
+                project = self.stores.projects.get(thread.project_id)
+            task_id = brief.task_id if brief is not None else None
+            if task_id:
+                task = self.stores.tasks.get(task_id)
+        except StoreError:
+            LOG.warning("Cannot read project/task for thread %s", thread_id, exc_info=True)
+        ctx = PermitContext(
+            thread_id=thread_id, brief=brief,
+            provider=thread.provider.value if thread is not None else "",
+            project=project, task=task)
+        return build_permit(ctx, self.approvals)
+
+    def _approval_requested(self, request: ApprovalRequest) -> None:
+        self.bus.publish({"kind": "approval_requested",
+                          "thread_id": request.thread_id,
+                          "data": request.to_json()})
+
+    def _approval_resolved(self, request: ApprovalRequest, decision, resolution: str) -> None:
+        self.bus.publish({"kind": "approval_resolved",
+                          "thread_id": request.thread_id,
+                          "data": {"req_id": request.req_id, "code": request.code,
+                                   "tool": request.tool, "command": request.command,
+                                   "origin": request.origin,
+                                   "decision": getattr(decision, "value", str(decision)),
+                                   "resolution": resolution}})
+
+    def resolve_approval(self, req_id: str, decision, always: bool = False) -> dict:
+        try:
+            entry = self.approvals.resolve(req_id, decision, always=always)
+        except ValueError as exc:
+            raise APIError(404, str(exc)) from exc
+        return {"ok": True, "req_id": req_id,
+                "decision": Decision(decision).value, "allowlisted": entry}
 
     def _record(self, session, event):
         with self._lock:
@@ -611,6 +666,16 @@ def _handler(daemon):
                     value = Decision(body["decision"]) if "decision" in body else _text(body["text"], "text")
                     daemon.answer(thread_id, body["req_id"], value)
                     return 200, {"ok": True}
+            if method == "GET" and parts == ["approvals"]:
+                _object(query, ())
+                return 200, [r.to_json() for r in daemon.approvals.pending()]
+            if method == "POST" and len(parts) == 2 and parts[0] == "approvals":
+                body = _object(self._body(), ("decision", "always"), ("decision",))
+                always = body.get("always", False)
+                if not isinstance(always, bool):
+                    raise APIError(400, "always must be a boolean")
+                return 200, daemon.resolve_approval(
+                    parts[1], Decision(_text(body["decision"], "decision")), always)
             if len(parts) in (2, 3) and parts[0] == "tasks":
                 task = daemon.require(stores.tasks, parts[1])
                 if len(parts) == 2 and method == "GET":
@@ -701,26 +766,19 @@ def load_providers(roster=None):
     return providers
 
 
-def placeholder_permit_factory(thread_id, brief):
-    from jarvis import permissions
-
-    def deny(tool, args):
-        LOG.warning("Permission denied for thread %s: WP5 not landed", thread_id)
-        return False
-
-    gated = permissions.gate(deny)
-
-    def permit(tool, args, callback_brief):
-        return Decision.ALLOW if gated(tool, args) else Decision.DENY
-    return permit
-
-
 def main() -> int:
-    daemon = Daemon(Stores(), load_providers(), placeholder_permit_factory, config.DAEMON_PORT)
+    # Imported here, not at module scope: the hatch reads the daemon it is
+    # given and nothing in the daemon needs it, so keeping the edge one-way
+    # keeps `import jarvis.v2.daemon` free of the subprocess machinery.
+    from .hatch import EscapeHatch
+
+    daemon = Daemon(Stores(), load_providers(), None, config.DAEMON_PORT)
+    hatch = EscapeHatch(daemon, daemon.approvals)
     done = threading.Event()
     previous = signal.signal(signal.SIGTERM, lambda *_: done.set())
     try:
         daemon.start()
+        hatch.start()
         LOG.info("Jarvis v2 listening on 127.0.0.1:%s", daemon.port)
         done.wait()
     except KeyboardInterrupt:
@@ -729,6 +787,7 @@ def main() -> int:
         print(f"jarvis daemon2: {exc}")
         return 1
     finally:
+        hatch.stop()
         daemon.stop()
         signal.signal(signal.SIGTERM, previous)
     return 0

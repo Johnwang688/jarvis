@@ -246,6 +246,106 @@ V2_DATA_DIR = Path(
     os.environ.get("JARVIS_V2_DATA", Path.home() / ".local" / "share" / "jarvis" / "v2")
 )
 
+# The v2 always-ask list (design §6, layer 2; jarvis/v2/permissions.py).
+#
+# The path holds **additions only**. §6 says a project may add to this layer and
+# may not remove from it, and the same rule has to hold for the file: a layer
+# that a corrupt, empty or hostile JSON file can disarm is not a layer. So
+# V2_ALWAYS_ASK_DEFAULTS below always applies, whatever the file says, and an
+# unreadable file costs the additions and nothing else.
+#
+# An entry is either a plain string — a tool name, or a phrase of command
+# tokens ("vercel domains buy"), fnmatch globs allowed per token — or a rule
+# object of the shape the defaults use.
+V2_ALWAYS_ASK = Path(
+    os.environ.get(
+        "JARVIS_V2_ALWAYS_ASK", Path.home() / ".config" / "jarvis" / "always-ask.json"
+    )
+)
+
+# The shipped list. Each entry says why it is here: an always-ask rule that
+# nobody can justify later is one that gets deleted the first time it is
+# inconvenient. Fields, all optional but at least one required:
+#   tools        exact tool names that always ask, whatever their arguments
+#   stem         the resolved command stem (rules.command_targets) must be this
+#   all          every pattern must fnmatch some token of the segment
+#   any          at least one pattern must fnmatch some token of the segment
+#   none         no token may fnmatch any of these (the "ordinary form" escape)
+#   kind         a named structural predicate implemented in v2/permissions.py
+V2_ALWAYS_ASK_DEFAULTS: list[dict] = [
+    {
+        "id": "vercel-prod",
+        "reason": "a production deploy is live for everyone the moment it lands",
+        "stem": "vercel",
+        "any": ["--prod", "--production"],
+    },
+    {
+        "id": "gh-release",
+        "reason": "a release is public and its tag is what other people build against",
+        "stem": "gh",
+        "all": ["release"],
+        "none": ["list", "view"],
+    },
+    {
+        "id": "git-push-protected",
+        "reason": "a push to a protected branch reaches production or everyone's checkout",
+        "kind": "git_push_protected",
+    },
+    {
+        "id": "git-push-force",
+        "reason": "a force push destroys commits that are already on the remote",
+        "kind": "git_push_force",
+    },
+    {
+        "id": "db-migrate-prod",
+        "reason": "a migration against a production database is not undone by a revert",
+        "kind": "migration_prod",
+    },
+    {
+        "id": "db-migrate-deploy",
+        "reason": "these two spellings are production-shaped by design, with no target to inspect",
+        "kind": "migration_always",
+    },
+    {
+        "id": "payments-stripe",
+        "reason": "it moves real money",
+        "stem": "stripe",
+    },
+    {
+        "id": "payments-purchase",
+        "reason": "a purchase spends the owner's money and is rarely refundable",
+        "any": ["--pay", "--pay=*", "--payment*", "*purchase*"],
+    },
+    {
+        "id": "payments-domains",
+        "reason": "buying a domain is a billed, year-long commitment",
+        "stem": "vercel",
+        "all": ["domains", "buy"],
+    },
+    {
+        "id": "credentials-login",
+        "reason": "creating or rotating a credential changes what every later run can reach",
+        "kind": "credential_command",
+    },
+    {
+        "id": "credentials-path",
+        "reason": "a write under a credential directory is a credential change however it is spelled",
+        "kind": "credential_path",
+    },
+    {
+        "id": "outward-send",
+        "reason": "it puts words in the owner's name somewhere the owner cannot take them back",
+        "tools": ["gmail_send", "discord_send"],
+    },
+]
+
+# Directories whose contents are credentials: a write under one is a credential
+# change (V2_ALWAYS_ASK_DEFAULTS "credentials-path"). Written as ~ so a test
+# that repoints HOME gets the test's directories.
+V2_CREDENTIAL_DIRS: tuple[str, ...] = (
+    "~/.ssh", "~/.aws", "~/.config/gh", "~/.config/jarvis", "~/.gnupg",
+)
+
 # Where context.py writes a tool result whole before truncating it in the
 # transcript, so the cut leaves a read_file-able pointer instead of a hole.
 # Beside sessions rather than in the repo: same character — bulk, machine-local,
