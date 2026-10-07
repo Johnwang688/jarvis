@@ -779,12 +779,33 @@ def picker_checks(page, mock):
     check("a model name carrying markup renders as text",
           row.locator("img").count() == 0 and "<img" in row.inner_text(), row.inner_text())
     check("and its handler never runs", page.evaluate("window.__pwned") is False)
+    # A6: the keys are the daemon's, and the mock refuses any other (it used
+    # to accept {id}, which is how every click reset the model unnoticed).
+    selects = len(mock.sent("POST", "/model"))
+    page.locator('[data-testid="model-evil/model"]').click()
+    body = until(lambda: mock.sent("POST", "/model")[selects:] or None)
+    check("clicking a row posts /model with {model: id}",
+          bool(body) and body[-1] == {"model": "evil/model"}, str(body))
+    check("and the selection actually moved", until(lambda: mock.world["models"]["selected"] == "evil/model"))
     # Setting effort does not also switch him onto that model.
+    selects = len(mock.sent("POST", "/model"))
     page.locator('[data-testid="effort-openai/gpt-5.6-luna"]').select_option("high")
-    body = until(lambda: mock.sent("POST", "/model") or None)
-    check("choosing an effort sends the effort",
-          bool(body) and body[-1].get("effort") == "high", str(body[-1] if body else None))
+    body = until(lambda: mock.sent("POST", "/models") or None)
+    check("choosing an effort posts /models with {model, effort}",
+          bool(body) and body[-1] == {"model": "openai/gpt-5.6-luna", "effort": "high"},
+          str(body[-1] if body else None))
+    page.locator('[data-testid="effort-openai/gpt-5.6-luna"]').select_option("")
+    body = until(lambda: len(mock.sent("POST", "/models")) >= 2 and mock.sent("POST", "/models"))
+    check("AUTO clears the effort through /models too",
+          bool(body) and body[-1] == {"model": "openai/gpt-5.6-luna", "effort": ""}, str(body))
+    time.sleep(0.2)
+    check("and neither effort change selected the model",
+          len(mock.sent("POST", "/model")) == selects, str(mock.sent("POST", "/model")[selects:]))
     page.locator('[data-testid="picker-close"]').click()
+    mutes = mock.sent("POST", "/mute")
+    check("every /mute the window sent carried {muted: bool}",
+          bool(mutes) and all(set(b) == {"muted"} and isinstance(b["muted"], bool) for b in mutes),
+          str(mutes))
     until(lambda: page.locator('[data-testid="picker"]').count() == 0)
 
     page.locator('[data-testid="open-voice"]').click()
@@ -795,7 +816,8 @@ def picker_checks(page, mock):
     # "" clears the override: the way back to the avatar's own voice.
     page.locator('[data-testid="voice-default"]').click()
     body = until(lambda: mock.sent("POST", "/voice") or None)
-    check("AVATAR DEFAULT clears the override", bool(body) and body[-1].get("name") == "")
+    check("AVATAR DEFAULT clears the override with {voice: \"\"}",
+          bool(body) and body[-1] == {"voice": ""}, str(body))
     page.locator('[data-testid="picker-close"]').click()
     until(lambda: page.locator('[data-testid="picker"]').count() == 0)
 

@@ -868,8 +868,11 @@ export default function App() {
         <ModelPicker
           models={models}
           selected={selectedModel}
-          onPick={(id, effort) => {
-            api.setModel(id, effort).then(loadModels).catch(() => {});
+          onPick={(id) => {
+            api.setModel(id).then(loadModels).catch(() => {});
+          }}
+          onEffort={(id, effort) => {
+            api.setModelEffort(id, effort).then(loadModels).catch(() => {});
           }}
           onClose={() => patch({ picker: null })}
         />

@@ -732,6 +732,25 @@ class Backend(unittest.TestCase):
         kinds = {e["kind"] for e in self.events_all()}
         self.assertTrue({"voice", "avatar", "model", "mute"} <= kinds)
 
+    def test_picker_body_keys_are_the_contract(self):
+        """A6: the HUD sent {id}, {name} and {mute}; the daemon read model,
+        voice and muted, so every click reset the setting it meant to change.
+        A wrong key is now refused by name rather than read as 'absent'."""
+        self.request("POST", "/models", {"add": "test/model"})
+        self.request("POST", "/model", {"model": "test/model"})
+        self.assertEqual(models.selected(), "test/model")
+        for path, body in (("/model", {"id": "test/model"}), ("/model", {"id": "test/model", "effort": "high"}),
+                           ("/voice", {"name": ""}), ("/mute", {"mute": True}),
+                           ("/mute", {"muted": "yes"}), ("/models", {"id": "test/model"})):
+            error = self.request("POST", path, body, status=400)["error"]
+            self.assertTrue("unknown fields" in error or "missing fields" in error or "boolean" in error, error)
+        # None of those refusals moved the selection back to the default.
+        self.assertEqual(models.selected(), "test/model")
+        self.assertFalse(voicectl.is_muted())
+        # Effort goes to /models {model, effort}, and does not move the selection.
+        self.request("POST", "/models", {"model": "test/model", "effort": ""})
+        self.assertEqual(models.selected(), "test/model")
+
 
 class CronChecks(unittest.TestCase):
     def test_table(self):

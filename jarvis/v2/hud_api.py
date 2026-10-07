@@ -598,6 +598,15 @@ def pickers(handler, daemon, parts, query):
             fail(400, "audio is empty")
         return 200, {"text": voice.stt(data, mime=mime)}
     body = handler._body()
+    # The keys each control reads, and nothing else. A body carrying some
+    # other key used to be read as "the key is absent", which for /model
+    # meant "back to the config default" and for /voice "clear the override"
+    # — the HUD sent {id}, {name} and {mute} for weeks and every click quietly
+    # undid itself (decisions A6). An unknown key is now a 400 that names it.
+    keys = {"mute": ("muted",), "avatar": ("slug",), "voice": ("voice",), "model": ("model",),
+            "models": ("add", "remove", "model", "effort")}.get(name)
+    if keys is not None:
+        _object(body, keys, () if name == "models" else keys)
     if name == "say":
         text = str(body.get("text", "")).strip()
         if not text:
@@ -605,7 +614,9 @@ def pickers(handler, daemon, parts, query):
         audio = voice.tts(text[:2000], voice=body.get("voice"), instructions=body.get("instructions"))
         return binary(handler, audio, "audio/wav" if audio.startswith(b"RIFF") else "audio/mpeg")
     if name == "mute":
-        voicectl.set_muted(bool(body.get("muted")))
+        if not isinstance(body["muted"], bool):
+            fail(400, "muted must be a boolean")
+        voicectl.set_muted(body["muted"])
         return 200, {"ok": True, "muted": voicectl.is_muted()}
     if name == "avatar":
         return 200, avatars.set_active(str(body.get("slug", ""))).describe()

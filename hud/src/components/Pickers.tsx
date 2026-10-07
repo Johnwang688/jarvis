@@ -54,7 +54,9 @@ export function SettingsDialog(props: { route: RouteView | null; onClose: () => 
 export function ModelPicker(props: {
   models: ModelRow[];
   selected: string | null;
-  onPick: (id: string, effort?: string | null) => void;
+  onPick: (id: string) => void;
+  /** `""` is AUTO. Setting effort must not also switch him onto that model. */
+  onEffort: (id: string, effort: string) => void;
   onClose: () => void;
 }) {
   return (
@@ -68,7 +70,7 @@ export function ModelPicker(props: {
           key={m.id}
           className={"prow" + (m.id === props.selected ? " sel" : "")}
           data-testid={`model-${m.id}`}
-          onClick={() => props.onPick(m.id, null)}
+          onClick={() => props.onPick(m.id)}
         >
           <span>{m.name || m.id}</span>
           <span className="sub">{m.id}</span>
@@ -79,8 +81,9 @@ export function ModelPicker(props: {
               onClick={(e) => e.stopPropagation()}
               onChange={(e) => {
                 e.stopPropagation();
-                // Setting effort must not also switch him onto that model.
-                props.onPick(m.id, e.target.value || null);
+                // Setting effort must not also switch him onto that model —
+                // AUTO included: it used to arrive as a row click.
+                props.onEffort(m.id, e.target.value);
               }}
               style={{ width: 90 }}
             >

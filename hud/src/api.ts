@@ -134,11 +134,16 @@ export const api = {
   avatars: () => req<{ avatars: AvatarDesc[]; active?: string }>("/avatars"),
   setAvatar: (slug: string) => req<AvatarDesc>("/avatar", json({ slug })),
   voices: () => req<{ voices: VoiceEntry[]; override?: string }>("/voices"),
-  setVoice: (name: string) => req<any>("/voice", json({ name })),
+  /** `""` clears the override. The key is `voice` (the daemon refuses any other). */
+  setVoice: (name: string) => req<any>("/voice", json({ voice: name })),
   models: () => req<{ models: ModelRow[]; selected?: string | null }>("/models"),
   catalog: () => req<{ models: ModelRow[]; stale?: string }>("/models/catalog"),
-  setModel: (id: string, effort?: string | null) => req<any>("/model", json({ id, effort })),
-  mute: (on: boolean) => req<any>("/mute", json({ mute: on })),
+  /** Select the fast path's global model; `""` returns to the config default. */
+  setModel: (id: string) => req<any>("/model", json({ model: id })),
+  /** Pin one roster model's effort; `""` follows the global default. Never selects it. */
+  setModelEffort: (model: string, effort: string) =>
+    req<any>("/models", json({ model, effort })),
+  mute: (on: boolean) => req<any>("/mute", json({ muted: on })),
 
   // --- speech -------------------------------------------------------------
   async stt(blob: Blob): Promise<string> {
