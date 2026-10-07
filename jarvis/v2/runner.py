@@ -612,7 +612,7 @@ class TaskRunner(TaskControl):
         task = self._require(run.task_id)
         model, effort = model_settings(role.value, provider.value, project)
         role_brief = roles.brief_for(role)
-        brief = Brief(role=role, cwd=task.worktree or project.root,
+        brief = Brief(role=role, cwd=task.worktree or worktrees.task_root(task, project),
                       system_append=role_brief.system_append,
                       profile=task.profile or project.profile, model=model, effort=effort,
                       allowed_tools=role_brief.tools_for(provider),
@@ -868,7 +868,8 @@ class TaskRunner(TaskControl):
 
     def _intake_prompt(self, task: Task) -> str:
         project = self._project(task)
-        return (f"A new task has been opened in project {project.name} (root {project.root}).\n"
+        return (f"A new task has been opened in project {project.name} "
+                f"(root {worktrees.task_root(task, project)}).\n"
                 f"Your worktree for it is {task.worktree}.\n\n"
                 f"The owner's brief, verbatim:\n---\n{task.brief}\n---\n\n"
                 f"Write the SPEC.\n\n{roles.SPEC_CONTRACT}")

@@ -27,6 +27,8 @@ export interface Project {
   extra_dirs: string[];
   always_ask: string[];
   inbox: boolean;
+  /** When the owner archived it; such a project is only in `/archive`. */
+  archived?: string | null;
 }
 
 export interface Platform {
@@ -51,6 +53,8 @@ export interface Thread {
   effort: string | null;
   /** The folder the thread was opened in. A move never changes it. */
   cwd?: string | null;
+  /** When the owner archived this thread; such a thread is only in `/archive`. */
+  archived?: string | null;
 }
 
 export interface TaskThread {
@@ -126,6 +130,8 @@ export interface Task {
   branch: string | null;
   profile: Profile | null;
   ceilings: Record<string, number>;
+  /** The project root this task was started under (decisions B5). */
+  root?: string | null;
 }
 
 export interface TreeEntry {
@@ -289,4 +295,53 @@ export interface ToolOp {
   finished?: number;
   ok?: boolean;
   summary?: string;
+}
+
+// --- projects: impact, archive, trash (decisions part B) --------------------
+
+export interface ProjectImpact {
+  project_id: string;
+  name: string;
+  root: string;
+  inbox: boolean;
+  archived: string | null;
+  /** What the confirmation was read from; archive and delete send it back. */
+  token: string;
+  /** Unfinished tasks and running turns: archiving waits for them. */
+  blockers: string[];
+  chat_threads: { count: number; archived: number };
+  tasks: { total: number; finished: number; active: { id: string; brief: string; state: TaskState }[] };
+  task_threads: number;
+  running_turns: { thread_id: string; title: string }[];
+  schedules: { id: string; brief: string; describe: string; enabled: boolean }[];
+  worktrees: { task_id: string; path: string; branch: string | null; exists: boolean }[];
+  /** What stays on the current folder if the root changes (B5). */
+  on_root: { threads: number; tasks: { id: string; brief: string; state: TaskState }[] };
+  discord_channel_id: string | null;
+}
+
+export interface TrashInfo {
+  location: string;
+  retention_days: number;
+  entries: number;
+}
+
+export interface ArchivedProject extends Project {
+  threads: Thread[];
+  task_threads: number;
+  tasks: { id: string; brief: string; state: TaskState; worktree: string | null; branch: string | null }[];
+  schedules: number;
+}
+
+export interface ArchiveView {
+  projects: ArchivedProject[];
+  threads: (Thread & { project_name: string })[];
+  trash: TrashInfo;
+}
+
+export interface DeleteResult {
+  deleted: string;
+  trash: { where: "linux" | "windows" | "staged"; location?: string; path?: string; error?: string };
+  removed?: { threads: number; tasks: number; schedules: number };
+  left_on_disk?: string[];
 }

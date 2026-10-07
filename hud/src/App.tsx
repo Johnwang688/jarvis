@@ -23,9 +23,18 @@ import { WakeGate, compileWake, matchesWake, WAKE_PATTERNS } from "./lib/wake";
 import type { Attachment, AvatarDesc, ModelRow, Schedule, VoiceEntry } from "./types";
 import { moveThreadTo } from "./lib/threads";
 import { lastProject, loadLastProject, saveLastProject } from "./lib/compose";
+import { ProjectDialog } from "./components/Pickers";
+import { ArchiveConfirm, ArchiveView } from "./components/Archive";
+import { afterProjectGone, afterThreadGone, forgetLastProject, projectNamesTaken } from "./lib/projects";
 
 const TABS: Tab[] = ["chat", "task", "file", "diff", "preview"];
 const PROPOSAL_WINDOW_MS = 60_000;
+/** Events after which an open confirmation or the Archive reads again. */
+const LIFECYCLE_KINDS = new Set([
+  "task_created", "task_status_changed", "project_created", "project_updated", "project_archived",
+  "project_restored", "project_deleted", "thread_archived", "thread_restored", "thread_deleted",
+  "thread_updated", "turn_started", "turn_finished",
+]);
 
 export default function App() {
   const { state, dispatch } = useStore();
@@ -38,6 +47,13 @@ export default function App() {
   const [editingSchedule, setEditingSchedule] = useState<Schedule | null>(null);
   // "+ new task" belongs to the row it was clicked under, not to a selection.
   const [newTaskProject, setNewTaskProject] = useState<string | null>(null);
+  // The project the edit or archive dialog is about (decisions B), and a
+  // counter every task/project/thread event bumps so open confirmations and
+  // the Archive view read the backend again rather than trusting a count.
+  const [projectTarget, setProjectTarget] = useState<string | null>(null);
+  const projectTargetRef = useRef<string | null>(null);
+  projectTargetRef.current = projectTarget;
+  const [lifecycle, setLifecycle] = useState(0);
 
   // `live` gives the capture callbacks — which run on the audio thread's
   // cadence, not React's — the current state without stale closures.
@@ -180,6 +196,7 @@ export default function App() {
       const tid: string | undefined = e.thread_id;
       const mine = !tid || tid === shown;
       const ours = !!tid && tid === at.turnThreadId;
+      if (LIFECYCLE_KINDS.has(kind)) setLifecycle((n) => n + 1);
       switch (kind) {
         case "turn_started":
           if (mine) {
@@ -280,6 +297,31 @@ export default function App() {
           break;
         case "mute":
           break;
+        // --- projects and threads changing in this or another window (B) ---
+        case "project_created":
+        case "project_updated":
+        case "project_restored":
+          void refreshProjects(e.project_id || data.project_id);
+          if (kind === "project_restored") {
+            void refreshThreads();
+            void refreshTasks();
+            void refreshSchedules();
+            void refreshArchivedNames();
+          }
+          break;
+        case "project_archived":
+        case "project_deleted":
+          projectGone(e.project_id || data.project_id, kind === "project_archived" ? "archived" : "deleted");
+          void refreshArchivedNames();
+          break;
+        case "thread_updated":
+        case "thread_restored":
+          void refreshThreads();
+          break;
+        case "thread_archived":
+        case "thread_deleted":
+          threadGone(e.thread_id || data.thread_id);
+          break;
         default:
           break;
       }
@@ -311,6 +353,77 @@ export default function App() {
       /* keep what we had */
     }
   }, [dispatch]);
+
+  /** Projects again, and the platform of the one that changed (its root may have). */
+  const refreshProjects = useCallback(
+    async (changed?: string | null) => {
+      try {
+        const projects = await api.projects();
+        const platforms = { ...live.current.platforms };
+        await Promise.all(
+          projects
+            .filter((p) => p.id === changed || !platforms[p.id])
+            .map(async (p) => {
+              platforms[p.id] = await api.platform(p.id).catch(() => ({ platform: "wsl", note: null }));
+            }),
+        );
+        dispatch({ type: "patch", patch: { projects, platforms } });
+        return projects;
+      } catch {
+        return live.current.projects; /* keep what we had */
+      }
+    },
+    [dispatch],
+  );
+
+  /**
+   * A project went away — archived or deleted, here or in another window. Its
+   * rows go, a conversation inside it closes into a new thread in the last
+   * project worked in, the remembered project forgets it, and a dialog open
+   * on it closes and says why (lib/projects.ts decides all of it).
+   */
+  const projectGone = useCallback(
+    (id: string, how: "archived" | "deleted") => {
+      if (!id) return;
+      const at = live.current;
+      const name = at.projects.find((p) => p.id === id)?.name || "the project";
+      forgetLastProject(id);
+      const next = afterProjectGone(at, id, loadLastProject());
+      const platforms = { ...at.platforms };
+      delete platforms[id];
+      const patchOut: Record<string, unknown> = { ...next, platforms };
+      delete patchOut.displaced;
+      if (next.displaced) {
+        Object.assign(patchOut, { messages: [], draft: "", ops: [], tab: "chat", taskFocus: false,
+                                  status: `${name} was ${how}`.toUpperCase() });
+      }
+      if ((at.picker === "editProject" || at.picker === "archiveProject") && projectTargetRef.current === id) {
+        patchOut.picker = null;
+        if (at.picker === "editProject") patchOut.error = `${name} was ${how} while you were editing it.`;
+      }
+      dispatch({ type: "patch", patch: patchOut as any });
+      void refreshThreads();
+      void refreshTasks();
+      void refreshSchedules();
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [dispatch],
+  );
+
+  /** One chat thread went away (archived or deleted). */
+  const threadGone = useCallback(
+    (id: string) => {
+      if (!id) return;
+      const next = afterThreadGone(live.current, id);
+      const patchOut: Record<string, unknown> = { threads: next.threads, threadId: next.threadId,
+                                                  compose: next.compose };
+      if (next.displaced) Object.assign(patchOut, { messages: [], draft: "", ops: [] });
+      dispatch({ type: "patch", patch: patchOut as any });
+      void refreshThreads();
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [dispatch],
+  );
 
   /**
    * Move a chat thread to another project. Optimistic — the row follows the
@@ -363,6 +476,16 @@ export default function App() {
         },
       });
     },
+    [dispatch],
+  );
+
+  /** Archived projects' names, so a rename preview numbers the way the backend will. */
+  const refreshArchivedNames = useCallback(
+    () =>
+      api
+        .archive()
+        .then((v) => dispatch({ type: "patch", patch: { archivedNames: v.projects.map((p) => p.name) } }))
+        .catch(() => {}),
     [dispatch],
   );
 
@@ -447,7 +570,7 @@ export default function App() {
         api.approvals().catch(() => []),
       ]);
       dispatch({ type: "patch", patch: { usage, schedules, route, approvals } });
-      await Promise.all([loadAvatar(), loadModels(), loadVoices()]);
+      await Promise.all([loadAvatar(), loadModels(), loadVoices(), refreshArchivedNames()]);
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -683,6 +806,7 @@ export default function App() {
       <div id="shell">
         <Sidebar
           projects={state.projects}
+          archivedNames={state.archivedNames}
           platforms={state.platforms}
           threads={state.threads}
           tasks={state.tasks}
@@ -707,6 +831,28 @@ export default function App() {
           onMoveCompose={(projectId) =>
             state.compose && patch({ compose: { ...state.compose, projectId } })
           }
+          onEditProject={(id) => {
+            setProjectTarget(id);
+            patch({ picker: "editProject" });
+          }}
+          onArchiveProject={(id) => {
+            setProjectTarget(id);
+            patch({ picker: "archiveProject" });
+          }}
+          onRenameProject={(id, name) =>
+            api.patchProject(id, { name }).then(async (saved) => {
+              await refreshProjects(id);
+              return saved;
+            })
+          }
+          onRenameThread={(id, title) =>
+            api.renameThread(id, title).then(async (saved) => {
+              await refreshThreads();
+              return saved;
+            })
+          }
+          onArchiveThread={(id) => api.archiveThread(id).then(() => threadGone(id))}
+          onOpenArchive={() => patch({ picker: "archive" })}
           onOpen={(what) => {
             if (what === "schedules") {
               setEditingSchedule(null);
@@ -740,12 +886,15 @@ export default function App() {
                   data-testid="profile"
                   style={{ width: 110 }}
                   value={project.profile}
+                  title="Applies to threads and task workers opened from now on."
                   onChange={(e) =>
                     api
                       .patchProject(project.id, { profile: e.target.value })
                       .then(() => api.projects())
                       .then((projects) => patch({ projects }))
-                      .catch(() => {})
+                      // Every refusal is shown (§18): a select that snaps back
+                      // with no word is a profile the owner believes changed.
+                      .catch((err) => patch({ error: `Could not change the profile: ${err.message}` }))
                   }
                 >
                   <option value="auto">auto</option>
@@ -912,6 +1061,46 @@ export default function App() {
                 newThread(created.id);
               })
           }
+          taken={projectNamesTaken(state.projects, null, state.archivedNames)}
+          onClose={() => patch({ picker: null })}
+        />
+      ) : null}
+      {state.picker === "editProject" && projectTarget ? (
+        <ProjectDialog
+          mode="edit"
+          initial={state.projects.find((p) => p.id === projectTarget) || null}
+          taken={projectNamesTaken(state.projects, projectTarget, state.archivedNames)}
+          onSave={(body) =>
+            api.patchProject(projectTarget, body).then(async () => {
+              await refreshProjects(projectTarget);
+              patch({ picker: null });
+            })
+          }
+          onClose={() => patch({ picker: null })}
+        />
+      ) : null}
+      {state.picker === "archiveProject" && projectTarget && state.projects.some((p) => p.id === projectTarget) ? (
+        <ArchiveConfirm
+          project={state.projects.find((p) => p.id === projectTarget)!}
+          version={lifecycle}
+          onCancelTask={(id) => api.cancelTask(id).then(refreshTasks)}
+          onArchived={(id) => {
+            patch({ picker: null });
+            projectGone(id, "archived");
+          }}
+          onClose={() => patch({ picker: null })}
+        />
+      ) : null}
+      {state.picker === "archive" ? (
+        <ArchiveView
+          version={lifecycle}
+          onRestored={() => {
+            void refreshProjects();
+            void refreshThreads();
+            void refreshTasks();
+            void refreshSchedules();
+          }}
+          onDeleted={() => void refreshProjects()}
           onClose={() => patch({ picker: null })}
         />
       ) : null}
