@@ -41,6 +41,7 @@ from ..model import TERMINAL_STATES, ProviderName, Role
 from ..provider import Decision, UserMessage
 from ..router import (FastPath, Incoming, NeedsProject, NewTask, Steer, Verb,
                       classify)
+from ..stores import StoreError
 from .render import _cap, approval_text, status_embed
 
 LOG = logging.getLogger(__name__)
@@ -174,17 +175,27 @@ class DiscordRouter:
     # -- placement (§11.1) -------------------------------------------------
 
     def _locate(self, message, channel_id):
-        """-> (where, project, task). `where` is dm / task / project / other."""
+        """-> (where, project, task). `where` is dm / task / project / archived / other.
+
+        An archived project's channel, and the old task threads under it, are
+        `archived` (decisions B1): nothing is placed, opened, started or steered
+        there; the owner is told why and pointed at the HUD.
+        """
         if "guild_id" not in message:
             return "dm", None, None
         tasks = self.stores.tasks.list(discord_thread_id=channel_id)
         if tasks:
             task = tasks[0]
-            return "task", self.stores.projects.get(task.project_id), task
-        # An archived project's channel places nothing (decisions B1).
-        projects = [p for p in self.stores.projects.list(discord_channel_id=channel_id) if not p.archived]
+            project = self.stores.projects.get(task.project_id)
+            if project is not None and project.archived:
+                return "archived", project, task
+            return "task", project, task
+        projects = self.stores.projects.list(discord_channel_id=channel_id)
+        live = [p for p in projects if not p.archived]
+        if live:
+            return "project", live[0], None
         if projects:
-            return "project", projects[0], None
+            return "archived", projects[0], None
         return "other", None, None
 
     # -- the message path --------------------------------------------------
@@ -203,7 +214,16 @@ class DiscordRouter:
         self.bot_id, self.owner_id = bot_id or self.bot_id, owner_id or self.owner_id
         channel_id = str(message.get("channel_id") or "")
         where, project, task = self._locate(message, channel_id)
-        if not should_respond(message, bot_id, owner_id, owned=where in ("dm", "task", "project")):
+        if not should_respond(message, bot_id, owner_id,
+                              owned=where in ("dm", "task", "project", "archived")):
+            return
+        if where == "archived":
+            # Before the approval parser, the classifier and the fast path: an
+            # archived project takes no work from here, whatever the message says.
+            self._post(channel_id, _cap(f"Project {project.name} is archived, so I won't "
+                                        "open, start or steer anything here. Restore it from "
+                                        "the HUD's Archive view to work in it again.",
+                                        MAX_DISCORD_CHARS))
             return
         if where == "dm":
             with self._lock:
@@ -464,8 +484,12 @@ class DiscordRouter:
             return
         if target is None:
             target = self.stores.projects.inbox()
-        task = self.stores.tasks.create(target.id, brief)
-        self.stores.tasks.save(task)
+        try:
+            task = self.stores.tasks.create(target.id, brief)
+            self.stores.tasks.save(task)
+        except StoreError as exc:                 # ProjectArchived: archived meanwhile
+            self._post(channel_id, _cap(f"I opened nothing: {exc}.", MAX_DISCORD_CHARS))
+            return
         summary = " ".join(task.brief.split()).rstrip(".")
         try:
             self.control.start(task.id)

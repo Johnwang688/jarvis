@@ -32,6 +32,16 @@ class StoreError(Exception):
     """A store operation failed without substituting incomplete data."""
 
 
+class ProjectArchived(StoreError):
+    """New work was aimed at an archived project (decisions B1).
+
+    Raised by `TaskStore` itself, under the store lock, so every way a task is
+    made — `POST /tasks`, Discord intake, a fast-path proposal, a schedule —
+    meets the same refusal, and an archive cannot land between the check and
+    the write: archiving saves the project under this same lock.
+    """
+
+
 def _validate(value: Any, expected: Any) -> None:
     """Dataclass constructors do not validate annotations on decoded JSON."""
     origin, args = get_origin(expected), get_args(expected)
@@ -271,11 +281,24 @@ class TaskStore(_Store[model.Task]):
     def create(self, project_id: str, brief: str, **values: Any) -> model.Task:
         if "state" in values and values["state"] != model.TaskState.INTAKE:
             raise StoreError("New tasks must start in intake; use transition()")
-        return self._create(project_id=project_id, brief=brief, **values)
+        with _lock:
+            self._refuse_archived(project_id)
+            return self._create(project_id=project_id, brief=brief, **values)
+
+    def _refuse_archived(self, project_id: str) -> None:
+        """No new task in an archived project. Checked at create and again at
+        the first save, both under the store lock: a task minted just before
+        its project was archived is still refused when it is written."""
+        project = self.stores.projects.get(project_id)
+        if project is not None and project.archived:
+            raise ProjectArchived(f"project {project.name} is archived; "
+                                  "restore it from the Archive first")
 
     def save(self, obj: model.Task) -> None:
         with _lock:
             previous = self.get(obj.id)
+            if previous is None or obj.id in self._pending:
+                self._refuse_archived(obj.project_id)
             expected = previous.state if previous else model.TaskState.INTAKE
             if obj.state != expected:
                 raise StoreError(f"Task {obj.id}: state changes require transition()")

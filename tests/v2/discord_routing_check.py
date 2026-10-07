@@ -446,6 +446,44 @@ class DiscordRoutingChecks(unittest.TestCase):
         self.assertIn("don't know a project", self.texts(DM_CHANNEL)[-1])
         self.assertEqual(len(self.control.named("start")), 2)
 
+    def test_an_archived_projects_old_task_thread_opens_and_starts_nothing(self):
+        """Decisions B1: an archived project takes no work, from any door.
+        Its old task thread used to place `task: X` in it and start it."""
+        from jarvis.v2.model import utcnow
+        self.stores.tasks.transition(self.task.id, TaskState.CANCELLED)
+        project = self.stores.projects.get(self.project.id)
+        project.archived = utcnow()
+        self.stores.projects.save(project)
+        before = {t.id for t in self.stores.tasks.list()}
+        for channel in (TASK_THREAD, PROJECT_CHANNEL):
+            for text in ("task: add a divide button", "steer: use the other parser",
+                         "resume " + self.task.id, "what is up", "yes"):
+                with self.subTest(channel=channel, text=text):
+                    self.listener.feed(message(text, channel=channel))
+                    self.assertIn("archived", self.texts(channel)[-1])
+        self.assertEqual({t.id for t in self.stores.tasks.list()}, before)
+        self.assertEqual(self.control.calls, [])
+        self.assertEqual(self.provider.messages, [])                     # no fast-path turn either
+        # A stranger in the same thread is still not heard at all.
+        posted = len(self.posts())
+        self.listener.feed(message("task: x", channel=TASK_THREAD, author="stranger"))
+        self.assertEqual(len(self.posts()), posted)
+
+    def test_intake_into_a_project_archived_meanwhile_says_so(self):
+        # The race past placement: the store refuses, the owner is told.
+        from jarvis.v2.model import utcnow
+        project = self.stores.projects.get(self.project.id)
+        self.stores.tasks.transition(self.task.id, TaskState.CANCELLED)
+        project.archived = utcnow()
+        self.stores.projects.save(project)
+        live = self.stores.projects.get(self.project.id)
+        live.archived = None
+        before = {t.id for t in self.stores.tasks.list()}
+        self.surface._intake("rewrite the parser", PROJECT_CHANNEL, live)   # a stale, unarchived copy
+        self.assertIn("opened nothing", self.texts(PROJECT_CHANNEL)[-1])
+        self.assertEqual({t.id for t in self.stores.tasks.list()}, before)
+        self.assertEqual(self.control.named("start"), [])
+
     # -- chat --------------------------------------------------------------
 
     def test_dm_and_channel_chat_each_reach_a_fast_path_thread(self):

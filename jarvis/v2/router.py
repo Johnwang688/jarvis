@@ -20,7 +20,7 @@ from .ledger import DEFAULT_ALLOWANCES, UsageLedger
 from .model import (PermissionProfile, ProviderName, Role, RoutingDecision,
                     TaskState, to_json)
 from .provider import Event
-from .stores import StoreError, _write_bytes
+from .stores import ProjectArchived, StoreError, _write_bytes
 
 PROPOSAL_GRACE_S = 60
 HEALTH_CACHE_S = 60
@@ -394,9 +394,14 @@ class Router:
             provider = proposal.get("provider")
             if provider and provider not in CLI_PROVIDERS:
                 raise ValueError("proposal provider must be claude or codex")
-            task = self.stores.tasks.create(project.id, text, provider_override=provider)
-            task.brief = apply_override(task, text, self.stores)
-            self.stores.tasks.save(task)
+            try:
+                task = self.stores.tasks.create(project.id, text, provider_override=provider)
+                task.brief = apply_override(task, text, self.stores)
+                self.stores.tasks.save(task)
+            except ProjectArchived:
+                # `place` skips archived projects; this is one archived since.
+                return (f"Project {project.name} was archived, so I opened nothing. "
+                        "Restore it from the HUD's Archive view to work there again.")
             summary = " ".join(task.brief.split()).rstrip(".")
             reply = f"Opened task {task.id} in {project.name}: {summary}. It will ask if anything is unclear."
             self.stores.tasks.journal(task.id, "proposed_by_fastpath", brief=text,

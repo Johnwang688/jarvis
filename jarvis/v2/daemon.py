@@ -32,7 +32,7 @@ from .model import (PermissionProfile, Project, ProviderName, Role, Thread,
                     from_json, to_json, utcnow)
 from .provider import (Brief, BriefRefused, Decision, Event, EventKind,
                        PermissionCallback, Provider, SessionHandle, Usage, UserMessage)
-from .stores import Stores, StoreError, _validate, _write_bytes
+from .stores import ProjectArchived, Stores, StoreError, _validate, _write_bytes
 from . import worktrees
 
 LOG = logging.getLogger(__name__)
@@ -627,7 +627,7 @@ def _handler(daemon):
                 if isinstance(exc, APIError):
                     status = exc.status
                     LOG.warning("%s %s -> %d %s", self.command, self.path, status, exc)
-                elif isinstance(exc, (DaemonError, BriefRefused, worktrees.WorktreeError)):
+                elif isinstance(exc, (DaemonError, BriefRefused, worktrees.WorktreeError, ProjectArchived)):
                     status = 409
                 elif isinstance(exc, (FileNotFoundError, LookupError)) and not isinstance(exc, KeyError):
                     status = 404
@@ -642,7 +642,7 @@ def _handler(daemon):
                     from jarvis.tools.secrets import scrub
                     # Only intentional, bounded API errors are reflected. JSON
                     # decoder/provider exceptions may contain request secrets.
-                    message = str(exc) if isinstance(exc, (APIError, DaemonError, BriefRefused, ControlError)) else "request failed (" + type(exc).__name__ + ")"
+                    message = str(exc) if isinstance(exc, (APIError, DaemonError, BriefRefused, ControlError, ProjectArchived)) else "request failed (" + type(exc).__name__ + ")"
                     self._json(status, {"error": scrub(message)})
                 except OSError:
                     pass
@@ -789,9 +789,10 @@ def _handler(daemon):
                     return 201, to_json(daemon.open_thread(**body))
                 if method == "POST":
                     body = _object(self._body(), ("project_id", "brief"), ("project_id", "brief"))
-                    from .projects import refuse_archived_project
-                    refuse_archived_project(daemon.require(stores.projects, body["project_id"]))
+                    daemon.require(stores.projects, body["project_id"])
                     _text(body["brief"], "brief")
+                    # An archived project is refused inside the store, under
+                    # its lock, atomically with the create (ProjectArchived -> 409).
                     with daemon._lock:
                         daemon._active()
                         task = stores.tasks.create(**body)

@@ -39,7 +39,7 @@ import time
 import uuid
 
 from .model import TERMINAL_STATES, Project, Role, Thread, to_json, utcnow
-from .stores import StoreError, _write_bytes
+from .stores import StoreError, _lock as _store_lock, _write_bytes
 from . import worktrees
 
 _SUFFIX = re.compile(r"^(.*?) \((\d+)\)$")
@@ -197,8 +197,11 @@ def impact(daemon, project_id: str) -> dict:
         # What stays on the current folder if the root changes (B5).
         "on_root": {
             "threads": sum(1 for t in threads if (t.cwd or "").rstrip("/") == root),
+            # Only a task that has pinned a root or made a worktree stays: one
+            # still in intake with neither starts under the new root.
             "tasks": [{"id": t.id, "brief": t.brief, "state": t.state.value}
-                      for t in active if (t.root or project.root).rstrip("/") == root],
+                      for t in active if (t.root or t.worktree)
+                      and (t.root or project.root).rstrip("/") == root],
         },
         "discord_channel_id": project.discord_channel_id,
     }
@@ -243,7 +246,11 @@ def archive_project(daemon, project_id: str, expect) -> dict:
         raise DaemonError("cannot archive yet: " + "; ".join(seen["blockers"]))
     _close_idle(daemon, [t.id for t in _threads_of(stores, project_id)])
     paused = []
-    with daemon.schedules.lock, daemon._lock:
+    # The store lock last: a task is created and first written under it, and
+    # refused there once the project is archived (`TaskStore._refuse_archived`),
+    # so this final check and the archive stamp are atomic with every way a
+    # task can be made, including the ones that do not hold `daemon._lock`.
+    with daemon.schedules.lock, daemon._lock, _store_lock:
         daemon._active()
         again = impact(daemon, project_id)
         _expect(expect, again)
