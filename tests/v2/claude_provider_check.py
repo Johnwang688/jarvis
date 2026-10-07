@@ -65,6 +65,7 @@ from jarvis.v2.provider import (  # noqa: E402
     BriefRefused,
     Decision,
     EventKind,
+    SessionLost,
     UserMessage,
 )
 from jarvis.v2.providers import claude  # noqa: E402
@@ -1086,6 +1087,40 @@ def set_model_checks() -> None:
         eq(restored.options.session_id, fresh.provider_session_id, "set_model: the same session id is kept")
         eq(fresh.native.brief.model, "claude-opus-5-5", "set_model: the brief keeps the old model")
         provider.close(fresh)
+
+        # Neither the new model nor the old one connects: the old client is
+        # already disconnected, so it must not be put back as if it worked.
+        def nothing_connects(options):
+            client = FakeClient(options, [result_message()])
+            if options.model in ("claude-fable-5-1", "claude-opus-5-5") and getattr(
+                    nothing_connects, "armed", False):
+                async def refuse():
+                    raise RuntimeError("login expired")
+                client.connect = refuse
+            return client
+
+        claude._client_factory = nothing_connects
+        lost = provider.start(Thread(id="chat3", project_id="p1", role=Role.CHAT,
+                                     provider=ProviderName.CLAUDE),
+                              brief(role=Role.CHAT, model="claude-opus-5-5", effort="high"), allow)
+        old = lost.native.client
+        nothing_connects.armed = True
+        try:
+            provider.set_model(lost, "claude-fable-5-1", "high")
+        except SessionLost as exc:
+            check("login expired" in str(exc) and "resumes" in str(exc),
+                  "set_model: a lost session says why and that the next message resumes it")
+        except BriefRefused:
+            check(False, "set_model: a double failure is SessionLost, not a plain refusal")
+        else:
+            check(False, "set_model: a double failure raises")
+        check(lost.native.closed, "set_model: a session that cannot reconnect is closed, not restored")
+        check(old.disconnects >= 1 and not old.connected,
+              "set_model: the disconnected old client is not treated as live")
+        events = list(provider.send(lost, UserMessage("after")))
+        check(len(events) == 1 and events[0].kind == EventKind.ERROR and "closed" in events[0].data["message"],
+              "set_model: a send on the lost session reports it closed (the daemon resumes instead)")
+        provider.close(lost)   # idempotent
     finally:
         claude._client_factory = original
 

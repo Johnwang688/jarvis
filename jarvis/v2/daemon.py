@@ -31,7 +31,8 @@ from .permissions import PermitContext, build_permit
 from .model import (PermissionProfile, Project, ProviderName, Role, Thread,
                     from_json, to_json, utcnow)
 from .provider import (Brief, BriefRefused, Decision, Event, EventKind,
-                       PermissionCallback, Provider, SessionHandle, Usage, UserMessage)
+                       PermissionCallback, Provider, SessionHandle, SessionLost, Usage,
+                       UserMessage)
 from .stores import Stores, StoreError, _validate, _write_bytes
 from . import worktrees
 
@@ -101,6 +102,12 @@ class _Session:
     # thread's effective choice with `applied` (thread_model, decisions A1/A7).
     applied: tuple | None = None
     announced: tuple | None = None
+    # The thread record's (model, effort) when `applied` was set: what a
+    # refused switch rolls the record back to.
+    applied_record: tuple | None = None
+    # The provider closed this session under us (a switch that could not even
+    # reconnect the old model); it is dropped when its turn ends.
+    lost: bool = False
 
 
 class Daemon:
@@ -305,6 +312,7 @@ class Daemon:
             return session.brief
         choice = thread_model.effective(session.thread)
         session.applied = session.announced = choice
+        session.applied_record = (session.thread.model, session.thread.effort)
         return replace(session.brief, model=choice[0], effort=choice[1])
 
     def _apply_choice(self, session):
@@ -328,24 +336,80 @@ class Daemon:
         if setter is None:
             raise DaemonError(f"the {session.thread.provider.value} provider cannot change "
                               "model mid-thread; the thread keeps " + thread_model.label(*session.applied))
-        setter(session.handle, *want)
+        try:
+            setter(session.handle, *want)
+        except Exception as exc:
+            self._switch_refused(session, want, exc)
+            return
         with self._lock:
             session.applied = want
+            session.applied_record = (session.thread.model, session.thread.effort)
             if want != session.announced:
                 session.announced = want
                 self._model_line(session.thread, want, "follows the default")
 
+    def _switch_refused(self, session, want, exc):
+        """A provider refused to move a thread onto `want`. The record goes
+        back to what the provider is still running, so the next message does
+        not try (and fail) the same switch again, and the transcript says so.
+
+        A refusal the provider survived (`BriefRefused`, a `ValueError`) lets
+        the turn go on, on the old model. `SessionLost` means the provider had
+        to close the session: the turn ends with an error and the session is
+        dropped, so the next message resumes it cleanly on the old model.
+        """
+        from . import thread_model
+        applied = session.applied
+        reason = str(exc) or type(exc).__name__
+        with self._lock:
+            thread = session.thread
+            restored = session.applied_record or (None, None)
+            thread.model, thread.effort = restored
+            try:
+                still = thread_model.effective(thread)
+            except Exception:
+                still = None
+            if still != applied:
+                # A default thread whose default moved on: pin it to what it
+                # runs, or every message would retry the switch.
+                thread.model, thread.effort = applied
+            thread.updated = utcnow()
+            self.stores.threads.save(thread)
+            session.announced = applied
+            session.applied_record = (thread.model, thread.effort)
+            text = (f"switch to {thread_model.label(*want)} refused: {reason}; "
+                    f"still on {thread_model.label(*applied)}")
+            self._system_line(thread, "model_set", text, {
+                "provider": thread.provider.value, "model": thread.model, "effort": thread.effort,
+                "effective_model": applied[0], "effective_effort": applied[1],
+                "refused_model": want[0], "refused_effort": want[1]})
+            record = self.thread_json(thread)
+            self.bus.publish({"kind": "thread_updated", "thread_id": thread.id,
+                              "project_id": thread.project_id,
+                              "data": {**record, "effective_model": applied[0],
+                                       "effective_effort": applied[1]}})
+            if isinstance(exc, SessionLost):
+                session.lost = True
+        if isinstance(exc, SessionLost):
+            raise DaemonError(f"the {thread.provider.value} session closed after a refused "
+                              "model switch; send again to resume it on "
+                              f"{thread_model.label(*applied)}")
+        LOG.warning("Thread %s stays on %s: %s", thread.id, applied, reason)
+
     def _model_line(self, thread, choice, why):
         from . import thread_model
         text = f"model → {thread_model.label(*choice)} ({why})"
-        record = {"kind": "model_set", "at": utcnow(), "thread_id": thread.id,
+        self._system_line(thread, "model_set", text, {
+            "provider": thread.provider.value, "model": thread.model, "effort": thread.effort,
+            "effective_model": choice[0], "effective_effort": choice[1]})
+        return text
+
+    def _system_line(self, thread, kind, text, data):
+        record = {"kind": kind, "at": utcnow(), "thread_id": thread.id,
                   "project_id": thread.project_id, "event_id": uuid.uuid4().hex,
-                  "data": {"provider": thread.provider.value, "model": thread.model,
-                           "effort": thread.effort, "effective_model": choice[0],
-                           "effective_effort": choice[1], "text": text}}
+                  "data": {**data, "text": text}}
         self.stores.threads._append(thread.id, "log.jsonl", record)
         self.bus.publish(record)
-        return text
 
     def set_thread_model(self, thread_id, body) -> dict:
         """`PATCH /threads/{id}` `{model?, effort?}`. Applies from the next
@@ -600,6 +664,11 @@ class Daemon:
             finally:
                 with self._lock:
                     session.worker = None
+                    if session.lost and self._sessions.get(session.thread.id) is session:
+                        # The provider closed it; the next send resumes afresh.
+                        self._sessions.pop(session.thread.id, None)
+                if session.lost:
+                    self._cleanup(session)
 
     def _session(self, thread_id):
         self.require(self.stores.threads, thread_id)

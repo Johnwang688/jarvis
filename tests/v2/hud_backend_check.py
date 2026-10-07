@@ -21,7 +21,8 @@ from jarvis.tools import voicectl
 from jarvis.v2 import hud_api as H, worktrees
 from jarvis.v2.daemon import Daemon, DaemonError
 from jarvis.v2.model import ProviderName as P, Role, TaskState, to_json
-from jarvis.v2.provider import Brief, Decision, Event, EventKind as K, SessionHandle, Usage
+from jarvis.v2.provider import (Brief, BriefRefused, Decision, Event, EventKind as K, SessionHandle,
+                               SessionLost, Usage)
 from jarvis.v2.providers.codex import CodexProvider
 from jarvis.v2.schedules import Cron, Schedules, ZONE, parse_when, describe
 from jarvis.v2.stores import Stores
@@ -973,6 +974,67 @@ class Backend(unittest.TestCase):
                          "the turn's own saves must not write the old choice back")
         self.send_and_settle(tid)
         self.assertEqual(fakes[P.FAST].changes, [("test/thinker", "high")])
+
+    def test_a_refused_switch_rolls_back_and_the_message_goes_on_the_old_model(self):
+        """A provider that cannot move a thread onto its new model must not
+        leave the record naming a model it is not running: every later
+        message would retry the switch and fail. The owner reads why."""
+        fakes = self.model_fakes()
+        claude = fakes[P.CLAUDE]
+        tid = self.chat("claude")["id"]
+        self.send_and_settle(tid)
+
+        def refuse(handle, model, effort):
+            claude.changes.append((model, effort))
+            raise BriefRefused("claude-sonnet-5-5 is not on this plan")
+        claude.set_model = refuse
+        self.request("PATCH", f"/threads/{tid}", {"model": "claude-sonnet-5-5", "effort": "low"})
+        sent = len(claude.messages)
+        self.events_all()
+        self.send_and_settle(tid, "still there?")
+        self.assertEqual(claude.changes, [("claude-sonnet-5-5", "low")])
+        self.assertEqual(len(claude.messages), sent + 1, "the message is sent, on the old model")
+        self.assertEqual(claude.messages[-1].text, "still there?")
+        stored = self.stores.threads.get(tid)
+        self.assertEqual((stored.model, stored.effort), (None, None),
+                         "the record is rolled back to what the provider still runs")
+        lines = [m["text"] for m in self.request("GET", f"/threads/{tid}/transcript")["messages"]
+                 if m["role"] == "system"]
+        self.assertEqual(lines[-1], "switch to claude-sonnet-5-5 · low refused: claude-sonnet-5-5 is "
+                                    "not on this plan; still on claude-opus-5-5 · high")
+        updated = [e for e in self.events_all() if e["kind"] == "thread_updated"]
+        self.assertEqual(updated[-1]["data"]["model"], None, "the HUD hears the rollback")
+        usage = [r for r in self.stores.threads.read_log(tid) if r.get("kind") == "usage"]
+        self.assertEqual(usage[-1]["data"]["model"], "claude-opus-5-5")
+        self.send_and_settle(tid, "again")
+        self.assertEqual(len(claude.changes), 1, "a refused switch is not retried on every message")
+        self.assertEqual(len(claude.messages), sent + 2)
+
+    def test_a_switch_that_loses_the_session_resumes_it_on_the_next_message(self):
+        fakes = self.model_fakes()
+        claude = fakes[P.CLAUDE]
+        tid = self.chat("claude")["id"]
+        self.send_and_settle(tid)
+
+        def lose(handle, model, effort):
+            raise SessionLost("reconnecting the old model failed too")
+        claude.set_model = lose
+        self.request("PATCH", f"/threads/{tid}", {"model": "claude-sonnet-5-5"})
+        sent = len(claude.messages)
+        self.request("POST", f"/threads/{tid}/send", {"text": "lost"}, status=202)
+        eventually(lambda: tid not in self.daemon._sessions)
+        self.assertEqual(len(claude.messages), sent, "nothing is sent on a closed session")
+        log = self.stores.threads.read_log(tid)
+        self.assertTrue(any(r.get("kind") == "error" and "send again to resume" in r["data"]["message"]
+                            for r in log), "the turn ends with an error that says what to do")
+        stored = self.stores.threads.get(tid)
+        self.assertEqual((stored.model, stored.effort), (None, None))
+        self.request("POST", f"/threads/{tid}/send", {"text": "back"}, status=202)
+        eventually(lambda: tid in self.daemon._sessions and self.daemon._sessions[tid].worker is None)
+        mode, brief = claude.opened[-1]
+        self.assertEqual((mode, brief.model, brief.effort), ("resume", "claude-opus-5-5", "high"),
+                         "the next message resumes cleanly, on the old model")
+        self.assertEqual(claude.messages[-1].text, "back")
 
     def test_patch_refuses_task_threads_and_providers_that_cannot_switch(self):
         self.model_fakes()

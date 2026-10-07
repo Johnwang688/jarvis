@@ -77,6 +77,7 @@ from ..provider import (
     EventKind,
     PermissionCallback,
     SessionHandle,
+    SessionLost,
     Usage,
     UserMessage,
 )
@@ -761,9 +762,14 @@ class ClaudeProvider:
         so nothing is lost but the seconds a reconnect costs.
 
         Refuses rather than narrows (§5.1): an effort off the CLI's ladder,
-        or a turn still running, raises — and a reconnect that fails puts the
-        old client back and raises, so the thread keeps working on the model
-        it had and the owner is told why.
+        or a turn still running, raises — and a reconnect that fails connects
+        the old model again and raises `BriefRefused`, so the thread keeps
+        working on the model it had and the owner is told why. If the old
+        model will not connect either, the old client is already
+        disconnected and putting it back would leave a session that looks
+        open and answers nothing: the session is closed instead and
+        `SessionLost` raised, so the caller drops the handle and the next
+        message resumes the conversation cleanly.
         """
         session = _native(h)
         if session.closed:
@@ -787,19 +793,29 @@ class ClaudeProvider:
                 _await(session.loop, old_client.disconnect(), CONTROL_TIMEOUT_S)
             except Exception:  # noqa: BLE001 — an old client that will not go quietly still goes
                 pass
+            lost = False
             try:
                 session.client = connect(brief)
             except BaseException as exc:  # noqa: BLE001
+                reason = f"claude could not switch to {model or 'its default model'}: {_safe(exc)}"
                 try:
                     session.client = connect(old_brief)
-                except BaseException:  # noqa: BLE001
-                    session.client = old_client
-                raise BriefRefused(
-                    f"claude could not switch to {model or 'its default model'}: {_safe(exc)}"
-                ) from None
-            session.brief = brief
+                except BaseException as again:  # noqa: BLE001
+                    lost = True
+                    reason += f"; reconnecting the old model failed too: {_safe(again)}"
+                else:
+                    raise BriefRefused(reason) from None
+            else:
+                session.brief = brief
         finally:
             session.sending.release()
+        if lost:
+            # The old client was disconnected above and neither connect took:
+            # close the session (deny anything pending, stop its loop) rather
+            # than hand back a client that can no longer answer.
+            session.client = old_client
+            self.close(h)
+            raise SessionLost(reason + "; the session is closed and resumes with the next message")
 
     def interrupt(self, h: SessionHandle) -> None:
         session = h.native
