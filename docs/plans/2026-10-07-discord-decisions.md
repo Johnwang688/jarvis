@@ -188,3 +188,32 @@ Owner, 2026-10-07.
   as the direct DM conversation and as the safety net when a channel is
   broken. This narrows O1.
 - The Discord plan is being revised for this (revision 3).
+
+---
+
+## Discord plan revision 3: open items, answered 2026-10-07
+
+All four plans are now final. Implementation waits for PRs #4 and #3 to merge,
+after the owner checks them on the HUD.
+
+- **O-C1.** A new top-level message in a project channel (or #ungrouped)
+  starts a new chat, threaded under that message. As recommended.
+- **O-C2.** Images from HUD chats show on Discord as a note
+  (`[2 images, in the HUD]`) and are never uploaded. Images sent from Discord
+  do reach the chat. Yes.
+- **O-C5.** Moving a chat to another project opens a new Discord thread in
+  the new channel, with links both ways. The old thread keeps working.
+  - **Owner addition:** the old thread is also **renamed with a header showing
+    it moved**.
+  - *Interpretation:* the name becomes `↪ moved to <project> · <name>`, capped
+    at 100 characters. A later HUD rename also updates the old thread's name,
+    with the header kept.
+- **O-C6.** A message sent while a turn is running is queued (up to 3), with
+  a quiet "next" note. Yes.
+- **O-C7.** Every chat is mirrored, and there is no opt-out. Yes.
+- **O-P1.** Manage Threads is not requested up front. It is added only if the
+  live check shows the bot cannot rename or archive its own threads. Yes.
+- **R-M.** No extra always-ask rule for `mkdir` outside the project folder.
+  - The owner's reasoning: `mkdir` creates and destroys nothing, so it causes
+    no permanent damage.
+  - The gap is accepted as stated in the plan.
