@@ -311,7 +311,7 @@ export function Sidebar(props: {
           );
         })}
       </div>
-      <div className="sidebar-foot" style={{ borderTop: "1px solid var(--cyan-faint)", flex: "0 0 auto" }}>
+      <div className="sidebar-foot" style={{ flex: "0 0 auto" }}>
         <div className="tree-row" data-testid="open-schedules" onClick={() => props.onOpen("schedules")}>
           <span className="tw">⏱</span>
           <span className="nm">Schedules</span>

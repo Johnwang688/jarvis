@@ -118,7 +118,7 @@ DEFAULT = Avatar(
     ],
     banner="J A R V I S",
     label="J.A.R.V.I.S.",
-    accent="#38bdf8",
+    accent="#6fc3df",
     description="The default: cyan arc reactor, triangle emblem.",
 )
 

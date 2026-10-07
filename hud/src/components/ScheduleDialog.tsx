@@ -144,7 +144,6 @@ function ScheduleForm(props: {
                 data-testid={`preset-${p.id}`}
                 aria-pressed={when.preset === p.id}
                 className={when.preset === p.id ? "on" : ""}
-                style={when.preset === p.id ? { background: "rgba(56, 189, 248, 0.3)" } : undefined}
                 onClick={() => set({ preset: p.id as Preset })}
               >
                 {p.label}

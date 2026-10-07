@@ -187,7 +187,7 @@ function Chip({ chip }: { chip: ProjectChip }) {
   const current = chip.projects.find((p) => p.id === chip.value);
   if (chip.editable && chip.projects.length === 0) {
     return (
-      <span className="projchip" data-testid="project-chip">
+      <span className="chip projchip" data-testid="project-chip">
         in:{" "}
         <button type="button" data-testid="project-chip-create" onClick={chip.onNewProject}>
           create a project
@@ -197,7 +197,7 @@ function Chip({ chip }: { chip: ProjectChip }) {
   }
   if (chip.editable) {
     return (
-      <span className="projchip" data-testid="project-chip" title="The project this new thread starts in">
+      <span className="chip projchip" data-testid="project-chip" title="The project this new thread starts in">
         in:{" "}
         <select
           data-testid="project-chip-select"
@@ -219,7 +219,7 @@ function Chip({ chip }: { chip: ProjectChip }) {
   }
   return (
     <span
-      className="projchip ro"
+      className="chip projchip ro"
       data-testid="project-chip"
       title={chip.folder ? `works in ${chip.folder}` : undefined}
     >

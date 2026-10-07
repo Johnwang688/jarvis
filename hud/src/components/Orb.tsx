@@ -40,15 +40,18 @@ const ACCENTABLE = new Set(["idle", "listening", "transcribing", "thinking", "co
 function palette(state: OrbState, accent?: string | null) {
   const p = (() => {
     switch (state) {
-      case "listening": return { hue: "56,189,248", boost: 1.35, spin: 1.6 };
-      case "transcribing": return { hue: "103,232,249", boost: 1.2, spin: 2.2 };
-      case "thinking": return { hue: "125,211,252", boost: 1.15, spin: 3.4 };
-      case "composing": return { hue: "94,234,212", boost: 1.3, spin: 1.8 };
+      // Graphite: the cool states are the glacier accent (111,195,223) and its
+      // lighter step (154,214,234). Idle is a little dimmer and slower, so the
+      // orb is present without glowing at you all session.
+      case "listening": return { hue: "154,214,234", boost: 1.35, spin: 1.6 };
+      case "transcribing": return { hue: "154,214,234", boost: 1.2, spin: 2.2 };
+      case "thinking": return { hue: "111,195,223", boost: 1.15, spin: 3.4 };
+      case "composing": return { hue: "125,205,200", boost: 1.3, spin: 1.8 };
       case "tool": return { hue: "251,191,36", boost: 1.2, spin: 3.4 };
-      case "approval": return { hue: "251,191,36", boost: 1.45, spin: 0.35 };
-      case "speaking": return { hue: "56,189,248", boost: 1.5, spin: 1.2 };
+      case "approval": return { hue: "251,191,36", boost: 1.5, spin: 0.35 };
+      case "speaking": return { hue: "154,214,234", boost: 1.5, spin: 1.2 };
       case "error": return { hue: "248,113,113", boost: 1.3, spin: 0.6 };
-      default: return { hue: "56,189,248", boost: 1.0, spin: 1.0 };
+      default: return { hue: "111,195,223", boost: 0.85, spin: 0.8 };
     }
   })();
   if (accent && ACCENTABLE.has(state)) p.hue = accent;
@@ -138,7 +141,7 @@ export function Orb(props: {
 
       const coreR = R * (0.3 + energy * 0.1);
       const glow = ctx.createRadialGradient(c, c, 0, c, c, coreR * 1.9);
-      glow.addColorStop(0, `rgba(224,242,254,${0.85 * P.boost * (0.55 + energy * 0.5)})`);
+      glow.addColorStop(0, `rgba(240,238,232,${0.85 * P.boost * (0.55 + energy * 0.5)})`);
       glow.addColorStop(0.25, `rgba(${P.hue},${0.5 * (0.5 + energy * 0.6)})`);
       glow.addColorStop(1, "rgba(0,0,0,0)");
       ctx.fillStyle = glow;
@@ -149,7 +152,7 @@ export function Orb(props: {
       if (!props.avatarUrl) {
         const triR = R * 0.21;
         const rot3 = -t * 0.15 * P.spin;
-        ctx.strokeStyle = `rgba(224,242,254,${0.5 + energy * 0.5})`;
+        ctx.strokeStyle = `rgba(240,238,232,${0.5 + energy * 0.5})`;
         ctx.lineWidth = 2;
         ctx.shadowColor = `rgb(${P.hue})`;
         ctx.shadowBlur = 18 * (0.6 + energy);

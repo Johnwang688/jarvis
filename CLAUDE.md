@@ -34,7 +34,11 @@ design §12 and §18). The status column is subscription meters: Claude's
 5-hour and weekly windows (Claude Code's own usage endpoint, cached, the
 login token never on `/usage`) and Codex's weekly window, green under 75%,
 yellow from 75%, red from 90%. Role routing is in Settings; schedules are
-one button; last routing decisions are a collapsed log. Remaining: the long-bench comparison (WP13). Briefs for every package, including the ones in flight, are in
+one button; last routing decisions are a collapsed log. The HUD wears the
+**Graphite** theme (2026-10-06, design §12.2 — replaces the cyan grid and
+notched panels): flat warm off-black, one sparing glacier-cyan accent, amber
+and red kept for pending and error only, and the default avatar's accent
+moved to `#6fc3df` so the orb matches. Remaining: the long-bench comparison (WP13). Briefs for every package, including the ones in flight, are in
 `docs/codex-briefs/`; each merged package left a `*-notes.md` beside its
 brief with what its implementer verified and what it proposes.
 

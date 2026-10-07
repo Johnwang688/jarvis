@@ -669,9 +669,19 @@ providers, and dictation with an adjustable send mode.
 └────────────────┴─────────────────────────────────────┴───────────────────┘
 ```
 
-Sci-fi skin kept: the orb with its ring sets and avatar face, the cyan
-palette, angular panels; but the information architecture above is the
-desktop apps'. Carried over as components: orb, avatar face, wake word,
+Skin: the **Graphite** theme (2026-10-06, amending the original "cyan
+palette, angular panels" choice — the blue field tired the owner's eyes over
+long sessions). A flat warm off-black (`#141413` window, `#1a1a19` panes,
+`#222221` raised) with warm-grey text, panes meeting at 1px rules with no
+notched corners, grid or glow, and one sparing glacier-cyan accent
+(`#6fc3df`) for focus, selection, the active tab, links and "running". Amber
+(tool running, authorization pending) and red (error) keep their exact values
+and meanings; the authorization card stays the loudest thing on screen. The
+orb with its ring sets and avatar face carries the sci-fi identity alone (the
+default avatar's accent moved to `#6fc3df` with it). The tokens live on
+`:root` in `hud/src/theme.css`; every text/background pair passes WCAG AA,
+the tightest at 4.6:1. The information
+architecture above is the desktop apps'. Carried over as components: orb, avatar face, wake word,
 capture pipeline, TTS speculation, approval card semantics (deny cheap,
 authorize deliberate, nothing keyboard-defaulted, `textContent` only),
 model / voice / avatar pickers, session (now thread) picker.
