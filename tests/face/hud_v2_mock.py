@@ -7,7 +7,7 @@ built and tested before the backend lands and then re-verified against it
 
 It is the v1 `hud_state_check` puppet pattern one level up: every route
 answers from a mutable world the test can rewrite between assertions, and the
-SSE stream is a `queue.Queue` the test releases one frame at a time. Nothing
+SSE stream is a queue the test releases one frame at a time. Nothing
 here guesses at a shape the contract does not state.
 
 Run it standalone to poke at the HUD by hand:
@@ -18,8 +18,8 @@ Run it standalone to poke at the HUD by hand:
 
 from __future__ import annotations
 
+import collections
 import json
-import queue
 import threading
 import time
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -290,7 +290,18 @@ class MockDaemon:
     def __init__(self, port: int):
         self.port = port
         self.world = _world()
-        self.sse: queue.Queue = queue.Queue()
+        # The SSE frames not yet handed to a connection. Only the newest
+        # `/events` connection takes frames (`_sse_gen`): a window that
+        # reloads leaves its old handler blocked here, and that handler cannot
+        # tell its client is gone until a *second* write fails, so with one
+        # shared queue it used to take the next frame and write it into a dead
+        # socket. That is how `approval_requested`, emitted shortly after the
+        # dictation section's reload, went missing (the "approval-origin"
+        # timeout).
+        self._sse: collections.deque = collections.deque()
+        self._sse_cond = threading.Condition()
+        self._sse_gen = 0
+        self._sse_closed = False
         self.calls: list[tuple[str, str, dict]] = []
         self.httpd: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
@@ -346,18 +357,25 @@ class MockDaemon:
                     self.send_header("Content-Type", "text/event-stream")
                     self.send_header("Cache-Control", "no-store")
                     self.end_headers()
+                    with mock._sse_cond:
+                        mock._sse_gen += 1
+                        mine = mock._sse_gen
+                        mock._sse_cond.notify_all()
                     while True:
-                        try:
-                            event = mock.sse.get(timeout=0.5)
-                        except queue.Empty:
+                        with mock._sse_cond:
+                            mock._sse_cond.wait_for(
+                                lambda: mock._sse_closed or mock._sse_gen != mine or mock._sse,
+                                timeout=0.5)
+                            if mock._sse_closed or mock._sse_gen != mine:
+                                return              # superseded: the window reconnected
+                            event = mock._sse.popleft() if mock._sse else None
+                        if event is None:
                             try:
                                 self.wfile.write(b": keepalive\n\n")
                                 self.wfile.flush()
                             except Exception:
                                 return
                             continue
-                        if event is None:
-                            return
                         try:
                             self.wfile.write(f"data: {json.dumps(event)}\n\n".encode())
                             self.wfile.flush()
@@ -644,7 +662,9 @@ class MockDaemon:
         return self
 
     def stop(self):
-        self.sse.put(None)
+        with self._sse_cond:
+            self._sse_closed = True
+            self._sse_cond.notify_all()
         if self.httpd:
             self.httpd.shutdown()
             self.httpd.server_close()
@@ -655,7 +675,20 @@ class MockDaemon:
         """Release one SSE frame."""
         frame = {"kind": kind, "data": data or {}}
         frame.update(extra)
-        self.sse.put(frame)
+        with self._sse_cond:
+            self._sse.append(frame)
+            self._sse_cond.notify_all()
+
+    def sse_connections(self) -> int:
+        """How many `/events` connections have opened; the newest one is live."""
+        with self._sse_cond:
+            return self._sse_gen
+
+    def await_reconnect(self, before: int, timeout: float = 6.0) -> bool:
+        """After a reload: wait for the window's new `/events` connection, so
+        a frame emitted next cannot be handed to the old page's dead one."""
+        with self._sse_cond:
+            return self._sse_cond.wait_for(lambda: self._sse_gen > before, timeout=timeout)
 
     def posted(self, path: str) -> list[dict]:
         return [b for m, p, b in self.calls if m == "POST" and p == path]
