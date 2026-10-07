@@ -799,3 +799,41 @@ not merge A with anything.
 D3 and D4 change two of them:
 - D14 is now narrower, because API-initiated renames are gated.
 - D15 is now handled by the crowding approval rather than left to the owner.
+
+---
+
+## Addendum (revision 2b): what the planner's second pass refined
+
+The planner returned a second, near-identical revision after the owner
+confirmed D1, D2 and D4. Its differences from the text above:
+
+- **Bare `new project`** asks for the name and the folder path one at a time.
+  - The dialogue is keyed by (channel, owner), with one open per channel.
+  - It lives in memory for 10 minutes and is lost on restart.
+  - Verbs such as `status` and `yes CODE` still win while it is open, and
+    `cancel` aborts it.
+  - It is kept in a separate map from the deferred "which project?" memory
+    (risk R8).
+- **Folder rules:**
+  - Windows-reserved names (`CON`, `NUL`, `COM1`…) are also refused under
+    `/mnt/c`.
+  - The allowed roots live in `config.PROJECT_FOLDER_ROOTS`, overridable only
+    by the env variable `JARVIS_PROJECT_ROOTS`.
+  - A folder that is already another project's root is refused from Discord
+    but allowed from the HUD (O6).
+- **Crowding:**
+  - The archive candidates are projects with **no task activity for 30+
+    days**; §2.4 says 60. The owner picks.
+  - A channel is never moved back out of the archive by Jarvis. Instead it
+    posts one line offering `move back`, which the owner types, so it counts
+    as the owner's action.
+- **Setup** also warns about *excess* permissions (Manage Roles, Manage
+  Server, Ban, Kick, Webhooks), not only missing ones.
+- **`GET /discord`** also reports `linker: {pending_renames,
+  awaiting_approval}` and `permissions: {missing, excess, administrator}`.
+  The HUD panel shows the "awaiting approval" note.
+- **Open items it adds:**
+  - **O2:** the HUD New Project "Create a Discord channel" box is checked by
+    default when the guild is configured.
+  - **O8:** add the owner to every new thread, so threads appear in your list
+    before the first ping.
