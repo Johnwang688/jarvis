@@ -84,3 +84,41 @@ recommended.
   - Jarvis threads and channels can message each other for context and
     collaboration, like Claude Code sessions do.
   - A peer's message is never the owner's authority.
+
+---
+
+## Slash commands ([`2026-10-07-slash-commands-plan.md`](2026-10-07-slash-commands-plan.md))
+
+Recorded 2026-10-07.
+
+**S-1. Slash commands come first**, before the update poster, so that
+approvals and question answers are not built twice. The order becomes:
+1. PR #4, then PR #3 (as before);
+2. the slash core (S1);
+3. the poster (PR A);
+4. linking (B1);
+5. Discord-side projects (B2);
+6. dropping the keywords (S2);
+7. `/model`, `/effort` and `/new` on Discord, plus the HUD `/` menu (S3).
+
+The Discord plan's §8 order is overridden.
+
+**S-2. No approval is ever given by voice.**
+- "Always" is only the typed `/always`.
+- *Interpretation:* the Approve and Deny buttons on approval posts are allowed.
+  A tap is authenticated and cannot come from a voice note. Always never gets a
+  button.
+
+**S-3. Keywords:** they keep working for one release, with a nudge toward the
+slash command. Then they are dropped, and a permanent tripwire holds old
+keyword forms without acting on them. Accepted.
+
+---
+
+## Thread-to-thread messaging ([`2026-10-07-peers-plan.md`](2026-10-07-peers-plan.md))
+
+**P-0. Being clarified with the owner.**
+- The owner's own messages always run the thread they are sent to, and that is
+  unchanged.
+- The "never wakes" rule applies only to notes one Jarvis thread leaves for
+  another.
