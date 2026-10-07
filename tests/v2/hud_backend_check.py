@@ -501,11 +501,14 @@ class Backend(unittest.TestCase):
 
     def test_schedules_crud_fire_skip_disable_and_run_now(self):
         schedule = self.schedule()
-        self.assertEqual(set(schedule), {"id", "project_id", "brief", "cron", "every_s", "enabled", "last_run_at", "last_task_id", "next_run_at", "created"})
+        self.assertEqual(set(schedule), {"id", "project_id", "brief", "cron", "every_s", "enabled",
+                                          "last_run_at", "last_task_id", "next_run_at", "created", "describe"})
+        self.assertEqual(schedule["describe"], "every 1 minute")
+        stored = {k: v for k, v in schedule.items() if k != "describe"}
+        self.assertEqual(Schedules(self.daemon).get(schedule["id"]), stored)
         path = "/schedules/" + schedule["id"]
         self.assertTrue((self.stores.root / "schedules" / (schedule["id"] + ".json")).is_file())
         self.assertEqual(self.request("GET", "/schedules"), [schedule])
-        self.assertEqual(Schedules(self.daemon).get(schedule["id"]), schedule)
         self.assertIsNone(self.daemon.schedules.fire(schedule["id"]))
         fired = self.request("POST", path + "/run-now", {})
         task_id = fired["last_task_id"]

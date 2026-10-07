@@ -632,6 +632,21 @@ def pickers(handler, daemon, parts, query):
     return 200, payload
 
 
+def _with_describe(record):
+    """The scheduler's own sentence, computed on the way out so the window
+    does not grow a second cron reader. Not stored: `fire` saves the record
+    it read, and a field added in place would be written back."""
+    if not isinstance(record, dict):
+        return record
+    from .schedules import describe
+    row = dict(record)
+    try:
+        row["describe"] = describe(row.get("cron"), row.get("every_s"))
+    except (TypeError, ValueError):
+        row["describe"] = ""
+    return row
+
+
 def route(handler, daemon, parts, query):
     """Return None for the existing daemon routes; never consume their bodies."""
     from .daemon import _object, safe_list
@@ -666,18 +681,18 @@ def route(handler, daemon, parts, query):
             return 200, preview(**body, now=schedules.clock())
         if len(parts) == 1:
             if method == "GET":
-                return 200, schedules.list()
+                return 200, [_with_describe(row) for row in schedules.list()]
             if method == "POST":
-                return 201, schedules.save(handler._body())
+                return 201, _with_describe(schedules.save(handler._body()))
         if len(parts) == 2:
             if method == "PATCH":
-                return 200, schedules.save(handler._body(), parts[1])
+                return 200, _with_describe(schedules.save(handler._body(), parts[1]))
             if method == "DELETE":
                 schedules.delete(parts[1])
                 return 200, {"ok": True}
         if len(parts) == 3 and parts[2] == "run-now" and method == "POST":
             _object(handler._body(), ())
-            return 200, schedules.fire(parts[1], manual=True)
+            return 200, _with_describe(schedules.fire(parts[1], manual=True))
     if len(parts) == 3 and parts[0] == "projects" and parts[2] in ("tree", "file", "platform"):
         project = daemon.require(stores.projects, parts[1])
         action = parts[2]

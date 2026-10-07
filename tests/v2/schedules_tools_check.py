@@ -55,7 +55,10 @@ class ScheduleTools(unittest.TestCase):
         made = self.create(project="eXample")
         self.assertEqual(made["project_id"], self.project.id)
         self.assertEqual(made["every_s"], 900)
-        self.assertEqual(self.daemon.schedules.get(made["id"]), made)
+        # `describe` is computed on the way out and never stored.
+        self.assertEqual(made["describe"], "every 15 minutes")
+        stored = {k: v for k, v in made.items() if k != "describe"}
+        self.assertEqual(self.daemon.schedules.get(made["id"]), stored)
         self.assertEqual(json.loads(self.dispatch("schedule_list")), [made])
         event = self.events.get(timeout=1)
         self.assertEqual(event["kind"], "schedule_created")

@@ -91,8 +91,9 @@ server.py`), re-homed; `POST /model` sets the **fast path's** model only.
   every_s?: int, enabled: true}` · `PATCH /schedules/{id}` · `DELETE
   /schedules/{id}` · `POST /schedules/{id}/run-now`. A schedule record:
   `{id, project_id, brief, cron, every_s, enabled, last_run_at,
-  last_task_id, next_run_at, created}`. Cron is 5-field, evaluated in
-  `America/Chicago`.
+  last_task_id, next_run_at, created, describe}`. `describe` is the
+  scheduler's plain-English reading, computed on the way out and not
+  stored. Cron is 5-field, evaluated in `America/Chicago`.
 
 ## Speech
 
