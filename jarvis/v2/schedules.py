@@ -224,7 +224,8 @@ class Schedules:
                 id=secrets.token_hex(4), cron=None, every_s=None, enabled=True,
                 last_run_at=None, last_task_id=None, next_run_at=None, created=_iso(now))
             record.update(body)
-            self.daemon.require(self.daemon.stores.projects, record["project_id"])
+            from .projects import refuse_archived_project
+            refuse_archived_project(self.daemon.require(self.daemon.stores.projects, record["project_id"]))
             _text(record["brief"], "brief")
             if not isinstance(record["enabled"], bool):
                 raise ValueError("enabled must be boolean")
@@ -262,6 +263,13 @@ class Schedules:
             if not manual and (not record["next_run_at"] or _stamp(record["next_run_at"]) > now):
                 return None
             stores = self.daemon.stores
+            from .projects import is_archived
+            if is_archived(stores, record["project_id"]):
+                # Paused with its project (decisions B1); belt and braces for a
+                # record whose `enabled` was changed by hand.
+                if manual:
+                    raise APIError(409, "its project is archived")
+                return None
             previous = stores.tasks.get(record["last_task_id"]) if record["last_task_id"] else None
             if previous and previous.state not in TERMINAL_STATES:
                 stores.tasks.journal(previous.id, "schedule_skipped", schedule_id=schedule_id,

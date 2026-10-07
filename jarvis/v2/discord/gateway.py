@@ -181,7 +181,8 @@ class DiscordRouter:
         if tasks:
             task = tasks[0]
             return "task", self.stores.projects.get(task.project_id), task
-        projects = self.stores.projects.list(discord_channel_id=channel_id)
+        # An archived project's channel places nothing (decisions B1).
+        projects = [p for p in self.stores.projects.list(discord_channel_id=channel_id) if not p.archived]
         if projects:
             return "project", projects[0], None
         return "other", None, None
@@ -434,7 +435,7 @@ class DiscordRouter:
             LOG.warning("Discord status post failed (%s)", type(exc).__name__)
 
     def _list_projects(self, channel_id) -> None:
-        projects = self.stores.projects.list()
+        projects = [p for p in self.stores.projects.list() if not p.archived]
         self._post(channel_id, _listing(
             "Projects", [f"`{p.id}` {p.name} — {p.root}" for p in projects]))
 
@@ -478,7 +479,8 @@ class DiscordRouter:
     def _chat_thread(self, project, key) -> str:
         with self._lock:
             thread_id = self._chat_threads.get(key)
-        if thread_id and self.stores.threads.get(thread_id) is not None:
+        cached = self.stores.threads.get(thread_id) if thread_id else None
+        if cached is not None and not cached.archived:
             return thread_id
         thread = self.daemon.open_thread(project.id, Role.CHAT, ProviderName.FAST, {})
         with self._lock:

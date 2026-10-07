@@ -49,11 +49,12 @@ def _project(name):
             project_id = thread.project_id
         if project_id:
             project = stores.projects.get(project_id)
-            if project is None:
+            if project is None or project.archived:
                 raise ValueError("calling project not found")
             return project.id
         return stores.projects.inbox().id
-    projects = stores.projects.list()
+    # Archived projects are invisible to tools (decisions B1).
+    projects = [p for p in stores.projects.list() if not p.archived]
     by_id = next((p for p in projects if p.id == name), None)
     if by_id:
         return by_id.id

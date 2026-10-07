@@ -347,20 +347,24 @@ class Router:
 
     def place(self, explicit=None, incoming=None):
         incoming = incoming or Incoming("")
+        # An archived project places nothing (decisions B1), and names match
+        # ignoring case and surrounding spaces, the rule the HUD numbers by.
+        live = [p for p in self.stores.projects.list() if not p.archived]
         if explicit:
-            matches = [p for p in self.stores.projects.list() if p.id == explicit or p.name == explicit]
+            wanted = explicit.strip().casefold()
+            matches = [p for p in live if p.id == explicit or p.name.strip().casefold() == wanted]
             return matches[0] if len(matches) == 1 else None
         if incoming.thread_id:
             thread = self.stores.threads.get(incoming.thread_id)
             if thread:
                 project = self.stores.projects.get(thread.project_id)
-                if project and not project.inbox:
+                if project and not project.inbox and not project.archived:
                     return project
         if incoming.project_id:
             project = self.stores.projects.get(incoming.project_id)
-            if project and not project.inbox:
+            if project and not project.inbox and not project.archived:
                 return project
-        matches = [p for p in self.stores.projects.list() if p.discord_channel_id == incoming.surface]
+        matches = [p for p in live if p.discord_channel_id == incoming.surface]
         return matches[0] if len(matches) == 1 else None
 
     def on_turn_finished(self, event, incoming=None):

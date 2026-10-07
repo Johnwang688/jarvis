@@ -137,6 +137,10 @@ class Daemon:
         from .schedules import Schedules
         self.router = Router(stores, self.providers, ledger=HUDLedger(stores))
         self.schedules = Schedules(self)
+        # Where a permanent delete goes (decisions B2). Only Jarvis's own
+        # entries in it are ever purged: `owned` is this daemon's data root.
+        from .trash import Trash
+        self.trash = Trash(stores.root)
         self.started_at = time.monotonic()
 
     def start(self) -> None:
@@ -218,6 +222,8 @@ class Daemon:
 
     def open_thread(self, project_id, role, provider, brief) -> Thread:
         project = self.require(self.stores.projects, project_id)
+        if project.archived:
+            raise DaemonError(f"project {project.name} is archived; restore it from the Archive first")
         role, provider = Role(role), ProviderName(provider)
         brief = self.make_brief(project, role, brief)
         if brief.task_id is not None:
@@ -298,6 +304,10 @@ class Daemon:
             self._active()
             session = self._sessions.get(thread_id)
         if session is None:
+            from .projects import is_archived
+            stored = self.require(self.stores.threads, thread_id)
+            if stored.archived or is_archived(self.stores, stored.project_id):
+                raise DaemonError("this thread is archived; restore it from the Archive to continue")
             session = self.resume_thread(thread_id)
         with self._lock:
             self._active()
@@ -305,6 +315,11 @@ class Daemon:
                 raise DaemonError("thread session is opening or closing")
             if session.worker is not None:
                 raise DaemonError("a turn is already running on this thread")
+            # Checked under the same lock an archive takes, so a turn cannot
+            # start in a thread the owner is archiving (decisions B1).
+            from .projects import is_archived
+            if session.thread.archived or is_archived(self.stores, session.thread.project_id):
+                raise DaemonError("this thread is archived; restore it from the Archive to continue")
             session.cancelled.clear()
             session.turn_id = uuid.uuid4().hex
             worker = threading.Thread(target=self._turn, args=(session, message),
@@ -672,7 +687,9 @@ def _handler(daemon):
                 return 200, None
             if parts == ["projects"]:
                 if method == "GET":
-                    return 200, [to_json(p) for p in safe_list(stores.projects)]
+                    # Archived projects are hidden from every list (decisions B1);
+                    # the HUD's Archive view reads them from /archive.
+                    return 200, [to_json(p) for p in safe_list(stores.projects) if not p.archived]
                 if method == "POST":
                     body = _object(self._body(), ("name", "root", "profile", "routing", "extra_dirs",
                                                    "always_ask", "discord_channel_id"), ("name", "root"))
@@ -681,11 +698,19 @@ def _handler(daemon):
                     _text(project.name, "name")
                     if not Path(project.root).is_absolute():
                         raise APIError(400, "root must be absolute")
-                    values = to_json(project)
-                    values.pop("id")
+                    if not Path(project.root).is_dir():
+                        raise APIError(400, "root must be an existing directory")
+                    from .projects import project_names_taken, unique_name
                     with daemon._lock:
                         daemon._active()
-                        return 201, to_json(stores.projects.create(**values))
+                        # A colliding name is numbered, never refused (B4 + B10).
+                        project.name = unique_name(project.name, project_names_taken(stores))
+                        values = to_json(project)
+                        values.pop("id")
+                        created = stores.projects.create(**values)
+                    daemon.bus.publish({"kind": "project_created", "project_id": created.id,
+                                        "data": to_json(created)})
+                    return 201, to_json(created)
             if len(parts) == 2 and parts[0] == "projects":
                 with daemon._lock:
                     project = daemon.require(stores.projects, parts[1])
@@ -695,6 +720,7 @@ def _handler(daemon):
                         daemon._active()
                         body = _object(self._body(), ("name", "root", "profile", "routing", "extra_dirs",
                                                       "always_ask", "discord_channel_id"))
+                        before = project
                         project = from_json(Project, {**to_json(project), **body})
                         _validate(project, Project)
                         _text(project.name, "name")
@@ -702,7 +728,31 @@ def _handler(daemon):
                             raise APIError(400, "root must be absolute")
                         if project.inbox and ("name" in body or "root" in body):
                             raise DaemonError("inbox name and root cannot change")
-                        stores.projects.save(project)
+                        from . import projects as edits
+                        edits.refuse_archived_project(before)
+                        if edits.name_key(project.name) != edits.name_key(before.name):
+                            # Numbered only when the name really changes, so the
+                            # owner's existing duplicates stay editable (B4).
+                            project.name = edits.unique_name(
+                                project.name, edits.project_names_taken(stores, but=project.id))
+                        else:
+                            project.name = project.name.strip() or before.name
+                        if project.root != before.root:
+                            if not Path(project.root).is_dir():
+                                raise APIError(400, "root must be an existing directory")
+                            # Tasks already under way keep the root they were
+                            # started under (B5): pin it before it changes.
+                            for task in safe_list(stores.tasks, project_id=project.id):
+                                if task.root is None and task.worktree:
+                                    task.root = before.root
+                                    stores.tasks.save(task)
+                        changed = sorted(k for k, v in to_json(project).items()
+                                         if to_json(before).get(k) != v)
+                        if changed:
+                            stores.projects.save(project)
+                            daemon.bus.publish({"kind": "project_updated", "project_id": project.id,
+                                                "data": {"project_id": project.id, "changed": changed,
+                                                         "project": to_json(project)}})
                         return 200, to_json(project)
             if parts in (["threads"], ["tasks"]):
                 store = stores.threads if parts[0] == "threads" else stores.tasks
@@ -712,9 +762,15 @@ def _handler(daemon):
                     if "project" in query:
                         daemon.require(stores.projects, query["project"])
                         filters["project_id"] = query["project"]
+                    # Archived threads, and everything in an archived project,
+                    # are hidden here too (decisions B1).
+                    from .projects import archived_project_ids
+                    hidden = archived_project_ids(stores)
                     if parts[0] == "threads":
-                        return 200, [daemon.thread_json(t) for t in safe_list(store, **filters)]
-                    return 200, [to_json(obj) for obj in safe_list(store, **filters)]
+                        return 200, [daemon.thread_json(t) for t in safe_list(store, **filters)
+                                     if not t.archived and t.project_id not in hidden]
+                    return 200, [to_json(obj) for obj in safe_list(store, **filters)
+                                 if obj.project_id not in hidden]
                 if method == "POST" and parts[0] == "threads":
                     # provider and brief are optional: a chat thread defaults to
                     # the fast path with an empty brief (the HUD's New Thread
@@ -730,7 +786,8 @@ def _handler(daemon):
                     return 201, to_json(daemon.open_thread(**body))
                 if method == "POST":
                     body = _object(self._body(), ("project_id", "brief"), ("project_id", "brief"))
-                    daemon.require(stores.projects, body["project_id"])
+                    from .projects import refuse_archived_project
+                    refuse_archived_project(daemon.require(stores.projects, body["project_id"]))
                     _text(body["brief"], "brief")
                     with daemon._lock:
                         daemon._active()
@@ -958,6 +1015,20 @@ def start_discord(daemon, control=None):
         return None
 
 
+def _purge_trash(daemon, done, interval=6 * 3600):
+    """Startup and every six hours: finish any delete a crash left staged, then
+    purge Jarvis's trash entries past the retention period (decisions B2)."""
+    from .projects import recover_staging
+    while True:
+        try:
+            recover_staging(daemon)
+            daemon.trash.purge()
+        except Exception:
+            LOG.warning("Trash purge failed", exc_info=True)
+        if done.wait(interval):
+            return
+
+
 def main() -> int:
     # Imported here, not at module scope: the hatch reads the daemon it is
     # given and nothing in the daemon needs it, so keeping the edge one-way
@@ -990,11 +1061,13 @@ def main() -> int:
     discord = None
     daemon.runner = TaskRunner(daemon, daemon.router)
     done = threading.Event()
+    purger = threading.Thread(target=_purge_trash, args=(daemon, done), name="jarvis-trash", daemon=True)
     previous = signal.signal(signal.SIGTERM, lambda *_: done.set())
     try:
         daemon.start()
         hatch.start()
         daemon.runner.serve()
+        purger.start()
         if remote:
             discord = start_discord(daemon)
         LOG.info("Jarvis v2 listening on 127.0.0.1:%s", daemon.port)
