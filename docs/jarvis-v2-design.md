@@ -645,10 +645,12 @@ providers, and dictation with an adjustable send mode.
   threshold, wake word, pre-roll, his-own-speech suppression) carries over
   as a component unchanged in behaviour; the mode only decides what
   happens to a finished utterance.
-- **Usage panel:** per provider, the ledger's state and today's tokens /
-  equivalent dollars, plus the provider's own quota where one exists —
-  Codex's app-server rate-limit windows (verify on 0.153.4; R6), and for
-  Claude nothing invented: the ledger figures, labelled equivalent.
+- **Usage panel:** subscription meters only. Claude shows its 5-hour and
+  weekly windows (from Claude Code's own usage endpoint; the login token
+  never leaves the daemon) and Codex shows its weekly window. Under 75%
+  green, from 75% yellow, from 90% red. A window the provider did not
+  report is a dash, never a bar invented from the ledger. Role routing
+  is in Settings. Last routing decisions are a collapsed log.
 - **Scheduled tasks** are a backend feature the HUD manages: a schedule is
   a project, a brief, a cron or interval, enabled or not; the daemon's
   scheduler creates and starts a task when due, through the same intake
@@ -808,8 +810,11 @@ for everything not under `jarvis/v2/`.
   on 0.153.4 declares `account/rateLimits/updated` with `usedPercent`,
   `windowDurationMins` and `resetsAt` per window (primary/secondary,
   sparse-merged). `CodexProvider` surfaces it as
-  `USAGE.provider_reported.rate_limits`; `/usage` shows it as `quota`. The
-  Claude half stays open: no documented quota endpoint, `quota: null`.
+  `USAGE.provider_reported.rate_limits`; `/usage` shows it as `quota`.
+  Claude's half is the same endpoint Claude Code's `/usage` command
+  calls (`GET /api/oauth/usage`: `five_hour` and `seven_day`), cached
+  for a few minutes. No login, a 401, or a body without those windows
+  stays `quota: null` — still never invented from the ledger.
 - **R6** Both subscriptions' *actual* headless limits. The firm's ledger
   counts local admission, not quota; the visible window on Claude is what the
   routing threshold reads, and it has to come from somewhere real.

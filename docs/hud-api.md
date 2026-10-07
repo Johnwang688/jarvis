@@ -79,8 +79,11 @@ server.py`), re-homed; `POST /model` sets the **fast path's** model only.
   "unavailable", "reason", "today": {"work_tokens", "spend_usd",
   "equivalent_usd"}, "allowance": {...}, "quota": null | {"windows": [
   {"name", "used_percent", "resets_at"}]}}`. `quota` is filled only from
-  a provider's own report (Codex rate-limit updates when verified); never
-  computed.
+  a provider's own report, never computed: Codex rate-limit updates
+  (5h and weekly), and Claude's 5h and week windows from Claude Code's
+  own usage endpoint when a subscription login is present. The login
+  token is not part of this response. A missing login, a 401, or a body
+  without those windows is `quota: null`.
 
 ## Schedules
 

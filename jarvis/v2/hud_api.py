@@ -4,11 +4,13 @@ from __future__ import annotations
 import base64
 import copy
 import difflib
+import json
 import math
 import mimetypes
 import os
 from pathlib import Path
 import re
+import time
 from urllib.parse import unquote, urlsplit
 
 from jarvis.tools.secrets import is_protected, scrub
@@ -25,6 +27,98 @@ FILE_CAP = 2 * 1024 * 1024
 PATCH_CAP = 1024 * 1024
 ATTACH_CAP = 4 * 1024 * 1024
 HUD_DIST = Path(__file__).resolve().parents[2] / "hud" / "dist"
+
+# Claude Code's own `/usage` command. Undocumented, so a failure is "not
+# reported", never a number invented from the ledger. The User-Agent has to
+# look like the CLI: a bare client is the bucket this endpoint 429s. The
+# version tracks `providers/claude.py` `CLAUDE_PIN`.
+CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+CLAUDE_USAGE_TTL_S = 300
+_CLAUDE_WINDOWS = (("five_hour", "5h"), ("seven_day", "week"))
+
+
+class ClaudeUsageUnavailable(Exception):
+    """A 429 or a transport failure. The last good reading stays."""
+
+
+def _claude_credentials_path() -> Path:
+    from .providers.claude import _credentials_path
+    return _credentials_path()
+
+
+def _claude_access_token():
+    """The login, for this one request. Never logged and never returned."""
+    path = _claude_credentials_path()
+    try:
+        raw = path.read_text()
+    except OSError:
+        return None
+    try:
+        oauth = json.loads(raw).get("claudeAiOauth") or {}
+    except ValueError:
+        return None
+    token = oauth.get("accessToken")
+    if not isinstance(token, str) or not token.strip():
+        return None
+    return token
+
+
+def fetch_claude_usage(token):
+    """Live call. Tests replace this whole function, so a suite never dials out.
+
+    The token is a header and nothing else: it is not interpolated into an
+    exception, a log line, or the value this returns.
+    """
+    import httpx
+    from .providers.claude import CLAUDE_PIN
+    try:
+        response = httpx.get(
+            CLAUDE_USAGE_URL,
+            headers={
+                "Authorization": "Bearer " + token,
+                "anthropic-beta": "oauth-2025-04-20",
+                "Accept": "application/json",
+                "User-Agent": "claude-code/" + CLAUDE_PIN,
+            },
+            timeout=8,
+        )
+    except httpx.HTTPError:
+        raise ClaudeUsageUnavailable("network")
+    if response.status_code == 429:
+        raise ClaudeUsageUnavailable("429")
+    if response.status_code == 401:
+        return None
+    if response.status_code != 200:
+        raise ClaudeUsageUnavailable("http")
+    try:
+        return response.json()
+    except ValueError:
+        raise ClaudeUsageUnavailable("body")
+
+
+def claude_windows(body):
+    """`five_hour` and `seven_day` onto the quota shape. Opus-only and
+    extra-usage fields are ignored so the row stays two bars.
+
+    `utilization` is already a percent (responses look like 74.0, not 0.74).
+    """
+    if not isinstance(body, dict):
+        return None
+    windows = []
+    for key, label in _CLAUDE_WINDOWS:
+        window = body.get(key)
+        if not isinstance(window, dict):
+            continue
+        used = window.get("utilization")
+        if type(used) not in (int, float) or isinstance(used, bool):
+            continue
+        if not math.isfinite(used) or used < 0:
+            continue
+        resets = window.get("resets_at")
+        if not isinstance(resets, str):
+            resets = ""
+        windows.append({"name": label, "used_percent": float(used), "resets_at": resets})
+    return {"windows": windows} if windows else None
 
 
 def fail(status, text):
@@ -216,6 +310,8 @@ class HUDLedger(UsageLedger):
     def __init__(self, *args, **kwargs):
         self.rate_limits = {}
         self._reported = None
+        self._claude_quota = None
+        self._claude_quota_at = 0.0
         super().__init__(*args, **kwargs)
 
     def _apply(self, row):
@@ -248,6 +344,8 @@ class HUDLedger(UsageLedger):
                 self._reported = None
 
     def quota(self, provider):
+        if provider == "claude":
+            return self._claude_subscription()
         if provider != "codex":
             return None
         windows = []
@@ -266,6 +364,43 @@ class HUDLedger(UsageLedger):
                         label = f"{report.get('limitName') or limit_id}: {label}"
                     windows.append(dict(name=label, used_percent=used, resets_at=window.get("resetsAt")))
         return {"windows": windows} if windows else None
+
+    def _claude_subscription(self):
+        """The subscription windows, cached. A miss is null, never a guess.
+
+        No credentials, a 401, or a body without the two windows is null.
+        A 429 or a network error keeps the last good reading, because this
+        runs on every `usage_updated` and the endpoint punishes polling.
+        """
+        now = time.monotonic()
+        with self._lock:
+            cached = self._claude_quota
+            fresh = cached is not None and (now - self._claude_quota_at) < CLAUDE_USAGE_TTL_S
+        if fresh:
+            return cached
+        token = _claude_access_token()
+        if not token:
+            with self._lock:
+                self._claude_quota = None
+                self._claude_quota_at = 0.0
+            return None
+        try:
+            body = fetch_claude_usage(token)
+        except ClaudeUsageUnavailable:
+            return cached
+        if body is None:
+            parsed = None
+        else:
+            parsed = claude_windows(body)
+        if not parsed:
+            with self._lock:
+                self._claude_quota = None
+                self._claude_quota_at = 0.0
+            return None
+        with self._lock:
+            self._claude_quota = parsed
+            self._claude_quota_at = time.monotonic()
+        return parsed
 
 
 def usage(daemon):

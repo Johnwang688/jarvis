@@ -145,6 +145,13 @@ class Backend(unittest.TestCase):
         catalog = patch.object(models, "catalog", return_value=self.catalog)
         catalog.start()
         self.addCleanup(catalog.stop)
+        # The owner's real Claude login must not be read, and the suite must
+        # not call the usage endpoint. A missing file is "not reported".
+        creds = patch.dict("os.environ", {
+            "JARVIS_CLAUDE_CREDENTIALS": str(self.root / "missing-claude-credentials.json"),
+        })
+        creds.start()
+        self.addCleanup(creds.stop)
         self.stores = Stores()
         self.providers = {name: Fake(name) for name in P}
         self.daemon = Daemon(self.stores, self.providers, lambda *_: lambda *_: Decision.DENY, 0)
@@ -450,6 +457,47 @@ class Backend(unittest.TestCase):
         self.assertEqual(restored.quota("codex")["windows"][0]["resets_at"], 1900000000)
         self.assertEqual(restored.totals(provider="codex")["work_tokens"], 14)
         self.assertIsNone(restored.quota("claude"))
+
+    def test_claude_subscription_quota_is_reported_not_invented(self):
+        token = "oat-hud-test-token-value"
+        path = self.root / "claude-credentials.json"
+        path.write_text(json.dumps({"claudeAiOauth": {"accessToken": token, "expiresAt": 1}}))
+        body = {
+            "five_hour": {"utilization": 74.0, "resets_at": "2026-10-07T01:00:00Z"},
+            "seven_day": {"utilization": 12.0, "resets_at": "2026-10-12T01:00:00Z"},
+            "seven_day_opus": {"utilization": 99.0, "resets_at": "2026-10-12T01:00:00Z"},
+        }
+        seen = []
+
+        def fake_fetch(got):
+            seen.append(got)
+            return body
+
+        with patch.dict("os.environ", {"JARVIS_CLAUDE_CREDENTIALS": str(path)}), \
+             patch.object(H, "fetch_claude_usage", fake_fetch):
+            usage = self.request("GET", "/usage")
+            rendered = json.dumps(usage)
+            self.assertNotIn(token, rendered)
+            self.assertEqual(seen, [token])
+            windows = usage["providers"]["claude"]["quota"]["windows"]
+            self.assertEqual([w["name"] for w in windows], ["5h", "week"])
+            self.assertEqual(windows[0]["used_percent"], 74.0)
+            self.assertEqual(windows[1]["used_percent"], 12.0)
+            self.assertNotIn("opus", rendered)
+            # A 429 keeps the last good reading rather than blanking the meters.
+            ledger = self.daemon.router.ledger
+            ledger._claude_quota_at = 0
+            with patch.object(H, "fetch_claude_usage", side_effect=H.ClaudeUsageUnavailable("429")):
+                self.assertEqual(ledger.quota("claude")["windows"][0]["used_percent"], 74.0)
+            # A 401 is a dead login: null, not yesterday's numbers.
+            ledger._claude_quota_at = 0
+            with patch.object(H, "fetch_claude_usage", return_value=None):
+                self.assertIsNone(ledger.quota("claude"))
+        # No credential file, no call.
+        called = []
+        with patch.object(H, "fetch_claude_usage", lambda got: called.append(got)):
+            self.assertIsNone(H.HUDLedger(self.stores).quota("claude"))
+        self.assertEqual(called, [])
 
     def test_schedules_crud_fire_skip_disable_and_run_now(self):
         schedule = self.schedule()
