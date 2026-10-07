@@ -275,11 +275,7 @@ export default function App() {
           break;
         case "thread_updated":
           // A thread's model or effort changed (here, or in another window).
-          if (tid)
-            dispatch({
-              type: "patch",
-              patch: { threads: live.current.threads.map((t) => (t.id === tid ? { ...t, ...data, id: t.id } : t)) },
-            });
+          if (tid) dispatch({ type: "thread_patch", id: tid, patch: data });
           break;
         case "model_set":
           // Every model and effort change is a line in the chat (A7).

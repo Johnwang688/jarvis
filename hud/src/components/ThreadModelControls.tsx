@@ -59,13 +59,10 @@ export function useThreadModel(state: State, dispatch: React.Dispatch<Action>, o
       if (!body) return;
       api
         .setThreadModel(thread.id, body)
-        .then((record) => {
-          const threads = state.threads.map((t) => (t.id === record.id ? { ...t, ...record } : t));
-          dispatch({ type: "patch", patch: { threads } });
-        })
+        .then((record) => dispatch({ type: "thread_patch", id: record.id, patch: record }))
         .catch((e) => setError(`Could not change model: ${e.message}`));
     },
-    [composing, state.compose, state.threads, thread, dispatch],
+    [composing, state.compose, thread, dispatch],
   );
 
   const openCatalog = useCallback(() => {
