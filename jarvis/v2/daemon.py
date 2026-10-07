@@ -315,7 +315,13 @@ class Daemon:
         if session.applied is None or not thread_model.is_chat(session.thread):
             return
         with self._lock:
-            want = thread_model.effective(session.thread)
+            try:
+                want = thread_model.effective(session.thread)
+            except Exception:
+                # A default that cannot be read right now (a broken
+                # routing.json) keeps the thread on what it already runs.
+                LOG.warning("Cannot resolve the model for thread %s", session.thread.id, exc_info=True)
+                return
             if want == session.applied:
                 return
         setter = getattr(session.provider, "set_model", None)
