@@ -198,6 +198,16 @@ on restore. Opening a thread or task in it, sending to one of its threads,
 moving a thread into or out of it, and editing it are refused (409). Every
 record, log, journal and cost is kept.
 
+No task is ever created in an archived project, by any door: the refusal
+lives in the task store (`ProjectArchived`), under the store lock the
+archive takes for its final check, so `POST /tasks` (409), Discord intake,
+a fast-path proposal and a schedule all meet it, and an archive cannot land
+between a create's check and its write. Discord answers in an archived
+project's channel or its old task threads with a note pointing at the
+Archive view, and opens, starts, steers and resumes nothing there.
+`DELETE /schedules/{id}` on an archived project's schedule is 409: it is
+paused, not deleted, and goes only with its project's permanent delete.
+
 - `POST /projects/{id}/archive?expect=<token>` → `{project,
   paused_schedules}`. 400 without `expect`; 409 for the Inbox, an
   unfinished task, a running chat turn (both named), or a stale token.
@@ -226,7 +236,10 @@ worktree and no branch is touched; the ledger and decision log are kept.
 
 - `DELETE /projects/{id}?expect=<token>` → `{deleted, name, removed:
   {threads, tasks, schedules}, left_on_disk: [worktree paths], trash:
-  {where: "linux"|"windows"|"staged", …}}`. 409 unless archived. Publishes
+  {where: "linux"|"windows"|"staged", …}}`. `staged` (with `path` and
+  `error`) means the records left every list but the move to the trash
+  failed; the daemon retries it at start and every six hours, and the HUD
+  says so rather than "in the trash". 409 unless archived. Publishes
   `schedule_deleted` per schedule and `project_deleted {project_id, name,
   removed_thread_ids, removed_task_ids}`.
 - `DELETE /threads/{id}` → `{deleted, trash}`. Archived chat threads (or
@@ -234,7 +247,11 @@ worktree and no branch is touched; the ledger and decision log are kept.
 - `GET /trash` → `{location, retention_days, entries, items: [{name, path,
   deleted}]}` — Jarvis's entries only. `POST /trash/empty` → `{removed}`.
   Jarvis's entries are purged after `JARVIS_TRASH_DAYS` (default 30) by the
-  daemon; entries the owner trashed from elsewhere are never touched.
+  daemon; entries the owner trashed from elsewhere are never touched. An
+  entry is Jarvis's only if its recorded path, with no `..` in it, lies
+  under the data root. One entry that cannot be removed is logged and
+  skipped; it never stops the rest. The Recycle Bin path reaches PowerShell
+  as base64 data decoded by the script, never as quoted text.
 
 **Owner only.** Archive, restore, both deletes and the trash empty answer
 only on the HUD's listener (`FACE_PORT`) and only to a request carrying the
