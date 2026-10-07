@@ -49,6 +49,7 @@ NAME_TABLE = [
     ("e2e-calc", ["E2E-CALC "], "e2e-calc (1)"),
     ("Inbox", ["Inbox"], "Inbox (1)"),
     ("new", ["old"], "new"),
+    ("straße", ["STRASSE"], "straße (1)"),
 ]
 
 
@@ -307,7 +308,9 @@ class RootChange(Base):
         self.stores.tasks.save(task)
         not_started = self.task(state=TaskState.INTAKE, worktree=False)
         impact = self.impact()
-        self.assertEqual({t["id"] for t in impact["on_root"]["tasks"]}, {task.id, not_started.id})
+        # Only the started task stays on the old folder; the one in intake,
+        # with no pinned root and no worktree, starts under the new root.
+        self.assertEqual({t["id"] for t in impact["on_root"]["tasks"]}, {task.id})
         self.request("PATCH", f"/projects/{self.project.id}", {"root": str(self.repo_b)})
         self.assertEqual(self.stores.tasks.get(task.id).root, str(self.repo_a))
         # A task that has not started yet starts under the new root.
@@ -404,6 +407,88 @@ class Archive(Base):
             hold.set()
         eventually(lambda: self.daemon._sessions[thread.id].worker is None)
         self.archive()
+
+
+class ArchivedTakesNoWork(Base):
+    """One guard at task creation (`TaskStore`), so every path meets it."""
+
+    def test_the_store_refuses_a_task_in_an_archived_project(self):
+        self.archive()
+        from jarvis.v2.stores import ProjectArchived
+        with self.assertRaises(ProjectArchived):
+            self.stores.tasks.create(self.project.id, "more")
+        refused = self.request("POST", "/tasks", {"project_id": self.project.id, "brief": "more"}, 409)
+        self.assertIn("archived", refused["error"])
+        self.assertEqual(self.stores.tasks.list(project_id=self.project.id), [])
+        # The other project is untouched.
+        self.request("POST", "/tasks", {"project_id": self.other.id, "brief": "fine"}, 201)
+
+    def test_a_task_minted_before_the_archive_is_refused_when_written(self):
+        from jarvis.v2.stores import ProjectArchived
+        task = self.stores.tasks.create(self.project.id, "minted, not yet saved")
+        self.archive()                                            # it saw no saved task to block on
+        with self.assertRaises(ProjectArchived):
+            self.stores.tasks.save(task)
+        with self.assertRaises(ProjectArchived):
+            self.stores.tasks.journal(task.id, "anything")        # a first write by another door
+        self.assertEqual(self.stores.tasks.list(project_id=self.project.id), [])
+
+    def test_archive_and_a_create_cannot_interleave(self):
+        """The archive's last check and its stamp hold the store lock, so a
+        create racing it (from Discord, say, which never takes daemon._lock)
+        either lands first and blocks the archive, or waits and is refused."""
+        from jarvis.v2.stores import ProjectArchived
+        outcome = {}
+        racer = threading.Thread(target=lambda: outcome.update(result=self._create_quietly()))
+        original = self.stores.projects.save
+
+        def save(project):
+            if project.id == self.project.id and project.archived and not racer.is_alive() and not outcome:
+                racer.start()
+                racer.join(0.3)
+                outcome["blocked"] = racer.is_alive()            # still waiting on the lock
+            return original(project)
+
+        with patch.object(self.stores.projects, "save", side_effect=save):
+            self.archive()
+        racer.join(5)
+        self.assertTrue(outcome["blocked"], "the create ran while the archive held its decision")
+        self.assertIsInstance(outcome["result"], ProjectArchived)
+        self.assertEqual(self.stores.tasks.list(project_id=self.project.id), [])
+
+    def _create_quietly(self):
+        try:
+            task = self.stores.tasks.create(self.project.id, "racing the archive")
+            self.stores.tasks.save(task)
+            return task
+        except Exception as exc:
+            return exc
+
+    def test_a_fast_path_proposal_in_a_project_archived_meanwhile_opens_nothing(self):
+        thread = self.chat(title="desk")
+        self.daemon.close_thread(thread.id)
+        self.archive()
+        router = Router(self.stores)
+        archived = self.stores.projects.get(self.project.id)
+        event = {"kind": "turn_finished", "thread_id": thread.id, "turn_id": "u1",
+                 "data": {"proposal": {"brief": "add divide"}}}
+        # `place` already skips archived projects; this is the race past it.
+        with patch.object(Router, "place", return_value=archived):
+            reply = router.on_turn_finished(event)
+        self.assertIn("archived", reply)
+        self.assertEqual(self.stores.tasks.list(project_id=self.project.id), [])
+
+    def test_an_archived_projects_schedule_is_paused_not_deletable(self):
+        schedule = self.request("POST", "/schedules", dict(project_id=self.project.id, brief="nightly",
+                                                            every_s=60), 201)
+        self.archive()
+        refused = self.request("DELETE", f"/schedules/{schedule['id']}", None, 409)
+        self.assertIn("paused, not deletable", refused["error"])
+        self.assertFalse(self.daemon.schedules.get(schedule["id"])["enabled"])  # still there, paused
+        # Restored, it deletes as before.
+        self.owner("POST", f"/projects/{self.project.id}/restore")
+        self.request("DELETE", f"/schedules/{schedule['id']}", None, 200)
+        self.assertEqual(self.daemon.schedules.list(), [])
 
 
 class Threads(Base):
@@ -579,10 +664,67 @@ class TrashUnit(unittest.TestCase):
         info = self.root / "Trash" / "info"
         (info / "...trashinfo").write_text(
             f"[Trash Info]\nPath={self.owned}/x\nDeletionDate=2020-01-01T00:00:00\n")
-        with self.assertRaises(T.TrashError):
-            self.trash.empty()
+        self.assertEqual(self.trash.empty(), 0)           # skipped and logged, never raised
         self.assertTrue((self.root / "Trash" / "files" / foreign["name"]).exists())
         self.assertTrue((self.root / "Trash" / "info").is_dir())
+
+    def test_a_bad_entry_is_skipped_and_the_rest_still_purge(self):
+        self.trash.put(self.item("first"))
+        info = self.root / "Trash" / "info"
+        (info / "...trashinfo").write_text(                       # sorts before "first"
+            f"[Trash Info]\nPath={self.owned}/x\nDeletionDate=2020-01-01T00:00:00\n")
+        self.trash.put(self.item("second"))
+        self.now += 31 * 86400
+        with self.assertLogs("jarvis.v2.trash", "WARNING"):
+            self.assertEqual(self.trash.purge(), 2)
+        self.assertFalse((self.root / "Trash" / "files" / "first").exists())
+        self.assertFalse((self.root / "Trash" / "files" / "second").exists())
+        # … and the bad one does not wedge every later purge and empty.
+        self.trash.put(self.item("third"))
+        with self.assertLogs("jarvis.v2.trash", "WARNING"):
+            self.assertEqual(self.trash.empty(), 1)
+
+    def test_ownership_is_judged_on_a_normalized_path(self):
+        info = self.root / "Trash" / "info"
+        files = self.root / "Trash" / "files"
+        info.mkdir(parents=True)
+        files.mkdir(parents=True)
+        (files / "theirs").mkdir()
+        # Path.relative_to compares components, so `<owned>/../desktop/theirs`
+        # used to pass as Jarvis's and an empty would have removed it.
+        for name, path in (("theirs", f"{self.owned}/../desktop/theirs"),
+                           ("dots", f"{self.owned}/a/../../elsewhere"),
+                           ("relative", "data/x")):
+            (info / f"{name}.trashinfo").write_text(
+                f"[Trash Info]\nPath={path}\nDeletionDate=2020-01-01T00:00:00\n")
+        self.assertEqual(self.trash.entries(), [])
+        self.assertEqual(self.trash.empty(), 0)
+        self.assertTrue((files / "theirs").is_dir())
+        self.trash.put(self.item("mine"))
+        self.assertEqual([e["name"] for e in self.trash.entries()], ["mine"])
+
+    def test_the_recycle_script_never_carries_the_path_as_text(self):
+        # PowerShell reads U+2018..U+201B as single quotes too; doubling only
+        # `'` left these open. The path is base64 data now, never parsed.
+        nasty = "/mnt/c/Users/o\u2019neil/\u2018x\u201a\u201b'$(calc)`n;"
+        for is_dir in (True, False):
+            with self.subTest(is_dir=is_dir), patch.object(Path, "is_dir", return_value=is_dir):
+                script = T.recycle_script(Path(nasty))
+                windows = T.windows_path(nasty)
+                self.assertNotIn(windows, script)
+                for piece in ("o\u2019neil", "\u2018x", "\u201a", "\u201b", "$(calc)", "neil"):
+                    self.assertNotIn(piece, script)
+                self.assertTrue(script.isascii())
+                data = re.search(r"FromBase64String\('([A-Za-z0-9+/=]+)'\)", script).group(1)
+                import base64
+                self.assertEqual(base64.b64decode(data).decode("utf-8"), windows)
+                self.assertIn("DeleteDirectory" if is_dir else "DeleteFile", script)
+                self.assertIn("'SendToRecycleBin'", script)
+        # The real recycler is never run here: with no powershell.exe it refuses.
+        with patch.object(T.shutil, "which", return_value=None), \
+                patch.object(T.subprocess, "run", side_effect=AssertionError("ran powershell")):
+            with self.assertRaises(T.TrashError):
+                T.recycle_windows(Path(nasty))
 
     def test_retention_setting(self):
         for raw, days in (("", 30.0), ("7", 7.0), ("0", 30.0), ("-1", 30.0), ("soon", 30.0)):
