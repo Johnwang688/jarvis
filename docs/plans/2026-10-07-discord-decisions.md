@@ -142,12 +142,22 @@ and 5).
 **D6.** A task's Discord thread is created once the task actually starts
 (`clarifying`), after the proposal grace window. Yes.
 
-**O3. Where new project folders go:** `C:\Users\johnw\Jarvis\work`
-(`/mnt/c/Users/johnw/Jarvis/work`), with one subfolder per new project.
-- The owner asked for model-quality protection on folder creation (Claude
-  Sonnet or Opus, not a cheap model).
-- **Open:** the lead raised the `/mnt/c` speed trade-off and the fact that the
-  folder is made by code, not by a model. The owner is answering.
+**O3. Where new project folders go:** `~/jarvis-work` on the WSL side
+(created 2026-10-07). The owner chose this over `/mnt/c` after the 9p
+speed and line-ending warning.
+- **A bare name** (`/project new name:robotics`, or "robotics" with no path)
+  creates `~/jarvis-work/robotics`.
+- **A full path** is used as given, still under the `folders.py` rules. The
+  allowed roots stay `$HOME` and `/mnt/c/Users/johnw`, with no dot folders,
+  no data/credential/repo dirs, and the parent must exist.
+- **A model rule on top:** folder creation that goes through a model (a chat
+  turn asking to make a project) is allowed only in a Claude Sonnet or Opus
+  thread.
+  - *Interpretation:* `/project new` involves no model, so it is always
+    allowed. A chat on a cheaper model is told to use `/project new` or a
+    Claude thread.
+  - The folder itself is always made by code, after the owner's `yes` on the
+    exact path.
 
 **O4.** The parent folder must already exist; one `mkdir`. Yes.
 
@@ -167,3 +177,14 @@ by hand.
 
 **R7 (channel privacy).** The server has one other member. The owner handles
 his access; nothing for Jarvis to do.
+
+**C1. Every HUD chat appears as a Discord thread in its project's channel.**
+Owner, 2026-10-07.
+- Ungrouped (Inbox) chats appear as threads in an **"ungrouped"** channel in
+  the server.
+- *Interpretation:* the mirror is two-way. A message typed in that Discord
+  thread is a turn in the same HUD chat, and the reverse.
+- *Interpretation:* Inbox tasks also go to "ungrouped" as threads. DMs stay
+  as the direct DM conversation and as the safety net when a channel is
+  broken. This narrows O1.
+- The Discord plan is being revised for this (revision 3).
