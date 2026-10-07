@@ -30,7 +30,11 @@ backend ran one real task end to end on 2026-09-16** (design §17): Claude
 orchestrated, Codex implemented in a worktree, a fresh Claude reviewer
 failed it once and passed it second time, DONE in 198 s. **The HUD v2 landed the same
 day** (WP12a backend + WP12b frontend under `hud/`, `jarvis hud` opens it;
-design §12 and §18). Remaining: the long-bench comparison (WP13). Briefs for every package, including the ones in flight, are in
+design §12 and §18). The status column is subscription meters: Claude's
+5-hour and weekly windows (Claude Code's own usage endpoint, cached, the
+login token never on `/usage`) and Codex's weekly window, green under 75%,
+yellow from 75%, red from 90%. Role routing is in Settings; schedules are
+one button; last routing decisions are a collapsed log. Remaining: the long-bench comparison (WP13). Briefs for every package, including the ones in flight, are in
 `docs/codex-briefs/`; each merged package left a `*-notes.md` beside its
 brief with what its implementer verified and what it proposes.
 

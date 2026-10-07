@@ -166,7 +166,7 @@ export interface ProviderUsage {
   reason: string;
   today: { work_tokens: number; spend_usd: number; equivalent_usd: number };
   allowance: Record<string, number> | null;
-  quota: null | { windows: { name: string; used_percent: number; resets_at: string }[] };
+  quota: null | { windows: { name: string; used_percent: number; resets_at: string | number }[] };
 }
 
 export interface Usage {
@@ -184,6 +184,8 @@ export interface Schedule {
   last_task_id: string | null;
   next_run_at: string | null;
   created: string;
+  /** The scheduler's own sentence. Absent on a record that predates it. */
+  describe?: string;
 }
 
 /** `POST /schedules/preview` — the backend owns the timezone and the calendar. */

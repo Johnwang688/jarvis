@@ -1,9 +1,9 @@
 // The pickers, all modal, all built from text.
 //
 // The model picker **chooses the fast path's model only** (§12.1). Provider
-// and model per role come from the routing table, shown read-only beside it:
-// the picker can never touch Claude's or Codex's settings, and saying so in
-// the window is part of the design, not a decoration.
+// and model per role live in Settings, read-only: the picker can never touch
+// Claude's or Codex's settings, and saying so in the window is part of the
+// design, not a decoration.
 //
 // A model name comes off the network, and this window draws authorization
 // cards — so every row is React text, never markup.
@@ -29,18 +29,39 @@ function Shell(props: { title: string; onClose: () => void; children: React.Reac
   );
 }
 
+export function SettingsDialog(props: { route: RouteView | null; onClose: () => void }) {
+  const chains = props.route?.table?.chains || {};
+  return (
+    <Shell title="Settings" onClose={props.onClose}>
+      <div className="pad" data-testid="routing-readonly">
+        <div className="muted small" style={{ marginBottom: 6 }}>Routing</div>
+        <table className="plain" data-testid="route-table">
+          <tbody>
+            {Object.entries(chains).map(([role, chain]) => (
+              <tr key={role}>
+                <th>{role}</th>
+                <td>{Array.isArray(chain) ? chain.join(" → ") : String(chain)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {Object.keys(chains).length === 0 ? <div className="muted small">no routing table</div> : null}
+      </div>
+    </Shell>
+  );
+}
+
 export function ModelPicker(props: {
   models: ModelRow[];
   selected: string | null;
-  route: RouteView | null;
   onPick: (id: string, effort?: string | null) => void;
   onClose: () => void;
 }) {
   return (
     <Shell title="Fast-path model" onClose={props.onClose}>
       <div className="pad small muted" data-testid="model-scope-note">
-        This picks the <b>fast path's</b> model only. Provider and model per role come from the
-        routing table below and are never changed here — the picker cannot touch Claude or Codex.
+        This picks the <b>fast path's</b> model only. Who runs each role is in Settings and is
+        never changed here — the picker cannot touch Claude or Codex.
       </div>
       {props.models.map((m) => (
         <div
@@ -71,20 +92,6 @@ export function ModelPicker(props: {
           ) : null}
         </div>
       ))}
-      {props.route ? (
-        <div className="pad" data-testid="routing-readonly">
-          <table className="plain">
-            <tbody>
-              {Object.entries(props.route.table?.chains || {}).map(([role, chain]) => (
-                <tr key={role}>
-                  <th>{role}</th>
-                  <td>{Array.isArray(chain) ? chain.join(" → ") : String(chain)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      ) : null}
     </Shell>
   );
 }

@@ -183,6 +183,7 @@ def _world() -> dict:
         "schedules": [
             {"id": "s1", "project_id": "p1", "brief": "morning briefing",
              "cron": "0 7 * * *", "every_s": None, "enabled": True,
+             "describe": "every day at 07:00",
              "last_run_at": "2026-09-15T07:00:00-05:00", "last_task_id": "k0",
              "next_run_at": "2026-09-16T07:00:00-05:00", "created": "2026-09-01T00:00:00+00:00"},
         ],
@@ -517,6 +518,7 @@ class MockDaemon:
                            "project_id": body.get("project_id", "p1"),
                            "brief": body.get("brief", ""), "last_run_at": None,
                            "last_task_id": None, "next_run_at": None,
+                           "describe": _preview(body.get("cron"), body.get("every_s"))["describe"],
                            "created": "2026-09-15T00:00:00+00:00"}
                     w["schedules"].append(rec)
                     return self._json(rec, 201)
@@ -577,6 +579,8 @@ class MockDaemon:
                     for s in w["schedules"]:
                         if s["id"] == parts[1]:
                             s.update(body)
+                            if "cron" in body or "every_s" in body:
+                                s["describe"] = _preview(s.get("cron"), s.get("every_s"))["describe"]
                             return self._json(s)
                     return self._err(404, "no such schedule")
                 return self._err(404, "no such route")

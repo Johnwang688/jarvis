@@ -1,175 +1,99 @@
-// Usage, Schedules and Route — the three read-mostly panels.
+// Usage, schedules and the decisions log — the status column.
 //
-// The usage rule that matters: **quota is filled only from a provider's own
-// report and is never computed**, so an absent quota says "not reported"
-// rather than being invented from the ledger. A number in a dashboard that
-// looks measured but is not is how a wrong number gets quoted.
-//
-// Which is also why there are two kinds of bar and they are labelled apart:
-// the provider's reported window, and our own local allowance. One bar that
-// sometimes meant either would be exactly the number nobody could quote.
+// Quota is filled only from a provider's own report and is never computed.
+// An absent window is a dash, not a bar at 0%: a bar is a number somebody
+// will quote, and 0% used is a different fact from "we do not know".
 
-import type { Project, RouteView, Schedule, Usage } from "../types";
-import { allowanceBar, barsFor, type Bar } from "../lib/quota";
+import type { RouteView, Usage } from "../types";
+import { meterFor, type Bar } from "../lib/quota";
 
-function QuotaBar(props: { bar: Bar; testid: string; thin?: boolean }) {
-  const b = props.bar;
+function ClaudeMark() {
   return (
-    <div className="qbar" data-testid={props.testid} data-percent={String(b.percent)}>
-      <div className="qhead">
-        <span className="qname">{b.name}</span>
-        <span className="qpct">{Math.round(b.percent)}%</span>
+    <svg className="claude-mark" viewBox="0 0 24 24" width="18" height="18" role="img" aria-label="Claude">
+      <path
+        fill="#D97757"
+        d="M12 1.2c.4 3.6 1.8 5.8 4.9 7-3.1 1.2-4.5 3.4-4.9 7-.4-3.6-1.8-5.8-4.9-7 3.1-1.2 4.5-3.4 4.9-7zm0 6.6c.25 2.2 1.15 3.6 3.1 4.3-1.95.7-2.85 2.1-3.1 4.3-.25-2.2-1.15-3.6-3.1-4.3 1.95-.7 2.85-2.1 3.1-4.3z"
+      />
+    </svg>
+  );
+}
+
+function Meter(props: { name: string; bar: Bar | null; testid: string }) {
+  const b = props.bar;
+  if (!b) {
+    return (
+      <div className="meter" data-testid={props.testid} data-percent="" title="not reported">
+        <span className="mlabel">{props.name}</span>
+        <span className="mdash">—</span>
       </div>
-      <div className={"qtrack" + (props.thin ? " thin" : "")}>
+    );
+  }
+  return (
+    <div className="meter" data-testid={props.testid} data-percent={String(b.percent)} title={b.note}>
+      <span className="mlabel">{props.name}</span>
+      <span className="mtrack">
         <i className={`qfill ${b.level}`} style={{ width: `${b.percent}%` }} />
-      </div>
-      <div className="qnote">{b.note}</div>
+      </span>
+      <span className="mpct">{Math.round(b.percent)}%</span>
     </div>
   );
 }
 
 export function UsagePanel(props: { usage: Usage | null }) {
   if (!props.usage) return <div className="block muted" data-testid="usage">usage not loaded</div>;
-  const rows = Object.entries(props.usage.providers || {});
+  const providers = props.usage.providers || {};
+  const claude = providers.claude;
+  const codex = providers.codex;
   return (
-    <div className="block" data-testid="usage">
-      <h3>Usage</h3>
-      {rows.length === 0 ? <div className="muted small">nothing reported</div> : null}
-      {rows.map(([name, p]) => {
-        const bars = barsFor(p);
-        const local = allowanceBar(p);
-        return (
-          <div key={name} style={{ marginBottom: 10 }} data-testid={`usage-${name}`}>
-            <div className="kv">
-              <span className="k">{name}</span>
-              {/* The state is a label and is styled like one; the reason is a
-                  sentence the provider wrote, so it is left as prose — running it
-                  through the label's uppercase makes it read as a shout. */}
-              <span className="v">
-                <span className={`phase ${p.state === "available" ? "done" : "blocked"}`}>
-                  {p.state}
-                </span>
-                {p.reason ? ` · ${p.reason}` : ""}
-              </span>
-            </div>
-            <div className="kv">
-              <span className="k">today</span>
-              <span className="v">
-                {(p.today?.work_tokens ?? 0).toLocaleString()} tok · ${(p.today?.spend_usd ?? 0).toFixed(4)}
-                {p.today?.equivalent_usd ? ` (equiv $${p.today.equivalent_usd.toFixed(4)})` : ""}
-              </span>
-            </div>
-            <div data-testid={`quota-${name}`}>
-              {bars.length ? (
-                bars.map((b) => (
-                  <QuotaBar key={b.name} bar={b} testid={`quota-bar-${name}-${b.name}`} />
-                ))
-              ) : (
-                <span className="muted small">not reported</span>
-              )}
-            </div>
-            {local ? (
-              <QuotaBar bar={local} testid={`allowance-${name}`} thin />
-            ) : null}
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-export function SchedulesPanel(props: {
-  schedules: Schedule[];
-  projects: Project[];
-  onNew: () => void;
-  onEdit: (s: Schedule) => void;
-  onToggle: (id: string, enabled: boolean) => void;
-  onRunNow: (id: string) => void;
-  onDelete: (id: string) => void;
-}) {
-  const named = (id: string) => props.projects.find((p) => p.id === id)?.name || id;
-  return (
-    <div className="block" data-testid="schedules">
-      <h3>Schedules</h3>
-      {props.schedules.map((s) => (
-        <div key={s.id} style={{ marginBottom: 6 }} data-testid={`schedule-${s.id}`}>
-          <div className="kv">
-            <span className="k">{s.enabled ? "on" : "off"}</span>
-            <span className="v">{s.brief.slice(0, 60)}</span>
-          </div>
-          <div className="kv">
-            <span className="k">when</span>
-            <span className="v">{s.cron || (s.every_s ? `every ${s.every_s}s` : "—")}</span>
-          </div>
-          <div className="kv">
-            <span className="k">project</span>
-            <span className="v">{named(s.project_id)}</span>
-          </div>
-          <div className="kv">
-            <span className="k">last / next</span>
-            <span className="v">{(s.last_run_at || "never") + " / " + (s.next_run_at || "—")}</span>
-          </div>
-          <div className="row">
-            <button type="button" data-testid={`schedule-edit-${s.id}`} onClick={() => props.onEdit(s)}>
-              Edit
-            </button>
-            <button type="button" data-testid={`schedule-toggle-${s.id}`} onClick={() => props.onToggle(s.id, !s.enabled)}>
-              {s.enabled ? "Disable" : "Enable"}
-            </button>
-            <button type="button" data-testid={`schedule-run-${s.id}`} onClick={() => props.onRunNow(s.id)}>
-              Run now
-            </button>
-            <button type="button" onClick={() => props.onDelete(s.id)}>Delete</button>
-          </div>
-        </div>
-      ))}
-      {props.schedules.length === 0 ? (
-        <div className="muted small" data-testid="schedules-empty">
-          Nothing scheduled. You can also just ask in chat — "schedule a morning briefing at 8 on
-          weekdays" — and Jarvis will create it here.
-        </div>
-      ) : null}
-      <div className="row" style={{ marginTop: 8 }}>
-        <button type="button" data-testid="schedule-new" onClick={props.onNew}>
-          + New schedule
-        </button>
-      </div>
-      <div className="muted small" style={{ marginTop: 6 }} data-testid="schedules-chat-note">
-        Or ask in chat: "schedule a morning briefing at 8 on weekdays".
-      </div>
-    </div>
-  );
-}
-
-export function RoutePanel(props: { route: RouteView | null }) {
-  if (!props.route) return <div className="block muted" data-testid="route">route not loaded</div>;
-  const r = props.route;
-  return (
-    <div className="block" data-testid="route">
-      <h3>Route</h3>
-      <div className="kv">
-        <span className="k">ledger</span>
-        <span className="v">
-          {Object.entries(r.states || {}).map(([k, v]) => `${k}: ${v}`).join(" · ") || "—"}
+    <div className="block usage-meters" data-testid="usage">
+      <div className="meter-row" data-testid="usage-claude">
+        <span className="meter-brand" data-testid="claude-mark">
+          <ClaudeMark />
         </span>
+        <div className="meter-bars" data-testid="quota-claude">
+          <Meter name="5h" bar={meterFor(claude, "5h")} testid="quota-bar-claude-5h" />
+          <Meter name="week" bar={meterFor(claude, "week")} testid="quota-bar-claude-week" />
+        </div>
       </div>
-      <table className="plain" data-testid="route-table">
-        <tbody>
-          {Object.entries(r.table?.chains || r.table || {}).map(([role, chain]) => (
-            <tr key={role}>
-              <th>{role}</th>
-              <td>{Array.isArray(chain) ? chain.join(" → ") : String(chain)}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-      <h3 style={{ marginTop: 10 }}>Last decisions</h3>
-      {(r.decisions || []).slice(-10).reverse().map((d, i) => (
+      <div className="meter-row" data-testid="usage-codex">
+        <span className="meter-brand">Codex</span>
+        <div className="meter-bars" data-testid="quota-codex">
+          <Meter name="week" bar={meterFor(codex, "weekly")} testid="quota-bar-codex-weekly" />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export function SchedulesButton(props: { count: number; onOpen: () => void }) {
+  return (
+    <div className="block">
+      <button type="button" className="sched-open" data-testid="schedule-open" onClick={props.onOpen}>
+        Schedules{props.count ? ` · ${props.count}` : ""}
+      </button>
+    </div>
+  );
+}
+
+export function DecisionsLog(props: { route: RouteView | null }) {
+  const decisions = [...(props.route?.decisions || [])].slice(-10).reverse();
+  const states = Object.entries(props.route?.states || {})
+    .map(([k, v]) => `${k}: ${v}`)
+    .join(" · ");
+  return (
+    <details className="block decisions" data-testid="decisions">
+      <summary data-testid="decisions-summary">
+        Decisions{decisions.length ? ` · ${decisions.length}` : ""}
+      </summary>
+      {states ? (
+        <div className="muted small" data-testid="route-states">{states}</div>
+      ) : null}
+      {decisions.map((d, i) => (
         <div className="step" key={i} data-testid="route-decision">
           {d.role} → {d.provider} ({d.reason})
         </div>
       ))}
-      {(r.decisions || []).length === 0 ? <div className="muted small">none yet</div> : null}
-    </div>
+      {decisions.length === 0 ? <div className="muted small">none yet</div> : null}
+    </details>
   );
 }

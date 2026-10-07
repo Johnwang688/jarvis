@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { allowanceBar, barsFor, clampPct, level, resetsIn } from "./quota";
+import { allowanceBar, barsFor, clampPct, level, meterFor, resetsIn } from "./quota";
 import type { ProviderUsage } from "../types";
 
 const T0 = Date.parse("2026-09-15T00:00:00Z");
@@ -14,10 +14,10 @@ const provider = (over: Partial<ProviderUsage>): ProviderUsage => ({
 });
 
 describe("quota bar math", () => {
-  it("steps colour at 70 and 90, on the boundary", () => {
+  it("steps colour at 75 and 90, on the boundary", () => {
     expect(level(0)).toBe("ok");
-    expect(level(69.9)).toBe("ok");
-    expect(level(70)).toBe("warn");
+    expect(level(74.9)).toBe("ok");
+    expect(level(75)).toBe("warn");
     expect(level(89.9)).toBe("warn");
     expect(level(90)).toBe("high");
     expect(level(100)).toBe("high");
@@ -36,6 +36,8 @@ describe("quota bar math", () => {
     expect(resetsIn("2026-09-15T00:12:00Z", T0)).toBe("resets in 12m");
     expect(resetsIn("2026-09-19T04:00:00Z", T0)).toBe("resets in 4d 4h");
     expect(resetsIn("2026-09-15T00:00:20Z", T0)).toBe("resets in under a minute");
+    // Codex reports unix seconds; Claude reports an ISO string.
+    expect(resetsIn(Date.parse("2026-09-15T03:12:00Z") / 1000, T0)).toBe("resets in 3h 12m");
   });
 
   it("a window already past reads as rolled over, not as a negative duration", () => {
@@ -64,6 +66,20 @@ describe("what the panel is allowed to draw", () => {
     expect(bars.map((b) => b.name)).toEqual(["5h", "weekly"]);
     expect(bars[0]).toMatchObject({ percent: 41, level: "ok", note: "resets in 4h 0m" });
     expect(bars[1]).toMatchObject({ percent: 82, level: "warn" });
+  });
+
+  it("a meter is the one named window, and a missing name is not a zero bar", () => {
+    const reported = provider({
+      quota: {
+        windows: [
+          { name: "5h", used_percent: 41, resets_at: "2026-09-15T04:00:00Z" },
+          { name: "weekly", used_percent: 82, resets_at: "2026-09-19T00:00:00Z" },
+        ],
+      },
+    });
+    expect(meterFor(reported, "weekly", T0)).toMatchObject({ name: "weekly", percent: 82, level: "warn" });
+    expect(meterFor(reported, "week", T0)).toBeNull();
+    expect(meterFor(provider({ quota: null }), "weekly", T0)).toBeNull();
   });
 
   it("draws nothing at all for a provider that reported no quota", () => {

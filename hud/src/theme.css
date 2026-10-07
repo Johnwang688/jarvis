@@ -288,6 +288,54 @@ table.plain th { color: var(--cyan); font-weight: 600; }
 .qbar .qfill.high { background: var(--red); }
 .qbar .qnote { font: 10px var(--mono); color: var(--dim); margin-top: 2px; }
 
+/* Subscription meters. Green is only these bars — the rest of the HUD's
+   --green is the teal "done" colour and means something else. */
+.usage-meters { display: flex; flex-direction: column; gap: 10px; }
+.meter-row { display: flex; gap: 10px; align-items: center; }
+.meter-brand {
+  width: 52px; flex: 0 0 52px; display: flex; align-items: center;
+  font: 11px var(--mono); color: var(--text);
+}
+.meter-bars { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.meter { display: flex; align-items: center; gap: 8px; }
+.meter .mlabel {
+  width: 32px; flex: 0 0 32px; font: 10px var(--mono); letter-spacing: 0.08em;
+  color: var(--dim); text-transform: uppercase;
+}
+.meter .mtrack { flex: 1 1 auto; height: 6px; background: rgba(56, 189, 248, 0.10); border: 1px solid var(--cyan-faint); }
+.meter .qfill { display: block; height: 100%; background: #4ade80; }
+.meter .qfill.ok { background: #4ade80; }
+.meter .qfill.warn { background: var(--amber); }
+.meter .qfill.high { background: var(--red); }
+.meter .mpct { width: 36px; flex: 0 0 36px; text-align: right; font: 10px var(--mono); color: var(--text); }
+.meter .mdash { color: var(--dim); margin-left: auto; }
+.claude-mark { display: block; }
+
+button.sched-open { width: 100%; letter-spacing: 0.14em; }
+button.quiet {
+  background: none; border: none; color: var(--dim); letter-spacing: 0.04em;
+  padding: 2px 6px; text-transform: none;
+}
+button.quiet:hover:not(:disabled) { background: none; color: var(--cyan); }
+
+.sched-row {
+  display: flex; gap: 8px; align-items: flex-start; justify-content: space-between;
+  padding: 8px 12px; border-bottom: 1px solid var(--cyan-faint);
+}
+.sched-main { min-width: 0; }
+.sched-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; flex: 0 0 auto; }
+.sched-read {
+  border: 1px solid var(--cyan-faint); padding: 10px;
+}
+.sched-sentence { font-size: 14px; margin-bottom: 4px; }
+
+details.decisions summary {
+  cursor: pointer; font: 11px var(--mono); letter-spacing: 0.14em;
+  text-transform: uppercase; color: var(--dim); list-style: none;
+}
+details.decisions summary::-webkit-details-marker { display: none; }
+details.decisions[open] summary { color: var(--cyan); margin-bottom: 8px; }
+
 /* ---- sidebar: the new-project button, drag and the thread menu ---- */
 #newproject {
   display: block; width: calc(100% - 16px); margin: 8px; padding: 8px 10px;

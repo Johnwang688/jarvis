@@ -13,8 +13,8 @@ import { FileTab } from "./components/FileTab";
 import { DiffTab } from "./components/DiffTab";
 import { PreviewTab } from "./components/PreviewTab";
 import { ApprovalQueue, ApprovalVeil } from "./components/Approvals";
-import { RoutePanel, SchedulesPanel, UsagePanel } from "./components/Panels";
-import { AvatarPicker, ModelPicker, NewProject, NewTask, VoicePicker } from "./components/Pickers";
+import { DecisionsLog, SchedulesButton, UsagePanel } from "./components/Panels";
+import { AvatarPicker, ModelPicker, NewProject, NewTask, SettingsDialog, VoicePicker } from "./components/Pickers";
 import { ScheduleDialog } from "./components/ScheduleDialog";
 import { Orb } from "./components/Orb";
 import { Capture } from "./lib/capture";
@@ -604,7 +604,18 @@ export default function App() {
           onNewTask={() => patch({ picker: "newTask" })}
           moveError={state.moveError}
           onMoveThread={moveThread}
-          onOpen={(what) => patch({ tab: what === "schedules" ? state.tab : state.tab, picker: what === "route" ? "route" : state.picker })}
+          onOpen={(what) => {
+            if (what === "schedules") {
+              setEditingSchedule(null);
+              patch({ picker: "schedule" });
+              return;
+            }
+            if (what === "route") {
+              patch({ picker: "settings" });
+              return;
+            }
+            document.querySelector('[data-testid="usage"]')?.scrollIntoView({ block: "nearest" });
+          }}
         />
 
         <div className="pane" id="main">
@@ -647,6 +658,9 @@ export default function App() {
               </button>
               <button type="button" data-testid="open-avatar" onClick={() => patch({ picker: "avatar" })}>
                 Avatar
+              </button>
+              <button type="button" data-testid="open-settings" onClick={() => patch({ picker: "settings" })}>
+                Settings
               </button>
             </div>
           </div>
@@ -707,24 +721,14 @@ export default function App() {
               onStart={() => task && api.startTask(task.id).then(refreshTasks).catch(() => {})}
             />
             <UsagePanel usage={state.usage} />
-            <SchedulesPanel
-              schedules={state.schedules}
-              projects={state.projects}
-              onNew={() => {
+            <SchedulesButton
+              count={state.schedules.length}
+              onOpen={() => {
                 setEditingSchedule(null);
                 patch({ picker: "schedule" });
               }}
-              onEdit={(s) => {
-                setEditingSchedule(s);
-                patch({ picker: "schedule" });
-              }}
-              onToggle={(id, enabled) =>
-                api.patchSchedule(id, { enabled }).then(refreshSchedules).catch(() => {})
-              }
-              onRunNow={(id) => api.runSchedule(id).catch(() => {})}
-              onDelete={(id) => api.deleteSchedule(id).then(refreshSchedules).catch(() => {})}
             />
-            <RoutePanel route={state.route} />
+            <DecisionsLog route={state.route} />
             {state.error ? <div className="block err" data-testid="error">{state.error}</div> : null}
           </div>
         </div>
@@ -747,7 +751,6 @@ export default function App() {
         <ModelPicker
           models={models}
           selected={selectedModel}
-          route={state.route}
           onPick={(id, effort) => {
             api.setModel(id, effort).then(loadModels).catch(() => {});
           }}
@@ -770,18 +773,8 @@ export default function App() {
           onClose={() => patch({ picker: null })}
         />
       ) : null}
-      {state.picker === "route" ? (
-        <div className="pickerveil" data-testid="picker" onClick={() => patch({ picker: null })}>
-          <div className="picker" onClick={(e) => e.stopPropagation()}>
-            <h3>Routing</h3>
-            <div className="rows">
-              <RoutePanel route={state.route} />
-            </div>
-            <div className="foot">
-              <button type="button" data-testid="picker-close" onClick={() => patch({ picker: null })}>Close</button>
-            </div>
-          </div>
-        </div>
+      {state.picker === "settings" || state.picker === "route" ? (
+        <SettingsDialog route={state.route} onClose={() => patch({ picker: null })} />
       ) : null}
       {state.picker === "newProject" ? (
         <NewProject
@@ -807,8 +800,14 @@ export default function App() {
       {state.picker === "schedule" ? (
         <ScheduleDialog
           projects={state.projects}
+          schedules={state.schedules}
           editing={editingSchedule}
           defaultProject={state.projectId || ""}
+          onToggle={(id, enabled) =>
+            api.patchSchedule(id, { enabled }).then(refreshSchedules).catch(() => {})
+          }
+          onRunNow={(id) => api.runSchedule(id).catch(() => {})}
+          onDelete={(id) => api.deleteSchedule(id).then(refreshSchedules).catch(() => {})}
           onSave={(body, id) =>
             (id ? api.patchSchedule(id, body) : api.createSchedule(body)).then(async () => {
               await refreshSchedules();

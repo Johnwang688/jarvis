@@ -681,24 +681,38 @@ def panels_checks(page, mock):
     print("\nusage, schedules, route")
     usage = page.locator('[data-testid="usage"]')
     until(lambda: usage.count() > 0 and usage.inner_text() != "")
-    check("both providers' state is shown",
-          "claude" in usage.inner_text() and "codex" in usage.inner_text())
-    check("today's figures are shown", "412,000" in usage.inner_text()
-          or "412000" in usage.inner_text(), usage.inner_text()[:200])
+    check("claude is the mark and two windows",
+          page.locator('[data-testid="claude-mark"]').count() == 1
+          and page.locator('[data-testid="quota-bar-claude-5h"]').count() == 1
+          and page.locator('[data-testid="quota-bar-claude-week"]').count() == 1)
+    check("codex is a weekly meter",
+          "codex" in usage.inner_text().lower()
+          and page.locator('[data-testid="quota-bar-codex-weekly"]').count() == 1)
+    check("and its 5-hour window is not drawn",
+          page.locator('[data-testid="quota-bar-codex-5h"]').count() == 0)
     check("a reported quota window is shown",
           "82%" in page.locator('[data-testid="quota-codex"]').inner_text(),
           page.locator('[data-testid="quota-codex"]').inner_text())
     # `quota` is filled only from a provider's own report; never computed.
-    check("an unreported quota says so, rather than being invented",
-          page.locator('[data-testid="quota-claude"]').inner_text().strip() == "not reported",
-          page.locator('[data-testid="quota-claude"]').inner_text())
-    check("a provider's reason is shown when it is not available",
-          "weekly window at 82%" in usage.inner_text())
+    claude = page.locator('[data-testid="quota-claude"]')
+    check("an unreported quota is a dash, rather than being invented",
+          "—" in claude.inner_text() and claude.locator(".qfill").count() == 0,
+          claude.inner_text())
+    check("today's ledger figures stay off the rail",
+          "412" not in usage.inner_text() and "local allowance" not in usage.inner_text().lower(),
+          usage.inner_text()[:200])
 
+    check("schedules are one button",
+          page.locator('[data-testid="schedule-open"]').count() == 1
+          and page.locator('[data-testid="schedule-cron"]').count() == 0)
+    page.locator('[data-testid="schedule-open"]').click()
+    page.wait_for_selector('[data-testid="schedule-dialog"]')
     sched = page.locator('[data-testid="schedules"]')
-    check("schedules are listed", "morning briefing" in sched.inner_text())
-    check("with their cron and last/next run",
-          "0 7 * * *" in sched.inner_text() and "2026-09-16" in sched.inner_text())
+    check("the list is plain English, not a cron expression",
+          "morning briefing" in sched.inner_text()
+          and "every day at 07:00" in sched.inner_text()
+          and "0 7 * * *" not in sched.inner_text(),
+          sched.inner_text()[:240])
     sched.locator('[data-testid="schedule-toggle-s1"]').click()
     body = until(lambda: mock.sent("PATCH", "/schedules/s1") or None)
     check("disable patches the schedule", bool(body) and body[-1].get("enabled") is False)
@@ -706,20 +720,26 @@ def panels_checks(page, mock):
     page.locator('[data-testid="schedule-run-s1"]').click()
     until(lambda: len(mock.sent("POST", "/schedules/s1/run-now")) > n)
     check("run now calls run-now", len(mock.sent("POST", "/schedules/s1/run-now")) > n)
+    page.locator('[data-testid="schedule-dialog"] [data-testid="picker-close"]').click()
+    until(lambda: page.locator('[data-testid="schedule-dialog"]').count() == 0)
 
-    # Creating one is a dialog now (schedule_dialog_checks): the inline form was
-    # three boxes that quietly required the owner to know cron.
-    check("creating a schedule is a dialog, not an inline cron box",
-          page.locator('[data-testid="schedule-new"]').count() == 1
-          and page.locator('[data-testid="schedule-cron"]').count() == 0)
-    check("and the panel says he can be asked in chat instead",
-          "chat" in page.locator('[data-testid="schedules-chat-note"]').inner_text().lower())
-
-    route = page.locator('[data-testid="route"]').first
-    check("the routing table is shown", "orchestrator" in route.inner_text())
-    check("ledger states are shown", "over_threshold" in route.inner_text())
+    decisions = page.locator('[data-testid="decisions"]')
+    check("decisions start collapsed", decisions.evaluate("el => el.open") is False)
+    check("and the log is not on the idle rail",
+          "claude over threshold" not in decisions.inner_text())
+    page.locator('[data-testid="decisions-summary"]').click()
+    until(lambda: decisions.evaluate("el => el.open") is True)
     check("the last decisions carry their reasons",
-          "claude over threshold" in route.inner_text(), route.inner_text()[:300])
+          "claude over threshold" in decisions.inner_text(), decisions.inner_text()[:300])
+    check("ledger states are in the opened log",
+          "over_threshold" in page.locator('[data-testid="route-states"]').inner_text())
+
+    page.locator('[data-testid="open-settings"]').click()
+    page.wait_for_selector('[data-testid="routing-readonly"]')
+    check("the routing table is in settings",
+          "orchestrator" in page.locator('[data-testid="routing-readonly"]').inner_text())
+    page.locator('[data-testid="picker-close"]').click()
+    until(lambda: page.locator('[data-testid="picker"]').count() == 0)
 
 
 def picker_checks(page, mock):
@@ -730,8 +750,8 @@ def picker_checks(page, mock):
     note = page.locator('[data-testid="model-scope-note"]').inner_text()
     check("the model picker states it is the fast path only",
           "fast path" in note.lower() and "codex" in note.lower(), note)
-    check("the routing table is shown read-only beside it",
-          page.locator('[data-testid="routing-readonly"]').count() == 1)
+    check("and does not carry the routing table",
+          page.locator('[data-testid="routing-readonly"]').count() == 0)
     # A model name off the network, carrying markup: it renders as text.
     page.evaluate("window.__pwned = false")
     row = page.locator('[data-testid="model-evil/model"]')
@@ -1038,54 +1058,49 @@ def move_checks(page, mock):
 
 def quota_checks(page, mock):
     print("\nquota bars")
-    until(lambda: page.locator('[data-testid="quota-bar-codex-5h"]').count() > 0)
-    for name, pct in (("5h", 41), ("weekly", 82)):
-        bar = page.locator(f'[data-testid="quota-bar-codex-{name}"]')
-        check(f"codex's {name} window is a bar", bar.count() == 1)
-        check(f"at the reported {pct}%",
-              bar.get_attribute("data-percent") == str(pct), bar.get_attribute("data-percent"))
-        width = bar.locator(".qfill").evaluate("el => el.style.width")
-        check(f"drawn {pct}% wide", width == f"{pct}%", width)
-        text = bar.inner_text()
-        # The fixture's reset times are fixed, so one of them is in the past by
-        # the time this runs — which is the ordinary case a second before the
-        # next poll, and must read as rolled over rather than as a negative.
-        check(f"labelled {name} with its reset state",
-              name in text.lower() and "resets" in text.lower(), text)
-
+    until(lambda: page.locator('[data-testid="quota-bar-codex-weekly"]').count() > 0)
+    bar = page.locator('[data-testid="quota-bar-codex-weekly"]')
+    check("codex's weekly window is a bar", bar.count() == 1)
+    check("at the reported 82%",
+          bar.get_attribute("data-percent") == "82", bar.get_attribute("data-percent"))
+    width = bar.locator(".qfill").evaluate("el => el.style.width")
+    check("drawn 82% wide", width == "82%", width)
+    # The fixture's reset is in the past by the time this runs — the ordinary
+    # case a second before the next poll, and it must read as rolled over.
+    check("the reset is a tooltip, not a second line",
+          "resets" in (bar.get_attribute("title") or "").lower()
+          and "resets" not in bar.inner_text().lower(),
+          bar.get_attribute("title"))
     check("the 82% window is amber, not red",
-          "warn" in (page.locator('[data-testid="quota-bar-codex-weekly"] .qfill')
-                     .get_attribute("class") or ""))
-    check("and the 41% one is neither",
-          "ok" in (page.locator('[data-testid="quota-bar-codex-5h"] .qfill')
-                   .get_attribute("class") or ""))
+          "warn" in (bar.locator(".qfill").get_attribute("class") or ""))
+    check("and the 5-hour window is not drawn",
+          page.locator('[data-testid="quota-bar-codex-5h"]').count() == 0)
 
-    # Never computed: a provider that reported no quota gets no bar at all.
+    # Never computed: a provider that reported no quota gets dashes, not bars.
     check("an unreported quota still says so, rather than drawing an empty bar",
-          page.locator('[data-testid="quota-claude"]').inner_text().strip() == "not reported",
+          "—" in page.locator('[data-testid="quota-claude"]').inner_text()
+          and page.locator('[data-testid="quota-claude"] .qfill').count() == 0,
           page.locator('[data-testid="quota-claude"]').inner_text())
-    check("and draws no bar", page.locator('[data-testid="quota-claude"] .qbar').count() == 0)
+    check("the local allowance is not a second bar",
+          page.locator('[data-testid="allowance-claude"]').count() == 0
+          and page.locator('[data-testid="allowance-fast"]').count() == 0)
 
-    # The local allowance is a second, thinner bar and is labelled apart.
-    local = page.locator('[data-testid="allowance-claude"]')
-    check("the local allowance is its own bar", local.count() == 1)
-    check("labelled so the two are never confused",
-          "local allowance" in local.inner_text().lower(), local.inner_text())
-    check("at today / allowance",
-          local.get_attribute("data-percent") in ("20.6", "20.599999999999998"),
-          local.get_attribute("data-percent"))
-    check("and is the thinner of the two",
-          "thin" in (local.locator(".qtrack").get_attribute("class") or ""))
-    check("a provider with no allowance gets no second bar",
-          page.locator('[data-testid="allowance-fast"]').count() == 0)
-
-    # A window that has not rolled over yet counts down.
+    # Claude's two windows, once the provider actually reports them.
     soon = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + 3 * 3600 + 12 * 60))
-    mock.world["usage"]["providers"]["codex"]["quota"]["windows"][0]["resets_at"] = soon
-    mock.emit("usage_updated", {"provider": "codex"})
-    until(lambda: "resets in"
-          in page.locator('[data-testid="quota-bar-codex-5h"]').inner_text().lower())
-    note = page.locator('[data-testid="quota-bar-codex-5h"]').inner_text()
+    mock.world["usage"]["providers"]["claude"]["quota"] = {"windows": [
+        {"name": "5h", "used_percent": 41, "resets_at": soon},
+        {"name": "week", "used_percent": 10, "resets_at": "2026-10-12T00:00:00Z"},
+    ]}
+    mock.emit("usage_updated", {"provider": "claude"})
+    until(lambda: page.locator('[data-testid="quota-bar-claude-5h"]').get_attribute("data-percent") == "41")
+    check("claude draws the 5-hour window",
+          page.locator('[data-testid="quota-bar-claude-5h"]').count() == 1
+          and page.locator('[data-testid="quota-bar-claude-week"]').get_attribute("data-percent") == "10")
+    check("and 41% is green",
+          "ok" in (page.locator('[data-testid="quota-bar-claude-5h"] .qfill').get_attribute("class") or ""))
+    five = page.locator('[data-testid="quota-bar-claude-5h"]')
+    until(lambda: "resets in" in (five.get_attribute("title") or "").lower())
+    note = five.get_attribute("title") or ""
     check("a future reset counts down", "resets in 3h" in note.lower(), note)
 
     # It follows usage_updated rather than a reload.
@@ -1102,34 +1117,29 @@ def quota_checks(page, mock):
 
 def schedule_dialog_checks(page, mock):
     print("\nschedule dialog")
-    check("the empty-state note says he can be asked in chat",
-          "schedule a morning briefing"
-          in page.locator('[data-testid="schedules-chat-note"]').inner_text().lower(),
-          page.locator('[data-testid="schedules-chat-note"]').inner_text())
-
-    page.locator('[data-testid="schedule-new"]').click()
+    page.locator('[data-testid="schedule-open"]').click()
     page.wait_for_selector('[data-testid="schedule-dialog"]')
+    check("the list is one quiet line when it would have been an essay",
+          page.locator('[data-testid="schedules-chat-note"]').count() == 0)
+    page.locator('[data-testid="schedule-new"]').click()
+    page.wait_for_selector('[data-testid="sched-brief"]')
     page.locator('[data-testid="sched-brief"]').fill("weekly sweep")
 
     # Every preset, and what the backend reads it back as.
     page.locator('[data-testid="preset-daily"]').click()
     page.locator('[data-testid="sched-time"]').fill("08:00")
-    until(lambda: page.locator('[data-testid="sched-expression"]').inner_text() == "0 8 * * *")
-    check("Daily at 08:00 is a daily cron",
-          page.locator('[data-testid="sched-expression"]').inner_text() == "0 8 * * *")
     until(lambda: "every day at 08:00" in page.locator('[data-testid="sched-describe"]').inner_text())
     check("and the reading comes from the backend, not from the window",
           "every day at 08:00" in page.locator('[data-testid="sched-describe"]').inner_text(),
           page.locator('[data-testid="sched-describe"]').inner_text())
+    check("the cron expression stays hidden until Advanced",
+          page.locator('[data-testid="sched-expression"]').count() == 0)
     check("with the next three fire times",
           page.locator('[data-testid="sched-next"]').count() == 3,
           str(page.locator('[data-testid="sched-next"]').count()))
 
     page.locator('[data-testid="preset-weekdays"]').click()
     page.locator('[data-testid="sched-time"]').fill("09:30")
-    until(lambda: page.locator('[data-testid="sched-expression"]').inner_text() == "30 9 * * 1-5")
-    check("Weekdays is 1-5",
-          page.locator('[data-testid="sched-expression"]').inner_text() == "30 9 * * 1-5")
     until(lambda: "weekdays at 09:30" in page.locator('[data-testid="sched-describe"]').inner_text())
     check("read back as weekdays",
           "weekdays at 09:30" in page.locator('[data-testid="sched-describe"]').inner_text())
@@ -1137,9 +1147,6 @@ def schedule_dialog_checks(page, mock):
     page.locator('[data-testid="preset-weekly"]').click()
     page.locator('[data-testid="sched-weekday"]').select_option("1")
     page.locator('[data-testid="sched-time"]').fill("10:00")
-    until(lambda: page.locator('[data-testid="sched-expression"]').inner_text() == "0 10 * * 1")
-    check("Weekly names the day",
-          page.locator('[data-testid="sched-expression"]').inner_text() == "0 10 * * 1")
     until(lambda: "Monday" in page.locator('[data-testid="sched-describe"]').inner_text())
     check("read back by name",
           "Monday" in page.locator('[data-testid="sched-describe"]').inner_text(),
@@ -1147,12 +1154,15 @@ def schedule_dialog_checks(page, mock):
 
     page.locator('[data-testid="preset-interval"]').click()
     page.locator('[data-testid="sched-every"]').fill("15")
-    until(lambda: "900" in page.locator('[data-testid="sched-expression"]').inner_text())
-    check("Every 15 minutes is an interval, never a cron",
-          page.locator('[data-testid="sched-expression"]').inner_text() == "every 900s",
-          page.locator('[data-testid="sched-expression"]').inner_text())
+    until(lambda: "every 15 minutes" in page.locator('[data-testid="sched-describe"]').inner_text())
+    check("Every 15 minutes is read back as an interval",
+          "every 15 minutes" in page.locator('[data-testid="sched-describe"]').inner_text(),
+          page.locator('[data-testid="sched-describe"]').inner_text())
     page.locator('[data-testid="sched-unit"]').select_option("hours")
-    until(lambda: page.locator('[data-testid="sched-expression"]').inner_text() == "every 54000s")
+    until(lambda: "every 15 hours" in page.locator('[data-testid="sched-describe"]').inner_text())
+    check("and hours stay an interval",
+          "every 15 hours" in page.locator('[data-testid="sched-describe"]').inner_text(),
+          page.locator('[data-testid="sched-describe"]').inner_text())
 
     # Advanced takes a raw cron, and refuses one that is not a cron rather than
     # guessing the missing field.
@@ -1177,8 +1187,10 @@ def schedule_dialog_checks(page, mock):
     check("and closes", page.locator('[data-testid="schedule-dialog"]').count() == 0)
 
     # The same dialog edits an existing one, opening on the preset that made it.
-    page.locator('[data-testid="schedule-edit-s1"]').click()
+    page.locator('[data-testid="schedule-open"]').click()
     page.wait_for_selector('[data-testid="schedule-dialog"]')
+    page.locator('[data-testid="schedule-edit-s1"]').click()
+    page.wait_for_selector('[data-testid="sched-brief"]')
     check("editing opens on the preset the cron came from",
           page.locator('[data-testid="preset-daily"]').get_attribute("aria-pressed") == "true",
           page.locator('[data-testid="preset-daily"]').get_attribute("aria-pressed"))
@@ -1188,7 +1200,7 @@ def schedule_dialog_checks(page, mock):
     check("and its brief",
           "morning briefing" in page.locator('[data-testid="sched-brief"]').input_value())
     page.locator('[data-testid="sched-time"]').fill("07:30")
-    until(lambda: page.locator('[data-testid="sched-expression"]').inner_text() == "30 7 * * *")
+    until(lambda: "every day at 07:30" in page.locator('[data-testid="sched-describe"]').inner_text())
     n = len(mock.sent("PATCH", "/schedules/s1"))
     page.locator('[data-testid="sched-save"]').click()
     body = until(lambda: mock.sent("PATCH", "/schedules/s1")[n:] or None)
@@ -1196,8 +1208,10 @@ def schedule_dialog_checks(page, mock):
           bool(body) and body[-1].get("cron") == "30 7 * * *", str(body[-1] if body else None))
 
     # Escape closes without saving.
-    page.locator('[data-testid="schedule-edit-s1"]').click()
+    page.locator('[data-testid="schedule-open"]').click()
     page.wait_for_selector('[data-testid="schedule-dialog"]')
+    page.locator('[data-testid="schedule-edit-s1"]').click()
+    page.wait_for_selector('[data-testid="sched-brief"]')
     n = len(mock.sent("PATCH", "/schedules/s1"))
     page.locator('[data-testid="sched-brief"]').press("Escape")
     until(lambda: page.locator('[data-testid="schedule-dialog"]').count() == 0)

@@ -16,11 +16,11 @@ export function clampPct(p: number): number {
   return Math.max(0, Math.min(100, p));
 }
 
-/** Colour steps at 70% and 90% — the brief's numbers, in one place. */
+/** Colour steps at 75% and 90%. Under 75 is green, from 75 yellow, from 90 red. */
 export function level(p: number): Level {
   const v = clampPct(p);
   if (v >= 90) return "high";
-  if (v >= 70) return "warn";
+  if (v >= 75) return "warn";
   return "ok";
 }
 
@@ -29,8 +29,12 @@ export function level(p: number): Level {
  * negative duration: a window that has rolled over is the ordinary case a
  * second before the next poll, not an error.
  */
-export function resetsIn(iso: string, now: number = Date.now()): string {
-  const at = Date.parse(iso || "");
+export function resetsIn(iso: string | number | null | undefined, now: number = Date.now()): string {
+  // Codex reports a unix timestamp; Claude reports an ISO string. A bare
+  // number of seconds is not a millisecond clock.
+  const at = typeof iso === "number"
+    ? (iso < 1e12 ? iso * 1000 : iso)
+    : Date.parse(String(iso || ""));
   if (!Number.isFinite(at)) return "reset time not reported";
   const ms = at - now;
   if (ms <= 0) return "resets now";
@@ -49,6 +53,22 @@ export interface Bar {
   percent: number;
   level: Level;
   note: string;
+}
+
+/**
+ * One named window, or null when the provider did not report it. A missing
+ * window is not a bar at 0%: 0% is a real reading, and "unknown" must not
+ * look like one.
+ */
+export function meterFor(p: ProviderUsage | undefined, name: string, now: number = Date.now()): Bar | null {
+  const window = (p?.quota?.windows || []).find((w) => w.name === name);
+  if (!window) return null;
+  return {
+    name: window.name,
+    percent: clampPct(window.used_percent),
+    level: level(window.used_percent),
+    note: resetsIn(window.resets_at, now),
+  };
 }
 
 /** The provider's own reported windows, in the order it reported them. */
