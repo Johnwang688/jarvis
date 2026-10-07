@@ -726,3 +726,19 @@ Additions to existing suites:
   `jarvis/v2/hatch.py`, `jarvis/v2/roles.py`, `jarvis/v2/hud_api.py`,
   `jarvis/v2/discord/gateway.py`, `jarvis/v2/commands.py` (slash plan),
   `hud/src/App.tsx`, `tests/v2/peers_check.py`
+
+---
+
+## Reconciliation with Discord plan revision 3 (lead, 2026-10-07)
+
+- **`Thread.surface`** is the Discord plan's field.
+  - `"discord:<id>"` names **this chat's own Discord thread**, not "a
+    channel's chat".
+  - Each Discord thread in a project channel is a chat or a task. There is no
+    single "project channel chat" any more.
+- **Mirroring of peer-driven turns** goes through the Discord plan's
+  `ChatMirror` (`jarvis/v2/discord/mirror.py`), so there is one mirror.
+- **Order:** peers phase 1 comes after Discord PR C.
+- **Phase 0** (`runtime.caller()`, per-session jarvis-mcp tokens) is also
+  needed by the Discord plan's B2b (the Sonnet/Opus rule for proposing
+  projects).

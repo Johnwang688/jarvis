@@ -1,261 +1,224 @@
-# Plan: Discord update poster + project channels (Jarvis v2), revision 2
+# Plan: Discord update poster, project channels and mirrored chats (Jarvis v2), revision 3
 
-**Status:** revised 2026-10-07 to apply the owner's decisions in
-[`2026-10-07-discord-decisions.md`](2026-10-07-discord-decisions.md). Where
-this plan and that file disagree, the decisions file wins.
+**Status:** revision 3, 2026-10-07. It follows
+[`2026-10-07-discord-decisions.md`](2026-10-07-discord-decisions.md),
+including "Discord open items, answered" and C1. Where they disagree, that
+file wins. Slash plumbing is owned by
+[`2026-10-07-slash-commands-plan.md`](2026-10-07-slash-commands-plan.md);
+thread-to-thread messaging by
+[`2026-10-07-peers-plan.md`](2026-10-07-peers-plan.md).
 
-- D6 is still **pending**.
-- Everything else in §9 is open, each with a recommendation.
+**Build order (S-1):** PR #4 → PR #3 → **S1 slash core** → **PR A** (poster) →
+**B1** (guild and linking) → **C** (mirrored chats, new) → **B2** (projects and
+folders from Discord) → **S2** (drop keywords) → **S3**.
 
-**When it gets built:** after PR #4 (projects and archive) and then PR #3
-(per-thread model) merge.
-
-**Deferred until after this ships:**
-- DM memory across restarts
-- the pending "which project?" question
-- choosing a model from Discord
-- archive handling beyond what is written here
-
-**The slash-command plumbing belongs to a separate plan.** This plan marks
-its hooks as **[SLASH]**.
+**Deferred:**
+- remembering the DM conversation's *pending dialogue state* across restarts
+  (the DM chat itself is now persisted);
+- the "which project?" follow-up;
+- slash plumbing (owned by the slash plan; this plan marks where it plugs in).
 
 ## What you will see in Discord after this ships
 
-- **A "Jarvis" category** in your server, with one channel per project, for
-  example `#school`.
-  - Every channel belongs to a project whose folder exists on your computer.
-- **Every task gets its own thread** in its project's channel, named
-  `a1b2c3d4 · <brief>`.
-- **One status card per task**, edited in place: phase, step `3/7`, time,
-  cost, last action, open question. It updates at most every 5 seconds and
-  never pings you.
-- **Milestone posts in the thread.**
-  - Started, Verified and Cancelled appear quietly.
-  - Question (with choices), Approval (the whole command and a code), Blocked,
-    Failed and Done (the report) are each followed by a one-line `@you`
-    message.
-  - Your phone notification opens right at the update. Nothing else ever pings
-    you.
-- **You answer in the thread with no @mention.**
-  - `yes CODE` approves. A code typed anywhere else runs nothing.
-  - Typed text answers a blocking question or steers the task.
-  - `status` and `cancel` work as before.
-- **Projects with no channel, and the Inbox, use your DMs.** You get question,
-  blocked, failed and done there. A DM notifies you by itself, so no extra
-  @line.
-- **You can make a project from Discord.**
-  - Say `new project`. Jarvis asks for a name and a folder.
-  - If the folder doesn't exist, Jarvis asks before creating it, with
-    `yes CODE`.
-  - If the folder already has files in it, Jarvis asks before using it.
-  - In your DMs, Jarvis creates a new channel for the project. In an unlinked
-    channel, it links that channel.
-  - `link <project>` links an existing channel to an existing project.
-- **The HUD:**
-  - Each project's Edit dialog gets Create channel / Link / Unlink and a
-    status pill.
-  - The New Project dialog gets a "Create a Discord channel" box.
-  - The status column gets a Discord light: green ok, amber with the reason,
-    red unreachable.
-- **Your actions carry through to the channel.** When you rename, archive,
-  restore or delete a project, its channel follows: it is renamed, moved to
-  "Jarvis Archive", moved back, or gets a final note.
-  - Jarvis may rename or move **any** linked channel when the action is yours.
-  - Anything Jarvis wants to do on its own asks you first with a
-    `yes/no CODE`. Example: archiving idle channels when the category gets
-    crowded.
-  - **Jarvis never deletes a channel.**
-  - Archiving and deleting **projects** stays HUD-only.
+**Layout**
+- A **Jarvis** category with one channel per project, plus **#ungrouped** for
+  Inbox work.
+- Every project gets a channel. New projects get one automatically, and your
+  four existing projects get one each after setup.
+- Inside a project's channel, **every task and every chat is its own
+  thread.**
 
----
+**Chats are the same conversation in both places**
+- A chat you start in the HUD appears as a thread in its project's channel
+  (Inbox chats in #ungrouped) the moment you send its first message.
+- What you typed shows as "You (HUD): …", followed by Jarvis's replies.
+- Typing in that Discord thread continues the same chat, and the HUD shows it
+  too.
+- A new top-level message in a project channel starts a **new** chat, as a
+  thread under your message.
 
-## Decisions applied
+**Your DM with Jarvis**
+- It stays its own conversation and is not copied into #ungrouped.
+- The HUD shows it as a chat.
+- It is also the backup route if a project's channel ever breaks.
 
-| Owner decision | Where it lands |
-|---|---|
-| D1: a separate `<@owner>` line after each pinging milestone; no extra line in DMs | §1 |
-| D2: projects and channels can be created and linked from Discord; a safe folder-creation function | §3 |
-| D3: never delete channels; archiving them when crowded needs your permission | §2.4 |
-| D4: rename and move any linked channel; your own actions count as permission; Jarvis-initiated actions go through the approval gate | §2.4 |
-| D5: no Administrator; server-wide Manage Channels plus thread and message permissions; `applications.commands` in the invite (**pending owner confirmation**) | §2.1 |
-| D6: thread created at `clarifying` | §1, **pending** |
-| D7: typed answers only | §4 |
-| D8: quiet "Cancelled" post | §1 |
-| D11–D18: accepted | §9 |
+**Tasks**
+- A task's thread appears when the task actually starts (`clarifying`).
+- It has one status card, edited in place and never pinging, plus short
+  milestone posts.
 
-One numbering note. The owner's D-numbers do not match revision 1's numbered
-list:
-- Owner D1 (pings) answers revision 1's item 7.
-- Revision 1's item 1 (DM fallback for unlinked projects) and item 6 (who
-  creates the categories) were not decided. Both are listed as open in §9.
+**Pings**
+- Only approvals, questions, blocked, failed and done ping you.
+- Each is followed by a separate one-line `@you`, so the notification lands
+  right on it.
+- Chat replies and everything else are silent. In DMs there is no extra line.
+
+**Approvals**
+- They appear in the thread that asked, with **Approve** and **Deny**
+  buttons.
+- "Always" is only the typed `/always`. Nothing is ever approved by voice.
+
+**New projects from Discord**
+- `/project new`. A bare name makes the folder `~/jarvis-work/<name>`; a full
+  path is used as given.
+- Jarvis shows the exact folder and makes it only after you confirm. It never
+  overwrites anything.
+- A Claude Sonnet or Opus chat can also offer to make a project for you;
+  cheaper chats point you to `/project new`.
+
+**Channel tidying**
+- When you rename, archive or restore a project, its channel follows.
+- If Jarvis wants to rename, move or archive a channel on its own (for example
+  when the category gets crowded), it asks you with Approve/Deny first.
+- **Channels are never deleted.**
+
+**In the HUD**
+- A Discord light shows ok, amber with the reason, or red.
+- The project dialog shows the channel's status.
+- Each chat links to its Discord thread.
 
 ---
 
 ## 0. What was verified in the code
 
-- **The poster (`Reporter`, `jarvis/v2/discord/reporter.py`) is never
-  started.**
-  - It is only constructed in `tests/v2/discord_render_check.py`.
-  - `daemon.main()` calls `start_discord()`, which builds only the
-    `DiscordRouter`, and only after `runner.serve()`.
-- **No guild id is stored anywhere.**
-  - The token bundle has only `bot_token` and `owner_id`.
-  - v1 `jarvis auth discord` invites the bot with permissions
-    `1024+2048+65536`.
-- **The owner's projects:** School `4040932c`, e2e-calc `571fbc98`, e2e-calc
-  `d71b5c52`, test `f0f8bfb3`.
-  - None has a channel. The Inbox has not been created yet.
-  - Tasks: one blocked (e2e-calc `571fbc98`), one done.
-- **Bug 1: the poster can lose a task's thread id.**
-  - `worktrees.ensure` holds a task object across `git worktree add` and then
-    saves it whole.
-  - That can wipe the `discord_thread_id` the poster just wrote, and the next
-    snapshot creates a second thread.
-- **Bug 2: answering a question from Discord does nothing.**
-  - A reply in a `clarifying` thread becomes `control.steer()`, which only
-    queues the text.
-  - `answer_question()` is never called from Discord.
-- **Smaller issues found in the code:**
-  - **Unprotected fields on `/projects`:**
-    - `POST`/`PATCH /projects` accept `discord_channel_id` from any loopback
-      caller.
-    - PR #4's `PATCH` name change is not owner-only either. This matters for
-      D4.
-  - **Pings and timing in the poster and REST layer:**
-    - `allowed_mentions` is hard-coded to `{"parse": []}`.
-    - Threads are created at intake.
-    - Every edit is preceded by an unarchive call.
-    - `task_question` is ignored.
-    - `DiscordRest` sleeps for any `retry_after`, including the 10-minute
-      waits a channel rename can trigger.
-  - **Missing intent:** `INTENTS` lacks `GUILDS`. To verify live.
-- **Already reusable:**
-  - `hud_api._picker_allowed` (home and `/mnt/<drive>` scope)
-  - `config.V2_CREDENTIAL_DIRS` (`~/.ssh`, `~/.aws`, `~/.config/gh`,
-    `~/.config/jarvis`, `~/.gnupg`)
-  - `config.V2_DATA_DIR`, `SESSIONS_DIR`, `SPILL_DIR`, `REPO_ROOT`
-  - `ApprovalRequest(allowlistable=False)`
-  - PR #4's `projects.owner_only`, `unique_name` and events
-- `/mnt/c/Users/johnw` exists.
+- **The poster is never started.** `Reporter` is built only in a test.
+  `start_discord()` builds only the `DiscordRouter`, and only after
+  `runner.serve()`.
+- **No guild id anywhere.** The token bundle has only `bot_token` and
+  `owner_id`. The v1 invite is scope `bot` with permissions `68608`.
+- **Owner data:**
+  - projects School, e2e-calc ×2 and test, none with a channel; the Inbox is
+    not yet created;
+  - tasks: `571fbc98` is blocked, one is done;
+  - the Windows profile is `/mnt/c/Users/johnw`.
+- **Bug 1 (double threads):** `worktrees.ensure` holds a stale task object
+  across `git worktree add`, then saves it whole, wiping `discord_thread_id`.
+  - **The same lost-update class threatens any field Discord writes onto a
+    `Thread`.** `daemon._record` and `_finish` call
+    `threads.save(session.thread)` on every usage event, from the session's
+    in-memory copy.
+- **Bug 2 (answering questions):** moves to S1 (`_answer`, shared by
+  `/answer` and plain text).
+- **The owner's message is not published on the bus.**
+  - `daemon.send` only appends `{"kind":"user", data:{text}}` to `log.jsonl`.
+  - The text logged is the *assembled* text: `hud_api.assemble_turn` inlines
+    attached files.
+  - There is no record of where the message came from (HUD or Discord) or of
+    the typed words alone.
+  - `UserMessage` is `text`, `images` and `origin` only.
+- **Threads have no automatic titles.** A title appears only through PR #4's
+  `rename_thread`, which publishes `thread_updated`. PR #4 also publishes
+  `thread_moved`, `thread_archived`, `thread_restored` and `thread_deleted`.
+- **Discord chat today:**
+  - `gateway._chat_threads` maps `"dm"` and each `project.id` to one fast-path
+    thread, in memory only.
+  - The gateway posts only the reply it waited for, and only the `text`
+    records.
+  - Approvals from chat threads have no `task_id`, so they always go to the DM.
+- **Secret scrubbing exists.** `jarvis.tools.secrets.scrub` (already used by
+  `assemble_turn`) can scrub everything posted to Discord.
+- **PR #3:** `thread_model.effective(thread) -> (model, effort)`. The Claude
+  default is `claude-opus-5-5`.
+- **Peers plan, phase 0, builds two things this plan reuses:**
+  - `runtime.caller()`, so a fast-path tool knows which chat called it;
+  - per-session jarvis-mcp tokens, so a Claude or Codex chat's MCP call can be
+    traced back to its chat.
+- **Peers plan, phase 1:** proposes `Thread.surface = "discord:<channel_id>" |
+  "dm"`. Reconciled in §4.2.
 
 ---
 
-## 1. The update poster (PR A)
+## 1. PR A: the update poster (after S1)
 
-**Wiring: `DiscordSurface` in `jarvis/v2/discord/__init__.py`**
-- It owns one `DiscordRest`, the `DiscordRouter`, the `Reporter`, later the
-  `ChannelLinker`, and a shared `owner_dm()` (moved out of
-  `gateway._owner_dm`).
-- `start_discord(daemon, control=None)` returns the surface and sets
-  `daemon.discord`.
-- **Start order:**
-  1. `daemon.start()`
-  2. Reporter
-  3. `runner.serve()`
-  4. The gateway listener
-- **Stop order:**
-  1. The gateway
-  2. `runner.stop()`
-  3. `reporter.close(flush=True)`, bounded to 2 s
-  4. The hatch, then the daemon
-- `start()` and `stop()` are both idempotent.
+S1 already provides approval buttons, `/yes`, `/no`, `/always`, `/answer`,
+bug 2 and the `Reply` sink. PR A builds none of those.
 
-**Restart behaviour**
-- The `tasks/<id>/discord.json` sidecar gains `embed_sha` and `thread_gone`.
-- **Reconcile pass on start, paced at ≤1 thread create per second:**
-  - Active tasks in linked projects with no thread get a thread and a card.
-    The milestone reads "Following task X (already blocked: …)".
-  - A task whose card differs from `embed_sha` gets one edit.
-  - Terminal tasks are never backfilled.
-  - Tasks in unlinked projects get a sidecar seeded silently, so there is no
-    DM storm on the first boot.
-- Reconcile also re-runs when the bus `dropped` counter grows.
+**Wiring: `DiscordSurface`**
+- It owns `DiscordRest`, the `DiscordRouter` with S1's `InteractionRouter`, the
+  `Reporter`, and later the `ChannelLinker` and `ChatMirror`.
+- `start_discord(daemon)` returns it and sets `daemon.discord`.
+- Start order:
+  1. `daemon.start`
+  2. Reporter subscribes
+  3. `runner.serve`
+  4. gateway
+- Stop order:
+  1. gateway
+  2. runner
+  3. `reporter.close(flush=True)` (2 s, bounded)
+  4. linker and mirror
+  5. hatch, then daemon
+- Both start and stop are idempotent.
 
-**Bug 1 fix**
-- `TaskStore.save` treats `discord_thread_id` as write-once: an incoming None
-  never overwrites a stored id.
-- The Reporter reads the thread id from the sidecar first.
+**Restarts**
+- Sidecar `tasks/<id>/discord.json` holds the thread id, message ids, `phase`,
+  `open_question`, `embed_sha` and `thread_gone`.
+- **Bug 1 fix:** `TaskStore.save` never replaces a stored non-null
+  `discord_thread_id` with None.
+- **Reconcile on start (≤1 create per second):**
+  - active tasks with a channel get a thread and a card;
+  - a stale `embed_sha` triggers one edit;
+  - terminal tasks are never backfilled;
+  - pre-existing tasks are seeded silently.
+- The reconcile runs again when the bus drops events.
 
-**Rate limits**
-- Keep the 5 s edit coalescing per thread.
-- One worker serializes all posts.
-- `DiscordRest` caps a 429 sleep at 10 s. Longer waits raise
-  `DiscordError(status, code, retry_after)`, and the caller defers.
-- Circuit breaker: back off 30 s, then 60 s, up to 5 min after three failures
-  in a row, then reconcile.
-- Edit first. Only on Discord code 50083 (thread archived): unarchive and
-  retry once.
+**Posts (§11.3 with D1, D6, D8)**
+- **When the thread is created (D6):** at the first snapshot whose phase is
+  not intake, i.e. `clarifying`, after the proposal grace window.
+  - The thread uses `auto_archive_duration=10080`.
+  - The owner is added to the thread.
+  - Started and the status card are posted.
+- Card edits are coalesced to at most one per 5 s per thread and never ping.
+- Milestones are capped at 400 characters, and the report at 1500 characters
+  with `report.txt` for the rest.
+- **Question:** from `task_question`, with its choices, plus "answer here or
+  `/answer`".
+- **Quiet posts:** Started, Verified and the new Cancelled post.
+- **Ping-worthy:** question, approval, blocked, failed and done.
+- **D1:**
+  - The milestone itself goes out with `allowed_mentions.parse=[]`.
+  - It is followed by a separate message: content `<@owner_id>`,
+    `allowed_mentions={"parse":[], "users":[owner_id]}`.
+  - New helper `DiscordRest.ping_owner(channel)`.
+  - No ping line in DMs (decided).
+- **Silent posts.** Every non-ping post in a guild carries the
+  `SUPPRESS_NOTIFICATIONS` flag (4096). Otherwise a channel set to "All
+  messages" on the phone would buzz on every card and chat line, against D1's
+  "nothing else ever pings".
 
-**What is posted (§11.3, with D1 and D8)**
+**DM is the safety net only (O1)**
+- Before B1, no channels exist, so everything is in safety-net mode: attention
+  milestones go to the DM, prefixed `[<project> · task <id>]`.
+- After B1, the DM is used only when a project's channel is broken (Discord
+  codes 10003 or 50013), and the HUD light says so.
 
-| When | Post | Followed by a `<@owner>` line? |
-|---|---|---|
-| First snapshot with phase ≠ intake (**D6 pending**) | Create the thread with `auto_archive_duration=10080` (7 days); `PUT` the owner as a thread member; "Started"; the status card | no |
-| Every snapshot | Card edit, coalesced | never |
-| `task_question` | "Question (blocking): … Choices: a / b. Reply here." (≤400) | **yes** |
-| `approval_requested` | Unchanged `approval_text`, posted whole; attached if over 2000 characters | **yes** (in a thread) |
-| → blocked / failed | Existing templates (≤400) | **yes** |
-| verifying → done | "Verified: …" | no |
-| → done | "Done" plus the report (≤1500, plus `report.txt`) | **yes** |
-| → cancelled | "Cancelled." (new template) | no |
+**Approvals in task threads**
+- `_post_approval` (S1 adds the buttons and message id) prefers the task
+  thread.
+- New:
+  - if posting to the thread fails, post to the DM and record the **DM** as
+    where the request was asked;
+  - add the D1 ping line (not in DMs).
 
-**D1 mechanics**
-- The milestone itself is posted with `allowed_mentions: {"parse": []}` and
-  contains no `<@`.
-- Immediately after, `rest.ping(channel, owner_id)` posts exactly
-  `<@owner_id>` with `allowed_mentions: {"parse": [], "users": [owner_id]}`.
-  Nothing else ever sets `users`.
-- **DMs:** no ping line.
-- In a thread, the mention also adds the owner to the thread. The `PUT` is
-  kept so threads appear in the owner's list before the first ping.
-
-**DM fallback**
-- For projects with no channel and for the Inbox: question, blocked, failed
-  and done go to the owner's DM, prefixed `[<project> · task <id>]`. No card
-  and no "Started".
-- This is still open; see §9.1.
-
-**Approvals**
-- `_post_approval` already prefers the task's thread.
-- New: if the thread post fails (10003 Unknown Channel, or 403), post to the
-  DM instead and record the DM as that request's only answer channel.
-- **[SLASH]** In PR A, split `_approval_answer` into `parse` and
-  `answer(channel_id, verdict, code)`. A slash `/yes` then calls `answer()`
-  with the interaction's channel, and nothing is built twice.
-
-**Failures are never silent**
-- **Log:** a WARNING with the operation, HTTP status and Discord code. Never
-  the token.
-- **HUD:**
-  - `GET /discord` returns `{connected, guild, admin, gateway, reporter:
-    {state, counters, dropped, last_error}}`.
-  - An SSE `discord_status` event on every state change.
-  - A `DiscordPanel` in `hud/src/components/Panels.tsx`.
-- **DM:** a missing permission is reported once per channel per 24 h.
+**Rate limits and failures**
+- `DiscordError` gains `.status`, `.code` and `.retry_after`.
+- `_api` sleeps at most 10 s; longer waits raise, and the caller defers.
+- Circuit breaker: 3 failures → back off 30 s, then 60 s, up to 5 min, then
+  reconcile.
+- Edits are sent first. On code 50083 (thread archived), unarchive and retry
+  once.
+- **Logging:** the log names the operation, HTTP status and Discord code,
+  **never the URL**. Interaction webhook paths carry an interaction token (S1).
+- **`GET /discord`:** `{connected, guild, gateway, commands (S1), reporter,
+  linker, mirror, permissions}`.
+- **HUD:** SSE `discord_status` and a `DiscordPanel` in `Panels.tsx`.
+- **DM alert:** a permission error sends one DM per channel per 24 h.
 
 ---
 
-## 2. Linking projects to channels (PR B1)
+## 2. Permissions, setup and the #ungrouped channel (part of B1)
 
-### 2.1 Guild setup and permissions (D5)
-
-**New human-only command: `jarvis auth discord-guild`**
-(`jarvis/v2/discord/setup.py`, plus a choice in `jarvis/__main__.py`
-`cmd_auth`)
-1. Lists the servers the bot is in; the owner picks one.
-2. Prints the re-invite URL.
-3. Waits for the owner.
-4. Finds or (after a y/N prompt) creates the categories **Jarvis** and
-   **Jarvis Archive**.
-5. Computes the bot's effective permissions with `perms.py`.
-6. Prints anything missing, or "ok".
-7. Writes `~/.config/jarvis/discord_guild.json` `{guild_id, category_id,
-   archive_category_id}`. This is the new `config.DISCORD_GUILD_PATH`.
-
-`discord_guild.json` is added to `permissions.protected_paths()`, so no agent
-can write it.
-
-**Permission set: no Administrator, Manage Roles, Manage Server, Ban or Kick**
+**D5 is decided: no Administrator.** The server-wide set:
 
 | Permission | Bit |
 |---|---|
@@ -268,572 +231,647 @@ can write it.
 | Create Public Threads | 1<<35 |
 | Send Messages in Threads | 1<<38 |
 
-**Total: `309237763088`.** Manage Channels is granted server-wide, because D4
-means moving channels that sit outside the two categories.
+- **Integer: `309237763088`.**
+- Invite shape: `https://discord.com/oauth2/authorize?client_id=<CLIENT_ID>&scope=bot+applications.commands&permissions=309237763088&guild_id=<GUILD_ID>&disable_guild_select=true`
+- The owner switches the permissions on by hand; the invite is the shortcut.
+- `applications.commands` is included (S1 needs it).
+- **Open item O-P1:** renaming or archiving the bot's *own* threads should work
+  as their creator; if the live check fails, add Manage Threads (integer
+  becomes `326417632272`).
 
-**Invite URL shape** (the setup command fills in the application id the way v1
-does):
+**`jarvis auth discord-guild`**
+- Human-only. Code in `jarvis/v2/discord/setup.py`, plus a `cmd_auth` choice.
+- **What it does:**
+  1. Lists guilds; the owner picks one.
+  2. Prints the invite.
+  3. Checks permissions, listing **missing** (blocking) and **excess** (a
+     warning; Administrator gets a loud warning).
+  4. After a y/N prompt (O6), creates **Jarvis**, **Jarvis Archive** and
+     **#ungrouped** (under Jarvis).
+  5. Writes `~/.config/jarvis/discord_guild.json` `{guild_id, category_id,
+     archive_category_id, ungrouped_channel_id}`.
+- The guild file is a protected path.
+- On start, the daemon links the Inbox to `ungrouped_channel_id`.
+  - The Inbox's folder is `$HOME`, which exists, so the rule "every channel
+    links to a project with a real folder" holds.
+  - The Inbox's channel cannot be relinked from the HUD or Discord. Only
+    re-running setup changes it.
+  - If #ungrouped is broken, Inbox work falls back to DM, and the light goes
+    amber.
+- **Never delete** is enforced in code: `DiscordRest` has no delete method, and
+  a test asserts no `DELETE` is ever sent.
 
-```
-https://discord.com/oauth2/authorize?client_id=<APPLICATION_ID>&scope=bot%20applications.commands&permissions=309237763088&guild_id=<GUILD_ID>&disable_guild_select=true
-```
+---
 
-- **`applications.commands` is needed for the slash work. Include it.**
-  - Guild-scoped commands register instantly with `guild_id` from this file.
-  - Interactions arrive over the existing gateway, and no extra intent is
-    needed.
-- Re-authorizing should update the bot's managed role. Verify this live. If it
-  doesn't, edit the bot's role in Server Settings → Roles.
+## 3. B1: linking projects to channels
 
-**Channel moves never send `lock_permissions` or `permission_overwrites`.**
-Those would need Manage Roles.
+**Model**
+- `Project.discord_channel_id` (exists).
+- New `discord_channel_origin: "created" | "linked" | None`, for display only.
+- A link requires `Path(project.root).is_dir()` and a project that is not
+  archived.
 
-**If the owner chooses Administrator anyway (bit 8)**
-- **Setup:** it detects bit 8, skips the missing-permission check (everything
-  passes), and prints this warning:
-  > "The bot has Administrator. Channel overwrites cannot restrict it, and a
-  > leaked token would control the whole server (roles, bans, webhooks,
-  > settings). Recommended: remove Administrator and re-invite with
-  > 309237763088."
-- **Status:** `GET /discord` reports `admin: true`, and the HUD panel shows an
-  amber "Administrator" note. It stays green otherwise.
-- **Nothing else changes.** The code-level guarantees stay the same:
-  `DiscordRest` has no delete method, and a test asserts no `DELETE` request
-  is ever made.
+**Naming:** the slug is lowercase ASCII with hyphens, ≤90 characters; empty
+becomes `project-<id>`; a clash gets `-<id[:4]>` appended. Topic: `Jarvis
+project · <name> · <id>`.
 
-### 2.2 Naming
-- `slug(name)`: NFKD, lowercase, `[^a-z0-9]+` becomes `-`, capped at 90
-  characters. An empty result becomes `project-<id>`.
-- If the slug is taken, append `-<id[:4]>`. This covers the owner's two
-  `e2e-calc` projects.
-- Topic: `Jarvis project · <name> · <id>`.
-- `Project.discord_channel_origin` (`"created"`, `"adopted"` or `None`) is
-  kept **for display only**: the pill says "created by Jarvis" or "linked by
-  you". It no longer changes behaviour.
+**Every project gets a channel (O1)**
+- The New Project dialog's "Create a Discord channel" box is on by default.
+- The Discord panel offers **"Create channels for 4 projects"** once after
+  setup.
+  - It is an owner-only route, `POST /discord/backfill`, because the CLI cannot
+    pass the HUD's owner check.
+  - Linking runs that project's reconcile, so the blocked e2e-calc task gets
+    its thread.
 
-### 2.3 HUD and API (owner-only, PR #4's `owner_only`)
-- **`GET /projects/{id}/discord`** returns `{channel_id, origin, name,
-  category, state, missing, checked_at}`.
-  - `state` is one of `linked_ok | unlinked | not_found | no_access |
-    wrong_guild | missing_permissions | folder_missing | unconfigured |
-    unreachable`.
-  - Cached 60 s, with a 5 s timeout.
-- **`POST /projects/{id}/discord`** (owner-only) takes `{action: "create" |
-  "link" | "unlink" | "archive_channel" | "restore_channel", channel_id?}`.
-- **Link validation:**
-  - The channel id is a snowflake.
-  - The bot can see the channel.
-  - It is in the configured guild.
-  - It is a text channel (type 0).
-  - It is not linked to another project.
-  - No permissions are missing.
-  - The project is not the Inbox and not archived.
-  - **The project's root is an existing directory (D2).**
-- `POST`/`PATCH /projects` now refuse `discord_channel_id` with a 400.
-- **HUD:**
-  - `ProjectDialog` (Pickers.tsx, PR #4) gets a `DiscordLink` control. It
-    replaces the read-only `project-discord`. The Unlink text says the channel
-    is kept.
-  - The New Project dialog gets the checkbox.
-  - Additions to `api.ts` and `types.ts`.
+**HUD routes** (`discord/routes.py`, mounted like PR #4's `projects.route`)
+- `GET /projects/{id}/discord` returns the state, the missing permissions and
+  the origin. Cached 60 s; 5 s timeout.
+- `POST /projects/{id}/discord` (owner-only): `create`, `link {channel_id}` or
+  `unlink`.
+- **Link validation:** snowflake; the bot can see the channel; same guild; text
+  channel; not linked to another project; no missing permissions.
+- `POST`/`PATCH /projects` refuse `discord_channel_id` with 400.
 
-### 2.4 Channel lifecycle (D3, D4)
+**D4 (decided)**
+- **The owner's actions act at once:**
+  - the owner-only HUD routes;
+  - a `PATCH /projects` rename that passes `projects.owner_only` (the
+    `project_updated` event gains `by: "owner" | "api"`);
+  - any slash command the owner ran.
+- **Anything Jarvis starts goes through the broker:**
+  - `ApprovalRequest(tool="discord_channel", args={action, channel, from, to,
+    why}, origin="Jarvis housekeeping", allowlistable=False)`, on the linker's
+    worker.
+  - It is shown with Approve/Deny (S1), never Always.
+  - A deny or a timeout does nothing.
+- **What counts as Jarvis-initiated:**
+  - a rename after an `api` PATCH;
+  - D3 crowding archives (at 45 of 50 channels, channels idle **30 days**);
+  - an overflow "Jarvis Archive 2" category;
+  - a move back the owner did not type.
 
-The created/adopted distinction is gone. The only rule is **who started the
-action**.
+**Lifecycle (`ChannelLinker`, any linked channel)**
 
-- **The owner's action** is permission for that project's channel. Owner
-  actions are:
-  - an owner-only HUD route (archive, restore, delete, the Discord routes);
-  - a `PATCH /projects` that passes the `owner_only` test;
-  - a typed Discord command from the owner.
-- **Anything else goes through the approval gate:**
-  `ApprovalRequest(tool="discord_channel_<op>", args={channel, from, to},
-  allowlistable=False, origin="Jarvis housekeeping")`.
-  - It goes to the owner's DM and shows as a HUD card.
-  - It is one-shot and typed-only. A timeout means no.
-  - "always" is not offered.
-- **Change to PR #4:** its `PATCH /projects` handler adds `"by": "owner" |
-  "api"` to the `project_updated` event data, worked out with `owner_only` as
-  a non-raising check. This closes a gap: an agent `curl`-ing a rename would
-  otherwise get the channel renamed with no approval.
-
-| Event | What happens to the linked channel (created or adopted alike) |
+| Event | Action |
 |---|---|
-| `project_updated`, name changed, `by: owner` | Renamed to the slug, deferred on a 429 ("rename pending" on the pill) |
-| `project_updated`, name changed, `by: api` | An approval request; renamed only on yes |
-| `project_archived` (HUD, owner's) | Moved to Jarvis Archive, with a note: "Archived in Jarvis on <date>." |
-| `project_restored` (owner's) | Moved back to Jarvis; renamed if the restore renumbered the name; "Restored." |
-| `project_deleted` (owner's) | A note: "Permanently deleted in Jarvis; this channel is kept." Then unlinked. PR #4's event gains `discord_channel_id` |
-| Jarvis category at ≥45 of its 50 channels (Jarvis-initiated) | One approval listing the channels of projects idle 60+ days: "Move these N to Jarvis Archive?" On yes, each is moved and gets a note |
-| Jarvis Archive category at ≥45 | An approval to create "Jarvis Archive 2" |
+| Rename, `by: owner` | Rename the channel now. On a 429, defer it, and the HUD shows "rename pending". |
+| Rename, `by: api` | Ask through the approval gate, then rename |
+| `project_archived` | Move to Jarvis Archive (no `lock_permissions`) and post a note |
+| `project_restored` | Move back, renaming if PR #4 renumbered the name, and post "Restored." |
+| `project_deleted` | Post a note and unlink. **Never deleted.** PR #4's event gains `discord_channel_id`. |
 
-- **Never delete:**
-  - `DiscordRest` gets no delete method.
-  - A test greps `jarvis/v2/discord/` for `"DELETE"`.
-  - Recorded fake calls never contain `DELETE`.
-- A channel moved for crowding stays linked and keeps working. Jarvis never
-  moves it back by itself. The owner can type `restore channel` in it.
+**HUD:** a `DiscordLink` control in `ProjectDialog` (pill, Create, Link,
+Unlink), the New Project checkbox, and the archive confirmation showing where
+the channel goes.
 
 ---
 
-## 3. Making projects and links from Discord (PR B2, D2)
+## 4. PR C: every chat is a Discord thread (C1)
 
-### 3.1 Verbs and dialogue
-These are the handlers in `jarvis/v2/discord/commands.py`. Each is one pure
-function. **[SLASH]** marks where a slash command maps onto it.
+### 4.1 Places after C
 
-- **Who and where:**
-  - Owner only, typed only. A voice note gets "Please type that."
-  - Works in the owner's DM, in an unlinked channel (an @mention is needed,
-    except inside the Jarvis category, where any unlinked channel counts as
-    owned for these verbs), or in a linked channel where stated below.
-- **No Discord verb archives or deletes a project (B11).**
-  `archive project …` gets the reply "Only from the HUD."
+| Where a message arrives | What it is |
+|---|---|
+| A DM | The **DM conversation**: an Inbox chat with `surface="dm"`, now persisted. Not copied into #ungrouped (recommended). |
+| A task thread (`Task.discord_thread_id`) | That task (S1: plain text answers or steers) |
+| A chat thread (`Thread.surface == "discord:<id>"`) | A turn in that chat |
+| A top-level message in a project channel or #ungrouped | **A new chat** in that project or the Inbox. Jarvis starts a Discord thread *from the owner's message* (Start Thread from Message, `POST /channels/{c}/messages/{m}/threads`) and replies inside it. |
+| An archived project's channel, or an archived chat's thread | A fixed reply: "restore it in the HUD" |
+| Anything else | Ignored. S1 allows only `/project link` there. |
 
-| Verb (typed) | Handler | [SLASH] maps to |
-|---|---|---|
-| `new project <name> at <abs path>` | `new_project(ctx, name, path)` | `/project new name: path:` |
-| `new project` alone | Asks "What's it called, and where's its folder? Reply `<name> at /absolute/path`." It keeps a pending entry for this channel (in memory, 10 min, cleared by `cancel` or a restart). | Not needed: the slash form takes both options |
-| `new project at <path>` in an unlinked channel | The name defaults to the channel's name | The same handler |
-| `link <project>` in an unlinked channel | `link_here(ctx, project)` | `/project link project:` |
-| `unlink` in a linked channel | `unlink_here(ctx)`, after a `yes CODE` | `/project unlink` |
-| `archive channel` / `restore channel` in a linked channel | `move_here(ctx, archive=True/False)`. The owner's command is the permission, so no code | `/channel archive` / `/channel restore` |
+- This replaces `gateway._chat_threads`. One rolling chat per channel would mix
+  unrelated conversations and could not be mirrored one-to-one.
+- New chats from Discord stay on the fast path until S3's `/new provider:`.
 
-**`new_project` step by step**
-1. `folders.check_new_root(path)` returns one of: refused (with the rule, said
-   plainly), `create`, `adopt_empty` or `adopt_nonempty`.
-2. If another project already uses the folder, refuse: "Project X already uses
-   it; `link X` instead."
-3. If the result is `create` or `adopt_nonempty`, Jarvis asks for a
-   confirmation through the broker:
-   - `ApprovalRequest(tool="project_folder_create"|"project_folder_adopt",
-     args={name, path, summary}, allowlistable=False, origin="Discord: new
-     project")`.
-   - It is posted in **this channel**. The text names the full path, says
-     "nothing inside will be changed" for an adoption, adds the 9p slowness
-     note for `/mnt/c`, and ends with "Reply `yes CODE` or `no CODE`".
-   - The existing answer rules apply: only here, typed only, one-shot, and a
-     timeout means no. The HUD card can also answer.
-   - **[SLASH]** `/yes code:` answers it.
-4. `adopt_empty` needs no confirmation: it only reads.
-5. After a yes, `folders.create_root(check, approval)` runs. Then the project
-   is created through PR #4's create path (refactored into
-   `projects.create_project(daemon, name, root)`), so it gets numbering and
-   `project_created`.
-6. Where the channel comes from:
-   - **Asked in the owner's DM:** Jarvis creates `#slug` in Jarvis.
-   - **Asked in an unlinked channel:** Jarvis links that channel, after the
-     §2.3 validation.
-   - **Asked in a linked channel:** refused: "This channel belongs to Y."
-7. The reply names the project, the folder and the `<#channel>`.
+### 4.2 One field, reconciled with the peers plan
 
-**`link_here`**
-- The owner's command is the permission.
-- If the project is already linked elsewhere, a confirmation code asks "Move
-  the link here? #old is kept."
+**`Thread.surface: str | None`**
+- `None`: not shown on Discord yet.
+- `"dm"`: the DM conversation.
+- `"discord:<id>"`, where `<id>` is the **Discord thread's own id**. A Discord
+  thread is a channel, so the peers plan's encoding is unchanged; only the
+  meaning narrows from "a channel's chat" to "this chat's thread".
 
-### 3.2 The folder function: `jarvis/v2/folders.py`
-No tool, MCP entry or open HTTP route reaches it. A test asserts it is called
-only from `discord/commands.py` (and later the slash handler).
+**Rules**
+- It is set by the gateway (when a chat starts from Discord) or by the
+  `ChatMirror` (at the first message of a HUD chat).
+- It changes only through `stores.threads.set_surface(id, value)`, under the
+  store lock.
+- `ThreadStore.save` never replaces a stored non-null `surface` with None. The
+  daemon's stale session copies make this necessary, the same bug class as
+  bug 1.
+- Sidecar `threads/<id>/discord.json`: `{surface, retired: [ids],
+  mirrored_through: <log line count>, name}`.
 
-- **`check_new_root(path: str) -> RootCheck(kind, path, summary)`** raises
-  `FolderRefused(reason)` for:
-  - **Bad input:** not a string, a NUL or control character, not absolute, a
-    `~`, any `..`, more than 4096 characters, a component over 255 characters.
-  - **Outside the allowed roots,** checked both lexically and after
-    `realpath` of the deepest existing ancestor. **Recommended policy:**
-    - inside `$HOME`, at least one level below it;
-    - inside `/mnt/c/Users/<owner>`, at least one level below it, where
-      `<owner>` is configured and checked to exist (here `johnw`).
-    - Everything else is refused by construction: `/`, `/etc`, `/usr`,
-      `/var`, `/opt`, `/root`, `/tmp`, `/proc`, `/sys`, `/dev`, `/boot`,
-      `/srv`, `/mnt/wsl*`, `/mnt/c` itself, `/mnt/c/Windows`,
-      `Program Files`, `ProgramData`, other users.
-  - **Protected even inside the roots:**
-    - any path component starting with `.` (this covers `~/.ssh`,
-      `~/.config/jarvis`, `~/.local/share/jarvis`, `~/.claude`, `~/.codex`
-      and every `.jarvis/`);
-    - explicitly as well: `V2_CREDENTIAL_DIRS`, `V2_DATA_DIR`,
-      `SESSIONS_DIR`, `SPILL_DIR`, the allowlist's directory;
-    - `REPO_ROOT` and everything below it;
-    - any task worktree;
-    - `AppData` under the Windows profile.
-  - **On `/mnt/c`:** a final name with `<>:"\|?*` or a trailing space or dot.
-  - **Parent must exist (recommended): yes.**
-    - It is one `mkdir`, never `parents=True`. A typo in a middle folder then
-      can't silently build a tree.
-    - The reply is: "/x/y doesn't exist either; create it first or pick
-      another path."
-  - **Symlinks:** a final component that is a symlink, or a parent that
-    resolves outside the roots or into a protected place.
-- **Kinds:**
-  - `create`: the path doesn't exist and its parent does.
-  - `adopt_empty`: an existing empty real directory.
-  - `adopt_nonempty`: an existing directory with contents.
-    - The summary is read-only: an item count, whether it is a git repo, the
-      branch.
-    - No file contents are read.
-- **`create_root(check, approval) -> Path`:**
-  - Requires a resolved ALLOW for this exact path, and re-runs
-    `check_new_root` to guard against the folder changing in between.
-  - Calls `os.mkdir(path, 0o755)` exactly once, with no `exist_ok`. A
-    `FileExistsError` means "Something appeared there; ask again."
-  - **Writes nothing inside:** no README, no `git init`.
-  - An adoption never calls `mkdir` and never touches anything.
-- Logs INFO with the path, the project id and the approval code, and
-  publishes `project_folder_created`.
+**Changes for the peers plan:**
+- rename its §1 row to "each thread in a project channel is a chat or a task";
+- drop the idea of "the project channel's chat";
+- post its quiet `↪ Request from thread "X"` lines through this `ChatMirror`,
+  so there is one mirror. Peers phase 1 comes after PR C.
 
----
+### 4.3 What the mirror posts
 
-## 4. Routing changes (gateway)
+New module `jarvis/v2/discord/mirror.py`, class `ChatMirror`. It runs on its
+own worker, separate from the Reporter, so a busy chat never delays task
+milestones.
 
-1. **`_locate`:** when the guild is configured, `task` and `project`
-   placement require the message's `guild_id` to match.
-   - A new place, `jarvis_category_unlinked`, is owned for the §3 verbs only.
-   - Anything else typed there gets "This channel isn't linked yet:
-     `link <project>` or `new project <name> at <path>`."
-   - The category comes from `GET /channels/{id}` `parent_id`, cached.
-   - This avoids needing the GUILDS intent for `CHANNEL_CREATE`.
-2. **An archived project's channel** gets a fixed reply ("restore it in the
-   HUD") and no chat or intake.
-3. **Typed text in a `clarifying` thread** with an open blocking question
-   calls `answer_question(task, first_blocking_index, text)`. Spoken text is
-   refused (**D7**).
-4. **Intake replies** point to the thread or `<#channel>`.
-5. **The approval DM fallback** (§1).
-6. **`router.place` and `classify`:** unchanged. The §3 verbs are parsed in
-   `commands.py` before `classify`.
-   - **[SLASH]** Interactions bypass the text parsing and call the same
-     handlers with a `ctx` of `{channel_id, place, owner, typed=True}`.
+**Which chats:** only `Role.CHAT` threads. Task worker threads are never
+mirrored; the task has its own thread.
 
----
+**When:** at the chat's **first owner message**, not when compose opens.
+Specifically, at the first `user_message` on a thread with `surface=None` whose
+project has a working channel.
 
-## 5. Security and safety
+**Prerequisite:** `daemon.send` publishes a new bus event `user_message`:
+- shape: `{thread_id, project_id, turn_id, data: {typed, via:
+  "hud"|"discord"|"dm"|"system"|"peer", origin, images: n, attachments:
+  [names], discord_message_id}}`;
+- the same fields go into the `user` log record;
+- `UserMessage` gains `via`, `typed` (the owner's words before file inlining)
+  and `discord_message_id`, all with defaults;
+- `assemble_turn` fills `typed`;
+- `docs/hud-api.md` adds the SSE event.
 
-- **Owner-only** (`should_respond`, unchanged), and the guild check.
-- **Typed-only** for approvals, answers and every §3 verb.
-- **Approvals only where asked,** including the folder confirmations.
-- **No agent path to channels or folders:**
-  - `"discord_"` is added to `fastpath.FORBIDDEN_PREFIXES`.
-  - A test asserts the only Discord tool in `MCP_TOOLS` is
-    `discord_dm_owner`.
-  - Calls to `create_channel` and `modify_channel` are allowed only in
-    `linker.py`, `commands.py` and `setup.py`.
-  - `folders.create_root` is reachable only from `commands.py`.
-  - The guild file is protected.
-  - A rename initiated through the API is approval-gated (§2.4).
-- **Never delete channels:** enforced in code and asserted in tests.
-- **The token is never logged.** Everything goes through `DiscordRest`'s
-  redaction.
-- **Every test uses a fake transport,** and `httpx.request` is patched to
-  fail.
-- **Accepted, as in PR #4:** the Origin check is a speed bump. An agent's
-  shell can forge it, but the folder and channel actions also need a
-  Discord-typed confirmation, and those need the owner.
+**Thread name**
+- The chat's title, else `<id> · <first 50 characters of the first message>`,
+  capped at 100 characters.
+- The id alone is unreadable on a phone; this is the id fallback plus the
+  excerpt.
+- Renamed on `thread_updated` (the owner's HUD rename, an owner action).
+- A rename made inside Discord is ignored: the HUD is the source of names.
 
----
+**What is posted**
 
-## 6. Tests
+| HUD event | Discord post (silent unless noted) |
+|---|---|
+| The owner's HUD message | `You (HUD): <typed>`, or `You (HUD, voice): …` for dictation. Over 2000 characters it is attached whole (existing behaviour). Attachments are listed by name only (`[attached: notes.md]`); file contents never go to Discord. Images become a note, `[2 images, in the HUD]` (O-C2). |
+| Settled `text` events | Jarvis's reply, split at 2000 characters with `_split`. Never deltas, never thinking. |
+| `turn_finished` | If tools ran, one footer line appended to the last reply (`· 4 tools: read_file, grep_files +2`). An error or interrupt becomes `· turn failed (<class>)` or `· interrupted`. |
+| Approval | `_post_approval` resolves `request.thread_id` to the chat's surface. The post has buttons and a **ping line**. |
+| Provider question (Codex `requestUserInput`) | The question, then a **ping line**. The owner's next typed message in that thread answers it (the existing `/threads/{id}/answer` path) instead of starting a turn. |
+| Peer-driven turn (peers plan) | The quiet `↪ Request from thread "X"` line, then the reply |
 
-Each of these fails on today's main.
+- Everything posted is run through `secrets.scrub()` first, so a pasted key
+  never reaches the server.
+- Every mirrored post is silent (flag 4096). The only pings are the D1 lines
+  for approvals and questions.
 
-**`discord_render_check.py`**
-- The write-once thread id.
-- No thread at intake (D6).
-- Auto-archive set to 10080, and the thread-member `PUT`.
-- **D1:**
-  - Each pinging milestone has `parse: []` and no `<@`, and is immediately
-    followed by a post whose content is exactly `<@OWNER>` with
-    `users: [OWNER]`.
-  - Started, verified, cancelled and card edits are never followed by one.
-  - DM fallback posts are never followed by one.
-- Choices in the question post.
-- The cancelled post.
-- The DM fallback (replaces `test_missing_channel_silent_count`).
-- Reconcile: active tasks, terminal tasks, seeded tasks, `embed_sha`.
-- 50083 leads to unarchive plus one retry.
-- A 429 with a 600 s wait raises at once.
-- The circuit breaker.
-- No token in any log.
+**Messages typed in Discord**
+- Run as `UserMessage(via="discord", discord_message_id=…)`. The mirror never
+  echoes them, because the owner's message is already there.
+- The HUD shows them as the owner's messages, labelled "via Discord".
+- **Images:** passed to the turn under `assemble_turn`'s caps (8 files, 4 MB
+  each). Text files are inlined under the same rules, and protected file names
+  are refused. Other file types are refused with a note.
+- **Voice notes** in an owned thread are transcribed (v1 rules) and run with
+  `spoken=True`. The reply comes as text plus speech, as today's DM does. A
+  voice note never approves or answers anything (S-2, D7).
+- **The owner's message while a turn is still running:** queued, up to 3, with
+  a quiet "I'll take this next".
 
-**`discord_routing_check.py`**
-- Another guild is ignored.
-- The archived reply.
-- A typed answer while clarifying is recorded; a spoken one is refused.
-- The approval DM fallback, with its answer valid only in the DM.
-- The Reporter and router together: thread, then approval, then the answer in
-  the thread; an answer in the DM is refused.
-- **The §3 dialogue:**
-  - `new project` leads to the prompt, then the code.
-  - `yes CODE` from another channel, a spoken one, or a non-owner does
-    nothing.
-  - On yes: the folder is created, the project is created, and the channel is
-    created (DM) or linked (unlinked channel).
-  - `link X`, `unlink` with a code, `archive channel`.
-  - `archive project X` gets "HUD only".
-- The surface starts and stops idempotently, with the Reporter started before
-  `serve()`.
+**Edits and deletes**
+- Editing or deleting a Discord message after it ran changes nothing.
+  `MESSAGE_UPDATE` and `MESSAGE_DELETE` are not dispatched.
+- The HUD has no message edit.
+- Jarvis never edits or deletes mirrored posts, apart from card edits and
+  stripping approval buttons.
 
-**New `tests/v2/folders_check.py`** (HOME and the Windows root patched to temp
-dirs). One case each:
-- relative path, `..`, `~`
-- `/etc/x`, `/mnt/c/Windows/x`
-- `<home>/.ssh/x`, `<home>/.config/jarvis/x`
-- `V2_DATA_DIR/x`, `REPO_ROOT/x`
-- `AppData/x`
-- home itself
-- missing parent
-- symlinked parent pointing to `/etc`
-- final component a symlink
-- `create` without approval, or with an approval for a different path, raises
-- `FileExistsError` handled
-- an adoption leaves the folder's mtime and listing unchanged
-- `mkdir` is called exactly once, with no `parents`
+**Echo prevention**
+1. Bot authors are never heard (v1 `should_respond`).
+2. `via="discord"` messages are never re-posted.
+3. A bounded set of processed `discord_message_id`s (the last 500) stops a
+   duplicate dispatch from running twice.
+4. Jarvis posts as the bot, never through a webhook that could look like a
+   user.
 
-**New `tests/v2/discord_linker_check.py`**
-- The slug table.
-- `perms.py` math, including the Administrator flag and its warning text.
-- The invite URL contains `bot%20applications.commands` and `309237763088`.
-- Rename with `by: owner` is immediate; with `by: api` it is approval-gated
-  and nothing happens on deny.
-- Archive, restore and delete moves and notes.
-- Crowding at 45 produces one `allowlistable=False` request; no on deny,
-  moves on allow.
-- No `DELETE` anywhere.
+### 4.4 Chat lifecycle
 
-**Other suites**
-- `hud_backend_check.py`:
-  - `GET /discord`.
-  - The owner-only 403 on `POST /projects/{id}/discord`.
-  - The link validation table, including `folder_missing`.
-  - `PATCH`/`POST /projects` with `discord_channel_id` returns 400.
-  - The `project_updated.by` field.
-- `archive_check.py` (PR #4): add the new routes to its owner-only list.
-- `permissions_check.py`: a write to `discord_guild.json` is denied.
-- HUD headless (`tests/face/hud_v2_projects_check.py`,
-  `hud_v2_mock_projects.py`):
-  - The pill renders each state.
-  - A bad id shows the error.
-  - Create is disabled when the guild isn't set up.
-  - The Unlink text says "kept".
-  - The checkbox.
-  - The `DiscordPanel` states, including the Administrator note.
+- **Moved to another project in the HUD (`thread_moved`).** Discord cannot move
+  threads. **Recommended:**
+  1. Create a new thread in the new channel with the same name.
+  2. Its first line reads "Continued from <#old>".
+  3. The old thread gets "Moved to <project> → <#new>".
+  4. `surface` points to the new thread; the old id goes to `retired`.
+  5. A message typed in the old thread still runs the chat (P-0), and the
+     reply posts there with a pointer to the new thread.
+  6. The rejected alternative, keeping the chat in the old channel, would leave
+     School chats under e2e-calc forever.
+- **Archived (PR #4, owner-only):** a quiet note "Archived in the HUD", then
+  the Discord thread is archived (as its creator; see O-P1). A message typed
+  there gets the fixed "restore it in the HUD" reply.
+- **Restored:** "Restored." The next post reopens the thread.
+- **Permanently deleted:** a note, then unlinked. The Discord thread is
+  **kept**.
+- **The whole project is archived:** the channel moves (§3); its threads go
+  with it.
+
+### 4.5 Rate limits and restarts
+
+- **Rate limits:**
+  - Each Discord thread has its own queue, limited to 4 posts per 5 s.
+  - Above 12 pending posts, the rest collapse into one line, "(N more
+    messages, open the HUD)", with the turn attached as `reply.txt`.
+  - 429s and the breaker are as in PR A.
+- **Progress is tracked against `log.jsonl`, not the bus.**
+  - Each bus event only triggers "bring thread X up to the end of its log".
+  - So bus drops and outages are recoverable.
+- **Restart reconcile:**
+  - For each chat with a surface, any log lines after `mirrored_through` are
+    posted if there are 6 or fewer.
+  - Otherwise one line: "(N messages while Discord was unavailable, see the
+    HUD)".
+- **Linking a project later** does not backfill old chats. A chat gets its
+  Discord thread at its next message.
+
+### 4.6 Inbox, DMs and HUD changes
+
+- Inbox **tasks** and **HUD chats** go to #ungrouped as threads.
+- **The DM conversation:**
+  - It is one Inbox chat with `surface="dm"`, found by that value instead of
+    the in-memory cache.
+  - HUD turns typed into it are posted to the DM **silently**.
+  - Replies to messages the owner sent from Discord notify, as DMs do today
+    (O-C3).
+  - S3's `/new` sets the new chat to `"dm"` and the old one to `"dm:retired"`.
+- **HUD:**
+  - `GET /threads` includes `surface`.
+  - The chat header shows "On Discord: #school › <name>" with a
+    `https://discord.com/channels/<guild>/<id>` link.
+  - Messages that arrived from Discord show "via Discord".
+  - Files touched: `ChatTab.tsx`, `types.ts`, `api.ts`.
 
 ---
 
-## 7. Live verification (owner)
+## 5. B2: projects and folders from Discord (slash-first)
+
+**Commands** (the slash plan registers them; this plan supplies the handlers):
+
+| Command | What it does |
+|---|---|
+| `/project new name:<> folder:<optional>` | No folder given: a bare name means `~/jarvis-work/<slug(name)>`. With nothing filled in, it opens a modal asking for Name and Folder. That covers D2's "asks for name and path", with no typed dialogue. |
+| `/project link project:<>` | Links the unlinked channel the owner is in |
+| `/project unlink` | Unlinks the channel the owner is in. The channel is kept. |
+| `/project channel project:<>` | Creates a channel for a project that has none |
+| `/channel archive` · `/channel restore` | Moves this project's channel to Jarvis Archive and back. The project stays active, and threads keep working. The owner typed it, so it counts as permission (D4). |
+
+- **Typed forms: not needed.**
+  - S2 drops keywords, and B2 lands after S1, so it adds no plain-text verbs.
+  - The rev-2 typed dialogue and its in-memory pending state are removed.
+  - Natural language goes through the model path below.
+- Archive and delete of **projects** stay HUD-only (B11). The fixed reply comes
+  from the slash plan's tripwire.
+
+**After `/project new`:**
+1. `folders.check_project_folder` runs, then a confirmation if one is needed.
+2. Then `folders.make_project_folder`, `projects.create_project` (PR #4
+   numbering, refactored out of `POST /projects`), and the channel.
+3. From a DM, the channel is created in the Jarvis category. From an unlinked
+   channel, that channel is linked instead.
+
+**The confirmation**
+- A broker request: `ApprovalRequest(tool="project_folder", args={action:
+  "create"|"adopt", path, name}, allowlistable=False)`.
+- It shows the **exact path**, with Approve and Deny, also as a HUD card.
+- It is one-shot, owner-only, never by voice, and denied on timeout.
+- **An empty existing folder is used without asking (O5).** A missing folder
+  asks first. A non-empty folder asks, showing its entry count and whether it
+  is a git repo.
+- The check runs again after the owner's yes. If the folder's state has
+  changed, Jarvis asks again.
+
+**`jarvis/v2/folders.py`**
+- **Input:** a string with no control characters.
+  - A bare name with no `/` means `~/jarvis-work/<slug>`.
+  - A leading `~/` is expanded once.
+  - Otherwise the path must be absolute.
+  - No `..`; ≤4096 characters in total and ≤255 per component.
+- **Checking:** done lexically **and** on the realpath of the nearest existing
+  ancestor.
+- **Allowed roots:** `$HOME` and `/mnt/c/Users/johnw`, strictly below them and
+  never the roots themselves. `~/jarvis-work` itself is refused as a project
+  folder.
+- **Refused:**
+  - any component starting with `.`;
+  - `config.V2_CREDENTIAL_DIRS`, `config.V2_DATA_DIR` and `config.REPO_ROOT`,
+    checked explicitly;
+  - `/mnt/c/Users/johnw/AppData`;
+  - under `/mnt/c`, names Windows cannot hold;
+  - a path that is already another project's root;
+  - a file or a symlink at the path.
+- **The parent must exist (O4).** If `~/jarvis-work` is missing, that is
+  reported.
+- **Creating:** exactly one `os.mkdir(path, 0o755)`, with no `parents` and no
+  `exist_ok`. Nothing is ever written inside it.
+- **Reachability:** only the confirmation handler calls it. It is not a tool
+  and not an HTTP route.
+
+**The model rule (O3)**
+- **New tool `project_propose(name, folder="")`.** It never creates anything.
+  It raises the same `project_folder` confirmation, from the chat that called
+  it.
+- **Enforced in the daemon, not in the model or the MCP process:**
+  - The tool reaches the daemon route `POST /project-proposals`.
+  - The daemon identifies the calling chat by its jarvis-mcp session token
+    (peers phase 0), or by `runtime.caller()` for in-process tools.
+  - It allows the call only if `thread.provider == ProviderName.CLAUDE`
+    **and** `thread_model.effective(thread)[0]` matches
+    `^claude-(sonnet|opus)-` once resolved.
+  - Anything else is refused, including an unknown or unresolved model.
+  - Limits: one pending proposal per chat, 3 per hour.
+- **The fast path cannot propose at all.**
+  - `project_propose` is not in `FAST_TOOLS`.
+  - Its system prompt says: "To make a project, the owner can use `/project
+    new`, or ask in a Claude chat."
+  - A Claude model reached through OpenRouter on the fast path does not count.
+- **Codex** sees the tool through MCP but is refused, with the same pointer.
+- **The folder is always made by code**, after the owner's yes, from the
+  request's stored args. The model never makes it.
+- **Dependency:** this part needs peers phase 0. If that has not landed, B2
+  ships the slash path, and the model path follows as a small B2b.
+
+---
+
+## 6. Security
+
+- **Owner-only:** v1 `should_respond`; S1's interaction gate; the guild check
+  in `_locate` and on `interaction.guild_id`.
+- **Answers count only where the question was asked.**
+  - Approvals, folder confirmations and housekeeping requests all go through
+    the broker with `allowlistable=False`.
+  - Buttons are checked against owner, message id and channel (S1).
+- **No voice approvals and no voice answers** (S-2, D7).
+- **No agent can create, rename, move or delete a channel, or create a
+  folder:**
+  - the `discord_` tool prefix is forbidden;
+  - only `linker.py`, `setup.py` and the B2 handlers call channel writes;
+  - `make_project_folder` is called only by the confirmation handler;
+  - grep tests prove both;
+  - the guild file is protected; `PATCH` no longer takes the channel field;
+    non-owner renames are tagged `by: api` and gated.
+- **Known gap (not closed):** a model's own shell can still `mkdir` under the
+  existing permission gates. The O3 rule governs *making projects*. Risk R-M
+  below.
+- **No secrets reach Discord or the logs:**
+  - everything mirrored goes through `scrub()`;
+  - file contents are never mirrored;
+  - tokens are never logged, URLs are never logged, and both the bot token and
+    interaction tokens are redacted.
+- **No live Discord in tests:** a fake transport, `httpx.request` patched to
+  raise, and temp folder roots.
+
+---
+
+## 7. Tests
+
+Each test below fails on today's main.
+
+**PR A, `discord_render_check.py`**
+- The bug 1 stale save keeps the thread id.
+- No thread during intake (D6).
+- `auto_archive_duration` is set, and the owner is added to the thread.
+- **D1:** the ping line has the exact content and `allowed_mentions`; quiet
+  posts carry flag 4096; DMs get no ping line.
+- `task_question` choices; the Cancelled post.
+- Safety-net DMs, including the broken-channel case.
+- Reconcile and `embed_sha`.
+- 50083 handling; a long 429 raises; the breaker trips.
+- Logs contain neither tokens nor URLs.
+
+**PR A, `discord_routing_check.py`**
+- Approval DM fallback with the answer channel recorded.
+- The ping line after an approval.
+- Startup and stop are idempotent; the Reporter subscribes before `serve()`.
+
+**B1, new `discord_linker_check.py`**
+- Slug table and `perms.py` table.
+- D4: `by: owner` renames now; `by: api` raises an approval request with no
+  call before the yes; a deny means no call.
+- Lifecycle notes and moves.
+- D3 at 45 channels, and the overflow category gated.
+- **No `DELETE` ever.**
+
+**B1, setup check**
+- Missing and excess permissions listed; the Administrator warning text.
+- Categories and #ungrouped are created only after y.
+- The Inbox is linked to #ungrouped and cannot be relinked.
+
+**B1, `hud_backend_check.py`**
+- Owner-only routes, the validation table, `POST /discord/backfill`.
+- `PATCH` refuses the channel field; `project_updated.by`.
+
+**PR C, new `discord_mirror_check.py`**
+- No Discord thread until the first owner message; then exactly one.
+- Name fallback, and rename on `thread_updated`.
+- `You (HUD):` shows the typed text, never the inlined file contents;
+  attachments by name; images as a note; scrubbed output.
+- Replies are split at 2000; one tool footer; no deltas or thinking.
+- A chat approval lands in the chat's thread with buttons and a ping.
+- A Codex question pings, and the next typed message answers it.
+- A message typed in Discord runs the same chat, is not echoed, and is labelled
+  "via Discord" in the transcript.
+- A duplicate message id runs once; bot authors are ignored.
+- A message during a running turn is queued (up to 3).
+- A voice note: the turn runs, but approvals stay untouched.
+- A top-level message in a project channel starts a new chat with a thread from
+  that message; in #ungrouped, an Inbox chat.
+- The DM chat persists across a restart through `surface="dm"`.
+- **Move:** a new thread with both link lines; the old id is an alias.
+- Archive, restore and delete notes; nothing deleted.
+- Above 12 pending posts the queue collapses.
+- Restart reconcile with ≤6 and with >6 messages.
+- `ThreadStore.save` keeps `surface` against a stale copy.
+
+**PR C, `hud_backend_check.py` and HUD headless**
+- `user_message` SSE.
+- `GET /threads` includes `surface`.
+- The chat header link, and the "via Discord" label.
+
+**B2, new `folders_check.py`**
+- Every refusal case.
+- The bare-name mapping, `~/` expansion, and a missing parent.
+- An empty folder is used silently; a non-empty one asks.
+- Exactly one directory is made, with nothing written inside.
+- A race leads to asking again.
+
+**B2, `discord_commands_check.py` additions**
+- The modal for `/project new`.
+- Confirmation shows the exact path; one-shot; never "always".
+- Link and unlink; `/channel archive|restore` act immediately.
+
+**B2, model-rule check**
+- Allowed: Claude with `claude-opus-*` or `claude-sonnet-*`.
+- Refused: fast path (`project_propose` is absent from `FAST_TOOLS`), Codex, an
+  unknown model, a Claude model on OpenRouter.
+- The folder exists only after the yes.
+
+---
+
+## 8. Live verification (owner)
 
 **At your desk**
-1. Make sure only `jarvis daemon2` is running. No v1 `jarvis face` or
-   `jarvis daemon`, or every reply doubles.
-2. Run `jarvis auth discord-guild`.
-   - Open the printed invite (it has `applications.commands` and
-     `309237763088`) and authorize it for your server.
-   - Let it create the categories.
-   - It should print "ok" and should **not** mention Administrator.
-3. Restart daemon2 and check the HUD panel shows **Discord: ok**.
-4. HUD → School → Edit → **Create channel**. Check `#school` appears and the
-   pill says "created by Jarvis · ok".
+1. Check that only daemon2 is running, and that the Interactions Endpoint URL
+   is empty (S1).
+2. Run `jarvis auth discord-guild`. Open the invite, switch on the 8
+   permissions, and let it create Jarvis, Jarvis Archive and #ungrouped. It
+   should report nothing missing.
+3. Restart daemon2. The light should be green. Click **"Create channels for 4
+   projects"**.
+4. Open a new HUD chat in School and send "hello".
+   - A thread should appear in #school with "You (HUD): hello" and the reply.
+   - Your phone should not buzz.
 
 **On your phone**
 
-5. DM `new project`, then reply `robotics at /home/johnw/projects/robotics`.
-   - You should get a code. Answer `yes CODE` **in a channel**: it should be
-     refused.
-   - Answer it in the DM. Check that the folder now exists and is empty, the
-     project is in the HUD, and `#robotics` is under Jarvis.
-6. DM `new project x at /home/johnw/.ssh/x` and check it is refused, naming
-   the rule. Then try `/etc/x`, then a path whose parent doesn't exist; both
-   should be refused too.
-7. Create a channel `#scratch` yourself inside the Jarvis category and type
-   `link test` in it. Check it links.
-8. In `#school`, send `task: add one line to README saying hello`. Check:
-   - a thread appears with "Started" and a card that updates at most every
-     5 s;
-   - on a question, approval or done, your phone buzzes and opens on the
-     `@you` line right below the update.
-9. If an approval comes, `yes CODE` in your DMs should be refused; answer it
-   in the thread instead.
-10. If the task asks a question, answer it in the thread with typed text.
-    Check the task moves on.
+5. Reply in that thread. The HUD should show it "via Discord", and the answer
+   should come back to both.
+6. Post a new top-level message in #school. A new thread should start under it,
+   and a new chat should appear in the HUD.
+7. Run `/task` in #school with a harmless brief.
+   - The thread should appear once it starts.
+   - The card should update silently.
+   - Question, approval and done should each ping, with the tap landing in the
+     thread.
+   - Approve with the button.
+8. In a chat, trigger an approval. It should appear in that chat's thread, not
+   the DM.
+9. Run `/project new name:robotics`. It should offer `~/jarvis-work/robotics`.
+   - Tap Approve. The folder should exist and be empty, and #robotics should
+     appear.
+   - Then try `/project new folder:/home/johnw/.ssh/x`: it should be refused.
+10. In a Claude Opus HUD chat, ask it to make a project "test-sonnet".
+    - You should get the exact path to approve.
+    - Try the same in a fast-path chat: you should be pointed to `/project
+      new`.
+11. DM Jarvis. The conversation should stay in the DM and show in the HUD
+    Inbox, but not in #ungrouped.
 
 **At your desk**
 
-11. Rename School in the HUD. Check `#school` follows.
-12. **Approval gate check:** from a terminal, run `curl -X PATCH
-    http://127.0.0.1:<port>/projects/<id> -d '{"name":"x"}'` with no Origin
-    header.
-    - A DM approval should arrive. Answer `no CODE` and check the channel is
-      unchanged.
-    - Rename it back in the HUD afterwards.
-13. Archive **test** in the HUD.
-    - `#scratch` should move to Jarvis Archive with a note.
-    - A message typed there should get the "archived" reply.
-    - Restore it and check it moves back.
-14. Remove "Send Messages in Threads" from the bot's role, then start a task.
-    Check:
-    - the panel turns amber and names the permission;
-    - the daemon log shows `403 / 50013` and no token;
-    - one DM arrives.
-
-    Put the permission back and check the panel turns green.
-15. Cut the network for a minute during a task. Check the panel goes red, then
-    catches up with no duplicate thread.
-16. Restart daemon2 in the middle of a task. Check there is no second thread
-    and no second "Started".
+12. Rename School in the HUD, and move a chat from School to test.
+    - The channel should be renamed.
+    - The moved chat should get a new thread in #test, with "Moved
+      to"/"Continued from" links.
+13. Archive test, then restore it. Check the channel moves both ways, with
+    notes.
+14. Remove "Send Messages in Threads" from the bot. The light should turn
+    amber, one DM should arrive, and the log should show `50013` with no token
+    or URL. Put the permission back.
+15. Restart daemon2 while a chat and a task are both active. There should be no
+    duplicate threads, and the catch-up line should appear if more than 6
+    messages are missing.
+16. Rename a chat in the HUD. If the Discord thread is not renamed, the light
+    should show the 403; that settles O-P1.
 
 ---
 
-## 8. Order, staffing, and where slash commands fit
+## 9. Sequence and staffing
 
-**Recommended sequence.** PR B is split into **B1** and **B2**.
+**Order:** PR #4 → PR #3 → **S1** → **PR A** → **B1** → **C** and **B2** in
+parallel → **S2** → **S3**. Peers phase 0 must land before B2b; peers phase 1
+comes after C.
 
-1. **PR A, the poster** (as in §1, with the D1 ping line). It has no slash
-   dependency.
-   - It adds **no new approval verbs**. Approvals already work as typed verbs
-     on main.
-   - PR A only moves where approvals are posted, adds the ping line and the
-     DM fallback, and factors `answer()` out for slash to call.
-   - **So landing slash before PR A is not needed:** nothing would be built
-     twice, and PR A is the feature the owner asked for first.
-2. **PR B1, linking:**
-   - guild setup with the `applications.commands` invite;
-   - `perms.py` and the protected guild file;
-   - the linker with the D3/D4 rules and the `project_updated.by` change;
-   - the HUD control and the owner-only routes;
-   - the guild check and the archived reply in `_locate`.
-
-   Slash needs `guild_id` and the new invite scope from B1, **so B1 lands
-   before slash**.
-3. **Slash PR (separate plan):**
-   - the command core: interactions, registration and ephemeral replies;
-   - `/yes /no /always` calling PR A's `answer()`, plus `/status /cancel
-     /task`.
-
-   It can start in parallel once PR A merges, using this plan's guild-file
-   contract (path and keys).
-4. **PR B2, Discord-side projects:**
-   - `folders.py`, `commands.py` (§3) and `projects.create_project`;
-   - link, unlink and archive-channel from Discord.
-
-   Built **on the slash command core**, so the dialogue is written once and
-   gets both a typed front end and a `/project` front end. B2 is the most
-   security-sensitive piece (a filesystem write started from a phone), so it
-   gets its own small review.
+**What each PR contains**
+- **PR A:** shrinks, because S1 took bug 2, the buttons and the reply sink. Its
+  tests run on DMs alone (safety-net mode).
+- **B1:** setup (permissions, scopes, categories, #ungrouped), `perms.py`, the
+  linker with D3/D4, the routes, backfill, the HUD link control.
+- **C:** new. The mirror, `Thread.surface`, `user_message`, `_locate` and the
+  new-chat-per-message rule, the persisted DM chat, chat approvals.
+  - It is a separate PR because it is the largest change and reshapes
+    `gateway._chat`.
+  - Folding it into B1 would make B1 too large to review on a phone.
+- **B2:** `/project` and `/channel` handlers, `folders.py`,
+  `projects.create_project`.
+  - B2b: `project_propose` and the model rule, after peers phase 0.
 
 **Staffing**
-- **Agent 1:** A, then B1, then B2.
-- **Agent 2:** slash, after A merges. The two touch `gateway.py` in different
-  places: Agent 1 changes `_locate` and `_post_approval`; slash adds the
-  interaction dispatch.
+- Agent 1: A → B1 → C.
+- Agent 2: B2 once B1 merges, in parallel with C. They touch mostly different
+  files (`folders.py`, `projects.py`, `interactions.py` handlers versus
+  `mirror.py` and `gateway._locate`/`_chat`).
+- S2 waits for C, so the plain-text path is final before keywords go.
 
-**If fewer PRs are preferred:** merge B1 and B2 and land them after slash. Do
-not merge A with anything.
+---
 
-**Critical files**
-- `jarvis/v2/discord/reporter.py`, `gateway.py`, `rest.py`
-- New: `jarvis/v2/discord/{linker,perms,routes,setup,commands}.py`
-- New: `jarvis/v2/folders.py`
-- `jarvis/v2/daemon.py`
-- `jarvis/v2/stores.py`
-- PR #4's `jarvis/v2/projects.py`
-- `jarvis/v2/permissions.py`
-- `jarvis/v2/providers/fastpath.py`
-- `jarvis/config.py`
-- `jarvis/__main__.py`
-- `hud/src/components/Pickers.tsx`, `Panels.tsx`
+## 10. Decisions
+
+**Decided:**
+
+| | Decision |
+|---|---|
+| D1 | A separate ping line, none in DMs |
+| D2 | Projects and folders from Discord, owner-confirmed |
+| D3 | Never delete channels |
+| D4 | The owner's actions count as permission; Jarvis-initiated changes go through the gate |
+| D5 | No Administrator; `309237763088`, plus `applications.commands` |
+| D6 | The task thread is created at `clarifying` |
+| D7 | Typed answers only |
+| D8 | A quiet Cancelled post |
+| D11–D18 | As recommended |
+| O1 | Every project gets a channel; DM only as a safety net and for the DM conversation |
+| O3 | Folders in `~/jarvis-work`, with the model rule |
+| O4 | The parent must exist |
+| O5 | An empty folder is used silently |
+| O6 | Setup creates the categories |
+| O7 | Crowding at 45 channels, 30 days idle |
+| R7 | Channel privacy is the owner's to handle |
+| S-1, S-2, S-3 | Slash first; no voice approvals and buttons allowed; keywords phased out |
+| C1 | Every chat is a Discord thread; the mirror is two-way |
+
+**Still open (the planner's recommendation for each):**
+1. **O-P1, Manage Threads:** don't add it up front. Renaming and archiving the
+   bot's own threads should work as their creator. If live step 16 shows a
+   403, add it (`326417632272`).
+2. **O-C1, a new top-level message in a project channel:** starts a new chat,
+   threaded under the message. The alternative is one rolling chat per channel.
+3. **O-C2, HUD images on Discord:** a note only, `[2 images, in the HUD]`,
+   never uploaded. Images sent *from* Discord do reach the chat.
+4. **O-C3, notifications in the DM:** replies to messages sent from Discord
+   notify, as today; anything typed in the HUD and copied to the DM is silent.
+5. **O-C4, the DM conversation in #ungrouped:** no. It stays DM-only and shows
+   in the HUD Inbox.
+6. **O-C5, moving a chat to another project:** a new Discord thread with links
+   both ways; the old thread still works as an alias.
+7. **O-C6, a message while a turn is running:** queue up to 3, with a quiet
+   "next" note.
+8. **O-C7, opting a chat out of Discord:** none at first, because C1 says every
+   chat.
+9. **O-M1, a cheap-model chat asked to make a project:** it cannot propose one;
+   it points to `/project new` or a Claude chat. A Claude model reached through
+   OpenRouter on the fast path does not count.
+10. **O-S1, slash-first B2:** no typed forms; `/project new` with nothing filled
+    in opens a modal asking for the name and folder.
+
+**Risks:**
+- **R-M:** a model's shell can still `mkdir` under existing gates. The O3 rule
+  covers making *projects*. Adding an always-ask rule for `mkdir` outside the
+  project root would close it.
+- **R12:** the `GUILDS` intent; verify that thread messages arrive.
+- **R13:** a v1 listener running alongside doubles message replies. Slash
+  commands are immune.
+- **R-T:** the server can hold at most 1000 active threads. Chats auto-archive
+  after 7 idle days, so this is far off.
+
+### Critical files
+- `jarvis/v2/discord/gateway.py` (`_locate`, `_chat` replaced,
+  `_post_approval`)
+- `jarvis/v2/discord/reporter.py`
+- `jarvis/v2/daemon.py` (`send` publishes `user_message`, `start_discord`,
+  `main`, `/projects`)
+- `jarvis/v2/stores.py` (write-once `Task.discord_thread_id` and
+  `Thread.surface`, `set_surface`)
+- `jarvis/v2/discord/rest.py`
+- New: `jarvis/v2/discord/{surface,linker,mirror,perms,routes,setup}.py`,
+  `jarvis/v2/folders.py`
+- Also changed: `jarvis/v2/model.py` (`Thread.surface`,
+  `Project.discord_channel_origin`), `jarvis/v2/provider.py`
+  (`UserMessage.via`, `typed`, `discord_message_id`), `jarvis/v2/hud_api.py`
+  (`assemble_turn` sets `typed`), PR #4's `jarvis/v2/projects.py`, PR #3's
+  `jarvis/v2/thread_model.py` (`effective`), `jarvis/v2/providers/fastpath.py`,
+  `jarvis/v2/permissions.py`, `jarvis/config.py`, `jarvis/__main__.py`,
+  `hud/src/components/{Pickers,Panels,ChatTab}.tsx`
 - Tests: `tests/v2/discord_render_check.py`, `discord_routing_check.py`,
-  `hud_backend_check.py`
-- New tests: `tests/v2/folders_check.py`, `discord_linker_check.py`
-- `tests/face/hud_v2_projects_check.py`
-
----
-
-## 9. Still-open decisions (planner's recommendation for each)
-
-1. **DM fallback for projects with no channel and for the Inbox.**
-   **Recommend:** question, blocked, failed and done to the owner's DM, with
-   no card and no ping line.
-2. **D6 (pending): when a thread is created.** **Recommend:** at
-   `clarifying`, after the proposal grace window. A withdrawn proposal leaves
-   nothing in Discord.
-3. **Allowed folder roots.** **Recommend:** `$HOME` and `/mnt/c/Users/johnw`,
-   each at least one level deep, with dot-folders and the §3.2 list refused.
-   Add more roots later in config.
-4. **Must the parent folder exist?** **Recommend:** yes, so only one `mkdir`.
-5. **Adopting an existing empty folder without a code.** **Recommend:** yes,
-   because it only reads. A non-empty folder always needs the code.
-6. **Who creates the categories.** **Recommend:** the setup command, after a
-   y/N prompt. This is now possible because Manage Channels is server-wide.
-7. **Crowding threshold and idleness.** **Recommend:** ask at 45 of 50
-   channels, and propose channels idle 60+ days. Moving a channel back stays
-   the owner's call (`restore channel`).
-8. **A rename that doesn't come from the HUD** (for example an agent's
-   `curl`). **Recommend:** approval-gated, as in §2.4. The alternative, never
-   following such renames, leaves channel names stale.
-9. **Renaming a project from Discord.** Not requested. **Recommend:** leave it
-   out of this plan. The slash plan can add `/project rename` later on the
-   same handlers, and it would count as the owner's action.
-10. **Administrator.** **Recommend:** no (D5). If the owner chooses it, only
-    the setup warning and the HUD note change (§2.1).
-11. **Do new channels inherit the Jarvis category's privacy?** A risk to
-    verify live: Discord's API may create the channel without copying the
-    category's overwrites.
-    - If the server ever has other members, check at step 4 that `#school` is
-      private.
-    - If it isn't, the fix needs Manage Roles, which the D5 set excludes. The
-      decision is then either: add Manage Roles, or keep the server private.
-
-**Accepted as recommended (D11–D18):**
-- D11: the write-once `discord_thread_id`.
-- D12: verify the GUILDS intent live, and add bit 0 if thread messages don't
-  arrive.
-- D13: check that no v1 listener is running at the same time.
-- D14: the Origin check is a speed bump.
-- D15: the 50-channel category cap. Now handled by the D3 crowding approval.
-- D16: a rare duplicate post on a crash.
-- D17: `project_deleted` gains the channel id.
-- D18: reconcile when the bus drops events.
-
-D3 and D4 change two of them:
-- D14 is now narrower, because API-initiated renames are gated.
-- D15 is now handled by the crowding approval rather than left to the owner.
-
----
-
-## Addendum (revision 2b): what the planner's second pass refined
-
-The planner returned a second, near-identical revision after the owner
-confirmed D1, D2 and D4. Its differences from the text above:
-
-- **Bare `new project`** asks for the name and the folder path one at a time.
-  - The dialogue is keyed by (channel, owner), with one open per channel.
-  - It lives in memory for 10 minutes and is lost on restart.
-  - Verbs such as `status` and `yes CODE` still win while it is open, and
-    `cancel` aborts it.
-  - It is kept in a separate map from the deferred "which project?" memory
-    (risk R8).
-- **Folder rules:**
-  - Windows-reserved names (`CON`, `NUL`, `COM1`…) are also refused under
-    `/mnt/c`.
-  - The allowed roots live in `config.PROJECT_FOLDER_ROOTS`, overridable only
-    by the env variable `JARVIS_PROJECT_ROOTS`.
-  - A folder that is already another project's root is refused from Discord
-    but allowed from the HUD (O6).
-- **Crowding:**
-  - The archive candidates are projects with **no task activity for 30+
-    days**; §2.4 says 60. The owner picks.
-  - A channel is never moved back out of the archive by Jarvis. Instead it
-    posts one line offering `move back`, which the owner types, so it counts
-    as the owner's action.
-- **Setup** also warns about *excess* permissions (Manage Roles, Manage
-  Server, Ban, Kick, Webhooks), not only missing ones.
-- **`GET /discord`** also reports `linker: {pending_renames,
-  awaiting_approval}` and `permissions: {missing, excess, administrator}`.
-  The HUD panel shows the "awaiting approval" note.
-- **Open items it adds:**
-  - **O2:** the HUD New Project "Create a Discord channel" box is checked by
-    default when the guild is configured.
-  - **O8:** add the owner to every new thread, so threads appear in your list
-    before the first ping.
+  `hud_backend_check.py`, new `discord_linker_check.py`,
+  `discord_mirror_check.py`, `folders_check.py`,
+  `tests/face/hud_v2_projects_check.py`
