@@ -6,7 +6,7 @@ model turn is retried automatically: a lost response may have executed tools.
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import json
 from pathlib import Path
 import shutil
@@ -54,6 +54,8 @@ class _Session:
     mutex: threading.RLock = field(default_factory=threading.RLock)
     sending: threading.Lock = field(default_factory=threading.Lock)
     interrupt_at: float | None = None
+    # A model/effort change waiting for the next turn/start (set_model).
+    override: dict | None = None
 
 
 class CodexProvider:
@@ -211,7 +213,13 @@ class CodexProvider:
             s.items.clear()
             submitted = True
             start_deadline = time.monotonic() + START_TIMEOUT
-            request = s.rpc.send("turn/start", {"threadId": s.thread_id, "input": inputs})
+            params = {"threadId": s.thread_id, "input": inputs}
+            # turn/start's `model` and `effort` override "this turn and
+            # subsequent turns" (TurnStartParams, generated from 0.153.4), so
+            # a change rides the next turn and then sticks to the thread.
+            override, s.override = s.override, None
+            params.update(override or {})
+            request = s.rpc.send("turn/start", params)
             started, response_seen, capacity, saw_usage = False, False, False, False
             early = deque()
             while True:
@@ -452,6 +460,24 @@ class CodexProvider:
             return
         s.rpc.reply(rid, error={"code": -32601, "message": "Unsupported server request"})
         yield self._event(h, EventKind.ERROR, message=f"Unexpected Codex server request: {method}", fatal=False)
+
+    def set_model(self, h: SessionHandle, model: str | None, effort: str | None) -> None:
+        """Change the model and effort from the next turn on (decisions A1).
+
+        Nothing is sent now: the pair rides the next `turn/start`, whose
+        `model`/`effort` fields override the thread from that turn on. The
+        session's brief is updated in memory so the model cooldown and the
+        `model/rerouted` refusal judge the model actually asked for; the
+        saved brief on disk is never rewritten.
+        """
+        s = h.native
+        if s is None or s.closed.is_set():
+            raise ValueError("Codex session is closed")
+        if not model:
+            raise ValueError("Codex needs a named model to switch to")
+        with s.mutex:
+            s.override = {"model": model, **({"effort": effort} if effort else {})}
+            s.brief = replace(s.brief, model=model, effort=effort)
 
     def interrupt(self, h: SessionHandle) -> None:
         s = h.native

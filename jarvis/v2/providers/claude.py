@@ -46,7 +46,7 @@ import threading
 import queue
 import uuid
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -239,6 +239,9 @@ class _Session:
     tools_seen: dict[str, tuple[str, dict]] = field(default_factory=dict)
     usage: Usage = field(default_factory=Usage)
     stderr: deque = field(default_factory=lambda: deque(maxlen=STDERR_LINES))
+    # Whether the CLI holds this session on disk yet — true after a resume or
+    # once a turn has produced a result. Decides how `set_model` reconnects.
+    resumable: bool = False
 
     def emit(self, kind: EventKind, **data: Any) -> None:
         """Put an event on the turn's queue. Silent outside a turn by design.
@@ -322,6 +325,7 @@ class ClaudeProvider:
             loop=loop,
             runner=runner,
             session_id=session_id,
+            resumable=resume,
         )
         options = self._options(brief, session, resume=resume, session_id=session_id)
         try:
@@ -654,6 +658,7 @@ class ClaudeProvider:
             return out
         if isinstance(msg, ResultMessage):
             self._note_session_id(session, msg.session_id)
+            session.resumable = True
             out.extend(self._result(session, msg))
             return out
         return out
@@ -744,6 +749,57 @@ class ClaudeProvider:
             session.handle.provider_session_id = session.session_id
 
     # -- control
+
+    def set_model(self, h: SessionHandle, model: str | None, effort: str | None) -> None:
+        """Move this conversation onto another model or effort (decisions A1).
+
+        Called between turns only — the daemon calls it at the start of the
+        next turn, before the message is sent. Claude Code fixes `--effort` at
+        spawn, so the change is a **resume with new options**: the client is
+        disconnected and a new one connects to the same session id with the
+        new model and effort. The conversation is the CLI's session on disk,
+        so nothing is lost but the seconds a reconnect costs.
+
+        Refuses rather than narrows (§5.1): an effort off the CLI's ladder,
+        or a turn still running, raises — and a reconnect that fails puts the
+        old client back and raises, so the thread keeps working on the model
+        it had and the owner is told why.
+        """
+        session = _native(h)
+        if session.closed:
+            raise ValueError("this Claude session is closed")
+        if effort is not None and effort not in EFFORT_LEVELS:
+            raise BriefRefused(f"effort {effort!r} is not one of {', '.join(EFFORT_LEVELS)}")
+        if not session.sending.acquire(blocking=False):
+            raise ValueError("a turn is running; the model changes at the next one")
+        try:
+            old_brief, old_client = session.brief, session.client
+            brief = replace(old_brief, model=model, effort=effort)
+            resume = session.resumable
+
+            def connect(target: Brief) -> Any:
+                options = self._options(target, session, resume=resume, session_id=session.session_id)
+                client = _client_factory(options)
+                _await(session.loop, client.connect(), CONNECT_TIMEOUT_S)
+                return client
+
+            try:
+                _await(session.loop, old_client.disconnect(), CONTROL_TIMEOUT_S)
+            except Exception:  # noqa: BLE001 — an old client that will not go quietly still goes
+                pass
+            try:
+                session.client = connect(brief)
+            except BaseException as exc:  # noqa: BLE001
+                try:
+                    session.client = connect(old_brief)
+                except BaseException:  # noqa: BLE001
+                    session.client = old_client
+                raise BriefRefused(
+                    f"claude could not switch to {model or 'its default model'}: {_safe(exc)}"
+                ) from None
+            session.brief = brief
+        finally:
+            session.sending.release()
 
     def interrupt(self, h: SessionHandle) -> None:
         session = h.native

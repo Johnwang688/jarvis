@@ -9,6 +9,7 @@ from pathlib import Path
 import queue
 import subprocess
 import tempfile
+import threading
 import time
 from types import SimpleNamespace
 import unittest
@@ -67,6 +68,33 @@ class Fake:
 
     def close(self, handle):
         pass
+
+
+class ModelFake(Fake):
+    """A Fake that records what it was opened with and every model change,
+    and can hold a turn open so a PATCH can land in the middle of one."""
+    def __init__(self, name):
+        super().__init__(name)
+        self.opened, self.changes, self.permits = [], [], []
+        self.hold = None
+        self.entered = threading.Event()
+
+    def start(self, thread, brief, permit):
+        self.opened.append(("resume" if thread.provider_session_id else "start", brief))
+        self.permits.append(permit)
+        return SessionHandle(thread.id, self.name, "fake:" + thread.id, SimpleNamespace(brief=brief))
+
+    resume = start
+
+    def set_model(self, handle, model, effort):
+        self.changes.append((model, effort))
+
+    def send(self, handle, message):
+        if self.hold is not None:
+            yield Event(K.TURN_STARTED, handle.thread_id, {})
+            self.entered.set()
+            self.hold.wait(4)
+        yield from super().send(handle, message)
 
 
 class FakeControl:
@@ -141,10 +169,30 @@ class Backend(unittest.TestCase):
         self.catalog = [models.normalize(dict(id="test/model", name="Test", context_length=10000,
                                              supported_parameters=["tools", "reasoning"],
                                              architecture={"input_modalities": ["text", "image"], "output_modalities": ["text"]},
-                                             pricing={"prompt": "0", "completion": "0"}))]
+                                             pricing={"prompt": "0", "completion": "0"})),
+                        models.normalize(dict(id="test/thinker", name="Thinker", context_length=10000,
+                                             supported_parameters=["tools", "reasoning"],
+                                             reasoning={"supported_efforts": ["high", "medium", "low"]},
+                                             architecture={"input_modalities": ["text"], "output_modalities": ["text"]},
+                                             pricing={"prompt": "0.000001", "completion": "0.000002"}))]
         catalog = patch.object(models, "catalog", return_value=self.catalog)
         catalog.start()
         self.addCleanup(catalog.stop)
+        # The catalog cache is never the owner's: effort ladders come from the
+        # fixture above, never ~/.cache/jarvis.
+        cache =patch.object(config, "MODEL_CACHE_PATH", self.root / "catalog.json")
+        cache.start()
+        self.addCleanup(cache.stop)
+        info = patch.object(models, "cached_info",
+                            side_effect=lambda model_id: next((m for m in self.catalog if m.id == model_id), None))
+        info.start()
+        self.addCleanup(info.stop)
+        routing = patch.object(config, "ROUTING_PATH", self.root / "routing.json")
+        routing.start()
+        self.addCleanup(routing.stop)
+        always = patch.object(config, "V2_ALWAYS_ASK", self.root / "always-ask.json")
+        always.start()
+        self.addCleanup(always.stop)
         # The owner's real Claude login must not be read, and the suite must
         # not call the usage endpoint. A missing file is "not reported".
         creds = patch.dict("os.environ", {
@@ -750,6 +798,199 @@ class Backend(unittest.TestCase):
         # Effort goes to /models {model, effort}, and does not move the selection.
         self.request("POST", "/models", {"model": "test/model", "effort": ""})
         self.assertEqual(models.selected(), "test/model")
+
+    # -- the model a chat thread runs on (decisions 2026-10-06, part A) ------
+
+    def model_fakes(self):
+        fakes = {name: ModelFake(name) for name in P}
+        self.daemon.providers.update(fakes)
+        return fakes
+
+    def chat(self, provider="fast", status=201, **brief):
+        return self.request("POST", "/threads", {"project_id": self.project.id, "role": "chat",
+                                                 "provider": provider, "brief": brief}, status=status)
+
+    def send_and_settle(self, thread_id, text="hi"):
+        self.request("POST", f"/threads/{thread_id}/send", {"text": text}, status=202)
+        eventually(lambda: self.daemon._sessions[thread_id].worker is None)
+
+    def brief_bytes(self, thread_id):
+        return self.stores.threads.path(thread_id).with_name("brief.json").read_bytes()
+
+    def test_open_thread_checks_the_model_before_anything_exists(self):
+        fakes = self.model_fakes()
+        self.request("POST", "/models", {"add": "test/thinker"})
+        body = self.chat(model="test/thinker", effort="low")
+        self.assertEqual((body["model"], body["effort"]), ("test/thinker", "low"))
+        self.assertEqual((fakes[P.FAST].opened[-1][1].model, fakes[P.FAST].opened[-1][1].effort),
+                         ("test/thinker", "low"))
+        before = len(self.stores.threads.list())
+        for brief, reason in (({"model": "test/model-gone"}, "supports tool calling"),
+                              ({"model": "test/thinker", "effort": "max"}, "does not offer 'max'"),
+                              ({"model": "test/thinker", "effort": "turbo"}, "not a reasoning effort")):
+            self.assertIn(reason, self.chat(status=400, **brief)["error"])
+        self.request("POST", "/models", {"remove": "test/thinker"})
+        self.assertIn("not on your model roster", self.chat(status=400, model="test/thinker")["error"])
+        self.assertEqual(len(self.stores.threads.list()), before, "a refused model leaves no thread behind")
+        self.assertIn("not a Claude model", self.chat("claude", status=400, model="test/thinker")["error"])
+
+    def test_claude_and_codex_chat_threads_are_full_agents_behind_the_gate(self):
+        """A1: a Claude or Codex chat thread runs in the thread's folder under
+        the project's profile, its tool calls through the §6 permit — the
+        same `build_permit` every task worker gets — and its approvals reach
+        the owner through the daemon's broker."""
+        fake = ModelFake(P.CLAUDE)
+        gate = Daemon(Stores(self.root / "gate"), {P.CLAUDE: fake, P.CODEX: ModelFake(P.CODEX)}, None, 0)
+        self.addCleanup(gate.stop)
+        project = gate.stores.projects.create("Gated", str(self.project_root), always_ask=["make deploy"])
+        thread = gate.open_thread(project.id, Role.CHAT, P.CLAUDE, {})
+        mode, brief = fake.opened[-1]
+        self.assertEqual(mode, "start")
+        self.assertEqual((brief.model, brief.effort), ("claude-opus-5-5", "high"), "A5: Opus 5.5 at high")
+        self.assertIsNone(thread.model, "a default thread stores no pin")
+        self.assertEqual(brief.cwd, str(self.project_root))
+        self.assertEqual(brief.profile, project.profile)
+        self.assertEqual(brief.always_ask, ["make deploy"])
+        self.assertIsNone(brief.allowed_tools, "a full agent: the provider's whole native toolset")
+        self.assertIn("chat thread", brief.system_append)
+        saved = json.loads(gate.stores.threads.path(thread.id).with_name("brief.json").read_text())
+        self.assertIsNone(saved["model"], "the saved brief keeps the choice (default), not a resolution")
+        permit = fake.permits[-1]
+        # Layer 1: never approvable, never asked of anyone.
+        self.assertEqual(permit("Bash", {"command": "sudo rm -rf /"}, brief), Decision.DENY)
+        self.assertEqual(gate.approvals.pending(), [])
+        # Layer 2: the project's always-ask addition reaches the owner's broker.
+        answer = {}
+        asker = threading.Thread(target=lambda: answer.setdefault(
+            "d", permit("Bash", {"command": "make deploy"}, brief)), daemon=True)
+        asker.start()
+        eventually(lambda: gate.approvals.pending())
+        pending = gate.approvals.pending()[0]
+        self.assertEqual((pending.thread_id, pending.command), (thread.id, "make deploy"))
+        gate.resolve_approval(pending.req_id, Decision.DENY)
+        asker.join(4)
+        self.assertEqual(answer["d"], Decision.DENY)
+        # (A Codex chat thread gets the same brief and permit; the real
+        # provider refuses a brief with always_ask additions it cannot
+        # enforce — codex_provider_check covers that refusal.)
+        codex = gate.open_thread(project.id, Role.CHAT, P.CODEX, {})
+        _, codex_brief = gate.providers[P.CODEX].opened[-1]
+        self.assertEqual((codex_brief.model, codex_brief.effort), ("gpt-6-astra", "xhigh"),
+                         "A5: Codex's routing default")
+        self.assertEqual(codex_brief.always_ask, ["make deploy"])
+        self.assertIsNone(codex.model)
+
+    def test_patch_model_applies_from_the_next_message_and_never_touches_the_brief(self):
+        fakes = self.model_fakes()
+        self.request("POST", "/models", {"add": "test/thinker"})
+        thread = self.chat()
+        tid = thread["id"]
+        saved = self.brief_bytes(tid)
+        self.send_and_settle(tid)
+        self.events_all()
+        body = self.request("PATCH", f"/threads/{tid}", {"model": "test/thinker"})
+        self.assertEqual((body["model"], body["effort"]), ("test/thinker", None))
+        stored = self.stores.threads.get(tid)
+        self.assertEqual((stored.model, stored.effort), ("test/thinker", None))
+        self.assertEqual(self.daemon._sessions[tid].thread.model, "test/thinker")
+        self.assertEqual(self.brief_bytes(tid), saved, "brief.json is never rewritten")
+        self.assertEqual(fakes[P.FAST].changes, [], "nothing changes until the next message")
+        published = [e for e in self.events_all() if e["kind"] in ("thread_updated", "model_set")]
+        self.assertEqual([e["kind"] for e in published], ["model_set", "thread_updated"])
+        self.assertEqual(published[1]["data"]["effective_effort"], "high")
+        self.send_and_settle(tid)
+        self.assertEqual(fakes[P.FAST].changes, [("test/thinker", "high")])
+        usage = [r for r in self.stores.threads.read_log(tid) if r.get("kind") == "usage"]
+        self.assertEqual((usage[0]["data"]["model"], usage[-1]["data"]["model"]),
+                         (models.tier("orchestrator"), "test/thinker"), "each turn records its model")
+        # Effort alone; then back to default; each a system line.
+        self.request("PATCH", f"/threads/{tid}", {"effort": "low"})
+        self.request("PATCH", f"/threads/{tid}", {"model": None})
+        self.assertEqual((self.stores.threads.get(tid).model, self.stores.threads.get(tid).effort), (None, None))
+        lines = [m for m in self.request("GET", f"/threads/{tid}/transcript")["messages"] if m["role"] == "system"]
+        self.assertEqual(len(lines), 3, lines)
+        self.assertIn("test/thinker · high (from the next message)", lines[0]["text"])
+        self.assertIn("test/thinker · low", lines[1]["text"])
+        self.assertIn("default", lines[2]["text"])
+        self.assertEqual(self.brief_bytes(tid), saved)
+        # Refusals, with the reason; none changes anything.
+        self.assertIn("does not offer", self.request("PATCH", f"/threads/{tid}",
+                      {"model": "test/thinker", "effort": "xhigh"}, status=400)["error"])
+        self.assertIn("supports tool calling", self.request("PATCH", f"/threads/{tid}",
+                      {"model": "nope/nope"}, status=400)["error"])
+        self.request("PATCH", f"/threads/{tid}", {"model": "test/thinker", "project_id": self.second.id}, status=400)
+        self.request("PATCH", f"/threads/{tid}", {}, status=400)
+        self.request("PATCH", f"/threads/{tid}", {"provider": "claude"}, status=400)
+        self.assertEqual(self.stores.threads.get(tid).model, None)
+
+    def test_a_default_thread_follows_a_global_change_between_turns(self):
+        fakes = self.model_fakes()
+        self.request("POST", "/models", {"add": "test/thinker"})
+        tid = self.chat()["id"]
+        self.send_and_settle(tid)
+        self.assertEqual(fakes[P.FAST].changes, [])
+        self.request("POST", "/model", {"model": "test/thinker"})   # the global picker
+        self.send_and_settle(tid)
+        self.assertEqual(fakes[P.FAST].changes, [("test/thinker", "high")],
+                         "an open default thread must pick up the global choice at its next turn")
+        lines = [m["text"] for m in self.request("GET", f"/threads/{tid}/transcript")["messages"]
+                 if m["role"] == "system"]
+        self.assertEqual(lines, ["model → test/thinker · high (follows the default)"])
+        self.send_and_settle(tid)
+        self.assertEqual(len(fakes[P.FAST].changes), 1, "no change, no call")
+
+    def test_a_pin_survives_a_global_change_and_a_resume(self):
+        fakes = self.model_fakes()
+        self.request("POST", "/models", {"add": "test/thinker"})
+        tid = self.chat()["id"]
+        saved = self.brief_bytes(tid)
+        self.request("PATCH", f"/threads/{tid}", {"model": "test/thinker", "effort": "medium"})
+        self.request("POST", "/models", {"add": "test/model"})
+        self.request("POST", "/model", {"model": "test/model"})
+        self.request("POST", "/models", {"remove": "test/thinker"})       # A3: stays pinned
+        self.daemon.close_thread(tid)
+        self.send_and_settle(tid)
+        mode, brief = fakes[P.FAST].opened[-1]
+        self.assertEqual((mode, brief.model, brief.effort), ("resume", "test/thinker", "medium"))
+        self.assertEqual(self.brief_bytes(tid), saved)
+        self.assertEqual(fakes[P.FAST].changes, [], "the resume opened on the pin; nothing to change")
+        # An effort change on the off-roster pin is still allowed (A3).
+        self.request("PATCH", f"/threads/{tid}", {"effort": "low"})
+
+    def test_patch_mid_turn_lands_on_the_next_turn(self):
+        fakes = self.model_fakes()
+        self.request("POST", "/models", {"add": "test/thinker"})
+        tid = self.chat()["id"]
+        fakes[P.FAST].hold = threading.Event()
+        self.request("POST", f"/threads/{tid}/send", {"text": "long"}, status=202)
+        eventually(fakes[P.FAST].entered.is_set)
+        self.request("PATCH", f"/threads/{tid}", {"model": "test/thinker"})
+        self.assertEqual(fakes[P.FAST].changes, [])
+        fakes[P.FAST].hold.set()
+        eventually(lambda: self.daemon._sessions[tid].worker is None)
+        fakes[P.FAST].hold = None
+        self.assertEqual(self.stores.threads.get(tid).model, "test/thinker",
+                         "the turn's own saves must not write the old choice back")
+        self.send_and_settle(tid)
+        self.assertEqual(fakes[P.FAST].changes, [("test/thinker", "high")])
+
+    def test_patch_refuses_task_threads_and_providers_that_cannot_switch(self):
+        self.model_fakes()
+        task = self.stores.tasks.create(self.project.id, "work")
+        thread = self.thread(task_id=task.id)
+        self.request("PATCH", f"/threads/{thread.id}", {"model": "test/model"}, status=409)
+        self.daemon.providers[P.CODEX] = Fake(P.CODEX)
+        codex = self.thread(P.CODEX)
+        self.assertIn("cannot change model", self.request(
+            "PATCH", f"/threads/{codex.id}", {"model": "gpt-5.5"}, status=409)["error"])
+
+    def test_thread_models_lists_each_providers_own_models(self):
+        body = self.request("GET", "/thread-models")["providers"]
+        self.assertEqual(set(body), {"fast", "claude", "codex"})
+        self.assertEqual(body["claude"]["default"], "claude-opus-5-5")
+        self.assertEqual(body["claude"]["default_effort"], "high")
+        self.assertEqual(body["fast"]["default"], models.tier("orchestrator"))
+        self.assertIn("gpt-5.6-sol", [m["id"] for m in body["codex"]["models"]])
 
 
 class CronChecks(unittest.TestCase):

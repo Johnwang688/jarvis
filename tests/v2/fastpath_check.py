@@ -656,6 +656,106 @@ def isolation_checks() -> None:
     print("ok  isolation: two concurrent handles share no proposal and no transcript")
 
 
+def _roster(selected: str = "", models=("other/model",)) -> None:
+    """Write the (temp) roster directly: the default plus `models`."""
+    config.MODELS_PATH.write_text(json.dumps({
+        "models": [config.TIERS["orchestrator"], *models], "selected": selected, "efforts": {}}))
+
+
+def model_checks() -> None:
+    """Decisions A1/A5: a default handle follows the global picker on every
+    turn; a pinned one does not; a change lands at a turn boundary only."""
+    seen: list[tuple[str, object]] = []
+    gate = threading.Event()
+    hold = threading.Event()
+
+    def fake(model, messages, tools=None, on_delta=None, **kw):
+        if tools is None:
+            return reply("a title")   # the session titler (cheap tier), not the turn
+        seen.append((model, kw.get("effort")))
+        if hold.is_set() and not any(m.get("role") == "tool" for m in messages):
+            gate.set()        # turn 1 is in its first call: the model changes now
+            return reply("", [("get_datetime", "{}")])
+        return reply("done")
+
+    provider = FastPathProvider()
+    _roster("")
+    default = provider.start(thread("dflt"), brief(), allow_all)
+    pinned = provider.start(thread("pin"), brief(model="other/model"), allow_all)
+    with scripted(fake):
+        drain(provider, default)
+        assert seen[-1][0] == config.TIERS["orchestrator"], seen
+        _roster("other/model")                     # the owner picks another model globally
+        drain(provider, default)
+        assert seen[-1][0] == "other/model", f"a default handle must follow the global choice: {seen}"
+        seen.clear()
+        _roster(config.TIERS["orchestrator"])
+        drain(provider, pinned)
+        assert seen and all(m == "other/model" for m, _ in seen), f"a pin must ignore the global: {seen}"
+
+        # set_model during turn 1: every call of turn 1 stays on the old model.
+        seen.clear()
+        hold.set()
+        changer = threading.Thread(target=lambda: (gate.wait(5),
+                                                   provider.set_model(pinned, "third/model", "low")))
+        changer.start()
+        first = drain(provider, pinned)
+        changer.join(5)
+        hold.clear()
+        assert len(seen) == 2 and all(m == "other/model" for m, _ in seen), \
+            f"a change mid-turn must not move that turn's calls: {seen}"
+        usage = [e for e in first if e.kind is EventKind.USAGE]
+        assert usage and usage[-1].data["provider_reported"]["model"] == "other/model", usage
+        seen.clear()
+        second = drain(provider, pinned)
+        assert seen == [("third/model", "low")], f"the next turn runs the new pair: {seen}"
+        assert one(second, EventKind.USAGE).data["provider_reported"]["model"] == "third/model"
+
+        # effort None keeps v1's per-model resolution (models.effort_for).
+        seen.clear()
+        provider.set_model(pinned, "third/model", None)
+        drain(provider, pinned)
+        from jarvis import models
+        assert seen == [("third/model", models.effort_for("third/model"))], seen
+        # "" sends no effort at all (a model with no reasoning control).
+        seen.clear()
+        provider.set_model(pinned, "third/model", "")
+        drain(provider, pinned)
+        assert seen == [("third/model", None)], seen
+    for h in (default, pinned):
+        provider.close(h)
+    try:
+        provider.set_model(pinned, "x/y", None)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("set_model on a closed handle must refuse")
+    _roster("")
+    print("ok  model: default follows the global per turn, a pin does not, a change waits for the next turn")
+
+
+def no_self_switch_checks() -> None:
+    """The agent has no lever on its own model or provider (decisions A1).
+
+    Only the owner changes them, through PATCH /threads/{id}. A tool that
+    could would let a thread pick itself something cheaper — or dearer — with
+    nobody asked, so this is asserted by name and by what the code calls.
+    """
+    from jarvis.v2 import mcp
+    reachable = set(fastpath.FAST_TOOLS) | set(mcp.MCP_TOOLS)
+    for name in sorted(reachable):
+        assert not any(word in name for word in ("model", "provider", "effort")), name
+    for name, tool in tools.REGISTRY.items():
+        assert not any(word in name for word in ("set_model", "thread_model", "set_provider")), name
+    roots = [Path(fastpath.__file__).parents[1] / "tools", Path(tools.__file__).parent]
+    for root in roots:
+        for path in root.rglob("*.py"):
+            text = path.read_text()
+            for needle in ("set_thread_model", "thread_model", ".set_model(", "models.select(", "models.set_effort("):
+                assert needle not in text, f"{path} reaches {needle}"
+    print("ok  guard: no fast-path, MCP or registered tool can change a thread's model or provider")
+
+
 def main() -> int:
     boundary_checks()
     validation_checks()
@@ -674,6 +774,8 @@ def main() -> int:
     answer_checks()
     usage_checks()
     isolation_checks()
+    model_checks()
+    no_self_switch_checks()
     print("\nall fast-path checks passed")
     return 0
 

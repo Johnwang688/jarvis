@@ -1013,6 +1013,83 @@ def secrets_checks() -> None:
 # --- main -------------------------------------------------------------------
 
 
+def set_model_checks() -> None:
+    """Decisions A1: a chat thread's model or effort changes between turns by
+    resuming the same session with new options — and keeps the gate."""
+    provider = claude.ClaudeProvider()
+    chat = Thread(id="chat", project_id="p1", role=Role.CHAT, provider=ProviderName.CLAUDE)
+    with fake([result_message()]):
+        handle = provider.start(chat, brief(role=Role.CHAT, model="claude-opus-5-5", effort="high"), allow)
+        first = FakeClient.instances[-1]
+        eq((first.options.model, first.options.effort), ("claude-opus-5-5", "high"), "set_model: opened on the chosen pair")
+        drain(provider, handle, "one")
+        provider.set_model(handle, "claude-sonnet-5-5", "low")
+        second = FakeClient.instances[-1]
+        check(second is not first and first.disconnects == 1, "set_model: the old client is disconnected, a new one connected")
+        eq((second.options.model, second.options.effort), ("claude-sonnet-5-5", "low"), "set_model: the new client runs the new pair")
+        eq(second.options.resume, SESSION_ID, "set_model: it resumes the same session (the conversation is kept)")
+        check(second.options.hooks["PreToolUse"][0].hooks and second.options.allowed_tools == [],
+              "set_model: the PreToolUse gate travels to the new client, allowed_tools stays empty")
+        eq(second.options.permission_mode, "auto", "set_model: the profile's permission mode is unchanged")
+        drain(provider, handle, "two")
+        eq(second.queries, ["two"], "set_model: the next turn goes to the new client")
+        eq(handle.native.brief.model, "claude-sonnet-5-5", "set_model: the session's brief carries the new model")
+
+        count = len(FakeClient.instances)
+        try:
+            provider.set_model(handle, "claude-sonnet-5-5", "ultra")
+        except BriefRefused as exc:
+            check("ultra" in str(exc), "set_model: an off-ladder effort is refused by name")
+        else:
+            check(False, "set_model: an off-ladder effort is refused")
+        eq(len(FakeClient.instances), count, "set_model: a refused effort spawns nothing")
+
+        handle.native.sending.acquire()
+        try:
+            provider.set_model(handle, "claude-opus-5-5", "high")
+        except ValueError as exc:
+            check("turn" in str(exc), "set_model: refused while a turn is running")
+        else:
+            check(False, "set_model: refused while a turn is running")
+        finally:
+            handle.native.sending.release()
+        provider.close(handle)
+
+    # A reconnect that fails puts the old pair back and says so.
+    original = claude._client_factory
+
+    def failing(options):
+        client = FakeClient(options, [result_message()])
+        if options.model == "claude-fable-5-1":
+            async def refuse():
+                raise RuntimeError("model not available on this plan")
+            client.connect = refuse
+        return client
+
+    FakeClient.instances = []
+    claude._client_factory = failing
+    try:
+        fresh = provider.start(Thread(id="chat2", project_id="p1", role=Role.CHAT,
+                                      provider=ProviderName.CLAUDE),
+                               brief(role=Role.CHAT, model="claude-opus-5-5", effort="high"), allow)
+        try:
+            provider.set_model(fresh, "claude-fable-5-1", "high")
+        except BriefRefused as exc:
+            check("claude-fable-5-1" in str(exc) and "not available" in str(exc),
+                  "set_model: a failed switch is refused with the reason")
+        else:
+            check(False, "set_model: a failed switch raises")
+        restored = FakeClient.instances[-1]
+        eq((restored.options.model, restored.connected), ("claude-opus-5-5", True),
+           "set_model: the old model is reconnected after a failed switch")
+        eq(restored.options.resume, None, "set_model: before any turn there is nothing to resume")
+        eq(restored.options.session_id, fresh.provider_session_id, "set_model: the same session id is kept")
+        eq(fresh.native.brief.model, "claude-opus-5-5", "set_model: the brief keeps the old model")
+        provider.close(fresh)
+    finally:
+        claude._client_factory = original
+
+
 def main() -> int:
     health_checks()
     options_checks()
@@ -1025,6 +1102,7 @@ def main() -> int:
     usage_checks()
     isolation_checks()
     secrets_checks()
+    set_model_checks()
     if _failures:
         print(f"\n{len(_failures)} check(s) FAILED:")
         for label in _failures:

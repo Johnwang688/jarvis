@@ -5,7 +5,7 @@ Threads save their Brief beside thread.json so resuming never invents a policy.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, replace
 import errno
 import http.client
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -96,6 +96,11 @@ class _Session:
     turn_id: str | None = None
     token_baseline: int = 0
     cost_baseline: float = 0.0
+    # Chat threads only: the (model, effort) the provider is running now, and
+    # the last one the transcript announced. A turn starts by comparing the
+    # thread's effective choice with `applied` (thread_model, decisions A1/A7).
+    applied: tuple | None = None
+    announced: tuple | None = None
 
 
 class Daemon:
@@ -226,6 +231,8 @@ class Daemon:
                 raise APIError(400, "brief task belongs to another project")
         if provider not in self.providers:
             raise DaemonError(f"provider {provider.value} unavailable: not in roster")
+        if role == Role.CHAT and brief.task_id is None:
+            brief = self._chat_brief(provider, brief)
         with self._lock:
             self._active()
             thread = self.stores.threads.create(project_id, role, provider,
@@ -246,9 +253,14 @@ class Daemon:
             session = _Session(thread, brief, provider)
             self._sessions[thread.id] = session
         try:
-            permit = self.permit_factory(thread.id, brief)
+            # The saved brief is never rewritten; a chat thread's provider is
+            # handed a copy carrying the thread's current choice instead, so a
+            # resume picks up a model changed since open (decisions A1). The
+            # permit is built over that same copy: one brief per session.
+            run_brief = self._run_brief(session)
+            permit = self.permit_factory(thread.id, run_brief)
             method = provider.resume if thread.provider_session_id else provider.start
-            handle = method(thread, brief, permit)
+            handle = method(thread, run_brief, permit)
             session.handle = handle
             usage = provider.usage(handle)
             session.token_baseline = usage.work_tokens
@@ -266,6 +278,122 @@ class Daemon:
             with self._lock:
                 self._sessions.pop(thread.id, None)
             raise
+
+    # -- the model a chat thread runs on (decisions 2026-10-06, part A) ------
+
+    def _chat_brief(self, provider, brief):
+        """A chat thread's brief: its model checked before anything is
+        created, and on Claude or Codex the chat role's prose. The gate is
+        not here — it is the same §6 permit every thread gets in `_open`."""
+        from . import roles, thread_model
+        try:
+            model, effort = thread_model.check(provider, brief.model, brief.effort)
+        except thread_model.ChoiceRefused as exc:
+            raise APIError(400, str(exc)) from exc
+        if model is None and effort is not None:
+            model = thread_model.default_model(provider)
+        changes = {"model": model, "effort": effort}
+        if provider in (ProviderName.CLAUDE, ProviderName.CODEX) and not brief.system_append:
+            changes["system_append"] = roles.brief_for(Role.CHAT).system_append
+        return replace(brief, **changes)
+
+    def _run_brief(self, session):
+        """The brief a provider is started with: the saved one, plus — for an
+        owner's chat thread — the thread's effective (model, effort)."""
+        from . import thread_model
+        if not thread_model.is_chat(session.thread):
+            return session.brief
+        choice = thread_model.effective(session.thread)
+        session.applied = session.announced = choice
+        return replace(session.brief, model=choice[0], effort=choice[1])
+
+    def _apply_choice(self, session):
+        """At a turn's start: hand the provider a changed choice. A default
+        thread follows the global picker here, every turn, and a change the
+        owner did not just make in this thread is written to its log."""
+        from . import thread_model
+        if session.applied is None or not thread_model.is_chat(session.thread):
+            return
+        with self._lock:
+            want = thread_model.effective(session.thread)
+            if want == session.applied:
+                return
+        setter = getattr(session.provider, "set_model", None)
+        if setter is None:
+            raise DaemonError(f"the {session.thread.provider.value} provider cannot change "
+                              "model mid-thread; the thread keeps " + thread_model.label(*session.applied))
+        setter(session.handle, *want)
+        with self._lock:
+            session.applied = want
+            if want != session.announced:
+                session.announced = want
+                self._model_line(session.thread, want, "follows the default")
+
+    def _model_line(self, thread, choice, why):
+        from . import thread_model
+        text = f"model → {thread_model.label(*choice)} ({why})"
+        record = {"kind": "model_set", "at": utcnow(), "thread_id": thread.id,
+                  "project_id": thread.project_id, "event_id": uuid.uuid4().hex,
+                  "data": {"provider": thread.provider.value, "model": thread.model,
+                           "effort": thread.effort, "effective_model": choice[0],
+                           "effective_effort": choice[1], "text": text}}
+        self.stores.threads._append(thread.id, "log.jsonl", record)
+        self.bus.publish(record)
+        return text
+
+    def set_thread_model(self, thread_id, body) -> dict:
+        """`PATCH /threads/{id}` `{model?, effort?}`. Applies from the next
+        message, never in the middle of a turn; `brief.json` is untouched.
+
+        `model: null` returns the thread to the default and resets its
+        effort; a new model resets the effort to that model's default unless
+        one is given with it; an effort alone on a default thread pins the
+        default model it is an effort *of*.
+        """
+        from . import thread_model
+        thread = self.require(self.stores.threads, thread_id)
+        if not thread_model.is_chat(thread):
+            raise APIError(409, "a task's threads run the model routing gave them")
+        provider = self.providers.get(thread.provider)
+        if provider is not None and not hasattr(provider, "set_model"):
+            raise APIError(409, f"the {thread.provider.value} provider cannot change model mid-thread")
+        if "model" in body:
+            model = body["model"]
+            effort = body.get("effort")
+        else:
+            model = thread.model
+            effort = body["effort"]
+        try:
+            model, effort = thread_model.check(thread.provider, model, effort, current=thread.model)
+            if model is None and effort is not None:
+                model = thread_model.default_model(thread.provider)
+        except thread_model.ChoiceRefused as exc:
+            raise APIError(400, str(exc)) from exc
+        with self._lock:
+            self._active()
+            thread = self.require(self.stores.threads, thread_id)
+            before = (thread.model, thread.effort)
+            thread.model, thread.effort = model, effort
+            thread.updated = utcnow()
+            self.stores.threads.save(thread)
+            session = self._sessions.get(thread.id)
+            if session is not None:
+                # The live record is saved again on every usage and finish;
+                # keep it in step so a turn in flight cannot write the old
+                # choice back over this one.
+                session.thread.model, session.thread.effort = model, effort
+            choice = thread_model.effective(thread)
+            if before != (model, effort):
+                if session is not None:
+                    session.announced = choice
+                self._model_line(thread, choice, "default, from the next message" if model is None
+                                 else "from the next message")
+            record = self.thread_json(thread)
+            self.bus.publish({"kind": "thread_updated", "thread_id": thread.id,
+                              "project_id": thread.project_id,
+                              "data": {**record, "effective_model": choice[0],
+                                       "effective_effort": choice[1]}})
+            return record
 
     def thread_json(self, thread) -> dict:
         """A thread on the wire, with `cwd` filled from its saved brief for
@@ -387,6 +515,14 @@ class Daemon:
                 self.stores.threads.save(thread)
             record = {**to_json(event), "project_id": thread.project_id, "turn_id": session.turn_id,
                       "at": utcnow(), "event_id": uuid.uuid4().hex}
+            if event.kind == EventKind.USAGE:
+                # Which model answered, per turn, in the durable record: a
+                # chat thread can change model mid-conversation now (A1, A7).
+                # A task thread runs what its brief named.
+                brief = getattr(session, "brief", None)
+                model, effort = (getattr(session, "applied", None)
+                                 or (getattr(brief, "model", None), getattr(brief, "effort", None)))
+                record["data"] = {**record.get("data", {}), "model": model, "effort": effort}
             if event.kind != EventKind.TEXT_DELTA:
                 # WP1 log() accepts text only; preserve full structured events
                 # through its serialized append primitive, in the same log.
@@ -423,6 +559,7 @@ class Daemon:
         try:
             if session.cancelled.is_set():
                 return
+            self._apply_choice(session)
             cancel_forwarded = False
             for event in session.provider.send(session.handle, message):
                 if event.thread_id != session.thread.id:

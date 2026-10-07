@@ -748,9 +748,21 @@ def route(handler, daemon, parts, query):
                 if mode is not None:
                     target.chmod(mode)
                 return 200, {"mtime": target.stat().st_mtime}
+    if parts == ["thread-models"] and method == "GET":
+        # What the input bar's provider/model/effort chips offer (decisions A2).
+        from . import thread_model
+        _object(query, ())
+        return 200, thread_model.describe()
     if len(parts) == 2 and parts[0] == "threads" and method == "PATCH":
         _object(query, ())
-        body = _object(handler._body(), ("project_id",), ("project_id",))
+        body = _object(handler._body(), ("project_id", "model", "effort"))
+        if "model" in body or "effort" in body:
+            # A chat thread's model and effort, from its next message on.
+            # Never its provider: a session cannot change provider.
+            if "project_id" in body:
+                fail(400, "move a thread and change its model in separate requests")
+            return 200, daemon.set_thread_model(parts[1], body)
+        _object(body, ("project_id",), ("project_id",))
         with daemon._lock:
             daemon._active()
             thread = daemon.require(stores.threads, parts[1])
@@ -783,12 +795,13 @@ def route(handler, daemon, parts, query):
             messages = []
             for row in stores.threads.read_log(thread.id):
                 kind = row.get("kind")
-                if kind not in (None, "text", "user"):
+                if kind not in (None, "text", "user", "model_set"):
                     continue
                 data = row.get("data", row)
                 text = data.get("text")
                 if isinstance(text, str):
-                    role = "assistant" if kind == "text" else "user" if kind == "user" else row.get("role", "assistant")
+                    role = ("assistant" if kind == "text" else "user" if kind == "user"
+                            else "system" if kind == "model_set" else row.get("role", "assistant"))
                     messages.append(dict(role=role, text=text, at=row.get("at", row.get("t"))))
             return 200, {"messages": messages}
     if len(parts) in (3, 4) and parts[0] == "tasks" and method == "GET":

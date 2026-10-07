@@ -128,7 +128,25 @@ sources do not settle the question rather than filling the gap.
 """.strip()
 
 
+_CHAT = """
+You are Jarvis, talking with the owner directly in one chat thread of a
+project, as a full agent working in that project's folder. There is no task
+around this conversation: no spec, no plan, no reviewer. The owner is reading
+your replies as they arrive and will steer you in the next message.
+
+Do what the owner asks in this thread, and say plainly what you changed, ran
+or could not do. Your tool calls pass through the owner's permission rules for
+this project; a call that is denied was denied on purpose, so do not retry it
+or work around it. Do not push, deploy or send anything outward unless the
+owner asked for exactly that in this conversation.
+""".strip()
+
+
 BRIEFS: dict[Role, RoleBrief] = {
+    # A chat thread on Claude or Codex (decisions A1). The fast path does not
+    # read this — it carries its own prompt — and neither does any task: the
+    # runner only asks for the four task roles.
+    Role.CHAT: RoleBrief(Role.CHAT, _CHAT, None, None),
     Role.ORCHESTRATOR: RoleBrief(Role.ORCHESTRATOR, _ORCHESTRATOR, READ_ONLY_TOOLS,
                                  MAX_TURNS["orchestrator"]),
     Role.IMPLEMENTER: RoleBrief(Role.IMPLEMENTER, _IMPLEMENTER, None,

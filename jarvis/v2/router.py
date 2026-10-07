@@ -29,6 +29,39 @@ CLI_PROVIDERS = ("claude", "codex")
 EFFORTS = ("default", "none", "minimal", "low", "medium", "high", "xhigh", "max")
 _CONFIG_LOCK = threading.RLock()
 
+# The models each CLI provider can be asked for by name, with the efforts each
+# one takes and whether it can see an image. One table, read by the
+# capability filter below (vision), by the per-thread model check
+# (`thread_model`) and by the HUD's model chip — so the router, the check and
+# the list cannot disagree about what exists.
+#
+# Claude: Claude Code's own model ids; `--effort` is the SDK's `EffortLevel`
+# (`providers/claude.py` `EFFORT_LEVELS`), and Haiku 4.5 has no effort control.
+# Codex: the models the routing defaults and the vision filter already named;
+# the app-server's ReasoningEffort is "a value advertised by the model", so
+# the ladder here is the one the routing defaults use (high, xhigh) and its
+# neighbours. Both lists are a statement of what Jarvis will ask for, not a
+# live probe; a model missing here is refused by name rather than guessed at.
+_CLAUDE_EFFORTS = ("low", "medium", "high", "xhigh", "max")
+_CODEX_EFFORTS = ("low", "medium", "high", "xhigh")
+CLI_MODELS: dict[str, dict[str, dict]] = {
+    "claude": {
+        "claude-opus-5-5": {"name": "Claude Opus 5.5", "efforts": _CLAUDE_EFFORTS, "vision": True},
+        "claude-sonnet-5-5": {"name": "Claude Sonnet 5.5", "efforts": _CLAUDE_EFFORTS, "vision": True},
+        "claude-fable-5-1": {"name": "Claude Fable 5.1", "efforts": _CLAUDE_EFFORTS, "vision": True},
+        "claude-opus-5": {"name": "Claude Opus 5", "efforts": _CLAUDE_EFFORTS, "vision": True},
+        "claude-sonnet-5": {"name": "Claude Sonnet 5", "efforts": _CLAUDE_EFFORTS, "vision": True},
+        "claude-haiku-4-5": {"name": "Claude Haiku 4.5", "efforts": (), "vision": True},
+    },
+    "codex": {
+        "gpt-6-astra": {"name": "GPT-6 Astra", "efforts": _CODEX_EFFORTS, "vision": True},
+        "gpt-5.6-sol": {"name": "GPT-5.6 Sol", "efforts": _CODEX_EFFORTS, "vision": True},
+        "gpt-5.6-terra": {"name": "GPT-5.6 Terra", "efforts": _CODEX_EFFORTS, "vision": True},
+        "gpt-5.6-luna": {"name": "GPT-5.6 Luna", "efforts": _CODEX_EFFORTS, "vision": True},
+        "gpt-5.5": {"name": "GPT-5.5", "efforts": _CODEX_EFFORTS, "vision": True},
+    },
+}
+
 
 @dataclass(frozen=True)
 class Incoming:
@@ -270,7 +303,7 @@ def resolve(role, task, project, ledger, providers, *, brief=None, images=None,
                 info = models.cached_info(model)
                 capable = info is None or info.vision
             else:
-                capable = model in {"gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5"}
+                capable = bool(CLI_MODELS["codex"].get(model, {}).get("vision"))
             if not capable:
                 problems.append(f"4 capability filter: model {model} is not known image-capable")
         # Both merged adapters accept explicit MCP configs. Future/fake adapters
