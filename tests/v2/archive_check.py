@@ -574,6 +574,16 @@ class TrashUnit(unittest.TestCase):
         self.assertTrue((self.root / "Trash" / "files" / foreign["name"]).exists())
         self.assertTrue((self.root / "Trash" / "info" / (foreign["name"] + ".trashinfo")).exists())
 
+    def test_a_planted_dotdot_entry_cannot_empty_the_whole_trash(self):
+        foreign = self.trash.put(self.item("theirs", self.root / "desktop"))
+        info = self.root / "Trash" / "info"
+        (info / "...trashinfo").write_text(
+            f"[Trash Info]\nPath={self.owned}/x\nDeletionDate=2020-01-01T00:00:00\n")
+        with self.assertRaises(T.TrashError):
+            self.trash.empty()
+        self.assertTrue((self.root / "Trash" / "files" / foreign["name"]).exists())
+        self.assertTrue((self.root / "Trash" / "info").is_dir())
+
     def test_retention_setting(self):
         for raw, days in (("", 30.0), ("7", 7.0), ("0", 30.0), ("-1", 30.0), ("soon", 30.0)):
             with self.subTest(raw=raw), patch.dict(os.environ, {"JARVIS_TRASH_DAYS": raw}):

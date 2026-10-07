@@ -200,8 +200,14 @@ class Trash:
             return None
 
     def _remove(self, entry: dict) -> None:
-        target = self.root / "files" / entry["name"]
-        if target.parent != self.root / "files":
+        name = entry["name"]
+        target = self.root / "files" / name
+        # `files/..` has `files` as its parent and *is* the trash itself, so a
+        # parent check alone would let a planted `...trashinfo` turn an empty
+        # into an rmtree of the owner's whole trash. Names are single, real
+        # path components or nothing happens.
+        if (not name or name in (".", "..") or "/" in name or "\0" in name
+                or target.parent != self.root / "files"):
             raise TrashError("refusing a trash entry outside the trash")
         if target.is_symlink() or target.is_file():
             target.unlink()
