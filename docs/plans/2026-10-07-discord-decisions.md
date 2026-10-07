@@ -117,8 +117,53 @@ keyword forms without acting on them. Accepted.
 
 ## Thread-to-thread messaging ([`2026-10-07-peers-plan.md`](2026-10-07-peers-plan.md))
 
-**P-0. Being clarified with the owner.**
-- The owner's own messages always run the thread they are sent to, and that is
-  unchanged.
-- The "never wakes" rule applies only to notes one Jarvis thread leaves for
-  another.
+**P-0. The owner's own messages always run the thread they are sent to.**
+Nothing in this plan changes that.
+
+**P-1. Threads may direct and steer each other, so they can collaborate.**
+Owner, 2026-10-07: read-only makes collaboration too hard. This overrides the
+plan's "notes never wake" and "consult mode is read-only" (decisions 1, 3
+and 5).
+- The plan is being revised.
+- The lead's proposed guardrails (the owner may overrule) are in the revised
+  plan.
+
+---
+
+## Discord open items, answered 2026-10-07
+
+**O1. DMs are only for ungrouped (Inbox) work.**
+- Work that belongs to a project goes to that project's channel.
+- *Interpretation:* every project gets a channel. The New Project box is on by
+  default, and the existing projects are backfilled once setup is done.
+- DM delivery remains only as a safety net when a project's channel is broken
+  (deleted by hand, or missing permission). The HUD light says so.
+
+**D6.** A task's Discord thread is created once the task actually starts
+(`clarifying`), after the proposal grace window. Yes.
+
+**O3. Where new project folders go:** `C:\Users\johnw\Jarvis\work`
+(`/mnt/c/Users/johnw/Jarvis/work`), with one subfolder per new project.
+- The owner asked for model-quality protection on folder creation (Claude
+  Sonnet or Opus, not a cheap model).
+- **Open:** the lead raised the `/mnt/c` speed trade-off and the fact that the
+  folder is made by code, not by a model. The owner is answering.
+
+**O4.** The parent folder must already exist; one `mkdir`. Yes.
+
+**O5.** An existing empty folder is used without asking; a non-empty one asks.
+Yes.
+
+**O6.** The setup command creates the "Jarvis" and "Jarvis Archive"
+categories, after a y/N prompt. Yes.
+
+**O7.** Crowding: at 45 of 50 channels, Jarvis asks to archive channels idle
+for **30 days**.
+- Confirmed: a channel is a project group, not a session.
+- Each task is a Discord thread inside its project's channel.
+
+**D5. No Administrator.** The owner switches the permissions on in Discord
+by hand.
+
+**R7 (channel privacy).** The server has one other member. The owner handles
+his access; nothing for Jarvis to do.
