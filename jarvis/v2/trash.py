@@ -4,8 +4,10 @@ Two destinations, chosen by where the thing lives:
 
 - **A Windows path** (`/mnt/<drive>/…`) goes to the Windows Recycle Bin,
   through PowerShell's `Microsoft.VisualBasic.FileIO.FileSystem` with
-  `SendToRecycleBin`. The path travels inside an `-EncodedCommand` as a
-  single-quoted PowerShell literal, so nothing in it is ever parsed as code.
+  `SendToRecycleBin`. The path never appears in the script as text: it is
+  carried as base64 of its UTF-8 bytes and decoded inside the script, so no
+  character in it — a quote, a curly quote PowerShell also reads as one, a
+  `$` or a backtick — is ever parsed as code.
 - **Anything else** goes to the freedesktop.org home trash,
   `$XDG_DATA_HOME/Trash/{files,info}`, with a `.trashinfo` beside each entry,
   so a file manager can show and restore it.
@@ -24,6 +26,7 @@ from __future__ import annotations
 import base64
 from datetime import datetime, timedelta
 import errno
+import logging
 import os
 from pathlib import Path
 import re
@@ -33,6 +36,7 @@ import time
 from typing import Callable
 from urllib.parse import quote, unquote
 
+LOG = logging.getLogger(__name__)
 DEFAULT_RETENTION_DAYS = 30.0
 _WINDOWS = re.compile(r"^/mnt/([a-zA-Z])(/.*)?$")
 
@@ -71,16 +75,25 @@ def windows_path(path: str | Path) -> str:
     return f"{match.group(1).upper()}:{rest or chr(92)}"
 
 
+def recycle_script(path: Path) -> str:
+    """The PowerShell that recycles `path`. The path is base64 data, decoded by
+    the script itself, never a literal: PowerShell treats U+2018-U+201B as
+    single quotes too, so escaping only `'` was not enough, and the only
+    escaping that cannot be incomplete is not parsing the path at all."""
+    data = base64.b64encode(windows_path(path).encode("utf-8")).decode("ascii")
+    method = "DeleteDirectory" if path.is_dir() else "DeleteFile"
+    return ("Add-Type -AssemblyName Microsoft.VisualBasic; "
+            f"$p = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('{data}')); "
+            f"[Microsoft.VisualBasic.FileIO.FileSystem]::{method}("
+            "$p, 'OnlyErrorDialogs', 'SendToRecycleBin')")
+
+
 def recycle_windows(path: Path) -> None:
     """Send one file or folder to the Windows Recycle Bin. Raises on failure."""
-    literal = windows_path(path).replace("'", "''")
+    script = recycle_script(path)
     exe = shutil.which("powershell.exe")
     if exe is None:
         raise TrashError("powershell.exe is not reachable from here")
-    method = "DeleteDirectory" if path.is_dir() else "DeleteFile"
-    script = ("Add-Type -AssemblyName Microsoft.VisualBasic; "
-              f"[Microsoft.VisualBasic.FileIO.FileSystem]::{method}("
-              f"'{literal}', 'OnlyErrorDialogs', 'SendToRecycleBin')")
     encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
     try:
         done = subprocess.run([exe, "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
@@ -177,15 +190,25 @@ class Trash:
             if parsed is None:
                 continue
             original, deleted = parsed
-            try:
-                Path(original).relative_to(self.owned)
-            except ValueError:
+            if not self._is_owned(original):
                 continue                           # somebody else's file
             found.append({"name": record.name[:-len(".trashinfo")], "path": original,
                           "deleted": deleted.isoformat(timespec="seconds"),
                           "_when": deleted, "_record": record})
         found.sort(key=lambda e: e["_when"])
         return found
+
+    def _is_owned(self, original: str) -> bool:
+        """Is this recorded path inside the data root? Judged on the path as
+        written, with no `..` allowed anywhere: `Path.relative_to` compares
+        components and would take `<owned>/../elsewhere` as Jarvis's."""
+        if not original.startswith("/") or "\0" in original:
+            return False
+        if ".." in original.split("/"):
+            return False
+        normal = Path(os.path.normpath(original))
+        owned = Path(os.path.normpath(str(self.owned)))
+        return normal == owned or owned in normal.parents
 
     @staticmethod
     def _parse(record: Path):
@@ -215,24 +238,30 @@ class Trash:
             shutil.rmtree(target)
         entry["_record"].unlink(missing_ok=True)
 
+    def _remove_each(self, entries: list[dict]) -> int:
+        """Remove each entry; one that cannot be removed is logged and skipped,
+        so a single bad entry never stops the rest, nor wedges every later
+        purge and empty behind it."""
+        removed = 0
+        for entry in entries:
+            try:
+                self._remove(entry)
+            except (TrashError, OSError) as exc:
+                LOG.warning("Skipping trash entry %r: %s", entry.get("name"),
+                            exc if isinstance(exc, TrashError) else type(exc).__name__)
+                continue
+            removed += 1
+        return removed
+
     def purge(self, *, older_than_days: float | None = None) -> int:
         """Delete Jarvis's entries older than the retention period."""
         days = self.retention if older_than_days is None else older_than_days
         cutoff = datetime.fromtimestamp(self.clock()) - timedelta(days=days)
-        removed = 0
-        for entry in self.entries():
-            if entry["_when"] <= cutoff:
-                self._remove(entry)
-                removed += 1
-        return removed
+        return self._remove_each([e for e in self.entries() if e["_when"] <= cutoff])
 
     def empty(self) -> int:
         """The manual empty: every Jarvis entry, whatever its age."""
-        removed = 0
-        for entry in self.entries():
-            self._remove(entry)
-            removed += 1
-        return removed
+        return self._remove_each(self.entries())
 
     def public(self, entries: list[dict]) -> list[dict]:
         return [{k: v for k, v in e.items() if not k.startswith("_")} for e in entries]
