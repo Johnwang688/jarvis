@@ -25,9 +25,31 @@ export function loadMonaco(): Promise<typeof MonacoNS> {
         inherit: true,
         rules: [],
         colors: {
-          "editor.background": "#050a12",
-          "editorGutter.background": "#050a12",
-          "editorLineNumber.foreground": "#3c5a78",
+          // Graphite. vs-dark's token colours were drawn for #1e1e1e, so they
+          // sit naturally on the pane colour; only the chrome moves.
+          "editor.background": "#1a1a19",
+          "editorGutter.background": "#1a1a19",
+          "editorLineNumber.foreground": "#88847b",
+          "editorLineNumber.activeForeground": "#b4b0a8",
+          "editor.lineHighlightBackground": "#222221",
+          "editor.lineHighlightBorder": "#00000000",
+          "editor.selectionBackground": "#6fc3df40",
+          "editor.inactiveSelectionBackground": "#6fc3df22",
+          "editorCursor.foreground": "#9ad6ea",
+          "editorIndentGuide.background1": "#2c2c2a",
+          "editorIndentGuide.activeBackground1": "#46453f",
+          "editorWidget.background": "#222221",
+          "editorWidget.border": "#46453f",
+          "scrollbarSlider.background": "#ffffff14",
+          "scrollbarSlider.hoverBackground": "#ffffff22",
+          "scrollbarSlider.activeBackground": "#ffffff30",
+          // Red here means "removed", the universal diff convention; the low
+          // alpha keeps it from reading as an error.
+          "diffEditor.insertedTextBackground": "#6dd08f26",
+          "diffEditor.removedTextBackground": "#f8717126",
+          "diffEditor.insertedLineBackground": "#6dd08f12",
+          "diffEditor.removedLineBackground": "#f8717112",
+          "diffEditor.diagonalFill": "#2c2c2a",
         },
       });
       return monaco as unknown as typeof MonacoNS;

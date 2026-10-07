@@ -241,7 +241,7 @@ export function Sidebar(props: {
           );
         })}
       </div>
-      <div style={{ borderTop: "1px solid var(--cyan-faint)", flex: "0 0 auto" }}>
+      <div style={{ borderTop: "1px solid var(--border)", flex: "0 0 auto" }}>
         <div className="tree-row" data-testid="open-schedules" onClick={() => props.onOpen("schedules")}>
           <span className="tw">⏱</span>
           <span className="nm">Schedules</span>
