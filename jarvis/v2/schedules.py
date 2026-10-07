@@ -242,8 +242,15 @@ class Schedules:
             return record
 
     def delete(self, schedule_id):
+        from .daemon import DaemonError
+        from .projects import is_archived
         with self.lock:
             record = self.get(schedule_id)
+            if is_archived(self.daemon.stores, record.get("project_id")):
+                # Archiving pauses a schedule; it never deletes one (decisions
+                # B1). It goes only with its project's permanent delete.
+                raise DaemonError("this schedule's project is archived, so the schedule is "
+                                  "paused, not deletable; restore the project first")
             self._path(schedule_id).unlink()
             self._changed("schedule_deleted", record)
 
