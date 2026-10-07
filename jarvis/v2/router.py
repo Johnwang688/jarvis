@@ -41,7 +41,10 @@ _CONFIG_LOCK = threading.RLock()
 # the app-server's ReasoningEffort is "a value advertised by the model", so
 # the ladder here is the one the routing defaults use (high, xhigh) and its
 # neighbours. Both lists are a statement of what Jarvis will ask for, not a
-# live probe; a model missing here is refused by name rather than guessed at.
+# live probe; a model missing here is refused by name rather than guessed at —
+# by the chip, and by the routing table too: `load_routing` and `/route`
+# accept a claude/codex model only from this table (`_cli_model`), plus
+# `roster`, the routing table's own spelling of "the configured default".
 _CLAUDE_EFFORTS = ("low", "medium", "high", "xhigh", "max")
 _CODEX_EFFORTS = ("low", "medium", "high", "xhigh")
 CLI_MODELS: dict[str, dict[str, dict]] = {
@@ -156,6 +159,23 @@ def _model(value):
     return model, None if effort == "default" else effort
 
 
+def _cli_model(provider, value):
+    """`_model`, for one CLI provider's routing entry: the model must be one
+    `CLI_MODELS` names (or `roster`) and the effort one that model offers."""
+    model, effort = _model(value)
+    if model == "roster":
+        return model, effort
+    known = CLI_MODELS[provider]
+    if model not in known:
+        raise ValueError(f"{model} is not a {provider} model Jarvis knows "
+                         f"(it knows {', '.join(known)})")
+    ladder = known[model]["efforts"]
+    if effort is not None and effort not in ladder:
+        offered = f"it offers {', '.join(ladder)}" if ladder else "it has no effort control"
+        raise ValueError(f"{model} does not offer effort {effort!r} ({offered}; or 'default')")
+    return model, effort
+
+
 def load_routing(path=None):
     path = path or config.ROUTING_PATH
     result = defaults()
@@ -176,8 +196,8 @@ def load_routing(path=None):
             else:
                 if not isinstance(value, dict) or value.keys() - set(CLI_PROVIDERS):
                     raise ValueError("models must map claude/codex to model/effort")
-                for setting in value.values():
-                    _model(setting)
+                for provider, setting in value.items():
+                    _cli_model(provider, setting)
                 result[key][role].update(value)
     fraction = saved.get("no_new_work", result["no_new_work"])
     if isinstance(fraction, bool) or not isinstance(fraction, (int, float)) or not 0 < fraction <= 1:
@@ -528,7 +548,7 @@ class Router:
         elif action == "models":
             if set(body) != {"action", "role", "provider", "model"} or body.get("provider") not in CLI_PROVIDERS:
                 raise ValueError("models requires role, provider and model/effort")
-            _model(body["model"])
+            _cli_model(body["provider"], body["model"])
         else:
             raise ValueError("action must be set or models")
         with _CONFIG_LOCK:
