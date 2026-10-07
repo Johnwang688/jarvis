@@ -126,6 +126,13 @@ trace; never a credential value.
   travel with it). A thread that belongs to a task (`task_id` set) → 409
   `{"error": "task threads move with their task"}`. Publishes
   `thread_moved {thread_id, from_project_id, to_project_id}` on the bus.
+  **A move re-labels a thread; it never re-roots it.** The brief saved at
+  open (cwd, permission profile, always_ask) is not rewritten, and every
+  resume reads it back, so a moved thread keeps working in the folder,
+  under the rules, it was opened with.
+- Thread records carry `cwd`, the folder the thread was opened in, set
+  from the brief at open. `GET /threads` fills it from the saved brief for
+  threads that predate the field, without writing anything.
 - `GET /fs/dirs?path=<abs>` → `{"path", "parent", "dirs": [names]}`, for a
   directory picker when creating a project or adding an access folder.
   Lists directories only, under `$HOME` or `/mnt/<drive>/` only, hidden

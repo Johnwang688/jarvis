@@ -44,6 +44,13 @@ symlinks them into `~/.claude/skills` and `~/.codex/skills`, skipping the
 `jarvis-only` ones), and `jarvis/runtime.py` carries a `proposal` slot
 beside the plan slot.
 
+HUD rule (2026-10-06, design §18): **the chat pane decides where a message
+goes; the sidebar only shows it.** The window holds a thread or a compose
+row, never a separately stored project (`hud/src/lib/compose.ts`). **New
+thread** is pinned at the top of the sidebar and starts in the last project
+worked in. A moved thread keeps the folder and permission rules it was
+opened with (`Thread.cwd`); a move re-labels, it never re-roots.
+
 ## What this is
 
 A personal agent ("Jarvis") with a **hand-rolled** tool-calling loop, routed

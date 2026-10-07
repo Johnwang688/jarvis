@@ -2,11 +2,19 @@
 // threads with role and provider — the orchestration view (§12.2). Windows
 // projects (`/mnt/<drive>/…`) carry a badge and the 9p caution as its title.
 //
-// Two things the owner's first use asked for live here.
+// **New thread is the pinned button at the top**, as in the Claude Code
+// desktop app. It opens a compose row in the last project worked in. The
+// project chip in the input bar (or dragging the compose row) changes the
+// project before the first message, and nothing reaches the server until
+// that message is sent. The sidebar never decides where a message goes. It
+// shows the active conversation's project (`activeProjectId`), and a project
+// row only expands and collapses. There used to be a stored "selected
+// project" that drifted from the thread a send actually went to
+// (lib/compose.ts).
 //
 // **Creating a project is a button, not a tree row.** A `+ New project` row at
 // the bottom of a tree of projects reads as one of them; the owner did not
-// find it. It is now the first thing in the pane and looks like a control.
+// find it. It is the `+` in the PROJECTS header.
 //
 // **A chat thread can be dragged to another project** — and can also be moved
 // from a menu, because a drag is not reachable from the keyboard and "the only
@@ -19,6 +27,10 @@
 import { useEffect, useState } from "react";
 import type { Project, Task, TaskThread, Thread } from "../types";
 import { canMoveThread, wouldMove } from "../lib/threads";
+import { composeMovable, folderName, movedAway, type Compose } from "../lib/compose";
+
+/** What a drag is carrying: a thread id, or the not-yet-sent compose row. */
+const COMPOSE_DRAG = "jarvis/compose";
 
 interface MenuAt {
   threadId: string;
@@ -34,17 +46,20 @@ export function Sidebar(props: {
   threads: Thread[];
   tasks: Task[];
   taskThreads: Record<string, TaskThread[]>;
-  projectId: string | null;
+  /** The active conversation's project, derived, never stored. */
+  activeProjectId: string | null;
+  compose: Compose | null;
   threadId: string | null;
   taskId: string | null;
   moveError: string;
-  onPickProject: (id: string) => void;
   onPickThread: (id: string) => void;
   onPickTask: (id: string) => void;
   onNewProject: () => void;
   onNewThread: () => void;
-  onNewTask: () => void;
+  /** The row's own project, never "whichever is selected". */
+  onNewTask: (projectId: string) => void;
   onMoveThread: (threadId: string, projectId: string) => void;
+  onMoveCompose: (projectId: string) => void;
   onOpen: (what: "schedules" | "usage" | "route") => void;
 }) {
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
@@ -52,7 +67,21 @@ export function Sidebar(props: {
   const [dragging, setDragging] = useState<string | null>(null);
   const [over, setOver] = useState<string | null>(null);
   const [menu, setMenu] = useState<MenuAt | null>(null);
-  const toggle = (id: string) => setExpanded((e) => ({ ...e, [id]: !e[id] }));
+  const isOpen = (id: string) => expanded[id] ?? id === props.activeProjectId;
+  const toggle = (id: string) => setExpanded((e) => ({ ...e, [id]: !(e[id] ?? id === props.activeProjectId) }));
+  const reveal = (id: string) => setExpanded((e) => ({ ...e, [id]: true }));
+
+  // The project holding the active conversation is always open: a new thread
+  // or a picked thread must never sit inside a collapsed project.
+  useEffect(() => {
+    if (props.activeProjectId) reveal(props.activeProjectId);
+  }, [props.activeProjectId, props.compose]);
+
+  /** Whether the current drag would do anything on this project row. */
+  const accepts = (projectId: string) =>
+    dragging === COMPOSE_DRAG
+      ? composeMovable(props.compose, projectId)
+      : !!dragging && wouldMove(props.threads, dragging, projectId);
 
   // A menu that outlives what opened it is a menu that acts on the wrong row.
   useEffect(() => {
@@ -89,17 +118,30 @@ export function Sidebar(props: {
 
   return (
     <div className="pane" id="sidebar">
-      <h2 className="bar">Projects</h2>
-      <button type="button" id="newproject" data-testid="new-project" onClick={props.onNewProject}>
-        + New project
+      <button type="button" id="newthread" data-testid="new-thread" onClick={props.onNewThread}>
+        <span className="plus">+</span> New thread
       </button>
+      <div className="barrow">
+        <h2 className="bar">Projects</h2>
+        <button
+          type="button"
+          id="newproject"
+          data-testid="new-project"
+          title="New project"
+          aria-label="New project"
+          onClick={props.onNewProject}
+        >
+          +
+        </button>
+      </div>
       {props.moveError ? (
         <div className="err movenote" data-testid="move-error">{props.moveError}</div>
       ) : null}
       <div className="scroll" data-testid="sidebar">
         {props.projects.map((p) => {
           const plat = props.platforms[p.id];
-          const open = expanded[p.id] ?? p.id === props.projectId;
+          const open = isOpen(p.id);
+          const composing = !!props.compose && props.compose.projectId === p.id && !props.threadId;
           const chats = props.threads.filter((t) => t.project_id === p.id && !t.task_id);
           const tasks = props.tasks.filter((t) => t.project_id === p.id);
           const target = over === p.id;
@@ -108,18 +150,15 @@ export function Sidebar(props: {
               <div
                 className={
                   "tree-row" +
-                  (p.id === props.projectId ? " sel" : "") +
+                  (p.id === props.activeProjectId ? " sel" : "") +
                   (target ? " droptarget" : "")
                 }
                 data-testid={`project-${p.id}`}
-                onClick={() => {
-                  props.onPickProject(p.id);
-                  toggle(p.id);
-                }}
+                onClick={() => toggle(p.id)}
                 onDragOver={(e) => {
                   // preventDefault is what makes a drop legal at all, so the
                   // row only accepts a drag that would actually change something.
-                  if (dragging && wouldMove(props.threads, dragging, p.id)) {
+                  if (accepts(p.id)) {
                     e.preventDefault();
                     e.dataTransfer.dropEffect = "move";
                     if (!target) setOver(p.id);
@@ -131,7 +170,14 @@ export function Sidebar(props: {
                   const id = e.dataTransfer.getData("text/plain") || dragging;
                   setOver(null);
                   setDragging(null);
-                  if (id) props.onMoveThread(id, p.id);
+                  if (!id) return;
+                  // The target opens, so what was dropped is still on screen.
+                  reveal(p.id);
+                  if (id === COMPOSE_DRAG) {
+                    if (composeMovable(props.compose, p.id)) props.onMoveCompose(p.id);
+                  } else {
+                    props.onMoveThread(id, p.id);
+                  }
                 }}
               >
                 <span className="tw">{open ? "▾" : "▸"}</span>
@@ -144,10 +190,26 @@ export function Sidebar(props: {
               </div>
               {open ? (
                 <>
-                  <div className="tree-row indent-1 muted small" onClick={props.onNewThread}>
-                    <span className="tw">+</span>
-                    <span className="nm">new chat thread</span>
-                  </div>
+                  {composing ? (
+                    <div
+                      className={"tree-row indent-1 ghost sel" + (dragging === COMPOSE_DRAG ? " dragging" : "")}
+                      data-testid="compose-row"
+                      title="Not sent yet. Change its project with the chip in the input bar, or drag it."
+                      draggable={!props.compose?.openedId}
+                      onDragStart={(e) => {
+                        e.dataTransfer.setData("text/plain", COMPOSE_DRAG);
+                        e.dataTransfer.effectAllowed = "move";
+                        setDragging(COMPOSE_DRAG);
+                      }}
+                      onDragEnd={() => {
+                        setDragging(null);
+                        setOver(null);
+                      }}
+                    >
+                      <span className="tw">·</span>
+                      <span className="nm">New thread</span>
+                    </div>
+                  ) : null}
                   {chats.map((t) => (
                     <div
                       key={t.id}
@@ -169,9 +231,13 @@ export function Sidebar(props: {
                       }}
                       onContextMenu={(e) => openMenu(e, t.id)}
                       onClick={() => props.onPickThread(t.id)}
+                      title={t.cwd ? `works in ${t.cwd}` : undefined}
                     >
                       <span className="tw">·</span>
                       <span className="nm">{t.title || t.id}</span>
+                      {movedAway(t, p) ? (
+                        <span className="moved" data-testid={`moved-${t.id}`}>↪ {folderName(t.cwd)}</span>
+                      ) : null}
                       <span className={`badge ${t.provider}`}>{t.provider}</span>
                       <button
                         type="button"
@@ -184,7 +250,11 @@ export function Sidebar(props: {
                       </button>
                     </div>
                   ))}
-                  <div className="tree-row indent-1 muted small" onClick={props.onNewTask}>
+                  <div
+                    className="tree-row indent-1 muted small"
+                    data-testid={`new-task-${p.id}`}
+                    onClick={() => props.onNewTask(p.id)}
+                  >
                     <span className="tw">+</span>
                     <span className="nm">new task</span>
                   </div>
@@ -241,7 +311,7 @@ export function Sidebar(props: {
           );
         })}
       </div>
-      <div style={{ borderTop: "1px solid var(--cyan-faint)", flex: "0 0 auto" }}>
+      <div className="sidebar-foot" style={{ borderTop: "1px solid var(--cyan-faint)", flex: "0 0 auto" }}>
         <div className="tree-row" data-testid="open-schedules" onClick={() => props.onOpen("schedules")}>
           <span className="tw">⏱</span>
           <span className="nm">Schedules</span>

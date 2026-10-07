@@ -4,7 +4,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, subscribe } from "./api";
-import { useStore, currentProject, currentTask, type Tab } from "./state/store";
+import { useStore, currentProject, currentProjectId, currentTask, type Tab } from "./state/store";
 import { Sidebar } from "./components/Sidebar";
 import { ChatTab } from "./components/ChatTab";
 import { InputBar } from "./components/InputBar";
@@ -22,6 +22,7 @@ import { HINTS, isMuted, loadMode, outcomeFor, saveMode, type DictationMode } fr
 import { WakeGate, compileWake, matchesWake, WAKE_PATTERNS } from "./lib/wake";
 import type { Attachment, AvatarDesc, ModelRow, Schedule, VoiceEntry } from "./types";
 import { moveThreadTo } from "./lib/threads";
+import { lastProject, loadLastProject, saveLastProject } from "./lib/compose";
 
 const TABS: Tab[] = ["chat", "task", "file", "diff", "preview"];
 const PROPOSAL_WINDOW_MS = 60_000;
@@ -35,11 +36,20 @@ export default function App() {
   const [voiceOverride, setVoiceOverride] = useState("");
   const [avatarCacheBust, setAvatarCacheBust] = useState(0);
   const [editingSchedule, setEditingSchedule] = useState<Schedule | null>(null);
+  // "+ new task" belongs to the row it was clicked under, not to a selection.
+  const [newTaskProject, setNewTaskProject] = useState<string | null>(null);
 
   // `live` gives the capture callbacks — which run on the audio thread's
   // cadence, not React's — the current state without stale closures.
   const live = useRef(state);
   live.current = state;
+  // A thread opened for a compose send, before it becomes `threadId`: its
+  // events are this window's from the moment it exists.
+  const pendingThread = useRef<string | null>(null);
+  // The thread whose transcript must not be reloaded when it becomes the open
+  // one, because the window already holds it: the first message, drawn
+  // optimistically, and a reply that may already be streaming.
+  const skipReload = useRef<string | null>(null);
 
   const patch = useCallback((p: Parameters<typeof dispatch>[0] extends any ? any : never) => {
     dispatch({ type: "patch", patch: p });
@@ -103,27 +113,55 @@ export default function App() {
 
   const send = useCallback(
     async (text: string, attachments: Attachment[]) => {
-      let threadId = live.current.threadId;
+      const at = live.current;
+      const before = at.messages;
+      let threadId = at.threadId;
+      const compose = at.compose;
       dispatch({ type: "message", message: { role: "user", text } });
       dispatch({ type: "patch", patch: { busy: true, orb: "thinking", status: "SENDING", draft: "", error: "" } });
       try {
+        let projectId = threadId ? at.threads.find((t) => t.id === threadId)?.project_id ?? null : null;
         if (!threadId) {
-          // No thread yet: open a chat thread in the current project so
-          // "type and send" always works. The failure is shown, never swallowed.
-          const projectId = live.current.projectId;
-          if (!projectId) throw new Error("Pick or create a project first.");
-          dispatch({ type: "patch", patch: { status: "OPENING THREAD" } });
-          const t = await api.openThread({ project_id: projectId, role: "chat" });
-          threadId = t.id;
-          await refreshThreads();
-          patch({ threadId: t.id, tab: "chat" });
+          // Composing: the thread is opened in the chip's project on the first
+          // message, and only then. Nothing reaches the server before it.
+          projectId = compose?.projectId ?? null;
+          if (!projectId) throw new Error("Create a project first.");
+          threadId = compose?.openedId || null;
+          if (!threadId) {
+            dispatch({ type: "patch", patch: { status: "OPENING THREAD" } });
+            const t = await api.openThread({ project_id: projectId, role: "chat" });
+            threadId = t.id;
+            // Remembered, so a retry after a failed send reuses this thread.
+            dispatch({ type: "patch", patch: { compose: { projectId, openedId: t.id } } });
+          }
+          pendingThread.current = threadId;
         }
+        dispatch({ type: "patch", patch: { turnThreadId: threadId } });
         await api.send(threadId, { text, attachments: attachments.length ? attachments : undefined });
-        dispatch({ type: "patch", patch: { status: "THINKING" } });
+        if (projectId) saveLastProject(projectId);
+        if (!at.threadId) {
+          // The compose row becomes the thread. Its transcript is already on
+          // screen; reloading it here is what used to wipe the first message.
+          skipReload.current = threadId;
+          await refreshThreads();
+          dispatch({ type: "patch", patch: { threadId, compose: null } });
+          pendingThread.current = null;
+        }
+        if (live.current.busy && live.current.turnThreadId === threadId && live.current.status === "SENDING") {
+          dispatch({ type: "patch", patch: { status: "THINKING" } });
+        }
       } catch (e: any) {
-        dispatch({ type: "patch", patch: { busy: false, orb: "error", status: "FAILED", error: `Could not send: ${e.message}` } });
+        // The words go back in the box, so a failed send costs nothing.
+        dispatch({
+          type: "patch",
+          patch: {
+            busy: false, turnThreadId: null, orb: "error", status: "FAILED",
+            error: `Could not send: ${e.message}`, messages: before, pendingTranscript: text,
+          },
+        });
       }
     },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [dispatch],
   );
 
@@ -133,10 +171,23 @@ export default function App() {
     const stop = subscribe((e: any) => {
       const kind = e.kind;
       const data = e.data || e;
-      const mine = !e.thread_id || e.thread_id === live.current.threadId;
+      const at = live.current;
+      // On screen: the thread the chat pane shows (or is about to). Ours: the
+      // thread whose turn this window started. They differ when the owner
+      // switches threads mid-turn, and the window must still hear that turn
+      // finish, or it waits on THINKING with the mic suppressed for good.
+      const shown = at.threadId ?? at.compose?.openedId ?? pendingThread.current;
+      const tid: string | undefined = e.thread_id;
+      const mine = !tid || tid === shown;
+      const ours = !!tid && tid === at.turnThreadId;
       switch (kind) {
         case "turn_started":
-          if (mine) dispatch({ type: "patch", patch: { busy: true, orb: "thinking", draft: "" } });
+          if (mine) {
+            dispatch({
+              type: "patch",
+              patch: { busy: true, orb: "thinking", draft: "", turnThreadId: at.turnThreadId ?? tid ?? null },
+            });
+          }
           break;
         case "text_delta":
           if (mine) dispatch({ type: "patch", patch: { status: "RESPONDING" } });
@@ -164,13 +215,20 @@ export default function App() {
             });
           break;
         case "turn_finished":
-          if (mine)
-            dispatch({ type: "patch", patch: { busy: false, orb: "idle", status: "" } });
-          capture.openFollowUp();
+          if (ours) {
+            dispatch({ type: "patch", patch: { busy: false, turnThreadId: null, orb: "idle", status: "" } });
+            // Only this window's own turn opens the follow-up window. A Discord
+            // turn finishing must not start the HUD listening.
+            capture.openFollowUp();
+          }
           break;
         case "error":
-          if (mine)
-            dispatch({ type: "patch", patch: { busy: false, orb: "error", error: data.message || "error" } });
+          if (ours)
+            dispatch({
+              type: "patch",
+              patch: { busy: false, turnThreadId: null, orb: "error", error: data.message || "error" },
+            });
+          else if (mine) dispatch({ type: "patch", patch: { orb: "error", error: data.message || "error" } });
           break;
         case "approval_requested":
           dispatch({ type: "approval_add", request: { ...data, req_id: data.req_id } });
@@ -180,7 +238,10 @@ export default function App() {
           break;
         case "proposal_reply":
           // A proposal is a system line with a 60-second cancel: the fast path
-          // has already answered and a task is about to run.
+          // has already answered and a task is about to run. Only in the
+          // thread that proposed it, never whichever thread happens to be open.
+          void refreshTasks();
+          if (!(tid && (tid === shown || ours))) break;
           dispatch({
             type: "message",
             message: {
@@ -191,7 +252,6 @@ export default function App() {
                 : undefined,
             },
           });
-          void refreshTasks();
           break;
         case "task_created":
         case "task_status_changed":
@@ -276,6 +336,36 @@ export default function App() {
     [dispatch],
   );
 
+  // A refused move explains itself, then gets out of the way.
+  useEffect(() => {
+    if (!state.moveError) return;
+    const t = setTimeout(() => dispatch({ type: "patch", patch: { moveError: "" } }), 6000);
+    return () => clearTimeout(t);
+  }, [state.moveError, dispatch]);
+
+  /** Start a new thread: a compose row in the last project worked in. */
+  const newThread = useCallback(
+    (projectId?: string | null) => {
+      const at = live.current;
+      pendingThread.current = null;
+      dispatch({
+        type: "patch",
+        patch: {
+          threadId: null,
+          compose: { projectId: projectId ?? lastProject(at.projects, at.threads, loadLastProject()) },
+          taskFocus: false,
+          tab: "chat",
+          messages: [],
+          draft: "",
+          ops: [],
+          error: "",
+          status: at.turnThreadId ? at.status : "",
+        },
+      });
+    },
+    [dispatch],
+  );
+
   const refreshSchedules = useCallback(
     () =>
       api
@@ -343,8 +433,11 @@ export default function App() {
         type: "patch",
         patch: {
           projects, threads, tasks, platforms,
-          projectId: projects[0]?.id ?? null,
-          threadId: threads.find((t) => !t.task_id)?.id ?? null,
+          // The window opens on a new thread in the last project worked in,
+          // as Claude Code opens on a new session. Nothing is sent until
+          // the owner speaks.
+          threadId: null,
+          compose: { projectId: lastProject(projects, threads, loadLastProject()) },
         },
       });
       const [usage, schedules, route, approvals] = await Promise.all([
@@ -363,10 +456,17 @@ export default function App() {
   // redraws from the saved conversation rather than from whatever is on screen.
   useEffect(() => {
     if (!state.threadId) return;
+    if (skipReload.current === state.threadId) {
+      skipReload.current = null;
+      return;
+    }
+    // A turn running in another thread keeps the window busy, but its status
+    // line is about that thread, not this one.
+    const status = live.current.turnThreadId === state.threadId ? live.current.status : "";
     api
       .transcript(state.threadId)
-      .then((r) => dispatch({ type: "patch", patch: { messages: r.messages || [], draft: "", ops: [] } }))
-      .catch(() => dispatch({ type: "patch", patch: { messages: [], draft: "", ops: [] } }));
+      .then((r) => dispatch({ type: "patch", patch: { messages: r.messages || [], draft: "", ops: [], status } }))
+      .catch(() => dispatch({ type: "patch", patch: { messages: [], draft: "", ops: [], status } }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.threadId]);
 
@@ -453,7 +553,8 @@ export default function App() {
     if (live.current.picker) return;
     // The interrupt half comes first: muting yourself must not take away the
     // orb as the way to shut him up.
-    if (live.current.busy && live.current.threadId) api.interrupt(live.current.threadId).catch(() => {});
+    const turn = live.current.turnThreadId;
+    if (live.current.busy && turn) api.interrupt(turn).catch(() => {});
     if (isMuted(live.current.dictation)) {
       dispatch({ type: "patch", patch: { status: "MIC MUTED" } });
       return;
@@ -570,6 +671,8 @@ export default function App() {
   };
 
   const project = currentProject(state);
+  const activeProjectId = currentProjectId(state);
+  const openThread = state.threadId ? state.threads.find((t) => t.id === state.threadId) || null : null;
   const task = currentTask(state);
   const hint =
     state.status ||
@@ -584,26 +687,26 @@ export default function App() {
           threads={state.threads}
           tasks={state.tasks}
           taskThreads={state.taskThreads}
-          projectId={state.projectId}
+          activeProjectId={activeProjectId}
+          compose={state.compose}
           threadId={state.threadId}
           taskId={state.taskId}
-          onPickProject={(id) => patch({ projectId: id })}
-          onPickThread={(id) => patch({ threadId: id, tab: "chat" })}
-          onPickTask={(id) => patch({ taskId: id, tab: "task" })}
-          onNewProject={() => patch({ picker: "newProject" })}
-          onNewThread={async () => {
-            if (!state.projectId) return;
-            try {
-              const t = await api.openThread({ project_id: state.projectId, role: "chat" });
-              await refreshThreads();
-              patch({ threadId: t.id, tab: "chat", error: "" });
-            } catch (e: any) {
-              patch({ error: `Could not open a thread: ${e.message}` });
-            }
+          onPickThread={(id) => {
+            pendingThread.current = null;
+            patch({ threadId: id, compose: null, taskFocus: false, tab: "chat" });
           }}
-          onNewTask={() => patch({ picker: "newTask" })}
+          onPickTask={(id) => patch({ taskId: id, taskFocus: true, tab: "task" })}
+          onNewProject={() => patch({ picker: "newProject" })}
+          onNewThread={() => newThread()}
+          onNewTask={(projectId) => {
+            setNewTaskProject(projectId);
+            patch({ picker: "newTask" });
+          }}
           moveError={state.moveError}
           onMoveThread={moveThread}
+          onMoveCompose={(projectId) =>
+            state.compose && patch({ compose: { ...state.compose, projectId } })
+          }
           onOpen={(what) => {
             if (what === "schedules") {
               setEditingSchedule(null);
@@ -679,6 +782,20 @@ export default function App() {
                 hint={hint}
                 pendingTranscript={state.pendingTranscript}
                 disabled={state.approvals.length > 0}
+                placeholder={
+                  state.compose
+                    ? `New thread in ${project?.name || "…"} · message, or @path to attach`
+                    : undefined
+                }
+                projectChip={{
+                  projects: state.projects,
+                  value: activeProjectId,
+                  editable: !!state.compose && !state.compose.openedId,
+                  folder: openThread?.cwd ?? null,
+                  onChange: (projectId) =>
+                    state.compose && patch({ compose: { ...state.compose, projectId } }),
+                  onNewProject: () => patch({ picker: "newProject" }),
+                }}
                 onModeChange={setMode}
                 onSend={(text, files) => void send(text, files)}
                 onTranscriptTaken={() => patch({ pendingTranscript: "" })}
@@ -700,9 +817,9 @@ export default function App() {
               />
             </div>
           ) : null}
-          {state.tab === "file" ? <FileTab projectId={state.projectId} /> : null}
+          {state.tab === "file" ? <FileTab projectId={activeProjectId} /> : null}
           {state.tab === "diff" ? <DiffTab taskId={state.taskId} /> : null}
-          {state.tab === "preview" ? <PreviewTab projectId={state.projectId} /> : null}
+          {state.tab === "preview" ? <PreviewTab projectId={activeProjectId} /> : null}
         </div>
 
         <div className="pane" id="right">
@@ -789,9 +906,10 @@ export default function App() {
                 patch({
                   projects,
                   platforms: { ...live.current.platforms, [created.id]: platform },
-                  projectId: created.id,
                   picker: null,
                 });
+                // A new project starts as a new thread in it.
+                newThread(created.id);
               })
           }
           onClose={() => patch({ picker: null })}
@@ -802,7 +920,7 @@ export default function App() {
           projects={state.projects}
           schedules={state.schedules}
           editing={editingSchedule}
-          defaultProject={state.projectId || ""}
+          defaultProject={activeProjectId || ""}
           onToggle={(id, enabled) =>
             api.patchSchedule(id, { enabled }).then(refreshSchedules).catch(() => {})
           }
@@ -824,11 +942,12 @@ export default function App() {
       {state.picker === "newTask" ? (
         <NewTask
           onCreate={(brief) => {
-            if (!state.projectId) return;
+            const projectId = newTaskProject || activeProjectId;
+            if (!projectId) return;
             api
-              .createTask({ project_id: state.projectId, brief })
+              .createTask({ project_id: projectId, brief })
               .then((t) => {
-                patch({ picker: null, taskId: t.id, tab: "task" });
+                patch({ picker: null, taskId: t.id, taskFocus: true, tab: "task" });
                 return refreshTasks();
               })
               .catch((e) => patch({ error: e.message }));

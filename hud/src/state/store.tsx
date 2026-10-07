@@ -9,6 +9,7 @@ import type {
   Thread, ToolOp, Usage, RouteView,
 } from "../types";
 import { DEFAULT_MODE, type DictationMode } from "../lib/dictation";
+import { activeProjectId, type Compose } from "../lib/compose";
 
 export type Tab = "chat" | "task" | "file" | "diff" | "preview";
 export type OrbState =
@@ -21,9 +22,19 @@ export interface State {
   threads: Thread[];
   tasks: Task[];
   taskThreads: Record<string, TaskThread[]>;
-  projectId: string | null;
+  /** The conversation is exactly one of: an existing thread (`threadId`), or
+   * a new thread being composed (`compose`). There is no stored project;
+   * `currentProject` derives it, so the sidebar cannot drift from where a
+   * message goes (lib/compose.ts). */
   threadId: string | null;
+  compose: Compose | null;
   taskId: string | null;
+  /** A task was picked more recently than a thread: the File tab follows it. */
+  taskFocus: boolean;
+  /** The thread whose turn this window started and is waiting on. Window-wide
+   * `busy` follows it, so switching threads mid-turn cannot wedge the window
+   * waiting for a finish it no longer listens for. */
+  turnThreadId: string | null;
   tab: Tab;
   messages: ChatMessage[];
   draft: string;
@@ -49,7 +60,7 @@ export interface State {
 
 export const initialState: State = {
   projects: [], platforms: {}, threads: [], tasks: [], taskThreads: {},
-  projectId: null, threadId: null, taskId: null, tab: "chat",
+  threadId: null, compose: null, taskId: null, taskFocus: false, turnThreadId: null, tab: "chat",
   messages: [], draft: "", ops: [], approvals: [], usage: null, schedules: [],
   route: null, avatar: null, wakePatterns: [], dictation: DEFAULT_MODE,
   level: 0, orb: "idle", status: "", busy: false, pendingTranscript: "",
@@ -139,7 +150,8 @@ export function StoreProvider({ children, initial }: { children: React.ReactNode
 export const useStore = () => useContext(Ctx);
 
 export const currentTask = (s: State) => s.tasks.find((t) => t.id === s.taskId) || null;
-export const currentProject = (s: State) => s.projects.find((p) => p.id === s.projectId) || null;
+export const currentProjectId = (s: State) => activeProjectId(s);
+export const currentProject = (s: State) => s.projects.find((p) => p.id === activeProjectId(s)) || null;
 
 /**
  * The routing line every status embed and the HUD task view show

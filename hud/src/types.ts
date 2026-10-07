@@ -49,6 +49,8 @@ export interface Thread {
   tokens: number;
   model: string | null;
   effort: string | null;
+  /** The folder the thread was opened in. A move never changes it. */
+  cwd?: string | null;
 }
 
 export interface TaskThread {

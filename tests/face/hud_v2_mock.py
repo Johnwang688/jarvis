@@ -69,6 +69,7 @@ def _world() -> dict:
                 "updated": "2026-09-15T00:00:00+00:00",
                 "turns": 2, "cost_usd": 0.0012, "tokens": 900,
                 "model": "openai/gpt-5.6-luna", "effort": None,
+                "cwd": "/home/johnw/projects/Jarvis",
             },
         ],
         "transcripts": {
@@ -500,6 +501,9 @@ class MockDaemon:
                         "created": "2026-09-15T00:00:00+00:00",
                         "updated": "2026-09-15T00:00:00+00:00",
                         "turns": 0, "cost_usd": 0.0, "tokens": 0, "model": None, "effort": None,
+                        # The folder is fixed at open, from the project's root.
+                        "cwd": next((p["root"] for p in w["projects"]
+                                     if p["id"] == body.get("project_id", "p1")), None),
                     }
                     w["threads"].append(rec)
                     w["transcripts"][rec["id"]] = []
@@ -525,6 +529,10 @@ class MockDaemon:
 
                 parts = [p for p in path.split("/") if p]
                 if len(parts) == 3 and parts[0] == "threads" and parts[2] == "send":
+                    # The daemon logs the user line before it answers 202, so a
+                    # transcript read right after a send already has it.
+                    w["transcripts"].setdefault(parts[1], []).append(
+                        {"role": "user", "text": body.get("text", ""), "at": "2026-09-15T00:00:02+00:00"})
                     return self._json({"turn_id": "turn-1"}, 202)
                 if len(parts) == 3 and parts[0] == "threads" and parts[2] == "interrupt":
                     return self._json({"ok": True})

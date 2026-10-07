@@ -116,8 +116,18 @@ def sidebar_checks(page, mock):
     check("a wsl project carries none",
           page.locator('[data-testid="project-p1"] .badge.win').count() == 0)
 
-    page.locator('[data-testid="project-p1"]').click()
-    until(lambda: page.locator('[data-testid="thread-t1"]').count() > 0)
+    # The window opens on a new thread in the last project worked in. On a
+    # fresh browser that is the most recently active chat thread's project.
+    check("the window boots into a new thread",
+          page.evaluate("window.__hud.state().threadId") is None
+          and page.locator('[data-testid="compose-row"]').count() == 1)
+    check("in the last project worked in",
+          page.locator('[data-testid="project-chip-select"]').input_value() == "p1",
+          page.locator('[data-testid="project-chip-select"]').input_value()
+          if page.locator('[data-testid="project-chip-select"]').count() else "no chip")
+    check("and nothing was opened on the server", not mock.posted("/threads"))
+
+    expand(page, "p1", "thread-t1")
     check("a project expands to its chat threads",
           page.locator('[data-testid="thread-t1"]').count() == 1)
     check("and to its tasks", page.locator('[data-testid="task-k1"]').count() == 1)
@@ -134,6 +144,11 @@ def sidebar_checks(page, mock):
           "orchestrator" in text_kt1 and "claude" in text_kt1, text_kt1)
     check("the implementer's provider is shown too",
           "codex" in page.locator('[data-testid="taskthread-kt2"]').inner_text().lower())
+    new = page.locator('[data-testid="new-thread"]').bounding_box()
+    tree = page.locator('[data-testid="project-p1"]').bounding_box()
+    check("New thread is a button pinned above the projects",
+          page.locator('[data-testid="new-thread"]').evaluate("el => el.tagName") == "BUTTON"
+          and bool(new) and bool(tree) and new["y"] < tree["y"])
     check("schedules, usage and route are reachable",
           page.locator('[data-testid="open-schedules"]').count() == 1
           and page.locator('[data-testid="open-usage"]').count() == 1
@@ -540,7 +555,10 @@ def task_checks(page, mock):
 
 def file_checks(page, mock):
     print("\nfile tab")
-    page.locator('[data-testid="project-p1"]').click()
+    # A project row only expands now; the File tab follows the active
+    # conversation, which here is task k1 in p1.
+    check("the file tab follows the active project",
+          page.evaluate("window.__hud.state().taskFocus") is True)
     page.locator('[data-testid="tab-file"]').click()
     # Wait on a real row, not on the tree being non-empty: it renders a "…"
     # placeholder while the fetch is in flight, so "non-empty" is true before
@@ -624,6 +642,7 @@ def file_checks(page, mock):
 
 def diff_checks(page, mock):
     print("\ndiff tab")
+    expand(page, "p1", "task-k1")
     page.locator('[data-testid="task-k1"]').click()
     page.locator('[data-testid="tab-diff"]').click()
     until(lambda: page.locator('[data-testid="difflist"]').inner_text() != "")
@@ -872,6 +891,97 @@ def expand(page, project_id: str, child: str, tries: int = 4):
     return page.locator(f'[data-testid="{child}"]').count() > 0
 
 
+def compose_checks(page, mock):
+    print("\nnew thread: compose, choose the project, then send")
+    page.locator('[data-testid="tab-chat"]').click()
+    opened = len(mock.posted("/threads"))
+    page.locator('[data-testid="new-thread"]').click()
+    until(lambda: page.locator('[data-testid="compose-row"]').count() > 0)
+    chip = page.locator('[data-testid="project-chip-select"]')
+    check("New thread opens a compose row", page.locator('[data-testid="compose-row"]').count() == 1)
+    check("in the last project a message was sent in", chip.input_value() == "p1", chip.input_value())
+    check("and the chat starts empty", page.locator('[data-testid="log"] .msg').count() == 0)
+
+    chip.select_option("p2")
+    check("the chip moves the compose row to the chosen project",
+          expand(page, "p2", "compose-row")
+          and page.evaluate("window.__hud.state().compose.projectId") == "p2")
+    check("choosing a project opens nothing on the server", len(mock.posted("/threads")) == opened)
+
+    box = page.locator('[data-testid="input"]')
+    box.fill("first words in schoolwork")
+    box.press("Enter")
+    body = until(lambda: mock.posted("/threads")[opened:] or None)
+    check("the first message opens the thread", bool(body))
+    check("in the chosen project", bool(body) and body[-1].get("project_id") == "p2",
+          str(body[-1] if body else None))
+    new_id = until(lambda: page.evaluate("window.__hud.state().threadId"))
+    sent = until(lambda: mock.sent("POST", f"/threads/{new_id}/send") or None)
+    check("and the message goes to that thread",
+          bool(sent) and sent[-1].get("text") == "first words in schoolwork", str(sent))
+    check("the compose row becomes the thread",
+          page.locator('[data-testid="compose-row"]').count() == 0
+          and expand(page, "p2", f"thread-{new_id}"))
+    time.sleep(0.3)
+    check("the first message stays on screen",
+          "first words in schoolwork" in page.locator('[data-testid="log"]').inner_text())
+    ro = page.locator('[data-testid="project-chip"]')
+    check("after it, the chip is read-only and names the folder",
+          page.locator('[data-testid="project-chip-select"]').count() == 0
+          and "schoolwork" in ro.inner_text(), ro.inner_text())
+
+    # Switching threads mid-turn must not wedge the window.
+    page.locator(f'[data-testid="thread-{new_id}"]').click()
+    expand(page, "p1", "thread-t1")
+    page.locator('[data-testid="thread-t1"]').click()
+    until(lambda: page.evaluate("window.__hud.state().threadId") == "t1")
+    check("a turn left running in another thread keeps the window busy",
+          page.evaluate("window.__hud.state().busy") is True)
+    mock.emit("turn_finished", {"stop": "end"}, thread_id=new_id)
+    check("and its finish is heard from any thread",
+          until(lambda: page.evaluate("window.__hud.state().busy") is False) is True)
+
+    # Another thread's proposal does not land in this chat.
+    mock.emit("proposal_reply", {"reply": "Opened task k9 elsewhere", "task_id": "k9"}, thread_id=new_id)
+    time.sleep(0.3)
+    check("another thread's proposal stays out of this chat",
+          "k9 elsewhere" not in page.locator('[data-testid="log"]').inner_text())
+
+    # The compose row drags like a thread, and a drop just re-aims it.
+    page.evaluate(DND)
+    page.locator('[data-testid="new-thread"]').click()
+    until(lambda: page.locator('[data-testid="compose-row"]').count() > 0)
+    check("New thread now defaults to the last project used",
+          page.locator('[data-testid="project-chip-select"]').input_value() == "p2")
+    carried = page.evaluate("window.__dnd.start('[data-testid=\"compose-row\"]')")
+    check("the compose row is draggable", carried == "jarvis/compose", str(carried))
+    check("its own project does not accept it",
+          page.evaluate("window.__dnd.over('[data-testid=\"project-p2\"]')") is False)
+    check("another project does", page.evaluate("window.__dnd.over('[data-testid=\"project-p1\"]')") is True)
+    patches = len(mock.calls)
+    page.evaluate("window.__dnd.drop('[data-testid=\"project-p1\"]')")
+    page.evaluate("window.__dnd.end()")
+    until(lambda: page.evaluate("window.__hud.state().compose.projectId") == "p1")
+    check("dropping it re-aims the new thread",
+          page.evaluate("window.__hud.state().compose.projectId") == "p1"
+          and page.locator('[data-testid="project-chip-select"]').input_value() == "p1")
+    check("with no call to the server",
+          not [c for c in mock.calls[patches:] if c[0] in ("POST", "PATCH")], str(mock.calls[patches:]))
+
+    # "+ new task" belongs to the row it sits under, whatever else is open.
+    expand(page, "p2", "new-task-p2")
+    tasks_before = len(mock.posted("/tasks"))
+    page.locator('[data-testid="new-task-p2"]').click()
+    page.wait_for_selector('[data-testid="task-brief"]')
+    page.locator('[data-testid="task-brief"]').fill("tidy the schoolwork db")
+    page.locator('[data-testid="create-task"]').click()
+    body = until(lambda: mock.posted("/tasks")[tasks_before:] or None)
+    check("+ new task uses its own row's project, not the active one",
+          bool(body) and body[-1].get("project_id") == "p2", str(body[-1] if body else None))
+    until(lambda: page.locator('[data-testid="picker"]').count() == 0)
+    page.locator('[data-testid="tab-chat"]').click()
+
+
 def newproject_checks(page, mock):
     print("\nnew project: the button, the picker, the dialog")
     # The owner's complaint was that creating a project was not obvious. At the
@@ -953,6 +1063,9 @@ def newproject_checks(page, mock):
     until(lambda: page.locator('[data-testid="project-p3"]').count() > 0)
     check("the created project appears in the sidebar",
           "trading firm" in page.locator('[data-testid="project-p3"]').inner_text())
+    check("and a new thread starts in it",
+          page.evaluate("window.__hud.state().compose && window.__hud.state().compose.projectId") == "p3"
+          and page.locator('[data-testid="project-chip-select"]').input_value() == "p3")
 
     # Escape cancels without creating anything.
     n = len(mock.posted("/projects"))
@@ -998,6 +1111,10 @@ def move_checks(page, mock):
           and page.evaluate("window.__hud.state().threads[0].project_id") == "p2",
           page.evaluate("window.__hud.state().threads[0].project_id"))
     check("under the project it was dropped on", expand(page, "p2", "thread-t1"))
+    hint = page.locator('[data-testid="moved-t1"]')
+    check("it says it still works in its original folder",
+          hint.count() == 1 and "Jarvis" in hint.inner_text(),
+          hint.inner_text() if hint.count() else "no hint")
 
     # A refusal reverts the row. The backend's rule is the one that decides, so
     # the world is made to refuse it — a thread the HUD still believes is a
@@ -1259,6 +1376,7 @@ def main():
             # rearrange the very tree the earlier sections navigate.
             quota_checks(page, mock)
             schedule_dialog_checks(page, mock)
+            compose_checks(page, mock)
             newproject_checks(page, mock)
             move_checks(page, mock)
 

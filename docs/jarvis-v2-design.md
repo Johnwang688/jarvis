@@ -917,6 +917,30 @@ its startup and every 4xx. Verified live: thread opened with the minimal
 body, a message answered by the fast path in ~1 s. The lesson is old —
 **a surface that can fail silently will, on the owner's first message.**
 
+**New thread, and where a message goes (2026-10-06).** The state-map
+review found the window kept a selected project and a selected thread that
+nothing kept in step: clicking a project, creating one, or clicking
+"+ new chat thread" under a project other than the selected one all sent
+the next message somewhere other than where the sidebar pointed. The rule
+now: **the chat pane decides where a message goes; the sidebar only shows
+it.** The conversation is exactly one of an existing thread or a *compose*
+row (a new thread not yet on the server). The project is derived from it,
+never stored (`hud/src/lib/compose.ts`). As in the Claude Code desktop app,
+**New thread** is a button pinned at the top of the sidebar. It opens a
+compose row in the last project worked in, and the window boots into one.
+The project chip in the input bar, or dragging the compose row, re-aims it
+before the first message, and nothing reaches the server until that
+message. After it, a thread moves by drag or menu, but **its working
+directory stays the folder it was opened in**, along with its permission
+rules: the brief is frozen at open, and the fast path refuses a strict
+brief, so letting permissions follow a move would break chats moved into a
+strict project. `Thread.cwd` makes the folder visible, and a moved thread's
+row shows `↪ <folder>`. Two turn-tracking fixes came with it. `busy` follows
+the thread whose turn this window started (`turnThreadId`), so switching
+threads mid-turn no longer leaves the window on THINKING with the mic
+suppressed. Another thread's `proposal_reply` and `turn_finished` no longer
+reach the open chat or open the HUD's follow-up listening window.
+
 Remaining: WP13 (the long-bench comparison, the owner's call on cost), a
 native Windows worker, the R8 hook on Codex, and prompt tuning in
 `roles.py` (§17's over-planning note). The daemon started by hand for the

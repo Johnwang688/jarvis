@@ -8,8 +8,25 @@
 // stops that key from reaching the document handler.
 
 import { useEffect, useRef, useState } from "react";
-import type { Attachment } from "../types";
+import type { Attachment, Project } from "../types";
 import { DICTATION_MODES, HINTS, type DictationMode } from "../lib/dictation";
+import { folderName } from "../lib/compose";
+
+/**
+ * `in: <project>`, where this conversation lives. Editable only while a new
+ * thread is being composed, because that is the only time the choice is still
+ * free. After the first message, moving is a sidebar action, and the chip
+ * shows the folder the thread works in, which a move never changes.
+ */
+export interface ProjectChip {
+  projects: Project[];
+  value: string | null;
+  editable: boolean;
+  /** The folder an existing thread works in; absent while composing. */
+  folder?: string | null;
+  onChange: (projectId: string) => void;
+  onNewProject: () => void;
+}
 
 const MAX_FILES = 8;
 const MAX_BYTES = 4 * 1024 * 1024;
@@ -29,6 +46,8 @@ export function InputBar(props: {
   hint: string;
   pendingTranscript: string;
   disabled?: boolean;
+  placeholder?: string;
+  projectChip?: ProjectChip | null;
   onModeChange: (m: DictationMode) => void;
   onSend: (text: string, attachments: Attachment[]) => void;
   onTranscriptTaken: () => void;
@@ -103,7 +122,7 @@ export function InputBar(props: {
           id="input"
           data-testid="input"
           value={text}
-          placeholder="Message, or @path to attach"
+          placeholder={props.placeholder || "Message, or @path to attach"}
           disabled={props.disabled}
           onChange={(e) => setText(e.target.value)}
           onPaste={(e) => {
@@ -138,6 +157,7 @@ export function InputBar(props: {
         </label>
       </div>
       <div className="row">
+        {props.projectChip ? <Chip chip={props.projectChip} /> : null}
         <div id="dictation" data-testid="dictation">
           {DICTATION_MODES.map((m) => (
             <button
@@ -160,5 +180,51 @@ export function InputBar(props: {
         </span>
       </div>
     </div>
+  );
+}
+
+function Chip({ chip }: { chip: ProjectChip }) {
+  const current = chip.projects.find((p) => p.id === chip.value);
+  if (chip.editable && chip.projects.length === 0) {
+    return (
+      <span className="projchip" data-testid="project-chip">
+        in:{" "}
+        <button type="button" data-testid="project-chip-create" onClick={chip.onNewProject}>
+          create a project
+        </button>
+      </span>
+    );
+  }
+  if (chip.editable) {
+    return (
+      <span className="projchip" data-testid="project-chip" title="The project this new thread starts in">
+        in:{" "}
+        <select
+          data-testid="project-chip-select"
+          style={{ width: "auto" }}
+          value={chip.value || ""}
+          onChange={(e) => chip.onChange(e.target.value)}
+          // Space on the select opens it; it must never reach push-to-talk.
+          onKeyDown={(e) => e.stopPropagation()}
+          onKeyUp={(e) => e.stopPropagation()}
+        >
+          {chip.projects.map((p) => (
+            <option key={p.id} value={p.id}>
+              {p.name}
+            </option>
+          ))}
+        </select>
+      </span>
+    );
+  }
+  return (
+    <span
+      className="projchip ro"
+      data-testid="project-chip"
+      title={chip.folder ? `works in ${chip.folder}` : undefined}
+    >
+      in: {current?.name || "?"}
+      {chip.folder ? <span className="muted"> · {folderName(chip.folder)}</span> : null}
+    </span>
   );
 }
