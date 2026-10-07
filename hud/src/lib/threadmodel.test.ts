@@ -17,6 +17,8 @@ const TM: ThreadModels = {
         { id: "moonshotai/kimi-k3", efforts: ["medium", "low"], vision: true, effort: "low",
           prompt_usd: 0.6, completion_usd: 2.5 },
         { id: "plain/no-reasoning", efforts: [], vision: true, prompt_usd: 0, completion_usd: 0 },
+        // A roster model the catalog has never described: no ladder known.
+        { id: "new/unlisted", name: "new/unlisted", unlisted: true, effort: "" },
       ],
     },
     claude: {
@@ -61,7 +63,7 @@ describe("the model list", () => {
     const opts = modelOptions(TM, fast());
     expect(opts[0]).toEqual({ value: "", label: "default · deepseek-v4-flash-0731" });
     expect(opts.map((o) => o.value)).toEqual(["", "deepseek/deepseek-v4-flash-0731", "moonshotai/kimi-k3",
-                                              "plain/no-reasoning", SEARCH]);
+                                              "plain/no-reasoning", "new/unlisted", SEARCH]);
     expect(opts[1].label).toBe("deepseek-v4-flash-0731 · $0.1/$0.3");
     expect(opts[3].label).toBe("no-reasoning · free");
   });
@@ -94,6 +96,19 @@ describe("effort (A4)", () => {
     expect(effortOptions(TM, fast("plain/no-reasoning"))).toEqual([]);
     expect(effortOptions(TM, { provider: "claude", model: "claude-haiku-4-5", effort: null })).toEqual([]);
     expect(effortOptions(TM, { provider: "codex", model: null, effort: null })[0].label).toBe("default · xhigh");
+  });
+
+  it("treats an unknown ladder as unknown, not as no reasoning control", () => {
+    // The backend sends such a model `high` and accepts any level
+    // (thread_model.efforts_of -> None); the chip must agree, for an
+    // unlisted roster model and for an off-roster pin alike.
+    for (const model of ["new/unlisted", "gone/model"]) {
+      expect(defaultEffort(TM, "fast", model)).toBe("high");
+      const opts = effortOptions(TM, fast(model));
+      expect(opts[0].label).toBe("default · high");
+      expect(opts.map((o) => o.value)).toEqual(["", "max", "xhigh", "high", "medium", "low", "minimal", "none"]);
+      expect(effective(TM, fast(model)).effort).toBe("high");
+    }
   });
 
   it("is reset to the new model's default when the model changes", () => {

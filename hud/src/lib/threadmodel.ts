@@ -69,10 +69,14 @@ export function entry(tm: ThreadModels | null, provider: ProviderName, model: st
   return tm.providers[provider]?.models.find((m) => m.id === model);
 }
 
-/** The model's own effort ladder; [] for none; null when unknown. */
+/** The model's own effort ladder; [] for none; null when unknown — a model
+ * the list does not carry (an off-roster pin) or carries without a ladder (a
+ * roster model the catalog has never described, `unlisted`). Unknown is not
+ * "no reasoning control": the backend sends such a model the default effort
+ * and accepts any level (`thread_model.efforts_of` returns None). */
 export function effortsFor(tm: ThreadModels | null, provider: ProviderName, model: string | null): string[] | null {
   const e = entry(tm, provider, model);
-  return e ? e.efforts || [] : null;
+  return e && Array.isArray(e.efforts) ? e.efforts : null;
 }
 
 function clamp(wanted: string, ladder: string[]): string | null {
@@ -87,8 +91,9 @@ function clamp(wanted: string, ladder: string[]): string | null {
 export function defaultEffort(tm: ThreadModels | null, provider: ProviderName, model: string | null): string | null {
   const e = entry(tm, provider, model);
   const wanted = (provider === "fast" && e?.effort) || tm?.effort_default || DEFAULT_EFFORT;
-  if (!e) return wanted;
-  const ladder = e.efforts || [];
+  const ladder = effortsFor(tm, provider, model);
+  // An unknown ladder is sent as asked, as the backend does.
+  if (ladder === null) return wanted;
   return ladder.length ? clamp(wanted, ladder) : null;
 }
 
@@ -154,14 +159,17 @@ export function modelOptions(tm: ThreadModels | null, c: Choice): Option[] {
   return out;
 }
 
-/** The effort select for the effective model; empty when it has no control. */
+/** The effort select for the effective model; empty when it has no control.
+ * An unknown ladder offers every level: the backend accepts any of them for
+ * a model it cannot describe, and refuses one a model it can describe lacks,
+ * with the reason. */
 export function effortOptions(tm: ThreadModels | null, c: Choice): Option[] {
   const eff = effective(tm, c);
   const ladder = effortsFor(tm, c.provider, eff.model);
   const dflt = c.model === null ? eff.effort : defaultEffort(tm, c.provider, c.model);
   if (ladder !== null && ladder.length === 0) return [];
   const out: Option[] = [{ value: "", label: `default · ${dflt || "none"}` }];
-  for (const level of ladder || []) out.push({ value: level, label: level });
+  for (const level of ladder ?? EFFORT_LADDER) out.push({ value: level, label: level });
   if (c.effort && !out.some((o) => o.value === c.effort)) out.push({ value: c.effort, label: c.effort });
   return out;
 }
