@@ -57,6 +57,9 @@ export interface State {
   moveError: string;
   picker: null | "model" | "voice" | "avatar" | "route" | "settings" | "newProject" | "newTask" | "schedule"
     | "editProject" | "archiveProject" | "archive";
+  /** Archived projects' names, from `/archive`: `/projects` hides them, but
+   * the backend still counts them when it numbers a name (decisions B4). */
+  archivedNames: string[];
 }
 
 export const initialState: State = {
@@ -65,7 +68,7 @@ export const initialState: State = {
   messages: [], draft: "", ops: [], approvals: [], usage: null, schedules: [],
   route: null, avatar: null, wakePatterns: [], dictation: DEFAULT_MODE,
   level: 0, orb: "idle", status: "", busy: false, pendingTranscript: "",
-  error: "", moveError: "", picker: null,
+  error: "", moveError: "", picker: null, archivedNames: [],
 };
 
 export type Action =

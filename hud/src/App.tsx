@@ -306,11 +306,13 @@ export default function App() {
             void refreshThreads();
             void refreshTasks();
             void refreshSchedules();
+            void refreshArchivedNames();
           }
           break;
         case "project_archived":
         case "project_deleted":
           projectGone(e.project_id || data.project_id, kind === "project_archived" ? "archived" : "deleted");
+          void refreshArchivedNames();
           break;
         case "thread_updated":
         case "thread_restored":
@@ -477,6 +479,16 @@ export default function App() {
     [dispatch],
   );
 
+  /** Archived projects' names, so a rename preview numbers the way the backend will. */
+  const refreshArchivedNames = useCallback(
+    () =>
+      api
+        .archive()
+        .then((v) => dispatch({ type: "patch", patch: { archivedNames: v.projects.map((p) => p.name) } }))
+        .catch(() => {}),
+    [dispatch],
+  );
+
   const refreshSchedules = useCallback(
     () =>
       api
@@ -558,7 +570,7 @@ export default function App() {
         api.approvals().catch(() => []),
       ]);
       dispatch({ type: "patch", patch: { usage, schedules, route, approvals } });
-      await Promise.all([loadAvatar(), loadModels(), loadVoices()]);
+      await Promise.all([loadAvatar(), loadModels(), loadVoices(), refreshArchivedNames()]);
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -794,6 +806,7 @@ export default function App() {
       <div id="shell">
         <Sidebar
           projects={state.projects}
+          archivedNames={state.archivedNames}
           platforms={state.platforms}
           threads={state.threads}
           tasks={state.tasks}
@@ -1048,7 +1061,7 @@ export default function App() {
                 newThread(created.id);
               })
           }
-          taken={projectNamesTaken(state.projects)}
+          taken={projectNamesTaken(state.projects, null, state.archivedNames)}
           onClose={() => patch({ picker: null })}
         />
       ) : null}
@@ -1056,7 +1069,7 @@ export default function App() {
         <ProjectDialog
           mode="edit"
           initial={state.projects.find((p) => p.id === projectTarget) || null}
-          taken={projectNamesTaken(state.projects, projectTarget)}
+          taken={projectNamesTaken(state.projects, projectTarget, state.archivedNames)}
           onSave={(body) =>
             api.patchProject(projectTarget, body).then(async () => {
               await refreshProjects(projectTarget);

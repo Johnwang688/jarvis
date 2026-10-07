@@ -99,6 +99,24 @@ def _rename_checks(page, mock, check, until, expand):
     time.sleep(0.2)
     check("Escape cancels and sends nothing", not mock.sent("PATCH", "/projects/p3"))
 
+    # An archived project's name still counts, as it does in the backend: the
+    # window learns those names from /archive, since /projects hides them.
+    vault = {**mock.world["projects"][0], "id": "p7", "name": "Vault", "root": "/home/johnw/vault",
+             "archived": "2026-10-01T00:00:00+00:00", "inbox": False}
+    mock.world["projects"].append(vault)
+    mock.emit("project_archived", {"project_id": "p7", "name": "Vault"}, project_id="p7")
+    until(lambda: "Vault" in page.evaluate("window.__hud.state().archivedNames"))
+    page.locator('[data-testid="project-name-p3"]').dblclick()
+    box = page.locator('[data-testid="rename-project-p3"]')
+    until(lambda: box.count() > 0)
+    box.fill("VAULT")
+    preview = page.locator('[data-testid="rename-project-p3-saves-as"]')
+    check("an archived project's name previews a number too",
+          preview.count() == 1 and "VAULT (1)" in preview.inner_text(),
+          preview.inner_text() if preview.count() else "no preview")
+    box.press("Escape")
+    until(lambda: page.locator('[data-testid="rename-project-p3"]').count() == 0)
+
     page.locator('[data-testid="project-name-p3"]').dblclick()
     until(lambda: page.locator('[data-testid="rename-project-p3"]').count() > 0)
     box = page.locator('[data-testid="rename-project-p3"]')
@@ -361,6 +379,26 @@ def _thread_archive_checks(page, mock, check, until, expand):
     until(lambda: page.locator('[data-testid="archive-view"]').count() == 0)
     page.evaluate("window.__hud.dispatch({type: 'patch', patch: {}})")
     check("Restore brings the thread back", expand(page, "p1", "thread-t1"))
+
+    # A delete whose move to the trash failed says so, rather than "in the trash".
+    w = mock.world
+    w["threads"].append({**w["threads"][0], "id": "t9", "title": "old notes",
+                         "archived": "2026-10-01T00:00:00+00:00"})
+    w["trash_fails"] = "TrashError: could not move it to the trash: disk full"
+    page.locator('[data-testid="open-archive"]').click()
+    until(lambda: page.locator('[data-testid="archive-delete-thread-t9"]').count() > 0)
+    page.locator('[data-testid="archive-delete-thread-t9"]').click()
+    until(lambda: page.locator('[data-testid="delete-confirm-btn"]').count() > 0)
+    page.locator('[data-testid="delete-confirm-btn"]').click()
+    until(lambda: mock.saw("DELETE", "/threads/t9"))
+    notice = until(lambda: page.locator('[data-testid="archive-notice"]').count() > 0
+                   and page.locator('[data-testid="archive-notice"]').inner_text())
+    check("a delete the trash refused says the records are staged for retry",
+          bool(notice) and "staged for retry" in notice and "disk full" in notice
+          and "are in the trash" not in notice, str(notice))
+    w["trash_fails"] = None
+    page.locator('[data-testid="archive-close"]').click()
+    until(lambda: page.locator('[data-testid="archive-view"]').count() == 0)
 
 
 def _other_window_checks(page, mock, check, until, expand):

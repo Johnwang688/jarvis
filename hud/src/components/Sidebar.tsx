@@ -61,6 +61,8 @@ interface MenuAt {
 
 export function Sidebar(props: {
   projects: Project[];
+  /** Archived projects' names: a rename preview counts them, as the backend does. */
+  archivedNames?: string[];
   platforms: Record<string, { platform: string; note: string | null }>;
   threads: Thread[];
   tasks: Task[];
@@ -282,7 +284,7 @@ export function Sidebar(props: {
                 {renaming?.kind === "project" && renaming.id === p.id ? (
                   <InlineRename
                     value={p.name}
-                    taken={projectNamesTaken(props.projects, p.id)}
+                    taken={projectNamesTaken(props.projects, p.id, props.archivedNames)}
                     testid={`rename-project-${p.id}`}
                     onSave={(name) => saveRename("project", p.id, name)}
                     onCancel={() => setRenaming(null)}

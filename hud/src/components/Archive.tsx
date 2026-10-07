@@ -21,7 +21,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../api";
 import type { ArchiveView as View, ArchivedProject, ChatMessage, Project, ProjectImpact, Thread } from "../types";
-import { archiveSummary, deleteSummary, plural } from "../lib/projects";
+import { archiveSummary, deletedNotice, deleteSummary, plural } from "../lib/projects";
 
 /** Escape closes; Enter is swallowed before any focused button sees it. */
 function useConfirmKeys(onClose: () => void) {
@@ -163,11 +163,11 @@ export function ArchiveView(props: {
   }, []);
   useEffect(load, [load, props.version]);
 
-  const act = (p: Promise<unknown>, after: () => void, done: string) => {
+  const act = <R,>(p: Promise<R>, after: () => void, done: string | ((result: R) => string)) => {
     setBusy(true);
     setError("");
-    p.then(() => {
-      setNotice(done);
+    p.then((result) => {
+      setNotice(typeof done === "string" ? done : done(result));
       after();
       load();
     })
@@ -189,15 +189,17 @@ export function ArchiveView(props: {
     if (!pending) return;
     if (pending.kind === "project") {
       if (!pending.impact) return;
+      const name = pending.project.name;
       act(api.deleteProject(pending.project.id, pending.impact.token), () => {
         setPending(null);
         props.onDeleted();
-      }, `Deleted ${pending.project.name}; Jarvis's records are in the trash.`);
+      }, (r) => deletedNotice(name, r));
     } else {
+      const name = `“${pending.thread.title || pending.thread.id}”`;
       act(api.deleteThread(pending.thread.id), () => {
         setPending(null);
         props.onDeleted();
-      }, `Deleted “${pending.thread.title || pending.thread.id}”; it is in the trash.`);
+      }, (r) => deletedNotice(name, r));
     }
   };
 

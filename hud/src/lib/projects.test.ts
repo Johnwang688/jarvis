@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  afterProjectGone, afterThreadGone, archiveSummary, deleteSummary, editEffects, forgetLastProject,
+  afterProjectGone, afterThreadGone, archiveSummary, deletedNotice, deleteSummary, editEffects, forgetLastProject,
   formFrom, nameKey, projectEditBody, projectNamesTaken, threadTitlesTaken, uniqueName,
 } from "./projects";
 import { LAST_PROJECT_KEY } from "./compose";
@@ -18,6 +18,7 @@ const NAME_TABLE: [string, string[], string][] = [
   ["e2e-calc", ["E2E-CALC "], "e2e-calc (1)"],
   ["Inbox", ["Inbox"], "Inbox (1)"],
   ["new", ["old"], "new"],
+  ["straße", ["STRASSE"], "straße (1)"],
 ];
 
 const project = (over: Partial<Project>): Project => ({
@@ -70,6 +71,19 @@ describe("names are numbered, never refused", () => {
     expect(nameKey("  Calc ")).toBe(nameKey("calc"));
   });
 
+  it("folds case the way Python's casefold does, not just toLowerCase", () => {
+    expect(nameKey("Straße")).toBe("strasse");
+    expect(nameKey("ﬁle")).toBe("file");
+    expect(nameKey("ΟΔΟΣ")).toBe(nameKey("οδος"));
+    expect(nameKey("οδος")).toBe("οδοσ");
+  });
+
+  it("counts archived projects' names, as the backend does", () => {
+    const projects = [project({ id: "p1", name: "calc" })];
+    expect(projectNamesTaken(projects, null, ["Vault"])).toEqual(["calc", "Vault", "Inbox"]);
+    expect(uniqueName("vault", projectNamesTaken(projects, "p1", ["Vault"]))).toBe("vault (1)");
+  });
+
   it("reserves the Inbox's name and leaves the project itself out", () => {
     const projects = [project({ id: "p1", name: "calc" }), project({ id: "p2", name: "site" })];
     expect(projectNamesTaken(projects, "p1")).toEqual(["site", "Inbox"]);
@@ -110,6 +124,13 @@ describe("the edit body sends only what changed", () => {
     const inbox = project({ inbox: true, name: "Inbox", root: "/home/o" });
     expect(projectEditBody(inbox, { ...formFrom(inbox), name: "Mine", root: "/tmp", profile: "ask" }))
       .toEqual({ profile: "ask" });
+  });
+
+  it("a root change with only not-yet-started tasks lists none on the old folder", () => {
+    // The backend leaves an intake task with no pinned root and no worktree
+    // out of on_root.tasks: it starts under the new root.
+    const lines = editEffects(p, { root: "/home/o/new" }, impact({ on_root: { threads: 0, tasks: [] }, worktrees: [] }));
+    expect(lines).toEqual(["0 threads keep working in /home/o/calc; new threads and tasks use /home/o/new."]);
   });
 
   it("says what a root change leaves on the old folder", () => {
@@ -208,5 +229,18 @@ describe("after a thread goes away", () => {
     const after = afterThreadGone({ ...base, threadId: "t2" }, "t1");
     expect(after.threadId).toBe("t2");
     expect(after.displaced).toBe(false);
+  });
+});
+
+describe("the delete notice says where the records went", () => {
+  it("the trash, the Recycle Bin, or staged for retry", () => {
+    expect(deletedNotice("calc", { deleted: "p1", trash: { where: "linux" } }))
+      .toBe("Deleted calc; Jarvis's records are in the trash.");
+    expect(deletedNotice("calc", { deleted: "p1", trash: { where: "windows" } })).toMatch(/Recycle Bin/);
+    const staged = deletedNotice("calc", {
+      deleted: "p1", trash: { where: "staged", path: "/d/deleting/x", error: "TrashError: disk full" } });
+    expect(staged).toMatch(/staged for retry in \/d\/deleting\/x/);
+    expect(staged).toMatch(/disk full/);
+    expect(staged).not.toMatch(/are in the trash/);
   });
 });

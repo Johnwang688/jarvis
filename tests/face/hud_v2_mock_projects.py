@@ -300,6 +300,13 @@ def handle(h, mock, method, path, body) -> bool:
                 h._err(409, "archive the thread first; only an archived thread can be deleted")
                 return True
             w["threads"] = [t for t in w["threads"] if t["id"] != thread["id"]]
+            if w.get("trash_fails"):
+                # The records left every list, but the move to the trash failed:
+                # `_to_trash`'s staged result.
+                h._json({"deleted": thread["id"], "trash": {
+                    "where": "staged", "path": "/data/deleting/x-thread-" + thread["id"],
+                    "error": w["trash_fails"]}})
+                return True
             w["trash"]["entries"] += 1
             h._json({"deleted": thread["id"], "trash": {"where": "linux", "location": w["trash"]["location"]}})
             return True

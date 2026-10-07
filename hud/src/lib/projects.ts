@@ -14,12 +14,20 @@
 // still aimed at a project that no longer takes messages, and the next send
 // finding out with a 409.
 
-import type { Project, ProjectImpact, Task, Thread } from "../types";
+import type { DeleteResult, Project, ProjectImpact, Task, Thread } from "../types";
 import { LAST_PROJECT_KEY, lastProject, type Compose } from "./compose";
 
-/** What two names are compared on: case and surrounding spaces ignored. */
+/**
+ * What two names are compared on: case and surrounding spaces ignored. Python
+ * uses `str.casefold()`, which JavaScript lacks; upper-then-lower plus folding
+ * the final sigma reproduces it for the cases that differ from a plain
+ * `toLowerCase()` (`ß` and `ẞ` → `ss`, ligatures such as `ﬁ` → `fi`, `ς` → `σ`).
+ * Known remaining gap: `trim()` and Python's `strip()` disagree on a few
+ * exotic characters (U+FEFF is trimmed here, U+001C–U+001F there). The backend
+ * decides the saved name either way; this only drives the preview.
+ */
 export function nameKey(name: string | null | undefined): string {
-  return (name || "").trim().toLowerCase();
+  return (name || "").trim().toUpperCase().toLowerCase().replace(/ς/g, "σ");
 }
 
 const SUFFIX = /^(.*?) \((\d+)\)$/;
@@ -36,9 +44,13 @@ export function uniqueName(wanted: string, taken: (string | null | undefined)[])
   return `${stem} (${n})`;
 }
 
-/** Every name a project may not take: the others', and the Inbox's. */
-export function projectNamesTaken(projects: Project[], but?: string | null): string[] {
-  return [...projects.filter((p) => p.id !== but).map((p) => p.name), "Inbox"];
+/**
+ * Every name a project may not take: the others' — archived ones included,
+ * because the backend counts them (`project_names_taken`) — and the Inbox's.
+ * `archived` comes from `/archive`, since `/projects` hides archived projects.
+ */
+export function projectNamesTaken(projects: Project[], but?: string | null, archived: string[] = []): string[] {
+  return [...projects.filter((p) => p.id !== but).map((p) => p.name), ...archived, "Inbox"];
 }
 
 /** Thread titles are unique within their project. */
@@ -136,6 +148,24 @@ export function deleteSummary(impact: ProjectImpact, retentionDays: number | nul
   lines.push(`Nothing inside ${impact.root} is touched.`);
   if (retentionDays) lines.push(`The trash keeps them for ${retentionDays} days.`);
   return lines;
+}
+
+/**
+ * What the Archive view says after a permanent delete. The records always
+ * leave every list; when the move to the trash itself failed they are staged
+ * under the data root and retried later (`recover_staging`), and the window
+ * must say so rather than claim they are in the trash.
+ */
+export function deletedNotice(what: string, result: DeleteResult | null | undefined): string {
+  const trash = result?.trash;
+  if (trash?.where === "staged") {
+    return `Deleted ${what} from Jarvis's lists, but the move to the trash failed` +
+      (trash.error ? ` (${trash.error})` : "") +
+      `. The records are staged for retry${trash.path ? ` in ${trash.path}` : ""}; ` +
+      "Jarvis tries again at its next start and every six hours.";
+  }
+  if (trash?.where === "windows") return `Deleted ${what}; Jarvis's records are in the Recycle Bin.`;
+  return `Deleted ${what}; Jarvis's records are in the trash.`;
 }
 
 /** Clear the remembered project when it is the one that went away. */
