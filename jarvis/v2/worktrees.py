@@ -100,12 +100,22 @@ def _protect_owner(root: Path, path: Path) -> None:
         raise WorktreeError(f"Refusing to manage owner's checkout: {path}")
 
 
-def prune(project: Project) -> None:
-    """Forget manually deleted worktrees immediately, retaining their branches."""
+def _prune(root: Path) -> None:
     with _lock:
-        root = Path(project.root).resolve()
+        root = root.resolve()
         if _is_git(root):
             _git(root, "worktree", "prune", "--expire", "now")
+
+
+def prune(project: Project) -> None:
+    """Forget manually deleted worktrees immediately, retaining their branches."""
+    _prune(Path(project.root))
+
+
+def task_root(task: Task, project: Project | None) -> str | None:
+    """The root a task works against: the one it was started under, pinned on
+    the task (decisions B5), else its project's current root."""
+    return task.root or (project.root if project is not None else None)
 
 
 def ensure(task: Task, project: Project, stores: Stores) -> Task:
@@ -113,12 +123,15 @@ def ensure(task: Task, project: Project, stores: Stores) -> Task:
         stores.tasks.path(task.id)  # Validate opaque ids before using them in paths.
         if task.project_id != project.id:
             raise WorktreeError(f"Task {task.id} does not belong to project {project.id}")
-        root = Path(project.root).resolve()
+        # Pinned on first use: a project root changed afterwards does not move
+        # this task's worktree, its commits, or its removal to another repo.
+        task.root = task_root(task, project)
+        root = Path(task.root).resolve()
         git = _is_git(root)
         base_ref = None
         event = "worktree_created"
         if git:
-            prune(project)
+            _prune(root)
             _exclude(root)
             registered = _registrations(root)
             path = Path(task.worktree).resolve() if task.worktree else root / ".jarvis" / "worktrees" / task.id
@@ -183,10 +196,10 @@ def remove(task: Task, stores: Stores, *, force: bool = False) -> None:
         if task.worktree is None:
             return
         path = Path(task.worktree).resolve()
-        project = stores.projects.get(task.project_id)
-        if project is None:
+        project = stores.projects.get(task.project_id) if task.root is None else None
+        if task.root is None and project is None:
             raise WorktreeError(f"Task {task.id}: project {task.project_id} not found")
-        root = Path(project.root).resolve()
+        root = Path(task_root(task, project)).resolve()
         if task.branch is None:
             if path != root / ".jarvis" / "tasks" / task.id:
                 raise WorktreeError(f"Refusing to remove unexpected task directory: {path}")
@@ -213,7 +226,7 @@ def remove(task: Task, stores: Stores, *, force: bool = False) -> None:
                 args = ["worktree", "remove"] + (["--force"] if force else [])
                 _git(root, *args, str(path))
             else:
-                prune(project)
+                _prune(root)
             branches = _git(root, "for-each-ref", "--format=%(refname)", "refs/heads").splitlines()
             if f"refs/heads/{task.branch}" in branches:
                 # Reachability against *all* other branches was checked above;
