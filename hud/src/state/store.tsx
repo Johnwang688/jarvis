@@ -55,7 +55,8 @@ export interface State {
   error: string;
   /** A refused thread move, shown beside the tree it was reverted in. */
   moveError: string;
-  picker: null | "model" | "voice" | "avatar" | "route" | "settings" | "newProject" | "newTask" | "schedule";
+  picker: null | "model" | "voice" | "avatar" | "route" | "settings" | "newProject" | "newTask" | "schedule"
+    | "editProject" | "archiveProject" | "archive";
 }
 
 export const initialState: State = {

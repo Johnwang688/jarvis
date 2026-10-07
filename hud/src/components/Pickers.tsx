@@ -8,9 +8,12 @@
 // A model name comes off the network, and this window draws authorization
 // cards — so every row is React text, never markup.
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { AvatarDesc, ModelRow, RouteView, VoiceEntry } from "../types";
+import type { Project, ProjectImpact } from "../types";
 import { DirPicker } from "./DirPicker";
+import { api } from "../api";
+import { editEffects, formFrom, nameKey, projectEditBody, uniqueName, type ProjectForm } from "../lib/projects";
 
 function Shell(props: { title: string; onClose: () => void; children: React.ReactNode; foot?: React.ReactNode }) {
   return (
@@ -153,43 +156,91 @@ export function AvatarPicker(props: {
 }
 
 /**
- * New project. The owner's first-use complaint was that creating one was not
- * obvious; this is the other half of that fix (the first is the button, in
- * `Sidebar`). Three things it will not do: guess a root, accept a path the
- * backend refuses, or close on an error the owner never saw.
+ * New project, and editing one (decisions B). The owner's first-use complaint
+ * was that creating one was not obvious; this is the other half of that fix
+ * (the first is the button, in `Sidebar`). Three things it will not do: guess
+ * a root, accept a path the backend refuses, or close on an error the owner
+ * never saw.
  *
  * The root and each access folder are chosen with `DirPicker`, so a typo is
  * not a project pointed at a folder that does not exist — and a `/mnt/<drive>/`
  * root is badged **before** it is created, because the 9p caution is advice
  * about a decision, not a label on one already made.
+ *
+ * In **edit** mode it sends only what changed (`projectEditBody`), and says
+ * what an edit leaves where it was: a new root applies to new threads and
+ * tasks, while existing threads and unfinished tasks stay on the old folder
+ * (B5), read back from `/impact` rather than guessed. The Inbox's name and
+ * root are fixed, and the dialog says so instead of letting a PATCH 409.
+ * A colliding name is numbered by the backend, and the dialog says what it
+ * will be saved as.
  */
-export function NewProject(props: {
-  onCreate: (body: { name: string; root: string; extra_dirs: string[]; profile: string }) => Promise<unknown>;
+export function ProjectDialog(props: {
+  mode: "new" | "edit";
+  initial?: Project | null;
+  /** Other projects' names, for the "saves as" preview; the backend decides. */
+  taken?: string[];
+  onCreate?: (body: { name: string; root: string; extra_dirs: string[]; profile: string }) => Promise<unknown>;
+  onSave?: (body: Record<string, unknown>) => Promise<unknown>;
   onClose: () => void;
 }) {
-  const [name, setName] = useState("");
-  const [root, setRoot] = useState("");
-  const [extra, setExtra] = useState<string[]>([]);
-  const [profile, setProfile] = useState("auto");
+  const edit = props.mode === "edit" && !!props.initial;
+  const initial = props.initial || null;
+  const start: ProjectForm = initial
+    ? formFrom(initial)
+    : { name: "", root: "", profile: "auto", extra_dirs: [], always_ask: [] };
+  const [name, setName] = useState(start.name);
+  const [root, setRoot] = useState(start.root);
+  const [extra, setExtra] = useState<string[]>(start.extra_dirs);
+  const [profile, setProfile] = useState(start.profile);
+  const [rules, setRules] = useState(start.always_ask.join("\n"));
   const [browsing, setBrowsing] = useState<null | "root" | "extra">(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [impact, setImpact] = useState<ProjectImpact | null>(null);
 
+  useEffect(() => {
+    if (!edit || !initial) return;
+    api.projectImpact(initial.id).then(setImpact).catch(() => setImpact(null));
+  }, [edit, initial?.id]);
+
+  // Escape closes the dialog wherever focus is (the Inbox's name box, the
+  // usual home for it, is disabled) — unless the folder picker is on top.
+  useEffect(() => {
+    if (browsing) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") props.onClose();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [browsing, props.onClose]);
+
+  const inbox = !!initial?.inbox;
   const windows = root.startsWith("/mnt/");
-  const ready = !!name.trim() && !!root.trim() && !busy;
+  const form: ProjectForm = {
+    name, root, profile, extra_dirs: extra, always_ask: rules.split("\n"),
+  };
+  const body = edit && initial ? projectEditBody(initial, form) : null;
+  const ready = !!name.trim() && !!root.trim() && !busy && (!edit || Object.keys(body || {}).length > 0);
+  const savesAs = props.taken && name.trim() && (!edit || nameKey(name) !== nameKey(initial?.name))
+    ? uniqueName(name, props.taken)
+    : "";
+  const effects = edit && initial && body ? editEffects(initial, body, impact) : [];
 
   const submit = () => {
     if (!name.trim()) return setError("Give the project a name.");
     if (!root.trim()) return setError("Choose a root folder.");
     if (busy) return;
+    if (edit && body && !Object.keys(body).length) return props.onClose();
     setBusy(true);
     setError("");
-    Promise.resolve(
-      props.onCreate({ name: name.trim(), root: root.trim(), extra_dirs: extra, profile }),
-    )
+    const go = edit
+      ? props.onSave?.(body || {})
+      : props.onCreate?.({ name: name.trim(), root: root.trim(), extra_dirs: extra, profile });
+    Promise.resolve(go)
       // The dialog stays open on a refusal with the backend's own words: a
       // dialog that closes on an error is a project the owner believes exists.
-      .catch((e) => setError(e?.message || "could not create the project"))
+      .catch((e) => setError(e?.message || (edit ? "could not save the project" : "could not create the project")))
       .finally(() => setBusy(false));
   };
 
@@ -202,24 +253,41 @@ export function NewProject(props: {
   return (
     <>
       <Shell
-        title="New project"
+        title={edit ? `Edit project · ${initial?.name}` : "New project"}
         onClose={props.onClose}
         foot={
-          <button type="button" data-testid="create-project" disabled={!ready} onClick={submit}>
-            Create
-          </button>
+          edit ? (
+            <button type="button" data-testid="save-project" disabled={!ready} onClick={submit}>
+              Save
+            </button>
+          ) : (
+            <button type="button" data-testid="create-project" disabled={!ready} onClick={submit}>
+              Create
+            </button>
+          )
         }
       >
-        <div className="pad col" onKeyDown={(e) => { if (e.key === "Escape") props.onClose(); }}>
+        <div className="pad col" data-testid={edit ? "project-dialog-edit" : "project-dialog-new"}
+             onKeyDown={(e) => { if (e.key === "Escape") props.onClose(); }}>
           <label className="muted small">Name</label>
           <input data-testid="project-name" placeholder="what to call it" value={name}
-                 autoFocus onKeyDown={keys} onChange={(e) => setName(e.target.value)} />
+                 autoFocus={!inbox} disabled={inbox} onKeyDown={keys} onChange={(e) => setName(e.target.value)} />
+          {savesAs && savesAs !== name.trim() ? (
+            <div className="muted small" data-testid="project-saves-as">
+              That name is taken; it will be saved as <b>{savesAs}</b>.
+            </div>
+          ) : null}
+          {inbox ? (
+            <div className="muted small" data-testid="project-inbox-note">
+              The Inbox is where unplaced chat lands: its name and folder are fixed.
+            </div>
+          ) : null}
 
           <label className="muted small">Root folder</label>
           <div className="row">
             <input data-testid="project-root" placeholder="choose or type an absolute path"
-                   value={root} onKeyDown={keys} onChange={(e) => setRoot(e.target.value)} />
-            <button type="button" data-testid="browse-root" onClick={() => setBrowsing("root")}>
+                   value={root} disabled={inbox} onKeyDown={keys} onChange={(e) => setRoot(e.target.value)} />
+            <button type="button" data-testid="browse-root" disabled={inbox} onClick={() => setBrowsing("root")}>
               Browse
             </button>
           </div>
@@ -246,11 +314,42 @@ export function NewProject(props: {
           </button>
 
           <label className="muted small">Profile</label>
-          <select data-testid="project-profile" value={profile} onChange={(e) => setProfile(e.target.value)}>
+          <select data-testid="project-profile" value={profile} autoFocus={inbox}
+                  onChange={(e) => setProfile(e.target.value)}>
             <option value="auto">auto (default)</option>
             <option value="ask">ask — every dangerous call reaches you</option>
             <option value="strict">strict — no network, deny-all</option>
           </select>
+
+          {edit ? (
+            <>
+              <label className="muted small">Always ask (one per line: a tool, or a command with globs)</label>
+              <textarea rows={3} data-testid="project-always-ask" value={rules}
+                        placeholder="vercel --prod"
+                        onKeyDown={(e) => {
+                          e.stopPropagation();
+                          if (e.key === "Escape") props.onClose();
+                        }}
+                        onChange={(e) => setRules(e.target.value)} />
+              <label className="muted small">Discord channel</label>
+              <div className="small" data-testid="project-discord">
+                {initial?.discord_channel_id || "none"}
+                <span className="muted"> · read-only</span>
+              </div>
+              {effects.length ? (
+                <div className="effects" data-testid="project-effects">
+                  {effects.map((line) => <div key={line}>{line}</div>)}
+                  {typeof body?.root === "string" && impact?.on_root.tasks.length ? (
+                    <ul className="small">
+                      {impact.on_root.tasks.map((t) => (
+                        <li key={t.id}>{t.id} · {t.state} · {t.brief.slice(0, 60)}</li>
+                      ))}
+                    </ul>
+                  ) : null}
+                </div>
+              ) : null}
+            </>
+          ) : null}
 
           {error ? <div className="err" data-testid="project-error">{error}</div> : null}
         </div>
@@ -270,6 +369,15 @@ export function NewProject(props: {
       ) : null}
     </>
   );
+}
+
+/** The create half of `ProjectDialog`, under its old name. */
+export function NewProject(props: {
+  onCreate: (body: { name: string; root: string; extra_dirs: string[]; profile: string }) => Promise<unknown>;
+  taken?: string[];
+  onClose: () => void;
+}) {
+  return <ProjectDialog mode="new" onCreate={props.onCreate} taken={props.taken} onClose={props.onClose} />;
 }
 
 export function NewTask(props: { onCreate: (brief: string) => void; onClose: () => void }) {

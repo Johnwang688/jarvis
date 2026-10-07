@@ -1381,6 +1381,9 @@ def main():
             compose_checks(page, mock)
             newproject_checks(page, mock)
             move_checks(page, mock)
+            # Decisions part B last of all: it renames, archives and deletes.
+            from tests.face.hud_v2_projects_check import projects_checks
+            projects_checks(page, mock, check, until, expand)
 
             ctx.close()
             browser.close()

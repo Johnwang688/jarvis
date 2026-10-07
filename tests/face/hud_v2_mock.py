@@ -29,6 +29,11 @@ from urllib.parse import parse_qs, urlparse
 REPO = Path(__file__).resolve().parents[2]
 DIST = REPO / "hud" / "dist"
 
+try:  # rename, edit, archive, restore, delete (decisions part B)
+    from tests.face import hud_v2_mock_projects as mock_projects
+except ImportError:  # run as a script from tests/face
+    import hud_v2_mock_projects as mock_projects  # type: ignore[no-redef]
+
 # A hostile avatar, checked for what it does rather than what it says: the art
 # is drawn in the window that gates approvals, so an `onload` in it must never
 # run. The HUD renders it through an <img>, which cannot run script whatever
@@ -333,6 +338,8 @@ class MockDaemon:
                 path, q = url.path, parse_qs(url.query)
                 self._record("GET", path, {k: v[0] for k, v in q.items()})
                 w = mock.world
+                if mock_projects.handle(self, mock, "GET", path, {}):
+                    return
 
                 if path == "/events":
                     self.send_response(200)
@@ -479,6 +486,8 @@ class MockDaemon:
                     return self._json({"text": w["stt_text"]})
                 body = self._body()
                 self._record("POST", path, body)
+                if mock_projects.handle(self, mock, "POST", path, body):
+                    return
 
                 if path == "/projects":
                     rec = {
@@ -561,6 +570,8 @@ class MockDaemon:
                 body = self._body()
                 path = urlparse(self.path).path
                 self._record("PATCH", path, body)
+                if mock_projects.handle(self, mock, "PATCH", path, body):
+                    return
                 parts = [p for p in path.split("/") if p]
                 w = mock.world
                 if len(parts) == 2 and parts[0] == "projects":
@@ -617,6 +628,8 @@ class MockDaemon:
             def do_DELETE(self):
                 path = urlparse(self.path).path
                 self._record("DELETE", path, {})
+                if mock_projects.handle(self, mock, "DELETE", path, {}):
+                    return
                 parts = [p for p in path.split("/") if p]
                 w = mock.world
                 if len(parts) == 2 and parts[0] == "schedules":

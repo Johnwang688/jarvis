@@ -11,6 +11,7 @@ import type {
   Project, RouteView, Schedule, SchedulePreview, Task, TaskThread, Thread, Tree, Usage,
   VoiceEntry, Attachment, DirListing,
 } from "./types";
+import type { ArchiveView, DeleteResult, ProjectImpact } from "./types";
 
 export class ApiError extends Error {
   status: number;
@@ -73,6 +74,25 @@ export const api = {
   /** Re-parent a **chat** thread; a task's threads 409 (they move with the task). */
   moveThread: (id: string, projectId: string) =>
     req<Thread>(`/threads/${id}`, patch({ project_id: projectId })),
+
+  // --- rename, archive, restore, delete (decisions part B) -----------------
+  // Archive, restore and delete answer only this window (the HUD's listener
+  // and its Origin); a project's archive and delete send back the token the
+  // confirmation was read from, so a project that changed meanwhile refuses.
+  /** A colliding title comes back numbered: read the result, not the input. */
+  renameThread: (id: string, title: string) => req<Thread>(`/threads/${id}`, patch({ title })),
+  projectImpact: (id: string) => req<ProjectImpact>(`/projects/${id}/impact`),
+  archiveProject: (id: string, token: string) =>
+    req<{ project: Project; paused_schedules: string[] }>(
+      `/projects/${id}/archive?expect=${encodeURIComponent(token)}`, json({})),
+  restoreProject: (id: string) => req<Project>(`/projects/${id}/restore`, json({})),
+  deleteProject: (id: string, token: string) =>
+    req<DeleteResult>(`/projects/${id}?expect=${encodeURIComponent(token)}`, { method: "DELETE" }),
+  archiveThread: (id: string) => req<Thread>(`/threads/${id}/archive`, json({})),
+  restoreThread: (id: string) => req<Thread>(`/threads/${id}/restore`, json({})),
+  deleteThread: (id: string) => req<DeleteResult>(`/threads/${id}`, { method: "DELETE" }),
+  archive: () => req<ArchiveView>("/archive"),
+  emptyTrash: () => req<{ removed: number }>("/trash/empty", json({})),
 
   // --- filesystem (directory picker only: names, never contents) -----------
   dirs: (path = "") => req<DirListing>(`/fs/dirs?path=${encodeURIComponent(path)}`),

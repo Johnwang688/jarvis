@@ -24,10 +24,29 @@
 // draggable, and its menu says why rather than letting the owner discover it
 // from a 409.
 
-import { useEffect, useState } from "react";
+//
+// **A project row has a `⋯` menu (and the same on right-click)**: Edit…,
+// Rename…, Archive… (decisions B). **Rename is inline** for project and thread
+// rows — double-click the name, or ⋯ → Rename — and the box swallows its own
+// clicks, so the single click that expands a row still does only that. The
+// Inbox cannot be renamed or archived, and its menu says why. Archive is the
+// way to put a project or thread away; deleting happens only from the
+// Archive view, and only to what is already archived.
+
+import { useEffect, useRef, useState } from "react";
 import type { Project, Task, TaskThread, Thread } from "../types";
 import { canMoveThread, wouldMove } from "../lib/threads";
 import { composeMovable, folderName, movedAway, type Compose } from "../lib/compose";
+import { projectNamesTaken, threadTitlesTaken } from "../lib/projects";
+import { InlineRename } from "./InlineRename";
+
+interface ProjectMenuAt {
+  projectId: string;
+  x: number;
+  y: number;
+}
+
+const INBOX_WHY = "The Inbox is where unplaced chat lands: it keeps its name and cannot be archived.";
 
 /** What a drag is carrying: a thread id, or the not-yet-sent compose row. */
 const COMPOSE_DRAG = "jarvis/compose";
@@ -61,12 +80,25 @@ export function Sidebar(props: {
   onMoveThread: (threadId: string, projectId: string) => void;
   onMoveCompose: (projectId: string) => void;
   onOpen: (what: "schedules" | "usage" | "route") => void;
+  // --- rename, edit, archive (decisions B); each resolves with the record
+  // the backend saved, whose name may be numbered.
+  onEditProject?: (projectId: string) => void;
+  onArchiveProject?: (projectId: string) => void;
+  onRenameProject?: (projectId: string, name: string) => Promise<Project>;
+  onRenameThread?: (threadId: string, title: string) => Promise<Thread>;
+  onArchiveThread?: (threadId: string) => Promise<unknown>;
+  onOpenArchive?: () => void;
 }) {
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [openTasks, setOpenTasks] = useState<Record<string, boolean>>({});
   const [dragging, setDragging] = useState<string | null>(null);
   const [over, setOver] = useState<string | null>(null);
   const [menu, setMenu] = useState<MenuAt | null>(null);
+  const [pmenu, setPmenu] = useState<ProjectMenuAt | null>(null);
+  const [renaming, setRenaming] = useState<{ kind: "project" | "thread"; id: string } | null>(null);
+  const [note, setNote] = useState<{ text: string; error: boolean } | null>(null);
+  const pmenuFirst = useRef<HTMLButtonElement | null>(null);
+  const pmenuOpener = useRef<HTMLElement | null>(null);
   const isOpen = (id: string) => expanded[id] ?? id === props.activeProjectId;
   const toggle = (id: string) => setExpanded((e) => ({ ...e, [id]: !(e[id] ?? id === props.activeProjectId) }));
   const reveal = (id: string) => setExpanded((e) => ({ ...e, [id]: true }));
@@ -116,6 +148,66 @@ export function Sidebar(props: {
     setMenu({ threadId: id, taskId, x: Math.round(r.left), y: Math.round(r.bottom) });
   };
 
+  // The project menu: same closing rules as the thread menu, plus focus goes
+  // to its first item on open and back to the ⋯ that opened it on close.
+  useEffect(() => {
+    if (!pmenu) return;
+    pmenuFirst.current?.focus();
+    const close = () => setPmenu(null);
+    const esc = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.stopPropagation();
+        setPmenu(null);
+        pmenuOpener.current?.focus();
+      }
+    };
+    document.addEventListener("mousedown", close);
+    document.addEventListener("keydown", esc, true);
+    return () => {
+      document.removeEventListener("mousedown", close);
+      document.removeEventListener("keydown", esc, true);
+    };
+  }, [pmenu]);
+
+  const openProjectMenu = (e: React.MouseEvent, id: string) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const el = e.currentTarget as HTMLElement;
+    pmenuOpener.current = el.querySelector?.("button.menu") || el;
+    const r = el.getBoundingClientRect();
+    const x = e.type === "contextmenu" ? e.clientX : Math.round(r.left);
+    const y = e.type === "contextmenu" ? e.clientY : Math.round(r.bottom);
+    setMenu(null);
+    setPmenu({ projectId: id, x, y });
+  };
+
+  // A refusal or a renumbered name explains itself, then gets out of the way.
+  useEffect(() => {
+    if (!note) return;
+    const t = setTimeout(() => setNote(null), 6000);
+    return () => clearTimeout(t);
+  }, [note]);
+
+  const saveRename = (kind: "project" | "thread", id: string, name: string) => {
+    const go = kind === "project" ? props.onRenameProject?.(id, name) : props.onRenameThread?.(id, name);
+    return Promise.resolve(go)
+      .then((saved: any) => {
+        const got = kind === "project" ? saved?.name : saved?.title;
+        setNote(got && got !== name ? { text: `“${name}” is taken; saved as “${got}”.`, error: false } : null);
+      })
+      .catch((e) => setNote({ text: `Could not rename: ${e?.message || e}`, error: true }))
+      .finally(() => setRenaming(null));
+  };
+
+  const archiveThread = (id: string) => {
+    setMenu(null);
+    Promise.resolve(props.onArchiveThread?.(id))
+      .then(() => setNote({ text: "Archived. Restore it from Archive at any time.", error: false }))
+      .catch((e) => setNote({ text: `Could not archive: ${e?.message || e}`, error: true }));
+  };
+
+  const pmenuProject = pmenu ? props.projects.find((p) => p.id === pmenu.projectId) || null : null;
+
   return (
     <div className="pane" id="sidebar">
       <button type="button" id="newthread" data-testid="new-thread" onClick={props.onNewThread}>
@@ -137,6 +229,11 @@ export function Sidebar(props: {
       {props.moveError ? (
         <div className="err movenote" data-testid="move-error">{props.moveError}</div>
       ) : null}
+      {note ? (
+        <div className={(note.error ? "err " : "muted small ") + "movenote"} data-testid="rename-note">
+          {note.text}
+        </div>
+      ) : null}
       <div className="scroll" data-testid="sidebar">
         {props.projects.map((p) => {
           const plat = props.platforms[p.id];
@@ -155,6 +252,7 @@ export function Sidebar(props: {
                 }
                 data-testid={`project-${p.id}`}
                 onClick={() => toggle(p.id)}
+                onContextMenu={(e) => openProjectMenu(e, p.id)}
                 onDragOver={(e) => {
                   // preventDefault is what makes a drop legal at all, so the
                   // row only accepts a drag that would actually change something.
@@ -181,12 +279,42 @@ export function Sidebar(props: {
                 }}
               >
                 <span className="tw">{open ? "▾" : "▸"}</span>
-                <span className="nm">{p.name}</span>
+                {renaming?.kind === "project" && renaming.id === p.id ? (
+                  <InlineRename
+                    value={p.name}
+                    taken={projectNamesTaken(props.projects, p.id)}
+                    testid={`rename-project-${p.id}`}
+                    onSave={(name) => saveRename("project", p.id, name)}
+                    onCancel={() => setRenaming(null)}
+                  />
+                ) : (
+                  <span
+                    className="nm"
+                    data-testid={`project-name-${p.id}`}
+                    title={p.inbox ? undefined : "double-click to rename"}
+                    onDoubleClick={(e) => {
+                      e.stopPropagation();
+                      if (!p.inbox && props.onRenameProject) setRenaming({ kind: "project", id: p.id });
+                    }}
+                  >
+                    {p.name}
+                  </span>
+                )}
                 {plat?.platform === "windows" ? (
                   <span className="badge win" title={plat.note || "Windows path worked from WSL"}>
                     WIN
                   </span>
                 ) : null}
+                <button
+                  type="button"
+                  className="menu"
+                  data-testid={`project-menu-${p.id}`}
+                  title="edit, rename, archive…"
+                  aria-label={`${p.name}: project menu`}
+                  onClick={(e) => openProjectMenu(e, p.id)}
+                >
+                  ⋯
+                </button>
               </div>
               {open ? (
                 <>
@@ -219,7 +347,7 @@ export function Sidebar(props: {
                         (dragging === t.id ? " dragging" : "")
                       }
                       data-testid={`thread-${t.id}`}
-                      draggable
+                      draggable={!(renaming?.kind === "thread" && renaming.id === t.id)}
                       onDragStart={(e) => {
                         e.dataTransfer.setData("text/plain", t.id);
                         e.dataTransfer.effectAllowed = "move";
@@ -234,7 +362,26 @@ export function Sidebar(props: {
                       title={t.cwd ? `works in ${t.cwd}` : undefined}
                     >
                       <span className="tw">·</span>
-                      <span className="nm">{t.title || t.id}</span>
+                      {renaming?.kind === "thread" && renaming.id === t.id ? (
+                        <InlineRename
+                          value={t.title || ""}
+                          taken={threadTitlesTaken(props.threads, p.id, t.id)}
+                          testid={`rename-thread-${t.id}`}
+                          onSave={(title) => saveRename("thread", t.id, title)}
+                          onCancel={() => setRenaming(null)}
+                        />
+                      ) : (
+                        <span
+                          className="nm"
+                          data-testid={`thread-name-${t.id}`}
+                          onDoubleClick={(e) => {
+                            e.stopPropagation();
+                            if (props.onRenameThread) setRenaming({ kind: "thread", id: t.id });
+                          }}
+                        >
+                          {t.title || t.id}
+                        </span>
+                      )}
                       {movedAway(t, p) ? (
                         <span className="moved" data-testid={`moved-${t.id}`}>↪ {folderName(t.cwd)}</span>
                       ) : null}
@@ -324,7 +471,75 @@ export function Sidebar(props: {
           <span className="tw">⇄</span>
           <span className="nm">Route</span>
         </div>
+        {props.onOpenArchive ? (
+          <div className="tree-row" data-testid="open-archive" onClick={props.onOpenArchive}>
+            <span className="tw">▤</span>
+            <span className="nm">Archive</span>
+          </div>
+        ) : null}
       </div>
+
+      {pmenu && pmenuProject ? (
+        <div
+          className="threadmenu"
+          data-testid="project-menu"
+          role="menu"
+          style={{ left: pmenu.x, top: pmenu.y }}
+          onMouseDown={(e) => e.stopPropagation()}
+        >
+          <div className="mhead">{pmenuProject.name}</div>
+          <button
+            type="button"
+            className="mrow"
+            ref={pmenuFirst}
+            role="menuitem"
+            style={{ display: "block", width: "100%", textAlign: "left", border: "none",
+                     background: "none", textTransform: "none", letterSpacing: 0 }}
+            data-testid="pmenu-edit"
+            onClick={() => {
+              setPmenu(null);
+              props.onEditProject?.(pmenuProject.id);
+            }}
+          >
+            Edit…
+          </button>
+          <button
+            type="button"
+            className="mrow"
+            role="menuitem"
+            disabled={pmenuProject.inbox}
+            style={{ display: "block", width: "100%", textAlign: "left", border: "none",
+                     background: "none", textTransform: "none", letterSpacing: 0 }}
+            data-testid="pmenu-rename"
+            onClick={() => {
+              setPmenu(null);
+              reveal(pmenuProject.id);
+              setRenaming({ kind: "project", id: pmenuProject.id });
+            }}
+          >
+            Rename…
+          </button>
+          <div className="msep" />
+          <button
+            type="button"
+            className="mrow danger"
+            role="menuitem"
+            disabled={pmenuProject.inbox}
+            style={{ display: "block", width: "100%", textAlign: "left", border: "none",
+                     background: "none", textTransform: "none", letterSpacing: 0 }}
+            data-testid="pmenu-archive"
+            onClick={() => {
+              setPmenu(null);
+              props.onArchiveProject?.(pmenuProject.id);
+            }}
+          >
+            Archive…
+          </button>
+          {pmenuProject.inbox ? (
+            <div className="mwhy" data-testid="pmenu-inbox-why">{INBOX_WHY}</div>
+          ) : null}
+        </div>
+      ) : null}
 
       {menu ? (
         <div
@@ -333,6 +548,35 @@ export function Sidebar(props: {
           style={{ left: menu.x, top: menu.y }}
           onMouseDown={(e) => e.stopPropagation()}
         >
+          {movable.ok && menuThread ? (
+            <>
+              <button
+                type="button"
+                className="mrow"
+                style={{ display: "block", width: "100%", textAlign: "left", border: "none",
+                         background: "none", textTransform: "none", letterSpacing: 0 }}
+                data-testid="tmenu-rename"
+                onClick={() => {
+                  setMenu(null);
+                  reveal(menuThread.project_id);
+                  setRenaming({ kind: "thread", id: menuThread.id });
+                }}
+              >
+                Rename…
+              </button>
+              <button
+                type="button"
+                className="mrow danger"
+                style={{ display: "block", width: "100%", textAlign: "left", border: "none",
+                         background: "none", textTransform: "none", letterSpacing: 0 }}
+                data-testid="tmenu-archive"
+                onClick={() => archiveThread(menuThread.id)}
+              >
+                Archive…
+              </button>
+              <div className="msep" />
+            </>
+          ) : null}
           <div className="mhead">Move to…</div>
           {movable.ok ? (
             props.projects
