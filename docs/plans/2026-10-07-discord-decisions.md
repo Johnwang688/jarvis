@@ -18,8 +18,8 @@ commands; thread-to-thread messaging).
 - Directly after it, Jarvis posts a separate one-line `@owner` message. The
   phone notification lands right where the update is.
 - Nothing else ever pings.
-- *Interpretation:* in DMs the extra line is skipped, because a DM already
-  notifies.
+- In DMs the extra line is skipped, because a DM already notifies
+  (confirmed by the owner).
 
 **D2. Channels can be created from Discord too, not only from the HUD.**
 - Every channel links to a project whose local folder exists.
@@ -28,6 +28,7 @@ commands; thread-to-thread messaging).
   2. If the folder does not exist, it asks whether to create it.
   3. It creates the folder only after the owner confirms.
 - Linking an existing channel from Discord is allowed.
+- The owner confirmed this flow.
 - The folder creation is owner-only and typed-only. It refuses protected
   locations and never overwrites. The exact location policy is in the revised
   plan.
@@ -41,7 +42,7 @@ commands; thread-to-thread messaging).
 **D4. Jarvis may rename, move or archive any linked channel, with the owner's
 permission.**
 - This applies whoever created the channel.
-- *Interpretation:* an action the owner takes counts as that permission. That
+- An action the owner takes counts as that permission (confirmed by the owner). That
   covers renaming or archiving the project in the HUD, and a Discord command
   the owner typed.
 - Anything Jarvis starts on its own goes through the approval gate as a yes/no
