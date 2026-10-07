@@ -933,6 +933,36 @@ class Backend(unittest.TestCase):
                          {"fast": (["auto", "ask"], True), "claude": (["auto", "ask"], True),
                           "codex": (["auto"], False)})
 
+    def test_a_caller_brief_cannot_loosen_the_project(self):
+        """A Claude or Codex chat thread is a full agent; the brief fields
+        that fence it are the project's, whatever a caller sends."""
+        fakes = self.model_fakes()
+        project = self.stores.projects.create("Fenced", str(self.project_root),
+                                              profile=PermissionProfile.ASK, always_ask=["make deploy"])
+        before = {t.id for t in self.stores.threads.list()}
+        for brief, field in (({"profile": "auto"}, "profile"),
+                             ({"always_ask": []}, "always_ask"),
+                             ({"always_ask": ["rm"]}, "always_ask"),
+                             ({"cwd": str(self.other)}, "cwd"),
+                             ({"cwd": "/"}, "cwd"),
+                             ({"mcp_servers": {"git": {"command": "git-mcp"}}}, "mcp_servers")):
+            with self.subTest(brief=brief):
+                error = self.request("POST", "/threads", {"project_id": project.id, "role": "chat",
+                                                          "provider": "claude", "brief": brief}, status=400)
+                self.assertIn("cannot loosen the project's " + field, error["error"])
+        self.assertEqual({t.id for t in self.stores.threads.list()}, before)
+        self.assertEqual(fakes[P.CLAUDE].opened, [])
+        # The project's own values, or stricter ones, are accepted.
+        self.request("POST", "/threads", {"project_id": project.id, "role": "chat", "provider": "claude",
+                                          "brief": {"cwd": str(self.project_root), "profile": "ask",
+                                                    "always_ask": ["make deploy"]}}, status=201)
+        _, brief = fakes[P.CLAUDE].opened[-1]
+        self.assertEqual((brief.cwd, brief.profile, brief.always_ask, brief.mcp_servers),
+                         (str(self.project_root), PermissionProfile.ASK, ["make deploy"], {}))
+        self.request("POST", "/threads", {"project_id": project.id, "role": "chat", "provider": "fast",
+                                          "brief": {"always_ask": ["make deploy", "git push"]}}, status=201)
+        self.assertEqual(fakes[P.FAST].opened[-1][1].always_ask, ["make deploy", "git push"])
+
     def test_patch_model_applies_from_the_next_message_and_never_touches_the_brief(self):
         fakes = self.model_fakes()
         self.request("POST", "/models", {"add": "test/thinker"})

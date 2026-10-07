@@ -12,6 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import importlib
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 import queue
@@ -215,7 +216,19 @@ class Daemon:
         if self._stopping:
             raise DaemonError("daemon is stopping")
 
+    # Strictness, loosest first: a caller may ask for a stricter profile than
+    # its project's, never a looser one.
+    _STRICTNESS = (PermissionProfile.AUTO, PermissionProfile.ASK, PermissionProfile.STRICT)
+
     def make_brief(self, project, role, value):
+        """A thread's brief. A `Brief` comes from the runner, which built it
+        from the project and task itself. A dict comes from a caller over the
+        API, so the fields that bound what the thread may do are the
+        project's: `cwd` is the project's folder, `profile` and `always_ask`
+        are the project's or stricter, and there are no MCP servers (a project
+        configures none). A caller brief that would loosen any of them is
+        refused, not narrowed — a Claude or Codex chat thread is a full agent
+        (decisions A1), and these fields are its fence."""
         if isinstance(value, Brief):
             brief = value
         else:
@@ -223,10 +236,30 @@ class Daemon:
                 raise APIError(400, "brief must be an object")
             brief = from_json(Brief, {"cwd": project.root, "profile": project.profile,
                                       "always_ask": project.always_ask, "role": role, **value})
+            self._within_project(project, brief)
         _validate(brief, Brief)
         if brief.role != role or not Path(brief.cwd).is_absolute():
             raise APIError(400, "brief role must match thread role and cwd must be absolute")
         return brief
+
+    def _within_project(self, project, brief):
+        loosened = []
+        if not isinstance(brief.cwd, str) or os.path.normpath(brief.cwd) != os.path.normpath(project.root):
+            loosened.append(f"cwd (the project's folder is {project.root})")
+        project_profile = PermissionProfile(project.profile)
+        try:
+            looser = (self._STRICTNESS.index(PermissionProfile(brief.profile))
+                      < self._STRICTNESS.index(project_profile))
+        except ValueError:
+            looser = True
+        if looser:
+            loosened.append(f"profile (the project's is {project_profile.value})")
+        if not isinstance(brief.always_ask, list) or set(project.always_ask) - set(brief.always_ask):
+            loosened.append("always_ask (the project's commands must all stay)")
+        if brief.mcp_servers:
+            loosened.append("mcp_servers (the project configures none)")
+        if loosened:
+            raise APIError(400, "a brief cannot loosen the project's " + ", ".join(loosened))
 
     def open_thread(self, project_id, role, provider, brief) -> Thread:
         project = self.require(self.stores.projects, project_id)
