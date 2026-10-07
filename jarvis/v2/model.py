@@ -107,6 +107,9 @@ class Thread:
     model: str | None = None
     effort: str | None = None
     migrated_from: str | None = None            # v1 session id, if any
+    # The folder the thread was opened in. Fixed for its life: a move between
+    # projects re-labels the thread, it never re-roots it (design §18).
+    cwd: str | None = None
 
 
 @dataclass

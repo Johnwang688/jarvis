@@ -492,6 +492,15 @@ class Backend(unittest.TestCase):
         self.request("POST", path + "/run-now", {}, status=404)
         self.request("POST", "/schedules/bad/run-now", {}, status=400)
 
+    def test_thread_cwd_backfilled_from_saved_brief(self):
+        thread = self.thread()
+        record = self.stores.threads.get(thread.id)
+        record.cwd = None                       # a thread opened before the field existed
+        self.stores.threads.save(record)
+        listed = {t["id"]: t for t in self.request("GET", "/threads")}
+        self.assertEqual(listed[thread.id]["cwd"], str(self.project_root))
+        self.assertIsNone(self.stores.threads.get(thread.id).cwd)   # listing wrote nothing
+
     def test_move_chat_preserves_record_log_session_and_subsequent_turn(self):
         thread = self.thread()
         path = f"/threads/{thread.id}"
@@ -504,7 +513,17 @@ class Backend(unittest.TestCase):
         log_path = self.stores.threads.path(thread.id).with_name("log.jsonl")
         log = log_path.read_bytes()
         handle = session.handle
+        brief_path = self.stores.threads.path(thread.id).with_name("brief.json")
+        brief = brief_path.read_bytes()
+        self.assertEqual(before["cwd"], str(self.project_root))
         result = self.request("PATCH", path, {"project_id": self.second.id})
+        # A move re-labels the thread; it never re-roots it. The saved brief
+        # (cwd, profile, always_ask) is untouched and the wire still reports
+        # the folder the thread was opened in.
+        self.assertEqual(brief_path.read_bytes(), brief)
+        listed = {t["id"]: t for t in self.request("GET", "/threads")}
+        self.assertEqual(listed[thread.id]["cwd"], str(self.project_root))
+        self.assertEqual(listed[thread.id]["project_id"], self.second.id)
         self.assertEqual(result, before | {"project_id": self.second.id})
         self.assertEqual(log_path.read_bytes(), log)
         self.assertIs(session.handle, handle)
@@ -518,6 +537,12 @@ class Backend(unittest.TestCase):
         saved = self.stores.threads.get(thread.id)
         self.assertEqual(saved.project_id, self.second.id)
         self.assertEqual(saved.provider_session_id, before["provider_session_id"])
+        self.daemon.close_thread(thread.id)
+        self.request("POST", path + "/send", {"text": "resumed in the new project"}, status=202)
+        self.settled(thread)
+        # Resumed from the saved brief: still the original folder.
+        self.assertEqual(self.daemon._sessions[thread.id].handle.native.brief.cwd, str(self.project_root))
+        self.assertEqual(brief_path.read_bytes(), brief)
         self.daemon.close_thread(thread.id)
         self.request("PATCH", path, {"project_id": self.project.id})
         self.request("POST", path + "/send", {"text": "resumed"}, status=202)

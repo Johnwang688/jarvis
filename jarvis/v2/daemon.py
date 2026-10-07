@@ -229,7 +229,8 @@ class Daemon:
         with self._lock:
             self._active()
             thread = self.stores.threads.create(project_id, role, provider,
-                                               model=brief.model, effort=brief.effort, task_id=brief.task_id)
+                                               model=brief.model, effort=brief.effort, task_id=brief.task_id,
+                                               cwd=brief.cwd)
         self._open(thread, brief)
         self._lifecycle("thread_opened", thread)
         return thread
@@ -265,6 +266,21 @@ class Daemon:
             with self._lock:
                 self._sessions.pop(thread.id, None)
             raise
+
+    def thread_json(self, thread) -> dict:
+        """A thread on the wire, with `cwd` filled from its saved brief for
+        threads opened before the field existed. Read-only: nothing is
+        rewritten, so listing threads can never change one."""
+        record = to_json(thread)
+        if record.get("cwd") is None:
+            try:
+                path = self.stores.threads.path(thread.id).with_name("brief.json")
+                cwd = json.loads(path.read_text()).get("cwd")
+                if isinstance(cwd, str):
+                    record["cwd"] = cwd
+            except (OSError, ValueError, AttributeError):
+                pass
+        return record
 
     def resume_thread(self, thread_id):
         thread = self.require(self.stores.threads, thread_id)
@@ -696,6 +712,8 @@ def _handler(daemon):
                     if "project" in query:
                         daemon.require(stores.projects, query["project"])
                         filters["project_id"] = query["project"]
+                    if parts[0] == "threads":
+                        return 200, [daemon.thread_json(t) for t in safe_list(store, **filters)]
                     return 200, [to_json(obj) for obj in safe_list(store, **filters)]
                 if method == "POST" and parts[0] == "threads":
                     # provider and brief are optional: a chat thread defaults to
