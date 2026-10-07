@@ -23,6 +23,8 @@ import { WakeGate, compileWake, matchesWake, WAKE_PATTERNS } from "./lib/wake";
 import type { Attachment, AvatarDesc, ModelRow, Schedule, VoiceEntry } from "./types";
 import { moveThreadTo } from "./lib/threads";
 import { lastProject, loadLastProject, saveLastProject } from "./lib/compose";
+import { composeChoice, threadBody } from "./lib/threadmodel";
+import { useThreadModel } from "./components/ThreadModelControls";
 
 const TABS: Tab[] = ["chat", "task", "file", "diff", "preview"];
 const PROPOSAL_WINDOW_MS = 60_000;
@@ -50,6 +52,10 @@ export default function App() {
   // one, because the window already holds it: the first message, drawn
   // optimistically, and a reply that may already be streaming.
   const skipReload = useRef<string | null>(null);
+  // provider ▾ · model ▾ · effort ▾ in the input bar (decisions 2026-10-06, A).
+  const threadModel = useThreadModel(state, dispatch, () => void loadModels());
+  const reloadThreadModels = useRef(threadModel.reload);
+  reloadThreadModels.current = threadModel.reload;
 
   const patch = useCallback((p: Parameters<typeof dispatch>[0] extends any ? any : never) => {
     dispatch({ type: "patch", patch: p });
@@ -129,7 +135,11 @@ export default function App() {
           threadId = compose?.openedId || null;
           if (!threadId) {
             dispatch({ type: "patch", patch: { status: "OPENING THREAD" } });
-            const t = await api.openThread({ project_id: projectId, role: "chat" });
+            // The provider, model and effort chosen while composing ride the
+            // first message; a default sends no model (decisions A1, A5).
+            const t = await api.openThread({
+              project_id: projectId, role: "chat", ...threadBody(composeChoice(compose)),
+            });
             threadId = t.id;
             // Remembered, so a retry after a failed send reuses this thread.
             dispatch({ type: "patch", patch: { compose: { projectId, openedId: t.id } } });
@@ -263,6 +273,18 @@ export default function App() {
         case "thread_moved":
           void refreshThreads();
           break;
+        case "thread_updated":
+          // A thread's model or effort changed (here, or in another window).
+          if (tid)
+            dispatch({
+              type: "patch",
+              patch: { threads: live.current.threads.map((t) => (t.id === tid ? { ...t, ...data, id: t.id } : t)) },
+            });
+          break;
+        case "model_set":
+          // Every model and effort change is a line in the chat (A7).
+          if (tid && tid === shown) dispatch({ type: "message", message: { role: "system", text: data.text || "" } });
+          break;
         case "usage_updated":
           api.usage().then((usage) => dispatch({ type: "patch", patch: { usage } })).catch(() => {});
           break;
@@ -274,6 +296,8 @@ export default function App() {
           break;
         case "model":
           void loadModels();
+          // A default thread's label names the global choice; re-read it.
+          void reloadThreadModels.current();
           break;
         case "voice":
           void loadVoices();
@@ -796,6 +820,8 @@ export default function App() {
                     state.compose && patch({ compose: { ...state.compose, projectId } }),
                   onNewProject: () => patch({ picker: "newProject" }),
                 }}
+                modelChip={threadModel.chip}
+                imageNote={threadModel.imageNote}
                 onModeChange={setMode}
                 onSend={(text, files) => void send(text, files)}
                 onTranscriptTaken={() => patch({ pendingTranscript: "" })}
@@ -864,6 +890,7 @@ export default function App() {
 
       <ApprovalVeil requests={state.approvals} onDecide={decide} />
 
+      {threadModel.picker}
       {state.picker === "model" ? (
         <ModelPicker
           models={models}

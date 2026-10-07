@@ -28,6 +28,7 @@ import { useEffect, useState } from "react";
 import type { Project, Task, TaskThread, Thread } from "../types";
 import { canMoveThread, wouldMove } from "../lib/threads";
 import { composeMovable, folderName, movedAway, type Compose } from "../lib/compose";
+import { shortId, threadTooltip } from "../lib/threadmodel";
 
 /** What a drag is carrying: a thread id, or the not-yet-sent compose row. */
 const COMPOSE_DRAG = "jarvis/compose";
@@ -231,7 +232,7 @@ export function Sidebar(props: {
                       }}
                       onContextMenu={(e) => openMenu(e, t.id)}
                       onClick={() => props.onPickThread(t.id)}
-                      title={t.cwd ? `works in ${t.cwd}` : undefined}
+                      title={threadTooltip(t, t.cwd)}
                     >
                       <span className="tw">·</span>
                       <span className="nm">{t.title || t.id}</span>
@@ -239,6 +240,9 @@ export function Sidebar(props: {
                         <span className="moved" data-testid={`moved-${t.id}`}>↪ {folderName(t.cwd)}</span>
                       ) : null}
                       <span className={`badge ${t.provider}`}>{t.provider}</span>
+                      {t.model ? (
+                        <span className="badge pin" data-testid={`pin-${t.id}`}>{shortId(t.model)}</span>
+                      ) : null}
                       <button
                         type="button"
                         className="menu"
