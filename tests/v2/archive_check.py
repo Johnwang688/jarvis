@@ -488,6 +488,19 @@ class Delete(Base):
         self.assertIn("project_deleted", self.kinds())
         self.assertFalse((self.stores.root / "deleting").exists() and any((self.stores.root / "deleting").iterdir()))
 
+    def test_a_crash_left_staging_folder_goes_to_the_trash_later(self):
+        stale = self.stores.root / "deleting" / "20260101T000000-project-deadbeef-abc123"
+        (stale / "projects").mkdir(parents=True)
+        (stale / "projects" / "deadbeef.json").write_text("{}")
+        fresh = self.stores.root / "deleting" / "now-project-feedface-abc123"
+        fresh.mkdir()
+        old = time.time() - 3600
+        os.utime(stale, (old, old))
+        self.assertEqual(P.recover_staging(self.daemon), 1)
+        self.assertFalse(stale.exists())
+        self.assertTrue(fresh.exists())                         # maybe a delete in progress
+        self.assertEqual([e["name"] for e in self.daemon.trash.entries()], [stale.name])
+
     def test_a_windows_data_root_goes_to_the_recycle_bin(self):
         recycled = []
 

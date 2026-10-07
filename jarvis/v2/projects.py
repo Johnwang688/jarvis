@@ -496,13 +496,19 @@ def archive_view(daemon) -> dict:
     return {"projects": rows, "threads": loose, "trash": daemon.trash.describe()}
 
 
-def recover_staging(daemon) -> int:
-    """Send any staging folder a crash left behind to the trash. Startup only."""
+def recover_staging(daemon, *, older_than_s: float = 600) -> int:
+    """Send any staging folder a crash left behind to the trash. A folder
+    younger than `older_than_s` may belong to a delete still in progress, and
+    is left for the next pass."""
     root = daemon.stores.root / "deleting"
     moved = 0
     if root.is_dir():
         for path in sorted(root.iterdir()):
-            if path.is_dir() and "error" not in _to_trash(daemon, path):
+            try:
+                young = time.time() - path.stat().st_mtime < older_than_s
+            except OSError:
+                continue
+            if path.is_dir() and not young and "error" not in _to_trash(daemon, path):
                 moved += 1
     return moved
 

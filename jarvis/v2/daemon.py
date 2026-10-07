@@ -742,10 +742,13 @@ def _handler(daemon):
                                 raise APIError(400, "root must be an existing directory")
                             # Tasks already under way keep the root they were
                             # started under (B5): pin it before it changes.
-                            for task in safe_list(stores.tasks, project_id=project.id):
-                                if task.root is None and task.worktree:
-                                    task.root = before.root
-                                    stores.tasks.save(task)
+                            from .stores import _lock as store_lock
+                            for listed in safe_list(stores.tasks, project_id=project.id):
+                                with store_lock:            # a fresh read, never a stale copy
+                                    task = stores.tasks.get(listed.id)
+                                    if task is not None and task.root is None and task.worktree:
+                                        task.root = before.root
+                                        stores.tasks.save(task)
                         changed = sorted(k for k, v in to_json(project).items()
                                          if to_json(before).get(k) != v)
                         if changed:
