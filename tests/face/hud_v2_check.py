@@ -27,6 +27,7 @@ Run:          PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. .venv/bin/python \\
 
 from __future__ import annotations
 
+import os
 import sys
 import time
 from pathlib import Path
@@ -38,7 +39,8 @@ from playwright.sync_api import sync_playwright  # noqa: E402
 
 from tests.face.hud_v2_mock import DIST, MockDaemon  # noqa: E402
 
-PORT = 8479
+# Overridable, so two worktrees can run the suite at once.
+PORT = int(os.environ.get("HUD_V2_CHECK_PORT", "8479"))
 BASE = f"http://127.0.0.1:{PORT}"
 
 FAILURES: list[str] = []
