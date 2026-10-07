@@ -55,6 +55,31 @@ thread** is pinned at the top of the sidebar and starts in the last project
 worked in. A moved thread keeps the folder and permission rules it was
 opened with (`Thread.cwd`); a move re-labels, it never re-roots.
 
+Per-thread model (2026-10-06, decisions A, design §8.1/§12.1/§18): **a chat
+thread runs on OpenRouter (the fast path), Claude or Codex**, picked with
+provider ▾ · model ▾ · effort ▾ beside `in: <project>`. The provider is fixed
+by the first message; model and effort change from the next message. The
+choice lives on the Thread record (`jarvis/v2/thread_model.py`) — **never
+rewrite `brief.json`** — and the daemon hands it to the provider per turn
+(`set_model` on all three providers). A default thread follows the global
+Model picker **every turn**; Claude defaults to `claude-opus-5-5` at high,
+Codex to its routing default; effort defaults to `high` (or the roster's pin)
+within the model's ladder. Claude and Codex chat threads are full agents in
+the thread's folder, behind the same §6 permit as task workers. The CLI model
+lists are `router.CLI_MODELS`, the one table the router's vision filter also
+reads. **No tool can change a thread's model or provider** (asserted in
+`tests/v2/fastpath_check.py`). The picker controls take exactly `{model}`,
+`{model, effort}` (on `/models`), `{voice}`, `{muted}`, and refuse any other
+key — the HUD sent the wrong keys for weeks and every click reset itself (A6).
+
+**Bench comparability, from the same change:** a v2 default chat thread now
+switches model mid-conversation when the global picker changes, and a pinned
+thread ignores the picker entirely, and v2 chat effort defaults to `high`
+rather than v1's `JARVIS_REASONING_EFFORT` (`max`). Any v2 bench run must pin
+the thread's model and effort and record both (each turn's usage record now
+carries `model` and `effort`), or its numbers are not comparable across runs.
+v1 benches are unaffected: `Agent.effort` is `None` there.
+
 ## What this is
 
 A personal agent ("Jarvis") with a **hand-rolled** tool-calling loop, routed

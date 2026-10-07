@@ -15,7 +15,20 @@ come from `WORKSHOP_PORT` (8403), a different origin by design.
 assets. `GET /avatar.svg`, `GET /avatars`, `GET /voices`, `GET /models`,
 `GET /models/catalog`, `POST /avatar`, `POST /voice`, `POST /model`,
 `POST /mute`, `POST /say` — **v1 semantics and shapes** (`jarvis/face/
-server.py`), re-homed; `POST /model` sets the **fast path's** model only.
+server.py`), re-homed; `POST /model` sets the **fast path's** global
+default only.
+
+The control bodies, exactly (2026-10-06, decisions A6 — the HUD sent `{id}`,
+`{name}` and `{mute}` for weeks and every click reset the setting it meant to
+change). An unknown key is a 400 that names it; it is never read as absent.
+
+| route | body |
+|---|---|
+| `POST /model` | `{"model": id}` — `""` returns to the config default |
+| `POST /models` | exactly one of `{"add": id}`, `{"remove": id}`, `{"model": id, "effort": level}` (`""` = AUTO) |
+| `POST /voice` | `{"voice": name}` — `""` clears the override |
+| `POST /mute` | `{"muted": bool}` |
+| `POST /avatar` | `{"slug": slug}` |
 
 ## Projects (additions to WP7)
 
@@ -149,3 +162,51 @@ trace; never a credential value.
   never a guess. Present in `FAST_TOOLS` and `MCP_TOOLS`. The tools write
   through the same store the scheduler reads and publish the same events,
   so the HUD list updates live.
+
+## Additions 2026-10-06 — the model a chat thread runs on
+
+Decisions in `docs/plans/2026-10-06-decisions.md` part A. A chat thread runs
+on one of three providers — `fast` (OpenRouter, the fast path), `claude`,
+`codex` — chosen when it is opened and fixed after. Its model and effort can
+change at any time and apply **from the next message**, never in the middle
+of a turn. The choice is stored on the Thread record (`model`, `effort`);
+**`brief.json` is never rewritten.**
+
+- `Thread.model = null` is **default**: OpenRouter follows the global Model
+  picker (`models.tier("orchestrator")`, i.e. the owner's selection or
+  `JARVIS_ORCHESTRATOR`) at the start of **every turn**; Claude is
+  `claude-opus-5-5`; Codex is its routing default for the orchestrator role.
+  `Thread.effort = null` is that model's default: `high`, or the roster's
+  per-model effort on OpenRouter, clamped to the model's own levels; none for
+  a model with no reasoning control.
+- `POST /threads` for `role: "chat"` takes `provider` (default `fast`) and
+  `brief: {model?, effort?}`. The model is checked **before** the record is
+  created: 400 with the reason for a model that is not on the roster (or
+  cannot call tools), not one of that CLI's models, or an effort off its
+  ladder. A Claude or Codex chat thread opens in the project root under the
+  project's profile and always-ask list, with the §6 permit as its gate.
+- `PATCH /threads/{id}` `{model?, effort?}` (with `project_id` as before; not
+  both in one request) → the thread record. `model: null` returns to the
+  default and resets the effort; a new model resets the effort unless one is
+  given with it; an effort alone on a default thread pins the default model
+  it is an effort of. A model already pinned stays usable after it leaves
+  the roster (shown "(not on roster)"). 400 with the reason on any refusal;
+  409 for a task's thread or a provider that cannot switch. There is no
+  `provider` field: a session cannot change provider.
+- Every change writes a `model_set` record to the thread's log (`data.text`,
+  e.g. `model → moonshotai/kimi-k3 · high (from the next message)`, or
+  `(follows the default)` when a default thread's turn starts on a new global
+  model) and publishes it, then `thread_updated {…thread, effective_model,
+  effective_effort}`. `GET /threads/{id}/transcript` returns `model_set`
+  records as `role: "system"`.
+- Each `usage` event in a thread's log carries `data.model` and
+  `data.effort`: which model answered that turn.
+- `GET /thread-models` → `{"effort_default": "high", "providers": {"fast" |
+  "claude" | "codex": {"label", "default", "default_effort", "models":
+  [{"id", "name", "efforts", "vision", …}], "note"}}}`. OpenRouter lists the
+  roster (`models.describe()` rows, with the roster's `effort`); Claude and
+  Codex list `router.CLI_MODELS`, the table the router's capability filter
+  reads. The full catalogue stays at `GET /models/catalog`; a model used from
+  it is pinned to the roster (`POST /models {add}`) first.
+- No tool reaches any of this. The agent cannot change its own model or
+  provider.
