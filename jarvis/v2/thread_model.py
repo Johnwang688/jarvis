@@ -29,7 +29,7 @@ from __future__ import annotations
 from typing import Any
 
 from jarvis import models
-from .model import ProviderName, Role, Thread
+from .model import PermissionProfile, ProviderName, Role, Thread
 
 DEFAULT_EFFORT = "high"
 CLAUDE_DEFAULT = "claude-opus-5-5"
@@ -38,6 +38,51 @@ LABELS = {ProviderName.FAST: "OpenRouter", ProviderName.CLAUDE: "Claude", Provid
 
 class ChoiceRefused(ValueError):
     """The model or effort cannot be used on this thread; the message says why."""
+
+
+# What each provider can run a project's chat thread under, as data: the
+# daemon refuses a thread before creating it with `refusal()`, and the HUD
+# greys a provider out from the same table (`describe()` sends it), so the
+# two cannot disagree. The rules are the providers' own refusals:
+# - Codex (`codex_config.validate`): the auto profile only, and no always-ask
+#   additions — the app-server has no pre-tool callback to enforce them;
+# - Claude (`ClaudeProvider._options`): no strict profile — Claude Code has
+#   no firm-style confinement (design §6.2);
+# - the fast path (`FastPathProvider._toolset`): no strict profile either.
+PROFILES: dict[ProviderName, tuple[str, ...]] = {
+    ProviderName.FAST: ("auto", "ask"),
+    ProviderName.CLAUDE: ("auto", "ask"),
+    ProviderName.CODEX: ("auto",),
+}
+TAKES_ALWAYS_ASK: dict[ProviderName, bool] = {
+    ProviderName.FAST: True, ProviderName.CLAUDE: True, ProviderName.CODEX: False,
+}
+
+
+def refusal(provider: ProviderName, profile: Any, always_ask: list[str] | tuple = ()) -> str | None:
+    """Why `provider` cannot run a chat thread under this profile and these
+    always-ask additions, or None when it can."""
+    provider = ProviderName(provider)
+    profile = PermissionProfile(profile).value
+    name = LABELS[provider]
+    if profile not in PROFILES[provider]:
+        if provider == ProviderName.CODEX:
+            return (f"{name} can only run a project on the auto profile, and this project "
+                    f"is on {profile}; {_others(provider, profile, always_ask)}change "
+                    "the project's profile")
+        return (f"{name} cannot run a strict project: it has no strict confinement "
+                "(design §6.2); change the project's profile to chat here")
+    if always_ask and not TAKES_ALWAYS_ASK[provider]:
+        return (f"{name} cannot enforce this project's always-ask commands "
+                f"({', '.join(always_ask)}); {_others(provider, profile, always_ask)}"
+                "remove them from the project")
+    return None
+
+
+def _others(provider: ProviderName, profile: str, always_ask) -> str:
+    names = [LABELS[p] for p in ProviderName if p != provider
+             and profile in PROFILES[p] and (TAKES_ALWAYS_ASK[p] or not always_ask)]
+    return f"use {' or '.join(names)}, or " if names else ""
 
 
 def is_chat(thread: Thread) -> bool:
@@ -204,5 +249,7 @@ def describe() -> dict[str, Any]:
         for row in rows:
             row.setdefault("default_effort", default_effort(provider, row["id"]))
         result[provider.value] = {"label": LABELS[provider], "default": model,
-                                  "default_effort": effort, "models": rows, "note": note}
+                                  "default_effort": effort, "models": rows, "note": note,
+                                  "profiles": list(PROFILES[provider]),
+                                  "always_ask": TAKES_ALWAYS_ASK[provider]}
     return {"providers": result, "effort_default": DEFAULT_EFFORT}

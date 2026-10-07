@@ -19,8 +19,8 @@ from urllib.parse import urlencode
 from jarvis import config, models, avatars, voice
 from jarvis.tools import voicectl
 from jarvis.v2 import hud_api as H, worktrees
-from jarvis.v2.daemon import Daemon, DaemonError
-from jarvis.v2.model import ProviderName as P, Role, TaskState, to_json
+from jarvis.v2.daemon import APIError, Daemon, DaemonError
+from jarvis.v2.model import PermissionProfile, ProviderName as P, Role, TaskState, to_json
 from jarvis.v2.provider import (Brief, BriefRefused, Decision, Event, EventKind as K, SessionHandle,
                                SessionLost, Usage)
 from jarvis.v2.providers.codex import CodexProvider
@@ -871,15 +871,67 @@ class Backend(unittest.TestCase):
         gate.resolve_approval(pending.req_id, Decision.DENY)
         asker.join(4)
         self.assertEqual(answer["d"], Decision.DENY)
-        # (A Codex chat thread gets the same brief and permit; the real
-        # provider refuses a brief with always_ask additions it cannot
-        # enforce — codex_provider_check covers that refusal.)
-        codex = gate.open_thread(project.id, Role.CHAT, P.CODEX, {})
+        # Codex cannot enforce always-ask additions (codex_config.validate),
+        # so a Codex chat thread in this project is refused before any
+        # record exists; in a project without them it gets the same brief.
+        with self.assertRaises(APIError) as refused:
+            gate.open_thread(project.id, Role.CHAT, P.CODEX, {})
+        self.assertIn("always-ask", str(refused.exception))
+        self.assertEqual(gate.providers[P.CODEX].opened, [])
+        plain = gate.stores.projects.create("Plain", str(self.project_root))
+        codex = gate.open_thread(plain.id, Role.CHAT, P.CODEX, {})
         _, codex_brief = gate.providers[P.CODEX].opened[-1]
         self.assertEqual((codex_brief.model, codex_brief.effort), ("gpt-6-astra", "xhigh"),
                          "A5: Codex's routing default")
-        self.assertEqual(codex_brief.always_ask, ["make deploy"])
+        self.assertEqual(codex_brief.profile, PermissionProfile.AUTO)
         self.assertIsNone(codex.model)
+
+    def test_a_provider_the_project_cannot_use_leaves_no_thread(self):
+        """Codex runs auto only and cannot enforce always-ask commands;
+        Claude and the fast path have no strict mode. Each is refused with
+        the reason before a record exists, and a provider that still
+        refuses at start leaves nothing behind either."""
+        fakes = self.model_fakes()
+        ask = self.stores.projects.create("Ask", str(self.project_root), profile=PermissionProfile.ASK)
+        gated = self.stores.projects.create("Gated", str(self.project_root), always_ask=["make deploy"])
+        strict = self.stores.projects.create("Strict", str(self.project_root),
+                                             profile=PermissionProfile.STRICT)
+        before = {t.id for t in self.stores.threads.list()}
+        for project, provider, reason in ((ask, "codex", "only run a project on the auto profile"),
+                                          (gated, "codex", "always-ask commands (make deploy)"),
+                                          (strict, "claude", "cannot run a strict project"),
+                                          (strict, "fast", "cannot run a strict project"),
+                                          (strict, "codex", "auto profile")):
+            with self.subTest(project=project.name, provider=provider):
+                error = self.request("POST", "/threads", {"project_id": project.id, "role": "chat",
+                                                          "provider": provider, "brief": {}}, status=400)
+                self.assertIn(reason, error["error"])
+        self.assertEqual({t.id for t in self.stores.threads.list()}, before)
+        self.assertEqual(self.stores.threads._pending, {})
+        self.assertEqual([f.opened for f in fakes.values()], [[], [], []], "no provider was started")
+        # The ones a project can use still open.
+        self.request("POST", "/threads", {"project_id": ask.id, "role": "chat", "provider": "claude",
+                                          "brief": {}}, status=201)
+        self.request("POST", "/threads", {"project_id": gated.id, "role": "chat", "provider": "fast",
+                                          "brief": {}}, status=201)
+        # A refusal the pre-check cannot see (the provider's own, at start)
+        # removes the never-started record too.
+        known = {t.id for t in self.stores.threads.list()}
+
+        def refuse(thread, brief, permit):
+            raise BriefRefused("claude session failed to start: login expired")
+        fakes[P.CLAUDE].start = refuse
+        self.assertIn("login expired", self.chat("claude", status=409)["error"])
+        self.assertEqual({t.id for t in self.stores.threads.list()}, known)
+        self.assertEqual(self.stores.threads._pending, {})
+        self.assertFalse([p for p in (self.root / "data").rglob("thread.json")
+                          if p.parent.name not in known], "no thread directory is left on disk")
+
+    def test_thread_models_say_which_profiles_each_provider_runs(self):
+        body = self.request("GET", "/thread-models")["providers"]
+        self.assertEqual({p: (body[p]["profiles"], body[p]["always_ask"]) for p in body},
+                         {"fast": (["auto", "ask"], True), "claude": (["auto", "ask"], True),
+                          "codex": (["auto"], False)})
 
     def test_patch_model_applies_from_the_next_message_and_never_touches_the_brief(self):
         fakes = self.model_fakes()

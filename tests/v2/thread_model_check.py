@@ -139,5 +139,44 @@ class ThreadModel(unittest.TestCase):
         self.assertFalse(tm.is_chat(Thread("abcdef01", "p", Role.IMPLEMENTER, P.CODEX)))
 
 
+class ProviderLimits(unittest.TestCase):
+    """`thread_model.refusal` is the daemon's pre-check and the HUD's greying;
+    the providers refuse for themselves at start. The table must say what the
+    providers do, or a thread is refused that would have run, or created and
+    then orphaned by a provider that will not."""
+
+    def provider_refuses(self, provider, brief):
+        from types import SimpleNamespace
+        from jarvis.v2.provider import BriefRefused
+        from jarvis.v2.providers import claude, codex_config, fastpath
+        try:
+            if provider == P.CODEX:
+                codex_config.validate(brief)
+            elif provider == P.CLAUDE:
+                try:
+                    claude.ClaudeProvider()._options(brief, SimpleNamespace(), resume=False, session_id=None)
+                except BriefRefused:
+                    raise
+                except Exception:
+                    pass    # past the refusals: it only needed a real session
+            else:
+                fastpath.FastPathProvider._toolset(object.__new__(fastpath.FastPathProvider), brief)
+        except BriefRefused:
+            return True
+        return False
+
+    def test_the_table_matches_each_providers_own_refusal(self):
+        from jarvis.v2.model import PermissionProfile
+        from jarvis.v2.provider import Brief
+        with tempfile.TemporaryDirectory() as cwd:
+            for provider in P:
+                for profile in PermissionProfile:
+                    for always_ask in ([], ["make deploy"]):
+                        with self.subTest(provider=provider.value, profile=profile.value, always_ask=always_ask):
+                            brief = Brief(Role.CHAT, cwd, profile=profile, always_ask=always_ask)
+                            why = tm.refusal(provider, profile, always_ask)
+                            self.assertEqual(why is not None, self.provider_refuses(provider, brief), why)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

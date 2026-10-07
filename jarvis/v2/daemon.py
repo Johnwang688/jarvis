@@ -245,7 +245,15 @@ class Daemon:
             thread = self.stores.threads.create(project_id, role, provider,
                                                model=brief.model, effort=brief.effort, task_id=brief.task_id,
                                                cwd=brief.cwd)
-        self._open(thread, brief)
+        try:
+            self._open(thread, brief)
+        except BaseException:
+            # A thread whose provider never started has no conversation to
+            # keep: leave no record behind for a surface to list.
+            with self._lock:
+                if thread.id not in self._sessions:
+                    self.stores.threads._delete(thread.id)
+            raise
         self._lifecycle("thread_opened", thread)
         return thread
 
@@ -293,6 +301,9 @@ class Daemon:
         created, and on Claude or Codex the chat role's prose. The gate is
         not here — it is the same §6 permit every thread gets in `_open`."""
         from . import roles, thread_model
+        why = thread_model.refusal(provider, brief.profile, brief.always_ask)
+        if why is not None:
+            raise APIError(400, why)
         try:
             model, effort = thread_model.check(provider, brief.model, brief.effort)
         except thread_model.ChoiceRefused as exc:
