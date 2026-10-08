@@ -49,7 +49,8 @@ def milestone(kind: str, task: Task, **ctx) -> str:
         "question": f"Question (blocking): {detail}" + (
             " Choices: " + " / ".join(ctx["options"]) if ctx.get("options") else ""),
         "approval": f"Approval required for {ctx.get('tool', 'tool')}: {detail} "
-                    f"Reply yes/no {ctx.get('code', '')} in this thread.",
+                    f"Answer here: tap a button, or /yes {ctx.get('code', '')} · "
+                    f"/no {ctx.get('code', '')}.",
         "blocked": f"Blocked: {detail or 'Owner input required.'}",
         "verified": f"Verified: {ctx.get('text', task.report.verified if task.report else 'Checks passed.')}",
         "done": f"Done: task {task.id}. {ctx.get('text', 'Report follows.')}",
@@ -84,13 +85,33 @@ def report_text(report: Report) -> ReportText:
     )))
 
 
-def approval_text(tool: str, args, code: str, origin: str) -> str:
-    """Never truncate. DiscordRest.post attaches this verbatim when >2000 chars."""
+def approval_text(tool: str, args, code: str, origin: str, *, allowlistable: bool = True) -> str:
+    """Never truncate. DiscordRest.post attaches this verbatim when >2000 chars.
+
+    `/always` is offered only where it can mint a standing rule: the owner is
+    never shown an answer that would be refused (S1)."""
     # A shell command must be visible with literal newlines, not JSON escapes.
     command = args.get("command") if isinstance(args, dict) else args
+    answers = f"`/yes {code}` · `/no {code}`" + (f" · `/always {code}`" if allowlistable else "")
     parts = [f"Approval required: {tool}", f"Origin: {origin}",
-             f"Reply yes/no {code} in this thread."]
+             f"Answer here: tap a button, or {answers}."]
     if isinstance(command, str):
         parts += ["Command:", command]
     parts += ["Arguments:", json.dumps(args, ensure_ascii=False, indent=2)]
     return "\n".join(parts)
+
+
+# Button custom ids carry the 4-character code, never the broker's request id:
+# the request id is the HUD's one-shot handle and never needs to leave the
+# machine. Whatever a press carries is untrusted anyway — `interactions.py`
+# finds the request by the message the button is on and checks the code agrees.
+APPROVE_PREFIX, DENY_PREFIX = "jv:a:", "jv:d:"
+
+
+def approval_components(code: str) -> list[dict]:
+    """Approve and Deny. Never an Always button: a standing rule is the typed
+    `/always` only (decisions S-2). No default — deny is as easy as approve."""
+    return [{"type": 1, "components": [
+        {"type": 2, "style": 3, "label": "Approve", "custom_id": APPROVE_PREFIX + code},
+        {"type": 2, "style": 4, "label": "Deny", "custom_id": DENY_PREFIX + code},
+    ]}]
