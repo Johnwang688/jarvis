@@ -55,6 +55,7 @@ def milestone(kind: str, task: Task, **ctx) -> str:
         "verified": f"Verified: {ctx.get('text', task.report.verified if task.report else 'Checks passed.')}",
         "done": f"Done: task {task.id}. {ctx.get('text', 'Report follows.')}",
         "failed": f"Failed: {detail or 'See the task log for details.'}",
+        "cancelled": "Cancelled.",
     }
     return _cap(templates[kind], 400)
 
