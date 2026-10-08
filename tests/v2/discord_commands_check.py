@@ -907,8 +907,10 @@ class VerbChecks(Harness):
                              for c in self.transport.calls))
         edit = next(c for c in self.transport.calls if c["path"] == strip)
         self.assertEqual(edit["json"]["components"], [])
-        self.assertIn("Denied", self.transport.channel_posts(TASK_THREAD)[-2]["content"]
-                      + self.transport.channel_posts(TASK_THREAD)[-1]["content"])
+        # The D1 ping line is posted by the watcher thread and may land after
+        # the answer (~1 run in 30): look for the answer, not at a position.
+        self.assertTrue(any("Denied" in (p.get("content") or "")
+                            for p in self.transport.channel_posts(TASK_THREAD)))
         # A stale tap after resolution.
         self.listener.interact(button(f"jv:a:{code}", message_id, **in_guild(TASK_THREAD)))
         self.refused("already answered")
