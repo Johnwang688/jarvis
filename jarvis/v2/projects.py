@@ -218,6 +218,43 @@ def impact(daemon, project_id: str) -> dict:
 
 # -- projects -------------------------------------------------------------------
 
+def create_project(daemon, name, root, **values) -> Project:
+    """Make one project record and announce it. Shared by `POST /projects` and
+    Discord's `/project new` (B2), so both number a colliding name the same way
+    (B4 + B10: numbered, never refused) and both refuse the same bodies.
+
+    `root` must already be an existing absolute directory: this never makes a
+    folder (that is `folders.py`, after the owner's yes). The
+    channel fields are not accepted here — a link is validated against Discord
+    and made by the channel linker alone."""
+    from .daemon import APIError, _routing_models, _text
+    from .model import from_json
+    from .stores import _validate
+    if "discord_channel_id" in values or "discord_channel_origin" in values:
+        raise APIError(400, "link a channel from the project dialog")
+    for key in ("id", "inbox", "archived", "created"):
+        if key in values:
+            raise APIError(400, f"{key} cannot be set on a new project")
+    project = from_json(Project, {"id": "00000000", **values, "name": name, "root": root})
+    _validate(project, Project)
+    _routing_models(project)
+    _text(project.name, "name")
+    if not Path(project.root).is_absolute():
+        raise APIError(400, "root must be absolute")
+    if not Path(project.root).is_dir():
+        raise APIError(400, "root must be an existing directory")
+    stores = daemon.stores
+    with daemon._lock:
+        daemon._active()
+        project.name = unique_name(project.name, project_names_taken(stores))
+        fields = to_json(project)
+        fields.pop("id")
+        created = stores.projects.create(**fields)
+    daemon.bus.publish({"kind": "project_created", "project_id": created.id,
+                        "data": to_json(created)})
+    return created
+
+
 def _expect(expect, current):
     from .daemon import APIError, DaemonError
     if not isinstance(expect, str) or not expect:
