@@ -743,23 +743,44 @@ and O1 in `docs/plans/2026-10-07-discord-decisions.md`. Code:
   thread id with None (bug 1: `worktrees.ensure` saved a stale copy across
   `git worktree add`). The worker reconciles from disk before its first
   event, again when the bus drops events, after the breaker, and shortly
-  after a transient failure: a task it has never seen is **seeded
-  silently** (no DM storm), active channel tasks get a thread and a card at
-  ≤ 1 create per second, terminal tasks are never backfilled, and a stale
-  `embed_sha` gets one edit. A milestone is marked done only once delivered
-  (or refused for good), so a missed one is posted late, never twice.
+  after a transient failure (or an unreachable DM): a task **created before
+  the poster started** and never seen is **seeded silently** (no DM storm) —
+  one created later, during an outage or behind dropped events, is reported
+  late instead — active channel tasks get a thread and a card at ≤ 1 create
+  per second, pre-existing terminal tasks are never backfilled, and a stale
+  `embed_sha` gets one edit. The pass reads ids and skips an unreadable
+  task, so one bad `task.json` cannot stop it. A milestone is marked done
+  only once delivered (or refused for good), so a missed one is posted
+  late, never twice. The thread id is written to the task record before the
+  sidecar (sidecar writes are best-effort); a create POST that succeeds at
+  Discord but whose reply is lost can still make a second thread — POST is
+  not idempotent.
 - **Failures.** `DiscordHTTPError` carries `status`, `code` and
-  `retry_after`; a 429 is slept only up to 10 s (three times), longer raises
-  and the caller defers. Edits go first and reopen a thread only on 50083.
-  Three transient failures (transport, long 429, 5xx) open a breaker: 30 s,
-  60 s, doubling to 5 min, then a reconcile. Logs name the operation, HTTP
-  status and Discord code — never a URL, a body or a token. `DiscordRest` has
-  no delete method and nothing in `jarvis/v2/discord/` spells `"DELETE"`
-  (D3; a test greps).
+  `retry_after`; a 429 is slept at most 10 s *in total* per call (and
+  `close()` interrupts the wait), longer raises and the caller defers. Edits
+  go first and reopen a thread only on 50083. Only transient failures
+  (transport, long 429, 5xx) are retried; any other refusal of a thread
+  create or an attention post goes to the DM. Three transient failures open
+  a breaker: 30 s, 60 s, doubling to 5 min, then a reconcile; events are
+  deferred only while it is open. A broken-place entry clears when its task
+  ends and ages out after an hour. 50001 and 50013 DM the owner once per
+  channel per 24 h, stamped only once sent. Logs name the operation, HTTP
+  status and Discord code — never a URL, a body or a token — and the
+  daemon's `configure_logging()` holds httpx, httpcore, urllib3, websocket,
+  anthropic and openai to WARNING, because httpx logs every request URL at
+  INFO and an interaction reply's URL holds its token. `DiscordRest` has no
+  delete method and nothing in `jarvis/v2/discord/` spells `"DELETE"` (D3;
+  a test greps).
+- **Scrub.** Every text field the poster sends — thread name, milestones,
+  report and `report.txt`, question and choices, the card — and the
+  approval text are run through `secrets.scrub` before rendering, so a
+  credential value from a protected file never reaches Discord (the full
+  command still shows, minus the value).
 - **The light.** `GET /discord` gains `reporter: {state ok|degraded|down,
   reason, counters, dropped, last_error{op,status,code,at}}`; a
   `discord_status` SSE event fires on every state change; the HUD's
-  `DiscordPanel` shows green, amber with the reason, or red.
+  `DiscordPanel` shows green, amber with the reason, or red. A surface that
+  failed to start is recorded by class name and shown red, not "pending".
 
 ---
 

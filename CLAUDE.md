@@ -80,7 +80,11 @@ Until B1 links channels, attention milestones go to the owner's DM prefixed
 stored `discord_thread_id` (bug 1); start-up reconcile **seeds existing
 tasks silently** and never backfills terminal ones. 429s over 10 s raise
 and defer; three transient failures open a 30 s → 5 min breaker. Logs carry
-operation, status and Discord code only. `DiscordRest` has no delete. Briefs for every package, including the ones in flight, are in
+operation, status and Discord code only, and **httpx/httpcore are held at
+WARNING** (`daemon.configure_logging`) — httpx logs full request URLs at
+INFO, and an interaction reply's URL *is* its token (a live leak, fixed
+2026-10-07). Everything posted is `secrets.scrub`bed before rendering,
+approvals included. `DiscordRest` has no delete. Briefs for every package, including the ones in flight, are in
 `docs/codex-briefs/`; each merged package left a `*-notes.md` beside its
 brief with what its implementer verified and what it proposes.
 

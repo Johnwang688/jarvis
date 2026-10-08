@@ -395,3 +395,8 @@ footing as `/approvals`.
 - SSE `discord_status` → `{"kind": "discord_status", "data": <the reporter
   object above>}`, published whenever `state` or `reason` changes. The HUD
   refetches `GET /discord` on it and redraws the Discord light.
+- A Discord surface that failed to start answers `{"connected": false,
+  "commands": {"state": "failed", "count": 0, "synced_at": null, "error":
+  "<ExceptionClass>"}, "reporter": {"state": "down", "reason": "the Discord
+  surface did not start (<ExceptionClass>)", …}}` — the class name only,
+  never the exception's message. The light is red.
