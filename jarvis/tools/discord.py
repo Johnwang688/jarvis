@@ -199,6 +199,17 @@ def discord_dm_owner(
 # -- one-time setup (human-only, via `jarvis auth discord`) ------------------
 
 
+INVITE_PERMISSIONS = 1024 + 2048 + 65536  # view channels + send messages + read history
+
+
+def invite_url(client_id) -> str:
+    """The bot invite. `applications.commands` is the scope slash commands
+    need (v2 S1); re-inviting a bot already in the server is harmless. PR B1
+    widens the permission integer to the decided set."""
+    return (f"https://discord.com/oauth2/authorize?client_id={client_id}"
+            f"&scope=bot+applications.commands&permissions={INVITE_PERMISSIONS}")
+
+
 def connect() -> int:
     """Interactive setup: token in (never echoed), validated, owner resolved,
     invite URL printed, and a test DM sent. Human-only by design."""
@@ -235,12 +246,10 @@ def connect() -> int:
     else:
         print(f"owner resolved from the application: {owner.get('username')} ({owner_id})")
 
-    permissions = 1024 + 2048 + 65536  # view channels + send messages + read history
     print(
         "\nInvite the bot to a server you own (it must share a server with you "
         "before it can DM you):\n"
-        f"  https://discord.com/oauth2/authorize?client_id={app['id']}"
-        f"&scope=bot&permissions={permissions}\n"
+        f"  {invite_url(app['id'])}\n"
     )
     input("press Enter once the bot is in the server… ")
 
