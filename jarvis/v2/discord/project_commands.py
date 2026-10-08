@@ -119,7 +119,7 @@ class ProjectCommands:
             reply.refuse(f"This channel is already linked to project {project.name}. Run "
                          "`/project new` in your DM with Jarvis or in an unlinked channel.")
             return
-        name, folder = _clean_name(name), str(folder or "").strip()
+        name, folder = _clean_name(name), str(folder or "").strip(" ")
         if not name and not folder:
             reply.modal(*new_project_modal())
             return
@@ -247,6 +247,11 @@ class ProjectCommands:
         target = self._project(value)
         if target is None:
             reply.refuse(f"I don't know a live project `{_short(value)}`.")
+            return
+        if target.discord_channel_id and target.discord_channel_id != reply.channel_id:
+            # Never take a link away from another channel silently.
+            reply.refuse(f"{target.name} already has <#{target.discord_channel_id}>; "
+                         "`/project unlink` there first.")
             return
         if not self._configured():
             reply.refuse(NOT_SET_UP)

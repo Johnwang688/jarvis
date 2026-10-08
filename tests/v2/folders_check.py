@@ -105,6 +105,30 @@ class InputChecks(Harness):
         self.refused("", "no folder")
         self.refused(None, "text")
 
+    def test_unicode_that_reads_one_way_and_is_another(self):
+        """Review fix 4: checked before trimming, and nothing invisible."""
+        for raw, why in (
+                (f"{self.home}/robo tics", "whitespace"),        # NBSP inside
+                (f" {self.home}/robotics", "whitespace"),        # strip() used to eat it
+                (f"{self.home}/robotics ", "whitespace"),
+                ("robotics ", "whitespace"),                       # a bare name too
+                (f"{self.home}/a b", "control character|whitespace"),   # line separator
+                (f"{self.home}/a　b", "whitespace"),               # ideographic space
+                (f"{self.home}/a b", "whitespace"),               # thin space
+                (f"{self.home}/a\tb", "control character"),
+                (f"{self.home}/café", "normalised"),             # decomposed é
+                (f"{self.home}/ä", "normalised"),                # decomposed ä
+                (f"{self.home}/́x", "combining mark"),            # nothing to attach to
+                (f"{self.home}/⃛x", "combining mark")):
+            self.refused(raw, why)
+        for filler in "ㅤᅟᅠﾠ⠀":
+            self.refused(f"{self.home}/a{filler}b", "filler")
+            self.refused(f"{self.home}/{filler}", "filler")
+        # What stays fine: precomposed letters, plain spaces, trimmed ASCII spaces.
+        self.assertEqual(check_project_folder(f"{self.home}/café").path, self.home / "café")
+        self.assertEqual(check_project_folder(f"  {self.home}/two words ").path,
+                         self.home / "two words")
+
     def test_length_limits(self):
         self.refused(f"{self.home}/" + "a" * 256, "255 bytes")
         self.refused(f"{self.home}/" + "é" * 128, "255 bytes")         # 256 bytes
@@ -259,6 +283,18 @@ class StateChecks(Harness):
             folders.make_project_folder(check, approval)
         self.assertEqual((caught.exception.check.state, caught.exception.check.entries),
                          ("nonempty", 1))
+
+    def test_an_empty_folder_appearing_after_an_approved_create_asks_again(self):
+        """Pins the signature re-check: an empty folder needs no ask on its own
+        (O5), but the owner approved *making* one, not adopting one."""
+        check = check_project_folder("robotics")
+        approval = self.approve(check)
+        (self.work / "robotics").mkdir()
+        with patch.object(os, "mkdir", side_effect=AssertionError("mkdir")):
+            with self.assertRaises(FolderChanged) as caught:
+                folders.make_project_folder(check, approval)
+        self.assertEqual((caught.exception.check.state, caught.exception.check.action),
+                         ("empty", "adopt"))
 
     def test_a_folder_appearing_inside_the_mkdir_asks_again(self):
         check = check_project_folder("robotics")

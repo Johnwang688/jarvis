@@ -93,8 +93,12 @@ REGISTRY: tuple[Cmd, ...] = (
     )),
     # Never on the HUD: its approval surface is the card, and a typed `/yes`
     # plus Enter would be a keyboard default on an authorization (plan §5).
-    Cmd("yes", "Approve the open request asked in this chat", (_CODE,)),
-    Cmd("no", "Deny the open request asked in this chat", (_CODE,)),
+    # Also in a server channel no project owns (B2): `/project new` asks its
+    # folder question there, and the post says "`/yes CODE` · `/no CODE`".
+    # Both are scoped to requests asked in this very channel. `/always` is not:
+    # nothing asked in such a channel can become a standing rule.
+    Cmd("yes", "Approve the open request asked in this chat", (_CODE,), places=ALL_PLACES),
+    Cmd("no", "Deny the open request asked in this chat", (_CODE,), places=ALL_PLACES),
     Cmd("always", "Approve, and stop asking about this one", (
         Opt("code", "string", "Approval code (optional when only one is open here)",
             complete="always_code"),

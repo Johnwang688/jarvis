@@ -15,8 +15,8 @@ the same gate before anything is read:
    guild must be that one. Then the channel must be a Jarvis place for the
    command (`commands.Cmd.places`); Discord cannot hide a command per channel,
    so places are enforced here, on the server. A server channel no project
-   owns takes only `/project new|link`, that form, and the approval buttons
-   of a post asked there (B2, `_other_ok`).
+   owns takes only `/project new|link`, that form, and `/yes`, `/no` and the
+   approval buttons for a request asked there (B2, `_other_ok`).
 
 **The 3-second rule.** A refusal that needs only reads is answered at once
 (type 4, ephemeral); autocomplete is answered at once (type 8). Everything else
@@ -278,9 +278,9 @@ class InteractionRouter:
 
     def _other_ok(self, interaction) -> bool:
         """A server channel no project owns ("other") takes only what B2 lets
-        it: a command whose places include it (`/project new|link`) and its
-        autocomplete, the `/project new` form, and an approval button — which
-        still has to be the very post the approval was asked in, in this
+        it: a command whose places include it (`/project new|link`, `/yes`, `/no`)
+        and its autocomplete, the `/project new` form, and an approval button —
+        which must be the very post the approval was asked in, in this
         channel (`button_target`), so nothing else is answerable here."""
         kind = interaction.get("type")
         data = interaction.get("data") or {}
@@ -653,7 +653,7 @@ def _fields(data) -> dict:
     for row in data.get("components") or []:
         for field in (row or {}).get("components") or []:
             if isinstance(field, dict) and isinstance(field.get("value"), str):
-                out[str(field.get("custom_id") or "")] = field["value"].strip()
+                out[str(field.get("custom_id") or "")] = field["value"]
     return out
 
 

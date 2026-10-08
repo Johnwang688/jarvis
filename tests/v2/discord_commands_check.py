@@ -556,11 +556,14 @@ class GateChecks(Harness):
         self.assertEqual(self.control.calls, [])
 
     def test_a_channel_jarvis_does_not_own_takes_no_command(self):
-        for name, options in (("status", {}), ("task", {"brief": "x"}), ("yes", {}),
+        for name, options in (("status", {}), ("task", {"brief": "x"}), ("always", {}),
                               ("project", {})):
             sub = "list" if name == "project" else None
             self.listener.interact(slash(name, options, sub=sub, **in_guild(PLAIN_CHANNEL)))
             self.refused("isn't a Jarvis place")
+        # B2: `/yes` and `/no` are taken there, scoped to what was asked there.
+        self.listener.interact(slash("yes", {}, **in_guild(PLAIN_CHANNEL)))
+        self.refused("No open authorization was asked in this chat")
         self.listener.interact(complete("task", "project", **in_guild(PLAIN_CHANNEL)))
         self.assertEqual(self.last_callback()["data"]["choices"], [])
         self.assertEqual(self.stores.tasks.list(), [self.stores.tasks.get(self.task.id)])
@@ -1138,7 +1141,11 @@ class GuildTransport(FakeTransport):
         path = url.removeprefix(config.DISCORD_API)
         body = kwargs.get("json")
         answer = None
-        if method == "GET" and path == f"/guilds/{B2_GUILD}":
+        if any(m == method and re.search(p, path) for m, p in self.fail):
+            return super().__call__(method, url, headers, timeout, **kwargs)
+        if method == "GET" and path == f"/guilds/{B2_GUILD}/channels":
+            answer = httpx.Response(200, json=[dict(c) for c in self.channels.values()])
+        elif method == "GET" and path == f"/guilds/{B2_GUILD}":
             answer = httpx.Response(200, json=self.guild)
         elif method == "GET" and path == f"/guilds/{B2_GUILD}/members/{BOT}":
             answer = httpx.Response(200, json=self.member)
@@ -1460,6 +1467,138 @@ class ProjectCommandChecks(Harness):
             self.assertNotIn(forbidden, source)
         self.run_slash("channel", sub="archive", channel=B2_PROJECT_CHANNEL, guild=GUILD)
         self.assertIsNone(self.stores.projects.get(self.project.id).archived)
+
+    # -- review fixes (PR #9) ---------------------------------------------------
+
+    def seed_pending_move(self, parent, reason):
+        self.linker._state["pending_moves"][B2_PROJECT_CHANNEL] = {
+            "project_id": self.project.id, "parent_id": parent, "reason": reason, "due": 0}
+
+    def test_an_older_pending_restore_cannot_undo_channel_archive(self):
+        # A HUD restore met a 429 and is waiting to move the channel to Jarvis.
+        self.seed_pending_move(B2_CATEGORY, "restore")
+        self.run_slash("channel", sub="archive", channel=B2_PROJECT_CHANNEL, guild=GUILD)
+        self.assertEqual(self.patches(B2_PROJECT_CHANNEL), [{"parent_id": B2_ARCHIVE}])
+        self.assertNotIn(B2_PROJECT_CHANNEL, self.linker._state["pending_moves"])
+        self.assertEqual(self.linker._state["archived_by"][B2_PROJECT_CHANNEL], "owner")
+        self.linker._retry_pending()                  # the old retry comes due
+        self.assertEqual(self.linker.reconcile(), 0)  # and a restart changes nothing
+        self.assertEqual(self.patches(B2_PROJECT_CHANNEL), [{"parent_id": B2_ARCHIVE}])
+        self.assertEqual(self.transport.channels[B2_PROJECT_CHANNEL]["parent_id"], B2_ARCHIVE)
+
+    def test_an_older_pending_crowding_move_cannot_undo_channel_restore(self):
+        self.transport.channels[B2_PROJECT_CHANNEL]["parent_id"] = B2_ARCHIVE
+        self.linker._state["archived_by"][B2_PROJECT_CHANNEL] = "crowding"
+        self.seed_pending_move(B2_ARCHIVE, "crowding")
+        self.run_slash("channel", sub="restore", channel=B2_PROJECT_CHANNEL, guild=GUILD)
+        self.assertEqual(self.patches(B2_PROJECT_CHANNEL), [{"parent_id": B2_CATEGORY}])
+        self.assertNotIn(B2_PROJECT_CHANNEL, self.linker._state["pending_moves"])
+        self.assertNotIn(B2_PROJECT_CHANNEL, self.linker._state["archived_by"])
+        self.linker._retry_pending()
+        self.linker.reconcile()
+        self.assertEqual(self.transport.channels[B2_PROJECT_CHANNEL]["parent_id"], B2_CATEGORY)
+
+    def test_a_rate_limited_channel_move_is_kept_for_the_owner_and_said(self):
+        self.transport.fail[("PATCH", f"^/channels/{B2_PROJECT_CHANNEL}$")] = (
+            429, {"message": "You are being rate limited.", "retry_after": 600, "global": False})
+        self.run_slash("channel", sub="archive", channel=B2_PROJECT_CHANNEL, guild=GUILD)
+        self.assertTrue(any("kept and retried" in text for text in self.said()), self.said())
+        row = self.linker._state["pending_moves"][B2_PROJECT_CHANNEL]
+        self.assertEqual((row["parent_id"], row["reason"]), (B2_ARCHIVE, "owner"))
+        # A refusal that will not pass is said and nothing is kept.
+        self.transport.fail[("PATCH", f"^/channels/{B2_PROJECT_CHANNEL}$")] = (
+            403, {"message": "Missing Permissions", "code": 50013})
+        self.run_slash("channel", sub="archive", channel=B2_PROJECT_CHANNEL, guild=GUILD)
+        self.assertTrue(any("Not moved" in text and "50013" in text for text in self.said()))
+        self.assertNotIn(B2_PROJECT_CHANNEL, self.linker._state["pending_moves"])
+
+    def test_link_never_takes_a_projects_channel_away_silently(self):
+        self.run_slash("project", {"project": self.project.id}, sub="link", channel=UNLINKED,
+                       guild=GUILD)
+        self.refused(f"Jarvis already has <#{B2_PROJECT_CHANNEL}>; `/project unlink` there "
+                     "first")
+        self.assertEqual(self.stores.projects.get(self.project.id).discord_channel_id,
+                         B2_PROJECT_CHANNEL)
+        self.assertFalse(self.patches(UNLINKED))
+
+    def test_an_unlinked_channels_approval_text_matches_the_answers_it_accepts(self):
+        def ask_there():
+            worker = self.background(slash("project", {"name": f"r{next(_ids)}"}, sub="new",
+                                           channel=UNLINKED, guild=GUILD))
+            request = self.asked(but=set(seen))
+            seen.add(request.req_id)
+            return request, worker
+
+        seen = set()
+        request, worker = ask_there()
+        # The approval post itself (the D1 ping line follows it in a guild).
+        post = next(p["content"] for p in self.transport.channel_posts(UNLINKED)
+                    if "Approval required" in (p.get("content") or ""))
+        offered = set(re.findall(r"`/(\w+) " + request.code + "`", post))
+        self.assertEqual(offered, {"yes", "no"})              # never `/always` here
+        self.run_slash("always", {"code": request.code}, channel=UNLINKED, guild=GUILD)
+        self.refused()                                       # not offered, not accepted
+        self.assertIn(request, self.approvals.pending())
+        # A bare `/yes` in another unowned channel reaches nothing asked here.
+        self.run_slash("yes", channel=PLAIN_CHANNEL_B2, guild=GUILD)
+        self.refused("No open authorization was asked in this chat")
+        self.assertIn(request, self.approvals.pending())
+        # Every answer the post offers is accepted where it was posted ("no"
+        # first: a "yes" links this channel, which ends the asking here).
+        for verdict in sorted(offered):
+            if request is None:
+                request, worker = ask_there()
+            self.run_slash(verdict, {"code": request.code}, channel=UNLINKED, guild=GUILD)
+            worker.join(5)
+            self.assertNotIn(request, self.approvals.pending(), verdict)
+            self.assertEqual(self.approvals.decisions[-1]["decision"],
+                             "allow" if verdict == "yes" else "deny")
+            request = None
+        self.assertEqual(self.stores.projects.list(discord_channel_id=UNLINKED)[0].name[:1], "r")
+
+
+PLAIN_CHANNEL_B2 = "770000000000000050"
+
+
+class OtherPlaceChecks(unittest.TestCase):
+    """`InteractionRouter._other_ok`: exactly what an unowned channel takes."""
+
+    def test_the_allowlist(self):
+        from jarvis.v2.discord.interactions import InteractionRouter
+        router = InteractionRouter(types.SimpleNamespace())
+        allowed = {
+            ("cmd", "project", "new"), ("cmd", "project", "link"), ("cmd", "yes", None),
+            ("cmd", "no", None), ("auto", "project", "link"), ("auto", "yes", None),
+            ("modal", "jv:project:new", None), ("button", "jv:a:abcd", None),
+            ("button", "jv:d:abcd", None)}
+        refused = {
+            ("cmd", "always", None), ("cmd", "project", "list"),
+            ("cmd", "project", "unlink"), ("cmd", "project", "channel"),
+            ("cmd", "channel", "archive"), ("cmd", "channel", "restore"),
+            ("cmd", "status", None), ("cmd", "task", None), ("cmd", "skill", None),
+            ("cmd", "nonsense", None), ("auto", "task", None), ("auto", "always", None),
+            ("modal", "jv:task::x:", None), ("modal", "jv:project:other", None),
+            ("button", "jv:x:abcd", None), ("button", "", None)}
+
+        def payload(kind, name, sub):
+            if kind in ("cmd", "auto"):
+                opts = [{"type": 1, "name": sub, "options": []}] if sub else []
+                return {"type": 2 if kind == "cmd" else 4, "data": {"name": name,
+                                                                  "options": opts}}
+            if kind == "modal":
+                return {"type": 5, "data": {"custom_id": name}}
+            return {"type": 3, "data": {"custom_id": name}}
+
+        for case in allowed:
+            self.assertTrue(router._other_ok(payload(*case)), case)
+        for case in refused:
+            self.assertFalse(router._other_ok(payload(*case)), case)
+        self.assertFalse(router._other_ok({"type": 1}))
+        # Every command an unowned channel takes is one this table names.
+        took = {c.name if not c.subcommands else f"{c.name} {s.name}"
+                for c in registry.REGISTRY for s in (c.subcommands or (c,))
+                if registry.OTHER in s.places}
+        self.assertEqual(took, {"project new", "project link", "yes", "no"})
 
 
 if __name__ == "__main__":

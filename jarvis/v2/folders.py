@@ -66,6 +66,9 @@ _WINDOWS_RESERVED = re.compile(
     r"^(con|prn|aux|nul|conin\$|conout\$|com[0-9¹²³]|lpt[0-9¹²³])(\..*)?$", re.IGNORECASE)
 _WINDOWS_BAD_CHARS = set('<>:"\\|?*')
 _DRIVE = re.compile(r"^/mnt/[A-Za-z](/|$)")
+# Characters that render as nothing (or as blank space) but are neither
+# whitespace nor format characters: Hangul fillers and the blank Braille cell.
+_FILLERS = frozenset("ㅤᅟᅠﾠ⠀")
 
 
 class FolderRefused(ValueError):
@@ -183,11 +186,21 @@ def resolve_input(raw) -> Path:
     """What the owner typed -> one absolute, normalised path, or FolderRefused."""
     if not isinstance(raw, str):
         raise FolderRefused("the folder must be text")
-    text = raw.strip()
+    # Every character rule runs on what was typed, *before* anything is
+    # trimmed: strip() eats NBSP, U+2028 and friends, which would let them
+    # vanish from one end and survive in the middle.
+    if _control(raw):
+        raise FolderRefused("the folder contains a control character")
+    if any(ch.isspace() and ch != " " for ch in raw):
+        raise FolderRefused("the folder contains whitespace other than a plain space")
+    if any(ch in _FILLERS for ch in raw):
+        raise FolderRefused("the folder contains an invisible filler character")
+    if unicodedata.normalize("NFC", raw) != raw:
+        raise FolderRefused("the folder is not in normalised (NFC) form; type it with "
+                            "precomposed characters")
+    text = raw.strip(" ")
     if not text:
         raise FolderRefused("no folder was given")
-    if _control(text):
-        raise FolderRefused("the folder contains a control character")
     if len(text) > MAX_PATH:
         raise FolderRefused(f"the folder is longer than {MAX_PATH} characters")
     if "/" not in text and not text.startswith("~"):
@@ -211,6 +224,10 @@ def resolve_input(raw) -> Path:
     for part in parts:
         if len(part.encode("utf-8")) > MAX_COMPONENT:
             raise FolderRefused(f"a folder name is longer than {MAX_COMPONENT} bytes")
+        if unicodedata.combining(part[0]) or unicodedata.category(part[0]).startswith("M"):
+            # Nothing to attach to but the `/` before it: it would draw on the
+            # separator in the approval and hide in the name on disk.
+            raise FolderRefused("a folder name starts with a combining mark")
     path = Path("/" + "/".join(parts))
     if len(str(path)) > MAX_PATH:
         raise FolderRefused(f"the folder is longer than {MAX_PATH} characters")

@@ -656,6 +656,9 @@ class DiscordRouter:
             except StoreError:                  # not a task id: ask in the DM
                 task = None
             channel = thread_for(self.stores, task) if task else None
+        # Where to ask, in this order once PR C lands: the task's thread, the
+        # chat's thread (C), the channel an owner command was typed in
+        # (`discord_channel_id`, B2), else the DM. Keep the B2 branch after C's.
         elif data.get("discord_channel_id"):
             # B2: a request raised by an owner's command (`/project new`,
             # `/project unlink`) is asked where the command was typed.

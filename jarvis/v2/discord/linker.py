@@ -83,8 +83,11 @@ RETRY_S = 30.0                 # a transient failure without a retry_after
 ASK_AGAIN_S = 24 * 3600.0      # after a denied or unanswered housekeeping ask
 ORIGIN = "Jarvis housekeeping"
 TEXT, CATEGORY = 0, 4
-# Why a channel sits in an archive category: with its project, or for room.
-BY_PROJECT, BY_CROWDING = "project", "crowding"
+# Why a channel sits in an archive category: with its project, for room, or
+# because the owner typed `/channel archive` (B2). Only BY_PROJECT is undone
+# by a restart's reconcile; the other two stay until the owner moves them.
+BY_PROJECT, BY_CROWDING, BY_OWNER = "project", "crowding", "owner"
+ARCHIVE_REASONS = (BY_PROJECT, BY_CROWDING, BY_OWNER)
 STATES = ("linked_ok", "unlinked", "not_found", "no_access", "wrong_guild",
           "missing_permissions", "folder_missing", "unconfigured", "unreachable")
 _SNOWFLAKE = re.compile(r"^[0-9]{5,24}$")
@@ -565,6 +568,11 @@ class ChannelLinker:
 
     def _rest_refusal(self, op, exc) -> LinkError:
         self._failed(op, exc)
+        return self._refusal(exc, op)
+
+    @staticmethod
+    def _refusal(exc, op="move_channel") -> LinkError:
+        """The LinkError for a failure that is already logged."""
         facts = describe(exc)
         if facts["status"] is None:
             return LinkError(502, f"Discord could not be reached ({facts['error']})")
@@ -714,22 +722,41 @@ class ChannelLinker:
             channel_id = project.discord_channel_id
             if not channel_id:
                 raise LinkError(409, f"project {project.name} has no channel")
+            # The owner's command supersedes any older move still waiting to
+            # retry (a 429'd restore, a crowding move): left pending, it would
+            # undo this one as soon as it came due.
+            with self._state_lock:
+                if self._state["pending_moves"].pop(str(channel_id), None) is not None:
+                    self._save_state()
             try:
                 current = self.rest.get_channel(channel_id, timeout=READ_TIMEOUT_S,
                                                 patient=False)
             except Exception as exc:
                 raise self._rest_refusal("get_channel", exc) from None
             parent = str(current.get("parent_id") or "")
-            archives = {cfg.archive_category_id, *(self._state.get("archive_overflow") or [])}
-            if (archive and parent in archives) or (not archive and parent == cfg.category_id):
+            if (archive and parent in self.archive_categories(cfg)) \
+                    or (not archive and parent == cfg.category_id):
+                # Already there. Still record that the owner chose it, so a
+                # restart's reconcile leaves it where the owner put it.
+                with self._state_lock:
+                    if archive:
+                        self._state["archived_by"][str(channel_id)] = BY_OWNER
+                    else:
+                        self._state["archived_by"].pop(str(channel_id), None)
+                    self._save_state()
                 return {"moved": False, "category": self.category_name(cfg, parent)}
             target = self.archive_target(cfg) if archive else cfg.category_id
             try:
-                self.rest.modify_channel(channel_id, parent_id=target)
+                # B1's bookkeeping: pending on a transient failure (the owner's
+                # move is retried, not lost), `archived_by` set or cleared.
+                self.move(project.id, channel_id, target,
+                          BY_OWNER if archive else "restore", raise_errors=True)
             except Exception as exc:
-                raise self._rest_refusal("archive_channel" if archive else "restore_channel",
-                                         exc) from None
-            self.invalidate(project.id)
+                refusal = self._refusal(exc)
+                if _transient(exc):
+                    refusal = LinkError(refusal.status, f"{refusal}; the move is kept and "
+                                                        "retried when Discord allows")
+                raise refusal from None
             self._crowding_due = True
             return {"moved": True, "category": self.category_name(cfg, target)}
 
@@ -816,11 +843,12 @@ class ChannelLinker:
             self._wrote(project_id)
             return True
 
-    def move(self, project_id, channel_id, parent_id, reason) -> bool:
+    def move(self, project_id, channel_id, parent_id, reason, *, raise_errors=False) -> bool:
         """Move a channel to a category by `parent_id` alone. `reason` is why
-        it now sits where it does (`project`, `crowding`, or `restore` for the
-        way back), kept so a restart knows which moves to undo. Failures that
-        may pass are kept pending."""
+        it now sits where it does (`project`, `crowding`, `owner`, or
+        `restore` for the way back), kept so a restart knows which moves to
+        undo. Failures that may pass are kept pending; `raise_errors` also
+        re-raises the failure, for an owner command that must answer."""
         with self._lock:
             try:
                 self.rest.modify_channel(channel_id, parent_id=parent_id)
@@ -834,10 +862,12 @@ class ChannelLinker:
                     else:
                         self._state["pending_moves"].pop(str(channel_id), None)
                     self._save_state()
+                if raise_errors:
+                    raise
                 return False
             with self._state_lock:
                 self._state["pending_moves"].pop(str(channel_id), None)
-                if reason in (BY_PROJECT, BY_CROWDING):
+                if reason in ARCHIVE_REASONS:
                     self._state["archived_by"][str(channel_id)] = reason
                 else:
                     self._state["archived_by"].pop(str(channel_id), None)
