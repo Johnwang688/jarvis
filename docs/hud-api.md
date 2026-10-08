@@ -415,3 +415,49 @@ footing as `/approvals`.
   "<ExceptionClass>"}, "reporter": {"state": "down", "reason": "the Discord
   surface did not start (<ExceptionClass>)", …}}` — the class name only,
   never the exception's message. The light is red.
+
+## Additions 2026-10-07 (Discord server and project channels — B1)
+
+- `GET /discord` gains three fields, copied one by one:
+  `"guild": {"configured": bool, "id": str | null}` (is `jarvis auth
+  discord-guild` done), `"linker": null | {"state": "ok" | "degraded" |
+  "unconfigured", "reason": str, "pending_renames": int,
+  "awaiting_approval": int}` (`null` when no Discord surface is running) and
+  `"permissions": null | {"missing": [name], "excess": [name],
+  "administrator": bool, "checked_at": epoch seconds | null}` — the bot's
+  server-wide permissions by name, from the linker's own periodic check.
+  The HUD light goes amber on a missing permission, on Administrator, and
+  while a rename is pending.
+- `Project` gains `discord_channel_origin: "created" | "linked" | null`
+  (display only).
+- `POST /projects` and `PATCH /projects/{id}` refuse `discord_channel_id`
+  (and `discord_channel_origin`) with 400 `"link a channel from the project
+  dialog"`. `project_updated` gains `"by": "owner" | "api"` (the HUD's own
+  listener and Origin, or anything else) and `"previous": {field: old
+  value}` for each changed field. `project_deleted` gains
+  `"discord_channel_id"`.
+- `GET /projects/{id}/discord[?refresh=1]` → `{"channel_id": str | null,
+  "origin": "created" | "linked" | null, "name": str | null, "category":
+  "Jarvis" | "Jarvis Archive" | "Jarvis Archive N" | "another category" |
+  null, "state": …, "missing": [name], "checked_at": epoch seconds | null,
+  "rename_pending": bool}`. `state` is one of `linked_ok`, `unlinked`,
+  `not_found`, `no_access`, `wrong_guild`, `missing_permissions`,
+  `folder_missing`, `unconfigured`, `unreachable` (also when no Discord
+  surface runs but the guild file exists). Cached 60 s; each Discord read
+  is held to 5 s.
+- `POST /projects/{id}/discord` **owner-only** (the HUD's listener and
+  Origin, else 403) with `{"action": "create"}`, `{"action": "link",
+  "channel_id": "<snowflake>"}` or `{"action": "unlink"}` → the view above.
+  It publishes `project_updated` with `changed: ["discord_channel_id"]`,
+  `by: "owner"`. Refusals: 400 for a bad id, an unseen or unknown channel,
+  another server, not a text channel, a missing permission there, #ungrouped
+  or a Jarvis category; 409 for a channel already linked elsewhere, an
+  archived project, a missing folder, the Inbox (only setup changes
+  #ungrouped), an already-linked create, no guild file, or no Discord
+  surface; 502/503 when Discord fails or rate-limits. Unlink keeps the
+  channel.
+- `POST /discord/backfill` **owner-only**, body `{}` → `{"created": int,
+  "results": [{"project_id", "name", "channel_id", "status": "created" |
+  "failed", "error"?}], "skipped": [{"project_id", "name", "reason"}]}` —
+  a channel for every live, unlinked project whose folder exists (never the
+  Inbox), one create a second.
