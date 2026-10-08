@@ -1103,10 +1103,14 @@ export default function App() {
             api
               .createProject(b)
               .then(async (created) => {
+                // Every project gets a channel (decisions O1). The project
+                // exists either way; a refused channel is said, not swallowed.
+                let channelNote = "";
                 if (options.channel) {
-                  // Every project gets a channel (decisions O1). The project
-                  // exists either way; a refused channel shows on its pill.
-                  await api.projectDiscordAction(created.id, { action: "create" }).catch(() => null);
+                  await api.projectDiscordAction(created.id, { action: "create" }).catch((e) => {
+                    channelNote = `Project ${created.name} was created, but its Discord channel was not: `
+                      + `${e?.message || "the request failed"}. Create it from the project dialog.`;
+                  });
                 }
                 const projects = await api.projects();
                 const platform = await api
@@ -1119,6 +1123,7 @@ export default function App() {
                 });
                 // A new project starts as a new thread in it.
                 newThread(created.id);
+                if (channelNote) patch({ error: channelNote });
               })
           }
           taken={projectNamesTaken(state.projects, null, state.archivedNames)}
