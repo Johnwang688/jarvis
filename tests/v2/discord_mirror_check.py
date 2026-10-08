@@ -1208,10 +1208,11 @@ class BugbotQuestionChecks(Harness):
         place = self.place(chat.id)
         self.idle(chat.id)
         self.settled(chat.id)
+        # The bus event is lost; only the log has the question. (The sync for
+        # the user message may already find it there — that is the fix too.)
         with patch.object(self.mirror, "_question", lambda thread, data: None):
             self.asking(chat)
             time.sleep(0.1)
-        self.assertFalse(any("Which package" in t for t in self.transport.texts(place)))
         self.mirror.subscription.dropped += 1             # an eviction: catch up
         self.mirror._kick()
         wait_for(lambda: any("Which package" in t for t in self.transport.texts(place)),
