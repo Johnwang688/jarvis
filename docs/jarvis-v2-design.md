@@ -888,6 +888,86 @@ D5, O1, O6 and O7 in `docs/plans/2026-10-07-discord-decisions.md`. Code:
   - The crowding note says how a channel comes back (`/channel restore`, B2,
     or by hand).
 
+### 11.7 Every chat is a Discord thread (PR C, 2026-10-07)
+
+Plan `docs/plans/2026-10-07-discord-plan.md` §4; decisions C1, O-C1…O-C7.
+`ChatMirror` (`jarvis/v2/discord/mirror.py`, on the `DiscordSurface`, its own
+worker) is the one place a chat meets Discord, both ways.
+
+- **`Thread.surface`**: `None`, `"dm"`, `"dm:retired"` or
+  `"discord:<Discord thread id>"`. Only `ThreadStore.set_surface` writes it,
+  under the store lock; **`ThreadStore.save` never changes it** — not just
+  "never back to None": a stale copy holding an *older* surface (before a
+  move) cannot put that back either. The daemon saves its session's
+  in-memory thread on every usage event, which is bug 1's lost update.
+  Sidecar `threads/<id>/discord.json`: `{surface, retired, moved_to, name,
+  mirrored_through}`.
+- **`user_message`.** `daemon.send` publishes it (before the worker starts,
+  so it leads its turn) with `{text, typed, via, origin, images,
+  attachments, spoken, discord_message_id, discord_channel_id}`, and the
+  `user` log record holds the same fields. `UserMessage` gained `via`,
+  `typed`, `attachments` (names), `spoken` and the two Discord ids, all
+  defaulted and never shown to a provider. `via` defaults to `hud` for an
+  owner message and `system` otherwise. `assemble_turn` fills `typed`,
+  `attachments` and `spoken` (the HUD's dictation sends `spoken: true`).
+- **Out.** Only `Role.CHAT` threads with no task. A chat gets its thread in
+  its project's channel (Inbox → #ungrouped) at its **first owner message**,
+  named by its title or `<id> · <first 50 chars>` (≤100), renamed on the
+  owner's HUD rename. Posted, scrubbed and silent (4096): "You (HUD): <typed
+  words>" (or "You (HUD, voice)"), attachments by name, images as `[N
+  images, in the HUD]`; settled `text` joined per turn and split at 2000 —
+  never a delta or thinking; one footer (`· 5 tools: read_file, grep_files
+  +2`, `· turn failed (<class>)`, `· interrupted`). A Codex question is
+  posted at once with a ping line; a proposal's sentence follows the reply.
+  A chat whose project has no channel is passed over (no backfill later).
+- **Progress is the log.** A bus event only marks a chat dirty; the worker
+  walks `log.jsonl` from `mirrored_through`, which advances only when a post
+  is delivered. A turn still running is waited for; a turn cut short by the
+  next user message is "interrupted". On start a chat ≤6 messages behind
+  gets them, further behind gets "(N messages while Discord was
+  unavailable, see the HUD)". Chats older than the mirror are seeded
+  silently.
+- **Pacing.** One outbox per Discord thread, 4 posts per 5 s; above 12
+  pending the rest become "(N more messages, open the HUD)" with
+  `reply.txt`. 429/5xx retry with back-off; 50083 unarchives and retries
+  once; **10003 unlinks the chat** (surface back to None) so its next
+  message makes a fresh thread.
+- **In (gateway `_locate`/`_chat`).** A DM is the DM conversation: one
+  persisted Inbox chat with `surface="dm"` (an archived one is retired to
+  `dm:retired` and a new one opened, so the DM never stops answering). A
+  chat's thread — current or retired — runs that chat. A top-level owner
+  message in a project channel or #ungrouped starts a **new chat** via Start
+  Thread from Message (a slash command, which has no message, gets a plain
+  thread). Anything else is ignored, mention or not; `_chat_threads` is
+  gone. The reply is never posted by the gateway: the mirror posts it from
+  the log, so Discord and HUD turns come back the same way. A Discord turn
+  is `UserMessage(via="discord" | "dm")`, never echoed; images and text
+  files follow `assemble_turn`'s caps and protected names (`paths=False`:
+  no @path read), anything else is refused with a note and never
+  downloaded. Voice notes run with `spoken=True` and get speech back; they
+  never approve and never answer. While a turn runs, up to three wait
+  ("I'll take this next."), the fourth is refused. The last 500 message ids
+  are remembered. An open provider question is answered by the next *typed*
+  message (`daemon.answer`).
+- **Approvals** raised in a chat go to its thread (or the DM for the DM
+  chat), buttons and ping line as for tasks; the approval worker waits up
+  to 3 s for a thread being made at that moment.
+- **Lifecycle.** A move makes a thread in the new channel ("Continued from
+  <#old>"), says "Moved to <project> → <#new>" in the old one and renames
+  it `↪ moved to <project> · <name>` (O-C5, kept on later renames); the old
+  one stays an alias and its replies point at the new one. Archive posts a
+  note and archives the thread as its creator — a 403 turns the light amber
+  ("add Manage Threads", O-P1); restore says "Restored."; a permanent delete
+  posts a note and unlinks. **Nothing is ever deleted on Discord.**
+- **Slash commands** work in a chat's thread (`commands.CHAT` place);
+  `/skill` there runs in that chat.
+- **HUD.** `GET /threads` carries `surface` and, with one, `discord: {kind,
+  channel, name, url}`; the chat header reads "On Discord: #school › name"
+  (links only to `https://discord.com/channels/<guild>/<id>`); a Discord
+  message is labelled "via Discord" live (`user_message`) and from the
+  transcript (`via`). `GET /discord` gains `mirror: {state, reason, queued,
+  last_error}`.
+
 ---
 
 ## 12. HUD v2 (G3) — specified 2026-09-16 from the owner's elaboration

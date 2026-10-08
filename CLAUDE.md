@@ -111,7 +111,25 @@ reconcile fixes what an outage missed, and asks persist across restarts.
 refuse `discord_channel_id`. A configured guild gates placement, and a newly
 linked project's tasks leave the DM safety net for threads at once. Tests
 that touch Discord point `config.DISCORD_GUILD_PATH` at a temp file — the
-owner's real one decides where channels go. Briefs for every package, including the ones in flight, are in
+owner's real one decides where channels go.
+
+**Every chat is a Discord thread, PR C (2026-10-07, design §11.7; plan
+§4, decisions C1).** `ChatMirror` (`discord/mirror.py`) gives a chat a
+thread in its project's channel at its first owner message and posts the
+owner's *typed* words (never an inlined file), settled replies and one
+footer, silent and scrubbed; what is typed in that thread runs the same
+chat as `UserMessage(via="discord")` and is never echoed. **Progress is
+`log.jsonl`** (`mirrored_through` in `threads/<id>/discord.json`), never the
+bus. **`Thread.surface` is written only by `ThreadStore.set_surface`** —
+`save` keeps the stored value whatever the caller holds, because the
+daemon saves stale session copies. `daemon.send` publishes `user_message`.
+The DM is one persisted Inbox chat (`surface="dm"`); a top-level message
+in a project channel starts a new chat; anything else is ignored. Moves
+open a new thread and rename the old `↪ moved to …` (O-C5); nothing on
+Discord is ever deleted. Tests that read `GET /discord` must point
+`config.DISCORD_GUILD_PATH` at a temp file — the owner's setup is done now.
+
+Briefs for every package, including the ones in flight, are in
 `docs/codex-briefs/`; each merged package left a `*-notes.md` beside its
 brief with what its implementer verified and what it proposes.
 
