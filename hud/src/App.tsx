@@ -28,6 +28,7 @@ import { useThreadModel } from "./components/ThreadModelControls";
 import { ProjectDialog } from "./components/Pickers";
 import { ArchiveConfirm, ArchiveView } from "./components/Archive";
 import { afterProjectGone, afterThreadGone, forgetLastProject, projectNamesTaken } from "./lib/projects";
+import { guildConfigured } from "./lib/discord";
 
 const TABS: Tab[] = ["chat", "task", "file", "diff", "preview"];
 const PROPOSAL_WINDOW_MS = 60_000;
@@ -1026,7 +1027,16 @@ export default function App() {
               onStart={() => task && api.startTask(task.id).then(refreshTasks).catch(() => {})}
             />
             <UsagePanel usage={state.usage} />
-            <DiscordPanel discord={state.discord} />
+            <DiscordPanel
+              discord={state.discord}
+              projects={state.projects}
+              onBackfill={() =>
+                api.discordBackfill().then(async (result) => {
+                  await refreshProjects();
+                  return result;
+                })
+              }
+            />
             <SchedulesButton
               count={state.schedules.length}
               onOpen={() => {
@@ -1088,10 +1098,16 @@ export default function App() {
       ) : null}
       {state.picker === "newProject" ? (
         <NewProject
-          onCreate={(b) =>
+          discordConfigured={guildConfigured(state.discord)}
+          onCreate={(b, options) =>
             api
               .createProject(b)
               .then(async (created) => {
+                if (options.channel) {
+                  // Every project gets a channel (decisions O1). The project
+                  // exists either way; a refused channel shows on its pill.
+                  await api.projectDiscordAction(created.id, { action: "create" }).catch(() => null);
+                }
                 const projects = await api.projects();
                 const platform = await api
                   .platform(created.id)
@@ -1114,6 +1130,7 @@ export default function App() {
           mode="edit"
           initial={state.projects.find((p) => p.id === projectTarget) || null}
           taken={projectNamesTaken(state.projects, projectTarget, state.archivedNames)}
+          onDiscordChanged={() => void refreshProjects(projectTarget)}
           onSave={(body) =>
             api.patchProject(projectTarget, body).then(async () => {
               await refreshProjects(projectTarget);

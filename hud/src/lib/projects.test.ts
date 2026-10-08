@@ -152,6 +152,14 @@ describe("confirmations read back from /impact", () => {
     expect(lines).toContain("1 schedule is paused until you restore it.");
     expect(lines.join(" ")).toContain("/home/o/calc/.jarvis/worktrees/k1 (jarvis/k1)");
     expect(lines[lines.length - 1]).toMatch(/^Nothing inside \/home\/o\/calc is touched/);
+    expect(lines.join(" ")).not.toContain("Discord");
+  });
+
+  it("archive: says where a linked project's Discord channel goes (B1)", () => {
+    const lines = archiveSummary(impact({ discord_channel_id: "830000000000000001" }));
+    expect(lines).toContain(
+      "Its Discord channel moves to the Jarvis Archive category, kept as it is; restoring moves it back.");
+    expect(lines[lines.length - 1]).toMatch(/^Nothing inside/);
   });
 
   it("delete: to the trash, worktrees stay, singular and plural", () => {
@@ -160,6 +168,8 @@ describe("confirmations read back from /impact", () => {
     expect(lines[1]).toMatch(/^Left on disk, with their branches: \/home\/o\/calc\/\.jarvis\/worktrees\/k1/);
     expect(lines).toContain("The trash keeps them for 30 days.");
     expect(deleteSummary(impact({ worktrees: [] }), null)[1]).toBe("No worktree of it is on disk any more.");
+    expect(deleteSummary(impact({ discord_channel_id: "830000000000000001" }), null))
+      .toContain("Its Discord channel is kept, with a note; it is never deleted.");
   });
 });
 

@@ -1270,7 +1270,9 @@ def discord_checks(page, mock):
           panel.get_attribute("data-level") == "ok"
           and "ok" in (panel.locator(".discord-dot").get_attribute("class") or ""),
           panel.get_attribute("data-level") or "")
-    check("and says so in words", panel.inner_text().strip() == "Discord ok", panel.inner_text())
+    # The light's own sentence: the panel may also hold B1's backfill button.
+    words = page.locator('[data-testid="discord-text"]').inner_text().strip()
+    check("and says so in words", words == "Discord ok", words)
 
     reporter = mock.world["discord"]["reporter"]
     reporter.update(state="degraded", reason=(
@@ -1660,6 +1662,9 @@ def main():
             newproject_checks(page, mock)
             move_checks(page, mock)
             thread_model_checks(page, mock)
+            # B1: project channels, before part B archives what they link.
+            from tests.face.hud_v2_discord_check import discord_link_checks
+            discord_link_checks(page, mock, check, until, expand)
             # Decisions part B last of all: it renames, archives and deletes.
             from tests.face.hud_v2_projects_check import projects_checks
             projects_checks(page, mock, check, until, expand)

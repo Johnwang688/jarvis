@@ -130,6 +130,10 @@ export function archiveSummary(impact: ProjectImpact): string[] {
   if (impact.worktrees.length) {
     lines.push(`Left on disk: ${impact.worktrees.map((w) => w.path + (w.branch ? ` (${w.branch})` : "")).join(", ")}.`);
   }
+  if (impact.discord_channel_id) {
+    // B1, decisions D3: the channel moves, it is never deleted.
+    lines.push("Its Discord channel moves to the Jarvis Archive category, kept as it is; restoring moves it back.");
+  }
   lines.push(`Nothing inside ${impact.root} is touched. Restore it from Archive at any time.`);
   return lines;
 }
@@ -146,6 +150,7 @@ export function deleteSummary(impact: ProjectImpact, retentionDays: number | nul
     ? `Left on disk, with their branches: ${existing.map((w) => w.path).join(", ")}.`
     : "No worktree of it is on disk any more.");
   lines.push(`Nothing inside ${impact.root} is touched.`);
+  if (impact.discord_channel_id) lines.push("Its Discord channel is kept, with a note; it is never deleted.");
   if (retentionDays) lines.push(`The trash keeps them for ${retentionDays} days.`);
   return lines;
 }

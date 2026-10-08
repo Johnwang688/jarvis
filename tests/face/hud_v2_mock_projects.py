@@ -101,12 +101,108 @@ def _root_ok(w, root):
             or any(p["root"] == root for p in w["projects"]))
 
 
+# -- B1: project channels ------------------------------------------------------
+
+_SLUG = re.compile(r"[^a-z0-9]+")
+
+
+def _slug(name, pid):
+    text = _SLUG.sub("-", (name or "").lower()).strip("-")[:90].strip("-")
+    return text or f"project-{pid}"
+
+
+def _configured(w):
+    return bool((w.get("discord") or {}).get("guild", {}).get("configured"))
+
+
+def channel_view(w, project):
+    """`GET /projects/{id}/discord` from the world: the backend's shape."""
+    views = w.setdefault("channel_views", {})
+    base = {"channel_id": project.get("discord_channel_id"),
+            "origin": project.get("discord_channel_origin") if project.get("discord_channel_id") else None,
+            "name": None, "category": None, "state": "unlinked", "missing": [],
+            "checked_at": 1.0, "rename_pending": False}
+    if not _configured(w):
+        return {**base, "state": "unconfigured"}
+    if not project.get("discord_channel_id"):
+        return base
+    return {**base, "name": _slug(project["name"], project["id"]), "category": "Jarvis",
+            "state": "linked_ok", **views.get(project["id"], {})}
+
+
+def _create_channel(w, project):
+    w["next_channel"] = w.get("next_channel", 830000000000000100) + 1
+    project["discord_channel_id"] = str(w["next_channel"])
+    project["discord_channel_origin"] = "created"
+
+
+def discord_handle(h, w, method, parts, body) -> bool:
+    if len(parts) == 3 and parts[0] == "projects" and parts[2] == "discord":
+        project = next((p for p in w["projects"] if p["id"] == parts[1]), None)
+        if project is None:
+            h._err(404, f"Project {parts[1]} not found")
+            return True
+        if method == "GET":
+            h._json(channel_view(w, project))
+            return True
+        if method != "POST":
+            return False
+        action = body.get("action")
+        if not _configured(w):
+            h._err(409, "Discord is not set up: run `jarvis auth discord-guild` first")
+        elif project.get("inbox"):
+            h._err(409, "The Inbox's channel is #ungrouped; only re-running "
+                        "`jarvis auth discord-guild` changes it")
+        elif action == "create":
+            if project.get("discord_channel_id"):
+                h._err(409, f"project {project['name']} already has a channel; unlink it first")
+                return True
+            _create_channel(w, project)
+            h._json(channel_view(w, project))
+        elif action == "link":
+            channel = str(body.get("channel_id") or "")
+            if not channel.isdigit() or len(channel) < 5:
+                h._err(400, "channel_id must be a Discord channel id (digits only)")
+            elif channel in w.get("missing_channels", ()):
+                h._err(400, "Discord has no channel with that id")
+            else:
+                project["discord_channel_id"], project["discord_channel_origin"] = channel, "linked"
+                h._json(channel_view(w, project))
+        elif action == "unlink":
+            project["discord_channel_id"], project["discord_channel_origin"] = None, None
+            h._json(channel_view(w, project))
+        else:
+            h._err(400, "action must be create, link or unlink")
+        return True
+    if parts == ["discord", "backfill"] and method == "POST":
+        if not _configured(w):
+            h._err(409, "Discord is not set up: run `jarvis auth discord-guild` first")
+            return True
+        results = []
+        for project in w["projects"]:
+            if project.get("inbox") or project.get("archived") or project.get("discord_channel_id"):
+                continue
+            _create_channel(w, project)
+            results.append({"project_id": project["id"], "name": project["name"],
+                            "channel_id": project["discord_channel_id"], "status": "created"})
+        h._json({"created": len(results), "results": results, "skipped": []})
+        return True
+    return False
+
+
 def handle(h, mock, method, path, body) -> bool:
     """Answer one request if it is this feature's; False lets the mock go on."""
     w = _state(mock.world)
     query = {k: v[0] for k, v in parse_qs(urlparse(h.path).query).items()}
     parts = [p for p in path.split("/") if p]
     hidden = _archived_ids(w)
+    if discord_handle(h, w, method, parts, body):
+        return True
+    if method in ("POST", "PATCH") and parts and parts[0] == "projects" and len(parts) <= 2 \
+            and ("discord_channel_id" in body or "discord_channel_origin" in body):
+        # B1: a channel is linked from the dialog's own control, never a PATCH.
+        h._err(400, "link a channel from the project dialog")
+        return True
 
     if method == "GET":
         if path == "/projects":

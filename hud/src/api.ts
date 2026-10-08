@@ -9,7 +9,7 @@
 import type {
   ApprovalRequest, AvatarDesc, ChatMessage, Diff, FileRead, ModelRow, Platform,
   Project, RouteView, Schedule, SchedulePreview, Task, TaskThread, Thread, Tree, Usage,
-  VoiceEntry, Attachment, DirListing, DiscordStatus } from "./types";
+  VoiceEntry, Attachment, DirListing, DiscordStatus, ProjectChannel, BackfillResult } from "./types";
 import type { ThreadModels } from "./lib/threadmodel";
 import type { ArchiveView, DeleteResult, ProjectImpact } from "./types";
 
@@ -147,6 +147,14 @@ export const api = {
   // --- usage / route / schedules -----------------------------------------
   usage: () => req<Usage>("/usage"),
   discord: () => req<DiscordStatus>("/discord"),
+  // B1: a project's channel. Reading is open; create, link, unlink and the
+  // backfill answer only this window (owner-only, like archive).
+  projectDiscord: (id: string, refresh = false) =>
+    req<ProjectChannel>(`/projects/${id}/discord${refresh ? "?refresh=1" : ""}`),
+  projectDiscordAction: (id: string,
+    body: { action: "create" | "unlink" } | { action: "link"; channel_id: string }) =>
+    req<ProjectChannel>(`/projects/${id}/discord`, json(body)),
+  discordBackfill: () => req<BackfillResult>("/discord/backfill", json({})),
   route: (projectId?: string) =>
     req<RouteView>(projectId ? `/route?project=${encodeURIComponent(projectId)}` : "/route"),
   schedules: () => req<Schedule[]>("/schedules"),

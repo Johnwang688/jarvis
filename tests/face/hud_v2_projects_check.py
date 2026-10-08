@@ -181,8 +181,10 @@ def _edit_checks(page, mock, check, until, expand):
           f"{name.input_value()} / {root.input_value()}")
     check("its impact was read from the backend", mock.saw("GET", "/projects/p3/impact"))
     check("Save is off until something changes", page.locator('[data-testid="save-project"]').is_disabled())
-    check("the Discord channel is read-only", page.locator('[data-testid="project-discord"]').count() == 1
-          and page.locator('[data-testid="project-discord"] input').count() == 0)
+    # B1 replaced the read-only id with the link control (hud_v2_discord_check).
+    check("the Discord channel has its own control, not a form field",
+          page.locator('[data-testid="discord-link"]').count() == 1
+          and page.locator('[data-testid="project-discord"]').count() == 0)
     root.fill("/home/johnw/notes")
     page.locator('[data-testid="project-profile"]').select_option("ask")
     effects = page.locator('[data-testid="project-effects"]')
