@@ -83,8 +83,11 @@ RETRY_S = 30.0                 # a transient failure without a retry_after
 ASK_AGAIN_S = 24 * 3600.0      # after a denied or unanswered housekeeping ask
 ORIGIN = "Jarvis housekeeping"
 TEXT, CATEGORY = 0, 4
-# Why a channel sits in an archive category: with its project, or for room.
-BY_PROJECT, BY_CROWDING = "project", "crowding"
+# Why a channel sits in an archive category: with its project, for room, or
+# because the owner typed `/channel archive` (B2). Only BY_PROJECT is undone
+# by a restart's reconcile; the other two stay until the owner moves them.
+BY_PROJECT, BY_CROWDING, BY_OWNER = "project", "crowding", "owner"
+ARCHIVE_REASONS = (BY_PROJECT, BY_CROWDING, BY_OWNER)
 STATES = ("linked_ok", "unlinked", "not_found", "no_access", "wrong_guild",
           "missing_permissions", "folder_missing", "unconfigured", "unreachable")
 _SNOWFLAKE = re.compile(r"^[0-9]{5,24}$")
@@ -565,6 +568,11 @@ class ChannelLinker:
 
     def _rest_refusal(self, op, exc) -> LinkError:
         self._failed(op, exc)
+        return self._refusal(exc, op)
+
+    @staticmethod
+    def _refusal(exc, op="move_channel") -> LinkError:
+        """The LinkError for a failure that is already logged."""
         facts = describe(exc)
         if facts["status"] is None:
             return LinkError(502, f"Discord could not be reached ({facts['error']})")
@@ -627,19 +635,28 @@ class ChannelLinker:
     def validate_link(self, project, channel_id) -> dict:
         """Every check a link must pass (shared with B2's `/project link`).
         -> the channel object."""
-        cfg = self._require_config()
+        self._require_config()
         if not isinstance(channel_id, str) or not _SNOWFLAKE.match(channel_id):
             raise LinkError(400, "channel_id must be a Discord channel id (digits only)")
         self._refuse_inbox(project)
+        self._refuse_unlinkable(project)
+        return self.validate_channel(channel_id, project_id=project.id)
+
+    def validate_channel(self, channel_id, *, project_id=None) -> dict:
+        """The channel half of `validate_link`: everything that does not depend
+        on the project. B2's `/project new` runs it *before* it makes a folder
+        or a project, so an unlinkable channel refuses with nothing made."""
+        cfg = self._require_config()
+        if not isinstance(channel_id, str) or not _SNOWFLAKE.match(channel_id):
+            raise LinkError(400, "channel_id must be a Discord channel id (digits only)")
         if channel_id == cfg.ungrouped_channel_id:
             raise LinkError(400, "#ungrouped belongs to the Inbox and cannot be linked")
         if channel_id in (cfg.category_id, cfg.archive_category_id,
                           *(self._state.get("archive_overflow") or [])):
             raise LinkError(400, "that is a Jarvis category, not a channel")
-        self._refuse_unlinkable(project)
         from ..daemon import safe_list
         for other in safe_list(self.stores.projects):
-            if other.id != project.id and other.discord_channel_id == channel_id:
+            if other.id != project_id and other.discord_channel_id == channel_id:
                 raise LinkError(409, f"that channel is already linked to project {other.name}")
         try:
             channel = self.rest.get_channel(channel_id, timeout=READ_TIMEOUT_S, patient=False)
@@ -688,6 +705,60 @@ class ChannelLinker:
                 if self._state["sanctioned"].pop(project.id, None) is not None:
                     self._save_state()
             return self.view(project.id, refresh=True)
+
+    def move_channel(self, project_id: str, *, archive: bool) -> dict:
+        """`/channel archive|restore` (B2): move a live project's channel to
+        the archive category or back to Jarvis. The project stays active and
+        its threads keep working. The owner typed the command, which is the
+        owner's permission (D4), so it acts at once. Never a delete (D3), and
+        never `lock_permissions` or overwrites. -> {"moved", "category"}."""
+        with self._lock:
+            cfg = self._require_config()
+            project = self._project(project_id)
+            self._refuse_inbox(project)
+            if project.archived:
+                raise LinkError(409, f"project {project.name} is archived; its channel moves "
+                                     "with the project, from the HUD")
+            channel_id = project.discord_channel_id
+            if not channel_id:
+                raise LinkError(409, f"project {project.name} has no channel")
+            # The owner's command supersedes any older move still waiting to
+            # retry (a 429'd restore, a crowding move): left pending, it would
+            # undo this one as soon as it came due.
+            with self._state_lock:
+                if self._state["pending_moves"].pop(str(channel_id), None) is not None:
+                    self._save_state()
+            try:
+                current = self.rest.get_channel(channel_id, timeout=READ_TIMEOUT_S,
+                                                patient=False)
+            except Exception as exc:
+                raise self._rest_refusal("get_channel", exc) from None
+            parent = str(current.get("parent_id") or "")
+            if (archive and parent in self.archive_categories(cfg)) \
+                    or (not archive and parent == cfg.category_id):
+                # Already there. Still record that the owner chose it, so a
+                # restart's reconcile leaves it where the owner put it.
+                with self._state_lock:
+                    if archive:
+                        self._state["archived_by"][str(channel_id)] = BY_OWNER
+                    else:
+                        self._state["archived_by"].pop(str(channel_id), None)
+                    self._save_state()
+                return {"moved": False, "category": self.category_name(cfg, parent)}
+            target = self.archive_target(cfg) if archive else cfg.category_id
+            try:
+                # B1's bookkeeping: pending on a transient failure (the owner's
+                # move is retried, not lost), `archived_by` set or cleared.
+                self.move(project.id, channel_id, target,
+                          BY_OWNER if archive else "restore", raise_errors=True)
+            except Exception as exc:
+                refusal = self._refusal(exc)
+                if _transient(exc):
+                    refusal = LinkError(refusal.status, f"{refusal}; the move is kept and "
+                                                        "retried when Discord allows")
+                raise refusal from None
+            self._crowding_due = True
+            return {"moved": True, "category": self.category_name(cfg, target)}
 
     def backfill(self) -> dict:
         """A channel for every unlinked, live project whose folder exists, at
@@ -772,11 +843,12 @@ class ChannelLinker:
             self._wrote(project_id)
             return True
 
-    def move(self, project_id, channel_id, parent_id, reason) -> bool:
+    def move(self, project_id, channel_id, parent_id, reason, *, raise_errors=False) -> bool:
         """Move a channel to a category by `parent_id` alone. `reason` is why
-        it now sits where it does (`project`, `crowding`, or `restore` for the
-        way back), kept so a restart knows which moves to undo. Failures that
-        may pass are kept pending."""
+        it now sits where it does (`project`, `crowding`, `owner`, or
+        `restore` for the way back), kept so a restart knows which moves to
+        undo. Failures that may pass are kept pending; `raise_errors` also
+        re-raises the failure, for an owner command that must answer."""
         with self._lock:
             try:
                 self.rest.modify_channel(channel_id, parent_id=parent_id)
@@ -790,10 +862,12 @@ class ChannelLinker:
                     else:
                         self._state["pending_moves"].pop(str(channel_id), None)
                     self._save_state()
+                if raise_errors:
+                    raise
                 return False
             with self._state_lock:
                 self._state["pending_moves"].pop(str(channel_id), None)
-                if reason in (BY_PROJECT, BY_CROWDING):
+                if reason in ARCHIVE_REASONS:
                     self._state["archived_by"][str(channel_id)] = reason
                 else:
                     self._state["archived_by"].pop(str(channel_id), None)

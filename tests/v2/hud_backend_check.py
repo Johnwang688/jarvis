@@ -163,7 +163,11 @@ class Backend(unittest.TestCase):
         for name, value in dict(V2_DATA_DIR=self.root / "data", ALLOWLIST_PATH=self.extra / "allowlist.json",
                                 MODELS_PATH=self.extra / "models.json", REPO_ROOT=self.project_root,
                                 AVATAR_STATE_PATH=self.root / "avatar.json", AVATARS_DIR=self.root / "avatars",
-                                AVATAR_ENV="").items():
+                                AVATAR_ENV="",
+                                # Never the owner's real Discord files: the guild
+                                # file decides `GET /discord`'s answer (B1).
+                                DISCORD_GUILD_PATH=self.root / "discord_guild.json",
+                                DISCORD_TOKEN_PATH=self.root / "discord_token.json").items():
             guard = patch.object(config, name, value)
             guard.start()
             self.addCleanup(guard.stop)

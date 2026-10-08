@@ -105,6 +105,11 @@ class ApprovalRequest:
     provider: str | None = None
     origin: str = ""                    # sanitized attribution (see `label`)
     allowlistable: bool = True          # False from the escape hatch (§6.1)
+    # Where on Discord to ask, when the asker is not a task (B2: `/project
+    # new` asks in the channel it was typed in). Set by daemon code only — no
+    # provider or tool builds a request with it — and still the DM if that
+    # post fails. The answer then counts there and only there.
+    discord_channel_id: str | None = None
     timeout_s: float | None = None      # set by the broker when asked; the card shows it
     req_id: str = ""
     code: str = ""
@@ -118,6 +123,7 @@ class ApprovalRequest:
             "task_id": self.task_id, "provider": self.provider,
             "origin": self.origin, "asked_at": self.asked_at,
             "allowlistable": self.allowlistable, "timeout_s": self.timeout_s,
+            "discord_channel_id": self.discord_channel_id,
         }
 
 

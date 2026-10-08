@@ -14,7 +14,9 @@ the same gate before anything is read:
    DM) — never 2, a private channel — and, once PR B1 configures a guild, the
    guild must be that one. Then the channel must be a Jarvis place for the
    command (`commands.Cmd.places`); Discord cannot hide a command per channel,
-   so places are enforced here, on the server.
+   so places are enforced here, on the server. A server channel no project
+   owns takes only `/project new|link`, that form, and `/yes`, `/no` and the
+   approval buttons for a request asked there (B2, `_other_ok`).
 
 **The 3-second rule.** A refusal that needs only reads is answered at once
 (type 4, ephemeral); autocomplete is answered at once (type 8). Everything else
@@ -37,6 +39,7 @@ from ..commands import (Context, SkillRefused, check_skill, completions, open_qu
 from ..control import ControlError
 from ..model import TERMINAL_STATES, ProviderName, TaskState
 from ..stores import StoreError
+from . import project_commands
 from .render import APPROVE_PREFIX, DENY_PREFIX
 from .rest import DiscordError, DiscordHTTPError
 
@@ -191,6 +194,7 @@ class InteractionRouter:
     def __init__(self, surface, *, clock=time.monotonic):
         self.surface = surface
         self.clock = clock
+        self.projects = project_commands.ProjectCommands(surface)
 
     # -- entry -------------------------------------------------------------
 
@@ -221,7 +225,8 @@ class InteractionRouter:
                 refusal = self.surface.archived_text(project)
             elif where == "chat_archived":
                 refusal = self.surface.CHAT_ARCHIVED_TEXT
-            elif where not in registry.JARVIS_PLACES:
+            elif where not in registry.JARVIS_PLACES and not (
+                    where == registry.OTHER and self._other_ok(interaction)):
                 refusal = NOT_HERE
         if refusal is not None:
             if kind == AUTOCOMPLETE:
@@ -272,6 +277,24 @@ class InteractionRouter:
         if guild and configured and str(guild) != str(configured):
             return WRONG_CONTEXT
         return None
+
+    def _other_ok(self, interaction) -> bool:
+        """A server channel no project owns ("other") takes only what B2 lets
+        it: a command whose places include it (`/project new|link`, `/yes`, `/no`)
+        and its autocomplete, the `/project new` form, and an approval button —
+        which must be the very post the approval was asked in, in this
+        channel (`button_target`), so nothing else is answerable here."""
+        kind = interaction.get("type")
+        data = interaction.get("data") or {}
+        if kind in (APPLICATION_COMMAND, AUTOCOMPLETE):
+            spec, _options, _label = self._spec(data)
+            return spec is not None and registry.OTHER in spec.places
+        if kind == MODAL_SUBMIT:
+            return str(data.get("custom_id") or "") == project_commands.MODAL_ID
+        if kind == COMPONENT:
+            custom = str(data.get("custom_id") or "")
+            return custom.startswith((APPROVE_PREFIX, DENY_PREFIX))
+        return False
 
     def _derived_context(self, interaction):
         """Only for a button or a modal, and only if Discord left `context`
@@ -510,6 +533,26 @@ class InteractionRouter:
     def _cmd_project_list(self, values, reply, place, interaction) -> None:
         self.surface._list_projects(reply)
 
+    # B2 (plan §5): the handlers live in project_commands.py.
+
+    def _cmd_project_new(self, values, reply, place, interaction) -> None:
+        self.projects.new(values.get("name"), values.get("folder"), reply, place)
+
+    def _cmd_project_link(self, values, reply, place, interaction) -> None:
+        self.projects.link(values["project"], reply, place)
+
+    def _cmd_project_unlink(self, values, reply, place, interaction) -> None:
+        self.projects.unlink(reply, place)
+
+    def _cmd_project_channel(self, values, reply, place, interaction) -> None:
+        self.projects.channel(values["project"], reply, place)
+
+    def _cmd_channel_archive(self, values, reply, place, interaction) -> None:
+        self.projects.move(True, reply, place)
+
+    def _cmd_channel_restore(self, values, reply, place, interaction) -> None:
+        self.projects.move(False, reply, place)
+
     # -- autocomplete --------------------------------------------------------
 
     def _autocomplete(self, interaction, reply, place) -> None:
@@ -559,6 +602,22 @@ class InteractionRouter:
     def _modal(self, interaction, reply, place) -> None:
         data = interaction.get("data") or {}
         custom = str(data.get("custom_id") or "")
+        if custom == project_commands.MODAL_ID:
+            # The `/project new` form. Its fields are re-checked exactly as the
+            # options would have been: the form round-tripped through Discord.
+            if place[0] not in registry.find("project", "new").places:
+                reply.refuse(NOT_HERE)
+                return
+            fields = _fields(data)
+            name, folder = fields.get("name", ""), fields.get("folder", "")
+            if len(name) > project_commands.NAME_MAX or len(folder) > 4000:
+                reply.refuse("That form's fields are too long. Nothing was made.")
+                return
+            if not name.strip():
+                reply.refuse("A project needs a name. Nothing was made.")
+                return
+            self.projects.new(name, folder, reply, place)
+            return
         parts = custom[len(MODAL_PREFIX):].split(":") if custom.startswith(MODAL_PREFIX) else []
         if len(parts) != 3:
             reply.refuse("That form isn't one I know. Nothing opened.")
@@ -592,6 +651,16 @@ class InteractionRouter:
             reply.refuse("A task needs a brief of 1-4000 characters.")
             return
         self._open(brief, skill, provider, target, reply)
+
+
+def _fields(data) -> dict:
+    """A modal's text inputs, by custom id (strings only)."""
+    out = {}
+    for row in data.get("components") or []:
+        for field in (row or {}).get("components") or []:
+            if isinstance(field, dict) and isinstance(field.get("value"), str):
+                out[str(field.get("custom_id") or "")] = field["value"]
+    return out
 
 
 _STORE_ID = re.compile(r"[0-9a-f]{8}")

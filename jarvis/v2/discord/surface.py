@@ -77,6 +77,8 @@ class DiscordSurface:
         from .linker import ChannelLinker
         self.linker = ChannelLinker(self.daemon, self.rest, approvals=self.daemon.approvals)
         self.linker.start()
+        # B2's slash handlers (`/project`, `/channel`) reach it through the router.
+        self.router.linker = self.linker
         # 1c. The chat mirror (PR C): on the bus before any turn can run, and
         # caught up from the chats' logs.
         self.mirror.start()

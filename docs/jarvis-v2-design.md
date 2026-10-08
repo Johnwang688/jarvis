@@ -888,7 +888,78 @@ D5, O1, O6 and O7 in `docs/plans/2026-10-07-discord-decisions.md`. Code:
   - The crowding note says how a channel comes back (`/channel restore`, B2,
     or by hand).
 
-### 11.7 Every chat is a Discord thread (PR C, 2026-10-07)
+### 11.7 Projects and folders from Discord (B2, 2026-10-07)
+
+Plan: `docs/plans/2026-10-07-discord-plan.md` §5; owner decisions D2, D4, O3,
+O4, O5, S-1/S-2 and B11. Code: `jarvis/v2/folders.py`,
+`jarvis/v2/discord/project_commands.py` (the handlers), and
+`projects.create_project`.
+
+- **Commands** (static registry, synced by the daemon): `/project new
+  name folder` (both empty opens a form with Name and Folder), `/project link
+  project`, `/project unlink`, `/project channel project`, and `/channel
+  archive|restore`. No typed keyword forms (S2). **Archiving or deleting a
+  project stays HUD-only** (B11): no command does either, and a test holds the
+  subcommand list to that.
+- **Places.** A server channel no project owns ("other") now takes
+  `/project new`, `/project link`, and `/yes`/`/no` plus the approval buttons
+  for a request asked there (the post offers exactly those; a button still
+  matches the very message and channel; `/always` stays refused, as nothing
+  asked there is allowlistable); everything else there
+  keeps "This channel isn't a Jarvis place." `/project new` from the DM makes
+  the channel under Jarvis; from an unlinked channel it links *that* channel
+  (validated first, so an unlinkable one refuses with nothing made); from a
+  linked channel it refuses. `/project link` refuses a project that already
+  has another channel ("`/project unlink` there first") rather than moving
+  the link silently.
+- **The folder** (`folders.py`): a bare name → `config.PROJECT_WORK_DIR/
+  <slug>` (`~/jarvis-work/<slug>`; the name picks it when no folder is
+  given); a leading `~/` expanded once; otherwise absolute. Refused: control
+  and format characters, `.`/`..`, > 4096 characters or > 255 bytes a
+  component, any dot component, anything not strictly below a
+  `config.PROJECT_FOLDER_ROOTS` root (`~`, `/mnt/c/Users/johnw`, env
+  `JARVIS_PROJECT_FOLDER_ROOTS`), the work dir itself; checked on the
+  input *before* any trimming — any whitespace but an ASCII space, invisible
+  fillers (U+3164, U+115F, U+1160, U+FFA0, U+2800), input that is not already
+  NFC, a component starting with a combining mark, inside *or holding*
+  `V2_CREDENTIAL_DIRS`, `V2_DATA_DIR`, `REPO_ROOT` or `/mnt/c/Users/johnw/
+  AppData` (case-insensitive on `/mnt/<drive>`), Windows-reserved names and
+  characters under `/mnt/<drive>`, another project's root, a file or a
+  symlink at the path, and a missing parent (O4). Every rule runs on the
+  typed path **and** on the realpath of its nearest existing ancestor, so a
+  symlinked parent cannot carry it out. The check lists names only, never
+  contents.
+- **Confirmation.** A missing folder (`create`) or one with something in it
+  (`adopt`, with its entry count and whether it is a git repo) asks first:
+  `ApprovalRequest(tool="project_folder", args={action, path, name[,
+  entries, git]}, origin="Discord: new project", allowlistable=False)`,
+  posted with Approve/Deny in the channel the command was typed in
+  (`ApprovalRequest.discord_channel_id`, still the DM if that post fails) and
+  shown as a HUD card. One-shot, never Always, never by voice, and a timeout
+  denies. An existing empty folder is used without asking (O5). After the yes
+  `make_project_folder` re-runs the check; anything different — a folder that
+  appeared, a count that changed — raises `FolderChanged` and the owner is
+  asked again about what is there now.
+- **Making it.** Exactly one `os.mkdir(path, 0o755)`, no parents, no
+  `exist_ok`, nothing written inside. `make_project_folder` is called only by
+  the confirmation handler: not a tool, not MCP, not a route (a grep test).
+  Then `projects.create_project` — the one create path `POST /projects` now
+  uses too, so PR #4's numbering applies — then the channel.
+- **`/project unlink`** asks Approve/Deny first (`tool="discord_channel"`,
+  `action: "unlink"`) and keeps the channel. **`/project link`**,
+  **`/project channel`** and **`/channel archive|restore`** act at once: the
+  owner typed them (D4). `/channel archive` moves the channel to the archive
+  target by `parent_id` alone (`ChannelLinker.move_channel`); the project
+  stays active and its threads keep working. The move goes through B1's
+  `move()` bookkeeping with reason `owner` (`archived_by` `owner`, which a
+  restart's reconcile leaves alone) or `restore` (clears it), and **first
+  drops any older pending move for that channel** — a 429'd restore or
+  crowding move would otherwise undo the owner's command when it came due. A
+  transient failure keeps the owner's move pending and says so.
+- **B2b, deferred:** `project_propose` and the Claude Sonnet/Opus rule (O3)
+  wait for the peers plan's phase 0.
+
+### 11.8 Every chat is a Discord thread (PR C, 2026-10-07)
 
 Plan `docs/plans/2026-10-07-discord-plan.md` §4; decisions C1, O-C1…O-C7.
 `ChatMirror` (`jarvis/v2/discord/mirror.py`, on the `DiscordSurface`, its own

@@ -694,7 +694,8 @@ class DiscordRouter:
                 self._subscription.task_done()
 
     def _post_approval(self, data: dict) -> None:
-        """Ask in the task's thread when it has one, else the owner's DM.
+        """Ask in the task's thread when it has one, else where the request
+        says (B2: an owner's `/project` command), else the owner's DM.
 
         A thread post that fails is asked again in the DM, and the DM is then
         recorded as where it was asked — so the answer counts there and only
@@ -710,15 +711,22 @@ class DiscordRouter:
             except StoreError:                  # not a task id: ask in the DM
                 task = None
             channel = thread_for(self.stores, task) if task else None
+        # Where to ask: the task's thread, the chat's thread (PR C), the
+        # channel an owner command was typed in (`discord_channel_id`, B2),
+        # else the DM.
         elif data.get("thread_id") and self.mirror is not None:
-            # A chat's approval goes to that chat's Discord thread (PR C), or
-            # to the DM for the DM conversation; a chat whose thread is being
-            # made right now is waited for, briefly.
+            # A chat's approval goes to that chat's Discord thread, or to the
+            # DM for the DM conversation; a chat whose thread is being made
+            # right now is waited for, briefly.
             try:
                 channel = self.mirror.channel_for(str(data["thread_id"]))
             except Exception as exc:
                 LOG.warning("Discord chat place not found (%s)", type(exc).__name__)
                 channel = None
+        if not channel and not task_id and data.get("discord_channel_id"):
+            # B2: a request raised by an owner's command (`/project new`,
+            # `/project unlink`) is asked where the command was typed.
+            channel = str(data["discord_channel_id"])
         if not req_id:
             self._announce("[approval] Discord could not deliver this request")
             return

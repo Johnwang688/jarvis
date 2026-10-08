@@ -113,7 +113,35 @@ linked project's tasks leave the DM safety net for threads at once. Tests
 that touch Discord point `config.DISCORD_GUILD_PATH` at a temp file — the
 owner's real one decides where channels go.
 
-**Every chat is a Discord thread, PR C (2026-10-07, design §11.7; plan
+**Projects and folders from Discord, B2 (2026-10-07, design §11.7; plan
+§5).** `/project new|link|unlink|channel` and `/channel archive|restore`
+(handlers in `discord/project_commands.py`); archiving or deleting a
+*project* stays HUD-only (B11). `/project new` with nothing filled in opens a
+form; a bare name means `~/jarvis-work/<slug>` (`config.PROJECT_WORK_DIR`).
+**`jarvis/v2/folders.py` is the folder boundary**: `check_project_folder`
+only reads (names, never contents) and refuses — lexically *and* on the
+realpath of the nearest existing ancestor — anything not strictly below
+`config.PROJECT_FOLDER_ROOTS`, dot components, the credential/data/repo dirs
+(inside or holding them), AppData, Windows-reserved names on `/mnt/<drive>`,
+another project's root, a file or symlink, a missing parent (O4), and —
+before any trimming — non-ASCII whitespace, invisible fillers and non-NFC
+input. `make_project_folder` is **one `os.mkdir(path, 0o755)`**, reachable only from
+the confirmation handler (grep-tested): a missing or non-empty folder is a
+`project_folder` approval (exact path, Approve/Deny in the channel it was
+typed in via `ApprovalRequest.discord_channel_id`, never Always, timeout
+denies); an empty one is used silently (O5); a change after the yes asks
+again. `POST /projects` and Discord share `projects.create_project`. From an
+unlinked channel, `/project new` links that channel; from the DM it makes one;
+from a linked channel it refuses; an unlinked channel also takes `/yes`/`/no`
+for what was asked there, so the post's offered answers all work. Unlink asks
+first; link (never stealing another channel's link), channel and `/channel
+archive|restore` act at once (D4) — the moves go through the linker's `move()`
+with reason `owner`/`restore` and drop any older pending move first, so a
+retry cannot undo them. Tests point the folder roots at
+temp dirs — never the owner's home. **B2b** (`project_propose`, the
+Sonnet/Opus rule) waits for peers phase 0.
+
+**Every chat is a Discord thread, PR C (2026-10-07, design §11.8; plan
 §4, decisions C1).** `ChatMirror` (`discord/mirror.py`) gives a chat a
 thread in its project's channel at its first owner message and posts the
 owner's *typed* words (never an inlined file), settled replies and one
