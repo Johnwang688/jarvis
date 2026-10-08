@@ -185,6 +185,17 @@ of a turn. The choice is stored on the Thread record (`model`, `effort`);
   cannot call tools), not one of that CLI's models, or an effort off its
   ladder. A Claude or Codex chat thread opens in the project root under the
   project's profile and always-ask list, with the §6 permit as its gate.
+  A provider the project cannot run is refused the same way, before any
+  record exists (`thread_model.refusal`): Codex runs the `auto` profile only
+  and cannot enforce always-ask additions; Claude and the fast path have no
+  `strict` mode. A refusal only the provider sees (at start) deletes the
+  never-started record before the error is returned.
+- **A caller's `brief` cannot loosen its project** (any role, any provider;
+  the runner's own `Brief` objects are not callers). `cwd` must be the
+  project's root, `profile` the project's or stricter (`auto` < `ask` <
+  `strict`), `always_ask` must keep every one of the project's commands
+  (adding more is fine), and `mcp_servers` must be empty. Anything else is a
+  400 naming the field. The HUD sends none of these.
 - `PATCH /threads/{id}` `{model?, effort?}` (with `project_id` as before; not
   both in one request) → the thread record. `model: null` returns to the
   default and resets the effort; a new model resets the effort unless one is
@@ -199,11 +210,25 @@ of a turn. The choice is stored on the Thread record (`model`, `effort`);
   model) and publishes it, then `thread_updated {…thread, effective_model,
   effective_effort}`. `GET /threads/{id}/transcript` returns `model_set`
   records as `role: "system"`.
+- A provider that refuses the switch at the turn's start does not cost the
+  message: the record is rolled back to what the provider still runs (a
+  default thread whose default moved on is pinned to it, so the switch is
+  not retried every turn), a `model_set` line says `switch to X refused:
+  <reason>; still on Y` (with `refused_model`, `refused_effort`), a
+  `thread_updated` follows, and the message is sent on the old model. If the
+  provider lost the session as well (Claude: neither the new model nor the
+  old one reconnects), the turn ends with an `error` and the session is
+  dropped; the next send resumes it on the old model.
 - Each `usage` event in a thread's log carries `data.model` and
   `data.effort`: which model answered that turn.
 - `GET /thread-models` → `{"effort_default": "high", "providers": {"fast" |
   "claude" | "codex": {"label", "default", "default_effort", "models":
-  [{"id", "name", "efforts", "vision", …}], "note"}}}`. OpenRouter lists the
+  [{"id", "name", "efforts", "vision", …}], "note", "profiles",
+  "always_ask"}}}`. `profiles` lists the permission profiles the provider can
+  run a chat thread under and `always_ask` says whether it can enforce a
+  project's always-ask commands; the HUD greys a provider out from these, and
+  `POST /threads` refuses by the same table. A row without `efforts` (an
+  `unlisted` roster model) has an unknown ladder, not none. OpenRouter lists the
   roster (`models.describe()` rows, with the roster's `effort`); Claude and
   Codex list `router.CLI_MODELS`, the table the router's capability filter
   reads. The full catalogue stays at `GET /models/catalog`; a model used from

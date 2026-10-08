@@ -65,9 +65,18 @@ rewrite `brief.json`** — and the daemon hands it to the provider per turn
 Model picker **every turn**; Claude defaults to `claude-opus-5-5` at high,
 Codex to its routing default; effort defaults to `high` (or the roster's pin)
 within the model's ladder. Claude and Codex chat threads are full agents in
-the thread's folder, behind the same §6 permit as task workers. The CLI model
-lists are `router.CLI_MODELS`, the one table the router's vision filter also
-reads. **No tool can change a thread's model or provider** (asserted in
+the thread's folder, behind the same §6 permit as task workers, so **a
+caller's `POST /threads` brief may not loosen the project** — `cwd`,
+`profile`, `always_ask` and `mcp_servers` are the project's (or stricter),
+else 400 (`Daemon.make_brief`). A provider the project cannot run (Codex off
+`auto` or with always-ask additions; Claude and the fast path under `strict`)
+is refused before any record exists, from the table in
+`thread_model.PROFILES`, which the HUD greys providers out from too. A
+refused mid-thread switch rolls the record back to what the provider still
+runs, writes `switch to X refused: …; still on Y`, and sends the message on
+the old model. The CLI model lists are `router.CLI_MODELS`, the one table the
+router's vision filter, the chip and `routing.json`/`/route` validation all
+read. **No tool can change a thread's model or provider** (asserted in
 `tests/v2/fastpath_check.py`). The picker controls take exactly `{model}`,
 `{model, effort}` (on `/models`), `{voice}`, `{muted}`, and refuse any other
 key — the HUD sent the wrong keys for weeks and every click reset itself (A6).
