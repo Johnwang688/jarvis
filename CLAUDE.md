@@ -81,7 +81,8 @@ is refused before any record exists, from the table in
 `thread_model.PROFILES`, which the HUD greys providers out from too. A
 refused mid-thread switch rolls the record back to what the provider still
 runs, writes `switch to X refused: …; still on Y`, and sends the message on
-the old model. The CLI model lists are `router.CLI_MODELS`, the one table the
+the old model. An archived thread, or one in an archived project, cannot
+change model (409, as with rename and move). The CLI model lists are `router.CLI_MODELS`, the one table the
 router's vision filter, the chip and `routing.json`/`/route` validation all
 read. **No tool can change a thread's model or provider** (asserted in
 `tests/v2/fastpath_check.py`). The picker controls take exactly `{model}`,

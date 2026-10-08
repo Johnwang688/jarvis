@@ -491,9 +491,14 @@ class Daemon:
                 model = thread_model.default_model(thread.provider)
         except thread_model.ChoiceRefused as exc:
             raise APIError(400, str(exc)) from exc
+        from . import projects
         with self._lock:
             self._active()
             thread = self.require(self.stores.threads, thread_id)
+            # An archived thread, or one in an archived project, is read-only
+            # until it is restored: the same rule as rename and move.
+            if thread.archived or projects.is_archived(self.stores, thread.project_id):
+                raise APIError(409, "restore the thread before changing its model")
             before = (thread.model, thread.effort)
             thread.model, thread.effort = model, effort
             thread.updated = utcnow()

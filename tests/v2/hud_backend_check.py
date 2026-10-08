@@ -818,6 +818,37 @@ class Backend(unittest.TestCase):
     def brief_bytes(self, thread_id):
         return self.stores.threads.path(thread_id).with_name("brief.json").read_bytes()
 
+    def test_an_archived_thread_or_one_in_an_archived_project_keeps_its_model(self):
+        # Read-only until restored, the rule rename and move already follow.
+        from jarvis.v2 import projects
+        self.model_fakes()
+        self.request("POST", "/models", {"add": "test/thinker"})
+        tid = self.chat()["id"]
+        projects.archive_thread(self.daemon, tid)
+        self.events_all()
+        for body in ({"model": "test/thinker"}, {"effort": "low"}, {"model": None}):
+            self.assertEqual(self.request("PATCH", f"/threads/{tid}", body, status=409)["error"],
+                             "restore the thread before changing its model", body)
+        with self.assertRaises(APIError) as refused:
+            self.daemon.set_thread_model(tid, {"model": "test/thinker"})
+        self.assertEqual(refused.exception.status, 409)
+        stored = self.stores.threads.get(tid)
+        self.assertEqual((stored.model, stored.effort), (None, None), "nothing is written")
+        self.assertEqual([e["kind"] for e in self.events_all()
+                          if e["kind"] in ("thread_updated", "model_set")], [], "and nothing is announced")
+        self.assertFalse([r for r in self.stores.threads.read_log(tid) if r.get("kind") == "model_set"])
+        # A live thread in an archived project is refused the same way.
+        projects.restore_thread(self.daemon, tid)
+        token = projects.impact(self.daemon, self.project.id)["token"]
+        projects.archive_project(self.daemon, self.project.id, token)
+        self.assertEqual(self.request("PATCH", f"/threads/{tid}", {"model": "test/thinker"}, status=409)["error"],
+                         "restore the thread before changing its model")
+        self.assertIsNone(self.stores.threads.get(tid).model)
+        # Restored, the change goes through.
+        projects.restore_project(self.daemon, self.project.id)
+        self.assertEqual(self.request("PATCH", f"/threads/{tid}", {"model": "test/thinker"})["model"],
+                         "test/thinker")
+
     def test_open_thread_checks_the_model_before_anything_exists(self):
         fakes = self.model_fakes()
         self.request("POST", "/models", {"add": "test/thinker"})

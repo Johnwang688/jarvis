@@ -789,6 +789,9 @@ class MockDaemon:
                         return self._err(400, "unknown fields: " + ", ".join(sorted(set(body) - {"model", "effort"})))
                     if t.get("task_id") or t.get("role") != "chat":
                         return self._err(409, "a task's threads run the model routing gave them")
+                    home = next((p for p in w["projects"] if p["id"] == t["project_id"]), {})
+                    if t.get("archived") or home.get("archived"):
+                        return self._err(409, "restore the thread before changing its model")
                     model = body["model"] if "model" in body else t.get("model")
                     effort = body.get("effort") if "model" in body else body["effort"]
                     refusal = _check_choice(w, t["provider"], model, effort, current=t.get("model"))
