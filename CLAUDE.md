@@ -123,16 +123,21 @@ only reads (names, never contents) and refuses — lexically *and* on the
 realpath of the nearest existing ancestor — anything not strictly below
 `config.PROJECT_FOLDER_ROOTS`, dot components, the credential/data/repo dirs
 (inside or holding them), AppData, Windows-reserved names on `/mnt/<drive>`,
-another project's root, a file or symlink, and a missing parent (O4).
-`make_project_folder` is **one `os.mkdir(path, 0o755)`**, reachable only from
+another project's root, a file or symlink, a missing parent (O4), and —
+before any trimming — non-ASCII whitespace, invisible fillers and non-NFC
+input. `make_project_folder` is **one `os.mkdir(path, 0o755)`**, reachable only from
 the confirmation handler (grep-tested): a missing or non-empty folder is a
 `project_folder` approval (exact path, Approve/Deny in the channel it was
 typed in via `ApprovalRequest.discord_channel_id`, never Always, timeout
 denies); an empty one is used silently (O5); a change after the yes asks
 again. `POST /projects` and Discord share `projects.create_project`. From an
 unlinked channel, `/project new` links that channel; from the DM it makes one;
-from a linked channel it refuses. Unlink asks first; link, channel and
-`/channel archive|restore` act at once (D4). Tests point the folder roots at
+from a linked channel it refuses; an unlinked channel also takes `/yes`/`/no`
+for what was asked there, so the post's offered answers all work. Unlink asks
+first; link (never stealing another channel's link), channel and `/channel
+archive|restore` act at once (D4) — the moves go through the linker's `move()`
+with reason `owner`/`restore` and drop any older pending move first, so a
+retry cannot undo them. Tests point the folder roots at
 temp dirs — never the owner's home. **B2b** (`project_propose`, the
 Sonnet/Opus rule) waits for peers phase 0.
 
