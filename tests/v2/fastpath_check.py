@@ -157,7 +157,9 @@ def boundary_checks() -> None:
     ):
         assert name not in fastpath.FAST_TOOLS, f"{name} must not be on the fast path"
     for name in fastpath.FAST_TOOLS:
-        assert not name.startswith(("browser_", "desktop_", "cad_", "gmail_")), name
+        assert not name.startswith(("browser_", "desktop_", "cad_", "gmail_", "discord_")), name
+    # S1: no fast-path tool may reach the Discord API, however it is named later.
+    assert "discord_" in fastpath.FORBIDDEN_PREFIXES, fastpath.FORBIDDEN_PREFIXES
 
     # Not one registered tool that is dangerous is reachable, whatever else moves.
     dangerous = {n for n, t in tools.REGISTRY.items() if t.dangerous}
@@ -477,6 +479,48 @@ def error_checks() -> None:
     print("ok  error: a raising llm.chat yields ERROR(fatal) and the generator terminates")
 
 
+def skill_checks() -> None:
+    """`UserMessage.skill` (S1): the body rides the turn; refusals never run one."""
+    from jarvis.v2 import commands
+
+    for name, meta, body in (("brief-me", "", "Say the date, then the weather."),
+                             ("board", "jarvis-only: true\n", "Open the whiteboard."),
+                             ("huge", "", "y" * (commands.SKILL_BODY_MAX + 1))):
+        (config.SKILLS_DIR / name).mkdir(exist_ok=True)
+        (config.SKILLS_DIR / name / "SKILL.md").write_text(
+            f"---\nname: {name}\n{meta}description: Use for {name}\n---\n{body}\n")
+    provider = FastPathProvider()
+    handle = provider.start(thread("skill"), brief(), allow_all)
+    seen = []
+
+    def fake(model, messages, tools=None, on_delta=None, **kw):
+        seen.extend(m["content"] for m in messages if m.get("role") == "user")
+        return reply("done")
+
+    with scripted(fake):
+        events = list(provider.send(handle, UserMessage(text="keep it short", skill="brief-me")))
+    assert one(events, EventKind.TURN_FINISHED).data["stop"] == "end", kinds(events)
+    # The session titler also calls llm.chat; the turn's own message is the one
+    # that *starts* with the skill header.
+    sent = next((s for s in seen if isinstance(s, str) and s.startswith("[The owner")), str(seen))
+    assert '[The owner invoked the skill "brief-me". Follow it.]' in sent, sent
+    assert "Say the date, then the weather." in sent, sent
+    assert sent.rstrip().endswith("[Request]\nkeep it short"), sent
+
+    for name, needle in (("board", "only runs in the v1 loop"), ("huge", "limit"),
+                         ("nope", "don't have a skill")):
+        calls = len(seen)
+        with scripted(fake):
+            events = list(provider.send(handle, UserMessage(text="x", skill=name)))
+        assert len(seen) == calls, f"{name}: a refused skill must not reach the model"
+        error = one(events, EventKind.ERROR)
+        assert error.data["fatal"] is False and needle in error.data["message"], error.data
+        assert one(events, EventKind.TURN_FINISHED).data["stop"] == "error"
+    provider.close(handle)
+    print("ok  skill: the body is injected with the request; jarvis-only, oversized and "
+          "unknown skills are refused before the model")
+
+
 def close_checks() -> None:
     provider = FastPathProvider()
     handle = provider.start(thread("close"), brief(), allow_all)
@@ -768,6 +812,7 @@ def main() -> int:
     exhaustion_checks()
     interrupt_checks()
     error_checks()
+    skill_checks()
     close_checks()
     resume_checks()
     approver_checks()

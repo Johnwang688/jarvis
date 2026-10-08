@@ -204,7 +204,15 @@ class CodexProvider:
                 yield self._event(h, EventKind.ERROR, message="Codex model cooling", fatal=False, **cooldown)
                 yield self._event(h, EventKind.TURN_FINISHED, stop="error")
                 return
-            inputs = [{"type": "text", "text": message.text, "text_elements": []}]
+            text = message.text
+            if message.skill:
+                # Codex has the skill installed (`jarvis skills link`), so it is
+                # told to use it — the same directive Claude gets. A native
+                # skill input item on turn/start is the S1 spike still pending.
+                from ..commands import skill_directive
+
+                text = skill_directive(message.skill, message.text)
+            inputs = [{"type": "text", "text": text, "text_elements": []}]
             for img in message.images:
                 inputs.append({"type": "image", "url": f"data:{img['mime']};base64,{img['b64']}"})
             s.accounting.complete = False

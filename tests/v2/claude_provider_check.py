@@ -921,6 +921,26 @@ def isolation_checks() -> None:
         provider.close(two)
 
 
+def skill_checks() -> None:
+    print("\n-- a named skill (S1) reaches Claude as a directive to use it")
+    provider = claude.ClaudeProvider()
+    with fake():
+        handle = provider.start(thread("sk"), brief(), lambda n, a, b: Decision.ALLOW)
+        FakeClient.instances[0].script = [result_message()]
+        list(provider.send(handle, UserMessage(text="keep it short", skill="morning-briefing")))
+        eq(FakeClient.instances[0].queries[-1],
+           'Use the "morning-briefing" skill for this request.\n\nkeep it short',
+           "the prompt is the directive, then the request")
+        FakeClient.instances[0].script = [result_message()]
+        list(provider.send(handle, UserMessage(text="", skill="morning-briefing")))
+        eq(FakeClient.instances[0].queries[-1],
+           'Use the "morning-briefing" skill for this request.', "no request: the directive alone")
+        FakeClient.instances[0].script = [result_message()]
+        list(provider.send(handle, UserMessage(text="plain")))
+        eq(FakeClient.instances[0].queries[-1], "plain", "no skill: the text, untouched")
+        provider.close(handle)
+
+
 # --- the credential rule ----------------------------------------------------
 
 
@@ -1136,6 +1156,7 @@ def main() -> int:
     error_checks()
     usage_checks()
     isolation_checks()
+    skill_checks()
     secrets_checks()
     set_model_checks()
     if _failures:
