@@ -261,6 +261,8 @@ export interface ModelRow {
   prompt_usd?: number | null;
   completion_usd?: number | null;
   intelligence?: number | null;
+  /** Whether the model accepts images (catalogue and roster rows). */
+  vision?: boolean;
 }
 
 export interface Attachment {

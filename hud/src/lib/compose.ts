@@ -12,7 +12,7 @@
 // the conversation, and `lastProject` picks the project a new thread starts
 // in. Both are pure, which is where the free tests grade them.
 
-import type { Project, Task, Thread } from "../types";
+import type { Project, ProviderName, Task, Thread } from "../types";
 
 /** A new thread being composed. `openedId` is set once the server has the
  * thread but its first message has not gone through, so a retry reuses it
@@ -20,6 +20,11 @@ import type { Project, Task, Thread } from "../types";
 export interface Compose {
   projectId: string | null;
   openedId?: string | null;
+  /** The provider, model and effort chosen while composing (lib/threadmodel).
+   * Absent means the defaults; a new thread never inherits the last one's. */
+  provider?: ProviderName;
+  model?: string | null;
+  effort?: string | null;
 }
 
 export const LAST_PROJECT_KEY = "jarvis.hud.lastProject";

@@ -23,6 +23,8 @@ import { WakeGate, compileWake, matchesWake, WAKE_PATTERNS } from "./lib/wake";
 import type { Attachment, AvatarDesc, ModelRow, Schedule, VoiceEntry } from "./types";
 import { moveThreadTo } from "./lib/threads";
 import { lastProject, loadLastProject, saveLastProject } from "./lib/compose";
+import { composeChoice, threadBody } from "./lib/threadmodel";
+import { useThreadModel } from "./components/ThreadModelControls";
 import { ProjectDialog } from "./components/Pickers";
 import { ArchiveConfirm, ArchiveView } from "./components/Archive";
 import { afterProjectGone, afterThreadGone, forgetLastProject, projectNamesTaken } from "./lib/projects";
@@ -66,6 +68,10 @@ export default function App() {
   // one, because the window already holds it: the first message, drawn
   // optimistically, and a reply that may already be streaming.
   const skipReload = useRef<string | null>(null);
+  // provider ▾ · model ▾ · effort ▾ in the input bar (decisions 2026-10-06, A).
+  const threadModel = useThreadModel(state, dispatch, () => void loadModels());
+  const reloadThreadModels = useRef(threadModel.reload);
+  reloadThreadModels.current = threadModel.reload;
 
   const patch = useCallback((p: Parameters<typeof dispatch>[0] extends any ? any : never) => {
     dispatch({ type: "patch", patch: p });
@@ -145,10 +151,16 @@ export default function App() {
           threadId = compose?.openedId || null;
           if (!threadId) {
             dispatch({ type: "patch", patch: { status: "OPENING THREAD" } });
-            const t = await api.openThread({ project_id: projectId, role: "chat" });
+            // The provider, model and effort chosen while composing ride the
+            // first message; a default sends no model (decisions A1, A5).
+            const t = await api.openThread({
+              project_id: projectId, role: "chat", ...threadBody(composeChoice(compose)),
+            });
             threadId = t.id;
             // Remembered, so a retry after a failed send reuses this thread.
-            dispatch({ type: "patch", patch: { compose: { projectId, openedId: t.id } } });
+            // The whole compose row is kept, provider, model and effort with
+            // it, so a failed first send retries on the same choice.
+            dispatch({ type: "patch", patch: { compose: { ...compose, projectId, openedId: t.id } } });
           }
           pendingThread.current = threadId;
         }
@@ -280,6 +292,25 @@ export default function App() {
         case "thread_moved":
           void refreshThreads();
           break;
+        case "thread_updated": {
+          // Two producers: a model/effort change sends the whole record
+          // (`changed: ["model","effort"]`), patched in place so a click's
+          // stale closure cannot undo it; a rename sends only `{thread_id,
+          // title, changed}`, and the list is read again. The envelope keys
+          // are never spread onto the thread.
+          const threadId = tid || data.thread_id;
+          if (threadId && data.id === threadId) {
+            const { thread_id: _t, changed: _c, effective_model: _m, effective_effort: _e, ...record } = data;
+            dispatch({ type: "thread_patch", id: threadId, patch: record });
+          } else {
+            void refreshThreads();
+          }
+          break;
+        }
+        case "model_set":
+          // Every model and effort change is a line in the chat (A7).
+          if (tid && tid === shown) dispatch({ type: "message", message: { role: "system", text: data.text || "" } });
+          break;
         case "usage_updated":
           api.usage().then((usage) => dispatch({ type: "patch", patch: { usage } })).catch(() => {});
           break;
@@ -291,6 +322,8 @@ export default function App() {
           break;
         case "model":
           void loadModels();
+          // A default thread's label names the global choice; re-read it.
+          void reloadThreadModels.current();
           break;
         case "voice":
           void loadVoices();
@@ -314,7 +347,6 @@ export default function App() {
           projectGone(e.project_id || data.project_id, kind === "project_archived" ? "archived" : "deleted");
           void refreshArchivedNames();
           break;
-        case "thread_updated":
         case "thread_restored":
           void refreshThreads();
           break;
@@ -945,6 +977,8 @@ export default function App() {
                     state.compose && patch({ compose: { ...state.compose, projectId } }),
                   onNewProject: () => patch({ picker: "newProject" }),
                 }}
+                modelChip={threadModel.chip}
+                imageNote={threadModel.imageNote}
                 onModeChange={setMode}
                 onSend={(text, files) => void send(text, files)}
                 onTranscriptTaken={() => patch({ pendingTranscript: "" })}
@@ -1013,12 +1047,16 @@ export default function App() {
 
       <ApprovalVeil requests={state.approvals} onDecide={decide} />
 
+      {threadModel.picker}
       {state.picker === "model" ? (
         <ModelPicker
           models={models}
           selected={selectedModel}
-          onPick={(id, effort) => {
-            api.setModel(id, effort).then(loadModels).catch(() => {});
+          onPick={(id) => {
+            api.setModel(id).then(loadModels).catch(() => {});
+          }}
+          onEffort={(id, effort) => {
+            api.setModelEffort(id, effort).then(loadModels).catch(() => {});
           }}
           onClose={() => patch({ picker: null })}
         />

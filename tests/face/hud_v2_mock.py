@@ -224,6 +224,8 @@ def _world() -> dict:
         },
         "models": {
             "selected": "openai/gpt-5.6-luna",
+            "default": "openai/gpt-5.6-luna",
+            "default_effort": "max",
             "models": [
                 {"id": "openai/gpt-5.6-luna", "name": "GPT-5.6 Luna",
                  "efforts": ["low", "medium", "high", "max"], "effort": None},
@@ -233,6 +235,18 @@ def _world() -> dict:
                  "efforts": [], "effort": None},
             ],
         },
+        # `GET /models/catalog`: every eligible OpenRouter model (tool calling
+        # is the refusal, so nothing here lacks it).
+        "catalog": [
+            {"id": "openai/gpt-5.6-luna", "name": "GPT-5.6 Luna", "vision": True,
+             "efforts": ["low", "medium", "high", "max"], "prompt_usd": 0.2, "completion_usd": 0.8},
+            {"id": "moonshotai/kimi-k3", "name": "Kimi K3", "vision": True,
+             "efforts": ["low", "medium", "high"], "prompt_usd": 0.6, "completion_usd": 2.5},
+            {"id": "deepseek/deepseek-v4-flash-0731", "name": "DeepSeek V4 Flash", "vision": False,
+             "efforts": ["low", "medium", "high"], "prompt_usd": 0.1, "completion_usd": 0.3},
+            {"id": "evil/model", "name": "<img src=x onerror=\"window.__pwned=1\">Bad", "vision": True,
+             "efforts": [], "prompt_usd": 0, "completion_usd": 0},
+        ],
         # `GET /fs/dirs` — names only, and only under $HOME or /mnt/<drive>/.
         # Anything else is 403, which is the picker's whole boundary: the
         # window does not re-implement the rule, it shows the refusal.
@@ -249,6 +263,106 @@ def _world() -> dict:
         "stt_text": "what is the weather",
     }
 
+
+def _models(w) -> dict:
+    """`models.describe()`'s shape: the roster, the selection, and what that
+    resolves to (`current`) beside the configured `default`."""
+    m = w["models"]
+    return {**m, "current": m.get("selected") or m["default"]}
+
+
+# --- a chat thread's model (decisions 2026-10-06, A) -----------------------
+# The same rules `jarvis/v2/thread_model.py` applies, small enough to read.
+
+CLI_MODELS = {
+    "claude": [{"id": "claude-opus-5-5", "name": "Claude Opus 5.5", "vision": True,
+                "efforts": ["low", "medium", "high", "xhigh", "max"]},
+               {"id": "claude-haiku-4-5", "name": "Claude Haiku 4.5", "vision": True, "efforts": []}],
+    "codex": [{"id": "gpt-6-astra", "name": "GPT-6 Astra", "vision": True,
+               "efforts": ["low", "medium", "high", "xhigh"]},
+              {"id": "gpt-5.6-sol", "name": "GPT-5.6 Sol", "vision": True,
+               "efforts": ["low", "medium", "high", "xhigh"]}],
+}
+_LADDER = ["max", "xhigh", "high", "medium", "low", "minimal", "none"]
+
+
+def _rows(w, provider):
+    if provider != "fast":
+        return CLI_MODELS[provider]
+    out = []
+    for row in w["models"]["models"]:
+        cat = next((c for c in w["catalog"] if c["id"] == row["id"]), {})
+        out.append({**cat, **row, "vision": cat.get("vision", row.get("vision", True))})
+    return out
+
+
+def _default_effort(w, provider, model):
+    row = next((r for r in _rows(w, provider) if r["id"] == model), None)
+    wanted = (row or {}).get("effort") or "high"
+    if row is None:
+        return wanted
+    ladder = row.get("efforts") or []
+    if not ladder:
+        return None
+    if wanted in ladder:
+        return wanted
+    i = _LADDER.index(wanted)
+    for level in _LADDER[i + 1:] + list(reversed(_LADDER[:i])):
+        if level in ladder:
+            return level
+    return ladder[0]
+
+
+def _thread_models(w):
+    defaults = {"fast": _models(w)["current"], "claude": "claude-opus-5-5", "codex": "gpt-6-astra"}
+    labels = {"fast": "OpenRouter", "claude": "Claude", "codex": "Codex"}
+    return {"effort_default": "high", "providers": {
+        p: {"label": labels[p], "default": defaults[p],
+            "default_effort": "xhigh" if p == "codex" else _default_effort(w, p, defaults[p]),
+            "models": _rows(w, p), "note": "",
+            # `thread_model.PROFILES` / `TAKES_ALWAYS_ASK`, as the daemon sends them.
+            "profiles": list(_PROFILES[p]), "always_ask": p != "codex"} for p in labels}}
+
+
+_PROFILES = {"fast": ("auto", "ask"), "claude": ("auto", "ask"), "codex": ("auto",)}
+
+
+def _provider_refusal(w, provider, project_id):
+    """`thread_model.refusal`: why the project cannot run this provider."""
+    project = next((p for p in w["projects"] if p["id"] == project_id), None)
+    if project is None:
+        return None
+    if project["profile"] not in _PROFILES[provider]:
+        return f"{provider} cannot run a project on the {project['profile']} profile"
+    if project.get("always_ask") and provider == "codex":
+        return "Codex cannot enforce this project's always-ask commands"
+    return None
+
+
+def _check_choice(w, provider, model, effort, current=None):
+    """None when the choice is fine, else the refusal's words."""
+    if w.get("refuse_choice"):
+        return w["refuse_choice"]
+    ids = [r["id"] for r in _rows(w, provider)]
+    if model and model != current and model not in ids:
+        return (f"{model} is not on your model roster; pin it to the roster first" if provider == "fast"
+                else f"{model} is not a {provider} model Jarvis knows")
+    target = model or _thread_models(w)["providers"][provider]["default"]
+    row = next((r for r in _rows(w, provider) if r["id"] == target), None)
+    if effort and row is not None and effort not in (row.get("efforts") or []):
+        return f"{target} does not offer {effort!r}"
+    return None
+
+
+# POST control -> (allowed keys, required keys), exactly as
+# `jarvis/v2/hud_api.py` `pickers` reads them.
+PICKER_KEYS = {
+    "/avatar": (("slug",), ("slug",)),
+    "/voice": (("voice",), ("voice",)),
+    "/model": (("model",), ("model",)),
+    "/mute": (("muted",), ("muted",)),
+    "/models": (("add", "remove", "model", "effort"), ()),
+}
 
 _DAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
 
@@ -425,9 +539,13 @@ class MockDaemon:
                 if path == "/voices":
                     return self._json(w["voices"])
                 if path == "/models":
-                    return self._json(w["models"])
+                    return self._json(_models(w))
+                if path == "/thread-models":
+                    return self._json(_thread_models(w))
                 if path == "/models/catalog":
-                    return self._json({"models": w["models"]["models"]})
+                    return self._json({"models": w["catalog"],
+                                       "roster": [m["id"] for m in w["models"]["models"]],
+                                       "stale": ""})
                 if path == "/avatar.svg":
                     body = HOSTILE_SVG.encode()
                     self.send_response(200)
@@ -520,14 +638,28 @@ class MockDaemon:
                     w["projects"].append(rec)
                     return self._json(rec, 201)
                 if path == "/threads":
+                    # The real daemon's body: provider and brief optional for a
+                    # chat thread, the model checked before anything exists.
+                    unknown = set(body) - {"project_id", "role", "provider", "brief"}
+                    if unknown:
+                        return self._err(400, "unknown fields: " + ", ".join(sorted(unknown)))
+                    provider = body.get("provider", "fast")
+                    if provider not in ("fast", "claude", "codex"):
+                        return self._err(400, f"{provider!r} is not a valid ProviderName")
+                    brief = body.get("brief") or {}
+                    refusal = (_provider_refusal(w, provider, body.get("project_id", "p1"))
+                               or _check_choice(w, provider, brief.get("model"), brief.get("effort")))
+                    if refusal:
+                        return self._err(400, refusal)
                     rec = {
                         "id": f"t{len(w['threads']) + 1}",
                         "project_id": body.get("project_id", "p1"), "role": "chat",
-                        "provider": "fast", "provider_session_id": None, "task_id": None,
-                        "title": body.get("title", "new thread"),
+                        "provider": provider, "provider_session_id": None, "task_id": None,
+                        "title": "new thread",
                         "created": "2026-09-15T00:00:00+00:00",
                         "updated": "2026-09-15T00:00:00+00:00",
-                        "turns": 0, "cost_usd": 0.0, "tokens": 0, "model": None, "effort": None,
+                        "turns": 0, "cost_usd": 0.0, "tokens": 0,
+                        "model": brief.get("model"), "effort": brief.get("effort"),
                         # The folder is fixed at open, from the project's root.
                         "cwd": next((p["root"] for p in w["projects"]
                                      if p["id"] == body.get("project_id", "p1")), None),
@@ -556,6 +688,9 @@ class MockDaemon:
 
                 parts = [p for p in path.split("/") if p]
                 if len(parts) == 3 and parts[0] == "threads" and parts[2] == "send":
+                    if w.get("fail_send"):
+                        w["fail_send"] -= 1
+                        return self._err(409, "thread session is opening or closing")
                     # The daemon logs the user line before it answers 202, so a
                     # transcript read right after a send already has it.
                     w["transcripts"].setdefault(parts[1], []).append(
@@ -571,26 +706,72 @@ class MockDaemon:
                     return self._json({"ok": True})
                 if len(parts) == 3 and parts[0] == "schedules" and parts[2] == "run-now":
                     return self._json({"ok": True})
-                if path in ("/avatar", "/voice", "/model", "/mute"):
+                if path in PICKER_KEYS:
+                    # The real daemon's keys, enforced the way it enforces
+                    # them: an unknown key is a 400 naming it. The mock used
+                    # to accept {id}/{name}/{mute}, which is how the suite
+                    # passed while every click reset the setting (A6).
+                    allowed, required = PICKER_KEYS[path]
+                    unknown = sorted(set(body) - set(allowed))
+                    missing = sorted(set(required) - set(body))
+                    if unknown:
+                        return self._err(400, "unknown fields: " + ", ".join(unknown))
+                    if missing:
+                        return self._err(400, "missing fields: " + ", ".join(missing))
                     if path == "/avatar":
                         w["avatars"]["active"] = body.get("slug", "")
                         desc = next((a for a in w["avatars"]["avatars"]
                                      if a["slug"] == body.get("slug")), {})
                         return self._json(desc)
                     if path == "/voice":
-                        w["voices"]["override"] = body.get("name", "")
-                    if path == "/model" and body.get("id"):
-                        w["models"]["selected"] = body["id"]
-                    return self._json({"ok": True})
+                        w["voices"]["override"] = body["voice"]
+                        return self._json({"voice": body["voice"]})
+                    if path == "/mute":
+                        if not isinstance(body["muted"], bool):
+                            return self._err(400, "muted must be a boolean")
+                        w["muted"] = body["muted"]
+                        return self._json({"ok": True, "muted": body["muted"]})
+                    if path == "/model":
+                        ids = [m["id"] for m in w["models"]["models"]]
+                        if body["model"] and body["model"] not in ids:
+                            return self._err(404, "not on the roster")
+                        w["models"]["selected"] = body["model"]
+                        return self._json(_models(w))
+                    given = [k for k in ("add", "remove", "model") if body.get(k)]
+                    if len(given) != 1:
+                        return self._err(400, "expected exactly one of add, remove, or model with effort")
+                    rows = w["models"]["models"]
+                    if body.get("add"):
+                        if not any(m["id"] == body["add"] for m in rows):
+                            found = next((m for m in w["catalog"] if m["id"] == body["add"]), None)
+                            if found is None:
+                                return self._err(400, "not an OpenRouter model that supports tool calling")
+                            rows.append(dict(found, effort=None))
+                    elif body.get("remove"):
+                        w["models"]["models"] = [m for m in rows if m["id"] != body["remove"]]
+                    else:
+                        row = next((m for m in rows if m["id"] == body["model"]), None)
+                        if row is None:
+                            return self._err(404, "not on the roster")
+                        row["effort"] = body.get("effort") or None
+                    return self._json(_models(w))
                 return self._err(404, "no such route")
 
             def do_PATCH(self):
                 body = self._body()
                 path = urlparse(self.path).path
                 self._record("PATCH", path, body)
+                parts = [p for p in path.split("/") if p]
+                if len(parts) == 2 and parts[0] == "threads" and isinstance(body, dict):
+                    # The daemon's rule: rename, move and model change are
+                    # three mutually exclusive request shapes.
+                    kinds = [k for k, keys in (("rename", {"title"}), ("move", {"project_id"}),
+                                               ("model", {"model", "effort"})) if body.keys() & keys]
+                    if len(kinds) != 1:
+                        return self._err(400, "rename, move and model change are separate requests" if kinds
+                                         else "missing fields: title, project_id, or model/effort")
                 if mock_projects.handle(self, mock, "PATCH", path, body):
                     return
-                parts = [p for p in path.split("/") if p]
                 w = mock.world
                 if len(parts) == 2 and parts[0] == "projects":
                     for p in w["projects"]:
@@ -598,6 +779,38 @@ class MockDaemon:
                             p.update({k: v for k, v in body.items() if k in p})
                             return self._json(p)
                     return self._err(404, "no such project")
+                if len(parts) == 2 and parts[0] == "threads" and ("model" in body or "effort" in body):
+                    # A chat thread's model and effort (decisions A1-A7), with
+                    # the real daemon's refusals and its two broadcasts.
+                    t = next((t for t in w["threads"] if t["id"] == parts[1]), None)
+                    if t is None:
+                        return self._err(404, "no such thread")
+                    if set(body) - {"model", "effort"}:
+                        return self._err(400, "unknown fields: " + ", ".join(sorted(set(body) - {"model", "effort"})))
+                    if t.get("task_id") or t.get("role") != "chat":
+                        return self._err(409, "a task's threads run the model routing gave them")
+                    home = next((p for p in w["projects"] if p["id"] == t["project_id"]), {})
+                    if t.get("archived") or home.get("archived"):
+                        return self._err(409, "restore the thread before changing its model")
+                    model = body["model"] if "model" in body else t.get("model")
+                    effort = body.get("effort") if "model" in body else body["effort"]
+                    refusal = _check_choice(w, t["provider"], model, effort, current=t.get("model"))
+                    if refusal:
+                        return self._err(400, refusal)
+                    if model is None and effort:
+                        model = _thread_models(w)["providers"][t["provider"]]["default"]
+                    t["model"], t["effort"] = model, effort
+                    shown = model or _thread_models(w)["providers"][t["provider"]]["default"]
+                    shown_effort = effort or _default_effort(w, t["provider"], shown)
+                    why = "default, from the next message" if model is None else "from the next message"
+                    text = f"model → {shown}" + (f" · {shown_effort}" if shown_effort else "") + f" ({why})"
+                    w["transcripts"].setdefault(t["id"], []).append(
+                        {"role": "system", "text": text, "at": "2026-09-15T00:00:03+00:00"})
+                    mock.emit("model_set", {"text": text, "model": model, "effort": effort},
+                              thread_id=t["id"], project_id=t["project_id"])
+                    mock.emit("thread_updated", dict(t, thread_id=t["id"], changed=["model", "effort"]),
+                              thread_id=t["id"], project_id=t["project_id"])
+                    return self._json(t)
                 if len(parts) == 2 and parts[0] == "threads":
                     for t in w["threads"]:
                         if t["id"] == parts[1]:

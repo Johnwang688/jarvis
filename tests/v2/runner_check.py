@@ -865,7 +865,10 @@ class DaemonRoutes(Fixture):
         task = self.new_task()
         status, body = self.request("POST", f"/tasks/{task.id}/start", {})
         self.assertEqual(status, 200)
-        self.assertEqual(body["state"], "clarifying")
+        # The reply can be a snapshot taken before the runner's thread moved
+        # the task out of intake; wait for the state rather than racing it.
+        self.assertIn(body["state"], ("intake", "clarifying"))
+        self.wait_state(task.id, S.CLARIFYING, timeout=5)
         eventually(lambda: self.task(task.id).status.open_question, 5, "the question")
         self.assertEqual(self.request("POST", f"/tasks/{task.id}/steer",
                                       {"text": "keep it small"})[:1], (200,))

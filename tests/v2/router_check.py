@@ -326,17 +326,32 @@ class Controls(Fixture):
         view = self.router.view()
         self.assertEqual(len(view["decisions"]), 10)
         self.assertEqual(set(view["states"]), {"claude", "codex", "fast"})
-        self.router.configure({"action": "models", "role": "reviewer", "provider": "claude", "model": "anthropic/other/xhigh"})
-        self.assertEqual(R.model_settings("reviewer", "claude"), ("anthropic/other", "xhigh"))
-        self.assertEqual(json.loads(config.ROUTING_PATH.read_text())["models"]["reviewer"]["claude"], "anthropic/other/xhigh")
+        self.router.configure({"action": "models", "role": "reviewer", "provider": "claude", "model": "claude-sonnet-5-5/xhigh"})
+        self.assertEqual(R.model_settings("reviewer", "claude"), ("claude-sonnet-5-5", "xhigh"))
+        self.assertEqual(json.loads(config.ROUTING_PATH.read_text())["models"]["reviewer"]["claude"], "claude-sonnet-5-5/xhigh")
         self.router.configure({"action": "set", "role": "reviewer", "chain": "codex", "project": self.project.id})
         self.assertEqual(self.stores.projects.get(self.project.id).routing.chains["reviewer"], ["codex"])
         for body in [{}, {"action": "set", "role": "chat", "chain": "codex"},
                      {"action": "set", "role": "reviewer", "chain": "fast"},
                      {"action": "set", "role": "reviewer", "chain": "codex,codex"},
-                     {"action": "models", "role": "reviewer", "provider": "codex", "model": "bad"}]:
+                     {"action": "models", "role": "reviewer", "provider": "codex", "model": "bad"},
+                     # CLI_MODELS is the one list: the chip offers nothing else,
+                     # so the routing table may not name anything else either.
+                     {"action": "models", "role": "reviewer", "provider": "claude", "model": "anthropic/other/xhigh"},
+                     {"action": "models", "role": "reviewer", "provider": "codex", "model": "claude-opus-5-5/high"},
+                     {"action": "models", "role": "reviewer", "provider": "codex", "model": "gpt-6-astra/max"},
+                     {"action": "models", "role": "reviewer", "provider": "claude", "model": "claude-haiku-4-5/high"}]:
             with self.assertRaises(ValueError):
                 self.router.configure(body)
+        self.assertEqual(json.loads(config.ROUTING_PATH.read_text())["models"]["reviewer"]["claude"],
+                         "claude-sonnet-5-5/xhigh", "a refused model writes nothing")
+        for good in ("roster/default", "claude-haiku-4-5/default", "claude-opus-5-5/max"):
+            self.router.configure({"action": "models", "role": "reviewer", "provider": "claude", "model": good})
+        # A hand-edited routing.json is held to the same list.
+        config.ROUTING_PATH.write_text(json.dumps({"models": {"reviewer": {"codex": "gpt-9-imaginary/high"}}}))
+        with self.assertRaises(ValueError) as refused:
+            R.load_routing()
+        self.assertIn("gpt-9-imaginary is not a codex model", str(refused.exception))
         self.assertFalse(list(Path(self.tmp.name).glob("*.tmp")))
 
     def test_http_happy_and_400(self):
@@ -354,7 +369,8 @@ class Controls(Fixture):
             self.assertEqual(self.request("GET", path)[0], 400)
         for body in ({}, [], {"action": "set", "role": "reviewer", "chain": []}, {"unknown": 1},
                      {"action": "set", "role": "reviewer", "chain": "codex", "project": ""},
-                     {"action": "models", "role": "reviewer", "provider": "codex", "model": "bad"}):
+                     {"action": "models", "role": "reviewer", "provider": "codex", "model": "bad"},
+                     {"action": "models", "role": "reviewer", "provider": "codex", "model": "unknown/high"}):
             self.assertEqual(self.request("POST", "/route", body)[0], 400)
 
     def test_cli_dispatch_happy_and_errors(self):

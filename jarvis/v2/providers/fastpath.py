@@ -235,6 +235,12 @@ class _Native:
     cost_usd: float = 0.0
     turns: int = 0
     closed: bool = False
+    # The model and effort the *next* turn runs on. `model=None` follows the
+    # global picker, resolved at the start of every turn (a v2 default thread
+    # must not stay on the model it was opened with). `effort=None` keeps v1's
+    # per-model resolution. Written by `set_model`, read only by `_run`.
+    model: str | None = None
+    effort: str | None = None
 
 
 # --- the provider -----------------------------------------------------------
@@ -300,6 +306,8 @@ class FastPathProvider:
             ),
             session=session,
             brief=brief,
+            model=brief.model,
+            effort=brief.effort,
         )
         native.agent.should_stop = native.stop.is_set
         return SessionHandle(
@@ -380,6 +388,19 @@ class FastPathProvider:
         native.agent.session = None
         h.native = None
 
+    def set_model(self, h: SessionHandle, model: str | None, effort: str | None) -> None:
+        """Change the model and effort from the next turn on (decisions A1).
+
+        Stored only: a turn in flight keeps every one of its calls on the
+        model it started with, and `_run` applies the new pair before the
+        next turn's first call. Costs nothing — the transcript is the
+        conversation, and any model can read it.
+        """
+        native = h.native
+        if native is None or native.closed:
+            raise ValueError("session closed")
+        native.model, native.effort = model, effort
+
     def interrupt(self, h: SessionHandle) -> None:
         """Cancel the turn in flight. v1 lands it at the next step boundary."""
         if h.native is not None:
@@ -449,7 +470,11 @@ class FastPathProvider:
         # where `task_propose` will run.
         proposal: dict[str, Any] = {}
 
-        state = _TurnState(thread_id, events)
+        # Which model answers is decided here, once per turn, never mid-turn:
+        # a default handle follows the global picker; a pinned one stays put.
+        native.agent.model = native.model or models.tier("orchestrator")
+        native.agent.effort = native.effort
+        state = _TurnState(thread_id, events, native.agent.model, native.effort)
         native.agent.on_event = state.on_event
 
         result: dict[str, Any] = {}
@@ -536,9 +561,12 @@ class _TurnState:
     back by order.
     """
 
-    def __init__(self, thread_id: str, events: queue.Queue):
+    def __init__(self, thread_id: str, events: queue.Queue, model: str | None = None,
+                 effort: str | None = None):
         self.thread_id = thread_id
         self.events = events
+        self.model = model
+        self.effort = effort
         self.calls = 0
         # (call_id, name) for every tool_start not yet answered. v1 fires all
         # of a batch's starts, then all of its ends, in the same order — so
@@ -612,7 +640,8 @@ class _TurnState:
                 "output": 0,
                 "cached": 0,
                 "cost_usd": delta,
-                "provider_reported": {"turn_cost_usd": total},
+                "provider_reported": {"turn_cost_usd": total, "model": self.model,
+                                      "effort": self.effort},
             },
         )
 

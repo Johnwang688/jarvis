@@ -80,7 +80,8 @@ export type Action =
   | { type: "op_done"; call_id: string; ok: boolean; summary: string }
   | { type: "approval_add"; request: ApprovalRequest }
   | { type: "approval_drop"; req_id: string }
-  | { type: "task_upsert"; task: Task };
+  | { type: "task_upsert"; task: Task }
+  | { type: "thread_patch"; id: string; patch: Partial<Thread> };
 
 export function reduce(s: State, a: Action): State {
   switch (a.type) {
@@ -138,6 +139,13 @@ export function reduce(s: State, a: Action): State {
       const tasks = i < 0 ? [...s.tasks, a.task] : s.tasks.map((t) => (t.id === a.task.id ? a.task : t));
       return { ...s, tasks };
     }
+
+    case "thread_patch":
+      // One thread's fields, merged into the list as it is *now*. A caller
+      // that wrote back a whole `threads` array it captured earlier (a click
+      // handler's closure) would undo every update that landed in between.
+      if (!s.threads.some((t) => t.id === a.id)) return s;
+      return { ...s, threads: s.threads.map((t) => (t.id === a.id ? { ...t, ...a.patch, id: t.id } : t)) };
   }
 }
 

@@ -48,6 +48,10 @@ export function InputBar(props: {
   disabled?: boolean;
   placeholder?: string;
   projectChip?: ProjectChip | null;
+  /** provider ▾ · model ▾ · effort ▾ (components/ModelChip), beside the project. */
+  modelChip?: React.ReactNode;
+  /** Shown while an image is staged, when the model cannot see one (A5). */
+  imageNote?: string | null;
   onModeChange: (m: DictationMode) => void;
   onSend: (text: string, attachments: Attachment[]) => void;
   onTranscriptTaken: () => void;
@@ -85,6 +89,9 @@ export function InputBar(props: {
     setNotes(msgs);
   };
 
+  const hasImage = files.some((f) => f.mime.startsWith("image/"));
+  const imageNote = hasImage ? props.imageNote : null;
+
   const send = () => {
     const body = text.trim();
     if (!body && files.length === 0) return;
@@ -114,6 +121,9 @@ export function InputBar(props: {
           {notes.map((n, i) => (
             <span className="chip muted" key={"n" + i}>{n}</span>
           ))}
+          {imageNote ? (
+            <span className="chip warn" data-testid="image-note">{imageNote}</span>
+          ) : null}
         </div>
       ) : null}
       <div id="inputrow">
@@ -158,6 +168,7 @@ export function InputBar(props: {
       </div>
       <div className="row">
         {props.projectChip ? <Chip chip={props.projectChip} /> : null}
+        {props.modelChip ?? null}
         <div id="dictation" data-testid="dictation">
           {DICTATION_MODES.map((m) => (
             <button

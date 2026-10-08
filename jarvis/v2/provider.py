@@ -18,6 +18,14 @@ class BriefRefused(Exception):
     """The provider cannot run this brief as stated (tool it cannot load, profile it lacks)."""
 
 
+class SessionLost(BriefRefused):
+    """A model switch failed and the old session could not be restored either.
+
+    The provider has closed the session; nothing is left to send on. The
+    owner of the handle should drop it and resume the thread afresh.
+    """
+
+
 @dataclass
 class Brief:
     role: Role

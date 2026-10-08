@@ -287,6 +287,31 @@ class Checks(unittest.TestCase):
         self.assertEqual(events[-1].kind, K.TURN_FINISHED)
         self.assertEqual(self.brain.calls("turn/start")[0]["params"]["input"][1], {"type": "image", "url": "data:image/png;base64,YWJj"})
 
+    def test_set_model_rides_the_next_turn_start(self):
+        """Decisions A1: turn/start's model/effort override "this turn and
+        subsequent turns" (TurnStartParams, 0.153.4), so a change is sent
+        with the next turn only, and the thread keeps it after that."""
+        h = self.start()
+        self.send(h)
+        self.assertNotIn("model", self.brain.calls("turn/start")[0]["params"])
+        self.provider.set_model(h, "gpt-5.6-sol", "xhigh")
+        self.assertEqual(len(self.brain.calls("turn/start")), 1, "set_model sends nothing by itself")
+        self.assertEqual((h.native.brief.model, h.native.brief.effort), ("gpt-5.6-sol", "xhigh"))
+        self.send(h)
+        second = self.brain.calls("turn/start")[1]["params"]
+        self.assertEqual((second["model"], second["effort"]), ("gpt-5.6-sol", "xhigh"))
+        self.send(h)
+        third = self.brain.calls("turn/start")[2]["params"]
+        self.assertNotIn("model", third)
+        self.assertNotIn("effort", third)
+        # A model/rerouted notification is judged against the model asked for.
+        self.assertEqual(h.native.brief.model, "gpt-5.6-sol")
+        with self.assertRaises(ValueError):
+            self.provider.set_model(h, None, "high")
+        self.provider.close(h)
+        with self.assertRaises(ValueError):
+            self.provider.set_model(h, "gpt-5.5", "high")
+
     def test_refused_briefs_and_api_account(self):
         for change in ({"profile": PermissionProfile.STRICT}, {"profile": PermissionProfile.ASK}, {"allowed_tools": []}, {"always_ask": ["git push"]}):
             with self.assertRaises(BriefRefused):

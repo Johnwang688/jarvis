@@ -598,6 +598,15 @@ def pickers(handler, daemon, parts, query):
             fail(400, "audio is empty")
         return 200, {"text": voice.stt(data, mime=mime)}
     body = handler._body()
+    # The keys each control reads, and nothing else. A body carrying some
+    # other key used to be read as "the key is absent", which for /model
+    # meant "back to the config default" and for /voice "clear the override"
+    # — the HUD sent {id}, {name} and {mute} for weeks and every click quietly
+    # undid itself (decisions A6). An unknown key is now a 400 that names it.
+    keys = {"mute": ("muted",), "avatar": ("slug",), "voice": ("voice",), "model": ("model",),
+            "models": ("add", "remove", "model", "effort")}.get(name)
+    if keys is not None:
+        _object(body, keys, () if name == "models" else keys)
     if name == "say":
         text = str(body.get("text", "")).strip()
         if not text:
@@ -605,7 +614,9 @@ def pickers(handler, daemon, parts, query):
         audio = voice.tts(text[:2000], voice=body.get("voice"), instructions=body.get("instructions"))
         return binary(handler, audio, "audio/wav" if audio.startswith(b"RIFF") else "audio/mpeg")
     if name == "mute":
-        voicectl.set_muted(bool(body.get("muted")))
+        if not isinstance(body["muted"], bool):
+            fail(400, "muted must be a boolean")
+        voicectl.set_muted(body["muted"])
         return 200, {"ok": True, "muted": voicectl.is_muted()}
     if name == "avatar":
         return 200, avatars.set_active(str(body.get("slug", ""))).describe()
@@ -745,13 +756,26 @@ def route(handler, daemon, parts, query):
                 if mode is not None:
                     target.chmod(mode)
                 return 200, {"mtime": target.stat().st_mtime}
+    if parts == ["thread-models"] and method == "GET":
+        # What the input bar's provider/model/effort chips offer (decisions A2).
+        from . import thread_model
+        _object(query, ())
+        return 200, thread_model.describe()
     if len(parts) == 2 and parts[0] == "threads" and method == "PATCH":
         _object(query, ())
-        body = handler._body()
-        if "title" in body:
+        body = _object(handler._body(), ("title", "project_id", "model", "effort"))
+        kinds = [k for k, keys in (("rename", {"title"}), ("move", {"project_id"}),
+                                   ("model", {"model", "effort"})) if body.keys() & keys]
+        if len(kinds) != 1:
+            fail(400, "rename, move and model change are separate requests" if kinds
+                 else "missing fields: title, project_id, or model/effort")
+        if kinds == ["rename"]:
             # A rename is its own request: `{title}` alone (decisions B4).
-            return 200, _projects.rename_thread(daemon, parts[1], _object(body, ("title",), ("title",))["title"])
-        body = _object(body, ("project_id",), ("project_id",))
+            return 200, _projects.rename_thread(daemon, parts[1], body["title"])
+        if kinds == ["model"]:
+            # A chat thread's model and effort, from its next message on.
+            # Never its provider: a session cannot change provider.
+            return 200, daemon.set_thread_model(parts[1], body)
         with daemon._lock:
             daemon._active()
             thread = daemon.require(stores.threads, parts[1])
@@ -787,12 +811,13 @@ def route(handler, daemon, parts, query):
             messages = []
             for row in stores.threads.read_log(thread.id):
                 kind = row.get("kind")
-                if kind not in (None, "text", "user"):
+                if kind not in (None, "text", "user", "model_set"):
                     continue
                 data = row.get("data", row)
                 text = data.get("text")
                 if isinstance(text, str):
-                    role = "assistant" if kind == "text" else "user" if kind == "user" else row.get("role", "assistant")
+                    role = ("assistant" if kind == "text" else "user" if kind == "user"
+                            else "system" if kind == "model_set" else row.get("role", "assistant"))
                     messages.append(dict(role=role, text=text, at=row.get("at", row.get("t"))))
             return 200, {"messages": messages}
     if len(parts) in (3, 4) and parts[0] == "tasks" and method == "GET":

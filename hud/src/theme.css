@@ -583,6 +583,15 @@ details.decisions[open] summary { color: var(--text); margin-bottom: 8px; }
 
 .movenote { padding: 4px 12px; }
 
+/* ---- per-thread model (decisions 2026-10-06, A): provider · model · effort ---- */
+.modelchip { gap: 4px; max-width: 46%; overflow: hidden; }
+.modelchip .err { color: var(--red); white-space: normal; }
+.badge.pin { color: var(--text-2); text-transform: none; max-width: 110px; overflow: hidden;
+             text-overflow: ellipsis; white-space: nowrap; }
+/* Red, not amber: amber means "pending"; an image the model cannot see is a
+   failure the owner should see before sending, not a wait. */
+.chip.warn { color: var(--red); border-color: var(--red-line); background: var(--red-soft); }
+
 /* ---- rename, edit, archive (decisions B) ---- */
 .tree-row .rename { display: inline-flex; align-items: center; gap: 6px; min-width: 0; flex: 1 1 auto; }
 .tree-row .rename input { padding: 1px 5px; font-size: 12px; min-width: 0; width: 100%; }

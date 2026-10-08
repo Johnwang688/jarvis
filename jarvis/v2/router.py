@@ -29,6 +29,42 @@ CLI_PROVIDERS = ("claude", "codex")
 EFFORTS = ("default", "none", "minimal", "low", "medium", "high", "xhigh", "max")
 _CONFIG_LOCK = threading.RLock()
 
+# The models each CLI provider can be asked for by name, with the efforts each
+# one takes and whether it can see an image. One table, read by the
+# capability filter below (vision), by the per-thread model check
+# (`thread_model`) and by the HUD's model chip — so the router, the check and
+# the list cannot disagree about what exists.
+#
+# Claude: Claude Code's own model ids; `--effort` is the SDK's `EffortLevel`
+# (`providers/claude.py` `EFFORT_LEVELS`), and Haiku 4.5 has no effort control.
+# Codex: the models the routing defaults and the vision filter already named;
+# the app-server's ReasoningEffort is "a value advertised by the model", so
+# the ladder here is the one the routing defaults use (high, xhigh) and its
+# neighbours. Both lists are a statement of what Jarvis will ask for, not a
+# live probe; a model missing here is refused by name rather than guessed at —
+# by the chip, and by the routing table too: `load_routing` and `/route`
+# accept a claude/codex model only from this table (`_cli_model`), plus
+# `roster`, the routing table's own spelling of "the configured default".
+_CLAUDE_EFFORTS = ("low", "medium", "high", "xhigh", "max")
+_CODEX_EFFORTS = ("low", "medium", "high", "xhigh")
+CLI_MODELS: dict[str, dict[str, dict]] = {
+    "claude": {
+        "claude-opus-5-5": {"name": "Claude Opus 5.5", "efforts": _CLAUDE_EFFORTS, "vision": True},
+        "claude-sonnet-5-5": {"name": "Claude Sonnet 5.5", "efforts": _CLAUDE_EFFORTS, "vision": True},
+        "claude-fable-5-1": {"name": "Claude Fable 5.1", "efforts": _CLAUDE_EFFORTS, "vision": True},
+        "claude-opus-5": {"name": "Claude Opus 5", "efforts": _CLAUDE_EFFORTS, "vision": True},
+        "claude-sonnet-5": {"name": "Claude Sonnet 5", "efforts": _CLAUDE_EFFORTS, "vision": True},
+        "claude-haiku-4-5": {"name": "Claude Haiku 4.5", "efforts": (), "vision": True},
+    },
+    "codex": {
+        "gpt-6-astra": {"name": "GPT-6 Astra", "efforts": _CODEX_EFFORTS, "vision": True},
+        "gpt-5.6-sol": {"name": "GPT-5.6 Sol", "efforts": _CODEX_EFFORTS, "vision": True},
+        "gpt-5.6-terra": {"name": "GPT-5.6 Terra", "efforts": _CODEX_EFFORTS, "vision": True},
+        "gpt-5.6-luna": {"name": "GPT-5.6 Luna", "efforts": _CODEX_EFFORTS, "vision": True},
+        "gpt-5.5": {"name": "GPT-5.5", "efforts": _CODEX_EFFORTS, "vision": True},
+    },
+}
+
 
 @dataclass(frozen=True)
 class Incoming:
@@ -123,6 +159,41 @@ def _model(value):
     return model, None if effort == "default" else effort
 
 
+def _cli_model(provider, value):
+    """`_model`, for one CLI provider's routing entry: the model must be one
+    `CLI_MODELS` names (or `roster`) and the effort one that model offers."""
+    model, effort = _model(value)
+    if model == "roster":
+        return model, effort
+    known = CLI_MODELS[provider]
+    if model not in known:
+        raise ValueError(f"{model} is not a {provider} model Jarvis knows "
+                         f"(it knows {', '.join(known)})")
+    ladder = known[model]["efforts"]
+    if effort is not None and effort not in ladder:
+        offered = f"it offers {', '.join(ladder)}" if ladder else "it has no effort control"
+        raise ValueError(f"{model} does not offer effort {effort!r} ({offered}; or 'default')")
+    return model, effort
+
+
+def check_project_models(models):
+    """A project's own `routing.models`, held to the rule `load_routing` holds
+    `routing.json` to: a known role, claude/codex only, and each entry a model
+    `CLI_MODELS` names (or `roster`) with an effort that model offers. Raises
+    ValueError naming the entry; called when `/projects` writes a project."""
+    if not isinstance(models, dict):
+        raise ValueError("routing.models must be an object")
+    for role, value in models.items():
+        _role(role)
+        if not isinstance(value, dict) or value.keys() - set(CLI_PROVIDERS):
+            raise ValueError(f"routing.models.{role} must map claude/codex to model/effort")
+        for provider, setting in value.items():
+            try:
+                _cli_model(provider, setting)
+            except ValueError as exc:
+                raise ValueError(f"routing.models.{role}.{provider}: {exc}") from exc
+
+
 def load_routing(path=None):
     path = path or config.ROUTING_PATH
     result = defaults()
@@ -143,8 +214,8 @@ def load_routing(path=None):
             else:
                 if not isinstance(value, dict) or value.keys() - set(CLI_PROVIDERS):
                     raise ValueError("models must map claude/codex to model/effort")
-                for setting in value.values():
-                    _model(setting)
+                for provider, setting in value.items():
+                    _cli_model(provider, setting)
                 result[key][role].update(value)
     fraction = saved.get("no_new_work", result["no_new_work"])
     if isinstance(fraction, bool) or not isinstance(fraction, (int, float)) or not 0 < fraction <= 1:
@@ -270,7 +341,7 @@ def resolve(role, task, project, ledger, providers, *, brief=None, images=None,
                 info = models.cached_info(model)
                 capable = info is None or info.vision
             else:
-                capable = model in {"gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5"}
+                capable = bool(CLI_MODELS["codex"].get(model, {}).get("vision"))
             if not capable:
                 problems.append(f"4 capability filter: model {model} is not known image-capable")
         # Both merged adapters accept explicit MCP configs. Future/fake adapters
@@ -504,7 +575,7 @@ class Router:
         elif action == "models":
             if set(body) != {"action", "role", "provider", "model"} or body.get("provider") not in CLI_PROVIDERS:
                 raise ValueError("models requires role, provider and model/effort")
-            _model(body["model"])
+            _cli_model(body["provider"], body["model"])
         else:
             raise ValueError("action must be set or models")
         with _CONFIG_LOCK:

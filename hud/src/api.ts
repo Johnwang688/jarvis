@@ -11,6 +11,7 @@ import type {
   Project, RouteView, Schedule, SchedulePreview, Task, TaskThread, Thread, Tree, Usage,
   VoiceEntry, Attachment, DirListing,
 } from "./types";
+import type { ThreadModels } from "./lib/threadmodel";
 import type { ArchiveView, DeleteResult, ProjectImpact } from "./types";
 
 export class ApiError extends Error {
@@ -65,8 +66,18 @@ export const api = {
   // --- threads ------------------------------------------------------------
   threads: (projectId?: string) =>
     req<Thread[]>(projectId ? `/threads?project=${encodeURIComponent(projectId)}` : "/threads"),
-  openThread: (body: { project_id: string; role?: string; title?: string }) =>
-    req<Thread>("/threads", json(body)),
+  openThread: (body: {
+    project_id: string; role?: string; title?: string;
+    /** fast | claude | codex; fixed once the thread exists (decisions A1). */
+    provider?: string;
+    brief?: { model?: string; effort?: string };
+  }) => req<Thread>("/threads", json(body)),
+  /** A chat thread's model and effort, from its next message; `model: null`
+   * is the default. Never its provider. */
+  setThreadModel: (id: string, body: { model?: string | null; effort?: string | null }) =>
+    req<Thread>(`/threads/${id}`, patch(body)),
+  /** What the provider / model / effort chips offer, per provider. */
+  threadModels: () => req<ThreadModels>("/thread-models"),
   transcript: (id: string) => req<{ messages: ChatMessage[] }>(`/threads/${id}/transcript`),
   send: (id: string, body: { text: string; images?: string[]; attachments?: Attachment[] }) =>
     req<{ turn_id: string }>(`/threads/${id}/send`, json(body)),
@@ -154,11 +165,18 @@ export const api = {
   avatars: () => req<{ avatars: AvatarDesc[]; active?: string }>("/avatars"),
   setAvatar: (slug: string) => req<AvatarDesc>("/avatar", json({ slug })),
   voices: () => req<{ voices: VoiceEntry[]; override?: string }>("/voices"),
-  setVoice: (name: string) => req<any>("/voice", json({ name })),
+  /** `""` clears the override. The key is `voice` (the daemon refuses any other). */
+  setVoice: (name: string) => req<any>("/voice", json({ voice: name })),
   models: () => req<{ models: ModelRow[]; selected?: string | null }>("/models"),
   catalog: () => req<{ models: ModelRow[]; stale?: string }>("/models/catalog"),
-  setModel: (id: string, effort?: string | null) => req<any>("/model", json({ id, effort })),
-  mute: (on: boolean) => req<any>("/mute", json({ mute: on })),
+  /** Select the fast path's global model; `""` returns to the config default. */
+  setModel: (id: string) => req<any>("/model", json({ model: id })),
+  /** Pin one roster model's effort; `""` follows the global default. Never selects it. */
+  setModelEffort: (model: string, effort: string) =>
+    req<any>("/models", json({ model, effort })),
+  mute: (on: boolean) => req<any>("/mute", json({ muted: on })),
+  /** Pin a catalogue model to the roster (refused unless it can call tools). */
+  addModel: (id: string) => req<any>("/models", json({ add: id })),
 
   // --- speech -------------------------------------------------------------
   async stt(blob: Blob): Promise<string> {

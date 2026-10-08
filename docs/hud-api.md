@@ -15,7 +15,20 @@ come from `WORKSHOP_PORT` (8403), a different origin by design.
 assets. `GET /avatar.svg`, `GET /avatars`, `GET /voices`, `GET /models`,
 `GET /models/catalog`, `POST /avatar`, `POST /voice`, `POST /model`,
 `POST /mute`, `POST /say` — **v1 semantics and shapes** (`jarvis/face/
-server.py`), re-homed; `POST /model` sets the **fast path's** model only.
+server.py`), re-homed; `POST /model` sets the **fast path's** global
+default only.
+
+The control bodies, exactly (2026-10-06, decisions A6 — the HUD sent `{id}`,
+`{name}` and `{mute}` for weeks and every click reset the setting it meant to
+change). An unknown key is a 400 that names it; it is never read as absent.
+
+| route | body |
+|---|---|
+| `POST /model` | `{"model": id}` — `""` returns to the config default |
+| `POST /models` | exactly one of `{"add": id}`, `{"remove": id}`, `{"model": id, "effort": level}` (`""` = AUTO) |
+| `POST /voice` | `{"voice": name}` — `""` clears the override |
+| `POST /mute` | `{"muted": bool}` |
+| `POST /avatar` | `{"slug": slug}` |
 
 ## Projects (additions to WP7)
 
@@ -130,7 +143,9 @@ trace; never a credential value.
   **A move re-labels a thread; it never re-roots it.** The brief saved at
   open (cwd, permission profile, always_ask) is not rewritten, and every
   resume reads it back, so a moved thread keeps working in the folder,
-  under the rules, it was opened with.
+  under the rules, it was opened with. The same route also takes a rename
+  `{title}` and a model change `{model?, effort?}` (below); exactly one of
+  the three shapes per request, or 400.
 - Thread records carry `cwd`, the folder the thread was opened in, set
   from the brief at open. `GET /threads` fills it from the saved brief for
   threads that predate the field, without writing anything.
@@ -151,6 +166,86 @@ trace; never a credential value.
   through the same store the scheduler reads and publish the same events,
   so the HUD list updates live.
 
+## Additions 2026-10-06 — the model a chat thread runs on
+
+Decisions in `docs/plans/2026-10-06-decisions.md` part A. A chat thread runs
+on one of three providers — `fast` (OpenRouter, the fast path), `claude`,
+`codex` — chosen when it is opened and fixed after. Its model and effort can
+change at any time and apply **from the next message**, never in the middle
+of a turn. The choice is stored on the Thread record (`model`, `effort`);
+**`brief.json` is never rewritten.**
+
+- `Thread.model = null` is **default**: OpenRouter follows the global Model
+  picker (`models.tier("orchestrator")`, i.e. the owner's selection or
+  `JARVIS_ORCHESTRATOR`) at the start of **every turn**; Claude is
+  `claude-opus-5-5`; Codex is its routing default for the orchestrator role.
+  `Thread.effort = null` is that model's default: `high`, or the roster's
+  per-model effort on OpenRouter, clamped to the model's own levels; none for
+  a model with no reasoning control.
+- `POST /threads` for `role: "chat"` takes `provider` (default `fast`) and
+  `brief: {model?, effort?}`. The model is checked **before** the record is
+  created: 400 with the reason for a model that is not on the roster (or
+  cannot call tools), not one of that CLI's models, or an effort off its
+  ladder. A Claude or Codex chat thread opens in the project root under the
+  project's profile and always-ask list, with the §6 permit as its gate.
+  A provider the project cannot run is refused the same way, before any
+  record exists (`thread_model.refusal`): Codex runs the `auto` profile only
+  and cannot enforce always-ask additions; Claude and the fast path have no
+  `strict` mode. A refusal only the provider sees (at start) deletes the
+  never-started record before the error is returned.
+- **A caller's `brief` cannot loosen its project** (any role, any provider;
+  the runner's own `Brief` objects are not callers). `cwd` must be the
+  project's root, `profile` the project's or stricter (`auto` < `ask` <
+  `strict`), `always_ask` must keep every one of the project's commands
+  (adding more is fine), and `mcp_servers` must be empty. Anything else is a
+  400 naming the field. The HUD sends none of these.
+- `PATCH /threads/{id}` `{model?, effort?}` → the thread record. This is one
+  of the route's three request shapes, and they are mutually exclusive: a
+  rename `{title}`, a move `{project_id}`, or a model change `{model?,
+  effort?}`. Fields from two shapes in one body are a 400 ("rename, move and
+  model change are separate requests"), and so is a body with none. `model: null` returns to the
+  default and resets the effort; a new model resets the effort unless one is
+  given with it; an effort alone on a default thread pins the default model
+  it is an effort of. A model already pinned stays usable after it leaves
+  the roster (shown "(not on roster)"). 400 with the reason on any refusal;
+  409 for a task's thread, a provider that cannot switch, or an archived
+  thread or one in an archived project ("restore the thread before changing
+  its model"). There is no
+  `provider` field: a session cannot change provider.
+- Every change writes a `model_set` record to the thread's log (`data.text`,
+  e.g. `model → moonshotai/kimi-k3 · high (from the next message)`, or
+  `(follows the default)` when a default thread's turn starts on a new global
+  model) and publishes it, then `thread_updated {…thread, thread_id,
+  changed: ["model", "effort"], effective_model, effective_effort}`. A
+  rename's `thread_updated` carries `changed: ["title"]` and no record; the
+  HUD patches in place when the record is there and refetches otherwise. `GET /threads/{id}/transcript` returns `model_set`
+  records as `role: "system"`.
+- A provider that refuses the switch at the turn's start does not cost the
+  message: the record is rolled back to what the provider still runs (a
+  default thread whose default moved on is pinned to it, so the switch is
+  not retried every turn), a `model_set` line says `switch to X refused:
+  <reason>; still on Y` (with `refused_model`, `refused_effort`), a
+  `thread_updated` follows, and the message is sent on the old model. If the
+  provider lost the session as well (Claude: neither the new model nor the
+  old one reconnects), the turn ends with an `error` and the session is
+  dropped; the next send resumes it on the old model.
+- Each `usage` event in a thread's log carries `data.model` and
+  `data.effort`: which model answered that turn.
+- `GET /thread-models` → `{"effort_default": "high", "providers": {"fast" |
+  "claude" | "codex": {"label", "default", "default_effort", "models":
+  [{"id", "name", "efforts", "vision", …}], "note", "profiles",
+  "always_ask"}}}`. `profiles` lists the permission profiles the provider can
+  run a chat thread under and `always_ask` says whether it can enforce a
+  project's always-ask commands; the HUD greys a provider out from these, and
+  `POST /threads` refuses by the same table. A row without `efforts` (an
+  `unlisted` roster model) has an unknown ladder, not none. OpenRouter lists the
+  roster (`models.describe()` rows, with the roster's `effort`); Claude and
+  Codex list `router.CLI_MODELS`, the table the router's capability filter
+  reads. The full catalogue stays at `GET /models/catalog`; a model used from
+  it is pinned to the roster (`POST /models {add}`) first.
+- No tool reaches any of this. The agent cannot change its own model or
+  provider.
+
 ## Additions 2026-10-06 (projects: rename, edit, archive — decisions part B)
 
 The owner's decisions are `docs/plans/2026-10-06-decisions.md` part B; the
@@ -165,7 +260,12 @@ so existing duplicates stay editable), `PATCH /threads/{id}` `{title}`, and
 restore. Read the name from the response, not the request.
 
 - `POST /projects` and `PATCH /projects/{id}`: `root` must be an existing
-  directory (400). A root change pins every task that already has a
+  directory (400). A `routing.models` override is held to `CLI_MODELS` on
+  write, the rule `routing.json` and `/route` follow: a known role,
+  `claude`/`codex` only, a model Jarvis knows for that CLI (or `roster`), and
+  an effort it offers; anything else is 400 naming the entry
+  (`routing.models.<role>.<provider>: …`). PATCH checks only when the body
+  carries `routing`, so a project saved before the check stays editable. A root change pins every task that already has a
   worktree to the old root first (`Task.root`), so it finishes, commits and
   is removed there; existing threads keep their frozen `cwd`; new threads
   and tasks use the new root. A PATCH of an archived project is 409. They
@@ -173,8 +273,9 @@ restore. Read the name from the response, not the request.
   changed: [fields], project}`; a PATCH that changes nothing publishes
   nothing.
 - `PATCH /threads/{id}` `{"title"}` → the thread record (title numbered).
-  A rename is its own request: `{title, project_id}` together is 400, and
-  the `{project_id}` move is unchanged. Publishes `thread_updated
+  A rename is its own request: `{title}` with `project_id`, `model` or
+  `effort` is 400, and the `{project_id}` move is unchanged (see the model
+  section above for the third shape, `{model?, effort?}`). Publishes `thread_updated
   {thread_id, title, changed: ["title"]}`. An archived thread is 409.
 - Task records carry `root`: the project root the task was started under,
   or null before its worktree exists.

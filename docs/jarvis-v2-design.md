@@ -372,6 +372,41 @@ a wrong write). `usage()` reports dollars only: v1 keeps no token total, and
 a wrong count is worse than none (the BYOK lesson). WP9's ledger must
 therefore not require tokens from the fast path.
 
+*Amended 2026-10-06 (decisions A1, A4, A5): three providers per chat thread.*
+Rule 4 now reads "any message in a chat thread → **that thread's provider**".
+A chat thread is opened on OpenRouter (the fast path, as above), **Claude**
+or **Codex**, chosen in the HUD while composing and fixed by the first
+message, because a provider session cannot change provider. So "the fast path
+cannot change anything" still describes the fast path, and **no longer
+describes every chat thread**: a Claude or Codex chat thread is a full agent
+working in the folder the thread was opened in (its `cwd`, the project root
+at open), with that provider's whole native toolset and the chat role's
+brief (`roles.BRIEFS[Role.CHAT]`). It stays behind the same gate as every
+task worker — the project's permission profile and always-ask list on its
+brief, the §6 permit built by `build_permit` (Claude's `PreToolUse` hook,
+Codex's approval handler), and approvals that reach the owner through the
+daemon's broker. Nothing runs ungated; Codex still refuses a brief it cannot
+enforce (an `ask` profile or always-ask additions, R8), loudly. There is no
+task, worktree or reviewer around a chat thread: that is the owner's choice
+to make per thread, and the fast path remains the default.
+
+The model and effort of a chat thread live on the Thread record and change
+from the next message (`PATCH /threads/{id}`); `brief.json` is never
+rewritten. The daemon hands the provider the thread's effective choice when
+it opens or resumes the session and, at the start of each turn, calls the
+provider's `set_model` if the choice moved. A default thread therefore
+follows the global Model picker on every turn (it used to keep the model it
+was opened with until the daemon restarted). The WP2 note above changes in
+one place: the fast path **honours `effort`** now (`Agent.effort`; `None`
+keeps v1's per-model resolution, so v1 surfaces are unchanged), and the
+v2 default is `high` within the model's own ladder, or the roster's pin for
+that model (A4) — v1's global `JARVIS_REASONING_EFFORT` is left alone. How
+each provider switches: the fast path reads the pair at the next turn's
+start; Codex sends `model`/`effort` with the next `turn/start` (which
+override that turn and the ones after it); Claude disconnects and resumes the
+same session with the new options, and puts the old client back if that
+fails.
+
 ### 8.2 Stage two: which provider runs each role
 
 When a task starts, and again whenever it needs a new worker thread, the
@@ -628,8 +663,18 @@ providers, and dictation with an adjustable send mode.
   daemon at the end.
 - **The model picker chooses the fast path's model only.** Provider and
   model per role come from the routing table (§8), shown read-only beside
-  it with a link to the routing editor. The picker can never touch Claude
-  or Codex settings.
+  it with a link to the routing editor. The global picker still never
+  touches a task's Claude or Codex settings. *Amended 2026-10-06 (decisions
+  A1–A5):* each **chat thread** has its own provider, model and effort,
+  chosen with three chips beside `in: <project>` in the input bar
+  (provider ▾ · model ▾ · effort ▾). The provider is picked while
+  composing and fixed after the first message; model and effort change from
+  the next message. OpenRouter lists the roster plus "search catalogue…"
+  (a model used from the catalogue is pinned to the roster); Claude and
+  Codex list `router.CLI_MODELS`. A pinned model that leaves the roster
+  stays pinned, shown "(not on roster)". Every change is a system line in
+  the chat. Task threads show their model read-only. No tool can change a
+  thread's model or provider — only the owner, in the HUD.
 - **Permissions default to `auto`** (D6); the project header carries the
   profile switch (auto / ask / strict) and the always-ask additions.
 - **Previews and agent-written pages are a separate origin**
@@ -950,6 +995,18 @@ the thread whose turn this window started (`turnThreadId`), so switching
 threads mid-turn no longer leaves the window on THINKING with the mic
 suppressed. Another thread's `proposal_reply` and `turn_finished` no longer
 reach the open chat or open the HUD's follow-up listening window.
+
+**The model a thread runs on (2026-10-06).** Decisions part A, design
+§8.1 and §12.1 amended. A chat thread picks its provider (OpenRouter,
+Claude, Codex) while composing and its model and effort at any time, from
+three chips in the input bar; the choice lives on the Thread record and
+`brief.json` is never rewritten. It came with a bug fix that predates it:
+the HUD had been sending `{id}`, `{name}` and `{mute}` to `/model`, `/voice`
+and `/mute`, which read `model`, `voice` and `muted`, so every click reset
+what it meant to set — and the mock accepted the wrong keys, so the suite
+passed. Both the daemon and the mock now refuse an unknown key by name. And
+a default thread follows the global Model picker on every turn; before, an
+open thread kept its opening model until the daemon restarted.
 
 **Projects: rename, edit, archive (2026-10-06, decisions part B).** A
 project row has a `⋯` menu (Edit…, Rename…, Archive…), and project and

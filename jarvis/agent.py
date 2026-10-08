@@ -186,6 +186,10 @@ class Agent:
         # Resolved through models.tier, not config.TIERS, so the model the
         # owner picked in the HUD reaches every surface that builds an Agent.
         self.model = model or models.tier("orchestrator")
+        # An explicit reasoning effort for this agent, set by its owner (v2's
+        # per-thread choice, decisions A4). None — every v1 surface — keeps
+        # v1's resolution per call (`models.effort_for`); "" sends no effort.
+        self.effort: str | None = None
         # `None` means "everything worth sending", not literally everything:
         # a deferred tool group (tools.ToolGroup) keeps its bulk out of the
         # request until `load_tools` asks for it, and keeps it out entirely on a
@@ -347,6 +351,15 @@ class Agent:
             "These are not loaded — call load_tools with the name to get them.\n"
             + "\n".join(lines)
         )
+
+    def _effort(self) -> str | None:
+        """The effort for the next call. Resolved per call, not at
+        construction: the model can move mid-conversation (the HUD's picker,
+        a v2 thread following the global default), and the ladder is not the
+        same on every model."""
+        if self.effort is None:
+            return models.effort_for(self.model)
+        return self.effort or None
 
     def _sync_tools(self) -> None:
         """Fold any newly-loaded tool group into this agent's specs.
@@ -619,7 +632,7 @@ class Agent:
                     # Resolved per call rather than once at construction: the
                     # HUD's model picker can move `self.model` mid-conversation,
                     # and the ladder is not the same on every model.
-                    effort=models.effort_for(self.model),
+                    effort=self._effort(),
                 )
             except llm.Cancelled:
                 turn.cancelled = True
@@ -798,7 +811,7 @@ class Agent:
         try:
             reply = llm.chat(
                 self.model, self.messages, stream=False,
-                effort=models.effort_for(self.model),
+                effort=self._effort(),
             )
         except Exception as exc:  # provider error, cancellation, anything
             self.on_event("interim_text", f"[no handoff: {type(exc).__name__}: {exc}]")

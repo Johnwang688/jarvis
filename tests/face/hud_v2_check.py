@@ -783,12 +783,33 @@ def picker_checks(page, mock):
     check("a model name carrying markup renders as text",
           row.locator("img").count() == 0 and "<img" in row.inner_text(), row.inner_text())
     check("and its handler never runs", page.evaluate("window.__pwned") is False)
+    # A6: the keys are the daemon's, and the mock refuses any other (it used
+    # to accept {id}, which is how every click reset the model unnoticed).
+    selects = len(mock.sent("POST", "/model"))
+    page.locator('[data-testid="model-evil/model"]').click()
+    body = until(lambda: mock.sent("POST", "/model")[selects:] or None)
+    check("clicking a row posts /model with {model: id}",
+          bool(body) and body[-1] == {"model": "evil/model"}, str(body))
+    check("and the selection actually moved", until(lambda: mock.world["models"]["selected"] == "evil/model"))
     # Setting effort does not also switch him onto that model.
+    selects = len(mock.sent("POST", "/model"))
     page.locator('[data-testid="effort-openai/gpt-5.6-luna"]').select_option("high")
-    body = until(lambda: mock.sent("POST", "/model") or None)
-    check("choosing an effort sends the effort",
-          bool(body) and body[-1].get("effort") == "high", str(body[-1] if body else None))
+    body = until(lambda: mock.sent("POST", "/models") or None)
+    check("choosing an effort posts /models with {model, effort}",
+          bool(body) and body[-1] == {"model": "openai/gpt-5.6-luna", "effort": "high"},
+          str(body[-1] if body else None))
+    page.locator('[data-testid="effort-openai/gpt-5.6-luna"]').select_option("")
+    body = until(lambda: len(mock.sent("POST", "/models")) >= 2 and mock.sent("POST", "/models"))
+    check("AUTO clears the effort through /models too",
+          bool(body) and body[-1] == {"model": "openai/gpt-5.6-luna", "effort": ""}, str(body))
+    time.sleep(0.2)
+    check("and neither effort change selected the model",
+          len(mock.sent("POST", "/model")) == selects, str(mock.sent("POST", "/model")[selects:]))
     page.locator('[data-testid="picker-close"]').click()
+    mutes = mock.sent("POST", "/mute")
+    check("every /mute the window sent carried {muted: bool}",
+          bool(mutes) and all(set(b) == {"muted"} and isinstance(b["muted"], bool) for b in mutes),
+          str(mutes))
     until(lambda: page.locator('[data-testid="picker"]').count() == 0)
 
     page.locator('[data-testid="open-voice"]').click()
@@ -799,7 +820,8 @@ def picker_checks(page, mock):
     # "" clears the override: the way back to the avatar's own voice.
     page.locator('[data-testid="voice-default"]').click()
     body = until(lambda: mock.sent("POST", "/voice") or None)
-    check("AVATAR DEFAULT clears the override", bool(body) and body[-1].get("name") == "")
+    check("AVATAR DEFAULT clears the override with {voice: \"\"}",
+          bool(body) and body[-1] == {"voice": ""}, str(body))
     page.locator('[data-testid="picker-close"]').click()
     until(lambda: page.locator('[data-testid="picker"]').count() == 0)
 
@@ -1346,6 +1368,181 @@ def schedule_dialog_checks(page, mock):
 
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# the model a thread runs on (decisions 2026-10-06, part A)
+# ---------------------------------------------------------------------------
+
+PNG_1PX = bytes.fromhex(
+    "89504e470d0a1a0a0000000d4948445200000001000000010806000000"
+    "1f15c4890000000d49444154789c6360000002000154a24f5d0000000049454e44ae426082")
+
+
+def writes(mock, since):
+    return [c for c in mock.calls[since:] if c[0] in ("POST", "PATCH") and c[1] not in ("/stt", "/mute")]
+
+
+def thread_model_checks(page, mock):
+    print("\nthe model a thread runs on: provider, model, effort")
+    w = mock.world
+    w["models"]["selected"] = "openai/gpt-5.6-luna"
+    mock.emit("model", {})
+    page.locator('[data-testid="tab-chat"]').click()
+    page.locator('[data-testid="new-thread"]').click()
+    until(lambda: page.locator('[data-testid="model-chip-select"]').count() > 0)
+    model = page.locator('[data-testid="model-chip-select"]')
+    until(lambda: "gpt-5.6-luna" in (model.locator("option").first.inner_text() or ""))
+    check("a new thread starts on the default, named",
+          model.input_value() == "" and model.locator("option").first.inner_text() == "default · gpt-5.6-luna",
+          model.locator("option").first.inner_text())
+    check("the provider chip offers OpenRouter, Claude and Codex",
+          page.locator('[data-testid="provider-chip-select"] option').all_inner_texts()
+          == ["OpenRouter", "Claude", "Codex"])
+    check("the catalogue search is the last model entry",
+          model.locator("option").last.inner_text() == "search catalogue…")
+    check("the effort defaults to high",
+          page.locator('[data-testid="effort-chip-select"] option').first.inner_text() == "default · high")
+
+    since = len(mock.calls)
+    page.locator('[data-testid="provider-chip-select"]').select_option("claude")
+    until(lambda: "claude-opus-5-5" in model.locator("option").first.inner_text())
+    check("Claude lists its own models, defaulting to Opus 5.5",
+          model.locator("option").first.inner_text() == "default · claude-opus-5-5"
+          and "claude-haiku-4-5" in model.locator("option").all_inner_texts())
+    model.select_option("claude-haiku-4-5")
+    check("a model with no effort control gets no effort chip",
+          until(lambda: page.locator('[data-testid="effort-chip-select"]').count() == 0) is True)
+    page.locator('[data-testid="provider-chip-select"]').select_option("fast")
+    check("changing provider starts from that provider's defaults",
+          until(lambda: model.input_value() == "") is True)
+    page.evaluate("window.__pwned = false")
+    model.select_option("evil/model")
+    check("the chip draws no markup from a network-supplied model",
+          page.locator('[data-testid="model-chip"] img').count() == 0
+          and page.evaluate("window.__pwned") is False)
+    model.select_option("openai/gpt-5.6-luna")
+    page.locator('[data-testid="effort-chip-select"]').select_option("low")
+    check("choosing while composing sends nothing", not writes(mock, since), str(writes(mock, since)))
+
+    # A provider the project's profile cannot run is greyed out, with why.
+    project_select = page.locator('[data-testid="project-chip-select"]')
+    started_in = project_select.input_value()
+    project_select.select_option("p2")              # the ask project
+    codex = page.locator('[data-testid="provider-chip-select"] option[value="codex"]')
+    until(lambda: codex.is_disabled())
+    check("Codex is greyed out in an ask project",
+          codex.is_disabled() and "auto" in (codex.get_attribute("title") or ""),
+          codex.get_attribute("title"))
+    check("and the providers it can run stay enabled",
+          not page.locator('[data-testid="provider-chip-select"] option[value="claude"]').is_disabled()
+          and not page.locator('[data-testid="provider-chip-select"] option[value="fast"]').is_disabled())
+    project_select.select_option("p1")              # an auto project
+    check("and enabled again in an auto project", until(lambda: not codex.is_disabled()) is True,
+          f"started in {started_in}")
+    project_select.select_option(started_in)
+    model.select_option("openai/gpt-5.6-luna")
+    page.locator('[data-testid="effort-chip-select"]').select_option("low")
+
+    # Space on a focused chip never starts push-to-talk.
+    model.focus()
+    page.keyboard.press("Space")
+    page.keyboard.press("Escape")
+    check("space on a chip does not start push-to-talk", page.evaluate("window.__hud.capture.ptt") is None)
+
+    opened = len(mock.posted("/threads"))
+    box = page.locator('[data-testid="input"]')
+    box.fill("model test")
+    w["fail_send"] = 1                                # the thread opens; its first send fails
+    box.press("Enter")
+    body = until(lambda: mock.posted("/threads")[opened:] or None)
+    check("the first message carries the choice",
+          bool(body) and body[-1].get("provider") == "fast"
+          and body[-1].get("brief") == {"model": "openai/gpt-5.6-luna", "effort": "low"},
+          str(body[-1] if body else None))
+    kept = until(lambda: page.evaluate("(() => { const c = window.__hud.state().compose;"
+                                       " return c && c.openedId && !window.__hud.state().busy ? c : null })()"))
+    check("a failed first send keeps the compose choice beside the opened thread",
+          bool(kept) and (kept.get("provider"), kept.get("model"), kept.get("effort"))
+          == ("fast", "openai/gpt-5.6-luna", "low"), str(kept))
+    box.fill("model test")
+    box.press("Enter")
+    tid = until(lambda: page.evaluate("window.__hud.state().threadId"))
+    mock.emit("turn_finished", {"stop": "end"}, thread_id=tid)
+    until(lambda: page.locator('[data-testid="provider-chip"]').count() > 0)
+    check("after it the provider is fixed",
+          page.locator('[data-testid="provider-chip-select"]').count() == 0
+          and page.locator('[data-testid="provider-chip"]').inner_text() == "OpenRouter")
+    pid = page.evaluate("window.__hud.state().threads.find(t => t.id === window.__hud.state().threadId)?.project_id")
+    expand(page, pid or "p1", f"thread-{tid}")
+    check("the sidebar row badges the pinned model",
+          until(lambda: page.locator(f'[data-testid="pin-{tid}"]').count() == 1) is True
+          and page.locator(f'[data-testid="pin-{tid}"]').inner_text() == "gpt-5.6-luna")
+    tip = page.locator(f'[data-testid="thread-{tid}"]').get_attribute("title") or ""
+    check("and its tooltip names the provider and the model",
+          "OpenRouter" in tip and "openai/gpt-5.6-luna" in tip and "pinned" in tip, tip)
+
+    since = len(mock.calls)
+    page.locator('[data-testid="model-chip-select"]').select_option("")
+    sent = until(lambda: mock.sent("PATCH", f"/threads/{tid}") or None)
+    check("a change after the first message is a PATCH", bool(sent) and sent[-1] == {"model": None}, str(sent))
+    check("and nothing else is written", [c[1] for c in writes(mock, since)] == [f"/threads/{tid}"],
+          str(writes(mock, since)))
+    check("the change is a line in the chat",
+          until(lambda: "model →" in page.locator('[data-testid="log"]').inner_text()) is True)
+    check("the pin badge goes when the thread follows the default",
+          until(lambda: page.locator(f'[data-testid="pin-{tid}"]').count() == 0) is True)
+
+    # A refused change leaves the chip on what the server holds, and says why.
+    w["refuse_choice"] = "evil/model cannot call tools here"
+    page.locator('[data-testid="model-chip-select"]').select_option("evil/model")
+    err = until(lambda: page.locator('[data-testid="model-error"]').count() and
+                page.locator('[data-testid="model-error"]').inner_text())
+    check("a refused change is shown with the server's reason",
+          bool(err) and "Could not change model" in err and "cannot call tools" in err, str(err))
+    check("and the chip reverts", page.locator('[data-testid="model-chip-select"]').input_value() == "")
+    w["refuse_choice"] = None
+
+    # The catalogue: search, use (pins to the roster), and the text-only note.
+    page.locator('[data-testid="model-chip-select"]').select_option("__search__")
+    page.wait_for_selector('[data-testid="catalog"]')
+    page.evaluate("window.__pwned = false")
+    evil = page.locator('[data-testid="catalog-row-evil/model"]')
+    until(lambda: evil.count() > 0)
+    check("a model name carrying markup renders as text in the catalogue",
+          evil.count() == 1 and evil.locator("img").count() == 0 and "<img" in evil.inner_text(),
+          evil.inner_text() if evil.count() else "no row")
+    check("and its handler never runs", page.evaluate("window.__pwned") is False)
+    page.locator('[data-testid="catalog-search"]').fill("deepseek")
+    check("the catalogue search narrows the list",
+          page.locator('[data-testid^="catalog-row-"]').count() == 1)
+    page.locator('[data-testid="catalog-use-deepseek/deepseek-v4-flash-0731"]').click()
+    added = until(lambda: mock.sent("POST", "/models") or None)
+    check("using a catalogue model pins it to the roster",
+          bool(added) and added[-1] == {"add": "deepseek/deepseek-v4-flash-0731"}, str(added))
+    sent = until(lambda: [b for b in mock.sent("PATCH", f"/threads/{tid}") if (b.get("model") or "").startswith("deepseek")] or None)
+    check("and puts this thread on it", bool(sent), str(mock.sent("PATCH", f"/threads/{tid}")))
+    until(lambda: page.locator('[data-testid="model-chip-select"]').input_value().startswith("deepseek"))
+    page.locator('[data-testid="filepicker"]').set_input_files(
+        files=[{"name": "shot.png", "mimeType": "image/png", "buffer": PNG_1PX}])
+    note = until(lambda: page.locator('[data-testid="image-note"]').count() and
+                 page.locator('[data-testid="image-note"]').inner_text())
+    check("a text-only model says it cannot see an attached image",
+          bool(note) and "text-only" in note, str(note))
+
+    # A task's thread is read-only.
+    w["threads"].append({
+        "id": "kt9", "project_id": "p1", "role": "implementer", "provider": "codex",
+        "provider_session_id": None, "task_id": "k1", "title": "", "created": "", "updated": "",
+        "turns": 1, "cost_usd": 0, "tokens": 0, "model": "gpt-5.6-sol", "effort": "high", "cwd": None})
+    mock.emit("thread_opened", {}, thread_id="kt9")
+    until(lambda: any(t["id"] == "kt9" for t in page.evaluate("window.__hud.state().threads")))
+    page.evaluate("window.__hud.dispatch({type: 'patch', patch: {threadId: 'kt9', compose: null}})")
+    ro = until(lambda: page.locator('[data-testid="model-chip-ro"]').count() and
+               page.locator('[data-testid="model-chip-ro"]').inner_text())
+    check("a task's thread shows its model read-only",
+          bool(ro) and "gpt-5.6-sol" in ro and page.locator('[data-testid="model-chip-select"]').count() == 0,
+          str(ro))
+
+
 def main():
     if not (DIST / "index.html").exists():
         print("hud/dist is not built. Run: cd hud && npm ci && npm run build")
@@ -1385,6 +1582,7 @@ def main():
             compose_checks(page, mock)
             newproject_checks(page, mock)
             move_checks(page, mock)
+            thread_model_checks(page, mock)
             # Decisions part B last of all: it renames, archives and deletes.
             from tests.face.hud_v2_projects_check import projects_checks
             projects_checks(page, mock, check, until, expand)
