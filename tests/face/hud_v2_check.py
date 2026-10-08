@@ -98,7 +98,7 @@ def boot(page, mock: MockDaemon, path: str = "/"):
     # meaningfully alive; waiting on the sidebar's first project is the cheapest
     # signal that the first wave of calls has landed.
     until(lambda: page.locator('[data-testid="project-p1"]').count() > 0)
-    _ = mock
+    mock.await_reconnect(0)
     return page
 
 
@@ -349,8 +349,12 @@ def dictation_checks(page, mock):
           str(sent[-1] if sent else None))
 
     # The choice persists; a reload comes back to it.
+    connections = mock.sse_connections()
     page.reload()
     page.wait_for_selector('[data-testid="dictation-auto"]')
+    # The next section's frames must reach the reloaded page, not the old
+    # page's dead stream (see MockDaemon._sse).
+    check("the reloaded window reconnects to the event stream", mock.await_reconnect(connections))
     check("the mode persists across a reload",
           page.locator('[data-testid="dictation-auto"]').get_attribute("aria-pressed") == "true")
     page.locator('[data-testid="dictation-review"]').click()
@@ -1579,6 +1583,9 @@ def main():
             newproject_checks(page, mock)
             move_checks(page, mock)
             thread_model_checks(page, mock)
+            # Decisions part B last of all: it renames, archives and deletes.
+            from tests.face.hud_v2_projects_check import projects_checks
+            projects_checks(page, mock, check, until, expand)
 
             ctx.close()
             browser.close()

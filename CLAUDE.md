@@ -30,7 +30,14 @@ backend ran one real task end to end on 2026-09-16** (design §17): Claude
 orchestrated, Codex implemented in a worktree, a fresh Claude reviewer
 failed it once and passed it second time, DONE in 198 s. **The HUD v2 landed the same
 day** (WP12a backend + WP12b frontend under `hud/`, `jarvis hud` opens it;
-design §12 and §18). The status column is subscription meters: Claude's
+design §12 and §18). **Projects are archived, never deleted in place**
+(2026-10-06, decisions part B): an archived project or thread keeps every
+record and is hidden from lists, placement and schedules; permanent delete
+is HUD-only, archived-only, goes to a trash (`jarvis/v2/trash.py`) and never
+touches a project folder or worktree; tasks pin the root they started under
+(`Task.root`); names collide into `name (1)`; and no tool can archive or
+delete (`tests/v2/archive_check.py`). Never call `_Store._delete` on a
+project — it rmtrees the flat `projects/` directory. The status column is subscription meters: Claude's
 5-hour and weekly windows (Claude Code's own usage endpoint, cached, the
 login token never on `/usage`) and Codex's weekly window, green under 75%,
 yellow from 75%, red from 90%. Role routing is in Settings; schedules are

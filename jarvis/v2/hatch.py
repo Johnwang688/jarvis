@@ -263,6 +263,8 @@ class EscapeHatch:
         """The task worktree, or the project root, or the daemon's cwd."""
         if task is not None and task.worktree and Path(task.worktree).is_dir():
             return task.worktree
+        if task is not None and task.root and Path(task.root).is_dir():
+            return task.root                    # pinned when it started (decisions B5)
         try:
             thread = self.daemon.stores.threads.get(thread_id)
             if thread is not None:

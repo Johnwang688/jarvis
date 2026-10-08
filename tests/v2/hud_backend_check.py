@@ -981,6 +981,10 @@ class Backend(unittest.TestCase):
         published = [e for e in self.events_all() if e["kind"] in ("thread_updated", "model_set")]
         self.assertEqual([e["kind"] for e in published], ["model_set", "thread_updated"])
         self.assertEqual(published[1]["data"]["effective_effort"], "high")
+        # The record plus the envelope a rename's thread_updated also carries.
+        self.assertEqual(published[1]["data"]["thread_id"], tid)
+        self.assertEqual(published[1]["data"]["changed"], ["model", "effort"])
+        self.assertEqual(published[1]["data"]["id"], tid)
         self.send_and_settle(tid)
         self.assertEqual(fakes[P.FAST].changes, [("test/thinker", "high")])
         usage = [r for r in self.stores.threads.read_log(tid) if r.get("kind") == "usage"]
@@ -1001,8 +1005,16 @@ class Backend(unittest.TestCase):
                       {"model": "test/thinker", "effort": "xhigh"}, status=400)["error"])
         self.assertIn("supports tool calling", self.request("PATCH", f"/threads/{tid}",
                       {"model": "nope/nope"}, status=400)["error"])
-        self.request("PATCH", f"/threads/{tid}", {"model": "test/thinker", "project_id": self.second.id}, status=400)
-        self.request("PATCH", f"/threads/{tid}", {}, status=400)
+        # Rename, move and model change are three mutually exclusive shapes.
+        for mixed in ({"model": "test/thinker", "project_id": self.second.id},
+                      {"effort": "low", "title": "renamed"},
+                      {"title": "renamed", "project_id": self.second.id},
+                      {"title": "renamed", "model": None, "project_id": self.second.id}):
+            self.assertEqual(self.request("PATCH", f"/threads/{tid}", mixed, status=400)["error"],
+                             "rename, move and model change are separate requests", mixed)
+        self.assertIn("missing fields", self.request("PATCH", f"/threads/{tid}", {}, status=400)["error"])
+        self.assertNotEqual(self.stores.threads.get(tid).title, "renamed")
+        self.assertEqual(self.stores.threads.get(tid).project_id, thread["project_id"])
         self.request("PATCH", f"/threads/{tid}", {"provider": "claude"}, status=400)
         self.assertEqual(self.stores.threads.get(tid).model, None)
 

@@ -676,6 +676,11 @@ def route(handler, daemon, parts, query):
         return binary(handler, data, mimetypes.guess_type(path.name)[0] or "application/octet-stream")
     if "/".join(parts) in ("avatar.svg", "avatars", "avatar", "voices", "voice", "models", "models/catalog", "model", "mute", "say", "stt"):
         return pickers(handler, daemon, parts, query)
+    # Archive, restore, permanent delete and the trash (decisions part B).
+    from . import projects as _projects
+    mounted = _projects.route(handler, daemon, parts, query)
+    if mounted is not None:
+        return mounted
     if parts == ["usage"] and method == "GET":
         _object(query, ())
         return 200, usage(daemon)
@@ -692,7 +697,10 @@ def route(handler, daemon, parts, query):
             return 200, preview(**body, now=schedules.clock())
         if len(parts) == 1:
             if method == "GET":
-                return 200, [_with_describe(row) for row in schedules.list()]
+                # An archived project's schedules are paused and hidden (B1).
+                hidden = _projects.archived_project_ids(stores)
+                return 200, [_with_describe(row) for row in schedules.list()
+                             if row.get("project_id") not in hidden]
             if method == "POST":
                 return 201, _with_describe(schedules.save(handler._body()))
         if len(parts) == 2:
@@ -755,14 +763,19 @@ def route(handler, daemon, parts, query):
         return 200, thread_model.describe()
     if len(parts) == 2 and parts[0] == "threads" and method == "PATCH":
         _object(query, ())
-        body = _object(handler._body(), ("project_id", "model", "effort"))
-        if "model" in body or "effort" in body:
+        body = _object(handler._body(), ("title", "project_id", "model", "effort"))
+        kinds = [k for k, keys in (("rename", {"title"}), ("move", {"project_id"}),
+                                   ("model", {"model", "effort"})) if body.keys() & keys]
+        if len(kinds) != 1:
+            fail(400, "rename, move and model change are separate requests" if kinds
+                 else "missing fields: title, project_id, or model/effort")
+        if kinds == ["rename"]:
+            # A rename is its own request: `{title}` alone (decisions B4).
+            return 200, _projects.rename_thread(daemon, parts[1], body["title"])
+        if kinds == ["model"]:
             # A chat thread's model and effort, from its next message on.
             # Never its provider: a session cannot change provider.
-            if "project_id" in body:
-                fail(400, "move a thread and change its model in separate requests")
             return 200, daemon.set_thread_model(parts[1], body)
-        _object(body, ("project_id",), ("project_id",))
         with daemon._lock:
             daemon._active()
             thread = daemon.require(stores.threads, parts[1])
@@ -771,6 +784,9 @@ def route(handler, daemon, parts, query):
             if thread.role != Role.CHAT:
                 fail(409, "only chat threads can move")
             target = daemon.require(stores.projects, body["project_id"])
+            if thread.archived or _projects.is_archived(stores, thread.project_id):
+                fail(409, "restore the thread before moving it")
+            _projects.refuse_archived_project(target)
             previous = thread.project_id
             thread.project_id = target.id
             stores.threads.save(thread)

@@ -87,6 +87,9 @@ class Project:
     extra_dirs: list[str] = field(default_factory=list)
     always_ask: list[str] = field(default_factory=list)   # additions only, §6 layer 2
     inbox: bool = False                                    # the one project for unplaced chat
+    # When the owner archived it (ISO time), or None. An archived project is
+    # hidden from every surface that places work; only the HUD restores it.
+    archived: str | None = None
 
 
 @dataclass
@@ -110,6 +113,9 @@ class Thread:
     # The folder the thread was opened in. Fixed for its life: a move between
     # projects re-labels the thread, it never re-roots it (design §18).
     cwd: str | None = None
+    # When the owner archived this one thread (ISO time), or None. A thread in
+    # an archived project is hidden with it and keeps its own value.
+    archived: str | None = None
 
 
 @dataclass
@@ -188,6 +194,10 @@ class Task:
     provider_override: ProviderName | None = None           # "use codex", §8.2 step 1
     ceilings: dict[str, float] = field(default_factory=dict)  # usd / hours / tokens
     migrated_from: str | None = None                        # v1 goal id, if any
+    # The project root this task was started under (decisions B5). Worktree
+    # create, status and remove use it, so a root changed mid-task cannot
+    # point a running task at a different repository. None: not started yet.
+    root: str | None = None
 
 
 # --- serialization ----------------------------------------------------------

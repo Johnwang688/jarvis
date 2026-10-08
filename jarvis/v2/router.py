@@ -20,7 +20,7 @@ from .ledger import DEFAULT_ALLOWANCES, UsageLedger
 from .model import (PermissionProfile, ProviderName, Role, RoutingDecision,
                     TaskState, to_json)
 from .provider import Event
-from .stores import StoreError, _write_bytes
+from .stores import ProjectArchived, StoreError, _write_bytes
 
 PROPOSAL_GRACE_S = 60
 HEALTH_CACHE_S = 60
@@ -400,20 +400,24 @@ class Router:
 
     def place(self, explicit=None, incoming=None):
         incoming = incoming or Incoming("")
+        # An archived project places nothing (decisions B1), and names match
+        # ignoring case and surrounding spaces, the rule the HUD numbers by.
+        live = [p for p in self.stores.projects.list() if not p.archived]
         if explicit:
-            matches = [p for p in self.stores.projects.list() if p.id == explicit or p.name == explicit]
+            wanted = explicit.strip().casefold()
+            matches = [p for p in live if p.id == explicit or p.name.strip().casefold() == wanted]
             return matches[0] if len(matches) == 1 else None
         if incoming.thread_id:
             thread = self.stores.threads.get(incoming.thread_id)
             if thread:
                 project = self.stores.projects.get(thread.project_id)
-                if project and not project.inbox:
+                if project and not project.inbox and not project.archived:
                     return project
         if incoming.project_id:
             project = self.stores.projects.get(incoming.project_id)
-            if project and not project.inbox:
+            if project and not project.inbox and not project.archived:
                 return project
-        matches = [p for p in self.stores.projects.list() if p.discord_channel_id == incoming.surface]
+        matches = [p for p in live if p.discord_channel_id == incoming.surface]
         return matches[0] if len(matches) == 1 else None
 
     def on_turn_finished(self, event, incoming=None):
@@ -443,9 +447,14 @@ class Router:
             provider = proposal.get("provider")
             if provider and provider not in CLI_PROVIDERS:
                 raise ValueError("proposal provider must be claude or codex")
-            task = self.stores.tasks.create(project.id, text, provider_override=provider)
-            task.brief = apply_override(task, text, self.stores)
-            self.stores.tasks.save(task)
+            try:
+                task = self.stores.tasks.create(project.id, text, provider_override=provider)
+                task.brief = apply_override(task, text, self.stores)
+                self.stores.tasks.save(task)
+            except ProjectArchived:
+                # `place` skips archived projects; this is one archived since.
+                return (f"Project {project.name} was archived, so I opened nothing. "
+                        "Restore it from the HUD's Archive view to work there again.")
             summary = " ".join(task.brief.split()).rstrip(".")
             reply = f"Opened task {task.id} in {project.name}: {summary}. It will ask if anything is unclear."
             self.stores.tasks.journal(task.id, "proposed_by_fastpath", brief=text,

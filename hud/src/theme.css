@@ -591,3 +591,24 @@ details.decisions[open] summary { color: var(--text); margin-bottom: 8px; }
 /* Red, not amber: amber means "pending"; an image the model cannot see is a
    failure the owner should see before sending, not a wait. */
 .chip.warn { color: var(--red); border-color: var(--red-line); background: var(--red-soft); }
+
+/* ---- rename, edit, archive (decisions B) ---- */
+.tree-row .rename { display: inline-flex; align-items: center; gap: 6px; min-width: 0; flex: 1 1 auto; }
+.tree-row .rename input { padding: 1px 5px; font-size: 12px; min-width: 0; width: 100%; }
+.tree-row .rename .savesas { font: 10px var(--mono); color: var(--text-muted); white-space: nowrap; }
+.threadmenu .msep { border-top: 1px solid var(--border); margin: 4px 0; }
+.threadmenu .mrow:disabled { color: var(--text-muted); cursor: default; }
+/* Archive is the menu's one consequential item: red, and last. */
+.threadmenu .mrow.danger:not(:disabled), button.danger:not(:disabled) { color: var(--red); }
+button.danger:not(:disabled) { border-color: var(--red-line); }
+button.danger:hover:not(:disabled) { background: var(--red-soft); }
+.picker.confirm { width: 520px; }
+.picker .blockers { border-left: 2px solid var(--amber); padding-left: 10px; display: flex; flex-direction: column; gap: 4px; }
+.picker .effects { border-left: 2px solid var(--accent-line); padding-left: 10px; font-size: 12px; color: var(--text-2); }
+.picker .arow { cursor: default; }
+.picker .arow .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.picker .arow button { padding: 2px 8px; }
+.picker .mhead {
+  padding: 8px 12px 2px; font: 600 10px var(--mono); letter-spacing: 0.06em;
+  color: var(--text-muted); text-transform: uppercase;
+}

@@ -1008,6 +1008,22 @@ passed. Both the daemon and the mock now refuse an unknown key by name. And
 a default thread follows the global Model picker on every turn; before, an
 open thread kept its opening model until the daemon restarted.
 
+**Projects: rename, edit, archive (2026-10-06, decisions part B).** A
+project row has a `⋯` menu (Edit…, Rename…, Archive…), and project and
+thread rows rename inline. A colliding name is numbered (`name (1)`), never
+refused. A project's root can change: existing threads keep their frozen
+`cwd`, and **tasks pin the root they were started under** (`Task.root`), so
+a task already running or blocked creates, commits and removes its worktree
+in the original repo. **Nothing is deleted by archiving**: an archived
+project or thread keeps every record and disappears from the lists,
+placement, schedule tools and the scheduler until restored. Permanent delete
+exists only in the HUD's Archive view, only for something archived, and
+moves Jarvis's records to a trash (`trash.py`: the Recycle Bin for
+`/mnt/<drive>/`, else the freedesktop home trash, purged after 30 days); it
+never touches the project's folder or a worktree. Archive and delete answer
+only the HUD's own listener, and no tool reaches them (B11). Routes in
+`docs/hud-api.md`.
+
 Remaining: WP13 (the long-bench comparison, the owner's call on cost), a
 native Windows worker, the R8 hook on Codex, and prompt tuning in
 `roles.py` (§17's over-planning note). The daemon started by hand for the
