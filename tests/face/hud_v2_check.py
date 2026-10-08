@@ -1419,6 +1419,25 @@ def thread_model_checks(page, mock):
     page.locator('[data-testid="effort-chip-select"]').select_option("low")
     check("choosing while composing sends nothing", not writes(mock, since), str(writes(mock, since)))
 
+    # A provider the project's profile cannot run is greyed out, with why.
+    project_select = page.locator('[data-testid="project-chip-select"]')
+    started_in = project_select.input_value()
+    project_select.select_option("p2")              # the ask project
+    codex = page.locator('[data-testid="provider-chip-select"] option[value="codex"]')
+    until(lambda: codex.is_disabled())
+    check("Codex is greyed out in an ask project",
+          codex.is_disabled() and "auto" in (codex.get_attribute("title") or ""),
+          codex.get_attribute("title"))
+    check("and the providers it can run stay enabled",
+          not page.locator('[data-testid="provider-chip-select"] option[value="claude"]').is_disabled()
+          and not page.locator('[data-testid="provider-chip-select"] option[value="fast"]').is_disabled())
+    project_select.select_option("p1")              # an auto project
+    check("and enabled again in an auto project", until(lambda: not codex.is_disabled()) is True,
+          f"started in {started_in}")
+    project_select.select_option(started_in)
+    model.select_option("openai/gpt-5.6-luna")
+    page.locator('[data-testid="effort-chip-select"]').select_option("low")
+
     # Space on a focused chip never starts push-to-talk.
     model.focus()
     page.keyboard.press("Space")

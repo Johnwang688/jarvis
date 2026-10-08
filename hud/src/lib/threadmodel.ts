@@ -9,7 +9,7 @@
 // A model name comes off the network and this window draws authorization
 // cards, so everything here produces **text** for React to render as text.
 
-import type { ProviderName, Thread } from "../types";
+import type { Project, ProviderName, Thread } from "../types";
 
 /** One row of a provider's model list (`GET /thread-models`). */
 export interface ModelEntry {
@@ -30,6 +30,10 @@ export interface ProviderModels {
   default_effort: string | null;
   models: ModelEntry[];
   note?: string;
+  /** The permission profiles this provider can run a chat thread under. */
+  profiles?: string[];
+  /** Whether it can enforce a project's always-ask commands. */
+  always_ask?: boolean;
 }
 
 /** `GET /thread-models`. */
@@ -109,6 +113,29 @@ export function effective(tm: ThreadModels | null, c: Choice): { model: string |
     return { model: p?.default ?? null, effort: c.effort ?? p?.default_effort ?? null };
   }
   return { model: c.model, effort: c.effort ?? defaultEffort(tm, c.provider, c.model) };
+}
+
+/** Why `provider` cannot run a chat thread in this project, or null when it
+ * can. The rules are the backend's (`thread_model.refusal`), read from
+ * `GET /thread-models` rather than restated here, so the chip greys out
+ * exactly what `POST /threads` would refuse. An older backend that sends no
+ * table greys out nothing; the daemon still refuses with its reason. */
+export function providerRefusal(
+  tm: ThreadModels | null,
+  provider: ProviderName,
+  project: Pick<Project, "profile" | "always_ask"> | null | undefined,
+): string | null {
+  const p = tm?.providers[provider];
+  if (!p || !project) return null;
+  const label = PROVIDER_LABELS[provider] || provider;
+  if (p.profiles && !p.profiles.includes(project.profile)) {
+    if (project.profile === "strict" && provider !== "codex")
+      return `${label} cannot run a strict project: it has no strict confinement`;
+    return `${label} can only run a project on the ${p.profiles.join(" or ")} profile; this project is on ${project.profile}`;
+  }
+  if (p.always_ask === false && project.always_ask?.length)
+    return `${label} cannot enforce this project's always-ask commands (${project.always_ask.join(", ")})`;
+  return null;
 }
 
 /** A compose row's choice; absent fields are the defaults (A5). */

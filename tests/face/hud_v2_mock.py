@@ -314,7 +314,24 @@ def _thread_models(w):
     return {"effort_default": "high", "providers": {
         p: {"label": labels[p], "default": defaults[p],
             "default_effort": "xhigh" if p == "codex" else _default_effort(w, p, defaults[p]),
-            "models": _rows(w, p), "note": ""} for p in labels}}
+            "models": _rows(w, p), "note": "",
+            # `thread_model.PROFILES` / `TAKES_ALWAYS_ASK`, as the daemon sends them.
+            "profiles": list(_PROFILES[p]), "always_ask": p != "codex"} for p in labels}}
+
+
+_PROFILES = {"fast": ("auto", "ask"), "claude": ("auto", "ask"), "codex": ("auto",)}
+
+
+def _provider_refusal(w, provider, project_id):
+    """`thread_model.refusal`: why the project cannot run this provider."""
+    project = next((p for p in w["projects"] if p["id"] == project_id), None)
+    if project is None:
+        return None
+    if project["profile"] not in _PROFILES[provider]:
+        return f"{provider} cannot run a project on the {project['profile']} profile"
+    if project.get("always_ask") and provider == "codex":
+        return "Codex cannot enforce this project's always-ask commands"
+    return None
 
 
 def _check_choice(w, provider, model, effort, current=None):
@@ -603,7 +620,8 @@ class MockDaemon:
                     if provider not in ("fast", "claude", "codex"):
                         return self._err(400, f"{provider!r} is not a valid ProviderName")
                     brief = body.get("brief") or {}
-                    refusal = _check_choice(w, provider, brief.get("model"), brief.get("effort"))
+                    refusal = (_provider_refusal(w, provider, body.get("project_id", "p1"))
+                               or _check_choice(w, provider, brief.get("model"), brief.get("effort")))
                     if refusal:
                         return self._err(400, refusal)
                     rec = {

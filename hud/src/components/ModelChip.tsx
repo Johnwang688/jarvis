@@ -31,8 +31,11 @@ export function ModelChip(props: {
   error?: string;
   onChange: (next: Choice) => void;
   onSearch: () => void;
+  /** Per provider, why the project cannot use it (greyed out), or null. */
+  refusals?: Partial<Record<ProviderName, string | null>>;
 }) {
   const c = props.choice;
+  const refused = props.refusals?.[c.provider] || null;
   const eff = effective(props.models, c);
   const efforts = effortOptions(props.models, c);
   const title = props.modelEditable
@@ -53,9 +56,14 @@ export function ModelChip(props: {
           onKeyUp={stop}
           onChange={(e) => props.onChange(applyProvider(c, e.target.value as ProviderName))}
         >
-          {PROVIDERS.map((p) => (
-            <option key={p} value={p}>{PROVIDER_LABELS[p]}</option>
-          ))}
+          {PROVIDERS.map((p) => {
+            const why = props.refusals?.[p] || null;
+            return (
+              <option key={p} value={p} disabled={!!why} title={why || undefined} data-refused={why ? "1" : undefined}>
+                {PROVIDER_LABELS[p]}
+              </option>
+            );
+          })}
         </select>
       ) : (
         <span data-testid="provider-chip">{PROVIDER_LABELS[c.provider] || c.provider}</span>
@@ -103,6 +111,10 @@ export function ModelChip(props: {
       )}
       {props.error ? (
         <span className="err" data-testid="model-error"> {props.error}</span>
+      ) : props.providerEditable && refused ? (
+        // The chosen provider cannot run in this project (it was chosen
+        // before the project changed): say so before the send is refused.
+        <span className="err" data-testid="provider-refused"> {refused}</span>
       ) : null}
     </span>
   );

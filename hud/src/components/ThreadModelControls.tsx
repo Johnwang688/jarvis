@@ -11,7 +11,8 @@ import { api } from "../api";
 import type { Action, State } from "../state/store";
 import type { ModelRow, Thread } from "../types";
 import {
-  chipEditable, choiceOf, composeChoice, patchBody, visionNote, type Choice, type ThreadModels,
+  chipEditable, choiceOf, composeChoice, patchBody, PROVIDERS, providerRefusal, visionNote,
+  type Choice, type ThreadModels,
 } from "../lib/threadmodel";
 import { CatalogPicker, ModelChip } from "./ModelChip";
 
@@ -42,6 +43,11 @@ export function useThreadModel(state: State, dispatch: React.Dispatch<Action>, o
 
   const choice: Choice | null = composing ? composeChoice(state.compose) : thread ? choiceOf(thread) : null;
   const editable = chipEditable(thread, composing);
+  // While composing, grey out a provider the chosen project's permission
+  // profile cannot run, with the reason as its tooltip (POST /threads would
+  // refuse it with the same reason).
+  const project = composing ? state.projects.find((p) => p.id === state.compose?.projectId) : undefined;
+  const refusals = Object.fromEntries(PROVIDERS.map((p) => [p, providerRefusal(models, p, project)]));
 
   const change = useCallback(
     (next: Choice) => {
@@ -101,6 +107,7 @@ export function useThreadModel(state: State, dispatch: React.Dispatch<Action>, o
         error={error}
         onChange={change}
         onSearch={openCatalog}
+        refusals={refusals}
       />
     ) : null;
 

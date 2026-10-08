@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   applyEffort, applyModel, applyProvider, chipEditable, defaultEffort, effective, effortOptions,
-  modelLabel, modelOptions, offRoster, patchBody, SEARCH, shortId, threadBody, threadTooltip,
+  modelLabel, modelOptions, offRoster, patchBody, providerRefusal, SEARCH, shortId, threadBody, threadTooltip,
   visionNote, type Choice, type ThreadModels,
 } from "./threadmodel";
 import type { Thread } from "../types";
@@ -175,5 +175,35 @@ describe("the sidebar tooltip", () => {
     expect(threadTooltip(thread({ provider: "claude", model: "claude-opus-5-5", effort: "high" })))
       .toBe("runs on Claude · claude-opus-5-5 · high (pinned)");
     expect(threadTooltip(thread(), "/home/x")).toBe("runs on OpenRouter · follows the default\nworks in /home/x");
+  });
+});
+
+describe("providers a project cannot run", () => {
+  // The table as `GET /thread-models` sends it (thread_model.PROFILES).
+  const limits: ThreadModels = {
+    providers: {
+      fast: { ...TM.providers.fast!, profiles: ["auto", "ask"], always_ask: true },
+      claude: { ...TM.providers.claude!, profiles: ["auto", "ask"], always_ask: true },
+      codex: { ...TM.providers.codex!, profiles: ["auto"], always_ask: false },
+    },
+  };
+  const project = (profile: "auto" | "ask" | "strict", always_ask: string[] = []) => ({ profile, always_ask });
+
+  it("greys out Codex in an ask project or one with always-ask commands", () => {
+    expect(providerRefusal(limits, "codex", project("ask"))).toContain("auto profile");
+    expect(providerRefusal(limits, "codex", project("auto", ["make deploy"]))).toContain("make deploy");
+    expect(providerRefusal(limits, "claude", project("ask", ["make deploy"]))).toBeNull();
+    expect(providerRefusal(limits, "codex", project("auto"))).toBeNull();
+  });
+
+  it("greys out Claude and OpenRouter in a strict project", () => {
+    expect(providerRefusal(limits, "claude", project("strict"))).toContain("strict");
+    expect(providerRefusal(limits, "fast", project("strict"))).toContain("strict");
+  });
+
+  it("refuses nothing it has no table or project for", () => {
+    expect(providerRefusal(TM, "codex", project("ask"))).toBeNull();
+    expect(providerRefusal(limits, "codex", null)).toBeNull();
+    expect(providerRefusal(null, "codex", project("ask"))).toBeNull();
   });
 });
