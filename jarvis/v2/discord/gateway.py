@@ -629,6 +629,11 @@ class DiscordRouter:
             try:
                 if record.get("kind") == "shutdown":
                     break
+                if not (record.get("data") or {}).get("code"):
+                    # Only the broker asks the owner, and every broker question
+                    # carries a code. Anything else (a provider's "the gate was
+                    # consulted") is never a DM, nor a resolution post.
+                    continue
                 if record["kind"] == "approval_requested":
                     self._post_approval(record.get("data") or {})
                 else:

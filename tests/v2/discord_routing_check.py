@@ -181,6 +181,35 @@ class FakeFast:
         pass
 
 
+class GateFast(FakeFast):
+    """Announces each gate consultation before `permit` decides, as the
+    Claude hook (every tool use) and Codex (every escalation) do."""
+
+    def __init__(self):
+        super().__init__()
+        self.calls = []
+
+    def start(self, thread, brief, permit):
+        return SessionHandle(thread.id, self.name, "fake:" + thread.id,
+                             {"permit": permit, "brief": brief})
+
+    resume = start
+
+    def send(self, handle, message):
+        yield Event(K.TURN_STARTED, handle.thread_id)
+        command = message.text.removeprefix("run:")
+        req_id = f"gate-{len(self.calls)}"
+        yield Event(K.APPROVAL_REQUESTED, handle.thread_id,
+                    {"req_id": req_id, "tool": "Bash", "args": {"command": command},
+                     "command": command})
+        decision = Decision(handle.native["permit"]("Bash", {"command": command},
+                                                    handle.native["brief"]))
+        self.calls.append((command, decision))
+        yield Event(K.APPROVAL_RESOLVED, handle.thread_id,
+                    {"req_id": req_id, "decision": decision.value})
+        yield Event(K.TURN_FINISHED, handle.thread_id, {"stop": "end"})
+
+
 def message(content="", channel=DM_CHANNEL, *, guild=GUILD, author=OWNER,
             bot=False, mention=False, **extra):
     body = {"channel_id": channel, "content": content,
@@ -324,6 +353,56 @@ class DiscordRoutingChecks(unittest.TestCase):
         request, result, worker = self.ask(command="rm -rf build")
         self.assertEqual(self.posts(DM_CHANNEL)[0][0], DM_CHANNEL)
         self.assertIn("rm -rf build", self.posts(DM_CHANNEL)[0][1]["content"])
+        self.listener.feed(dm(f"no {request.code}"))
+        worker.join(2)
+        self.assertEqual(result["decision"], Decision.DENY)
+
+    # -- auto mode is quiet (2026-10-08) ------------------------------------
+
+    def test_auto_settled_tool_calls_never_reach_discord(self):
+        """Ten tool calls that the policy settles on its own send no DM, no
+        thread post, no ping and no resolution post. Fails against the daemon
+        that forwarded every provider gate event as an approval_requested."""
+        from jarvis.v2.model import PermissionProfile
+        from jarvis.v2.provider import Brief, UserMessage
+
+        gate = GateFast()
+        self.daemon.providers[ProviderName.FAST] = gate
+        brief = Brief(role=Role.IMPLEMENTER, cwd=self.tmp.name,
+                      profile=PermissionProfile.AUTO, task_id=self.task.id)
+        thread = self.daemon.open_thread(self.project.id, Role.IMPLEMENTER,
+                                         ProviderName.FAST, brief)
+        before = len(self.transport.calls)
+        questions = self.daemon.bus.subscribe(lambda r: r.get("kind") in (
+            "approval_requested", "approval_resolved"))
+        self.addCleanup(self.daemon.bus.unsubscribe, questions)
+        for index in range(10):
+            self.daemon.send(thread.id, UserMessage(f"run:echo {index}"))
+            wait_for(lambda: len(gate.calls) == index + 1)
+            wait_for(lambda: self.daemon._sessions[thread.id].worker is None
+                     or not self.daemon._sessions[thread.id].worker.is_alive())
+        self.assertEqual([d for _, d in gate.calls], [Decision.ALLOW] * 10)
+        time.sleep(0.3)        # the watcher thread has had its chance to post
+        self.assertEqual(self.transport.calls[before:], [])
+        self.assertEqual(self.approvals.pending(), [])
+        self.assertTrue(questions.empty(), "no approval event reached the bus at all")
+
+    def test_a_question_without_a_broker_code_is_never_posted(self):
+        """The gateway's own guard: only the broker asks the owner, and every
+        broker question carries a code. A provider-shaped record that reaches
+        the bus anyway posts nothing, and its resolution posts nothing."""
+        before = len(self.transport.calls)
+        self.daemon.bus.publish({"kind": "approval_requested", "thread_id": "t",
+                                 "data": {"req_id": "gate-1", "tool": "Bash",
+                                          "args": {"command": "ls"}, "command": "ls",
+                                          "task_id": self.task.id}})
+        self.daemon.bus.publish({"kind": "approval_resolved", "thread_id": "t",
+                                 "data": {"req_id": "gate-1", "decision": "allow"}})
+        time.sleep(0.3)
+        self.assertEqual(self.transport.calls[before:], [])
+        # ...while a real question still reaches the owner, once.
+        request, result, worker = self.ask(command="rm -rf build")
+        self.assertEqual(len(self.posts(DM_CHANNEL)), 1)
         self.listener.feed(dm(f"no {request.code}"))
         worker.join(2)
         self.assertEqual(result["decision"], Decision.DENY)

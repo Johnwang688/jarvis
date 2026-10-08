@@ -693,11 +693,21 @@ class PermitProvider:
         from jarvis.v2.provider import Event, EventKind as K
         self.messages.append(message)
         yield Event(K.TURN_STARTED, handle.thread_id)
-        if message.text.startswith("run:"):
-            command = message.text[4:]
+        commands = message.text[4:].split("\n") if message.text.startswith("run:") else []
+        for index, command in enumerate(commands):
+            # The real providers announce every gate consultation before
+            # `permit` decides anything — Claude's hook once per tool use,
+            # Codex once per escalation. That is the shape that flashed a card
+            # and sent a DM per tool call in auto mode, so the fake keeps it.
+            req_id = f"gate-{len(self.calls)}-{index}"
+            yield Event(K.APPROVAL_REQUESTED, handle.thread_id,
+                        {"req_id": req_id, "tool": "Bash",
+                         "args": {"command": command}, "command": command})
             decision = handle.native["permit"]("Bash", {"command": command},
                                                handle.native["brief"])
             self.calls.append((command, decision))
+            yield Event(K.APPROVAL_RESOLVED, handle.thread_id,
+                        {"req_id": req_id, "decision": decision.value})
         yield Event(K.TURN_FINISHED, handle.thread_id, {"stop": "end"})
 
     def interrupt(self, handle):
@@ -792,6 +802,101 @@ def daemon_checks():
             eq(status, 404, "an answered request cannot be answered again")
             status, _ = http_json(daemon.port, "POST", "/approvals/nope", {"decision": "sideways"})
             ok(status in (400, 404), "a nonsense decision is refused")
+        finally:
+            daemon.stop()
+
+
+def _drain(subscription, wait=0.3):
+    seen = []
+    while True:
+        try:
+            seen.append(subscription.get(timeout=wait))
+        except Exception:
+            return seen
+
+
+def auto_quiet_checks():
+    """Auto mode must not flash: a decision made without the owner is never a
+    card, a DM or a resolution, while a real question still reaches them.
+
+    Fails against the pre-2026-10-08 daemon, which forwarded every provider
+    gate event onto the bus as `approval_requested` / `approval_resolved` —
+    ten tool calls meant ten cards and ten DMs, each withdrawn a moment later.
+    """
+    from jarvis.v2 import daemon as daemon_mod
+    from jarvis.v2.model import PermissionProfile as P, ProviderName, Role
+    from jarvis.v2.provider import Brief, Decision, UserMessage
+    from jarvis.v2.stores import Stores
+
+    with Sandbox() as box:
+        provider = PermitProvider()
+        stores = Stores(config.V2_DATA_DIR)
+        daemon = daemon_mod.Daemon(stores, {ProviderName.FAST: provider}, None, 0)
+        daemon.start()
+        try:
+            project_root = box.root / "project"
+            project_root.mkdir()
+            status, project = http_json(daemon.port, "POST", "/projects",
+                                        {"name": "p", "root": str(project_root)})
+            eq(status, 201, "project created")
+            brief = Brief(role=Role.IMPLEMENTER, cwd=str(project_root), profile=P.AUTO)
+            thread = daemon.open_thread(project["id"], Role.IMPLEMENTER,
+                                        ProviderName.FAST, brief)
+            subscription = daemon.bus.subscribe(
+                lambda r: r.get("thread_id") == thread.id or "approval" in r.get("kind", ""))
+
+            # Ten calls the policy settles on its own: rules ALLOW (layer 4)
+            # and "the provider's reviewer decides" (layer 5 under auto).
+            allowed = ["pnpm build", "git status", "ls -la", "npm test", "make",
+                       "git commit -m wip", "curl https://example.com",
+                       "docker ps", "pytest -x", "cargo build"]
+            daemon.send(thread.id, UserMessage("run:" + "\n".join(allowed)))
+            deadline = time.monotonic() + 5
+            while len(provider.calls) < len(allowed) and time.monotonic() < deadline:
+                time.sleep(0.005)
+            eq([decision for _, decision in provider.calls], [Decision.ALLOW] * len(allowed),
+               "every auto-settled call was allowed")
+            seen = _drain(subscription)
+            kinds = [r.get("kind") for r in seen]
+            eq(kinds.count("approval_requested"), 0,
+               "ten auto-settled tool calls publish no approval_requested")
+            eq(kinds.count("approval_resolved"), 0,
+               "and no approval_resolved flicker either")
+            ok("turn_finished" in kinds, "the turn itself was published")
+            eq(daemon.approvals.pending(), [], "nothing is left pending for the owner")
+            logged = [row.get("kind") for row in stores.threads.read_log(thread.id)]
+            eq(logged.count("gate_requested"), len(allowed),
+               "each gate consultation is still in the thread log, for the audit")
+            ok("approval_requested" not in logged,
+               "and none of it is logged as a question for the owner")
+
+            # A genuinely ask-worthy call still reaches the owner, exactly once.
+            worker = threading.Thread(
+                target=lambda: daemon.send(thread.id, UserMessage("run:git push origin main")))
+            worker.start()
+            deadline = time.monotonic() + 5
+            queued = []
+            while time.monotonic() < deadline:
+                status, queued = http_json(daemon.port, "GET", "/approvals")
+                if queued:
+                    break
+                time.sleep(0.01)
+            eq(len(queued), 1, "the always-ask push is queued for the owner")
+            status, _ = http_json(daemon.port, "POST", "/approvals/" + queued[0]["req_id"],
+                                  {"decision": "deny"})
+            eq(status, 200, "and answered")
+            deadline = time.monotonic() + 5
+            while len(provider.calls) < len(allowed) + 1 and time.monotonic() < deadline:
+                time.sleep(0.005)
+            eq(provider.calls[-1], ("git push origin main", Decision.DENY),
+               "the owner's no reaches the blocked call")
+            seen = _drain(subscription)
+            asked = [r for r in seen if r.get("kind") == "approval_requested"]
+            eq(len(asked), 1, "a real question publishes exactly one approval_requested")
+            ok(all((r.get("data") or {}).get("code") for r in asked),
+               "and it is the broker's, carrying the code a surface answers by")
+            eq([r.get("kind") for r in seen].count("approval_resolved"), 1,
+               "and exactly one approval_resolved")
         finally:
             daemon.stop()
 
@@ -963,7 +1068,7 @@ def discord_checks():
 def main():
     for section in (matrix_checks, always_ask_checks, file_deny_checks,
                     human_backed_checks, log_checks, approvals_checks,
-                    daemon_checks, hatch_checks, discord_checks):
+                    daemon_checks, auto_quiet_checks, hatch_checks, discord_checks):
         print(f"-- {section.__name__}")
         section()
     print()

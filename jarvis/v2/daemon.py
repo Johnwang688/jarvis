@@ -39,6 +39,19 @@ from . import worktrees
 
 LOG = logging.getLogger(__name__)
 STOP_TIMEOUT = 2.0
+
+# A provider's APPROVAL_REQUESTED / APPROVAL_RESOLVED mean "the gate was
+# consulted about this tool call": the Claude hook emits a pair for *every*
+# tool use, and Codex for every escalation, before `permit` has decided
+# anything. They are not questions for the owner. Only the broker
+# (`PendingApprovals`, through `_approval_requested`) publishes those, and only
+# when a decision really waits on a human. Forwarded under their own names,
+# they became a card and a DM per tool call that vanished a moment later when
+# `permit` allowed it: the auto-mode flashing and the Discord DM spam
+# (2026-10-08). They stay in the thread log under these names and never reach
+# the bus.
+GATE_KINDS = {EventKind.APPROVAL_REQUESTED: "gate_requested",
+              EventKind.APPROVAL_RESOLVED: "gate_resolved"}
 _TASK_VERBS = ("start", "steer", "cancel", "resume", "answer")
 
 
@@ -210,7 +223,12 @@ class Daemon:
             return {"jarvis-daemon": True, "version": 2,
                     "uptime": time.monotonic() - self.started_at, "providers": providers,
                     "threads_open": sum(s.handle is not None for s in self._sessions.values()),
-                    "turns_running": sum(s.worker is not None for s in self._sessions.values())}
+                    "turns_running": sum(s.worker is not None for s in self._sessions.values()),
+                    # The HUD builds preview URLs from this rather than a
+                    # hard-coded 8403: a HUD served by any other daemon (a
+                    # test's, on an ephemeral port) must never reach the
+                    # owner's live workshop origin.
+                    "workshop_port": self.workshop_port}
 
     def require(self, store, object_id):
         if not isinstance(object_id, str) or not re.fullmatch(r"[0-9a-f]{8}", object_id):
@@ -685,6 +703,11 @@ class Daemon:
                 model, effort = (getattr(session, "applied", None)
                                  or (getattr(brief, "model", None), getattr(brief, "effort", None)))
                 record["data"] = {**record.get("data", {}), "model": model, "effort": effort}
+            if event.kind in GATE_KINDS:
+                # Logged for the audit trail, never published: see GATE_KINDS.
+                record["kind"] = GATE_KINDS[event.kind]
+                self.stores.threads._append(thread.id, "log.jsonl", record)
+                return
             if event.kind != EventKind.TEXT_DELTA:
                 # WP1 log() accepts text only; preserve full structured events
                 # through its serialized append primitive, in the same log.

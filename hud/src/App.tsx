@@ -261,6 +261,11 @@ export default function App() {
           else if (mine) dispatch({ type: "patch", patch: { orb: "error", error: data.message || "error" } });
           break;
         case "approval_requested":
+          // Only the broker asks the owner, and every broker question carries
+          // a code. A record without one is a provider saying "the gate was
+          // consulted", which the daemon no longer publishes; if one ever
+          // arrives it must not flash a card nobody can answer.
+          if (!data.code) break;
           dispatch({ type: "approval_add", request: { ...data, req_id: data.req_id } });
           break;
         case "approval_resolved":
