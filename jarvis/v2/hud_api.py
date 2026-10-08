@@ -718,6 +718,7 @@ def _linker_status(status) -> dict:
                     ("ok", "degraded", "unconfigured") else "degraded",
                     "reason": str(linker.get("reason") or "")[:300],
                     "pending_renames": int(linker.get("pending_renames") or 0),
+                    "pending_moves": int(linker.get("pending_moves") or 0),
                     "awaiting_approval": int(linker.get("awaiting_approval") or 0)}
                    if isinstance(linker, dict) else None),
         "permissions": ({"missing": _names(perms.get("missing")),

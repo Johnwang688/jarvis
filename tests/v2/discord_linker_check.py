@@ -316,6 +316,14 @@ class SlugAndPermissionTables(unittest.TestCase):
         for label, channel, expected in table:
             with self.subTest(label):
                 self.assertEqual(perms.effective(guild, roles, member, channel), expected)
+        # Role overwrites are pooled — every deny, then every allow — never
+        # applied role by role (review fix 5): with the allowing role listed
+        # first, a per-role pass would let the later deny win.
+        reordered = {"user": {"id": "bot"}, "roles": ["r2", "r1"]}
+        self.assertEqual(perms.effective(guild, roles, reordered,
+                                         ch(("r1", 0, 0, S), ("r2", 0, S, 0))), V | S | E | A)
+        self.assertEqual(perms.effective(guild, roles, reordered,
+                                         ch(("r2", 0, S, 0), ("r1", 0, 0, S))), V | S | E | A)
         admin = {"user": {"id": "bot"}, "roles": ["admin"]}
         self.assertEqual(perms.effective(guild, roles, admin, ch((g, 0, 0, V))), perms.ALL,
                          "Administrator ignores every channel overwrite")
@@ -631,13 +639,15 @@ class LifecycleChecks(Harness):
             self.assertNotIn(forbidden, moved)
         self.assertIn("Jarvis Archive", self.fake.posts(channel)[-1])
         self.assertIn("kept", self.fake.posts(channel)[-1])
-        # Restored under a renumbered name: moved back and renamed, one PATCH.
+        # Restored under PR #4's renumbered name: moved back first, then the
+        # name as its own request (a 429 on one must not cost the other).
         project = self.stores.projects.get(self.school.id)
         project.name = "School (1)"
         self.stores.projects.save(project)
         linker._handle({"kind": "project_restored", "project_id": self.school.id,
-                        "data": {"project_id": self.school.id, "name": "School (1)"}})
-        self.assertEqual(self.patches(channel)[-1], {"parent_id": CATEGORY, "name": "school-1"})
+                        "data": {"project_id": self.school.id, "name": "School (1)",
+                                 "previous_name": "School"}})
+        self.assertEqual(self.patches(channel)[-2:], [{"parent_id": CATEGORY}, {"name": "school-1"}])
         self.assertEqual(self.fake.posts(channel)[-1], "Restored.")
         # Restored with the same name: moved back only.
         linker._handle({"kind": "project_restored", "project_id": self.school.id,
@@ -716,12 +726,14 @@ class CrowdingChecks(Harness):
         linker = self.make()
         self.crowd(45, parent=ARCHIVE)
         self.serve(linker)
+        # Counted before the check (review fix 4): a category made *by* the
+        # check, without asking, must show up as a difference.
+        before = len(self.fake.named("POST", f"/guilds/{GUILD}/channels"))
         self.assertEqual(linker.check_crowding(), ["archive_full"])
         wait_for(lambda: self.approvals.pending())
         request = self.approvals.pending()[0]
         self.assertEqual(request.args["action"], "create_category")
         self.assertEqual(request.args["to"], "Jarvis Archive 2")
-        before = len(self.fake.named("POST", f"/guilds/{GUILD}/channels"))
         time.sleep(0.05)
         self.assertEqual(len(self.fake.named("POST", f"/guilds/{GUILD}/channels")), before,
                          "no category before the yes")
@@ -917,6 +929,235 @@ class SetupChecks(Harness):
             self.assertEqual(cli.cmd_auth(SimpleNamespace(service="discord-guild",
                                                           client_json=None, redo=False)), 0)
         ran.assert_called_once_with()
+
+
+class ReviewFixChecks(Harness):
+    """PR #8's independent review: each repro, turned into a check that fails
+    on 9ed9ab1."""
+
+    linked = LifecycleChecks.linked
+    rename = LifecycleChecks.rename
+
+    def later(self, linker, seconds=301):
+        linker._wall = lambda: time.time() + seconds
+
+    def asks(self, linker):
+        return [job for job in linker._state["asks"]]
+
+    # -- 1. only a sanctioned name is ever applied ------------------------------
+
+    def test_a_pending_owner_rename_never_carries_an_api_rename(self):
+        """The reviewer's verify2: the channel ended up `pwned-by-agent`."""
+        linker, channel = self.linked()
+        self.fake.fail[("PATCH", f"/channels/{channel}")] = (
+            429, {"retry_after": 300.0, "message": "slow"})
+        linker._handle(self.rename("Homework", "owner"))          # pending
+        del self.fake.fail[("PATCH", f"/channels/{channel}")]
+        linker._handle(self.rename("Pwned By Agent", "api"))      # must ask
+        self.later(linker)
+        linker._retry_renames()   # PR #8's name for the retry
+        self.assertEqual(self.fake.channels[channel]["name"], "school")
+        self.assertNotIn({"name": "pwned-by-agent"}, self.patches(channel))
+        self.assertEqual(linker.status()["linker"]["pending_renames"], 0,
+                         "the stale owner rename is dropped, not retried under a new name")
+        self.assertEqual([j["args"]["to"] for j in self.asks(linker)], ["pwned-by-agent"],
+                         "the api rename waits for its own approval")
+
+    def test_a_pending_rename_retries_its_own_name(self):
+        linker, channel = self.linked()
+        self.fake.fail[("PATCH", f"/channels/{channel}")] = (
+            429, {"retry_after": 300.0, "message": "slow"})
+        linker._handle(self.rename("Homework", "owner"))
+        del self.fake.fail[("PATCH", f"/channels/{channel}")]
+        self.later(linker)
+        linker._retry_renames()   # PR #8's name for the retry
+        self.assertEqual(self.patches(channel)[-1], {"name": "homework"})
+        self.assertEqual(linker.sanctioned(self.school.id), "homework")
+
+    def test_a_restore_never_applies_a_name_nobody_sanctioned(self):
+        linker, channel = self.linked()
+        linker._handle({"kind": "project_archived", "project_id": self.school.id, "data": {}})
+        # The name changed while nobody approved the channel following it.
+        project = self.stores.projects.get(self.school.id)
+        project.name = "Pwned"
+        self.stores.projects.save(project)
+        linker._handle({"kind": "project_restored", "project_id": self.school.id,
+                        "data": {"project_id": self.school.id, "name": "Pwned",
+                                 "previous_name": "Pwned"}})
+        self.assertEqual(self.patches(channel)[-1], {"parent_id": CATEGORY}, "moved back only")
+        self.assertEqual(self.fake.channels[channel]["name"], "school")
+        self.assertEqual([j["args"]["to"] for j in self.asks(linker)], ["pwned"])
+        # Approved, it is applied — through the gate.
+        self.serve(linker)
+        wait_for(lambda: self.approvals.pending())
+        self.assertEqual(self.patches(channel)[-1], {"parent_id": CATEGORY})
+        self.approvals.resolve(self.approvals.pending()[0].req_id, Decision.ALLOW)
+        wait_for(lambda: self.fake.channels[channel]["name"] == "pwned")
+
+    # -- 2. nothing the owner did is lost to a failure ---------------------------
+
+    def test_an_archive_move_survives_a_5xx(self):
+        linker, channel = self.linked()
+        self.fake.fail[("PATCH", f"/channels/{channel}")] = (503, {"message": "down"})
+        project = self.stores.projects.get(self.school.id)
+        project.archived = "2026-10-07T00:00:00+00:00"
+        self.stores.projects.save(project)
+        linker._handle({"kind": "project_archived", "project_id": self.school.id, "data": {}})
+        self.assertEqual(linker.status()["linker"]["pending_moves"], 1)
+        del self.fake.fail[("PATCH", f"/channels/{channel}")]
+        self.later(linker)
+        linker._retry_pending()
+        self.assertEqual(self.fake.channels[channel]["parent_id"], ARCHIVE)
+        self.assertEqual(linker.status()["linker"]["pending_moves"], 0)
+
+    def test_a_restore_on_a_429_moves_first_and_keeps_both(self):
+        """The reviewer's verify: one PATCH with name+move lost the move."""
+        linker, channel = self.linked()
+        linker._handle({"kind": "project_archived", "project_id": self.school.id, "data": {}})
+        project = self.stores.projects.get(self.school.id)
+        project.name = "School (1)"
+        self.stores.projects.save(project)
+        self.fake.fail[("PATCH", f"/channels/{channel}")] = (
+            429, {"retry_after": 300.0, "message": "slow"})
+        linker._handle({"kind": "project_restored", "project_id": self.school.id,
+                        "data": {"name": "School (1)", "previous_name": "School"}})
+        status = linker.status()["linker"]
+        self.assertEqual((status["pending_moves"], status["pending_renames"]), (1, 1))
+        del self.fake.fail[("PATCH", f"/channels/{channel}")]
+        self.later(linker)
+        linker._retry_pending()
+        self.assertEqual((self.fake.channels[channel]["parent_id"],
+                          self.fake.channels[channel]["name"]), (CATEGORY, "school-1"))
+
+    def test_a_rename_that_meets_a_5xx_is_kept(self):
+        linker, channel = self.linked()
+        self.fake.fail[("PATCH", f"/channels/{channel}")] = httpx.ConnectError("down")
+        linker._handle(self.rename("Homework", "owner"))
+        self.assertEqual(linker.status()["linker"]["pending_renames"], 1)
+        del self.fake.fail[("PATCH", f"/channels/{channel}")]
+        self.later(linker)
+        linker._retry_pending()
+        self.assertEqual(self.fake.channels[channel]["name"], "homework")
+
+    def test_startup_reconcile_moves_what_the_outage_missed(self):
+        self.configure()
+        linker = self.make()
+        school = linker.create(self.school.id)["channel_id"]
+        calc = linker.create(self.calc.id)["channel_id"]
+        (self.root / "idle").mkdir()
+        idle = self.stores.projects.create("Idle", str(self.root / "idle"))
+        idle_channel = linker.create(idle.id)["channel_id"]
+        # Archived while Discord was down: the channel is still in Jarvis.
+        project = self.stores.projects.get(self.school.id)
+        project.archived = "2026-10-07T00:00:00+00:00"
+        self.stores.projects.save(project)
+        # Restored while Discord was down: the channel is still in the archive.
+        self.assertTrue(linker.move(self.calc.id, calc, ARCHIVE, "project"))
+        # Moved for room: it stays where it is.
+        self.assertTrue(linker.move(idle.id, idle_channel, ARCHIVE, "crowding"))
+        fresh = ChannelLinker(self.daemon, self.rest, approvals=self.approvals)
+        self.addCleanup(fresh.close)
+        self.assertEqual(fresh.reconcile(), 2)
+        self.assertEqual(self.fake.channels[school]["parent_id"], ARCHIVE)
+        self.assertEqual(self.fake.channels[calc]["parent_id"], CATEGORY)
+        self.assertEqual(self.fake.channels[idle_channel]["parent_id"], ARCHIVE)
+        self.assertEqual(fresh.reconcile(), 0, "and a second pass has nothing to do")
+
+    def test_asks_and_their_answers_survive_a_restart(self):
+        linker, channel = self.linked()
+        linker._handle(self.rename("Homework", "api"))
+        self.assertEqual(len(self.asks(linker)), 1)
+        # A new process: the unanswered ask is asked again.
+        again = ChannelLinker(self.daemon, self.rest, approvals=self.approvals)
+        self.addCleanup(again.close)
+        self.serve(again)
+        wait_for(lambda: self.approvals.pending())
+        self.assertEqual(self.approvals.pending()[0].args["to"], "homework")
+        self.approvals.resolve(self.approvals.pending()[0].req_id, Decision.DENY)
+        wait_for(lambda: not again._state["asks"])
+        # A denied crowding ask is not re-asked by the next process either.
+        again._state["asked"]["crowded"] = time.time()
+        again._save_state()
+        third = ChannelLinker(self.daemon, self.rest, approvals=self.approvals)
+        self.assertFalse(third._may_ask("crowded"))
+        self.assertEqual(self.patches(channel), [])
+
+    # -- 3. whoever had a name first keeps it ------------------------------------
+
+    def test_the_first_project_keeps_its_name(self):
+        """The reviewer's verify: A's `#school` became `school-ff3a`."""
+        linker, a = self.linked()
+        (self.root / "b").mkdir()
+        b = self.stores.projects.create("School!", str(self.root / "b"))
+        b_channel = linker.create(b.id)["channel_id"]
+        self.assertEqual(self.fake.channels[b_channel]["name"], f"school-{b.id[:4]}")
+        linker._handle({"kind": "project_restored", "project_id": self.school.id,
+                        "data": {"name": "School", "previous_name": "School"}})
+        self.assertEqual(self.fake.channels[a]["name"], "school")
+        self.assertFalse([p for p in self.patches(a) if "name" in p])
+        # B renamed to its own name by the owner keeps its suffixed channel name.
+        linker._handle({"kind": "project_updated", "project_id": b.id,
+                        "data": {"changed": ["name"], "by": "owner"}})
+        self.assertFalse([p for p in self.patches(b_channel) if "name" in p])
+
+    def test_a_clash_is_judged_on_the_names_discord_has(self):
+        self.configure()
+        self.fake.add("830000000000000040", "school", parent=CATEGORY)   # made by hand
+        linker = self.make()
+        view = linker.create(self.school.id)
+        self.assertEqual(view["name"], f"school-{self.school.id[:4]}")
+
+    # -- 6. a create whose answer was lost is adopted, not repeated ---------------
+
+    def test_a_lost_create_is_adopted_on_retry(self):
+        self.configure()
+        linker = self.make()
+        original = self.rest.create_channel
+
+        def lost(*a, **k):
+            original(*a, **k)                     # Discord made it...
+            raise httpx.ReadTimeout("lost")       # ...and the answer never came
+
+        self.rest.create_channel = lost
+        with self.assertRaises(LinkError):
+            linker.create(self.school.id)
+        self.rest.create_channel = original
+        made = [c for c in self.fake.channels.values() if c.get("topic", "").endswith(self.school.id)]
+        self.assertEqual(len(made), 1)
+        view = linker.create(self.school.id)
+        self.assertEqual(view["channel_id"], made[0]["id"])
+        self.assertEqual(len(self.fake.named("POST", f"/guilds/{GUILD}/channels")), 1,
+                         "the retry adopted the channel instead of making a second")
+
+    # -- 8. only the linker and setup write channels --------------------------------
+
+    # B2 adds its handler module here (plan §6).
+    CHANNEL_WRITERS = {"jarvis/v2/discord/linker.py", "jarvis/v2/discord/setup.py",
+                       "jarvis/v2/discord/rest.py"}
+
+    def test_only_the_linker_and_setup_write_channels(self):
+        import re
+        root = Path(__file__).resolve().parents[2]
+        pattern = re.compile(r"\b(create_channel|modify_channel)\s*\(")
+        found = set()
+        for path in (root / "jarvis").rglob("*.py"):
+            if pattern.search(path.read_text(encoding="utf-8")):
+                found.add(path.relative_to(root).as_posix())
+        self.assertTrue(found)
+        self.assertLessEqual(found, self.CHANNEL_WRITERS,
+                             f"channel writes outside the allowlist: {found - self.CHANNEL_WRITERS}")
+
+    # -- 9. a crowding move says how the channel comes back -----------------------
+
+    def test_a_crowding_note_says_how_it_comes_back(self):
+        linker, channel = self.linked()
+        linker.approvals = SimpleNamespace(ask=lambda request: Decision.ALLOW)
+        linker.ask_now({"action": "archive_idle", "key": "crowded",
+                        "projects": [[self.school.id, channel]], "args": {"action": "archive"}})
+        self.assertEqual(self.patches(channel)[-1], {"parent_id": ARCHIVE})
+        note = self.fake.posts(channel)[-1]
+        self.assertIn("/channel restore", note)
+        self.assertIn("still active", note)
 
 
 if __name__ == "__main__":
