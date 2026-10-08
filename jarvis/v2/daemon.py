@@ -377,10 +377,10 @@ class Daemon:
             if want == session.applied:
                 return
         setter = getattr(session.provider, "set_model", None)
-        if setter is None:
-            raise DaemonError(f"the {session.thread.provider.value} provider cannot change "
-                              "model mid-thread; the thread keeps " + thread_model.label(*session.applied))
         try:
+            if setter is None:
+                raise ValueError(f"the {session.thread.provider.value} provider cannot change "
+                                 "model mid-thread")
             setter(session.handle, *want)
         except Exception as exc:
             self._switch_refused(session, want, exc)

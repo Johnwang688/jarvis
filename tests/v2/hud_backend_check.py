@@ -1092,6 +1092,26 @@ class Backend(unittest.TestCase):
         self.assertEqual(len(claude.changes), 1, "a refused switch is not retried on every message")
         self.assertEqual(len(claude.messages), sent + 2)
 
+    def test_a_default_that_moves_under_a_provider_that_cannot_switch_pins_the_thread(self):
+        fast = Fake(P.FAST)                     # no set_model at all
+        self.daemon.providers[P.FAST] = fast
+        self.request("POST", "/models", {"add": "test/thinker"})
+        tid = self.chat()["id"]
+        self.send_and_settle(tid)
+        was = models.tier("orchestrator")
+        self.request("POST", "/model", {"model": "test/thinker"})   # the global picker moves
+        self.send_and_settle(tid, "after the move")
+        self.assertEqual(fast.messages[-1].text, "after the move", "the message still goes")
+        stored = self.stores.threads.get(tid)
+        self.assertEqual(stored.model, was, "pinned to what it runs, so the switch is not retried")
+        lines = [m["text"] for m in self.request("GET", f"/threads/{tid}/transcript")["messages"]
+                 if m["role"] == "system"]
+        self.assertEqual(len(lines), 1, lines)
+        self.assertIn("cannot change model mid-thread", lines[0])
+        self.send_and_settle(tid, "once more")
+        self.assertEqual(len([m for m in self.request("GET", f"/threads/{tid}/transcript")["messages"]
+                              if m["role"] == "system"]), 1, "no second refusal")
+
     def test_a_switch_that_loses_the_session_resumes_it_on_the_next_message(self):
         fakes = self.model_fakes()
         claude = fakes[P.CLAUDE]
