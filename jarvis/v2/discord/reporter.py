@@ -52,6 +52,7 @@ carries on every change: ok, degraded (with a reason) or down.
 from __future__ import annotations
 
 from collections import Counter
+import copy
 import hashlib
 import json
 import logging
@@ -59,7 +60,9 @@ import queue
 import threading
 import time
 
-from ..model import TERMINAL_STATES, Task, TaskState, from_json
+from jarvis.tools.secrets import scrub
+
+from ..model import TERMINAL_STATES, Task, TaskState, from_json, utcnow
 from ..stores import StoreError, _lock, _write_bytes
 from .render import _cap, milestone, report_text, status_embed
 from .rest import (MISSING_ACCESS, MISSING_PERMISSIONS, UNKNOWN_CHANNEL, describe)
@@ -72,11 +75,15 @@ BREAKER_AFTER = 3
 BACKOFF_S = (30.0, 60.0, 120.0, 240.0, 300.0)
 FLUSH_S = 2.0
 ALERT_EVERY_S = 24 * 3600.0
+BROKEN_TTL_S = 3600.0           # a broken-place entry ages out; a new failure re-adds it
+LIST_BACKOFF_MAX_S = 300.0
 KINDS = frozenset({"task_created", "task_status_changed", "task_updated", "task_question"})
 # Milestones that need the owner: followed by the ping line in a guild, and the
 # only ones that go to the DM safety net.
 ATTENTION = frozenset({"question", "blocked", "failed", "done"})
 BROKEN = frozenset({UNKNOWN_CHANNEL, MISSING_ACCESS, MISSING_PERMISSIONS})
+# The two that mean "the bot is not allowed there": the owner is told by DM.
+ALERT_CODES = frozenset({MISSING_ACCESS, MISSING_PERMISSIONS})
 QUESTION_TAIL = " Answer here or with `/answer`."
 
 
@@ -113,6 +120,43 @@ def _transient(exc) -> bool:
     return status is None or status == 429 or status >= 500
 
 
+def _clean(text):
+    """Everything this poster sends goes through the transcript scrub first:
+    a credential value from a protected file never reaches Discord."""
+    return scrub(text) if isinstance(text, str) and text else text
+
+
+def _scrubbed(task: Task) -> Task:
+    """A copy of the snapshot with every text field Discord could be shown
+    scrubbed *before* rendering, so the render caps (400, 1500, 1024, 6000)
+    still hold after a value is replaced by the longer redaction marker."""
+    task = copy.deepcopy(task)
+    task.brief = _clean(task.brief)
+    status = task.status
+    status.open_question = _clean(status.open_question)
+    status.last_tool = _clean(status.last_tool)
+    status.last_file = _clean(status.last_file)
+    for question in task.spec.questions:
+        question.text = _clean(question.text)
+        question.options = [_clean(option) for option in question.options]
+    if task.report is not None:
+        report = task.report
+        report.done = [_clean(x) for x in report.done]
+        report.changed = [_clean(x) for x in report.changed]
+        report.open = [_clean(x) for x in report.open]
+        report.verified = _clean(report.verified)
+        report.next = _clean(report.next)
+    return task
+
+
+def _created(task):
+    from datetime import datetime
+    try:
+        return datetime.fromisoformat(task.created)
+    except (TypeError, ValueError):
+        return None
+
+
 class Reporter:
     """Subscribes on construction; the worker reconciles, then takes events.
 
@@ -123,8 +167,14 @@ class Reporter:
     """
 
     def __init__(self, stores, rest, bus, *, dm_channel=None, reconcile: bool = True,
-                 clock=time.monotonic, wall=time.time):
+                 clock=time.monotonic, wall=time.time, started_at: str | None = None):
         self.stores, self.rest, self.bus = stores, rest, bus
+        # Tasks created before this stamp existed before the poster did, and
+        # only those are seeded silently. One created after it — during an
+        # outage, or while its events were dropped — is reported, late.
+        # Seconds resolution, so a task from the same second counts as new:
+        # posting late is the safe side, losing a question is not.
+        self.started_at = started_at or utcnow()
         self._dm_channel = dm_channel
         self._clock, self._wall = clock, wall
         self.counters = Counter()
@@ -145,8 +195,9 @@ class Reporter:
         self._failures = 0
         self._backoff = 0
         self._open_until = None
-        self._broken: dict[str, int] = {}
+        self._broken: dict[str, tuple[int, float]] = {}   # channel -> (code, wall time)
         self._alerted: dict[str, float] = {}
+        self._list_backoff = 0
         self.last_error = None
         self._published = ("ok", "")
         self._worker = threading.Thread(target=self._run, name="jarvis-discord-reporter",
@@ -187,7 +238,10 @@ class Reporter:
             return "down", (f"Discord is failing ({error.get('op', '?')}: HTTP "
                             f"{error.get('status')}, code {error.get('code')}); "
                             "retrying with back-off")
-        broken = dict(self._broken)         # status() reads this from the HTTP thread
+        now = self._wall()
+        # status() reads this from the HTTP thread: copy, and skip aged entries.
+        broken = {channel: code for channel, (code, at) in dict(self._broken).items()
+                  if now - at < BROKEN_TTL_S}
         if broken:
             channel, code = next(iter(broken.items()))
             why = {UNKNOWN_CHANNEL: "is gone", MISSING_ACCESS: "is not visible to the bot",
@@ -227,9 +281,10 @@ class Reporter:
         LOG.warning("Discord %s failed (HTTP %s, code %s, %s)", op, facts["status"],
                     facts["code"], facts["error"])
         code = facts["code"]
-        if channel is not None and code in BROKEN:
-            self._broken[str(channel)] = code
-            if code == MISSING_PERMISSIONS:
+        permanent_create = op == "create_thread" and not _transient(exc)
+        if channel is not None and (code in BROKEN or permanent_create):
+            self._broken[str(channel)] = (code or facts["status"] or 0, self._wall())
+            if code in ALERT_CODES:
                 self._alert(channel, code)
         if _transient(exc):
             self._failures += 1
@@ -276,15 +331,17 @@ class Reporter:
         last = self._alerted.get(str(channel))
         if last is not None and now - last < ALERT_EVERY_S:
             return
-        self._alerted[str(channel)] = now
         dm = self._dm()
         if not dm:
-            return
+            return                       # not stamped: the next failure tries again
+        why = ("the bot cannot see it" if code == MISSING_ACCESS
+               else "the bot is missing a permission there")
         try:
             self.rest.post(dm, content=(
-                f"I can't post in <#{channel}>: the bot is missing a permission there "
-                f"(Discord {code}). Task updates that need you come to this DM until it is "
-                "fixed; the HUD's Discord light shows it too."))
+                f"I can't post in <#{channel}>: {why} (Discord {code}). Task updates that "
+                "need you come to this DM until it is fixed; the HUD's Discord light shows "
+                "it too."))
+            self._alerted[str(channel)] = now   # only once it was actually sent
             self._count("alerts")
         except Exception as exc:
             facts = describe(exc)
@@ -327,8 +384,13 @@ class Reporter:
             if self._dm_channel is None:
                 self._count("undelivered")
                 return True
+            # The DM could not be found just now (the router swallowed why):
+            # retry by reconcile, so a terminal Done/Failed is not lost for want
+            # of a later event.
+            self._count("dm_unavailable")
+            self._schedule_reconcile(self._clock() + RETRY_AFTER_FAILURE)
             return False
-        prefix = f"[{_cap(project.name, 60)} · task {task.id}] "
+        prefix = _clean(f"[{_cap(project.name, 60)} · task {task.id}] ")
         ok, _, _ = self._call(f"dm_{kind}", self.rest.post, dm, content=prefix + content,
                               files=files)
         if ok:
@@ -345,21 +407,19 @@ class Reporter:
             report = report_text(task.report)
             content += "\n" + report
             if report.overflow is not None:
-                files = (("report.txt", report.overflow),)
+                files = (("report.txt", _clean(report.overflow)),)
+        content = _clean(content)
         if thread:
             ok, _message, exc = self._post(kind, thread, content=content, files=files,
                                            ping=kind in ATTENTION)
             if ok:
                 return True
-            code = getattr(exc, "code", None)
             if exc is None or _transient(exc):
                 return False                    # transient: a reconcile retries it
-            if code not in BROKEN:
-                # Discord refused this post for good (a 4xx about the post, not
-                # the place): retrying it on every snapshot would never land.
-                self._count("refused")
-                return True
-            if code == UNKNOWN_CHANNEL:
+            # Refused for good — the place is gone, locked or forbidden, or the
+            # post itself was refused: an attention milestone still reaches the
+            # owner through the DM; a quiet one is settled.
+            if getattr(exc, "code", None) == UNKNOWN_CHANNEL:
                 self._gone(task, sidecar)
         return self._to_dm(kind, content, files, task, project)
 
@@ -377,8 +437,15 @@ class Reporter:
     # -- sidecar -----------------------------------------------------------
 
     def _save(self, task_id, sidecar):
-        _write_bytes(sidecar_path(self.stores, task_id),
-                     json.dumps(sidecar, sort_keys=True).encode("utf-8"))
+        """Best-effort: a sidecar that cannot be written costs at worst a late
+        repeat, never the post that was already made."""
+        try:
+            _write_bytes(sidecar_path(self.stores, task_id),
+                         json.dumps(sidecar, sort_keys=True).encode("utf-8"))
+        except (StoreError, OSError, TypeError, ValueError) as exc:
+            self._count("sidecar_errors")
+            LOG.warning("Discord sidecar for task %s not saved (%s)", task_id,
+                        type(exc).__name__)
 
     # -- the thread and its card ------------------------------------------
 
@@ -393,8 +460,9 @@ class Reporter:
         """-> (thread id or None, deferred). `deferred` means a create failed in
         a way worth retrying (transport, 429, 5xx, breaker open): the caller
         holds its milestones for the reconcile rather than sending them to the
-        DM. A create Discord refused for good (10003/50001/50013) is not
-        deferred — that is the safety net's case."""
+        DM. Any other refusal — 10003/50001/50013, 50024 wrong channel type,
+        30033 too many threads, a bare 404 — is for good, and that is the
+        safety net's case."""
         if sidecar.get("thread_gone"):
             return None, False
         current = self.stores.tasks.get(task.id)
@@ -409,21 +477,28 @@ class Reporter:
         self._pace()
         if self._stop.is_set():
             return None, True
-        name = _cap(f"{task.id} · {' '.join(task.brief.split())}", 100)
+        name = _cap(_clean(f"{task.id} · {' '.join(task.brief.split())}"), 100)
         channel = project.discord_channel_id
         ok, thread, exc = self._call("create_thread", self.rest.create_thread, channel, name,
                                      channel=channel)
         if not ok:
-            return None, exc is None or getattr(exc, "code", None) not in BROKEN
+            return None, exc is None or _transient(exc)
         self._count("threads")
+        # The id goes on the task record first (write-once: TaskStore.save never
+        # wipes it), then the sidecar, best-effort — so the narrowest possible
+        # window loses a thread Discord already made. Reload under the store
+        # lock; never overwrite newer runner status.
+        try:
+            with _lock:
+                current = self.stores.tasks.get(task.id)
+                if current is not None and not current.discord_thread_id:
+                    current.discord_thread_id = thread
+                    self.stores.tasks.save(current)
+        except StoreError as exc:
+            LOG.warning("Discord thread id not saved on task %s (%s)", task.id,
+                        type(exc).__name__)
         sidecar["discord_thread_id"] = thread
         self._save(task.id, sidecar)
-        # Reload while holding the store lock; never overwrite newer runner status.
-        with _lock:
-            current = self.stores.tasks.get(task.id)
-            if current is not None and not current.discord_thread_id:
-                current.discord_thread_id = thread
-                self.stores.tasks.save(current)
         self._call("add_owner", self.rest.add_owner, thread, channel=thread)
         return thread, False
 
@@ -459,9 +534,16 @@ class Reporter:
     # -- one task ----------------------------------------------------------
 
     def _deliver(self, task: Task, project, sidecar: dict, *, reconcile=False, questions=None):
+        task = _scrubbed(task)
+        project = copy.copy(project)
+        project.name = _clean(project.name)
+        if questions:
+            questions = [{**q, "text": _clean(q.get("text")),
+                          "options": [_clean(o) for o in q.get("options") or []]}
+                         for q in questions if isinstance(q, dict)]
         phase = task.status.phase
         channelled = bool(project.discord_channel_id)
-        if reconcile and "phase" not in sidecar:
+        if reconcile and "phase" not in sidecar and self._preexisting(task):
             # Never seen by this poster: record where it stands, post nothing
             # to the DM. An active task with a channel gets its thread and card.
             # A task still in intake is not under way: it gets its "Started"
@@ -481,7 +563,7 @@ class Reporter:
                                             create=phase not in TERMINAL_STATES)
             if thread and not sidecar.get("seeded") and not sidecar.get("started_message_id"):
                 ok, message_id, exc = self._post("started", thread,
-                                                 content=milestone("started", task))
+                                                 content=_clean(milestone("started", task)))
                 if ok:
                     sidecar["started_message_id"] = message_id
                     self._save(task.id, sidecar)
@@ -530,6 +612,12 @@ class Reporter:
                 sidecar["phase"] = phase.value
                 sidecar.pop("partial", None)
                 sidecar.pop("partial_for", None)
+                if phase in TERMINAL_STATES:
+                    # Nothing more will be posted there: a broken-thread entry
+                    # for it must not hold the light amber.
+                    for place in (thread, sidecar.get("discord_thread_id")):
+                        if place and self._broken.pop(str(place), None) is not None:
+                            self._changed()
         question = task.status.open_question
         if phase == TaskState.CLARIFYING and question and question != sidecar.get("open_question"):
             options = next((q.options for q in task.spec.questions
@@ -571,25 +659,52 @@ class Reporter:
         finally:
             self.reconciling = False
 
+    def _preexisting(self, task) -> bool:
+        """Created before this poster started (so it may be seeded silently)."""
+        from datetime import datetime
+        created = _created(task)
+        try:
+            started = datetime.fromisoformat(self.started_at)
+        except (TypeError, ValueError):
+            return True
+        return created is not None and created < started
+
     def _reconcile_tasks(self):
         self._reconcile_at = None
         self._count("reconciles")
         try:
-            tasks = self.stores.tasks.list()
-        except StoreError as exc:
+            ids = self.stores.tasks.ids()
+        except (StoreError, OSError) as exc:
+            # Keep taking live events; try the pass again with back-off.
+            delay = min(RETRY_AFTER_FAILURE * (2 ** self._list_backoff), LIST_BACKOFF_MAX_S)
+            self._list_backoff += 1
+            self._schedule_reconcile(self._clock() + delay)
             LOG.warning("Discord reconcile could not list tasks (%s)", type(exc).__name__)
             return
-        for task in tasks:
+        self._list_backoff = 0
+        for task_id in ids:
             if self._stop.is_set() or self._closing or self.breaker_open():
                 if self.breaker_open():
                     self._reconcile_at = self._open_until
                 return
             try:
+                task = self.stores.tasks.get(task_id)
+            except StoreError as exc:
+                # One unreadable record never stops the pass (or the breaker
+                # from closing behind it).
+                self._count("unreadable_tasks")
+                LOG.warning("Discord reconcile skipped unreadable task %s (%s)", task_id,
+                            type(exc).__name__)
+                continue
+            if task is None:
+                continue
+            try:
                 project = self.stores.projects.get(task.project_id)
                 if project is None:
                     continue
                 sidecar = read_sidecar(self.stores, task.id)
-                if task.state in TERMINAL_STATES and "phase" not in sidecar:
+                if (task.state in TERMINAL_STATES and "phase" not in sidecar
+                        and self._preexisting(task)):
                     # Never backfilled: record it so it stays quiet for good.
                     sidecar.update(seeded=True, phase=task.status.phase.value,
                                    open_question=task.status.open_question)
@@ -668,10 +783,11 @@ class Reporter:
                         # reconcile, not the event stream, catches up.
                         self._dropped_seen = dropped
                         self._schedule_reconcile(self._clock())
-                    if self._open_until is not None:
-                        # The breaker tripped and has not closed: whatever this
-                        # event says is on disk, and the post-back-off attempt
-                        # is always a reconcile, never this one event.
+                    if self.breaker_open():
+                        # Whatever this event says is on disk; the reconcile at
+                        # the end of the back-off catches up. Once the back-off
+                        # has run out, events are handled again whether or not
+                        # that reconcile could finish.
                         self._schedule_reconcile(self._open_until)
                     elif self._closing and self._late():
                         pass

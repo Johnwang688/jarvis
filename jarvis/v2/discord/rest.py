@@ -12,11 +12,12 @@ is reported by exception class only, and an HTTP failure by status and
 Discord's own message, with every secret the call used redacted from it.
 Callers log the operation name, never the path.
 
-**Rate limits (PR A).** A 429 is slept out here only when Discord asks for
-at most `MAX_SLEEP_S` (10 s), and only `MAX_RETRIES` times; a longer wait
-raises `DiscordHTTPError(status=429, retry_after=…)` so the caller can defer
-the work rather than hold a worker hostage. The Reporter's circuit breaker
-counts those raises.
+**Rate limits (PR A).** A 429 is slept out here only while the total sleep
+for one call stays within `MAX_SLEEP_S` (10 s), and at most `MAX_RETRIES`
+times; anything more raises `DiscordHTTPError(status=429, retry_after=…)` so
+the caller can defer the work rather than hold a worker hostage. The sleep
+waits on the adapter's close event, so `close()` cuts it short. The
+Reporter's circuit breaker counts those raises.
 
 **Never a DELETE.** This adapter has no delete method of any kind, and a
 test asserts no `DELETE` ever leaves it (decisions D3): channels and threads
@@ -27,7 +28,7 @@ from __future__ import annotations
 import json
 import math
 import re
-import time
+import threading
 
 import httpx
 
@@ -104,10 +105,17 @@ class DiscordRest:
         self._client = (httpx.Client(transport=transport)
                         if isinstance(transport, httpx.BaseTransport) else None)
         self._request = self._client.request if self._client else (transport or httpx.request)
+        self._closed = threading.Event()
 
     def close(self):
+        self._closed.set()          # wakes any 429 wait at once
         if self._client:
             self._client.close()
+
+    def _sleep(self, delay: float) -> None:
+        """A rate-limit wait that `close()` interrupts."""
+        if self._closed.wait(delay):
+            raise DiscordError("Error: Discord adapter closed during a rate-limit wait")
 
     def _api(self, method, path, *, secrets=(), **kwargs):
         token = v1._load_bundle()["bot_token"]
@@ -118,7 +126,7 @@ class DiscordRest:
                 text = text.replace(secret, "[REDACTED]")
             return text
 
-        retries = 0
+        retries, slept = 0, 0.0
         while True:
             try:
                 response = self._request(
@@ -138,13 +146,14 @@ class DiscordRest:
                         raise ValueError("invalid retry delay")
                 except (ValueError, KeyError, TypeError, AttributeError):
                     raise DiscordHTTPError(redact(v1._fail(response)), 429) from None
-                if delay > MAX_SLEEP_S or retries >= MAX_RETRIES:
+                if slept + delay > MAX_SLEEP_S or retries >= MAX_RETRIES:
                     # The caller defers: a worker parked for minutes on one
                     # bucket would hold every other post behind it.
                     raise DiscordHTTPError(redact(v1._fail(response)), 429,
                                            retry_after=delay) from None
                 retries += 1
-                time.sleep(delay)
+                slept += delay
+                self._sleep(delay)
                 continue
             if not 200 <= response.status_code < 300:
                 code = None

@@ -180,6 +180,15 @@ class _Store(Generic[T]):
         return [obj for obj in objects
                 if all(getattr(obj, key) == value for key, value in filters.items())]
 
+    def ids(self) -> list[str]:
+        """Every saved id, without reading a record: a caller that must not
+        stop at one unreadable file (the Discord reconcile) reads each with
+        `get` and skips the ones that raise. `list` stays strict."""
+        pattern = f"*/{self.filename}" if self.filename else "*.json"
+        with _lock:
+            return [p.parent.name if self.filename else p.stem
+                    for p in sorted(self.root.glob(pattern))]
+
     def _write(self, obj: T) -> None:
         path = self.path(obj.id)
         try:

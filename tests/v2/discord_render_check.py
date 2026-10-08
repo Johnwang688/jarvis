@@ -142,18 +142,44 @@ class DiscordChecks(unittest.TestCase):
         self.assertEqual((caught.exception.status, caught.exception.code), (403, 50013))
         # Over 10 s: raise with the wait, sleep nothing — the caller defers.
         self.fake.responses = [httpx.Response(429, json={"retry_after": 30.5})]
-        with patch("jarvis.v2.discord.rest.time.sleep") as sleep:
+        with patch.object(self.rest, "_sleep") as sleep:
             with self.assertRaises(DiscordHTTPError) as caught:
                 self.rest.post("t", "hi")
         sleep.assert_not_called()
         self.assertEqual((caught.exception.status, caught.exception.retry_after), (429, 30.5))
-        # At most 10 s is slept, and only MAX_RETRIES times in a row.
-        self.fake.responses = [httpx.Response(429, json={"retry_after": 10})] * 4
-        with patch("jarvis.v2.discord.rest.time.sleep") as sleep:
+        # At most 10 s is slept *in total* for one call (plan §1), not 10 s a try.
+        self.fake.responses = [httpx.Response(429, json={"retry_after": 4})] * 4
+        with patch.object(self.rest, "_sleep") as sleep:
+            with self.assertRaises(DiscordHTTPError) as caught:
+                self.rest.post("t", "hi")
+        self.assertEqual([call.args for call in sleep.call_args_list], [(4.0,), (4.0,)])
+        self.assertEqual(caught.exception.retry_after, 4.0)
+        self.fake.responses = [httpx.Response(429, json={"retry_after": 10})] * 2
+        with patch.object(self.rest, "_sleep") as sleep:
             with self.assertRaises(DiscordHTTPError):
                 self.rest.post("t", "hi")
-        self.assertEqual(sleep.call_count, 3)
-        self.assertTrue(all(call.args == (10.0,) for call in sleep.call_args_list))
+        self.assertEqual(sleep.call_count, 1)
+
+    def test_a_rate_limit_wait_is_cut_short_by_close(self):
+        rest = DiscordRest(self.fake)
+        self.fake.responses = [httpx.Response(429, json={"retry_after": 9})]
+        failure = {}
+
+        def call():
+            try:
+                rest.post("t", "hi")
+            except DiscordError as exc:
+                failure["exc"] = exc
+        worker = threading.Thread(target=call)
+        started = time.monotonic()
+        worker.start()
+        wait_for(lambda: len(self.fake.calls) == 1)
+        rest.close()
+        worker.join(3)
+        self.assertFalse(worker.is_alive())
+        self.assertLess(time.monotonic() - started, 2)
+        self.assertIn("closed", str(failure["exc"]))
+        self.assertEqual(len(self.fake.calls), 1)
 
     def test_edit_reopens_an_archived_thread_only_when_told_to(self):
         self.rest.edit("t", "m", embed={"title": "x"})
@@ -177,7 +203,7 @@ class DiscordChecks(unittest.TestCase):
     def test_multipart_and_retry_preserve_file(self):
         self.fake.responses = [httpx.Response(429, json={"retry_after": 0.125}),
                                httpx.Response(200, json={"id": "message"})]
-        with patch("jarvis.v2.discord.rest.time.sleep") as sleep:
+        with patch.object(self.rest, "_sleep") as sleep:
             self.assertEqual(self.rest.post("t", "diff", files=(("diff.txt", "λ\n+code"),)), "message")
         sleep.assert_called_once_with(0.125)
         for call in self.fake.calls:
@@ -189,7 +215,7 @@ class DiscordChecks(unittest.TestCase):
 
     def test_retry_header_and_fail_text(self):
         self.fake.responses = [httpx.Response(429, json={}, headers={"Retry-After": "0.25"})]
-        with patch("jarvis.v2.discord.rest.time.sleep") as sleep:
+        with patch.object(self.rest, "_sleep") as sleep:
             self.rest.unarchive("t")
         sleep.assert_called_once_with(0.25)
         for status in (400, 403, 500):
@@ -739,7 +765,10 @@ class DiscordChecks(unittest.TestCase):
             made.append(task)
         self.stores, self.bus = stores, EventBus()
         with patch("jarvis.v2.discord.reporter.CREATE_INTERVAL", 0.3):
-            self.rep = Reporter(stores, self.rest, self.bus, dm_channel=lambda: DM)
+            # These tasks existed before the poster started (the stamp is
+            # seconds-resolution, so the test says so rather than sleeping).
+            self.rep = Reporter(stores, self.rest, self.bus, dm_channel=lambda: DM,
+                                started_at="2999-01-01T00:00:00+00:00")
             self.addCleanup(self.rep.close)
             wait_for(lambda: self.rep.counters["reconciles"] == 1
                      and len([c for c in self.fake.calls if "embeds" in json.dumps(c.get("json", {}))
@@ -846,15 +875,16 @@ class DiscordChecks(unittest.TestCase):
         self.assertEqual(len(self.fake.calls), calls, "the open breaker short-circuits")
         # Past the back-off, the reconcile tries again; failing, it waits 60 s.
         now[0] = 1031.0
+        nudge = {"kind": "task_updated", "task_id": "00000000", "data": {}}  # no such task
         with self.assertLogs("jarvis.v2.discord.reporter", logging.WARNING):
-            self.publish("task_updated", data={})
+            self.bus.publish(dict(nudge))
             wait_for(lambda: self.rep.counters["reconciles"] >= 2)
             self.drained()
         self.assertEqual(self.rep._open_until, 1031.0 + 60)
         # Discord is back: the next reconcile makes the thread and the light goes green.
         self.fake.rules.clear()
         now[0] = 1100.0
-        self.publish("task_updated", data={})
+        self.bus.publish(dict(nudge))
         wait_for(lambda: self.rep.counters["reconciles"] >= 3)
         self.drained()
         self.assertFalse(self.rep.breaker_open())
@@ -930,6 +960,235 @@ class DiscordChecks(unittest.TestCase):
         self.reporter()
         self.bus.close()
         wait_for(lambda: not self.rep._worker.is_alive())
+
+
+    # -- review fixes (PR #6 review) ---------------------------------------
+
+    def trip_breaker(self, now):
+        """Three transient failures on the DM path: the breaker opens."""
+        self.move(TaskState.CLARIFYING, TaskState.BLOCKED)
+        self.drained()
+        for _ in range(3):
+            if self.rep.breaker_open():
+                break
+            self.publish()
+            self.drained()
+        self.assertTrue(self.rep.breaker_open())
+
+    def nudge(self):
+        self.bus.publish({"kind": "task_updated", "task_id": "00000000", "data": {}})
+
+    def test_review1_a_task_created_during_an_outage_still_gets_its_question(self):
+        """Its task_created was dropped while the breaker was open; the
+        reconcile after the back-off must report it, not seed it silently."""
+        now = [1000.0]
+        failing = [True]
+        self.fake.rules.append((lambda m, p: failing[0], lambda: httpx.ConnectError("x")))
+        self.bus = EventBus()
+        with self.assertLogs("jarvis.v2.discord.reporter", logging.WARNING):
+            self.reporter(channel=None, clock=lambda: now[0],
+                          started_at="2000-01-01T00:00:00+00:00")
+            self.trip_breaker(now)
+        other = self.stores.tasks.create(self.project.id, "New work")
+        self.stores.tasks.save(other)
+        self.publish("task_created", task=other)
+        other = self.stores.tasks.transition(other.id, TaskState.CLARIFYING)
+        other.status.open_question = "Which database?"
+        other.spec.questions.append(OpenQuestion("Which database?", True, options=["pg", "sqlite"]))
+        self.stores.tasks.save(other)
+        self.publish(task=other)
+        self.drained()
+        failing[0] = False
+        now[0] = 2000.0
+        self.nudge()
+        wait_for(lambda: any("Which database?" in (c or "") for c in self.contents(DM)))
+        self.drained()
+        question = next(c for c in self.contents(DM) if "Which database?" in c)
+        self.assertIn("Choices: pg / sqlite", question)
+        self.assertNotIn("seeded", self.sidecar(other))
+
+    def test_review2_an_unreadable_task_never_wedges_the_breaker(self):
+        now = [1000.0]
+        failing = [True]
+        self.fake.rules.append((lambda m, p: failing[0], lambda: httpx.ConnectError("x")))
+        self.reporter(channel=None, clock=lambda: now[0])
+        bad = self.stores.tasks.create(self.project.id, "Bad")
+        self.stores.tasks.save(bad)
+        self.stores.tasks.path(bad.id).write_text("{not json")
+        with self.assertLogs("jarvis.v2.discord.reporter", logging.WARNING) as logs:
+            self.trip_breaker(now)
+            failing[0] = False
+            now[0] = 5000.0
+            self.nudge()
+            wait_for(lambda: self.rep.counters["unreadable_tasks"] >= 1)
+            self.drained()
+        self.assertIn(bad.id, "\n".join(logs.output))
+        self.assertIsNone(self.rep._open_until)
+        self.assertEqual(self.rep.status()["state"], "ok")
+        self.move(TaskState.RUNNING, TaskState.FAILED)
+        self.drained()
+        self.assertTrue(any("Failed" in c for c in self.contents(DM)), self.contents(DM))
+
+    def test_review2_events_are_handled_once_the_back_off_has_run_out(self):
+        """Even when the reconcile cannot list tasks at all."""
+        now = [1000.0]
+        failing = [True]
+        self.fake.rules.append((lambda m, p: failing[0], lambda: httpx.ConnectError("x")))
+        self.reporter(channel=None, clock=lambda: now[0])
+        with self.assertLogs("jarvis.v2.discord.reporter", logging.WARNING):
+            self.trip_breaker(now)
+            failing[0] = False
+            now[0] = 5000.0
+            with patch.object(self.stores.tasks, "ids", side_effect=OSError("disk")):
+                self.move(TaskState.RUNNING, TaskState.FAILED)
+                self.drained()
+        self.assertTrue(any("Failed" in c for c in self.contents(DM)), self.contents(DM))
+        self.assertGreater(self.rep._reconcile_at, now[0])      # retried with back-off
+
+    def test_review3_a_permanent_create_refusal_sends_attention_to_the_dm(self):
+        self.fake.rules.append((lambda m, p: p.endswith("/threads"),
+                                lambda: httpx.Response(400, json={"code": 50024, "message": "x"})))
+        self.reporter()
+        with self.assertLogs("jarvis.v2.discord.reporter", logging.WARNING):
+            self.move(TaskState.CLARIFYING, TaskState.BLOCKED)
+            self.drained()
+        self.assertTrue(self.contents(DM)[-1].startswith(f"[Jarvis · task {self.task.id}] Blocked"))
+        self.assertEqual(self.rep.status()["state"], "degraded")
+
+    def test_review3_a_refused_attention_post_falls_back_to_the_dm(self):
+        """A locked thread refuses the post with a plain 403: the owner still
+        hears about it, in the DM."""
+        self.reporter()
+        self.move(TaskState.CLARIFYING)
+        self.drained()
+        thread = self.thread_id()
+        self.fake.rules.append((lambda m, p: p == f"/channels/{thread}/messages",
+                                lambda: httpx.Response(403, json={"message": "locked"})))
+        with self.assertLogs("jarvis.v2.discord.reporter", logging.WARNING):
+            self.move(TaskState.BLOCKED)
+            self.drained()
+        self.assertTrue(self.contents(DM)[-1].startswith(f"[Jarvis · task {self.task.id}] Blocked"))
+        self.assertEqual(self.sidecar()["phase"], "blocked")
+
+    def test_review4_an_unreachable_dm_is_retried_without_a_new_event(self):
+        answer = [None]
+        with patch("jarvis.v2.discord.reporter.RETRY_AFTER_FAILURE", 1.0):
+            self.reporter(channel=None)
+            self.rep._dm_channel = lambda: answer[0]
+            self.move(TaskState.CLARIFYING, TaskState.BLOCKED, TaskState.FAILED)
+            self.drained()
+            self.assertEqual(self.contents(DM), [])
+            self.assertIsNotNone(self.rep._reconcile_at)
+            answer[0] = DM
+            wait_for(lambda: self.contents(DM))
+            self.drained()
+        self.assertTrue(self.contents(DM)[-1].startswith(f"[Jarvis · task {self.task.id}] Failed"))
+
+    def test_review5_a_broken_thread_entry_clears_when_its_task_finishes(self):
+        self.reporter()
+        self.move(TaskState.CLARIFYING)
+        self.drained()
+        thread = self.thread_id()
+        rule = (lambda m, p: p == f"/channels/{thread}/messages",
+                lambda: httpx.Response(403, json={"code": 50013, "message": "x"}))
+        self.fake.rules.append(rule)
+        with self.assertLogs("jarvis.v2.discord.reporter", logging.WARNING):
+            self.move(TaskState.PLANNED, TaskState.RUNNING, TaskState.FAILED)
+            self.drained()
+        self.fake.rules.remove(rule)
+        self.assertEqual(self.rep.status()["state"], "ok")
+
+    def test_review5_a_broken_entry_ages_out(self):
+        wall = [1_000_000.0]
+        self.fake.rules.append((lambda m, p: p.endswith("/threads"),
+                                lambda: httpx.Response(403, json={"code": 50013, "message": "x"})))
+        self.reporter(wall=lambda: wall[0])
+        with self.assertLogs("jarvis.v2.discord.reporter", logging.WARNING):
+            self.move(TaskState.CLARIFYING)
+            self.drained()
+        self.assertEqual(self.rep.status()["state"], "degraded")
+        wall[0] += 3601
+        self.assertEqual(self.rep.status()["state"], "ok")
+
+    def test_review6_nothing_secret_reaches_discord(self):
+        envdir = Path(self.tmp.name) / "envdir"
+        envdir.mkdir()
+        secret = "sk-test-PRA-0123456789abcdef"
+        (envdir / ".env").write_text(f"FAKE_API_KEY={secret}\n")
+        from jarvis.tools import secrets
+        with patch.object(secrets, "_search_dirs", return_value=[envdir]):
+            self.reporter()
+            task = self.stores.tasks.get(self.task.id)
+            task.brief = f"deploy with {secret}"
+            self.stores.tasks.save(task)
+            task = self.move(TaskState.CLARIFYING)
+            question = OpenQuestion(f"Use {secret}?", True, options=[secret, "no"])
+            task.spec.questions = [question]
+            task.status.open_question = question.text
+            task.status.last_file = f"/tmp/{secret}"
+            self.stores.tasks.save(task)
+            self.publish(task=task)
+            self.drained()
+            self.task = self.stores.tasks.get(self.task.id)
+            self.task.spec.questions[0].answer = "no"
+            self.task.status.open_question = None
+            self.task.report = Report(done=[f"used {secret} " + "x" * 3000], verified=secret)
+            self.stores.tasks.save(self.task)
+            self.move(TaskState.PLANNED, TaskState.RUNNING, TaskState.VERIFYING, TaskState.DONE)
+            self.drained()
+            self.rep.close(flush=True)
+        wire = repr(self.fake.calls)
+        self.assertNotIn(secret, wire)
+        self.assertIn("redacted", wire)
+        self.assertTrue(any(c.get("files") for c in self.posts()), "the report overflow was attached")
+
+    def test_review8_missing_access_alerts_too_and_a_failed_alert_is_retried(self):
+        dm_posts = [0]
+
+        def dm_rule(method, path):
+            if path != f"/channels/{DM}/messages":
+                return False
+            dm_posts[0] += 1
+            return dm_posts[0] == 1                        # the first alert fails
+        self.fake.rules.append((dm_rule, lambda: httpx.Response(500, json={"message": "x"})))
+        self.fake.rules.append((lambda m, p: p.endswith("/threads"),
+                                lambda: httpx.Response(403, json={"code": 50001, "message": "x"})))
+        with patch("jarvis.v2.discord.reporter.RETRY_AFTER_FAILURE", 60):
+            self.reporter()
+            with self.assertLogs("jarvis.v2.discord.reporter", logging.WARNING):
+                self.move(TaskState.CLARIFYING)
+                self.drained()
+                self.assertEqual(self.rep.counters["alerts"], 0)
+                self.move(TaskState.BLOCKED)
+                self.drained()
+                self.assertEqual(self.rep.counters["alerts"], 1)
+                self.move(TaskState.RUNNING)                 # still broken: no third try
+                self.drained()
+        alerts = [c for c in self.contents(DM) if "<#project-channel>" in c]
+        # The first was refused (500) and not stamped, so the next failure
+        # sent it again; after that one landed, 24 h of quiet.
+        self.assertEqual(len(alerts), 2, self.contents(DM))
+        self.assertEqual(self.rep.counters["alerts"], 1)
+        self.assertIn("cannot see it", alerts[0])
+        self.assertIn("50001", alerts[0])
+
+    def test_review10_the_thread_id_survives_a_failed_sidecar_write(self):
+        self.reporter()
+        real = reporter_mod._write_bytes
+
+        def fail_sidecar(path, data):
+            if path.name == "discord.json":
+                raise OSError("disk full")
+            return real(path, data)
+        with patch.object(reporter_mod, "_write_bytes", side_effect=fail_sidecar), \
+                self.assertLogs("jarvis.v2.discord.reporter", logging.WARNING):
+            self.move(TaskState.CLARIFYING)
+            self.drained()
+            thread = self.stores.tasks.get(self.task.id).discord_thread_id
+            self.assertIsNotNone(thread)
+            self.move(TaskState.PLANNED)
+            self.drained()
+        self.assertEqual(len(self.creates()), 1)
 
 
 if __name__ == "__main__":
