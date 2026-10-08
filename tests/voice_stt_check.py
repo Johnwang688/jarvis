@@ -10,7 +10,10 @@ no key.
 """
 from __future__ import annotations
 
+import json
+import os
 from pathlib import Path
+import subprocess
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -91,15 +94,19 @@ def main():
     ok("secret-looking body" not in message and "Provider returned" not in message,
        "and never quotes a response body")
 
-    text, fake, exc = run({"a/primary": llm.LLMError("HTTP 401: bad key"),
+    text, fake, exc = run({"a/primary": llm.LLMError("HTTP 401: body-quoted-401 sk-or-v1-fake"),
                            "b/fallback": "unreached"})
     ok(isinstance(exc, voice.STTUnavailable) and "key" in str(exc),
        "a refused key stops at once with a sentence about the key")
+    ok("body-quoted-401" not in str(exc) and "sk-or-v1" not in str(exc),
+       f"and the 401's response body is not quoted: {str(exc)!r}")
     ok([c[0] for c in fake.calls] == ["a/primary"],
        "and spends no second request on a fallback that would be refused too")
 
-    text, fake, exc = run({"a/primary": llm.LLMError("HTTP 402: no credit"), "b/fallback": "x"})
+    text, fake, exc = run({"a/primary": llm.LLMError("HTTP 402: body-quoted-402"), "b/fallback": "x"})
     ok([c[0] for c in fake.calls] == ["a/primary"], "nor on a 402")
+    ok(isinstance(exc, voice.STTUnavailable) and "body-quoted-402" not in str(exc),
+       f"and the 402's response body is not quoted either: {str(exc)!r}")
 
     text, fake, exc = run({"a/primary": "once"}, fallback=("a/primary",))
     ok([c[0] for c in fake.calls] == ["a/primary"], "a fallback equal to the primary is not tried twice")
@@ -107,8 +114,23 @@ def main():
     text, fake, exc = run({"a/primary": provider_404}, fallback=())
     ok(isinstance(exc, voice.STTUnavailable), "an empty fallback list still fails cleanly")
 
-    ok(config.STT_FALLBACK_MODELS and config.STT_MODEL not in config.STT_FALLBACK_MODELS,
-       "the shipped default has a fallback that is a different model")
+    # The *shipped* default, read in a fresh interpreter with both variables
+    # removed: the owner's environment (an empty JARVIS_STT_FALLBACK is a
+    # legitimate way to disable it) must not decide what this asserts.
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("JARVIS_STT_FALLBACK", "JARVIS_STT_MODEL")}
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
+    shipped = subprocess.run(
+        [sys.executable, "-c",
+         "import json; from jarvis import config; "
+         "print(json.dumps([config.STT_MODEL, config.STT_FALLBACK_MODELS]))"],
+        env=env, capture_output=True, text=True, timeout=60)
+    try:
+        primary, fallbacks = json.loads(shipped.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        primary, fallbacks = None, []
+    ok(bool(fallbacks) and primary not in fallbacks,
+       f"the shipped default has a fallback that is a different model: {primary!r} {fallbacks!r}")
 
     try:
         voice.stt(b"", mime="audio/wav")

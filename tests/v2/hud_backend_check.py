@@ -277,7 +277,13 @@ class Backend(unittest.TestCase):
 
     def test_listeners_static_and_preview_origin(self):
         for port in (self.daemon.port, self.daemon.face_port):
-            self.assertEqual(self.request("GET", "/status", port=port)["version"], 2)
+            status = self.request("GET", "/status", port=port)
+            self.assertEqual(status["version"], 2)
+            # The HUD builds preview URLs from this; a constant 8403 sent the
+            # HUD suite to the owner's live daemon (2026-10-08). After start it
+            # is the bound port, never the ephemeral 0 it was asked for.
+            self.assertEqual(status["workshop_port"], self.daemon.workshop_port)
+            self.assertNotEqual(status["workshop_port"], 0)
             # Either the built HUD (title pinned for FORBIDDEN_TITLES) or, with no
         # build present, the placeholder naming hud/dist.
         page = self.request("GET", "/", port=port)

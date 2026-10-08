@@ -89,9 +89,11 @@ KINDS = frozenset({"user_message", "turn_finished", "question", "question_answer
                    "thread_moved", "thread_archived", "thread_restored", "thread_deleted",
                    "proposal_reply"})
 # Records of a turn the walk composes into posts; anything else is skipped.
+# A provider's gate consultations are logged as gate_requested/gate_resolved
+# (daemon.GATE_KINDS, 2026-10-08); they belong to the turn but post nothing.
 TURN_KINDS = frozenset({"turn_started", "text", "thinking", "tool_started", "tool_finished",
-                        "usage", "error", "question", "plan_updated", "approval_requested",
-                        "approval_resolved", "reviewer_declined", "turn_finished"})
+                        "usage", "error", "question", "plan_updated", "gate_requested",
+                        "gate_resolved", "reviewer_declined", "turn_finished"})
 MESSAGE_KINDS = frozenset({"user", "text"})
 QUEUED_TEXT = "I'll take this next."
 FULL_TEXT = ("Three messages are already waiting on this turn; send this one again once "

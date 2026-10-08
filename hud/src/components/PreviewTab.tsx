@@ -21,14 +21,24 @@ export function PreviewTab(props: { projectId: string | null }) {
   // another port) loaded the owner's live daemon's preview for the fixture
   // project `p1`, and the live log filled with 400s.
   const [workshopPort, setWorkshopPort] = useState<number | null>(null);
+  // A failed /status is *not* "a daemon too old to say": falling back to 8403
+  // there would aim the preview at the live port again. It retries, and the
+  // button stays disabled until the daemon has answered.
   useEffect(() => {
     let live = true;
-    api
-      .status()
-      .then((status) => live && setWorkshopPort(workshopPortFrom(status)))
-      .catch(() => live && setWorkshopPort(workshopPortFrom(null)));
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const ask = (attempt: number) => {
+      api
+        .status()
+        .then((status) => live && setWorkshopPort(workshopPortFrom(status)))
+        .catch(() => {
+          if (live && attempt < 5) timer = setTimeout(() => ask(attempt + 1), 1000 * (attempt + 1));
+        });
+    };
+    ask(0);
     return () => {
       live = false;
+      if (timer) clearTimeout(timer);
     };
   }, []);
 
