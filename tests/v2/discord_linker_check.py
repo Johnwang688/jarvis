@@ -210,6 +210,13 @@ class Harness(unittest.TestCase):
             self.linker.start()
         return self.linker
 
+    @staticmethod
+    def serve(linker):
+        """Start the workers without the start-up crowding pass, so a test's
+        own `check_crowding()` is the only one (no race with the worker)."""
+        linker._crowding_due = False
+        return linker.start()
+
     def published(self, kind=None):
         out = []
         while True:
@@ -562,7 +569,7 @@ class LifecycleChecks(Harness):
 
     def test_an_api_rename_asks_first_and_sends_nothing_before_yes(self):
         linker, channel = self.linked()
-        linker.start()
+        self.serve(linker)
         linker._handle(self.rename("Homework", "api"))
         wait_for(lambda: self.approvals.pending())
         request = self.approvals.pending()[0]
@@ -582,7 +589,7 @@ class LifecycleChecks(Harness):
 
     def test_a_denied_or_unanswered_rename_does_nothing(self):
         linker, channel = self.linked()
-        linker.start()
+        self.serve(linker)
         linker._handle(self.rename("Homework", "api"))
         wait_for(lambda: self.approvals.pending())
         self.approvals.resolve(self.approvals.pending()[0].req_id, Decision.DENY)
@@ -685,7 +692,7 @@ class CrowdingChecks(Harness):
         self.crowd(41)
         self.assertEqual(linker.check_crowding(), [])
         self.crowd(1, first=850000000000000000)
-        linker.start()
+        self.serve(linker)
         self.assertEqual(linker.check_crowding(), ["crowded"])
         self.assertEqual(linker.check_crowding(), [], "never asked twice at once")
         wait_for(lambda: self.approvals.pending())
@@ -708,7 +715,7 @@ class CrowdingChecks(Harness):
         self.configure()
         linker = self.make()
         self.crowd(45, parent=ARCHIVE)
-        linker.start()
+        self.serve(linker)
         self.assertEqual(linker.check_crowding(), ["archive_full"])
         wait_for(lambda: self.approvals.pending())
         request = self.approvals.pending()[0]
@@ -737,7 +744,7 @@ class CrowdingChecks(Harness):
         school = linker.create(self.school.id)["channel_id"]
         self.idle(self.stores.projects.get(self.school.id))
         self.crowd(44)
-        linker.start()
+        self.serve(linker)
         self.assertEqual(linker.check_crowding(), ["crowded"])
         wait_for(lambda: self.approvals.pending())
         self.approvals.resolve(self.approvals.pending()[0].req_id, Decision.DENY)
