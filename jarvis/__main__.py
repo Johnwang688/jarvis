@@ -376,6 +376,12 @@ def cmd_daemon2(args) -> int:
     return daemon.main()
 
 
+def cmd_discord(args) -> int:
+    from .v2.discord import commands
+
+    return commands.main("sync" if args.sync else "check")
+
+
 def cmd_skills(args) -> int:
     from .v2 import skills_link
 
@@ -857,6 +863,16 @@ def main() -> int:
     hud.set_defaults(func=cmd_hud)
 
     sub.add_parser("daemon2", help="v2 daemon and local API").set_defaults(func=cmd_daemon2)
+
+    discord = sub.add_parser("discord", help="v2 Discord surface (human-only)")
+    discord_sub = discord.add_subparsers(dest="action", required=True)
+    slash = discord_sub.add_parser("commands", help="check or register the slash commands")
+    mode = slash.add_mutually_exclusive_group()
+    mode.add_argument("--check", action="store_true",
+                      help="compare the registered commands with the code (default)")
+    mode.add_argument("--sync", action="store_true",
+                      help="register them with one bulk overwrite if they differ")
+    slash.set_defaults(func=cmd_discord)
 
     route = sub.add_parser("route", help="show or configure v2 provider routing")
     route.add_argument("action", nargs="?", choices=["set", "models"])

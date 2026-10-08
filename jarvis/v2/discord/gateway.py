@@ -9,40 +9,56 @@ because every one of those rules was written after something went wrong:
   owner rule is not re-implemented here: this module asks v1's function about
   the same message with the mention supplied, so there stays exactly one copy
   of "who may trigger an agent".
-* **A transcription can never resolve an authorization.** A voice note reaches
-  `router.classify` with `spoken=True`, which already refuses to make a verb of
-  it, and `_handle` additionally never reaches the approval parser on a spoken
-  turn. A mishearing must not become a yes.
+* **A transcription can never resolve an authorization, or answer a
+  question.** A voice note reaches `router.classify` with `spoken=True`, which
+  already refuses to make a verb of it, and `_handle` additionally never
+  reaches the approval parser — or `_answer` — on a spoken turn. A mishearing
+  must not become a yes (decisions D7, S-2).
 * **An answer counts only where the question was asked.** v1 scoped that to the
   DM channel; §11.2 applies it to threads. The channel an approval was posted
   to is recorded here under the request id, with the same one-shot lifetime as
   the request: a code typed in another thread, in the project channel, in a DM
-  or in a guild channel Jarvis does not own resolves nothing and says so.
+  or in a guild channel Jarvis does not own resolves nothing and says so. The
+  Approve/Deny buttons (S1) are held tighter still: the press must come from
+  the very message the approval was posted as.
 * **Two open questions and a bare "yes" is a guess**, so it asks for the code.
   Anything that is not a clear answer resolves nothing.
+
+S1 adds slash commands (`interactions.py`). There is still one implementation
+of every verb: each takes a `Reply` sink instead of a channel id, so the typed
+keyword path (`ChannelReply`) and the slash path (`InteractionReply`) share it.
+Keywords keep working for one release (decisions S-3) and every keyword reply
+ends with a nudge toward its slash command.
 
 Nothing here decides permissions. The broker (§6 layer 5) owns that; this is
 one surface it can ask through, and it denies on every failure path already.
 """
 from __future__ import annotations
 
+import json
 import logging
+from pathlib import Path
 import queue
 import re
 import threading
 import time
+from typing import Protocol
 
 from jarvis import discord_gateway as v1gw
+from jarvis import permissions as v1permissions
 from jarvis.discord_approvals import _parse as _parse_answer
 from jarvis.tools import discord as v1tools
 
+from ..approvals import v1_request
+from ..commands import open_questions
 from ..control import ControlError
 from ..model import TERMINAL_STATES, ProviderName, Role
 from ..provider import Decision, UserMessage
 from ..router import (FastPath, Incoming, NeedsProject, NewTask, Steer, Verb,
                       classify)
-from ..stores import StoreError
-from .render import _cap, approval_text, status_embed
+from ..stores import StoreError, _write_bytes
+from .commands import SyncResult
+from .render import _cap, approval_components, approval_text, status_embed
 
 LOG = logging.getLogger(__name__)
 
@@ -55,6 +71,11 @@ APPROVAL_KINDS = frozenset({"approval_requested", "approval_resolved"})
 _NOT_AN_ANSWER = frozenset({"cancel", "stop"})
 _IN_PROJECT = re.compile(r"^in\s+([^:\n]{1,60}):\s*(.+)$", re.I | re.S)
 _RESUME = re.compile(r"^(\S+)(?:\s+on\s+(\S+))?$", re.I)
+# The slash command each typed keyword becomes (S1 transition, decisions S-3).
+_SLASH = {"yes": "/yes", "allow": "/yes", "no": "/no", "deny": "/no", "always": "/always",
+          "steer": "/steer", "redirect": "/steer", "cancel": "/cancel", "status": "/status",
+          "tasks": "/status", "projects": "/project list", "resume": "/resume",
+          "task": "/task"}
 
 
 def should_respond(message: dict, bot_id: str, owner_id: str, *, owned: bool = False) -> bool:
@@ -71,6 +92,81 @@ def should_respond(message: dict, bot_id: str, owner_id: str, *, owned: bool = F
     return v1gw.should_respond(message, bot_id, owner_id)
 
 
+def clean_code(code) -> str:
+    """An owner-typed approval code, safe to echo: lowercase, no markup, short."""
+    return re.sub(r"[^a-z0-9]", "", str(code or "").lower())[:8]
+
+
+# -- reply sinks --------------------------------------------------------------
+
+
+class Reply(Protocol):
+    """Where a verb's answer goes. One implementation per verb, two sinks."""
+    channel_id: str
+
+    def send(self, content=None, *, embed=None, files=(), components=None,
+             ephemeral=False): ...
+
+    def refuse(self, text: str) -> None:
+        """A refusal: private on an interaction, a plain post in a channel."""
+
+    def defer(self, *, ephemeral: bool = False) -> None:
+        """Called before any store write or control call (the 3-second rule)."""
+
+
+class ChannelReply:
+    """The message path: every answer is an ordinary bot post in the channel."""
+
+    def __init__(self, surface, channel_id):
+        self.surface = surface
+        self.channel_id = str(channel_id)
+
+    def send(self, content=None, *, embed=None, files=(), components=None, ephemeral=False):
+        return self.surface._post(self.channel_id, content, files=files, embed=embed,
+                                  components=components)
+
+    def refuse(self, text):
+        self.send(text)
+
+    def defer(self, *, ephemeral=False):
+        pass
+
+    def finish(self):
+        pass
+
+
+class NudgingReply:
+    """A keyword reply that ends with its slash command (decisions S-3)."""
+
+    def __init__(self, inner, slash: str):
+        self.inner = inner
+        self.channel_id = inner.channel_id
+        self.note = f"(next time: `{slash}`)"
+
+    def _nudge(self, content):
+        if content is None:
+            return self.note
+        return f"{content}\n{self.note}"
+
+    def send(self, content=None, *, embed=None, files=(), components=None, ephemeral=False):
+        if content is None and files and embed is None:
+            return self.inner.send(None, files=files, components=components)
+        return self.inner.send(self._nudge(content), embed=embed, files=files,
+                               components=components, ephemeral=ephemeral)
+
+    def refuse(self, text):
+        self.inner.refuse(self._nudge(text))
+
+    def defer(self, *, ephemeral=False):
+        self.inner.defer(ephemeral=ephemeral)
+
+    def finish(self):
+        getattr(self.inner, "finish", lambda: None)()
+
+
+# -- the socket ---------------------------------------------------------------
+
+
 class _V2Listener(v1gw.GatewayListener):
     """v1's socket (HELLO/IDENTIFY/heartbeat/4014) with v2's dispatch.
 
@@ -80,11 +176,21 @@ class _V2Listener(v1gw.GatewayListener):
     `_serve` — including the 4014 "intents are off" stop, which must never turn
     into a retry loop — is inherited unchanged. Proposed to v1 as a `dispatch`
     hook in WP10b-notes.md, which would delete this override entirely.
+
+    S1: READY also carries the application id (the command sync and the
+    interaction gate both need it), and INTERACTION_CREATE — which needs no
+    intent — goes to a worker thread at once, because an interaction has three
+    seconds to be answered and the socket loop must never wait on one. v1's
+    listener ignores INTERACTION_CREATE, so a stray v1 process cannot
+    double-handle a command.
     """
 
-    def __init__(self, handler, announce=print):
+    def __init__(self, handler, announce=print, *, on_interaction=None, on_ready=None):
         super().__init__(run_turn=lambda *_a, **_k: "", announce=announce)
         self._handler = handler
+        self.application_id = ""
+        self.on_interaction = on_interaction
+        self.on_ready = on_ready
 
     def _session(self, ws) -> None:
         import websocket
@@ -117,11 +223,20 @@ class _V2Listener(v1gw.GatewayListener):
                 return
             elif kind == "READY":
                 self.bot_id = str(data["user"]["id"])
+                application = (data.get("application") or {}).get("id")
+                if application:
+                    self.application_id = str(application)
                 self.announce(f"[discord] listening as {data['user'].get('username')} "
                               f"(replies only to the owner)")
+                if self.on_ready is not None:
+                    threading.Thread(target=self.on_ready, args=(self,), daemon=True,
+                                     name="jarvis-discord-ready").start()
             elif kind == "MESSAGE_CREATE":
                 threading.Thread(target=self._handler,
                                  args=(data, self.bot_id, self.owner_id), daemon=True).start()
+            elif kind == "INTERACTION_CREATE" and self.on_interaction is not None:
+                threading.Thread(target=self.on_interaction, args=(data,), daemon=True,
+                                 name="jarvis-discord-interaction").start()
 
 
 class DiscordRouter:
@@ -129,7 +244,10 @@ class DiscordRouter:
 
     def __init__(self, daemon, stores, router, approvals, control, rest,
                  listener_factory=None, *, announce=None, dm_channel=None,
-                 turn_timeout_s: float = TURN_TIMEOUT_S):
+                 turn_timeout_s: float = TURN_TIMEOUT_S, sync_commands: bool = True,
+                 clock=time.monotonic, approval_posts_path=None):
+        from .interactions import InteractionRouter
+
         self.daemon = daemon
         self.stores = stores
         self.router = router
@@ -138,16 +256,37 @@ class DiscordRouter:
         self.rest = rest
         self.bot_id = ""
         self.owner_id = ""
+        self.application_id = ""
+        # PR B1 sets this from `jarvis auth discord-guild`; the interaction gate
+        # already refuses a mismatch once it is set.
+        self.guild_id: str | None = None
         self.turn_timeout_s = turn_timeout_s
+        self.sync_commands = sync_commands
+        self.commands = SyncResult()
+        self._synced = False
         self._announce = announce or (lambda text: LOG.info("%s", text))
         self._dm_channel = dm_channel or v1tools.owner_dm_channel
         self._dm_cache = None
         self._lock = threading.RLock()
         self._approval_channels: dict[str, str] = {}
+        # req_id -> (channel, message id, code) of the post carrying the buttons.
+        self._approval_messages: dict[str, tuple[str, str, str]] = {}
+        # The same map on disk, so a restart can strip the buttons of posts
+        # whose requests died with the previous process (the broker denies
+        # them all at shutdown). Beside the stores, never the owner's real
+        # data dir unless the stores are.
+        self._posts_path = Path(approval_posts_path) if approval_posts_path else \
+            Path(stores.root) / "discord" / "approval-posts.json"
+        self._stale_worker = None
         self._answered_here: set[str] = set()
         self._chat_threads: dict[str, str] = {}
+        self.interactions = InteractionRouter(self, clock=clock)
         factory = listener_factory or (lambda handler: _V2Listener(handler, self._announce))
         self.listener = factory(self.handle)
+        # Attributes rather than constructor arguments, so any listener
+        # (including a test's) is wired the same way.
+        self.listener.on_interaction = self.handle_interaction
+        self.listener.on_ready = self._ready
         self._stop = threading.Event()
         self._subscription = daemon.bus.subscribe(lambda r: r.get("kind") in APPROVAL_KINDS)
         self._worker = threading.Thread(target=self._watch, name="jarvis-discord-approvals",
@@ -159,6 +298,38 @@ class DiscordRouter:
     def start(self) -> None:
         self.listener.start()
         self.owner_id = str(getattr(self.listener, "owner_id", "") or self.owner_id)
+        self._stale_worker = threading.Thread(target=self._strip_stale, daemon=True,
+                                              name="jarvis-discord-stale-buttons")
+        self._stale_worker.start()
+
+    def _strip_stale(self) -> None:
+        """Every approval post the last process left open loses its buttons.
+        Their requests cannot be answered any more (a press is refused either
+        way); this just stops a dead button from looking live."""
+        try:
+            stale = json.loads(self._posts_path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return
+        except (OSError, ValueError) as exc:
+            LOG.warning("Discord approval-post map unreadable (%s)", type(exc).__name__)
+            stale = {}
+        if not isinstance(stale, dict):
+            stale = {}
+        for req_id, row in stale.items():
+            with self._lock:
+                if req_id in self._approval_messages:   # one of ours, posted since
+                    continue
+            if isinstance(row, list) and len(row) == 3 and all(isinstance(x, str) for x in row):
+                self._strip_buttons(row[0], row[1])
+        self._save_posts()
+
+    def _save_posts(self) -> None:
+        with self._lock:
+            rows = {req_id: list(row) for req_id, row in self._approval_messages.items()}
+            try:
+                _write_bytes(self._posts_path, json.dumps(rows).encode("utf-8"))
+            except (StoreError, OSError) as exc:
+                LOG.warning("Discord approval-post map not saved (%s)", type(exc).__name__)
 
     def stop(self) -> None:
         if self._stop.is_set():
@@ -171,6 +342,30 @@ class DiscordRouter:
         except Exception:
             LOG.warning("Discord listener did not stop cleanly")
         self._worker.join(timeout=2)
+        if self._stale_worker is not None:
+            self._stale_worker.join(timeout=2)
+
+    def _ready(self, listener) -> None:
+        """First READY: remember who we are, then sync the commands once."""
+        self.bot_id = str(getattr(listener, "bot_id", "") or self.bot_id)
+        self.application_id = str(getattr(listener, "application_id", "") or self.application_id)
+        self.owner_id = str(getattr(listener, "owner_id", "") or self.owner_id)
+        with self._lock:
+            if self._synced or not self.sync_commands or not self.application_id:
+                return
+            self._synced = True
+        from . import commands
+
+        self.commands = commands.sync(self.rest, self.application_id)
+        self._announce(self.commands.line())
+
+    def status(self) -> dict:
+        """For `GET /discord`. Holds no token, no path and no payload."""
+        return {"connected": bool(self.application_id) and not self._stop.is_set(),
+                "commands": self.commands.to_json()}
+
+    def handle_interaction(self, interaction) -> None:
+        self.interactions.handle(interaction)
 
     # -- placement (§11.1) -------------------------------------------------
 
@@ -198,6 +393,16 @@ class DiscordRouter:
             return "archived", projects[0], None
         return "other", None, None
 
+    def _remember_dm(self, channel_id) -> None:
+        with self._lock:
+            self._dm_cache = str(channel_id)
+
+    @staticmethod
+    def archived_text(project) -> str:
+        return _cap(f"Project {project.name} is archived, so I won't open, start or steer "
+                    "anything here. Restore it from the HUD's Archive view to work in it "
+                    "again.", MAX_DISCORD_CHARS)
+
     # -- the message path --------------------------------------------------
 
     def handle(self, message, bot_id=None, owner_id=None) -> None:
@@ -217,17 +422,14 @@ class DiscordRouter:
         if not should_respond(message, bot_id, owner_id,
                               owned=where in ("dm", "task", "project", "archived")):
             return
+        reply = ChannelReply(self, channel_id)
         if where == "archived":
             # Before the approval parser, the classifier and the fast path: an
             # archived project takes no work from here, whatever the message says.
-            self._post(channel_id, _cap(f"Project {project.name} is archived, so I won't "
-                                        "open, start or steer anything here. Restore it from "
-                                        "the HUD's Archive view to work in it again.",
-                                        MAX_DISCORD_CHARS))
+            reply.send(self.archived_text(project))
             return
         if where == "dm":
-            with self._lock:
-                self._dm_cache = channel_id
+            self._remember_dm(channel_id)
         text = v1gw.strip_mention(message.get("content") or "", bot_id)
         spoken = False
         note = v1gw.voice_attachment(message)
@@ -235,29 +437,37 @@ class DiscordRouter:
             try:
                 text, spoken = self._hear(note), True
             except Exception as exc:
-                self._post(channel_id, f"I couldn't make out that voice message ({exc}).")
+                reply.send(f"I couldn't make out that voice message ({exc}).")
                 return
         if not text.strip():
             return
         # Typed only: a transcription is one mishearing away from "yes".
-        if not spoken and self._approval_answer(channel_id, text):
+        if not spoken and self._approval_answer(channel_id, text, reply):
             return
-        incoming = Incoming(
+        incoming = self._incoming(text, channel_id, project, task, spoken)
+        destination = classify(incoming)
+        if isinstance(destination, Verb):
+            self._verb(destination, reply, project, task)
+        elif isinstance(destination, NewTask):
+            nudged = NudgingReply(reply, _SLASH["task"])
+            try:
+                self._intake(destination.text, nudged, project)
+            except ControlError as exc:
+                nudged.send(str(exc))
+        elif isinstance(destination, Steer):
+            self._steer_or_answer(destination.task_id, text, reply, spoken)
+        elif isinstance(destination, FastPath):
+            self._chat(reply, where, project, text, spoken, incoming)
+
+    @staticmethod
+    def _incoming(text, channel_id, project, task, spoken=False) -> Incoming:
+        return Incoming(
             text=text,
             surface=(project.discord_channel_id if project and project.discord_channel_id
                      else channel_id),
             project_id=project.id if project else None,
             task_id=task.id if task else None,
             spoken=spoken)
-        destination = classify(incoming)
-        if isinstance(destination, Verb):
-            self._verb(destination, channel_id, project, task)
-        elif isinstance(destination, NewTask):
-            self._intake(destination.text, channel_id, project)
-        elif isinstance(destination, Steer):
-            self._steer(destination.task_id, text, channel_id, spoken)
-        elif isinstance(destination, FastPath):
-            self._chat(channel_id, where, project, text, spoken, incoming)
 
     def _hear(self, attachment) -> str:
         """Voice note -> transcript, v1's rules (size cap, empty is an error)."""
@@ -275,49 +485,113 @@ class DiscordRouter:
 
     # -- approvals ---------------------------------------------------------
 
-    def _approval_answer(self, channel_id: str, text: str) -> bool:
-        """True when this message was an answer (or a refusal to guess at one)."""
+    def _approval_answer(self, channel_id: str, text: str, reply) -> bool:
+        """True when this typed message was an answer (or a refusal to guess at one)."""
         verdict, code = _parse_answer(text)
         if verdict is None or text.strip().split()[0].lower() in _NOT_AN_ANSWER:
             return False
+        target, refusal = self.approval_target(verdict, code, channel_id,
+                                               bare_falls_through=True)
+        if target is None and refusal is None:
+            return False
+        nudged = NudgingReply(reply, _SLASH[{"allow": "yes", "deny": "no"}.get(verdict, verdict)])
+        if refusal is not None:
+            nudged.refuse(refusal)
+            return True
+        self.decide(target, verdict, nudged)
+        return True
+
+    def pending_here(self, channel_id: str) -> list:
+        """The open requests that were asked in this channel, and only those."""
+        with self._lock:
+            channels = dict(self._approval_channels)
+        return [r for r in self.approvals.pending() if channels.get(r.req_id) == str(channel_id)]
+
+    @staticmethod
+    def allowlistable(request) -> tuple[bool, str]:
+        """Whether `always` could mint a standing rule for this request."""
+        if not getattr(request, "allowlistable", True):
+            return False, "it came through a path that never makes standing rules"
+        try:
+            v1permissions.entry_for(*v1_request(request.tool, dict(request.args or {})))
+        except v1permissions.NotAllowlistable as exc:
+            return False, str(exc)
+        except Exception as exc:
+            return False, type(exc).__name__
+        return True, ""
+
+    def approval_target(self, verdict, code, channel_id, *, bare_falls_through: bool):
+        """-> (request, None) to resolve, (None, sentence) to refuse, or
+        (None, None) when a bare word claims nothing and may be ordinary text.
+
+        Reads only: the slash path calls this before it defers."""
+        code = clean_code(code)
         with self._lock:
             channels = dict(self._approval_channels)
         open_requests = list(self.approvals.pending())
         if code:
             match = next((r for r in open_requests if r.code == code), None)
             if match is None:
-                self._post(channel_id, f"No open authorization with code `{code}`.")
-                return True
-            if channels.get(match.req_id) != channel_id:
-                self._post(channel_id, f"That code (`{code}`) was asked elsewhere — "
-                                       f"answer it where it was posted. Nothing ran.")
-                return True
+                return None, f"No open authorization with code `{code}`."
+            if channels.get(match.req_id) != str(channel_id):
+                return None, (f"That code (`{code}`) was asked elsewhere — answer it where "
+                              f"it was posted. Nothing ran.")
             target = match
         else:
-            mine = [r for r in open_requests if channels.get(r.req_id) == channel_id]
+            mine = [r for r in open_requests if channels.get(r.req_id) == str(channel_id)]
             if not mine:
-                return False
+                if bare_falls_through:
+                    return None, None
+                return None, "No open authorization was asked in this chat."
             if len(mine) > 1:
                 codes = ", ".join(f"`{r.code}` ({r.tool})" for r in mine)
-                self._post(channel_id, f"Which one? Reply with the code: {codes}.")
-                return True
+                return None, f"Which one? Answer with the code: {codes}."
             target = mine[0]
+        if verdict == "always":
+            ok, why = self.allowlistable(target)
+            if not ok:
+                return None, (f"`{target.code}` can't become a standing rule ({_cap(why, 160)}). "
+                              f"Answer it once with `/yes {target.code}` or `/no {target.code}`. "
+                              "Nothing ran.")
+        return target, None
+
+    def decide(self, target, verdict, reply) -> None:
+        """Resolve one request the caller has already checked, and say so."""
         decision = Decision.DENY if verdict == "deny" else Decision.ALLOW
+        reply.defer()
         try:
             with self._lock:
                 self._answered_here.add(target.req_id)
             self.approvals.resolve(target.req_id, decision, always=(verdict == "always"))
         except ValueError:
-            self._post(channel_id, f"That one (`{target.code}`) already expired — nothing ran.")
-            return True
+            reply.send(f"That one (`{target.code}`) was already answered or expired — "
+                       "nothing ran.")
+            return
         if decision is Decision.DENY:
-            self._post(channel_id, f"Denied. `{target.tool}` did not run.")
+            reply.send(f"Denied. `{target.tool}` did not run.")
         elif verdict == "always":
-            self._post(channel_id, f"Authorized `{target.tool}`, and I will stop asking "
-                                   f"about this one.")
+            reply.send(f"Authorized `{target.tool}`, and I will stop asking about this one.")
         else:
-            self._post(channel_id, f"Authorized. Running `{target.tool}` now.")
-        return True
+            reply.send(f"Authorized. Running `{target.tool}` now.")
+
+    def button_target(self, message_id, channel_id, code):
+        """The open request a button press is for, or (None, sentence).
+
+        The press must come from the message the approval was posted as, in
+        the channel it was asked in, with the code that message carries. The
+        custom id is untrusted: it is only allowed to agree with the lookup."""
+        with self._lock:
+            found = [(req_id, row) for req_id, row in self._approval_messages.items()
+                     if row[1] == str(message_id)]
+        if not found:
+            return None, "That approval was already answered — nothing ran."
+        req_id, (asked_in, _message, posted_code) = found[0]
+        if asked_in != str(channel_id) or posted_code != clean_code(code):
+            return None, "That button does not match its approval. Nothing ran."
+        request = next((r for r in self.approvals.pending() if r.req_id == req_id), None)
+        if request is None:
+            return None, "That approval was already answered — nothing ran."
+        return request, None
 
     def _watch(self) -> None:
         while not self._stop.is_set():
@@ -339,6 +613,7 @@ class DiscordRouter:
 
     def _post_approval(self, data: dict) -> None:
         req_id = str(data.get("req_id") or "")
+        code = str(data.get("code") or "")
         channel = None
         task_id = data.get("task_id")
         if task_id:
@@ -354,24 +629,48 @@ class DiscordRouter:
         if isinstance(command, str) and not isinstance(args.get("command"), str):
             # The owner must see the entire command, never a digest of it.
             args["command"] = command
-        body = approval_text(str(data.get("tool") or ""), args,
-                             str(data.get("code") or ""), str(data.get("origin") or ""))
+        tool = str(data.get("tool") or "")
+        request = _Asked(tool=tool, args=args,
+                         allowlistable=data.get("allowlistable", True) is not False)
+        body = approval_text(tool, args, code, str(data.get("origin") or ""),
+                             allowlistable=self.allowlistable(request)[0])
         with self._lock:
             self._approval_channels[req_id] = str(channel)
         try:
             # Never split or cap: DiscordRest attaches an over-long approval whole.
-            self.rest.post(channel, content=body)
+            message_id = self.rest.post(channel, content=body,
+                                        components=approval_components(code))
         except Exception:
             with self._lock:
                 self._approval_channels.pop(req_id, None)
             raise
+        with self._lock:
+            live = req_id in self._approval_channels      # not resolved meanwhile
+            if live:
+                self._approval_messages[req_id] = (str(channel), str(message_id), code)
+        if live:
+            self._save_posts()
+        else:
+            self._strip_buttons(str(channel), str(message_id))
+
+    def _strip_buttons(self, channel, message_id) -> None:
+        try:
+            self.rest.edit(channel, message_id, components=[])
+        except Exception as exc:
+            LOG.warning("Discord approval buttons not removed (%s)", type(exc).__name__)
 
     def _post_resolution(self, data: dict) -> None:
         req_id = str(data.get("req_id") or "")
         with self._lock:
             channel = self._approval_channels.pop(req_id, None)
+            posted = self._approval_messages.pop(req_id, None)
             here = req_id in self._answered_here
             self._answered_here.discard(req_id)
+        if posted is not None:
+            self._save_posts()
+            # Answered anywhere — HUD, timeout, slash, a button — the buttons go,
+            # so a stale tap cannot reach a later request.
+            self._strip_buttons(posted[0], posted[1])
         if not channel:
             return
         where = "answered here" if here else "answered on another surface"
@@ -379,126 +678,164 @@ class DiscordRouter:
                             f"`{data.get('tool', '')}`: {data.get('resolution', '')} ({where}).")
 
     # -- verbs -------------------------------------------------------------
+    # Each verb takes a `Reply`. Refusals that need only reads come first, then
+    # `reply.defer()`, then the first store write or control call.
 
-    def _verb(self, verb: Verb, channel_id, project, task) -> None:
+    def _verb(self, verb: Verb, reply, project, task) -> None:
         name, argument = verb.name, verb.argument.strip()
+        reply = NudgingReply(reply, _SLASH.get(name, "/" + name))
         try:
             if name in ("yes", "no", "always"):
                 # Only reachable with no open request in this channel: the
                 # answer parser above claims every message that answers one.
-                self._post(channel_id, f"No open authorization with code `{argument}`.")
+                reply.refuse(f"No open authorization with code `{clean_code(argument)}`.")
             elif name in ("steer", "redirect"):
-                self._steer(task.id if task else None, argument, channel_id, False)
+                self._steer(task.id if task else None, argument, reply, False)
             elif name == "cancel":
-                self._cancel(argument or (task.id if task else ""), channel_id)
+                self._cancel(argument or (task.id if task else ""), reply)
             elif name == "status":
-                self._status(channel_id, project, task)
+                self._status(reply, project, task)
             elif name == "projects":
-                self._list_projects(channel_id)
+                self._list_projects(reply)
             elif name == "tasks":
-                self._list_tasks(channel_id, project)
+                self._list_tasks(reply, project)
             elif name == "resume":
-                self._resume(argument, channel_id)
+                match = _RESUME.match(argument)
+                if not match:
+                    reply.refuse("Say `resume <task id>` or `resume <task id> on <provider>`.")
+                    return
+                try:
+                    provider = ProviderName(match.group(2).lower()) if match.group(2) else None
+                except ValueError:
+                    reply.refuse("Provider must be claude, codex or fast.")
+                    return
+                self._resume(match.group(1), provider, reply)
         except ControlError as exc:
-            self._post(channel_id, str(exc))
+            reply.send(str(exc))
+        except StoreError:
+            # A typed id that is not the store's id shape (`cancel foo`).
+            typed = " ".join(argument.split()[:1]).replace("`", "")
+            reply.send(f"I don't know a task `{_cap(typed, 40)}`.")
 
-    def _steer(self, task_id, text, channel_id, spoken) -> None:
+    def _steer(self, task_id, text, reply, spoken) -> None:
         if not task_id:
-            self._post(channel_id, "There is no task here to steer — say `task: …` to open one.")
+            reply.refuse("There is no task here to steer — open one with `/task`, or name "
+                         "one with `/steer task:`.")
             return
+        reply.defer()
         self.control.steer(task_id, text, spoken=spoken)
-        self._post(channel_id, f"Noted — steering task {task_id} at its next step.")
+        reply.send(f"Noted — steering task {task_id} at its next step.")
 
-    def _cancel(self, task_id, channel_id) -> None:
+    def _steer_or_answer(self, task_id, text, reply, spoken) -> None:
+        """Plain text in a task thread: the open question's answer if one is
+        waiting, otherwise a steer (plan §4.3, bug 2). Never an answer when spoken."""
+        task = self.stores.tasks.get(task_id) if task_id else None
+        waiting = open_questions(task)
+        try:
+            if waiting and spoken:
+                reply.refuse("I can't take a voice note as an answer to the open question — "
+                             "type it here, or use `/answer`. Nothing was answered.")
+            elif waiting:
+                self._answer(task, waiting[0][0], text, reply)
+            else:
+                self._steer(task_id, text, reply, spoken)
+        except ControlError as exc:
+            reply.send(str(exc))
+
+    def _answer(self, task, index: int, text: str, reply) -> None:
+        """The one answer path, shared by `/answer` and plain typed text."""
+        reply.defer()
+        updated = self.control.answer_question(task.id, index, text)
+        remaining = open_questions(updated) if updated is not None else []
+        tail = (f" Next question: {_cap(remaining[0][1].text, 300)}" if remaining
+                else " That was the last open question; the task carries on.")
+        reply.send(_cap(f"Answered task {task.id}'s question {index + 1}: "
+                        f"{_cap(' '.join(text.split()), 300)}.{tail}", MAX_DISCORD_CHARS))
+
+    def _cancel(self, task_id, reply) -> None:
         if not task_id:
-            self._post(channel_id, "Cancel what? Reply `cancel <task id>`.")
+            reply.refuse("Cancel what? Use `/cancel task:<id>`.")
             return
+        reply.defer()
         # A proposal still inside its grace window is withdrawn before any CLI
         # session starts; anything else is cancelled at the next step boundary.
         if self.router.cancel_proposal(task_id):
-            self._post(channel_id, f"Withdrew task {task_id} before it started.")
+            reply.send(f"Withdrew task {task_id} before it started.")
             return
         task = self.control.cancel(task_id)
-        self._post(channel_id, f"Cancelling task {task_id}; it stops at the next step boundary "
-                               f"(now {task.state.value}).")
+        reply.send(f"Cancelling task {task_id}; it stops at the next step boundary "
+                   f"(now {task.state.value}).")
 
-    def _resume(self, argument, channel_id) -> None:
-        match = _RESUME.match(argument)
-        if not match:
-            self._post(channel_id, "Reply `resume <task id>` or `resume <task id> on <provider>`.")
-            return
-        task_id, provider = match.group(1), match.group(2)
-        try:
-            provider = ProviderName(provider.lower()) if provider else None
-        except ValueError:
-            self._post(channel_id, "Provider must be claude, codex or fast.")
-            return
+    def _resume(self, task_id, provider, reply) -> None:
+        reply.defer()
         task = self.control.resume(task_id, provider=provider)
         where = f" on {provider.value}" if provider else ""
-        self._post(channel_id, f"Resumed task {task.id}{where} ({task.state.value}).")
+        reply.send(f"Resumed task {task.id}{where} ({task.state.value}).")
 
-    def _status(self, channel_id, project, task) -> None:
+    def _status(self, reply, project, task) -> None:
         if task is None:
-            self._list_tasks(channel_id, project)
+            self._list_tasks(reply, project)
             return
+        reply.defer(ephemeral=True)
         try:
             current = self.control.status(task.id) or task
         except ControlError:
             current = task
         project = project or self.stores.projects.get(current.project_id)
         if project is None:
-            self._post(channel_id, f"Task {current.id} has no project on disk.")
+            reply.send(f"Task {current.id} has no project on disk.")
             return
-        try:
-            self.rest.post(channel_id, embed=status_embed(current, project))
-        except Exception as exc:
-            LOG.warning("Discord status post failed (%s)", type(exc).__name__)
+        reply.send(embed=status_embed(current, project))
 
-    def _list_projects(self, channel_id) -> None:
+    def _list_projects(self, reply) -> None:
+        reply.defer(ephemeral=True)
         projects = [p for p in self.stores.projects.list() if not p.archived]
-        self._post(channel_id, _listing(
-            "Projects", [f"`{p.id}` {p.name} — {p.root}" for p in projects]))
+        reply.send(_listing("Projects", [f"`{p.id}` {p.name} — {p.root}" for p in projects]))
 
-    def _list_tasks(self, channel_id, project) -> None:
+    def _list_tasks(self, reply, project) -> None:
+        reply.defer(ephemeral=True)
         tasks = [t for t in self.stores.tasks.list() if t.state not in TERMINAL_STATES]
         if project is not None:
             tasks = [t for t in tasks if t.project_id == project.id]
-        self._post(channel_id, _listing("Active tasks", [
+        reply.send(_listing("Active tasks", [
             f"`{t.id}` {t.state.value} — {_cap(' '.join(t.brief.split()), 80)}" for t in tasks]))
 
     # -- intake and chat ---------------------------------------------------
 
-    def _intake(self, brief, channel_id, project) -> None:
+    def _intake(self, brief, reply, project, *, provider: str | None = None,
+                parse_named: bool = True) -> None:
         brief = brief.strip()
-        named = _IN_PROJECT.match(brief)
+        named = _IN_PROJECT.match(brief) if parse_named else None
         target = project
         if named:
             target = self.router.place(named.group(1).strip())
             brief = named.group(2).strip()
             if target is None:
-                self._post(channel_id, f"I don't know a project called "
-                                       f"`{_cap(named.group(1).strip(), 60)}`.")
+                reply.refuse(f"I don't know a project called "
+                             f"`{_cap(named.group(1).strip(), 60)}`.")
                 return
         if not brief:
-            self._post(channel_id, "A task needs a brief: `task: <what to do>`.")
+            reply.refuse("A task needs a brief: `/task brief:<what to do>`.")
             return
+        reply.defer()
         if target is None:
             target = self.stores.projects.inbox()
         try:
-            task = self.stores.tasks.create(target.id, brief)
+            extra = {"provider_override": provider} if provider else {}
+            task = self.stores.tasks.create(target.id, brief, **extra)
             self.stores.tasks.save(task)
         except StoreError as exc:                 # ProjectArchived: archived meanwhile
-            self._post(channel_id, _cap(f"I opened nothing: {exc}.", MAX_DISCORD_CHARS))
+            reply.send(_cap(f"I opened nothing: {exc}.", MAX_DISCORD_CHARS))
             return
         summary = " ".join(task.brief.split()).rstrip(".")
         try:
             self.control.start(task.id)
         except ControlError as exc:
-            self._post(channel_id, f"Opened task {task.id} in {target.name}, but it cannot "
-                                   f"start yet: {exc}")
+            reply.send(f"Opened task {task.id} in {target.name}, but it cannot "
+                       f"start yet: {exc}")
             return
-        self._post(channel_id, _cap(f"Opened task {task.id} in {target.name}: {summary}. "
-                                    f"It will ask if anything is unclear.", MAX_DISCORD_CHARS))
+        reply.send(_cap(f"Opened task {task.id} in {target.name}: {summary}. "
+                        f"It will ask if anything is unclear.", MAX_DISCORD_CHARS))
 
     def _chat_thread(self, project, key) -> str:
         with self._lock:
@@ -511,18 +848,19 @@ class DiscordRouter:
             self._chat_threads[key] = thread.id
         return thread.id
 
-    def _chat(self, channel_id, where, project, text, spoken, incoming) -> None:
+    def _chat(self, reply, where, project, text, spoken, incoming, *, skill=None) -> None:
+        reply.defer()
         if where != "project" or project is None:
             project, key = self.stores.projects.inbox(), "dm"
         else:
             key = project.id
         thread_id = self._chat_thread(project, key)
-        reply, finished = self._turn(thread_id, text)
-        if reply.strip():
-            for chunk in _split(reply.strip()):
-                self._post(channel_id, chunk)
+        answer, finished = self._turn(thread_id, text, skill=skill)
+        if answer.strip():
+            for chunk in _split(answer.strip()):
+                reply.send(chunk)
             if spoken:
-                self._speak(channel_id, reply.strip())
+                self._speak(reply, answer.strip())
         if finished is not None and (finished.get("data") or {}).get("proposal"):
             # Replay-protected by turn id inside the router, so a runner that
             # also consumes this event cannot open the task a second time.
@@ -530,15 +868,15 @@ class DiscordRouter:
                 finished, Incoming(text=text, surface=incoming.surface,
                                    project_id=project.id, thread_id=thread_id))
             if isinstance(outcome, NeedsProject):
-                self._post(channel_id, outcome.reply)
+                reply.send(outcome.reply)
             elif outcome:
-                self._post(channel_id, _cap(str(outcome), MAX_DISCORD_CHARS))
+                reply.send(_cap(str(outcome), MAX_DISCORD_CHARS))
 
-    def _turn(self, thread_id, text):
+    def _turn(self, thread_id, text, *, skill=None):
         subscription = self.daemon.bus.subscribe(lambda r: r.get("thread_id") == thread_id)
         reply, finished = "", None
         try:
-            turn_id = self.daemon.send(thread_id, UserMessage(text=text))
+            turn_id = self.daemon.send(thread_id, UserMessage(text=text, skill=skill))
             deadline = time.monotonic() + self.turn_timeout_s
             while not self._stop.is_set():
                 remaining = deadline - time.monotonic()
@@ -567,16 +905,16 @@ class DiscordRouter:
             self.daemon.bus.unsubscribe(subscription)
         return reply, finished
 
-    def _speak(self, channel_id, reply) -> None:
+    def _speak(self, reply, text) -> None:
         from jarvis import voice
 
         try:
-            audio = voice.tts(reply)
+            audio = voice.tts(text)
         except Exception as exc:
             self._announce(f"[discord] tts failed ({type(exc).__name__}); text-only reply")
             return
         name, _mime = v1gw._audio_filename(audio)
-        self._post(channel_id, None, files=((name, audio),))
+        reply.send(None, files=((name, audio),))
 
     # -- posting -----------------------------------------------------------
 
@@ -593,12 +931,20 @@ class DiscordRouter:
             self._dm_cache = channel
         return channel
 
-    def _post(self, channel_id, content, files=()):
+    def _post(self, channel_id, content, files=(), *, embed=None, components=None):
         try:
-            return self.rest.post(channel_id, content=content, files=files)
+            return self.rest.post(channel_id, content=content, embed=embed, files=files,
+                                  components=components)
         except Exception as exc:
             LOG.warning("Discord post failed (%s)", type(exc).__name__)
             return None
+
+
+class _Asked:
+    """The parts of an approval request `allowlistable` reads, from bus data."""
+
+    def __init__(self, tool, args, allowlistable=True):
+        self.tool, self.args, self.allowlistable = tool, args, allowlistable
 
 
 def _split(text: str, limit: int = MAX_DISCORD_CHARS) -> list[str]:
@@ -624,7 +970,7 @@ def _listing(title: str, lines: list[str], limit: int = MAX_DISCORD_CHARS) -> st
     for index, line in enumerate(lines):
         more = len(lines) - index
         tail = f"\n… and {more} more."
-        if len(body) + 1 + len(line) + len(tail) > limit:
+        if len(body) + 1 + len(line) + len(tail) > limit - 40:
             return body + tail
         body += "\n" + line
     return body

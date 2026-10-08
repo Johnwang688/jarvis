@@ -104,6 +104,11 @@ class UserMessage:
     text: str
     images: list[dict] = field(default_factory=list)     # [{"b64":..., "mime":...}]
     origin: str = "owner"                                 # "owner" | "system" | "owner-ran" (§6.1)
+    # A skill the owner invoked by name (`/skill`). Each provider maps it onto
+    # its own mechanism: the fast path injects the body, Claude and Codex get a
+    # directive to use the skill they have installed (`commands.skill_directive`).
+    # Validated against `commands.invocable_skills()` before it gets here.
+    skill: str | None = None
 
 
 # Permission callback the daemon hands every provider: the five layers of §6

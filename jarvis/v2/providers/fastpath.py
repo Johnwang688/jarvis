@@ -167,7 +167,11 @@ FORBIDDEN_TOOLS: frozenset[str] = frozenset(
     }
 )
 
-FORBIDDEN_PREFIXES = ("browser_", "desktop_", "cad_", "gmail_")
+# "discord_": nothing on the fast path legitimately needs Discord — chat
+# replies are posted by the surface, not by a tool — and the slash plan's rule
+# is that no tool reaches the Discord API at all (S1). `discord_dm_owner`
+# stays available to Claude/Codex through jarvis-mcp, which has its own list.
+FORBIDDEN_PREFIXES = ("browser_", "desktop_", "cad_", "gmail_", "discord_")
 
 
 def _validate_toolset() -> None:
@@ -461,6 +465,25 @@ class FastPathProvider:
         events: queue.Queue = queue.Queue()
         done = object()
 
+        text = message.text
+        if message.skill:
+            # The owner named a skill: its body goes into the turn, which saves
+            # a `skill_read` step and cannot be skipped by the model. Same trust
+            # as `skill_read` — skill bodies are the owner's words. A skill that
+            # is unknown, jarvis-only or over the cap is refused, never cut.
+            from ..commands import SkillRefused, skill_body
+
+            try:
+                body = skill_body(message.skill)
+            except SkillRefused as exc:
+                yield Event(EventKind.TURN_STARTED, thread_id)
+                yield Event(EventKind.ERROR, thread_id, {"message": str(exc), "fatal": False})
+                yield Event(EventKind.TURN_FINISHED, thread_id, {"stop": "error"})
+                return
+            request = message.text.strip() or "(no further request — run the skill)"
+            text = (f'[The owner invoked the skill "{message.skill}". Follow it.]\n{body}'
+                    f"\n\n[Request]\n{request}")
+
         # A cancel aimed at the *previous* turn must not kill this one — the v1
         # face clears its event under the agent lock right before run_turn for
         # exactly this reason, and we hold `busy` here.
@@ -485,7 +508,7 @@ class FastPathProvider:
 
                 runtime.bind(proposal=proposal)
                 result["turn"] = native.agent.run_turn(
-                    message.text, images=list(message.images) or None
+                    text, images=list(message.images) or None
                 )
             except BaseException as exc:  # noqa: BLE001 — reported, never swallowed
                 result["error"] = exc

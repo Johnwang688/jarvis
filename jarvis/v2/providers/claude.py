@@ -931,12 +931,22 @@ def _prompt(message: UserMessage) -> Any:
 
     Text alone goes as a plain string (the SDK's own fast path); anything with
     an image becomes a streamed content-block message.
+
+    A named skill (`/skill`) becomes a directive: Claude Code has the skill
+    installed natively (`jarvis skills link`), so it is told to use it and its
+    Skill tool loads it. Whether a headless `/<name>` prompt would invoke it
+    directly is the S1 spike still pending; the directive works either way.
     """
+    text = message.text
+    if message.skill:
+        from ..commands import skill_directive
+
+        text = skill_directive(message.skill, message.text)
     if not message.images:
-        return message.text
+        return text
     content: list[dict] = []
-    if message.text:
-        content.append({"type": "text", "text": message.text})
+    if text:
+        content.append({"type": "text", "text": text})
     for image in message.images:
         content.append(
             {

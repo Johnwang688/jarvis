@@ -920,10 +920,33 @@ def hatch_checks():
         eq(daemon.sent, [], "a non-command decline has nothing to offer")
 
 
+def discord_checks():
+    """S1: no fast-path tool reaches Discord, and `/always` (typed, or the
+    keyword) never mints a rule the request cannot honestly become."""
+    from jarvis.v2.approvals import ApprovalRequest
+    from jarvis.v2.discord.gateway import DiscordRouter
+    from jarvis.v2.providers import fastpath
+
+    ok("discord_" in fastpath.FORBIDDEN_PREFIXES, "discord_ is a forbidden fast-path prefix")
+    ok(not [n for n in fastpath.FAST_TOOLS if n.startswith("discord_")],
+       "no discord_ tool is on the fast path")
+    with Sandbox():
+        for command, expected in (("pnpm build", True), ("git status && rm -rf build", False),
+                                  ("   ", False), ("cat $(ls)", False)):
+            request = ApprovalRequest(tool="Bash", args={"command": command}, command=command)
+            eq(DiscordRouter.allowlistable(request)[0], expected,
+               f"/always allowed for {command!r}")
+        hatch = ApprovalRequest(tool="Bash", args={"command": "pnpm build"},
+                                command="pnpm build", allowlistable=False)
+        eq(DiscordRouter.allowlistable(hatch)[0], False,
+           "/always is refused for an escape-hatch request")
+        ok(not config.ALLOWLIST_PATH.exists(), "checking allowlistability writes nothing")
+
+
 def main():
     for section in (matrix_checks, always_ask_checks, file_deny_checks,
                     human_backed_checks, log_checks, approvals_checks,
-                    daemon_checks, hatch_checks):
+                    daemon_checks, hatch_checks, discord_checks):
         print(f"-- {section.__name__}")
         section()
     print()

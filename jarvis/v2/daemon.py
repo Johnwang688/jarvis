@@ -579,7 +579,9 @@ class Daemon:
             self.stores.threads._append(thread_id, "log.jsonl",
                                         {"kind": "user", "at": utcnow(), "turn_id": turn_id,
                                          "thread_id": thread_id,
-                                         "data": {"text": message.text}})
+                                         "data": ({"text": message.text, "skill": message.skill}
+                                                  if message.skill else
+                                                  {"text": message.text})})
             session.worker = worker
             worker.start()
             return turn_id
@@ -1292,6 +1294,8 @@ def start_discord(daemon, control=None):
         surface = DiscordRouter(daemon, daemon.stores, router,
                                 daemon.approvals, control, DiscordRest())
         surface.start()
+        # `GET /discord` reads its status (connection, command sync) from here.
+        daemon.discord = surface
         return surface
     except Exception as exc:
         # Class only: this path is one frame away from the credential bundle.

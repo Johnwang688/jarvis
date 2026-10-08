@@ -31,7 +31,9 @@ from jarvis.v2 import daemon as daemon_mod
 from jarvis.v2.approvals import ApprovalRequest, PendingApprovals
 from jarvis.v2.control import ControlError
 from jarvis.v2.daemon import Daemon
-from jarvis.v2.discord.gateway import DiscordRouter, _V2Listener, _listing, _split
+from jarvis.v2.discord.gateway import (ChannelReply, DiscordRouter, _V2Listener, _listing,
+                                       _split)
+from jarvis.v2.model import OpenQuestion
 from jarvis.v2.discord.rest import DiscordRest
 from jarvis.v2.model import ProviderName, Role, TaskState
 from jarvis.v2.provider import Decision, Event, EventKind as K, SessionHandle, Usage
@@ -393,6 +395,107 @@ class DiscordRoutingChecks(unittest.TestCase):
         self.listener.feed(message(f"yes {request.code}", channel=TASK_THREAD))
         self.assertTrue(any("No open authorization" in t for t in self.texts(TASK_THREAD)))
 
+    # -- S1: buttons, standing rules, nudges, answers -----------------------
+
+    def test_approval_posts_carry_approve_and_deny_and_never_always(self):
+        request, result, worker = self.ask(task_id=self.task.id)
+        _, body = self.posts(TASK_THREAD)[0]
+        buttons = [b for row in body["components"] for b in row["components"]]
+        self.assertEqual([b["label"] for b in buttons], ["Approve", "Deny"])
+        self.assertEqual([b["custom_id"] for b in buttons],
+                         [f"jv:a:{request.code}", f"jv:d:{request.code}"])
+        self.assertNotIn(request.req_id, json.dumps(body))      # the broker id stays home
+        self.assertIn(f"/always {request.code}", body["content"])
+        message_id = self.surface._approval_messages[request.req_id][1]
+        self.assertEqual(self.surface._approval_messages[request.req_id],
+                         (TASK_THREAD, message_id, request.code))
+        self.approvals.shutdown()
+        worker.join(2)
+
+    def test_a_resolution_anywhere_strips_the_buttons(self):
+        request, result, worker = self.ask(task_id=self.task.id)
+        message_id = self.surface._approval_messages[request.req_id][1]
+        self.approvals.resolve(request.req_id, Decision.DENY)        # the HUD card, say
+        worker.join(2)
+        path = f"/channels/{TASK_THREAD}/messages/{message_id}"
+        wait_for(lambda: any(c["path"] == path for c in self.transport.calls))
+        edit = next(c for c in self.transport.calls if c["path"] == path)
+        self.assertEqual((edit["method"], edit["json"]["components"]), ("PATCH", []))
+        self.assertNotIn("content", edit["json"])                  # the command stays readable
+        self.assertNotIn(request.req_id, self.surface._approval_messages)
+        # The on-disk copy (for stripping after a restart) forgets it too.
+        posts = Path(self.stores.root) / "discord" / "approval-posts.json"
+        wait_for(lambda: json.loads(posts.read_text()) == {})
+
+    def test_always_is_refused_where_no_standing_rule_can_be_made(self):
+        request, result, worker = self.ask(command="git status && rm -rf build",
+                                           task_id=self.task.id)
+        self.assertNotIn("/always", self.posts(TASK_THREAD)[0][1]["content"])
+        self.listener.feed(message(f"always {request.code}", channel=TASK_THREAD))
+        self.assertTrue(self.approvals.pending(), "a refused always must not approve")
+        self.assertIn("can't become a standing rule", self.texts(TASK_THREAD)[-1])
+        self.assertFalse(config.ALLOWLIST_PATH.exists())
+        self.approvals.shutdown()
+        worker.join(2)
+        self.assertEqual(result["decision"], Decision.DENY)
+
+    def test_every_keyword_reply_ends_with_its_slash_command(self):
+        cases = [("steer: use the other parser", "/steer"), ("cancel", "/cancel"),
+                 ("status", "/status"), ("projects", "/project list"),
+                 ("tasks", "/status"), (f"resume {self.task.id}", "/resume")]
+        for text, slash in cases:
+            with self.subTest(text=text):
+                before = len(self.posts(TASK_THREAD))
+                self.listener.feed(message(text, channel=TASK_THREAD))
+                body = self.posts(TASK_THREAD)[before][1]
+                self.assertTrue(body["content"].endswith(f"(next time: `{slash}`)"), body)
+        request, result, worker = self.ask(task_id=self.task.id)
+        self.listener.feed(message(f"no {request.code}", channel=TASK_THREAD))
+        worker.join(2)
+        self.assertTrue(any(t.startswith("Denied.") and t.endswith("(next time: `/no`)")
+                            for t in self.texts(TASK_THREAD)))
+        self.listener.feed(dm("task: think about lunch"))
+        self.assertTrue(self.texts(DM_CHANNEL)[-1].endswith("(next time: `/task`)"))
+        # Plain conversation is not a keyword and is never nudged.
+        self.listener.feed(dm("what is up"))
+        wait_for(lambda: "fast path answered" in self.texts(DM_CHANNEL)[-1])
+        self.assertNotIn("next time", self.texts(DM_CHANNEL)[-1])
+
+    def _clarifying(self, options=("pnpm", "npm")):
+        self.stores.tasks.transition(self.task.id, TaskState.CLARIFYING)
+        task = self.stores.tasks.get(self.task.id)
+        task.spec.questions = [OpenQuestion("Which runner?", False, assumed="pytest"),
+                               OpenQuestion("Which package manager?", True, list(options))]
+        self.stores.tasks.save(task)
+        return task
+
+    def test_typed_text_in_a_clarifying_thread_answers_its_open_question(self):
+        self._clarifying()
+        self.listener.feed(message("pnpm, please", channel=TASK_THREAD))
+        self.assertEqual(self.control.named("answer_question"),
+                         [("answer_question", (self.task.id, 1, "pnpm, please"), {})])
+        self.assertEqual(self.control.named("steer"), [])
+        self.assertIn("Answered", self.texts(TASK_THREAD)[-1])
+        # `steer:` is still an explicit steer, not an answer.
+        self.listener.feed(message("steer: also run lint", channel=TASK_THREAD))
+        self.assertEqual(len(self.control.named("steer")), 1)
+
+    def test_a_voice_note_never_answers_a_question(self):
+        self._clarifying()
+        note = {"attachments": [{"content_type": "audio/ogg", "url": "u", "size": 10,
+                                 "waveform": "x"}], "flags": v1gw.VOICE_MESSAGE_FLAG}
+        with patch.object(v1gw, "_download", return_value=b"audio"), \
+             patch("jarvis.voice.stt", return_value="pnpm"):
+            self.listener.feed(message("", channel=TASK_THREAD, **note))
+        self.assertEqual(self.control.named("answer_question"), [])
+        self.assertEqual(self.control.named("steer"), [])
+        self.assertIn("voice note", self.texts(TASK_THREAD)[-1])
+
+    def test_without_an_open_question_plain_text_still_steers(self):
+        self.listener.feed(message("try the other parser", channel=TASK_THREAD))
+        self.assertEqual(self.control.named("answer_question"), [])
+        self.assertEqual(self.control.named("steer")[0][1], (self.task.id, "try the other parser"))
+
     # -- verbs -------------------------------------------------------------
 
     def test_steer_cancel_status_resume_projects_tasks(self):
@@ -479,7 +582,9 @@ class DiscordRoutingChecks(unittest.TestCase):
         live = self.stores.projects.get(self.project.id)
         live.archived = None
         before = {t.id for t in self.stores.tasks.list()}
-        self.surface._intake("rewrite the parser", PROJECT_CHANNEL, live)   # a stale, unarchived copy
+        # A stale, unarchived copy; verbs take a reply sink, not a channel id (S1).
+        self.surface._intake("rewrite the parser", ChannelReply(self.surface, PROJECT_CHANNEL),
+                             live)
         self.assertIn("opened nothing", self.texts(PROJECT_CHANNEL)[-1])
         self.assertEqual({t.id for t in self.stores.tasks.list()}, before)
         self.assertEqual(self.control.named("start"), [])

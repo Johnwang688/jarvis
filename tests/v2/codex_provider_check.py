@@ -287,6 +287,17 @@ class Checks(unittest.TestCase):
         self.assertEqual(events[-1].kind, K.TURN_FINISHED)
         self.assertEqual(self.brain.calls("turn/start")[0]["params"]["input"][1], {"type": "image", "url": "data:image/png;base64,YWJj"})
 
+    def test_a_named_skill_is_a_directive_on_turn_start(self):
+        """S1: Codex has the skill installed, so it is told to use it. (A native
+        skill input item is the pending spike; the directive works either way.)"""
+        h = self.start()
+        list(self.provider.send(h, UserMessage("keep it short", skill="morning-briefing")))
+        self.assertEqual(self.brain.calls("turn/start")[0]["params"]["input"][0]["text"],
+                         'Use the "morning-briefing" skill for this request.\n\nkeep it short')
+        list(self.provider.send(h, UserMessage("plain")))
+        self.assertEqual(self.brain.calls("turn/start")[1]["params"]["input"][0]["text"], "plain")
+        self.provider.close(h)
+
     def test_set_model_rides_the_next_turn_start(self):
         """Decisions A1: turn/start's model/effort override "this turn and
         subsequent turns" (TurnStartParams, 0.153.4), so a change is sent

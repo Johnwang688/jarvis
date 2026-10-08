@@ -610,13 +610,20 @@ characters on Discord; the HUD shows the full version.
 
 - In a **task thread**: any owner message is addressed to that task, no
   mention needed. Verbs (`yes/no <code>`, `steer: …`, `cancel`, `status`)
-  are parsed first; anything else is a steering message to the orchestrator.
+  are parsed first. Then, **if the task is `clarifying` with an open
+  blocking question, typed text answers it** (`control.answer_question`,
+  through the same `_answer` as `/answer` — S1, bug 2); a voice note never
+  answers one. Anything else is a steering message to the orchestrator.
 - In a **project channel** (not a thread): `task: …` opens a task; other
   owner messages go to the project's chat thread on the fast path.
 - Everywhere: owner only, typed only for approvals and verbs (the v1
   spoken-turns-never-authorize rule stands).
 - Approval codes are accepted **only in the thread the request was posted
   in**, the v1 same-channel rule applied to threads.
+- **Keywords are on their way out (S1 → S2, decisions S-3).** They still
+  work for one release, and every keyword reply ends with a nudge such as
+  "(next time: `/cancel`)". S2 removes them and keeps a tripwire that holds
+  the old forms without acting.
 
 ### 11.3 Update protocol (G4)
 
@@ -631,6 +638,69 @@ characters on Discord; the HUD shows the full version.
   them.
 - Long content (a diff, a report over the cap) is attached as a file, not
   split across messages.
+- **Approval posts carry Approve and Deny buttons (S1).** Never an Always
+  button: a standing rule is the typed `/always` only (decisions S-2), and
+  `/always` is offered and accepted only where `permissions.entry_for` can
+  mint one. A press must match the owner, the posted message id and its
+  channel; the custom id carries the 4-character code, never the broker's
+  request id. Whatever resolves the request — HUD, timeout, slash, button —
+  strips the buttons.
+
+### 11.4 Slash commands (S1, 2026-10-07)
+
+Plan: `docs/plans/2026-10-07-slash-commands-plan.md`; owner decisions S-1..S-3
+in `docs/plans/2026-10-07-discord-decisions.md`.
+
+- **One registry, static code.** `jarvis/v2/commands.py` holds `Opt`, `Cmd`,
+  `REGISTRY`, the completers and `invocable_skills()`. No skill, project,
+  task or code ever enters the *registered* payload; they reach the owner
+  only as autocomplete suggestions, and every handler re-checks what it is
+  given. S1 registers eleven: `/task` (an empty brief opens a multi-line
+  modal), `/status`, `/cancel`, `/steer`, `/answer`, `/yes`, `/no`,
+  `/always`, `/resume`, `/skill`, `/project list`. The rest of `/project`
+  and `/channel` arrive with B1/B2 — no stubs.
+- **Registration is global** with `contexts [0, 1]`, `integration_types [0]`
+  and `default_member_permissions "0"` (guild commands never appear in a
+  DM). The daemon syncs once, on the first READY (which carries the
+  application id): GET, diff, and one bulk PUT only if they differ — never a
+  DELETE. `jarvis discord commands [--check | --sync]` is the human CLI.
+  `/applications/` is spelled only in `jarvis/v2/discord/commands.py`; a test
+  greps the tree.
+- **The gate, on every interaction, autocomplete included:** our
+  application id; the owner (`member.user.id` / `user.id`); `context` 0 or
+  1; the configured guild once B1 sets one; then the place — an archived
+  project's channel refuses, a channel Jarvis does not own refuses, and
+  `Cmd.places` is enforced on the server.
+- **The 3-second rule.** Read-only refusals answer at once (type 4,
+  ephemeral); autocomplete answers at once (type 8, ≤ 25). Everything else
+  sends type 5 **before** its first store write or control call, then edits
+  `@original`; past 14 minutes or on a 401/404 a public reply becomes a
+  channel post. A private one never does: its content is dropped and one
+  short public pointer ("That reply expired — run `/status` again") is
+  posted instead. Lookups (`/status`, `/project list`) and refusals are
+  ephemeral; actions are public. An unexpected exception after the deferral
+  says "That failed (`<Class>`); it may not have run." — never "Done." — and
+  a malformed id is an "I don't know" reply, never silence. A button or modal
+  with no `context` derives it from `guild_id` or a DM-typed channel; a
+  command never does, and a group DM is refused either way.
+- **Button posts survive a restart as plain posts.** The approval-post map
+  is also kept in `<v2 data>/discord/approval-posts.json`; on start, every
+  post the previous process left open loses its buttons (its request died
+  with that process — the broker denies everything at shutdown).
+- **One implementation per verb.** Verbs take a `Reply` sink —
+  `ChannelReply` for typed messages, `InteractionReply` for commands — so
+  the keyword and slash paths cannot drift.
+- **`/skill`** suggests the repo skills minus `jarvis-only`. In a DM or
+  project channel it is a chat turn with `UserMessage.skill` set: the fast
+  path injects the body (refused above 8k characters), Claude and Codex get
+  the directive `Use the "<name>" skill for this request.` (a headless
+  `/<name>` prompt and a Codex skill input item are unverified spikes). In a
+  task thread it is a steer. The thread log records `skill`.
+- **Never logged:** the interaction payload and its token. `DiscordRest`
+  redacts the bot token and every interaction token from its errors, and no
+  error carries a path. `GET /discord` reports `{connected, commands:
+  {state, count, synced_at, error}}` — states only.
+- `"discord_"` is a forbidden fast-path tool prefix.
 
 ---
 

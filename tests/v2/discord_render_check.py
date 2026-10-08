@@ -209,7 +209,10 @@ class DiscordChecks(unittest.TestCase):
         command = "printf '" + "x" * 5000 + "'\nsecond command"
         rendered = approval_text("shell", {"command": command, "cwd": "/tmp"}, "C42", "task abc")
         self.assertIn(command, rendered)
-        self.assertIn("yes/no C42", rendered)
+        self.assertIn("/yes C42", rendered)
+        self.assertIn("/always C42", rendered)
+        self.assertNotIn("/always", approval_text("shell", {"command": "a && b"}, "C44",
+                                                  "task abc", allowlistable=False))
         self.assertIn("Origin: task abc", rendered)
         self.rest.post("t", rendered)
         call = self.fake.calls[-1]

@@ -658,6 +658,25 @@ def _with_describe(record):
     return row
 
 
+def discord_status(daemon) -> dict:
+    """`GET /discord` (S1): is the surface up, and did the command sync work.
+
+    Built from the surface's own status record, which holds states, counts
+    and times only — never a token, an interaction token or a request path.
+    PR A extends this with the reporter, the guild and permissions."""
+    surface = getattr(daemon, "discord", None)
+    if surface is None:
+        from .daemon import discord_connected
+        state = "pending" if discord_connected() else "off"
+        return {"connected": False,
+                "commands": {"state": state, "count": 0, "synced_at": None, "error": None}}
+    status = surface.status()
+    commands = status.get("commands") or {}
+    return {"connected": bool(status.get("connected")),
+            "commands": {key: commands.get(key) for key in
+                         ("state", "count", "synced_at", "error")}}
+
+
 def route(handler, daemon, parts, query):
     """Return None for the existing daemon routes; never consume their bodies."""
     from .daemon import _object, safe_list
@@ -684,6 +703,9 @@ def route(handler, daemon, parts, query):
     if parts == ["usage"] and method == "GET":
         _object(query, ())
         return 200, usage(daemon)
+    if parts == ["discord"] and method == "GET":
+        _object(query, ())
+        return 200, discord_status(daemon)
     if parts == ["fs", "dirs"] and method == "GET":
         # No path means "start at home": the picker opens there (WP12c frontend).
         _object(query, ("path",))
@@ -815,6 +837,9 @@ def route(handler, daemon, parts, query):
                     continue
                 data = row.get("data", row)
                 text = data.get("text")
+                if kind == "user" and isinstance(text, str) and isinstance(data.get("skill"), str):
+                    # A `/skill` turn shows as the owner typed it (S1).
+                    text = f"/skill {data['skill']} {text}".rstrip()
                 if isinstance(text, str):
                     role = ("assistant" if kind == "text" else "user" if kind == "user"
                             else "system" if kind == "model_set" else row.get("role", "assistant"))

@@ -309,6 +309,27 @@ class Backend(unittest.TestCase):
         self.assertEqual(other._listeners, [])
         self.assertEqual(self.request("GET", "/status")["version"], 2)
 
+    def test_discord_status_route_holds_states_never_secrets(self):
+        """`GET /discord` (S1): connected + the command sync, nothing else."""
+        with patch.object(config, "DISCORD_TOKEN_PATH", self.root / "absent.json"):
+            self.assertEqual(self.request("GET", "/discord"),
+                             {"connected": False, "commands": {"state": "off", "count": 0,
+                                                               "synced_at": None, "error": None}})
+
+        class Surface:
+            def status(self):
+                return {"connected": True, "token": "synthetic-leak",
+                        "commands": {"state": "ok", "count": 11, "synced_at": 1.0,
+                                     "error": None, "path": "/webhooks/1/synthetic-leak"}}
+
+        self.daemon.discord = Surface()
+        body = self.request("GET", "/discord")
+        self.assertEqual(body, {"connected": True, "commands": {
+            "state": "ok", "count": 11, "synced_at": 1.0, "error": None}})
+        self.assertNotIn("synthetic-leak", json.dumps(body))
+        self.request("GET", "/discord", headers={"Sec-Fetch-Site": "cross-site"}, status=403)
+        self.request("GET", "/discord?x=1", status=400)
+
     def test_host_origin_and_errors(self):
         for headers in ({"Host": "attacker.example"}, {"Origin": f"http://localhost:{self.daemon.workshop_port}"},
                         {"Origin": "null"}, {"Sec-Fetch-Site": "cross-site"}):
@@ -444,6 +465,12 @@ class Backend(unittest.TestCase):
         self.assertTrue(all(set(r) == {"role", "text", "at"} and r["at"] for r in transcript))
         self.stores.threads.log(thread.id, "user", "legacy")
         self.assertEqual(self.request("GET", path + "/transcript")["messages"][-1]["text"], "legacy")
+        # A `/skill` turn (S1) shows as the owner typed it.
+        self.stores.threads._append(thread.id, "log.jsonl", {
+            "kind": "user", "at": "2026-10-07T00:00:00Z", "thread_id": thread.id,
+            "data": {"text": "keep it short", "skill": "morning-briefing"}})
+        self.assertEqual(self.request("GET", path + "/transcript")["messages"][-1]["text"],
+                         "/skill morning-briefing keep it short")
         rows = self.request("GET", f"/tasks/{task.id}/threads")
         self.assertEqual(rows[0]["state"], "open")
         self.assertEqual(set(rows[0]), {"thread_id", "role", "provider", "model", "state", "turns", "cost_usd"})
