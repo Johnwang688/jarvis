@@ -114,13 +114,22 @@ def refuse_archived_project(project: Project) -> None:
 
 # -- the owner-only gate ----------------------------------------------------------
 
-def owner_only(handler, daemon) -> None:
-    """The HUD's listener and the HUD's Origin, or 403. See the module note."""
-    from .daemon import APIError
+def is_owner(handler, daemon) -> bool:
+    """The owner-only test without the 403: the HUD's listener and its Origin.
+
+    `PATCH /projects` uses it to tag `project_updated` with `by: "owner" |
+    "api"` (B1, decisions D4): an owner rename moves the Discord channel at
+    once, anything else asks through the approval gate first."""
     port = handler.server.server_address[1]
     host = handler.headers.get("Host", "")
     origin = handler.headers.get("Origin")
-    if port != daemon.face_port or not origin or origin != f"http://{host}":
+    return port == daemon.face_port and bool(origin) and origin == f"http://{host}"
+
+
+def owner_only(handler, daemon) -> None:
+    """The HUD's listener and the HUD's Origin, or 403. See the module note."""
+    from .daemon import APIError
+    if not is_owner(handler, daemon):
         raise APIError(403, "only the owner can do this, from the HUD")
 
 
@@ -369,7 +378,11 @@ def delete_project(daemon, project_id: str, expect) -> dict:
     daemon.bus.publish({"kind": "project_deleted", "project_id": project_id,
                         "data": {"project_id": project_id, "name": project.name,
                                  "removed_thread_ids": [t.id for t in threads],
-                                 "removed_task_ids": [t.id for t in tasks]}})
+                                 "removed_task_ids": [t.id for t in tasks],
+                                 # B1: the record is gone, so the channel linker
+                                 # learns here which channel to leave a note in.
+                                 # The channel itself is kept (decisions D3).
+                                 "discord_channel_id": project.discord_channel_id}})
     return result
 
 

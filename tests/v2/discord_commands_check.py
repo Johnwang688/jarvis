@@ -222,6 +222,8 @@ class Harness(unittest.TestCase):
             (skills / name / "SKILL.md").write_text(
                 f"---\nname: {name}\n{meta}description: Use for {name}\n---\n{body}\n")
         for name, value in (("DISCORD_TOKEN_PATH", token_path),
+                            # Never the owner's real guild file (B1).
+                            ("DISCORD_GUILD_PATH", root / "discord_guild.json"),
                             ("ALLOWLIST_PATH", root / "allowlist.json"),
                             ("SKILLS_DIR", skills)):
             patcher = patch.object(config, name, value)

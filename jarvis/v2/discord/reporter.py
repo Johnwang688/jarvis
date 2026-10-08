@@ -14,7 +14,7 @@ records are consumed, never provider prose or events.
   grace window never makes one), auto-archiving after a week idle, with the
   owner added. "Started", then one status card edited in place, then the
   milestones.
-* Its project has no channel yet (every project, until B1 links them), or the
+* Its project has no channel (B1 links them; until then every project), or the
   channel or thread is broken (Discord 10003 unknown channel, 50001/50013
   missing access or permissions): the **attention** milestones — question,
   blocked, failed, done with its report — go to the owner's DM, prefixed
@@ -46,6 +46,12 @@ delivered, or once Discord said the place is gone.
 and Discord's code — never the URL, never a message body, never a token.
 Three transient failures in a row (transport, 429 too long to sleep, 5xx)
 open a breaker: 30 s, then 60 s, doubling up to 5 min, then a reconcile.
+**Linking (B1).** When the channel linker links a project (`project_updated`
+with `changed: ["discord_channel_id"]`), that project's tasks are reconciled
+at once: an active or blocked task gets its thread and card in the new
+channel, and one whose old thread was deleted gets a fresh one — the DM is
+then the safety net only if that channel breaks too.
+
 `status()` is what `GET /discord` shows and what a `discord_status` SSE event
 carries on every change: ok, degraded (with a reason) or down.
 """
@@ -78,6 +84,10 @@ ALERT_EVERY_S = 24 * 3600.0
 BROKEN_TTL_S = 3600.0           # a broken-place entry ages out; a new failure re-adds it
 LIST_BACKOFF_MAX_S = 300.0
 KINDS = frozenset({"task_created", "task_status_changed", "task_updated", "task_question"})
+# B1: a project gaining (or losing) its channel. Only the linker's own
+# `changed: ["discord_channel_id"]` events are taken; every other project edit
+# is ignored here.
+LINK_KIND = "project_updated"
 # Milestones that need the owner: followed by the ping line in a guild, and the
 # only ones that go to the DM safety net.
 ATTENTION = frozenset({"question", "blocked", "failed", "done"})
@@ -179,7 +189,10 @@ class Reporter:
         self._clock, self._wall = clock, wall
         self.counters = Counter()
         self._status_lock = threading.Lock()
-        self.subscription = bus.subscribe(lambda r: r.get("kind") in KINDS)
+        self.subscription = bus.subscribe(
+            lambda r: r.get("kind") in KINDS or (
+                r.get("kind") == LINK_KIND
+                and "discord_channel_id" in ((r.get("data") or {}).get("changed") or ())))
         self._stop = threading.Event()
         self._closing = False
         self._flush = False
@@ -466,7 +479,9 @@ class Reporter:
         if sidecar.get("thread_gone"):
             return None, False
         current = self.stores.tasks.get(task.id)
-        thread = sidecar.get("discord_thread_id") or (current.discord_thread_id if current else None)
+        rethread = bool(sidecar.get("rethread"))
+        thread = sidecar.get("discord_thread_id") or (
+            current.discord_thread_id if current and not rethread else None)
         if thread:
             if sidecar.get("discord_thread_id") != thread:
                 sidecar["discord_thread_id"] = thread
@@ -491,13 +506,16 @@ class Reporter:
         try:
             with _lock:
                 current = self.stores.tasks.get(task.id)
-                if current is not None and not current.discord_thread_id:
+                if current is not None and (rethread or not current.discord_thread_id):
+                    # A rethread (B1) replaces the gone id: the gateway places
+                    # owner messages by the id on the task record.
                     current.discord_thread_id = thread
                     self.stores.tasks.save(current)
         except StoreError as exc:
             LOG.warning("Discord thread id not saved on task %s (%s)", task.id,
                         type(exc).__name__)
         sidecar["discord_thread_id"] = thread
+        sidecar.pop("rethread", None)
         self._save(task.id, sidecar)
         self._call("add_owner", self.rest.add_owner, thread, channel=thread)
         return thread, False
@@ -634,6 +652,9 @@ class Reporter:
         self._save(task.id, sidecar)
 
     def _handle(self, record):
+        if record.get("kind") == LINK_KIND:
+            self._relinked(record)
+            return
         task_id = record["task_id"]
         current = self.stores.tasks.get(task_id)
         if current is None:
@@ -651,6 +672,47 @@ class Reporter:
             self._count("skipped")
             return
         self._deliver(task, project, read_sidecar(self.stores, task_id), questions=questions)
+
+    def _relinked(self, record):
+        """A project was linked to a channel, or unlinked (B1). Its own
+        reconcile runs now, so an active or blocked task that lived on the DM
+        safety net gets its thread and card in the new channel at once —
+        including one whose old thread Discord had deleted (`thread_gone`).
+        The DM stays the safety net only for a channel that later breaks."""
+        data = record.get("data") or {}
+        project_id = record.get("project_id") or data.get("project_id")
+        previous = (data.get("previous") or {}).get("discord_channel_id")
+        if previous and self._broken.pop(str(previous), None) is not None:
+            self._changed()
+        if not project_id:
+            return
+        project = self.stores.projects.get(project_id)
+        if project is None:
+            return
+        self._count("relinks")
+        for task in self.stores.tasks.list(project_id=project_id):
+            if self._stop.is_set() or self.breaker_open():
+                self._schedule_reconcile(self._open_until or self._clock())
+                return
+            if task.state in TERMINAL_STATES:
+                continue
+            sidecar = read_sidecar(self.stores, task.id)
+            if project.discord_channel_id and sidecar.get("thread_gone"):
+                # A fresh thread in the new channel; the gone one is kept on
+                # record only as history.
+                gone = sidecar.get("discord_thread_id") or task.discord_thread_id
+                for key in ("thread_gone", "discord_thread_id", "started_message_id",
+                            "discord_status_message_id", "embed_sha"):
+                    sidecar.pop(key, None)
+                sidecar["rethread"] = True
+                if gone:
+                    sidecar["retired_threads"] = sorted(
+                        set(sidecar.get("retired_threads") or []) | {str(gone)})
+                self._save(task.id, sidecar)
+            try:
+                self._deliver(task, project, sidecar, reconcile=True)
+            except Exception as exc:
+                LOG.warning("Discord relink of a task failed (%s)", type(exc).__name__)
 
     def _reconcile(self):
         self.reconciling = True
