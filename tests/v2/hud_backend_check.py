@@ -349,6 +349,14 @@ class Backend(unittest.TestCase):
             "counters": {"posts": 4, "dm": 1}, "dropped": 2,
             "last_error": {"op": "create_thread", "status": 403, "code": 50013, "at": 2.5}})
         self.assertNotIn("synthetic-leak", json.dumps(body))
+        # A start that failed (review fix 7): red with the class, not "pending".
+        self.daemon.discord, self.daemon.discord_error = None, "RuntimeError"
+        body = self.request("GET", "/discord")
+        self.assertEqual(body["commands"], {"state": "failed", "count": 0, "synced_at": None,
+                                            "error": "RuntimeError"})
+        self.assertEqual(body["reporter"]["state"], "down")
+        self.assertIn("RuntimeError", body["reporter"]["reason"])
+        self.daemon.discord_error = None
         self.request("GET", "/discord", headers={"Sec-Fetch-Site": "cross-site"}, status=403)
         self.request("GET", "/discord?x=1", status=400)
 

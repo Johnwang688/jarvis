@@ -32,6 +32,10 @@ export function discordLight(status: DiscordStatus | null): DiscordLight {
     const why = reporter.reason || lastError(status) || "failing";
     return { level: "down", text: `Discord down · ${why}` };
   }
+  if (!status.connected && status.commands?.state === "failed") {
+    // The surface never came up (or its sync failed before it connected).
+    return { level: "down", text: `Discord down · did not start${status.commands.error ? ` (${status.commands.error})` : ""}` };
+  }
   if (!status.connected) {
     return { level: "warn", text: "Discord not connected yet" };
   }

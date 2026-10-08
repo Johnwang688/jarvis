@@ -376,6 +376,23 @@ class DiscordRoutingChecks(unittest.TestCase):
         worker.join(2)
         self.assertEqual(result["decision"], Decision.ALLOW)
 
+    def test_review6_an_approval_shows_the_whole_command_minus_secret_values(self):
+        envdir = Path(self.tmp.name) / "envdir"
+        envdir.mkdir()
+        secret = "sk-test-PRA-approval-0123456789"
+        (envdir / ".env").write_text(f"FAKE_API_KEY={secret}\n")
+        from jarvis.tools import secrets
+        command = f"curl -H 'Authorization: Bearer {secret}' https://api.example/deploy"
+        with patch.object(secrets, "_search_dirs", return_value=[envdir]):
+            request, result, worker = self.ask(command=command, task_id=self.task.id)
+        body = self.posts(TASK_THREAD)[0][1]["content"]
+        self.assertNotIn(secret, repr(self.transport.calls))
+        self.assertIn("curl -H 'Authorization: Bearer ", body)        # the rest stays readable
+        self.assertIn("https://api.example/deploy", body)
+        self.assertIn("redacted", body)
+        self.approvals.shutdown()
+        worker.join(2)
+
     def test_approval_finds_the_thread_in_the_sidecar(self):
         """Bug 1: the sidecar is read first, so a task record that lost its
         thread id still has its approvals asked in its thread."""
@@ -942,6 +959,70 @@ class SurfaceChecks(unittest.TestCase):
         self.assertIsNone(surface)
         self.assertIsNone(self.daemon.discord)
         self.assertNotIn("runner.stop", self.log)
+        # Recorded by class name, so GET /discord shows red rather than "pending".
+        self.assertEqual(self.daemon.discord_error, "RuntimeError")
+        from jarvis.v2.hud_api import discord_status
+        status = discord_status(self.daemon)
+        self.assertEqual(status["reporter"]["state"], "down")
+        self.assertEqual(status["commands"], {"state": "failed", "count": 0,
+                                              "synced_at": None, "error": "RuntimeError"})
+        self.assertNotIn("no socket", json.dumps(status))
+
+
+class LogLeakChecks(unittest.TestCase):
+    """httpx logs every request's full URL at INFO, and an interaction reply's
+    URL holds a live interaction token (found on the live daemon). The daemon's
+    logging setup holds those libraries to WARNING."""
+
+    APP, ITOKEN = "123456789012345678", "aW50ZXJhY3Rpb24tdG9rZW4tc3ludGhldGlj"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        token_path = Path(self.tmp.name) / "discord_token.json"
+        token_path.write_text(json.dumps({"bot_token": TOKEN, "owner_id": OWNER}))
+        patcher = patch.object(config, "DISCORD_TOKEN_PATH", token_path)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        import logging
+        self.saved = {name: logging.getLogger(name).level for name in daemon_mod.QUIET_LOGGERS}
+        root = logging.getLogger()
+        self.root_handlers = list(root.handlers)
+        self.root_level = root.level
+
+        def restore():
+            for name, level in self.saved.items():
+                logging.getLogger(name).setLevel(level)
+            root.handlers[:] = self.root_handlers
+            root.setLevel(self.root_level)
+        self.addCleanup(restore)
+
+    def test_no_interaction_token_or_webhook_path_reaches_the_log(self):
+        import logging
+        records = []
+
+        class Keep(logging.Handler):
+            def emit(self, record):
+                records.append(record.getMessage())
+        keep = Keep(level=logging.DEBUG)
+        for name in ("httpx", "httpcore"):
+            logging.getLogger(name).addHandler(keep)
+            self.addCleanup(logging.getLogger(name).removeHandler, keep)
+        root = logging.getLogger()
+        root.handlers[:] = [logging.NullHandler()]        # basicConfig adds nothing here
+        root.setLevel(logging.INFO)                      # the daemon's level
+        daemon_mod.configure_logging()
+
+        rest = DiscordRest(httpx.MockTransport(lambda request: httpx.Response(200, json={"id": "9"})))
+        self.addCleanup(rest.close)
+        rest.followup(self.APP, self.ITOKEN, content="Done.")
+        rest.edit_original(self.APP, self.ITOKEN, content="Done.")
+        text = "\n".join(records)
+        self.assertNotIn(self.ITOKEN, text)
+        self.assertNotIn("/webhooks/", text)
+        self.assertNotIn(TOKEN, text)
+        for name in daemon_mod.QUIET_LOGGERS:
+            self.assertGreaterEqual(logging.getLogger(name).getEffectiveLevel(), logging.WARNING)
 
 
 class DaemonStartupChecks(unittest.TestCase):

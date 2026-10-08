@@ -1297,6 +1297,19 @@ def discord_checks(page, mock):
     check("a reason is rendered as text, never markup",
           panel.locator("img").count() == 0 and not page.evaluate("window.__pwned === 1"))
 
+    # A surface that never started is red with its class, not "pending" (review 7).
+    saved = dict(mock.world["discord"])
+    mock.world["discord"] = {"connected": False,
+                             "commands": {"state": "failed", "count": 0, "synced_at": None,
+                                          "error": "RuntimeError"},
+                             "reporter": None}
+    mock.emit("discord_status", {"state": "down"})
+    until(lambda: panel.get_attribute("data-level") == "down")
+    check("a failed start is red and names the class",
+          panel.get_attribute("data-level") == "down" and "RuntimeError" in panel.inner_text(),
+          panel.inner_text())
+    mock.world["discord"] = saved
+
     reporter.update(state="ok", reason="", last_error=None)
     mock.emit("discord_status", {"state": "ok"})
     until(lambda: panel.get_attribute("data-level") == "ok")

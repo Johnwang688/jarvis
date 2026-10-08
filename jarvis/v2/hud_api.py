@@ -668,6 +668,16 @@ def discord_status(daemon) -> dict:
     surface = getattr(daemon, "discord", None)
     if surface is None:
         from .daemon import discord_connected
+        failed = getattr(daemon, "discord_error", None)
+        if isinstance(failed, str) and failed:
+            # start_discord raised: say so, red, with the class and nothing else.
+            failed = failed[:60]
+            return {"connected": False,
+                    "commands": {"state": "failed", "count": 0, "synced_at": None,
+                                 "error": failed},
+                    "reporter": {"state": "down",
+                                 "reason": f"the Discord surface did not start ({failed})",
+                                 "counters": {}, "dropped": 0, "last_error": None}}
         state = "pending" if discord_connected() else "off"
         return {"connected": False,
                 "commands": {"state": state, "count": 0, "synced_at": None, "error": None},

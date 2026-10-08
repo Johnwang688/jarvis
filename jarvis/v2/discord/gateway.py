@@ -48,6 +48,7 @@ from jarvis import discord_gateway as v1gw
 from jarvis import permissions as v1permissions
 from jarvis.discord_approvals import _parse as _parse_answer
 from jarvis.tools import discord as v1tools
+from jarvis.tools.secrets import scrub
 
 from ..approvals import v1_request
 from ..commands import open_questions
@@ -641,8 +642,10 @@ class DiscordRouter:
         tool = str(data.get("tool") or "")
         request = _Asked(tool=tool, args=args,
                          allowlistable=data.get("allowlistable", True) is not False)
-        body = approval_text(tool, args, code, str(data.get("origin") or ""),
-                             allowlistable=self.allowlistable(request)[0])
+        # The whole command is shown, minus any secret value pasted into it:
+        # the transcript scrub runs over the text Discord receives.
+        body = scrub(approval_text(tool, args, code, str(data.get("origin") or ""),
+                                   allowlistable=self.allowlistable(request)[0]))
         posted = None
         if channel:
             posted = self._ask_in(req_id, str(channel), body, code)

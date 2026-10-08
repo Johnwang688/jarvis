@@ -138,6 +138,7 @@ class Daemon:
         # PR A attaches its DiscordSurface here (`start_discord`); `GET /discord`
         # reads it. None means no Discord on this daemon.
         self.discord = None
+        self.discord_error: str | None = None   # why start_discord failed (class name)
         self._lock = threading.RLock()
         self._worktree_lock = threading.Lock()
         self._sessions: dict[str, _Session] = {}
@@ -1312,6 +1313,9 @@ def start_discord(daemon, control=None, **surface_kwargs):
         # Class only: this path is one frame away from the credential bundle.
         LOG.warning("Discord surface not started (%s)", type(exc).__name__)
         daemon.discord = None
+        # The class only, for `GET /discord`: a start that failed is red on
+        # the HUD, not an endless "pending".
+        daemon.discord_error = type(exc).__name__
         if surface is not None:
             try:
                 surface.stop(runner=False)     # the daemon still needs its runner
@@ -1334,6 +1338,26 @@ def _purge_trash(daemon, done, interval=6 * 3600):
             return
 
 
+# Libraries that log a request's full URL at INFO (httpx: `HTTP Request: POST
+# https://…`) or DEBUG. A Discord interaction reply's URL *is* a credential —
+# `/webhooks/<app>/<interaction token>/…` — so at INFO every slash-command
+# reply wrote a live token into the daemon log (found on the live daemon,
+# 2026-10-07). Our own code logs operations, never URLs; these are held to
+# WARNING so a library cannot do it for us.
+QUIET_LOGGERS = ("httpx", "httpcore", "urllib3", "websocket", "anthropic", "openai")
+
+
+def configure_logging() -> None:
+    """The daemon's logging: INFO to stderr, URL-logging libraries at WARNING."""
+    # A daemon that logs nowhere is one whose failures are invisible: the
+    # first owner message that silently did nothing (2026-09-16) left no trace.
+    if not logging.getLogger().handlers:
+        logging.basicConfig(level=logging.INFO, stream=sys.stderr,
+                            format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    for name in QUIET_LOGGERS:
+        logging.getLogger(name).setLevel(logging.WARNING)
+
+
 def main() -> int:
     # Imported here, not at module scope: the hatch reads the daemon it is
     # given and nothing in the daemon needs it, so keeping the edge one-way
@@ -1341,11 +1365,7 @@ def main() -> int:
     from .hatch import EscapeHatch
     from .runner import TaskRunner
 
-    # A daemon that logs nowhere is one whose failures are invisible: the
-    # first owner message that silently did nothing (2026-09-16) left no trace.
-    if not logging.getLogger().handlers:
-        logging.basicConfig(level=logging.INFO, stream=sys.stderr,
-                            format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    configure_logging()
 
     remote = discord_connected()
     approvals = None

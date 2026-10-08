@@ -50,4 +50,14 @@ describe("the Discord light", () => {
     expect(failed.level).toBe("warn");
     expect(failed.text).toContain("commands not synced");
   });
+
+  it("is red, not pending, when the Discord surface failed to start", () => {
+    const failed = status({ connected: false, reporter: null,
+      commands: { state: "failed", count: 0, synced_at: null, error: "RuntimeError" } });
+    expect(discordLight(failed)).toEqual({ level: "down", text: "Discord down · did not start (RuntimeError)" });
+    const routed = status({ connected: false,
+      commands: { state: "failed", count: 0, synced_at: null, error: "RuntimeError" },
+      reporter: reporter({ state: "down", reason: "the Discord surface did not start (RuntimeError)" }) });
+    expect(discordLight(routed).level).toBe("down");
+  });
 });
