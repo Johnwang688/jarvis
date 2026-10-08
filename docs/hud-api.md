@@ -469,3 +469,8 @@ footing as `/approvals`.
   "failed", "error"?}], "skipped": [{"project_id", "name", "reason"}]}` —
   a channel for every live, unlinked project whose folder exists (never the
   Inbox), one create a second.
+- Review fixes (PR #8): `GET /discord`'s `linker` gains `"pending_moves":
+  int` (archive/restore moves waiting out a 429 or an outage), and
+  `project_restored` gains `"previous_name"` (the name before PR #4's
+  renumbering). A `create` adopts an unlinked Jarvis channel whose topic
+  ends with `· <project id>` instead of making a second one.

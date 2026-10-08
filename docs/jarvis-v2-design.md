@@ -858,7 +858,35 @@ D5, O1, O6 and O7 in `docs/plans/2026-10-07-discord-decisions.md`. Code:
   light goes amber on a missing permission or Administrator.
 - **No DELETE anywhere** still holds: `DiscordRest` has no delete method,
   nothing in `jarvis/v2/discord/` spells `"DELETE"`, and B1's fake Discord
-  fails the suite on one.
+  fails the suite on one. Only `linker.py` and `setup.py` call
+  `create_channel`/`modify_channel` (a grep test with an allowlist B2 extends).
+- **Review fixes (PR #8).**
+  - *Only a sanctioned name is applied.* The linker keeps, per project, the
+    last name the owner's action or an approval chose (`linker.json`
+    `sanctioned`). A pending rename retries its **own** name and is dropped
+    once the project's name has moved on — the newer change then takes its
+    own owner/api path, so an `api` rename can never ride an owner's 429
+    retry. A restore applies a new name only if it was sanctioned or is PR
+    #4's renumbering of the archived name (`project_restored` carries
+    `previous_name`); anything else moves the channel back and asks.
+  - *Nothing is lost to a failure.* A rename or move that meets a 429, a 5xx
+    or a transport failure is kept (`pending_renames`, `pending_moves`) and
+    retried when due; restore sends the move and the rename as separate
+    requests. A start-up reconcile moves an archived project's channel out
+    of Jarvis, and a live project's channel back out of the archive when it
+    went there with its project — never one moved for crowding
+    (`archived_by: project | crowding`). Open asks and the time each ask was
+    answered persist, so a restart asks an unanswered question again and
+    does not re-ask an answered one for a day. `GET /discord`'s linker gains
+    `pending_moves`.
+  - *Names.* Clashes are judged on the channel names Discord has (the cached
+    guild channel list), and a channel already carrying the bare or the
+    suffixed slug keeps it, so whoever had a name first keeps it.
+  - *Idempotent create.* A create first adopts an unlinked channel in the
+    Jarvis category whose topic ends with `· <project id>` — the residue of a
+    create whose answer was lost.
+  - The crowding note says how a channel comes back (`/channel restore`, B2,
+    or by hand).
 
 ### 11.7 Projects and folders from Discord (B2, 2026-10-07)
 

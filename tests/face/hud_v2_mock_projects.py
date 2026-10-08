@@ -143,6 +143,9 @@ def discord_handle(h, w, method, parts, body) -> bool:
             h._err(404, f"Project {parts[1]} not found")
             return True
         if method == "GET":
+            if w.get("slow_channel_view"):
+                import time
+                time.sleep(w["slow_channel_view"])
             h._json(channel_view(w, project))
             return True
         if method != "POST":
@@ -154,6 +157,9 @@ def discord_handle(h, w, method, parts, body) -> bool:
             h._err(409, "The Inbox's channel is #ungrouped; only re-running "
                         "`jarvis auth discord-guild` changes it")
         elif action == "create":
+            if w.get("refuse_channel_create"):
+                h._err(502, w["refuse_channel_create"])
+                return True
             if project.get("discord_channel_id"):
                 h._err(409, f"project {project['name']} already has a channel; unlink it first")
                 return True

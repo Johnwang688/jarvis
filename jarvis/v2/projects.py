@@ -327,6 +327,7 @@ def restore_project(daemon, project_id: str) -> dict:
         project = daemon.require(stores.projects, project_id)
         if not project.archived:
             raise DaemonError(f"project {project.name} is not archived")
+        previous_name = project.name
         project.name = unique_name(project.name, project_names_taken(stores, but=project.id))
         project.archived = None
         stores.projects.save(project)
@@ -341,6 +342,9 @@ def restore_project(daemon, project_id: str) -> dict:
         daemon.schedules._changed("schedule_updated", record)
     daemon.bus.publish({"kind": "project_restored", "project_id": project.id,
                         "data": {"project_id": project.id, "name": project.name,
+                                 # B1: a renumbered name is the owner's restore,
+                                 # so the channel linker may apply it unasked.
+                                 "previous_name": previous_name,
                                  "resumed_schedules": [r["id"] for r in resumed]}})
     return to_json(project)
 

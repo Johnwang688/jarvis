@@ -15,17 +15,31 @@ archive (D3, O7: 45 of 50 channels, projects idle 30 days), an overflow
 `ApprovalRequest(tool="discord_channel", origin="Jarvis housekeeping",
 allowlistable=False)`: Approve or Deny, never Always, and a deny or a timeout
 does nothing. Those asks run on their own worker, one at a time, so a question
-the owner has not answered never holds up the owner's own renames.
+the owner has not answered never holds up the owner's own renames; they are
+kept in `linker.json` and asked again after a restart.
+
+**Only a sanctioned name is ever applied** (review fix 1). A channel name is
+written only when the owner's own action or an approval chose it, and the
+last such name is kept per project (`sanctioned`). A pending rename retries
+*its own* name and is dropped the moment the project's name moves on — the
+newer change then takes its own owner/api path. A restore that would apply a
+name nobody sanctioned moves the channel back and asks about the name.
+
+**Nothing an owner did is lost to a failure** (review fix 2). A rename or a
+move that meets a 429, a 5xx or a transport failure is kept pending in
+`linker.json` and retried when due; a restore moves first and renames
+separately. On start, a reconcile moves an archived project's channel out of
+Jarvis, and a live project's channel back out of the archive when it went
+there with its project (never one moved for crowding — `archived_by`).
 
 **Never a delete (D3).** A channel is created, renamed, moved between the
 Jarvis categories, posted in, or left alone. `DiscordRest` has no delete
 method, and a permanently deleted project's channel is kept with a note.
 Moving never sends `lock_permissions` or `permission_overwrites`.
 
-**Rate limits.** Discord allows two renames per channel per ten minutes. A
-rename that meets a long 429 is kept as *pending* and retried when Discord
-said; the HUD shows "rename pending" and `GET /discord` counts them. Creates
-(backfill, crowding moves) are paced at one a second.
+**Rate limits.** Discord allows two renames per channel per ten minutes; the
+HUD shows "rename pending" and `GET /discord` counts pending renames and
+moves. Creates (backfill, crowding moves) are paced at one a second.
 
 Nothing here logs a URL, a token or a message body: failures are the
 operation, the HTTP status and Discord's code (`rest.describe`).
@@ -41,6 +55,7 @@ import re
 import threading
 import time
 import unicodedata
+import uuid
 
 from ..approvals import ApprovalRequest
 from ..model import TERMINAL_STATES, to_json
@@ -48,8 +63,7 @@ from ..provider import Decision
 from ..stores import StoreError, _write_bytes
 from . import guild as guildmod
 from . import perms
-from .rest import (MISSING_ACCESS, MISSING_PERMISSIONS, UNKNOWN_CHANNEL, DiscordHTTPError,
-                   describe)
+from .rest import (MISSING_ACCESS, MISSING_PERMISSIONS, UNKNOWN_CHANNEL, describe)
 
 LOG = logging.getLogger(__name__)
 
@@ -61,15 +75,23 @@ CROWDED_AT = 45
 IDLE_DAYS = 30
 VIEW_TTL_S = 60.0
 FACTS_TTL_S = 60.0
+CHANNELS_TTL_S = 60.0
 READ_TIMEOUT_S = 5.0
 CREATE_INTERVAL = 1.0
 TICK_S = 5.0
+RETRY_S = 30.0                 # a transient failure without a retry_after
 ASK_AGAIN_S = 24 * 3600.0      # after a denied or unanswered housekeeping ask
 ORIGIN = "Jarvis housekeeping"
 TEXT, CATEGORY = 0, 4
+# Why a channel sits in an archive category: with its project, or for room.
+BY_PROJECT, BY_CROWDING = "project", "crowding"
 STATES = ("linked_ok", "unlinked", "not_found", "no_access", "wrong_guild",
           "missing_permissions", "folder_missing", "unconfigured", "unreachable")
 _SNOWFLAKE = re.compile(r"^[0-9]{5,24}$")
+CROWDING_NOTE = ("Moved to {where} to make room (you approved it). The project is still "
+                 "active and this channel still works. It comes back to Jarvis with "
+                 "`/channel restore` (coming soon); until then you can drag it back in "
+                 "Discord — the link is kept either way.")
 
 
 class LinkError(Exception):
@@ -94,6 +116,12 @@ def slug(name: str, project_id: str, taken=()) -> str:
         suffix = f"-{project_id[:4]}"
         text = text[:SLUG_MAX - len(suffix)].strip("-") + suffix
     return text
+
+
+def slugs(name: str, project_id: str) -> tuple[str, str]:
+    """The two names a project's channel may carry: bare and clash-suffixed."""
+    bare = slug(name, project_id)
+    return bare, slug(name, project_id, {bare})
 
 
 def topic(project) -> str:
@@ -132,13 +160,15 @@ class ChannelLinker:
         self._state_path = Path(state_path) if state_path else \
             Path(self.stores.root) / "discord" / "linker.json"
         self._lock = threading.RLock()        # serialises every channel write
+        self._state_lock = threading.RLock()  # linker.json, read and written by three threads
         self._views: dict[str, tuple[float, dict]] = {}
         self._facts: tuple[float, dict] | None = None
+        self._channels_cache: tuple[float, list] | None = None
         self._perm_status: dict | None = None
         self._awaiting = 0
-        self._asked: dict[str, float] = {}    # housekeeping key -> wall time asked
         self._last_create = None
         self._linked_cfg = None
+        self._reconciled_cfg = None
         self._crowding_due = True
         self.last_error: dict | None = None
         self._state = self._load_state()
@@ -153,6 +183,11 @@ class ChannelLinker:
         if self.subscription is not None:
             return self
         self.subscription = self.daemon.bus.subscribe(lambda r: r.get("kind") in KINDS)
+        # Asks a previous process left unanswered are asked again (fix 2).
+        with self._state_lock:
+            for job in self._state["asks"]:
+                self._awaiting += 1
+                self._jobs.put(job)
         self._worker = threading.Thread(target=self._run, name="jarvis-discord-linker",
                                         daemon=True)
         self._asker = threading.Thread(target=self._ask_loop, name="jarvis-discord-linker-asks",
@@ -204,6 +239,25 @@ class ChannelLinker:
         self._facts = (now, facts)
         return facts
 
+    def channels(self, cfg, *, refresh=False) -> list | None:
+        """The guild's channels, cached 60 s; None when Discord cannot say.
+        Every channel write here drops the cache, so names stay current."""
+        now = self._clock()
+        cached = self._channels_cache
+        if not refresh and cached is not None and now - cached[0] < CHANNELS_TTL_S:
+            return cached[1]
+        try:
+            found = self.rest.guild_channels(cfg.guild_id, timeout=READ_TIMEOUT_S, patient=False)
+        except Exception as exc:
+            self._failed("list_channels", exc)
+            return None
+        self._channels_cache = (now, found)
+        return found
+
+    def _wrote(self, project_id=None) -> None:
+        self._channels_cache = None
+        self.invalidate(project_id)
+
     def refresh_permissions(self) -> dict | None:
         """The server-wide check `GET /discord` shows; None until configured."""
         cfg = self.config()
@@ -229,7 +283,12 @@ class ChannelLinker:
         LOG.warning("Discord %s failed (HTTP %s, code %s, %s)", op, facts["status"],
                     facts["code"], facts["error"])
 
-    # -- persisted state (overflow categories, pending renames) -------------
+    # -- persisted state ------------------------------------------------------
+    # archive_overflow: [category id]; pending_renames: {channel: {project_id,
+    # name, due}}; pending_moves: {channel: {project_id, parent_id, reason,
+    # due}}; sanctioned: {project id: the last name the owner or an approval
+    # chose}; archived_by: {channel: "project" | "crowding"}; asked: {key:
+    # when}; asks: [the housekeeping jobs not yet answered].
 
     def _load_state(self) -> dict:
         try:
@@ -238,22 +297,50 @@ class ChannelLinker:
             data = {}
         if not isinstance(data, dict):
             data = {}
-        overflow = [c for c in data.get("archive_overflow") or [] if isinstance(c, str)]
-        renames = {k: v for k, v in (data.get("pending_renames") or {}).items()
-                   if isinstance(v, dict)}
-        return {"archive_overflow": overflow, "pending_renames": renames}
+
+        def rows(key):
+            return {str(k): v for k, v in (data.get(key) or {}).items() if isinstance(v, dict)} \
+                if isinstance(data.get(key), dict) else {}
+
+        def strings(key):
+            return {str(k): v for k, v in (data.get(key) or {}).items() if isinstance(v, str)} \
+                if isinstance(data.get(key), dict) else {}
+
+        asked = data.get("asked") if isinstance(data.get("asked"), dict) else {}
+        return {
+            "archive_overflow": [c for c in data.get("archive_overflow") or [] if isinstance(c, str)],
+            "pending_renames": rows("pending_renames"),
+            "pending_moves": rows("pending_moves"),
+            "sanctioned": strings("sanctioned"),
+            "archived_by": strings("archived_by"),
+            "asked": {str(k): float(v) for k, v in asked.items() if isinstance(v, (int, float))},
+            "asks": [j for j in data.get("asks") or [] if isinstance(j, dict) and j.get("action")],
+        }
 
     def _save_state(self) -> None:
-        try:
-            _write_bytes(self._state_path, json.dumps(self._state, sort_keys=True).encode())
-        except (StoreError, OSError) as exc:
-            LOG.warning("Discord linker state not saved (%s)", type(exc).__name__)
+        with self._state_lock:
+            try:
+                _write_bytes(self._state_path, json.dumps(self._state, sort_keys=True).encode())
+            except (StoreError, OSError, TypeError, ValueError) as exc:
+                LOG.warning("Discord linker state not saved (%s)", type(exc).__name__)
+
+    def _sanction(self, project_id, name) -> None:
+        with self._state_lock:
+            if self._state["sanctioned"].get(project_id) != name:
+                self._state["sanctioned"][project_id] = name
+                self._save_state()
+
+    def sanctioned(self, project_id) -> str | None:
+        return self._state["sanctioned"].get(project_id)
 
     def archive_target(self, cfg) -> str:
         """Where an archived channel goes: the newest overflow category, else
         Jarvis Archive."""
         overflow = self._state.get("archive_overflow") or []
         return overflow[-1] if overflow else cfg.archive_category_id
+
+    def archive_categories(self, cfg) -> set[str]:
+        return {cfg.archive_category_id, *(self._state.get("archive_overflow") or [])}
 
     def category_name(self, cfg, parent) -> str | None:
         parent = str(parent or "")
@@ -273,11 +360,17 @@ class ChannelLinker:
     def status(self) -> dict:
         """For `GET /discord`: states and counts, never a token or a URL."""
         cfg = self.config()
-        pending = len(self._state.get("pending_renames") or {})
+        renames = len(self._state.get("pending_renames") or {})
+        moves = len(self._state.get("pending_moves") or {})
         if cfg is None:
             state, reason = "unconfigured", "run `jarvis auth discord-guild` to set up the server"
-        elif pending:
-            state, reason = "degraded", f"{pending} channel rename(s) pending (Discord rate limit)"
+        elif renames or moves:
+            parts = []
+            if renames:
+                parts.append(f"{renames} channel rename(s)")
+            if moves:
+                parts.append(f"{moves} channel move(s)")
+            state, reason = "degraded", " and ".join(parts) + " pending (Discord rate limit or outage)"
         elif self.last_error and self._wall() - self.last_error.get("at", 0) < 600:
             error = self.last_error
             state, reason = "degraded", (f"last {error['op']} failed (HTTP {error['status']}, "
@@ -286,8 +379,8 @@ class ChannelLinker:
             state, reason = "ok", ""
         return {
             "guild": {"configured": cfg is not None, "id": cfg.guild_id if cfg else None},
-            "linker": {"state": state, "reason": reason, "pending_renames": pending,
-                       "awaiting_approval": self._awaiting},
+            "linker": {"state": state, "reason": reason, "pending_renames": renames,
+                       "pending_moves": moves, "awaiting_approval": self._awaiting},
             "permissions": dict(self._perm_status) if self._perm_status else None,
         }
 
@@ -368,6 +461,12 @@ class ChannelLinker:
             raise LinkError(404, f"no project {project_id}")
         return project
 
+    def _get(self, project_id):
+        try:
+            return self.stores.projects.get(project_id)
+        except StoreError:
+            return None
+
     def _require_config(self):
         cfg = self.config()
         if cfg is None:
@@ -388,13 +487,44 @@ class ChannelLinker:
             raise LinkError(409, f"the folder {project.root} does not exist, so the project "
                                  "cannot have a channel")
 
-    def _taken(self, project_id) -> set[str]:
-        from ..daemon import safe_list
+    def _channel_name(self, cfg, channel_id) -> str | None:
+        for channel in self.channels(cfg) or ():
+            if str(channel.get("id")) == str(channel_id):
+                name = channel.get("name")
+                return name if isinstance(name, str) else None
+        return None
+
+    def _taken(self, project_id, own_channel=None) -> set[str]:
+        """The names already in use, from the channels Discord really has
+        (review fix 3) — never this project's own channel. If Discord cannot
+        be read, the other linked projects' names stand in."""
+        cfg = self.config()
+        listed = self.channels(cfg) if cfg is not None else None
         names = {"ungrouped"}
+        if listed is not None:
+            for channel in listed:
+                if channel.get("type") == CATEGORY or str(channel.get("id")) == str(own_channel):
+                    continue
+                if isinstance(channel.get("name"), str):
+                    names.add(channel["name"])
+            return names
+        from ..daemon import safe_list
         for other in safe_list(self.stores.projects):
             if other.id != project_id and other.discord_channel_id and not other.inbox:
-                names.add(slug(other.name, other.id))
+                names.update(slugs(other.name, other.id))
         return names
+
+    def target_name(self, project, current=None) -> str:
+        """The name this project's channel should carry. A current name that
+        is already the bare or the suffixed slug is kept: whoever had a name
+        first keeps it."""
+        bare, suffixed = slugs(project.name, project.id)
+        if current in (bare, suffixed):
+            return current
+        return bare if bare not in self._taken(project.id, project.discord_channel_id) else suffixed
+
+    def names_match(self, project, name) -> bool:
+        return name in slugs(project.name, project.id)
 
     def _pace(self):
         if self._last_create is not None:
@@ -414,6 +544,8 @@ class ChannelLinker:
             project.discord_channel_id = channel_id
             project.discord_channel_origin = origin if channel_id else None
             self.stores.projects.save(project)
+        if previous and previous != channel_id:
+            self._forget_channel(previous)
         self.invalidate(project_id)
         self.daemon.bus.publish({"kind": "project_updated", "project_id": project.id,
                                  "data": {"project_id": project.id,
@@ -421,6 +553,15 @@ class ChannelLinker:
                                           "project": to_json(project), "by": by,
                                           "previous": {"discord_channel_id": previous}}})
         return project
+
+    def _forget_channel(self, channel_id) -> None:
+        """A channel is no longer linked: nothing pending for it may still run."""
+        with self._state_lock:
+            changed = False
+            for key in ("pending_renames", "pending_moves", "archived_by"):
+                changed |= self._state[key].pop(str(channel_id), None) is not None
+            if changed:
+                self._save_state()
 
     def _rest_refusal(self, op, exc) -> LinkError:
         self._failed(op, exc)
@@ -434,8 +575,28 @@ class ChannelLinker:
         return LinkError(502, f"Discord refused {op} (HTTP {facts['status']}, code "
                               f"{facts['code']}){': ' + why if why else ''}")
 
+    def _orphan(self, cfg, project) -> dict | None:
+        """A channel Jarvis already made for this project (its topic ends with
+        `· <id>`) but never recorded — the create's answer was lost, or the
+        link was refused after it (review fix 6). Adopting it makes a retry
+        idempotent."""
+        from ..daemon import safe_list
+        listed = self.channels(cfg, refresh=True)
+        if listed is None:
+            return None
+        linked = {p.discord_channel_id for p in safe_list(self.stores.projects)
+                  if p.discord_channel_id}
+        for channel in listed:
+            text = channel.get("topic")
+            if (channel.get("type") == TEXT and str(channel.get("parent_id") or "") == cfg.category_id
+                    and isinstance(text, str) and text.endswith(f"· {project.id}")
+                    and str(channel.get("id")) not in linked):
+                return channel
+        return None
+
     def create(self, project_id: str, *, by: str = "owner") -> dict:
-        """A new channel in the Jarvis category, named by `slug`, topic set."""
+        """A new channel in the Jarvis category, named by `slug`, topic set —
+        or the one a lost create already made, adopted."""
         with self._lock:
             cfg = self._require_config()
             project = self._project(project_id)
@@ -444,14 +605,21 @@ class ChannelLinker:
             if project.discord_channel_id:
                 raise LinkError(409, f"project {project.name} already has a channel; "
                                      "unlink it first")
-            self._pace()
-            name = slug(project.name, project.id, self._taken(project.id))
-            try:
-                channel_id = self.rest.create_channel(cfg.guild_id, name, kind=TEXT,
-                                                      parent_id=cfg.category_id,
-                                                      topic=topic(project))
-            except Exception as exc:
-                raise self._rest_refusal("create_channel", exc) from None
+            orphan = self._orphan(cfg, project)
+            if orphan is not None:
+                channel_id, name = str(orphan["id"]), orphan.get("name")
+            else:
+                self._pace()
+                name = self.target_name(project)
+                try:
+                    channel_id = self.rest.create_channel(cfg.guild_id, name, kind=TEXT,
+                                                          parent_id=cfg.category_id,
+                                                          topic=topic(project))
+                except Exception as exc:
+                    raise self._rest_refusal("create_channel", exc) from None
+                self._wrote()
+            if isinstance(name, str):
+                self._sanction(project.id, name)
             self._set_channel(project.id, channel_id, "created", by=by)
             self._crowding_due = True
             return self.view(project.id, refresh=True)
@@ -510,7 +678,10 @@ class ChannelLinker:
             project = self._project(project_id)
             if project.discord_channel_id and project.discord_channel_id == channel_id:
                 return self.view(project.id, refresh=True)
-            self.validate_link(project, channel_id)
+            channel = self.validate_link(project, channel_id)
+            # The owner chose this channel as it is named: that name stands.
+            if isinstance(channel.get("name"), str):
+                self._sanction(project.id, channel["name"])
             self._set_channel(project.id, channel_id, "linked", by=by)
             return self.view(project.id, refresh=True)
 
@@ -522,6 +693,9 @@ class ChannelLinker:
             if not project.discord_channel_id:
                 return self.view(project.id, refresh=True)
             self._set_channel(project.id, None, None, by=by)
+            with self._state_lock:
+                if self._state["sanctioned"].pop(project.id, None) is not None:
+                    self._save_state()
             return self.view(project.id, refresh=True)
 
     def move_channel(self, project_id: str, *, archive: bool) -> dict:
@@ -607,6 +781,104 @@ class ChannelLinker:
             self._set_channel(inbox.id, cfg.ungrouped_channel_id, "created", by="owner")
         return True
 
+    # -- the two channel writes, kept when they fail (review fix 2) --------------
+
+    def _due(self, exc) -> float:
+        delay = getattr(exc, "retry_after", None)
+        try:
+            delay = float(delay) if delay is not None else RETRY_S
+        except (TypeError, ValueError):
+            delay = RETRY_S
+        return self._wall() + max(delay, 1.0)
+
+    def rename(self, project_id, channel_id, name) -> bool:
+        """Apply a **sanctioned** name — the owner's own action or an approved
+        ask chose it; nothing else calls this. A 429, 5xx or transport
+        failure keeps it pending, retried when due."""
+        self._sanction(project_id, name)
+        with self._lock:
+            try:
+                self.rest.modify_channel(channel_id, name=name)
+            except Exception as exc:
+                self._failed("rename_channel", exc)
+                with self._state_lock:
+                    if _transient(exc):
+                        self._state["pending_renames"][str(channel_id)] = {
+                            "project_id": project_id, "name": name, "due": self._due(exc)}
+                    else:
+                        self._state["pending_renames"].pop(str(channel_id), None)
+                    self._save_state()
+                self.invalidate(project_id)
+                return False
+            with self._state_lock:
+                if self._state["pending_renames"].pop(str(channel_id), None) is not None:
+                    self._save_state()
+            self._wrote(project_id)
+            return True
+
+    def move(self, project_id, channel_id, parent_id, reason) -> bool:
+        """Move a channel to a category by `parent_id` alone. `reason` is why
+        it now sits where it does (`project`, `crowding`, or `restore` for the
+        way back), kept so a restart knows which moves to undo. Failures that
+        may pass are kept pending."""
+        with self._lock:
+            try:
+                self.rest.modify_channel(channel_id, parent_id=parent_id)
+            except Exception as exc:
+                self._failed("move_channel", exc)
+                with self._state_lock:
+                    if _transient(exc):
+                        self._state["pending_moves"][str(channel_id)] = {
+                            "project_id": project_id, "parent_id": str(parent_id),
+                            "reason": reason, "due": self._due(exc)}
+                    else:
+                        self._state["pending_moves"].pop(str(channel_id), None)
+                    self._save_state()
+                return False
+            with self._state_lock:
+                self._state["pending_moves"].pop(str(channel_id), None)
+                if reason in (BY_PROJECT, BY_CROWDING):
+                    self._state["archived_by"][str(channel_id)] = reason
+                else:
+                    self._state["archived_by"].pop(str(channel_id), None)
+                self._save_state()
+            self._wrote(project_id)
+            return True
+
+    def _retry_pending(self) -> None:
+        """Retry what is due. A rename retries **its own** name, and only
+        while the project still carries it: once the name has moved on, the
+        newer change took its own owner/api path (fix 1). A move retries only
+        while it still fits the project's state."""
+        now = self._wall()
+        for channel, row in list((self._state.get("pending_renames") or {}).items()):
+            if row.get("due", 0) > now:
+                continue
+            project = self._get(row.get("project_id") or "")
+            name = row.get("name")
+            if (project is None or project.discord_channel_id != channel
+                    or not isinstance(name, str) or not self.names_match(project, name)):
+                with self._state_lock:
+                    self._state["pending_renames"].pop(channel, None)
+                    self._save_state()
+                continue
+            self.rename(project.id, channel, name)
+        for channel, row in list((self._state.get("pending_moves") or {}).items()):
+            if row.get("due", 0) > now:
+                continue
+            project = self._get(row.get("project_id") or "")
+            reason = row.get("reason")
+            fits = project is not None and project.discord_channel_id == channel and (
+                bool(project.archived) if reason == BY_PROJECT else not project.archived)
+            if not fits:
+                with self._state_lock:
+                    self._state["pending_moves"].pop(channel, None)
+                    self._save_state()
+                continue
+            self.move(project.id, channel, row.get("parent_id"), reason)
+
+    _retry_renames = _retry_pending     # PR #8's name, kept for callers built on it
+
     # -- lifecycle events (worker) ----------------------------------------------
 
     def _handle(self, record) -> None:
@@ -620,14 +892,18 @@ class ChannelLinker:
         if kind == "project_updated":
             changed = data.get("changed") or []
             if "name" in changed:
-                self._renamed(project_id, data)
+                self._renamed(cfg, project_id, data)
         elif kind == "project_archived":
             self._archived(cfg, project_id)
         elif kind == "project_restored":
-            self._restored(cfg, project_id)
+            self._restored(cfg, project_id, data)
         elif kind == "project_deleted":
             channel = data.get("discord_channel_id")
             if channel:
+                self._forget_channel(channel)
+                with self._state_lock:
+                    if self._state["sanctioned"].pop(project_id, None) is not None:
+                        self._save_state()
                 name = str(data.get("name") or "")
                 self._note(channel, f"Project {name} was permanently deleted in the HUD. "
                                     "This channel is kept; it is no longer linked to Jarvis.")
@@ -638,115 +914,101 @@ class ChannelLinker:
         except Exception as exc:
             self._failed("post_note", exc)
 
-    def _renamed(self, project_id, data) -> None:
-        try:
-            project = self.stores.projects.get(project_id)
-        except StoreError:
-            return
+    def _ask_rename(self, project, channel, to, why) -> None:
+        current = self._channel_name(self.config(), channel) if self.config() else None
+        before = current or self.sanctioned(project.id) or ""
+        self._enqueue({
+            "action": "rename", "project_id": project.id, "channel": channel, "to": to,
+            "args": {"action": "rename", "channel": channel, "from": before, "to": to,
+                     "why": why}})
+
+    def _renamed(self, cfg, project_id, data) -> None:
+        project = self._get(project_id)
         if project is None or not project.discord_channel_id or project.inbox:
             return
-        to = slug(project.name, project.id, self._taken(project.id))
-        previous = (data.get("previous") or {}).get("name") or ""
-        if data.get("by") == "owner":
-            self.rename(project.id, project.discord_channel_id, to)
+        channel = project.discord_channel_id
+        current = self._channel_name(cfg, channel)
+        to = self.target_name(project, current)
+        if current is not None and to == current:
+            self._sanction(project.id, current)      # the channel already says it
             return
-        # Not the owner's own action: ask first (D4).
-        before = slug(previous, project.id) if previous else ""
-        self._enqueue({
-            "action": "rename", "project_id": project.id,
-            "channel": project.discord_channel_id, "to": to,
-            "args": {"action": "rename", "channel": project.discord_channel_id,
-                     "from": before, "to": to,
-                     "why": f"project {project.name} was renamed outside the HUD"}})
-
-    def rename(self, project_id, channel_id, name) -> bool:
-        """Rename now; a long 429 keeps it pending, retried when Discord said."""
-        with self._lock:
-            try:
-                self.rest.modify_channel(channel_id, name=name)
-            except DiscordHTTPError as exc:
-                if exc.status == 429:
-                    delay = float(exc.retry_after or 60.0)
-                    self._state["pending_renames"][str(channel_id)] = {
-                        "project_id": project_id, "name": name, "due": self._wall() + delay}
-                    self._save_state()
-                    self.invalidate(project_id)
-                    self._failed("rename_channel", exc)
-                    return False
-                self._failed("rename_channel", exc)
-                return False
-            except Exception as exc:
-                self._failed("rename_channel", exc)
-                return False
-            if self._state["pending_renames"].pop(str(channel_id), None) is not None:
-                self._save_state()
-            self.invalidate(project_id)
-            return True
-
-    def _retry_renames(self) -> None:
-        now = self._wall()
-        for channel, row in list((self._state.get("pending_renames") or {}).items()):
-            if row.get("due", 0) > now:
-                continue
-            project = None
-            try:
-                project = self.stores.projects.get(row.get("project_id") or "")
-            except StoreError:
-                pass
-            if project is None or project.discord_channel_id != channel:
-                self._state["pending_renames"].pop(channel, None)
-                self._save_state()
-                continue
-            # The newest name wins: a rename typed while one was pending.
-            self.rename(project.id, channel, slug(project.name, project.id,
-                                                  self._taken(project.id)))
+        if data.get("by") == "owner":
+            self.rename(project.id, channel, to)
+            return
+        # Not the owner's own action: ask first (D4). A pending owner rename
+        # for an older name is dropped by the retry, never carried along.
+        self._ask_rename(project, channel, to, f"project {project.name} was renamed outside the HUD")
 
     def _archived(self, cfg, project_id) -> None:
-        try:
-            project = self.stores.projects.get(project_id)
-        except StoreError:
-            return
+        project = self._get(project_id)
         if project is None or not project.discord_channel_id or project.inbox:
             return
         target = self.archive_target(cfg)
-        with self._lock:
-            try:
-                self.rest.modify_channel(project.discord_channel_id, parent_id=target)
-            except Exception as exc:
-                self._failed("archive_channel", exc)
-                return
+        self.move(project.id, project.discord_channel_id, target, BY_PROJECT)
         self._note(project.discord_channel_id,
-                   f"Project {project.name} was archived in the HUD. This channel moved to "
+                   f"Project {project.name} was archived in the HUD. This channel moves to "
                    f"{self.category_name(cfg, target)} and is kept; restore the project in "
                    "the HUD to work here again.")
         self._crowding_due = True
 
-    def _restored(self, cfg, project_id) -> None:
-        try:
-            project = self.stores.projects.get(project_id)
-        except StoreError:
-            return
+    def _restored(self, cfg, project_id, data=None) -> None:
+        """Move back first; the name is a separate step, applied only if it
+        was sanctioned — the name the project had when the owner archived it,
+        or PR #4's renumbering of that name on restore. Anything else asks."""
+        data = data or {}
+        project = self._get(project_id)
         if project is None or not project.discord_channel_id or project.inbox:
             return
-        channel_id = project.discord_channel_id
-        name = slug(project.name, project.id, self._taken(project.id))
-        current = None
-        try:
-            current = self.rest.get_channel(channel_id, timeout=READ_TIMEOUT_S, patient=False)
-        except Exception as exc:
-            self._failed("get_channel", exc)
-        with self._lock:
-            try:
-                if current is not None and current.get("name") == name:
-                    self.rest.modify_channel(channel_id, parent_id=cfg.category_id)
-                else:
-                    # PR #4 may have renumbered the name on restore.
-                    self.rest.modify_channel(channel_id, parent_id=cfg.category_id, name=name)
-            except Exception as exc:
-                self._failed("restore_channel", exc)
-                return
-        self._note(channel_id, "Restored.")
+        channel = project.discord_channel_id
+        self.move(project.id, channel, cfg.category_id, "restore")
+        current = self._channel_name(cfg, channel)
+        to = self.target_name(project, current)
+        sanctioned = self.sanctioned(project.id)
+        before = data.get("previous_name")
+        renumbered = (isinstance(before, str) and before != project.name
+                      and (self.names_match(SimpleProject(before, project.id), sanctioned or "")
+                           or self.names_match(SimpleProject(before, project.id), current or "")))
+        if current is not None and to == current:
+            pass
+        elif to == sanctioned or renumbered:
+            self.rename(project.id, channel, to)
+        else:
+            self._ask_rename(project, channel, to,
+                             f"project {project.name} was restored under a name nobody "
+                             "approved for its channel; it was moved back with its old name")
+        self._note(channel, "Restored.")
         self._crowding_due = True
+
+    # -- start-up reconcile (review fix 2) ------------------------------------------
+
+    def reconcile(self) -> int:
+        """Bring channels in line with their projects after a restart or an
+        outage: an archived project's channel still in Jarvis goes to the
+        archive; a live project's channel that went to the archive *with its
+        project* comes back. One moved for crowding stays. -> moves made."""
+        cfg = self.config()
+        if cfg is None:
+            return 0
+        listed = self.channels(cfg, refresh=True)
+        if listed is None:
+            return 0
+        from ..daemon import safe_list
+        parents = {str(c.get("id")): str(c.get("parent_id") or "") for c in listed}
+        archives = self.archive_categories(cfg)
+        moved = 0
+        for project in safe_list(self.stores.projects):
+            channel = project.discord_channel_id
+            if not channel or project.inbox or channel not in parents:
+                continue
+            if channel in (self._state.get("pending_moves") or {}):
+                continue                      # the retry owns it
+            where = parents[channel]
+            if project.archived and where == cfg.category_id:
+                moved += self.move(project.id, channel, self.archive_target(cfg), BY_PROJECT)
+            elif (not project.archived and where in archives
+                  and self._state["archived_by"].get(channel) == BY_PROJECT):
+                moved += self.move(project.id, channel, cfg.category_id, "restore")
+        return moved
 
     # -- crowding (D3, O7) -----------------------------------------------------
 
@@ -766,11 +1028,8 @@ class ChannelLinker:
         cfg = self.config()
         if cfg is None:
             return []
-        try:
-            channels = self.rest.guild_channels(cfg.guild_id, timeout=READ_TIMEOUT_S,
-                                                patient=False)
-        except Exception as exc:
-            self._failed("list_channels", exc)
+        channels = self.channels(cfg, refresh=True)
+        if channels is None:
             return []
         counts: dict[str, int] = {}
         for channel in channels:
@@ -792,7 +1051,7 @@ class ChannelLinker:
                                    for p in idle)
                 self._enqueue({
                     "action": "archive_idle", "key": "crowded",
-                    "projects": [(p.id, p.discord_channel_id) for p in idle],
+                    "projects": [[p.id, p.discord_channel_id] for p in idle],
                     "args": {"action": "archive", "channel": listed, "from": "Jarvis",
                              "to": self.category_name(cfg, self.archive_target(cfg)),
                              "why": (f"Move these {len(idle)} to Jarvis Archive? The Jarvis "
@@ -815,17 +1074,30 @@ class ChannelLinker:
         return raised
 
     def _may_ask(self, key) -> bool:
-        asked = self._asked.get(key)
-        return asked is None or (asked >= 0 and self._wall() - asked >= ASK_AGAIN_S)
+        """Never while one is open (persisted), and not for a day after one
+        was answered (persisted too, so a restart does not re-ask)."""
+        with self._state_lock:
+            if any(job.get("key") == key for job in self._state["asks"]):
+                return False
+            asked = self._state["asked"].get(key)
+        return asked is None or self._wall() - asked >= ASK_AGAIN_S
 
     # -- housekeeping asks (asker worker) -----------------------------------------
 
     def _enqueue(self, job) -> None:
-        key = job.get("key")
-        if key:
-            self._asked[key] = -1.0           # open: never asked twice at once
+        job = dict(job, id=uuid.uuid4().hex[:12])
+        with self._state_lock:
+            self._state["asks"].append(job)
+            self._save_state()
         self._awaiting += 1
         self._jobs.put(job)
+
+    def _settle(self, job) -> None:
+        with self._state_lock:
+            self._state["asks"] = [j for j in self._state["asks"] if j.get("id") != job.get("id")]
+            if job.get("key"):
+                self._state["asked"][job["key"]] = self._wall()
+            self._save_state()
 
     def _ask_loop(self) -> None:
         while not self._stop.is_set():
@@ -838,8 +1110,10 @@ class ChannelLinker:
                 LOG.warning("Discord housekeeping ask failed (%s)", type(exc).__name__)
             finally:
                 self._awaiting = max(0, self._awaiting - 1)
-                if job.get("key"):
-                    self._asked[job["key"]] = self._wall()
+                if not self._stop.is_set():
+                    # A shutdown denies every open ask; that is not an answer,
+                    # so the job stays on disk and is asked again next start.
+                    self._settle(job)
 
     def ask_now(self, job) -> Decision:
         """Run one housekeeping job on the calling thread (the tests' path)."""
@@ -848,8 +1122,7 @@ class ChannelLinker:
             return self._ask(job)
         finally:
             self._awaiting = max(0, self._awaiting - 1)
-            if job.get("key"):
-                self._asked[job["key"]] = self._wall()
+            self._settle(job)
 
     def _ask(self, job) -> Decision:
         if self.approvals is None:
@@ -865,27 +1138,21 @@ class ChannelLinker:
             return decision
         action = job["action"]
         if action == "rename":
-            project = self.stores.projects.get(job["project_id"])
+            project = self._get(job["project_id"])
             # Only what was asked: if the name or the link moved since, nothing.
             if (project is not None and project.discord_channel_id == job["channel"]
-                    and slug(project.name, project.id, self._taken(project.id)) == job["to"]):
+                    and self.names_match(project, job["to"])):
                 self.rename(project.id, job["channel"], job["to"])
         elif action == "archive_idle":
             target = self.archive_target(cfg)
             for project_id, channel in job["projects"]:
-                project = self.stores.projects.get(project_id)
-                if project is None or project.discord_channel_id != channel:
+                project = self._get(project_id)
+                if project is None or project.discord_channel_id != channel or project.archived:
                     continue
                 with self._lock:
                     self._pace()
-                    try:
-                        self.rest.modify_channel(channel, parent_id=target)
-                    except Exception as exc:
-                        self._failed("archive_channel", exc)
-                        continue
-                self.invalidate(project_id)
-                self._note(channel, f"Moved to {self.category_name(cfg, target)} to make room "
-                                    "(you approved it). The project is still active.")
+                if self.move(project_id, channel, target, BY_CROWDING):
+                    self._note(channel, CROWDING_NOTE.format(where=self.category_name(cfg, target)))
         elif action == "create_category":
             with self._lock:
                 try:
@@ -893,8 +1160,10 @@ class ChannelLinker:
                 except Exception as exc:
                     self._failed("create_category", exc)
                     return decision
-                self._state["archive_overflow"].append(str(created))
-                self._save_state()
+                with self._state_lock:
+                    self._state["archive_overflow"].append(str(created))
+                    self._save_state()
+                self._wrote()
         return decision
 
     # -- the worker ----------------------------------------------------------
@@ -904,12 +1173,16 @@ class ChannelLinker:
         while not self._stop.is_set():
             try:
                 self.ensure_inbox()
+                cfg = self.config()
+                if cfg is not None and self._reconciled_cfg != cfg:
+                    self._reconciled_cfg = cfg
+                    self.reconcile()
                 if refreshed_at is None or self._clock() - refreshed_at >= FACTS_TTL_S * 10:
-                    if self.config() is not None:
+                    if cfg is not None:
                         self.refresh_permissions()
                         refreshed_at = self._clock()
-                self._retry_renames()
-                if self._crowding_due and self.config() is not None:
+                self._retry_pending()
+                if self._crowding_due and cfg is not None:
                     self._crowding_due = False
                     self.check_crowding()
             except Exception as exc:
@@ -926,3 +1199,10 @@ class ChannelLinker:
                 LOG.warning("Discord linker could not handle an event (%s)", type(exc).__name__)
             finally:
                 self.subscription.task_done()
+
+
+class SimpleProject:
+    """Just enough of a project for `names_match` on a name it no longer has."""
+
+    def __init__(self, name, project_id):
+        self.name, self.id = name, project_id
