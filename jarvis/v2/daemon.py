@@ -1002,24 +1002,12 @@ def _handler(daemon):
                     body = _no_channel_field(self._body())
                     body = _object(body, ("name", "root", "profile", "routing", "extra_dirs",
                                           "always_ask"), ("name", "root"))
-                    project = from_json(Project, {"id": "00000000", **body})
-                    _validate(project, Project)
-                    _routing_models(project)
-                    _text(project.name, "name")
-                    if not Path(project.root).is_absolute():
-                        raise APIError(400, "root must be absolute")
-                    if not Path(project.root).is_dir():
-                        raise APIError(400, "root must be an existing directory")
-                    from .projects import project_names_taken, unique_name
-                    with daemon._lock:
-                        daemon._active()
-                        # A colliding name is numbered, never refused (B4 + B10).
-                        project.name = unique_name(project.name, project_names_taken(stores))
-                        values = to_json(project)
-                        values.pop("id")
-                        created = stores.projects.create(**values)
-                    daemon.bus.publish({"kind": "project_created", "project_id": created.id,
-                                        "data": to_json(created)})
+                    # One create path for the HUD and Discord's `/project new`
+                    # (B2): a colliding name is numbered, never refused.
+                    from .projects import create_project
+                    values = dict(body)
+                    created = create_project(daemon, values.pop("name"), values.pop("root"),
+                                             **values)
                     return 201, to_json(created)
             if len(parts) == 2 and parts[0] == "projects":
                 with daemon._lock:

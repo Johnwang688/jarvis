@@ -389,6 +389,20 @@ DISCORD_GUILD_PATH = Path(
     )
 )
 
+# Where `/project new` may make or adopt a project folder (v2 B2,
+# `jarvis/v2/folders.py`; decisions O3, O4). A folder must sit strictly *below*
+# one of these, never be one, and pass every refusal in folders.py. Written as
+# ~ so a test that repoints HOME gets the test's directories; env
+# `JARVIS_PROJECT_FOLDER_ROOTS` is a colon-separated override.
+PROJECT_FOLDER_ROOTS: tuple[str, ...] = tuple(
+    p for p in os.environ.get("JARVIS_PROJECT_FOLDER_ROOTS", "").split(":") if p
+) or ("~", "/mnt/c/Users/johnw")
+
+# Where a bare project name lands: `/project new name:robotics` makes
+# `<this>/robotics` (decisions O3). The folder itself must already exist (O4)
+# and is never a project folder on its own.
+PROJECT_WORK_DIR = os.environ.get("JARVIS_PROJECT_WORK_DIR", "~/jarvis-work")
+
 # Spotify OAuth token bundle (client id + refresh token), written once by
 # `jarvis auth spotify` and read only by spotify_auth.py. Same use-but-never-see
 # contract as the Google token: outside the repo, mode 600, invisible to the
