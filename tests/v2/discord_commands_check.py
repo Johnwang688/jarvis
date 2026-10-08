@@ -598,6 +598,50 @@ class GateChecks(Harness):
         self.refused("no open question")
         self.assertEqual(self.control.calls, [])
 
+    def test_a_malformed_id_still_gets_exactly_one_answer(self):
+        """`Store.path` raises on anything but 8 hex characters; that must be an
+        "I don't know" reply, never a silent "application did not respond"."""
+        cases = ((slash("status", {"task": "zzzz"}), "don't know a task"),
+                 (slash("cancel", {"task": "foo"}), "don't know a task"),
+                 (slash("steer", {"text": "x", "task": "ABCDEF12"}), "don't know a task"),
+                 (complete("answer", "text", others={"task": "zz"}), None),
+                 (complete("answer", "question", others={"task": "1234567g"}), None),
+                 (modal_submit("jv:task:zzzzzzzz::", "a brief"), "archived or gone"))
+        for payload, text in cases:
+            with self.subTest(payload=payload["data"]):
+                before = len(self.transport.callbacks())
+                self.listener.interact(payload)
+                self.assertEqual(len(self.transport.callbacks()), before + 1)
+                if text is None:
+                    self.assertEqual(self.last_callback(), {"type": 8, "data": {"choices": []}})
+                else:
+                    self.refused(text)
+        self.assertEqual(self.control.calls, [])
+
+    def test_a_button_without_context_derives_it_and_a_command_never_does(self):
+        request, result, worker = self.ask(task_id=self.task.id)
+        message_id = self.surface._approval_messages[request.req_id][1]
+        # Guild: derived from guild_id; the press then fails on its own merits.
+        self.listener.interact(button("jv:a:zzzz", message_id, context=None,
+                                      **in_guild(TASK_THREAD)))
+        self.refused("does not match")
+        # A channel Discord types as a DM.
+        dm_press = button("jv:a:zzzz", "1", context=None)
+        dm_press["channel"] = {"id": DM_CHANNEL, "type": 1}
+        self.listener.interact(dm_press)
+        self.refused("already answered")
+        # A group DM (type 3) is never derived into anything.
+        group = button("jv:a:zzzz", "1", context=None, channel="9999")
+        group["channel"] = {"id": "9999", "type": 3}
+        self.listener.interact(group)
+        self.refused("only work in your DM")
+        # A command with no context still fails closed.
+        self.listener.interact(slash("status", context=None, **in_guild(TASK_THREAD)))
+        self.refused("only work in your DM")
+        self.assertTrue(self.approvals.pending())
+        self.approvals.shutdown()
+        worker.join(2)
+
     def test_autocomplete_bypasses_are_rechecked(self):
         self.listener.interact(slash("skill", {"name": "nope"}))
         self.refused("don't have a skill")
@@ -627,29 +671,50 @@ class TimingChecks(Harness):
         return any(c.get("type") == 5 for c in self.transport.callbacks())
 
     def test_the_deferral_goes_out_before_any_control_call_or_store_write(self):
+        """Every action command: the type 5 is on the wire before the first
+        control call, store write, broker resolution or chat-thread open."""
         order = []
+
+        def watch(owner, name):
+            original = getattr(owner, name)
+
+            def wrapped(*args, **kwargs):
+                order.append((name, self.deferred_already()))
+                return original(*args, **kwargs)
+            setattr(owner, name, wrapped)
+
+        self.clarifying()                                       # for /answer
+        blocked = self.stores.tasks.create(self.project.id, "stuck",
+                                           discord_thread_id=OTHER_THREAD)
+        self.stores.tasks.save(blocked)
+        self.stores.tasks.transition(blocked.id, TaskState.CLARIFYING)
+        self.stores.tasks.transition(blocked.id, TaskState.BLOCKED)
+        request, result, worker = self.ask(task_id=self.task.id)
+
         for name in ("steer", "cancel", "start", "resume", "answer_question"):
-            original = getattr(self.control, name)
+            watch(self.control, name)
+        watch(self.stores.tasks, "create")
+        watch(self.approvals, "resolve")
+        watch(self.daemon, "open_thread")
 
-            def wrapped(*args, _name=name, _original=original, **kwargs):
-                order.append((_name, self.deferred_already()))
-                return _original(*args, **kwargs)
-            setattr(self.control, name, wrapped)
-        create = self.stores.tasks.create
-
-        def creating(*args, **kwargs):
-            order.append(("create", self.deferred_already()))
-            return create(*args, **kwargs)
-        self.stores.tasks.create = creating
-
-        for payload in (slash("steer", {"text": "x"}, **in_guild(TASK_THREAD)),
-                        slash("cancel", **in_guild(TASK_THREAD)),
-                        slash("task", {"brief": "write the tests"})):
-            self.transport.calls.clear()
-            self.listener.interact(payload)
-            self.assertEqual(order[-1][1], True, order)
-        self.assertEqual({name for name, _ in order}, {"steer", "cancel", "create", "start"})
-        self.assertTrue(all(ok for _, ok in order), order)
+        cases = (("steer", slash("steer", {"text": "x"}, **in_guild(TASK_THREAD))),
+                 ("resolve", slash("yes", **in_guild(TASK_THREAD))),
+                 ("answer_question", slash("answer", {"text": "pnpm"}, **in_guild(TASK_THREAD))),
+                 ("resume", slash("resume", **in_guild(OTHER_THREAD))),
+                 ("open_thread", slash("skill", {"name": "morning-briefing"})),
+                 ("steer", slash("skill", {"name": "morning-briefing"}, **in_guild(TASK_THREAD))),
+                 ("cancel", slash("cancel", **in_guild(TASK_THREAD))),
+                 ("create", slash("task", {"brief": "write the tests"})))
+        for first, payload in cases:
+            with self.subTest(first=first):
+                self.transport.calls.clear()
+                start = len(order)
+                self.listener.interact(payload)
+                seen = order[start:]
+                self.assertTrue(seen and seen[0][0] == first, seen)
+                self.assertTrue(all(ok for _, ok in seen), seen)
+        worker.join(2)
+        self.assertEqual(result["decision"], Decision.ALLOW)
 
     def test_refusals_are_private_and_actions_are_public(self):
         self.listener.interact(slash("steer", {"text": "x"}))
@@ -682,6 +747,52 @@ class TimingChecks(Harness):
         self.transport.fail[("PATCH", r"@original$")] = (404, {"message": "Unknown Webhook"})
         self.listener.interact(slash("steer", {"text": "x"}, **in_guild(TASK_THREAD)))
         self.assertIn("Noted", self.transport.channel_posts(TASK_THREAD)[-1]["content"])
+
+    def test_a_private_reply_never_falls_back_to_a_public_post(self):
+        # /project list, with a token that is dead by the time it answers.
+        self.transport.fail[("PATCH", r"@original$")] = (404, {"message": "Unknown Webhook"})
+        self.listener.interact(slash("project", sub="list"))
+        posts = self.transport.channel_posts(DM_CHANNEL)
+        self.assertEqual([p["content"] for p in posts],
+                         ["That reply expired — run `/project list` again."])
+        del self.transport.fail[("PATCH", r"@original$")]
+
+        # /status, answered after the 14-minute window.
+        def slow(task_id):
+            self.now[0] += 15 * 60
+            return self.stores.tasks.get(task_id)
+        self.control.status = slow
+        self.listener.interact(slash("status", **in_guild(TASK_THREAD)))
+        posts = self.transport.channel_posts(TASK_THREAD)
+        self.assertEqual([p.get("content") for p in posts],
+                         ["That reply expired — run `/status` again."])
+        self.assertFalse(any("embeds" in p for p in posts))
+        everything = json.dumps(self.transport.channel_posts())
+        self.assertNotIn("migrate the skills folder", everything)
+        self.assertNotIn(self.tmp.name, everything)
+
+    def test_a_public_reply_still_falls_back_to_a_channel_post(self):
+        self.transport.fail[("PATCH", r"@original$")] = (404, {"message": "Unknown Webhook"})
+        self.listener.interact(slash("steer", {"text": "x"}, **in_guild(TASK_THREAD)))
+        self.assertIn("Noted", self.transport.channel_posts(TASK_THREAD)[-1]["content"])
+
+    def test_an_unexpected_failure_says_so_and_never_done(self):
+        def broken(task_id, text, *, spoken=False):
+            raise RuntimeError("internal detail " + TOKEN)
+        self.control.steer = broken
+        with self.assertLogs("jarvis.v2", level="WARNING") as logs:
+            self.listener.interact(slash("steer", {"text": "x"}, **in_guild(TASK_THREAD)))
+        self.assertEqual([e.get("content") for e in self.edits()],
+                         ["That failed (`RuntimeError`); it may not have run."])
+        self.assertNotIn("internal detail", "\n".join(logs.output))
+        self.assertNotIn(TOKEN, "\n".join(logs.output))
+        self.assertIn("RuntimeError", "\n".join(logs.output))
+
+    def test_an_oversized_skill_is_refused_before_any_deferral(self):
+        self.listener.interact(slash("skill", {"name": "huge"}))
+        self.refused("limit")
+        self.assertFalse(self.deferred_already())
+        self.assertEqual(self.provider.messages, [])
 
     def test_a_deferral_that_says_nothing_still_stops_thinking(self):
         reply = InteractionReply(self.rest, APP, slash("status"), fallback=self.surface._post,
@@ -795,6 +906,32 @@ class VerbChecks(Harness):
         # A stale tap after resolution.
         self.listener.interact(button(f"jv:a:{code}", message_id, **in_guild(TASK_THREAD)))
         self.refused("already answered")
+
+    def test_button_posts_are_remembered_and_stripped_after_a_restart(self):
+        path = Path(self.stores.root) / "discord" / "approval-posts.json"
+        request, result, worker = self.ask(task_id=self.task.id)
+        channel, message_id, code = self.surface._approval_messages[request.req_id]
+        self.assertEqual(json.loads(path.read_text()),
+                         {request.req_id: [channel, message_id, code]})
+        # The process dies with the request open: shutdown denies it without a
+        # resolution event, so the map on disk still names the post when the
+        # next daemon starts.
+        self.approvals.shutdown()
+        worker.join(2)
+        self.assertEqual(result["decision"], Decision.DENY)
+        self.assertIn(request.req_id, json.loads(path.read_text()))
+        self.transport.calls.clear()
+        again = DiscordRouter(self.daemon, self.stores, self.router, self.approvals,
+                              self.control, self.rest, FakeListener,
+                              announce=lambda text: None, sync_commands=False)
+        self.addCleanup(again.stop)
+        again.start()
+        strip = f"/channels/{channel}/messages/{message_id}"
+        wait_for(lambda: any(c["path"] == strip for c in self.transport.calls))
+        edit = next(c for c in self.transport.calls if c["path"] == strip)
+        self.assertEqual((edit["method"], edit["json"]["components"]), ("PATCH", []))
+        wait_for(lambda: json.loads(path.read_text()) == {})
+        self.assertFalse(any(c["method"] == "DELETE" for c in self.transport.calls))
 
     def test_answer_and_plain_text_share_one_answer_path(self):
         self.clarifying()
@@ -910,6 +1047,17 @@ class VerbChecks(Harness):
 
 
 class SecretChecks(Harness):
+    def test_a_failed_callback_never_echoes_its_token(self):
+        def echo(path):                     # a Discord that echoes the request back
+            return {"message": f"bad request at {path} with {TOKEN}"}
+        self.transport.fail[("POST", r"^/interactions/")] = (400, echo)
+        token = ITOKEN + "42"
+        with self.assertRaises(DiscordError) as caught:
+            self.rest.callback("42", token, 4, {"content": "x"})
+        self.assertNotIn(token, str(caught.exception))
+        self.assertNotIn(TOKEN, str(caught.exception))
+        self.assertIn("[REDACTED]", str(caught.exception))
+
     def test_no_token_in_logs_exceptions_or_bodies(self):
         def echo(path):                     # a Discord that echoes the request back
             return {"message": f"bad request at {path} with {TOKEN}"}

@@ -290,9 +290,14 @@ def open_questions(task) -> list[tuple[int, Any]]:
 
 
 def _option_task(ctx: Context):
+    from .stores import StoreError
+
     wanted = str(ctx.options.get("task", "") or "").strip()
     if wanted:
-        task = ctx.stores.tasks.get(wanted)
+        try:
+            task = ctx.stores.tasks.get(wanted)
+        except StoreError:                  # not the store's id shape: unknown
+            return None
         return task if task is not None and task.project_id in _live_project_ids(ctx.stores) \
             else None
     return ctx.task

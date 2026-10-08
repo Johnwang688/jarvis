@@ -423,6 +423,9 @@ class DiscordRoutingChecks(unittest.TestCase):
         self.assertEqual((edit["method"], edit["json"]["components"]), ("PATCH", []))
         self.assertNotIn("content", edit["json"])                  # the command stays readable
         self.assertNotIn(request.req_id, self.surface._approval_messages)
+        # The on-disk copy (for stripping after a restart) forgets it too.
+        posts = Path(self.stores.root) / "discord" / "approval-posts.json"
+        wait_for(lambda: json.loads(posts.read_text()) == {})
 
     def test_always_is_refused_where_no_standing_rule_can_be_made(self):
         request, result, worker = self.ask(command="git status && rm -rf build",

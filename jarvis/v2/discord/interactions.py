@@ -28,12 +28,15 @@ logged by class only.
 from __future__ import annotations
 
 import logging
+import re
 import time
 
 from .. import commands as registry
-from ..commands import Context, SkillRefused, check_skill, completions, open_questions
+from ..commands import (Context, SkillRefused, check_skill, completions, open_questions,
+                        skill_body)
 from ..control import ControlError
 from ..model import TERMINAL_STATES, ProviderName, TaskState
+from ..stores import StoreError
 from .render import APPROVE_PREFIX, DENY_PREFIX
 from .rest import DiscordError, DiscordHTTPError
 
@@ -64,9 +67,16 @@ class InteractionReply:
         self._token = str(interaction.get("token") or "")
         self.channel_id = str(interaction.get("channel_id")
                               or (interaction.get("channel") or {}).get("id") or "")
+        data = interaction.get("data") or {}
+        name = str(data.get("name") or "") if interaction.get("type") in (2, 4) else ""
+        options = data.get("options") or []
+        if name and options and isinstance(options[0], dict) and options[0].get("type") == 1:
+            name += f" {options[0].get('name')}"
+        self.command = name
         self._clock = clock
         self.deadline = clock() + window_s
         self._fallback = fallback
+        self._pointed = False
         self.responded = False
         self.deferred = False
         self.ephemeral = False
@@ -119,8 +129,9 @@ class InteractionReply:
         if not self.responded:
             self.defer(ephemeral=ephemeral)
         self.said = True
+        private = ephemeral or self.ephemeral
         if self.dead or self._clock() >= self.deadline:
-            return self._channel(content, embed, files, components)
+            return self._channel(content, embed, files, components, private)
         try:
             if self.deferred and not self.original_used:
                 self.original_used = True
@@ -133,13 +144,22 @@ class InteractionReply:
         except DiscordHTTPError as exc:
             if exc.status in (401, 404):
                 self.dead = True
-                return self._channel(content, embed, files, components)
+                return self._channel(content, embed, files, components, private)
             LOG.warning("Discord interaction reply failed (HTTP %s)", exc.status)
         except DiscordError as exc:
             LOG.warning("Discord interaction reply failed (%s)", type(exc).__name__)
             self.dead = True
-            return self._channel(content, embed, files, components)
+            return self._channel(content, embed, files, components, private)
         return None
+
+    def fail(self, text: str) -> None:
+        """Something broke mid-command: say so (privately if nothing has been
+        answered yet), and never let `finish` claim it went fine."""
+        if not self.responded:
+            self.refuse(text)
+        else:
+            self.send(text)
+        self.said = True
 
     def finish(self) -> None:
         """A deferred reply that never said anything still has to stop
@@ -148,9 +168,19 @@ class InteractionReply:
                 and self._clock() < self.deadline:
             self.send("Done.")
 
-    def _channel(self, content, embed, files, components):
+    def _channel(self, content, embed, files, components, private=False):
+        """The fallback once the token cannot carry the reply. A public reply
+        becomes an ordinary channel post. A private one is **dropped** — a
+        lookup or a refusal meant for the owner's eyes only must never
+        reappear in public — and a single short pointer says to ask again."""
         if not self.channel_id:
             return None
+        if private:
+            if self._pointed:
+                return None
+            self._pointed = True
+            again = f" — run `/{self.command}` again" if self.command else ""
+            return self._fallback(self.channel_id, f"That reply expired{again}.")
         return self._fallback(self.channel_id, content, files=files, embed=embed,
                               components=components)
 
@@ -201,7 +231,12 @@ class InteractionRouter:
             self.surface._remember_dm(reply.channel_id)
         place = (where, project, task)
         if kind == AUTOCOMPLETE:
-            self._autocomplete(interaction, reply, place)
+            try:
+                self._autocomplete(interaction, reply, place)
+            except Exception as exc:
+                LOG.warning("Discord autocomplete failed (%s)", type(exc).__name__)
+                if not reply.responded:
+                    reply.choices([])
             return
         try:
             if kind == APPLICATION_COMMAND:
@@ -212,6 +247,10 @@ class InteractionRouter:
                 self._modal(interaction, reply, place)
         except ControlError as exc:
             reply.send(str(exc))
+        except Exception as exc:
+            # Class only: the message could carry anything the call touched.
+            LOG.warning("Discord interaction failed (%s)", type(exc).__name__)
+            reply.fail(f"That failed (`{type(exc).__name__}`); it may not have run.")
         finally:
             reply.finish()
 
@@ -223,11 +262,30 @@ class InteractionRouter:
             return OWNER_ONLY
         context = interaction.get("context")
         guild = interaction.get("guild_id")
+        if context is None and interaction.get("type") in (COMPONENT, MODAL_SUBMIT):
+            context = self._derived_context(interaction)
         if context not in (0, 1) or (context == 0) != bool(guild):
             return WRONG_CONTEXT
         configured = getattr(self.surface, "guild_id", None)
         if guild and configured and str(guild) != str(configured):
             return WRONG_CONTEXT
+        return None
+
+    def _derived_context(self, interaction):
+        """Only for a button or a modal, and only if Discord left `context`
+        out: a guild id means 0; a channel Discord types as a DM (1), or the
+        owner DM this surface already knows, means 1. Anything else — a group
+        DM included — stays None, which the gate refuses. Commands and
+        autocomplete never get this: for them a missing context fails closed."""
+        if interaction.get("guild_id"):
+            return 0
+        channel = interaction.get("channel") or {}
+        if channel.get("type") == 1:
+            return 1
+        known = getattr(self.surface, "_dm_cache", None)
+        channel_id = str(interaction.get("channel_id") or channel.get("id") or "")
+        if known and channel_id == str(known):
+            return 1
         return None
 
     # -- parsing -----------------------------------------------------------
@@ -286,7 +344,7 @@ class InteractionRouter:
             if here is None:
                 return None, f"Which task? Add `{key}:` — or use this in the task's thread."
             return here, None
-        task = self.surface.stores.tasks.get(wanted) if _plain_id(wanted) else None
+        task = _get(self.surface.stores.tasks, wanted)
         if task is None:
             return None, f"I don't know a task `{_short(wanted)}`."
         project = self.surface.stores.projects.get(task.project_id)
@@ -424,6 +482,11 @@ class InteractionRouter:
         where, project, task = place
         try:
             name = check_skill(values["name"])
+            if where != "task":
+                # A chat turn runs on the fast path, which injects the body:
+                # its size cap is checked here, before the deferral, so a
+                # refusal is said up front instead of after "thinking…".
+                skill_body(name)
         except SkillRefused as exc:
             reply.refuse(str(exc))
             return
@@ -501,8 +564,7 @@ class InteractionRouter:
         # The custom id round-tripped through Discord: every part is re-checked.
         target = None
         if project_id:
-            target = self.surface.stores.projects.get(project_id) if _plain_id(project_id) \
-                else None
+            target = _get(self.surface.stores.projects, project_id)
             if target is None or target.archived:
                 reply.refuse("That project is archived or gone, so I opened nothing.")
                 return
@@ -526,8 +588,22 @@ class InteractionRouter:
         self._open(brief, skill, provider, target, reply)
 
 
+_STORE_ID = re.compile(r"[0-9a-f]{8}")
+
+
 def _plain_id(value: str) -> bool:
-    return value.isalnum() and len(value) <= 32
+    """The store's own id shape (`Store.path`): anything else is unknown."""
+    return isinstance(value, str) and _STORE_ID.fullmatch(value) is not None
+
+
+def _get(store, object_id):
+    """A store read by an owner-typed id: unknown rather than raised."""
+    if not _plain_id(object_id):
+        return None
+    try:
+        return store.get(object_id)
+    except StoreError:
+        return None
 
 
 def _short(value, limit: int = 40) -> str:

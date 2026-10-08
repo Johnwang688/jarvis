@@ -35,7 +35,9 @@ one surface it can ask through, and it denies on every failure path already.
 """
 from __future__ import annotations
 
+import json
 import logging
+from pathlib import Path
 import queue
 import re
 import threading
@@ -54,7 +56,7 @@ from ..model import TERMINAL_STATES, ProviderName, Role
 from ..provider import Decision, UserMessage
 from ..router import (FastPath, Incoming, NeedsProject, NewTask, Steer, Verb,
                       classify)
-from ..stores import StoreError
+from ..stores import StoreError, _write_bytes
 from .commands import SyncResult
 from .render import _cap, approval_components, approval_text, status_embed
 
@@ -243,7 +245,7 @@ class DiscordRouter:
     def __init__(self, daemon, stores, router, approvals, control, rest,
                  listener_factory=None, *, announce=None, dm_channel=None,
                  turn_timeout_s: float = TURN_TIMEOUT_S, sync_commands: bool = True,
-                 clock=time.monotonic):
+                 clock=time.monotonic, approval_posts_path=None):
         from .interactions import InteractionRouter
 
         self.daemon = daemon
@@ -269,6 +271,13 @@ class DiscordRouter:
         self._approval_channels: dict[str, str] = {}
         # req_id -> (channel, message id, code) of the post carrying the buttons.
         self._approval_messages: dict[str, tuple[str, str, str]] = {}
+        # The same map on disk, so a restart can strip the buttons of posts
+        # whose requests died with the previous process (the broker denies
+        # them all at shutdown). Beside the stores, never the owner's real
+        # data dir unless the stores are.
+        self._posts_path = Path(approval_posts_path) if approval_posts_path else \
+            Path(stores.root) / "discord" / "approval-posts.json"
+        self._stale_worker = None
         self._answered_here: set[str] = set()
         self._chat_threads: dict[str, str] = {}
         self.interactions = InteractionRouter(self, clock=clock)
@@ -289,6 +298,38 @@ class DiscordRouter:
     def start(self) -> None:
         self.listener.start()
         self.owner_id = str(getattr(self.listener, "owner_id", "") or self.owner_id)
+        self._stale_worker = threading.Thread(target=self._strip_stale, daemon=True,
+                                              name="jarvis-discord-stale-buttons")
+        self._stale_worker.start()
+
+    def _strip_stale(self) -> None:
+        """Every approval post the last process left open loses its buttons.
+        Their requests cannot be answered any more (a press is refused either
+        way); this just stops a dead button from looking live."""
+        try:
+            stale = json.loads(self._posts_path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return
+        except (OSError, ValueError) as exc:
+            LOG.warning("Discord approval-post map unreadable (%s)", type(exc).__name__)
+            stale = {}
+        if not isinstance(stale, dict):
+            stale = {}
+        for req_id, row in stale.items():
+            with self._lock:
+                if req_id in self._approval_messages:   # one of ours, posted since
+                    continue
+            if isinstance(row, list) and len(row) == 3 and all(isinstance(x, str) for x in row):
+                self._strip_buttons(row[0], row[1])
+        self._save_posts()
+
+    def _save_posts(self) -> None:
+        with self._lock:
+            rows = {req_id: list(row) for req_id, row in self._approval_messages.items()}
+            try:
+                _write_bytes(self._posts_path, json.dumps(rows).encode("utf-8"))
+            except (StoreError, OSError) as exc:
+                LOG.warning("Discord approval-post map not saved (%s)", type(exc).__name__)
 
     def stop(self) -> None:
         if self._stop.is_set():
@@ -301,6 +342,8 @@ class DiscordRouter:
         except Exception:
             LOG.warning("Discord listener did not stop cleanly")
         self._worker.join(timeout=2)
+        if self._stale_worker is not None:
+            self._stale_worker.join(timeout=2)
 
     def _ready(self, listener) -> None:
         """First READY: remember who we are, then sync the commands once."""
@@ -602,10 +645,13 @@ class DiscordRouter:
                 self._approval_channels.pop(req_id, None)
             raise
         with self._lock:
-            if req_id in self._approval_channels:      # not resolved meanwhile
+            live = req_id in self._approval_channels      # not resolved meanwhile
+            if live:
                 self._approval_messages[req_id] = (str(channel), str(message_id), code)
-            else:
-                self._strip_buttons(str(channel), str(message_id))
+        if live:
+            self._save_posts()
+        else:
+            self._strip_buttons(str(channel), str(message_id))
 
     def _strip_buttons(self, channel, message_id) -> None:
         try:
@@ -621,6 +667,7 @@ class DiscordRouter:
             here = req_id in self._answered_here
             self._answered_here.discard(req_id)
         if posted is not None:
+            self._save_posts()
             # Answered anywhere — HUD, timeout, slash, a button — the buttons go,
             # so a stale tap cannot reach a later request.
             self._strip_buttons(posted[0], posted[1])
@@ -665,6 +712,10 @@ class DiscordRouter:
                 self._resume(match.group(1), provider, reply)
         except ControlError as exc:
             reply.send(str(exc))
+        except StoreError:
+            # A typed id that is not the store's id shape (`cancel foo`).
+            typed = " ".join(argument.split()[:1]).replace("`", "")
+            reply.send(f"I don't know a task `{_cap(typed, 40)}`.")
 
     def _steer(self, task_id, text, reply, spoken) -> None:
         if not task_id:
