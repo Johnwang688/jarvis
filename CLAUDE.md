@@ -101,7 +101,13 @@ one-time backfill) act at once, as does an owner rename/archive/restore
 (`project_updated.by == "owner"`); anything else (an `api` rename, a
 crowding archive at 45 of 50, "Jarvis Archive 2") is a `discord_channel`
 approval from "Jarvis housekeeping", never Always, and a deny does nothing.
-Moving a channel never sends permission fields. `POST`/`PATCH /projects`
+Moving a channel never sends permission fields. **Only a sanctioned name is
+ever applied** (review fix, 2026-10-07): a pending rename retries its own
+name and is dropped when the project's name moves on — recomputing it from
+the live name let an `api` rename ride an owner's 429 retry past the gate.
+Renames and moves that fail transiently are kept pending, a start-up
+reconcile fixes what an outage missed, and asks persist across restarts.
+`POST`/`PATCH /projects`
 refuse `discord_channel_id`. A configured guild gates placement, and a newly
 linked project's tasks leave the DM safety net for threads at once. Tests
 that touch Discord point `config.DISCORD_GUILD_PATH` at a temp file — the
