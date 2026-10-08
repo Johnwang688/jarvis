@@ -459,20 +459,29 @@ class Daemon:
         reason = str(exc) or type(exc).__name__
         with self._lock:
             thread = session.thread
-            restored = session.applied_record or (None, None)
-            thread.model, thread.effort = restored
             try:
-                still = thread_model.effective(thread)
+                asked = thread_model.effective(thread)
             except Exception:
-                still = None
-            if still != applied:
-                # A default thread whose default moved on: pin it to what it
-                # runs, or every message would retry the switch.
-                thread.model, thread.effort = applied
-            thread.updated = utcnow()
-            self.stores.threads.save(thread)
-            session.announced = applied
-            session.applied_record = (thread.model, thread.effort)
+                asked = None
+            # Roll back only while the record still asks for the refused
+            # choice: a PATCH that landed during the switch is the owner's
+            # newer word, and the next turn tries that one instead.
+            rollback = asked == want
+            if rollback:
+                restored = session.applied_record or (None, None)
+                thread.model, thread.effort = restored
+                try:
+                    still = thread_model.effective(thread)
+                except Exception:
+                    still = None
+                if still != applied:
+                    # A default thread whose default moved on: pin it to what
+                    # it runs, or every message would retry the switch.
+                    thread.model, thread.effort = applied
+                thread.updated = utcnow()
+                self.stores.threads.save(thread)
+                session.announced = applied
+                session.applied_record = (thread.model, thread.effort)
             text = (f"switch to {thread_model.label(*want)} refused: {reason}; "
                     f"still on {thread_model.label(*applied)}")
             self._system_line(thread, "model_set", text, {
@@ -775,9 +784,21 @@ class Daemon:
             self.stores.threads.save(session.thread)
             self._record(session, event)
 
+    @staticmethod
+    def _provider_closed(session) -> bool:
+        """Whether the provider closed this session itself (Codex closes its
+        handle on any transport error; Claude and the fast path mark theirs).
+        Read off the native handle, never assumed open."""
+        closed = getattr(getattr(session.handle, "native", None), "closed", False)
+        try:
+            return bool(closed.is_set()) if hasattr(closed, "is_set") else closed is True
+        except Exception:
+            return False
+
     def _turn(self, session, message):
         terminal = None
         failed = False
+        fatal = False
         try:
             if session.cancelled.is_set():
                 return
@@ -796,6 +817,7 @@ class Daemon:
                     break
                 self._record(session, event)
                 failed |= event.kind == EventKind.ERROR
+                fatal |= event.kind == EventKind.ERROR and bool((event.data or {}).get("fatal"))
         except Exception as exc:
             failed = True
             try:
@@ -816,6 +838,16 @@ class Daemon:
             finally:
                 with self._lock:
                     session.worker = None
+                    # A fatal turn error, or a provider that closed the session
+                    # under us (Codex does on any RpcError), strands the
+                    # session: every later send would answer "session is
+                    # closed" until a restart. Drop it, so the next message
+                    # resumes it and `_run_brief` re-applies the model choice.
+                    # Claude resumes its CLI session by id and the fast path
+                    # reloads its saved transcript, so for them a drop costs a
+                    # reconnect, never the conversation.
+                    if fatal or self._provider_closed(session):
+                        session.lost = True
                     if session.lost and self._sessions.get(session.thread.id) is session:
                         # The provider closed it; the next send resumes afresh.
                         self._sessions.pop(session.thread.id, None)
