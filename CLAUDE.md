@@ -45,7 +45,25 @@ one button; last routing decisions are a collapsed log. The HUD wears the
 **Graphite** theme (2026-10-06, design §12.2 — replaces the cyan grid and
 notched panels): flat warm off-black, one sparing glacier-cyan accent, amber
 and red kept for pending and error only, and the default avatar's accent
-moved to `#6fc3df` so the orb matches. Remaining: the long-bench comparison (WP13). Briefs for every package, including the ones in flight, are in
+moved to `#6fc3df` so the orb matches. Remaining: the long-bench comparison (WP13).
+
+**Discord slash commands, S1 (2026-10-07, design §11.4; plan
+`docs/plans/2026-10-07-slash-commands-plan.md`, decisions S-1..S-3).** One
+static registry in `jarvis/v2/commands.py` — no skill, project or task ever
+enters the registered payload, they are autocomplete only and re-checked on
+submit. Global registration, synced once per daemon on the first READY (GET,
+diff, one bulk PUT, never a DELETE); `jarvis discord commands
+[--check|--sync]` is the human CLI, and `/applications/` is spelled only in
+`jarvis/v2/discord/commands.py` (a test greps). Every interaction —
+autocomplete included — is gated on our application id, the owner, context
+0/1 and the place, and sends its deferral **before** any store write or
+control call. Approval posts carry Approve/Deny buttons, never Always; a
+press must match owner, message id and channel; `/always` is refused where
+`entry_for` cannot mint a rule. Plain typed text in a clarifying task thread
+answers its open question (one `_answer` with `/answer`); a voice note never
+does. Verbs take a `Reply` sink so keyword and slash share one
+implementation; keywords still work with a "(next time: `/x`)" nudge until
+S2 removes them. `"discord_"` is a forbidden fast-path prefix. Briefs for every package, including the ones in flight, are in
 `docs/codex-briefs/`; each merged package left a `*-notes.md` beside its
 brief with what its implementer verified and what it proposes.
 

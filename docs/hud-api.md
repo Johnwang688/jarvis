@@ -361,3 +361,19 @@ Claude or Codex threads, Discord) — `tests/v2/archive_check.py` asserts
 it. The gate keeps every tool's HTTP client off these routes; it is not a
 boundary against a shell command the permission gate approved, the same
 footing as `/approvals`.
+
+## Additions 2026-10-07 (Discord slash core — S1)
+
+- `GET /discord` → `{"connected": bool, "commands": {"state", "count",
+  "synced_at", "error"}}`. `state` is `ok` (the registered commands match
+  the code), `failed` (with `error`: an exception class and Discord's own
+  message, the bot token redacted), `pending` (the bundle exists but the
+  surface has not synced yet), or `off` (no `jarvis auth discord`).
+  `synced_at` is epoch seconds or null. States, counts and times only: the
+  route never carries a token, an interaction token or a request path. PR A
+  extends it with the reporter, guild and permissions; the HUD light reads
+  it then.
+- Thread transcripts: a user turn sent with a skill (`/skill` on Discord)
+  is shown as `/skill <name> <text>`. The log row is
+  `{"kind": "user", "data": {"text", "skill"}}`; `skill` is absent on
+  ordinary turns.
