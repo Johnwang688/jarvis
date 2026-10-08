@@ -9,8 +9,7 @@
 import type {
   ApprovalRequest, AvatarDesc, ChatMessage, Diff, FileRead, ModelRow, Platform,
   Project, RouteView, Schedule, SchedulePreview, Task, TaskThread, Thread, Tree, Usage,
-  VoiceEntry, Attachment, DirListing,
-} from "./types";
+  VoiceEntry, Attachment, DirListing, DiscordStatus } from "./types";
 import type { ThreadModels } from "./lib/threadmodel";
 import type { ArchiveView, DeleteResult, ProjectImpact } from "./types";
 
@@ -147,6 +146,7 @@ export const api = {
 
   // --- usage / route / schedules -----------------------------------------
   usage: () => req<Usage>("/usage"),
+  discord: () => req<DiscordStatus>("/discord"),
   route: (projectId?: string) =>
     req<RouteView>(projectId ? `/route?project=${encodeURIComponent(projectId)}` : "/route"),
   schedules: () => req<Schedule[]>("/schedules"),

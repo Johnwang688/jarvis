@@ -612,3 +612,13 @@ button.danger:hover:not(:disabled) { background: var(--red-soft); }
   padding: 8px 12px 2px; font: 600 10px var(--mono); letter-spacing: 0.06em;
   color: var(--text-muted); text-transform: uppercase;
 }
+
+/* The Discord light (PR A): one dot and one sentence. */
+.discord-panel { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-2); }
+.discord-dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--border-strong); }
+.discord-dot.ok { background: var(--green); }
+.discord-dot.warn { background: var(--amber); }
+.discord-dot.down { background: var(--red); }
+.discord-panel[data-level="warn"] .discord-text { color: var(--amber); }
+.discord-panel[data-level="down"] .discord-text { color: var(--red); }
+.discord-text { overflow-wrap: anywhere; }

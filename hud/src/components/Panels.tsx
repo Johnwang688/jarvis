@@ -4,8 +4,9 @@
 // An absent window is a dash, not a bar at 0%: a bar is a number somebody
 // will quote, and 0% used is a different fact from "we do not know".
 
-import type { RouteView, Usage } from "../types";
+import type { DiscordStatus, RouteView, Usage } from "../types";
 import { meterFor, type Bar } from "../lib/quota";
+import { discordLight } from "../lib/discord";
 
 function ClaudeMark() {
   return (
@@ -61,6 +62,23 @@ export function UsagePanel(props: { usage: Usage | null }) {
           <Meter name="week" bar={meterFor(codex, "weekly")} testid="quota-bar-codex-weekly" />
         </div>
       </div>
+    </div>
+  );
+}
+
+/** The Discord light (PR A): green ok, amber with the reason, red down.
+ * The text is the backend's sentence or an operation/status/code triple —
+ * rendered as text, never markup, like everything else in this window. */
+export function DiscordPanel(props: { discord: DiscordStatus | null }) {
+  const light = discordLight(props.discord);
+  const counters = props.discord?.reporter?.counters || {};
+  const title = Object.entries(counters)
+    .map(([k, v]) => `${k}: ${v}`)
+    .join(" · ");
+  return (
+    <div className="block discord-panel" data-testid="discord" data-level={light.level} title={title}>
+      <i className={`discord-dot ${light.level}`} aria-hidden="true" />
+      <span className="discord-text" data-testid="discord-text">{light.text}</span>
     </div>
   );
 }

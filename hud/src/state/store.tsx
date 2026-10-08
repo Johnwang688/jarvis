@@ -6,8 +6,7 @@
 import React, { createContext, useContext, useReducer } from "react";
 import type {
   ApprovalRequest, AvatarDesc, ChatMessage, Project, Schedule, Task, TaskThread,
-  Thread, ToolOp, Usage, RouteView,
-} from "../types";
+  Thread, ToolOp, Usage, RouteView, DiscordStatus } from "../types";
 import { DEFAULT_MODE, type DictationMode } from "../lib/dictation";
 import { activeProjectId, type Compose } from "../lib/compose";
 
@@ -41,6 +40,8 @@ export interface State {
   ops: ToolOp[];
   approvals: ApprovalRequest[];
   usage: Usage | null;
+  /** The Discord light (PR A): `GET /discord`, refetched on `discord_status`. */
+  discord: DiscordStatus | null;
   schedules: Schedule[];
   route: RouteView | null;
   avatar: AvatarDesc | null;
@@ -65,7 +66,7 @@ export interface State {
 export const initialState: State = {
   projects: [], platforms: {}, threads: [], tasks: [], taskThreads: {},
   threadId: null, compose: null, taskId: null, taskFocus: false, turnThreadId: null, tab: "chat",
-  messages: [], draft: "", ops: [], approvals: [], usage: null, schedules: [],
+  messages: [], draft: "", ops: [], approvals: [], usage: null, discord: null, schedules: [],
   route: null, avatar: null, wakePatterns: [], dictation: DEFAULT_MODE,
   level: 0, orb: "idle", status: "", busy: false, pendingTranscript: "",
   error: "", moveError: "", picker: null, archivedNames: [],

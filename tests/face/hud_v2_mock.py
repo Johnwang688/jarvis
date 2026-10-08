@@ -193,6 +193,13 @@ def _world() -> dict:
              "last_run_at": "2026-09-15T07:00:00-05:00", "last_task_id": "k0",
              "next_run_at": "2026-09-16T07:00:00-05:00", "created": "2026-09-01T00:00:00+00:00"},
         ],
+        # `GET /discord` (S1 + PR A): the Discord light reads this.
+        "discord": {
+            "connected": True,
+            "commands": {"state": "ok", "count": 11, "synced_at": 1.0, "error": None},
+            "reporter": {"state": "ok", "reason": "", "counters": {"posts": 3},
+                         "dropped": 0, "last_error": None},
+        },
         "route": {
             "table": {"chains": {"orchestrator": ["claude", "codex"],
                                  "implementer": ["codex", "claude"],
@@ -510,6 +517,8 @@ class MockDaemon:
                     return self._json(w["approvals"])
                 if path == "/usage":
                     return self._json(w["usage"])
+                if path == "/discord":
+                    return self._json(w["discord"])
                 if path == "/schedules":
                     return self._json(w["schedules"])
                 if path == "/route":
