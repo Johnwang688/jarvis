@@ -129,31 +129,44 @@ class InteractionReply:
                                "components": components})
 
     def send(self, content=None, *, embed=None, files=(), components=None, ephemeral=False):
+        """Say something over the token. `said` is set only once something
+        reached the owner (or the channel fallback took it): a 5xx or a long
+        429 is retried once and then falls back to the channel, so Discord is
+        never left on "thinking…" with the outcome only in a log."""
         if not self.responded:
             self.defer(ephemeral=ephemeral)
-        self.said = True
         private = ephemeral or self.ephemeral
         if self.dead or self._clock() >= self.deadline:
-            return self._channel(content, embed, files, components, private)
-        try:
-            if self.deferred and not self.original_used:
-                self.original_used = True
-                self.rest.edit_original(self.app_id, self._token, content=content, embed=embed,
-                                        files=files, components=components)
-                return "@original"
-            return self.rest.followup(self.app_id, self._token, content=content, embed=embed,
-                                      files=files, components=components,
-                                      ephemeral=ephemeral or self.ephemeral)
-        except DiscordHTTPError as exc:
-            if exc.status in (401, 404):
+            return self._fallen_back(content, embed, files, components, private)
+        for attempt in (1, 2):
+            try:
+                if self.deferred and not self.original_used:
+                    self.rest.edit_original(self.app_id, self._token, content=content,
+                                            embed=embed, files=files, components=components)
+                    self.original_used = True
+                    self.said = True
+                    return "@original"
+                result = self.rest.followup(self.app_id, self._token, content=content,
+                                            embed=embed, files=files, components=components,
+                                            ephemeral=ephemeral or self.ephemeral)
+                self.said = True
+                return result
+            except DiscordHTTPError as exc:
+                if exc.status in (401, 404):
+                    self.dead = True
+                    break
+                LOG.warning("Discord interaction reply failed (HTTP %s, attempt %d)",
+                            exc.status, attempt)
+            except DiscordError as exc:
+                LOG.warning("Discord interaction reply failed (%s)", type(exc).__name__)
                 self.dead = True
-                return self._channel(content, embed, files, components, private)
-            LOG.warning("Discord interaction reply failed (HTTP %s)", exc.status)
-        except DiscordError as exc:
-            LOG.warning("Discord interaction reply failed (%s)", type(exc).__name__)
-            self.dead = True
-            return self._channel(content, embed, files, components, private)
-        return None
+                break
+        return self._fallen_back(content, embed, files, components, private)
+
+    def _fallen_back(self, content, embed, files, components, private):
+        result = self._channel(content, embed, files, components, private)
+        self.said = True
+        return result
 
     def fail(self, text: str) -> None:
         """Something broke mid-command: say so (privately if nothing has been
