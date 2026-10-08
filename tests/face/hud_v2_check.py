@@ -1260,6 +1260,62 @@ def quota_checks(page, mock):
                      .get_attribute("class") or ""))
 
 
+def discord_checks(page, mock):
+    """PR A: the Discord light — green ok, amber with the reason, red down —
+    following `discord_status` rather than a reload, and never markup."""
+    print("\ndiscord light")
+    panel = page.locator('[data-testid="discord"]')
+    until(lambda: panel.count() > 0 and panel.get_attribute("data-level") == "ok")
+    check("the light is green when the poster is fine",
+          panel.get_attribute("data-level") == "ok"
+          and "ok" in (panel.locator(".discord-dot").get_attribute("class") or ""),
+          panel.get_attribute("data-level") or "")
+    check("and says so in words", panel.inner_text().strip() == "Discord ok", panel.inner_text())
+
+    reporter = mock.world["discord"]["reporter"]
+    reporter.update(state="degraded", reason=(
+        "channel 123 is missing a bot permission (50013); attention updates go to your DM"))
+    mock.emit("discord_status", {"state": "degraded"})
+    until(lambda: panel.get_attribute("data-level") == "warn")
+    check("discord_status turns it amber", panel.get_attribute("data-level") == "warn")
+    check("amber carries the reason",
+          "50013" in panel.inner_text() and "DM" in panel.inner_text(), panel.inner_text())
+
+    reporter.update(state="down", reason="",
+                    last_error={"op": "create_thread", "status": 429, "code": None, "at": 1.0})
+    mock.emit("discord_status", {"state": "down"})
+    until(lambda: panel.get_attribute("data-level") == "down")
+    check("down is red", panel.get_attribute("data-level") == "down"
+          and "down" in (panel.locator(".discord-dot").get_attribute("class") or ""))
+    check("and names the operation and status",
+          "create_thread" in panel.inner_text() and "429" in panel.inner_text(),
+          panel.inner_text())
+
+    reporter.update(state="degraded", reason='<img src=x onerror="window.__pwned=1">', last_error=None)
+    mock.emit("discord_status", {"state": "degraded"})
+    until(lambda: "<img" in panel.inner_text())
+    check("a reason is rendered as text, never markup",
+          panel.locator("img").count() == 0 and not page.evaluate("window.__pwned === 1"))
+
+    # A surface that never started is red with its class, not "pending" (review 7).
+    saved = dict(mock.world["discord"])
+    mock.world["discord"] = {"connected": False,
+                             "commands": {"state": "failed", "count": 0, "synced_at": None,
+                                          "error": "RuntimeError"},
+                             "reporter": None}
+    mock.emit("discord_status", {"state": "down"})
+    until(lambda: panel.get_attribute("data-level") == "down")
+    check("a failed start is red and names the class",
+          panel.get_attribute("data-level") == "down" and "RuntimeError" in panel.inner_text(),
+          panel.inner_text())
+    mock.world["discord"] = saved
+
+    reporter.update(state="ok", reason="", last_error=None)
+    mock.emit("discord_status", {"state": "ok"})
+    until(lambda: panel.get_attribute("data-level") == "ok")
+    check("and back to green", panel.get_attribute("data-level") == "ok")
+
+
 def schedule_dialog_checks(page, mock):
     print("\nschedule dialog")
     page.locator('[data-testid="schedule-open"]').click()
@@ -1598,6 +1654,7 @@ def main():
             # WP12c last: these add a project and re-parent a thread, so they
             # rearrange the very tree the earlier sections navigate.
             quota_checks(page, mock)
+            discord_checks(page, mock)
             schedule_dialog_checks(page, mock)
             compose_checks(page, mock)
             newproject_checks(page, mock)

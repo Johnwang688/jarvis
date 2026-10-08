@@ -135,6 +135,10 @@ class Daemon:
         # this daemon serves state only and the /tasks verbs answer 409, which
         # is what every pre-WP11 test and every embedded use already expects.
         self.runner = None
+        # PR A attaches its DiscordSurface here (`start_discord`); `GET /discord`
+        # reads it. None means no Discord on this daemon.
+        self.discord = None
+        self.discord_error: str | None = None   # why start_discord failed (class name)
         self._lock = threading.RLock()
         self._worktree_lock = threading.Lock()
         self._sessions: dict[str, _Session] = {}
@@ -1296,28 +1300,45 @@ class _NoControl:
         return []
 
 
-def start_discord(daemon, control=None):
-    """Attach the Discord router, or None if it is not connected/cannot start.
+def start_discord(daemon, control=None, **surface_kwargs):
+    """Start the Discord surface and return it (setting `daemon.discord`), or
+    None if it is not connected/cannot start.
+
+    The surface owns the order (discord/surface.py): the Reporter subscribes,
+    then `daemon.runner.serve()`, then the gateway — so call this after
+    `daemon.start()` and before anything else serves the runner. A second call
+    returns the surface already attached.
 
     A 4014 close (Message Content Intent off) is v1's job and stays v1's: the
     listener prints the explanation and stops rather than retry-looping.
     """
-    from .discord.gateway import DiscordRouter
-    from .discord.rest import DiscordRest
+    from .discord.surface import DiscordSurface
     from .router import daemon_router
 
+    existing = getattr(daemon, "discord", None)
+    if existing is not None:
+        return existing
+    surface = None
     try:
         router = getattr(daemon, "router", None) or daemon_router(daemon)
         control = control or getattr(daemon, "runner", None) or _NoControl()
-        surface = DiscordRouter(daemon, daemon.stores, router,
-                                daemon.approvals, control, DiscordRest())
-        surface.start()
-        # `GET /discord` reads its status (connection, command sync) from here.
+        surface = DiscordSurface(daemon, control=control, router=router, **surface_kwargs)
+        # `GET /discord` reads its status (connection, commands, reporter) here.
         daemon.discord = surface
+        surface.start()
         return surface
     except Exception as exc:
         # Class only: this path is one frame away from the credential bundle.
         LOG.warning("Discord surface not started (%s)", type(exc).__name__)
+        daemon.discord = None
+        # The class only, for `GET /discord`: a start that failed is red on
+        # the HUD, not an endless "pending".
+        daemon.discord_error = type(exc).__name__
+        if surface is not None:
+            try:
+                surface.stop(runner=False)     # the daemon still needs its runner
+            except Exception:
+                pass
         return None
 
 
@@ -1335,6 +1356,26 @@ def _purge_trash(daemon, done, interval=6 * 3600):
             return
 
 
+# Libraries that log a request's full URL at INFO (httpx: `HTTP Request: POST
+# https://…`) or DEBUG. A Discord interaction reply's URL *is* a credential —
+# `/webhooks/<app>/<interaction token>/…` — so at INFO every slash-command
+# reply wrote a live token into the daemon log (found on the live daemon,
+# 2026-10-07). Our own code logs operations, never URLs; these are held to
+# WARNING so a library cannot do it for us.
+QUIET_LOGGERS = ("httpx", "httpcore", "urllib3", "websocket", "anthropic", "openai")
+
+
+def configure_logging() -> None:
+    """The daemon's logging: INFO to stderr, URL-logging libraries at WARNING."""
+    # A daemon that logs nowhere is one whose failures are invisible: the
+    # first owner message that silently did nothing (2026-09-16) left no trace.
+    if not logging.getLogger().handlers:
+        logging.basicConfig(level=logging.INFO, stream=sys.stderr,
+                            format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    for name in QUIET_LOGGERS:
+        logging.getLogger(name).setLevel(logging.WARNING)
+
+
 def main() -> int:
     # Imported here, not at module scope: the hatch reads the daemon it is
     # given and nothing in the daemon needs it, so keeping the edge one-way
@@ -1342,11 +1383,7 @@ def main() -> int:
     from .hatch import EscapeHatch
     from .runner import TaskRunner
 
-    # A daemon that logs nowhere is one whose failures are invisible: the
-    # first owner message that silently did nothing (2026-09-16) left no trace.
-    if not logging.getLogger().handlers:
-        logging.basicConfig(level=logging.INFO, stream=sys.stderr,
-                            format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    configure_logging()
 
     remote = discord_connected()
     approvals = None
@@ -1372,10 +1409,11 @@ def main() -> int:
     try:
         daemon.start()
         hatch.start()
-        daemon.runner.serve()
-        purger.start()
         if remote:
+            # Reporter subscribes, then the runner serves, then the gateway.
             discord = start_discord(daemon)
+        daemon.runner.serve()                   # idempotent if Discord served it
+        purger.start()
         LOG.info("Jarvis v2 listening on 127.0.0.1:%s", daemon.port)
         done.wait()
     except KeyboardInterrupt:
@@ -1384,13 +1422,14 @@ def main() -> int:
         print(f"jarvis daemon2: {exc}")
         return 1
     finally:
-        # Discord first, so no verb arrives at a runner that is stopping; then
-        # the runner, so its workers see interrupted turns rather than a dead
-        # daemon. Nothing is cancelled — a task left RUNNING is re-admitted by
-        # `serve()`'s recovery next boot.
+        # The gateway first, so no verb arrives at a runner that is stopping;
+        # then the runner, so its workers see interrupted turns rather than a
+        # dead daemon; then the Reporter, flushing within 2 s (all three inside
+        # `discord.stop()`). Nothing is cancelled — a task left RUNNING is
+        # re-admitted by `serve()`'s recovery next boot.
         if discord is not None:
             discord.stop()
-        daemon.runner.stop()
+        daemon.runner.stop()                    # idempotent if Discord stopped it
         hatch.stop()
         daemon.stop()
         signal.signal(signal.SIGTERM, previous)

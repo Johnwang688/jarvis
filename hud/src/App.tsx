@@ -13,7 +13,7 @@ import { FileTab } from "./components/FileTab";
 import { DiffTab } from "./components/DiffTab";
 import { PreviewTab } from "./components/PreviewTab";
 import { ApprovalQueue, ApprovalVeil } from "./components/Approvals";
-import { DecisionsLog, SchedulesButton, UsagePanel } from "./components/Panels";
+import { DecisionsLog, DiscordPanel, SchedulesButton, UsagePanel } from "./components/Panels";
 import { AvatarPicker, ModelPicker, NewProject, NewTask, SettingsDialog, VoicePicker } from "./components/Pickers";
 import { ScheduleDialog } from "./components/ScheduleDialog";
 import { Orb } from "./components/Orb";
@@ -311,6 +311,10 @@ export default function App() {
           // Every model and effort change is a line in the chat (A7).
           if (tid && tid === shown) dispatch({ type: "message", message: { role: "system", text: data.text || "" } });
           break;
+        case "discord_status":
+          // The event says something changed; the route says what, filtered.
+          api.discord().then((discord) => dispatch({ type: "patch", patch: { discord } })).catch(() => {});
+          break;
         case "usage_updated":
           api.usage().then((usage) => dispatch({ type: "patch", patch: { usage } })).catch(() => {});
           break;
@@ -595,13 +599,14 @@ export default function App() {
           compose: { projectId: lastProject(projects, threads, loadLastProject()) },
         },
       });
-      const [usage, schedules, route, approvals] = await Promise.all([
+      const [usage, schedules, route, approvals, discord] = await Promise.all([
         api.usage().catch(() => null),
         api.schedules().catch(() => []),
         api.route().catch(() => null),
         api.approvals().catch(() => []),
+        api.discord().catch(() => null),
       ]);
-      dispatch({ type: "patch", patch: { usage, schedules, route, approvals } });
+      dispatch({ type: "patch", patch: { usage, schedules, route, approvals, discord } });
       await Promise.all([loadAvatar(), loadModels(), loadVoices(), refreshArchivedNames()]);
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1021,6 +1026,7 @@ export default function App() {
               onStart={() => task && api.startTask(task.id).then(refreshTasks).catch(() => {})}
             />
             <UsagePanel usage={state.usage} />
+            <DiscordPanel discord={state.discord} />
             <SchedulesButton
               count={state.schedules.length}
               onOpen={() => {

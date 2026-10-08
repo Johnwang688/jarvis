@@ -181,6 +181,22 @@ export interface Usage {
   providers: Record<string, ProviderUsage>;
 }
 
+/** `GET /discord` and the `discord_status` SSE event (S1 + PR A). States,
+ * counts and times only — never a token, a URL or a message body. */
+export interface DiscordReporter {
+  state: "ok" | "degraded" | "down";
+  reason: string;
+  counters: Record<string, number>;
+  dropped: number;
+  last_error: { op: string; status: number | null; code: number | null; at: number | null } | null;
+}
+
+export interface DiscordStatus {
+  connected: boolean;
+  commands: { state: "ok" | "failed" | "pending" | "off"; count: number; synced_at: number | null; error: string | null };
+  reporter: DiscordReporter | null;
+}
+
 export interface Schedule {
   id: string;
   project_id: string;

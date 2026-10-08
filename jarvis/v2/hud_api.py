@@ -663,18 +663,54 @@ def discord_status(daemon) -> dict:
 
     Built from the surface's own status record, which holds states, counts
     and times only — never a token, an interaction token or a request path.
-    PR A extends this with the reporter, the guild and permissions."""
+    PR A adds `reporter` (the update poster's health); B1 adds the guild and
+    permissions."""
     surface = getattr(daemon, "discord", None)
     if surface is None:
         from .daemon import discord_connected
+        failed = getattr(daemon, "discord_error", None)
+        if isinstance(failed, str) and failed:
+            # start_discord raised: say so, red, with the class and nothing else.
+            failed = failed[:60]
+            return {"connected": False,
+                    "commands": {"state": "failed", "count": 0, "synced_at": None,
+                                 "error": failed},
+                    "reporter": {"state": "down",
+                                 "reason": f"the Discord surface did not start ({failed})",
+                                 "counters": {}, "dropped": 0, "last_error": None}}
         state = "pending" if discord_connected() else "off"
         return {"connected": False,
-                "commands": {"state": state, "count": 0, "synced_at": None, "error": None}}
+                "commands": {"state": state, "count": 0, "synced_at": None, "error": None},
+                "reporter": None}
     status = surface.status()
     commands = status.get("commands") or {}
     return {"connected": bool(status.get("connected")),
             "commands": {key: commands.get(key) for key in
-                         ("state", "count", "synced_at", "error")}}
+                         ("state", "count", "synced_at", "error")},
+            "reporter": _reporter_status(status.get("reporter"))}
+
+
+def _reporter_status(reporter) -> dict | None:
+    """The update poster's health (PR A), field by field: a state, a reason
+    sentence, integer counters, the bus drop count and the last failure as
+    operation, HTTP status, Discord code and time. Nothing else passes."""
+    if not isinstance(reporter, dict):
+        return None
+    state = reporter.get("state")
+    counters = reporter.get("counters") or {}
+    error = reporter.get("last_error")
+    return {
+        "state": state if state in ("ok", "degraded", "down") else "down",
+        "reason": str(reporter.get("reason") or "")[:300],
+        "counters": {str(k): int(v) for k, v in counters.items()
+                     if isinstance(v, int) and not isinstance(v, bool)},
+        "dropped": int(reporter.get("dropped") or 0),
+        "last_error": ({"op": str(error.get("op") or "")[:40],
+                        "status": error.get("status") if isinstance(error.get("status"), int) else None,
+                        "code": error.get("code") if isinstance(error.get("code"), int) else None,
+                        "at": error.get("at") if isinstance(error.get("at"), (int, float)) else None}
+                       if isinstance(error, dict) else None),
+    }
 
 
 def route(handler, daemon, parts, query):

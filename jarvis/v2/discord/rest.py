@@ -11,13 +11,24 @@ So nothing here logs, and no error string carries a URL: a transport failure
 is reported by exception class only, and an HTTP failure by status and
 Discord's own message, with every secret the call used redacted from it.
 Callers log the operation name, never the path.
+
+**Rate limits (PR A).** A 429 is slept out here only while the total sleep
+for one call stays within `MAX_SLEEP_S` (10 s), and at most `MAX_RETRIES`
+times; anything more raises `DiscordHTTPError(status=429, retry_after=…)` so
+the caller can defer the work rather than hold a worker hostage. The sleep
+waits on the adapter's close event, so `close()` cuts it short. The
+Reporter's circuit breaker counts those raises.
+
+**Never a DELETE.** This adapter has no delete method of any kind, and a
+test asserts no `DELETE` ever leaves it (decisions D3): channels and threads
+are archived or left alone, never removed.
 """
 from __future__ import annotations
 
 import json
 import math
 import re
-import time
+import threading
 
 import httpx
 
@@ -27,18 +38,42 @@ from jarvis.tools import discord as v1
 DiscordError = v1.DiscordError
 
 EPHEMERAL = 64
+# Message flag: the post appears, but no push or desktop notification fires,
+# whatever the owner's per-channel notification setting is (decisions D1).
+SUPPRESS_NOTIFICATIONS = 4096
+MAX_SLEEP_S = 10.0
+MAX_RETRIES = 3
+# A thread with no activity for this many minutes auto-archives (7 days).
+THREAD_ARCHIVE_MINUTES = 10080
+# Discord JSON error codes the surfaces act on. The meaning of each is fixed by
+# Discord; nothing here infers one from a message string.
+UNKNOWN_CHANNEL = 10003
+MISSING_ACCESS = 50001
+MISSING_PERMISSIONS = 50013
+THREAD_ARCHIVED = 50083
 _TOKEN = re.compile(r"^[A-Za-z0-9_.\-]{1,500}$")
 _SNOWFLAKE = re.compile(r"^[0-9]{1,24}$")
 
 
 class DiscordHTTPError(DiscordError):
     """A non-2xx answer. `status` lets a caller tell a dead interaction token
-    (401/404) from anything else; the message never holds a path or a token."""
+    (401/404) from anything else; `code` is Discord's own JSON error code
+    (10003 unknown channel, 50013 missing permissions, 50083 thread archived)
+    or None; `retry_after` is the wait Discord asked for on a 429 that was too
+    long to sleep here. The message never holds a path or a token."""
 
-    def __init__(self, message: str, status: int, code=None):
+    def __init__(self, message: str, status: int, code=None, retry_after=None):
         super().__init__(message)
         self.status = status
         self.code = code
+        self.retry_after = retry_after
+
+
+def describe(exc) -> dict:
+    """The loggable facts of a failure: HTTP status and Discord code, or the
+    transport's exception class. Never its message, which may hold a body."""
+    return {"status": getattr(exc, "status", None), "code": getattr(exc, "code", None),
+            "error": type(exc).__name__}
 
 
 def _snowflake(value) -> str:
@@ -46,6 +81,10 @@ def _snowflake(value) -> str:
     if not _SNOWFLAKE.match(value):
         raise DiscordError("Error: Discord id is not a snowflake")
     return value
+
+
+def _snowflake_or(value, default) -> str:
+    return str(value) if value else default
 
 
 def _token(value) -> str:
@@ -66,10 +105,17 @@ class DiscordRest:
         self._client = (httpx.Client(transport=transport)
                         if isinstance(transport, httpx.BaseTransport) else None)
         self._request = self._client.request if self._client else (transport or httpx.request)
+        self._closed = threading.Event()
 
     def close(self):
+        self._closed.set()          # wakes any 429 wait at once
         if self._client:
             self._client.close()
+
+    def _sleep(self, delay: float) -> None:
+        """A rate-limit wait that `close()` interrupts."""
+        if self._closed.wait(delay):
+            raise DiscordError("Error: Discord adapter closed during a rate-limit wait")
 
     def _api(self, method, path, *, secrets=(), **kwargs):
         token = v1._load_bundle()["bot_token"]
@@ -80,6 +126,7 @@ class DiscordRest:
                 text = text.replace(secret, "[REDACTED]")
             return text
 
+        retries, slept = 0, 0.0
         while True:
             try:
                 response = self._request(
@@ -99,7 +146,14 @@ class DiscordRest:
                         raise ValueError("invalid retry delay")
                 except (ValueError, KeyError, TypeError, AttributeError):
                     raise DiscordHTTPError(redact(v1._fail(response)), 429) from None
-                time.sleep(delay)
+                if slept + delay > MAX_SLEEP_S or retries >= MAX_RETRIES:
+                    # The caller defers: a worker parked for minutes on one
+                    # bucket would hold every other post behind it.
+                    raise DiscordHTTPError(redact(v1._fail(response)), 429,
+                                           retry_after=delay) from None
+                retries += 1
+                slept += delay
+                self._sleep(delay)
                 continue
             if not 200 <= response.status_code < 300:
                 code = None
@@ -120,8 +174,32 @@ class DiscordRest:
     def create_channel(self, guild_id, name) -> str:
         return self._id("POST", f"/guilds/{guild_id}/channels", json={"name": name, "type": 0})
 
-    def create_thread(self, channel_id, name) -> str:
-        return self._id("POST", f"/channels/{channel_id}/threads", json={"name": name, "type": 11})
+    def create_thread(self, channel_id, name, *,
+                      auto_archive_duration: int = THREAD_ARCHIVE_MINUTES) -> str:
+        """A public thread (type 11) that archives itself after a week idle."""
+        return self._id("POST", f"/channels/{channel_id}/threads",
+                        json={"name": name, "type": 11,
+                              "auto_archive_duration": int(auto_archive_duration)})
+
+    def add_owner(self, thread_id, owner_id=None):
+        """Add the owner to a thread, so it shows in their thread list."""
+        owner = _snowflake_or(owner_id, self._owner())
+        self._api("PUT", f"/channels/{thread_id}/thread-members/{owner}")
+
+    def ping_owner(self, channel_id, owner_id=None) -> str:
+        """The D1 ping line: exactly `<@owner>`, mentioning the owner and no one
+        else. The one post that is allowed to notify; never sent to a DM."""
+        owner = _snowflake_or(owner_id, self._owner())
+        return self._id("POST", f"/channels/{channel_id}/messages",
+                        json={"content": f"<@{owner}>",
+                              "allowed_mentions": {"parse": [], "users": [owner]}})
+
+    @staticmethod
+    def _owner() -> str:
+        owner = v1._load_bundle().get("owner_id")
+        if not owner:
+            raise DiscordError("Error: no owner_id in the Discord token bundle")
+        return str(owner)
 
     @staticmethod
     def _message(content, embed, components=None, flags=None):
@@ -154,13 +232,27 @@ class DiscordRest:
                                           else data, "text/plain; charset=utf-8"))
                           for i, (name, data) in enumerate(files)]}
 
-    def post(self, channel_id, content=None, embed=None, files=(), components=None) -> str:
+    def post(self, channel_id, content=None, embed=None, files=(), components=None,
+             *, silent: bool = False) -> str:
+        """`silent` sets SUPPRESS_NOTIFICATIONS: every guild post that is not
+        the D1 ping line carries it, so nothing but the ping line buzzes."""
         return self._id("POST", f"/channels/{channel_id}/messages",
-                        **self._payload(content, embed, files, components))
+                        **self._payload(content, embed, files, components,
+                                        SUPPRESS_NOTIFICATIONS if silent else None))
 
     def edit(self, channel_id, message_id, content=None, embed=None, components=None):
-        self._api("PATCH", f"/channels/{channel_id}/messages/{message_id}",
-                  json=self._message(content, embed, components))
+        """Edit first. Only when Discord says the thread is archived (50083) is
+        it reopened and the edit tried once more — never pre-emptively, which
+        cost a second request on every edit of a live thread."""
+        body = self._message(content, embed, components)
+        path = f"/channels/{channel_id}/messages/{message_id}"
+        try:
+            self._api("PATCH", path, json=body)
+        except DiscordHTTPError as exc:
+            if exc.code != THREAD_ARCHIVED:
+                raise
+            self.unarchive(channel_id)
+            self._api("PATCH", path, json=body)
 
     def unarchive(self, thread_id):
         self._api("PATCH", f"/channels/{thread_id}", json={"archived": False})
