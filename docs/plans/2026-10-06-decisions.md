@@ -181,3 +181,14 @@ Codex threads, or Discord.
   and avoid refactoring code the other one needs.
 - The headless suite takes `HUD_V2_CHECK_PORT`, so the two worktrees can
   run it at the same time.
+
+---
+
+**A4 amendment (owner, 2026-10-07).** A thread that has no model of its own
+follows the global default.
+- If the owner changes only its **effort**, it **keeps following the global
+  default model**. The effort choice is stored on its own and clamped to
+  whatever the default model supports when each turn runs.
+- Only an explicit model choice pins a model to the thread.
+- This replaces PR #3's behaviour, where an effort-only change also pinned
+  the default model of the moment.
