@@ -622,3 +622,13 @@ button.danger:hover:not(:disabled) { background: var(--red-soft); }
 .discord-panel[data-level="warn"] .discord-text { color: var(--amber); }
 .discord-panel[data-level="down"] .discord-text { color: var(--red); }
 .discord-text { overflow-wrap: anywhere; }
+/* B1: the project dialog's channel pill and the panel's one-time backfill. */
+.discord-panel { flex-wrap: wrap; }
+.discord-backfill { font-size: 12px; }
+.discord-link .pill { display: inline-flex; align-items: center; gap: 6px; font-size: 12px;
+  padding: 2px 8px; border: 1px solid var(--border-strong); border-radius: 10px;
+  overflow-wrap: anywhere; }
+.discord-link .pill.warn { color: var(--amber); }
+.discord-link .pill.down { color: var(--red); }
+.discord-link .pill.off { color: var(--text-2); }
+.discord-link button.ghost { padding: 0 6px; }

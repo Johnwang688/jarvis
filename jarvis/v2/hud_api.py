@@ -663,11 +663,16 @@ def discord_status(daemon) -> dict:
 
     Built from the surface's own status record, which holds states, counts
     and times only — never a token, an interaction token or a request path.
-    PR A adds `reporter` (the update poster's health); B1 adds the guild and
-    permissions."""
+    PR A adds `reporter` (the update poster's health); B1 adds `guild`,
+    `linker` and `permissions`."""
     surface = getattr(daemon, "discord", None)
     if surface is None:
         from .daemon import discord_connected
+        from .discord import guild as _guild
+        cfg = _guild.load()
+        offline = {"guild": {"configured": cfg is not None,
+                             "id": cfg.guild_id if cfg is not None else None},
+                   "linker": None, "permissions": None}
         failed = getattr(daemon, "discord_error", None)
         if isinstance(failed, str) and failed:
             # start_discord raised: say so, red, with the class and nothing else.
@@ -677,17 +682,52 @@ def discord_status(daemon) -> dict:
                                  "error": failed},
                     "reporter": {"state": "down",
                                  "reason": f"the Discord surface did not start ({failed})",
-                                 "counters": {}, "dropped": 0, "last_error": None}}
+                                 "counters": {}, "dropped": 0, "last_error": None},
+                    **offline}
         state = "pending" if discord_connected() else "off"
         return {"connected": False,
                 "commands": {"state": state, "count": 0, "synced_at": None, "error": None},
-                "reporter": None}
+                "reporter": None, **offline}
     status = surface.status()
     commands = status.get("commands") or {}
     return {"connected": bool(status.get("connected")),
             "commands": {key: commands.get(key) for key in
                          ("state", "count", "synced_at", "error")},
-            "reporter": _reporter_status(status.get("reporter"))}
+            "reporter": _reporter_status(status.get("reporter")),
+            **_linker_status(status)}
+
+
+def _names(value, limit=20) -> list[str]:
+    return [str(v)[:60] for v in value[:limit] if isinstance(v, str)] \
+        if isinstance(value, list) else []
+
+
+def _linker_status(status) -> dict:
+    """B1's three fields, copied one by one like the reporter's: the guild
+    (configured, id), the channel linker (state, reason, pending renames,
+    open housekeeping asks) and the bot's server-wide permissions (missing,
+    excess, administrator). A surface without a linker reads as unconfigured."""
+    guild = status.get("guild") if isinstance(status.get("guild"), dict) else {}
+    gid = guild.get("id")
+    linker = status.get("linker")
+    perms = status.get("permissions")
+    return {
+        "guild": {"configured": bool(guild.get("configured")),
+                  "id": gid if isinstance(gid, str) and gid.isdigit() else None},
+        "linker": ({"state": linker.get("state") if linker.get("state") in
+                    ("ok", "degraded", "unconfigured") else "degraded",
+                    "reason": str(linker.get("reason") or "")[:300],
+                    "pending_renames": int(linker.get("pending_renames") or 0),
+                    "pending_moves": int(linker.get("pending_moves") or 0),
+                    "awaiting_approval": int(linker.get("awaiting_approval") or 0)}
+                   if isinstance(linker, dict) else None),
+        "permissions": ({"missing": _names(perms.get("missing")),
+                         "excess": _names(perms.get("excess")),
+                         "administrator": bool(perms.get("administrator")),
+                         "checked_at": perms.get("checked_at")
+                         if isinstance(perms.get("checked_at"), (int, float)) else None}
+                        if isinstance(perms, dict) else None),
+    }
 
 
 def _reporter_status(reporter) -> dict | None:
@@ -734,6 +774,11 @@ def route(handler, daemon, parts, query):
     # Archive, restore, permanent delete and the trash (decisions part B).
     from . import projects as _projects
     mounted = _projects.route(handler, daemon, parts, query)
+    if mounted is not None:
+        return mounted
+    # Project channels: the light, link/create/unlink and backfill (B1).
+    from .discord import routes as _discord_routes
+    mounted = _discord_routes.route(handler, daemon, parts, query)
     if mounted is not None:
         return mounted
     if parts == ["usage"] and method == "GET":

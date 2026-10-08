@@ -199,6 +199,10 @@ def _world() -> dict:
             "commands": {"state": "ok", "count": 11, "synced_at": 1.0, "error": None},
             "reporter": {"state": "ok", "reason": "", "counters": {"posts": 3},
                          "dropped": 0, "last_error": None},
+            # B1: the server is set up and the bot has exactly what it needs.
+            "guild": {"configured": True, "id": "800000000000000001"},
+            "linker": {"state": "ok", "reason": "", "pending_renames": 0, "awaiting_approval": 0},
+            "permissions": {"missing": [], "excess": [], "administrator": False, "checked_at": 1.0},
         },
         "route": {
             "table": {"chains": {"orchestrator": ["claude", "codex"],

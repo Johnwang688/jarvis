@@ -782,6 +782,112 @@ and O1 in `docs/plans/2026-10-07-discord-decisions.md`. Code:
   `DiscordPanel` shows green, amber with the reason, or red. A surface that
   failed to start is recorded by class name and shown red, not "pending".
 
+### 11.6 The server and project channels (B1, 2026-10-07)
+
+Plan: `docs/plans/2026-10-07-discord-plan.md` §2–§3; owner decisions D3, D4,
+D5, O1, O6 and O7 in `docs/plans/2026-10-07-discord-decisions.md`. Code:
+`jarvis/v2/discord/{perms,guild,setup,linker,routes}.py`.
+
+- **Setup is human-only:** `jarvis auth discord-guild` lists the servers the
+  bot is in, prints the invite pinned to the chosen one
+  (`scope=bot+applications.commands`, `permissions=309237763088`,
+  `guild_id`, `disable_guild_select=true`), checks the bot's permissions with
+  Discord's own algorithm (`perms.effective`) — a **missing** one blocks
+  (fix it, press Enter, it checks again), an **excess** one warns,
+  Administrator loudly (D5: never Administrator) — and only after a y/N (O6)
+  creates the **Jarvis** and **Jarvis Archive** categories and **#ungrouped**
+  under Jarvis, reusing any a previous run made. It writes
+  `~/.config/jarvis/discord_guild.json` (`config.DISCORD_GUILD_PATH`, env
+  `JARVIS_DISCORD_GUILD`) `{guild_id, category_id, archive_category_id,
+  ungrouped_channel_id}`, mode 600, atomically. The file is in
+  `permissions.protected_paths()`; the daemon re-reads it (cached on mtime)
+  whenever it needs it, so no restart. The v1 invite carries the same
+  integer.
+- **Every channel links to a project whose folder exists** (O1). A link
+  needs `Path(root).is_dir()` and a project that is not archived.
+  `Project.discord_channel_origin` (`created` | `linked`) is display only.
+  The slug is lowercase ASCII with hyphens, ≤ 90 characters, `project-<id>`
+  when empty, `-<id[:4]>` on a clash; the topic is `Jarvis project · <name> ·
+  <id>`. The daemon links the **Inbox** to #ungrouped as soon as the guild
+  file exists; nothing else can relink, unlink or give it a channel.
+- **Owner-only routes** (`discord/routes.py`, mounted beside
+  `projects.route`): `GET /projects/{id}/discord` (the light, cached 60 s,
+  each read ≤ 5 s and never sleeping out a 429), `POST
+  /projects/{id}/discord {action: create | link | unlink}`, and `POST
+  /discord/backfill` (one create a second). Link validation, one function
+  (`ChannelLinker.validate_link`, for B2's `/project link` too): a
+  snowflake; not #ungrouped or a Jarvis category; the project live, not the
+  Inbox, its folder present; not linked to another project (409); the bot
+  can see it; same guild; a text channel; no missing permission there.
+  `POST`/`PATCH /projects` refuse `discord_channel_id` (400 "link a channel
+  from the project dialog").
+- **Who may change a channel (D4).** `project_updated` gains `by: "owner" |
+  "api"` (`projects.is_owner`, the non-raising `owner_only`) and `previous`.
+  The `ChannelLinker` (its own worker) renames at once on an owner rename
+  — a long 429 keeps it *pending* and retries when Discord said, shown as
+  "rename pending" — and asks first on an `api` one:
+  `ApprovalRequest(tool="discord_channel", args={action, channel, from, to,
+  why}, origin="Jarvis housekeeping", allowlistable=False)`, Approve/Deny and
+  never Always, on a separate asker so an open question never holds up the
+  owner's own renames. A deny or a timeout does nothing; a yes re-checks
+  that the project still has that name and channel. Archive moves the
+  channel to Jarvis Archive by `parent_id` alone (`modify_channel` cannot
+  send `lock_permissions` or `permission_overwrites`) and posts a note;
+  restore moves it back, renaming only if PR #4 renumbered the name, and
+  posts "Restored."; a permanent delete posts a note (the event now carries
+  `discord_channel_id`) and the channel is **kept**.
+- **Crowding (D3, O7).** At 45 of 50 channels in Jarvis, one approval lists
+  the channels of projects idle 30+ days ("Move these N to Jarvis Archive?";
+  the projects stay active). At 45 in the archive target, one approval to
+  create "Jarvis Archive 2"; later archives go to the newest overflow
+  category (kept in `<v2 data>/discord/linker.json`). An ask is never open
+  twice, and after a deny it waits a day.
+- **Placement.** Once a guild is configured, `_locate` and S1's interaction
+  gate place only messages and interactions whose `guild_id` matches; an
+  archived project's channel keeps its fixed reply.
+- **The safety net steps aside.** The Reporter hears the linker's
+  `project_updated` (`changed: ["discord_channel_id"]`) and reconciles that
+  project at once: an active or blocked task gets its thread and card in the
+  new channel, and one whose thread Discord deleted (`thread_gone`) gets a
+  fresh one (the old id kept in `retired_threads`). The DM stays the net only
+  for a channel that later breaks.
+- **`GET /discord`** gains `guild {configured, id}`, `linker {state ok |
+  degraded | unconfigured, reason, pending_renames, awaiting_approval}` and
+  `permissions {missing, excess, administrator, checked_at}` (refreshed by the
+  linker's worker, never on the HTTP thread), copied field by field. The HUD
+  light goes amber on a missing permission or Administrator.
+- **No DELETE anywhere** still holds: `DiscordRest` has no delete method,
+  nothing in `jarvis/v2/discord/` spells `"DELETE"`, and B1's fake Discord
+  fails the suite on one. Only `linker.py` and `setup.py` call
+  `create_channel`/`modify_channel` (a grep test with an allowlist B2 extends).
+- **Review fixes (PR #8).**
+  - *Only a sanctioned name is applied.* The linker keeps, per project, the
+    last name the owner's action or an approval chose (`linker.json`
+    `sanctioned`). A pending rename retries its **own** name and is dropped
+    once the project's name has moved on — the newer change then takes its
+    own owner/api path, so an `api` rename can never ride an owner's 429
+    retry. A restore applies a new name only if it was sanctioned or is PR
+    #4's renumbering of the archived name (`project_restored` carries
+    `previous_name`); anything else moves the channel back and asks.
+  - *Nothing is lost to a failure.* A rename or move that meets a 429, a 5xx
+    or a transport failure is kept (`pending_renames`, `pending_moves`) and
+    retried when due; restore sends the move and the rename as separate
+    requests. A start-up reconcile moves an archived project's channel out
+    of Jarvis, and a live project's channel back out of the archive when it
+    went there with its project — never one moved for crowding
+    (`archived_by: project | crowding`). Open asks and the time each ask was
+    answered persist, so a restart asks an unanswered question again and
+    does not re-ask an answered one for a day. `GET /discord`'s linker gains
+    `pending_moves`.
+  - *Names.* Clashes are judged on the channel names Discord has (the cached
+    guild channel list), and a channel already carrying the bare or the
+    suffixed slug keeps it, so whoever had a name first keeps it.
+  - *Idempotent create.* A create first adopts an unlinked channel in the
+    Jarvis category whose topic ends with `· <project id>` — the residue of a
+    create whose answer was lost.
+  - The crowding note says how a channel comes back (`/channel restore`, B2,
+    or by hand).
+
 ---
 
 ## 12. HUD v2 (G3) — specified 2026-09-16 from the owner's elaboration

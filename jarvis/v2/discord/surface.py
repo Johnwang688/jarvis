@@ -3,7 +3,7 @@ interaction router, and the update poster — started and stopped in the one
 order that loses nothing.
 
 **Start.** `daemon.start` (the caller's), then the Reporter subscribes, then
-`runner.serve()`, then the gateway. The Reporter has to be on the bus before
+the channel linker (B1) starts, then `runner.serve()`, then the gateway. The Reporter has to be on the bus before
 the runner's recovery publishes its first snapshot, or a task re-admitted at
 boot changes phase with nobody listening; the gateway comes last so no verb
 reaches a runner that is not serving yet. `serve()` is idempotent, so the
@@ -11,7 +11,8 @@ daemon's own call to it afterwards is harmless.
 
 **Stop.** The gateway first, so no verb arrives at a runner that is stopping;
 then the runner, so its last snapshots are published; then the Reporter, which
-drains them and sends due card edits within 2 s; then REST. The hatch and the
+drains them and sends due card edits within 2 s; then the channel linker
+(B1); then REST. The hatch and the
 daemon are the caller's to stop after this.
 
 Both are idempotent: a second `start()` or `stop()` does nothing.
@@ -47,6 +48,7 @@ class DiscordSurface:
                                     self.rest, listener_factory,
                                     sync_commands=sync_commands, **kwargs)
         self.reporter = None
+        self.linker = None
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -61,6 +63,11 @@ class DiscordSurface:
         self.reporter = Reporter(self.daemon.stores, self.rest, self.daemon.bus,
                                  dm_channel=self.router._owner_dm,
                                  reconcile=self._reconcile)
+        # 1b. The channel linker (B1), after the Reporter so the Reporter
+        # hears the Inbox being linked to #ungrouped and every later link.
+        from .linker import ChannelLinker
+        self.linker = ChannelLinker(self.daemon, self.rest, approvals=self.daemon.approvals)
+        self.linker.start()
         # 2. The runner's recovery publishes now, and the Reporter hears it.
         runner = getattr(self.daemon, "runner", None)
         if runner is not None and hasattr(runner, "serve"):
@@ -88,6 +95,8 @@ class DiscordSurface:
                 LOG.warning("Task runner did not stop cleanly (%s)", type(exc).__name__)
         if self.reporter is not None:
             self.reporter.close(flush=True)
+        if self.linker is not None:
+            self.linker.close()
         if self._own_rest:
             self.rest.close()
 
@@ -98,4 +107,6 @@ class DiscordSurface:
         Reporter's health. States, counts and times only."""
         status = dict(self.router.status())
         status["reporter"] = self.reporter.status() if self.reporter is not None else None
+        if self.linker is not None:
+            status.update(self.linker.status())     # guild, linker, permissions (B1)
         return status

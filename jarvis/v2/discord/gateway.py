@@ -260,9 +260,10 @@ class DiscordRouter:
         self.bot_id = ""
         self.owner_id = ""
         self.application_id = ""
-        # PR B1 sets this from `jarvis auth discord-guild`; the interaction gate
-        # already refuses a mismatch once it is set.
-        self.guild_id: str | None = None
+        # The configured guild (B1) is read from `jarvis auth discord-guild`'s
+        # file whenever it is needed (`guild_id` below); a test may pin it.
+        self._guild_pin: str | None = None
+        self._guild_pinned = False
         self.turn_timeout_s = turn_timeout_s
         self.sync_commands = sync_commands
         self.commands = SyncResult()
@@ -295,6 +296,24 @@ class DiscordRouter:
         self._worker = threading.Thread(target=self._watch, name="jarvis-discord-approvals",
                                         daemon=True)
         self._worker.start()
+
+    # -- the configured guild (B1) ----------------------------------------
+
+    @property
+    def guild_id(self) -> str | None:
+        """The server Jarvis lives in, or None before `jarvis auth
+        discord-guild`. Re-read on every use (cached on the file's mtime), so
+        setup takes effect without a restart. Once set, a guild message or
+        interaction from any other server is placed nowhere."""
+        if self._guild_pinned:
+            return self._guild_pin
+        from . import guild
+        cfg = guild.load()
+        return cfg.guild_id if cfg is not None else None
+
+    @guild_id.setter
+    def guild_id(self, value) -> None:
+        self._guild_pinned, self._guild_pin = True, (str(value) if value else None)
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -381,6 +400,11 @@ class DiscordRouter:
         """
         if "guild_id" not in message:
             return "dm", None, None
+        configured = self.guild_id
+        if configured and str(message.get("guild_id")) != str(configured):
+            # Another server (B1): nothing there is a Jarvis place, whatever
+            # its channel id happens to match.
+            return "other", None, None
         tasks = self.stores.tasks.list(discord_thread_id=channel_id)
         if tasks:
             task = tasks[0]

@@ -79,6 +79,10 @@ class DiscordChecks(unittest.TestCase):
         self.bundle = patch.object(config, "DISCORD_TOKEN_PATH", token_path)
         self.bundle.start()
         self.addCleanup(self.bundle.stop)
+        # Never the owner's real guild file (B1).
+        guild = patch.object(config, "DISCORD_GUILD_PATH", Path(self.tmp.name) / "discord_guild.json")
+        guild.start()
+        self.addCleanup(guild.stop)
         # Accidental use of the default client must never reach the network.
         self.network = patch.object(httpx, "request", side_effect=AssertionError("live network"))
         self.network.start()

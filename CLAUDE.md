@@ -84,7 +84,34 @@ operation, status and Discord code only, and **httpx/httpcore are held at
 WARNING** (`daemon.configure_logging`) — httpx logs full request URLs at
 INFO, and an interaction reply's URL *is* its token (a live leak, fixed
 2026-10-07). Everything posted is `secrets.scrub`bed before rendering,
-approvals included. `DiscordRest` has no delete. Briefs for every package, including the ones in flight, are in
+approvals included. `DiscordRest` has no delete.
+
+**Discord server and project channels, B1 (2026-10-07, design §11.6; plan
+§2–§3).** `jarvis auth discord-guild` (human-only, `discord/setup.py`) picks
+the server, prints the invite pinned to it (`permissions=309237763088`, D5:
+**never Administrator**), blocks on a missing permission and warns on an
+excess one (`discord/perms.py` is Discord's own algorithm), and only after a
+y/N creates Jarvis, Jarvis Archive and #ungrouped and writes
+`discord_guild.json` (mode 600, a **protected path**; re-read by the daemon,
+no restart). The `ChannelLinker` (`discord/linker.py`, on the surface) links
+the Inbox to #ungrouped — nothing else can move it — and owns every channel
+write: the owner-only routes (`discord/routes.py`: create, link a pasted id
+through one validation function, unlink — **the channel is kept** — and the
+one-time backfill) act at once, as does an owner rename/archive/restore
+(`project_updated.by == "owner"`); anything else (an `api` rename, a
+crowding archive at 45 of 50, "Jarvis Archive 2") is a `discord_channel`
+approval from "Jarvis housekeeping", never Always, and a deny does nothing.
+Moving a channel never sends permission fields. **Only a sanctioned name is
+ever applied** (review fix, 2026-10-07): a pending rename retries its own
+name and is dropped when the project's name moves on — recomputing it from
+the live name let an `api` rename ride an owner's 429 retry past the gate.
+Renames and moves that fail transiently are kept pending, a start-up
+reconcile fixes what an outage missed, and asks persist across restarts.
+`POST`/`PATCH /projects`
+refuse `discord_channel_id`. A configured guild gates placement, and a newly
+linked project's tasks leave the DM safety net for threads at once. Tests
+that touch Discord point `config.DISCORD_GUILD_PATH` at a temp file — the
+owner's real one decides where channels go. Briefs for every package, including the ones in flight, are in
 `docs/codex-briefs/`; each merged package left a `*-notes.md` beside its
 brief with what its implementer verified and what it proposes.
 

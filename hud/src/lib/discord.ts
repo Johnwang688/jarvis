@@ -4,7 +4,7 @@
 // failure), red when it is down. "Off" is grey: no Discord is configured,
 // which is a fact about the setup, not a fault.
 
-import type { DiscordStatus } from "../types";
+import type { DiscordStatus, Project, ProjectChannel } from "../types";
 
 export type DiscordLevel = "ok" | "warn" | "down" | "off";
 
@@ -46,5 +46,62 @@ export function discordLight(status: DiscordStatus | null): DiscordLight {
   if (status.commands?.state === "failed") {
     return { level: "warn", text: `Discord · commands not synced${status.commands.error ? ` (${status.commands.error})` : ""}` };
   }
+  // B1: the server-wide permission check. Administrator is amber too: it
+  // works, but it is the setting decisions D5 rule out.
+  const perms = status.guild?.configured ? status.permissions : null;
+  if (perms?.missing?.length) {
+    return { level: "warn", text: `Discord · the bot is missing ${perms.missing.join(", ")}` };
+  }
+  if (perms?.administrator) {
+    return { level: "warn", text: "Discord · the bot has Administrator; remove it (only the 8 permissions are needed)" };
+  }
+  if (status.linker?.state === "degraded") {
+    return { level: "warn", text: `Discord · ${status.linker.reason || "channel housekeeping is behind"}` };
+  }
   return { level: "ok", text: "Discord ok" };
+}
+
+/** Is the server set up (`jarvis auth discord-guild`)? */
+export function guildConfigured(status: DiscordStatus | null): boolean {
+  return !!status?.guild?.configured;
+}
+
+/** The projects the one-time backfill would give a channel: live, not the
+ * Inbox (the daemon links it to #ungrouped), and not linked yet. The backend
+ * also skips a project whose folder is missing, and says so. */
+export function backfillTargets(projects: Project[]): Project[] {
+  return projects.filter((p) => !p.inbox && !p.archived && !p.discord_channel_id);
+}
+
+/** One project's channel, as a pill: a colour and a few words. */
+export function channelPill(view: ProjectChannel | null): DiscordLight {
+  if (!view) return { level: "off", text: "checking…" };
+  const name = view.name ? `#${view.name}` : view.channel_id ? `channel ${view.channel_id}` : "";
+  switch (view.state) {
+    case "linked_ok":
+      return { level: "ok", text: `${name}${view.category ? ` · ${view.category}` : ""}` };
+    case "unlinked":
+      return { level: "off", text: "no channel" };
+    case "unconfigured":
+      return { level: "off", text: "Discord server not set up" };
+    case "folder_missing":
+      return { level: "warn", text: "the project folder is missing" };
+    case "missing_permissions":
+      return { level: "warn", text: `${name} · bot is missing ${view.missing.join(", ")}` };
+    case "not_found":
+      return { level: "down", text: `channel ${view.channel_id} no longer exists` };
+    case "no_access":
+      return { level: "down", text: `the bot cannot see channel ${view.channel_id}` };
+    case "wrong_guild":
+      return { level: "down", text: `${name} is in another server` };
+    case "unreachable":
+      return { level: "warn", text: "Discord could not be reached" };
+  }
+  return { level: "off", text: String(view.state) };
+}
+
+export function originText(origin: ProjectChannel["origin"]): string {
+  if (origin === "created") return "created by Jarvis";
+  if (origin === "linked") return "linked by you";
+  return "";
 }

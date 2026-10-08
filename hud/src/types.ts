@@ -24,6 +24,8 @@ export interface Project {
   profile: Profile;
   routing: Routing;
   discord_channel_id: string | null;
+  /** B1, display only: who made the link. Never sent back on a PATCH. */
+  discord_channel_origin?: "created" | "linked" | null;
   extra_dirs: string[];
   always_ask: string[];
   inbox: boolean;
@@ -195,6 +197,47 @@ export interface DiscordStatus {
   connected: boolean;
   commands: { state: "ok" | "failed" | "pending" | "off"; count: number; synced_at: number | null; error: string | null };
   reporter: DiscordReporter | null;
+  /** B1: is `jarvis auth discord-guild` done, and the server's id. */
+  guild?: { configured: boolean; id: string | null };
+  /** B1: the channel linker. `null` when no Discord surface is running. */
+  linker?: {
+    state: "ok" | "degraded" | "unconfigured";
+    reason: string;
+    pending_renames: number;
+    /** Review fix 2: archive/restore moves waiting out a 429 or an outage. */
+    pending_moves?: number;
+    awaiting_approval: number;
+  } | null;
+  /** B1: the bot's server-wide permissions, by name. */
+  permissions?: {
+    missing: string[];
+    excess: string[];
+    administrator: boolean;
+    checked_at: number | null;
+  } | null;
+}
+
+/** `GET /projects/{id}/discord` (B1): one project's channel light. */
+export type ChannelState =
+  | "linked_ok" | "unlinked" | "not_found" | "no_access" | "wrong_guild"
+  | "missing_permissions" | "folder_missing" | "unconfigured" | "unreachable";
+
+export interface ProjectChannel {
+  channel_id: string | null;
+  origin: "created" | "linked" | null;
+  name: string | null;
+  category: string | null;
+  state: ChannelState;
+  missing: string[];
+  checked_at: number | null;
+  rename_pending: boolean;
+}
+
+/** `POST /discord/backfill` (B1). */
+export interface BackfillResult {
+  created: number;
+  results: { project_id: string; name: string; channel_id: string | null; status: "created" | "failed"; error?: string }[];
+  skipped: { project_id: string; name: string; reason: string }[];
 }
 
 export interface Schedule {

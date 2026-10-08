@@ -315,7 +315,10 @@ class Backend(unittest.TestCase):
             self.assertEqual(self.request("GET", "/discord"),
                              {"connected": False, "commands": {"state": "off", "count": 0,
                                                                "synced_at": None, "error": None},
-                              "reporter": None})
+                              "reporter": None,
+                              # B1: no guild file, no linker, no permission check.
+                              "guild": {"configured": False, "id": None},
+                              "linker": None, "permissions": None})
 
         class Surface:
             def status(self):
@@ -326,7 +329,8 @@ class Backend(unittest.TestCase):
         self.daemon.discord = Surface()
         body = self.request("GET", "/discord")
         self.assertEqual(body, {"connected": True, "commands": {
-            "state": "ok", "count": 11, "synced_at": 1.0, "error": None}, "reporter": None})
+            "state": "ok", "count": 11, "synced_at": 1.0, "error": None}, "reporter": None,
+            "guild": {"configured": False, "id": None}, "linker": None, "permissions": None})
         self.assertNotIn("synthetic-leak", json.dumps(body))
 
         class WithReporter(Surface):
@@ -349,6 +353,30 @@ class Backend(unittest.TestCase):
             "counters": {"posts": 4, "dm": 1}, "dropped": 2,
             "last_error": {"op": "create_thread", "status": 403, "code": 50013, "at": 2.5}})
         self.assertNotIn("synthetic-leak", json.dumps(body))
+
+        class WithLinker(Surface):
+            """B1: guild, linker and permissions, field by field."""
+            def status(self):
+                status = super().status()
+                status.update(
+                    guild={"configured": True, "id": "800000000000000001", "token": "synthetic-leak"},
+                    linker={"state": "degraded", "reason": "1 channel rename(s) pending",
+                            "pending_renames": 1, "awaiting_approval": 2,
+                            "url": "https://discord.com/synthetic-leak"},
+                    permissions={"missing": ["Attach Files"], "excess": ["Administrator"],
+                                 "administrator": True, "checked_at": 3.0,
+                                 "body": "synthetic-leak"})
+                return status
+
+        self.daemon.discord = WithLinker()
+        body = self.request("GET", "/discord")
+        self.assertEqual(body["guild"], {"configured": True, "id": "800000000000000001"})
+        self.assertEqual(body["linker"], {"state": "degraded", "reason": "1 channel rename(s) pending",
+                                          "pending_renames": 1, "pending_moves": 0,
+                                          "awaiting_approval": 2})
+        self.assertEqual(body["permissions"], {"missing": ["Attach Files"], "excess": ["Administrator"],
+                                               "administrator": True, "checked_at": 3.0})
+        self.assertNotIn("synthetic-leak", json.dumps(body))
         # A start that failed (review fix 7): red with the class, not "pending".
         self.daemon.discord, self.daemon.discord_error = None, "RuntimeError"
         body = self.request("GET", "/discord")
@@ -359,6 +387,134 @@ class Backend(unittest.TestCase):
         self.daemon.discord_error = None
         self.request("GET", "/discord", headers={"Sec-Fetch-Site": "cross-site"}, status=403)
         self.request("GET", "/discord?x=1", status=400)
+
+    # -- B1: project channels -------------------------------------------------
+
+    def owner(self, method, path, body=None, status=200):
+        """The HUD's own request: its listener and its Origin."""
+        port = self.daemon.face_port
+        return self.request(method, path, body, status, port=port,
+                            headers={"Origin": f"http://127.0.0.1:{port}"})
+
+    def discord_linker(self):
+        from tests.v2.discord_linker_check import (ARCHIVE, CATEGORY, GUILD, TOKEN, UNGROUPED,
+                                                   FakeDiscord)
+        from jarvis.v2.discord import guild as guildmod
+        from jarvis.v2.discord import linker as linker_mod
+        from jarvis.v2.discord.linker import ChannelLinker
+        from jarvis.v2.discord.rest import DiscordRest
+        token = self.root / "discord_token.json"
+        token.write_text(json.dumps({"bot_token": TOKEN, "owner_id": "1"}))
+        for name, value in (("DISCORD_TOKEN_PATH", token),
+                            ("DISCORD_GUILD_PATH", self.root / "discord_guild.json")):
+            guard = patch.object(config, name, value)
+            guard.start()
+            self.addCleanup(guard.stop)
+        pace = patch.object(linker_mod, "CREATE_INTERVAL", 0.0)
+        pace.start()
+        self.addCleanup(pace.stop)
+        network = patch("httpx.request", side_effect=AssertionError("live network"))
+        network.start()
+        self.addCleanup(network.stop)
+        fake = FakeDiscord()
+        fake.configured()
+        guildmod.write(guildmod.GuildConfig(GUILD, CATEGORY, ARCHIVE, UNGROUPED))
+        rest = DiscordRest(fake)
+        self.addCleanup(rest.close)
+        linker = ChannelLinker(self.daemon, rest, approvals=self.daemon.approvals)
+        self.addCleanup(linker.close)
+        self.daemon.discord = SimpleNamespace(linker=linker, status=lambda: {
+            "connected": True, "commands": {}, **linker.status()})
+        self.addCleanup(setattr, self.daemon, "discord", None)
+        return fake, linker
+
+    def test_project_discord_routes_are_owner_only(self):
+        fake, _ = self.discord_linker()
+        path = f"/projects/{self.project.id}/discord"
+        # Reading the light is not an action; acting is the owner's alone.
+        self.assertEqual(self.request("GET", path)["state"], "unlinked")
+        for port, headers in ((self.daemon.port, {}),
+                              (self.daemon.port, {"Origin": f"http://127.0.0.1:{self.daemon.port}"}),
+                              (self.daemon.face_port, {})):
+            for target, body in ((path, {"action": "create"}), ("/discord/backfill", {})):
+                with self.subTest(port=port, headers=headers, target=target):
+                    self.request("POST", target, body, 403, port=port, headers=headers)
+        self.assertEqual(fake.named("POST"), [], "a refused request reached Discord")
+        self.assertIsNone(self.stores.projects.get(self.project.id).discord_channel_id)
+
+    def test_project_discord_create_link_unlink_and_validation(self):
+        from tests.v2.discord_linker_check import CATEGORY, OTHER_GUILD, UNGROUPED
+        fake, _ = self.discord_linker()
+        path = f"/projects/{self.project.id}/discord"
+        for body, status, words in (
+                ({}, 400, "missing fields: action"),
+                ({"action": "delete"}, 400, "create, link or unlink"),
+                ({"action": "link"}, 400, "channel_id"),
+                ({"action": "create", "channel_id": "1"}, 400, "no channel_id"),
+                ({"action": "link", "channel_id": "nope"}, 400, "digits"),
+                ({"action": "link", "channel_id": 830000000000000001}, 400, "digits"),
+                ({"action": "link", "channel_id": "839999999999999999"}, 400, "no channel"),
+                ({"action": "link", "channel_id": UNGROUPED}, 400, "Inbox"),
+                ({"action": "unlink", "extra": 1}, 400, "unknown fields")):
+            with self.subTest(body=body):
+                self.assertIn(words, self.owner("POST", path, body, status)["error"])
+        fake.add("830000000000000001", "notes", guild=OTHER_GUILD)
+        self.assertIn("another server", self.owner(
+            "POST", path, {"action": "link", "channel_id": "830000000000000001"}, 400)["error"])
+        fake.add("830000000000000002", "test-notes", parent=CATEGORY)
+        self.events_all()
+        view = self.owner("POST", path, {"action": "link", "channel_id": "830000000000000002"})
+        self.assertEqual((view["state"], view["origin"], view["name"]),
+                         ("linked_ok", "linked", "test-notes"))
+        updated = [e for e in self.events_all() if e["kind"] == "project_updated"]
+        self.assertEqual(updated[-1]["data"]["changed"], ["discord_channel_id"])
+        # The same channel cannot be linked to a second project (409).
+        self.assertIn("already linked", self.owner(
+            "POST", f"/projects/{self.second.id}/discord",
+            {"action": "link", "channel_id": "830000000000000002"}, 409)["error"])
+        self.assertEqual(self.owner("POST", path, {"action": "unlink"})["state"], "unlinked")
+        self.assertIn("830000000000000002", fake.channels, "unlink keeps the channel")
+        view = self.owner("POST", path, {"action": "create"})
+        self.assertEqual((view["state"], view["origin"]), ("linked_ok", "created"))
+        self.assertEqual(self.request("GET", path)["channel_id"], view["channel_id"])
+        self.request("GET", "/projects/deadbeef/discord", status=404)
+        self.owner("POST", "/projects/deadbeef/discord", {"action": "create"}, 404)
+
+    def test_backfill_route(self):
+        self.discord_linker()
+        result = self.owner("POST", "/discord/backfill", {})
+        self.assertEqual(result["created"], 2)
+        self.assertEqual({r["name"] for r in result["results"]}, {"Test", "Other"})
+        self.assertTrue(all(self.stores.projects.get(p).discord_channel_origin == "created"
+                            for p in (self.project.id, self.second.id)))
+        self.assertEqual(self.owner("POST", "/discord/backfill", {})["created"], 0)
+        self.owner("POST", "/discord/backfill", {"x": 1}, 400)
+        status = self.request("GET", "/discord")
+        self.assertEqual(status["guild"]["configured"], True)
+        self.assertIn(status["linker"]["state"], ("ok", "degraded"))
+
+    def test_without_a_surface_the_light_says_why_and_actions_refuse(self):
+        path = f"/projects/{self.project.id}/discord"
+        with patch.object(config, "DISCORD_GUILD_PATH", self.root / "absent.json"):
+            self.assertEqual(self.request("GET", path)["state"], "unconfigured")
+            self.assertIn("not running", self.owner("POST", path, {"action": "create"}, 409)["error"])
+
+    def test_projects_refuse_the_channel_field_and_tag_who_renamed(self):
+        for method, path, body in (
+                ("POST", "/projects", {"name": "x", "root": str(self.other),
+                                       "discord_channel_id": "1"}),
+                ("PATCH", self.url, {"discord_channel_id": "1"}),
+                ("PATCH", self.url, {"discord_channel_origin": "linked"})):
+            with self.subTest(method=method, body=body):
+                error = self.owner(method, path, body, 400)["error"]
+                self.assertEqual(error, "link a channel from the project dialog")
+        self.assertIsNone(self.stores.projects.get(self.project.id).discord_channel_id)
+        self.events_all()
+        self.owner("PATCH", self.url, {"name": "Renamed by me"})
+        self.request("PATCH", self.url, {"name": "Renamed by a script"})
+        updated = [e["data"] for e in self.events_all() if e["kind"] == "project_updated"]
+        self.assertEqual([(e["by"], e["previous"]) for e in updated],
+                         [("owner", {"name": "Test"}), ("api", {"name": "Renamed by me"})])
 
     def test_host_origin_and_errors(self):
         for headers in ({"Host": "attacker.example"}, {"Origin": f"http://localhost:{self.daemon.workshop_port}"},

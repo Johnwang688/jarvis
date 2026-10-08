@@ -84,6 +84,9 @@ class Project:
     profile: PermissionProfile = PermissionProfile.AUTO
     routing: Routing = field(default_factory=Routing)
     discord_channel_id: str | None = None
+    # Display only (B1): "created" by Jarvis, "linked" by the owner, or None.
+    # Set and cleared with the channel id, by the channel linker alone.
+    discord_channel_origin: str | None = None
     extra_dirs: list[str] = field(default_factory=list)
     always_ask: list[str] = field(default_factory=list)   # additions only, §6 layer 2
     inbox: bool = False                                    # the one project for unplaced chat

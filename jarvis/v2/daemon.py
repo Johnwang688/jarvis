@@ -855,6 +855,15 @@ def _object(value, allowed, required=()):
     return value
 
 
+def _no_channel_field(body):
+    """`POST`/`PATCH /projects` no longer take a channel (B1): a link is
+    validated against Discord and made by the owner-only channel routes."""
+    if isinstance(body, dict) and ("discord_channel_id" in body
+                                   or "discord_channel_origin" in body):
+        raise APIError(400, "link a channel from the project dialog")
+    return body
+
+
 def _routing_models(project):
     """A project's per-role model overrides name only models Jarvis knows for
     that CLI, the same rule `routing.json` and `/route` follow (400 if not)."""
@@ -990,8 +999,9 @@ def _handler(daemon):
                     # the HUD's Archive view reads them from /archive.
                     return 200, [to_json(p) for p in safe_list(stores.projects) if not p.archived]
                 if method == "POST":
-                    body = _object(self._body(), ("name", "root", "profile", "routing", "extra_dirs",
-                                                   "always_ask", "discord_channel_id"), ("name", "root"))
+                    body = _no_channel_field(self._body())
+                    body = _object(body, ("name", "root", "profile", "routing", "extra_dirs",
+                                          "always_ask"), ("name", "root"))
                     project = from_json(Project, {"id": "00000000", **body})
                     _validate(project, Project)
                     _routing_models(project)
@@ -1018,8 +1028,9 @@ def _handler(daemon):
                         return 200, to_json(project)
                     if method == "PATCH":
                         daemon._active()
-                        body = _object(self._body(), ("name", "root", "profile", "routing", "extra_dirs",
-                                                      "always_ask", "discord_channel_id"))
+                        body = _no_channel_field(self._body())
+                        body = _object(body, ("name", "root", "profile", "routing", "extra_dirs",
+                                              "always_ask"))
                         before = project
                         project = from_json(Project, {**to_json(project), **body})
                         _validate(project, Project)
@@ -1057,9 +1068,15 @@ def _handler(daemon):
                                          if to_json(before).get(k) != v)
                         if changed:
                             stores.projects.save(project)
+                            # `by` (B1, decisions D4): the owner's own edit
+                            # moves the Discord channel at once; anything else
+                            # (`api`) asks through the approval gate first.
+                            by = "owner" if edits.is_owner(self, daemon) else "api"
+                            previous = {k: to_json(before).get(k) for k in changed}
                             daemon.bus.publish({"kind": "project_updated", "project_id": project.id,
                                                 "data": {"project_id": project.id, "changed": changed,
-                                                         "project": to_json(project)}})
+                                                         "project": to_json(project), "by": by,
+                                                         "previous": previous}})
                         return 200, to_json(project)
             if parts in (["threads"], ["tasks"]):
                 store = stores.threads if parts[0] == "threads" else stores.tasks

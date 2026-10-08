@@ -12,6 +12,7 @@ import { useEffect, useState } from "react";
 import type { AvatarDesc, ModelRow, RouteView, VoiceEntry } from "../types";
 import type { Project, ProjectImpact } from "../types";
 import { DirPicker } from "./DirPicker";
+import { DiscordLink } from "./DiscordLink";
 import { api } from "../api";
 import { editEffects, formFrom, nameKey, projectEditBody, uniqueName, type ProjectForm } from "../lib/projects";
 
@@ -183,8 +184,14 @@ export function ProjectDialog(props: {
   initial?: Project | null;
   /** Other projects' names, for the "saves as" preview; the backend decides. */
   taken?: string[];
-  onCreate?: (body: { name: string; root: string; extra_dirs: string[]; profile: string }) => Promise<unknown>;
+  /** `channel`: also create its Discord channel (B1, the New Project box). */
+  onCreate?: (body: { name: string; root: string; extra_dirs: string[]; profile: string },
+              options: { channel: boolean }) => Promise<unknown>;
   onSave?: (body: Record<string, unknown>) => Promise<unknown>;
+  /** Is the Discord server set up? Decides the New Project box (B1). */
+  discordConfigured?: boolean;
+  /** A channel was created, linked or unlinked from the dialog. */
+  onDiscordChanged?: () => void;
   onClose: () => void;
 }) {
   const edit = props.mode === "edit" && !!props.initial;
@@ -201,6 +208,10 @@ export function ProjectDialog(props: {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [impact, setImpact] = useState<ProjectImpact | null>(null);
+  // Every project gets a channel (decisions O1): on by default once the
+  // server is set up, and off — with the reason — before.
+  const [channel, setChannel] = useState(!!props.discordConfigured);
+  useEffect(() => setChannel(!!props.discordConfigured), [props.discordConfigured]);
 
   useEffect(() => {
     if (!edit || !initial) return;
@@ -239,7 +250,8 @@ export function ProjectDialog(props: {
     setError("");
     const go = edit
       ? props.onSave?.(body || {})
-      : props.onCreate?.({ name: name.trim(), root: root.trim(), extra_dirs: extra, profile });
+      : props.onCreate?.({ name: name.trim(), root: root.trim(), extra_dirs: extra, profile },
+                         { channel: channel && !!props.discordConfigured });
     Promise.resolve(go)
       // The dialog stays open on a refusal with the backend's own words: a
       // dialog that closes on an error is a project the owner believes exists.
@@ -324,6 +336,21 @@ export function ProjectDialog(props: {
             <option value="strict">strict — no network, deny-all</option>
           </select>
 
+          {!edit ? (
+            <label className="row small" data-testid="project-discord-row">
+              <input type="checkbox" data-testid="project-discord-create"
+                     checked={channel && !!props.discordConfigured}
+                     disabled={!props.discordConfigured}
+                     onChange={(e) => setChannel(e.target.checked)} />
+              <span>Create a Discord channel</span>
+              {!props.discordConfigured ? (
+                <span className="muted" data-testid="project-discord-setup">
+                  · set up the server first: <code>jarvis auth discord-guild</code>
+                </span>
+              ) : null}
+            </label>
+          ) : null}
+
           {edit ? (
             <>
               <label className="muted small">Always ask (one per line: a tool, or a command with globs)</label>
@@ -335,10 +362,7 @@ export function ProjectDialog(props: {
                         }}
                         onChange={(e) => setRules(e.target.value)} />
               <label className="muted small">Discord channel</label>
-              <div className="small" data-testid="project-discord">
-                {initial?.discord_channel_id || "none"}
-                <span className="muted"> · read-only</span>
-              </div>
+              {initial ? <DiscordLink project={initial} onChanged={props.onDiscordChanged} /> : null}
               {effects.length ? (
                 <div className="effects" data-testid="project-effects">
                   {effects.map((line) => <div key={line}>{line}</div>)}
@@ -376,11 +400,14 @@ export function ProjectDialog(props: {
 
 /** The create half of `ProjectDialog`, under its old name. */
 export function NewProject(props: {
-  onCreate: (body: { name: string; root: string; extra_dirs: string[]; profile: string }) => Promise<unknown>;
+  onCreate: (body: { name: string; root: string; extra_dirs: string[]; profile: string },
+             options: { channel: boolean }) => Promise<unknown>;
   taken?: string[];
+  discordConfigured?: boolean;
   onClose: () => void;
 }) {
-  return <ProjectDialog mode="new" onCreate={props.onCreate} taken={props.taken} onClose={props.onClose} />;
+  return <ProjectDialog mode="new" onCreate={props.onCreate} taken={props.taken}
+                        discordConfigured={props.discordConfigured} onClose={props.onClose} />;
 }
 
 export function NewTask(props: { onCreate: (brief: string) => void; onClose: () => void }) {

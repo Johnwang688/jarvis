@@ -314,6 +314,12 @@ def cmd_auth(args) -> int:
         from .tools import discord
 
         return discord.connect()
+    if args.service == "discord-guild":
+        # v2 B1: which server, its permissions, the Jarvis categories and
+        # #ungrouped — human-only, so no agent picks where channels go.
+        from .v2.discord import setup
+
+        return setup.run()
     if args.service == "spotify":
         from . import spotify_auth
 
@@ -834,7 +840,7 @@ def main() -> int:
     auth = sub.add_parser("auth", help="connect an external account (one-time, human-only)")
     auth.add_argument(
         "service",
-        choices=["google", "onshape", "discord", "spotify"],
+        choices=["google", "onshape", "discord", "discord-guild", "spotify"],
         help="which service to connect",
     )
     auth.add_argument(

@@ -199,13 +199,17 @@ def discord_dm_owner(
 # -- one-time setup (human-only, via `jarvis auth discord`) ------------------
 
 
-INVITE_PERMISSIONS = 1024 + 2048 + 65536  # view channels + send messages + read history
+# The decided set (v2 B1, decisions D5 — never Administrator): Manage Channels,
+# View Channel, Send Messages, Embed Links, Attach Files, Read Message History,
+# Create Public Threads, Send Messages in Threads. `jarvis.v2.discord.perms`
+# owns the arithmetic and asserts this number.
+INVITE_PERMISSIONS = 309237763088
 
 
 def invite_url(client_id) -> str:
     """The bot invite. `applications.commands` is the scope slash commands
-    need (v2 S1); re-inviting a bot already in the server is harmless. PR B1
-    widens the permission integer to the decided set."""
+    need (v2 S1); re-inviting a bot already in the server is harmless.
+    `jarvis auth discord-guild` prints the same invite pinned to one server."""
     return (f"https://discord.com/oauth2/authorize?client_id={client_id}"
             f"&scope=bot+applications.commands&permissions={INVITE_PERMISSIONS}")
 

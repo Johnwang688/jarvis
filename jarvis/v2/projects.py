@@ -114,13 +114,22 @@ def refuse_archived_project(project: Project) -> None:
 
 # -- the owner-only gate ----------------------------------------------------------
 
-def owner_only(handler, daemon) -> None:
-    """The HUD's listener and the HUD's Origin, or 403. See the module note."""
-    from .daemon import APIError
+def is_owner(handler, daemon) -> bool:
+    """The owner-only test without the 403: the HUD's listener and its Origin.
+
+    `PATCH /projects` uses it to tag `project_updated` with `by: "owner" |
+    "api"` (B1, decisions D4): an owner rename moves the Discord channel at
+    once, anything else asks through the approval gate first."""
     port = handler.server.server_address[1]
     host = handler.headers.get("Host", "")
     origin = handler.headers.get("Origin")
-    if port != daemon.face_port or not origin or origin != f"http://{host}":
+    return port == daemon.face_port and bool(origin) and origin == f"http://{host}"
+
+
+def owner_only(handler, daemon) -> None:
+    """The HUD's listener and the HUD's Origin, or 403. See the module note."""
+    from .daemon import APIError
+    if not is_owner(handler, daemon):
         raise APIError(403, "only the owner can do this, from the HUD")
 
 
@@ -281,6 +290,7 @@ def restore_project(daemon, project_id: str) -> dict:
         project = daemon.require(stores.projects, project_id)
         if not project.archived:
             raise DaemonError(f"project {project.name} is not archived")
+        previous_name = project.name
         project.name = unique_name(project.name, project_names_taken(stores, but=project.id))
         project.archived = None
         stores.projects.save(project)
@@ -295,6 +305,9 @@ def restore_project(daemon, project_id: str) -> dict:
         daemon.schedules._changed("schedule_updated", record)
     daemon.bus.publish({"kind": "project_restored", "project_id": project.id,
                         "data": {"project_id": project.id, "name": project.name,
+                                 # B1: a renumbered name is the owner's restore,
+                                 # so the channel linker may apply it unasked.
+                                 "previous_name": previous_name,
                                  "resumed_schedules": [r["id"] for r in resumed]}})
     return to_json(project)
 
@@ -369,7 +382,11 @@ def delete_project(daemon, project_id: str, expect) -> dict:
     daemon.bus.publish({"kind": "project_deleted", "project_id": project_id,
                         "data": {"project_id": project_id, "name": project.name,
                                  "removed_thread_ids": [t.id for t in threads],
-                                 "removed_task_ids": [t.id for t in tasks]}})
+                                 "removed_task_ids": [t.id for t in tasks],
+                                 # B1: the record is gone, so the channel linker
+                                 # learns here which channel to leave a note in.
+                                 # The channel itself is kept (decisions D3).
+                                 "discord_channel_id": project.discord_channel_id}})
     return result
 
 

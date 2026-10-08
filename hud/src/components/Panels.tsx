@@ -4,9 +4,10 @@
 // An absent window is a dash, not a bar at 0%: a bar is a number somebody
 // will quote, and 0% used is a different fact from "we do not know".
 
-import type { DiscordStatus, RouteView, Usage } from "../types";
+import { useState } from "react";
+import type { BackfillResult, DiscordStatus, Project, RouteView, Usage } from "../types";
 import { meterFor, type Bar } from "../lib/quota";
-import { discordLight } from "../lib/discord";
+import { backfillTargets, discordLight, guildConfigured } from "../lib/discord";
 
 function ClaudeMark() {
   return (
@@ -69,16 +70,50 @@ export function UsagePanel(props: { usage: Usage | null }) {
 /** The Discord light (PR A): green ok, amber with the reason, red down.
  * The text is the backend's sentence or an operation/status/code triple —
  * rendered as text, never markup, like everything else in this window. */
-export function DiscordPanel(props: { discord: DiscordStatus | null }) {
+export function DiscordPanel(props: {
+  discord: DiscordStatus | null;
+  /** B1: the live projects, for the one-time "Create channels" button. */
+  projects?: Project[];
+  onBackfill?: () => Promise<BackfillResult>;
+}) {
   const light = discordLight(props.discord);
   const counters = props.discord?.reporter?.counters || {};
   const title = Object.entries(counters)
     .map(([k, v]) => `${k}: ${v}`)
     .join(" · ");
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState("");
+  // Offered once the server is set up and a surface is running, for as long
+  // as a project has no channel — so after the backfill it is gone.
+  const targets = backfillTargets(props.projects || []);
+  const offer = !!props.onBackfill && guildConfigured(props.discord) && !!props.discord?.linker
+    && targets.length > 0;
+  const backfill = () => {
+    if (!props.onBackfill || busy) return;
+    setBusy(true);
+    setNote("");
+    props.onBackfill()
+      .then((r) => {
+        const failed = r.results.filter((x) => x.status === "failed");
+        const parts = [`Created ${r.created} channel${r.created === 1 ? "" : "s"}.`];
+        if (failed.length) parts.push(`Failed: ${failed.map((x) => `${x.name} (${x.error || "error"})`).join("; ")}.`);
+        if (r.skipped.length) parts.push(`Skipped: ${r.skipped.map((x) => `${x.name} (${x.reason})`).join("; ")}.`);
+        setNote(parts.join(" "));
+      })
+      .catch((e) => setNote(e?.message || "could not create the channels"))
+      .finally(() => setBusy(false));
+  };
   return (
     <div className="block discord-panel" data-testid="discord" data-level={light.level} title={title}>
       <i className={`discord-dot ${light.level}`} aria-hidden="true" />
       <span className="discord-text" data-testid="discord-text">{light.text}</span>
+      {offer ? (
+        <button type="button" className="discord-backfill" data-testid="discord-backfill"
+                disabled={busy} onClick={backfill}>
+          Create channels for {targets.length} project{targets.length === 1 ? "" : "s"}
+        </button>
+      ) : null}
+      {note ? <span className="muted small" data-testid="discord-backfill-result">{note}</span> : null}
     </div>
   );
 }
