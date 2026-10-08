@@ -176,6 +176,24 @@ def _cli_model(provider, value):
     return model, effort
 
 
+def check_project_models(models):
+    """A project's own `routing.models`, held to the rule `load_routing` holds
+    `routing.json` to: a known role, claude/codex only, and each entry a model
+    `CLI_MODELS` names (or `roster`) with an effort that model offers. Raises
+    ValueError naming the entry; called when `/projects` writes a project."""
+    if not isinstance(models, dict):
+        raise ValueError("routing.models must be an object")
+    for role, value in models.items():
+        _role(role)
+        if not isinstance(value, dict) or value.keys() - set(CLI_PROVIDERS):
+            raise ValueError(f"routing.models.{role} must map claude/codex to model/effort")
+        for provider, setting in value.items():
+            try:
+                _cli_model(provider, setting)
+            except ValueError as exc:
+                raise ValueError(f"routing.models.{role}.{provider}: {exc}") from exc
+
+
 def load_routing(path=None):
     path = path or config.ROUTING_PATH
     result = defaults()

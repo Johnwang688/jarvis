@@ -831,6 +831,16 @@ def _object(value, allowed, required=()):
     return value
 
 
+def _routing_models(project):
+    """A project's per-role model overrides name only models Jarvis knows for
+    that CLI, the same rule `routing.json` and `/route` follow (400 if not)."""
+    from .router import check_project_models
+    try:
+        check_project_models(project.routing.models)
+    except ValueError as exc:
+        raise APIError(400, str(exc)) from exc
+
+
 def _text(value, name):
     if not isinstance(value, str) or not value.strip():
         raise APIError(400, f"{name} must be a nonempty string")
@@ -960,6 +970,7 @@ def _handler(daemon):
                                                    "always_ask", "discord_channel_id"), ("name", "root"))
                     project = from_json(Project, {"id": "00000000", **body})
                     _validate(project, Project)
+                    _routing_models(project)
                     _text(project.name, "name")
                     if not Path(project.root).is_absolute():
                         raise APIError(400, "root must be absolute")
@@ -988,6 +999,10 @@ def _handler(daemon):
                         before = project
                         project = from_json(Project, {**to_json(project), **body})
                         _validate(project, Project)
+                        if "routing" in body:
+                            # Only when written: a project saved before the
+                            # check must stay renameable.
+                            _routing_models(project)
                         _text(project.name, "name")
                         if not Path(project.root).is_absolute():
                             raise APIError(400, "root must be absolute")

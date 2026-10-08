@@ -260,7 +260,12 @@ so existing duplicates stay editable), `PATCH /threads/{id}` `{title}`, and
 restore. Read the name from the response, not the request.
 
 - `POST /projects` and `PATCH /projects/{id}`: `root` must be an existing
-  directory (400). A root change pins every task that already has a
+  directory (400). A `routing.models` override is held to `CLI_MODELS` on
+  write, the rule `routing.json` and `/route` follow: a known role,
+  `claude`/`codex` only, a model Jarvis knows for that CLI (or `roster`), and
+  an effort it offers; anything else is 400 naming the entry
+  (`routing.models.<role>.<provider>: …`). PATCH checks only when the body
+  carries `routing`, so a project saved before the check stays editable. A root change pins every task that already has a
   worktree to the old root first (`Task.root`), so it finishes, commits and
   is removed there; existing threads keep their frozen `cwd`; new threads
   and tasks use the new root. A PATCH of an archived project is 409. They

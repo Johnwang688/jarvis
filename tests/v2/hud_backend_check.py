@@ -849,6 +849,42 @@ class Backend(unittest.TestCase):
         self.assertEqual(self.request("PATCH", f"/threads/{tid}", {"model": "test/thinker"})["model"],
                          "test/thinker")
 
+    def test_a_projects_routing_models_are_held_to_cli_models_on_write(self):
+        # The rule routing.json and /route already follow (`router._cli_model`).
+        before = len(self.stores.projects.list())
+        root = str(self.other)
+        for models, reason in (
+                ({"implementer": {"codex": "gpt-9/high"}}, "is not a codex model Jarvis knows"),
+                ({"reviewer": {"claude": "claude-haiku-4-5/high"}}, "has no effort control"),
+                ({"reviewer": {"claude": "claude-opus-5-5/turbo"}}, "invalid model/effort"),
+                ({"orchestrator": {"codex": "gpt-5.5"}}, "expected model/effort"),
+                ({"orchestrator": {"fast": "x/high"}}, "must map claude/codex"),
+                ({"janitor": {"codex": "gpt-5.5/high"}}, "role must be")):
+            error = self.request("POST", "/projects", {"name": "routed", "root": root,
+                                                       "routing": {"models": models}}, status=400)["error"]
+            self.assertIn(reason, error, models)
+        self.assertEqual(len(self.stores.projects.list()), before, "a refused project is never created")
+        good = {"implementer": {"codex": "gpt-5.5/high", "claude": "roster/default"},
+                "reviewer": {"claude": "claude-sonnet-5-5/max"}}
+        made = self.request("POST", "/projects", {"name": "routed", "root": root,
+                                                  "routing": {"models": good}}, status=201)
+        self.assertEqual(made["routing"]["models"], good)
+        # PATCH is held to the same rule, and a refusal changes nothing.
+        error = self.request("PATCH", f"/projects/{made['id']}", {"routing": {"models": {
+            "implementer": {"claude": "claude-opus-5-5/xhigh", "codex": "gpt-5.6-luna/max"}}}}, status=400)["error"]
+        self.assertIn("routing.models.implementer.codex", error)
+        self.assertIn("does not offer effort 'max'", error)
+        self.assertEqual(self.stores.projects.get(made["id"]).routing.models, good)
+        self.request("PATCH", f"/projects/{made['id']}", {"routing": {"models": {
+            "implementer": {"claude": "claude-opus-5-5/xhigh"}}}})
+        self.assertEqual(self.stores.projects.get(made["id"]).routing.models,
+                         {"implementer": {"claude": "claude-opus-5-5/xhigh"}})
+        # A project saved before the check stays editable in every other way.
+        legacy = self.stores.projects.get(made["id"])
+        legacy.routing.models = {"implementer": {"codex": "gpt-9/high"}}
+        self.stores.projects.save(legacy)
+        self.assertEqual(self.request("PATCH", f"/projects/{made['id']}", {"name": "renamed"})["name"], "renamed")
+
     def test_open_thread_checks_the_model_before_anything_exists(self):
         fakes = self.model_fakes()
         self.request("POST", "/models", {"add": "test/thinker"})
