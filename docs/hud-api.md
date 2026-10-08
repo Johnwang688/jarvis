@@ -274,6 +274,14 @@ reserved. Thread titles are unique within their project. Applied on
 so existing duplicates stay editable), `PATCH /threads/{id}` `{title}`, and
 restore. Read the name from the response, not the request.
 
+`POST /projects` and Discord's `/project new` (B2) share one create path,
+`projects.create_project(daemon, name, root, **values)`, so both number and
+refuse identically and both publish `project_created`. The route itself is
+unchanged; it never makes a folder. A folder made from Discord arrives as an
+ordinary approval card (`tool: "project_folder"`, `args {action: "create" |
+"adopt", path, name[, entries, git]}`, `allowlistable: false`); approval
+payloads gain `discord_channel_id` (where Discord was asked, or `null`).
+
 - `POST /projects` and `PATCH /projects/{id}`: `root` must be an existing
   directory (400). A `routing.models` override is held to `CLI_MODELS` on
   write, the rule `routing.json` and `/route` follow: a known role,

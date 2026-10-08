@@ -860,6 +860,65 @@ D5, O1, O6 and O7 in `docs/plans/2026-10-07-discord-decisions.md`. Code:
   nothing in `jarvis/v2/discord/` spells `"DELETE"`, and B1's fake Discord
   fails the suite on one.
 
+### 11.7 Projects and folders from Discord (B2, 2026-10-07)
+
+Plan: `docs/plans/2026-10-07-discord-plan.md` §5; owner decisions D2, D4, O3,
+O4, O5, S-1/S-2 and B11. Code: `jarvis/v2/folders.py`,
+`jarvis/v2/discord/project_commands.py` (the handlers), and
+`projects.create_project`.
+
+- **Commands** (static registry, synced by the daemon): `/project new
+  name folder` (both empty opens a form with Name and Folder), `/project link
+  project`, `/project unlink`, `/project channel project`, and `/channel
+  archive|restore`. No typed keyword forms (S2). **Archiving or deleting a
+  project stays HUD-only** (B11): no command does either, and a test holds the
+  subcommand list to that.
+- **Places.** A server channel no project owns ("other") now takes
+  `/project new` and `/project link` (and the approval buttons of a post asked
+  there, still matched to the very message and channel); everything else there
+  keeps "This channel isn't a Jarvis place." `/project new` from the DM makes
+  the channel under Jarvis; from an unlinked channel it links *that* channel
+  (validated first, so an unlinkable one refuses with nothing made); from a
+  linked channel it refuses.
+- **The folder** (`folders.py`): a bare name → `config.PROJECT_WORK_DIR/
+  <slug>` (`~/jarvis-work/<slug>`; the name picks it when no folder is
+  given); a leading `~/` expanded once; otherwise absolute. Refused: control
+  and format characters, `.`/`..`, > 4096 characters or > 255 bytes a
+  component, any dot component, anything not strictly below a
+  `config.PROJECT_FOLDER_ROOTS` root (`~`, `/mnt/c/Users/johnw`, env
+  `JARVIS_PROJECT_FOLDER_ROOTS`), the work dir itself, inside *or holding*
+  `V2_CREDENTIAL_DIRS`, `V2_DATA_DIR`, `REPO_ROOT` or `/mnt/c/Users/johnw/
+  AppData` (case-insensitive on `/mnt/<drive>`), Windows-reserved names and
+  characters under `/mnt/<drive>`, another project's root, a file or a
+  symlink at the path, and a missing parent (O4). Every rule runs on the
+  typed path **and** on the realpath of its nearest existing ancestor, so a
+  symlinked parent cannot carry it out. The check lists names only, never
+  contents.
+- **Confirmation.** A missing folder (`create`) or one with something in it
+  (`adopt`, with its entry count and whether it is a git repo) asks first:
+  `ApprovalRequest(tool="project_folder", args={action, path, name[,
+  entries, git]}, origin="Discord: new project", allowlistable=False)`,
+  posted with Approve/Deny in the channel the command was typed in
+  (`ApprovalRequest.discord_channel_id`, still the DM if that post fails) and
+  shown as a HUD card. One-shot, never Always, never by voice, and a timeout
+  denies. An existing empty folder is used without asking (O5). After the yes
+  `make_project_folder` re-runs the check; anything different — a folder that
+  appeared, a count that changed — raises `FolderChanged` and the owner is
+  asked again about what is there now.
+- **Making it.** Exactly one `os.mkdir(path, 0o755)`, no parents, no
+  `exist_ok`, nothing written inside. `make_project_folder` is called only by
+  the confirmation handler: not a tool, not MCP, not a route (a grep test).
+  Then `projects.create_project` — the one create path `POST /projects` now
+  uses too, so PR #4's numbering applies — then the channel.
+- **`/project unlink`** asks Approve/Deny first (`tool="discord_channel"`,
+  `action: "unlink"`) and keeps the channel. **`/project link`**,
+  **`/project channel`** and **`/channel archive|restore`** act at once: the
+  owner typed them (D4). `/channel archive` moves the channel to the archive
+  target by `parent_id` alone (`ChannelLinker.move_channel`); the project
+  stays active and its threads keep working.
+- **B2b, deferred:** `project_propose` and the Claude Sonnet/Opus rule (O3)
+  wait for the peers plan's phase 0.
+
 ---
 
 ## 12. HUD v2 (G3) — specified 2026-09-16 from the owner's elaboration
