@@ -57,6 +57,21 @@ export interface Thread {
   cwd?: string | null;
   /** When the owner archived this thread; such a thread is only in `/archive`. */
   archived?: string | null;
+  /** PR C: where this chat lives on Discord — `"dm"`, `"discord:<thread id>"`,
+   * `"dm:retired"`, or null before its first message is mirrored. */
+  surface?: string | null;
+  /** PR C: the same place, named for the chat header (present with a surface). */
+  discord?: ThreadDiscord | null;
+}
+
+export interface ThreadDiscord {
+  kind: "thread" | "dm";
+  /** The channel's name without `#` (or "DM"), for "On Discord: #school › name". */
+  channel: string | null;
+  /** The Discord thread's name. */
+  name: string;
+  /** `https://discord.com/channels/<guild>/<thread>`, or null (DM, no guild file). */
+  url: string | null;
 }
 
 export interface TaskThread {
@@ -208,6 +223,13 @@ export interface DiscordStatus {
     pending_moves?: number;
     awaiting_approval: number;
   } | null;
+  /** PR C: the chat mirror — posts still to send, and the last failure. */
+  mirror?: {
+    state: "ok" | "degraded" | "down";
+    reason: string;
+    queued: number;
+    last_error: { op: string; status: number | null; code: number | null; at: number | null } | null;
+  } | null;
   /** B1: the bot's server-wide permissions, by name. */
   permissions?: {
     missing: string[];
@@ -347,6 +369,8 @@ export interface ChatMessage {
   at?: string;
   /** A system line that carries a cancel affordance (a proposal_reply). */
   proposal?: { task_id: string; until: number };
+  /** PR C: the owner's message came from Discord (a thread or the DM). */
+  via?: "discord" | "dm";
 }
 
 export interface ToolOp {

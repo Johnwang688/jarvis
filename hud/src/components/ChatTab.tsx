@@ -8,7 +8,8 @@
 // `*foo*` — while only his is rendered.
 
 import { useEffect, useRef, useState } from "react";
-import type { ChatMessage, ToolOp } from "../types";
+import type { ChatMessage, Thread, ToolOp } from "../types";
+import { chatPlace } from "../lib/discord";
 import { Markdown } from "./Markdown";
 
 function Proposal({ msg, onCancel }: { msg: ChatMessage; onCancel: (id: string) => void }) {
@@ -41,6 +42,8 @@ function Proposal({ msg, onCancel }: { msg: ChatMessage; onCancel: (id: string) 
 }
 
 export function ChatTab(props: {
+  /** The open chat, for its "On Discord" header (PR C); null while composing. */
+  thread?: Thread | null;
   messages: ChatMessage[];
   draft: string;
   ops: ToolOp[];
@@ -52,15 +55,30 @@ export function ChatTab(props: {
     if (el) el.scrollTop = el.scrollHeight;
   }, [props.messages, props.draft]);
 
+  const place = chatPlace(props.thread);
   return (
     <div className="tabbody">
+      {place ? (
+        <div className="chat-place muted small" data-testid="chat-discord">
+          {place.url ? (
+            <a href={place.url} target="_blank" rel="noopener noreferrer">{place.text}</a>
+          ) : (
+            place.text
+          )}
+        </div>
+      ) : null}
       <div className="scroll" id="log" ref={logRef} data-testid="log">
         {props.messages.map((m, i) =>
           m.proposal ? (
             <Proposal key={i} msg={m} onCancel={props.onCancelTask} />
           ) : (
             <div className={`msg ${m.role}`} key={i} data-testid={`msg-${m.role}`}>
-              <div className="who">{m.role === "user" ? "YOU" : m.role === "system" ? "SYSTEM" : "JARVIS"}</div>
+              <div className="who">
+                {m.role === "user" ? "YOU" : m.role === "system" ? "SYSTEM" : "JARVIS"}
+                {m.role === "user" && m.via ? (
+                  <span className="via" data-testid="via-discord"> · via Discord</span>
+                ) : null}
+              </div>
               {m.role === "assistant" ? (
                 <Markdown text={m.text} />
               ) : (
