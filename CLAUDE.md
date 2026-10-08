@@ -111,7 +111,24 @@ reconcile fixes what an outage missed, and asks persist across restarts.
 refuse `discord_channel_id`. A configured guild gates placement, and a newly
 linked project's tasks leave the DM safety net for threads at once. Tests
 that touch Discord point `config.DISCORD_GUILD_PATH` at a temp file — the
-owner's real one decides where channels go. Briefs for every package, including the ones in flight, are in
+owner's real one decides where channels go. **Only the broker asks the owner (2026-10-08).** A provider's
+`APPROVAL_REQUESTED`/`APPROVAL_RESOLVED` mean "the gate was consulted" — the
+Claude hook emits a pair for *every* tool use, before `permit` decides — and
+the daemon used to forward them onto the bus under those names, so auto mode
+flashed a card and sent a DM per tool call (and a real question raised two
+cards, one unanswerable). `daemon.GATE_KINDS` now logs them as
+`gate_requested`/`gate_resolved` and never publishes them; the bus's
+`approval_requested` comes only from `PendingApprovals`, and the HUD and the
+Discord watcher both ignore one without a broker `code`. Dictation falls back
+from parakeet (one OpenRouter endpoint, Together; `HTTP 404: Provider returned
+404` when it is down) to `config.STT_FALLBACK_MODELS` (default
+`x-ai/grok-stt-1.0`; free suite `tests/voice_stt_check.py`), and `/stt`
+answers 502 with a sentence. The HUD reads
+the preview port from `/status` → `workshop_port`, and `hud_v2_check` aborts
+and fails any request to 8402/8403/8405 — it used to load the live daemon's
+preview.
+
+Briefs for every package, including the ones in flight, are in
 `docs/codex-briefs/`; each merged package left a `*-notes.md` beside its
 brief with what its implementer verified and what it proposes.
 
