@@ -28,7 +28,7 @@ import { useThreadModel } from "./components/ThreadModelControls";
 import { ProjectDialog } from "./components/Pickers";
 import { ArchiveConfirm, ArchiveView } from "./components/Archive";
 import { afterProjectGone, afterThreadGone, forgetLastProject, projectNamesTaken } from "./lib/projects";
-import { guildConfigured } from "./lib/discord";
+import { guildConfigured, ownerLine } from "./lib/discord";
 
 const TABS: Tab[] = ["chat", "task", "file", "diff", "preview"];
 const PROPOSAL_WINDOW_MS = 60_000;
@@ -222,7 +222,7 @@ export default function App() {
           if (mine && tid && (data.via === "discord" || data.via === "dm")) {
             dispatch({
               type: "message",
-              message: { role: "user", text: data.typed ?? data.text ?? "", via: data.via },
+              message: { role: "user", text: ownerLine(data), via: data.via },
             });
           }
           break;

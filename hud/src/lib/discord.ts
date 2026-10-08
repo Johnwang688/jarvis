@@ -124,3 +124,10 @@ export function originText(origin: ProjectChannel["origin"]): string {
   if (origin === "linked") return "linked by you";
   return "";
 }
+
+/** The words a `user_message` from Discord shows as. `typed` is "" for a
+ * message that carried only files, so it falls back to the assembled text
+ * (the same text the transcript shows after a reload), never a blank bubble. */
+export function ownerLine(data: { typed?: string | null; text?: string | null }): string {
+  return data.typed || data.text || "";
+}

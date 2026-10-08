@@ -10,6 +10,7 @@
 // cards, so everything here produces **text** for React to render as text.
 
 import type { Project, ProviderName, Thread } from "../types";
+import { conversationThreadId, type Compose } from "./compose";
 
 /** One row of a provider's model list (`GET /thread-models`). */
 export interface ModelEntry {
@@ -283,4 +284,34 @@ export function threadTooltip(thread: Thread, cwd?: string | null): string {
     ? `runs on ${label} · ${thread.model}${thread.effort ? ` · ${thread.effort}` : ""} (pinned)`
     : `runs on ${label} · follows the default${thread.effort ? ` · effort ${thread.effort}` : ""}`;
   return cwd ? `${runs}\nworks in ${cwd}` : runs;
+}
+
+/** What the chips show and where a change goes, for the window's conversation.
+ *
+ * - composing: the compose row's choice, every chip editable, nothing sent;
+ * - a thread: its record, a change is a PATCH to it;
+ * - **opened**: a compose row whose thread is on the server but whose first
+ *   send failed (`compose.openedId`, no `threadId`). Its record may not be
+ *   loaded yet, and the compose row holds exactly the choice it was opened
+ *   with, so the chips show that and a change is a PATCH to the opened
+ *   thread. They used to vanish here, until the retry went through. */
+export function chipState(
+  s: { threadId: string | null; compose: Compose | null; threads: Thread[] },
+): { choice: Choice | null; thread: Thread | null; targetId: string | null; composing: boolean; editable: { provider: boolean; model: boolean } } {
+  const composing = !!s.compose && !s.compose.openedId;
+  if (composing) {
+    return { choice: composeChoice(s.compose), thread: null, targetId: null, composing,
+             editable: chipEditable(null, true) };
+  }
+  const id = conversationThreadId(s);
+  const thread = id ? s.threads.find((t) => t.id === id) || null : null;
+  if (thread) {
+    return { choice: choiceOf(thread), thread, targetId: thread.id, composing,
+             editable: chipEditable(thread, false) };
+  }
+  if (id && s.compose?.openedId === id) {
+    return { choice: composeChoice(s.compose), thread: null, targetId: id, composing,
+             editable: { provider: false, model: true } };
+  }
+  return { choice: null, thread: null, targetId: null, composing, editable: chipEditable(null, false) };
 }

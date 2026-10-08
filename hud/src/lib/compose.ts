@@ -109,3 +109,11 @@ export function movedAway(thread: Thread, project: Project | undefined): boolean
   const norm = (p: string) => p.replace(/[\\/]+$/, "");
   return norm(thread.cwd) !== norm(project.root);
 }
+
+/** The thread the window's conversation is on: the open thread, or the one a
+ * compose row already opened on the server when its first message failed.
+ * The model chips read this, so they stay on screen for that retry instead
+ * of vanishing between "composing" and "a thread". */
+export function conversationThreadId(s: { threadId: string | null; compose: Compose | null }): string | null {
+  return s.threadId ?? s.compose?.openedId ?? null;
+}

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { backfillTargets, channelPill, chatPlace, discordLight, guildConfigured, originText } from "./discord";
+import { backfillTargets, channelPill, chatPlace, discordLight, guildConfigured, originText, ownerLine } from "./discord";
 import type { DiscordReporter, DiscordStatus, Project, ProjectChannel, Thread } from "../types";
 
 const reporter = (over: Partial<DiscordReporter> = {}): DiscordReporter => ({
@@ -164,5 +164,18 @@ describe("PR C: chats on Discord", () => {
       reason: "the bot cannot archive thread its own chat threads (HTTP 403); add Manage Threads" } }));
     expect(light.level).toBe("warn");
     expect(light.text).toContain("Manage Threads");
+  });
+});
+
+describe("a Discord message in the open chat (Bugbot 2026-10-08)", () => {
+  it("a files-only message is never a blank bubble", () => {
+    // typed is "" when only files were sent; `??` kept the empty string.
+    expect(ownerLine({ typed: "", text: "[attached file: a.txt]\nnotes" })).toBe("[attached file: a.txt]\nnotes");
+  });
+
+  it("shows the typed words when there are any", () => {
+    expect(ownerLine({ typed: "look", text: "look\n[attached file: a.txt]\nnotes" })).toBe("look");
+    expect(ownerLine({ text: "older shape" })).toBe("older shape");
+    expect(ownerLine({})).toBe("");
   });
 });

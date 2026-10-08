@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  activeProjectId, composeMovable, folderName, lastProject, loadLastProject, movedAway,
+  activeProjectId, composeMovable, conversationThreadId, folderName, lastProject, loadLastProject, movedAway,
   saveLastProject, LAST_PROJECT_KEY,
 } from "./compose";
 import type { Project, Task, Thread } from "../types";
@@ -120,5 +120,13 @@ describe("the folder a thread works in", () => {
     expect(movedAway(thread("t", "p1", "", { cwd: "/home/johnw/p1/" }), p1)).toBe(false);
     expect(movedAway(thread("t", "p1", "", { cwd: "/home/johnw/p2" }), p1)).toBe(true);
     expect(movedAway(thread("t", "p1", "", { cwd: null }), p1)).toBe(false);
+  });
+});
+
+describe("conversationThreadId", () => {
+  it("is the open thread, else the thread a failed first send opened", () => {
+    expect(conversationThreadId({ threadId: "t1", compose: null })).toBe("t1");
+    expect(conversationThreadId({ threadId: null, compose: { projectId: "p1", openedId: "t9" } })).toBe("t9");
+    expect(conversationThreadId({ threadId: null, compose: { projectId: "p1" } })).toBeNull();
   });
 });

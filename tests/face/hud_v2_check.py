@@ -1547,6 +1547,15 @@ def thread_model_checks(page, mock):
     check("a failed first send keeps the compose choice beside the opened thread",
           bool(kept) and (kept.get("provider"), kept.get("model"), kept.get("effort"))
           == ("fast", "openai/gpt-5.6-luna", "low"), str(kept))
+    # Bugbot 2026-10-08: the chips used to vanish here, until the retry.
+    chips = until(lambda: page.locator('[data-testid="model-chip-select"]').count() > 0
+                  and page.locator('[data-testid="effort-chip-select"]').count() > 0)
+    check("and the chips stay on screen, on that choice, for the retry",
+          bool(chips)
+          and page.locator('[data-testid="model-chip-select"]').input_value() == "openai/gpt-5.6-luna"
+          and page.locator('[data-testid="effort-chip-select"]').input_value() == "low",
+          page.locator('[data-testid="model-chip-select"]').input_value()
+          if page.locator('[data-testid="model-chip-select"]').count() else "no model chip")
     box.fill("model test")
     box.press("Enter")
     tid = until(lambda: page.evaluate("window.__hud.state().threadId"))
