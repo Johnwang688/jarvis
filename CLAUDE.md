@@ -157,7 +157,11 @@ question (D7); a question is recorded even with nowhere to post it, and
 `daemon.answer` logs `question_answered` so the mirror re-posts an open one
 of the running turn from the log — never one from before a restart.
 `InteractionReply.said` is set only after something reached the owner (a
-5xx is retried once, then posted in the channel).
+5xx on the idempotent edit is retried once; a followup or a 429 goes straight
+to the channel — a retried POST can post twice). The fast path declares
+`keeps_session_on_error`: its v1 transcript is saved only when a turn
+returns, so a fatal 429/5xx keeps the session (dropping it would cost the
+model the failed turn); it is dropped only once really closed.
 
 **Every chat is a Discord thread, PR C (2026-10-07, design §11.8; plan
 §4, decisions C1).** `ChatMirror` (`discord/mirror.py`) gives a chat a

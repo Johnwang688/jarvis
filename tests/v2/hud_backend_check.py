@@ -1152,9 +1152,9 @@ class Backend(unittest.TestCase):
                     yield Event(K.TURN_FINISHED, handle.thread_id, {"stop": "error"})
                     return
                 yield from super().send(handle, message)
-        fake = Dying(P.FAST)
-        self.daemon.providers[P.FAST] = fake
-        tid = self.chat()["id"]
+        fake = Dying(P.CODEX)
+        self.daemon.providers[P.CODEX] = fake
+        tid = self.chat("codex")["id"]
         for text in ("one", "two", "three"):
             self.send_and_settle(tid, text)
         errors = [r["data"]["message"] for r in self.stores.threads.read_log(tid)
@@ -1163,6 +1163,39 @@ class Backend(unittest.TestCase):
         self.assertEqual([how for how, _ in fake.opened], ["start", "resume"])
         # The resume re-applies the thread's model choice through _run_brief.
         self.assertIsNotNone(self.daemon._sessions[tid].applied)
+
+    def test_review_f2_the_fast_path_keeps_its_session_through_a_fatal_error(self):
+        """The fast path's transcript is saved only when a turn returns:
+        dropping its session on a fatal 429/5xx would resume a model that no
+        longer knows the failed turn's message or its completed tool steps."""
+        from jarvis.v2.providers.fastpath import FastPathProvider
+        self.assertIs(FastPathProvider.keeps_session_on_error, True)
+
+        class Flaky(ModelFake):
+            keeps_session_on_error = True
+
+            def send(self, handle, message):
+                self.messages.append(message)
+                if len(self.messages) == 1:
+                    yield Event(K.ERROR, handle.thread_id,
+                                {"message": "RateLimited: 429 after retries", "fatal": True})
+                    yield Event(K.TURN_FINISHED, handle.thread_id, {"stop": "error"})
+                    return
+                yield from Fake.send(self, handle, message)
+        fake = Flaky(P.FAST)
+        self.daemon.providers[P.FAST] = fake
+        tid = self.chat()["id"]
+        self.send_and_settle(tid, "one")
+        session = self.daemon._sessions.get(tid)
+        self.assertIsNotNone(session, "the fast path's session was dropped on a fatal error")
+        self.send_and_settle(tid, "try again")
+        self.assertIs(self.daemon._sessions.get(tid), session)
+        self.assertEqual([how for how, _ in fake.opened], ["start"], "no resume")
+        # A session that really closed is still dropped and resumed.
+        session.handle.native.closed = True
+        self.send_and_settle(tid, "three")
+        self.send_and_settle(tid, "four")
+        self.assertEqual([how for how, _ in fake.opened], ["start", "resume"])
 
     def test_bugbot2_a_provider_that_closed_its_session_is_reopened(self):
         """No fatal flag, but the native handle says closed: also dropped."""

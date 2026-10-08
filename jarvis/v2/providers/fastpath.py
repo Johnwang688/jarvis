@@ -254,6 +254,12 @@ class FastPathProvider:
     """v1's `Agent` as a v2 provider. See the module docstring."""
 
     name = ProviderName.FAST
+    # A raise inside run_turn (a 429 or 5xx that outlasted its retries) is
+    # reported as ERROR(fatal), but the Agent and its in-memory transcript
+    # are intact; the v1 session is saved only when a turn returns. The
+    # daemon keeps the session (PR #12 review F2), so "try again" reaches
+    # a model that knows what it already did. Only `close` ends it.
+    keeps_session_on_error = True
 
     def health(self) -> tuple[bool, str]:
         """Can this provider run a turn at all? Never spends a token.

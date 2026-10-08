@@ -80,6 +80,7 @@ READ_TIMEOUT_S = 5.0
 CREATE_INTERVAL = 1.0
 TICK_S = 5.0
 RETRY_S = 30.0                 # a transient failure without a retry_after
+LISTING_BACKOFF_MAX_S = 600.0  # a channel listing that keeps failing: at most every 10 min
 ASK_AGAIN_S = 24 * 3600.0      # after a denied or unanswered housekeeping ask
 ORIGIN = "Jarvis housekeeping"
 TEXT, CATEGORY = 0, 4
@@ -176,6 +177,8 @@ class ChannelLinker:
         # A reconcile or crowding pass whose channel listing failed is tried
         # again, but not before this (monotonic) time.
         self._listing_retry_at = None
+        self._listing_backoff = 0
+        self._listing_retry_after = None
         self._refreshed_at = None
         self.last_error: dict | None = None
         self._state = self._load_state()
@@ -257,6 +260,7 @@ class ChannelLinker:
             found = self.rest.guild_channels(cfg.guild_id, timeout=READ_TIMEOUT_S, patient=False)
         except Exception as exc:
             self._failed("list_channels", exc)
+            self._listing_retry_after = getattr(exc, "retry_after", None)
             return None
         self._channels_cache = (now, found)
         return found
@@ -1225,10 +1229,27 @@ class ChannelLinker:
     def _listing_due(self) -> bool:
         return self._listing_retry_at is None or self._clock() >= self._listing_retry_at
 
+    def _listing_wait(self) -> None:
+        """A pass that needs the channel list could not have it: wait 30 s,
+        doubling to 10 min, and never sooner than Discord's retry_after."""
+        delay = min(RETRY_S * (2 ** self._listing_backoff), LISTING_BACKOFF_MAX_S)
+        self._listing_backoff += 1
+        try:
+            asked = float(self._listing_retry_after or 0)
+        except (TypeError, ValueError):
+            asked = 0.0
+        self._listing_retry_after = None
+        self._listing_retry_at = self._clock() + max(delay, asked)
+
+    def _listing_ok(self) -> None:
+        self._listing_retry_at = None
+        self._listing_backoff = 0
+
     def _housekeep(self) -> None:
         """One tick of the worker's housekeeping. Each pass is marked done
         only once it succeeded: a reconcile or a crowding count whose channel
-        listing failed is tried again (after RETRY_S), not lost until the
+        listing failed is tried again (30 s doubling to 10 min, never sooner
+        than Discord's retry_after), not lost until the
         next restart."""
         try:
             self.ensure_inbox()
@@ -1239,9 +1260,11 @@ class ChannelLinker:
         if cfg is not None and self._reconciled_cfg != cfg and self._listing_due():
             # Armed first, so a pass that raises waits RETRY_S too.
             self._listing_retry_at = self._clock() + RETRY_S
-            if self.reconcile() is not None:
+            if self.reconcile() is None:
+                self._listing_wait()
+            else:
                 self._reconciled_cfg = cfg
-                self._listing_retry_at = None
+                self._listing_ok()
         if self._refreshed_at is None or self._clock() - self._refreshed_at >= FACTS_TTL_S * 10:
             if cfg is not None:
                 self.refresh_permissions()
@@ -1256,11 +1279,13 @@ class ChannelLinker:
             raised = None
             try:
                 raised = self.check_crowding()
+                if raised is None:
+                    self._listing_wait()
+                else:
+                    self._listing_ok()
             finally:
                 if raised is None:
                     self._crowding_due = True
-                else:
-                    self._listing_retry_at = None
 
     def _run(self) -> None:
         while not self._stop.is_set():

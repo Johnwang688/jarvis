@@ -884,6 +884,27 @@ class BugbotLinkerChecks(Harness):
         self.assertFalse(linker._crowding_due)
         self.assertEqual(len(self.fake.named(*self.LIST)), before + 1)
 
+    def test_review_f5_a_failing_listing_backs_off_to_ten_minutes(self):
+        linker, now = self.clocked()
+        linker._crowding_due = False
+        self.fake.fail[self.LIST] = (503, {"message": "unavailable"})
+        waits = []
+        for _ in range(7):
+            linker._housekeep()
+            waits.append(round(linker._listing_retry_at - now[0]))
+            now[0] = linker._listing_retry_at
+        self.assertEqual(waits, [30, 60, 120, 240, 480, 600, 600])
+        # Discord's own retry_after wins when it is longer.
+        self.fake.fail[self.LIST] = (429, {"message": "slow", "retry_after": 900.0})
+        linker._housekeep()
+        self.assertEqual(round(linker._listing_retry_at - now[0]), 900)
+        # And a success resets it.
+        del self.fake.fail[self.LIST]
+        now[0] = linker._listing_retry_at
+        linker._housekeep()
+        self.assertIsNone(linker._listing_retry_at)
+        self.assertEqual(linker._reconciled_cfg, linker.config())
+
     def test_the_inbox_link_is_marked_only_once_written(self):
         linker, _now = self.clocked()
         real = linker._set_channel

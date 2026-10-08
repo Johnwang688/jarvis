@@ -842,11 +842,15 @@ class Daemon:
                     # under us (Codex does on any RpcError), strands the
                     # session: every later send would answer "session is
                     # closed" until a restart. Drop it, so the next message
-                    # resumes it and `_run_brief` re-applies the model choice.
-                    # Claude resumes its CLI session by id and the fast path
-                    # reloads its saved transcript, so for them a drop costs a
-                    # reconnect, never the conversation.
-                    if fatal or self._provider_closed(session):
+                    # resumes it and `_run_brief` re-applies the model choice;
+                    # Claude resumes its CLI session by id. A provider whose
+                    # session outlives its own fatal errors says so
+                    # (`keeps_session_on_error`, the fast path: its transcript
+                    # is saved only when a turn returns, so a drop would cost
+                    # the model the failed turn's message and completed tool
+                    # steps) and is dropped only once it really closed.
+                    keeps = getattr(session.provider, "keeps_session_on_error", False) is True
+                    if (fatal and not keeps) or self._provider_closed(session):
                         session.lost = True
                     if session.lost and self._sessions.get(session.thread.id) is session:
                         # The provider closed it; the next send resumes afresh.

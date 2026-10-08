@@ -1247,6 +1247,94 @@ class BugbotQuestionChecks(Harness):
         self.assertIsNone(self.mirror.pending_question(chat.id))
 
 
+class ReviewQuestionChecks(Harness):
+    """PR #12 review: a question posted once however the log and the bus race,
+    and an answered one never resurrected."""
+
+    asking = BugbotQuestionChecks.asking
+
+    def test_f1_a_sync_that_recovered_it_first_does_not_post_it_again(self):
+        chat = self.open_chat()
+        self.hud_send(chat, "hello")
+        place = self.place(chat.id)
+        self.idle(chat.id)
+        self.settled(chat.id)
+        # The daemon logs the question before publishing it: a sync (the
+        # user_message's) runs between the two and recovers it from the log.
+        original = self.mirror._handle
+
+        def handle(record):
+            if record.get("kind") == "question":
+                with self.mirror._lock:
+                    self.mirror._dirty.add(chat.id)
+                self.mirror._process_dirty()
+            return original(record)
+        self.mirror._handle = handle
+        self.asking(chat)
+        wait_for(lambda: any("Which package" in t for t in self.transport.texts(place)))
+        time.sleep(0.3)
+        self.mirror._kick()
+        time.sleep(0.3)
+        self.assertEqual(len([t for t in self.transport.texts(place) if "Which package" in t]), 1)
+        self.assertEqual(self.transport.texts(place).count(f"<@{OWNER}>"), 1)
+        self.listener.feed(guild_message("pnpm", place))
+        wait_for(lambda: self.provider.answers, what="the answer")
+        self.idle(chat.id)
+
+    def test_f1_the_natural_order_posts_it_once(self):
+        chat = self.open_chat()
+        self.hud_send(chat, "hello")
+        place = self.place(chat.id)
+        self.idle(chat.id)
+        self.settled(chat.id)
+        original = self.mirror._handle
+
+        def handle(record):
+            if record.get("kind") == "user_message":
+                wait_for(lambda: any(r.get("kind") == "question"
+                                     for r in self.stores.threads.read_log(chat.id)))
+            return original(record)
+        self.mirror._handle = handle
+        self.asking(chat)
+        wait_for(lambda: any("Which package" in t for t in self.transport.texts(place)))
+        time.sleep(0.5)
+        self.assertEqual(len([t for t in self.transport.texts(place) if "Which package" in t]), 1)
+        self.assertEqual(self.transport.texts(place).count(f"<@{OWNER}>"), 1)
+        self.listener.feed(guild_message("pnpm", place))
+        wait_for(lambda: self.provider.answers, what="the answer")
+        self.idle(chat.id)
+
+    def test_m3d_a_question_answered_in_the_hud_is_not_posted_once_a_place_appears(self):
+        """Never posted (no DM at the time), answered in the HUD, the turn
+        still running: when the DM comes back, nothing is asked."""
+        reachable = [True]
+        self.mirror._dm_channel = lambda: DM_CHANNEL if reachable[0] else None
+        self.listener.feed(dm("hi"))
+        chat = wait_for(lambda: [t for t in self.chats() if t.surface == "dm"])[0]
+        self.idle(chat.id)
+        self.settled(chat.id)
+        reachable[0] = False
+        self.provider.plan["set it up"] = [("question", "Which package manager?"),
+                                           ("wait",), ("text", "set up")]
+        self.provider.release.clear()
+        self.hud_send(chat, "set it up")
+        wait_for(lambda: self.mirror.pending_question(chat.id), what="the question recorded")
+        self.request("POST", f"/threads/{chat.id}/answer", {"req_id": "q-1", "text": "npm"})
+        wait_for(lambda: self.mirror.pending_question(chat.id) is None, what="answered")
+        reachable[0] = True
+        with patch.object(self.mirror, "_open_question",
+                          wraps=self.mirror._open_question) as looked:
+            self.now[0] += M.RETRY_S + 0.1
+            self.mirror._kick()
+            wait_for(lambda: looked.called, what="the sync to look again")
+        time.sleep(0.2)
+        self.assertFalse(any("Which package" in t for t in self.transport.texts(DM_CHANNEL)),
+                         "an answered question was posted")
+        self.assertIsNone(self.mirror.pending_question(chat.id))
+        self.provider.release.set()
+        self.idle(chat.id)
+
+
 class WriterChecks(unittest.TestCase):
     # The chat mirror makes, renames and archives *threads*, never channels:
     # it calls none of create_channel/modify_channel (B1's CHANNEL_WRITERS

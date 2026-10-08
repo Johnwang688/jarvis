@@ -1628,7 +1628,9 @@ def thread_model_checks(page, mock):
     check("the catalogue search narrows the list",
           page.locator('[data-testid^="catalog-row-"]').count() == 1)
     page.locator('[data-testid="catalog-use-deepseek/deepseek-v4-flash-0731"]').click()
-    added = until(lambda: mock.sent("POST", "/models") or None)
+    # Wait for *this* add: earlier sections already POSTed /models (the global
+    # picker's {model, effort}), so "any POST" raced the click.
+    added = until(lambda: [b for b in mock.sent("POST", "/models") if "add" in b] or None)
     check("using a catalogue model pins it to the roster",
           bool(added) and added[-1] == {"add": "deepseek/deepseek-v4-flash-0731"}, str(added))
     sent = until(lambda: [b for b in mock.sent("PATCH", f"/threads/{tid}") if (b.get("model") or "").startswith("deepseek")] or None)

@@ -130,17 +130,19 @@ class InteractionReply:
 
     def send(self, content=None, *, embed=None, files=(), components=None, ephemeral=False):
         """Say something over the token. `said` is set only once something
-        reached the owner (or the channel fallback took it): a 5xx or a long
-        429 is retried once and then falls back to the channel, so Discord is
-        never left on "thinking…" with the outcome only in a log."""
+        reached the owner (or the channel fallback took it). A 5xx on the
+        (idempotent) edit of the original is retried once; anything else that
+        fails — a followup, a long 429 — falls back to the channel at once, so
+        Discord is never left on "thinking…" with the outcome only in a log."""
         if not self.responded:
             self.defer(ephemeral=ephemeral)
         private = ephemeral or self.ephemeral
         if self.dead or self._clock() >= self.deadline:
             return self._fallen_back(content, embed, files, components, private)
         for attempt in (1, 2):
+            editing = self.deferred and not self.original_used
             try:
-                if self.deferred and not self.original_used:
+                if editing:
                     self.rest.edit_original(self.app_id, self._token, content=content,
                                             embed=embed, files=files, components=components)
                     self.original_used = True
@@ -157,6 +159,12 @@ class InteractionReply:
                     break
                 LOG.warning("Discord interaction reply failed (HTTP %s, attempt %d)",
                             exc.status, attempt)
+                # Only the idempotent edit is retried, and only on a 5xx. A
+                # followup POST may already exist behind a 502/504 (a retry
+                # would post it twice), and a long 429 asked us to wait —
+                # both go straight to the channel instead.
+                if not (editing and (exc.status or 0) >= 500 and attempt == 1):
+                    break
             except DiscordError as exc:
                 LOG.warning("Discord interaction reply failed (%s)", type(exc).__name__)
                 self.dead = True

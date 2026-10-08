@@ -1071,6 +1071,11 @@ class ChatMirror:
             return
         with self._lock:
             self._questions[thread.id] = str(req_id)
+            if self._asked.get(thread.id) == str(req_id):
+                # The daemon logs the question before it publishes it, so a
+                # sync can recover and post it from the log first: posted once,
+                # one ping.
+                return
         self._post_question(thread.id, data)
 
     def _post_question(self, chat_id, data) -> bool:

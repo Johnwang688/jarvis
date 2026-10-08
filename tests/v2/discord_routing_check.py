@@ -1190,5 +1190,43 @@ class DaemonStartupChecks(unittest.TestCase):
         self.assertEqual(control.list_tasks(), [])
 
 
+class FilesOnlyRespondChecks(unittest.TestCase):
+    """A files-only message counts as content in an owned place (PR #12, 3a)
+    — and the owner-only, never-bots and mention halves still decide."""
+
+    BOT, OWNER, STRANGER = "100", "200", "300"
+    FILE = {"url": "https://cdn.example/a.txt", "filename": "a.txt",
+            "content_type": "text/plain", "size": 4}
+
+    def message(self, author, *, guild=True, mention=False, bot=False):
+        body = {"id": "1", "channel_id": "9", "content": f"<@{self.BOT}>" if mention else "",
+                "author": {"id": author, **({"bot": True} if bot else {})},
+                "mentions": [{"id": self.BOT}] if mention else [],
+                "attachments": [dict(self.FILE)]}
+        if guild:
+            body["guild_id"] = "7"
+        return body
+
+    def respond(self, message, owned):
+        from jarvis.v2.discord.gateway import should_respond
+        return should_respond(message, self.BOT, self.OWNER, owned=owned)
+
+    def test_who_and_where(self):
+        self.assertFalse(self.respond(self.message(self.STRANGER), True), "a stranger, owned place")
+        self.assertFalse(self.respond(self.message(self.STRANGER, guild=False), True),
+                         "a stranger's DM")
+        self.assertFalse(self.respond(self.message(self.OWNER, bot=True), True),
+                         "a bot carrying the owner's id")
+        self.assertFalse(self.respond(self.message(self.OWNER), False),
+                         "the owner, an unowned guild channel, no mention")
+        self.assertFalse(self.respond(self.message(self.OWNER, mention=True), False),
+                         "the owner, an unowned guild channel, mentioned")
+        self.assertTrue(self.respond(self.message(self.OWNER, guild=False), True), "the owner's DM")
+        self.assertTrue(self.respond(self.message(self.OWNER), True), "the owner, an owned place")
+        bare = self.message(self.OWNER)
+        bare["attachments"] = []
+        self.assertFalse(self.respond(bare, True), "never empty")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -224,6 +224,7 @@ class Reporter:
         self._broken: dict[str, tuple[int, float]] = {}   # channel -> (code, wall time)
         self._alerted: dict[str, float] = {}
         self._list_backoff = 0
+        self._parent_unknown: set[str] = set()     # relinks whose old parent is unknown, warned
         self.last_error = None
         self._published = ("ok", "")
         self._worker = threading.Thread(target=self._run, name="jarvis-discord-reporter",
@@ -686,7 +687,20 @@ class Reporter:
                         if place and self._broken.pop(str(place), None) is not None:
                             self._changed()
         question = task.status.open_question
-        if phase == TaskState.CLARIFYING and question and question != sidecar.get("open_question"):
+        # Two questions in one phase share a `Task.updated` stamp, so the
+        # stamp cannot order them: an event snapshot posts (or clears) a
+        # question only while it is still the one open on disk. A reconcile
+        # reads the disk, so it always is.
+        current = question
+        if not reconcile:
+            try:
+                record = self.stores.tasks.get(task.id)
+            except StoreError:
+                record = None
+            current = _clean(record.status.open_question) if record is not None else None
+        if question != current:
+            self._count("stale_questions")
+        elif phase == TaskState.CLARIFYING and question and question != sidecar.get("open_question"):
             options = next((q.options for q in task.spec.questions
                             if q.text == question and q.answer is None), None)
             if options is None and questions:
@@ -754,6 +768,12 @@ class Reporter:
             if live and not parent and project.discord_channel_id:
                 ok, info, _ = self._call("get_thread", self.rest.get_channel, live)
                 parent = (info or {}).get("parent_id") if ok and isinstance(info, dict) else None
+                if not parent and task.id not in self._parent_unknown:
+                    # Its posts stay in the old thread: say so, once per task.
+                    self._parent_unknown.add(task.id)
+                    self._count("parent_unknown")
+                    LOG.warning("Discord relink: task %s's thread has no known parent channel; "
+                                "its updates stay in that thread", task.id)
             if (project.discord_channel_id and live and parent
                     and str(parent) != str(project.discord_channel_id)):
                 # Relinked to another channel while the task is live: a new

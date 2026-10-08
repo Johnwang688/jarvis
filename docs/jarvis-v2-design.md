@@ -800,7 +800,10 @@ and O1 in `docs/plans/2026-10-07-discord-decisions.md`. Code:
   there), the old thread gets "Moved to <#new>" and is kept, never deleted,
   and its id goes to `retired_threads`. A sidecar from before the field
   takes the event's `previous` channel, else asks Discord for the thread's
-  parent.
+  parent (and if Discord cannot say, the task stays put and a warning is
+  logged once). *Questions in one phase* share a stamp, so an event snapshot
+  posts or clears a question only while it is still the one open on disk
+  (PR #12 review F3).
 
 ### 11.6 The server and project channels (B1, 2026-10-07)
 
@@ -914,7 +917,9 @@ D5, O1, O6 and O7 in `docs/plans/2026-10-07-discord-decisions.md`. Code:
   link is marked done only once written. A restore says "Restored." only when
   the channel moved, and otherwise that the move will be retried (or that
   Discord refused it). `/channel archive|restore` drops an older pending move
-  only after its own lookup succeeded. A housekeeping ask that was approved
+  only after its own lookup succeeded. A failed listing is retried after 30 s,
+  doubling to 10 min, never sooner than Discord's `retry_after` (review F5).
+  A housekeeping ask that was approved
   is settled even if a shutdown began meanwhile, so a restart never replays
   an action that already ran (a second archive category).
 
@@ -1076,7 +1081,9 @@ worker) is the one place a chat meets Discord, both ways.
   mirror's sync re-posts an open question (asked, with no later
   `question_answered`) of the turn **this process is running**, with its D1
   ping outside DMs, so a dropped bus event is recovered; a question from
-  before a restart died with its provider and is never resurrected.
+  before a restart died with its provider and is never resurrected. Either
+  path posts it **once**: the bus event checks what the sync already asked
+  (the daemon logs before it publishes, review F1).
 - **Approvals** raised in a chat go to its thread (or the DM for the DM
   chat), buttons and ping line as for tasks; the approval worker waits up
   to 3 s for a thread being made at that moment.

@@ -1296,6 +1296,84 @@ class DiscordChecks(unittest.TestCase):
         self.assertIn("<@owner>", self.contents(new))
         self.assertEqual(len(self.contents(old)), before)
 
+    # -- PR #12 review ---------------------------------------------------------
+
+    def relink(self, channel, previous):
+        project = self.stores.projects.get(self.project.id)
+        project.discord_channel_id = channel
+        self.stores.projects.save(project)
+        self.bus.publish({"kind": "project_updated", "project_id": project.id,
+                          "data": {"project_id": project.id, "changed": ["discord_channel_id"],
+                                   "previous": {"discord_channel_id": previous}}})
+        self.drained()
+
+    def test_review_f3_a_stale_question_in_the_same_phase_is_never_posted(self):
+        """Two questions in one CLARIFYING phase share a stamp: a queued Q1
+        snapshot replayed after a reconcile delivered Q2 used to post Q1 and
+        then Q2 again — three questions, three pings."""
+        self.reporter()
+        task = self.move(TaskState.CLARIFYING)
+        self.drained()
+        q1 = OpenQuestion("Which target?", True)
+        task.spec.questions = [q1]
+        task.status.open_question = q1.text
+        self.stores.tasks.save(task)
+        stale = deepcopy(task)
+        task.spec.questions[0].answer = "staging"
+        task.spec.questions.append(OpenQuestion("Which region?", True))
+        task.status.open_question = "Which region?"
+        self.stores.tasks.save(task)
+        self.rep._schedule_reconcile(self.rep._clock())
+        self.nudge()
+        wait_for(lambda: self.rep.counters["reconciles"] >= 2)
+        self.drained()
+        self.publish(task=stale)
+        self.drained()
+        self.publish(task=task)
+        self.drained()
+        asked = [c for c in self.contents() if (c or "").startswith("Question")]
+        self.assertEqual(len(asked), 1, asked)
+        self.assertIn("Which region?", asked[0])
+        self.assertEqual(self.contents().count("<@owner>"), 1)
+        self.assertGreaterEqual(self.rep.counters["stale_questions"], 1)
+
+    def test_review_a_relink_with_an_open_question_asks_it_once_there(self):
+        self.reporter(channel="old-channel")
+        task = self.move(TaskState.CLARIFYING)
+        task.spec.questions = [OpenQuestion("Which target?", True)]
+        task.status.open_question = "Which target?"
+        self.stores.tasks.save(task)
+        self.publish(task=task)
+        self.drained()
+        self.relink("new-channel", "old-channel")
+        new = self.thread_id()
+        self.publish(task=task)                 # the same snapshot again
+        self.drained()
+        self.relink("new-channel", "old-channel")   # and a duplicate link event
+        self.assertEqual(sum(1 for c in self.contents(new) if (c or "").startswith("Question")), 1)
+        self.assertEqual(self.contents(new).count("<@owner>"), 1)
+        self.assertEqual(len(self.creates()), 2)
+
+    def test_review_f5_an_unknown_parent_is_warned_once(self):
+        """A sidecar from before `channel_id`, no `previous`, and Discord
+        cannot say where the thread lives: the task stays put, and says so."""
+        self.reporter(channel="old-channel")
+        self.move(TaskState.CLARIFYING, TaskState.PLANNED, TaskState.RUNNING)
+        self.drained()
+        side = self.sidecar()
+        side.pop("channel_id", None)
+        self.rep._save(self.task.id, side)
+        old = self.thread_id()
+        self.relink(None, "old-channel")
+        self.fake.rules.append((lambda m, p: m == "GET" and p == f"/channels/{old}",
+                                lambda: httpx.Response(500, json={"message": "down"})))
+        with self.assertLogs("jarvis.v2.discord.reporter", logging.WARNING) as logs:
+            self.relink("new-channel", None)
+            self.relink("new-channel", None)
+        warned = [line for line in logs.output if "no known parent" in line]
+        self.assertEqual(len(warned), 1, logs.output)
+        self.assertEqual(self.thread_id(), old)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

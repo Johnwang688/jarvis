@@ -829,6 +829,39 @@ class TimingChecks(Harness):
         reply.finish()
         self.assertEqual(len(self.edits()), 1, "no Done. after a real reply")
 
+    def test_review_f4_a_followup_or_a_429_is_never_retried(self):
+        """A followup POST may exist behind a 502/504 (a retry posts it
+        twice), and a long 429 asked for a wait: both go straight to the
+        channel. Only the idempotent edit is retried, on a 5xx."""
+        reply = InteractionReply(self.rest, APP, slash("steer", {"text": "x"}, **in_guild(TASK_THREAD)),
+                                 fallback=self.surface._post, clock=lambda: self.now[0])
+        reply.defer()
+        self.assertEqual(reply.send("first"), "@original")
+        calls = []
+
+        def broken_followup(*args, **kwargs):
+            calls.append(kwargs.get("content"))
+            raise DiscordHTTPError("bad gateway", 502)
+        with patch.object(self.rest, "followup", side_effect=broken_followup), \
+                self.assertLogs("jarvis.v2.discord.interactions", logging.WARNING):
+            reply.send("second")
+        self.assertEqual(calls, ["second"], "a followup was retried")
+        self.assertEqual(self.transport.channel_posts(TASK_THREAD)[-1]["content"], "second")
+
+        late = InteractionReply(self.rest, APP, slash("steer", {"text": "x"}, **in_guild(TASK_THREAD)),
+                                fallback=self.surface._post, clock=lambda: self.now[0])
+        late.defer()
+        edits = []
+
+        def limited(*args, **kwargs):
+            edits.append(kwargs.get("content"))
+            raise DiscordHTTPError("slow down", 429, retry_after=60.0)
+        with patch.object(self.rest, "edit_original", side_effect=limited), \
+                self.assertLogs("jarvis.v2.discord.interactions", logging.WARNING):
+            late.send("third")
+        self.assertEqual(edits, ["third"], "a long 429 was retried at once")
+        self.assertEqual(self.transport.channel_posts(TASK_THREAD)[-1]["content"], "third")
+
     def test_bugbot6_said_is_not_set_before_anything_was_said(self):
         reply = InteractionReply(self.rest, APP, slash("status"),
                                  fallback=lambda *a, **k: self.assertTrue(False, "no fallback yet"),
