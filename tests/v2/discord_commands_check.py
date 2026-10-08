@@ -924,9 +924,11 @@ class VerbChecks(Harness):
         wait_for(path.exists)
         self.assertEqual(json.loads(path.read_text()),
                          {request.req_id: [channel, message_id, code]})
-        # The process dies with the request open: shutdown denies it without a
-        # resolution event, so the map on disk still names the post when the
-        # next daemon starts.
+        # The process dies with the request open. The gateway stops first (the
+        # daemon's real order), so the broker's shutdown denial, which is now
+        # announced (2026-10-08), finds no watcher: the map on disk still names
+        # the post when the next daemon starts.
+        self.surface.stop()
         self.approvals.shutdown()
         worker.join(2)
         self.assertEqual(result["decision"], Decision.DENY)
