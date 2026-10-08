@@ -404,7 +404,19 @@ class ChatMirror:
         """Give a chat its surface: the store first (write-once against stale
         saves), then the sidecar, then the index, then the HUD hears it.
         `through` is where mirroring starts (default: the end of the log)."""
-        self.stores.threads.set_surface(chat_id, surface)
+        # The index first, so a message typed in the new thread the moment it
+        # exists is already placed; undone if the store refuses.
+        place = surface_id(surface)
+        if place:
+            with self._lock:
+                self._places[place] = (chat_id, False)
+        try:
+            self.stores.threads.set_surface(chat_id, surface)
+        except BaseException:
+            with self._lock:
+                if place and self._places.get(place) == (chat_id, False):
+                    self._places.pop(place, None)
+            raise
         if through is None:
             try:
                 through = len(self.stores.threads.read_log(chat_id))

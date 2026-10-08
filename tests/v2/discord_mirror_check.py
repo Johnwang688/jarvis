@@ -924,6 +924,33 @@ class RestartChecks(Harness):
                          ["You (HUD): unheard", "the answer", "You (HUD): heard", "the answer"])
 
 
+class WriterChecks(unittest.TestCase):
+    # The chat mirror makes, renames and archives *threads*, never channels:
+    # it calls none of create_channel/modify_channel (B1's CHANNEL_WRITERS
+    # grep in discord_linker_check), and only it and REST touch threads.
+    THREAD_WRITERS = {"jarvis/v2/discord/mirror.py"}
+
+    def test_only_the_mirror_renames_or_archives_chat_threads(self):
+        import re
+        root = Path(__file__).resolve().parents[2]
+        # REST calls only: `projects.rename_thread` is the HUD's own rename.
+        pattern = re.compile(r"\brest\.(rename_thread|archive_thread|start_thread_from_message)\s*\(")
+        found = set()
+        for path in (root / "jarvis").rglob("*.py"):
+            text = path.read_text(encoding="utf-8")
+            if pattern.search(text):
+                found.add(path.relative_to(root).as_posix())
+            if path.name == "mirror.py":
+                self.assertNotRegex(text, r"\b(create_channel|modify_channel)\s*\(")
+        # The gateway starts a chat through the mirror's `start_chat`; nothing
+        # else, and no tool, reaches these calls.
+        self.assertTrue(found)
+        self.assertLessEqual(found, self.THREAD_WRITERS, found - self.THREAD_WRITERS)
+
+    def test_rest_has_no_delete(self):
+        self.assertFalse([name for name in dir(DiscordRest) if "delete" in name.lower()])
+
+
 class StoreChecks(unittest.TestCase):
     def test_save_keeps_the_surface_against_a_stale_copy(self):
         with tempfile.TemporaryDirectory() as tmp:
