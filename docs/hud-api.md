@@ -377,3 +377,21 @@ footing as `/approvals`.
   is shown as `/skill <name> <text>`. The log row is
   `{"kind": "user", "data": {"text", "skill"}}`; `skill` is absent on
   ordinary turns.
+
+## Additions 2026-10-07 (Discord update poster — PR A)
+
+- `GET /discord` gains `"reporter"`: `null` when no Discord surface is
+  running, else `{"state": "ok" | "degraded" | "down", "reason": str,
+  "counters": {name: int}, "dropped": int, "last_error": null | {"op": str,
+  "status": int | null, "code": int | null, "at": epoch seconds}}`.
+  `degraded` means the poster is working around something — a channel
+  Discord calls broken (10003/50001/50013, so attention updates go to the
+  owner's DM) or a recent transient failure — and `reason` says which in
+  one sentence. `down` means the circuit breaker is open. `counters` are
+  integers only (`posts`, `pings`, `edits`, `threads`, `dm`, `errors`,
+  `reconciles`, `breaker_trips`, …); `dropped` is the bus's evicted-event
+  count for the poster. The route copies these fields one by one: no URL,
+  message body or token ever passes.
+- SSE `discord_status` → `{"kind": "discord_status", "data": <the reporter
+  object above>}`, published whenever `state` or `reason` changes. The HUD
+  refetches `GET /discord` on it and redraws the Discord light.

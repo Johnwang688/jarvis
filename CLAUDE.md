@@ -63,7 +63,24 @@ press must match owner, message id and channel; `/always` is refused where
 answers its open question (one `_answer` with `/answer`); a voice note never
 does. Verbs take a `Reply` sink so keyword and slash share one
 implementation; keywords still work with a "(next time: `/x`)" nudge until
-S2 removes them. `"discord_"` is a forbidden fast-path prefix. Briefs for every package, including the ones in flight, are in
+S2 removes them. `"discord_"` is a forbidden fast-path prefix.
+
+**Discord update poster, PR A (2026-10-07, design §11.5; plan
+`docs/plans/2026-10-07-discord-plan.md` §1).** `DiscordSurface`
+(`jarvis/v2/discord/surface.py`) owns REST, the router and the `Reporter`,
+started Reporter → `runner.serve()` → gateway and stopped gateway → runner →
+`reporter.close(flush=True)`. A task's thread appears at its first
+non-intake snapshot (D6). **Nothing pings but one line**: every guild post
+carries `SUPPRESS_NOTIFICATIONS` (4096), and question/approval/blocked/
+failed/done are followed by a separate `<@owner>` post (D1) — never in a DM.
+Until B1 links channels, attention milestones go to the owner's DM prefixed
+`[<project> · task <id>]`; later the DM is only for broken channels
+(10003/50013), which also turns the HUD's Discord light amber. The sidecar
+`tasks/<id>/discord.json` is read first and `TaskStore.save` never wipes a
+stored `discord_thread_id` (bug 1); start-up reconcile **seeds existing
+tasks silently** and never backfills terminal ones. 429s over 10 s raise
+and defer; three transient failures open a 30 s → 5 min breaker. Logs carry
+operation, status and Discord code only. `DiscordRest` has no delete. Briefs for every package, including the ones in flight, are in
 `docs/codex-briefs/`; each merged package left a `*-notes.md` beside its
 brief with what its implementer verified and what it proposes.
 

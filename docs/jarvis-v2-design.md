@@ -702,6 +702,65 @@ in `docs/plans/2026-10-07-discord-decisions.md`.
   {state, count, synced_at, error}}` — states only.
 - `"discord_"` is a forbidden fast-path tool prefix.
 
+### 11.5 The update poster (PR A, 2026-10-07)
+
+Plan: `docs/plans/2026-10-07-discord-plan.md` §1; owner decisions D1, D6, D8
+and O1 in `docs/plans/2026-10-07-discord-decisions.md`. Code:
+`jarvis/v2/discord/{surface,reporter}.py`.
+
+- **One `DiscordSurface`** owns `DiscordRest`, the router (with S1's
+  interaction router) and the `Reporter`; `start_discord(daemon)` returns it
+  and sets `daemon.discord`. **Start:** `daemon.start` → the Reporter
+  subscribes → `runner.serve()` → the gateway, so a task the runner re-admits
+  at boot is heard. **Stop:** gateway → runner → `reporter.close(flush=True)`
+  (≤ 2 s) → hatch → daemon. Both are idempotent.
+- **The thread is created at the first snapshot whose phase is not
+  `intake`** (D6) — a proposal withdrawn in its grace window never gets one —
+  with `auto_archive_duration=10080`, the owner added as a member, then
+  "Started" and the status card.
+- **What notifies (D1).** Every guild post carries `SUPPRESS_NOTIFICATIONS`
+  (4096): the card and its edits (≤ 1 per 5 s per thread), Started,
+  Verified, Cancelled (D8), and every milestone's own text. Question,
+  approval, blocked, failed and done are followed by a separate post whose
+  content is exactly `<@owner>` with `allowed_mentions {"parse": [],
+  "users": [owner]}` (`DiscordRest.ping_owner`) — the only thing that pings.
+  A DM gets neither the flag nor the ping line. Milestones ≤ 400 characters;
+  the report ≤ 1500 with the rest as `report.txt`. A question comes from
+  `task_question` (or a new `open_question` on a snapshot), with its choices
+  and "Answer here or with `/answer`", once per question.
+- **The DM is the safety net (O1).** A project with no channel (all of them
+  until B1), or a channel Discord calls broken (10003, 50001, 50013), sends
+  the attention milestones — question, blocked, failed, done with its report
+  — to the owner's DM, prefixed `[<project> · task <id>]`. A 50013 also DMs
+  the owner once per channel per 24 h. A deleted thread (10003) is marked
+  `thread_gone` and never recreated. Approvals do the same: the task thread
+  first, and if that post fails the DM is asked *and recorded as where it
+  was asked*, so only the DM's answer counts; the DM post enters S1's
+  persisted approval-post map like any other.
+- **Restarts.** `tasks/<id>/discord.json` holds the thread and message ids,
+  `phase`, `open_question`, `embed_sha` and `thread_gone`, and is read
+  before `Task.discord_thread_id`. `TaskStore.save` never replaces a stored
+  thread id with None (bug 1: `worktrees.ensure` saved a stale copy across
+  `git worktree add`). The worker reconciles from disk before its first
+  event, again when the bus drops events, after the breaker, and shortly
+  after a transient failure: a task it has never seen is **seeded
+  silently** (no DM storm), active channel tasks get a thread and a card at
+  ≤ 1 create per second, terminal tasks are never backfilled, and a stale
+  `embed_sha` gets one edit. A milestone is marked done only once delivered
+  (or refused for good), so a missed one is posted late, never twice.
+- **Failures.** `DiscordHTTPError` carries `status`, `code` and
+  `retry_after`; a 429 is slept only up to 10 s (three times), longer raises
+  and the caller defers. Edits go first and reopen a thread only on 50083.
+  Three transient failures (transport, long 429, 5xx) open a breaker: 30 s,
+  60 s, doubling to 5 min, then a reconcile. Logs name the operation, HTTP
+  status and Discord code — never a URL, a body or a token. `DiscordRest` has
+  no delete method and nothing in `jarvis/v2/discord/` spells `"DELETE"`
+  (D3; a test greps).
+- **The light.** `GET /discord` gains `reporter: {state ok|degraded|down,
+  reason, counters, dropped, last_error{op,status,code,at}}`; a
+  `discord_status` SSE event fires on every state change; the HUD's
+  `DiscordPanel` shows green, amber with the reason, or red.
+
 ---
 
 ## 12. HUD v2 (G3) — specified 2026-09-16 from the owner's elaboration
