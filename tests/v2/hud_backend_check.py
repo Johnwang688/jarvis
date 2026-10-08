@@ -192,6 +192,11 @@ class Backend(unittest.TestCase):
                             side_effect=lambda model_id: next((m for m in self.catalog if m.id == model_id), None))
         info.start()
         self.addCleanup(info.stop)
+        # Never the owner's real guild file: once setup has run, it decides
+        # what `GET /discord` and every thread's Discord link say.
+        guild = patch.object(config, "DISCORD_GUILD_PATH", self.root / "no-guild.json")
+        guild.start()
+        self.addCleanup(guild.stop)
         routing = patch.object(config, "ROUTING_PATH", self.root / "routing.json")
         routing.start()
         self.addCleanup(routing.stop)
@@ -322,7 +327,9 @@ class Backend(unittest.TestCase):
                               "reporter": None,
                               # B1: no guild file, no linker, no permission check.
                               "guild": {"configured": False, "id": None},
-                              "linker": None, "permissions": None})
+                              "linker": None, "permissions": None,
+                              # PR C: no surface, no chat mirror.
+                              "mirror": None})
 
         class Surface:
             def status(self):
@@ -334,7 +341,8 @@ class Backend(unittest.TestCase):
         body = self.request("GET", "/discord")
         self.assertEqual(body, {"connected": True, "commands": {
             "state": "ok", "count": 11, "synced_at": 1.0, "error": None}, "reporter": None,
-            "guild": {"configured": False, "id": None}, "linker": None, "permissions": None})
+            "guild": {"configured": False, "id": None}, "linker": None, "permissions": None,
+            "mirror": None})
         self.assertNotIn("synthetic-leak", json.dumps(body))
 
         class WithReporter(Surface):
@@ -671,6 +679,63 @@ class Backend(unittest.TestCase):
         self.request("GET", f"/tasks/{task.id}/journal?after=-1", status=400)
         self.request("GET", "/threads/deadbeef/transcript", status=404)
         self.request("POST", path + "/send", {"text": "", "attachments": [{}]}, status=400)
+
+    def test_user_message_sse_surface_and_via_discord(self):
+        """PR C: the owner's message on the SSE stream with its typed words,
+        the chat's Discord place on `GET /threads`, and "via Discord" on the
+        transcript for a message typed there."""
+        guild_file = self.root / "discord_guild.json"
+        guild_file.write_text(json.dumps({
+            "guild_id": "100000000000000003", "category_id": "100000000000000004",
+            "archive_category_id": "100000000000000005",
+            "ungrouped_channel_id": "100000000000000006"}))
+        guard = patch.object(config, "DISCORD_GUILD_PATH", guild_file)
+        guard.start()
+        self.addCleanup(guard.stop)
+        thread = self.thread()
+        conn = http.client.HTTPConnection("127.0.0.1", self.daemon.port, timeout=5)
+        self.addCleanup(conn.close)
+        conn.request("GET", f"/events?thread={thread.id}")
+        stream = conn.getresponse()
+        self.assertEqual(stream.readline(), b": connected\n")
+        note = base64.b64encode(b"inlined words").decode()
+        turn = self.request("POST", f"/threads/{thread.id}/send", {
+            "text": "look at @hello.txt", "spoken": True,
+            "attachments": [{"name": "note.txt", "mime": "text/plain", "data_b64": note}]}, 202)
+        event = None
+        while event is None:
+            line = stream.readline()
+            if line.startswith(b"data: "):
+                record = json.loads(line[6:])
+                if record["kind"] == "user_message":
+                    event = record
+        self.assertEqual(event["turn_id"], turn["turn_id"])
+        self.assertEqual(event["project_id"], self.project.id)
+        data = event["data"]
+        self.assertEqual((data["typed"], data["via"], data["spoken"], data["attachments"],
+                          data["images"]),
+                         ("look at @hello.txt", "hud", True, ["note.txt", "hello.txt"], 0))
+        self.assertIn("inlined words", data["text"])      # what the provider got
+        self.assertNotIn("inlined words", data["typed"])   # what Discord may show
+        self.settled(thread)
+        self.request("POST", f"/threads/{thread.id}/send", {"text": "x", "spoken": "yes"}, 400)
+
+        listed = next(t for t in self.request("GET", "/threads") if t["id"] == thread.id)
+        self.assertIsNone(listed["surface"])
+        self.assertNotIn("discord", listed)
+        self.stores.threads.set_surface(thread.id, "discord:800000000000000001")
+        listed = next(t for t in self.request("GET", "/threads") if t["id"] == thread.id)
+        self.assertEqual(listed["surface"], "discord:800000000000000001")
+        self.assertEqual(listed["discord"], {
+            "kind": "thread", "channel": "test", "name": thread.id,
+            "url": "https://discord.com/channels/100000000000000003/800000000000000001"})
+        self.stores.threads._append(thread.id, "log.jsonl", {
+            "kind": "user", "at": "2026-10-07T00:00:00Z", "thread_id": thread.id,
+            "data": {"text": "from my phone", "typed": "from my phone", "via": "discord"}})
+        messages = self.request("GET", f"/threads/{thread.id}/transcript")["messages"]
+        self.assertEqual(messages[-1]["via"], "discord")
+        self.assertEqual(messages[-1]["text"], "from my phone")
+        self.assertNotIn("via", messages[0])
 
     def test_attachment_limits_scrubbing_and_scope(self):
         make = lambda name, data: dict(name=name, mime="text/plain", data_b64=base64.b64encode(data).decode())

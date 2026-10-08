@@ -25,7 +25,10 @@ from typing import Any, Iterable
 # Where a command may run. A Discord channel is one of these places
 # (`DiscordRouter._locate`); "other" is a guild channel Jarvis does not own.
 DM, PROJECT, TASK, OTHER = "dm", "project", "task", "other"
-JARVIS_PLACES = frozenset({DM, PROJECT, TASK})
+# A chat's own Discord thread (PR C): every chat is one, and slash commands
+# work there as in its project's channel.
+CHAT = "chat"
+JARVIS_PLACES = frozenset({DM, PROJECT, TASK, CHAT})
 ALL_PLACES = JARVIS_PLACES | {OTHER}
 
 # Discord: a choice name is at most 100 characters, and autocomplete returns

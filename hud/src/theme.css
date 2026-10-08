@@ -632,3 +632,8 @@ button.danger:hover:not(:disabled) { background: var(--red-soft); }
 .discord-link .pill.down { color: var(--red); }
 .discord-link .pill.off { color: var(--text-2); }
 .discord-link button.ghost { padding: 0 6px; }
+
+/* PR C: where the open chat lives on Discord, and a message typed there. */
+.chat-place { padding: 4px 12px; border-bottom: 1px solid var(--border); }
+.chat-place a { color: inherit; text-decoration: underline; }
+.msg .who .via { text-transform: none; letter-spacing: 0; opacity: 0.75; }

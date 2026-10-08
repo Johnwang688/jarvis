@@ -126,7 +126,8 @@ export default function App() {
         dispatch({ type: "patch", patch: { orb: "idle", status: "", pendingTranscript: text } });
         return;
       }
-      await send(text, []);
+      // Dictated: the Discord mirror labels it "You (HUD, voice)" (PR C).
+      await send(text, [], true);
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [dispatch],
@@ -135,7 +136,7 @@ export default function App() {
   // ---- sending ------------------------------------------------------------
 
   const send = useCallback(
-    async (text: string, attachments: Attachment[]) => {
+    async (text: string, attachments: Attachment[], spoken = false) => {
       const at = live.current;
       const before = at.messages;
       let threadId = at.threadId;
@@ -166,7 +167,10 @@ export default function App() {
           pendingThread.current = threadId;
         }
         dispatch({ type: "patch", patch: { turnThreadId: threadId } });
-        await api.send(threadId, { text, attachments: attachments.length ? attachments : undefined });
+        await api.send(threadId, {
+          text, attachments: attachments.length ? attachments : undefined,
+          ...(spoken ? { spoken: true } : {}),
+        });
         if (projectId) saveLastProject(projectId);
         if (!at.threadId) {
           // The compose row becomes the thread. Its transcript is already on
@@ -211,6 +215,17 @@ export default function App() {
       const ours = !!tid && tid === at.turnThreadId;
       if (LIFECYCLE_KINDS.has(kind)) setLifecycle((n) => n + 1);
       switch (kind) {
+        case "user_message":
+          // PR C: a message the owner typed in Discord (a chat's thread or the
+          // DM) appears in the open chat as theirs, labelled. A HUD message is
+          // already on screen from send(), so it is never added twice.
+          if (mine && tid && (data.via === "discord" || data.via === "dm")) {
+            dispatch({
+              type: "message",
+              message: { role: "user", text: data.typed ?? data.text ?? "", via: data.via },
+            });
+          }
+          break;
         case "turn_started":
           if (mine) {
             dispatch({
@@ -958,6 +973,7 @@ export default function App() {
           {state.tab === "chat" ? (
             <>
               <ChatTab
+                thread={openThread}
                 messages={state.messages}
                 draft={state.draft}
                 ops={state.ops}

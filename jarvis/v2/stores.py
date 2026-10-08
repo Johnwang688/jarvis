@@ -264,10 +264,39 @@ class ProjectStore(_Store[model.Project]):
             return found[0] if found else self.create("Inbox", str(Path.home()), inbox=True)
 
 
+SURFACE = re.compile(r"^(?:dm|dm:retired|discord:[0-9]{1,24})$")
+
+
 class ThreadStore(_Store[model.Thread]):
     def create(self, project_id: str, role: model.Role, provider: model.ProviderName,
                **values: Any) -> model.Thread:
+        if values.get("surface") is not None:
+            raise StoreError("A thread's surface is set with set_surface()")
         return self._create(project_id=project_id, role=role, provider=provider, **values)
+
+    def save(self, obj: model.Thread) -> None:
+        """`surface` is never written here (plan §4.2). The daemon saves its
+        session's in-memory copy of a thread on every usage event and turn
+        end, and that copy was read before the Discord mirror gave the chat a
+        thread — the lost-update class of bug 1. So a save keeps whatever
+        surface is stored, None or not; only `set_surface` changes it."""
+        with _lock:
+            previous = self.get(obj.id)
+            if previous is not None:
+                obj.surface = previous.surface
+            elif obj.surface is not None:
+                raise StoreError("A thread's surface is set with set_surface()")
+            super().save(obj)
+
+    def set_surface(self, thread_id: str, value: str | None) -> model.Thread:
+        """The one writer of `Thread.surface`, under the store lock."""
+        if value is not None and (not isinstance(value, str) or not SURFACE.match(value)):
+            raise StoreError(f"Thread {thread_id}: invalid surface {value!r}")
+        with _lock:
+            thread = self._require(thread_id)
+            thread.surface = value
+            self._write(thread)
+            return thread
 
     def delete(self, object_id: str) -> None:
         with _lock:

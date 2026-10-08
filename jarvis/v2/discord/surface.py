@@ -3,7 +3,8 @@ interaction router, and the update poster — started and stopped in the one
 order that loses nothing.
 
 **Start.** `daemon.start` (the caller's), then the Reporter subscribes, then
-the channel linker (B1) starts, then `runner.serve()`, then the gateway. The Reporter has to be on the bus before
+the channel linker (B1) starts, then the chat mirror (PR C), then
+`runner.serve()`, then the gateway. The Reporter has to be on the bus before
 the runner's recovery publishes its first snapshot, or a task re-admitted at
 boot changes phase with nobody listening; the gateway comes last so no verb
 reaches a runner that is not serving yet. `serve()` is idempotent, so the
@@ -12,7 +13,8 @@ daemon's own call to it afterwards is harmless.
 **Stop.** The gateway first, so no verb arrives at a runner that is stopping;
 then the runner, so its last snapshots are published; then the Reporter, which
 drains them and sends due card edits within 2 s; then the channel linker
-(B1); then REST. The hatch and the
+(B1); then the chat mirror (PR C), which sends what it can within its own
+bound; then REST. The hatch and the
 daemon are the caller's to stop after this.
 
 Both are idempotent: a second `start()` or `stop()` does nothing.
@@ -30,6 +32,7 @@ class DiscordSurface:
                  listener_factory=None, dm_channel=None, announce=None,
                  sync_commands: bool = True, reconcile: bool = True):
         from .gateway import DiscordRouter
+        from .mirror import ChatMirror
         from .rest import DiscordRest
 
         self.daemon = daemon
@@ -44,9 +47,15 @@ class DiscordSurface:
             kwargs["announce"] = announce
         if dm_channel is not None:
             kwargs["dm_channel"] = dm_channel
+        # The chat mirror (PR C) is the surface's, so it stops in the
+        # surface's order; it reaches the router's DM channel and speech
+        # lazily, because the router is built with it.
+        self.mirror = ChatMirror(daemon, self.rest, dm_channel=lambda: self.router._owner_dm(),
+                                 speak=lambda text: self.router._voice_reply(text),
+                                 router=router)
         self.router = DiscordRouter(daemon, daemon.stores, router, daemon.approvals, control,
                                     self.rest, listener_factory,
-                                    sync_commands=sync_commands, **kwargs)
+                                    sync_commands=sync_commands, mirror=self.mirror, **kwargs)
         self.reporter = None
         self.linker = None
 
@@ -70,6 +79,9 @@ class DiscordSurface:
         self.linker.start()
         # B2's slash handlers (`/project`, `/channel`) reach it through the router.
         self.router.linker = self.linker
+        # 1c. The chat mirror (PR C): on the bus before any turn can run, and
+        # caught up from the chats' logs.
+        self.mirror.start()
         # 2. The runner's recovery publishes now, and the Reporter hears it.
         runner = getattr(self.daemon, "runner", None)
         if runner is not None and hasattr(runner, "serve"):
@@ -99,6 +111,8 @@ class DiscordSurface:
             self.reporter.close(flush=True)
         if self.linker is not None:
             self.linker.close()
+        # The mirror sends what it can of its outbox within its own bound.
+        self.mirror.close(flush=True)
         if self._own_rest:
             self.rest.close()
 

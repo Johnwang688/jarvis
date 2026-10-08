@@ -141,6 +141,25 @@ retry cannot undo them. Tests point the folder roots at
 temp dirs — never the owner's home. **B2b** (`project_propose`, the
 Sonnet/Opus rule) waits for peers phase 0.
 
+**Every chat is a Discord thread, PR C (2026-10-07, design §11.8; plan
+§4, decisions C1).** `ChatMirror` (`discord/mirror.py`) gives a chat a
+thread in its project's channel at its first owner message and posts the
+owner's *typed* words (never an inlined file), settled replies and one
+footer, silent and scrubbed; what is typed in that thread runs the same
+chat as `UserMessage(via="discord")` and is never echoed. **Progress is
+`log.jsonl`** (`mirrored_through` in `threads/<id>/discord.json`), never the
+bus. **`Thread.surface` is written only by `ThreadStore.set_surface`** —
+`save` keeps the stored value whatever the caller holds, because the
+daemon saves stale session copies. `daemon.send` publishes `user_message`.
+The DM is one persisted Inbox chat (`surface="dm"`); a top-level message
+in a project channel starts a new chat; anything else is ignored. Moves
+open a new thread and rename the old `↪ moved to …` (O-C5); nothing on
+Discord is ever deleted. A post the thread refuses (50001/50013) goes to
+the owner's DM instead; an escape-hatch result shows its command line only,
+never its output; speech is made from the scrubbed reply. Tests that read
+`GET /discord` must point
+`config.DISCORD_GUILD_PATH` at a temp file — the owner's setup is done now.
+
 Briefs for every package, including the ones in flight, are in
 `docs/codex-briefs/`; each merged package left a `*-notes.md` beside its
 brief with what its implementer verified and what it proposes.

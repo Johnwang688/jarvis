@@ -254,6 +254,24 @@ class DiscordRest:
                         json={"name": name, "type": 11,
                               "auto_archive_duration": int(auto_archive_duration)})
 
+    def start_thread_from_message(self, channel_id, message_id, name, *,
+                                  auto_archive_duration: int = THREAD_ARCHIVE_MINUTES) -> str:
+        """Start Thread from Message (PR C): a new chat threaded under the
+        owner's own top-level post. The owner wrote it, so they are already a
+        member; nothing else is added."""
+        return self._id("POST", f"/channels/{channel_id}/messages/{message_id}/threads",
+                        json={"name": name,
+                              "auto_archive_duration": int(auto_archive_duration)})
+
+    def archive_thread(self, thread_id):
+        """Archive one of the bot's own threads, as its creator (PR C, O-P1).
+        Never locked, never deleted: a later post reopens it."""
+        self._api("PATCH", f"/channels/{thread_id}", json={"archived": True})
+
+    def rename_thread(self, thread_id, name):
+        """A thread is a channel: only its name is sent."""
+        self._api("PATCH", f"/channels/{thread_id}", json={"name": name})
+
     def add_owner(self, thread_id, owner_id=None):
         """Add the owner to a thread, so it shows in their thread list."""
         owner = _snowflake_or(owner_id, self._owner())
