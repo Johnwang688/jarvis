@@ -89,7 +89,11 @@ rewrite `brief.json`** — and the daemon hands it to the provider per turn
 (`set_model` on all three providers). A default thread follows the global
 Model picker **every turn**; Claude defaults to `claude-opus-5-5` at high,
 Codex to its routing default; effort defaults to `high` (or the roster's pin)
-within the model's ladder. Claude and Codex chat threads are full agents in
+within the model's ladder. **Only an explicit model pins a thread** (A4
+amendment, 2026-10-07): an effort-only change on a default thread stores the
+effort and leaves `model` null, and `thread_model.effective` clamps it to
+whatever the default supports at each turn (none for a default with no
+reasoning control); choosing default again clears both. Claude and Codex chat threads are full agents in
 the thread's folder, behind the same §6 permit as task workers, so **a
 caller's `POST /threads` brief may not loosen the project** — `cwd`,
 `profile`, `always_ask` and `mcp_servers` are the project's (or stricter),

@@ -1128,6 +1128,94 @@ class Backend(unittest.TestCase):
         self.send_and_settle(tid)
         self.assertEqual(len(fakes[P.FAST].changes), 1, "no change, no call")
 
+    def test_an_effort_alone_keeps_a_default_thread_on_the_default_model(self):
+        """A4 amendment (2026-10-07): an effort-only change on a default
+        thread stores the effort and leaves `model` None; the thread follows
+        every later global change, with the effort re-clamped to each new
+        default and dropped for one with no reasoning control. Only an
+        explicit model pins."""
+        fakes = self.model_fakes()
+        self.request("POST", "/models", {"add": "test/thinker"})
+        self.request("POST", "/models", {"add": "test/model"})
+        tid = self.chat()["id"]
+        saved = self.brief_bytes(tid)
+        first = models.tier("orchestrator")       # not in the fixture: its ladder is unknown
+        self.send_and_settle(tid)
+        self.events_all()
+        # An unknown ladder takes any level, as the v1 rule does.
+        body = self.request("PATCH", f"/threads/{tid}", {"effort": "max"})
+        self.assertEqual((body["model"], body["effort"]), (None, "max"), "the model stays default")
+        stored = self.stores.threads.get(tid)
+        self.assertEqual((stored.model, stored.effort), (None, "max"))
+        self.assertEqual(self.daemon._sessions[tid].thread.model, None)
+        updated = [e for e in self.events_all() if e["kind"] == "thread_updated"]
+        self.assertEqual((updated[-1]["data"]["model"], updated[-1]["data"]["effective_model"],
+                          updated[-1]["data"]["effective_effort"]), (None, first, "max"))
+        self.send_and_settle(tid)
+        self.assertEqual(fakes[P.FAST].changes, [(first, "max")])
+        # The global default moves to a model whose ladder stops at high: the
+        # thread follows it, and the stored effort is clamped down to it.
+        self.request("POST", "/model", {"model": "test/thinker"})
+        self.send_and_settle(tid)
+        self.assertEqual(fakes[P.FAST].changes[-1], ("test/thinker", "high"))
+        self.assertEqual((self.stores.threads.get(tid).model, self.stores.threads.get(tid).effort),
+                         (None, "max"), "the owner's choice is kept, not overwritten by the clamp")
+        # An effort chosen on that default is checked against what was offered.
+        self.assertIn("does not offer 'max'", self.request(
+            "PATCH", f"/threads/{tid}", {"effort": "max"}, status=400)["error"])
+        self.request("PATCH", f"/threads/{tid}", {"effort": "low"})
+        self.assertEqual(self.stores.threads.get(tid).model, None)
+        self.send_and_settle(tid)
+        self.assertEqual(fakes[P.FAST].changes[-1], ("test/thinker", "low"))
+        # A default with no reasoning control gets no effort at all.
+        self.request("POST", "/model", {"model": "test/model"})
+        self.send_and_settle(tid)
+        self.assertEqual(fakes[P.FAST].changes[-1], ("test/model", None))
+        self.assertIn("no reasoning effort", self.request(
+            "PATCH", f"/threads/{tid}", {"effort": "low"}, status=400)["error"])
+        # Back to a default with a ladder: the stored effort applies again.
+        self.request("POST", "/model", {"model": "test/thinker"})
+        self.send_and_settle(tid)
+        self.assertEqual(fakes[P.FAST].changes[-1], ("test/thinker", "low"))
+        lines = [m["text"] for m in self.request("GET", f"/threads/{tid}/transcript")["messages"]
+                 if m["role"] == "system"]
+        self.assertEqual(lines[0], f"effort → max (default model: {first})")
+        self.assertIn("model → test/thinker · high (follows the default)", lines)
+        self.assertIn("effort → low (default model: test/thinker)", lines)
+        self.assertIn("model → test/model (follows the default)", lines)
+        self.assertEqual(lines[-1], "model → test/thinker · low (follows the default)")
+        # Only an explicit model pins; it starts on its own default effort.
+        body = self.request("PATCH", f"/threads/{tid}", {"model": "test/thinker"})
+        self.assertEqual((body["model"], body["effort"]), ("test/thinker", None))
+        self.request("POST", "/model", {"model": "test/model"})
+        self.send_and_settle(tid)
+        self.assertEqual(fakes[P.FAST].changes[-1], ("test/thinker", "high"), "a pin ignores the default")
+        # Back to the default clears the effort as well as the pin.
+        self.request("PATCH", f"/threads/{tid}", {"effort": "low"})
+        body = self.request("PATCH", f"/threads/{tid}", {"model": None})
+        self.assertEqual((body["model"], body["effort"]), (None, None))
+        self.assertEqual(self.brief_bytes(tid), saved, "brief.json is never rewritten")
+
+    def test_an_effort_without_a_model_opens_a_thread_that_follows_the_default(self):
+        fakes = self.model_fakes()
+        self.request("POST", "/models", {"add": "test/thinker"})
+        self.request("POST", "/model", {"model": "test/thinker"})
+        body = self.chat(effort="low")
+        self.assertEqual((body["model"], body["effort"]), (None, "low"))
+        _, brief = fakes[P.FAST].opened[-1]
+        self.assertEqual((brief.model, brief.effort), ("test/thinker", "low"),
+                         "the provider starts on the default, at the chosen effort")
+        tid = body["id"]
+        self.request("POST", "/models", {"add": "test/model"})
+        self.request("POST", "/model", {"model": "test/model"})
+        self.send_and_settle(tid)
+        self.assertEqual(fakes[P.FAST].changes, [("test/model", None)])
+        # Claude: an effort alone keeps the thread on Opus, the default.
+        body = self.chat("claude", effort="max")
+        self.assertEqual((body["model"], body["effort"]), (None, "max"))
+        _, brief = fakes[P.CLAUDE].opened[-1]
+        self.assertEqual((brief.model, brief.effort), ("claude-opus-5-5", "max"))
+
     def test_a_pin_survives_a_global_change_and_a_resume(self):
         fakes = self.model_fakes()
         self.request("POST", "/models", {"add": "test/thinker"})

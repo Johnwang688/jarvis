@@ -1491,6 +1491,26 @@ def thread_model_checks(page, mock):
     check("the pin badge goes when the thread follows the default",
           until(lambda: page.locator(f'[data-testid="pin-{tid}"]').count() == 0) is True)
 
+    # An effort alone keeps the thread on the default model (A4 amendment).
+    n = len(mock.sent("PATCH", f"/threads/{tid}"))
+    page.locator('[data-testid="effort-chip-select"]').select_option("low")
+    sent = until(lambda: mock.sent("PATCH", f"/threads/{tid}")[n:] or None)
+    check("an effort on a default thread is a PATCH of the effort alone",
+          bool(sent) and sent[-1] == {"effort": "low"}, str(sent))
+    check("and the line names the default model it still follows",
+          until(lambda: "effort → low (default model: openai/gpt-5.6-luna)"
+                in page.locator('[data-testid="log"]').inner_text()) is True)
+    model = page.locator('[data-testid="model-chip-select"]')
+    check("the chip still shows the default",
+          until(lambda: page.locator('[data-testid="effort-chip-select"]').input_value() == "low") is True
+          and model.input_value() == "" and model.locator("option").first.inner_text() == "default · gpt-5.6-luna",
+          model.input_value())
+    check("and no pin badge appears", page.locator(f'[data-testid="pin-{tid}"]').count() == 0)
+    tip = page.locator(f'[data-testid="thread-{tid}"]').get_attribute("title") or ""
+    check("its tooltip says it follows the default, at that effort",
+          until(lambda: "follows the default · effort low" in
+                (page.locator(f'[data-testid="thread-{tid}"]').get_attribute("title") or "")) is True, tip)
+
     # A refused change leaves the chip on what the server holds, and says why.
     w["refuse_choice"] = "evil/model cannot call tools here"
     page.locator('[data-testid="model-chip-select"]').select_option("evil/model")

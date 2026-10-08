@@ -20,6 +20,11 @@ Where the choice lives, and why there:
 - `Thread.effort = None` is **that model's default**: `high`, unless the
   roster pins an effort for it, clamped to the model's own ladder, and
   nothing at all for a model with no reasoning control (A4).
+- An effort on a thread with `model = None` is stored **on its own**, and the
+  thread keeps following the default model (A4 amendment, 2026-10-07): the
+  effort is clamped to whatever the default supports at the start of each
+  turn, and dropped for a default with no reasoning control. Only an
+  explicit model choice pins a model to a thread.
 
 Nothing here is a tool. The agent cannot change its own model or provider;
 only the owner can, through `PATCH /threads/{id}` (asserted by the suites).
@@ -159,12 +164,27 @@ def default_choice(provider: ProviderName) -> tuple[str | None, str | None]:
     return model, default_effort(provider, model) if model else None
 
 
+def clamp_effort(provider: ProviderName, model: str, wanted: str) -> str | None:
+    """A stored effort as `model` can run it: itself when the model offers
+    it, else the nearest level it does offer (down first); nothing for a
+    model with no reasoning control; as asked when the ladder is unknown."""
+    ladder = efforts_of(provider, model)
+    if ladder is None:
+        return wanted
+    return _clamp(wanted, ladder) if ladder else None
+
+
 def effective(thread: Thread) -> tuple[str | None, str | None]:
-    """(model, effort) the thread's next turn runs on."""
+    """(model, effort) the thread's next turn runs on.
+
+    A default thread follows the default model every turn, and an effort the
+    owner chose for it is re-clamped to whatever that model is now (A4
+    amendment), so a default that moves is never sent a level it lacks.
+    """
     if thread.model is None:
         model, effort = default_choice(thread.provider)
-        if thread.effort is not None:
-            effort = thread.effort
+        if thread.effort is not None and model is not None:
+            effort = clamp_effort(thread.provider, model, thread.effort)
         return model, effort
     effort = thread.effort if thread.effort is not None else default_effort(thread.provider, thread.model)
     return thread.model, effort
@@ -184,6 +204,11 @@ def check(provider: ProviderName, model: str | None, effort: str | None, *,
     `current` is the thread's pinned model, if any: a model already pinned
     stays usable after it leaves the roster (A3) — an effort change on it is
     not a new choice of model.
+
+    An effort with no model is checked against the default model of the
+    moment (what the owner was offered), but the model stays None: the
+    thread keeps following the default, and `effective` re-clamps the effort
+    to it every turn.
     """
     provider = ProviderName(provider)
     if model is not None and not isinstance(model, str):
