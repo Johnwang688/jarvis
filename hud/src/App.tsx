@@ -142,7 +142,9 @@ export default function App() {
             });
             threadId = t.id;
             // Remembered, so a retry after a failed send reuses this thread.
-            dispatch({ type: "patch", patch: { compose: { projectId, openedId: t.id } } });
+            // The whole compose row is kept, provider, model and effort with
+            // it, so a failed first send retries on the same choice.
+            dispatch({ type: "patch", patch: { compose: { ...compose, projectId, openedId: t.id } } });
           }
           pendingThread.current = threadId;
         }

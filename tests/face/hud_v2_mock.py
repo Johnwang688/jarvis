@@ -661,6 +661,9 @@ class MockDaemon:
 
                 parts = [p for p in path.split("/") if p]
                 if len(parts) == 3 and parts[0] == "threads" and parts[2] == "send":
+                    if w.get("fail_send"):
+                        w["fail_send"] -= 1
+                        return self._err(409, "thread session is opening or closing")
                     # The daemon logs the user line before it answers 202, so a
                     # transcript read right after a send already has it.
                     w["transcripts"].setdefault(parts[1], []).append(

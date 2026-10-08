@@ -1447,12 +1447,20 @@ def thread_model_checks(page, mock):
     opened = len(mock.posted("/threads"))
     box = page.locator('[data-testid="input"]')
     box.fill("model test")
+    w["fail_send"] = 1                                # the thread opens; its first send fails
     box.press("Enter")
     body = until(lambda: mock.posted("/threads")[opened:] or None)
     check("the first message carries the choice",
           bool(body) and body[-1].get("provider") == "fast"
           and body[-1].get("brief") == {"model": "openai/gpt-5.6-luna", "effort": "low"},
           str(body[-1] if body else None))
+    kept = until(lambda: page.evaluate("(() => { const c = window.__hud.state().compose;"
+                                       " return c && c.openedId && !window.__hud.state().busy ? c : null })()"))
+    check("a failed first send keeps the compose choice beside the opened thread",
+          bool(kept) and (kept.get("provider"), kept.get("model"), kept.get("effort"))
+          == ("fast", "openai/gpt-5.6-luna", "low"), str(kept))
+    box.fill("model test")
+    box.press("Enter")
     tid = until(lambda: page.evaluate("window.__hud.state().threadId"))
     mock.emit("turn_finished", {"stop": "end"}, thread_id=tid)
     until(lambda: page.locator('[data-testid="provider-chip"]').count() > 0)
