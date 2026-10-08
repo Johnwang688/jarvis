@@ -314,7 +314,8 @@ class Backend(unittest.TestCase):
         with patch.object(config, "DISCORD_TOKEN_PATH", self.root / "absent.json"):
             self.assertEqual(self.request("GET", "/discord"),
                              {"connected": False, "commands": {"state": "off", "count": 0,
-                                                               "synced_at": None, "error": None}})
+                                                               "synced_at": None, "error": None},
+                              "reporter": None})
 
         class Surface:
             def status(self):
@@ -325,7 +326,28 @@ class Backend(unittest.TestCase):
         self.daemon.discord = Surface()
         body = self.request("GET", "/discord")
         self.assertEqual(body, {"connected": True, "commands": {
-            "state": "ok", "count": 11, "synced_at": 1.0, "error": None}})
+            "state": "ok", "count": 11, "synced_at": 1.0, "error": None}, "reporter": None})
+        self.assertNotIn("synthetic-leak", json.dumps(body))
+
+        class WithReporter(Surface):
+            """PR A: the update poster's health, field by field — a stray key,
+            a URL in an odd field or a non-integer counter never passes."""
+            def status(self):
+                status = super().status()
+                status["reporter"] = {
+                    "state": "degraded", "reason": "channel 1 is missing a bot permission (50013)",
+                    "counters": {"posts": 4, "dm": 1, "leak": "synthetic-leak"},
+                    "dropped": 2, "url": "https://discord.com/synthetic-leak",
+                    "last_error": {"op": "create_thread", "status": 403, "code": 50013,
+                                   "at": 2.5, "message": "synthetic-leak"}}
+                return status
+
+        self.daemon.discord = WithReporter()
+        body = self.request("GET", "/discord")
+        self.assertEqual(body["reporter"], {
+            "state": "degraded", "reason": "channel 1 is missing a bot permission (50013)",
+            "counters": {"posts": 4, "dm": 1}, "dropped": 2,
+            "last_error": {"op": "create_thread", "status": 403, "code": 50013, "at": 2.5}})
         self.assertNotIn("synthetic-leak", json.dumps(body))
         self.request("GET", "/discord", headers={"Sec-Fetch-Site": "cross-site"}, status=403)
         self.request("GET", "/discord?x=1", status=400)

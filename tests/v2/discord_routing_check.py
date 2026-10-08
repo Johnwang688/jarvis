@@ -64,13 +64,17 @@ class FakeTransport:
 
     def __init__(self):
         self.calls = []
+        # Standing answers: (predicate(method, path), response).
+        self.rules = []
 
     def __call__(self, method, url, headers, timeout, **kwargs):
         assert headers == {"Authorization": f"Bot {TOKEN}"}
         assert TOKEN not in repr(kwargs)
-        self.calls.append({"method": method,
-                           "path": url.removeprefix(config.DISCORD_API),
-                           **deepcopy(kwargs)})
+        path = url.removeprefix(config.DISCORD_API)
+        self.calls.append({"method": method, "path": path, **deepcopy(kwargs)})
+        for matches, response in self.rules:
+            if matches(method, path):
+                return response
         return httpx.Response(200, json={"id": str(len(self.calls))})
 
 
@@ -269,6 +273,9 @@ class DiscordRoutingChecks(unittest.TestCase):
         # not merely for some approval post to exist: with two asks open, the
         # looser condition is already true when the second one is still in the air.
         wait_for(lambda: request.req_id in self.surface._approval_channels)
+        # ...and its post recorded (the map the buttons and S1's restart
+        # strip both read), which now happens before the ping line goes out.
+        wait_for(lambda: request.req_id in self.surface._approval_messages)
         return request, result, thread
 
     # -- who is heard ------------------------------------------------------
@@ -318,6 +325,77 @@ class DiscordRoutingChecks(unittest.TestCase):
         self.listener.feed(dm(f"no {request.code}"))
         worker.join(2)
         self.assertEqual(result["decision"], Decision.DENY)
+
+    # -- PR A: silent posts, the ping line, the DM fallback -----------------
+
+    def test_a_thread_approval_is_silent_and_followed_by_the_ping_line(self):
+        """D1: the approval post itself never notifies; one `<@owner>` line
+        right after it does. The buttons stay on the approval, not the ping."""
+        request, result, worker = self.ask(task_id=self.task.id)
+        wait_for(lambda: len(self.posts(TASK_THREAD)) == 2)
+        (_, approval), (_, ping) = self.posts(TASK_THREAD)
+        self.assertEqual(approval["flags"], 4096)
+        self.assertEqual(approval["allowed_mentions"], {"parse": []})
+        self.assertIn("components", approval)
+        self.assertEqual(ping, {"content": f"<@{OWNER}>",
+                                "allowed_mentions": {"parse": [], "users": [OWNER]}})
+        posted = [c for c in self.transport.calls if c["path"].endswith("/messages")]
+        self.assertEqual(self.surface._approval_messages[request.req_id][1],
+                         str(self.transport.calls.index(posted[0]) + 1))
+        self.approvals.shutdown()
+        worker.join(2)
+
+    def test_a_dm_approval_has_no_ping_line_and_no_silent_flag(self):
+        request, result, worker = self.ask(command="rm -rf build")
+        time.sleep(0.05)
+        [(_, body)] = self.posts(DM_CHANNEL)
+        self.assertNotIn("flags", body)
+        self.assertFalse([c for c in self.transport.calls if f"<@{OWNER}>" in json.dumps(c)])
+        self.approvals.shutdown()
+        worker.join(2)
+
+    def test_a_failed_thread_post_asks_in_the_dm_and_only_the_dm_answers(self):
+        self.transport.rules.append((
+            lambda method, path: method == "POST" and path == f"/channels/{TASK_THREAD}/messages",
+            httpx.Response(403, json={"code": 50013, "message": "Missing Permissions"})))
+        request, result, worker = self.ask(task_id=self.task.id)
+        self.assertEqual(self.surface._approval_channels[request.req_id], DM_CHANNEL)
+        channel, message_id, code = self.surface._approval_messages[request.req_id]
+        self.assertEqual((channel, code), (DM_CHANNEL, request.code))
+        # Persisted with S1's map, so a restart strips these buttons too.
+        saved = json.loads(self.surface._posts_path.read_text())
+        self.assertEqual(saved[request.req_id], [DM_CHANNEL, message_id, request.code])
+        self.assertIn(request.code, self.posts(DM_CHANNEL)[0][1]["content"])
+        self.assertNotIn("flags", self.posts(DM_CHANNEL)[0][1])
+        self.assertFalse([c for c in self.transport.calls if f"<@{OWNER}>" in json.dumps(c)])
+        # Asked in the DM now: the thread's yes resolves nothing.
+        self.transport.rules.clear()
+        self.listener.feed(message(f"yes {request.code}", channel=TASK_THREAD))
+        self.assertTrue(self.approvals.pending())
+        self.listener.feed(dm(f"yes {request.code}"))
+        worker.join(2)
+        self.assertEqual(result["decision"], Decision.ALLOW)
+
+    def test_approval_finds_the_thread_in_the_sidecar(self):
+        """Bug 1: the sidecar is read first, so a task record that lost its
+        thread id still has its approvals asked in its thread."""
+        task = self.stores.tasks.create(self.project.id, "sidecar only")
+        self.stores.tasks.save(task)
+        sidecar = self.stores.tasks.path(task.id).with_name("discord.json")
+        sidecar.write_text(json.dumps({"discord_thread_id": OTHER_THREAD}))
+        request, result, worker = self.ask(task_id=task.id)
+        self.assertEqual(self.surface._approval_channels[request.req_id], OTHER_THREAD)
+        self.approvals.shutdown()
+        worker.join(2)
+
+    def test_replies_in_a_guild_are_silent_and_in_the_dm_are_not(self):
+        self.listener.feed(message("status", channel=TASK_THREAD))
+        self.listener.feed(dm("projects"))
+        thread_posts = self.posts(TASK_THREAD)
+        dm_posts = self.posts(DM_CHANNEL)
+        self.assertTrue(thread_posts and dm_posts)
+        self.assertTrue(all(body.get("flags") == 4096 for _, body in thread_posts))
+        self.assertTrue(all("flags" not in body for _, body in dm_posts))
 
     def test_a_code_typed_anywhere_else_resolves_nothing(self):
         other = self.stores.tasks.create(self.project.id, "other", discord_thread_id=OTHER_THREAD)
@@ -754,6 +832,116 @@ class ListenerChecks(unittest.TestCase):
         self.assertEqual(seen[0]["channel_id"], PLAIN_CHANNEL)   # unmentioned, undropped
         self.assertEqual(ws.sent[0]["op"], 2)
         self.assertEqual(ws.sent[0]["d"]["token"], TOKEN)
+
+
+class FakeRunner:
+    """Records when it was served and stopped, and whether the Reporter was
+    already on the bus at that moment."""
+
+    def __init__(self, bus, log):
+        self.bus, self.log = bus, log
+        self.served = 0
+        self.reporter_listening = None
+
+    def serve(self, *, recover=True):
+        self.served += 1
+        self.log.append("serve")
+        with self.bus._lock:
+            subscribers = list(self.bus._subscribers.values())
+        probe = {"kind": "task_status_changed"}
+        self.reporter_listening = any(callable(f) and f(probe) for f in subscribers)
+
+    def stop(self, timeout=5.0):
+        self.log.append("runner.stop")
+
+
+class SurfaceChecks(unittest.TestCase):
+    """PR A wiring: one DiscordSurface, started and stopped in order, twice-safe."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        root = Path(self.tmp.name)
+        token_path = root / "discord_token.json"
+        token_path.write_text(json.dumps({"bot_token": TOKEN, "owner_id": OWNER}))
+        for name, value in (("DISCORD_TOKEN_PATH", token_path),
+                            ("ALLOWLIST_PATH", root / "allowlist.json")):
+            patcher = patch.object(config, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        network = patch.object(httpx, "request", side_effect=AssertionError("live network"))
+        network.start()
+        self.addCleanup(network.stop)
+        self.stores = Stores(root / "state")
+        self.daemon = Daemon(self.stores, {ProviderName.FAST: FakeFast()},
+                             lambda thread_id, brief: (lambda *_a: Decision.ALLOW), 0)
+        self.addCleanup(self.daemon.stop)
+        self.log = []
+        self.daemon.runner = FakeRunner(self.daemon.bus, self.log)
+        self.transport = FakeTransport()
+        log = self.log
+
+        class Listener(FakeListener):
+            def start(self):
+                log.append("gateway.start")
+
+            def stop(self):
+                log.append("gateway.stop")
+        self.listener = Listener
+
+    def surface(self):
+        from jarvis.v2.discord.surface import DiscordSurface
+        surface = DiscordSurface(self.daemon, control=FakeControl(self.stores),
+                                 rest=DiscordRest(self.transport), router=Router(self.stores),
+                                 listener_factory=self.listener, dm_channel=lambda: DM_CHANNEL,
+                                 announce=lambda text: None, sync_commands=False)
+        self.addCleanup(surface.stop)
+        return surface
+
+    def test_start_order_reporter_then_serve_then_gateway_and_idempotent(self):
+        surface = self.surface()
+        self.assertIsNone(surface.reporter)
+        surface.start()
+        surface.start()
+        self.assertEqual(self.log, ["serve", "gateway.start"])
+        self.assertTrue(self.daemon.runner.reporter_listening,
+                        "the Reporter must be subscribed before serve() recovers tasks")
+        self.assertIsNotNone(surface.reporter)
+        original = surface.reporter.close
+        surface.reporter.close = lambda flush=False: (self.log.append(f"reporter.close:{flush}"),
+                                                      original(flush=flush))
+        surface.stop()
+        surface.stop()
+        self.assertEqual(self.log[2:], ["gateway.stop", "runner.stop", "reporter.close:True"])
+        self.assertFalse(surface.reporter._worker.is_alive())
+
+    def test_start_discord_attaches_once_and_reports_the_reporter(self):
+        from jarvis.v2.hud_api import discord_status
+        kwargs = dict(rest=DiscordRest(self.transport), listener_factory=self.listener,
+                      dm_channel=lambda: DM_CHANNEL, announce=lambda text: None,
+                      sync_commands=False)
+        surface = daemon_mod.start_discord(self.daemon, FakeControl(self.stores), **kwargs)
+        self.addCleanup(surface.stop)
+        self.assertIs(self.daemon.discord, surface)
+        self.assertIs(daemon_mod.start_discord(self.daemon, **kwargs), surface)
+        self.assertEqual(self.daemon.runner.served, 1)
+        status = discord_status(self.daemon)
+        self.assertEqual(status["reporter"]["state"], "ok")
+        self.assertEqual(set(status["reporter"]),
+                         {"state", "reason", "counters", "dropped", "last_error"})
+
+    def test_a_surface_that_cannot_start_leaves_the_runner_serving(self):
+        class Broken(FakeListener):
+            def start(self):
+                raise RuntimeError("no socket")
+        with self.assertLogs("jarvis.v2.daemon", "WARNING"):
+            surface = daemon_mod.start_discord(
+                self.daemon, FakeControl(self.stores), rest=DiscordRest(self.transport),
+                listener_factory=Broken, dm_channel=lambda: DM_CHANNEL,
+                announce=lambda text: None, sync_commands=False)
+        self.assertIsNone(surface)
+        self.assertIsNone(self.daemon.discord)
+        self.assertNotIn("runner.stop", self.log)
 
 
 class DaemonStartupChecks(unittest.TestCase):
