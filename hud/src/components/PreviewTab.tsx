@@ -8,13 +8,29 @@
 // together are no sandbox at all, because a framed page could then reach out
 // of it and script the window that gates approvals.
 
-import { useState } from "react";
-import { judgePreviewUrl, workshopUrl } from "../lib/preview";
+import { useEffect, useState } from "react";
+import { api } from "../api";
+import { judgePreviewUrl, workshopPortFrom, workshopUrl } from "../lib/preview";
 
 export function PreviewTab(props: { projectId: string | null }) {
   const [typed, setTyped] = useState("");
   const [src, setSrc] = useState("");
   const [reason, setReason] = useState("");
+  // The workshop origin of *the daemon serving this window*, from /status.
+  // It used to be a constant 8403, so a HUD under test (served by a mock on
+  // another port) loaded the owner's live daemon's preview for the fixture
+  // project `p1`, and the live log filled with 400s.
+  const [workshopPort, setWorkshopPort] = useState<number | null>(null);
+  useEffect(() => {
+    let live = true;
+    api
+      .status()
+      .then((status) => live && setWorkshopPort(workshopPortFrom(status)))
+      .catch(() => live && setWorkshopPort(workshopPortFrom(null)));
+    return () => {
+      live = false;
+    };
+  }, []);
 
   const go = (raw: string) => {
     const v = judgePreviewUrl(raw);
@@ -46,10 +62,10 @@ export function PreviewTab(props: { projectId: string | null }) {
         <button
           type="button"
           data-testid="preview-project"
-          disabled={!props.projectId}
+          disabled={!props.projectId || workshopPort === null}
           onClick={() => {
-            if (!props.projectId) return;
-            const u = workshopUrl(props.projectId, "index.html");
+            if (!props.projectId || workshopPort === null) return;
+            const u = workshopUrl(props.projectId, "index.html", workshopPort);
             setTyped(u);
             go(u);
           }}

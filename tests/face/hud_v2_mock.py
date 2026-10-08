@@ -508,7 +508,8 @@ class MockDaemon:
                             return
 
                 if path == "/status":
-                    return self._json({"version": "2.0-mock", "uptime_s": 1})
+                    return self._json({"version": "2.0-mock", "uptime_s": 1,
+                                       "workshop_port": mock.workshop_port})
                 if path == "/projects":
                     return self._json(w["projects"])
                 if path == "/threads":
@@ -890,6 +891,28 @@ class MockDaemon:
         self.httpd.daemon_threads = True
         self._thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
         self._thread.start()
+
+        # The mock's own workshop origin, reported on /status, so the Preview
+        # tab never builds a URL to the owner's live daemon on 8403 (which is
+        # what put `GET /p/p1/index.html -> 400` in the live log).
+        class Workshop(SimpleHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                mock.workshop_hits.append(self.path)
+                body = b"<!doctype html><title>mock preview</title><h1>preview</h1>"
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        self.workshop_hits: list[str] = []
+        self.workshop = ThreadingHTTPServer(("127.0.0.1", 0), Workshop)
+        self.workshop.daemon_threads = True
+        self.workshop_port = self.workshop.server_address[1]
+        threading.Thread(target=self.workshop.serve_forever, daemon=True).start()
         return self
 
     def stop(self):
@@ -899,6 +922,9 @@ class MockDaemon:
         if self.httpd:
             self.httpd.shutdown()
             self.httpd.server_close()
+        if getattr(self, "workshop", None):
+            self.workshop.shutdown()
+            self.workshop.server_close()
 
     # -- driving -----------------------------------------------------------
 

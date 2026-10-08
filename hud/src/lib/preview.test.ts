@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { judgePreviewUrl, workshopUrl } from "./preview";
+import { judgePreviewUrl, workshopPortFrom, workshopUrl } from "./preview";
 
 describe("preview URL policy", () => {
   it("refuses the HUD's own origin, in every spelling", () => {
@@ -44,5 +44,20 @@ describe("preview URL policy", () => {
   it("builds a workshop path on the separate origin", () => {
     expect(workshopUrl("p1", "docs/index.html")).toBe("http://127.0.0.1:8403/p/p1/docs/index.html");
     expect(workshopUrl("p1", "/leading")).toBe("http://127.0.0.1:8403/p/p1/leading");
+    expect(workshopUrl("ab12cd34", "index.html", 41234)).toBe(
+      "http://127.0.0.1:41234/p/ab12cd34/index.html",
+    );
+  });
+
+  it("takes the workshop port from the serving daemon's /status", () => {
+    // A hard-coded 8403 sent the HUD suite's fixture project to the owner's
+    // live daemon (`GET /p/p1/index.html` -> 400 in its log).
+    expect(workshopPortFrom({ workshop_port: 41234 })).toBe(41234);
+    // Only a daemon too old to say falls back to the default.
+    expect(workshopPortFrom({})).toBe(8403);
+    expect(workshopPortFrom(null)).toBe(8403);
+    for (const bad of ["8403", 0, -1, 70000, 1.5, null]) {
+      expect(workshopPortFrom({ workshop_port: bad })).toBe(8403);
+    }
   });
 });

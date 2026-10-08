@@ -28,6 +28,7 @@ Run:          PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. .venv/bin/python \\
 from __future__ import annotations
 
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -477,6 +478,22 @@ def approval_checks(page, mock):
     page.keyboard.press("Escape")
     until(lambda: page.locator('[data-testid="approval-card"]').count() == 0)
 
+    # Auto mode must not flash (2026-10-08): only the broker asks the owner,
+    # and every broker question carries a code. A provider's "the gate was
+    # consulted" record has none and is never a card, however many arrive.
+    for index in range(10):
+        gate = {"req_id": f"gate-{index}", "tool": "Bash",
+                "args": {"command": "ls"}, "command": "ls"}
+        mock.emit("approval_requested", gate)
+        mock.emit("approval_resolved", {"req_id": f"gate-{index}", "decision": "allow"})
+    mock.emit("approval_requested", {"req_id": "gate-held", "tool": "Bash",
+                                     "args": {"command": "ls"}, "command": "ls"})
+    time.sleep(0.5)
+    check("a record without a broker code raises no card",
+          page.locator('[data-testid="approval-card"]').count() == 0)
+    check("and the orb never turns to the approval state",
+          page.evaluate("window.__hud.state().orb") != "approval")
+
 
 def task_checks(page, mock):
     print("\ntask tab")
@@ -692,8 +709,14 @@ def preview_checks(page, mock):
     page.locator('[data-testid="preview-project"]').click()
     until(lambda: page.locator('[data-testid="preview-frame"]').count() > 0)
     frame = page.locator('[data-testid="preview-frame"]')
-    check("the project preview loads from the workshop origin",
-          "8403" in (frame.get_attribute("src") or ""), frame.get_attribute("src") or "")
+    src = frame.get_attribute("src") or ""
+    # The serving daemon's workshop origin, from /status — never a constant
+    # 8403, which is the owner's live daemon (`GET /p/p1/index.html -> 400`).
+    check("the project preview loads from the workshop origin the daemon reported",
+          src == f"http://127.0.0.1:{mock.workshop_port}/p/p1/index.html", src)
+    until(lambda: mock.workshop_hits or None)
+    check("and the mock's own workshop served it", mock.workshop_hits == ["/p/p1/index.html"],
+          str(mock.workshop_hits))
     sandbox = frame.get_attribute("sandbox") or ""
     check("the frame is sandboxed", "allow-scripts" in sandbox, sandbox)
     # allow-scripts together with allow-same-origin is no sandbox at all.
@@ -1634,6 +1657,16 @@ def main():
                 args=["--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream"],
             )
             ctx = browser.new_context(permissions=["microphone"])
+            # The owner's live daemon listens on these. Nothing this suite
+            # loads may reach it: a hard-coded preview port once did, and its
+            # log filled with `GET /p/p1/index.html -> 400`.
+            live = re.compile(r"^https?://(127\.0\.0\.1|localhost|\[::1\]):(8402|8403|8405)/")
+
+            def refuse_live(route):
+                FAILURES.append(f"the HUD under test reached a live daemon port: {route.request.url}")
+                route.abort()
+
+            ctx.route(live, refuse_live)
             ctx.add_init_script(FAKE_RECOGNIZER)
             page = ctx.new_page()
             page.on("pageerror", lambda e: FAILURES.append(f"page error: {e}"))
