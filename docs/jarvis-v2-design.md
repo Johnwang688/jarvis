@@ -674,9 +674,19 @@ in `docs/plans/2026-10-07-discord-decisions.md`.
 - **The 3-second rule.** Read-only refusals answer at once (type 4,
   ephemeral); autocomplete answers at once (type 8, ≤ 25). Everything else
   sends type 5 **before** its first store write or control call, then edits
-  `@original`; past 14 minutes or on a 401/404 the reply becomes a channel
-  post. Lookups (`/status`, `/project list`) and refusals are ephemeral;
-  actions are public.
+  `@original`; past 14 minutes or on a 401/404 a public reply becomes a
+  channel post. A private one never does: its content is dropped and one
+  short public pointer ("That reply expired — run `/status` again") is
+  posted instead. Lookups (`/status`, `/project list`) and refusals are
+  ephemeral; actions are public. An unexpected exception after the deferral
+  says "That failed (`<Class>`); it may not have run." — never "Done." — and
+  a malformed id is an "I don't know" reply, never silence. A button or modal
+  with no `context` derives it from `guild_id` or a DM-typed channel; a
+  command never does, and a group DM is refused either way.
+- **Button posts survive a restart as plain posts.** The approval-post map
+  is also kept in `<v2 data>/discord/approval-posts.json`; on start, every
+  post the previous process left open loses its buttons (its request died
+  with that process — the broker denies everything at shutdown).
 - **One implementation per verb.** Verbs take a `Reply` sink —
   `ChannelReply` for typed messages, `InteractionReply` for commands — so
   the keyword and slash paths cannot drift.
