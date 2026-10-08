@@ -375,7 +375,8 @@ class Backend(unittest.TestCase):
         body = self.request("GET", "/discord")
         self.assertEqual(body["guild"], {"configured": True, "id": "800000000000000001"})
         self.assertEqual(body["linker"], {"state": "degraded", "reason": "1 channel rename(s) pending",
-                                          "pending_renames": 1, "awaiting_approval": 2})
+                                          "pending_renames": 1, "pending_moves": 0,
+                                          "awaiting_approval": 2})
         self.assertEqual(body["permissions"], {"missing": ["Attach Files"], "excess": ["Administrator"],
                                                "administrator": True, "checked_at": 3.0})
         self.assertNotIn("synthetic-leak", json.dumps(body))

@@ -204,6 +204,8 @@ export interface DiscordStatus {
     state: "ok" | "degraded" | "unconfigured";
     reason: string;
     pending_renames: number;
+    /** Review fix 2: archive/restore moves waiting out a 429 or an outage. */
+    pending_moves?: number;
     awaiting_approval: number;
   } | null;
   /** B1: the bot's server-wide permissions, by name. */

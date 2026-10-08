@@ -11,7 +11,7 @@
 // Every name and reason is React text: channel names come off the network,
 // and this window draws authorization cards.
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import type { Project, ProjectChannel } from "../types";
 import { channelPill, originText } from "../lib/discord";
@@ -20,27 +20,38 @@ export function DiscordLink(props: { project: Project; onChanged?: () => void })
   const [view, setView] = useState<ProjectChannel | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [loading, setLoading] = useState(false);
   const [paste, setPaste] = useState("");
   const [linking, setLinking] = useState(false);
+  // Every request takes a number; only the newest one may draw. A slow read
+  // started before an action must not paint the old state over its answer.
+  const seq = useRef(0);
 
   const load = useCallback((refresh = false) => {
-    api.projectDiscord(props.project.id, refresh).then(setView).catch((e) => setError(e.message));
+    const mine = ++seq.current;
+    setLoading(true);
+    api
+      .projectDiscord(props.project.id, refresh)
+      .then((next) => { if (mine === seq.current) setView(next); })
+      .catch((e) => { if (mine === seq.current) setError(e.message); })
+      .finally(() => { if (mine === seq.current) setLoading(false); });
   }, [props.project.id]);
   useEffect(() => load(), [load]);
 
   const act = (body: Parameters<typeof api.projectDiscordAction>[1]) => {
-    if (busy) return;
+    if (busy || loading) return;
+    const mine = ++seq.current;
     setBusy(true);
     setError("");
     api
       .projectDiscordAction(props.project.id, body)
       .then((next) => {
-        setView(next);
+        if (mine === seq.current) setView(next);
         setLinking(false);
         setPaste("");
         props.onChanged?.();
       })
-      .catch((e) => setError(e.message))
+      .catch((e) => { if (mine === seq.current) setError(e.message); })
       .finally(() => setBusy(false));
   };
 
@@ -48,12 +59,13 @@ export function DiscordLink(props: { project: Project; onChanged?: () => void })
   const unconfigured = view?.state === "unconfigured";
   const linked = !!view?.channel_id;
   const inbox = props.project.inbox;
-  const off = busy || !view || unconfigured;
+  const off = busy || loading || !view || unconfigured;
 
   return (
     <div className="col discord-link" data-testid="discord-link">
       <div className="row">
-        <span className={`pill ${pill.level}`} data-testid="discord-pill" data-state={view?.state || ""}>
+        <span className={`pill ${pill.level}`} data-testid="discord-pill" data-state={view?.state || ""}
+              data-loading={loading ? "1" : ""}>
           <i className={`discord-dot ${pill.level}`} aria-hidden="true" />
           {pill.text}
         </span>
@@ -63,7 +75,7 @@ export function DiscordLink(props: { project: Project; onChanged?: () => void })
         {view?.rename_pending ? (
           <span className="muted small" data-testid="discord-rename-pending">rename pending</span>
         ) : null}
-        <button type="button" className="ghost" data-testid="discord-recheck" disabled={busy}
+        <button type="button" className="ghost" data-testid="discord-recheck" disabled={busy || loading}
                 onClick={() => load(true)} title="check the channel again">↻</button>
       </div>
       {unconfigured ? (

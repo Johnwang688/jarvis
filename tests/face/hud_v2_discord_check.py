@@ -181,3 +181,35 @@ def discord_link_checks(page, mock, check, until, expand):
     check("the archive confirmation says the channel moves to Jarvis Archive, kept",
           "Discord channel moves to the Jarvis Archive" in summary and "kept" in summary, summary)
     _close(page, until)
+
+    # -- review fixes (PR #8) --------------------------------------------------------
+    # A read in flight disables the actions, so a stale read cannot be acted
+    # on, nor paint over an action's answer.
+    _edit(page, until, "p2")
+    w["slow_channel_view"] = 1.2
+    page.locator('[data-testid="discord-recheck"]').click()
+    until(lambda: pill.get_attribute("data-loading") == "1")
+    check("while the channel is being read, its actions are off",
+          page.locator('[data-testid="discord-unlink"]').is_disabled()
+          and page.locator('[data-testid="discord-recheck"]').is_disabled())
+    until(lambda: pill.get_attribute("data-loading") == "", timeout=4)
+    w["slow_channel_view"] = 0
+    check("and on again once it lands", not page.locator('[data-testid="discord-unlink"]').is_disabled())
+    _close(page, until)
+
+    # A New Project whose channel is refused says so instead of swallowing it.
+    w["refuse_channel_create"] = "Discord refused create_channel (HTTP 403, code 50013)"
+    page.locator('[data-testid="new-project"]').click()
+    page.wait_for_selector('[data-testid="project-discord-create"]')
+    page.locator('[data-testid="project-root"]').fill("/home/johnw/projects/jarvis-trading-firm")
+    name = page.locator('[data-testid="project-name"]')
+    name.fill("robotics")
+    name.press("Enter")
+    error = page.locator('[data-testid="error"]')
+    until(lambda: error.count() > 0 and "Discord channel was not" in error.inner_text())
+    text = error.inner_text() if error.count() else ""
+    check("a refused channel for a new project is shown as a note",
+          "Discord channel was not" in text and "50013" in text, text)
+    w["refuse_channel_create"] = None
+    page.evaluate("window.__hud.dispatch({type: 'patch', patch: {error: ''}})")
+    _close(page, until)
