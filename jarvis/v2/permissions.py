@@ -170,7 +170,7 @@ def log_decision(record: ApprovalRecord, path: Path | None = None) -> None:
 
 
 def protected_paths() -> set[Path]:
-    """The v2 config trio plus v1's allowlist, resolved.
+    """The v2 config trio, v1's allowlist and the Discord guild file, resolved.
 
     Derived from `config.ALLOWLIST_PATH`'s directory rather than hard-coded at
     `~/.config/jarvis`, so a test that repoints the allowlist repoints the trio
@@ -178,8 +178,12 @@ def protected_paths() -> set[Path]:
     """
     allow = Path(config.ALLOWLIST_PATH).expanduser()
     directory = allow.parent
-    names = ("allowlist.json", "models.json", "routing.json")
-    paths = {allow, Path(config.MODELS_PATH).expanduser()}
+    # discord_guild.json (B1) is not permission state but decides where Jarvis
+    # may create, rename and move channels: only `jarvis auth discord-guild`
+    # writes it.
+    names = ("allowlist.json", "models.json", "routing.json", "discord_guild.json")
+    paths = {allow, Path(config.MODELS_PATH).expanduser(),
+             Path(config.DISCORD_GUILD_PATH).expanduser()}
     paths |= {directory / name for name in names}
     return {_resolve(p) for p in paths}
 

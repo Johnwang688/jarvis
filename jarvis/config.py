@@ -377,6 +377,17 @@ DISCORD_TOKEN_PATH = Path(
     )
 )
 DISCORD_API = "https://discord.com/api/v10"
+# The Discord server Jarvis lives in (v2 B1): `{guild_id, category_id,
+# archive_category_id, ungrouped_channel_id}`, written once by the human-only
+# `jarvis auth discord-guild` and read by the daemon whenever it needs it, so
+# setup takes effect without a restart. Ids only, no secret — but it decides
+# where Jarvis may create and move channels, so no agent may write it
+# (`jarvis.v2.permissions.protected_paths`).
+DISCORD_GUILD_PATH = Path(
+    os.environ.get(
+        "JARVIS_DISCORD_GUILD", Path.home() / ".config" / "jarvis" / "discord_guild.json"
+    )
+)
 
 # Spotify OAuth token bundle (client id + refresh token), written once by
 # `jarvis auth spotify` and read only by spotify_auth.py. Same use-but-never-see

@@ -56,6 +56,7 @@ class Sandbox:
             "MODELS_PATH": config.MODELS_PATH,
             "V2_DATA_DIR": config.V2_DATA_DIR,
             "V2_ALWAYS_ASK": config.V2_ALWAYS_ASK,
+            "DISCORD_GUILD_PATH": config.DISCORD_GUILD_PATH,
         }
         self._home = os.environ.get("HOME")
         os.environ["HOME"] = str(self.home)
@@ -63,6 +64,7 @@ class Sandbox:
         config.MODELS_PATH = self.home / ".config" / "jarvis" / "models.json"
         config.V2_DATA_DIR = self.root / "v2data"
         config.V2_ALWAYS_ASK = self.home / ".config" / "jarvis" / "always-ask.json"
+        config.DISCORD_GUILD_PATH = self.home / ".config" / "jarvis" / "discord_guild.json"
         return self
 
     def __exit__(self, *exc):
@@ -351,6 +353,10 @@ def file_deny_checks():
             str(config.MODELS_PATH),
             str(config.ALLOWLIST_PATH.with_name("routing.json")),
             str(config.ALLOWLIST_PATH.with_name("models.json")),
+            # B1: where Jarvis may create and move channels is setup's alone.
+            str(config.DISCORD_GUILD_PATH),
+            str(config.ALLOWLIST_PATH.with_name("discord_guild.json")),
+            "~/.config/jarvis/discord_guild.json",
             "~/.config/jarvis/allowlist.json",                # spelled with a ~
             str(repo / "jarvis" / "tools" / ".." / "rules.py"),   # spelled with a ..
             "/tmp/somewhere/.env",
@@ -388,6 +394,17 @@ def file_deny_checks():
         eq(permit(*bash(f"tee {config.ALLOWLIST_PATH}"), brief), Decision.DENY,
            "a writing stem given the allowlist is refused")
         eq(box.decisions[-1]["layer"], "deny", "and it is refused at layer 1")
+        guild_file = config.DISCORD_GUILD_PATH
+        for tool, args in (("Write", {"file_path": str(guild_file), "content": "{}"}),
+                           ("write_file", {"path": str(guild_file), "content": "{}"}),
+                           ("Edit", {"file_path": str(guild_file), "old_string": "a",
+                                     "new_string": "b"})):
+            before = len(asker.seen)
+            eq(permit(tool, args, brief), Decision.DENY,
+               f"{tool} must not write discord_guild.json (B1)")
+            eq(len(asker.seen), before, f"{tool}'s guild-file refusal is never put to the owner")
+        eq(permit(*bash(f"echo '{{}}' > {guild_file}"), brief), Decision.DENY,
+           "a redirect onto discord_guild.json is refused")
 
         # A write under a credential directory is always-ask, not a refusal.
         before = len(asker.seen)

@@ -117,7 +117,9 @@ class DiscordRest:
         if self._closed.wait(delay):
             raise DiscordError("Error: Discord adapter closed during a rate-limit wait")
 
-    def _api(self, method, path, *, secrets=(), **kwargs):
+    def _api(self, method, path, *, secrets=(), timeout=30, patient=True, **kwargs):
+        """`timeout` is the transport's; `patient=False` raises a 429 at once
+        instead of sleeping it out (a status read with a 5 s budget, B1)."""
         token = v1._load_bundle()["bot_token"]
         hidden = [s for s in (token, *secrets) if s]
 
@@ -131,7 +133,7 @@ class DiscordRest:
             try:
                 response = self._request(
                     method, f"{config.DISCORD_API}{path}",
-                    headers={"Authorization": f"Bot {token}"}, timeout=30, **kwargs)
+                    headers={"Authorization": f"Bot {token}"}, timeout=timeout, **kwargs)
             except Exception as exc:
                 # Transport exception messages can contain the URL, headers or
                 # request data: the class is all that leaves.
@@ -146,7 +148,7 @@ class DiscordRest:
                         raise ValueError("invalid retry delay")
                 except (ValueError, KeyError, TypeError, AttributeError):
                     raise DiscordHTTPError(redact(v1._fail(response)), 429) from None
-                if slept + delay > MAX_SLEEP_S or retries >= MAX_RETRIES:
+                if not patient or slept + delay > MAX_SLEEP_S or retries >= MAX_RETRIES:
                     # The caller defers: a worker parked for minutes on one
                     # bucket would hold every other post behind it.
                     raise DiscordHTTPError(redact(v1._fail(response)), 429,
@@ -171,8 +173,79 @@ class DiscordRest:
         except (ValueError, KeyError, TypeError):
             raise DiscordError("Error: Discord API response has no id") from None
 
-    def create_channel(self, guild_id, name) -> str:
-        return self._id("POST", f"/guilds/{guild_id}/channels", json={"name": name, "type": 0})
+    def create_channel(self, guild_id, name, *, kind: int = 0, parent_id=None,
+                       topic=None) -> str:
+        """A text channel (0) or a category (4). Never a permission overwrite:
+        a channel Jarvis makes inherits its category's permissions."""
+        body = {"name": name, "type": int(kind)}
+        if parent_id is not None:
+            body["parent_id"] = str(parent_id)
+        if topic is not None:
+            body["topic"] = topic
+        return self._id("POST", f"/guilds/{guild_id}/channels", json=body)
+
+    def modify_channel(self, channel_id, *, name=None, parent_id=None, topic=None):
+        """Rename, move between categories, or set the topic (B1, D3/D4).
+
+        Only those three fields can ever be sent: never `lock_permissions` and
+        never `permission_overwrites`, so moving a channel into Jarvis Archive
+        does not re-sync or rewrite who can see it."""
+        body = {}
+        if name is not None:
+            body["name"] = name
+        if parent_id is not None:
+            body["parent_id"] = str(parent_id)
+        if topic is not None:
+            body["topic"] = topic
+        if not body:
+            raise DiscordError("Error: nothing to change on the channel")
+        self._api("PATCH", f"/channels/{channel_id}", json=body)
+
+    # -- reads (B1: setup and the channel light) ----------------------------
+
+    def _json(self, path, *, timeout=30, patient=True):
+        try:
+            return self._api("GET", path, timeout=timeout, patient=patient).json()
+        except ValueError:
+            raise DiscordError("Error: Discord response is not JSON") from None
+
+    def get_channel(self, channel_id, *, timeout=30, patient=True) -> dict:
+        body = self._json(f"/channels/{channel_id}", timeout=timeout, patient=patient)
+        if not isinstance(body, dict):
+            raise DiscordError("Error: Discord channel is not an object")
+        return body
+
+    def guild(self, guild_id, *, timeout=30, patient=True) -> dict:
+        """The guild object; it carries `owner_id` and `roles`."""
+        body = self._json(f"/guilds/{guild_id}", timeout=timeout, patient=patient)
+        if not isinstance(body, dict):
+            raise DiscordError("Error: Discord guild is not an object")
+        return body
+
+    def guild_member(self, guild_id, user_id, *, timeout=30, patient=True) -> dict:
+        body = self._json(f"/guilds/{guild_id}/members/{user_id}", timeout=timeout,
+                          patient=patient)
+        if not isinstance(body, dict):
+            raise DiscordError("Error: Discord member is not an object")
+        return body
+
+    def guild_channels(self, guild_id, *, timeout=30, patient=True) -> list:
+        body = self._json(f"/guilds/{guild_id}/channels", timeout=timeout, patient=patient)
+        if not isinstance(body, list):
+            raise DiscordError("Error: Discord channel list is not a list")
+        return [c for c in body if isinstance(c, dict)]
+
+    def my_guilds(self) -> list:
+        body = self._json("/users/@me/guilds")
+        if not isinstance(body, list):
+            raise DiscordError("Error: Discord guild list is not a list")
+        return [g for g in body if isinstance(g, dict)]
+
+    def me(self, *, timeout=30, patient=True) -> dict:
+        body = self._json("/users/@me", timeout=timeout, patient=patient)
+        if not isinstance(body, dict):
+            raise DiscordError("Error: Discord user is not an object")
+        return body
 
     def create_thread(self, channel_id, name, *,
                       auto_archive_duration: int = THREAD_ARCHIVE_MINUTES) -> str:
