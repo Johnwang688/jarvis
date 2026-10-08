@@ -68,6 +68,8 @@ class DiscordSurface:
         from .linker import ChannelLinker
         self.linker = ChannelLinker(self.daemon, self.rest, approvals=self.daemon.approvals)
         self.linker.start()
+        # B2's slash handlers (`/project`, `/channel`) reach it through the router.
+        self.router.linker = self.linker
         # 2. The runner's recovery publishes now, and the Reporter hears it.
         runner = getattr(self.daemon, "runner", None)
         if runner is not None and hasattr(runner, "serve"):

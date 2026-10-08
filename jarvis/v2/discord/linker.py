@@ -459,19 +459,28 @@ class ChannelLinker:
     def validate_link(self, project, channel_id) -> dict:
         """Every check a link must pass (shared with B2's `/project link`).
         -> the channel object."""
-        cfg = self._require_config()
+        self._require_config()
         if not isinstance(channel_id, str) or not _SNOWFLAKE.match(channel_id):
             raise LinkError(400, "channel_id must be a Discord channel id (digits only)")
         self._refuse_inbox(project)
+        self._refuse_unlinkable(project)
+        return self.validate_channel(channel_id, project_id=project.id)
+
+    def validate_channel(self, channel_id, *, project_id=None) -> dict:
+        """The channel half of `validate_link`: everything that does not depend
+        on the project. B2's `/project new` runs it *before* it makes a folder
+        or a project, so an unlinkable channel refuses with nothing made."""
+        cfg = self._require_config()
+        if not isinstance(channel_id, str) or not _SNOWFLAKE.match(channel_id):
+            raise LinkError(400, "channel_id must be a Discord channel id (digits only)")
         if channel_id == cfg.ungrouped_channel_id:
             raise LinkError(400, "#ungrouped belongs to the Inbox and cannot be linked")
         if channel_id in (cfg.category_id, cfg.archive_category_id,
                           *(self._state.get("archive_overflow") or [])):
             raise LinkError(400, "that is a Jarvis category, not a channel")
-        self._refuse_unlinkable(project)
         from ..daemon import safe_list
         for other in safe_list(self.stores.projects):
-            if other.id != project.id and other.discord_channel_id == channel_id:
+            if other.id != project_id and other.discord_channel_id == channel_id:
                 raise LinkError(409, f"that channel is already linked to project {other.name}")
         try:
             channel = self.rest.get_channel(channel_id, timeout=READ_TIMEOUT_S, patient=False)
@@ -514,6 +523,41 @@ class ChannelLinker:
                 return self.view(project.id, refresh=True)
             self._set_channel(project.id, None, None, by=by)
             return self.view(project.id, refresh=True)
+
+    def move_channel(self, project_id: str, *, archive: bool) -> dict:
+        """`/channel archive|restore` (B2): move a live project's channel to
+        the archive category or back to Jarvis. The project stays active and
+        its threads keep working. The owner typed the command, which is the
+        owner's permission (D4), so it acts at once. Never a delete (D3), and
+        never `lock_permissions` or overwrites. -> {"moved", "category"}."""
+        with self._lock:
+            cfg = self._require_config()
+            project = self._project(project_id)
+            self._refuse_inbox(project)
+            if project.archived:
+                raise LinkError(409, f"project {project.name} is archived; its channel moves "
+                                     "with the project, from the HUD")
+            channel_id = project.discord_channel_id
+            if not channel_id:
+                raise LinkError(409, f"project {project.name} has no channel")
+            try:
+                current = self.rest.get_channel(channel_id, timeout=READ_TIMEOUT_S,
+                                                patient=False)
+            except Exception as exc:
+                raise self._rest_refusal("get_channel", exc) from None
+            parent = str(current.get("parent_id") or "")
+            archives = {cfg.archive_category_id, *(self._state.get("archive_overflow") or [])}
+            if (archive and parent in archives) or (not archive and parent == cfg.category_id):
+                return {"moved": False, "category": self.category_name(cfg, parent)}
+            target = self.archive_target(cfg) if archive else cfg.category_id
+            try:
+                self.rest.modify_channel(channel_id, parent_id=target)
+            except Exception as exc:
+                raise self._rest_refusal("archive_channel" if archive else "restore_channel",
+                                         exc) from None
+            self.invalidate(project.id)
+            self._crowding_due = True
+            return {"moved": True, "category": self.category_name(cfg, target)}
 
     def backfill(self) -> dict:
         """A channel for every unlinked, live project whose folder exists, at

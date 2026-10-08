@@ -21,6 +21,7 @@ from copy import deepcopy
 import itertools
 import json
 import logging
+import os
 from pathlib import Path
 import re
 import sys
@@ -329,14 +330,14 @@ class RegistrationChecks(unittest.TestCase):
         payload = dcommands.to_discord()
         dcommands.validate(payload)
         self.assertEqual(sorted(c["name"] for c in payload),
-                         ["always", "answer", "cancel", "no", "project", "resume", "skill",
+                         ["always", "answer", "cancel", "channel", "no", "project", "resume", "skill",
                           "status", "steer", "task", "yes"])
         for command in payload:
             self.assertEqual(command["contexts"], [0, 1], command["name"])
             self.assertEqual(command["integration_types"], [0])
             self.assertEqual(command["default_member_permissions"], "0")
         project = next(c for c in payload if c["name"] == "project")
-        self.assertEqual([o["name"] for o in project["options"]], ["list"])   # no S1 stubs
+        self.assertEqual([o["name"] for o in project["options"]], ["list", "new", "link", "unlink", "channel"])
 
     def test_validate_catches_each_limit(self):
         def broken(change):
@@ -410,7 +411,7 @@ class SyncChecks(Harness):
         self.assertEqual(len(self.transport.puts()), 1)
         self.assertEqual(self.transport.puts()[0]["json"], dcommands.to_discord())
         self.assertEqual(self.surface.commands.state, "ok")
-        self.assertEqual(self.surface.commands.count, 11)
+        self.assertEqual(self.surface.commands.count, 12)
         before = len(self.transport.calls)
         self.listener.ready()                                   # a reconnect's READY
         self.assertEqual(len(self.transport.calls), before)
@@ -448,7 +449,7 @@ class SyncChecks(Harness):
         status = hud_api.discord_status(self.daemon)
         self.assertEqual(status["connected"], True)
         self.assertEqual(status["commands"]["state"], "ok")
-        self.assertEqual(status["commands"]["count"], 11)
+        self.assertEqual(status["commands"]["count"], 12)
         self.assertEqual(set(status["commands"]), {"state", "count", "synced_at", "error"})
         self.assertNotIn(TOKEN, json.dumps(status))
         self.assertNotIn(ITOKEN, json.dumps(status))
@@ -465,7 +466,7 @@ class SyncChecks(Harness):
         self.assertEqual(dcommands.main("sync", rest=self.rest, out=said.append), 0)
         self.assertEqual(len(self.transport.puts()), 2)
         self.assertEqual(dcommands.main("check", rest=self.rest, out=said.append), 0)
-        self.assertIn("up to date (11)", said[-1])
+        self.assertIn("up to date (12)", said[-1])
         self.assertNotIn(TOKEN, "\n".join(said))
 
 
@@ -913,6 +914,9 @@ class VerbChecks(Harness):
         path = Path(self.stores.root) / "discord" / "approval-posts.json"
         request, result, worker = self.ask(task_id=self.task.id)
         channel, message_id, code = self.surface._approval_messages[request.req_id]
+        # The map is written just after the post is recorded in memory, on the
+        # watcher's thread: wait for the file rather than racing it (~1 in 20).
+        wait_for(path.exists)
         self.assertEqual(json.loads(path.read_text()),
                          {request.req_id: [channel, message_id, code]})
         # The process dies with the request open: shutdown denies it without a
@@ -1097,6 +1101,365 @@ class SecretChecks(Harness):
         reply = InteractionReply(self.rest, APP, payload, fallback=self.surface._post)
         self.assertNotIn(payload["token"], repr(reply))
         self.assertNotIn(payload["token"], json.dumps(self.surface.status()))
+
+
+# -- B2: projects and folders from Discord (plan §5) ------------------------------
+
+B2_GUILD = "770000000000000001"
+B2_CATEGORY = "770000000000000010"
+B2_ARCHIVE = "770000000000000011"
+B2_UNGROUPED = "770000000000000012"
+B2_BOT_ROLE = "770000000000000020"
+UNLINKED = "770000000000000030"
+B2_PROJECT_CHANNEL = "770000000000000040"
+
+
+class GuildTransport(FakeTransport):
+    """FakeTransport plus just enough of a server for the channel linker:
+    channels, the guild, its roles and the bot's member record."""
+
+    def __init__(self):
+        super().__init__()
+        from jarvis.v2.discord import perms
+        self.guild = {"id": B2_GUILD, "owner_id": OWNER,
+                      "roles": [{"id": B2_GUILD, "permissions": "0"},
+                                {"id": B2_BOT_ROLE, "permissions": str(perms.REQUIRED)}]}
+        self.member = {"user": {"id": BOT}, "roles": [B2_BOT_ROLE]}
+        self.channels = {}
+        for cid, name, kind, parent in (
+                (B2_CATEGORY, "Jarvis", 4, None), (B2_ARCHIVE, "Jarvis Archive", 4, None),
+                (B2_UNGROUPED, "ungrouped", 0, B2_CATEGORY),
+                (UNLINKED, "robots-chat", 0, None),
+                (B2_PROJECT_CHANNEL, "jarvis", 0, B2_CATEGORY)):
+            self.channels[cid] = {"id": cid, "name": name, "type": kind, "guild_id": B2_GUILD,
+                                  "parent_id": parent, "permission_overwrites": []}
+
+    def __call__(self, method, url, headers, timeout, **kwargs):
+        path = url.removeprefix(config.DISCORD_API)
+        body = kwargs.get("json")
+        answer = None
+        if method == "GET" and path == f"/guilds/{B2_GUILD}":
+            answer = httpx.Response(200, json=self.guild)
+        elif method == "GET" and path == f"/guilds/{B2_GUILD}/members/{BOT}":
+            answer = httpx.Response(200, json=self.member)
+        elif method == "POST" and path == f"/guilds/{B2_GUILD}/channels":
+            cid = str(770000000000100000 + next(_ids))
+            self.channels[cid] = {"id": cid, "name": body["name"], "type": body.get("type", 0),
+                                  "guild_id": B2_GUILD, "parent_id": body.get("parent_id"),
+                                  "permission_overwrites": []}
+            answer = httpx.Response(201, json=self.channels[cid])
+        elif path.startswith("/channels/") and path.count("/") == 2 \
+                and method in ("GET", "PATCH"):
+            channel = self.channels.get(path.split("/")[2])
+            if channel is not None:
+                if method == "PATCH":
+                    channel.update(body)
+                answer = httpx.Response(200, json=channel)
+        if answer is None:
+            return super().__call__(method, url, headers, timeout, **kwargs)
+        with self.lock:
+            self.calls.append({"method": method, "path": path, **deepcopy(kwargs)})
+        return answer
+
+
+class ProjectCommandChecks(Harness):
+    """`/project new|link|unlink|channel` and `/channel archive|restore` (B2).
+
+    The folder roots are a temp `home`; the linker is a real `ChannelLinker`
+    over `GuildTransport`, never the owner's server."""
+
+    def setUp(self):
+        super().setUp()
+        from jarvis.v2.discord import linker as linker_mod
+        from jarvis.v2.discord.guild import GuildConfig
+        from jarvis.v2.discord.linker import ChannelLinker
+        pace = patch.object(linker_mod, "CREATE_INTERVAL", 0.0)
+        pace.start()
+        self.addCleanup(pace.stop)
+        self.transport = GuildTransport()
+        self.addCleanup(lambda: self.assertEqual(self.transport.violations, []))
+        self.rest = DiscordRest(self.transport)
+        self.surface.rest = self.rest
+        self.home = Path(self.tmp.name) / "home"
+        self.work = self.home / "jarvis-work"
+        self.work.mkdir(parents=True)
+        for name, value in (("PROJECT_FOLDER_ROOTS", (str(self.home),)),
+                            ("PROJECT_WORK_DIR", str(self.work))):
+            patcher = patch.object(config, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        cfg = GuildConfig(B2_GUILD, B2_CATEGORY, B2_ARCHIVE, B2_UNGROUPED)
+        self.linker = ChannelLinker(self.daemon, self.rest, approvals=self.approvals,
+                                    guild=lambda: cfg, bot_id=BOT)
+        self.surface.linker = self.linker
+        project = self.stores.projects.get(self.project.id)
+        project.discord_channel_id = B2_PROJECT_CHANNEL
+        self.stores.projects.save(project)
+        self.project = project
+        task = self.stores.tasks.get(self.task.id)
+        task.discord_thread_id = TASK_THREAD
+        self.stores.tasks.save(task)
+
+    # -- helpers -------------------------------------------------------------
+
+    def background(self, payload):
+        worker = threading.Thread(target=self.listener.interact, args=(payload,), daemon=True)
+        worker.start()
+        self.addCleanup(worker.join, 5)
+        return worker
+
+    def posted(self):
+        return [r for r in self.approvals.pending() if r.req_id in self.surface._approval_messages]
+
+    def asked(self, but=()):
+        wait_for(lambda: [r for r in self.posted() if r.req_id not in but])
+        return [r for r in self.posted() if r.req_id not in but][-1]
+
+    def press(self, request, verdict="a"):
+        channel, message_id, code = self.surface._approval_messages[request.req_id]
+        self.listener.interact(button(f"jv:{verdict}:{code}", message_id, channel=channel,
+                                      guild=None if channel == DM_CHANNEL else GUILD))
+
+    def named(self, name):
+        return [p for p in self.stores.projects.list() if p.name == name]
+
+    def creates(self):
+        return [c for c in self.transport.calls
+                if c["method"] == "POST" and c["path"] == f"/guilds/{B2_GUILD}/channels"]
+
+    def patches(self, channel):
+        return [c["json"] for c in self.transport.calls
+                if c["method"] == "PATCH" and c["path"] == f"/channels/{channel}"]
+
+    def form(self, name, folder, **kwargs):
+        return interaction(5, {"custom_id": "jv:project:new", "components": [
+            {"type": 1, "components": [{"type": 4, "custom_id": "name", "value": name}]},
+            {"type": 1, "components": [{"type": 4, "custom_id": "folder", "value": folder}]}]},
+            **kwargs)
+
+    # -- /project new ----------------------------------------------------------
+
+    def test_nothing_filled_in_opens_the_form_and_makes_nothing(self):
+        self.run_slash("project", {}, sub="new")
+        callback = self.last_callback()
+        self.assertEqual(callback["type"], 9)
+        self.assertEqual(callback["data"]["custom_id"], "jv:project:new")
+        fields = [row["components"][0]["custom_id"] for row in callback["data"]["components"]]
+        self.assertEqual(fields, ["name", "folder"])
+        self.assertEqual(self.approvals.decisions, [])
+        self.assertEqual(os.listdir(self.work), [])
+        self.assertEqual(self.named("Robotics"), [])
+        # The submitted form runs the command: an existing empty folder, no ask.
+        (self.work / "robotics").mkdir()
+        self.listener.interact(self.form("Robotics", ""))
+        self.assertEqual([p.root for p in self.named("Robotics")], [str(self.work / "robotics")])
+        self.assertEqual(self.approvals.decisions, [])
+
+    def test_from_the_dm_a_bare_name_asks_with_the_exact_path_then_makes_all_three(self):
+        worker = self.background(slash("project", {"name": "robotics"}, sub="new"))
+        request = self.asked()
+        target = self.work / "robotics"
+        self.assertEqual(request.tool, "project_folder")
+        self.assertEqual(request.args, {"action": "create", "path": str(target),
+                                        "name": "robotics"})
+        self.assertFalse(request.allowlistable)
+        self.assertEqual(request.origin, "Discord: new project")
+        channel, _message, code = self.surface._approval_messages[request.req_id]
+        self.assertEqual(channel, DM_CHANNEL)
+        post = self.transport.channel_posts(DM_CHANNEL)[-1]
+        self.assertIn(f'"path": "{target}"', post["content"])
+        self.assertNotIn("/always", post["content"])             # never offers always
+        self.assertEqual([b["label"] for b in post["components"][0]["components"]],
+                         ["Approve", "Deny"])
+        self.assertFalse(target.exists())                         # nothing before the yes
+        self.assertEqual(self.named("robotics"), [])
+        # A typed `/always` is refused too: a folder is never a standing rule.
+        self.run_slash("always", {"code": code})
+        self.refused("can't become a standing rule")
+        self.press(request)
+        worker.join(5)
+        self.assertTrue(target.is_dir())
+        self.assertEqual(os.listdir(target), [])
+        project = self.named("robotics")[0]
+        self.assertEqual(project.root, str(target))
+        self.assertEqual(len(self.creates()), 1)
+        self.assertEqual(self.creates()[0]["json"]["parent_id"], B2_CATEGORY)
+        self.assertIn(project.discord_channel_id, self.transport.channels)
+        self.assertEqual(project.discord_channel_origin, "created")
+        self.assertTrue(any(str(target) in text for text in self.said()))
+        # One-shot: the same button again runs nothing.
+        message_id = self.surface._approval_messages.get(request.req_id, (None, "1"))[1]
+        self.listener.interact(button(f"jv:a:{request.code}", message_id, channel=DM_CHANNEL))
+        self.refused("already answered")
+        self.assertEqual(len(self.named("robotics")), 1)
+
+    def test_a_deny_makes_nothing(self):
+        worker = self.background(slash("project", {"name": "robotics"}, sub="new"))
+        self.press(self.asked(), "d")
+        worker.join(5)
+        self.assertFalse((self.work / "robotics").exists())
+        self.assertEqual(self.named("robotics"), [])
+        self.assertEqual(self.creates(), [])
+        self.assertTrue(any("nothing was made" in text for text in self.said()))
+
+    def test_a_timeout_denies_and_makes_nothing(self):
+        self.approvals.timeout_s = 0.2
+        self.run_slash("project", {"name": "robotics"}, sub="new")
+        self.assertEqual(self.approvals.decisions[-1]["resolution"], "timeout")
+        self.assertFalse((self.work / "robotics").exists())
+        self.assertEqual(self.named("robotics"), [])
+
+    def test_an_empty_folder_is_used_without_asking(self):
+        (self.work / "notes").mkdir()
+        self.run_slash("project", {"name": "Notes", "folder": "notes"}, sub="new")
+        self.assertEqual(self.approvals.decisions, [])
+        self.assertEqual(self.named("Notes")[0].root, str(self.work / "notes"))
+
+    def test_a_nonempty_folder_asks_with_its_count_and_git(self):
+        target = self.home / "existing"
+        (target / ".git").mkdir(parents=True)
+        (target / "README.md").write_text("hello")
+        worker = self.background(slash("project", {"name": "Existing",
+                                                   "folder": str(target)}, sub="new"))
+        request = self.asked()
+        self.assertEqual(request.args, {"action": "adopt", "path": str(target),
+                                        "name": "Existing", "entries": 2, "git": True})
+        self.assertTrue(any("2 entries, a git repository" in text for text in self.said()))
+        self.press(request)
+        worker.join(5)
+        self.assertEqual(self.named("Existing")[0].root, str(target))
+        self.assertEqual(sorted(os.listdir(target)), [".git", "README.md"])
+
+    def test_a_change_after_the_yes_asks_again(self):
+        worker = self.background(slash("project", {"name": "robotics"}, sub="new"))
+        first = self.asked()
+        (self.work / "robotics" / "planted").mkdir(parents=True)
+        self.press(first)
+        second = self.asked(but={first.req_id})
+        self.assertEqual((second.args["action"], second.args["entries"]), ("adopt", 1))
+        self.assertTrue(any("Asking again" in text for text in self.said()))
+        self.assertEqual(self.named("robotics"), [])
+        self.press(second)
+        worker.join(5)
+        self.assertEqual(self.named("robotics")[0].root, str(self.work / "robotics"))
+
+    def test_refused_folders_make_nothing_and_say_why(self):
+        for folder in ("/etc/robotics", f"{self.home}/.ssh/robotics", "relative/path",
+                       str(self.home), str(self.work), f"{self.home}/missing/parent"):
+            self.run_slash("project", {"name": "robotics", "folder": folder}, sub="new")
+            self.refused("Nothing was made")
+        self.assertEqual(self.named("robotics"), [])
+        self.assertEqual(self.approvals.decisions, [])
+
+    def test_from_an_unlinked_channel_that_channel_is_linked(self):
+        (self.work / "robotics").mkdir()
+        self.run_slash("project", {"name": "Robotics"}, sub="new", channel=UNLINKED,
+                       guild=GUILD)
+        project = self.named("Robotics")[0]
+        self.assertEqual(project.discord_channel_id, UNLINKED)
+        self.assertEqual(project.discord_channel_origin, "linked")
+        self.assertEqual(self.creates(), [])
+
+    def test_from_an_unlinked_channel_the_ask_is_posted_there(self):
+        worker = self.background(slash("project", {"name": "robotics"}, sub="new",
+                                       channel=UNLINKED, guild=GUILD))
+        request = self.asked()
+        self.assertEqual(self.surface._approval_messages[request.req_id][0], UNLINKED)
+        self.press(request)                       # the button works in that channel
+        worker.join(5)
+        self.assertEqual(self.named("robotics")[0].discord_channel_id, UNLINKED)
+
+    def test_from_a_linked_channel_it_refuses(self):
+        for channel in (B2_PROJECT_CHANNEL, TASK_THREAD):
+            self.run_slash("project", {"name": "robotics"}, sub="new", channel=channel,
+                           guild=GUILD)
+            self.refused("already linked to project Jarvis")
+        self.assertEqual(self.named("robotics"), [])
+        self.assertEqual(os.listdir(self.work), [])
+
+    def test_an_unlinkable_channel_refuses_before_anything_is_made(self):
+        self.run_slash("project", {"name": "robotics"}, sub="new", channel=B2_UNGROUPED,
+                       guild=GUILD)
+        self.assertTrue(any("can't link this channel" in text for text in self.said()))
+        self.assertEqual(self.approvals.decisions, [])
+        self.assertFalse((self.work / "robotics").exists())
+        self.assertEqual(self.named("robotics"), [])
+
+    def test_other_channels_still_refuse_everything_else(self):
+        self.run_slash("status", channel=UNLINKED, guild=GUILD)
+        self.refused("isn't a Jarvis place")
+        self.run_slash("project", sub="list", channel=UNLINKED, guild=GUILD)
+        self.refused("isn't a Jarvis place")
+
+    # -- /project link, unlink, channel ------------------------------------------
+
+    def test_link_acts_at_once_in_an_unlinked_channel(self):
+        (self.home / "calc").mkdir()
+        calc = self.stores.projects.create("calc", str(self.home / "calc"))
+        self.run_slash("project", {"project": calc.id}, sub="link", channel=UNLINKED,
+                       guild=GUILD)
+        self.assertEqual(self.stores.projects.get(calc.id).discord_channel_id, UNLINKED)
+        self.assertEqual(self.approvals.decisions, [])
+        self.run_slash("project", {"project": calc.id}, sub="link",
+                       channel=B2_PROJECT_CHANNEL, guild=GUILD)
+        self.refused("already linked")
+
+    def test_unlink_asks_first_and_keeps_the_channel(self):
+        worker = self.background(slash("project", sub="unlink", channel=B2_PROJECT_CHANNEL,
+                                       guild=GUILD))
+        request = self.asked()
+        self.assertEqual((request.tool, request.args["action"]), ("discord_channel", "unlink"))
+        self.assertFalse(request.allowlistable)
+        self.assertEqual(self.surface._approval_messages[request.req_id][0],
+                         B2_PROJECT_CHANNEL)
+        self.press(request, "d")
+        worker.join(5)
+        self.assertEqual(self.stores.projects.get(self.project.id).discord_channel_id,
+                         B2_PROJECT_CHANNEL)
+        worker = self.background(slash("project", sub="unlink", channel=B2_PROJECT_CHANNEL,
+                                       guild=GUILD))
+        self.press(self.asked(but={request.req_id}))
+        worker.join(5)
+        self.assertIsNone(self.stores.projects.get(self.project.id).discord_channel_id)
+        self.assertIn(B2_PROJECT_CHANNEL, self.transport.channels)
+        self.assertFalse(any(c["method"] == "DELETE" for c in self.transport.calls))
+
+    def test_project_channel_makes_one_for_a_project_without(self):
+        (self.home / "calc").mkdir()
+        calc = self.stores.projects.create("calc", str(self.home / "calc"))
+        self.run_slash("project", {"project": "calc"}, sub="channel")
+        self.assertEqual(len(self.creates()), 1)
+        self.assertIsNotNone(self.stores.projects.get(calc.id).discord_channel_id)
+        self.run_slash("project", {"project": "calc"}, sub="channel")
+        self.refused("already has a channel")
+
+    # -- /channel archive|restore ------------------------------------------------
+
+    def test_channel_archive_and_restore_act_at_once_and_keep_the_project_active(self):
+        self.run_slash("channel", sub="archive", channel=B2_PROJECT_CHANNEL, guild=GUILD)
+        self.assertEqual(self.patches(B2_PROJECT_CHANNEL), [{"parent_id": B2_ARCHIVE}])
+        self.assertEqual(self.approvals.decisions, [])
+        self.assertIsNone(self.stores.projects.get(self.project.id).archived)
+        self.assertTrue(any("stays active" in text for text in self.said()))
+        # Still the project's place: commands keep working there.
+        self.run_slash("channel", sub="restore", channel=B2_PROJECT_CHANNEL, guild=GUILD)
+        self.assertEqual(self.patches(B2_PROJECT_CHANNEL)[-1], {"parent_id": B2_CATEGORY})
+        self.run_slash("channel", sub="restore", channel=B2_PROJECT_CHANNEL, guild=GUILD)
+        self.assertEqual(len(self.patches(B2_PROJECT_CHANNEL)), 2)     # already there
+        self.run_slash("channel", sub="archive")                       # the DM
+        self.refused("isn't a Jarvis place")
+
+    def test_no_command_archives_or_deletes_a_project(self):
+        verbs = {sub.name for sub in registry.BY_NAME["project"].subcommands}
+        self.assertEqual(verbs, {"list", "new", "link", "unlink", "channel"})
+        self.assertEqual({s.name for s in registry.BY_NAME["channel"].subcommands},
+                         {"archive", "restore"})
+        source = (REPO / "jarvis" / "v2" / "discord" / "project_commands.py").read_text()
+        for forbidden in ("archive_project", "delete_project", "restore_project", "trash",
+                          "rmtree", "rmdir", "os.remove", "os.unlink"):
+            self.assertNotIn(forbidden, source)
+        self.run_slash("channel", sub="archive", channel=B2_PROJECT_CHANNEL, guild=GUILD)
+        self.assertIsNone(self.stores.projects.get(self.project.id).archived)
 
 
 if __name__ == "__main__":
