@@ -136,6 +136,13 @@ Already: every provider `Event` plus lifecycle records (`thread_opened`,
 `mute`, `avatar`, `model`, `voice` (v1's broadcast kinds, so every open
 window relabels).
 
+**Except a provider's `approval_requested` / `approval_resolved`** (2026-10-08):
+those only mean "the gate was consulted" and fire for every tool call, so they
+never reach `/events`; the thread log keeps them as `gate_requested` /
+`gate_resolved` rows. The `approval_*` records on `/events` are the broker's
+alone, always carry a `code`, and `approval_resolved` also follows a timeout or
+shutdown.
+
 ## Errors
 
 Every error is `{"error": str}` with 400/403/404/409/413; never a stack
