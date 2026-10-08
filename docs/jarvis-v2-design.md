@@ -162,7 +162,11 @@ plan_updated · usage · turn_finished · error
 
 Providers translate their native streams into these. Nothing above the
 provider layer knows what a `stream-json` line or an app-server notification
-looks like. `reviewer_declined` is the event D7 hangs on.
+looks like. `reviewer_declined` is the event D7 hangs on. A provider's
+`approval_requested`/`approval_resolved` mean only "the gate was consulted"
+and never reach the bus (2026-10-08): the daemon logs them as
+`gate_requested`/`gate_resolved`, and the bus's `approval_*` come from the
+broker alone.
 
 ### 5.3 ClaudeProvider
 

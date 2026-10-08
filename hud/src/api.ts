@@ -194,7 +194,18 @@ export const api = {
       headers: { "Content-Type": blob.type || "audio/wav" },
       body: blob,
     });
-    if (!res.ok) throw new ApiError(res.status, `stt ${res.status}`);
+    if (!res.ok) {
+      // The daemon says which models failed and how (`speech-to-text
+      // unavailable: … (HTTP 404)`); show that rather than a bare status.
+      let message = `stt ${res.status}`;
+      try {
+        const err = await res.json();
+        if (err && typeof err.error === "string" && err.error) message = err.error;
+      } catch {
+        /* not JSON: keep the status */
+      }
+      throw new ApiError(res.status, message);
+    }
     const body = await res.json();
     return body.text || "";
   },

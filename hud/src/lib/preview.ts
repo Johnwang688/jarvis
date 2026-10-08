@@ -62,6 +62,21 @@ export function judgePreviewUrl(raw: string, facePort = FACE_PORT): PreviewVerdi
   return { ok: true, url: url.href, reason: "" };
 }
 
+/**
+ * The workshop port the serving daemon reported on `/status`.
+ *
+ * Only a daemon too old to report one falls back to the default: the HUD and
+ * its daemon ship together, so that is a stale daemon, not a test. A test's
+ * mock reports its own port, which is the point — a hard-coded 8403 sent the
+ * HUD suite's fixture project to the owner's live daemon.
+ */
+export function workshopPortFrom(status: unknown): number {
+  const port = (status as { workshop_port?: unknown } | null)?.workshop_port;
+  return typeof port === "number" && Number.isInteger(port) && port > 0 && port < 65536
+    ? port
+    : WORKSHOP_PORT;
+}
+
 /** The workshop URL for a file inside a project (docs/hud-api.md, Preview origin). */
 export function workshopUrl(projectId: string, rel: string, port = WORKSHOP_PORT): string {
   const clean = rel.replace(/^\/+/, "");

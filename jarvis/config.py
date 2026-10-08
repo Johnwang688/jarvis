@@ -513,6 +513,14 @@ DESKTOP_APPS: dict[str, dict] = {
 # parakeet 100% @0.52s, grok-stt 100% @0.80s, voxtral 100% @0.99s,
 # mai-transcribe rejects webm. Parakeet is also the cheapest ($0.0015/min).
 STT_MODEL = os.environ.get("JARVIS_STT_MODEL", "nvidia/parakeet-tdt-0.6b-v3")
+# Tried in order when STT_MODEL fails (2026-10-08). Parakeet has exactly one
+# OpenRouter endpoint (Together); when that endpoint is down every request
+# answers `HTTP 404: Provider returned 404` and dictation simply stopped.
+# grok-stt was the runner-up in the 2026-07-30 probe (100% @0.80s) and is a
+# different provider entirely, so one outage cannot take out both. A comma
+# list; empty disables the fallback.
+STT_FALLBACK_MODELS = [m.strip() for m in os.environ.get(
+    "JARVIS_STT_FALLBACK", "x-ai/grok-stt-1.0").split(",") if m.strip()]
 
 
 def _load_dotenv() -> None:

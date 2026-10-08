@@ -68,6 +68,11 @@ change). An unknown key is a 400 that names it; it is never read as absent.
   iframes that, or any `http://localhost:<port>/…` URL the owner types.
   Never the HUD origin: the backend refuses to proxy it, the frontend
   refuses to load it.
+- The port is read from `GET /status` → `workshop_port` (2026-10-08), never
+  assumed: a hard-coded 8403 made the HUD suite's mock-served window load the
+  owner's **live** daemon's preview for fixture project `p1`
+  (`GET /p/p1/index.html -> 400` in the live log). Only a daemon too old to
+  report one falls back to 8403.
 
 ## Threads (additions)
 
@@ -111,7 +116,10 @@ change). An unknown key is a 400 that names it; it is never read as absent.
 
 ## Speech
 
-- `POST /stt` body `audio/*` (WAV or webm) → `{"text"}` via `voice.stt`.
+- `POST /stt` body `audio/*` (WAV or webm) → `{"text"}` via `voice.stt`,
+  which tries `STT_MODEL` then `STT_FALLBACK_MODELS`. When every model fails
+  it is a **502** whose `error` names each model and its HTTP status (never a
+  response body), and the HUD shows that sentence.
 - `POST /say` as v1 → audio bytes (`RIFF` or MP3; the client sniffs).
 - The HUD keeps v1's `/converse`-style streaming for **chat turns** as a
   client convenience? **No.** v2 chat is `POST /threads/{id}/send` (202)
@@ -127,6 +135,13 @@ Already: every provider `Event` plus lifecycle records (`thread_opened`,
 `schedule_fired {schedule_id, task_id}`, `usage_updated {provider}`,
 `mute`, `avatar`, `model`, `voice` (v1's broadcast kinds, so every open
 window relabels).
+
+**Except a provider's `approval_requested` / `approval_resolved`** (2026-10-08):
+those only mean "the gate was consulted" and fire for every tool call, so they
+never reach `/events`; the thread log keeps them as `gate_requested` /
+`gate_resolved` rows. The `approval_*` records on `/events` are the broker's
+alone, always carry a `code`, and `approval_resolved` also follows a timeout or
+shutdown.
 
 ## Errors
 

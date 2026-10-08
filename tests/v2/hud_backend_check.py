@@ -277,7 +277,13 @@ class Backend(unittest.TestCase):
 
     def test_listeners_static_and_preview_origin(self):
         for port in (self.daemon.port, self.daemon.face_port):
-            self.assertEqual(self.request("GET", "/status", port=port)["version"], 2)
+            status = self.request("GET", "/status", port=port)
+            self.assertEqual(status["version"], 2)
+            # The HUD builds preview URLs from this; a constant 8403 sent the
+            # HUD suite to the owner's live daemon (2026-10-08). After start it
+            # is the bound port, never the ephemeral 0 it was asked for.
+            self.assertEqual(status["workshop_port"], self.daemon.workshop_port)
+            self.assertNotEqual(status["workshop_port"], 0)
             # Either the built HUD (title pinned for FORBIDDEN_TITLES) or, with no
         # build present, the placeholder naming hud/dist.
         page = self.request("GET", "/", port=port)
@@ -320,6 +326,11 @@ class Backend(unittest.TestCase):
 
     def test_discord_status_route_holds_states_never_secrets(self):
         """`GET /discord` (S1): connected + the command sync, nothing else."""
+        # Never the owner's real guild file (B1): once they ran `jarvis auth
+        # discord-guild`, this test read their live guild id and failed.
+        guild = patch.object(config, "DISCORD_GUILD_PATH", self.root / "absent-guild.json")
+        guild.start()
+        self.addCleanup(guild.stop)
         with patch.object(config, "DISCORD_TOKEN_PATH", self.root / "absent.json"):
             self.assertEqual(self.request("GET", "/discord"),
                              {"connected": False, "commands": {"state": "off", "count": 0,
@@ -1023,6 +1034,19 @@ class Backend(unittest.TestCase):
             stt.assert_called_once_with(b"RIFFaudio", mime="audio/wav")
             self.request("POST", "/stt", raw=b"text", headers={"Content-Type": "text/plain"}, status=400)
             self.request("POST", "/stt", raw=b"", headers={"Content-Type": "audio/webm"}, status=400)
+        # A provider outage is a sentence for the HUD (502 naming each model
+        # and its status), never a traceback; a raw LLMError's body is not
+        # reflected, because it can quote anything the provider sent back.
+        down = voice.STTUnavailable("speech-to-text unavailable: a/one (HTTP 404), b/two (HTTP 503)")
+        with patch.object(voice, "stt", side_effect=down):
+            body = self.request("POST", "/stt", raw=b"RIFFaudio",
+                                headers={"Content-Type": "audio/wav"}, status=502)
+            self.assertEqual(body["error"], str(down))
+        from jarvis import llm
+        with patch.object(voice, "stt", side_effect=llm.LLMError("HTTP 500: never-expose-this")):
+            body = self.request("POST", "/stt", raw=b"RIFFaudio",
+                                headers={"Content-Type": "audio/wav"}, status=502)
+            self.assertEqual(body["error"], "speech-to-text failed (LLMError)")
         for audio, mime in ((b"RIFFwav", "audio/wav"), (b"MP3data", "audio/mpeg")):
             with patch.object(voice, "tts", return_value=audio) as tts:
                 self.assertEqual(self.request("POST", "/say", {"text": "x" * 2500, "voice": "test"}), audio)
