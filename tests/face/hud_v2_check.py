@@ -1547,6 +1547,15 @@ def thread_model_checks(page, mock):
     check("a failed first send keeps the compose choice beside the opened thread",
           bool(kept) and (kept.get("provider"), kept.get("model"), kept.get("effort"))
           == ("fast", "openai/gpt-5.6-luna", "low"), str(kept))
+    # Bugbot 2026-10-08: the chips used to vanish here, until the retry.
+    chips = until(lambda: page.locator('[data-testid="model-chip-select"]').count() > 0
+                  and page.locator('[data-testid="effort-chip-select"]').count() > 0)
+    check("and the chips stay on screen, on that choice, for the retry",
+          bool(chips)
+          and page.locator('[data-testid="model-chip-select"]').input_value() == "openai/gpt-5.6-luna"
+          and page.locator('[data-testid="effort-chip-select"]').input_value() == "low",
+          page.locator('[data-testid="model-chip-select"]').input_value()
+          if page.locator('[data-testid="model-chip-select"]').count() else "no model chip")
     box.fill("model test")
     box.press("Enter")
     tid = until(lambda: page.evaluate("window.__hud.state().threadId"))
@@ -1619,7 +1628,9 @@ def thread_model_checks(page, mock):
     check("the catalogue search narrows the list",
           page.locator('[data-testid^="catalog-row-"]').count() == 1)
     page.locator('[data-testid="catalog-use-deepseek/deepseek-v4-flash-0731"]').click()
-    added = until(lambda: mock.sent("POST", "/models") or None)
+    # Wait for *this* add: earlier sections already POSTed /models (the global
+    # picker's {model, effort}), so "any POST" raced the click.
+    added = until(lambda: [b for b in mock.sent("POST", "/models") if "add" in b] or None)
     check("using a catalogue model pins it to the roster",
           bool(added) and added[-1] == {"add": "deepseek/deepseek-v4-flash-0731"}, str(added))
     sent = until(lambda: [b for b in mock.sent("PATCH", f"/threads/{tid}") if (b.get("model") or "").startswith("deepseek")] or None)

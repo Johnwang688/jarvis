@@ -9,9 +9,9 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../api";
 import type { Action, State } from "../state/store";
-import type { ModelRow, Thread } from "../types";
+import type { ModelRow } from "../types";
 import {
-  chipEditable, choiceOf, composeChoice, patchBody, PROVIDERS, providerRefusal, visionNote,
+  chipState, patchBody, PROVIDERS, providerRefusal, visionNote,
   type Choice, type ThreadModels,
 } from "../lib/threadmodel";
 import { CatalogPicker, ModelChip } from "./ModelChip";
@@ -36,13 +36,13 @@ export function useThreadModel(state: State, dispatch: React.Dispatch<Action>, o
     void reload();
   }, [reload]);
 
-  const thread: Thread | null = state.threadId ? state.threads.find((t) => t.id === state.threadId) || null : null;
-  const composing = !!state.compose && !state.compose.openedId;
+  // The open thread, or the one a compose row opened whose first send failed
+  // (lib/threadmodel `chipState`): the chips stay on screen for the retry
+  // instead of vanishing between "composing" and "a thread".
+  const { choice, targetId, composing, editable } = chipState(state);
   // Clear a stale refusal when the conversation changes.
-  useEffect(() => setError(""), [state.threadId, composing]);
+  useEffect(() => setError(""), [targetId, composing]);
 
-  const choice: Choice | null = composing ? composeChoice(state.compose) : thread ? choiceOf(thread) : null;
-  const editable = chipEditable(thread, composing);
   // While composing, grey out a provider the chosen project's permission
   // profile cannot run, with the reason as its tooltip (POST /threads would
   // refuse it with the same reason).
@@ -60,15 +60,22 @@ export function useThreadModel(state: State, dispatch: React.Dispatch<Action>, o
         });
         return;
       }
-      if (!thread) return;
-      const body = patchBody(choiceOf(thread), next);
+      if (!targetId || !choice) return;
+      const body = patchBody(choice, next);
       if (!body) return;
+      const opened = state.compose?.openedId === targetId ? state.compose : null;
       api
-        .setThreadModel(thread.id, body)
-        .then((record) => dispatch({ type: "thread_patch", id: record.id, patch: record }))
+        .setThreadModel(targetId, body)
+        .then((record) => {
+          dispatch({ type: "thread_patch", id: record.id, patch: record });
+          // An opened-but-unsent thread's chips read the compose row: keep it
+          // on what the server now holds.
+          if (opened)
+            dispatch({ type: "patch", patch: { compose: { ...opened, model: record.model ?? null, effort: record.effort ?? null } } });
+        })
         .catch((e) => setError(`Could not change model: ${e.message}`));
     },
-    [composing, state.compose, thread, dispatch],
+    [composing, state.compose, choice, targetId, dispatch],
   );
 
   const openCatalog = useCallback(() => {

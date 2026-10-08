@@ -50,7 +50,14 @@ open a breaker: 30 s, then 60 s, doubling up to 5 min, then a reconcile.
 with `changed: ["discord_channel_id"]`), that project's tasks are reconciled
 at once: an active or blocked task gets its thread and card in the new
 channel, and one whose old thread was deleted gets a fresh one — the DM is
-then the safety net only if that channel breaks too.
+then the safety net only if that channel breaks too. A live task whose thread
+is in **another** channel (the project was unlinked and linked elsewhere)
+gets a new thread in the new one, "Continued from <#old>", and the old thread
+— kept, never deleted — says "Moved to <#new>" (O-C5, applied to tasks).
+
+**Never backwards.** The sidecar's `seen_updated` is the newest
+`Task.updated` delivered; an event snapshot older than that is skipped, so a
+reconcile that ran ahead of queued snapshots cannot be undone by them.
 
 `status()` is what `GET /discord` shows and what a `discord_status` SSE event
 carries on every change: ok, degraded (with a reason) or down.
@@ -160,9 +167,15 @@ def _scrubbed(task: Task) -> Task:
 
 
 def _created(task):
+    return _stamp(task.created)
+
+
+def _stamp(value):
+    """An ISO stamp as a datetime, or None. `Task.updated` mixes seconds and
+    microseconds precision, so stamps are compared parsed, never as text."""
     from datetime import datetime
     try:
-        return datetime.fromisoformat(task.created)
+        return datetime.fromisoformat(value)
     except (TypeError, ValueError):
         return None
 
@@ -211,6 +224,7 @@ class Reporter:
         self._broken: dict[str, tuple[int, float]] = {}   # channel -> (code, wall time)
         self._alerted: dict[str, float] = {}
         self._list_backoff = 0
+        self._parent_unknown: set[str] = set()     # relinks whose old parent is unknown, warned
         self.last_error = None
         self._published = ("ok", "")
         self._worker = threading.Thread(target=self._run, name="jarvis-discord-reporter",
@@ -515,10 +529,34 @@ class Reporter:
             LOG.warning("Discord thread id not saved on task %s (%s)", task.id,
                         type(exc).__name__)
         sidecar["discord_thread_id"] = thread
+        # The parent channel, so a relink to another channel can tell that a
+        # live task's thread is in the old one (item 7, O-C5 for tasks).
+        sidecar["channel_id"] = str(channel)
         sidecar.pop("rethread", None)
         self._save(task.id, sidecar)
         self._call("add_owner", self.rest.add_owner, thread, channel=thread)
+        moved_from = sidecar.pop("moved_from", None)
+        if moved_from:
+            self._moved(task, sidecar, str(moved_from), str(thread))
         return thread, False
+
+    def _moved(self, task, sidecar, old, new):
+        """The project moved to another channel while this task was live: the
+        new thread opens with "Continued from <#old>" (which stands in for
+        Started), and the old thread — kept as it is, never deleted — says
+        "Moved to <#new>". Both quiet, both best-effort: a link that fails
+        costs a link, never the task's posts."""
+        ok, message_id, _ = self._post("continued", new, content=_clean(
+            f"Continued from <#{old}> (task {task.id}: the project moved channel)."))
+        if ok:
+            sidecar["started_message_id"] = message_id
+        self._save(task.id, sidecar)
+        # No `channel=`: a refusal in the old place is not this task's broken
+        # channel any more, so it must not turn the light amber.
+        if self._call("moved_note", self.rest.post, old, silent=True,
+                      content=_clean(f"Moved to <#{new}>: this task's updates continue "
+                                     "there."))[0]:
+            self._count("posts")
 
     def _card(self, task, project, sidecar, thread):
         embed = status_embed(task, project)
@@ -552,6 +590,18 @@ class Reporter:
     # -- one task ----------------------------------------------------------
 
     def _deliver(self, task: Task, project, sidecar: dict, *, reconcile=False, questions=None):
+        # Never let an older snapshot move the sidecar backwards. A reconcile
+        # posts from disk while older event snapshots can still be queued
+        # behind it; replaying one would rewind `phase` and make the next pass
+        # post Verified, Done and the owner ping a second time. `updated` moves
+        # strictly forward on every transition, so a snapshot older than the
+        # newest one already delivered has nothing left to say.
+        stamp, seen = _stamp(task.updated), _stamp(sidecar.get("seen_updated"))
+        if not reconcile and stamp is not None and seen is not None and stamp < seen:
+            self._count("stale_snapshots")
+            return
+        if stamp is not None and (seen is None or stamp > seen):
+            sidecar["seen_updated"] = task.updated
         task = _scrubbed(task)
         project = copy.copy(project)
         project.name = _clean(project.name)
@@ -637,7 +687,20 @@ class Reporter:
                         if place and self._broken.pop(str(place), None) is not None:
                             self._changed()
         question = task.status.open_question
-        if phase == TaskState.CLARIFYING and question and question != sidecar.get("open_question"):
+        # Two questions in one phase share a `Task.updated` stamp, so the
+        # stamp cannot order them: an event snapshot posts (or clears) a
+        # question only while it is still the one open on disk. A reconcile
+        # reads the disk, so it always is.
+        current = question
+        if not reconcile:
+            try:
+                record = self.stores.tasks.get(task.id)
+            except StoreError:
+                record = None
+            current = _clean(record.status.open_question) if record is not None else None
+        if question != current:
+            self._count("stale_questions")
+        elif phase == TaskState.CLARIFYING and question and question != sidecar.get("open_question"):
             options = next((q.options for q in task.spec.questions
                             if q.text == question and q.answer is None), None)
             if options is None and questions:
@@ -697,7 +760,38 @@ class Reporter:
             if task.state in TERMINAL_STATES:
                 continue
             sidecar = read_sidecar(self.stores, task.id)
-            if project.discord_channel_id and sidecar.get("thread_gone"):
+            live = None if sidecar.get("thread_gone") else (
+                sidecar.get("discord_thread_id") or task.discord_thread_id)
+            # A sidecar from before the parent was recorded: its thread was
+            # made in the channel this link replaced, or Discord says where.
+            parent = sidecar.get("channel_id") or previous
+            if live and not parent and project.discord_channel_id:
+                ok, info, _ = self._call("get_thread", self.rest.get_channel, live)
+                parent = (info or {}).get("parent_id") if ok and isinstance(info, dict) else None
+                if not parent and task.id not in self._parent_unknown:
+                    # Its posts stay in the old thread: say so, once per task.
+                    self._parent_unknown.add(task.id)
+                    self._count("parent_unknown")
+                    LOG.warning("Discord relink: task %s's thread has no known parent channel; "
+                                "its updates stay in that thread", task.id)
+            if (project.discord_channel_id and live and parent
+                    and str(parent) != str(project.discord_channel_id)):
+                # Relinked to another channel while the task is live: a new
+                # thread there, linked both ways; the old one is kept as is.
+                for key in ("discord_thread_id", "started_message_id",
+                            "discord_status_message_id", "embed_sha", "channel_id"):
+                    sidecar.pop(key, None)
+                self._drop_pending(str(live), task.id)
+                sidecar["rethread"] = True
+                sidecar["moved_from"] = str(live)
+                # An open question is asked again in the new thread, which is
+                # where the owner's typed answer is now routed.
+                sidecar.pop("open_question", None)
+                sidecar["retired_threads"] = sorted(
+                    set(sidecar.get("retired_threads") or []) | {str(live)})
+                self._count("moved_tasks")
+                self._save(task.id, sidecar)
+            elif project.discord_channel_id and sidecar.get("thread_gone"):
                 # A fresh thread in the new channel; the gone one is kept on
                 # record only as history.
                 gone = sidecar.get("discord_thread_id") or task.discord_thread_id
@@ -777,8 +871,12 @@ class Reporter:
                 LOG.warning("Discord reconcile of a task failed (%s)", type(exc).__name__)
         if self._open_until is not None and not self.breaker_open():
             # A whole pass with the breaker shut: it is closed again, whether
-            # or not the pass had anything to send.
+            # or not the pass had anything to send — and the failure count and
+            # back-off go with it, so the HUD light returns to ok rather than
+            # staying "degraded" on a failure that is over.
             self._open_until = None
+            self._failures = 0
+            self._backoff = 0
             self._changed()
 
     # -- card edits --------------------------------------------------------
@@ -844,7 +942,10 @@ class Reporter:
                         # Events were evicted: their state is on disk, so the
                         # reconcile, not the event stream, catches up.
                         self._dropped_seen = dropped
-                        self._schedule_reconcile(self._clock())
+                        # Never before the breaker re-closes: a reconcile due
+                        # "now" with the breaker open is a busy loop of
+                        # get(timeout=0).
+                        self._schedule_reconcile(max(self._clock(), self._open_until or 0.0))
                     if self.breaker_open():
                         # Whatever this event says is on disk; the reconcile at
                         # the end of the back-off catches up. Once the back-off

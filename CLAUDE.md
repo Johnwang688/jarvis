@@ -141,6 +141,28 @@ retry cannot undo them. Tests point the folder roots at
 temp dirs — never the owner's home. **B2b** (`project_propose`, the
 Sonnet/Opus rule) waits for peers phase 0.
 
+**Bugbot fixes (2026-10-08, design §11.5/§11.6/§11.8).** The rule they share:
+**nothing is marked done before it worked, and nothing older overwrites
+something newer.** The reporter skips an event snapshot older than the
+sidecar's `seen_updated` (a reconcile that ran ahead of queued snapshots used
+to rewind `phase` and post Done and the ping twice); a relink to another
+channel gives a live task a new thread there ("Continued from"/"Moved to",
+the old one kept — the O-C5 *Interpretation* for tasks). The linker marks its
+reconcile, crowding count and Inbox link done only on success. A turn that
+ends with a fatal error, or whose provider closed its handle, drops the daemon
+session so the next send resumes it (`session.lost`); a refused model switch
+rolls the record back only while it still asks for the refused choice. In
+chats, a files-only Discord message runs as a turn and **never answers** a
+question (D7); a question is recorded even with nowhere to post it, and
+`daemon.answer` logs `question_answered` so the mirror re-posts an open one
+of the running turn from the log — never one from before a restart.
+`InteractionReply.said` is set only after something reached the owner (a
+5xx on the idempotent edit is retried once; a followup or a 429 goes straight
+to the channel — a retried POST can post twice). The fast path declares
+`keeps_session_on_error`: its v1 transcript is saved only when a turn
+returns, so a fatal 429/5xx keeps the session (dropping it would cost the
+model the failed turn); it is dropped only once really closed.
+
 **Every chat is a Discord thread, PR C (2026-10-07, design §11.8; plan
 §4, decisions C1).** `ChatMirror` (`discord/mirror.py`) gives a chat a
 thread in its project's channel at its first owner message and posts the

@@ -44,7 +44,7 @@ from jarvis.v2.daemon import Daemon  # noqa: E402
 from jarvis.v2.discord import commands as dcommands  # noqa: E402
 from jarvis.v2.discord.gateway import DiscordRouter, _V2Listener  # noqa: E402
 from jarvis.v2.discord.interactions import InteractionReply  # noqa: E402
-from jarvis.v2.discord.rest import DiscordError, DiscordRest  # noqa: E402
+from jarvis.v2.discord.rest import DiscordError, DiscordHTTPError, DiscordRest  # noqa: E402
 from jarvis.v2.model import OpenQuestion, ProviderName, TaskState, utcnow  # noqa: E402
 from jarvis.v2.provider import Decision  # noqa: E402
 from jarvis.v2.router import Router  # noqa: E402
@@ -799,6 +799,84 @@ class TimingChecks(Harness):
         self.refused("limit")
         self.assertFalse(self.deferred_already())
         self.assertEqual(self.provider.messages, [])
+
+    def test_bugbot6_a_failing_token_reply_is_retried_then_posted_in_the_channel(self):
+        """A 5xx used to be logged only, with `said` already set: Discord
+        stayed on "thinking…" and the outcome reached nobody."""
+        self.transport.fail[("PATCH", r"@original$")] = (503, {"message": "unavailable"})
+        with self.assertLogs("jarvis.v2.discord.interactions", logging.WARNING):
+            self.listener.interact(slash("steer", {"text": "x"}, **in_guild(TASK_THREAD)))
+        self.assertEqual(len(self.edits()), 2, "retried once")
+        self.assertIn("Noted", self.transport.channel_posts(TASK_THREAD)[-1]["content"])
+
+    def test_bugbot6_a_reply_that_works_on_its_retry_is_said_once(self):
+        reply = InteractionReply(self.rest, APP, slash("status"), fallback=self.surface._post,
+                                 clock=lambda: self.now[0])
+        reply.defer()
+        real = self.rest.edit_original
+        outcomes = [DiscordHTTPError("unavailable", 503)]
+
+        def flaky(*args, **kwargs):
+            if outcomes:
+                raise outcomes.pop()
+            return real(*args, **kwargs)
+        with patch.object(self.rest, "edit_original", side_effect=flaky), \
+                self.assertLogs("jarvis.v2.discord.interactions", logging.WARNING):
+            self.assertEqual(reply.send("All good."), "@original")
+        self.assertTrue(reply.said and reply.original_used)
+        self.assertEqual([e["content"] for e in self.edits()], ["All good."])
+        self.assertEqual(self.transport.channel_posts(), [])
+        reply.finish()
+        self.assertEqual(len(self.edits()), 1, "no Done. after a real reply")
+
+    def test_review_f4_a_followup_or_a_429_is_never_retried(self):
+        """A followup POST may exist behind a 502/504 (a retry posts it
+        twice), and a long 429 asked for a wait: both go straight to the
+        channel. Only the idempotent edit is retried, on a 5xx."""
+        reply = InteractionReply(self.rest, APP, slash("steer", {"text": "x"}, **in_guild(TASK_THREAD)),
+                                 fallback=self.surface._post, clock=lambda: self.now[0])
+        reply.defer()
+        self.assertEqual(reply.send("first"), "@original")
+        calls = []
+
+        def broken_followup(*args, **kwargs):
+            calls.append(kwargs.get("content"))
+            raise DiscordHTTPError("bad gateway", 502)
+        with patch.object(self.rest, "followup", side_effect=broken_followup), \
+                self.assertLogs("jarvis.v2.discord.interactions", logging.WARNING):
+            reply.send("second")
+        self.assertEqual(calls, ["second"], "a followup was retried")
+        self.assertEqual(self.transport.channel_posts(TASK_THREAD)[-1]["content"], "second")
+
+        late = InteractionReply(self.rest, APP, slash("steer", {"text": "x"}, **in_guild(TASK_THREAD)),
+                                fallback=self.surface._post, clock=lambda: self.now[0])
+        late.defer()
+        edits = []
+
+        def limited(*args, **kwargs):
+            edits.append(kwargs.get("content"))
+            raise DiscordHTTPError("slow down", 429, retry_after=60.0)
+        with patch.object(self.rest, "edit_original", side_effect=limited), \
+                self.assertLogs("jarvis.v2.discord.interactions", logging.WARNING):
+            late.send("third")
+        self.assertEqual(edits, ["third"], "a long 429 was retried at once")
+        self.assertEqual(self.transport.channel_posts(TASK_THREAD)[-1]["content"], "third")
+
+    def test_bugbot6_said_is_not_set_before_anything_was_said(self):
+        reply = InteractionReply(self.rest, APP, slash("status"),
+                                 fallback=lambda *a, **k: self.assertTrue(False, "no fallback yet"),
+                                 clock=lambda: self.now[0])
+        reply.defer()
+        seen = []
+
+        def look(*args, **kwargs):
+            seen.append(reply.said)
+            raise DiscordHTTPError("unavailable", 503)
+        with patch.object(self.rest, "edit_original", side_effect=look), \
+                patch.object(reply, "_channel", return_value=None), \
+                self.assertLogs("jarvis.v2.discord.interactions", logging.WARNING):
+            reply.send("x")
+        self.assertEqual(seen, [False, False])
 
     def test_a_deferral_that_says_nothing_still_stops_thinking(self):
         reply = InteractionReply(self.rest, APP, slash("status"), fallback=self.surface._post,

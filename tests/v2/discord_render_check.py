@@ -1194,6 +1194,186 @@ class DiscordChecks(unittest.TestCase):
             self.drained()
         self.assertEqual(len(self.creates()), 1)
 
+    # -- Bugbot fixes (2026-10-08) ----------------------------------------
+
+    def test_bugbot1_an_older_snapshot_never_rewinds_the_sidecar(self):
+        """A reconcile delivers Done from disk while older snapshots are still
+        queued behind it. Replaying them used to rewind `phase`, and the next
+        pass posted Verified, Done and the ping a second time."""
+        gate, entered = threading.Event(), threading.Event()
+        original = self.rest.post
+
+        def slow(*args, **kwargs):
+            entered.set()
+            gate.wait(3)
+            return original(*args, **kwargs)
+        self.reporter()
+        with patch.object(self.rest, "post", side_effect=slow):
+            self.move(TaskState.CLARIFYING)                  # the worker parks in a post
+            self.assertTrue(entered.wait(3))
+            self.move(TaskState.PLANNED, TaskState.RUNNING, TaskState.VERIFYING,
+                      TaskState.DONE)
+            self.rep._schedule_reconcile(self.rep._clock())  # a drop, a breaker close
+            gate.set()
+            wait_for(lambda: self.rep.counters["reconciles"] >= 2, timeout=4)
+            self.drained()
+        # Any later pass finds nothing left to say.
+        self.rep._schedule_reconcile(self.rep._clock())
+        self.nudge()
+        wait_for(lambda: self.rep.counters["reconciles"] >= 3)
+        self.drained()
+        heads = [(c or "<card>").split(":")[0] for c in self.contents(self.thread_id())]
+        self.assertEqual(heads.count("Done"), 1, heads)
+        self.assertEqual(heads.count("<@owner>"), 1, heads)
+        self.assertEqual(self.sidecar()["phase"], "done")
+        self.assertGreaterEqual(self.rep.counters["stale_snapshots"], 1)
+
+    def test_bugbot5_a_closing_pass_resets_the_failure_count(self):
+        """A pass with nothing to send closes the breaker; the failure count
+        and the back-off go too, so the light returns to ok."""
+        now = [1000.0]
+        self.reporter(channel=None, dm=None, clock=lambda: now[0])
+        with self.assertLogs("jarvis.v2.discord.reporter", logging.WARNING):
+            for _ in range(3):
+                self.rep._failed("post", httpx.ConnectError("x"))
+        self.assertTrue(self.rep.breaker_open())
+        self.assertEqual(self.rep.status()["state"], "down")
+        now[0] = 2000.0
+        self.nudge()
+        wait_for(lambda: self.rep.counters["reconciles"] >= 2)
+        self.drained()
+        self.assertEqual((self.rep._failures, self.rep._backoff), (0, 0))
+        self.assertEqual(self.rep.status()["state"], "ok")
+
+    def test_bugbot5_a_drop_while_the_breaker_is_open_waits_for_it(self):
+        now = [1000.0]
+        self.bus = EventBus(capacity=1)
+        self.reporter(channel=None, dm=None, clock=lambda: now[0])
+        with self.assertLogs("jarvis.v2.discord.reporter", logging.WARNING):
+            for _ in range(3):
+                self.rep._failed("post", httpx.ConnectError("x"))
+        until = self.rep._open_until
+        self.rep.subscription.dropped += 1                    # an eviction
+        self.nudge()
+        self.drained()
+        self.assertGreaterEqual(self.rep._reconcile_at, until,
+                                "a reconcile due inside the back-off busy-loops")
+
+    def test_bugbot7_a_relink_moves_live_tasks_to_the_new_channel(self):
+        """Unlinked, then linked to another channel: a live task opens a new
+        thread there, linked both ways, and the old thread is kept."""
+        self.reporter(channel="old-channel")
+        self.move(TaskState.CLARIFYING, TaskState.PLANNED, TaskState.RUNNING)
+        self.drained()
+        old = self.thread_id()
+        self.assertEqual(self.sidecar()["channel_id"], "old-channel")
+
+        def relink(channel, previous):
+            project = self.stores.projects.get(self.project.id)
+            project.discord_channel_id = channel
+            self.stores.projects.save(project)
+            self.bus.publish({"kind": "project_updated", "project_id": project.id,
+                              "data": {"project_id": project.id,
+                                       "changed": ["discord_channel_id"],
+                                       "previous": {"discord_channel_id": previous}}})
+            self.drained()
+        relink(None, "old-channel")
+        relink("new-channel", None)
+        new = self.thread_id()
+        self.assertNotEqual(new, old)
+        self.assertEqual([c["path"] for c in self.creates()][-1], "/channels/new-channel/threads")
+        self.assertEqual(self.stores.tasks.get(self.task.id).discord_thread_id, new)
+        self.assertTrue(any(f"Continued from <#{old}>" in (c or "") for c in self.contents(new)))
+        self.assertTrue(any(f"Moved to <#{new}>" in (c or "") for c in self.contents(old)))
+        self.assertFalse(any((c or "").startswith("Started") for c in self.contents(new)))
+        self.assertEqual(self.sidecar()["retired_threads"], [old])
+        self.assertEqual(self.sidecar()["channel_id"], "new-channel")
+        # Later milestones, ping included, land in the new thread only.
+        before = len(self.contents(old))
+        self.move(TaskState.FAILED)
+        self.drained()
+        self.assertTrue(any((c or "").startswith("Failed") for c in self.contents(new)))
+        self.assertIn("<@owner>", self.contents(new))
+        self.assertEqual(len(self.contents(old)), before)
+
+    # -- PR #12 review ---------------------------------------------------------
+
+    def relink(self, channel, previous):
+        project = self.stores.projects.get(self.project.id)
+        project.discord_channel_id = channel
+        self.stores.projects.save(project)
+        self.bus.publish({"kind": "project_updated", "project_id": project.id,
+                          "data": {"project_id": project.id, "changed": ["discord_channel_id"],
+                                   "previous": {"discord_channel_id": previous}}})
+        self.drained()
+
+    def test_review_f3_a_stale_question_in_the_same_phase_is_never_posted(self):
+        """Two questions in one CLARIFYING phase share a stamp: a queued Q1
+        snapshot replayed after a reconcile delivered Q2 used to post Q1 and
+        then Q2 again — three questions, three pings."""
+        self.reporter()
+        task = self.move(TaskState.CLARIFYING)
+        self.drained()
+        q1 = OpenQuestion("Which target?", True)
+        task.spec.questions = [q1]
+        task.status.open_question = q1.text
+        self.stores.tasks.save(task)
+        stale = deepcopy(task)
+        task.spec.questions[0].answer = "staging"
+        task.spec.questions.append(OpenQuestion("Which region?", True))
+        task.status.open_question = "Which region?"
+        self.stores.tasks.save(task)
+        self.rep._schedule_reconcile(self.rep._clock())
+        self.nudge()
+        wait_for(lambda: self.rep.counters["reconciles"] >= 2)
+        self.drained()
+        self.publish(task=stale)
+        self.drained()
+        self.publish(task=task)
+        self.drained()
+        asked = [c for c in self.contents() if (c or "").startswith("Question")]
+        self.assertEqual(len(asked), 1, asked)
+        self.assertIn("Which region?", asked[0])
+        self.assertEqual(self.contents().count("<@owner>"), 1)
+        self.assertGreaterEqual(self.rep.counters["stale_questions"], 1)
+
+    def test_review_a_relink_with_an_open_question_asks_it_once_there(self):
+        self.reporter(channel="old-channel")
+        task = self.move(TaskState.CLARIFYING)
+        task.spec.questions = [OpenQuestion("Which target?", True)]
+        task.status.open_question = "Which target?"
+        self.stores.tasks.save(task)
+        self.publish(task=task)
+        self.drained()
+        self.relink("new-channel", "old-channel")
+        new = self.thread_id()
+        self.publish(task=task)                 # the same snapshot again
+        self.drained()
+        self.relink("new-channel", "old-channel")   # and a duplicate link event
+        self.assertEqual(sum(1 for c in self.contents(new) if (c or "").startswith("Question")), 1)
+        self.assertEqual(self.contents(new).count("<@owner>"), 1)
+        self.assertEqual(len(self.creates()), 2)
+
+    def test_review_f5_an_unknown_parent_is_warned_once(self):
+        """A sidecar from before `channel_id`, no `previous`, and Discord
+        cannot say where the thread lives: the task stays put, and says so."""
+        self.reporter(channel="old-channel")
+        self.move(TaskState.CLARIFYING, TaskState.PLANNED, TaskState.RUNNING)
+        self.drained()
+        side = self.sidecar()
+        side.pop("channel_id", None)
+        self.rep._save(self.task.id, side)
+        old = self.thread_id()
+        self.relink(None, "old-channel")
+        self.fake.rules.append((lambda m, p: m == "GET" and p == f"/channels/{old}",
+                                lambda: httpx.Response(500, json={"message": "down"})))
+        with self.assertLogs("jarvis.v2.discord.reporter", logging.WARNING) as logs:
+            self.relink("new-channel", None)
+            self.relink("new-channel", None)
+        warned = [line for line in logs.output if "no known parent" in line]
+        self.assertEqual(len(warned), 1, logs.output)
+        self.assertEqual(self.thread_id(), old)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

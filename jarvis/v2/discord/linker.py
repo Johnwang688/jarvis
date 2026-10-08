@@ -80,6 +80,7 @@ READ_TIMEOUT_S = 5.0
 CREATE_INTERVAL = 1.0
 TICK_S = 5.0
 RETRY_S = 30.0                 # a transient failure without a retry_after
+LISTING_BACKOFF_MAX_S = 600.0  # a channel listing that keeps failing: at most every 10 min
 ASK_AGAIN_S = 24 * 3600.0      # after a denied or unanswered housekeeping ask
 ORIGIN = "Jarvis housekeeping"
 TEXT, CATEGORY = 0, 4
@@ -173,6 +174,12 @@ class ChannelLinker:
         self._linked_cfg = None
         self._reconciled_cfg = None
         self._crowding_due = True
+        # A reconcile or crowding pass whose channel listing failed is tried
+        # again, but not before this (monotonic) time.
+        self._listing_retry_at = None
+        self._listing_backoff = 0
+        self._listing_retry_after = None
+        self._refreshed_at = None
         self.last_error: dict | None = None
         self._state = self._load_state()
         self._stop = threading.Event()
@@ -253,6 +260,7 @@ class ChannelLinker:
             found = self.rest.guild_channels(cfg.guild_id, timeout=READ_TIMEOUT_S, patient=False)
         except Exception as exc:
             self._failed("list_channels", exc)
+            self._listing_retry_after = getattr(exc, "retry_after", None)
             return None
         self._channels_cache = (now, found)
         return found
@@ -722,17 +730,19 @@ class ChannelLinker:
             channel_id = project.discord_channel_id
             if not channel_id:
                 raise LinkError(409, f"project {project.name} has no channel")
-            # The owner's command supersedes any older move still waiting to
-            # retry (a 429'd restore, a crowding move): left pending, it would
-            # undo this one as soon as it came due.
-            with self._state_lock:
-                if self._state["pending_moves"].pop(str(channel_id), None) is not None:
-                    self._save_state()
             try:
                 current = self.rest.get_channel(channel_id, timeout=READ_TIMEOUT_S,
                                                 patient=False)
             except Exception as exc:
+                # Nothing was decided: an older pending move stays pending.
                 raise self._rest_refusal("get_channel", exc) from None
+            # The owner's command supersedes any older move still waiting to
+            # retry (a 429'd restore, a crowding move): left pending, it would
+            # undo this one as soon as it came due. Dropped only now that the
+            # command will act — a failed lookup must not lose the older move.
+            with self._state_lock:
+                if self._state["pending_moves"].pop(str(channel_id), None) is not None:
+                    self._save_state()
             parent = str(current.get("parent_id") or "")
             if (archive and parent in self.archive_categories(cfg)) \
                     or (not archive and parent == cfg.category_id):
@@ -800,12 +810,15 @@ class ChannelLinker:
         except StoreError as exc:
             LOG.warning("Discord linker could not read the Inbox (%s)", type(exc).__name__)
             return False
-        self._linked_cfg = cfg
         if inbox.discord_channel_id == cfg.ungrouped_channel_id \
                 and inbox.discord_channel_origin == "created":
+            self._linked_cfg = cfg
             return False
         with self._lock:
             self._set_channel(inbox.id, cfg.ungrouped_channel_id, "created", by="owner")
+        # Marked done only once the link is written: a failure is retried on
+        # the next tick instead of leaving the Inbox unlinked until restart.
+        self._linked_cfg = cfg
         return True
 
     # -- the two channel writes, kept when they fail (review fix 2) --------------
@@ -990,7 +1003,7 @@ class ChannelLinker:
         if project is None or not project.discord_channel_id or project.inbox:
             return
         channel = project.discord_channel_id
-        self.move(project.id, channel, cfg.category_id, "restore")
+        moved = self.move(project.id, channel, cfg.category_id, "restore")
         current = self._channel_name(cfg, channel)
         to = self.target_name(project, current)
         sanctioned = self.sanctioned(project.id)
@@ -1006,7 +1019,15 @@ class ChannelLinker:
             self._ask_rename(project, channel, to,
                              f"project {project.name} was restored under a name nobody "
                              "approved for its channel; it was moved back with its old name")
-        self._note(channel, "Restored.")
+        if moved:
+            self._note(channel, "Restored.")
+        elif str(channel) in (self._state.get("pending_moves") or {}):
+            self._note(channel, (f"Project {project.name} was restored in the HUD. Moving this "
+                                 "channel back to Jarvis did not work yet; it will be retried."))
+        else:
+            self._note(channel, (f"Project {project.name} was restored in the HUD, but Discord "
+                                 "refused to move this channel back to Jarvis. Move it by hand, "
+                                 "or use /channel restore."))
         self._crowding_due = True
 
     # -- start-up reconcile (review fix 2) ------------------------------------------
@@ -1015,13 +1036,15 @@ class ChannelLinker:
         """Bring channels in line with their projects after a restart or an
         outage: an archived project's channel still in Jarvis goes to the
         archive; a live project's channel that went to the archive *with its
-        project* comes back. One moved for crowding stays. -> moves made."""
+        project* comes back. One moved for crowding stays. -> moves made, or
+        None when the guild's channels could not be listed (nothing was
+        checked, so the caller tries again)."""
         cfg = self.config()
         if cfg is None:
             return 0
         listed = self.channels(cfg, refresh=True)
         if listed is None:
-            return 0
+            return None
         from ..daemon import safe_list
         parents = {str(c.get("id")): str(c.get("parent_id") or "") for c in listed}
         archives = self.archive_categories(cfg)
@@ -1054,13 +1077,14 @@ class ChannelLinker:
 
     def check_crowding(self) -> list[str]:
         """Count the Jarvis category and the archive target; ask (once) when
-        either reaches 45 of 50. -> the asks raised (for tests and logs)."""
+        either reaches 45 of 50. -> the asks raised (for tests and logs), or
+        None when the channels could not be listed (nothing was counted)."""
         cfg = self.config()
         if cfg is None:
             return []
         channels = self.channels(cfg, refresh=True)
         if channels is None:
-            return []
+            return None
         counts: dict[str, int] = {}
         for channel in channels:
             parent = str(channel.get("parent_id") or "")
@@ -1134,15 +1158,19 @@ class ChannelLinker:
             job = self._jobs.get()
             if job is None:
                 return
+            decision = None
             try:
-                self._ask(job)
+                decision = self._ask(job)
             except Exception as exc:
                 LOG.warning("Discord housekeeping ask failed (%s)", type(exc).__name__)
             finally:
                 self._awaiting = max(0, self._awaiting - 1)
-                if not self._stop.is_set():
-                    # A shutdown denies every open ask; that is not an answer,
-                    # so the job stays on disk and is asked again next start.
+                # A shutdown denies every open ask; that is not an answer, so
+                # the job stays on disk and is asked again next start. An
+                # approval is a real answer whenever it came (a shutdown never
+                # approves): its action already ran, and replaying it after a
+                # restart would do it twice — a second archive category.
+                if decision == Decision.ALLOW or not self._stop.is_set():
                     self._settle(job)
 
     def ask_now(self, job) -> Decision:
@@ -1198,23 +1226,71 @@ class ChannelLinker:
 
     # -- the worker ----------------------------------------------------------
 
+    def _listing_due(self) -> bool:
+        return self._listing_retry_at is None or self._clock() >= self._listing_retry_at
+
+    def _listing_wait(self) -> None:
+        """A pass that needs the channel list could not have it: wait 30 s,
+        doubling to 10 min, and never sooner than Discord's retry_after."""
+        delay = min(RETRY_S * (2 ** self._listing_backoff), LISTING_BACKOFF_MAX_S)
+        self._listing_backoff += 1
+        try:
+            asked = float(self._listing_retry_after or 0)
+        except (TypeError, ValueError):
+            asked = 0.0
+        self._listing_retry_after = None
+        self._listing_retry_at = self._clock() + max(delay, asked)
+
+    def _listing_ok(self) -> None:
+        self._listing_retry_at = None
+        self._listing_backoff = 0
+
+    def _housekeep(self) -> None:
+        """One tick of the worker's housekeeping. Each pass is marked done
+        only once it succeeded: a reconcile or a crowding count whose channel
+        listing failed is tried again (30 s doubling to 10 min, never sooner
+        than Discord's retry_after), not lost until the
+        next restart."""
+        try:
+            self.ensure_inbox()
+        except Exception as exc:
+            # Retried next tick; the rest of the tick still runs.
+            LOG.warning("Discord linker could not link the Inbox (%s)", type(exc).__name__)
+        cfg = self.config()
+        if cfg is not None and self._reconciled_cfg != cfg and self._listing_due():
+            # Armed first, so a pass that raises waits RETRY_S too.
+            self._listing_retry_at = self._clock() + RETRY_S
+            if self.reconcile() is None:
+                self._listing_wait()
+            else:
+                self._reconciled_cfg = cfg
+                self._listing_ok()
+        if self._refreshed_at is None or self._clock() - self._refreshed_at >= FACTS_TTL_S * 10:
+            if cfg is not None:
+                self.refresh_permissions()
+                self._refreshed_at = self._clock()
+        self._retry_pending()
+        if self._crowding_due and cfg is not None and self._listing_due():
+            # Cleared before the count, so a move made meanwhile (an owner's
+            # /channel on the HTTP thread) re-arms it; put back if the
+            # listing failed, so the count is not lost until the next move.
+            self._crowding_due = False
+            self._listing_retry_at = self._clock() + RETRY_S
+            raised = None
+            try:
+                raised = self.check_crowding()
+                if raised is None:
+                    self._listing_wait()
+                else:
+                    self._listing_ok()
+            finally:
+                if raised is None:
+                    self._crowding_due = True
+
     def _run(self) -> None:
-        refreshed_at = None
         while not self._stop.is_set():
             try:
-                self.ensure_inbox()
-                cfg = self.config()
-                if cfg is not None and self._reconciled_cfg != cfg:
-                    self._reconciled_cfg = cfg
-                    self.reconcile()
-                if refreshed_at is None or self._clock() - refreshed_at >= FACTS_TTL_S * 10:
-                    if cfg is not None:
-                        self.refresh_permissions()
-                        refreshed_at = self._clock()
-                self._retry_pending()
-                if self._crowding_due and cfg is not None:
-                    self._crowding_due = False
-                    self.check_crowding()
+                self._housekeep()
             except Exception as exc:
                 LOG.warning("Discord linker housekeeping failed (%s)", type(exc).__name__)
             try:

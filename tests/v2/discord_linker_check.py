@@ -835,6 +835,169 @@ class GatewayAndReporterChecks(Harness):
         self.assertEqual(sidecar["retired_threads"], ["839999999999999990"])
 
 
+class BugbotLinkerChecks(Harness):
+    """Cursor Bugbot findings (2026-10-08): nothing is marked done before it
+    succeeded. Each fails against 728e148."""
+
+    linked = LifecycleChecks.linked
+    LIST = ("GET", f"/guilds/{GUILD}/channels")
+
+    def clocked(self):
+        now = [1000.0]
+        self.configure()
+        linker = ChannelLinker(self.daemon, self.rest, approvals=self.approvals,
+                               clock=lambda: now[0])
+        self.addCleanup(linker.close)
+        return linker, now
+
+    def test_a_reconcile_whose_listing_failed_runs_again(self):
+        linker, now = self.clocked()
+        channel = linker.create(self.school.id)["channel_id"]
+        project = self.stores.projects.get(self.school.id)
+        project.archived = "2026-10-07T00:00:00+00:00"         # archived during an outage
+        self.stores.projects.save(project)
+        linker._crowding_due = False
+        self.fake.fail[self.LIST] = (503, {"message": "unavailable"})
+        self.assertIsNone(linker.reconcile(), "a failed listing is not 'nothing to do'")
+        linker._housekeep()
+        self.assertIsNone(linker._reconciled_cfg)
+        del self.fake.fail[self.LIST]
+        linker._housekeep()
+        self.assertEqual(self.fake.channels[channel]["parent_id"], CATEGORY,
+                         "retried before its back-off")
+        now[0] += linker_mod.RETRY_S + 1
+        linker._housekeep()
+        self.assertEqual(self.fake.channels[channel]["parent_id"], ARCHIVE)
+        self.assertEqual(linker._reconciled_cfg, linker.config())
+
+    def test_a_crowding_count_whose_listing_failed_runs_again(self):
+        linker, now = self.clocked()
+        linker._reconciled_cfg = linker.config()
+        self.fake.fail[self.LIST] = (503, {"message": "unavailable"})
+        self.assertIsNone(linker.check_crowding())
+        linker._housekeep()
+        self.assertTrue(linker._crowding_due, "the count was lost with the listing")
+        del self.fake.fail[self.LIST]
+        now[0] += linker_mod.RETRY_S + 1
+        before = len(self.fake.named(*self.LIST))
+        linker._housekeep()
+        self.assertFalse(linker._crowding_due)
+        self.assertEqual(len(self.fake.named(*self.LIST)), before + 1)
+
+    def test_review_f5_a_failing_listing_backs_off_to_ten_minutes(self):
+        linker, now = self.clocked()
+        linker._crowding_due = False
+        self.fake.fail[self.LIST] = (503, {"message": "unavailable"})
+        waits = []
+        for _ in range(7):
+            linker._housekeep()
+            waits.append(round(linker._listing_retry_at - now[0]))
+            now[0] = linker._listing_retry_at
+        self.assertEqual(waits, [30, 60, 120, 240, 480, 600, 600])
+        # Discord's own retry_after wins when it is longer.
+        self.fake.fail[self.LIST] = (429, {"message": "slow", "retry_after": 900.0})
+        linker._housekeep()
+        self.assertEqual(round(linker._listing_retry_at - now[0]), 900)
+        # And a success resets it.
+        del self.fake.fail[self.LIST]
+        now[0] = linker._listing_retry_at
+        linker._housekeep()
+        self.assertIsNone(linker._listing_retry_at)
+        self.assertEqual(linker._reconciled_cfg, linker.config())
+
+    def test_the_inbox_link_is_marked_only_once_written(self):
+        linker, _now = self.clocked()
+        real = linker._set_channel
+        calls = []
+
+        def once(*args, **kwargs):
+            calls.append(args)
+            if len(calls) == 1:
+                raise linker_mod.StoreError("disk busy")
+            return real(*args, **kwargs)
+        with patch.object(linker, "_set_channel", side_effect=once):
+            with self.assertRaises(linker_mod.StoreError):
+                linker.ensure_inbox()
+            self.assertIsNone(linker._linked_cfg)
+            self.assertTrue(linker.ensure_inbox())
+        self.assertEqual(self.stores.projects.inbox().discord_channel_id, UNGROUPED)
+        self.assertFalse(linker.ensure_inbox(), "and then it is done")
+
+    def test_restored_is_said_only_when_the_channel_moved(self):
+        linker, channel = self.linked()
+        linker._handle({"kind": "project_archived", "project_id": self.school.id, "data": {}})
+        self.fake.fail[("PATCH", f"/channels/{channel}")] = (
+            429, {"retry_after": 300.0, "message": "slow"})
+        linker._handle({"kind": "project_restored", "project_id": self.school.id,
+                        "data": {"project_id": self.school.id}})
+        self.assertNotIn("Restored.", self.fake.posts(channel))
+        self.assertIn("will be retried", self.fake.posts(channel)[-1])
+        self.fake.fail[("PATCH", f"/channels/{channel}")] = (403, {"message": "no", "code": 50013})
+        linker._handle({"kind": "project_restored", "project_id": self.school.id,
+                        "data": {"project_id": self.school.id}})
+        self.assertNotIn("Restored.", self.fake.posts(channel))
+        self.assertIn("refused", self.fake.posts(channel)[-1])
+        del self.fake.fail[("PATCH", f"/channels/{channel}")]
+        linker._handle({"kind": "project_restored", "project_id": self.school.id,
+                        "data": {"project_id": self.school.id}})
+        self.assertEqual(self.fake.posts(channel)[-1], "Restored.")
+
+    def test_a_failed_lookup_keeps_the_older_pending_move(self):
+        linker, channel = self.linked()
+        linker._handle({"kind": "project_archived", "project_id": self.school.id, "data": {}})
+        project = self.stores.projects.get(self.school.id)
+        project.archived = None
+        self.stores.projects.save(project)
+        self.fake.fail[("PATCH", f"/channels/{channel}")] = (
+            429, {"retry_after": 300.0, "message": "slow"})
+        linker._handle({"kind": "project_restored", "project_id": self.school.id,
+                        "data": {"project_id": self.school.id}})
+        self.assertEqual(linker.status()["linker"]["pending_moves"], 1)
+        self.fake.fail[("GET", f"/channels/{channel}")] = httpx.ConnectError("down")
+        with self.assertRaises(LinkError):
+            linker.move_channel(self.school.id, archive=False)
+        self.assertEqual(linker.status()["linker"]["pending_moves"], 1,
+                         "the restore's pending move was lost to a failed lookup")
+        del self.fake.fail[("GET", f"/channels/{channel}")]
+        del self.fake.fail[("PATCH", f"/channels/{channel}")]
+        self.assertTrue(linker.move_channel(self.school.id, archive=False)["moved"])
+        self.assertEqual(linker.status()["linker"]["pending_moves"], 0)
+
+    def test_an_approved_ask_is_settled_even_during_a_shutdown(self):
+        """Approved, its action ran, then the linker stopped: the job used to
+        stay on disk and the next start made a second archive category."""
+        linker, _channel = self.linked()
+        linker._enqueue({"action": "create_category", "key": "archive_full",
+                         "name": "Jarvis Archive 2",
+                         "args": {"action": "create_category", "channel": "Jarvis Archive 2",
+                                  "from": "Jarvis Archive", "to": "Jarvis Archive 2",
+                                  "why": "full"}})
+
+        def approve_then_stop(request):
+            linker._stop.set()
+            return Decision.ALLOW
+        with patch.object(self.approvals, "ask", side_effect=approve_then_stop):
+            linker._jobs.put(None)
+            linker._ask_loop()
+        made = [c for c in self.fake.named("POST", f"/guilds/{GUILD}/channels")
+                if c["json"].get("name") == "Jarvis Archive 2"]
+        self.assertEqual(len(made), 1)
+        self.assertEqual(linker._state["asks"], [])
+        again = ChannelLinker(self.daemon, self.rest, approvals=self.approvals)
+        self.assertEqual(again._state["asks"], [], "a restart would replay it")
+
+    def test_a_shutdown_deny_still_keeps_the_ask(self):
+        linker, channel = self.linked()
+        linker._handle(LifecycleChecks.rename(self, "Homework", "api"))
+
+        def deny_on_shutdown(request):
+            linker._stop.set()
+            return Decision.DENY
+        with patch.object(self.approvals, "ask", side_effect=deny_on_shutdown):
+            linker._ask_loop()
+        self.assertEqual(len(linker._state["asks"]), 1, "a shutdown's deny is not an answer")
+
+
 class SetupChecks(Harness):
     def run_setup(self, answers):
         out = io.StringIO()

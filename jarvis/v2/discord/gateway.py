@@ -94,6 +94,13 @@ def should_respond(message: dict, bot_id: str, owner_id: str, *, owned: bool = F
     if owned and "guild_id" in message:
         mentions = [*(message.get("mentions") or []), {"id": bot_id}]
         message = {**message, "mentions": mentions}
+    if owned and _files_of(message) and not v1gw.strip_mention(
+            message.get("content") or "", bot_id).strip():
+        # Files with no words are content in an owned place (§11.8: a Discord
+        # turn's files follow assemble_turn). v1's rule only knows text and
+        # voice, so it is asked about the message as if it carried a word;
+        # the owner-only and never-bots halves still decide.
+        message = {**message, "content": "[attachments]"}
     return v1gw.should_respond(message, bot_id, owner_id)
 
 
@@ -1003,6 +1010,12 @@ class DiscordRouter:
             reply.refuse("I can't take a voice note as an answer to the open question — "
                          "type it here. Nothing was answered.")
             return True
+        if not text.strip():
+            # Files with no typed words answer nothing (D7: only typed text
+            # does). The message runs as an ordinary turn instead — queued
+            # behind the waiting one like any other (O-C6), files and all —
+            # the same fall-through as an answer that fails (§11.8).
+            return False
         try:
             answered = self.mirror.answer(chat_id, text)
         except Exception as exc:

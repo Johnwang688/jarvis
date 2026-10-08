@@ -92,8 +92,9 @@ KINDS = frozenset({"user_message", "turn_finished", "question", "question_answer
 # A provider's gate consultations are logged as gate_requested/gate_resolved
 # (daemon.GATE_KINDS, 2026-10-08); they belong to the turn but post nothing.
 TURN_KINDS = frozenset({"turn_started", "text", "thinking", "tool_started", "tool_finished",
-                        "usage", "error", "question", "plan_updated", "gate_requested",
-                        "gate_resolved", "reviewer_declined", "turn_finished"})
+                        "usage", "error", "question", "question_answered", "plan_updated",
+                        "gate_requested", "gate_resolved", "reviewer_declined",
+                        "turn_finished"})
 MESSAGE_KINDS = frozenset({"user", "text"})
 QUEUED_TEXT = "I'll take this next."
 FULL_TEXT = ("Three messages are already waiting on this turn; send this one again once "
@@ -287,6 +288,11 @@ class ChatMirror:
         # backs off like posts do, honouring Discord's retry_after.
         self._create_retry: dict[str, tuple[float, float]] = {}
         self._questions: dict[str, str] = {}
+        # chat id -> the req id whose question was put on Discord; and when a
+        # question with nowhere to go yet (no DM, a thread still being made)
+        # is looked at again.
+        self._asked: dict[str, str] = {}
+        self._question_retry: dict[str, float] = {}
         self._inbound: dict[str, deque] = {}
         self._drain_at: dict[str, float] = {}
         self._failures = 0
@@ -686,6 +692,7 @@ class ChatMirror:
                     times.append(sent[0] + self.rate_window_s)
             times += [at for chat, at in self._drain_at.items() if self._inbound.get(chat)]
             times += [at for at, _delay in self._create_retry.values()]
+            times += list(self._question_retry.values())
         if not times:
             return 0.5
         return min(0.5, max(0.0, min(times) - now))
@@ -712,6 +719,8 @@ class ChatMirror:
             with self._lock:
                 self._dirty.add(chat_id)
                 self._questions.pop(chat_id, None)
+                self._asked.pop(chat_id, None)
+                self._question_retry.pop(chat_id, None)
                 if self._inbound.get(chat_id):
                     self._drain_at[chat_id] = self._clock()
             if data.get("proposal") and getattr(self.daemon, "runner", None) is None:
@@ -739,6 +748,11 @@ class ChatMirror:
 
     def _process_dirty(self) -> None:
         with self._lock:
+            now = self._clock()
+            for chat_id, at in list(self._question_retry.items()):
+                if at <= now:
+                    self._question_retry.pop(chat_id, None)
+                    self._dirty.add(chat_id)
             dirty, self._dirty = self._dirty, set()
         for chat_id in dirty:
             try:
@@ -829,8 +843,9 @@ class ChatMirror:
             self._remember(chat_id, surface, side)
         target = self.target(chat_id)
         if not target:
+            self._question_later(chat_id)
             return
-        posts, cursor = [], start
+        posts, cursor, running = [], start, None
         while cursor < len(log):
             row = log[cursor]
             kind = row.get("kind")
@@ -855,6 +870,7 @@ class ChatMirror:
                     end, cut = j - 1, True           # never finished: interrupted
                     break
             if end is None:
+                running = turn
                 break                                # the turn is still running
             segment = [r for r in log[cursor:end + 1] if r.get("turn_id") == turn]
             posts += self._turn_posts(chat_id, target, log, segment, turn, end + 1, cut)
@@ -863,6 +879,54 @@ class ChatMirror:
             self._enqueue(posts)
         with self._lock:
             self._enqueued[chat_id] = max(self._enqueued.get(chat_id, 0), cursor)
+        if running is not None:
+            self._open_question(chat_id, log[cursor:], running)
+
+    def _open_question(self, chat_id, rows, turn) -> None:
+        """A question its bus event never put on Discord (the event was
+        dropped, or there was nowhere to post it yet): found in the log of the
+        turn still running — asked, with no later `question_answered` — and
+        posted once, with its ping. Only for the turn this process is running:
+        a provider question dies with the daemon, so one from before a
+        restart is never resurrected."""
+        asked = None
+        for row in rows:
+            if row.get("turn_id") != turn:
+                continue
+            kind, data = row.get("kind"), row.get("data") or {}
+            if kind == "question" and data.get("req_id"):
+                asked = data
+            elif (kind in ("question_answered", "turn_finished") and asked is not None
+                  and (kind == "turn_finished"
+                       or str(data.get("req_id")) == str(asked.get("req_id")))):
+                asked = None
+        if asked is None or not self._live_turn(chat_id, turn):
+            return
+        req_id = str(asked["req_id"])
+        with self._lock:
+            if self._asked.get(chat_id) == req_id:
+                return
+            self._questions[chat_id] = req_id
+        self._count("questions_recovered")
+        self._post_question(chat_id, asked)
+
+    def _live_turn(self, chat_id, turn) -> bool:
+        daemon = self.daemon
+        lock = getattr(daemon, "_lock", None)
+        sessions = getattr(daemon, "_sessions", None)
+        if lock is None or not isinstance(sessions, dict):
+            return False
+        with lock:
+            session = sessions.get(chat_id)
+            return (session is not None and session.worker is not None
+                    and getattr(session, "turn_id", None) == turn)
+
+    def _question_later(self, chat_id) -> None:
+        """A question is open and was never posted: come back to it."""
+        with self._lock:
+            req_id = self._questions.get(chat_id)
+            if req_id and self._asked.get(chat_id) != req_id:
+                self._question_retry.setdefault(chat_id, self._clock() + RETRY_S)
 
     def _mark(self, chat_id, through, side) -> None:
         side["mirrored_through"] = max(int(side.get("mirrored_through") or 0), through)
@@ -996,22 +1060,44 @@ class ChatMirror:
 
     def _question(self, thread, data) -> None:
         """A provider question (Codex `requestUserInput`): posted at once, the
-        turn is waiting on it, then the D1 ping line (not in a DM)."""
-        target = self.target(thread.id)
+        turn is waiting on it, then the D1 ping line (not in a DM).
+
+        Recorded first, whether or not it can be posted now: with no place yet
+        (the thread still being made, the DM unavailable) the owner's next
+        typed message must still answer it, and the sync posts it once the
+        place exists."""
         req_id = data.get("req_id")
-        if not target or not req_id:
+        if not req_id:
             return
+        with self._lock:
+            self._questions[thread.id] = str(req_id)
+            if self._asked.get(thread.id) == str(req_id):
+                # The daemon logs the question before it publishes it, so a
+                # sync can recover and post it from the log first: posted once,
+                # one ping.
+                return
+        self._post_question(thread.id, data)
+
+    def _post_question(self, chat_id, data) -> bool:
+        target = self.target(chat_id)
+        if not target:
+            self._question_later(chat_id)
+            with self._lock:
+                self._dirty.add(chat_id)         # a thread being made: the sync goes on
+            return False
         options = [str(o) for o in data.get("options") or [] if isinstance(o, (str, int))]
         lines = [f"Question: {data.get('text') or ''}"]
         lines += [f"{i}. {_cap(o, 200)}" for i, o in enumerate(options[:10], 1)]
         lines.append("Answer by typing here.")
-        posts = [_Post(thread.id, target, content=_cap(scrub("\n".join(lines)), MAX_CHARS),
+        posts = [_Post(chat_id, target, content=_cap(scrub("\n".join(lines)), MAX_CHARS),
                        keep=True)]
         if target != self._dm_id():
-            posts.append(_Post(thread.id, target, action="ping"))
+            posts.append(_Post(chat_id, target, action="ping"))
         with self._lock:
-            self._questions[thread.id] = str(req_id)
+            self._asked[chat_id] = str(data.get("req_id"))
+            self._question_retry.pop(chat_id, None)
         self._enqueue(posts)
+        return True
 
     def _proposal_without_runner(self, thread, record) -> None:
         """No task runner on this daemon (an embedded or test daemon): the
@@ -1126,6 +1212,8 @@ class ChatMirror:
             if self._dm == chat_id:
                 self._dm = None
             self._questions.pop(chat_id, None)
+            self._asked.pop(chat_id, None)
+            self._question_retry.pop(chat_id, None)
             self._inbound.pop(chat_id, None)
         surface = state.get("surface")
         target = self._dm_id() if surface == "dm" else surface_id(surface)

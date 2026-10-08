@@ -49,6 +49,16 @@ def mirror_checks(page, mock, check, until, base_reconnect):
           "sent from my phone" in last.inner_text(), last.inner_text())
     check("labelled via Discord", last.locator('[data-testid="via-discord"]').count() == 1)
 
+    # Bugbot 2026-10-08: files with no words (typed "") drew a blank bubble.
+    before = page.locator('[data-testid="msg-user"]').count()
+    mock.emit("user_message", {"text": "[attached file: a.txt]\nplain notes", "typed": "",
+                               "via": "discord", "images": 0, "attachments": ["a.txt"]},
+              thread_id="t1", project_id="p1", turn_id="turn-d2")
+    until(lambda: page.locator('[data-testid="msg-user"]').count() > before)
+    last = page.locator('[data-testid="msg-user"]').last
+    check("a files-only Discord message is never a blank bubble",
+          "attached file: a.txt" in last.inner_text(), last.inner_text())
+
     count = page.locator('[data-testid="msg-user"]').count()
     mock.emit("user_message", {"text": "typed here", "typed": "typed here", "via": "hud"},
               thread_id="t1", project_id="p1", turn_id="turn-h1")

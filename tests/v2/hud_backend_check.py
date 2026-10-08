@@ -1119,7 +1119,125 @@ class Backend(unittest.TestCase):
 
     def send_and_settle(self, thread_id, text="hi"):
         self.request("POST", f"/threads/{thread_id}/send", {"text": text}, status=202)
-        eventually(lambda: self.daemon._sessions[thread_id].worker is None)
+        # A session the provider lost is dropped when its turn ends.
+        eventually(lambda: getattr(self.daemon._sessions.get(thread_id), "worker", None) is None)
+
+    # -- Bugbot fixes (2026-10-08) -----------------------------------------
+
+    def test_bugbot2_a_fatal_turn_error_reopens_the_session(self):
+        """Codex closes its handle on any RpcError. The daemon used to keep
+        the dead session, so every later send said "session is closed"."""
+        class Dying(ModelFake):
+            def __init__(self, name):
+                super().__init__(name)
+                self.closed, self.sends = set(), 0
+
+            def start(self, thread, brief, permit):
+                handle = super().start(thread, brief, permit)
+                self.closed.discard(thread.id)
+                return handle
+            resume = start
+
+            def send(self, handle, message):
+                self.sends += 1
+                if handle.thread_id in self.closed:
+                    yield Event(K.ERROR, handle.thread_id,
+                                {"message": "Codex session is closed", "fatal": True})
+                    yield Event(K.TURN_FINISHED, handle.thread_id, {"stop": "error"})
+                    return
+                if self.sends == 1:
+                    self.closed.add(handle.thread_id)       # what codex.send's except does
+                    yield Event(K.ERROR, handle.thread_id,
+                                {"message": "turn/start failed", "fatal": True})
+                    yield Event(K.TURN_FINISHED, handle.thread_id, {"stop": "error"})
+                    return
+                yield from super().send(handle, message)
+        fake = Dying(P.CODEX)
+        self.daemon.providers[P.CODEX] = fake
+        tid = self.chat("codex")["id"]
+        for text in ("one", "two", "three"):
+            self.send_and_settle(tid, text)
+        errors = [r["data"]["message"] for r in self.stores.threads.read_log(tid)
+                  if r.get("kind") == "error"]
+        self.assertEqual(errors, ["turn/start failed"])
+        self.assertEqual([how for how, _ in fake.opened], ["start", "resume"])
+        # The resume re-applies the thread's model choice through _run_brief.
+        self.assertIsNotNone(self.daemon._sessions[tid].applied)
+
+    def test_review_f2_the_fast_path_keeps_its_session_through_a_fatal_error(self):
+        """The fast path's transcript is saved only when a turn returns:
+        dropping its session on a fatal 429/5xx would resume a model that no
+        longer knows the failed turn's message or its completed tool steps."""
+        from jarvis.v2.providers.fastpath import FastPathProvider
+        self.assertIs(FastPathProvider.keeps_session_on_error, True)
+
+        class Flaky(ModelFake):
+            keeps_session_on_error = True
+
+            def send(self, handle, message):
+                self.messages.append(message)
+                if len(self.messages) == 1:
+                    yield Event(K.ERROR, handle.thread_id,
+                                {"message": "RateLimited: 429 after retries", "fatal": True})
+                    yield Event(K.TURN_FINISHED, handle.thread_id, {"stop": "error"})
+                    return
+                yield from Fake.send(self, handle, message)
+        fake = Flaky(P.FAST)
+        self.daemon.providers[P.FAST] = fake
+        tid = self.chat()["id"]
+        self.send_and_settle(tid, "one")
+        session = self.daemon._sessions.get(tid)
+        self.assertIsNotNone(session, "the fast path's session was dropped on a fatal error")
+        self.send_and_settle(tid, "try again")
+        self.assertIs(self.daemon._sessions.get(tid), session)
+        self.assertEqual([how for how, _ in fake.opened], ["start"], "no resume")
+        # A session that really closed is still dropped and resumed.
+        session.handle.native.closed = True
+        self.send_and_settle(tid, "three")
+        self.send_and_settle(tid, "four")
+        self.assertEqual([how for how, _ in fake.opened], ["start", "resume"])
+
+    def test_bugbot2_a_provider_that_closed_its_session_is_reopened(self):
+        """No fatal flag, but the native handle says closed: also dropped."""
+        class Closing(ModelFake):
+            def send(self, handle, message):
+                for event in super().send(handle, message):
+                    if event.kind == K.TURN_FINISHED and len(self.messages) == 1:
+                        handle.native.closed = True        # closed under the daemon
+                    yield event
+        fake = Closing(P.FAST)
+        self.daemon.providers[P.FAST] = fake
+        tid = self.chat()["id"]
+        self.send_and_settle(tid, "one")
+        self.send_and_settle(tid, "two")
+        self.assertEqual([how for how, _ in fake.opened], ["start", "resume"])
+        # An ordinary turn keeps its session: no reopen per message.
+        self.send_and_settle(tid, "three")
+        self.assertEqual(len(fake.opened), 2)
+
+    def test_bugbot9_a_patch_during_a_refused_switch_is_kept(self):
+        fakes = self.model_fakes()
+        claude = fakes[P.CLAUDE]
+        tid = self.chat("claude")["id"]
+        self.send_and_settle(tid)
+        entered, release = threading.Event(), threading.Event()
+
+        def refuse(handle, model, effort):
+            claude.changes.append((model, effort))
+            entered.set()
+            release.wait(4)
+            raise BriefRefused("not on this plan")
+        claude.set_model = refuse
+        self.request("PATCH", f"/threads/{tid}", {"model": "claude-sonnet-5-5", "effort": "low"})
+        self.request("POST", f"/threads/{tid}/send", {"text": "go"}, status=202)
+        eventually(entered.is_set)
+        # The owner changes their mind while the refused switch is in flight.
+        self.request("PATCH", f"/threads/{tid}", {"model": "claude-opus-5-5", "effort": "medium"})
+        release.set()
+        eventually(lambda: self.daemon._sessions[tid].worker is None)
+        stored = self.stores.threads.get(tid)
+        self.assertEqual((stored.model, stored.effort), ("claude-opus-5-5", "medium"),
+                         "the later PATCH was overwritten by the rollback")
 
     def brief_bytes(self, thread_id):
         return self.stores.threads.path(thread_id).with_name("brief.json").read_bytes()

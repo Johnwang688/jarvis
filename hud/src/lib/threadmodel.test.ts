@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  applyEffort, applyModel, applyProvider, chipEditable, defaultEffort, effective, effortOptions,
+  applyEffort, applyModel, applyProvider, chipEditable, chipState, defaultEffort, effective, effortOptions,
   modelLabel, modelOptions, offRoster, patchBody, providerRefusal, SEARCH, shortId, threadBody, threadTooltip,
   visionNote, type Choice, type ThreadModels,
 } from "./threadmodel";
@@ -238,5 +238,37 @@ describe("providers a project cannot run", () => {
     expect(providerRefusal(TM, "codex", project("ask"))).toBeNull();
     expect(providerRefusal(limits, "codex", null)).toBeNull();
     expect(providerRefusal(null, "codex", project("ask"))).toBeNull();
+  });
+});
+
+describe("chipState (Bugbot 2026-10-08)", () => {
+  const opened = { projectId: "p1", openedId: "t9", provider: "fast" as const, model: "openai/gpt-5.6-luna", effort: "low" };
+
+  it("keeps the chips after a failed first send, on the compose row's choice", () => {
+    // The thread is on the server, its first message failed, and its record
+    // is not loaded yet: the chips used to vanish here.
+    const s = chipState({ threadId: null, compose: opened, threads: [] });
+    expect(s.choice).toEqual({ provider: "fast", model: "openai/gpt-5.6-luna", effort: "low" });
+    expect(s.targetId).toBe("t9");
+    expect(s.composing).toBe(false);
+    expect(s.editable).toEqual({ provider: false, model: true });
+  });
+
+  it("reads the opened thread's record once it is loaded", () => {
+    const t = thread({ id: "t9", model: "x/y", effort: "high" });
+    const s = chipState({ threadId: null, compose: opened, threads: [t] });
+    expect(s.choice).toEqual({ provider: "fast", model: "x/y", effort: "high" });
+    expect(s.thread?.id).toBe("t9");
+  });
+
+  it("composing and an open thread behave as before", () => {
+    const c = chipState({ threadId: null, compose: { projectId: "p1" }, threads: [] });
+    expect(c.composing).toBe(true);
+    expect(c.editable).toEqual({ provider: true, model: true });
+    expect(c.targetId).toBeNull();
+    const t = thread({ id: "t1" });
+    const open = chipState({ threadId: "t1", compose: null, threads: [t] });
+    expect(open.targetId).toBe("t1");
+    expect(chipState({ threadId: null, compose: null, threads: [t] }).choice).toBeNull();
   });
 });
