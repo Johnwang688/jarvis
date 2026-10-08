@@ -311,6 +311,11 @@ class Backend(unittest.TestCase):
 
     def test_discord_status_route_holds_states_never_secrets(self):
         """`GET /discord` (S1): connected + the command sync, nothing else."""
+        # Never the owner's real guild file (B1): once they ran `jarvis auth
+        # discord-guild`, this test read their live guild id and failed.
+        guild = patch.object(config, "DISCORD_GUILD_PATH", self.root / "absent-guild.json")
+        guild.start()
+        self.addCleanup(guild.stop)
         with patch.object(config, "DISCORD_TOKEN_PATH", self.root / "absent.json"):
             self.assertEqual(self.request("GET", "/discord"),
                              {"connected": False, "commands": {"state": "off", "count": 0,
