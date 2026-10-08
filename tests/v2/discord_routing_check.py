@@ -266,6 +266,9 @@ class DiscordRoutingChecks(unittest.TestCase):
             dm_channel=lambda: DM_CHANNEL, turn_timeout_s=5)
         self.addCleanup(self.surface.stop)
         self.listener = self.surface.listener
+        # Chats are posted by the mirror (PR C); its 4-per-5-s pacing is
+        # discord_mirror_check's subject, not this suite's.
+        self.surface.mirror.rate_posts = 1000
         self.surface.start()
 
         self.project = self.stores.projects.create(
@@ -288,6 +291,25 @@ class DiscordRoutingChecks(unittest.TestCase):
 
     def texts(self, channel=None):
         return [body.get("content", "") for _, body in self.posts(channel)]
+
+    def chats(self, project_id=None):
+        return [t for t in self.stores.threads.list()
+                if t.role == Role.CHAT and (project_id is None or t.project_id == project_id)]
+
+    def chat_place(self, project_id, before=()):
+        """The Discord thread of the newest chat opened in a project (PR C)."""
+        wait_for(lambda: [t for t in self.chats(project_id)
+                          if t.id not in before and t.surface])
+        chat = [t for t in self.chats(project_id) if t.id not in before and t.surface][-1]
+        return chat, chat.surface.split(":", 1)[1]
+
+    def idle(self, thread_id):
+        """Until the daemon has no turn running on this chat."""
+        def done():
+            with self.daemon._lock:
+                session = self.daemon._sessions.get(thread_id)
+                return session is None or session.worker is None
+        wait_for(done)
 
     def ask(self, tool="Bash", command="pnpm run deploy --prod", task_id=None):
         """Ask for an approval from another thread, as a provider would."""
@@ -322,17 +344,21 @@ class DiscordRoutingChecks(unittest.TestCase):
         self.listener.feed(message("what is up", channel=TASK_THREAD))
         self.assertEqual([call[1][0] for call in self.control.named("steer")], [self.task.id])
 
-        self.listener.feed(message("what is up", channel=PROJECT_CHANNEL))
-        wait_for(lambda: self.texts(PROJECT_CHANNEL))
-        self.assertIn("fast path answered", self.texts(PROJECT_CHANNEL)[0])
+        # A top-level message in a project channel is a new chat in its own
+        # thread (PR C, O-C1): the reply is posted there, not in the channel.
+        self.listener.feed(message("what is up", channel=PROJECT_CHANNEL, id="900001"))
+        _chat, place = self.chat_place(self.project.id)
+        wait_for(lambda: self.texts(place))
+        self.assertIn("fast path answered", self.texts(place)[0])
+        self.assertEqual(self.texts(PROJECT_CHANNEL), [])
 
+        # A channel Jarvis does not own is not a place (plan §4.1): ignored,
+        # with a mention or without.
         before = len(self.transport.calls)
         self.listener.feed(message("what is up", channel=PLAIN_CHANNEL))
-        self.assertEqual(len(self.transport.calls), before)
-
         self.listener.feed(message("what is up", channel=PLAIN_CHANNEL, mention=True))
-        wait_for(lambda: self.texts(PLAIN_CHANNEL))
-        self.assertIn("fast path answered", self.texts(PLAIN_CHANNEL)[0])
+        time.sleep(0.2)
+        self.assertEqual(len(self.transport.calls), before)
 
     # -- approvals ---------------------------------------------------------
 
@@ -502,15 +528,15 @@ class DiscordRoutingChecks(unittest.TestCase):
         for channel, guild in ((OTHER_THREAD, GUILD), (PROJECT_CHANNEL, GUILD),
                                (DM_CHANNEL, None)):
             self.listener.feed(message(f"yes {request.code}", channel=channel, guild=guild))
-        # A guild channel Jarvis does not own is not even read without a mention;
-        # with one, the code is still refused rather than answered.
+        # A guild channel Jarvis does not own is not a place at all (PR C,
+        # plan §4.1): with a mention or without, nothing there is read.
         self.listener.feed(message(f"yes {request.code}", channel=PLAIN_CHANNEL))
-        self.assertEqual(self.texts(PLAIN_CHANNEL), [])
         self.listener.feed(message(f"yes {request.code}", channel=PLAIN_CHANNEL, mention=True))
+        self.assertEqual(self.texts(PLAIN_CHANNEL), [])
 
         self.assertTrue(self.approvals.pending(), "the request must still be open")
         self.assertFalse(self.control.named("steer"))
-        for channel in (OTHER_THREAD, PROJECT_CHANNEL, DM_CHANNEL, PLAIN_CHANNEL):
+        for channel in (OTHER_THREAD, PROJECT_CHANNEL, DM_CHANNEL):
             self.assertTrue(any("asked elsewhere" in t for t in self.texts(channel)), channel)
         self.approvals.shutdown()
         worker.join(2)
@@ -770,17 +796,32 @@ class DiscordRoutingChecks(unittest.TestCase):
     def test_dm_and_channel_chat_each_reach_a_fast_path_thread(self):
         self.listener.feed(dm("what did we decide about the ledger?"))
         wait_for(lambda: self.texts(DM_CHANNEL))
-        self.listener.feed(message("and in here?", channel=PROJECT_CHANNEL, mention=True))
-        wait_for(lambda: self.texts(PROJECT_CHANNEL))
+        self.listener.feed(message("and in here?", channel=PROJECT_CHANNEL, mention=True,
+                                   id="900002"))
+        first, place = self.chat_place(self.project.id)
+        wait_for(lambda: self.texts(place))
         threads = self.stores.threads.list()
         self.assertEqual(sorted(t.project_id for t in threads),
                          sorted([self.stores.projects.inbox().id, self.project.id]))
         self.assertTrue(all(t.role == Role.CHAT and t.provider == ProviderName.FAST
                             for t in threads))
-        # A second message in the same place reuses the thread it opened.
+        dm_chat = next(t for t in threads if t.project_id != self.project.id)
+        self.assertEqual(dm_chat.surface, "dm")
+        # The DM conversation is one chat: a second DM reuses it.
+        self.idle(dm_chat.id)
         self.listener.feed(dm("and that other thing?"))
         wait_for(lambda: len(self.texts(DM_CHANNEL)) == 2)
         self.assertEqual(len(self.stores.threads.list()), 2)
+        # A second top-level message in a project channel is a second chat
+        # (O-C1); a message inside the first chat's thread stays in it.
+        self.idle(first.id)
+        self.listener.feed(message("still here?", channel=place, id="900003"))
+        wait_for(lambda: len(self.texts(place)) == 2)
+        self.assertEqual(len(self.stores.threads.list()), 2)
+        self.listener.feed(message("a new subject", channel=PROJECT_CHANNEL, id="900004"))
+        second, other_place = self.chat_place(self.project.id, before={first.id})
+        self.assertNotEqual(other_place, place)
+        self.assertEqual(len(self.stores.threads.list()), 3)
 
     def test_a_proposal_on_turn_finished_is_handed_to_the_router_once(self):
         handed = []
@@ -793,8 +834,11 @@ class DiscordRoutingChecks(unittest.TestCase):
         self.router.on_turn_finished = counted
         self.provider.proposal = {"brief": "convert the skills folder", "project": "Jarvis"}
         self.listener.feed(message("could you convert the skills folder",
-                                   channel=PROJECT_CHANNEL))
-        wait_for(lambda: any("Opened task" in t for t in self.texts(PROJECT_CHANNEL)))
+                                   channel=PROJECT_CHANNEL, id="900005"))
+        # With no task runner on this daemon, the chat mirror hands the
+        # proposal to the router and posts its sentence in the chat's thread.
+        first, place = self.chat_place(self.project.id)
+        wait_for(lambda: any("Opened task" in t for t in self.texts(place)))
         self.assertEqual(len(handed), 1)
         opened = [t for t in self.stores.tasks.list() if t.id != self.task.id]
         self.assertEqual(len(opened), 1)
@@ -807,14 +851,17 @@ class DiscordRoutingChecks(unittest.TestCase):
 
         # A turn that proposes nothing never reaches the router at all.
         self.provider.proposal = None
-        self.listener.feed(message("and again", channel=PROJECT_CHANNEL))
-        wait_for(lambda: len(self.texts(PROJECT_CHANNEL)) >= 3)
+        self.idle(first.id)
+        self.listener.feed(message("and again", channel=place, id="900006"))
+        wait_for(lambda: len(self.texts(place)) >= 3)
         self.assertEqual(len(handed), 1)
 
     def test_cancel_inside_the_grace_window_withdraws_a_proposal(self):
         self.provider.proposal = {"brief": "convert the skills folder", "project": "Jarvis"}
-        self.listener.feed(message("convert the skills folder", channel=PROJECT_CHANNEL))
-        wait_for(lambda: any("Opened task" in t for t in self.texts(PROJECT_CHANNEL)))
+        self.listener.feed(message("convert the skills folder", channel=PROJECT_CHANNEL,
+                                   id="900007"))
+        _chat, place = self.chat_place(self.project.id)
+        wait_for(lambda: any("Opened task" in t for t in self.texts(place)))
         opened = [t for t in self.stores.tasks.list() if t.id != self.task.id][0]
 
         self.listener.feed(message(f"cancel {opened.id}", channel=PROJECT_CHANNEL))
@@ -827,7 +874,7 @@ class DiscordRoutingChecks(unittest.TestCase):
     def test_chat_splits_at_2000_and_only_approvals_are_attached_whole(self):
         self.provider.reply = "\n".join(f"line {i} " + "x" * 80 for i in range(120))
         self.listener.feed(dm("say a lot"))
-        wait_for(lambda: len(self.texts(DM_CHANNEL)) >= 2)
+        wait_for(lambda: " ".join(self.texts(DM_CHANNEL)).split() == self.provider.reply.split())
         chunks = self.texts(DM_CHANNEL)
         self.assertGreater(len(chunks), 1)
         self.assertTrue(all(len(chunk) <= 2000 for chunk in chunks))

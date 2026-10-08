@@ -78,7 +78,8 @@ export const api = {
   /** What the provider / model / effort chips offer, per provider. */
   threadModels: () => req<ThreadModels>("/thread-models"),
   transcript: (id: string) => req<{ messages: ChatMessage[] }>(`/threads/${id}/transcript`),
-  send: (id: string, body: { text: string; images?: string[]; attachments?: Attachment[] }) =>
+  /** `spoken` (PR C): dictated, so the Discord mirror says "You (HUD, voice)". */
+  send: (id: string, body: { text: string; images?: string[]; attachments?: Attachment[]; spoken?: boolean }) =>
     req<{ turn_id: string }>(`/threads/${id}/send`, json(body)),
   interrupt: (id: string) => req<any>(`/threads/${id}/interrupt`, json({})),
   /** Re-parent a **chat** thread; a task's threads 409 (they move with the task). */

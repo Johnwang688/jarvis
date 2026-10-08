@@ -282,6 +282,14 @@ reserved. Thread titles are unique within their project. Applied on
 so existing duplicates stay editable), `PATCH /threads/{id}` `{title}`, and
 restore. Read the name from the response, not the request.
 
+`POST /projects` and Discord's `/project new` (B2) share one create path,
+`projects.create_project(daemon, name, root, **values)`, so both number and
+refuse identically and both publish `project_created`. The route itself is
+unchanged; it never makes a folder. A folder made from Discord arrives as an
+ordinary approval card (`tool: "project_folder"`, `args {action: "create" |
+"adopt", path, name[, entries, git]}`, `allowlistable: false`); approval
+payloads gain `discord_channel_id` (where Discord was asked, or `null`).
+
 - `POST /projects` and `PATCH /projects/{id}`: `root` must be an existing
   directory (400). A `routing.models` override is held to `CLI_MODELS` on
   write, the rule `routing.json` and `/route` follow: a known role,
@@ -474,3 +482,30 @@ footing as `/approvals`.
   `project_restored` gains `"previous_name"` (the name before PR #4's
   renumbering). A `create` adopts an unlinked Jarvis channel whose topic
   ends with `· <project id>` instead of making a second one.
+
+## Additions 2026-10-07 (every chat is a Discord thread — PR C)
+
+- SSE **`user_message`** `{kind, thread_id, project_id, turn_id, at, data:
+  {text, typed, via, origin, images, attachments, spoken, discord_message_id,
+  discord_channel_id}}` — the owner's message, published before its turn's
+  first event. `text` is what the provider got (files inlined), `typed` the
+  owner's own words, `via` one of `hud`, `discord`, `dm`, `system`, `peer`,
+  `images` a count and `attachments` names only. The `user` record in
+  `/threads/{id}/log` holds the same `data`. The HUD draws only `discord`
+  and `dm` ones (its own message is already on screen).
+- `POST /threads/{id}/send` accepts `"spoken": bool` (dictation); anything
+  else is 400.
+- SSE **`question_answered`** `{kind, thread_id, project_id, data: {req_id}}`
+  after `POST /threads/{id}/answer` (or a Discord answer) reaches the
+  provider, so every surface can stop showing the question as open.
+- `GET /threads` (and every thread record) carries `"surface": null | "dm" |
+  "dm:retired" | "discord:<id>"`, and, when set, `"discord": {"kind":
+  "thread" | "dm", "channel": str | null, "name": str, "url":
+  "https://discord.com/channels/<guild>/<id>" | null}`. `surface` is never
+  accepted from the HUD; `thread_updated` with `changed: ["surface"]` says
+  it moved.
+- `GET /threads/{id}/transcript`: a user message typed in Discord carries
+  `"via": "discord" | "dm"`.
+- `GET /discord` gains `"mirror": null | {"state": "ok" | "degraded" |
+  "down", "reason": str, "queued": int, "last_error": null | {op, status,
+  code, at}}`; the light goes amber when it is not ok.

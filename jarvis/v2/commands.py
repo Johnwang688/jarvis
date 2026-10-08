@@ -25,7 +25,11 @@ from typing import Any, Iterable
 # Where a command may run. A Discord channel is one of these places
 # (`DiscordRouter._locate`); "other" is a guild channel Jarvis does not own.
 DM, PROJECT, TASK, OTHER = "dm", "project", "task", "other"
-JARVIS_PLACES = frozenset({DM, PROJECT, TASK})
+# A chat's own Discord thread (PR C): every chat is one, and slash commands
+# work there as in its project's channel.
+CHAT = "chat"
+JARVIS_PLACES = frozenset({DM, PROJECT, TASK, CHAT})
+ALL_PLACES = JARVIS_PLACES | {OTHER}
 
 # Discord: a choice name is at most 100 characters, and autocomplete returns
 # at most 25 of them.
@@ -92,8 +96,12 @@ REGISTRY: tuple[Cmd, ...] = (
     )),
     # Never on the HUD: its approval surface is the card, and a typed `/yes`
     # plus Enter would be a keyboard default on an authorization (plan §5).
-    Cmd("yes", "Approve the open request asked in this chat", (_CODE,)),
-    Cmd("no", "Deny the open request asked in this chat", (_CODE,)),
+    # Also in a server channel no project owns (B2): `/project new` asks its
+    # folder question there, and the post says "`/yes CODE` · `/no CODE`".
+    # Both are scoped to requests asked in this very channel. `/always` is not:
+    # nothing asked in such a channel can become a standing rule.
+    Cmd("yes", "Approve the open request asked in this chat", (_CODE,), places=ALL_PLACES),
+    Cmd("no", "Deny the open request asked in this chat", (_CODE,), places=ALL_PLACES),
     Cmd("always", "Approve, and stop asking about this one", (
         Opt("code", "string", "Approval code (optional when only one is open here)",
             complete="always_code"),
@@ -108,10 +116,29 @@ REGISTRY: tuple[Cmd, ...] = (
         Opt("name", "string", "Skill", required=True, complete="skill"),
         Opt("request", "string", "What you want from it", max_length=4000),
     ), surfaces=frozenset({"discord", "hud"})),
-    # Only `list` in S1. `new`, `link`, `unlink` and `channel` arrive with B1
-    # and B2; an unregistered subcommand is better than a stub that refuses.
+    # B2 (plan §5). Archiving and deleting *projects* stay HUD-only (B11): no
+    # subcommand here does either. "Other" — a server channel no project owns —
+    # takes only `new` (it becomes the new project's channel) and `link`.
     Cmd("project", "Projects", subcommands=(
         Cmd("list", "List your projects", ephemeral=True),
+        Cmd("new", "Make a project and its folder (leave both empty for a form)", (
+            Opt("name", "string", "Project name", max_length=100),
+            Opt("folder", "string", "A bare name (~/jarvis-work/<name>), ~/path or /full/path",
+                max_length=4000),
+        ), places=ALL_PLACES),
+        Cmd("link", "Link this channel to a project", (
+            Opt("project", "string", "The project", required=True, complete="project"),
+        ), places=ALL_PLACES),
+        Cmd("unlink", "Unlink this channel from its project (the channel is kept)"),
+        Cmd("channel", "Make a channel for a project that has none", (
+            Opt("project", "string", "The project", required=True, complete="project"),
+        )),
+    )),
+    # B2: the owner typing it is the permission (D4), so these act at once.
+    Cmd("channel", "This project's Discord channel", subcommands=(
+        Cmd("archive", "Move this channel to Jarvis Archive (the project stays active)",
+            places=frozenset({PROJECT, TASK})),
+        Cmd("restore", "Move this channel back to Jarvis", places=frozenset({PROJECT, TASK})),
     )),
 )
 

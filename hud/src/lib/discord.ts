@@ -4,7 +4,7 @@
 // failure), red when it is down. "Off" is grey: no Discord is configured,
 // which is a fact about the setup, not a fault.
 
-import type { DiscordStatus, Project, ProjectChannel } from "../types";
+import type { DiscordStatus, Project, ProjectChannel, Thread } from "../types";
 
 export type DiscordLevel = "ok" | "warn" | "down" | "off";
 
@@ -58,7 +58,26 @@ export function discordLight(status: DiscordStatus | null): DiscordLight {
   if (status.linker?.state === "degraded") {
     return { level: "warn", text: `Discord · ${status.linker.reason || "channel housekeeping is behind"}` };
   }
+  // PR C: the chat mirror. Amber either way — a chat's lines wait and are
+  // caught up from its log, so nothing here is lost, only late.
+  const mirror = status.mirror;
+  if (mirror && mirror.state !== "ok") {
+    return { level: "warn", text: `Discord · chats: ${mirror.reason || mirror.state}` };
+  }
   return { level: "ok", text: "Discord ok" };
+}
+
+/** PR C: where an open chat lives on Discord, for its header —
+ * "On Discord: #school › Essay plan" with a link, or the DM. Null before the
+ * chat's first message is mirrored (or for a retired DM chat). */
+export function chatPlace(thread: Thread | null | undefined): { text: string; url: string | null } | null {
+  const place = thread?.discord;
+  if (!thread?.surface || !place) return null;
+  if (place.kind === "dm") return { text: "On Discord: your DM with Jarvis", url: null };
+  const channel = place.channel ? `#${place.channel} › ` : "";
+  // Only Discord's own web address is ever a link here.
+  const url = place.url && /^https:\/\/discord\.com\/channels\/\d+\/\d+$/.test(place.url) ? place.url : null;
+  return { text: `On Discord: ${channel}${place.name}`, url };
 }
 
 /** Is the server set up (`jarvis auth discord-guild`)? */

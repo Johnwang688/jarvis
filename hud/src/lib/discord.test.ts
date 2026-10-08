@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { backfillTargets, channelPill, discordLight, guildConfigured, originText } from "./discord";
-import type { DiscordReporter, DiscordStatus, Project, ProjectChannel } from "../types";
+import { backfillTargets, channelPill, chatPlace, discordLight, guildConfigured, originText } from "./discord";
+import type { DiscordReporter, DiscordStatus, Project, ProjectChannel, Thread } from "../types";
 
 const reporter = (over: Partial<DiscordReporter> = {}): DiscordReporter => ({
   state: "ok", reason: "", counters: {}, dropped: 0, last_error: null, ...over,
@@ -128,5 +128,41 @@ describe("B1: the server and the project channels", () => {
     const targets = backfillTargets([p("a"), p("b", { discord_channel_id: "1" }),
       p("inbox", { inbox: true }), p("old", { archived: "2026-01-01" })]);
     expect(targets.map((x) => x.id)).toEqual(["a"]);
+  });
+});
+
+describe("PR C: chats on Discord", () => {
+  const thread = (over: Partial<Thread> = {}): Thread => ({
+    id: "abcd1234", project_id: "p1", role: "chat", provider: "fast", provider_session_id: null,
+    task_id: null, title: "", created: "", updated: "", turns: 0, cost_usd: 0, tokens: 0,
+    model: null, effort: null, ...over,
+  } as Thread);
+
+  it("names the channel and thread and links to Discord", () => {
+    expect(chatPlace(thread({ surface: "discord:800", discord: {
+      kind: "thread", channel: "school", name: "Essay plan",
+      url: "https://discord.com/channels/100/800" } }))).toEqual({
+      text: "On Discord: #school › Essay plan", url: "https://discord.com/channels/100/800" });
+  });
+
+  it("says nothing before the first message, and never links anywhere else", () => {
+    expect(chatPlace(thread())).toBeNull();
+    expect(chatPlace(null)).toBeNull();
+    expect(chatPlace(thread({ surface: "discord:800", discord: {
+      kind: "thread", channel: null, name: "x", url: "javascript:alert(1)" } }))).toEqual({
+      text: "On Discord: x", url: null });
+  });
+
+  it("shows the DM conversation without a link", () => {
+    expect(chatPlace(thread({ surface: "dm", discord: {
+      kind: "dm", channel: "DM", name: "your DM with Jarvis", url: null } }))?.text)
+      .toBe("On Discord: your DM with Jarvis");
+  });
+
+  it("turns the light amber when the chat mirror is behind", () => {
+    const light = discordLight(status({ mirror: { state: "degraded", queued: 3, last_error: null,
+      reason: "the bot cannot archive thread its own chat threads (HTTP 403); add Manage Threads" } }));
+    expect(light.level).toBe("warn");
+    expect(light.text).toContain("Manage Threads");
   });
 });

@@ -111,7 +111,56 @@ reconcile fixes what an outage missed, and asks persist across restarts.
 refuse `discord_channel_id`. A configured guild gates placement, and a newly
 linked project's tasks leave the DM safety net for threads at once. Tests
 that touch Discord point `config.DISCORD_GUILD_PATH` at a temp file — the
-owner's real one decides where channels go. **Only the broker asks the owner (2026-10-08).** A provider's
+owner's real one decides where channels go.
+
+**Projects and folders from Discord, B2 (2026-10-07, design §11.7; plan
+§5).** `/project new|link|unlink|channel` and `/channel archive|restore`
+(handlers in `discord/project_commands.py`); archiving or deleting a
+*project* stays HUD-only (B11). `/project new` with nothing filled in opens a
+form; a bare name means `~/jarvis-work/<slug>` (`config.PROJECT_WORK_DIR`).
+**`jarvis/v2/folders.py` is the folder boundary**: `check_project_folder`
+only reads (names, never contents) and refuses — lexically *and* on the
+realpath of the nearest existing ancestor — anything not strictly below
+`config.PROJECT_FOLDER_ROOTS`, dot components, the credential/data/repo dirs
+(inside or holding them), AppData, Windows-reserved names on `/mnt/<drive>`,
+another project's root, a file or symlink, a missing parent (O4), and —
+before any trimming — non-ASCII whitespace, invisible fillers and non-NFC
+input. `make_project_folder` is **one `os.mkdir(path, 0o755)`**, reachable only from
+the confirmation handler (grep-tested): a missing or non-empty folder is a
+`project_folder` approval (exact path, Approve/Deny in the channel it was
+typed in via `ApprovalRequest.discord_channel_id`, never Always, timeout
+denies); an empty one is used silently (O5); a change after the yes asks
+again. `POST /projects` and Discord share `projects.create_project`. From an
+unlinked channel, `/project new` links that channel; from the DM it makes one;
+from a linked channel it refuses; an unlinked channel also takes `/yes`/`/no`
+for what was asked there, so the post's offered answers all work. Unlink asks
+first; link (never stealing another channel's link), channel and `/channel
+archive|restore` act at once (D4) — the moves go through the linker's `move()`
+with reason `owner`/`restore` and drop any older pending move first, so a
+retry cannot undo them. Tests point the folder roots at
+temp dirs — never the owner's home. **B2b** (`project_propose`, the
+Sonnet/Opus rule) waits for peers phase 0.
+
+**Every chat is a Discord thread, PR C (2026-10-07, design §11.8; plan
+§4, decisions C1).** `ChatMirror` (`discord/mirror.py`) gives a chat a
+thread in its project's channel at its first owner message and posts the
+owner's *typed* words (never an inlined file), settled replies and one
+footer, silent and scrubbed; what is typed in that thread runs the same
+chat as `UserMessage(via="discord")` and is never echoed. **Progress is
+`log.jsonl`** (`mirrored_through` in `threads/<id>/discord.json`), never the
+bus. **`Thread.surface` is written only by `ThreadStore.set_surface`** —
+`save` keeps the stored value whatever the caller holds, because the
+daemon saves stale session copies. `daemon.send` publishes `user_message`.
+The DM is one persisted Inbox chat (`surface="dm"`); a top-level message
+in a project channel starts a new chat; anything else is ignored. Moves
+open a new thread and rename the old `↪ moved to …` (O-C5); nothing on
+Discord is ever deleted. A post the thread refuses (50001/50013) goes to
+the owner's DM instead; an escape-hatch result shows its command line only,
+never its output; speech is made from the scrubbed reply. Tests that read
+`GET /discord` must point
+`config.DISCORD_GUILD_PATH` at a temp file — the owner's setup is done now.
+
+**Only the broker asks the owner (2026-10-08).** A provider's
 `APPROVAL_REQUESTED`/`APPROVAL_RESOLVED` mean "the gate was consulted" — the
 Claude hook emits a pair for *every* tool use, before `permit` decides — and
 the daemon used to forward them onto the bus under those names, so auto mode
@@ -119,14 +168,15 @@ flashed a card and sent a DM per tool call (and a real question raised two
 cards, one unanswerable). `daemon.GATE_KINDS` now logs them as
 `gate_requested`/`gate_resolved` and never publishes them; the bus's
 `approval_requested` comes only from `PendingApprovals`, and the HUD and the
-Discord watcher both ignore one without a broker `code`. Dictation falls back
-from parakeet (one OpenRouter endpoint, Together; `HTTP 404: Provider returned
-404` when it is down) to `config.STT_FALLBACK_MODELS` (default
-`x-ai/grok-stt-1.0`; free suite `tests/voice_stt_check.py`), and `/stt`
-answers 502 with a sentence. The HUD reads
-the preview port from `/status` → `workshop_port`, and `hud_v2_check` aborts
-and fails any request to 8402/8403/8405 — it used to load the live daemon's
-preview.
+Discord watcher both ignore one without a broker `code`. A broker timeout or
+shutdown now publishes `approval_resolved` too, so a Discord post loses its
+buttons. Dictation falls back from parakeet (one OpenRouter endpoint,
+Together; `HTTP 404: Provider returned 404` when it is down) to
+`config.STT_FALLBACK_MODELS` (default `x-ai/grok-stt-1.0`; free suite
+`tests/voice_stt_check.py`), and `/stt` answers 502 with a sentence. The HUD
+reads the preview port from `/status` → `workshop_port`, and `hud_v2_check`
+aborts and fails any request to 8402/8403/8405 — it used to load the live
+daemon's preview.
 
 Briefs for every package, including the ones in flight, are in
 `docs/codex-briefs/`; each merged package left a `*-notes.md` beside its

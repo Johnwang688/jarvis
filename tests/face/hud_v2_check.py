@@ -348,6 +348,9 @@ def dictation_checks(page, mock):
     check("AUTO sends the finished utterance", bool(sent))
     check("carrying the transcript", bool(sent) and sent[-1].get("text") == "what is the weather",
           str(sent[-1] if sent else None))
+    # PR C: a dictated send says so, so the Discord mirror writes "You (HUD, voice)".
+    check("marked as spoken", bool(sent) and sent[-1].get("spoken") is True,
+          str(sent[-1] if sent else None))
 
     # The choice persists; a reload comes back to it.
     connections = mock.sse_connections()
@@ -1675,6 +1678,9 @@ def main():
             window_checks(page, mock)
             sidebar_checks(page, mock)
             chat_checks(page, mock)
+            # PR C: the chat's place on Discord, and messages typed there.
+            from tests.face.hud_v2_mirror_check import mirror_checks
+            mirror_checks(page, mock, check, until, mock.await_reconnect)
             safety_render_checks(page, mock)
             input_checks(page, mock)
             dictation_checks(page, mock)

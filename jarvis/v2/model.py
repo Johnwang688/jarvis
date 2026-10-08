@@ -119,6 +119,11 @@ class Thread:
     # When the owner archived this one thread (ISO time), or None. A thread in
     # an archived project is hidden with it and keeps its own value.
     archived: str | None = None
+    # Where a chat lives on Discord (plan §4.2, PR C): None (not there yet),
+    # "dm" (the DM conversation), "dm:retired", or "discord:<thread id>" — the
+    # Discord thread's own id. Changed only by `ThreadStore.set_surface`;
+    # `ThreadStore.save` keeps whatever is stored.
+    surface: str | None = None
 
 
 @dataclass

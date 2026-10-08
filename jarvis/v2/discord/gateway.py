@@ -35,6 +35,7 @@ one surface it can ask through, and it denies on every failure path already.
 """
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 import logging
 from pathlib import Path
@@ -53,12 +54,13 @@ from jarvis.tools.secrets import scrub
 from ..approvals import v1_request
 from ..commands import open_questions
 from ..control import ControlError
-from ..model import TERMINAL_STATES, ProviderName, Role
+from ..model import TERMINAL_STATES, ProviderName
 from ..provider import Decision, UserMessage
-from ..router import (FastPath, Incoming, NeedsProject, NewTask, Steer, Verb,
+from ..router import (FastPath, Incoming, NewTask, Steer, Verb,
                       classify)
 from ..stores import StoreError, _write_bytes
 from .commands import SyncResult
+from .mirror import FULL_TEXT, QUEUED_TEXT
 from .render import _cap, approval_components, approval_text, status_embed
 from .reporter import thread_for
 from .rest import describe
@@ -248,8 +250,9 @@ class DiscordRouter:
     def __init__(self, daemon, stores, router, approvals, control, rest,
                  listener_factory=None, *, announce=None, dm_channel=None,
                  turn_timeout_s: float = TURN_TIMEOUT_S, sync_commands: bool = True,
-                 clock=time.monotonic, approval_posts_path=None):
+                 clock=time.monotonic, approval_posts_path=None, mirror=None):
         from .interactions import InteractionRouter
+        from .mirror import ChatMirror
 
         self.daemon = daemon
         self.stores = stores
@@ -283,7 +286,13 @@ class DiscordRouter:
             Path(stores.root) / "discord" / "approval-posts.json"
         self._stale_worker = None
         self._answered_here: set[str] = set()
-        self._chat_threads: dict[str, str] = {}
+        # Every chat is a Discord thread (PR C): the mirror knows which Discord
+        # thread is which chat, posts the chat's lines and runs what is typed
+        # there. A DiscordSurface passes its own (and stops it in its order);
+        # a router built alone makes and owns one.
+        self._owns_mirror = mirror is None
+        self.mirror = mirror if mirror is not None else ChatMirror(
+            daemon, rest, dm_channel=self._owner_dm, speak=self._voice_reply, router=router)
         self.interactions = InteractionRouter(self, clock=clock)
         factory = listener_factory or (lambda handler: _V2Listener(handler, self._announce))
         self.listener = factory(self.handle)
@@ -318,6 +327,8 @@ class DiscordRouter:
     # -- lifecycle ---------------------------------------------------------
 
     def start(self) -> None:
+        if self._owns_mirror:
+            self.mirror.start()
         self.listener.start()
         self.owner_id = str(getattr(self.listener, "owner_id", "") or self.owner_id)
         self._stale_worker = threading.Thread(target=self._strip_stale, daemon=True,
@@ -366,6 +377,8 @@ class DiscordRouter:
         self._worker.join(timeout=2)
         if self._stale_worker is not None:
             self._stale_worker.join(timeout=2)
+        if self._owns_mirror:
+            self.mirror.close()
 
     def _ready(self, listener) -> None:
         """First READY: remember who we are, then sync the commands once."""
@@ -384,7 +397,8 @@ class DiscordRouter:
     def status(self) -> dict:
         """For `GET /discord`. Holds no token, no path and no payload."""
         return {"connected": bool(self.application_id) and not self._stop.is_set(),
-                "commands": self.commands.to_json()}
+                "commands": self.commands.to_json(),
+                "mirror": self.mirror.status()}
 
     def handle_interaction(self, interaction) -> None:
         self.interactions.handle(interaction)
@@ -392,11 +406,15 @@ class DiscordRouter:
     # -- placement (§11.1) -------------------------------------------------
 
     def _locate(self, message, channel_id):
-        """-> (where, project, task). `where` is dm / task / project / archived / other.
+        """-> (where, project, task). `where` is dm / task / chat / project /
+        archived / chat_archived / other (plan §4.1).
 
-        An archived project's channel, and the old task threads under it, are
-        `archived` (decisions B1): nothing is placed, opened, started or steered
-        there; the owner is told why and pointed at the HUD.
+        An archived project's channel, and the old task and chat threads under
+        it, are `archived` (decisions B1): nothing is placed, opened, started or
+        steered there; the owner is told why and pointed at the HUD. A chat's
+        Discord thread — its current one, or an old one after a move — is
+        `chat` (`chat_for(channel)` says which), and `chat_archived` when that
+        one chat is archived.
         """
         if "guild_id" not in message:
             return "dm", None, None
@@ -412,6 +430,14 @@ class DiscordRouter:
             if project is not None and project.archived:
                 return "archived", project, task
             return "task", project, task
+        chat = self.chat_for(channel_id)
+        if chat is not None:
+            project = self.stores.projects.get(chat.project_id)
+            if project is not None and project.archived:
+                return "archived", project, None
+            if chat.archived:
+                return "chat_archived", project, None
+            return "chat", project, None
         projects = self.stores.projects.list(discord_channel_id=channel_id)
         live = [p for p in projects if not p.archived]
         if live:
@@ -419,6 +445,17 @@ class DiscordRouter:
         if projects:
             return "archived", projects[0], None
         return "other", None, None
+
+    def chat_for(self, channel_id):
+        """The chat whose Discord thread (current or retired) this is, or None."""
+        mirror = getattr(self, "mirror", None)
+        found = mirror.locate(channel_id) if mirror is not None else None
+        if found is None:
+            return None
+        try:
+            return self.stores.threads.get(found[0])
+        except StoreError:
+            return None
 
     def _remember_dm(self, channel_id) -> None:
         with self._lock:
@@ -429,6 +466,9 @@ class DiscordRouter:
         return _cap(f"Project {project.name} is archived, so I won't open, start or steer "
                     "anything here. Restore it from the HUD's Archive view to work in it "
                     "again.", MAX_DISCORD_CHARS)
+
+    CHAT_ARCHIVED_TEXT = ("This chat is archived, so I won't run anything here. Restore it "
+                          "from the HUD's Archive view to carry on.")
 
     # -- the message path --------------------------------------------------
 
@@ -447,13 +487,21 @@ class DiscordRouter:
         channel_id = str(message.get("channel_id") or "")
         where, project, task = self._locate(message, channel_id)
         if not should_respond(message, bot_id, owner_id,
-                              owned=where in ("dm", "task", "project", "archived")):
+                              owned=where in ("dm", "task", "chat", "project", "archived",
+                                              "chat_archived")):
             return
+        if where == "other":
+            # Not a Jarvis place (plan §4.1): ignored, mention or not.
+            return
+        if self.mirror.seen(message.get("id")):
+            return                      # a duplicate delivery runs once (§4.3)
         reply = ChannelReply(self, channel_id)
-        if where == "archived":
+        if where in ("archived", "chat_archived"):
             # Before the approval parser, the classifier and the fast path: an
-            # archived project takes no work from here, whatever the message says.
-            reply.send(self.archived_text(project))
+            # archived project or chat takes no work from here, whatever the
+            # message says.
+            reply.send(self.archived_text(project) if where == "archived"
+                       else self.CHAT_ARCHIVED_TEXT)
             return
         if where == "dm":
             self._remember_dm(channel_id)
@@ -466,12 +514,18 @@ class DiscordRouter:
             except Exception as exc:
                 reply.send(f"I couldn't make out that voice message ({exc}).")
                 return
-        if not text.strip():
+        if not text.strip() and not (where in ("dm", "chat", "project")
+                                     and _files_of(message)):
             return
         # Typed only: a transcription is one mishearing away from "yes".
         if not spoken and self._approval_answer(channel_id, text, reply):
             return
+        chat = self.chat_for(channel_id) if where == "chat" else None
+        if where in ("chat", "dm") and self._question_answer(chat, text, spoken, reply):
+            return
         incoming = self._incoming(text, channel_id, project, task, spoken)
+        if chat is not None:
+            incoming = replace(incoming, thread_id=chat.id)
         destination = classify(incoming)
         if isinstance(destination, Verb):
             self._verb(destination, reply, project, task)
@@ -484,7 +538,8 @@ class DiscordRouter:
         elif isinstance(destination, Steer):
             self._steer_or_answer(destination.task_id, text, reply, spoken)
         elif isinstance(destination, FastPath):
-            self._chat(reply, where, project, text, spoken, incoming)
+            self._chat(reply, where, project, text, spoken, incoming, message=message,
+                       chat=chat)
 
     @staticmethod
     def _incoming(text, channel_id, project, task, spoken=False) -> Incoming:
@@ -644,7 +699,8 @@ class DiscordRouter:
                 self._subscription.task_done()
 
     def _post_approval(self, data: dict) -> None:
-        """Ask in the task's thread when it has one, else the owner's DM.
+        """Ask in the task's thread when it has one, else where the request
+        says (B2: an owner's `/project` command), else the owner's DM.
 
         A thread post that fails is asked again in the DM, and the DM is then
         recorded as where it was asked — so the answer counts there and only
@@ -660,6 +716,22 @@ class DiscordRouter:
             except StoreError:                  # not a task id: ask in the DM
                 task = None
             channel = thread_for(self.stores, task) if task else None
+        # Where to ask: the task's thread, the chat's thread (PR C), the
+        # channel an owner command was typed in (`discord_channel_id`, B2),
+        # else the DM.
+        elif data.get("thread_id") and self.mirror is not None:
+            # A chat's approval goes to that chat's Discord thread, or to the
+            # DM for the DM conversation; a chat whose thread is being made
+            # right now is waited for, briefly.
+            try:
+                channel = self.mirror.channel_for(str(data["thread_id"]))
+            except Exception as exc:
+                LOG.warning("Discord chat place not found (%s)", type(exc).__name__)
+                channel = None
+        if not channel and not task_id and data.get("discord_channel_id"):
+            # B2: a request raised by an owner's command (`/project new`,
+            # `/project unlink`) is asked where the command was typed.
+            channel = str(data["discord_channel_id"])
         if not req_id:
             self._announce("[approval] Discord could not deliver this request")
             return
@@ -911,84 +983,153 @@ class DiscordRouter:
         reply.send(_cap(f"Opened task {task.id} in {target.name}: {summary}. "
                         f"It will ask if anything is unclear.", MAX_DISCORD_CHARS))
 
-    def _chat_thread(self, project, key) -> str:
-        with self._lock:
-            thread_id = self._chat_threads.get(key)
-        cached = self.stores.threads.get(thread_id) if thread_id else None
-        if cached is not None and not cached.archived:
-            return thread_id
-        thread = self.daemon.open_thread(project.id, Role.CHAT, ProviderName.FAST, {})
-        with self._lock:
-            self._chat_threads[key] = thread.id
-        return thread.id
-
-    def _chat(self, reply, where, project, text, spoken, incoming, *, skill=None) -> None:
-        reply.defer()
-        if where != "project" or project is None:
-            project, key = self.stores.projects.inbox(), "dm"
-        else:
-            key = project.id
-        thread_id = self._chat_thread(project, key)
-        answer, finished = self._turn(thread_id, text, skill=skill)
-        if answer.strip():
-            for chunk in _split(answer.strip()):
-                reply.send(chunk)
-            if spoken:
-                self._speak(reply, answer.strip())
-        if finished is not None and (finished.get("data") or {}).get("proposal"):
-            # Replay-protected by turn id inside the router, so a runner that
-            # also consumes this event cannot open the task a second time.
-            outcome = self.router.on_turn_finished(
-                finished, Incoming(text=text, surface=incoming.surface,
-                                   project_id=project.id, thread_id=thread_id))
-            if isinstance(outcome, NeedsProject):
-                reply.send(outcome.reply)
-            elif outcome:
-                reply.send(_cap(str(outcome), MAX_DISCORD_CHARS))
-
-    def _turn(self, thread_id, text, *, skill=None):
-        subscription = self.daemon.bus.subscribe(lambda r: r.get("thread_id") == thread_id)
-        reply, finished = "", None
+    def _question_answer(self, chat, text, spoken, reply) -> bool:
+        """An open provider question in this chat (a Codex `requestUserInput`)
+        is answered by the owner's next *typed* message, through the existing
+        answer path, instead of starting a turn. A voice note never answers
+        (decisions D7)."""
+        chat_id = chat.id if chat is not None else self.mirror._dm
+        if not chat_id or not self.mirror.pending_question(chat_id):
+            return False
+        if spoken:
+            reply.refuse("I can't take a voice note as an answer to the open question — "
+                         "type it here. Nothing was answered.")
+            return True
         try:
-            turn_id = self.daemon.send(thread_id, UserMessage(text=text, skill=skill))
-            deadline = time.monotonic() + self.turn_timeout_s
-            while not self._stop.is_set():
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    break
-                try:
-                    record = subscription.get(timeout=min(0.2, remaining))
-                except queue.Empty:
-                    continue
-                try:
-                    if record.get("kind") == "shutdown":
-                        break
-                    if record.get("turn_id") not in (None, turn_id):
-                        continue
-                    if record["kind"] == "text":
-                        reply += (record.get("data") or {}).get("text", "")
-                    elif record["kind"] == "turn_finished":
-                        finished = record
-                        break
-                finally:
-                    subscription.task_done()
+            answered = self.mirror.answer(chat_id, text)
         except Exception as exc:
-            LOG.warning("Fast-path turn failed (%s)", type(exc).__name__)
-            reply = reply or f"That chat thread could not run a turn ({type(exc).__name__})."
-        finally:
-            self.daemon.bus.unsubscribe(subscription)
-        return reply, finished
+            # Answered elsewhere meanwhile (the HUD), or the turn ended: the
+            # message is an ordinary turn after all, not lost.
+            LOG.info("Discord chat answer fell through to a turn (%s)", type(exc).__name__)
+            return False
+        if not answered:
+            return False
+        reply.send("Answered; carrying on.")
+        return True
 
-    def _speak(self, reply, text) -> None:
+    def _chat(self, reply, where, project, text, spoken, incoming, *, skill=None,
+              message=None, chat=None) -> None:
+        """A turn in a chat, from Discord (plan §4.1). The reply is not posted
+        here: the mirror posts every chat's lines from its log, so a turn typed
+        in Discord and one typed in the HUD come back the same way.
+
+        * DM: the DM conversation (`surface="dm"`), persisted.
+        * A chat's Discord thread (current or old): that chat.
+        * A top-level message in a project channel or #ungrouped: a **new**
+          chat, threaded under the owner's message (O-C1); a slash command,
+          which has no message, gets a plain thread.
+        """
+        from ..daemon import DaemonError
+        reply.defer()
+        message = message or {}
+        message_id = str(message.get("id") or "") or None
+        channel = str(reply.channel_id)
+        slash = not message
+        try:
+            if where == "dm":
+                chat_id, via = self.mirror.ensure_dm_chat(), "dm"
+            elif where == "chat" and chat is not None:
+                chat_id, via = chat.id, "discord"
+            elif where == "project" and project is not None:
+                chat_id, channel = self.mirror.start_chat(project, channel, text,
+                                                          message_id=message_id)
+                via = "discord"
+            else:
+                reply.refuse("This is not a place Jarvis keeps a chat.")
+                return
+        except DaemonError as exc:
+            reply.send(_cap(f"I couldn't open a chat: {exc}", MAX_DISCORD_CHARS))
+            return
+        except Exception as exc:
+            LOG.warning("Discord chat not opened (HTTP %s, code %s, %s)", *_facts(exc))
+            reply.send(f"I couldn't open a chat here ({type(exc).__name__}).")
+            return
+        files = _files_of(message)
+        images, names, full = [], [], text
+        if files:
+            # Images and text files from Discord, under the HUD's caps and
+            # protected-name rules (`assemble_turn`, never an @path read).
+            try:
+                chat_project = self.stores.threads.get(chat_id)
+                built = self._take_files(chat_project, text, files)
+            except Exception as exc:
+                reply.send(f"I couldn't take those attachments ({type(exc).__name__}); "
+                           "nothing ran.")
+                return
+            full, images, names = built.text, built.images, built.attachments
+        body = UserMessage(text=full, images=images, skill=skill, via=via, typed=text,
+                           attachments=names, spoken=spoken,
+                           discord_message_id=message_id, discord_channel_id=channel)
+        try:
+            outcome = self.mirror.submit(chat_id, body)
+        except DaemonError as exc:
+            reply.send(_cap(f"That chat could not take a turn: {exc}", MAX_DISCORD_CHARS))
+            return
+        if outcome == "queued":
+            self._post(channel, QUEUED_TEXT)
+        elif outcome == "full":
+            self._post(channel, FULL_TEXT)
+        if slash:
+            # An interaction must be answered; the reply itself follows from
+            # the mirror, in the chat's own place.
+            reply.send("On it." if where != "project" else f"On it, in <#{channel}>.")
+
+    def _take_files(self, chat, text, files):
+        """Discord attachments -> a UserMessage under `assemble_turn`'s rules:
+        at most 8, 4 MB each, protected names refused, text scrubbed, images
+        as images. Anything that is neither an image nor text is refused with
+        a note, and nothing refused is downloaded."""
+        import base64
+        import mimetypes
+
+        from jarvis.tools.secrets import is_protected
+
+        from ..hud_api import ATTACH_CAP, assemble_turn
+        project = self.stores.projects.get(chat.project_id) if chat is not None else None
+        items, notes = [], []
+        for attachment in files[:8]:
+            name = str(attachment.get("filename") or "attachment")[:200]
+            mime = (attachment.get("content_type") or mimetypes.guess_type(name)[0]
+                    or "").split(";")[0].strip().lower()
+            size = int(attachment.get("size") or 0)
+            if not (mime.startswith("image/") or mime.startswith("text/") or mime in TEXT_MIMES):
+                notes.append(f"[{name}: only images and text files are taken — not attached]")
+                continue
+            if is_protected(name.replace("\\", "/")):
+                notes.append(f"[{name} holds live credentials — not attached]")
+                continue
+            if size > ATTACH_CAP:
+                notes.append(f"[{name} is over 4MB — not attached]")
+                continue
+            try:
+                data = v1gw._download(str(attachment.get("url") or ""))
+            except Exception as exc:
+                notes.append(f"[{name}: download failed ({type(exc).__name__}) — not attached]")
+                continue
+            items.append({"name": name, "mime": mime or "text/plain",
+                          "data_b64": base64.b64encode(data).decode()})
+        if len(files) > 8:
+            notes.append(f"[{len(files) - 8} attachment(s) over the 8-per-turn cap were dropped]")
+        if not items:
+            body = "\n\n".join(x for x in [text.strip(), *notes] if x)
+            return UserMessage(body or "(an attachment I could not take)")
+        built = assemble_turn(project, {"text": text, "attachments": items}, paths=False)
+        if notes:
+            built.text = built.text + "\n\n" + "\n\n".join(notes)
+        return built
+
+    def _voice_reply(self, text):
+        """Speech for a reply to a voice note (v1 rules): -> (name, audio), or
+        None when synthesis failed, which leaves the reply text-only."""
         from jarvis import voice
 
         try:
             audio = voice.tts(text)
         except Exception as exc:
             self._announce(f"[discord] tts failed ({type(exc).__name__}); text-only reply")
-            return
+            return None
         name, _mime = v1gw._audio_filename(audio)
-        reply.send(None, files=((name, audio),))
+        return name, audio
 
     # -- posting -----------------------------------------------------------
 
@@ -1026,6 +1167,18 @@ class _Asked:
 
     def __init__(self, tool, args, allowlistable=True):
         self.tool, self.args, self.allowlistable = tool, args, allowlistable
+
+
+TEXT_MIMES = frozenset({"application/json", "application/xml", "application/x-yaml",
+                        "application/yaml", "application/toml", "application/javascript",
+                        "application/x-sh"})
+
+
+def _files_of(message) -> list[dict]:
+    """A message's attachments, minus its voice note (that one is heard)."""
+    voice = v1gw.voice_attachment(message)
+    return [a for a in (message.get("attachments") or [])
+            if isinstance(a, dict) and a is not voice]
 
 
 def _split(text: str, limit: int = MAX_DISCORD_CHARS) -> list[str]:
