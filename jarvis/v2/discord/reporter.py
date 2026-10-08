@@ -50,7 +50,14 @@ open a breaker: 30 s, then 60 s, doubling up to 5 min, then a reconcile.
 with `changed: ["discord_channel_id"]`), that project's tasks are reconciled
 at once: an active or blocked task gets its thread and card in the new
 channel, and one whose old thread was deleted gets a fresh one — the DM is
-then the safety net only if that channel breaks too.
+then the safety net only if that channel breaks too. A live task whose thread
+is in **another** channel (the project was unlinked and linked elsewhere)
+gets a new thread in the new one, "Continued from <#old>", and the old thread
+— kept, never deleted — says "Moved to <#new>" (O-C5, applied to tasks).
+
+**Never backwards.** The sidecar's `seen_updated` is the newest
+`Task.updated` delivered; an event snapshot older than that is skipped, so a
+reconcile that ran ahead of queued snapshots cannot be undone by them.
 
 `status()` is what `GET /discord` shows and what a `discord_status` SSE event
 carries on every change: ok, degraded (with a reason) or down.

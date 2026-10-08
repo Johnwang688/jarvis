@@ -785,6 +785,22 @@ and O1 in `docs/plans/2026-10-07-discord-decisions.md`. Code:
   `discord_status` SSE event fires on every state change; the HUD's
   `DiscordPanel` shows green, amber with the reason, or red. A surface that
   failed to start is recorded by class name and shown red, not "pending".
+- **Bugbot fixes (2026-10-08).** *No rewind:* the sidecar keeps
+  `seen_updated`, the newest `Task.updated` delivered (a transition always
+  moves it forward); an event snapshot older than that is skipped, so a
+  reconcile that ran ahead of queued snapshots can no longer rewind `phase`
+  and post Verified, Done and the ping twice. *Breaker:* the pass that
+  re-closes it also clears the failure count and back-off (the light goes
+  back to ok), and a drop while it is open schedules the reconcile at its
+  end, never "now" (that was a busy loop). *Relink to another channel
+  (decisions, Interpretation under O-C5):* the sidecar records the thread's
+  parent (`channel_id`); when a project's channel changes under a live task,
+  the task gets a new thread in the new channel opening with "Continued
+  from <#old>" (standing in for Started; an open question is asked again
+  there), the old thread gets "Moved to <#new>" and is kept, never deleted,
+  and its id goes to `retired_threads`. A sidecar from before the field
+  takes the event's `previous` channel, else asks Discord for the thread's
+  parent.
 
 ### 11.6 The server and project channels (B1, 2026-10-07)
 
@@ -891,6 +907,16 @@ D5, O1, O6 and O7 in `docs/plans/2026-10-07-discord-decisions.md`. Code:
     create whose answer was lost.
   - The crowding note says how a channel comes back (`/channel restore`, B2,
     or by hand).
+- **Bugbot fixes (2026-10-08): nothing is marked done before it worked.**
+  `reconcile()` and `check_crowding()` return None when the guild's channels
+  cannot be listed, and the worker (`_housekeep`) marks the reconcile done or
+  clears crowding only on success, trying again after `RETRY_S`; the Inbox
+  link is marked done only once written. A restore says "Restored." only when
+  the channel moved, and otherwise that the move will be retried (or that
+  Discord refused it). `/channel archive|restore` drops an older pending move
+  only after its own lookup succeeded. A housekeeping ask that was approved
+  is settled even if a shutdown began meanwhile, so a restart never replays
+  an action that already ran (a second archive category).
 
 ### 11.7 Projects and folders from Discord (B2, 2026-10-07)
 
@@ -1039,6 +1065,18 @@ worker) is the one place a chat meets Discord, both ways.
   ("I'll take this next."), the fourth is refused. The last 500 message ids
   are remembered. An open provider question is answered by the next *typed*
   message (`daemon.answer`).
+- **Questions, Bugbot fixes (2026-10-08).** A Discord message with files and
+  no words now reaches the turn path in an owned place (v1's `should_respond`
+  knew only text and voice), and it **never answers** an open question —
+  only typed words do (D7); it runs as an ordinary turn, queued behind the
+  waiting one (O-C6), the same fall-through as a failed answer. A question is
+  recorded (`pending_question`) even when there is nowhere to post it yet
+  (no DM, a thread still being made) and posted once there is.
+  `daemon.answer` logs `question_answered` beside the question, and the
+  mirror's sync re-posts an open question (asked, with no later
+  `question_answered`) of the turn **this process is running**, with its D1
+  ping outside DMs, so a dropped bus event is recovered; a question from
+  before a restart died with its provider and is never resurrected.
 - **Approvals** raised in a chat go to its thread (or the DM for the DM
   chat), buttons and ping line as for tasks; the approval worker waits up
   to 3 s for a thread being made at that moment.

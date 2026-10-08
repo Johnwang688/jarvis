@@ -208,6 +208,12 @@ after the owner checks them on the HUD.
   - *Interpretation:* the name becomes `↪ moved to <project> · <name>`, capped
     at 100 characters. A later HUD rename also updates the old thread's name,
     with the header kept.
+  - *Interpretation (Bugbot fixes, 2026-10-08):* tasks follow the same rule
+    when their **project** moves channel. Unlinked and linked to another
+    channel while a task is live, the task gets a new thread in the new
+    channel ("Continued from <#old>"), the old thread gets "Moved to <#new>"
+    and is kept as it is (never deleted, not renamed), and every later post,
+    pings included, goes to the new thread.
 - **O-C6.** A message sent while a turn is running is queued (up to 3), with
   a quiet "next" note. Yes.
 - **O-C7.** Every chat is mirrored, and there is no opt-out. Yes.
