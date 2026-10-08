@@ -614,6 +614,21 @@ class DiscordRoutingChecks(unittest.TestCase):
         self.approvals.shutdown()
         worker.join(2)
 
+    def test_a_timed_out_approval_strips_its_buttons_and_is_forgotten(self):
+        """The broker used to deny on timeout without announcing it, so the
+        post kept live buttons and `_approval_channels` kept the entry forever."""
+        self.approvals.timeout_s = 0.4
+        request, result, worker = self.ask(task_id=self.task.id)
+        message_id = self.surface._approval_messages[request.req_id][1]
+        worker.join(3)
+        self.assertEqual(result["decision"], Decision.DENY)
+        path = f"/channels/{TASK_THREAD}/messages/{message_id}"
+        wait_for(lambda: any(c["path"] == path and c["method"] == "PATCH"
+                             for c in self.transport.calls))
+        wait_for(lambda: request.req_id not in self.surface._approval_channels)
+        self.assertNotIn(request.req_id, self.surface._approval_messages)
+        wait_for(lambda: any("timed out, nothing ran" in t for t in self.texts(TASK_THREAD)))
+
     def test_a_resolution_anywhere_strips_the_buttons(self):
         request, result, worker = self.ask(task_id=self.task.id)
         message_id = self.surface._approval_messages[request.req_id][1]

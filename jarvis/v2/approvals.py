@@ -133,6 +133,7 @@ class _Pending:
     event: threading.Event = field(default_factory=threading.Event)
     decision: Decision | None = None
     resolution: str = ""
+    announced: bool = False             # resolve() already told on_resolve
 
 
 class DenyAll:
@@ -205,13 +206,26 @@ class PendingApprovals:
                     self._pending.pop(request.req_id, None)
                 return self._record(request, Decision.DENY, "nowhere-to-ask")
 
-        answered = item.event.wait(self.timeout_s)
+        item.event.wait(self.timeout_s)
         with self._lock:
             self._pending.pop(request.req_id, None)
-            decision = item.decision if answered else None
-            resolution = item.resolution or ("timeout" if not answered else "")
+            if item.event.is_set():
+                # Answered (resolve) or released (shutdown). Read under the
+                # lock, so an answer that lands as the wait times out is the
+                # one taken — never a timeout reported over an announced yes.
+                decision, resolution, announced = item.decision, item.resolution, item.announced
+            else:
+                # Timed out. Setting the event means a resolve() racing this
+                # finds the request gone and refuses, rather than answering it.
+                item.event.set()
+                decision, resolution, announced = None, "timeout", False
         if decision is None:
             decision, resolution = Decision.DENY, resolution or "timeout"
+        if not announced:
+            # A timeout or a shutdown is an outcome every surface must hear:
+            # without it a Discord post kept its buttons and the gateway kept
+            # the request's channel forever (found in review, 2026-10-08).
+            self._announce(request, decision, resolution)
         return self._record(request, decision, resolution)
 
     # -- the answering side ------------------------------------------------
@@ -243,13 +257,10 @@ class PendingApprovals:
                         item.resolution = f"allow (not allowlistable: {exc})"
                     except OSError as exc:
                         item.resolution = f"allow (allowlist not written: {exc})"
+            item.announced = True
             item.event.set()
             request, resolution = item.request, item.resolution
-        if self._on_resolve is not None:
-            try:
-                self._on_resolve(request, decision, resolution)
-            except Exception:
-                LOG.exception("Cannot announce resolution of %s", req_id)
+        self._announce(request, decision, resolution)
         return entry
 
     def resolve_code(self, code: str, decision: Decision | str, *, always: bool = False):
@@ -295,6 +306,14 @@ class PendingApprovals:
             if code not in taken:
                 return code
         return _secrets.token_hex(2)
+
+    def _announce(self, request: ApprovalRequest, decision: Decision, resolution: str) -> None:
+        if self._on_resolve is None:
+            return
+        try:
+            self._on_resolve(request, decision, resolution)
+        except Exception:
+            LOG.exception("Cannot announce resolution of %s", request.req_id)
 
     def _record(self, request: ApprovalRequest, decision: Decision, resolution: str) -> Decision:
         self.decisions.append({

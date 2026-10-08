@@ -819,9 +819,17 @@ class DiscordRouter:
             self._strip_buttons(posted[0], posted[1])
         if not channel:
             return
+        resolution = str(data.get("resolution", ""))
+        if resolution in ("timeout", "shutdown"):
+            # Nobody answered: the broker denied (it now announces this).
+            where = ("timed out, nothing ran" if resolution == "timeout"
+                     else "Jarvis stopped first, nothing ran")
+            self._post(channel, f"Approval `{data.get('code', '')}` for "
+                                f"`{data.get('tool', '')}`: {where}.")
+            return
         where = "answered here" if here else "answered on another surface"
         self._post(channel, f"Approval `{data.get('code', '')}` for "
-                            f"`{data.get('tool', '')}`: {data.get('resolution', '')} ({where}).")
+                            f"`{data.get('tool', '')}`: {resolution} ({where}).")
 
     # -- verbs -------------------------------------------------------------
     # Each verb takes a `Reply`. Refusals that need only reads come first, then

@@ -578,12 +578,28 @@ def approvals_checks():
             raised = exc
         ok(raised is not None, "a second resolve is refused (one-shot ids)")
 
-        # Timeout denies.
-        quick = PendingApprovals(timeout_s=0.05)
-        eq(quick.ask(ApprovalRequest(tool="Bash")), Decision.DENY, "timeout denies")
+        eq(len(resolved), 1, "an answered request is announced exactly once")
+
+        # Timeout denies, and is announced: without the announcement a Discord
+        # post kept its buttons and the gateway kept the request forever.
+        timed_out = []
+        quick = PendingApprovals(timeout_s=0.05, on_request=lambda r: None,
+                                 on_resolve=lambda r, d, why: timed_out.append((r.req_id, d, why)))
+        late = ApprovalRequest(tool="Bash")
+        eq(quick.ask(late), Decision.DENY, "timeout denies")
+        eq(timed_out, [(late.req_id, Decision.DENY, "timeout")],
+           "and a timeout publishes exactly one resolution, a denial")
+        refused = None
+        try:
+            quick.resolve(late.req_id, Decision.ALLOW)
+        except ValueError as exc:
+            refused = exc
+        ok(refused is not None and len(timed_out) == 1,
+           "an answer after the timeout is refused and announces nothing")
 
         # Shutdown releases waiters with a denial.
-        closing = PendingApprovals()
+        released = []
+        closing = PendingApprovals(on_resolve=lambda r, d, why: released.append((d, why)))
         held = []
         thread = threading.Thread(target=lambda: held.append(closing.ask(ApprovalRequest(tool="Bash"))))
         thread.start()
@@ -593,6 +609,7 @@ def approvals_checks():
         closing.shutdown()
         thread.join(3)
         eq(held, [Decision.DENY], "shutdown denies every waiter")
+        eq(released, [(Decision.DENY, "shutdown")], "and announces each one, once")
         eq(closing.ask(ApprovalRequest(tool="Bash")), Decision.DENY,
            "and a closed broker denies immediately")
 
