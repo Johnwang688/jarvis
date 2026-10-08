@@ -302,6 +302,12 @@ class TaskStore(_Store[model.Task]):
             expected = previous.state if previous else model.TaskState.INTAKE
             if obj.state != expected:
                 raise StoreError(f"Task {obj.id}: state changes require transition()")
+            if previous is not None and previous.discord_thread_id and not obj.discord_thread_id:
+                # Write-once (bug 1). A caller holding a copy read before the
+                # Discord poster made the thread — `worktrees.ensure` across
+                # `git worktree add`, any runner save — must not wipe its id,
+                # or the next snapshot makes a second thread for the task.
+                obj.discord_thread_id = previous.discord_thread_id
             super().save(obj)
 
     def transition(self, task_id: str, new_state: model.TaskState, *, reason: str = "") -> model.Task:
