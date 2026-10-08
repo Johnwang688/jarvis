@@ -219,6 +219,8 @@ class InteractionRouter:
                 {"guild_id": str(guild)} if guild else {}, reply.channel_id)
             if where == "archived":
                 refusal = self.surface.archived_text(project)
+            elif where == "chat_archived":
+                refusal = self.surface.CHAT_ARCHIVED_TEXT
             elif where not in registry.JARVIS_PLACES:
                 refusal = NOT_HERE
         if refusal is not None:
@@ -499,7 +501,11 @@ class InteractionRouter:
             self.surface._steer(task.id, text, reply, False)
             return
         incoming = self.surface._incoming(request, reply.channel_id, project, task)
-        self.surface._chat(reply, where, project, request, False, incoming, skill=name)
+        # In a chat's Discord thread the skill runs in that chat (PR C); in a
+        # project channel it starts a new chat, in the DM the DM conversation.
+        chat = self.surface.chat_for(reply.channel_id) if where == "chat" else None
+        self.surface._chat(reply, where, project, request, False, incoming, skill=name,
+                           chat=chat)
 
     def _cmd_project_list(self, values, reply, place, interaction) -> None:
         self.surface._list_projects(reply)

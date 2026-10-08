@@ -109,6 +109,21 @@ class UserMessage:
     # directive to use the skill they have installed (`commands.skill_directive`).
     # Validated against `commands.invocable_skills()` before it gets here.
     skill: str | None = None
+    # Where the message came from and what the owner actually wrote (PR C,
+    # plan §4.3). `via` is "hud" | "discord" | "dm" | "system" | "peer"; None
+    # means "hud" for an owner message and "system" for anything else.
+    # `typed` is the owner's words before `assemble_turn` inlined any file
+    # (None: the text is the typed words); `attachments` are file names
+    # only, never contents. `spoken` marks dictation or a voice note. The two
+    # Discord ids say which message ran the turn and in which channel, so a
+    # reply goes back there and a duplicate delivery runs once. None of these
+    # reach a provider: they are for the log, the bus and the mirror.
+    via: str | None = None
+    typed: str | None = None
+    attachments: list[str] = field(default_factory=list)
+    spoken: bool = False
+    discord_message_id: str | None = None
+    discord_channel_id: str | None = None
 
 
 # Permission callback the daemon hands every provider: the five layers of §6

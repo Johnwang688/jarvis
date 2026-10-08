@@ -318,7 +318,9 @@ class Backend(unittest.TestCase):
                               "reporter": None,
                               # B1: no guild file, no linker, no permission check.
                               "guild": {"configured": False, "id": None},
-                              "linker": None, "permissions": None})
+                              "linker": None, "permissions": None,
+                              # PR C: no surface, no chat mirror.
+                              "mirror": None})
 
         class Surface:
             def status(self):
@@ -330,7 +332,8 @@ class Backend(unittest.TestCase):
         body = self.request("GET", "/discord")
         self.assertEqual(body, {"connected": True, "commands": {
             "state": "ok", "count": 11, "synced_at": 1.0, "error": None}, "reporter": None,
-            "guild": {"configured": False, "id": None}, "linker": None, "permissions": None})
+            "guild": {"configured": False, "id": None}, "linker": None, "permissions": None,
+            "mirror": None})
         self.assertNotIn("synthetic-leak", json.dumps(body))
 
         class WithReporter(Surface):

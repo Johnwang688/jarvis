@@ -65,6 +65,30 @@ def is_running(port: int) -> bool:
         conn.close()
 
 
+VIAS = ("hud", "discord", "dm", "system", "peer")
+
+
+def user_data(message: UserMessage) -> dict:
+    """The `user` log record's data and the `user_message` event's (PR C).
+
+    `text` is what the provider received (with any file inlined); `typed` is
+    the owner's own words, which is all the Discord mirror ever shows.
+    `attachments` are names, never contents; `images` is a count."""
+    via = message.via or ("hud" if message.origin == "owner" else "system")
+    if via not in VIAS:
+        raise APIError(400, "via must be one of " + ", ".join(VIAS))
+    data = {"text": message.text,
+            "typed": message.typed if message.typed is not None else message.text,
+            "via": via, "origin": message.origin, "images": len(message.images),
+            "attachments": [str(name)[:200] for name in message.attachments][:8],
+            "spoken": bool(message.spoken),
+            "discord_message_id": message.discord_message_id,
+            "discord_channel_id": message.discord_channel_id}
+    if message.skill:
+        data["skill"] = message.skill
+    return data
+
+
 def safe_list(store, **filters):
     """Keep the strict store contract; isolate corrupt saved records here."""
     try:
@@ -551,6 +575,14 @@ class Daemon:
         threads opened before the field existed. Read-only: nothing is
         rewritten, so listing threads can never change one."""
         record = to_json(thread)
+        if thread.surface:
+            # Where the chat is on Discord (PR C): names and a link, for the
+            # chat header. Never a token; the guild id is setup's.
+            try:
+                from .discord.mirror import describe_surface
+                record["discord"] = describe_surface(self, thread)
+            except Exception:
+                record["discord"] = None
         if record.get("cwd") is None:
             try:
                 path = self.stores.threads.path(thread.id).with_name("brief.json")
@@ -573,6 +605,7 @@ class Daemon:
 
     def send(self, thread_id: str, message: UserMessage) -> str:
         _validate(message, UserMessage)
+        data = user_data(message)
         with self._lock:
             self._active()
             session = self._sessions.get(thread_id)
@@ -600,10 +633,14 @@ class Daemon:
             turn_id = session.turn_id
             self.stores.threads._append(thread_id, "log.jsonl",
                                         {"kind": "user", "at": utcnow(), "turn_id": turn_id,
-                                         "thread_id": thread_id,
-                                         "data": ({"text": message.text, "skill": message.skill}
-                                                  if message.skill else
-                                                  {"text": message.text})})
+                                         "thread_id": thread_id, "data": data})
+            # The owner's message on the bus (PR C, plan §4.3), before the
+            # worker starts, so it precedes every event of its turn. The
+            # Discord mirror and the HUD read it; the log record above holds
+            # the same fields, which is what the mirror catches up from.
+            self.bus.publish({"kind": "user_message", "thread_id": thread_id,
+                              "project_id": session.thread.project_id, "turn_id": turn_id,
+                              "at": utcnow(), "data": dict(data)})
             session.worker = worker
             worker.start()
             return turn_id

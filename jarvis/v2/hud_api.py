@@ -233,13 +233,20 @@ def directories(name):
             "dirs": sorted(names)}
 
 
-def assemble_turn(project, body):
-    """v1 fences/notes/caps, with project-scoped @paths and credential names refused."""
+def assemble_turn(project, body, *, paths: bool = True):
+    """v1 fences/notes/caps, with project-scoped @paths and credential names refused.
+
+    `paths=False` (a message typed in Discord, PR C) takes the attachments
+    under the same caps and refusals but never reads an `@path` from disk."""
     from .daemon import _object
-    _object(body, ("text", "images", "attachments"), ("text",))
+    _object(body, ("text", "images", "attachments", "spoken"), ("text",))
     typed = body["text"]
     if not isinstance(typed, str):
         fail(400, "text must be a string")
+    # Dictation (PR C): the Discord mirror shows it as "You (HUD, voice)".
+    spoken = body.get("spoken", False)
+    if not isinstance(spoken, bool):
+        fail(400, "spoken must be a boolean")
     attachments, images = body.get("attachments", []), body.get("images", [])
     if not isinstance(attachments, list) or not isinstance(images, list):
         fail(400, "images and attachments must be lists")
@@ -253,7 +260,7 @@ def assemble_turn(project, body):
         _object(item, ("name", "mime", "data_b64"), ("name", "mime", "data_b64"))
         combined.append(item)
     notes = []
-    for token in re.findall(r"(?:(?<=\s)|^)@(\S+)", typed):
+    for token in (re.findall(r"(?:(?<=\s)|^)@(\S+)", typed) if paths else ()):
         name = token.rstrip(".,;:!?)\"'")
         try:
             raw, target = scope(project, name)
@@ -273,7 +280,7 @@ def assemble_turn(project, body):
             if not isinstance(exc, (APIError, OSError)):
                 raise
             notes.append(f"[{name}: unavailable or outside scope — not attached]")
-    result_images, blocks = [], []
+    result_images, blocks, names = [], [], []
     for item in combined[:8]:
         if any(not isinstance(item.get(k), str) for k in ("name", "mime", "data_b64")):
             fail(400, "attachment fields must be strings")
@@ -289,6 +296,8 @@ def assemble_turn(project, body):
         if len(data) > ATTACH_CAP:
             notes.append(f"[{name} is over 4MB — not attached]")
             continue
+        if not item.get("direct"):
+            names.append(name)
         if mime.startswith("image/"):
             result_images.append({"b64": base64.b64encode(data).decode(), "mime": mime})
             if not item.get("direct"):
@@ -302,7 +311,10 @@ def assemble_turn(project, body):
     text = "\n\n".join(([typed.strip()] if typed.strip() else []) + blocks + notes)
     if not text:
         fail(400, "text or attachments required")
-    return UserMessage(text, result_images)
+    # `typed` is the owner's own words: the Discord mirror shows those and the
+    # attachment names, never what was inlined (PR C, plan §4.3).
+    return UserMessage(text, result_images, via="hud", typed=typed.strip(),
+                       attachments=names, spoken=spoken)
 
 
 class HUDLedger(UsageLedger):
@@ -664,7 +676,7 @@ def discord_status(daemon) -> dict:
     Built from the surface's own status record, which holds states, counts
     and times only — never a token, an interaction token or a request path.
     PR A adds `reporter` (the update poster's health); B1 adds `guild`,
-    `linker` and `permissions`."""
+    `linker` and `permissions`; PR C adds `mirror` (the chat mirror's)."""
     surface = getattr(daemon, "discord", None)
     if surface is None:
         from .daemon import discord_connected
@@ -672,7 +684,7 @@ def discord_status(daemon) -> dict:
         cfg = _guild.load()
         offline = {"guild": {"configured": cfg is not None,
                              "id": cfg.guild_id if cfg is not None else None},
-                   "linker": None, "permissions": None}
+                   "linker": None, "permissions": None, "mirror": None}
         failed = getattr(daemon, "discord_error", None)
         if isinstance(failed, str) and failed:
             # start_discord raised: say so, red, with the class and nothing else.
@@ -694,7 +706,29 @@ def discord_status(daemon) -> dict:
             "commands": {key: commands.get(key) for key in
                          ("state", "count", "synced_at", "error")},
             "reporter": _reporter_status(status.get("reporter")),
+            "mirror": _mirror_status(status.get("mirror")),
             **_linker_status(status)}
+
+
+def _mirror_status(mirror) -> dict | None:
+    """The chat mirror's health (PR C), field by field: a state, a reason
+    sentence, the posts still waiting, and the last failure as operation,
+    HTTP status, Discord code and time. Nothing else passes."""
+    if not isinstance(mirror, dict):
+        return None
+    state = mirror.get("state")
+    error = mirror.get("last_error")
+    queued = mirror.get("queued")
+    return {
+        "state": state if state in ("ok", "degraded", "down") else "down",
+        "reason": str(mirror.get("reason") or "")[:300],
+        "queued": queued if isinstance(queued, int) and not isinstance(queued, bool) else 0,
+        "last_error": ({"op": str(error.get("op") or "")[:40],
+                        "status": error.get("status") if isinstance(error.get("status"), int) else None,
+                        "code": error.get("code") if isinstance(error.get("code"), int) else None,
+                        "at": error.get("at") if isinstance(error.get("at"), (int, float)) else None}
+                       if isinstance(error, dict) else None),
+    }
 
 
 def _names(value, limit=20) -> list[str]:
@@ -923,7 +957,11 @@ def route(handler, daemon, parts, query):
                 if isinstance(text, str):
                     role = ("assistant" if kind == "text" else "user" if kind == "user"
                             else "system" if kind == "model_set" else row.get("role", "assistant"))
-                    messages.append(dict(role=role, text=text, at=row.get("at", row.get("t"))))
+                    message = dict(role=role, text=text, at=row.get("at", row.get("t")))
+                    if kind == "user" and data.get("via") in ("discord", "dm"):
+                        # Typed in Discord (PR C): the HUD labels it "via Discord".
+                        message["via"] = data["via"]
+                    messages.append(message)
             return 200, {"messages": messages}
     if len(parts) in (3, 4) and parts[0] == "tasks" and method == "GET":
         task = daemon.require(stores.tasks, parts[1])

@@ -967,11 +967,17 @@ class VerbChecks(Harness):
         wait_for(lambda: self.provider.messages)
         message = self.provider.messages[-1]
         self.assertEqual((message.skill, message.text), ("morning-briefing", "keep it short"))
-        self.assertIn("the fast path answered", self.edits()[-1]["content"])
+        # The interaction is answered at once; the reply is the chat's, and the
+        # mirror posts it in the DM conversation like any other turn (PR C).
+        self.assertEqual(self.edits()[-1]["content"], "On it.")
+        wait_for(lambda: any("the fast path answered" in (b.get("content") or "")
+                             for b in self.transport.channel_posts(DM_CHANNEL)))
         thread = self.stores.threads.list()[0]
+        self.assertEqual(thread.surface, "dm")
         logged = [r for r in self.stores.threads.read_log(thread.id) if r.get("kind") == "user"]
-        self.assertEqual(logged[-1]["data"], {"text": "keep it short",
-                                              "skill": "morning-briefing"})
+        data = logged[-1]["data"]
+        self.assertEqual((data["text"], data["skill"], data["via"]),
+                         ("keep it short", "morning-briefing", "dm"))
 
     def test_skill_in_a_task_thread_is_a_steer(self):
         self.listener.interact(slash("skill", {"name": "morning-briefing", "request": "today"},
