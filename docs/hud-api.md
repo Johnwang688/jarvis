@@ -182,11 +182,20 @@ of a turn. The choice is stored on the Thread record (`model`, `effort`);
   `Thread.effort = null` is that model's default: `high`, or the roster's
   per-model effort on OpenRouter, clamped to the model's own levels; none for
   a model with no reasoning control.
+- **Only an explicit model pins** (A4 amendment, 2026-10-07). A default
+  thread (`model: null`) with an `effort` keeps following the default model;
+  the effort is stored on its own and clamped at the start of every turn to
+  whatever the default supports then (down the ladder first, then up; as
+  asked when the catalog cannot describe the model), and dropped altogether
+  for a default with no reasoning control. The stored value is never
+  rewritten by the clamp, so a default that moves back gets it again.
+  `effective_effort` on `thread_updated` is the clamped value.
 - `POST /threads` for `role: "chat"` takes `provider` (default `fast`) and
   `brief: {model?, effort?}`. The model is checked **before** the record is
   created: 400 with the reason for a model that is not on the roster (or
   cannot call tools), not one of that CLI's models, or an effort off its
-  ladder. A Claude or Codex chat thread opens in the project root under the
+  ladder (the default model's ladder when no model is given; the thread
+  still opens on `model: null`). A Claude or Codex chat thread opens in the project root under the
   project's profile and always-ask list, with the §6 permit as its gate.
   A provider the project cannot run is refused the same way, before any
   record exists (`thread_model.refusal`): Codex runs the `auto` profile only
@@ -204,18 +213,24 @@ of a turn. The choice is stored on the Thread record (`model`, `effort`);
   rename `{title}`, a move `{project_id}`, or a model change `{model?,
   effort?}`. Fields from two shapes in one body are a 400 ("rename, move and
   model change are separate requests"), and so is a body with none. `model: null` returns to the
-  default and resets the effort; a new model resets the effort unless one is
-  given with it; an effort alone on a default thread pins the default model
-  it is an effort of. A model already pinned stays usable after it leaves
+  default and resets the effort — unpinning is a choice of model like any
+  other, so it clears a stored effort too (`{model: null, effort}` keeps
+  one); a new model resets the effort unless one is given with it; an effort
+  alone on a default thread stores the effort and leaves `model: null`, so
+  the thread keeps following the default. That effort is checked against the
+  default model of the moment (what the chip offers): 400 for a level it
+  lacks, or when it has no reasoning control. A model already pinned stays usable after it leaves
   the roster (shown "(not on roster)"). 400 with the reason on any refusal;
   409 for a task's thread, a provider that cannot switch, or an archived
   thread or one in an archived project ("restore the thread before changing
   its model"). There is no
   `provider` field: a session cannot change provider.
 - Every change writes a `model_set` record to the thread's log (`data.text`,
-  e.g. `model → moonshotai/kimi-k3 · high (from the next message)`, or
+  e.g. `model → moonshotai/kimi-k3 · high (from the next message)`;
+  `effort → high (default model: X)` for an effort-only change on a default
+  thread (`effort → default · high (…)` when it is cleared); or
   `(follows the default)` when a default thread's turn starts on a new global
-  model) and publishes it, then `thread_updated {…thread, thread_id,
+  model, naming the re-clamped effort) and publishes it, then `thread_updated {…thread, thread_id,
   changed: ["model", "effort"], effective_model, effective_effort}`. A
   rename's `thread_updated` carries `changed: ["title"]` and no record; the
   HUD patches in place when the record is there and refetches otherwise. `GET /threads/{id}/transcript` returns `model_set`

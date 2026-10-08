@@ -106,11 +106,26 @@ export function defaultModel(tm: ThreadModels | null, provider: ProviderName): s
   return tm?.providers[provider]?.default ?? null;
 }
 
-/** The model and effort the thread's next message runs on. */
+/** A stored effort as `model` can run it: itself, the nearest level the
+ * model offers (down first), nothing for a model with no reasoning control,
+ * and as asked when the ladder is unknown (`thread_model.clamp_effort`). */
+export function clampEffort(tm: ThreadModels | null, provider: ProviderName, model: string | null, wanted: string): string | null {
+  const ladder = effortsFor(tm, provider, model);
+  if (ladder === null) return wanted;
+  return ladder.length ? clamp(wanted, ladder) : null;
+}
+
+/** The model and effort the thread's next message runs on. A default thread
+ * follows the default model, and an effort chosen on it is clamped to
+ * whatever that model is now (A4 amendment). */
 export function effective(tm: ThreadModels | null, c: Choice): { model: string | null; effort: string | null } {
   if (c.model === null) {
     const p = tm?.providers[c.provider];
-    return { model: p?.default ?? null, effort: c.effort ?? p?.default_effort ?? null };
+    const model = p?.default ?? null;
+    const effort = c.effort === null
+      ? p?.default_effort ?? null
+      : model === null ? c.effort : clampEffort(tm, c.provider, model, c.effort);
+    return { model, effort };
   }
   return { model: c.model, effort: c.effort ?? defaultEffort(tm, c.provider, c.model) };
 }
@@ -189,26 +204,37 @@ export function modelOptions(tm: ThreadModels | null, c: Choice): Option[] {
 /** The effort select for the effective model; empty when it has no control.
  * An unknown ladder offers every level: the backend accepts any of them for
  * a model it cannot describe, and refuses one a model it can describe lacks,
- * with the reason. */
+ * with the reason.
+ *
+ * On a default thread the ladder is the default model's, and an effort kept
+ * from an earlier default that this one lacks is listed with what it runs
+ * as now (A4 amendment: the choice is kept, and clamped per turn). */
 export function effortOptions(tm: ThreadModels | null, c: Choice): Option[] {
   const eff = effective(tm, c);
   const ladder = effortsFor(tm, c.provider, eff.model);
-  const dflt = c.model === null ? eff.effort : defaultEffort(tm, c.provider, c.model);
+  const dflt = c.model === null
+    ? tm?.providers[c.provider]?.default_effort ?? null
+    : defaultEffort(tm, c.provider, c.model);
   if (ladder !== null && ladder.length === 0) return [];
   const out: Option[] = [{ value: "", label: `default · ${dflt || "none"}` }];
   for (const level of ladder ?? EFFORT_LADDER) out.push({ value: level, label: level });
-  if (c.effort && !out.some((o) => o.value === c.effort)) out.push({ value: c.effort, label: c.effort });
+  if (c.effort && !out.some((o) => o.value === c.effort)) {
+    const runs = eff.effort && eff.effort !== c.effort ? ` (runs as ${eff.effort})` : "";
+    out.push({ value: c.effort, label: c.effort + runs });
+  }
   return out;
 }
 
-/** A new model resets the effort to that model's default (A4). */
+/** A new model resets the effort to that model's default (A4). Going back to
+ * the default (`null`) is a choice of model too, so it clears a stored
+ * effort as well as the pin. */
 export function applyModel(c: Choice, model: string | null): Choice {
   return { ...c, model, effort: null };
 }
 
-/** An effort alone pins the model it is an effort of, as the backend does. */
-export function applyEffort(tm: ThreadModels | null, c: Choice, effort: string | null): Choice {
-  if (effort && c.model === null) return { ...c, model: defaultModel(tm, c.provider), effort };
+/** An effort alone never pins a model: a default thread keeps following the
+ * default, and the effort is clamped to it per turn (A4 amendment). */
+export function applyEffort(_tm: ThreadModels | null, c: Choice, effort: string | null): Choice {
   return { ...c, effort };
 }
 
@@ -255,6 +281,6 @@ export function threadTooltip(thread: Thread, cwd?: string | null): string {
   const label = PROVIDER_LABELS[thread.provider] || thread.provider;
   const runs = thread.model
     ? `runs on ${label} · ${thread.model}${thread.effort ? ` · ${thread.effort}` : ""} (pinned)`
-    : `runs on ${label} · follows the default`;
+    : `runs on ${label} · follows the default${thread.effort ? ` · effort ${thread.effort}` : ""}`;
   return cwd ? `${runs}\nworks in ${cwd}` : runs;
 }

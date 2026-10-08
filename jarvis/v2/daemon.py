@@ -347,8 +347,8 @@ class Daemon:
             model, effort = thread_model.check(provider, brief.model, brief.effort)
         except thread_model.ChoiceRefused as exc:
             raise APIError(400, str(exc)) from exc
-        if model is None and effort is not None:
-            model = thread_model.default_model(provider)
+        # An effort with no model keeps the thread on the default model (A4
+        # amendment): the record holds the effort on its own.
         changes = {"model": model, "effort": effort}
         if provider in (ProviderName.CLAUDE, ProviderName.CODEX) and not brief.system_append:
             changes["system_append"] = roles.brief_for(Role.CHAT).system_append
@@ -456,6 +456,18 @@ class Daemon:
             "effective_model": choice[0], "effective_effort": choice[1]})
         return text
 
+    def _effort_line(self, thread, choice):
+        """`effort → high (default model: X)`: an effort change on a thread
+        that follows the default model, and keeps following it."""
+        effort = choice[1] or "none"
+        if thread.effort is None:
+            effort = f"default · {effort}"
+        text = f"effort → {effort} (default model: {choice[0] or 'unknown'})"
+        self._system_line(thread, "model_set", text, {
+            "provider": thread.provider.value, "model": thread.model, "effort": thread.effort,
+            "effective_model": choice[0], "effective_effort": choice[1]})
+        return text
+
     def _system_line(self, thread, kind, text, data):
         record = {"kind": kind, "at": utcnow(), "thread_id": thread.id,
                   "project_id": thread.project_id, "event_id": uuid.uuid4().hex,
@@ -467,10 +479,13 @@ class Daemon:
         """`PATCH /threads/{id}` `{model?, effort?}`. Applies from the next
         message, never in the middle of a turn; `brief.json` is untouched.
 
-        `model: null` returns the thread to the default and resets its
-        effort; a new model resets the effort to that model's default unless
-        one is given with it; an effort alone on a default thread pins the
-        default model it is an effort *of*.
+        A model change — a new model, or `model: null` back to the default —
+        resets the effort to that model's default unless one is given with
+        it; unpinning is a choice of model like any other, so it clears a
+        stored effort too. An effort alone on a default thread is stored on its own and the
+        thread **keeps following the default model** (A4 amendment,
+        2026-10-07): `thread_model.effective` clamps it to whatever the
+        default supports at each turn. Only an explicit model pins one.
         """
         from . import thread_model
         thread = self.require(self.stores.threads, thread_id)
@@ -487,8 +502,6 @@ class Daemon:
             effort = body["effort"]
         try:
             model, effort = thread_model.check(thread.provider, model, effort, current=thread.model)
-            if model is None and effort is not None:
-                model = thread_model.default_model(thread.provider)
         except thread_model.ChoiceRefused as exc:
             raise APIError(400, str(exc)) from exc
         from . import projects
@@ -513,8 +526,13 @@ class Daemon:
             if before != (model, effort):
                 if session is not None:
                     session.announced = choice
-                self._model_line(thread, choice, "default, from the next message" if model is None
-                                 else "from the next message")
+                if model is None and before[0] is None:
+                    # Only a default thread's effort changed: it still
+                    # follows the default model, and the line names it.
+                    self._effort_line(thread, choice)
+                else:
+                    self._model_line(thread, choice, "default, from the next message" if model is None
+                                     else "from the next message")
             record = self.thread_json(thread)
             self.bus.publish({"kind": "thread_updated", "thread_id": thread.id,
                               "project_id": thread.project_id,

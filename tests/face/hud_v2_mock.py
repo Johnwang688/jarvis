@@ -797,13 +797,18 @@ class MockDaemon:
                     refusal = _check_choice(w, t["provider"], model, effort, current=t.get("model"))
                     if refusal:
                         return self._err(400, refusal)
-                    if model is None and effort:
-                        model = _thread_models(w)["providers"][t["provider"]]["default"]
+                    # An effort alone keeps a default thread on the default
+                    # model (A4 amendment): the record holds the effort only.
+                    was_default = t.get("model") is None
                     t["model"], t["effort"] = model, effort
                     shown = model or _thread_models(w)["providers"][t["provider"]]["default"]
                     shown_effort = effort or _default_effort(w, t["provider"], shown)
-                    why = "default, from the next message" if model is None else "from the next message"
-                    text = f"model → {shown}" + (f" · {shown_effort}" if shown_effort else "") + f" ({why})"
+                    if model is None and was_default:
+                        text = (f"effort → {effort or 'default · ' + (shown_effort or 'none')}"
+                                f" (default model: {shown})")
+                    else:
+                        why = "default, from the next message" if model is None else "from the next message"
+                        text = f"model → {shown}" + (f" · {shown_effort}" if shown_effort else "") + f" ({why})"
                     w["transcripts"].setdefault(t["id"], []).append(
                         {"role": "system", "text": text, "at": "2026-09-15T00:00:03+00:00"})
                     mock.emit("model_set", {"text": text, "model": model, "effort": effort},

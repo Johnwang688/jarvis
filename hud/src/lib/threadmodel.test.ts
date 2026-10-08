@@ -116,9 +116,42 @@ describe("effort (A4)", () => {
       .toEqual(fast("deepseek/deepseek-v4-flash-0731", null));
   });
 
-  it("chosen on a default thread pins the default model it is an effort of", () => {
-    expect(applyEffort(TM, fast(), "low")).toEqual(fast("deepseek/deepseek-v4-flash-0731", "low"));
+  it("chosen on a default thread keeps it following the default model (A4 amendment)", () => {
+    expect(applyEffort(TM, fast(), "low")).toEqual(fast(null, "low"));
+    expect(applyEffort(TM, fast(null, "low"), null)).toEqual(fast(null, null));
     expect(applyEffort(TM, fast("moonshotai/kimi-k3"), null)).toEqual(fast("moonshotai/kimi-k3", null));
+    // So the change is a PATCH of the effort alone, and the chip still says default.
+    expect(patchBody(fast(), applyEffort(TM, fast(), "low"))).toEqual({ effort: "low" });
+    expect(modelLabel(TM, fast(null, "low"))).toBe("default · deepseek-v4-flash-0731");
+    expect(modelOptions(TM, fast(null, "low"))[0]).toEqual({ value: "", label: "default · deepseek-v4-flash-0731" });
+    expect(threadTooltip(thread({ effort: "low" }))).toBe("runs on OpenRouter · follows the default · effort low");
+  });
+
+  it("on a default thread is clamped to whatever the default is now", () => {
+    expect(effective(TM, fast(null, "low"))).toEqual({ model: "deepseek/deepseek-v4-flash-0731", effort: "low" });
+    // The default moves to a model whose ladder stops at medium: max runs as medium.
+    const moved = (model: string): ThreadModels => ({
+      ...TM, providers: { ...TM.providers, fast: { ...TM.providers.fast!, default: model } },
+    });
+    expect(effective(moved("moonshotai/kimi-k3"), fast(null, "max")))
+      .toEqual({ model: "moonshotai/kimi-k3", effort: "medium" });
+    const opts = effortOptions(moved("moonshotai/kimi-k3"), fast(null, "max"));
+    expect(opts.map((o) => o.value)).toEqual(["", "medium", "low", "max"]);
+    expect(opts[opts.length - 1].label).toBe("max (runs as medium)");
+    // A default with no reasoning control: no effort, and no effort chip.
+    expect(effective(moved("plain/no-reasoning"), fast(null, "low")))
+      .toEqual({ model: "plain/no-reasoning", effort: null });
+    expect(effortOptions(moved("plain/no-reasoning"), fast(null, "low"))).toEqual([]);
+    // An unknown ladder sends it as asked; the label of "default" is the default model's own.
+    expect(effective(moved("gone/model"), fast(null, "max"))).toEqual({ model: "gone/model", effort: "max" });
+    expect(effortOptions(TM, fast(null, "low"))[0].label).toBe("default · high");
+  });
+
+  it("an explicit model still pins, on its own default effort", () => {
+    expect(applyModel(fast(null, "low"), "moonshotai/kimi-k3")).toEqual(fast("moonshotai/kimi-k3", null));
+    expect(patchBody(fast(null, "low"), fast("moonshotai/kimi-k3"))).toEqual({ model: "moonshotai/kimi-k3" });
+    // Back to the default clears the stored effort with the pin.
+    expect(applyModel(fast("moonshotai/kimi-k3", "low"), null)).toEqual(fast(null, null));
   });
 
   it("works out what the next message runs on", () => {

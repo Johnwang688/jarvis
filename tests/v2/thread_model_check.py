@@ -92,6 +92,38 @@ class ThreadModel(unittest.TestCase):
         thread.effort = "low"
         self.assertEqual(tm.effective(thread), ("moonshotai/kimi-k3", "low"))
 
+    def test_an_effort_on_a_default_thread_follows_the_default_model(self):
+        """A4 amendment: the effort is stored on its own, the model stays
+        default, and the effort is clamped to whatever the default is now —
+        nothing at all for a default with no reasoning control."""
+        self.roster("moonshotai/kimi-k3", "plain/no-reasoning", "cat/only-max",
+                    selected="openai/gpt-5.6-luna")
+        self.assertEqual(tm.check(P.FAST, None, "max"), (None, "max"), "an effort alone pins nothing")
+        thread = Thread("abcdef01", "p", Role.CHAT, P.FAST, effort="max")
+        self.assertEqual(tm.effective(thread), ("openai/gpt-5.6-luna", "max"))
+        self.roster("moonshotai/kimi-k3", "plain/no-reasoning", "cat/only-max",
+                    selected="moonshotai/kimi-k3")
+        self.assertEqual(tm.effective(thread), ("moonshotai/kimi-k3", "medium"), "clamped down to the ladder")
+        self.assertEqual(thread.effort, "max", "the stored choice is not rewritten")
+        thread.effort = "low"
+        self.assertEqual(tm.effective(thread), ("moonshotai/kimi-k3", "low"))
+        self.roster("moonshotai/kimi-k3", "plain/no-reasoning", "cat/only-max",
+                    selected="plain/no-reasoning")
+        self.assertEqual(tm.effective(thread), ("plain/no-reasoning", None), "no ladder, no effort")
+        self.roster("moonshotai/kimi-k3", "plain/no-reasoning", "cat/only-max", selected="cat/only-max")
+        self.assertEqual(tm.effective(thread), ("cat/only-max", "max"), "nothing below: the nearest above")
+        with self.assertRaises(tm.ChoiceRefused):
+            tm.check(P.FAST, None, "low")      # the default of the moment does not offer it
+        # Claude and Codex follow their own defaults the same way.
+        self.assertEqual(tm.effective(Thread("abcdef02", "p", Role.CHAT, P.CLAUDE, effort="low")),
+                         ("claude-opus-5-5", "low"))
+        self.assertEqual(tm.effective(Thread("abcdef03", "p", Role.CHAT, P.CODEX, effort="max")),
+                         ("gpt-6-astra", "xhigh"))
+        # An explicit model still pins: the default moving does not move it.
+        pinned = Thread("abcdef04", "p", Role.CHAT, P.FAST, model="moonshotai/kimi-k3", effort="low")
+        self.roster("moonshotai/kimi-k3", selected="")
+        self.assertEqual(tm.effective(pinned), ("moonshotai/kimi-k3", "low"))
+
     def test_check_refuses_with_the_reason(self):
         self.roster("moonshotai/kimi-k3")
         self.assertEqual(tm.check(P.FAST, "moonshotai/kimi-k3", "low"), ("moonshotai/kimi-k3", "low"))
