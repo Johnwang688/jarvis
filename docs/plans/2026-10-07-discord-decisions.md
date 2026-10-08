@@ -217,3 +217,7 @@ after the owner checks them on the HUD.
   - The owner's reasoning: `mkdir` creates and destroys nothing, so it causes
     no permanent damage.
   - The gap is accepted as stated in the plan.
+
+**Merging (owner, 2026-10-07).** The lead may merge the Discord PRs once each
+one passes independent review. Waiting for the owner's acceptance is no
+longer required for these.
