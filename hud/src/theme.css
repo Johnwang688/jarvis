@@ -97,6 +97,8 @@ input, textarea, select {
   padding: 5px 8px;
   width: 100%;
 }
+input[type="checkbox"] { width: auto; flex: 0 0 auto; padding: 0; margin: 0; accent-color: var(--accent); }
+label.row { justify-content: flex-start; cursor: pointer; }
 input::placeholder, textarea::placeholder { color: var(--text-muted); }
 select option { background: var(--bg-2); color: var(--text); }
 textarea { resize: vertical; font-family: inherit; }
