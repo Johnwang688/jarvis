@@ -873,6 +873,15 @@ class Daemon:
     def answer(self, thread_id, req_id, decision):
         session = self._session(thread_id)
         session.provider.answer(session.handle, req_id, decision)
+        # In the log too, beside the question it closes, so a surface catching
+        # up from the log (the Discord mirror) knows the question is no
+        # longer open. Nothing the provider sees.
+        try:
+            self.stores.threads._append(thread_id, "log.jsonl", {
+                "kind": "question_answered", "at": utcnow(), "thread_id": thread_id,
+                "turn_id": session.turn_id, "data": {"req_id": req_id}})
+        except Exception:
+            LOG.warning("Cannot log the answer on thread %s", thread_id, exc_info=True)
         # Whoever answered (the HUD, Discord), every surface still showing the
         # question as open hears that it is not (PR C).
         self.bus.publish({"kind": "question_answered", "thread_id": thread_id,

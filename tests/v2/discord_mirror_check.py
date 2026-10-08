@@ -1143,6 +1143,109 @@ class ReviewFixChecks(Harness):
         self.idle(new.id)
 
 
+class BugbotQuestionChecks(Harness):
+    """Cursor Bugbot findings on the question path (2026-10-08), each written
+    to fail against the code it read."""
+
+    def asking(self, chat, text="set it up"):
+        self.provider.plan[text] = [("question", "Which package manager?")]
+        self.hud_send(chat, text)
+        wait_for(lambda: any(r.get("kind") == "question"
+                             for r in self.stores.threads.read_log(chat.id)),
+                 what="the question in the log")
+
+    def test_files_with_no_text_never_answer_and_run_as_a_turn(self):
+        """D7: only typed words answer. A files-only message used to answer
+        the question with "" and lose its files."""
+        chat = self.open_chat()
+        self.asking(chat)
+        place = self.place(chat.id)
+        wait_for(lambda: self.mirror.pending_question(chat.id), what="the question")
+        self.download.side_effect = lambda url: b"attached words"
+        self.listener.feed(guild_message("", place, attachments=[
+            {"url": "https://cdn.example/a.txt", "filename": "a.txt",
+             "content_type": "text/plain", "size": 14}]))
+        wait_for(lambda: M.QUEUED_TEXT in self.transport.texts(place), what="queued")
+        self.assertEqual(self.provider.answers, [])
+        self.assertEqual(self.mirror.pending_question(chat.id), "q-1")
+        self.listener.feed(guild_message("pnpm", place))
+        wait_for(lambda: self.provider.answers, what="the typed answer")
+        self.assertEqual(self.provider.answers, [("q-1", "pnpm")])
+        wait_for(lambda: len(self.provider.messages) == 2, what="the files as a turn")
+        self.assertEqual(self.provider.messages[-1].attachments, ["a.txt"])
+        self.assertIn("attached words", self.provider.messages[-1].text)
+        self.idle(chat.id)
+
+    def test_a_question_with_nowhere_to_go_is_kept_and_posted_later(self):
+        """No DM channel at the moment it is asked: recorded anyway, so the
+        typed answer still answers, and posted once the DM is back."""
+        reachable = [True]
+        self.mirror._dm_channel = lambda: DM_CHANNEL if reachable[0] else None
+        self.listener.feed(dm("hi"))
+        chat = wait_for(lambda: [t for t in self.chats() if t.surface == "dm"])[0]
+        self.idle(chat.id)
+        self.settled(chat.id)
+        reachable[0] = False
+        self.asking(chat)
+        wait_for(lambda: self.mirror.pending_question(chat.id), what="the question recorded")
+        self.assertFalse(any("Which package" in t for t in self.transport.texts(DM_CHANNEL)))
+        reachable[0] = True
+        self.now[0] += M.RETRY_S + 0.1
+        wait_for(lambda: any("Which package" in t for t in self.transport.texts(DM_CHANNEL)),
+                 what="the question posted once the DM is back")
+        self.assertNotIn(f"<@{OWNER}>", self.transport.texts(DM_CHANNEL), "a DM never pings")
+        self.listener.feed(dm("pnpm"))
+        wait_for(lambda: self.provider.answers, what="the answer")
+        self.assertEqual(self.provider.answers, [("q-1", "pnpm")])
+        self.idle(chat.id)
+        self.settled(chat.id)
+        asked = [t for t in self.transport.texts(DM_CHANNEL) if "Which package" in t]
+        self.assertEqual(len(asked), 1, "posted more than once")
+
+    def test_a_dropped_question_event_is_recovered_from_the_log(self):
+        chat = self.open_chat()
+        self.hud_send(chat, "hello")
+        place = self.place(chat.id)
+        self.idle(chat.id)
+        self.settled(chat.id)
+        with patch.object(self.mirror, "_question", lambda thread, data: None):
+            self.asking(chat)
+            time.sleep(0.1)
+        self.assertFalse(any("Which package" in t for t in self.transport.texts(place)))
+        self.mirror.subscription.dropped += 1             # an eviction: catch up
+        self.mirror._kick()
+        wait_for(lambda: any("Which package" in t for t in self.transport.texts(place)),
+                 what="the question recovered from the log")
+        wait_for(lambda: f"<@{OWNER}>" in self.transport.texts(place), what="its D1 ping")
+        self.assertEqual(self.mirror.pending_question(chat.id), "q-1")
+        self.listener.feed(guild_message("pnpm", place))
+        wait_for(lambda: self.provider.answers, what="the answer")
+        self.idle(chat.id)
+        self.settled(chat.id)
+        self.assertEqual(len([t for t in self.transport.texts(place) if "Which package" in t]), 1)
+        self.assertEqual(self.transport.texts(place).count(f"<@{OWNER}>"), 1)
+
+    def test_a_question_from_before_this_process_is_not_resurrected(self):
+        chat = self.open_chat()
+        self.hud_send(chat, "hello")
+        place = self.place(chat.id)
+        self.idle(chat.id)
+        self.settled(chat.id)
+        # A question its provider (and daemon) did not survive.
+        self.stores.threads._append(chat.id, "log.jsonl", {
+            "kind": "question", "turn_id": "a-turn-from-before", "thread_id": chat.id,
+            "at": "2026-01-01T00:00:00+00:00",
+            "data": {"req_id": "q-old", "text": "Which old thing?", "options": []}})
+        with patch.object(self.mirror, "_open_question",
+                          wraps=self.mirror._open_question) as looked:
+            self.mirror.subscription.dropped += 1
+            self.mirror._kick()
+            wait_for(lambda: looked.called, what="the sync to look at it")
+        time.sleep(0.1)
+        self.assertFalse(any("Which old thing" in t for t in self.transport.texts(place)))
+        self.assertIsNone(self.mirror.pending_question(chat.id))
+
+
 class WriterChecks(unittest.TestCase):
     # The chat mirror makes, renames and archives *threads*, never channels:
     # it calls none of create_channel/modify_channel (B1's CHANNEL_WRITERS
