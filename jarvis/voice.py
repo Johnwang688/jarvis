@@ -358,11 +358,49 @@ def tts(
     )
 
 
+class STTUnavailable(llm.LLMError):
+    """Every configured STT model failed. The message is short and safe to
+    show a surface: model ids and HTTP statuses, never a response body."""
+
+
+# A failure no other model can fix: the key itself is refused, or the account
+# cannot pay. Trying the next model would only spend another request.
+_STT_FINAL = re.compile(r"^HTTP (401|402)\b")
+
+
+def _stt_reason(exc: Exception) -> str:
+    match = re.match(r"^HTTP (\d{3})", str(exc))
+    if match:
+        return f"HTTP {match.group(1)}"
+    return "failed after retries" if "attempts" in str(exc) else type(exc).__name__
+
+
 def stt(audio: bytes, mime: str = "audio/webm") -> str:
-    """Transcribe spoken audio to text."""
+    """Transcribe spoken audio to text.
+
+    Tries `config.STT_MODEL`, then each of `config.STT_FALLBACK_MODELS`. A
+    model whose only provider is down answers `HTTP 404: Provider returned
+    404` (parakeet, 2026-10-08), so the fallback is a different provider, not
+    a retry. Raises `STTUnavailable` naming each model and its status when
+    none answers.
+    """
     if not audio:
         raise ValueError("no audio")
     ext = mime.rsplit("/", 1)[-1].split(";")[0] or "webm"
-    return llm.transcribe(
-        audio, model=config.STT_MODEL, filename=f"audio.{ext}", mime=mime
-    )
+    models = [config.STT_MODEL] + [
+        m for m in config.STT_FALLBACK_MODELS if m != config.STT_MODEL]
+    failures: list[str] = []
+    for model in models:
+        try:
+            text = llm.transcribe(audio, model=model, filename=f"audio.{ext}", mime=mime)
+        except llm.LLMError as exc:
+            if _STT_FINAL.match(str(exc)):
+                raise STTUnavailable(f"speech-to-text refused ({_stt_reason(exc)}): "
+                                     "check the OpenRouter key and credit") from exc
+            failures.append(f"{model} ({_stt_reason(exc)})")
+            continue
+        if failures:
+            _warn_once(f"[voice] stt: {', '.join(failures)} failed; "
+                       f"answered by {model}")
+        return text
+    raise STTUnavailable("speech-to-text unavailable: " + ", ".join(failures))

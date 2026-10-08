@@ -954,6 +954,19 @@ class Backend(unittest.TestCase):
             stt.assert_called_once_with(b"RIFFaudio", mime="audio/wav")
             self.request("POST", "/stt", raw=b"text", headers={"Content-Type": "text/plain"}, status=400)
             self.request("POST", "/stt", raw=b"", headers={"Content-Type": "audio/webm"}, status=400)
+        # A provider outage is a sentence for the HUD (502 naming each model
+        # and its status), never a traceback; a raw LLMError's body is not
+        # reflected, because it can quote anything the provider sent back.
+        down = voice.STTUnavailable("speech-to-text unavailable: a/one (HTTP 404), b/two (HTTP 503)")
+        with patch.object(voice, "stt", side_effect=down):
+            body = self.request("POST", "/stt", raw=b"RIFFaudio",
+                                headers={"Content-Type": "audio/wav"}, status=502)
+            self.assertEqual(body["error"], str(down))
+        from jarvis import llm
+        with patch.object(voice, "stt", side_effect=llm.LLMError("HTTP 500: never-expose-this")):
+            body = self.request("POST", "/stt", raw=b"RIFFaudio",
+                                headers={"Content-Type": "audio/wav"}, status=502)
+            self.assertEqual(body["error"], "speech-to-text failed (LLMError)")
         for audio, mime in ((b"RIFFwav", "audio/wav"), (b"MP3data", "audio/mpeg")):
             with patch.object(voice, "tts", return_value=audio) as tts:
                 self.assertEqual(self.request("POST", "/say", {"text": "x" * 2500, "voice": "test"}), audio)

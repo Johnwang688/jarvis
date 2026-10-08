@@ -566,7 +566,7 @@ def preview_route(handler, daemon, parts, query):
 
 
 def pickers(handler, daemon, parts, query):
-    from jarvis import avatars, models, voice
+    from jarvis import avatars, llm, models, voice
     from jarvis.tools import voicectl
     from .daemon import _object
     name = "/".join(parts)
@@ -596,7 +596,16 @@ def pickers(handler, daemon, parts, query):
         data = handler._raw_body()
         if not data:
             fail(400, "audio is empty")
-        return 200, {"text": voice.stt(data, mime=mime)}
+        try:
+            return 200, {"text": voice.stt(data, mime=mime)}
+        except llm.LLMError as exc:
+            # A provider outage is a sentence for the HUD, not a traceback in
+            # the daemon log. STTUnavailable's message is model ids and HTTP
+            # statuses only; any other LLMError may quote a response body, so
+            # it is named by type.
+            message = str(exc) if isinstance(exc, voice.STTUnavailable) else (
+                f"speech-to-text failed ({type(exc).__name__})")
+            fail(502, message)     # logged as one warning line by _dispatch
     body = handler._body()
     # The keys each control reads, and nothing else. A body carrying some
     # other key used to be read as "the key is absent", which for /model
