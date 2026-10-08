@@ -487,6 +487,9 @@ footing as `/approvals`.
   and `dm` ones (its own message is already on screen).
 - `POST /threads/{id}/send` accepts `"spoken": bool` (dictation); anything
   else is 400.
+- SSE **`question_answered`** `{kind, thread_id, project_id, data: {req_id}}`
+  after `POST /threads/{id}/answer` (or a Discord answer) reaches the
+  provider, so every surface can stop showing the question as open.
 - `GET /threads` (and every thread record) carries `"surface": null | "dm" |
   "dm:retired" | "discord:<id>"`, and, when set, `"discord": {"kind":
   "thread" | "dm", "channel": str | null, "name": str, "url":

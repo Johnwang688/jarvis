@@ -84,7 +84,8 @@ RETRY_MAX_S = 60.0
 DRAIN_POLL_S = 1.0
 DOWN_AFTER = 3
 FORBIDDEN = frozenset({MISSING_ACCESS, MISSING_PERMISSIONS})
-KINDS = frozenset({"user_message", "turn_finished", "question", "thread_updated",
+KINDS = frozenset({"user_message", "turn_finished", "question", "question_answered",
+                   "thread_updated",
                    "thread_moved", "thread_archived", "thread_restored", "thread_deleted",
                    "proposal_reply"})
 # Records of a turn the walk composes into posts; anything else is skipped.
@@ -128,7 +129,13 @@ def user_line(data: dict) -> str | None:
     if isinstance(data.get("skill"), str):
         typed = f"/skill {data['skill']} {typed}".rstrip()
     if via == "system":
-        head = f"· system: {_cap(' '.join(typed.split()), 400)}"
+        # The first line only: an escape-hatch result is "[owner ran: <cmd>]"
+        # followed by the command's output, and file contents are never
+        # mirrored (plan §6) — `cat diary.txt` must not reach Discord.
+        lines = typed.strip().splitlines() or [""]
+        more = " (output in the HUD)" if len(lines) > 1 else ""
+        head = f"· system: {_cap(' '.join(lines[0].split()), 300)}{more}"
+        return scrub(head)
     elif via == "peer":
         head = f"↪ Request from another thread: {_cap(' '.join(typed.split()), 400)}"
     else:
@@ -240,6 +247,7 @@ class _Post:
     through: int | None = None      # mirrored_through once this one is delivered
     name: str | None = None         # rename
     tries: int = 0
+    keep: bool = False              # never collapsed (a question)
 
 
 class ChatMirror:
@@ -273,6 +281,9 @@ class ChatMirror:
         self._sent: dict[str, deque] = {}
         self._retry_at: dict[str, float] = {}
         self._backoff: dict[str, float] = {}
+        # chat id -> (next create attempt, current delay): thread creation
+        # backs off like posts do, honouring Discord's retry_after.
+        self._create_retry: dict[str, tuple[float, float]] = {}
         self._questions: dict[str, str] = {}
         self._inbound: dict[str, deque] = {}
         self._drain_at: dict[str, float] = {}
@@ -581,10 +592,18 @@ class ChatMirror:
         command, which has no message. -> (chat id, Discord thread id)."""
         opened = self.daemon.open_thread(project.id, Role.CHAT, ProviderName.FAST, {})
         name = chat_name(opened, text)
-        if message_id:
-            place = self.rest.start_thread_from_message(channel_id, message_id, name)
-        else:
-            place = self.rest.create_thread(channel_id, name)
+        try:
+            if message_id:
+                place = self.rest.start_thread_from_message(channel_id, message_id, name)
+            else:
+                place = self.rest.create_thread(channel_id, name)
+        except Exception as exc:
+            # No Discord thread, so no chat: an empty one left in the HUD
+            # would be a conversation nobody had.
+            self._failed("create_thread", exc)
+            self._discard(opened)
+            raise
+        if not message_id:
             try:
                 self.rest.add_owner(place)
             except Exception as exc:
@@ -592,6 +611,22 @@ class ChatMirror:
         self.attach(opened.id, f"discord:{place}", name)
         self._count("threads")
         return opened.id, str(place)
+
+    def _discard(self, thread) -> None:
+        """Undo an `open_thread` whose chat never started (nothing was said)."""
+        try:
+            self.daemon.close_thread(thread.id)
+        except Exception:
+            pass
+        try:
+            self.stores.threads.delete(thread.id)
+        except Exception as exc:
+            LOG.warning("An unstarted chat was not removed (%s)", type(exc).__name__)
+            return
+        self.daemon.bus.publish({"kind": "thread_deleted", "thread_id": thread.id,
+                                 "project_id": thread.project_id,
+                                 "data": {"thread_id": thread.id,
+                                          "project_id": thread.project_id}})
 
     # -- the worker ------------------------------------------------------------
 
@@ -648,6 +683,7 @@ class ChatMirror:
                 if sent and len(sent) >= self.rate_posts:
                     times.append(sent[0] + self.rate_window_s)
             times += [at for chat, at in self._drain_at.items() if self._inbound.get(chat)]
+            times += [at for at, _delay in self._create_retry.values()]
         if not times:
             return 0.5
         return min(0.5, max(0.0, min(times) - now))
@@ -680,8 +716,15 @@ class ChatMirror:
                 self._proposal_without_runner(thread, record)
         elif kind == "question":
             self._question(thread, data)
+        elif kind == "question_answered":
+            # Answered in the HUD (or here): the next Discord message is a
+            # turn again, not an answer to a question nobody is waiting on.
+            with self._lock:
+                if self._questions.get(chat_id) == str(data.get("req_id")):
+                    self._questions.pop(chat_id, None)
         elif kind == "proposal_reply":
-            self._say(chat_id, data.get("reply"))
+            self._say(chat_id, data.get("reply"),
+                      silent=self._quiet(chat_id, data.get("turn_id")))
         elif kind == "thread_updated":
             if "title" in (data.get("changed") or ()):
                 self._renamed(thread)
@@ -840,6 +883,12 @@ class ChatMirror:
         if data.get("via") == "dm":
             return False
         name = chat_name(thread, data.get("typed") or data.get("text") or "")
+        with self._lock:
+            retry = self._create_retry.get(thread.id)
+        if retry is not None and self._clock() < retry[0]:
+            with self._lock:
+                self._dirty.add(thread.id)           # not yet: the worker comes back
+            return None
         with self._create_lock:
             fresh = self.stores.threads.get(thread.id)
             if fresh is not None and fresh.surface:
@@ -849,10 +898,20 @@ class ChatMirror:
             except Exception as exc:
                 self._failed("create_thread", exc)
                 if _transient(exc):
+                    # Back off like a post: 5 s doubling to 60 s, never sooner
+                    # than Discord's own retry_after.
+                    delay = retry[1] * 2 if retry is not None else RETRY_S
+                    delay = min(delay, RETRY_MAX_S)
+                    wait = max(delay, float(getattr(exc, "retry_after", None) or 0))
                     with self._lock:
+                        self._create_retry[thread.id] = (self._clock() + wait, delay)
                         self._dirty.add(thread.id)   # the worker comes back to it
                     return None
+                with self._lock:
+                    self._create_retry.pop(thread.id, None)
                 return False
+            with self._lock:
+                self._create_retry.pop(thread.id, None)
             try:
                 self.rest.add_owner(place)
             except Exception as exc:
@@ -901,7 +960,10 @@ class ChatMirror:
                 chunks.append(tail)
         posts = [_Post(chat_id, reply_to, content=chunk, silent=silent) for chunk in chunks]
         if reply and asked.get("spoken") and via in ("discord", "dm") and self._speak:
-            posts.append(_Post(chat_id, reply_to, action="speak", content=reply, silent=silent))
+            # Spoken from the scrubbed text, like every other post: a value
+            # the scrub redacts must not come back as audio.
+            posts.append(_Post(chat_id, reply_to, action="speak", content=scrub(reply),
+                               silent=silent))
         if posts:
             posts[-1].through = through
         else:
@@ -909,6 +971,19 @@ class ChatMirror:
         return posts
 
     # -- out-of-band posts ---------------------------------------------------------
+
+    def _quiet(self, chat_id, turn_id) -> bool:
+        """Silent, except in the DM for a turn the owner sent from the DM
+        (O-C3): a reply to a Discord DM notifies, as DMs always have."""
+        if self.target(chat_id) != self._dm_id() or not turn_id:
+            return True
+        try:
+            log = self.stores.threads.read_log(chat_id)
+        except StoreError:
+            return True
+        asked = next((r.get("data") or {} for r in reversed(log)
+                      if r.get("kind") == "user" and r.get("turn_id") == turn_id), {})
+        return asked.get("via") != "dm"
 
     def _say(self, chat_id, text, *, silent=True) -> None:
         target = self.target(chat_id)
@@ -928,7 +1003,8 @@ class ChatMirror:
         lines = [f"Question: {data.get('text') or ''}"]
         lines += [f"{i}. {_cap(o, 200)}" for i, o in enumerate(options[:10], 1)]
         lines.append("Answer by typing here.")
-        posts = [_Post(thread.id, target, content=_cap(scrub("\n".join(lines)), MAX_CHARS))]
+        posts = [_Post(thread.id, target, content=_cap(scrub("\n".join(lines)), MAX_CHARS),
+                       keep=True)]
         if target != self._dm_id():
             posts.append(_Post(thread.id, target, action="ping"))
         with self._lock:
@@ -951,7 +1027,7 @@ class ChatMirror:
             return
         text = outcome.reply if isinstance(outcome, NeedsProject) else outcome
         if isinstance(text, str):
-            self._say(thread.id, text)
+            self._say(thread.id, text, silent=self._quiet(thread.id, record.get("turn_id")))
 
     # -- lifecycle (§4.4) -------------------------------------------------------------
 
@@ -1081,16 +1157,22 @@ class ChatMirror:
             return
         items = list(box)
         keep, rest = items[:COLLAPSE_AT - 1], items[COLLAPSE_AT - 1:]
-        actions = [p for p in rest if p.action in ("archive", "rename")]
-        bodies = [p.content for p in rest if p.action == "post" and p.content]
-        through = max((p.through for p in rest if p.through is not None), default=None)
-        chat_id = rest[-1].chat_id
+        # Never folded into the line: a question and its D1 ping (the turn
+        # waits on the owner), and thread renames and archives.
+        actions = [p for p in rest if p.keep or p.action in ("archive", "rename", "ping")]
+        held = {id(p) for p in actions}
+        folded = [p for p in rest if id(p) not in held]
+        if not folded:
+            return
+        bodies = [p.content for p in folded if p.action == "post" and p.content]
+        through = max((p.through for p in folded if p.through is not None), default=None)
+        chat_id = folded[-1].chat_id
         collapsed = []
         if bodies:
             collapsed.append(_Post(chat_id, channel, content=(
                 f"({len(bodies)} more messages, open the HUD)"),
                 files=(("reply.txt", "\n\n".join(bodies)),),
-                silent=all(p.silent for p in rest if p.action == "post"), through=through))
+                silent=all(p.silent for p in folded if p.action == "post"), through=through))
         elif through is not None:
             collapsed.append(_Post(chat_id, channel, action="marker", through=through))
         self._outbox[channel] = deque(keep + collapsed + actions)
@@ -1180,12 +1262,19 @@ class ChatMirror:
                     self._failed("unarchive", again)
                     return "retry" if _transient(again) else "dropped"
                 return self._send(item)
-            self._failed(op, exc)
-            if item.action in ("archive", "rename") and (status == 403 or code in FORBIDDEN):
+            refused = status == 403 or code in FORBIDDEN
+            if item.action in ("archive", "rename") and refused:
                 # O-P1: the bot cannot do this to its own thread. Reported on
-                # the light; Manage Threads would be the fix.
+                # the light (set before `_failed` publishes the status);
+                # Manage Threads would be the fix.
                 self.forbidden = {"op": op, "status": status, "code": code, "at": self._wall()}
-                self._publish_status()
+                self._failed(op, exc)
+                return "dropped"
+            self._failed(op, exc)
+            if item.action in ("post", "speak") and refused:
+                # The thread is closed to the bot: the DM is the safety net
+                # (C1, O1), as the Reporter's is for tasks.
+                self._to_dm(item)
                 return "dropped"
             if _transient(exc):
                 return "retry"
@@ -1193,9 +1282,34 @@ class ChatMirror:
                 return "gone"
             return "dropped"
         self._ok()
+        if item.action in ("archive", "rename") and self.forbidden:
+            self.forbidden = None                # it works now: the light clears
+            self._publish_status()
         self._count({"post": "posts", "speak": "voice", "ping": "pings",
                      "archive": "archives", "rename": "renames"}[item.action])
         return "sent"
+
+    def _to_dm(self, item) -> None:
+        """Re-send one refused post to the owner's DM, prefixed with where it
+        belonged. Notifies: the owner learns the thread is closed to the bot."""
+        dm = self._dm_id()
+        if not dm or str(item.channel) == dm:
+            return
+        try:
+            thread = self.stores.threads.get(item.chat_id)
+            project = self.stores.projects.get(thread.project_id) if thread else None
+        except StoreError:
+            project = None
+        label = _cap(scrub(project.name), 60) if project is not None else "Jarvis"
+        prefix = f"[{label} · chat {item.chat_id}] "
+        if item.action == "speak":
+            moved = _Post(item.chat_id, dm, action="speak", content=item.content,
+                          silent=False, through=item.through)
+        else:
+            moved = _Post(item.chat_id, dm, content=prefix + (item.content or ""),
+                          files=item.files, silent=False, through=item.through)
+        self._enqueue([moved])
+        self._count("dm_fallback")
 
     def _gone(self, channel) -> None:
         """Discord says this thread no longer exists (deleted by hand). Its
@@ -1297,8 +1411,10 @@ class ChatMirror:
                       f"{error['code']}); {queued} chat post(s) waiting") if error else "failing"
         elif self.forbidden and self._wall() - self.forbidden.get("at", 0) < 24 * 3600:
             state = "degraded"
-            reason = (f"the bot cannot {self.forbidden['op'].replace('_', ' ')} its own chat "
-                      f"threads (HTTP {self.forbidden['status']}); add Manage Threads")
+            verb = {"archive_thread": "archive", "rename_thread": "rename"}.get(
+                self.forbidden.get("op"), "change")
+            reason = (f"the bot cannot {verb} its own chat threads (HTTP "
+                      f"{self.forbidden['status']}); add Manage Threads")
         elif error and self._wall() - error.get("at", 0) < 600:
             state = "degraded"
             reason = (f"last chat {error['op']} failed (HTTP {error['status']}, code "

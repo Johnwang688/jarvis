@@ -988,9 +988,14 @@ worker) is the one place a chat meets Discord, both ways.
   words>" (or "You (HUD, voice)"), attachments by name, images as `[N
   images, in the HUD]`; settled `text` joined per turn and split at 2000 —
   never a delta or thinking; one footer (`· 5 tools: read_file, grep_files
-  +2`, `· turn failed (<class>)`, `· interrupted`). A Codex question is
-  posted at once with a ping line; a proposal's sentence follows the reply.
-  A chat whose project has no channel is passed over (no backfill later).
+  +2`, `· turn failed (<class>)`, `· interrupted`). Speech for a voice
+  reply is synthesized from the *scrubbed* text. A system message (an
+  escape-hatch result) shows its **first line only** — `[owner ran: <cmd>]`
+  — and never the command's output. A Codex question is posted at once with
+  a ping line, and is cleared when it is answered anywhere (the daemon
+  publishes `question_answered`); a proposal's sentence follows the reply,
+  notifying in the DM when the turn came from the DM (O-C3). A chat whose
+  project has no channel is passed over (no backfill later).
 - **Progress is the log.** A bus event only marks a chat dirty; the worker
   walks `log.jsonl` from `mirrored_through`, which advances only when a post
   is delivered. A turn still running is waited for; a turn cut short by the
@@ -1000,16 +1005,26 @@ worker) is the one place a chat meets Discord, both ways.
   silently.
 - **Pacing.** One outbox per Discord thread, 4 posts per 5 s; above 12
   pending the rest become "(N more messages, open the HUD)" with
-  `reply.txt`. 429/5xx retry with back-off; 50083 unarchives and retries
-  once; **10003 unlinks the chat** (surface back to None) so its next
-  message makes a fresh thread.
+  `reply.txt` — never a question, its ping line, or a rename/archive. 429/5xx
+  retry with back-off, and so does making a chat's thread (per chat, 5 s
+  doubling to 60 s, never sooner than Discord's `retry_after`); 50083
+  unarchives and retries once; **10003 unlinks the chat** (surface back to
+  None) so its next message makes a fresh thread; **50001/50013 on a post
+  re-sends it to the owner's DM**, prefixed `[<project> · chat <id>]` and
+  notifying — the DM is the safety net (C1, O1).
 - **In (gateway `_locate`/`_chat`).** A DM is the DM conversation: one
   persisted Inbox chat with `surface="dm"` (an archived one is retired to
-  `dm:retired` and a new one opened, so the DM never stops answering). A
+  `dm:retired` and a new one opened, so the DM never stops answering;
+  **restoring the old chat in the HUD leaves it detached from Discord** — it
+  keeps `dm:retired` and is a HUD-only chat from then on). A top-level
+  message whose Discord thread cannot be started opens no chat (the one
+  `open_thread` made is removed again). A
   chat's thread — current or retired — runs that chat. A top-level owner
   message in a project channel or #ungrouped starts a **new chat** via Start
   Thread from Message (a slash command, which has no message, gets a plain
-  thread). Anything else is ignored, mention or not; `_chat_threads` is
+  thread). An open provider question is answered by the next typed message;
+  if that answer fails (answered in the HUD meanwhile), the message runs as
+  an ordinary turn. Anything else is ignored, mention or not; `_chat_threads` is
   gone. The reply is never posted by the gateway: the mirror posts it from
   the log, so Discord and HUD turns come back the same way. A Discord turn
   is `UserMessage(via="discord" | "dm")`, never echoed; images and text

@@ -194,6 +194,7 @@ class Scripted:
                 stop = "error"
             elif kind == "question":
                 self.answered.clear()
+                self.awaiting = "q-1"
                 yield Event(K.QUESTION, tid, {"req_id": "q-1", "text": step[1],
                                               "options": ["npm", "pnpm"]})
                 self.answered.wait(5)
@@ -206,6 +207,10 @@ class Scripted:
         self.release.set()
 
     def answer(self, handle, req_id, decision):
+        # Like the Codex provider: an unknown or already-answered request raises.
+        if req_id != getattr(self, "awaiting", None):
+            raise ValueError("Unknown or resolved request")
+        self.awaiting = None
         self.answers.append((req_id, decision))
         self.answered.set()
 
@@ -922,6 +927,220 @@ class RestartChecks(Harness):
         self.settled(chat.id)
         self.assertEqual(self.transport.texts(place)[2:],
                          ["You (HUD): unheard", "the answer", "You (HUD): heard", "the answer"])
+
+
+class ReviewFixChecks(Harness):
+    """The PR #10 review's findings, each written to fail against the code
+    the review read."""
+
+    def started(self, chat, text="hello"):
+        self.hud_send(chat, text)
+        place = self.place(chat.id)
+        self.idle(chat.id)
+        self.settled(chat.id)
+        return place
+
+    def test_a_secret_in_a_reply_reaches_neither_speech_nor_any_post(self):
+        self.provider.default = [("text", f"the key is {SECRET} ok")]
+        chat = self.open_chat()
+        place = self.started(chat)
+        self.assertTrue(any("the key is" in t for t in self.transport.texts(place)))
+        with patch.object(self.gateway, "_hear", return_value="say the key"):
+            self.listener.feed(guild_message("", place, attachments=[{
+                "url": "https://cdn.example/v.ogg", "content_type": "audio/ogg", "size": 10,
+                "waveform": "AA=="}], flags=1 << 13))
+        wait_for(lambda: self.spoken, what="speech")
+        self.idle(chat.id)
+        self.settled(chat.id)
+        self.assertTrue(self.spoken and all(SECRET not in text for text in self.spoken),
+                        "an unscrubbed reply was spoken")
+        self.assertNotIn(SECRET, repr(self.transport.calls))
+
+    def test_escape_hatch_output_is_never_mirrored(self):
+        from jarvis.v2.provider import UserMessage
+        chat = self.open_chat()
+        place = self.started(chat)
+        self.daemon.send(chat.id, UserMessage(
+            text="[owner ran: cat diary.txt]\nDear diary, private words", origin="owner-ran"))
+        self.idle(chat.id)
+        self.settled(chat.id)
+        self.assertIn("· system: [owner ran: cat diary.txt] (output in the HUD)",
+                      self.transport.texts(place))
+        self.assertNotIn("Dear diary", json.dumps(self.transport.calls))
+
+    def test_a_thread_closed_to_the_bot_falls_back_to_the_dm(self):
+        chat = self.open_chat()
+        place = self.started(chat)
+        self.transport.fail.append(("POST", lambda path: path == f"/channels/{place}/messages",
+                                    403, {"code": 50013, "message": "Missing Permissions"}, None))
+        self.listener.feed(guild_message("are you there?", place))
+        wait_for(lambda: self.transport.texts(DM_CHANNEL), what="the DM safety net")
+        self.idle(chat.id)
+        self.settled(chat.id)
+        dm = self.transport.posts(DM_CHANNEL)[-1]
+        self.assertEqual(dm["content"], f"[School · chat {chat.id}] the answer")
+        self.assertIsNone(dm.get("flags"), "the safety net must notify")
+
+    def test_thread_creation_backs_off_and_honours_retry_after(self):
+        creates = lambda: [c for c in self.transport.made()
+                           if c["path"] == f"/channels/{SCHOOL_CHANNEL}/threads"]
+        unavailable = ("POST", lambda path: path == f"/channels/{SCHOOL_CHANNEL}/threads",
+                       503, {"message": "unavailable"}, None)
+        self.transport.fail.append(unavailable)
+        chat = self.open_chat()
+        self.hud_send(chat, "hello")
+        wait_for(lambda: creates(), what="a first create")
+        time.sleep(1.0)
+        self.assertEqual(len(creates()), 1, "creates retried with no back-off")
+        self.now[0] += 5.1
+        wait_for(lambda: len(creates()) == 2, what="the retry after 5 s")
+        self.transport.fail.remove(unavailable)
+        limited = ("POST", lambda path: path == f"/channels/{SCHOOL_CHANNEL}/threads",
+                   429, {"message": "slow down", "retry_after": 30}, None)
+        self.transport.fail.append(limited)
+        self.now[0] += 10.1
+        wait_for(lambda: len(creates()) == 3, what="the retry after 10 s")
+        # The back-off alone would be 20 s now; Discord asked for 30.
+        self.now[0] += 21
+        time.sleep(0.8)
+        self.assertEqual(len(creates()), 3, "Discord's retry_after was not honoured")
+        self.transport.fail.remove(limited)
+        self.now[0] += 10
+        self.place(chat.id)
+        self.idle(chat.id)
+
+    def test_an_at_path_typed_in_discord_is_never_read_from_disk(self):
+        (self.root / "notes.md").write_text("PRIVATE-NOTES-FROM-DISK")
+        chat = self.open_chat()
+        place = self.started(chat)
+        self.download.side_effect = lambda url: b"attached words"
+        self.listener.feed(guild_message("see @notes.md please", place, attachments=[
+            {"url": "https://cdn.example/a.txt", "filename": "a.txt",
+             "content_type": "text/plain", "size": 14}]))
+        wait_for(lambda: len(self.provider.messages) == 2)
+        message = self.provider.messages[-1]
+        self.assertIn("attached words", message.text)
+        self.assertNotIn("PRIVATE-NOTES-FROM-DISK", message.text)
+        self.assertEqual(message.attachments, ["a.txt"])
+        self.idle(chat.id)
+
+    def test_a_question_answered_in_the_hud_frees_the_next_message(self):
+        self.provider.plan["set it up"] = [("question", "Which package manager?"),
+                                           ("wait",), ("text", "set up")]
+        self.provider.release.clear()
+        chat = self.open_chat()
+        self.hud_send(chat, "set it up")
+        place = self.place(chat.id)
+        wait_for(lambda: self.mirror.pending_question(chat.id), what="the question")
+        self.request("POST", f"/threads/{chat.id}/answer", {"req_id": "q-1", "text": "npm"})
+        wait_for(lambda: self.mirror.pending_question(chat.id) is None,
+                 what="the question cleared while the turn still runs")
+        self.listener.feed(guild_message("and the tests?", place))
+        wait_for(lambda: M.QUEUED_TEXT in self.transport.texts(place))
+        self.assertEqual(self.provider.answers, [("q-1", "npm")])
+        self.provider.release.set()
+        wait_for(lambda: [m.typed for m in self.provider.messages] == ["set it up",
+                                                                      "and the tests?"],
+                 timeout=10)
+        self.idle(chat.id)
+
+    def test_an_answer_that_fails_runs_as_an_ordinary_turn(self):
+        chat = self.open_chat()
+        place = self.started(chat)
+        with self.mirror._lock:
+            self.mirror._questions[chat.id] = "q-stale"
+        self.listener.feed(guild_message("next thing", place))
+        wait_for(lambda: len(self.provider.messages) == 2, what="the turn")
+        self.assertEqual(self.provider.messages[-1].typed, "next thing")
+        self.idle(chat.id)
+
+    def test_collapse_keeps_a_question_and_its_ping(self):
+        quiet = ChatMirror(self.daemon, self.rest, dm_channel=lambda: DM_CHANNEL)
+        chat = "abcd1234"
+        posts = [M._Post(chat, "900", content=f"line {i}") for i in range(14)]
+        posts.append(M._Post(chat, "900", content="Question: which one?", keep=True))
+        posts.append(M._Post(chat, "900", action="ping"))
+        posts += [M._Post(chat, "900", content=f"after {i}", through=40 + i) for i in range(3)]
+        quiet._enqueue(posts)
+        box = list(quiet._outbox["900"])
+        self.assertIn("Question: which one?", [p.content for p in box])
+        self.assertIn("ping", [p.action for p in box])
+        collapsed = [p for p in box if (p.content or "").endswith("open the HUD)")]
+        self.assertEqual(len(collapsed), 1)
+        self.assertEqual(collapsed[0].through, 42)
+
+    def test_the_forbidden_light_says_so_plainly_and_clears(self):
+        chat = self.open_chat()
+        place = self.started(chat)
+        refuse = ("PATCH", lambda path: path == f"/channels/{place}", 403,
+                  {"code": 50013, "message": "Missing Permissions"}, None)
+        self.transport.fail.append(refuse)
+        seen = self.daemon.bus.subscribe({"kind": "discord_status"})
+        P.archive_thread(self.daemon, chat.id)
+        wait_for(lambda: self.mirror.forbidden, what="the refusal")
+        first = seen.get(timeout=2)["data"]["mirror"]
+        self.assertIn("Manage Threads", first["reason"],
+                      "the first status published must already say why")
+        self.assertIn("cannot archive its own chat threads", first["reason"])
+        self.transport.fail.remove(refuse)
+        P.restore_thread(self.daemon, chat.id)
+        P.rename_thread(self.daemon, chat.id, "Works now")
+        wait_for(lambda: self.mirror.forbidden is None, what="the light to clear")
+        self.assertNotIn("Manage Threads", self.mirror.status()["reason"])
+
+    def test_a_proposal_reply_to_a_dm_message_notifies(self):
+        self.listener.feed(dm("plan my week"))
+        chat = wait_for(lambda: [t for t in self.chats() if t.surface == "dm"])[0]
+        self.idle(chat.id)
+        self.settled(chat.id)
+        turn = [r for r in self.stores.threads.read_log(chat.id) if r.get("kind") == "user"][-1]
+        self.daemon.bus.publish({"kind": "proposal_reply", "thread_id": chat.id,
+                                 "project_id": chat.project_id,
+                                 "data": {"turn_id": turn["turn_id"],
+                                          "reply": "Starting a task for that."}})
+        wait_for(lambda: "Starting a task for that." in self.transport.texts(DM_CHANNEL))
+        post = next(p for p in self.transport.posts(DM_CHANNEL)
+                    if p.get("content") == "Starting a task for that.")
+        self.assertIsNone(post.get("flags"), "a reply to a DM message must notify")
+        # A HUD turn's proposal in the DM chat stays silent.
+        self.hud_send(chat, "from the desk")
+        self.idle(chat.id)
+        hud_turn = [r for r in self.stores.threads.read_log(chat.id)
+                    if r.get("kind") == "user"][-1]
+        self.daemon.bus.publish({"kind": "proposal_reply", "thread_id": chat.id,
+                                 "project_id": chat.project_id,
+                                 "data": {"turn_id": hud_turn["turn_id"],
+                                          "reply": "Starting another."}})
+        wait_for(lambda: "Starting another." in self.transport.texts(DM_CHANNEL))
+        post = next(p for p in self.transport.posts(DM_CHANNEL)
+                    if p.get("content") == "Starting another.")
+        self.assertEqual(post.get("flags"), 4096)
+
+    def test_a_chat_whose_thread_cannot_start_is_not_left_behind(self):
+        message = guild_message("plan my week", SCHOOL_CHANNEL)
+        self.transport.fail.append((
+            "POST", lambda path: path.endswith(f"/messages/{message['id']}/threads"),
+            403, {"code": 50013, "message": "Missing Permissions"}, None))
+        self.listener.feed(message)
+        wait_for(lambda: any("couldn't open a chat" in t
+                             for t in self.transport.texts(SCHOOL_CHANNEL)))
+        self.assertEqual(self.chats(self.school.id), [], "an empty chat was left in the HUD")
+        self.assertEqual(self.provider.messages, [])
+
+    def test_an_archived_dm_chat_is_retired_and_a_fresh_one_answers(self):
+        self.listener.feed(dm("first"))
+        old = wait_for(lambda: [t for t in self.chats() if t.surface == "dm"])[0]
+        self.idle(old.id)
+        self.settled(old.id)
+        P.archive_thread(self.daemon, old.id)
+        self.listener.feed(dm("second"))
+        new = wait_for(lambda: [t for t in self.chats()
+                                if t.surface == "dm" and t.id != old.id])[0]
+        self.assertEqual(self.stores.threads.get(old.id).surface, "dm:retired")
+        self.assertEqual(new.project_id, self.inbox.id)
+        wait_for(lambda: len(self.provider.messages) == 2)
+        self.assertEqual(self.provider.messages[-1].typed, "second")
+        self.idle(new.id)
 
 
 class WriterChecks(unittest.TestCase):

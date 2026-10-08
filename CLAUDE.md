@@ -154,7 +154,10 @@ daemon saves stale session copies. `daemon.send` publishes `user_message`.
 The DM is one persisted Inbox chat (`surface="dm"`); a top-level message
 in a project channel starts a new chat; anything else is ignored. Moves
 open a new thread and rename the old `↪ moved to …` (O-C5); nothing on
-Discord is ever deleted. Tests that read `GET /discord` must point
+Discord is ever deleted. A post the thread refuses (50001/50013) goes to
+the owner's DM instead; an escape-hatch result shows its command line only,
+never its output; speech is made from the scrubbed reply. Tests that read
+`GET /discord` must point
 `config.DISCORD_GUILD_PATH` at a temp file — the owner's setup is done now.
 
 Briefs for every package, including the ones in flight, are in

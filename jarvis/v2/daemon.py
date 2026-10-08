@@ -818,6 +818,11 @@ class Daemon:
     def answer(self, thread_id, req_id, decision):
         session = self._session(thread_id)
         session.provider.answer(session.handle, req_id, decision)
+        # Whoever answered (the HUD, Discord), every surface still showing the
+        # question as open hears that it is not (PR C).
+        self.bus.publish({"kind": "question_answered", "thread_id": thread_id,
+                          "project_id": session.thread.project_id,
+                          "data": {"req_id": req_id}})
 
     def _cleanup(self, session):
         for operation in (session.provider.interrupt, session.provider.close):

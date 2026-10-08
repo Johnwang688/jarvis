@@ -991,10 +991,14 @@ class DiscordRouter:
                          "type it here. Nothing was answered.")
             return True
         try:
-            self.mirror.answer(chat_id, text)
+            answered = self.mirror.answer(chat_id, text)
         except Exception as exc:
-            reply.send(f"That answer did not reach the chat ({type(exc).__name__}).")
-            return True
+            # Answered elsewhere meanwhile (the HUD), or the turn ended: the
+            # message is an ordinary turn after all, not lost.
+            LOG.info("Discord chat answer fell through to a turn (%s)", type(exc).__name__)
+            return False
+        if not answered:
+            return False
         reply.send("Answered; carrying on.")
         return True
 
