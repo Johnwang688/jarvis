@@ -59,6 +59,8 @@ from ..router import (FastPath, Incoming, NeedsProject, NewTask, Steer, Verb,
 from ..stores import StoreError, _write_bytes
 from .commands import SyncResult
 from .render import _cap, approval_components, approval_text, status_embed
+from .reporter import thread_for
+from .rest import describe
 
 LOG = logging.getLogger(__name__)
 
@@ -612,16 +614,23 @@ class DiscordRouter:
                 self._subscription.task_done()
 
     def _post_approval(self, data: dict) -> None:
+        """Ask in the task's thread when it has one, else the owner's DM.
+
+        A thread post that fails is asked again in the DM, and the DM is then
+        recorded as where it was asked — so the answer counts there and only
+        there, exactly as if it had been asked there first. In a guild the post
+        is silent and followed by the D1 ping line; a DM notifies by itself."""
         req_id = str(data.get("req_id") or "")
         code = str(data.get("code") or "")
         channel = None
         task_id = data.get("task_id")
         if task_id:
-            task = self.stores.tasks.get(task_id)
-            channel = task.discord_thread_id if task else None
-        channel = channel or self._owner_dm()
-        if not channel or not req_id:
-            # The broker denies on timeout; it does not need rescuing here.
+            try:
+                task = self.stores.tasks.get(task_id)
+            except StoreError:                  # not a task id: ask in the DM
+                task = None
+            channel = thread_for(self.stores, task) if task else None
+        if not req_id:
             self._announce("[approval] Discord could not deliver this request")
             return
         args = dict(data.get("args") or {})
@@ -634,24 +643,57 @@ class DiscordRouter:
                          allowlistable=data.get("allowlistable", True) is not False)
         body = approval_text(tool, args, code, str(data.get("origin") or ""),
                              allowlistable=self.allowlistable(request)[0])
+        posted = None
+        if channel:
+            posted = self._ask_in(req_id, str(channel), body, code)
+        if posted is None:
+            dm = self._owner_dm()
+            if not dm:
+                # The broker denies on timeout; it does not need rescuing here.
+                self._announce("[approval] Discord could not deliver this request")
+                return
+            posted = self._ask_in(req_id, dm, body, code, raise_errors=True)
+        channel, message_id = posted
         with self._lock:
-            self._approval_channels[req_id] = str(channel)
+            pending = req_id in self._approval_channels     # not resolved meanwhile
+            if pending:
+                self._approval_messages[req_id] = (channel, str(message_id), code)
+        if not pending:
+            self._strip_buttons(channel, str(message_id))
+            return
+        # S1's persisted map: a restart strips these buttons if the request
+        # died with this process — the DM fallback's post included.
+        self._save_posts()
+        if not self._is_dm(channel):
+            # D1: the approval itself is silent; this line is what notifies.
+            try:
+                self.rest.ping_owner(channel)
+            except Exception as exc:
+                LOG.warning("Discord ping_owner failed (HTTP %s, code %s, %s)",
+                            *_facts(exc))
+
+    def _ask_in(self, req_id, channel, body, code, *, raise_errors=False):
+        """Post one approval and record where it was asked. -> (channel, message
+        id), or None when the post failed and the caller may try elsewhere."""
+        with self._lock:
+            self._approval_channels[req_id] = channel
         try:
             # Never split or cap: DiscordRest attaches an over-long approval whole.
             message_id = self.rest.post(channel, content=body,
-                                        components=approval_components(code))
-        except Exception:
+                                        components=approval_components(code),
+                                        silent=not self._is_dm(channel))
+        except Exception as exc:
             with self._lock:
                 self._approval_channels.pop(req_id, None)
-            raise
-        with self._lock:
-            live = req_id in self._approval_channels      # not resolved meanwhile
-            if live:
-                self._approval_messages[req_id] = (str(channel), str(message_id), code)
-        if live:
-            self._save_posts()
-        else:
-            self._strip_buttons(str(channel), str(message_id))
+            LOG.warning("Discord approval post failed (HTTP %s, code %s, %s)", *_facts(exc))
+            if raise_errors:
+                raise
+            return None
+        return channel, message_id
+
+    def _is_dm(self, channel) -> bool:
+        dm = self._owner_dm()
+        return bool(dm) and str(channel) == str(dm)
 
     def _strip_buttons(self, channel, message_id) -> None:
         try:
@@ -932,12 +974,19 @@ class DiscordRouter:
         return channel
 
     def _post(self, channel_id, content, files=(), *, embed=None, components=None):
+        """A plain bot post. In a guild it is silent (decisions D1: nothing but
+        the ping line notifies); in the DM it notifies as a DM always has."""
         try:
             return self.rest.post(channel_id, content=content, embed=embed, files=files,
-                                  components=components)
+                                  components=components, silent=not self._is_dm(channel_id))
         except Exception as exc:
-            LOG.warning("Discord post failed (%s)", type(exc).__name__)
+            LOG.warning("Discord post failed (HTTP %s, code %s, %s)", *_facts(exc))
             return None
+
+
+def _facts(exc) -> tuple:
+    facts = describe(exc)
+    return facts["status"], facts["code"], facts["error"]
 
 
 class _Asked:
