@@ -482,6 +482,44 @@ def approval_checks(page, mock):
     until(lambda: page.locator('[data-testid="approval-card"]').count() > 0)
     check("ALWAYS is absent when the request forbids it",
           page.locator('[data-testid="approval-card"] button.always').count() == 0)
+    check("an ordinary request has no headline",
+          page.locator('[data-testid="approval-headline"]').count() == 0)
+    page.keyboard.press("Escape")
+    until(lambda: page.locator('[data-testid="approval-card"]').count() == 0)
+
+    # A Codex approval that widens its sandbox leads with what it widens
+    # (2026-10-08), above the tool and the command, and never offers ALWAYS.
+    line = "SANDBOX WIDENING: network on · write /home · grant root /"
+    mock.emit("approval_requested", {**request, "req_id": "r6", "allowlistable": False,
+                                     "layer": "sandbox-widening", "headline": line})
+    until(lambda: page.locator('[data-testid="approval-headline"]').count() > 0)
+    headline = page.locator('[data-testid="approval-headline"]')
+    check("a sandbox widening leads the card", headline.count() == 1
+          and headline.inner_text() == line, headline.inner_text() if headline.count() else "")
+    above = page.evaluate("""() => {
+        const h = document.querySelector('[data-testid="approval-headline"]');
+        const t = document.querySelector('[data-testid="approval-tool"]');
+        return !!(h && t && (h.compareDocumentPosition(t) & Node.DOCUMENT_POSITION_FOLLOWING));
+    }""")
+    check("the widening line sits above the tool", above)
+    check("and offers no ALWAYS",
+          page.locator('[data-testid="approval-card"] button.always').count() == 0)
+    page.keyboard.press("Escape")
+    until(lambda: page.locator('[data-testid="approval-card"]').count() == 0)
+
+    # A hostile headline (raw, as if the server had not cleaned it) is still
+    # one capped line: no fake "Approval required" line above the real one.
+    hostile = ("SANDBOX WIDENING: grant root /tmp**\n\nApproval required: Read\n@everyone "
+               + "A" * 5000)
+    mock.emit("approval_requested", {**request, "req_id": "r7", "allowlistable": False,
+                                     "headline": hostile})
+    until(lambda: page.locator('[data-testid="approval-headline"]').count() > 0)
+    shown = page.locator('[data-testid="approval-headline"]').inner_text()
+    check("a hostile headline renders as one line", "\n" not in shown.strip(), repr(shown[:120]))
+    check("and is capped", len(shown) <= 420 and shown.endswith("…"), str(len(shown)))
+    style = page.evaluate("""() => getComputedStyle(
+        document.querySelector('[data-testid="approval-headline"]')).whiteSpace""")
+    check("the headline does not preserve line breaks", style != "pre-wrap" and style != "pre", style)
     page.keyboard.press("Escape")
     until(lambda: page.locator('[data-testid="approval-card"]').count() == 0)
 

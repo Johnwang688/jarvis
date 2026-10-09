@@ -310,6 +310,8 @@ export interface ApprovalRequest {
   origin: string;
   asked_at: string;
   allowlistable?: boolean;
+  /** Shown first and loud: a Codex approval that widens its sandbox. */
+  headline?: string;
   timeout_s?: number;
   remote?: boolean;
 }

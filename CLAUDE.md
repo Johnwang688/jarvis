@@ -32,7 +32,24 @@ past `CLAUDE_VERIFIED`, with `JARVIS_CLAUDE_STRICT=1` restoring the old
 major.minor match, and a failed `--version` probe is retried after 60 s
 rather than cached),
 the Codex provider over the app-server (WP4 — lifted from the trading firm's
-transport; its reviewer escalates nothing to us, design R8), a worktree per
+transport; its reviewer escalates nothing to us, design R8; **a version floor,
+not a pin** since 2026-10-08 — `providers/codex_cli.py` runs codex ≥ 0.153.4,
+warns once above the verified 0.161.0, `JARVIS_CODEX_STRICT=1` restores the
+exact match, `JARVIS_CODEX_CLI` picks the binary and nothing under `/mnt/`
+ever runs. Unlike Claude's resolver it *refuses* a relative/Windows/broken
+override rather than warning, launches the realpath it checked rather than
+the symlink, and resolves per session rather than per process — on purpose,
+design §5.4. **A Codex approval arrives already passed by Codex's reviewer,
+so under AUTO nobody decides it** unless we make someone: a sandbox-widening
+approval — extra permissions, network, grant root, `writeStdin`, or any field
+outside the verified schema — goes to a human via `permit(...,
+widening=...)` with no Always and a "SANDBOX WIDENING: …" headline, and
+declines with no human, and its grants pass layer 1 first — a grant that is
+or contains protected state or touches a credential dir is DENY unasked
+(`denied_grant`); the headline is Codex-supplied text, so it is one cleaned,
+capped line everywhere; unknown methods get an error, malformed approvals
+and unknown `kind`s a decline; null fields never overwrite the item's
+command; `answer()` can only deny an approval — keep all of it), a worktree per
 task (WP6), the daemon and local API (WP7, `jarvis daemon2`), one skills
 folder for three consumers plus `jarvis-mcp` (WP8), and Discord rendering
 (WP10a), Discord routing with thread-scoped approvals (WP10b), and the

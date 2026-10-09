@@ -36,6 +36,7 @@ import secrets as _secrets
 import threading
 import time
 from typing import Any, Callable
+import unicodedata
 
 from jarvis import permissions
 from .model import utcnow
@@ -47,6 +48,25 @@ LOCAL_TIMEOUT_S = 120.0     # a card in front of the owner
 REMOTE_TIMEOUT_S = 600.0    # a DM: you have to get your phone out (v1's 10 minutes)
 
 _CODE_CHARS = "23456789abcdefghjkmnpqrstuvwxyz"   # no 0/o/1/l/i: it is typed back
+
+
+def clean_line(text, cap: int = 120) -> str:
+    """One display line from provider- or model-supplied text, `label()`'s
+    rule generalised: every run of whitespace, control or format characters
+    (newlines, NUL, zero-width and bidi overrides) becomes one space, backticks
+    go, and the result is capped with "…". Markdown is left alone here — the
+    HUD renders text literally — and escaped by the Discord renderer."""
+    out, space = [], False
+    for ch in str(text).replace("`", ""):
+        if ch.isspace() or unicodedata.category(ch) in ("Cc", "Cf", "Zl", "Zp"):
+            space = True
+            continue
+        if space and out:
+            out.append(" ")
+        space = False
+        out.append(ch)
+    line = "".join(out)
+    return line if len(line) <= cap else line[:max(1, cap - 1)].rstrip() + "…"
 
 
 def label(origin_id: str, name: str = "") -> str:
@@ -105,6 +125,10 @@ class ApprovalRequest:
     provider: str | None = None
     origin: str = ""                    # sanitized attribution (see `label`)
     allowlistable: bool = True          # False from the escape hatch (§6.1)
+    # A line every surface shows *first*, above the tool and its arguments —
+    # set only for a Codex approval that widens the sandbox ("SANDBOX
+    # WIDENING: network on · write /home"), which is never allowlistable.
+    headline: str = ""
     # Where on Discord to ask, when the asker is not a task (B2: `/project
     # new` asks in the channel it was typed in). Set by daemon code only — no
     # provider or tool builds a request with it — and still the DM if that
@@ -123,6 +147,7 @@ class ApprovalRequest:
             "task_id": self.task_id, "provider": self.provider,
             "origin": self.origin, "asked_at": self.asked_at,
             "allowlistable": self.allowlistable, "timeout_s": self.timeout_s,
+            "headline": self.headline,
             "discord_channel_id": self.discord_channel_id,
         }
 

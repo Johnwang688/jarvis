@@ -1,4 +1,42 @@
-"""Codex 0.153.4 app-server adapter, with native tools and broker callbacks.
+"""Codex app-server adapter, with native tools and broker callbacks.
+
+The protocol was generated from and verified against codex-cli 0.153.4 and
+0.161.0 (docs/codex-briefs/codex-0.161-protocol-notes.md). Any version at or
+above codex_cli.CODEX_MIN runs; one newer than CODEX_VERIFIED runs with a
+warning. What keeps a newer version from loosening the gate is narrower than
+"anything not understood is refused", and worth stating exactly:
+
+- an unrecognised server *method* gets a JSON-RPC error and never reaches the
+  permit callback; a request whose params are not an object, or whose
+  handling raises, is answered with an error too;
+- a command/file approval whose fields have the wrong types, or that names
+  an approval `kind` we cannot describe, is declined without asking anyone;
+- a command approval is judged on the item's real command (a null field
+  never erases it) and declined if there is none; a plain approval naming a
+  different command from its item is declined, while a `writeStdin` or
+  `approvalId` one (where a difference is expected) is a widening with both
+  commands judged by layer 1 and shown;
+- every filesystem grant a widening opens is judged by layer 1 first: one
+  that is or contains protected state or touches a credential directory is
+  DENY, unasked; and the headline, built from Codex-supplied strings, is one
+  cleaned and capped line;
+- an approval that would **widen the sandbox** (extra permissions, a
+  managed-network prompt, a grant root, terminal input) is put to a human
+  every time, with no Always (`permit(..., widening=...)`), and declined with
+  no human. The reply is a bare `{decision}`, so the grant cannot be split
+  off; and a request reaches us only after Codex's reviewer passed it, so
+  without this an AUTO brief's "the reviewer decides" meant nobody did;
+- a plain in-sandbox approval under AUTO is still accepted on the strength
+  of Codex's reviewer (design R8) — that is the AUTO contract, not a gap
+  this adapter closes;
+- a non-null approval field outside the verified schema
+  (`_KNOWN_APPROVAL_FIELDS`) counts as a widening — it may be a new grant —
+  so a human is asked, shown it, and offered no Always.
+
+What is *not* covered: a field we know whose *meaning* a newer Codex
+broadens, and runtime behaviour the schema does not describe. Re-diff the
+protocol (the notes say how) before trusting a version far past
+CODEX_VERIFIED.
 
 Transport/config/accounting patterns originate in jarvis-trading-firm. No
 model turn is retried automatically: a lost response may have executed tools.
@@ -8,8 +46,9 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass, field, replace
 import json
+import os
 from pathlib import Path
-import shutil
+import re
 import subprocess
 import threading
 import time
@@ -19,11 +58,11 @@ from jarvis import config
 from jarvis.v2.model import ProviderName, Thread
 from jarvis.v2.provider import (Brief, BriefRefused, Decision, Event, EventKind,
                                PermissionCallback, SessionHandle, Usage, UserMessage)
-from . import codex_config
+from ..approvals import clean_line
+from . import codex_cli, codex_config
 from .codex_rpc import RpcError, RpcProcess, RpcTimeout
 from .codex_usage import Accounting
 
-CODEX_PIN = "0.153.4"
 START_TIMEOUT = 30.0
 INTERRUPT_TIMEOUT = 10.0
 _auth_lock = threading.Lock()
@@ -36,6 +75,204 @@ class _Pending:
     question: bool
     ready: threading.Event = field(default_factory=threading.Event)
     value: Decision | str | None = None
+
+
+@dataclass
+class _Request:
+    """One server request: answered at most once, refused if never answered."""
+    rid: object = None
+    replied: bool = False
+
+
+def _approval_problem(p: dict) -> str | None:
+    """Why a command/file approval request cannot be read, or None.
+
+    Checked against the 0.153.4 and 0.161.0 schemas (identical for both):
+    itemId is a required string; the fields shown to the owner are strings
+    or null; a permission grant riding the approval is an object or null.
+    """
+    if not isinstance(p.get("itemId"), str) or not p["itemId"]:
+        return "missing itemId"
+    for key in ("command", "cwd", "reason", "grantRoot", "approvalId"):
+        if p.get(key) is not None and not isinstance(p[key], str):
+            return f"{key} is not a string"
+    if p.get("additionalPermissions") is not None and not isinstance(p["additionalPermissions"], dict):
+        return "additionalPermissions is not an object"
+    if p.get("networkApprovalContext") is not None and not isinstance(p["networkApprovalContext"], dict):
+        return "networkApprovalContext is not an object"
+    if p.get("kind") is not None and not isinstance(p["kind"], str):
+        return "kind is not a string"
+    if p.get("availableDecisions") is not None and not isinstance(p["availableDecisions"], list):
+        return "availableDecisions is not a list"
+    return None
+
+
+# Approval kinds that are a plain command run inside the sandbox. Anything
+# else widens what the sandbox lets through; a kind not listed at all is one
+# this adapter cannot describe to the owner, so it is declined outright.
+_PLAIN_KINDS = (None, "command")
+_WIDENING_KINDS = {"writeStdin": "input to a running terminal (writeStdin)"}
+# Every approval field in the 0.153.4 and 0.161.0 schemas (identical in both).
+# A non-null field outside this set is one a newer Codex added and we cannot
+# judge — it might be another grant riding the accept — so it counts as a
+# widening: a human is asked, shown the field, and offered no Always.
+_KNOWN_APPROVAL_FIELDS = frozenset({
+    "threadId", "turnId", "itemId", "startedAtMs", "approvalId", "reason",
+    "command", "cwd", "commandActions", "environmentId", "kind", "availableDecisions",
+    "additionalPermissions", "networkApprovalContext",
+    "proposedExecpolicyAmendment", "proposedNetworkPolicyAmendments",   # proposals only:
+    # they apply only on an acceptWith…Amendment answer, which we never send.
+    "grantRoot",
+})
+
+
+def _content(value) -> bool:
+    """Whether a permission overlay asks for anything. None, False, and empty
+    containers ask for nothing; `network: {enabled: false}` narrows."""
+    if value is None or value is False:
+        return False
+    if isinstance(value, dict):
+        return any(_content(v) for v in value.values())
+    if isinstance(value, (list, tuple, str)):
+        return len(value) > 0
+    return True
+
+
+def _compact(value) -> str:
+    text = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return text if len(text) <= 300 else text[:299] + "…"
+
+
+# The headline is built from Codex-supplied strings (paths, hosts, commands)
+# and lands first on an authorization surface, so every part is one cleaned
+# line (approvals.clean_line: no newlines or control characters, no
+# backticks) and the whole is capped. The full detail stays in `args`.
+PART_CAP, HEADLINE_CAP = 120, 400
+_GLOB = re.compile(r"[*?\[{]")
+
+
+def _headline(parts: list[str]) -> str | None:
+    if not parts:
+        return None
+    parts = [clean_line(part, PART_CAP) for part in parts]
+    line, shown = "SANDBOX WIDENING: ", 0
+    for part in parts:
+        joined = line + (" · " if shown else "") + part
+        if shown and len(joined) > HEADLINE_CAP - 16:
+            break
+        line, shown = joined, shown + 1
+    if shown < len(parts):
+        line += f" … (+{len(parts) - shown} more)"
+    return line
+
+
+def _place(path: str, cwd: str) -> str:
+    return path if os.path.isabs(os.path.expanduser(path)) else os.path.join(cwd, path)
+
+
+def _fs_path(path, cwd: str) -> tuple[str, str | None]:
+    """One FileSystemPath (0.161.0 schema): its words, and the directory or
+    file it covers (None for the sandbox's own minimal set). A shape we cannot
+    place covers "/", so layer 1 judges it as the widest grant it could be."""
+    if isinstance(path, dict):
+        if path.get("type") == "path" and isinstance(path.get("path"), str):
+            return path["path"], _place(path["path"], cwd)
+        if path.get("type") == "glob_pattern" and isinstance(path.get("pattern"), str):
+            literal = _GLOB.split(path["pattern"], 1)[0]
+            base = literal if literal.endswith("/") or not literal else os.path.dirname(literal) or ""
+            return path["pattern"], _place(base or ".", cwd)
+        if path.get("type") == "special" and isinstance(path.get("value"), dict):
+            value = path["value"]
+            kind = value.get("kind")
+            sub = value.get("subpath") if isinstance(value.get("subpath"), str) else None
+            words = f"<{kind}>" + (f"/{sub}" if sub else "")
+            if kind == "minimal":
+                return words, None
+            if kind == "root":
+                return words, "/" + (sub or "")
+            if kind == "project_roots":
+                return words, os.path.join(cwd, sub) if sub else cwd
+            if kind in ("tmpdir", "slash_tmp"):
+                return words, "/tmp"
+            if kind == "unknown" and isinstance(value.get("path"), str):
+                return f"{value['path']}" + (f"/{sub}" if sub else ""), _place(value["path"], cwd)
+    return _compact(path), "/"
+
+
+def _describe_permissions(extra: dict, cwd: str) -> tuple[list[str], list[tuple[str, str]]]:
+    """Words for each grant in an AdditionalPermissionProfile, and each
+    filesystem grant as (access, path) for layer 1's ancestor check."""
+    parts, grants = [], []
+    for key, value in extra.items():
+        if not _content(value):
+            continue
+        if key == "network" and isinstance(value, dict) and set(value) <= {"enabled"}:
+            parts.append("network on" if value.get("enabled") is True else f"network {_compact(value)}")
+        elif key == "fileSystem" and isinstance(value, dict):
+            for sub, paths in value.items():
+                if not _content(paths) or sub == "globScanMaxDepth":
+                    continue
+                if sub in ("read", "write") and isinstance(paths, list) and all(isinstance(x, str) for x in paths):
+                    parts.append(f"{sub} {', '.join(paths)}")
+                    grants.extend((sub, _place(x, cwd)) for x in paths)
+                elif sub == "entries" and isinstance(paths, list):
+                    for entry in paths:
+                        if isinstance(entry, dict) and isinstance(entry.get("access"), str):
+                            words, where = _fs_path(entry.get("path"), cwd)
+                            parts.append(f"{entry['access']} {words}")
+                            if where is not None and entry["access"] != "deny":
+                                access = "read" if entry["access"] == "read" else "write"
+                                grants.append((access, where))
+                        else:
+                            parts.append(f"filesystem {_compact(entry)}")
+                            grants.append(("write", "/"))
+                else:
+                    parts.append(f"filesystem {sub} {_compact(paths)}")
+                    grants.append(("write", "/"))
+        else:
+            parts.append(f"{key} {_compact(value)}")
+    if not parts:
+        parts.append(f"additional permissions {_compact(extra)}")
+    return parts, grants
+
+
+def _widening(p: dict, cwd: str) -> tuple[list[str], list[tuple[str, str]], str | None]:
+    """``(parts, grants, refusal)`` for one approval request.
+
+    ``parts`` describe what accepting would let through beyond the sandbox
+    (extra permissions riding on the approval, a managed-network prompt, a
+    grant root, terminal input, a field we do not know); the reply is a bare
+    ``{decision}``, so such a grant is accepted whole or not at all.
+    ``grants`` are the filesystem paths it would open, for layer 1.
+    ``refusal`` is set for a kind this adapter cannot describe, which is
+    declined without asking anyone.
+    """
+    parts, grants = [], []
+    kind = p.get("kind")
+    if kind not in _PLAIN_KINDS:
+        if kind not in _WIDENING_KINDS:
+            return [], [], f"unknown approval kind {clean_line(kind, 40)!r}"
+        parts.append(_WIDENING_KINDS[kind])
+    if _content(p.get("additionalPermissions")):
+        words, more = _describe_permissions(p["additionalPermissions"], cwd)
+        parts.extend(words)
+        grants.extend(more)
+    net = p.get("networkApprovalContext")
+    if net is not None:
+        host, protocol = net.get("host"), net.get("protocol")
+        parts.append(f"network access to {protocol or '?'}://{host or '?'}"
+                     if isinstance(host, str) and (protocol is None or isinstance(protocol, str))
+                     else f"network access {_compact(net)}")
+    if p.get("grantRoot") is not None:
+        parts.append(f"grant root {p['grantRoot']}")
+        grants.append(("write", _place(p["grantRoot"], cwd)))
+    for key in sorted(k for k, v in p.items() if v is not None and k not in _KNOWN_APPROVAL_FIELDS):
+        parts.append(f"unrecognised field {str(key)[:60]}={_compact(p[key])}")
+    return parts, grants, None
+
+
+def _same_command(a: str, b: str) -> bool:
+    return " ".join(a.split()) == " ".join(b.split())
 
 
 @dataclass
@@ -62,24 +299,38 @@ class CodexProvider:
     name = ProviderName.CODEX
 
     def health(self) -> tuple[bool, str]:
-        binary = shutil.which("codex")
-        if binary is None:
-            return False, "codex is not on PATH"
+        binary, reason = self._probe()
+        return binary is not None, reason
+
+    def _probe(self) -> tuple[str | None, str]:
+        """``(binary, reason)``: the realpath to launch, or None and why not.
+
+        The binary is resolved once (codex_cli.resolve) and its realpath is
+        what is version-checked *and* launched, so the auto-updater flipping
+        ~/.codex/packages/standalone/current between the two cannot swap the
+        binary that was checked for one that was not.
+        """
+        found, reason = codex_cli.resolve()
+        if found is None:
+            return None, reason
+        binary = os.path.realpath(found)
         # No credential contents are read. login status is a local CLI probe.
         env = codex_config.clean_env(Path.home(), codex_config.owner_home())
         try:
             version = subprocess.run([binary, "--version"], env=env, capture_output=True,
                                      text=True, timeout=10)
-            found = version.stdout.strip().removeprefix("codex-cli ")
-            if version.returncode or found != CODEX_PIN:
-                return False, f"codex {found}, pinned {CODEX_PIN}"
+            if version.returncode:
+                return None, f"codex at {found} failed to report its version"
+            ok, reason = codex_cli.check(version.stdout, found)
+            if not ok:
+                return None, reason
             login = subprocess.run([binary, "login", "status"], env=env, capture_output=True,
                                    text=True, timeout=10)
             if login.returncode or "logged in using chatgpt" not in (login.stdout + login.stderr).lower():
-                return False, "codex requires a ChatGPT login; API-key billing refused"
+                return None, "codex requires a ChatGPT login; API-key billing refused"
         except (OSError, subprocess.TimeoutExpired) as exc:
-            return False, f"codex health failed ({type(exc).__name__})"
-        return True, f"codex {CODEX_PIN}, ChatGPT login"
+            return None, f"codex health failed ({type(exc).__name__})"
+        return binary, f"{reason}, ChatGPT login"
 
     def start(self, thread: Thread, brief: Brief, permit: PermissionCallback) -> SessionHandle:
         return self._open(thread, brief, permit, resume=False)
@@ -92,8 +343,8 @@ class CodexProvider:
         native_id = (thread.provider_session_id or "").removeprefix("codex:")
         if resume and (not (thread.provider_session_id or "").startswith("codex:") or not native_id):
             raise BriefRefused("Codex resume requires a codex:<thread id> session")
-        ok, reason = self.health()
-        if not ok:
+        binary, reason = self._probe()
+        if binary is None:
             raise BriefRefused(reason)
         # Also serialize preparation, account inspection and refresh-prone startup.
         with _auth_lock:
@@ -101,7 +352,7 @@ class CodexProvider:
             with _state_lock:
                 if candidate in _open_homes:
                     raise BriefRefused("Codex thread already has an open session")
-            argv, env, home = codex_config.prepare(thread.id, brief)
+            argv, env, home = codex_config.prepare(thread.id, brief, binary)
             home = home.resolve()
             with _state_lock:
                 if home in _open_homes:
@@ -223,7 +474,7 @@ class CodexProvider:
             start_deadline = time.monotonic() + START_TIMEOUT
             params = {"threadId": s.thread_id, "input": inputs}
             # turn/start's `model` and `effort` override "this turn and
-            # subsequent turns" (TurnStartParams, generated from 0.153.4), so
+            # subsequent turns" (TurnStartParams; unchanged 0.153.4 → 0.161.0), so
             # a change rides the next turn and then sticks to the thread.
             override, s.override = s.override, None
             params.update(override or {})
@@ -264,6 +515,18 @@ class CodexProvider:
                     continue
                 method, params = msg["method"], msg.get("params", {})
                 if "id" in msg:
+                    if not isinstance(params, dict):
+                        s.rpc.reply(msg["id"], error={"code": -32602, "message": "Malformed request params"})
+                        raise RpcError("Codex server request params are not an object")
+                    if method == "currentTime/read":
+                        # A side-effect-free clock read (experimental API). It
+                        # carries a threadId and no turnId, so it is answered
+                        # here rather than failing the turn-identity check.
+                        if params.get("threadId") != s.thread_id:
+                            s.rpc.reply(msg["id"], error={"code": -32602, "message": "Request identity mismatch"})
+                            raise RpcError("Codex server request identity mismatch")
+                        s.rpc.reply(msg["id"], {"currentTimeAt": int(time.time())})
+                        continue
                     if (params.get("threadId") != s.thread_id
                             or not isinstance(params.get("turnId"), str) or not params["turnId"]
                             or (s.turn_id and params.get("turnId") != s.turn_id)):
@@ -274,7 +537,16 @@ class CodexProvider:
                     if not started:
                         started = True
                         yield self._event(h, EventKind.TURN_STARTED)
-                    yield from self._server_request(h, msg)
+                    pending_request = _Request()
+                    try:
+                        yield from self._server_request(h, msg, pending_request)
+                    except BaseException:
+                        # Whatever broke — a shape we could not read, a dead
+                        # transport, an abandoned generator — the request is
+                        # answered with an error, never left to be guessed at.
+                        if not pending_request.replied:
+                            self._refuse(s, msg["id"])
+                        raise
                     # Human latency is not a turn/start transport timeout.
                     if not response_seen:
                         start_deadline = time.monotonic() + START_TIMEOUT
@@ -354,7 +626,7 @@ class CodexProvider:
         if method == "account/updated" and p.get("authMode") not in (None, "chatgpt"):
             raise RpcError("Codex changed away from ChatGPT authentication")
         if method == "account/rateLimits/updated":
-            # Verified from 0.153.4 generate-ts: AccountRateLimitsUpdatedNotification
+            # Verified from generate-ts (0.153.4, 0.161.0): AccountRateLimitsUpdatedNotification
             # carries a sparse RateLimitSnapshot, independent of any turn id.
             u = s.accounting.usage()
             yield self._event(h, EventKind.USAGE, input=u.input_tokens, output=u.output_tokens,
@@ -407,18 +679,76 @@ class CodexProvider:
             yield self._event(h, EventKind.REVIEWER_DECLINED, tool=name, args=args,
                               command=args.get("command"), reason=p["review"].get("rationale") or "Reviewer declined")
 
-    def _server_request(self, h, msg):
+    @staticmethod
+    def _reply(s, request, result=None, **kwargs):
+        if request.replied:
+            raise RpcError("Codex server request answered twice")
+        request.replied = True
+        s.rpc.reply(request.rid, result, **kwargs)
+
+    @staticmethod
+    def _refuse(s, rid):
+        try:
+            s.rpc.reply(rid, error={"code": -32603, "message": "Request refused"})
+        except Exception:
+            pass  # the transport is already gone; closing the session refuses it
+
+    def _server_request(self, h, msg, request):
         s = h.native
         method, p, rid = msg["method"], msg.get("params", {}), msg["id"]
+        request.rid = rid
         req_id = str(rid)
         if method == "item/permissions/requestApproval":
-            s.rpc.reply(rid, {"permissions": {}, "scope": "turn"})
+            # An empty grant: a permissions expansion is never approved here.
+            self._reply(s, request, {"permissions": {}, "scope": "turn"})
             return
         if method in ("item/commandExecution/requestApproval", "item/fileChange/requestApproval"):
+            problem = _approval_problem(p)
+            if problem:
+                # Fail closed on a shape we cannot read: decline, and never
+                # put a half-understood request in front of the owner.
+                self._reply(s, request, {"decision": "decline"})
+                yield self._event(h, EventKind.ERROR, fatal=False,
+                                  message=f"Codex approval request declined: {problem}")
+                return
+            cwd = p.get("cwd") if isinstance(p.get("cwd"), str) and p["cwd"] else s.brief.cwd
+            parts, grants, refusal = _widening(p, cwd)
+            if refusal:
+                self._reply(s, request, {"decision": "decline"})
+                yield self._event(h, EventKind.ERROR, fatal=False,
+                                  message=f"Codex approval request declined: {refusal}")
+                return
             shell = method == "item/commandExecution/requestApproval"
             item = s.items.get(p.get("itemId"), {})
             name, args = self._tool(item if item else {"type": "commandExecution" if shell else "fileChange"})
-            args.update(p)
+            # Only non-null values: a `command: null` must not erase the item's
+            # real command and leave the never-approvable rules judging "".
+            args.update({k: v for k, v in p.items() if v is not None})
+            declined, also = None, []
+            item_command = item.get("command") if isinstance(item.get("command"), str) else None
+            if shell and (not isinstance(args.get("command"), str) or not args["command"].strip()):
+                declined = "no command to judge"
+            elif shell and item_command is not None and not _same_command(item_command, args["command"]):
+                if p.get("kind") in _PLAIN_KINDS and p.get("approvalId") is None:
+                    # A plain approval naming a different command than the
+                    # item runs: judging either alone could pass the one that runs.
+                    declined = "its command differs from the item's"
+                else:
+                    # Expected shapes: writeStdin carries the text typed into a
+                    # running terminal, and an approvalId marks a subcommand
+                    # (the zsh exec bridge). Both commands are judged by layer
+                    # 1 and a human sees both.
+                    args["item_command"] = item_command
+                    also.append(item_command)
+                    parts.append(f"command {args['command']} (in running {item_command})")
+            if declined:
+                self._reply(s, request, {"decision": "decline"})
+                yield self._event(h, EventKind.ERROR, fatal=False,
+                                  message=f"Codex approval request declined: {declined}")
+                return
+            line = _headline(parts)
+            if line:
+                args["sandbox_widening"] = line
             args["req_id"] = req_id
             pending = _Pending(False)
             with s.mutex:
@@ -428,17 +758,23 @@ class CodexProvider:
             yield self._event(h, EventKind.APPROVAL_REQUESTED, req_id=req_id, tool=name, args=args, command=args.get("command"))
             try:
                 # Deliberately on the send caller's thread: broker context survives.
-                decision = s.permit(name, args, s.brief)
+                # A widening goes as a keyword the model cannot reach; a
+                # callback that does not take it raises, and that denies.
+                decision = (s.permit(name, args, s.brief, widening=line, grants=tuple(grants),
+                                     also_commands=tuple(also)) if line
+                            else s.permit(name, args, s.brief))
                 decision = Decision(decision)
             except Exception:
                 decision = Decision.DENY
             with s.mutex:
-                if pending.ready.is_set():
-                    decision = pending.value
+                # answer() can only take an approval *back* (DENY); a yes comes
+                # from the permit callback alone, never from a racing answer.
+                if pending.ready.is_set() and pending.value == Decision.DENY:
+                    decision = Decision.DENY
                 if s.closed.is_set() or s.cancelled.is_set() or s.rpc.failed.is_set():
                     decision = Decision.DENY
                 s.pending.pop(req_id, None)
-            s.rpc.reply(rid, {"decision": "accept" if decision == Decision.ALLOW else "decline"})
+            self._reply(s, request, {"decision": "accept" if decision == Decision.ALLOW else "decline"})
             yield self._event(h, EventKind.APPROVAL_RESOLVED, req_id=req_id, decision=decision.value)
             if s.rpc.failed.is_set():
                 raise RpcError("Codex transport failed during approval")
@@ -464,10 +800,13 @@ class CodexProvider:
                 if s.cancelled.is_set():
                     break
                 answers[q["id"]] = {"answers": [pending.value]}
-            s.rpc.reply(rid, {"answers": answers})
+            self._reply(s, request, {"answers": answers})
             return
-        s.rpc.reply(rid, error={"code": -32601, "message": "Unsupported server request"})
-        yield self._event(h, EventKind.ERROR, message=f"Unexpected Codex server request: {method}", fatal=False)
+        # Anything else — including an approval- or permission-shaped method a
+        # newer Codex adds — is refused with an error, never approved.
+        self._reply(s, request, error={"code": -32601, "message": "Unsupported server request"})
+        yield self._event(h, EventKind.ERROR, message=f"Unexpected Codex server request refused: {str(method)[:80]}",
+                          fatal=False)
 
     def set_model(self, h: SessionHandle, model: str | None, effort: str | None) -> None:
         """Change the model and effort from the next turn on (decisions A1).
@@ -506,7 +845,13 @@ class CodexProvider:
                 if type(decision) is not str:
                     raise ValueError("A Codex question requires text")
             else:
+                # Approvals are decided by the permit callback (the broker),
+                # which runs the never-approvable rules. A direct answer may
+                # only withdraw one; it can never turn a refusal into a yes.
                 decision = Decision(decision)
+                if decision != Decision.DENY:
+                    raise ValueError("A Codex approval is decided by the approval broker; "
+                                     "answer() can only deny it")
             pending.value = decision
             pending.ready.set()
 

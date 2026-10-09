@@ -230,8 +230,54 @@ broker alone.
 
 - Built on the **app-server JSON-RPC protocol over stdio**, lifting
   `firm/codex_rpc.py`, `codex_config.py` and the usage accounting from
-  `~/projects/jarvis-trading-firm` (D10). Pinned to `codex-cli 0.153.4`; the
-  version check before each session stays.
+  `~/projects/jarvis-trading-firm` (D10). ~~Pinned to `codex-cli 0.153.4`~~
+  **A version floor, not a pin (2026-10-08):** the CLI auto-updates, and the
+  exact pin turned the update to 0.161.0 into "Could not send" for every
+  Codex thread. `providers/codex_cli.py` now accepts `CODEX_MIN` (0.153.4)
+  and newer, warns once per process above `CODEX_VERIFIED` (0.161.0), and
+  refuses older; `JARVIS_CODEX_STRICT=1` restores an exact match against the
+  verified versions. The binary is `JARVIS_CODEX_CLI`, else the first `codex`
+  on PATH outside `/mnt/` (the Windows npm shim must never run), else
+  `~/.local/bin/codex`; its realpath is version-checked and launched, so an
+  update between the two cannot swap it. The version check before each
+  session stays. The 0.153.4 → 0.161.0 protocol diff is
+  `docs/codex-briefs/codex-0.161-protocol-notes.md`.
+
+  **Deliberate differences from the Claude resolver (#14),** so nobody
+  "aligns" them by accident: an override that is relative, under `/mnt/`,
+  `.cmd`/`.bat`/`.exe`, or not executable is **refused** (health fails with a
+  sentence) where Claude warns and falls back or uses it — Codex has a
+  sandbox to protect and no bundled CLI to fall back on, so a wrong binary
+  must be loud. Codex **launches the realpath** it version-checked where
+  Claude launches the symlink (Claude's SDK spawns later and the updater
+  re-points the link; for Codex the check and the spawn are moments apart and
+  must be the same file). And Codex **resolves per session** (every `_open`
+  and every `/status`) where Claude resolves once per process, so an update
+  is picked up by the next Codex thread without a restart.
+- **What actually keeps the floor from loosening the gate** (corrected
+  2026-10-08 after review — the first draft claimed "anything not understood
+  gets an error or a decline", which was not the whole truth). A Codex
+  approval reaches us only *after* its `auto_review` reviewer passed it, and
+  under AUTO `permit`'s layer 5 answered ALLOW, so a sandbox-widening grant
+  riding on an approval (extra permissions, network, a grant root, terminal
+  input) was accepted with no human — and the `{decision}` reply cannot strip
+  it. Now: unknown server methods get an error; malformed approvals and
+  unknown `kind`s are declined unasked; **a widening approval is always asked
+  of a human** (`permit(..., widening=...)`, no Always, headline "SANDBOX
+  WIDENING: …" first on the card and the Discord post; deny-all, timeout or
+  strict declines), and so is one carrying a field outside the verified
+  schema. The headline is one cleaned, capped line on every surface (each
+  part through `approvals.clean_line`, ~400 overall, markdown escaped for
+  Discord, kept inline when the post overflows). Layer 1 judges what a
+  widening opens: a grant that is or contains protected state, a
+  SELF_PROTECTED file, or touches a credential directory is DENY unasked
+  (`permissions.denied_grant`). A command that differs from its item is
+  declined only for a plain approval; for `writeStdin` and `approvalId`
+  subcommands both commands are judged and shown, and a human asked. A
+  `command: null` can no longer erase the item's real command, and
+  a command approval with none is declined; `provider.answer()` can only
+  deny an approval. A plain in-sandbox approval under AUTO is still accepted
+  on the reviewer's word — that is R8, not a regression.
 - Approval requests `item/commandExecution/requestApproval`,
   `item/fileChange/requestApproval`, `item/permissions/requestApproval` are
   **routed to the broker**, where the firm denies them. `requestUserInput`
@@ -1379,7 +1425,8 @@ for everything not under `jarvis/v2/`.
   equivalent removed from the toolset). Until then, a project with
   always-ask additions routes its tasks to Claude.
 - **R6, Codex half answered (WP12a, 2026-09-16):** the app-server protocol
-  on 0.153.4 declares `account/rateLimits/updated` with `usedPercent`,
+  on 0.153.4 (unchanged in 0.161.0 but for an optional `normalModelSlug`)
+  declares `account/rateLimits/updated` with `usedPercent`,
   `windowDurationMins` and `resetsAt` per window (primary/secondary,
   sparse-merged). `CodexProvider` surfaces it as
   `USAGE.provider_reported.rate_limits`; `/usage` shows it as `quota`.
