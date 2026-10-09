@@ -246,6 +246,12 @@ V2_DATA_DIR = Path(
     os.environ.get("JARVIS_V2_DATA", Path.home() / ".local" / "share" / "jarvis" / "v2")
 )
 
+# Which `claude` binary the v2 Claude provider drives (`providers/claude.py`,
+# `resolve_cli`). Empty means "find it": the first real `claude` on PATH that is
+# not a Windows shim under /mnt/, then ~/.local/bin/claude, and only then the
+# SDK's bundled CLI — which lags the installed one and refuses newer models.
+CLAUDE_CLI = os.environ.get("JARVIS_CLAUDE_CLI", "")
+
 # The v2 always-ask list (design §6, layer 2; jarvis/v2/permissions.py).
 #
 # The path holds **additions only**. §6 says a project may add to this layer and

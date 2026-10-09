@@ -243,6 +243,9 @@ class Daemon:
             except Exception as exc:
                 ok, reason = False, f"{type(exc).__name__}: {exc}"
             providers[name.value] = {"ok": bool(ok), "reason": str(reason)}
+            cli = _cli_status(provider)
+            if cli is not None:
+                providers[name.value]["cli"] = cli
         with self._lock:
             return {"jarvis-daemon": True, "version": 2,
                     "uptime": time.monotonic() - self.started_at, "providers": providers,
@@ -1471,6 +1474,23 @@ def _purge_trash(daemon, done, interval=6 * 3600):
             return
 
 
+def _cli_status(provider):
+    """`{path, version}` of the CLI a provider spawns, for `/status` — the path
+    and the version string only. None for a provider that reports no CLI (the
+    fast path, a fake, an unavailable one) or whose report fails."""
+    info = getattr(provider, "cli_info", None)
+    if not callable(info):
+        return None
+    try:
+        got = info()
+        if not isinstance(got, dict):
+            return None
+        return {key: got[key] if isinstance(got.get(key), str) else None
+                for key in ("path", "version")}
+    except Exception:  # noqa: BLE001 — /status must answer whatever a provider does
+        return None
+
+
 # Libraries that log a request's full URL at INFO (httpx: `HTTP Request: POST
 # https://…`) or DEBUG. A Discord interaction reply's URL *is* a credential —
 # `/webhooks/<app>/<interaction token>/…` — so at INFO every slash-command
@@ -1530,6 +1550,11 @@ def main() -> int:
         daemon.runner.serve()                   # idempotent if Discord served it
         purger.start()
         LOG.info("Jarvis v2 listening on 127.0.0.1:%s", daemon.port)
+        claude_cli = _cli_status(daemon.providers.get(ProviderName.CLAUDE))
+        if claude_cli is not None:
+            # Once, at start-up: which `claude` every Claude session spawns.
+            LOG.info("claude CLI in use: %s, version %s",
+                     claude_cli["path"] or "SDK bundled", claude_cli["version"] or "unknown")
         done.wait()
     except KeyboardInterrupt:
         pass

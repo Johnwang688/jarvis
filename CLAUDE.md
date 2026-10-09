@@ -18,7 +18,12 @@ Merged on `main` so far, each with a free suite under `tests/v2/`: stores +
 v1 session migration (WP1), the fast-path provider with `FAST_TOOLS` and
 `task_propose` (WP2), the Claude provider over the Agent SDK (WP3 — the
 `PreToolUse` hook is the gate; the SDK sandbox does **not** confine on this
-WSL2, so Claude workers run unsandboxed and confinement routes to Codex),
+WSL2, so Claude workers run unsandboxed and confinement routes to Codex;
+and every client is built with an explicit `cli_path` from `resolve_cli()` —
+`JARVIS_CLAUDE_CLI`, else the first real `claude` on PATH not under `/mnt/`,
+else `~/.local/bin/claude`, else the SDK's bundled CLI with a warning —
+because unset, the SDK runs its own lagging bundled copy, which refused a
+newer model live on 2026-10-08; never pin the version, it self-updates),
 the Codex provider over the app-server (WP4 — lifted from the trading firm's
 transport; its reviewer escalates nothing to us, design R8), a worktree per
 task (WP6), the daemon and local API (WP7, `jarvis daemon2`), one skills

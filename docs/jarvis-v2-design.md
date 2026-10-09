@@ -176,6 +176,19 @@ broker alone.
   `resume=`. The raw CLI's `--permission-prompt-tool` no longer exists in
   2.1.233, so the SDK is the only supported path for headless permission
   routing.
+- **Which `claude` it spawns is set explicitly** (2026-10-08). With
+  `cli_path` unset the SDK does *not* run the installed binary: it runs the
+  CLI bundled in its wheel (2.1.273 in SDK 0.2.153), which lags the owner's
+  self-updating install and refused a newer model live ("version 2.1.280 or
+  newer is required"). `providers/claude.py:resolve_cli()` picks, once per
+  process: `JARVIS_CLAUDE_CLI` if executable; else the first executable
+  `claude` on PATH that is not under `/mnt/` (never the Windows npm shim, nor
+  a `.cmd`/`.bat`/`.exe` behind a symlink); else `~/.local/bin/claude` (a
+  systemd unit's PATH rarely has it); else the bundled CLI, with one warning.
+  Every `ClaudeAgentOptions` — start, resume and `set_model`'s reconnect —
+  carries it. The version is not pinned. `health()` probes `--version` once
+  per real binary rather than per `/status`, and `/status` reports the CLI's
+  path and version under `providers.claude.cli`.
 - Permission mode `auto`. **Jarvis's rules (§6) live in a `PreToolUse`
   hook, not in `can_use_tool`** — verified 2026-09-15 (R2): under `auto`
   the classifier settles every call and the callback is never consulted,

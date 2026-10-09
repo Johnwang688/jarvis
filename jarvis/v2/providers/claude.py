@@ -1,7 +1,8 @@
 """ClaudeProvider — Claude Code behind the v2 provider interface (design §5.3).
 
-The SDK (`claude-agent-sdk` 0.2.153) spawns the installed `claude` binary and
-inherits its subscription login, so a worker here is the owner's own Claude
+The SDK (`claude-agent-sdk` 0.2.153) spawns a `claude` binary — the owner's
+installed one, because `resolve_cli()` says so — and inherits its subscription
+login, so a worker here is the owner's own Claude
 Code running headless in a task worktree. Three things about that shape decide
 almost every line below.
 
@@ -28,6 +29,14 @@ call, not in a list at the end. The turn coroutine's `finally` always posts the
 sentinel, so the generator cannot hang, and an SDK exception becomes
 `ERROR{fatal: True}` and then stops.
 
+**Which `claude` runs is chosen here, never left to the SDK** (2026-10-08).
+With `cli_path` unset the SDK spawns the CLI bundled inside its wheel (2.1.273
+in 0.2.153), which lags the owner's self-updating install and refuses newer
+models outright ("does not support this model; version 2.1.280 or newer is
+required"). `resolve_cli()` picks the owner's real install once per process,
+and every `ClaudeAgentOptions` this module builds carries it. The version is
+deliberately not pinned: the install updates itself, and that is the point.
+
 A note on money: `ResultMessage.total_cost_usd` is reported even on a
 subscription, where nothing is billed (R1: 0.28 for a three-tool turn). It is
 passed through unchanged as an **equivalent** figure; what it means is the
@@ -38,9 +47,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
-import shutil
 import subprocess
 import threading
 import queue
@@ -67,6 +76,7 @@ from claude_agent_sdk import (
     UserMessage as SdkUserMessage,
 )
 
+from ... import config
 from ...tools import secrets
 from ..model import PermissionProfile, ProviderName, Thread
 from ..provider import (
@@ -157,6 +167,142 @@ def _safe(text: Any) -> str:
 # process goes through here, so a suite never needs one.
 def _client_factory(options: ClaudeAgentOptions) -> Any:
     return ClaudeSDKClient(options=options)
+
+
+# --- which claude -----------------------------------------------------------
+
+LOG = logging.getLogger(__name__)
+
+# Never a Windows binary or shim. `/mnt/<drive>` is the Windows side of WSL,
+# where npm's `claude` is a shell script that launches the *Windows* CLI with a
+# Windows home and a Windows login; these suffixes are its other spellings.
+_FOREIGN_SUFFIXES = (".cmd", ".bat", ".ps1", ".exe")
+_FOREIGN_ROOTS = ("/mnt",)  # a tuple so the free suite can point it at a temp dir
+
+
+def _under_mnt(path: Path) -> bool:
+    text = str(path)
+    return any(text == root or text.startswith(root.rstrip("/") + "/") for root in _FOREIGN_ROOTS)
+
+
+def _usable(path: Path) -> bool:
+    """A real, executable `claude` on the Linux side, and nothing else."""
+    try:
+        for candidate in (path, path.resolve()):
+            if candidate.name.lower().endswith(_FOREIGN_SUFFIXES) or _under_mnt(candidate):
+                return False
+        return path.is_file() and os.access(path, os.X_OK)
+    except OSError:
+        return False
+
+
+def find_cli(
+    *,
+    configured: str | None = None,
+    path_env: str | None = None,
+    home: Path | None = None,
+) -> tuple[str | None, str]:
+    """(path, source) for the `claude` to drive. Only looks at files.
+
+    Order: an explicit `config.CLAUDE_CLI` (env `JARVIS_CLAUDE_CLI`) that is an
+    executable file; the first usable `claude` on PATH (relative entries and
+    anything under `/mnt/` are skipped); `~/.local/bin/claude`, because a
+    systemd unit's PATH rarely has it; else `(None, "bundled")`, which leaves
+    the SDK to its own bundled CLI. The three inputs default to the live
+    config, PATH and home; a test passes its own.
+    """
+    configured = config.CLAUDE_CLI if configured is None else configured
+    path_env = os.environ.get("PATH", "") if path_env is None else path_env
+    home = Path.home() if home is None else home
+    if configured:
+        explicit = Path(configured).expanduser()
+        if explicit.is_file() and os.access(explicit, os.X_OK):
+            return str(explicit), "config"
+        LOG.warning("JARVIS_CLAUDE_CLI=%s is not an executable file; ignoring it", configured)
+    for entry in path_env.split(os.pathsep):
+        if not entry or not os.path.isabs(entry):
+            continue
+        candidate = Path(entry) / "claude"
+        if _usable(candidate):
+            return str(candidate), "path"
+    local = home / ".local" / "bin" / "claude"
+    if _usable(local):
+        return str(local), "local-bin"
+    return None, "bundled"
+
+
+def bundled_version() -> str | None:
+    """The SDK's bundled CLI version, read from its own constant. No process."""
+    try:
+        from claude_agent_sdk._cli_version import __cli_version__
+
+        return str(__cli_version__)
+    except Exception:  # noqa: BLE001 — a private module may move; this feeds a log line
+        return None
+
+
+_cli_lock = threading.Lock()
+_cli_resolved: tuple[str | None, str] | None = None
+# realpath -> version. `~/.local/bin/claude` is a symlink into a versioned
+# directory that the CLI's own updater re-points, so the key is the real file:
+# an update is noticed at the next look, and nothing is re-probed otherwise.
+_cli_versions: dict[str, str | None] = {}
+
+
+def resolve_cli() -> str | None:
+    """The `cli_path` every client in this module is built with. Resolved once
+    per process; None means the SDK's bundled CLI, with one warning logged."""
+    global _cli_resolved
+    with _cli_lock:
+        if _cli_resolved is None:
+            path, source = find_cli()
+            _cli_resolved = (path, source)
+            if path is None:
+                version = bundled_version()
+                LOG.warning(
+                    "no installed claude found (JARVIS_CLAUDE_CLI, PATH, ~/.local/bin); "
+                    "falling back to the SDK's bundled CLI%s, which may refuse newer models",
+                    f" {version}" if version else "",
+                )
+            else:
+                LOG.info("claude CLI: %s (from %s)", path, source)
+        return _cli_resolved[0]
+
+
+def reset_cli_cache() -> None:
+    """Forget the resolution and the probed versions. For tests."""
+    global _cli_resolved
+    with _cli_lock:
+        _cli_resolved = None
+        _cli_versions.clear()
+
+
+def _probe_version(path: str) -> str | None:
+    """`<path> --version`, at most once per real binary."""
+    key = os.path.realpath(path)
+    with _cli_lock:
+        if key in _cli_versions:
+            return _cli_versions[key]
+    try:
+        probe = subprocess.run([path, "--version"], capture_output=True, text=True, timeout=20)
+        found = (probe.stdout or "").strip().split(" ")[0] if probe.returncode == 0 else ""
+    except (OSError, subprocess.TimeoutExpired):
+        found = ""
+    with _cli_lock:
+        _cli_versions[key] = found or None
+    return found or None
+
+
+def cli_info() -> dict:
+    """`{path, version, source}` of the CLI in use, as `/status` reports it.
+
+    `path` is None when the SDK's bundled CLI is in use; its version then comes
+    from the SDK's constant rather than a process.
+    """
+    path = resolve_cli()
+    source = _cli_resolved[1] if _cli_resolved else "bundled"
+    version = _probe_version(path) if path else bundled_version()
+    return {"path": path, "version": version, "source": source}
 
 
 # --- health -----------------------------------------------------------------
@@ -275,29 +421,31 @@ class ClaudeProvider:
         keychain) has no bundle to read, and refusing to run because a file
         this provider does not own has changed shape would be a worse failure
         than the one it is guarding against.
+
+        The binary is `resolve_cli()`'s, the same one every session spawns, and
+        its `--version` runs once per real file (see `_probe_version`), not on
+        every `/status`.
         """
-        binary = shutil.which("claude")
-        if binary is None:
-            return False, "claude is not on PATH"
-        try:
-            probe = subprocess.run(
-                [binary, "--version"], capture_output=True, text=True, timeout=20
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            return False, f"claude --version failed ({type(exc).__name__})"
-        if probe.returncode:
-            return False, f"claude --version exited {probe.returncode}"
-        found = (probe.stdout or "").strip().split(" ")[0]
+        info = cli_info()
+        found = info["version"]
+        if info["path"] is None:
+            if not found:
+                return False, "no claude CLI found (JARVIS_CLAUDE_CLI, PATH, ~/.local/bin)"
+            label = f"{found} (SDK bundled)"
+        elif not found:
+            return False, f"{info['path']} --version failed"
+        else:
+            label = found
         if _series(found) != _series(CLAUDE_PIN):
-            return False, f"claude {found or '?'}, pinned {CLAUDE_PIN}"
+            return False, f"claude {label}, pinned {CLAUDE_PIN}"
         expiry = _login_expiry_ms()
         if expiry is None:
             if not _credentials_path().exists():
-                return False, f"claude {found}: no login found; run `claude login`"
-            return True, f"claude {found}, login expiry unknown"
+                return False, f"claude {label}: no login found; run `claude login`"
+            return True, f"claude {label}, login expiry unknown"
         if expiry <= _now_ms():
-            return False, f"claude {found}: login expired; run `claude login`"
-        return True, f"claude {found}, subscription login"
+            return False, f"claude {label}: login expired; run `claude login`"
+        return True, f"claude {label}, subscription login"
 
     # -- lifecycle
 
@@ -387,6 +535,12 @@ class ClaudeProvider:
             },
             "stderr": session.stderr.append,
         }
+        cli_path = resolve_cli()
+        if cli_path is not None:
+            # The owner's own install, never the SDK's bundled copy, which
+            # lags it and refuses newer models. None leaves the SDK to its
+            # bundled CLI — the last resort `resolve_cli` already warned of.
+            kwargs["cli_path"] = cli_path
         if brief.model:
             kwargs["model"] = brief.model
         if brief.effort:

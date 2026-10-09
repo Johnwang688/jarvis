@@ -36,6 +36,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -272,20 +273,29 @@ def credentials(payload):
 
 
 @contextlib.contextmanager
-def cli(version: str | None, *, on_path: bool = True, returncode: int = 0):
-    """A fake `claude` binary: no process is ever spawned."""
-    which, run = claude.shutil.which, claude.subprocess.run
-    claude.shutil.which = lambda name: "/fake/bin/claude" if on_path else None
+def cli(version: str | None, *, on_path: bool = True, returncode: int = 0,
+        bundled: str | None = None):
+    """A fake `claude` binary: no process is ever spawned.
+
+    `on_path=False` means the resolver found nothing, so the SDK's bundled CLI
+    would run; `bundled` is the version that CLI reports (None: not even that).
+    """
+    find, run, bundled_version = claude.find_cli, claude.subprocess.run, claude.bundled_version
+    claude.find_cli = lambda **kw: ("/fake/bin/claude", "path") if on_path else (None, "bundled")
+    claude.bundled_version = lambda: bundled
 
     def fake_run(argv, **kw):
         return subprocess.CompletedProcess(argv, returncode, f"{version} (Claude Code)\n", "")
 
     claude.subprocess.run = fake_run
+    claude.reset_cli_cache()
     try:
         yield
     finally:
-        claude.shutil.which = which
+        claude.find_cli = find
+        claude.bundled_version = bundled_version
         claude.subprocess.run = run
+        claude.reset_cli_cache()
 
 
 def health_checks() -> None:
@@ -297,6 +307,12 @@ def health_checks() -> None:
     with cli("2.1.240", on_path=False), credentials({"claudeAiOauth": {"expiresAt": future}}):
         ok, reason = provider.health()
         check(not ok and "PATH" in reason, f"missing binary is unavailable: {reason}")
+
+    with cli("2.1.240", on_path=False, bundled="2.1.273"), \
+            credentials({"claudeAiOauth": {"expiresAt": future}}):
+        ok, reason = provider.health()
+        check(ok and "2.1.273" in reason and "bundled" in reason,
+              f"with no install, the SDK's bundled CLI is named as such: {reason}")
 
     with cli("1.9.0"), credentials({"claudeAiOauth": {"expiresAt": future}}):
         ok, reason = provider.health()
@@ -347,10 +363,179 @@ def health_checks() -> None:
 
         claude.subprocess.run = spy
         provider.health()
+        provider.health()
+        provider.health()
     check(
         len(seen) == 1 and seen[0][1:] == ["--version"],
-        f"health spawns only `claude --version`: {seen}",
+        f"health spawns only `claude --version`, once however often /status asks: {seen}",
     )
+
+
+# --- which claude -------------------------------------------------------------
+
+FAKE_CLI_SCRIPT = "#!/bin/sh\necho '0.0.0 (fake claude, never meant to run)'\n"
+
+
+def fake_exe(path: Path, *, executable: bool = True) -> Path:
+    """A stand-in `claude`. Never executed by the resolver, which only stats."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(FAKE_CLI_SCRIPT)
+    path.chmod(0o755 if executable else 0o644)
+    return path
+
+
+class Capture(logging.Handler):
+    def __init__(self):
+        super().__init__(logging.DEBUG)
+        self.records: list[logging.LogRecord] = []
+
+    def emit(self, record):
+        self.records.append(record)
+
+
+@contextlib.contextmanager
+def captured_log():
+    handler, logger = Capture(), logging.getLogger(claude.__name__)
+    previous = logger.level
+    logger.addHandler(handler)
+    logger.setLevel(logging.DEBUG)
+    try:
+        yield handler.records
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(previous)
+
+
+def resolver_checks() -> None:
+    print("\n-- which claude: the resolver (temp dirs, a fake PATH, nothing spawned)")
+    spawned: list = []
+    run = claude.subprocess.run
+    claude.subprocess.run = lambda argv, **kw: spawned.append(list(argv)) or subprocess.CompletedProcess(argv, 1, "", "")
+    previous_roots = claude._FOREIGN_ROOTS
+    try:
+        with tempfile.TemporaryDirectory(prefix="jarvis-cli-") as tmp:
+            root = Path(tmp).resolve()
+            # The Windows side of WSL, relocated so a test never touches /mnt.
+            claude._FOREIGN_ROOTS = (str(root / "mnt"),)
+            shim = fake_exe(root / "mnt" / "c" / "npm" / "claude")
+            real = fake_exe(root / "usr" / "bin" / "claude")
+            explicit = fake_exe(root / "opt" / "claude-explicit")
+            home = root / "home"
+            local = fake_exe(home / ".local" / "bin" / "claude")
+            empty = root / "empty"
+            empty.mkdir()
+            path_env = os.pathsep.join([str(shim.parent), str(real.parent)])
+
+            eq(claude.find_cli(configured=str(explicit), path_env=path_env, home=home),
+               (str(explicit), "config"), "an explicit JARVIS_CLAUDE_CLI wins over PATH and ~/.local/bin")
+
+            with captured_log() as logs:
+                got = claude.find_cli(configured=str(root / "missing"), path_env=path_env, home=home)
+            eq(got, (str(real), "path"), "an explicit path that is not there falls through")
+            check(any(r.levelno == logging.WARNING and "JARVIS_CLAUDE_CLI" in r.getMessage() for r in logs),
+                  "...and says it was ignored")
+            noexec = fake_exe(root / "opt" / "claude-noexec", executable=False)
+            eq(claude.find_cli(configured=str(noexec), path_env=path_env, home=home),
+               (str(real), "path"), "an explicit path that is not executable falls through")
+
+            eq(claude.find_cli(configured="", path_env=path_env, home=home),
+               (str(real), "path"), "a /mnt/ shim first on PATH is skipped for the real one behind it")
+            eq(claude.find_cli(configured="", path_env=str(shim.parent), home=empty),
+               (None, "bundled"), "a /mnt/ shim alone is never used")
+
+            # A clean-looking PATH entry whose `claude` is a link into /mnt/.
+            linkdir = root / "linkbin"
+            linkdir.mkdir()
+            (linkdir / "claude").symlink_to(shim)
+            eq(claude.find_cli(configured="", path_env=os.pathsep.join([str(linkdir), str(real.parent)]),
+                               home=home),
+               (str(real), "path"), "a symlink into /mnt/ is skipped too")
+            cmddir = root / "cmdbin"
+            fake_exe(cmddir / "claude.cmd")
+            (cmddir / "claude").symlink_to(cmddir / "claude.cmd")
+            eq(claude.find_cli(configured="", path_env=str(cmddir), home=empty),
+               (None, "bundled"), "a .cmd shim behind a `claude` name is skipped")
+
+            plain = root / "plainbin"
+            fake_exe(plain / "claude", executable=False)
+            eq(claude.find_cli(configured="", path_env=os.pathsep.join(["relative/bin", str(plain)]),
+                               home=home),
+               (str(local), "local-bin"),
+               "a non-executable claude and a relative PATH entry are skipped; ~/.local/bin is the fallback")
+            eq(claude.find_cli(configured="", path_env="", home=home),
+               (str(local), "local-bin"), "with nothing on PATH (a systemd unit), ~/.local/bin/claude is used")
+            eq(claude.find_cli(configured="", path_env=str(empty), home=empty),
+               (None, "bundled"), "with nothing anywhere, None: the SDK's bundled CLI")
+
+            # resolve_cli: once per process, and one warning naming the bundled CLI.
+            env_before = {k: os.environ.get(k) for k in ("PATH", "HOME")}
+            cli_before = claude.config.CLAUDE_CLI
+            try:
+                os.environ["PATH"], os.environ["HOME"] = str(empty), str(empty)
+                claude.config.CLAUDE_CLI = ""
+                claude.reset_cli_cache()
+                with captured_log() as logs:
+                    first = claude.resolve_cli()
+                    second = claude.resolve_cli()
+                warnings = [r.getMessage() for r in logs if r.levelno == logging.WARNING]
+                check(first is None and second is None, "resolve_cli: nothing found is None")
+                bundled = claude.bundled_version()
+                check(len(warnings) == 1 and "bundled" in warnings[0]
+                      and (bundled is None or bundled in warnings[0]),
+                      f"resolve_cli: exactly one warning, naming the bundled CLI {bundled}: {warnings}")
+                info = claude.cli_info()
+                eq((info["path"], info["version"], info["source"]), (None, bundled, "bundled"),
+                   "cli_info: the bundled version comes from the SDK's constant")
+
+                os.environ["PATH"] = path_env
+                claude.reset_cli_cache()
+                calls: list = []
+                find = claude.find_cli
+                claude.find_cli = lambda **kw: calls.append(kw) or find(**kw)
+                try:
+                    for _ in range(3):
+                        got = claude.resolve_cli()
+                finally:
+                    claude.find_cli = find
+                eq((got, len(calls)), (str(real), 1), "resolve_cli: resolved once, then cached")
+
+                claude.config.CLAUDE_CLI = str(explicit)
+                claude.reset_cli_cache()
+                eq(claude.resolve_cli(), str(explicit), "resolve_cli reads config.CLAUDE_CLI")
+            finally:
+                claude.config.CLAUDE_CLI = cli_before
+                for key, value in env_before.items():
+                    if value is None:
+                        os.environ.pop(key, None)
+                    else:
+                        os.environ[key] = value
+                claude.reset_cli_cache()
+    finally:
+        claude._FOREIGN_ROOTS = previous_roots
+        claude.subprocess.run = run
+    eq(spawned, [], "the resolver and the bundled path spawn nothing")
+
+
+def cli_options_checks(cli_path: str) -> None:
+    print("\n-- every client is built with the resolved cli_path")
+    provider = claude.ClaudeProvider()
+    with fake([result_message()]):
+        handle = provider.start(thread(), brief(), allow)
+        eq(str(FakeClient.instances[-1].options.cli_path), cli_path, "start: options carry cli_path")
+        drain(provider, handle, "one")
+        provider.set_model(handle, "claude-sonnet-5-5", "low")
+        eq(str(FakeClient.instances[-1].options.cli_path), cli_path,
+           "set_model: the reconnected client carries the same cli_path")
+        provider.close(handle)
+    with fake():
+        handle = provider.resume(thread(session_id=SESSION_ID), brief(), allow)
+        eq(str(FakeClient.instances[-1].options.cli_path), cli_path, "resume: options carry cli_path")
+        provider.close(handle)
+    with fake(), cli("2.1.240", on_path=False):
+        handle = provider.start(thread(), brief(), allow)
+        check(FakeClient.instances[-1].options.cli_path is None,
+              "nothing found: cli_path is left unset, so the SDK uses its bundled CLI")
+        provider.close(handle)
 
 
 # --- options ----------------------------------------------------------------
@@ -1146,6 +1331,14 @@ def set_model_checks() -> None:
 
 
 def main() -> int:
+    # Hermetic: every client in this suite resolves to a fake executable in a
+    # temp dir, never the owner's real `claude` (which nothing here may run).
+    hermetic = tempfile.mkdtemp(prefix="jarvis-wp3-cli-")
+    fake_cli = str(fake_exe(Path(hermetic) / "claude"))
+    claude.config.CLAUDE_CLI = fake_cli
+    claude.reset_cli_cache()
+    resolver_checks()
+    cli_options_checks(fake_cli)
     health_checks()
     options_checks()
     sequence_checks()
