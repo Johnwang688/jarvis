@@ -1383,9 +1383,14 @@ jarvis/
   tools — `git(path, args)`, `git_worktree(repo, branch, base)`,
   `git_pull_request(worktree, title, body)` — none `dangerous`, all in
   `workflows.SAFE_TOOLS`, `git` in every sub-agent type's `BASE_TOOLS` and the
-  other two in the new `builder` type only. **They are safe without an
-  approver because the approver is not what guards them**: `judge()` is a pure
-  function over (arguments, where we are), so every verdict is a table row.
+  other two in the new `builder` type only. **They are ordinary registered
+  tools**, so `tools.default_names()` hands all three to the foreground chat,
+  goal runs and attended tasks as well: a goal or a task can make a worktree,
+  commit and open a pull request with no approval asked. That is intended —
+  nothing here merges, and a PR is a proposal someone else accepts. **They are
+  safe without an approver because the approver is not what guards them**:
+  `judge()` is a pure function over (arguments, where we are), so every
+  verdict is a table row.
 
   *Where git may write is a place, not a verb.* Reads run in any repository.
   Anything that changes one runs only inside a worktree `git_worktree` made
@@ -1439,9 +1444,13 @@ jarvis/
   tables for the verdicts, a real repository under a temp HOME for the
   properties that are about how git is *run*, each with a sanity half proving
   the trap fires under plain git. Not covered, said plainly: the owner's own
-  global git configuration and credential helpers (they run on push/fetch),
-  `gh` (resolved from PATH, a user-writable place), and anything an *approved*
-  `run_command` does. Workflows still cap at 20 steps, which is tight for a
+  global git configuration and credential helpers (they run on push/fetch);
+  an `include.path` / `includeIf` *already* in that global config that points
+  at a file an agent can write (the agent cannot create one — writes to the
+  global config and `git config` writes are both refused — but one the owner
+  made would pull agent-writable settings in; the repository-scope check does
+  not look at global includes); `gh` (resolved from PATH, a user-writable
+  place); and anything an *approved* `run_command` does. Workflows still cap at 20 steps, which is tight for a
   change that needs a worktree, edits, commits and a PR — raise
   `workflows.start`'s `max_steps` if that bites.
 - **Jarvis may not touch his own control plane.** `config.is_face_origin()` —

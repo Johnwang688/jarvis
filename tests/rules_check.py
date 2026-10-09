@@ -61,7 +61,13 @@ MATRIX = [
     # Excluded from auto-approval at the owner's instruction.
     ("git push origin main", rules.ASK),
     ("rg --pre=x pattern .", rules.ASK),         # the flag runs a program
+    ("rg --pre x pattern .", rules.ASK),
+    ("rg --hostname-bin=x pattern .", rules.ASK),
     ("rg -n pattern .", rules.ALLOW),
+    ("rg --pretty pattern .", rules.ALLOW),       # a prefix of --pre is not --pre
+    ("rg -p pattern .", rules.ALLOW),
+    ("rg --pre-glob '*.gz' pattern .", rules.ALLOW),
+    ("sed -i.bak s/a/b/ f.txt", rules.ASK),        # sed keeps prefix matching: the value glues on
     ("git clean -fd", rules.ASK),
     ("git reset --hard HEAD~1", rules.ASK),
     ("git reset HEAD~1", rules.ALLOW),          # a mixed reset loses nothing committed
@@ -309,6 +315,8 @@ READONLY_MUST_REFUSE = [
     "rg --pre=x pattern f.txt",
     "rg --pre x pattern f.txt",
     "rg --hostname-bin=x --hyperlink-format=default pattern .",
+    "rg --hostname-bin x pattern .",
+    "rg -n --pre=x pattern .",
     "nohup sh -c 'touch PWNED'",
     # Writing git subcommands the seven-name denylist never mentioned.
     "git rm -f f.txt",
@@ -440,6 +448,8 @@ READONLY_MUST_ALLOW = [
     "ls -la /tmp",
     "rg -n pattern f.txt",
     "rg --files-with-matches --glob '*.py' pattern .",
+    "rg --pretty pattern f.txt",
+    "rg --pre-glob '*.gz' pattern f.txt",
     "env",
     "grep -rn foo /tmp",
     "cat /tmp/notes.txt",

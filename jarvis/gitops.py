@@ -443,8 +443,8 @@ def _not_own(name: str) -> Ruling:
         f"{OWN_PREFIX} — name it {OWN_PREFIX}<something>")
 
 
-def _strategy_problem(options) -> str:
-    for value in _values(options, "-s", "--strategy"):
+def _strategy_problem(options, short: bool = True) -> str:
+    for value in _values(options, *(("-s", "--strategy") if short else ("--strategy",))):
         if value not in _BUILTIN_STRATEGIES:
             return (f"merge strategy '{value}' is not one of git's built-in strategies, "
                     "and any other name is a program on PATH")
@@ -600,11 +600,14 @@ def _judge_sub(sub: str, rest: list[str], paths: list[str], ctx: RepoContext) ->
         return _judge_checkout(rest, paths, ctx)
 
     if sub in ("merge", "cherry-pick", "revert", "rebase", "pull"):
-        options, _ = _parse(rest, "smFXxC", {
+        # `-s` is --strategy for merge, rebase and pull, and --signoff (no
+        # value) for cherry-pick and revert, where the strategy is spelled out.
+        shorts = "smFXxC" if sub in ("merge", "rebase", "pull") else "mFXxC"
+        options, _ = _parse(rest, shorts, {
             "strategy", "strategy-option", "message", "file", "into-name", "cleanup",
             "onto", "exec", "mainline", "depth", "deepen", "shallow-since",
             "shallow-exclude", "server-option", "jobs"})
-        problem = _strategy_problem(options)
+        problem = _strategy_problem(options, short=sub in ("merge", "rebase", "pull"))
         if problem:
             return _refuse(problem)
         if sub == "rebase":
@@ -1114,10 +1117,6 @@ def _execute(ctx: RepoContext, args: list[str]) -> tuple[bool, str]:
             return False, (f"Declined after review ({verdict.verdict}): {verdict.reason or 'no reason given'}. "
                            "Find a routine way to do it, or leave it for the owner and say so.")
         note = f"\n[reviewed and allowed: {verdict.reason}]"
-    if ruling.check == "push":
-        problem = _outgoing_problem(ctx, ruling.remote)
-        if problem:
-            return False, f"Refused to push: {problem}."
     argv = list(ruling.argv or args)
     timeout = NETWORK_TIMEOUT_S if ruling.network else LOCAL_TIMEOUT_S
     with _lock_for(ctx.toplevel):
@@ -1127,6 +1126,12 @@ def _execute(ctx: RepoContext, args: list[str]) -> tuple[bool, str]:
             if now != ctx.branch:
                 return False, (f"Refused: the worktree moved from {ctx.branch or 'a detached HEAD'} to "
                                f"{now or 'a detached HEAD'} while this was being judged. Run it again.")
+        if ruling.check == "push":
+            # Under the lock, so what is scanned is what is pushed: a commit
+            # made between a scan outside it and the push would go unread.
+            problem = _outgoing_problem(ctx, ruling.remote)
+            if problem:
+                return False, f"Refused to push: {problem}."
         before = _head(ctx.cwd) if ruling.check == "commits" else None
         code, out, err = _git(ctx.cwd, argv, timeout=timeout)
         guard = _commit_guard(ctx.cwd, before) if ruling.check == "commits" else ""

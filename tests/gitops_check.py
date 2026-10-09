@@ -98,6 +98,7 @@ ROUTINE = {
         ["merge", "main"], ["merge", "--no-ff", "origin/main"], ["merge", "--squash", "x"],
         ["merge", "-s", "ours", "x"], ["rebase", "origin/main"], ["rebase", "--abort"],
         ["cherry-pick", "abc123"], ["revert", "HEAD"], ["pull"], ["pull", "origin", "main"],
+        ["cherry-pick", "-s", "abc123"], ["revert", "-s", "HEAD"], ["cherry-pick", "-xs", "abc123"],
         ["pull", "--ff-only"], ["am", "x.mbox"],
         ["push"], ["push", "origin"], ["push", "-u", "origin", "jarvis/feat"],
         ["push", "origin", "HEAD"], ["push", "origin", "HEAD:jarvis/feat"],
@@ -181,7 +182,9 @@ REFUSED = {
         ["fetch", "--update-head-ok"], ["fetch", "--refmap=x"],
         ["pull", "--exec", "x"], ["rebase", "--exec", "x"],
         ["merge", "-s", "external"], ["merge", "--strategy=custom"],
-        ["merge", "--strategy", "mine"], ["cherry-pick", "-s", "custom"],
+        ["merge", "--strategy", "mine"], ["cherry-pick", "--strategy=custom", "abc123"],
+        ["revert", "--strategy", "custom", "HEAD"], ["rebase", "-s", "custom", "main"],
+        ["pull", "-s", "custom"],
         ["format-patch", "-o", "/tmp/x"], ["format-patch", "HEAD~1"],
         ["archive", "HEAD"], ["bundle", "create", "x"], ["difftool"], ["mergetool"],
         ["send-email"], ["instaweb"], ["help"], ["hook", "run", "x"],
@@ -641,6 +644,22 @@ def credential_checks() -> None:
         (wt / "notes.txt").write_text("harmless\n", encoding="utf-8")
         run(str(wt), ["add", "notes.txt"])
         assert "UNDONE" not in run(str(wt), ["commit", "-m", "notes, redacted"])
+
+        # The outgoing scan runs under the worktree's lock, after the branch is
+        # re-read, so what it read is what the push sends (review of PR #23).
+        held: list[bool] = []
+        real_scan = gitops._outgoing_problem
+
+        def watching(ctx, remote):
+            held.append(gitops._lock_for(ctx.toplevel).locked())
+            return real_scan(ctx, remote)
+
+        gitops._outgoing_problem = watching
+        try:
+            run(str(wt), ["push", "--dry-run", "origin"])
+        finally:
+            gitops._outgoing_problem = real_scan
+        assert held == [True], f"the outgoing scan ran outside the lock: {held}"
 
         # A commit that got in some other way (here: the harness) cannot be pushed.
         (wt / "leak.txt").write_text(f"{secret}\n", encoding="utf-8")

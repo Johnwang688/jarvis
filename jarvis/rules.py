@@ -147,6 +147,13 @@ _WRITES_ANYWAY: dict[str, tuple[str, ...]] = {
     # allowlisted for what it does by default, with a flag that runs a program.
     "rg": ("--pre", "--hostname-bin"),
 }
+# Stems whose flags are matched whole (`--pre`, `--pre=X`) rather than as a
+# prefix. A prefix is right for `sed`, whose `-i.bak` glues its value on, and
+# wrong for `rg`, where it caught `--pretty` and `--pre-glob` — a read that
+# asked, while `rg -p` (the same read) did not (review of PR #23). ripgrep
+# itself refuses an abbreviated flag (15.1.0: "unrecognized flag --pr"), so a
+# whole-name match cannot be walked around by shortening one.
+_WHOLE_FLAG_STEMS = frozenset({"rg"})
 
 # Wrappers that run *another* command. Judging the wrapper is judging nothing:
 # `env sh -c '…'` and `nohup rm -rf /` are the inner command wearing a hat, and
@@ -514,8 +521,9 @@ def writes_anyway(tokens: list[str]) -> str:
     `-delete` and `-exec … +` had never been caught at all.
     """
     stem = _stem(tokens)
+    whole = stem in _WHOLE_FLAG_STEMS
     for flag in _WRITES_ANYWAY.get(stem, ()):
-        if any(t == flag or t.startswith(flag) for t in tokens[1:]):
+        if any(t == flag or t.startswith(flag + "=" if whole else flag) for t in tokens[1:]):
             return flag
     return ""
 
