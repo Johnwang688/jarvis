@@ -55,7 +55,7 @@ from pathlib import Path
 import re
 import unicodedata
 
-from jarvis import config
+from jarvis import config, untrusted
 
 MAX_PATH = 4096
 MAX_COMPONENT = 255
@@ -155,8 +155,9 @@ def folder_slug(name: str) -> str:
 def _control(text: str) -> bool:
     # Cc are control characters; Cf (format: bidi overrides, zero-width
     # joiners) and line/paragraph separators would let a path read one way on
-    # the approval and be another on disk.
-    return any(unicodedata.category(ch) in ("Cc", "Cf", "Zl", "Zp") for ch in text)
+    # the approval and be another on disk. One set, shared with the approval
+    # headline and fetched web text: `untrusted.UNSEEN_CATEGORIES`.
+    return any(untrusted.unseen(ch) for ch in text)
 
 
 def _home() -> Path:
