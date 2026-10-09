@@ -779,7 +779,7 @@ class FaceHandler(SimpleHTTPRequestHandler):
         try:
             data = self._read_json()
             chosen = models_mod.select(str(data.get("model", "")))
-        except LookupError as exc:
+        except models_mod.NotOnRoster as exc:
             self._json_error(404, str(exc))
             return
         except Exception as exc:
@@ -817,6 +817,10 @@ class FaceHandler(SimpleHTTPRequestHandler):
                 '{"model": id, "effort": level}',
             )
             return
+        if "effort" in data and not effort_id:
+            # An effort riding an add or a remove used to be dropped silently.
+            self._json_error(400, 'effort goes with {"model": id, "effort": level} only')
+            return
         try:
             if add_id:
                 models_mod.add(add_id)
@@ -826,10 +830,14 @@ class FaceHandler(SimpleHTTPRequestHandler):
                 # "" clears the pin and hands the model back to the global
                 # default, which is the way out of any choice made here.
                 models_mod.set_effort(effort_id, str(data.get("effort") or ""))
+        except models_mod.RosterRefused as exc:
+            # Unpinning the last model, or the default nothing else replaces.
+            self._json_error(409, str(exc))
+            return
         except models_mod.NotEligible as exc:
             self._json_error(400, str(exc))
             return
-        except LookupError as exc:
+        except models_mod.NotOnRoster as exc:
             self._json_error(404, str(exc))
             return
         payload = models_mod.describe()

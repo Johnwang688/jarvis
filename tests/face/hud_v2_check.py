@@ -793,6 +793,124 @@ def panels_checks(page, mock):
     until(lambda: page.locator('[data-testid="picker"]').count() == 0)
 
 
+def _badge_on(page, model_id):
+    return page.locator(f'[data-testid="model-{model_id}"] [data-testid="model-badge-default"]').count() == 1
+
+
+def roster_edit_checks(page, mock):
+    """2026-10-08: any model unpins with its ×, the HUD chooses *the* default,
+    the config default is named as the fallback, and a refusal is shown."""
+    w = mock.world
+    luna, kimi = "openai/gpt-5.6-luna", "moonshotai/kimi-k3"
+    check("the default badge sits on the HUD's choice", until(lambda: _badge_on(page, "evil/model")) is True)
+    check("and only there", page.locator('[data-testid="model-badge-default"]').count() == 1)
+    line = page.locator('[data-testid="model-config-default"]').inner_text()
+    check("the env model is named as the config default, a fallback",
+          f"config default (JARVIS_ORCHESTRATOR): {luna}" in line
+          and "used only when nothing is chosen here" in line, line)
+
+    # Set as default: an explicit action, and the badge moves with it.
+    sent = len(mock.sent("POST", "/model"))
+    page.locator(f'[data-testid="model-setdefault-{luna}"]').click()
+    body = until(lambda: mock.sent("POST", "/model")[sent:] or None)
+    check("Set as default posts /model {model}", bool(body) and body[-1] == {"model": luna}, str(body))
+    check("and the badge moves to it", until(lambda: _badge_on(page, luna)) is True)
+    check("the current default offers no Set as default",
+          page.locator(f'[data-testid="model-setdefault-{luna}"]').count() == 0)
+    time.sleep(0.3)
+    check("Set as default sent exactly one /model (the row click did not add one)",
+          len(mock.sent("POST", "/model")) == sent + 1, str(mock.sent("POST", "/model")[sent:]))
+    # Clicking the row that already is the default sends nothing.
+    sent = len(mock.sent("POST", "/model"))
+    page.locator(f'[data-testid="model-{luna}"] .sub').click()
+    time.sleep(0.3)
+    check("clicking the current default's row sends nothing",
+          len(mock.sent("POST", "/model")) == sent, str(mock.sent("POST", "/model")[sent:]))
+
+    # Reset to config default: `{model: ""}`, and the line says it is in use.
+    sent = len(mock.sent("POST", "/model"))
+    page.locator('[data-testid="model-reset-default"]').click()
+    body = until(lambda: mock.sent("POST", "/model")[sent:] or None)
+    check("Reset to config default posts /model {model: \"\"}",
+          bool(body) and body[-1] == {"model": ""}, str(body))
+    check("and the config default is in use",
+          until(lambda: "in use" in page.locator('[data-testid="model-config-default"]').inner_text()) is True,
+          page.locator('[data-testid="model-config-default"]').inner_text())
+    check("with nothing left to reset", until(
+        lambda: page.locator('[data-testid="model-reset-default"]').is_disabled()) is True)
+
+    # A refusal is shown inline, in the backend's words, and nothing moves.
+    sent = len(mock.sent("POST", "/model"))
+    page.locator(f'[data-testid="model-remove-{luna}"]').click()
+    err = until(lambda: page.locator('[data-testid="model-picker-error"]').count()
+                and page.locator('[data-testid="model-picker-error"]').inner_text())
+    check("unpinning the default in use is refused, and the reason is shown",
+          bool(err) and "choose another default first" in err and luna in err, str(err))
+    check("and the row stays", page.locator(f'[data-testid="model-{luna}"]').count() == 1)
+    check("and the refused × did not select the row", len(mock.sent("POST", "/model")) == sent)
+
+    # Another window pins a model: the `model` broadcast relabels this one.
+    w["models"]["models"].append({"id": kimi, "name": "Kimi K3", "efforts": ["low", "medium", "high"],
+                                  "effort": None})
+    mock.emit("model", {})
+    check("a model broadcast redraws the roster",
+          until(lambda: page.locator(f'[data-testid="model-{kimi}"]').count() == 1) is True)
+
+    # The × on the HUD-chosen default succeeds and hands the default back to
+    # the config one — and says so, since the env row's × is refused.
+    page.locator(f'[data-testid="model-setdefault-{kimi}"]').click()
+    until(lambda: _badge_on(page, kimi))
+    page.locator(f'[data-testid="model-remove-{kimi}"]').click()
+    note = until(lambda: page.locator('[data-testid="model-picker-notice"]').count()
+                 and page.locator('[data-testid="model-picker-notice"]').inner_text())
+    check("unpinning the chosen default says the default fell back",
+          bool(note) and "Unpinned Kimi K3" in note and f"config default, {luna}" in note, str(note))
+    check("and the badge is back on the config default", until(lambda: _badge_on(page, luna)) is True)
+
+    # "Pin a model…" opens the catalogue on top of the picker, pin-only.
+    page.locator('[data-testid="model-pin-more"]').click()
+    page.wait_for_selector('[data-testid="catalog"]')
+    until(lambda: page.locator(f'[data-testid="catalog-pin-{kimi}"]').count() > 0)
+    check("Pin a model… opens the catalogue over the picker",
+          page.locator('[data-testid="catalog"]').count() == 1 and page.locator('[data-testid="picker"]').count() == 1)
+    check("from the picker it pins only (no Use, which would move the open thread)",
+          page.locator('[data-testid^="catalog-use-"]').count() == 0)
+    adds = len(mock.sent("POST", "/models"))
+    page.locator(f'[data-testid="catalog-pin-{kimi}"]').click()
+    body = until(lambda: mock.sent("POST", "/models")[adds:] or None)
+    check("pinning there posts /models {add}", bool(body) and body[-1] == {"add": kimi}, str(body))
+    check("and the picker lists it",
+          until(lambda: page.locator(f'[data-testid="model-{kimi}"]').count() == 1) is True)
+    page.locator('[data-testid="catalog-close"]').click()
+    until(lambda: page.locator('[data-testid="catalog"]').count() == 0)
+    check("closing the catalogue leaves the picker open", page.locator('[data-testid="picker"]').count() == 1)
+
+    # The × unpins a row without selecting it.
+    sent = len(mock.sent("POST", "/model"))
+    removes = len(mock.sent("POST", "/models"))
+    page.locator(f'[data-testid="model-remove-{kimi}"]').click()
+    body = until(lambda: mock.sent("POST", "/models")[removes:] or None)
+    check("the × posts /models {remove}", bool(body) and body[-1] == {"remove": kimi}, str(body))
+    check("and the row is gone", until(lambda: page.locator(f'[data-testid="model-{kimi}"]').count() == 0) is True)
+    time.sleep(0.2)
+    check("and the × did not select it", len(mock.sent("POST", "/model")) == sent,
+          str(mock.sent("POST", "/model")[sent:]))
+    check("a successful action clears the refusal",
+          page.locator('[data-testid="model-picker-error"]').count() == 0)
+    check("and an ordinary unpin carries no fallback notice",
+          page.locator('[data-testid="model-picker-notice"]').count() == 0)
+
+    # Another window sets the default: the broadcast moves the badge here.
+    w["models"]["selected"] = "evil/model"
+    mock.emit("model", {})
+    check("a model broadcast moves the default badge", until(lambda: _badge_on(page, "evil/model")) is True)
+    check("and the reset is offered again",
+          until(lambda: not page.locator('[data-testid="model-reset-default"]').is_disabled()) is True)
+    # Model names stay text in the badge row too.
+    check("a hostile name still renders as text beside its badge",
+          page.locator('[data-testid="model-evil/model"] img').count() == 0)
+
+
 def picker_checks(page, mock):
     print("\npickers")
     page.locator('[data-testid="open-model"]').click()
@@ -831,6 +949,7 @@ def picker_checks(page, mock):
     time.sleep(0.2)
     check("and neither effort change selected the model",
           len(mock.sent("POST", "/model")) == selects, str(mock.sent("POST", "/model")[selects:]))
+    roster_edit_checks(page, mock)
     page.locator('[data-testid="picker-close"]').click()
     mutes = mock.sent("POST", "/mute")
     check("every /mute the window sent carried {muted: bool}",
@@ -1630,7 +1749,7 @@ def thread_model_checks(page, mock):
     page.locator('[data-testid="catalog-use-deepseek/deepseek-v4-flash-0731"]').click()
     # Wait for *this* add: earlier sections already POSTed /models (the global
     # picker's {model, effort}), so "any POST" raced the click.
-    added = until(lambda: [b for b in mock.sent("POST", "/models") if "add" in b] or None)
+    added = until(lambda: [b for b in mock.sent("POST", "/models") if b.get("add", "").startswith("deepseek")] or None)
     check("using a catalogue model pins it to the roster",
           bool(added) and added[-1] == {"add": "deepseek/deepseek-v4-flash-0731"}, str(added))
     sent = until(lambda: [b for b in mock.sent("PATCH", f"/threads/{tid}") if (b.get("model") or "").startswith("deepseek")] or None)
@@ -1642,6 +1761,31 @@ def thread_model_checks(page, mock):
                  page.locator('[data-testid="image-note"]').inner_text())
     check("a text-only model says it cannot see an attached image",
           bool(note) and "text-only" in note, str(note))
+
+    # The catalogue unpins what is pinned (2026-10-08): "on roster" was text.
+    page.locator('[data-testid="model-chip-select"]').select_option("__search__")
+    page.wait_for_selector('[data-testid="catalog"]')
+    luna = "openai/gpt-5.6-luna"
+    until(lambda: page.locator(f'[data-testid="catalog-unpin-{luna}"]').count() > 0)
+    check("a pinned model offers Unpin in the catalogue",
+          page.locator(f'[data-testid="catalog-unpin-{luna}"]').count() == 1
+          and page.locator(f'[data-testid="catalog-pin-{luna}"]').count() == 0)
+    # Luna is the default in use: refused, with the reason, and still pinned.
+    page.locator(f'[data-testid="catalog-unpin-{luna}"]').click()
+    err = until(lambda: page.locator('[data-testid="catalog-error"]').count()
+                and page.locator('[data-testid="catalog-error"]').inner_text())
+    check("a refused Unpin is shown in the catalogue",
+          bool(err) and "choose another default first" in err, str(err))
+    check("and the model stays pinned", page.locator(f'[data-testid="catalog-unpin-{luna}"]').count() == 1)
+    deep = "deepseek/deepseek-v4-flash-0731"
+    page.locator(f'[data-testid="catalog-unpin-{deep}"]').click()
+    removed = until(lambda: [b for b in mock.sent("POST", "/models") if b.get("remove") == deep] or None)
+    check("Unpin posts /models {remove}", bool(removed), str(mock.sent("POST", "/models")[-3:]))
+    check("and the row offers Pin again",
+          until(lambda: page.locator(f'[data-testid="catalog-pin-{deep}"]').count() == 1) is True)
+    check("and the catalogue error cleared", page.locator('[data-testid="catalog-error"]').count() == 0)
+    page.locator('[data-testid="catalog-close"]').click()
+    until(lambda: page.locator('[data-testid="catalog"]').count() == 0)
 
     # A task's thread is read-only.
     w["threads"].append({

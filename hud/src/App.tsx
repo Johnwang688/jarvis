@@ -20,7 +20,8 @@ import { Orb } from "./components/Orb";
 import { Capture } from "./lib/capture";
 import { HINTS, isMuted, loadMode, outcomeFor, saveMode, type DictationMode } from "./lib/dictation";
 import { WakeGate, compileWake, matchesWake, WAKE_PATTERNS } from "./lib/wake";
-import type { Attachment, AvatarDesc, ModelRow, Schedule, VoiceEntry } from "./types";
+import type { Attachment, AvatarDesc, Schedule, VoiceEntry } from "./types";
+import type { RosterView } from "./lib/roster";
 import { moveThreadTo } from "./lib/threads";
 import { lastProject, loadLastProject, saveLastProject } from "./lib/compose";
 import { composeChoice, threadBody } from "./lib/threadmodel";
@@ -42,8 +43,9 @@ const LIFECYCLE_KINDS = new Set([
 export default function App() {
   const { state, dispatch } = useStore();
   const [avatars, setAvatars] = useState<AvatarDesc[]>([]);
-  const [models, setModels] = useState<ModelRow[]>([]);
-  const [selectedModel, setSelectedModel] = useState<string | null>(null);
+  // The fast path's roster and its default (`GET /models`), re-read on every
+  // `model` broadcast so another window's change relabels this one.
+  const [roster, setRoster] = useState<RosterView | null>(null);
   const [voices, setVoices] = useState<VoiceEntry[]>([]);
   const [voiceOverride, setVoiceOverride] = useState("");
   const [avatarCacheBust, setAvatarCacheBust] = useState(0);
@@ -578,11 +580,15 @@ export default function App() {
   const loadModels = useCallback(async () => {
     try {
       const r = await api.models();
-      setModels(r.models || []);
-      setSelectedModel(r.selected ?? null);
+      setRoster({ ...r, models: r.models || [] });
     } catch {
       /* the picker just has nothing to show */
     }
+  }, []);
+
+  const rosterChanged = useCallback((r: RosterView) => {
+    setRoster({ ...r, models: r.models || [] });
+    void reloadThreadModels.current();
   }, []);
 
   const loadVoices = useCallback(async () => {
@@ -1084,20 +1090,26 @@ export default function App() {
 
       <ApprovalVeil requests={state.approvals} onDecide={decide} />
 
-      {threadModel.picker}
       {state.picker === "model" ? (
         <ModelPicker
-          models={models}
-          selected={selectedModel}
-          onPick={(id) => {
-            api.setModel(id).then(loadModels).catch(() => {});
-          }}
-          onEffort={(id, effort) => {
-            api.setModelEffort(id, effort).then(loadModels).catch(() => {});
-          }}
+          view={roster}
+          // Each answer is the new describe(): drawn at once, and the chips
+          // re-read too (a default thread's label names the default). The
+          // `model` broadcast does the same for every other window. A refusal
+          // propagates to the picker, which shows it.
+          onPick={(id) => api.setModel(id).then(rosterChanged)}
+          onEffort={(id, effort) => api.setModelEffort(id, effort).then(rosterChanged)}
+          onRemove={(id) => api.removeModel(id).then((r) => {
+            rosterChanged(r);
+            return r;
+          })}
+          onReset={() => api.setModel("").then(rosterChanged)}
+          onPinMore={threadModel.openRosterCatalog}
           onClose={() => patch({ picker: null })}
         />
       ) : null}
+      {/* After the Model picker, so its "Pin a model…" opens on top of it. */}
+      {threadModel.picker}
       {state.picker === "voice" ? (
         <VoicePicker
           voices={voices}

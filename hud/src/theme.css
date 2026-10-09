@@ -474,6 +474,8 @@ h2.bar {
 .picker .prow .sub { font: 10px var(--mono); color: var(--text-muted); margin-left: auto; }
 .picker .prow .tw { color: var(--text-muted); font: 10px var(--mono); }
 .picker .prow select { padding: 2px 6px; }
+.picker .prow .unpin { padding: 0 7px; line-height: 18px; color: var(--text-muted); }
+.picker .prow .unpin:hover { color: var(--red); }
 .picker .foot { padding: 10px 12px; border-top: 1px solid var(--border); display: flex; gap: 8px; }
 .picker label.muted { font-size: 11px; }
 

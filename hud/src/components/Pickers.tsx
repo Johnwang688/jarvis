@@ -9,12 +9,15 @@
 // cards — so every row is React text, never markup.
 
 import { useEffect, useState } from "react";
-import type { AvatarDesc, ModelRow, RouteView, VoiceEntry } from "../types";
+import type { AvatarDesc, RouteView, VoiceEntry } from "../types";
 import type { Project, ProjectImpact } from "../types";
 import { DirPicker } from "./DirPicker";
 import { DiscordLink } from "./DiscordLink";
 import { api } from "../api";
 import { editEffects, formFrom, nameKey, projectEditBody, uniqueName, type ProjectForm } from "../lib/projects";
+import {
+  chosenHere, configDefaultLine, effectiveDefault, refusal, removeNotice, rowBadges, type RosterView,
+} from "../lib/roster";
 
 function Shell(props: { title: string; onClose: () => void; children: React.ReactNode; foot?: React.ReactNode }) {
   return (
@@ -55,29 +58,98 @@ export function SettingsDialog(props: { route: RouteView | null; onClose: () => 
   );
 }
 
+/**
+ * The fast path's roster and **its default** (2026-10-08). The model chosen
+ * here is the default every default-following fast-path thread runs on: it is
+ * stored in models.json, survives a restart and beats `JARVIS_ORCHESTRATOR`,
+ * which is only the fallback while nothing is chosen ("Reset to config
+ * default"). Any row unpins with its ×, the env model included; the backend
+ * refuses an unpin that would leave the default unlisted, and that refusal is
+ * shown here in its own words — never swallowed.
+ */
 export function ModelPicker(props: {
-  models: ModelRow[];
-  selected: string | null;
-  onPick: (id: string) => void;
+  view: RosterView | null;
+  /** Set as default (`POST /model {model}`). */
+  onPick: (id: string) => Promise<unknown>;
   /** `""` is AUTO. Setting effort must not also switch him onto that model. */
-  onEffort: (id: string, effort: string) => void;
+  onEffort: (id: string, effort: string) => Promise<unknown>;
+  /** Unpin from the roster (`POST /models {remove}`). Never selects.
+   * Resolves to the roster after the change. */
+  onRemove: (id: string) => Promise<RosterView>;
+  /** Back to the config default (`POST /model {model: ""}`). */
+  onReset: () => Promise<unknown>;
+  /** Open the catalogue to pin a model, on top of this picker. */
+  onPinMore?: () => void;
   onClose: () => void;
 }) {
+  const [error, setError] = useState("");
+  // A successful action that changed more than it says: unpinning the
+  // model chosen as the default hands the default back to the config one.
+  const [notice, setNotice] = useState("");
+  const view = props.view;
+  const models = view?.models || [];
+  const current = effectiveDefault(view);
+  const run = (what: string, go: () => Promise<unknown>, then?: (result: unknown) => void) => {
+    setError("");
+    setNotice("");
+    go().then((result) => then?.(result)).catch((e) => setError(refusal(what, e)));
+  };
   return (
-    <Shell title="Fast-path model" onClose={props.onClose}>
+    <Shell
+      title="Fast-path model"
+      onClose={props.onClose}
+      foot={props.onPinMore ? (
+        // The way out of "pin another one first", on the same screen.
+        <button type="button" data-testid="model-pin-more" onClick={props.onPinMore}>
+          Pin a model…
+        </button>
+      ) : null}
+    >
       <div className="pad small muted" data-testid="model-scope-note">
         This picks the <b>fast path's</b> model only. Who runs each role is in Settings and is
         never changed here — the picker cannot touch Claude or Codex.
       </div>
-      {props.models.map((m) => (
+      <div className="pad small muted row" data-testid="model-config-default">
+        <span style={{ flex: "1 1 auto", overflowWrap: "anywhere" }}>{configDefaultLine(view)}</span>
+        <button
+          type="button"
+          data-testid="model-reset-default"
+          disabled={!chosenHere(view)}
+          title="Stop using the model chosen here; follow the config default"
+          onClick={() => run("reset to the config default", props.onReset)}
+        >
+          Reset to config default
+        </button>
+      </div>
+      {error ? <div className="pad err" data-testid="model-picker-error">{error}</div> : null}
+      {notice ? <div className="pad small" data-testid="model-picker-notice">{notice}</div> : null}
+      {models.map((m) => (
         <div
           key={m.id}
-          className={"prow" + (m.id === props.selected ? " sel" : "")}
+          className={"prow" + (m.id === current ? " sel" : "")}
           data-testid={`model-${m.id}`}
-          onClick={() => props.onPick(m.id)}
+          title={m.id === current ? "The default" : "Click to set as the default"}
+          onClick={() => {
+            if (m.id !== current) run(`set ${m.id} as the default`, () => props.onPick(m.id));
+          }}
         >
           <span>{m.name || m.id}</span>
+          {rowBadges(view, m.id).map((b) => (
+            <span key={b} className="badge" data-testid={`model-badge-${b}`}>{b}</span>
+          ))}
           <span className="sub">{m.id}</span>
+          {m.id !== current ? (
+            <button
+              type="button"
+              data-testid={`model-setdefault-${m.id}`}
+              onClick={(e) => {
+                e.stopPropagation();
+                run(`set ${m.id} as the default`, () => props.onPick(m.id));
+              }}
+            >
+              Set as default
+            </button>
+          ) : null}
           {m.efforts?.length ? (
             <select
               data-testid={`effort-${m.id}`}
@@ -87,7 +159,8 @@ export function ModelPicker(props: {
                 e.stopPropagation();
                 // Setting effort must not also switch him onto that model —
                 // AUTO included: it used to arrive as a row click.
-                props.onEffort(m.id, e.target.value);
+                const effort = e.target.value;
+                run(`set the effort of ${m.id}`, () => props.onEffort(m.id, effort));
               }}
               style={{ width: 90 }}
             >
@@ -97,6 +170,22 @@ export function ModelPicker(props: {
               ))}
             </select>
           ) : null}
+          <button
+            type="button"
+            className="unpin"
+            data-testid={`model-remove-${m.id}`}
+            title="Unpin from the roster"
+            aria-label={`Unpin ${m.id}`}
+            onClick={(e) => {
+              // Unpinning must not also set the row as the default.
+              e.stopPropagation();
+              const before = view;
+              run(`unpin ${m.id}`, () => props.onRemove(m.id),
+                  (after) => setNotice(removeNotice(before, after as RosterView, m.id)));
+            }}
+          >
+            ×
+          </button>
         </div>
       ))}
     </Shell>

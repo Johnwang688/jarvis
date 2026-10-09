@@ -228,6 +228,198 @@ def roster_checks() -> None:
     print("ok  roster: seeded, add validated, remove clears a stale selection, corrupt file survived")
 
 
+def _refused(fn, *args, needle: str = "") -> str:
+    """Call fn, expecting RosterRefused; returns its sentence."""
+    try:
+        fn(*args)
+    except models.RosterRefused as exc:
+        assert needle in str(exc), exc
+        return str(exc)
+    raise AssertionError(f"{fn.__name__}{args} was not refused")
+
+
+def roster_edit_checks() -> None:
+    """The HUD can unpin any model — the configured default included — and
+    choose the default, without ever leaving a default thread on a model the
+    picker does not list (2026-10-08)."""
+    _reset_catalog()
+    _serve(FIXTURE)
+    config.MODELS_PATH.unlink(missing_ok=True)
+    default = config.TIERS["orchestrator"]
+    opus, tiny, luna = "anthropic/claude-opus-5", "tiny/free-model", "openai/gpt-5.6-luna"
+
+    # A plain unpin, and the selected model's unpin falling back to config.
+    models.add(opus)
+    models.add(tiny)
+    models.remove(tiny)
+    assert models.roster().models == [default, opus], models.roster()
+    models.select(opus)
+    models.remove(opus)
+    assert models.selected() == "" and models.tier("orchestrator") == default
+    assert models.describe()["default_source"] == "config"
+
+    # The env model while it is the effective default (nothing chosen): refused.
+    models.add(opus)
+    _refused(models.remove, default, needle="choose another default first")
+    assert default in models.roster().models
+
+    # Choose another default, and the env model unpins like any other.
+    models.select(opus)
+    assert models.describe()["default_source"] == "hud"
+    assert models.describe()["current"] == opus
+    models.remove(default)
+    assert models.roster().models == [opus], models.roster()
+    saved = json.loads(config.MODELS_PATH.read_text())
+    assert saved["removed_default"] == default, saved
+    # ...and stays unpinned across a reload: _load used to put it straight back.
+    assert models.roster().models == [opus] and models.tier("orchestrator") == opus
+    assert [m["id"] for m in models.describe()["models"]] == [opus]
+
+    # The roster is never empty: the last model cannot go.
+    _refused(models.remove, opus, needle="only model")
+    assert models.roster().models == [opus]
+    # Nor can the selection go while the env model is unpinned — the loop
+    # would fall back onto a model the picker no longer lists.
+    models.add(tiny)
+    _refused(models.remove, opus, needle="choose another default first")
+    models.remove(tiny)
+
+    # A hand-edited file that leaves nothing selected cannot hide the default.
+    config.MODELS_PATH.write_text(json.dumps(
+        {"models": [opus], "selected": "", "removed_default": default}))
+    assert models.roster().models == [default, opus], models.roster()
+    config.MODELS_PATH.write_text(json.dumps(
+        {"models": [], "selected": "", "removed_default": default}))
+    assert models.roster().models == [default], "an empty roster was loaded"
+
+    # Reset to config default re-lists the env model and clears the flag.
+    config.MODELS_PATH.write_text(json.dumps(
+        {"models": [opus], "selected": opus, "removed_default": default}))
+    models.select("")
+    assert models.roster().models == [default, opus], models.roster()
+    assert models.selected() == "" and models.tier("orchestrator") == default
+    assert json.loads(config.MODELS_PATH.read_text())["removed_default"] == ""
+
+    # Re-pinning the env model by hand clears the flag too.
+    models.select(opus)
+    models.remove(default)
+    models.add(default)
+    assert json.loads(config.MODELS_PATH.read_text())["removed_default"] == ""
+    assert models.roster().models == [opus, default]
+
+    # A flag naming a model that is no longer the configured default is
+    # ignored, so a changed JARVIS_ORCHESTRATOR is seeded as before.
+    config.MODELS_PATH.write_text(json.dumps(
+        {"models": [opus], "selected": opus, "removed_default": "old/default"}))
+    assert models.roster().models == [default, opus], models.roster()
+
+    # An unpinned model's effort pin goes with it — out of the file, not just
+    # filtered on the next read. Luna is the fixture model with a ladder.
+    config.MODELS_PATH.unlink()
+    models.add(opus)
+    models.add(luna)
+    models.select(opus)
+    models.set_effort(luna, "low")
+    assert json.loads(config.MODELS_PATH.read_text())["efforts"] == {luna: "low"}
+    models.remove(luna)
+    assert json.loads(config.MODELS_PATH.read_text())["efforts"] == {}
+    models.select("")
+    config.MODELS_PATH.unlink()
+    print("ok  roster edits: any model unpins, the env model stays unpinned, "
+          "the effective default is always listed, reset re-lists it")
+
+
+ROSTER_WRITES = ("models.select(", "models.set_effort(", "models.remove(", "models.add(",
+                 "models_mod.select(", "models_mod.set_effort(", "models_mod.remove(",
+                 "models_mod.add(", "models._save(", "MODELS_PATH")
+
+
+def no_tool_checks() -> None:
+    """The agent has no tool for the model he thinks with (2026-08-22), and
+    that now covers the roster too: unpinning the model a turn runs on, or
+    choosing the default, is the owner's, in the window."""
+    from jarvis import tools
+
+    for name in tools.REGISTRY:
+        assert not any(w in name for w in ("model", "roster")), f"registered tool {name!r}"
+    root = Path(tools.__file__).parent
+    for path in sorted(root.rglob("*.py")):
+        text = path.read_text(encoding="utf-8")
+        for needle in ROSTER_WRITES:
+            assert needle not in text, f"{path} reaches {needle}"
+    print("ok  guard: no tool can change the roster, the default or an effort pin")
+
+
+def robustness_checks() -> None:
+    """A non-UTF-8 file, an atomic save, one snapshot per listing, and the
+    404 class that catches only "not on the roster" (review of PR #13)."""
+    _reset_catalog()
+    _serve(FIXTURE)
+    default = config.TIERS["orchestrator"]
+    opus = "anthropic/claude-opus-5"
+
+    # Not UTF-8: degrades to the seed like any corrupt file. It used to raise
+    # UnicodeDecodeError out of effort_for — i.e. out of every v1 turn.
+    config.MODELS_PATH.write_bytes(b'{"models": ["\xff\xfe"], "selected": ""}')
+    assert models.roster().models == [default]
+    models.effort_for(default)
+    assert [m["id"] for m in models.describe()["models"]] == [default]
+    _refused(models.remove, default, needle="only model")
+    models.add(opus)  # and a write replaces it cleanly
+    assert json.loads(config.MODELS_PATH.read_text(encoding="utf-8"))["models"] == [default, opus]
+
+    # Atomic, and the file keeps its mode: no temp file left behind.
+    config.MODELS_PATH.chmod(0o640)
+    models.select(opus)
+    assert config.MODELS_PATH.stat().st_mode & 0o777 == 0o640, oct(config.MODELS_PATH.stat().st_mode)
+    leftovers = [p.name for p in config.MODELS_PATH.parent.iterdir() if p.name.startswith(".models-")]
+    assert not leftovers, leftovers
+    config.MODELS_PATH.chmod(0o644)
+
+    # One snapshot per describe(): a change landing between two reads must
+    # not make `selected` and `current` disagree, nor list a removed model.
+    snapshots = [models.Roster(models=[default, opus], selected=opus),
+                 models.Roster(models=[default], selected="")]
+    reads = {"n": 0}
+    real_roster = models.roster
+
+    def racing():
+        reads["n"] += 1
+        return snapshots[min(reads["n"] - 1, 1)]
+
+    models.roster = racing
+    try:
+        payload = models.describe()
+    finally:
+        models.roster = real_roster
+    assert reads["n"] == 1, f"describe read the roster {reads['n']} times"
+    assert payload["selected"] == opus and payload["current"] == opus, payload
+    assert [m["id"] for m in payload["models"]] == [default, opus], payload
+    assert payload["default_source"] == "hud"
+
+    # The 404 class is exactly "not on the roster".
+    for call in (lambda: models.remove("never/listed"), lambda: models.select("never/listed"),
+                 lambda: models.set_effort("never/listed", "low")):
+        try:
+            call()
+        except models.NotOnRoster as exc:
+            assert isinstance(exc, LookupError) and "not on the roster" in str(exc)
+        else:
+            raise AssertionError("a model off the roster was not refused")
+
+    # The pure refusal rule the HUD mock imports agrees with remove().
+    rule = models.removal_refusal
+    assert rule([default], "", default, default) and "only model" in rule([default], "", default, default)
+    assert "choose another default first" in rule([default, opus], "", default, default)
+    assert rule([default, opus], opus, default, default) is None
+    assert rule([default, opus], opus, default, opus) is None
+    assert "choose another default first" in rule([opus, "tiny/free-model"], opus, default, opus)
+    models.select("")
+    config.MODELS_PATH.unlink()
+    print("ok  robustness: non-UTF-8 file seeds, atomic save keeps its mode, "
+          "describe reads one snapshot, 404 is NotOnRoster only")
+
+
 def tier_checks() -> None:
     _reset_catalog()
     _serve(FIXTURE)
@@ -494,6 +686,10 @@ def route_checks() -> None:
         assert _request("POST", "/models", {"add": "x", "remove": "y"})[0] == 400
         assert _request("POST", "/models", {"remove": "not/listed"})[0] == 404
         assert _request("POST", "/models", {"model": "x", "add": "y"})[0] == 400
+        # An effort riding an add or a remove is refused, not dropped.
+        assert _request("POST", "/models", {"add": "tiny/free-model", "effort": "low"})[0] == 400
+        assert _request("POST", "/models", {"remove": default, "effort": "low"})[0] == 400
+        assert "tiny/free-model" not in models.roster().models
 
         status, data = _request("POST", "/models", {"add": "anthropic/claude-opus-5"})
         assert status == 200 and "anthropic/claude-opus-5" in [m["id"] for m in data["models"]]
@@ -526,6 +722,11 @@ def route_checks() -> None:
         # Removing the selected model puts the live agent back on the default.
         _request("POST", "/models", {"remove": "anthropic/claude-opus-5"})
         assert agent.model == default and models.selected() == ""
+        # The env model is the effective default now, so unpinning it is a
+        # 409 with a sentence the picker can show, not a silent fallback.
+        _request("POST", "/models", {"add": "tiny/free-model"})
+        status, data = _request("POST", "/models", {"remove": default})
+        assert status == 409 and "choose another default first" in data["error"], (status, data)
 
         for path, payload in (("/model", {"model": ""}), ("/models", {"add": "x"})):
             assert _request("POST", path, payload, origin="http://evil.example")[0] == 403, path
@@ -550,6 +751,9 @@ def main() -> int:
             cache_checks()
             config.MODEL_CACHE_PATH = Path(tmp) / "cache" / "models.json"
             roster_checks()
+            roster_edit_checks()
+            robustness_checks()
+            no_tool_checks()
             tier_checks()
             effort_checks()
             byok_cost_checks()

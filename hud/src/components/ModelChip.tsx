@@ -122,8 +122,10 @@ export function ModelChip(props: {
 
 /**
  * The OpenRouter catalogue, searched (A2). "Use" pins the model to the roster
- * and puts this thread on it; "Pin" only adds it to the roster. Eligibility
- * is the backend's refusal: a model that cannot call tools is never listed.
+ * and puts this thread on it; "Pin" only adds it to the roster, and "Unpin"
+ * takes a pinned one off it (2026-10-08) — refused by the backend, with its
+ * reason shown, when that would leave the default unlisted. Eligibility is
+ * the backend's refusal: a model that cannot call tools is never listed.
  */
 export function CatalogPicker(props: {
   catalog: ModelRow[] | null;
@@ -131,6 +133,10 @@ export function CatalogPicker(props: {
   error?: string;
   onUse: (id: string) => void;
   onPin: (id: string) => void;
+  onUnpin: (id: string) => void;
+  /** Opened from the Model picker: pin and unpin only — "Use" would also
+   * move the open thread, which that picker is not about. */
+  pinOnly?: boolean;
   onClose: () => void;
 }) {
   const [q, setQ] = useState("");
@@ -162,7 +168,7 @@ export function CatalogPicker(props: {
             onKeyUp={stop}
           />
           <span className="muted small">
-            Only models that can call tools are listed. Using one pins it to your roster.
+            Only models that can call tools are listed.{props.pinOnly ? "" : " Using one pins it to your roster."}
             {total > rows.length ? ` Showing ${rows.length} of ${total}; narrow the search.` : ""}
           </span>
           {props.catalog === null ? <span className="muted small">loading…</span> : null}
@@ -175,11 +181,16 @@ export function CatalogPicker(props: {
               <div key={m.id} className="prow" data-testid={`catalog-row-${m.id}`}>
                 <span>{m.name || shortId(m.id)}</span>
                 <span className="sub">{m.id}{m.vision === false ? " · text-only" : ""}</span>
-                <button type="button" data-testid={`catalog-use-${m.id}`} onClick={() => props.onUse(m.id)}>
-                  Use
-                </button>
+                {props.pinOnly ? null : (
+                  <button type="button" data-testid={`catalog-use-${m.id}`} onClick={() => props.onUse(m.id)}>
+                    Use
+                  </button>
+                )}
                 {pinned ? (
-                  <span className="muted small">on roster</span>
+                  <button type="button" data-testid={`catalog-unpin-${m.id}`}
+                          title="Take it off your roster" onClick={() => props.onUnpin(m.id)}>
+                    Unpin
+                  </button>
                 ) : (
                   <button type="button" data-testid={`catalog-pin-${m.id}`} onClick={() => props.onPin(m.id)}>
                     Pin

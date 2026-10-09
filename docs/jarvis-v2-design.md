@@ -1146,6 +1146,15 @@ providers, and dictation with an adjustable send mode.
   stays pinned, shown "(not on roster)". Every change is a system line in
   the chat. Task threads show their model read-only. No tool can change a
   thread's model or provider — only the owner, in the HUD.
+  *Amended 2026-10-08:* the Model picker edits the roster and **chooses the
+  default**. Each row has Set as default and an × (unpin; never selects);
+  the model in use carries a `default` badge; the env model is shown as
+  "config default (JARVIS_ORCHESTRATOR)", used only while nothing is
+  chosen, with "Reset to config default". The catalogue's pinned rows offer
+  Unpin. Any model unpins, the env model included; the backend refuses
+  (409, shown inline) only an unpin that would empty the roster or leave a
+  default thread on an unlisted model. Claude's and Codex's chat defaults
+  are unchanged and not HUD-editable.
 - **Permissions default to `auto`** (D6); the project header carries the
   profile switch (auto / ask / strict) and the always-ask additions.
 - **Previews and agent-written pages are a separate origin**

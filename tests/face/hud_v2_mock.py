@@ -279,7 +279,17 @@ def _models(w) -> dict:
     """`models.describe()`'s shape: the roster, the selection, and what that
     resolves to (`current`) beside the configured `default`."""
     m = w["models"]
-    return {**m, "current": m.get("selected") or m["default"]}
+    return {**m, "current": m.get("selected") or m["default"],
+            "default_source": "hud" if m.get("selected") else "config"}
+
+
+def _remove_refusal(w, model_id) -> str | None:
+    """`models.remove`'s refusals (2026-10-08), from the backend's own pure
+    rule rather than a copy here that could drift from it."""
+    from jarvis.models import removal_refusal
+    m = w["models"]
+    return removal_refusal([r["id"] for r in m["models"]], m.get("selected") or "",
+                           m["default"], model_id)
 
 
 # --- a chat thread's model (decisions 2026-10-06, A) -----------------------
@@ -750,10 +760,18 @@ class MockDaemon:
                         if body["model"] and body["model"] not in ids:
                             return self._err(404, "not on the roster")
                         w["models"]["selected"] = body["model"]
+                        if not body["model"] and w["models"]["default"] not in ids:
+                            # Reset to config default re-lists the env model.
+                            found = next((m for m in w["catalog"] if m["id"] == w["models"]["default"]), None)
+                            w["models"]["models"].insert(0, dict(found or {"id": w["models"]["default"],
+                                                                           "name": w["models"]["default"]},
+                                                                 effort=None))
                         return self._json(_models(w))
                     given = [k for k in ("add", "remove", "model") if body.get(k)]
                     if len(given) != 1:
                         return self._err(400, "expected exactly one of add, remove, or model with effort")
+                    if "effort" in body and not body.get("model"):
+                        return self._err(400, "effort goes with {model, effort}, not with add or remove")
                     rows = w["models"]["models"]
                     if body.get("add"):
                         if not any(m["id"] == body["add"] for m in rows):
@@ -762,6 +780,13 @@ class MockDaemon:
                                 return self._err(400, "not an OpenRouter model that supports tool calling")
                             rows.append(dict(found, effort=None))
                     elif body.get("remove"):
+                        if not any(m["id"] == body["remove"] for m in rows):
+                            return self._err(404, f"{body['remove']!r} is not on the roster")
+                        why = _remove_refusal(w, body["remove"])
+                        if why:
+                            return self._err(409, why)
+                        if w["models"].get("selected") == body["remove"]:
+                            w["models"]["selected"] = ""
                         w["models"]["models"] = [m for m in rows if m["id"] != body["remove"]]
                     else:
                         row = next((m for m in rows if m["id"] == body["model"]), None)
