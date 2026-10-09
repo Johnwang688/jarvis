@@ -257,7 +257,7 @@ def stale_reason() -> str:
 # OpenRouter's reasoning ladder, hardest first. A model advertises the subset
 # it understands in `reasoning.supported_efforts`; the ones here are every
 # level seen across the live catalog (2026-08-22).
-EFFORT_LADDER = ("max", "xhigh", "high", "medium", "low", "minimal", "none")
+EFFORT_LADDER = ("ultra", "max", "xhigh", "high", "medium", "low", "minimal", "none")
 
 _effort_warned = False
 

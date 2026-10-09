@@ -21,9 +21,10 @@ Where the choice lives, and why there:
   default for the orchestrator role (`routing.json`) for Codex. The HUD's
   Codex default wins over routing **for chat threads only**; it never writes
   routing.json, and tasks keep routing's table.
-- `Thread.effort = None` is **that model's default**: `high`, unless the
-  roster pins an effort for it, clamped to the model's own ladder, and
-  nothing at all for a model with no reasoning control (A4).
+- `Thread.effort = None` is **that model's default**: the provider-advertised
+  default when known, otherwise `high`; an OpenRouter roster pin wins. It is
+  clamped to the model's own ladder, and omitted for a model with no reasoning
+  control (A4).
 - An effort on a thread with `model = None` is stored **on its own**, and the
   thread keeps following the default model (A4 amendment, 2026-10-07): the
   effort is clamped to whatever the default supports at the start of each
@@ -135,7 +136,7 @@ def _clamp(wanted: str, ladder: tuple[str, ...]) -> str | None:
 
 
 def default_effort(provider: ProviderName, model: str) -> str | None:
-    """A4: high, or the roster's pin for this model, within its ladder."""
+    """The provider's advertised default, otherwise A4's high, in its ladder."""
     provider = ProviderName(provider)
     wanted = DEFAULT_EFFORT
     if provider == ProviderName.FAST:
@@ -143,6 +144,10 @@ def default_effort(provider: ProviderName, model: str) -> str | None:
             wanted = models.roster().efforts.get(model) or DEFAULT_EFFORT
         except Exception:
             wanted = DEFAULT_EFFORT
+    else:
+        entry = _cli(provider).get(model)
+        if entry and entry.get("default_effort"):
+            wanted = entry["default_effort"]
     ladder = efforts_of(provider, model)
     if ladder is None:
         # Cold catalog: sent as asked, the v1 rule (an effort a model does not

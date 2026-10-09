@@ -94,6 +94,18 @@ def peer(script_path, log_path, thread_name):
             continue
         elif method == "account/read":
             result = {"account": {"type": script.get("account", "chatgpt")}}
+        elif method == "model/list":
+            pages = script.get("model_pages", [[{
+                "id": "fake-model", "model": "fake-model", "displayName": "Fake Model",
+                "hidden": False, "inputModalities": ["text"],
+                "supportedReasoningEfforts": [{"reasoningEffort": "high"}],
+                "defaultReasoningEffort": "high",
+            }]])
+            index = int(p.get("cursor", "0"))
+            result = {"data": pages[index],
+                      "nextCursor": str(index + 1) if index + 1 < len(pages) else None}
+        elif method == "account/rateLimits/read":
+            result = script.get("rate_limits", {"rateLimits": None, "rateLimitsByLimitId": {}})
         elif method == "config/read":
             result = {"config": settings}
         elif method in ("thread/start", "thread/resume"):
@@ -385,6 +397,34 @@ class Checks(unittest.TestCase):
         self.assertEqual(reports[0].data["provider_reported"]["rate_limits"]["primary"]["usedPercent"], 42)
         self.assertEqual(events[-1].data["stop"], "end")
         self.assertEqual(self.provider.usage(h).work_tokens, 80)
+
+    def test_account_metadata_reads_paginated_models_and_quota_without_a_turn(self):
+        self.brain.script.update(model_pages=[
+            [{"id": "gpt-6.1-sol", "model": "gpt-6.1-sol", "displayName": "GPT-6.1 Sol",
+              "hidden": False, "inputModalities": ["text", "image"],
+              "supportedReasoningEfforts": [{"reasoningEffort": "low"}, {"reasoningEffort": "max"}],
+              "defaultReasoningEffort": "low"}],
+            [{"id": "gpt-6-luna", "model": "gpt-6-luna", "displayName": "GPT-6 Luna",
+              "hidden": False, "inputModalities": ["text"],
+              "supportedReasoningEfforts": [{"reasoningEffort": "medium"}],
+              "defaultReasoningEffort": "medium"}],
+        ], rate_limits={"rateLimits": {"limitId": "codex", "primary": {
+            "usedPercent": 19, "windowDurationMins": 300, "resetsAt": 1900000000}}})
+
+        metadata = self.provider.account_metadata()
+
+        self.assertEqual([row["model"] for row in metadata["models"]],
+                         ["gpt-6.1-sol", "gpt-6-luna"])
+        self.assertEqual(metadata["rate_limits"]["rateLimits"]["primary"]["usedPercent"], 19)
+        calls = self.brain.calls()
+        model_calls = [call for call in calls if call.get("method") == "model/list"]
+        self.assertEqual([call["params"].get("cursor") for call in model_calls], [None, "1"])
+        rate_call = next(call for call in calls if call.get("method") == "account/rateLimits/read")
+        self.assertNotIn("params", rate_call, "old app-servers require a no-params request")
+        self.assertFalse(self.brain.calls("thread/start"), "metadata must not spend a model turn")
+        cfg = tomllib.loads((self.root / "data" / "codex" / "_metadata" / "config.toml").read_text())
+        self.assertNotIn("model", cfg)
+        self.assertNotIn("mcp_servers", cfg)
 
     def test_full_exact_events(self):
         h = self.start("full")

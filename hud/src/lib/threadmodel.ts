@@ -69,7 +69,7 @@ export const PROVIDER_LABELS: Record<ProviderName, string> = {
   claude: "Claude",
   codex: "Codex",
 };
-export const EFFORT_LADDER = ["max", "xhigh", "high", "medium", "low", "minimal", "none"];
+export const EFFORT_LADDER = ["ultra", "max", "xhigh", "high", "medium", "low", "minimal", "none"];
 export const DEFAULT_EFFORT = "high";
 /** The model select's last entry on OpenRouter. */
 export const SEARCH = "__search__";

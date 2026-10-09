@@ -65,6 +65,9 @@ from .codex_usage import Accounting
 
 START_TIMEOUT = 30.0
 INTERRUPT_TIMEOUT = 10.0
+METADATA_LOCK_TIMEOUT = 0.05
+MODEL_PAGE_LIMIT = 100
+MODEL_PAGE_CAP = 20
 _auth_lock = threading.Lock()
 _state_lock = threading.Lock()
 _open_homes: set[Path] = set()
@@ -331,6 +334,64 @@ class CodexProvider:
         except (OSError, subprocess.TimeoutExpired) as exc:
             return None, f"codex health failed ({type(exc).__name__})"
         return binary, f"{reason}, ChatGPT login"
+
+    def account_metadata(self) -> dict:
+        """Read the logged-in account's model catalog and quota snapshot.
+
+        This uses a short-lived app-server rather than starting a model turn.
+        Preparation and account inspection share the same lock as session
+        startup, but a HUD read never waits behind a turn that is opening.
+        """
+        binary, reason = self._probe()
+        if binary is None:
+            raise BriefRefused(reason)
+        if not _auth_lock.acquire(timeout=METADATA_LOCK_TIMEOUT):
+            raise RpcTimeout("Codex account metadata is busy")
+        rpc = None
+        try:
+            argv, env, home = codex_config.prepare_metadata(binary)
+            rpc = RpcProcess(argv, cwd=str(home), env=env)
+            rpc.start().initialize()
+            account_result = rpc.request("account/read", {"refreshToken": False})
+            if not isinstance(account_result, dict):
+                raise RpcError("Codex account response is invalid")
+            account = account_result.get("account") or {}
+            if not isinstance(account, dict):
+                raise RpcError("Codex account response is invalid")
+            if account.get("type") != "chatgpt":
+                raise BriefRefused("Codex requires ChatGPT authentication; API-key billing refused")
+
+            rows, cursor, seen = [], None, set()
+            for _ in range(MODEL_PAGE_CAP):
+                params = {"includeHidden": False, "limit": MODEL_PAGE_LIMIT}
+                if cursor is not None:
+                    params["cursor"] = cursor
+                page = rpc.request("model/list", params)
+                if not isinstance(page, dict) or not isinstance(page.get("data"), list):
+                    raise RpcError("Codex model catalog response is invalid")
+                if any(not isinstance(row, dict) for row in page["data"]):
+                    raise RpcError("Codex model catalog contains an invalid row")
+                rows.extend(page["data"])
+                next_cursor = page.get("nextCursor")
+                if next_cursor is None:
+                    break
+                if not isinstance(next_cursor, str) or not next_cursor or next_cursor in seen:
+                    raise RpcError("Codex model catalog pagination is invalid")
+                seen.add(next_cursor)
+                cursor = next_cursor
+            else:
+                raise RpcError("Codex model catalog exceeded the pagination limit")
+            if not rows:
+                raise RpcError("Codex model catalog is empty")
+
+            rate_limits = rpc.request("account/rateLimits/read")
+            if not isinstance(rate_limits, dict):
+                raise RpcError("Codex rate-limit response is invalid")
+            return {"models": rows, "rate_limits": rate_limits}
+        finally:
+            if rpc is not None:
+                rpc.close()
+            _auth_lock.release()
 
     def start(self, thread: Thread, brief: Brief, permit: PermissionCallback) -> SessionHandle:
         return self._open(thread, brief, permit, resume=False)

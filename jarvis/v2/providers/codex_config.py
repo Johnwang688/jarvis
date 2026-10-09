@@ -68,6 +68,15 @@ def config_text(brief: Brief) -> str:
     return "\n".join(lines) + "\n"
 
 
+def metadata_config_text() -> str:
+    """Minimal strict config for account/model/quota reads (no thread starts)."""
+    values = dict(model_provider="openai", forced_login_method="chatgpt",
+                  cli_auth_credentials_store="file", sandbox_mode="workspace-write",
+                  approval_policy="on-request", approvals_reviewer="auto_review",
+                  check_for_update_on_startup=False)
+    return "\n".join(f"{k} = {_value(v)}" for k, v in values.items()) + "\n"
+
+
 def owner_home() -> Path:
     return Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))).resolve()
 
@@ -80,15 +89,8 @@ def clean_env(home: Path, auth_home: Path | None = None) -> dict[str, str]:
     return env
 
 
-def prepare(thread_id: str, brief: Brief, binary: str | None = None) -> tuple[list[str], dict[str, str], Path]:
-    """The app-server argv, child environment and private home for a thread.
-
-    ``binary`` is the codex the caller already version-checked; without one
-    it is resolved here the same way (codex_cli.resolve), never from a bare
-    PATH lookup that could land on the Windows shim.
-    """
-    validate(brief)
-    if not re.fullmatch(r"[A-Za-z0-9_-]+", thread_id):
+def _prepare_home(name: str, text: str, binary: str | None) -> tuple[list[str], dict[str, str], Path]:
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", name):
         raise BriefRefused("Invalid Codex private thread directory id")
     auth_home = owner_home()
     auth = auth_home / "auth.json"
@@ -101,7 +103,7 @@ def prepare(thread_id: str, brief: Brief, binary: str | None = None) -> tuple[li
         if binary is None:
             raise BriefRefused(reason)
     root = Path(config.V2_DATA_DIR) / "codex"
-    home = root / thread_id
+    home = root / name
     for directory in (root, home, home / "tmp"):
         if directory.is_symlink():
             raise BriefRefused("Codex private directory must not be a symlink")
@@ -119,5 +121,21 @@ def prepare(thread_id: str, brief: Brief, binary: str | None = None) -> tuple[li
     skills = home / "skills"
     if not skills.exists() and not skills.is_symlink() and (auth_home / "skills").is_dir():
         skills.symlink_to(auth_home / "skills", target_is_directory=True)
-    atomically_write(home / "config.toml", config_text(brief))
+    atomically_write(home / "config.toml", text)
     return [str(Path(binary).resolve()), "app-server", "--strict-config", "--stdio"], clean_env(home), home
+
+
+def prepare(thread_id: str, brief: Brief, binary: str | None = None) -> tuple[list[str], dict[str, str], Path]:
+    """The app-server argv, child environment and private home for a thread.
+
+    ``binary`` is the codex the caller already version-checked; without one
+    it is resolved here the same way (codex_cli.resolve), never from a bare
+    PATH lookup that could land on the Windows shim.
+    """
+    validate(brief)
+    return _prepare_home(thread_id, config_text(brief), binary)
+
+
+def prepare_metadata(binary: str | None = None) -> tuple[list[str], dict[str, str], Path]:
+    """An isolated app-server home for read-only account metadata RPCs."""
+    return _prepare_home("_metadata", metadata_config_text(), binary)

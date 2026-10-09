@@ -10,6 +10,7 @@ import mimetypes
 import os
 from pathlib import Path
 import re
+import threading
 import time
 from urllib.parse import unquote, urlsplit
 
@@ -34,6 +35,7 @@ HUD_DIST = Path(__file__).resolve().parents[2] / "hud" / "dist"
 # version is the CLI in use (`providers/claude.py` `usage_agent_version`).
 CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 CLAUDE_USAGE_TTL_S = 300
+CODEX_METADATA_TTL_S = 300
 _CLAUDE_WINDOWS = (("five_hour", "5h"), ("seven_day", "week"))
 
 
@@ -324,6 +326,8 @@ class HUDLedger(UsageLedger):
         self._reported = None
         self._claude_quota = None
         self._claude_quota_at = 0.0
+        self._codex_metadata_at = 0.0
+        self._codex_refresh = threading.Lock()
         super().__init__(*args, **kwargs)
 
     def _apply(self, row):
@@ -377,6 +381,59 @@ class HUDLedger(UsageLedger):
                     windows.append(dict(name=label, used_percent=used, resets_at=window.get("resetsAt")))
         return {"windows": windows} if windows else None
 
+    def refresh_codex(self, provider) -> None:
+        """Refresh models and quota once per TTL, without starting a turn.
+
+        Only the first concurrent HUD request launches the metadata peer.
+        Failures retain the last good snapshot and are throttled by the same
+        TTL, keeping status reads cheap while Codex is busy or unavailable.
+        """
+        read = getattr(provider, "account_metadata", None)
+        if not callable(read):
+            return
+        now = time.monotonic()
+        with self._lock:
+            if now - self._codex_metadata_at < CODEX_METADATA_TTL_S:
+                return
+        if not self._codex_refresh.acquire(blocking=False):
+            return
+        try:
+            now = time.monotonic()
+            with self._lock:
+                if now - self._codex_metadata_at < CODEX_METADATA_TTL_S:
+                    return
+            try:
+                metadata = read()
+            except Exception as exc:
+                # A turn is briefly preparing under Codex's auth lock. Let the
+                # next HUD request retry instead of hiding metadata for a TTL.
+                from .providers.codex_rpc import RpcTimeout
+                if isinstance(exc, RpcTimeout) and "metadata is busy" in str(exc):
+                    return
+                with self._lock:
+                    self._codex_metadata_at = time.monotonic()
+                return
+            if not isinstance(metadata, dict):
+                with self._lock:
+                    self._codex_metadata_at = time.monotonic()
+                return
+
+            # The catalog and quota are independent useful results: retain the
+            # previous half if a future app-server changes only the other.
+            try:
+                from .router import set_codex_models
+                set_codex_models(metadata.get("models"))
+            except (TypeError, ValueError):
+                pass
+            body = metadata.get("rate_limits")
+            reports = _codex_rate_limits(body) if isinstance(body, dict) else None
+            with self._lock:
+                if reports is not None:
+                    self.rate_limits = reports
+                self._codex_metadata_at = time.monotonic()
+        finally:
+            self._codex_refresh.release()
+
     def _claude_subscription(self):
         """The subscription windows, cached. A miss is null, never a guess.
 
@@ -422,6 +479,8 @@ def usage(daemon):
     result = {}
     for provider in ProviderName:
         instance = daemon.providers.get(provider)
+        if provider == ProviderName.CODEX and isinstance(router.ledger, HUDLedger):
+            router.ledger.refresh_codex(instance)
         ok, reason = router.health.check(instance) if instance else (False, "provider not in roster")
         router.ledger.set_health(provider.value, ok, reason)
         state = router.ledger.state(provider.value, no_new_work=settings["no_new_work"],
@@ -430,6 +489,32 @@ def usage(daemon):
         result[provider.value] = dict(state=state["state"], reason=state["reason"], today=state["totals"],
                                       allowance=settings["allowances"][provider.value], quota=quota)
     return {"providers": result}
+
+
+def _codex_rate_limits(body) -> dict[str, dict] | None:
+    """Normalize `account/rateLimits/read` into HUDLedger's keyed snapshots."""
+    if not isinstance(body, dict):
+        return None
+    reports = {}
+    by_id = body.get("rateLimitsByLimitId")
+    if isinstance(by_id, dict):
+        for limit_id, report in by_id.items():
+            if isinstance(limit_id, str) and limit_id and isinstance(report, dict):
+                reports[limit_id] = copy.deepcopy(report)
+                reports[limit_id].setdefault("limitId", limit_id)
+    current = body.get("rateLimits")
+    if isinstance(current, dict):
+        limit_id = current.get("limitId") or "codex"
+        if isinstance(limit_id, str) and limit_id and limit_id not in reports:
+            reports[limit_id] = copy.deepcopy(current)
+    return reports
+
+
+def _refresh_codex_metadata(daemon) -> None:
+    from .router import daemon_router
+    ledger = daemon_router(daemon).ledger
+    if isinstance(ledger, HUDLedger):
+        ledger.refresh_codex(daemon.providers.get(ProviderName.CODEX))
 
 
 def _scrub_source(text):
@@ -922,6 +1007,7 @@ def route(handler, daemon, parts, query):
         # What the input bar's provider/model/effort chips offer (decisions A2).
         from . import thread_model
         _object(query, ())
+        _refresh_codex_metadata(daemon)
         return 200, thread_model.describe()
     if parts == ["thread-models"] and method == "POST":
         # The default Claude or Codex chat threads run on (2026-10-08): the
@@ -931,6 +1017,7 @@ def route(handler, daemon, parts, query):
         from . import thread_model
         _object(query, ())
         body = _object(handler._body(), ("provider", "model", "effort"), ("provider", "model"))
+        _refresh_codex_metadata(daemon)
         try:
             thread_model.set_provider_default(body["provider"], body["model"], body.get("effort"))
         except thread_model.ChoiceRefused as exc:

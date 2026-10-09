@@ -801,6 +801,66 @@ class Backend(unittest.TestCase):
         self.assertEqual(restored.totals(provider="codex")["work_tokens"], 14)
         self.assertIsNone(restored.quota("claude"))
 
+    def test_codex_metadata_populates_quota_and_the_account_model_catalog(self):
+        from jarvis.v2 import router
+        previous = {key: value.copy() for key, value in router.CLI_MODELS["codex"].items()}
+        self.addCleanup(lambda: router.CLI_MODELS.__setitem__("codex", previous))
+        calls = []
+
+        def metadata():
+            calls.append(True)
+            return {
+                "models": [
+                    {"model": "gpt-6.1-sol", "displayName": "GPT-6.1 Sol", "hidden": False,
+                     "inputModalities": ["text", "image"],
+                     "supportedReasoningEfforts": [{"reasoningEffort": "low"},
+                                                    {"reasoningEffort": "medium"},
+                                                    {"reasoningEffort": "max"},
+                                                    {"reasoningEffort": "ultra"}],
+                     "defaultReasoningEffort": "medium"},
+                    {"model": "gpt-6-sol", "displayName": "GPT-6 Sol", "hidden": False,
+                     "inputModalities": ["text", "image"],
+                     "supportedReasoningEfforts": [{"reasoningEffort": "none"},
+                                                    {"reasoningEffort": "high"}],
+                     "defaultReasoningEffort": "high"},
+                    {"model": "gpt-6-luna", "displayName": "GPT-6 Luna", "hidden": False,
+                     "inputModalities": ["text"],
+                     "supportedReasoningEfforts": [{"reasoningEffort": "low"}],
+                     "defaultReasoningEffort": "low"},
+                ],
+                "rate_limits": {"rateLimitsByLimitId": {"codex": {
+                    "limitName": "Codex", "primary": {"usedPercent": 19,
+                    "windowDurationMins": 300, "resetsAt": 1900000000},
+                    "secondary": {"usedPercent": 25, "windowDurationMins": 10080,
+                    "resetsAt": 1900001000}}}},
+            }
+
+        self.providers[P.CODEX].account_metadata = metadata
+        described = self.request("GET", "/thread-models")["providers"]["codex"]
+        rows = {row["id"]: row for row in described["models"]}
+        self.assertEqual(set(rows), {"gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna"})
+        self.assertEqual((rows["gpt-6.1-sol"]["efforts"], rows["gpt-6.1-sol"]["default_effort"]),
+                         (["low", "medium", "max", "ultra"], "medium"))
+        self.assertFalse(rows["gpt-6-luna"]["vision"])
+        quota = self.request("GET", "/usage")["providers"]["codex"]["quota"]
+        self.assertEqual([(row["name"], row["used_percent"]) for row in quota["windows"]],
+                         [("5h", 19), ("weekly", 25)])
+        self.assertEqual(len(calls), 1, "model and quota endpoints share one TTL cache")
+
+        # The refreshed table is also the validator used by the model picker.
+        selected = self.request("POST", "/thread-models", {
+            "provider": "codex", "model": "gpt-6.1-sol", "effort": "ultra"})
+        self.assertEqual(selected["providers"]["codex"]["hud_default"],
+                         {"model": "gpt-6.1-sol", "effort": "ultra"})
+
+        # A temporary app-server failure keeps the last good meters/catalog.
+        ledger = self.daemon.router.ledger
+        ledger._codex_metadata_at = 0
+        self.providers[P.CODEX].account_metadata = lambda: (_ for _ in ()).throw(RuntimeError("offline"))
+        quota = self.request("GET", "/usage")["providers"]["codex"]["quota"]
+        self.assertEqual(quota["windows"][0]["used_percent"], 19)
+        self.assertIn("gpt-6.1-sol", router.CLI_MODELS["codex"])
+
     def test_claude_subscription_quota_is_reported_not_invented(self):
         token = "oat-hud-test-token-value"
         path = self.root / "claude-credentials.json"

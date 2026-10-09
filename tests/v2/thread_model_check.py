@@ -71,6 +71,7 @@ class ThreadModel(unittest.TestCase):
         self.assertEqual(tm.default_effort(P.CLAUDE, "claude-opus-5-5"), "high")
         self.assertIsNone(tm.default_effort(P.CLAUDE, "claude-haiku-4-5"))
         self.assertEqual(tm.default_effort(P.CODEX, "gpt-5.6-sol"), "high")
+        self.assertEqual(tm.default_effort(P.CODEX, "gpt-6.1-sol"), "low")
 
     def test_defaults_per_provider(self):
         """A5: OpenRouter follows the global picker (read, not hard-coded);
@@ -162,6 +163,8 @@ class ThreadModel(unittest.TestCase):
         self.assertEqual([m["id"] for m in described["codex"]["models"]], list(router.CLI_MODELS["codex"]))
         self.assertEqual(described["claude"]["default"], "claude-opus-5-5")
         self.assertEqual(described["fast"]["label"], "OpenRouter")
+        self.assertTrue({"gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna"}.issubset(
+            {m["id"] for m in described["codex"]["models"]}))
         # The router's vision filter reads the same table.
         self.assertTrue(all(router.CLI_MODELS["codex"][m]["vision"] for m in
                             ("gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5")))

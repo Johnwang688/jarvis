@@ -26,7 +26,7 @@ PROPOSAL_GRACE_S = 60
 HEALTH_CACHE_S = 60
 ROLES = ("orchestrator", "implementer", "reviewer", "researcher")
 CLI_PROVIDERS = ("claude", "codex")
-EFFORTS = ("default", "none", "minimal", "low", "medium", "high", "xhigh", "max")
+EFFORTS = ("default", "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
 _CONFIG_LOCK = threading.RLock()
 
 # The models each CLI provider can be asked for by name, with the efforts each
@@ -37,14 +37,10 @@ _CONFIG_LOCK = threading.RLock()
 #
 # Claude: Claude Code's own model ids; `--effort` is the SDK's `EffortLevel`
 # (`providers/claude.py` `EFFORT_LEVELS`), and Haiku 4.5 has no effort control.
-# Codex: the models the routing defaults and the vision filter already named;
-# the app-server's ReasoningEffort is "a value advertised by the model", so
-# the ladder here is the one the routing defaults use (high, xhigh) and its
-# neighbours. Both lists are a statement of what Jarvis will ask for, not a
-# live probe; a model missing here is refused by name rather than guessed at —
-# by the chip, and by the routing table too: `load_routing` and `/route`
-# accept a claude/codex model only from this table (`_cli_model`), plus
-# `roster`, the routing table's own spelling of "the configured default".
+# Codex: this is the cold/offline fallback. HUD reads replace it atomically
+# with the logged-in account's app-server `model/list` catalog, including the
+# advertised effort ladder and image support. A model missing from the active
+# table is refused by name rather than guessed at — by the chip and routing.
 _CLAUDE_EFFORTS = ("low", "medium", "high", "xhigh", "max")
 _CODEX_EFFORTS = ("low", "medium", "high", "xhigh")
 CLI_MODELS: dict[str, dict[str, dict]] = {
@@ -57,6 +53,12 @@ CLI_MODELS: dict[str, dict[str, dict]] = {
         "claude-haiku-4-5": {"name": "Claude Haiku 4.5", "efforts": (), "vision": True},
     },
     "codex": {
+        "gpt-6.1-sol": {"name": "GPT-6.1 Sol", "efforts": ("low", "medium", "high", "xhigh", "max", "ultra"),
+                        "vision": True, "default_effort": "low"},
+        "gpt-6-sol": {"name": "GPT-6 Sol", "efforts": ("low", "medium", "high", "xhigh", "max", "ultra"),
+                      "vision": True, "default_effort": "medium"},
+        "gpt-6-luna": {"name": "GPT-6 Luna", "efforts": ("low", "medium", "high", "xhigh", "max"),
+                       "vision": True, "default_effort": "medium"},
         "gpt-6-astra": {"name": "GPT-6 Astra", "efforts": _CODEX_EFFORTS, "vision": True},
         "gpt-5.6-sol": {"name": "GPT-5.6 Sol", "efforts": _CODEX_EFFORTS, "vision": True},
         "gpt-5.6-terra": {"name": "GPT-5.6 Terra", "efforts": _CODEX_EFFORTS, "vision": True},
@@ -64,6 +66,47 @@ CLI_MODELS: dict[str, dict[str, dict]] = {
         "gpt-5.5": {"name": "GPT-5.5", "efforts": _CODEX_EFFORTS, "vision": True},
     },
 }
+
+
+def set_codex_models(rows) -> dict[str, dict]:
+    """Atomically install a validated app-server model catalog.
+
+    Unknown future fields are ignored. An empty/malformed catalog is refused
+    so a transient protocol problem cannot erase the offline fallback.
+    """
+    parsed: dict[str, dict] = {}
+    allowed_efforts = set(EFFORTS) - {"default"}
+    if not isinstance(rows, list):
+        raise ValueError("Codex model catalog must be a list")
+    for row in rows:
+        if not isinstance(row, dict) or row.get("hidden") is True:
+            continue
+        model_id = row.get("model") if isinstance(row.get("model"), str) else row.get("id")
+        if (not isinstance(model_id, str) or not model_id.strip() or
+                len(model_id) > 200 or any(c.isspace() for c in model_id)):
+            continue
+        model_id = model_id.strip()
+        display = row.get("displayName")
+        name = display.strip() if isinstance(display, str) and display.strip() else model_id
+        efforts, seen = [], set()
+        advertised = row.get("supportedReasoningEfforts")
+        if isinstance(advertised, list):
+            for item in advertised:
+                effort = item.get("reasoningEffort") if isinstance(item, dict) else item
+                if isinstance(effort, str) and effort in allowed_efforts and effort not in seen:
+                    efforts.append(effort)
+                    seen.add(effort)
+        default = row.get("defaultReasoningEffort")
+        default = default if isinstance(default, str) and default in efforts else None
+        modalities = row.get("inputModalities")
+        vision = True if not isinstance(modalities, list) else "image" in modalities
+        parsed[model_id] = {"name": name, "efforts": tuple(efforts), "vision": vision,
+                            "default_effort": default}
+    if not parsed:
+        raise ValueError("Codex model catalog has no usable models")
+    with _CONFIG_LOCK:
+        CLI_MODELS["codex"] = parsed
+    return parsed
 
 
 @dataclass(frozen=True)

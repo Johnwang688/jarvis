@@ -107,7 +107,7 @@ describe("effort (A4)", () => {
       expect(defaultEffort(TM, "fast", model)).toBe("high");
       const opts = effortOptions(TM, fast(model));
       expect(opts[0].label).toBe("default · high");
-      expect(opts.map((o) => o.value)).toEqual(["", "max", "xhigh", "high", "medium", "low", "minimal", "none"]);
+      expect(opts.map((o) => o.value)).toEqual(["", "ultra", "max", "xhigh", "high", "medium", "low", "minimal", "none"]);
       expect(effective(TM, fast(model)).effort).toBe("high");
     }
   });
