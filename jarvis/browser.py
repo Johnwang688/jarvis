@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse
 
-from . import config
+from . import config, untrusted
 
 
 class BrowserError(RuntimeError):
@@ -60,6 +60,129 @@ _REF_SCAN_JS = """(max) => {
         });
     });
     return out;
+}"""
+
+# The snapshot's PAGE TEXT, minus what a person looking at the page cannot see.
+#
+# innerText already leaves out display:none and visibility:hidden — judged on
+# the *computed* style, so class rules and external stylesheets count here,
+# which fetch_page (no renderer) cannot do. What innerText keeps, and a reader
+# does not see, is text that is rendered but invisible: opacity ~0, a near-zero
+# font size, a clip or clip-path that leaves nothing, a transform that scales to
+# nothing, a (nearly) zero-size box that clips its overflow, and anything
+# pushed off the top or left of the page (left/margin/text-indent: -9999px —
+# the text's own rectangle is measured, so every spelling of "off-screen"
+# counts). Those text nodes are hidden for the one innerText read and put back
+# in a `finally`, so a page without hidden text is never touched, and one with
+# it is left as it was found.
+#
+# aria-hidden is deliberately NOT used here (fetch_page does use it, having
+# nothing better): it means "not for assistive technology", not "invisible",
+# and the renderer can answer the real question directly.
+#
+# Interactive-element labels are not filtered: an icon button names itself
+# with exactly the visually-hidden text this would remove ("Close", "Menu").
+# They are capped at 80 characters each and fenced with the rest.
+_PAGE_TEXT_JS = """(limit) => {
+    const body = document.body;
+    if (!body) return '';
+    const SKIP = 'script,style,noscript,template,textarea,select,option,datalist';
+    const sx = window.scrollX, sy = window.scrollY;
+    const ruled = new Map();
+
+    const clipRect = (cs) => {
+        if (cs.position !== 'absolute' && cs.position !== 'fixed') return false;
+        const m = /^rect\\((.*)\\)$/.exec(cs.clip || '');
+        if (!m) return false;
+        const n = m[1].split(/[\\s,]+/).map(parseFloat);
+        return n.length === 4 && n.every(Number.isFinite)
+            && (n[1] - n[3] <= 1 || n[2] - n[0] <= 1);
+    };
+    const clipPath = (v) => {
+        if (!v || v === 'none') return false;
+        if (/^(circle|ellipse)\\(\\s*0(px|%)?[\\s)]/.test(v)) return true;
+        const m = /^inset\\(([^)]*)\\)/.exec(v);
+        if (!m) return false;
+        const p = m[1].split(' round ')[0].trim().split(/\\s+/);
+        if (!p.every((a) => /%$/.test(a) || a === '0' || a === '0px')) return false;
+        const n = p.map(parseFloat);
+        const [t, r, b, l] = n.length === 1 ? [n[0], n[0], n[0], n[0]]
+            : n.length === 2 ? [n[0], n[1], n[0], n[1]]
+            : n.length === 3 ? [n[0], n[1], n[2], n[1]] : n;
+        return t + b >= 100 || l + r >= 100;
+    };
+    const flat = (v) => {
+        const m = /^matrix\\(([^)]*)\\)$/.exec(v || '');
+        if (!m) return false;
+        const [a, b, c, d] = m[1].split(',').map(parseFloat);
+        return a * d - b * c === 0;
+    };
+    // Does this element hide everything inside it? Cached, and resolved
+    // top-down without recursion, so a deeply nested page cannot overflow.
+    const hides = (el) => {
+        const chain = [];
+        for (let e = el; e && e !== document.documentElement && !ruled.has(e); e = e.parentElement)
+            chain.push(e);
+        for (let i = chain.length - 1; i >= 0; i--) {
+            const e = chain[i];
+            const up = e.parentElement && ruled.get(e.parentElement);
+            let h = !!up;
+            if (!h) {
+                const cs = getComputedStyle(e);
+                h = parseFloat(cs.opacity) <= 0.05 || clipRect(cs) || clipPath(cs.clipPath)
+                    || flat(cs.transform);
+                if (!h) {
+                    const cx = /hidden|clip/.test(cs.overflowX), cy = /hidden|clip/.test(cs.overflowY);
+                    if (cx || cy) {
+                        const r = e.getBoundingClientRect();
+                        h = (cx && r.width <= 1) || (cy && r.height <= 1);
+                    }
+                }
+            }
+            ruled.set(e, h);
+        }
+        return !!ruled.get(el);
+    };
+
+    // innerText follows DOM order, so once twice `limit` characters of visible
+    // text have gone by, nothing later can reach the slice. Only text judged
+    // visible spends the budget — a count of nodes would let a page pad with
+    // hidden ones and slip the next past the scan.
+    let budget = 2 * limit;
+    const range = document.createRange();
+    const hidden = [];
+    const walker = document.createTreeWalker(body, NodeFilter.SHOW_TEXT);
+    for (let n = walker.nextNode(); n && budget > 0; n = walker.nextNode()) {
+        if (!/\\S/.test(n.data)) continue;
+        const p = n.parentElement;
+        if (!p || p.closest(SKIP)) continue;
+        const cs = getComputedStyle(p);
+        // visibility is inherited, so the parent's computed value is the text's.
+        // innerText leaves that text out already; it is ruled hidden here only
+        // so it never spends the budget.
+        let h = cs.visibility !== 'visible' || parseFloat(cs.fontSize) < 2 || hides(p);
+        if (!h) {
+            range.selectNodeContents(n);
+            const r = range.getBoundingClientRect();
+            h = r.width < 1 || r.height < 1 || r.right + sx <= 0 || r.bottom + sy <= 0;
+        }
+        if (h) hidden.push(n);
+        else budget -= n.data.replace(/\\s+/g, ' ').trim().length;
+    }
+
+    const wraps = [];
+    try {
+        for (const n of hidden) {
+            const s = document.createElement('span');
+            s.style.setProperty('display', 'none', 'important');
+            n.parentNode.insertBefore(s, n);
+            s.appendChild(n);
+            wraps.push([s, n]);
+        }
+        return body.innerText.slice(0, limit);
+    } finally {
+        for (const [s, n] of wraps) s.replaceWith(n);
+    }
 }"""
 
 _MARK_JS = """(els) => {
@@ -309,7 +432,9 @@ class Session:
         self._spend()
         self.page.goto(url, wait_until="domcontentloaded", timeout=30_000)
         self._guard_landing()
-        return f"Loaded {self.page.url}\nTitle: {self.page.title()}"
+        # The title is the page's own words, so it is fenced like the snapshot.
+        title = untrusted.fence(f"Title: {untrusted.one_line(self.page.title())}", self.page.url)
+        return f"Loaded {self.page.url}\n{title}"
 
     def _guard_landing(self) -> None:
         """Re-check policy on wherever the page actually ended up.
@@ -334,25 +459,32 @@ class Session:
 
         This is the channel text-only models use. Refs are exact, so there is
         no coordinate guessing — usually more reliable than vision for the web.
+
+        Every line of it is the page talking (the title, the labels, the body
+        text), so the whole snapshot is fenced as untrusted web content, and
+        the body leaves out text a person viewing the page cannot see
+        (`_PAGE_TEXT_JS`). The format inside the fence is unchanged.
         """
         self.page.wait_for_timeout(150)
         elements = self.page.evaluate(_REF_SCAN_JS, max_elements)
 
-        body = self.page.evaluate(
-            "() => document.body ? document.body.innerText.slice(0, 4000) : ''"
-        )
-        body = re.sub(r"\n{3,}", "\n\n", body or "").strip()
+        body = untrusted.strip_invisible(self.page.evaluate(_PAGE_TEXT_JS, 4000) or "")
+        body = re.sub(r"\n{3,}", "\n\n", body).strip()
 
-        lines = [f"URL: {self.page.url}", f"Title: {self.page.title()}", "", "INTERACTIVE:"]
+        # Title, labels and type attributes are the page's words: one line each,
+        # so a label carrying a newline cannot draw a ref line of its own.
+        title = untrusted.one_line(self.page.title())
+        lines = [f"URL: {self.page.url}", f"Title: {title}", "", "INTERACTIVE:"]
         for el in elements:
-            label = el["text"] or "(no label)"
-            extra = f" type={el['type']}" if el["type"] else ""
+            label = untrusted.one_line(el["text"], cap=80) or "(no label)"
+            kind = untrusted.one_line(el["type"], cap=40)
+            extra = f" type={kind}" if kind else ""
             extra += " checked" if el["checked"] else ""
             lines.append(f"  [{el['ref']}] <{el['tag']}{extra}> {label}")
         if not elements:
             lines.append("  (none found)")
         lines += ["", "PAGE TEXT:", body or "(empty)"]
-        return "\n".join(lines)
+        return untrusted.fence("\n".join(lines), self.page.url)
 
     def _locator(self, ref: str):
         locator = self.page.locator(f'[data-jarvis-ref="{ref}"]')
