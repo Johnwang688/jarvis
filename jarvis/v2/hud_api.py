@@ -840,6 +840,10 @@ def route(handler, daemon, parts, query):
     mounted = _discord_routes.route(handler, daemon, parts, query)
     if mounted is not None:
         return mounted
+    if parts == ["activity"] and method == "GET":
+        # The sidebar's dots: every thread and task that is not idle.
+        _object(query, ())
+        return 200, daemon.activity.snapshot()
     if parts == ["usage"] and method == "GET":
         _object(query, ())
         return 200, usage(daemon)

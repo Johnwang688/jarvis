@@ -161,6 +161,9 @@ def _world() -> dict:
             "test_calc.py": {"before": "", "after": "import unittest\n"},
         },
         "approvals": [],
+        # The sidebar dots (2026-10-08): what `GET /activity` answers. A seen
+        # call sets the row idle and says so on SSE, as the daemon does.
+        "activity": {"threads": {}, "tasks": {}},
         "usage": {
             "providers": {
                 "claude": {
@@ -579,6 +582,8 @@ class MockDaemon:
                     return self._json([t for t in w["tasks"] if not pid or t["project_id"] == pid])
                 if path == "/approvals":
                     return self._json(w["approvals"])
+                if path == "/activity":
+                    return self._json(w["activity"])
                 if path == "/usage":
                     return self._json(w["usage"])
                 if path == "/discord":
@@ -771,6 +776,15 @@ class MockDaemon:
                     return self._json({"turn_id": "turn-1"}, 202)
                 if len(parts) == 3 and parts[0] == "threads" and parts[2] == "interrupt":
                     return self._json({"ok": True})
+                if len(parts) == 3 and parts[0] in ("threads", "tasks") and parts[2] == "seen":
+                    of = parts[0]
+                    status = w["activity"][of].get(parts[1], "idle")
+                    if status in ("unread", "failed"):
+                        w["activity"][of].pop(parts[1], None)
+                        mock.emit("activity", {"of": of[:-1], "id": parts[1], "project_id": "p1",
+                                               "status": "idle"})
+                        status = "idle"
+                    return self._json({"status": status})
                 if len(parts) == 3 and parts[0] == "tasks":
                     return self._json({"ok": True})
                 if len(parts) == 2 and parts[0] == "approvals":
@@ -1013,6 +1027,15 @@ class MockDaemon:
             self.workshop.server_close()
 
     # -- driving -----------------------------------------------------------
+
+    def activity(self, of: str, object_id: str, status: str):
+        """Set one row's status in the world and say so on SSE."""
+        table = self.world["activity"][of + "s"]
+        if status == "idle":
+            table.pop(object_id, None)
+        else:
+            table[object_id] = status
+        self.emit("activity", {"of": of, "id": object_id, "project_id": "p1", "status": status})
 
     def emit(self, kind: str, data: dict | None = None, **extra):
         """Release one SSE frame."""

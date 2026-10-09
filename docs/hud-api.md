@@ -568,3 +568,28 @@ footing as `/approvals`.
 - `GET /discord` gains `"mirror": null | {"state": "ok" | "degraded" |
   "down", "reason": str, "queued": int, "last_error": null | {op, status,
   code, at}}`; the light goes amber when it is not ok.
+
+## Additions 2026-10-08 (sidebar status dots)
+
+- `GET /activity` → `{"threads": {<id>: status}, "tasks": {<id>: status}}`,
+  every thread and task that is **not** idle. `status` is one of `working`
+  (a turn is running; a task in intake, clarifying, planned, running or
+  verifying), `needs_input` (an approval or provider question is open on the
+  thread, or on any of a task's threads; a task that is blocked, or
+  clarifying with a blocking question — outranks working), `unread` (a chat
+  thread's last turn, or a task that is done, not yet opened), `failed` (the
+  same for a turn that ended `stop: "error"`, or a failed task) or `idle`.
+  An interrupted turn and a cancelled task are idle. A task's own threads
+  are never unread or failed: the task row carries the outcome.
+- `POST /threads/{id}/seen` and `POST /tasks/{id}/seen`, body `{}` →
+  `{"status": <its status now>}`. The owner opened it: unread and failed
+  become idle. The HUD calls them on opening a thread (chat tab) or task
+  (task tab), and when one finishes while open in a visible window.
+- SSE **`activity`** `{kind: "activity", data: {of: "thread" | "task", id,
+  project_id, status}}`, published whenever a status changes, after the
+  record that caused it. The ids are inside `data` on purpose: a stream
+  filtered by `?thread=` or `?project=` never carries it.
+- Running turns and open asks are in memory (a restart ends both); what was
+  last finished and what was seen are in `threads/<id>/activity.json` and
+  `tasks/<id>/activity.json`. No sidecar is idle, so threads and tasks from
+  before this shipped start read.

@@ -187,6 +187,31 @@ h2.bar {
 .tree-row:hover { background: var(--hover); }
 .tree-row.sel { background: var(--selected); color: var(--text); box-shadow: inset 2px 0 var(--accent); }
 .tree-row .tw { flex: 0 0 10px; color: var(--text-muted); font: 10px var(--mono); }
+
+/* ---- what a row is doing (2026-10-08, lib/activity.ts) ----
+   Idle is the plain `·`. Working is a hollow ring that pulses, with a band
+   sweeping across the row, so it reads without motion too; unread is a solid
+   accent dot; waiting on the owner is amber (amber means pending); failed is
+   a red triangle with a `!`. Motion stops under reduced-motion. */
+.act { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; }
+.act:not(.idle) { width: 8px; height: 8px; border-radius: 50%; }
+.act.working { border: 1.5px solid var(--accent); animation: act-pulse 1.4s ease-in-out infinite; }
+.act.unread { background: var(--accent); }
+.act.needs_input { background: var(--amber); box-shadow: 0 0 0 2px var(--amber-soft); }
+.act.failed { width: 11px; height: 11px; border-radius: 0; }
+.act.failed svg { width: 11px; height: 11px; display: block; }
+.act.failed path { fill: var(--red); }
+.act.failed rect { fill: var(--bg-0); }
+.tree-row.act-working {
+  background-image: linear-gradient(90deg, transparent 0%, var(--accent-soft) 50%, transparent 100%);
+  background-size: 200% 100%; background-repeat: no-repeat;
+  animation: act-sweep 2.2s linear infinite;
+}
+@keyframes act-pulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.45; transform: scale(0.8); } }
+@keyframes act-sweep { from { background-position: 200% 0; } to { background-position: -100% 0; } }
+@media (prefers-reduced-motion: reduce) {
+  .act.working, .tree-row.act-working { animation: none; }
+}
 .tree-row .nm { overflow: hidden; text-overflow: ellipsis; }
 .indent-1 { padding-left: 26px; }
 .indent-2 { padding-left: 40px; }

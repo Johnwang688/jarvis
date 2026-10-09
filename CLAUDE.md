@@ -277,6 +277,26 @@ and layout persist in localStorage behind try/catch. The free checks are
 `tests/face/hud_v2_layout_check.py`, run first by `hud_v2_check.py` in a
 context of its own, plus `hud/src/lib/layout.test.ts`.
 
+**Sidebar status dots (2026-10-08, design §18; contract in
+`docs/hud-api.md`).** The `·` left of each sidebar thread and task is what it
+is doing: idle `·`, working (pulsing ring, sweeping row), needs input
+(amber: an approval or question open, a blocked task — outranks working,
+since both arrive mid-turn), unread (blue: finished, not opened since) and
+failed (red ⚠: ended in an error, not opened since). An interrupt or a
+cancel is idle. A task row shows its phase this way (the word is its
+tooltip), and a folded project shows its most urgent row. **The daemon
+decides every status** (`jarvis/v2/activity.py`, an observer on the bus —
+`EventBus.observe`, called after the fan-out and outside the lock, so it
+cannot drop a record and what it publishes follows its cause); the HUD only
+draws `GET /activity` plus SSE `activity`, whose ids ride in `data` so no
+`?thread=`/`?project=` stream (the runner's turn wait) ever carries one.
+**Read means opened in the HUD** — `POST /threads|tasks/<id>/seen` on
+opening, or when it finishes open in a visible window; a Discord read does
+not count (owner's call). Unread and failed persist in an `activity.json`
+sidecar; no sidecar is idle, so nothing from before turned blue. A task's own
+threads are never unread or failed. Free suites: `tests/v2/activity_check.py`,
+`hud/src/lib/activity.test.ts`, `tests/face/hud_v2_activity_check.py`.
+
 Per-thread model (2026-10-06, decisions A, design §8.1/§12.1/§18): **a chat
 thread runs on OpenRouter (the fast path), Claude or Codex**, picked with
 provider ▾ · model ▾ · effort ▾ beside `in: <project>`. The provider is fixed

@@ -32,6 +32,7 @@ import { afterProjectGone, afterThreadGone, forgetLastProject, projectNamesTaken
 import { guildConfigured, ownerLine } from "./lib/discord";
 import { CollapseButton, Rail, Splitter, ZoomControl, useLayout } from "./components/Layout";
 import { ZOOM_DEFAULT, maxWidth } from "./lib/layout";
+import { clearsOnRead } from "./lib/activity";
 
 const TABS: Tab[] = ["chat", "task", "file", "diff", "preview"];
 const PROPOSAL_WINDOW_MS = 60_000;
@@ -392,6 +393,13 @@ export default function App() {
         case "thread_deleted":
           threadGone(e.thread_id || data.thread_id);
           break;
+        case "activity":
+          // The sidebar dots (lib/activity.ts). Marking read is the effect below.
+          dispatch({ type: "activity", record: e });
+          break;
+        case "_connected":
+          void refreshActivity();
+          break;
         default:
           break;
       }
@@ -413,6 +421,14 @@ export default function App() {
       }
     } catch {
       /* the window keeps what it had rather than blanking */
+    }
+  }, [dispatch]);
+
+  const refreshActivity = useCallback(async () => {
+    try {
+      dispatch({ type: "patch", patch: { activity: await api.activity() } });
+    } catch {
+      /* keep what we had */
     }
   }, [dispatch]);
 
@@ -637,6 +653,7 @@ export default function App() {
           compose: { projectId: lastProject(projects, threads, loadLastProject()) },
         },
       });
+      void refreshActivity();
       const [usage, schedules, route, approvals, discord] = await Promise.all([
         api.usage().catch(() => null),
         api.schedules().catch(() => []),
@@ -667,6 +684,34 @@ export default function App() {
       .catch(() => dispatch({ type: "patch", patch: { messages: [], draft: "", ops: [], status } }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.threadId]);
+
+  // Reading clears blue and red (2026-10-08): a thread open in the chat tab,
+  // or a task open in the task tab, while the window is visible — on opening
+  // it, and when it finishes with the owner watching. The daemon answers with
+  // an `activity` record that sets it idle, which ends the loop.
+  const [visible, setVisible] = useState(() => document.visibilityState !== "hidden");
+  useEffect(() => {
+    const on = () => setVisible(document.visibilityState !== "hidden");
+    document.addEventListener("visibilitychange", on);
+    return () => document.removeEventListener("visibilitychange", on);
+  }, []);
+  const marking = useRef(new Set<string>());
+  useEffect(() => {
+    if (!visible) return;
+    const mark = (key: string, call: () => Promise<unknown>) => {
+      if (marking.current.has(key)) return;
+      marking.current.add(key);
+      call().catch(() => {}).finally(() => marking.current.delete(key));
+    };
+    const t = state.threadId;
+    if (t && state.tab === "chat" && clearsOnRead(state.activity.threads[t])) {
+      mark("thread:" + t, () => api.seenThread(t));
+    }
+    const k = state.taskId;
+    if (k && state.tab === "task" && clearsOnRead(state.activity.tasks[k])) {
+      mark("task:" + k, () => api.seenTask(k));
+    }
+  }, [visible, state.threadId, state.taskId, state.tab, state.activity]);
 
   useEffect(() => {
     if (!state.taskId) return;
@@ -896,6 +941,7 @@ export default function App() {
           threads={state.threads}
           tasks={state.tasks}
           taskThreads={state.taskThreads}
+          activity={state.activity}
           activeProjectId={activeProjectId}
           compose={state.compose}
           threadId={state.threadId}
