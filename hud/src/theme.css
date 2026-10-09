@@ -193,6 +193,13 @@ h2.bar {
    sweeping across the row, so it reads without motion too; unread is a solid
    accent dot; waiting on the owner is amber (amber means pending); failed is
    a red triangle with a `!`. Motion stops under reduced-motion. */
+/* A task's and a folded project's dot sit in a slot of their own, as wide as
+   the widest dot (failed), so no status ever moves the name beside it. The
+   project's is at the row's end, before its menu, so project names keep
+   their place. */
+.tree-row .slot { flex: 0 0 11px; display: inline-flex; align-items: center; justify-content: center; }
+.tree-row .slot.end { margin-left: auto; }
+.tree-row .slot.end + .menu { margin-left: 0; }
 .act { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; }
 .act:not(.idle) { width: 8px; height: 8px; border-radius: 50%; }
 .act.working { border: 1.5px solid var(--accent); animation: act-pulse 1.4s ease-in-out infinite; }

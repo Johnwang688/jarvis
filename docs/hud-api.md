@@ -573,22 +573,38 @@ footing as `/approvals`.
 
 - `GET /activity` → `{"threads": {<id>: status}, "tasks": {<id>: status}}`,
   every thread and task that is **not** idle. `status` is one of `working`
-  (a turn is running; a task in intake, clarifying, planned, running or
-  verifying), `needs_input` (an approval or provider question is open on the
-  thread, or on any of a task's threads; a task that is blocked, or
-  clarifying with a blocking question — outranks working), `unread` (a chat
-  thread's last turn, or a task that is done, not yet opened), `failed` (the
-  same for a turn that ended `stop: "error"`, or a failed task) or `idle`.
-  An interrupted turn and a cancelled task are idle. A task's own threads
-  are never unread or failed: the task row carries the outcome.
+  (a turn is running; a task in clarifying, planned, running or verifying),
+  `needs_input` (an approval or provider question is open on the thread, or
+  on any of a task's threads; a task that is blocked, or clarifying with a
+  blocking question — outranks working), `unread` (a chat thread's last
+  turn, or a task that is done, not yet opened), `failed` (the same for a
+  turn that ended `stop: "error"`, or a failed task) or `idle`. An
+  interrupted turn, a cancelled task and a task in intake (waiting for the
+  owner to press Start) are idle. A task's own threads are never unread or
+  failed: the task row carries the outcome. A provider question closes with
+  its turn; a broker approval does not (the escape hatch raises one after
+  `turn_finished`, and an interrupted turn can end with its permit still
+  blocked), so it counts until its `approval_resolved` — published on a
+  resolve, a timeout and a shutdown alike.
 - `POST /threads/{id}/seen` and `POST /tasks/{id}/seen`, body `{}` →
   `{"status": <its status now>}`. The owner opened it: unread and failed
   become idle. The HUD calls them on opening a thread (chat tab) or task
-  (task tab), and when one finishes while open in a visible window.
+  (task tab), and when one finishes while open in a visible window, and
+  draws the answer at once (the `activity` record may not reach a window
+  whose stream is reconnecting) unless a record for that row, or a snapshot
+  sent after the call, has arrived since. A sidecar that cannot be written
+  is logged, never a 500, and never recreates a deleted thread or task.
 - SSE **`activity`** `{kind: "activity", data: {of: "thread" | "task", id,
   project_id, status}}`, published whenever a status changes, after the
-  record that caused it. The ids are inside `data` on purpose: a stream
-  filtered by `?thread=` or `?project=` never carries it.
+  record that caused it. A task is followed from `task_created`; a new
+  task's idle (intake) is not published, since no window holds a status for
+  a task that did not exist. `project_id` is
+  where the thread or task is when the record goes out, so a moved thread's
+  records name its new project. The ids are inside `data` on purpose: a
+  stream filtered by `?thread=` or `?project=` never carries it. Since a
+  status is published on change only, the HUD replays every record that
+  arrives while a `GET /activity` is in flight over that snapshot when it
+  lands; applied as-is, the older snapshot would undo them for good.
 - Running turns and open asks are in memory (a restart ends both); what was
   last finished and what was seen are in `threads/<id>/activity.json` and
   `tasks/<id>/activity.json`. No sidecar is idle, so threads and tasks from

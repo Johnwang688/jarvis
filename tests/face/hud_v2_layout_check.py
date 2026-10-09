@@ -680,12 +680,13 @@ def _small_window_checks(page, mock, check, until):
 
 
 CHIP_CONTROLS = ['[data-testid="provider-chip-select"]', '[data-testid="model-chip-select"]',
-                 '[data-testid="effort-chip-select"]']
+                 '[data-testid="effort-chip-select"]', '[data-testid="provider-defaults-open"]']
 
 
 def _model_chip_checks(page, mock, check, until):
     """The chip's own controls, not just the chip: the chip's centre was
-    reachable while its right half was clipped away behind dictation."""
+    reachable while its right half was clipped away behind dictation. On
+    Claude, so `default ▾` is drawn too: the widest the chip gets."""
     for (w, h), zoom, layout in (((1280, 800), "100", '{"left":480,"right":560}'),
                                  ((1280, 800), "160", "{}"),
                                  ((1024, 700), "160", "{}"),
@@ -693,9 +694,11 @@ def _model_chip_checks(page, mock, check, until):
         page.set_viewport_size({"width": w, "height": h})
         _set_storage(page, zoom=zoom, layout=layout)
         _boot(page, mock, None, until, reload=True)
-        until(lambda: page.locator(CHIP_CONTROLS[-1]).count() > 0, timeout=3)
+        until(lambda: page.locator(CHIP_CONTROLS[0]).count() > 0, timeout=3)
+        page.locator(CHIP_CONTROLS[0]).select_option("claude")
+        until(lambda: all(page.locator(sel).count() > 0 for sel in CHIP_CONTROLS), timeout=3)
         bad = [f"{sel}: {why}" for sel in CHIP_CONTROLS for ok, why in [_reachable(page, sel)] if not ok]
-        check(f"at {w}x{h} and {zoom}% provider, model and effort are all on screen and clickable",
+        check(f"at {w}x{h} and {zoom}% provider, model, effort and default ▾ are all on screen and clickable",
               not bad, "; ".join(bad))
     page.set_viewport_size({"width": 1280, "height": 800})
     _set_storage(page, zoom="100", layout="{}")

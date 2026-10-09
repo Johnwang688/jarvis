@@ -12,7 +12,11 @@ The checks worth keeping, each written to bite:
   - opening a thread or task is what clears blue and red, and nothing else;
   - a task row draws its phase as a dot, never as the old phase word;
   - a folded project shows its most urgent row, and nothing when it is open;
-  - a reload reads `GET /activity`, so the dots survive one.
+  - a reload reads `GET /activity`, so the dots survive one;
+  - no status change moves a task's or a project's name (review, 2026-10-09);
+  - a record heard while `GET /activity` is in flight is not undone when the
+    older snapshot lands, and `/seen`'s own answer clears a dot even when no
+    SSE record follows it (review, 2026-10-09).
 """
 from __future__ import annotations
 
@@ -136,7 +140,93 @@ def activity_checks(page, mock, check, until, expand, boot):
     check("after a reload the dots are read back", status("t1") == "failed" and status("k1") == "working",
           f"{status('t1')} / {status('k1')}")
 
-    # Leave the world as the rest of the suite expects it.
+    _no_shift_checks(page, mock, check, until, expand, status)
+    _race_checks(page, mock, check, until, expand, boot, status, seen)
+
+    # Leave the world as the rest of the suite expects it: a fresh window on
+    # a new thread, p1 open, every row idle.
     mock.activity("thread", "t1", "idle")
     mock.activity("task", "k1", "idle")
     until(lambda: status("t1") == "idle" and status("k1") == "idle", timeout=3)
+    boot(page, mock)
+    expand(page, "p1", "thread-t1")
+
+
+def _left(page, sel):
+    box = page.locator(sel).bounding_box()
+    return round(box["x"], 1) if box else None
+
+
+def _no_shift_checks(page, mock, check, until, expand, status):
+    """A status change never nudges a name: the dot has a slot of its own."""
+    expand(page, "p1", "task-k1")
+    name = '[data-testid="task-k1"] .nm'
+    at = {}
+    for s in ("idle", "working", "needs_input", "unread", "failed"):
+        mock.activity("task", "k1", s)
+        until(lambda: status("k1") == s, timeout=3)
+        at[s] = _left(page, name)
+    check("a task's name stays put whatever its dot says", len(set(at.values())) == 1, str(at))
+
+    mock.activity("task", "k1", "idle")
+    mock.activity("thread", "t1", "idle")
+    until(lambda: status("k1") == "idle" and status("t1") == "idle", timeout=3)
+    name = '[data-testid="project-name-p1"]'
+    at = {"open": _left(page, name)}
+    for _ in range(4):
+        if page.locator('[data-testid="thread-t1"]').count() == 0:
+            break
+        page.locator('[data-testid="project-p1"]').click()
+        until(lambda: page.locator('[data-testid="thread-t1"]').count() == 0, timeout=1)
+    at["folded, idle"] = _left(page, name)
+    mock.activity("thread", "t1", "failed")
+    until(lambda: page.locator('[data-testid="project-activity-p1"]').count() > 0, timeout=3)
+    at["folded, failed"] = _left(page, name)
+    mock.activity("thread", "t1", "unread")
+    until(lambda: page.locator('[data-testid="project-activity-p1"]').get_attribute("data-status") == "unread",
+          timeout=3)
+    at["folded, unread"] = _left(page, name)
+    check("a project's name stays put, folded or open, whatever its dot says",
+          len(set(at.values())) == 1, str(at))
+    expand(page, "p1", "thread-t1")
+
+
+def _race_checks(page, mock, check, until, expand, boot, status, seen):
+    """The window's two answers that can be older than a record it has heard."""
+    import threading
+
+    # GET /activity is a snapshot from when the daemon took it. A record
+    # published while it is in flight is newer, and the daemon never sends it
+    # twice (it publishes on change only), so the snapshot must not undo it.
+    mock.activity("thread", "t1", "failed")
+    gate = threading.Event()
+    mock.activity_gate = gate
+    asked = len(mock.sent("GET", "/activity"))
+    try:
+        boot(page, mock)
+        # Both the boot's and the stream's snapshots are taken (and held).
+        until(lambda: len(mock.sent("GET", "/activity")) >= asked + 2, timeout=3)
+        expand(page, "p1", "thread-t1")
+        mock.activity("thread", "t1", "working")
+        until(lambda: status("t1") == "working", timeout=3)
+        heard = status("t1")
+    finally:
+        mock.activity_gate = None
+        gate.set()
+    page.wait_for_timeout(500)
+    check("a record heard while GET /activity was in flight survives the snapshot landing",
+          heard == "working" and status("t1") == "working", f"{heard} -> {status('t1')}")
+
+    # `/seen` answers with the status now. While the stream is reconnecting
+    # no record follows it, and the answer alone must clear the dot.
+    mock.activity_seen_quiet = True
+    try:
+        mock.activity("thread", "t1", "unread")
+        until(lambda: status("t1") == "unread", timeout=3)
+        before = seen("/threads/t1/seen")
+        page.locator('[data-testid="thread-t1"]').click()
+        until(lambda: status("t1") == "idle", timeout=3)
+        check("opening a thread clears its dot from /seen's answer, with no record behind it",
+              status("t1") == "idle" and seen("/threads/t1/seen") > before, str(status("t1")))
+    finally:
+        mock.activity_seen_quiet = False

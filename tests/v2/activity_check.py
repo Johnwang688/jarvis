@@ -12,12 +12,22 @@ Fake provider, temporary stores, loopback HTTP only. The ones written to bite:
     and an approval on one of its threads makes the task need input;
   - an `activity` record is published only when a status changes, after the
     record that caused it, and never on a thread- or project-filtered stream.
+
+Added by the review (2026-10-09), each verified to fail against 18475c6:
+
+  - an unstarted (INTAKE) task is idle, live and after a reload alike;
+  - a broker approval outlives the turn that raised it (a provider question
+    does not), for a chat thread and for a task's thread;
+  - no sidecar write recreates a deleted thread or task, and a disk that
+    refuses one never turns `/seen` into an error;
+  - a moved thread's records name the project it is in now.
 """
 from __future__ import annotations
 
 import http.client
 import json
 from pathlib import Path
+import shutil
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -147,9 +157,42 @@ class ActivityChecks(unittest.TestCase):
         self.assertEqual(self.status(thread), "needs_input", "the question is still open")
         self.d.bus.publish({"kind": "question_answered", "thread_id": thread.id, "data": {"req_id": "q1"}})
         self.assertEqual(self.status(thread), "working")
-        self.ask(thread, req_id="r2")
+        self.ask(thread, kind="question", req_id="q2", code=None)
         self.release(thread)
-        self.assertEqual(self.status(thread), "unread", "a finished turn closes what it left open")
+        self.assertEqual(self.status(thread), "unread", "a finished turn closes the questions it left open")
+
+    def test_a_broker_approval_outlives_the_turn_that_raised_it(self):
+        # An interrupted turn can end with its permit still blocked, and the
+        # escape hatch raises its approval after turn_finished on a thread of
+        # its own. Only `approval_resolved` (resolve, timeout, shutdown) closes
+        # one; a provider question still ends with its turn.
+        thread = self.chat()
+        self.block(thread)
+        self.ask(thread, req_id="r1")
+        self.ask(thread, kind="question", req_id="q1", code=None)
+        self.release(thread)
+        self.assertEqual(self.status(thread), "needs_input", "the approval is still waiting on the owner")
+        self.assertEqual(self.request("GET", "/activity")["threads"], {thread.id: "needs_input"})
+        self.d.bus.publish({"kind": "approval_resolved", "thread_id": thread.id, "data": {"req_id": "r1"}})
+        self.assertEqual(self.status(thread), "unread", "the question ended with the turn")
+        # Raised after the turn finished (the hatch's shape): it still counts.
+        self.ask(thread, req_id="r2")
+        self.assertEqual(self.status(thread), "needs_input")
+        self.d.bus.publish({"kind": "approval_resolved", "thread_id": thread.id, "data": {"req_id": "r2"}})
+        self.assertEqual(self.status(thread), "unread")
+
+    def test_a_task_waits_while_its_threads_approval_outlives_the_turn(self):
+        task = self.task(TaskState.CLARIFYING, TaskState.PLANNED, TaskState.RUNNING)
+        worker = self.stores.threads.create(self.project.id, Role.IMPLEMENTER, ProviderName.FAST,
+                                            task_id=task.id)
+        self.stores.threads.save(worker)
+        self.d.bus.publish({"kind": "turn_started", "thread_id": worker.id})
+        self.ask(worker)
+        self.d.bus.publish({"kind": "turn_finished", "thread_id": worker.id, "turn_id": "t1",
+                            "data": {"stop": "interrupted"}})
+        self.assertEqual(self.d.activity.task_status(task), "needs_input")
+        self.d.bus.publish({"kind": "approval_resolved", "thread_id": worker.id, "data": {"req_id": "r1"}})
+        self.assertEqual(self.d.activity.task_status(task), "working")
 
     def test_unread_survives_a_restart_and_old_threads_start_read(self):
         thread, old = self.chat(), self.chat()
@@ -166,7 +209,8 @@ class ActivityChecks(unittest.TestCase):
         self.block(thread)
         self.ask(thread)
         self.ask(thread)          # the same request again: no change
-        self.release(thread)
+        self.release(thread)      # still waiting on the approval: no change
+        self.d.bus.publish({"kind": "approval_resolved", "thread_id": thread.id, "data": {"req_id": "r1"}})
         mine = [r["data"]["status"] for r in self.seen_records if r["data"]["id"] == thread.id]
         self.assertEqual(mine, ["working", "needs_input", "unread"])
         self.request("POST", f"/threads/{thread.id}/seen", {})
@@ -206,6 +250,60 @@ class ActivityChecks(unittest.TestCase):
         self.request("POST", "/threads/deadbeef/seen", {}, 404)
         self.request("POST", "/tasks/deadbeef/seen", {}, 404)
 
+    def test_nothing_recreates_a_deleted_thread(self):
+        from jarvis.v2 import projects, trash
+        self.d.trash = trash.Trash(self.stores.root, root=self.root / "Trash",
+                                   recycle=lambda path: self.fail("nothing here is on Windows"))
+        thread = self.chat()
+        self.block(thread)
+        self.release(thread)                     # a sidecar, and the thread's meta remembered
+        folder = self.stores.threads.path(thread.id).parent
+        self.assertTrue((folder / "activity.json").is_file())
+        projects.archive_thread(self.d, thread.id)
+        projects.delete_thread(self.d, thread.id)
+        self.assertFalse(folder.exists())
+        # A late record for it, and a read that raced the delete.
+        self.d.bus.publish({"kind": "turn_finished", "thread_id": thread.id, "turn_id": "late",
+                            "data": {"stop": "end"}})
+        self.d.activity.seen_thread(thread.id)
+        self.assertFalse(folder.exists(), "the activity sidecar brought the deleted thread back")
+        self.request("POST", f"/threads/{thread.id}/seen", {}, 404)
+
+    def test_nothing_recreates_a_deleted_task(self):
+        task = self.task(TaskState.CLARIFYING, TaskState.PLANNED, TaskState.RUNNING,
+                         TaskState.VERIFYING, TaskState.DONE)
+        folder = self.stores.tasks.path(task.id).parent
+        # The owner's read raced the delete: its sidecar was read just before
+        # the project (and the task with it) went to the trash.
+        side = self.d.activity._sidecar(self.stores.tasks, task.id)
+        self.assertEqual(side, {"terminal": "done", "seen": False})
+        shutil.rmtree(folder)
+        with patch.object(self.d.activity, "_sidecar", return_value=side):
+            self.d.activity.seen_task(task)
+        self.assertFalse(folder.exists(), "the activity sidecar brought the deleted task back")
+
+    def test_seen_never_answers_500_when_the_disk_refuses(self):
+        thread = self.chat()
+        self.block(thread)
+        self.release(thread)
+        with patch("jarvis.v2.activity._write_bytes", side_effect=OSError(28, "No space left on device")):
+            value = self.request("POST", f"/threads/{thread.id}/seen", {})
+        self.assertIn(value["status"], ("idle", "unread"))
+
+    def test_records_carry_the_project_the_thread_is_in_now(self):
+        (self.root / "other").mkdir()
+        other = self.stores.projects.create("other", str(self.root / "other"))
+        thread = self.chat()
+        self.block(thread)
+        self.release(thread)
+        self.request("POST", f"/threads/{thread.id}/seen", {})
+        self.request("PATCH", f"/threads/{thread.id}", {"project_id": other.id})
+        self.send(thread, "again")
+        self.finish(thread)
+        mine = [r["data"] for r in self.seen_records if r["data"]["id"] == thread.id]
+        self.assertEqual(mine[-1]["status"], "unread")
+        self.assertEqual(mine[-1]["project_id"], other.id, "a moved thread's records named its old project")
+
     # -- tasks ----------------------------------------------------------------
 
     def test_task_phases(self):
@@ -228,6 +326,24 @@ class ActivityChecks(unittest.TestCase):
         self.assertEqual(self.request("POST", f"/tasks/{failed.id}/seen", {}), {"status": "idle"})
         self.assertEqual(self.request("POST", f"/tasks/{running.id}/seen", {}), {"status": "working"})
 
+    def test_an_unstarted_task_is_idle_live_and_after_a_reload(self):
+        # INTAKE waits for the owner to press Start: nothing is running. Live
+        # (the records) and a reload (GET /activity) must say the same.
+        task = self.request("POST", "/tasks", {"project_id": self.project.id, "brief": "later"}, 201)
+        self.assertEqual(task["state"], "intake")
+        self.assertEqual(self.d.activity.task_status(self.stores.tasks.get(task["id"])), "idle")
+        self.assertEqual(self.request("GET", "/activity")["tasks"], {})
+        mine = lambda: [r["data"]["status"] for r in self.seen_records if r["data"]["id"] == task["id"]]  # noqa: E731
+        # task_created is followed: idle is remembered, so a brand-new task
+        # adds nothing to the stream, and Start is a change worth a record.
+        self.assertEqual(self.d.activity._shown.get(("task", task["id"])), "idle")
+        self.assertEqual(mine(), [])
+        moved = self.stores.tasks.transition(task["id"], TaskState.CLARIFYING)
+        self.d.bus.publish({"kind": "task_status_changed", "task_id": moved.id,
+                            "project_id": moved.project_id, "data": to_json(moved)})
+        self.assertEqual(mine(), ["working"])
+        self.assertEqual(self.request("GET", "/activity")["tasks"], {task["id"]: "working"})
+
     def test_a_task_done_before_this_shipped_is_idle(self):
         task = self.stores.tasks.create(project_id=self.project.id, brief="old")
         self.stores.tasks.save(task)
@@ -246,6 +362,7 @@ class ActivityChecks(unittest.TestCase):
         self.ask(worker)
         self.assertEqual(self.d.activity.task_status(task), "needs_input")
         self.assertEqual(self.seen_records[-1]["data"]["id"], task.id)
+        self.d.bus.publish({"kind": "approval_resolved", "thread_id": worker.id, "data": {"req_id": "r1"}})
         self.d.bus.publish({"kind": "turn_finished", "thread_id": worker.id, "turn_id": "t1",
                             "data": {"stop": "error"}})
         self.assertEqual(self.d.activity.thread_status(worker.id), "idle")

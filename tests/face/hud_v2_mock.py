@@ -492,6 +492,14 @@ class MockDaemon:
         self.calls: list[tuple[str, str, dict]] = []
         self.httpd: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
+        # The sidebar dots' races (2026-10-09): while `activity_gate` is an
+        # Event, `GET /activity` takes its snapshot on arrival and answers
+        # only once the Event is set, so a record emitted in between was
+        # published while the snapshot was in flight. `activity_seen_quiet`
+        # makes `/seen` answer with no SSE record behind it, as when the
+        # window's stream is reconnecting.
+        self.activity_gate: threading.Event | None = None
+        self.activity_seen_quiet = False
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -583,7 +591,11 @@ class MockDaemon:
                 if path == "/approvals":
                     return self._json(w["approvals"])
                 if path == "/activity":
-                    return self._json(w["activity"])
+                    snapshot = json.loads(json.dumps(w["activity"]))
+                    gate = mock.activity_gate
+                    if gate is not None:
+                        gate.wait(5)
+                    return self._json(snapshot)
                 if path == "/usage":
                     return self._json(w["usage"])
                 if path == "/discord":
@@ -781,8 +793,9 @@ class MockDaemon:
                     status = w["activity"][of].get(parts[1], "idle")
                     if status in ("unread", "failed"):
                         w["activity"][of].pop(parts[1], None)
-                        mock.emit("activity", {"of": of[:-1], "id": parts[1], "project_id": "p1",
-                                               "status": "idle"})
+                        if not mock.activity_seen_quiet:
+                            mock.emit("activity", {"of": of[:-1], "id": parts[1], "project_id": "p1",
+                                                   "status": "idle"})
                         status = "idle"
                     return self._json({"status": status})
                 if len(parts) == 3 and parts[0] == "tasks":

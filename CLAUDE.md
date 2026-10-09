@@ -282,9 +282,13 @@ context of its own, plus `hud/src/lib/layout.test.ts`.
 is doing: idle `·`, working (pulsing ring, sweeping row), needs input
 (amber: an approval or question open, a blocked task — outranks working,
 since both arrive mid-turn), unread (blue: finished, not opened since) and
-failed (red ⚠: ended in an error, not opened since). An interrupt or a
-cancel is idle. A task row shows its phase this way (the word is its
-tooltip), and a folded project shows its most urgent row. **The daemon
+failed (red ⚠: ended in an error, not opened since). An interrupt, a
+cancel and an unstarted (INTAKE) task are idle. A provider question ends
+with its turn but a broker approval only with its `approval_resolved` (the
+escape hatch asks after `turn_finished`). A task row shows its phase this
+way (the word is its tooltip), and a folded project shows its most urgent
+row at the row's end; every dot has a fixed slot, so no status moves a
+name. **The daemon
 decides every status** (`jarvis/v2/activity.py`, an observer on the bus —
 `EventBus.observe`, called after the fan-out and outside the lock, so it
 cannot drop a record and what it publishes follows its cause); the HUD only
@@ -293,8 +297,13 @@ draws `GET /activity` plus SSE `activity`, whose ids ride in `data` so no
 **Read means opened in the HUD** — `POST /threads|tasks/<id>/seen` on
 opening, or when it finishes open in a visible window; a Discord read does
 not count (owner's call). Unread and failed persist in an `activity.json`
-sidecar; no sidecar is idle, so nothing from before turned blue. A task's own
-threads are never unread or failed. Free suites: `tests/v2/activity_check.py`,
+sidecar, written only while `thread.json`/`task.json` still exists (under
+the store lock, as `mirror._save` does) so it never resurrects a deleted
+one; no sidecar is idle, so nothing from before turned blue. A task's own
+threads are never unread or failed. **An answer older than a record must not
+undo it** (`ActivitySync` in `lib/activity.ts`): records heard while `GET
+/activity` is in flight are replayed over the snapshot, and `/seen`'s own
+answer is drawn unless that row heard something newer. Free suites: `tests/v2/activity_check.py`,
 `hud/src/lib/activity.test.ts`, `tests/face/hud_v2_activity_check.py`.
 
 Per-thread model (2026-10-06, decisions A, design §8.1/§12.1/§18): **a chat

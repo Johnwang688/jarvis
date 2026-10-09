@@ -37,7 +37,8 @@
 // lib/activity.ts): `·` idle, a pulsing ring and a sweeping row while it
 // works, yellow when it waits for the owner, blue when it finished unread, a
 // red ⚠ when it failed. A task row shows its phase this way too (the phase
-// word is its tooltip), and a collapsed project shows its most urgent one.
+// word is its tooltip), and a collapsed project shows its most urgent one at
+// the row's end. Each dot has a fixed slot: no status moves a name.
 
 import { useEffect, useRef, useState } from "react";
 import type { Project, Task, TaskThread, Thread } from "../types";
@@ -305,7 +306,6 @@ export function Sidebar(props: {
                 }}
               >
                 <span className="tw">{open ? "▾" : "▸"}</span>
-                {folded !== "idle" ? <Dot status={folded} testid={`project-activity-${p.id}`} /> : null}
                 {renaming?.kind === "project" && renaming.id === p.id ? (
                   <InlineRename
                     value={p.name}
@@ -332,6 +332,11 @@ export function Sidebar(props: {
                     WIN
                   </span>
                 ) : null}
+                {/* At the row's end, always there: a dot coming or going never
+                    moves the name, and the name stays level with the others. */}
+                <span className="slot end">
+                  {folded !== "idle" ? <Dot status={folded} testid={`project-activity-${p.id}`} /> : null}
+                </span>
                 <button
                   type="button"
                   className="menu"
@@ -458,7 +463,9 @@ export function Sidebar(props: {
                           }}
                         >
                           <span className="tw">{tOpen ? "▾" : "▸"}</span>
-                          <Dot status={activity.tasks[t.id] || "idle"} testid={`activity-${t.id}`} />
+                          <span className="slot">
+                            <Dot status={activity.tasks[t.id] || "idle"} testid={`activity-${t.id}`} />
+                          </span>
                           <span className="nm">{t.brief.slice(0, 40)}</span>
                         </div>
                         {tOpen
