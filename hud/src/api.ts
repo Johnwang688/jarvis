@@ -13,6 +13,7 @@ import type {
 import type { ThreadModels } from "./lib/threadmodel";
 import type { RosterView } from "./lib/roster";
 import type { ArchiveView, DeleteResult, ProjectImpact } from "./types";
+import { parseActivity, type ActivityView } from "./lib/activity";
 
 export class ApiError extends Error {
   status: number;
@@ -90,6 +91,11 @@ export const api = {
   send: (id: string, body: { text: string; images?: string[]; attachments?: Attachment[]; spoken?: boolean }) =>
     req<SendResult>(`/threads/${id}/send`, json(body)),
   interrupt: (id: string) => req<any>(`/threads/${id}/interrupt`, json({})),
+  /** The sidebar dots (2026-10-08): every thread and task that is not idle. */
+  activity: () => req<any>("/activity").then(parseActivity) as Promise<ActivityView>,
+  /** The owner opened it: no longer unread or failed. */
+  seenThread: (id: string) => req<{ status: string }>(`/threads/${id}/seen`, json({})),
+  seenTask: (id: string) => req<{ status: string }>(`/tasks/${id}/seen`, json({})),
   /** Re-parent a **chat** thread; a task's threads 409 (they move with the task). */
   moveThread: (id: string, projectId: string) =>
     req<Thread>(`/threads/${id}`, patch({ project_id: projectId })),
@@ -241,10 +247,17 @@ export function subscribe(onEvent: (e: any) => void, onReopen?: () => void): () 
   const open = () => {
     if (closed) return;
     source = new EventSource("/events");
-    // Every open after the first is a reconnect: whatever was published in
-    // the gap is gone, so the window re-reads what it cannot afford to have
-    // missed (a turn finishing, above all).
+    // Every (re)connect, as a pseudo-record: what the window holds from
+    // before a daemon restart (a running turn, say) is read again. And every
+    // open after the first is a reconnect: whatever was published in the gap
+    // is gone, so the window re-reads what it cannot afford to have missed
+    // (a turn finishing, above all).
     source.onopen = () => {
+      try {
+        onEvent({ kind: "_connected" });
+      } catch {
+        /* never a crash */
+      }
       opened += 1;
       if (opened > 1) onReopen?.();
     };

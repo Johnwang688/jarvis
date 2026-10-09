@@ -43,10 +43,13 @@ class Fixture(unittest.TestCase):
         self.ledger = UsageLedger(self.stores, clock=lambda: self.now)
         self.providers = {p.value: Fake() for p in P}
         self.router = R.Router(self.stores, self.providers, self.ledger, clock=lambda: self.now, health_cache=self.cache)
-        for target, value in [("ROUTING_PATH", Path(self.tmp.name) / "routing.json")]:
+        for target, value in [("ROUTING_PATH", Path(self.tmp.name) / "routing.json"),
+                              ("CODEX_CATALOG_PATH", Path(self.tmp.name) / "codex-models.json")]:
             patcher = patch.object(config, target, value)
             patcher.start()
             self.addCleanup(patcher.stop)
+        codex_table = R.CLI_MODELS["codex"]
+        self.addCleanup(lambda: R.CLI_MODELS.__setitem__("codex", codex_table))
         for patcher in [patch.object(models, "tier", return_value="anthropic/claude-test"),
                         patch.object(models, "effort_for", return_value="high"),
                         patch.object(models, "cached_info", return_value=None)]:
@@ -204,8 +207,14 @@ class Ladder(Fixture):
         self.providers["claude"].supported_mcp_servers = {"files"}
         brief = Brief(Role.ORCHESTRATOR, self.tmp.name, mcp_servers={"git": {}})
         self.assertIn("missing MCP servers git", self.resolve(brief=brief).reason)
+        with patch.dict(R.CLI_MODELS["codex"], {"gpt-text": {"name": "Text", "efforts": ("high",),
+                                                             "vision": False}}):
+            self.project.routing.models["implementer"] = {"codex": "gpt-text/high"}
+            self.assertEqual(self.resolve("implementer", images=[{}]).provider, P.CLAUDE)
+        # A project entry naming a model Jarvis does not know degrades to the
+        # global table (vision-capable here), it does not fail the role.
         self.project.routing.models["implementer"] = {"codex": "unknown/high"}
-        self.assertEqual(self.resolve("implementer", images=[{}]).provider, P.CLAUDE)
+        self.assertEqual(self.resolve("implementer", images=[{}]).provider, P.CODEX)
 
     def test_health_drops_cache_expiry_and_exception(self):
         self.providers["claude"] = Fake((False, "login expired"), (True, "fixed"))
@@ -339,7 +348,9 @@ class Controls(Fixture):
                      # so the routing table may not name anything else either.
                      {"action": "models", "role": "reviewer", "provider": "claude", "model": "anthropic/other/xhigh"},
                      {"action": "models", "role": "reviewer", "provider": "codex", "model": "claude-opus-5-5/high"},
-                     {"action": "models", "role": "reviewer", "provider": "codex", "model": "gpt-6-astra/max"},
+                     {"action": "models", "role": "reviewer", "provider": "codex", "model": "gpt-6-luna/ultra"},
+                     {"action": "models", "role": "reviewer", "provider": "claude", "model": "roster/ultra"},
+                     {"action": "models", "role": "reviewer", "provider": "claude", "model": "claude-opus-5-5/ultra"},
                      {"action": "models", "role": "reviewer", "provider": "claude", "model": "claude-haiku-4-5/high"}]:
             with self.assertRaises(ValueError):
                 self.router.configure(body)
@@ -347,11 +358,14 @@ class Controls(Fixture):
                          "claude-sonnet-5-5/xhigh", "a refused model writes nothing")
         for good in ("roster/default", "claude-haiku-4-5/default", "claude-opus-5-5/max"):
             self.router.configure({"action": "models", "role": "reviewer", "provider": "claude", "model": good})
-        # A hand-edited routing.json is held to the same list.
+        # A hand-edited routing.json is held to the same list: the entry it
+        # cannot use falls back to that role's default, with a note, rather
+        # than making the whole table unreadable (PR #20 review).
         config.ROUTING_PATH.write_text(json.dumps({"models": {"reviewer": {"codex": "gpt-9-imaginary/high"}}}))
-        with self.assertRaises(ValueError) as refused:
-            R.load_routing()
-        self.assertIn("gpt-9-imaginary is not a codex model", str(refused.exception))
+        notes = []
+        loaded = R.load_routing(notes=notes)
+        self.assertEqual(loaded["models"]["reviewer"]["codex"], R.defaults()["models"]["reviewer"]["codex"])
+        self.assertIn("gpt-9-imaginary is not a codex model", " ".join(notes))
         self.assertFalse(list(Path(self.tmp.name).glob("*.tmp")))
 
     def test_http_happy_and_400(self):
@@ -385,6 +399,361 @@ class Controls(Fixture):
             self.assertIn("table", json.loads(output.getvalue()))
         with patch("sys.argv", ["jarvis", "route", "set", "bad", "codex"]), patch.object(config, "DAEMON_PORT", self.daemon.port), redirect_stdout(io.StringIO()):
             self.assertEqual(command.main(), 1)
+
+
+
+def live_rows(*ids, ladder=("low", "medium", "high", "xhigh", "max", "ultra"), **extra):
+    """`model/list` rows as the account's app-server sends them."""
+    return [{"model": m, "displayName": m.upper(), "hidden": False, "inputModalities": ["text", "image"],
+             "supportedReasoningEfforts": [{"reasoningEffort": e} for e in ladder],
+             "defaultReasoningEffort": "medium", **extra} for m in ids]
+
+
+LIVE = live_rows("gpt-6.1-sol", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-sol",
+                 "gpt-5.6-terra", "gpt-5.6-luna")   # gpt-5.5 is hidden from the live listing
+
+
+class CodexCatalog(Controls):
+    """PR #20 review: the Codex table moved under persisted config. The table
+    is the account's last good catalog, else the built-in fallback — replaced
+    whole, never a union. What was saved naming a model it lacks degrades to
+    the default with a note, an effort a model no longer offers is clamped,
+    and nothing is ever rewritten, so the choice returns with the model."""
+
+    def restart(self):
+        """What a daemon restart does to the table before `main()` loads the
+        saved catalog: the built-in fallback."""
+        R.CLI_MODELS["codex"] = {m: dict(e) for m, e in R.CODEX_FALLBACK.items()}
+
+    def test_the_offline_ladders_match_the_live_catalog(self):
+        self.restart()
+        for value in ("gpt-6-astra/max", "gpt-6-astra/ultra", "gpt-5.6-sol/ultra", "gpt-5.6-terra/ultra",
+                      "gpt-6.1-sol/ultra", "gpt-6-sol/ultra", "gpt-6-luna/max", "gpt-5.6-luna/max"):
+            self.assertEqual(R._cli_model("codex", value)[1], value.rsplit("/", 1)[1], value)
+        for value in ("gpt-6-luna/ultra", "gpt-5.6-luna/ultra", "gpt-5.5/max"):
+            with self.assertRaises(ValueError, msg=value):
+                R._cli_model("codex", value)
+
+    def test_scenario_a_a_live_only_entry_survives_a_restart(self):
+        R.set_codex_models(live_rows("gpt-7-nova") + LIVE)
+        self.router.configure({"action": "models", "role": "implementer", "provider": "codex",
+                               "model": "gpt-7-nova/ultra"})
+        self.restart()
+        self.assertIsNotNone(R.load_codex_catalog())
+        notes = []
+        self.assertEqual(R.load_routing(notes=notes)["models"]["implementer"]["codex"], "gpt-7-nova/ultra")
+        self.assertEqual(notes, [])
+        self.assertEqual(R.model_settings("implementer", "codex"), ("gpt-7-nova", "ultra"))
+        # Without the saved catalog the entry degrades, said, never raised,
+        # and routing.json still holds it.
+        config.CODEX_CATALOG_PATH.unlink()
+        self.restart()
+        self.assertIsNone(R.load_codex_catalog())
+        notes = []
+        loaded = R.load_routing(notes=notes)
+        self.assertEqual(loaded["models"]["implementer"]["codex"], R.defaults()["models"]["implementer"]["codex"])
+        self.assertIn("gpt-7-nova is not a codex model", " ".join(notes))
+        self.assertEqual(json.loads(config.ROUTING_PATH.read_text())["models"]["implementer"]["codex"],
+                         "gpt-7-nova/ultra", "never rewritten")
+        self.resolve("implementer")                      # a task still routes
+        self.start()
+        for path in ("/route", "/usage"):
+            self.assertEqual(self.request("GET", path)[0], 200, path)
+        status, view = self.request("GET", "/route")
+        self.assertIn("gpt-7-nova is not a codex model", " ".join(view["notes"]))
+
+    def test_scenario_b_a_dropped_model_degrades_and_comes_back(self):
+        self.router.configure({"action": "models", "role": "implementer", "provider": "codex",
+                               "model": "gpt-5.5/high"})
+        stored = config.ROUTING_PATH.read_text()
+        R.set_codex_models(LIVE + [{"model": "gpt-5.5", "hidden": True}])
+        self.assertNotIn("gpt-5.5", R.CLI_MODELS["codex"], "replaced whole: no union")
+        notes = []
+        self.assertEqual(R.load_routing(notes=notes)["models"]["implementer"]["codex"],
+                         R.defaults()["models"]["implementer"]["codex"])
+        self.assertIn("gpt-5.5 is not a codex model", " ".join(notes))
+        self.task.provider_override = P.CODEX
+        self.resolve("implementer")
+        journal = [r for r in self.stores.tasks.read_journal(self.task.id) if r["event"] == "routing_decision"]
+        self.assertEqual((journal[-1]["model"], journal[-1]["effort"]), ("gpt-5.6-sol", "high"))
+        self.assertEqual(config.ROUTING_PATH.read_text(), stored, "never rewritten")
+        # The account offers it again: the owner's choice is back.
+        R.set_codex_models(LIVE + live_rows("gpt-5.5", ladder=("low", "medium", "high")))
+        self.assertEqual(R.model_settings("implementer", "codex"), ("gpt-5.5", "high"))
+
+    def test_a_saved_effort_the_model_no_longer_offers_is_clamped(self):
+        """Option 1: clamp, don't refuse. gpt-6-astra/ultra saved while the
+        account offered it; a catalog whose astra stops at xhigh runs xhigh,
+        says so, and keeps ultra in the file for when it returns."""
+        self.router.configure({"action": "models", "role": "orchestrator", "provider": "codex",
+                               "model": "gpt-6-astra/ultra"})
+        R.set_codex_models(live_rows("gpt-6-astra", ladder=("low", "medium", "high", "xhigh")) + LIVE[2:])
+        notes = []
+        self.assertEqual(R.model_settings("orchestrator", "codex", notes=notes), ("gpt-6-astra", "xhigh"))
+        self.assertIn("gpt-6-astra does not offer effort 'ultra' now; running at xhigh", " ".join(notes))
+        self.assertEqual(json.loads(config.ROUTING_PATH.read_text())["models"]["orchestrator"]["codex"],
+                         "gpt-6-astra/ultra")
+        # A project's own entry clamps the same way.
+        self.project.routing.models["reviewer"] = {"codex": "gpt-6-astra/max"}
+        self.assertEqual(R.model_settings("reviewer", "codex", self.project), ("gpt-6-astra", "xhigh"))
+
+    def test_the_table_is_the_last_catalog_never_a_union(self):
+        R.set_codex_models(live_rows("gpt-7-nova", "gpt-6-astra"))
+        R.set_codex_models(live_rows("gpt-6-astra"))
+        self.assertEqual(set(R.CLI_MODELS["codex"]), {"gpt-6-astra"})
+        with self.assertRaises(ValueError):
+            R.check_project_models({"implementer": {"codex": "gpt-7-nova/ultra"}})
+        self.restart()
+        R.load_codex_catalog()
+        self.assertEqual(set(R.CLI_MODELS["codex"]), {"gpt-6-astra"}, "the saved catalog is the last one")
+
+    def test_a_bad_routing_file_degrades_and_post_route_repairs_it(self):
+        bad = {"chains": {"reviewer": ["fast"], "janitor": ["codex"]},
+               "models": {"implementer": {"codex": "gpt-9/high", "fast": "x/high"},
+                          "reviewer": {"codex": "gpt-6-astra/turbo", "claude": "roster/ultra"},
+                          "researcher": {"codex": "gpt-6-astra/low"}},
+               "no_new_work": 7, "allowances": {"codex": {"work_tokens": -1}, "mystery": {}},
+               "surprise": True}
+        config.ROUTING_PATH.write_text(json.dumps(bad))
+        notes = []
+        loaded = R.load_routing(notes=notes)
+        defaults = R.defaults()
+        self.assertEqual(loaded["chains"]["reviewer"], defaults["chains"]["reviewer"])
+        self.assertEqual(loaded["models"]["implementer"], defaults["models"]["implementer"])
+        self.assertEqual(loaded["models"]["reviewer"], defaults["models"]["reviewer"])
+        self.assertEqual(loaded["models"]["researcher"]["codex"], "gpt-6-astra/low", "the good entry is kept")
+        self.assertEqual((loaded["no_new_work"], loaded["allowances"]),
+                         (defaults["no_new_work"], defaults["allowances"]))
+        joined = " | ".join(notes)
+        for words in ("surprise", "chains.reviewer", "chains.janitor", "gpt-9 is not a codex model",
+                      "models.implementer.fast", "models.reviewer.codex", "claude takes no effort 'ultra'",
+                      "no_new_work", "allowances.codex", "allowances.mystery"):
+            self.assertIn(words, joined)
+        self.start()
+        for path in ("/route", "/usage"):
+            self.assertEqual(self.request("GET", path)[0], 200, path)
+        # POST /route reads the table before writing it; it must still work,
+        # and it keeps a well-formed entry it was not asked about.
+        bad["models"]["reviewer"]["codex"] = "gpt-7-later/high"
+        config.ROUTING_PATH.write_text(json.dumps(bad))
+        status, _ = self.request("POST", "/route", {"action": "models", "role": "implementer",
+                                                    "provider": "codex", "model": "gpt-6-astra/high"})
+        self.assertEqual(status, 200)
+        written = json.loads(config.ROUTING_PATH.read_text())
+        self.assertEqual(written["models"]["implementer"]["codex"], "gpt-6-astra/high")
+        self.assertEqual(written["models"]["reviewer"]["codex"], "gpt-7-later/high", "never erased")
+        self.assertNotIn("surprise", written)
+        self.assertEqual(written["chains"]["reviewer"], defaults["chains"]["reviewer"])
+        # A file that is not JSON at all is replaced by the next write.
+        config.ROUTING_PATH.write_text("{ not json")
+        self.assertEqual(R.load_routing(), defaults)
+        self.assertEqual(self.request("GET", "/route")[0], 200)
+        status, view = self.request("POST", "/route", {"action": "set", "role": "reviewer", "chain": "codex"})
+        self.assertEqual((status, view["table"]["chains"]["reviewer"]), (200, ["codex"]))
+        self.assertEqual(R.load_routing(notes=[])["chains"]["reviewer"], ["codex"])
+
+    def test_roster_takes_only_its_own_clis_efforts(self):
+        self.assertEqual(R._cli_model("claude", "roster/max"), ("roster", "max"))
+        self.assertEqual(R._cli_model("codex", "roster/ultra"), ("roster", "ultra"))
+        for value in ("roster/ultra", "roster/minimal", "roster/none"):
+            with self.assertRaises(ValueError, msg=value):
+                R._cli_model("claude", value)
+        with self.assertRaises(ValueError):
+            R.check_project_models({"implementer": {"claude": "roster/ultra"}})
+        # A table handed in, not loaded, is held to the same rule.
+        table = R.defaults()
+        table["models"]["implementer"]["claude"] = "roster/ultra"
+        notes = []
+        self.assertEqual(R.model_settings("implementer", "claude", None, table, notes=notes), (None, None))
+        self.assertIn("claude takes no effort 'ultra'", " ".join(notes))
+
+    def test_hostile_catalog_rows_are_skipped_or_cleaned(self):
+        from jarvis.v2 import codex_catalog as C
+        before = dict(R.CLI_MODELS["codex"])
+        for rows in (None, "rows", [], [None, 5, "x", {"id": 5}, {"model": "bad id"}, {"model": "x" * 200},
+                                        {"model": "gpt-‮evil"}, {"model": "-leading"}]):
+            with self.assertRaises(ValueError, msg=rows):
+                R.set_codex_models(rows)
+            self.assertEqual(R.CLI_MODELS["codex"], before, "a refused catalog changes nothing")
+        self.assertFalse(config.CODEX_CATALOG_PATH.exists(), "and saves nothing")
+        rows = [
+            {"model": "a\x1b[31mb", "displayName": "control"},
+            {"model": "gpt-ok", "displayName": "‮evil​ name\n" + "D" * 2_000_000,
+             "supportedReasoningEfforts": [{"reasoningEffort": "turbo"}, "high", {"reasoningEffort": "high"},
+                                           {"reasoningEffort": "default"}, None],
+             "inputModalities": None},
+            {"model": "gpt-ok", "displayName": "second copy"},
+            {"model": "gpt-6-astra"},
+            {"model": "gpt-text", "inputModalities": ["text"]},
+            {"model": "gpt-hidden", "hidden": True},
+            {"model": "gpt-hidden-ish", "hidden": "yes"},
+            {"id": "gpt-by-id", "displayName": "   "},
+        ]
+        parsed = R.set_codex_models(rows)
+        self.assertEqual(list(parsed), ["gpt-ok", "gpt-6-astra", "gpt-text", "gpt-by-id"])
+        ok = parsed["gpt-ok"]
+        self.assertLessEqual(len(ok["name"]), C.MAX_NAME)
+        self.assertTrue(ok["name"].startswith("evil name"), ok["name"])
+        self.assertFalse(any(ord(c) < 32 or c in "‮​" for c in ok["name"]))
+        self.assertEqual(ok["efforts"], ("high",))
+        # No modalities is not evidence of sight, whoever the model is.
+        self.assertFalse(ok["vision"])
+        self.assertFalse(parsed["gpt-6-astra"]["vision"])
+        self.assertFalse(parsed["gpt-text"]["vision"])
+        self.assertEqual(parsed["gpt-by-id"]["name"], "gpt-by-id")
+        self.assertNotIn("gpt-hidden", R.CLI_MODELS["codex"])
+        self.assertNotIn("gpt-hidden-ish", R.CLI_MODELS["codex"], "anything but an explicit false hides")
+        many = R.set_codex_models(live_rows(*(f"m{n}" for n in range(C.MAX_MODELS + 50))))
+        self.assertEqual(len(many), C.MAX_MODELS)
+
+    def test_the_saved_catalog_is_atomic_private_and_read_back_validated(self):
+        R.set_codex_models(live_rows("gpt-7-nova", "gpt-6-astra"))
+        path = config.CODEX_CATALOG_PATH
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        self.assertEqual([p.name for p in path.parent.iterdir() if p.name.startswith(f".{path.name}.")], [])
+        saved = json.loads(path.read_text())
+        self.assertEqual([row["model"] for row in saved["models"]], ["gpt-7-nova", "gpt-6-astra"])
+        # The file goes through the same parser as the live response: a
+        # tampered row is skipped, a strange one cleaned.
+        saved["models"].append({"model": "evil id", "displayName": "x",
+                                "supportedReasoningEfforts": [{"reasoningEffort": "high"}]})
+        saved["models"].append({"model": "gpt-odd", "displayName": "x",
+                                "supportedReasoningEfforts": ["warp", "low"], "inputModalities": "image"})
+        path.write_text(json.dumps(saved))
+        self.restart()
+        table = R.load_codex_catalog()
+        self.assertNotIn("evil id", table)
+        self.assertEqual((table["gpt-odd"]["efforts"], table["gpt-odd"]["vision"]), (("low",), False))
+        # A corrupt file is the built-in fallback.
+        for raw in (b"{ not json", b"[]", b'{"models": 5}', b'{"version": 1, "models": []}',
+                    b'{"version": 9, "models": [{"model": "gpt-x"}]}', b"\xff\xfe"):
+            R.set_codex_models(live_rows("gpt-7-nova"))     # then a restart reads garbage
+            path.write_bytes(raw)
+            self.restart()
+            self.assertIsNone(R.load_codex_catalog(), raw)
+            self.assertEqual(set(R.CLI_MODELS["codex"]), set(R.CODEX_FALLBACK), raw)
+        path.write_bytes(b" " * (2 * 1024 * 1024))
+        self.assertIsNone(R.load_codex_catalog(), "an oversized file is not read")
+        # A save that fails keeps the table it installed, and says so.
+        with patch("jarvis.v2.codex_catalog._write_bytes", side_effect=R.StoreError("disk full")), \
+                self.assertLogs("jarvis.v2.codex_catalog", "WARNING") as logged:
+            R.set_codex_models(live_rows("gpt-7-nova"))
+        self.assertIn("gpt-7-nova", R.CLI_MODELS["codex"])
+        self.assertIn("not written (StoreError)", " ".join(logged.output))
+        self.assertNotIn("disk full", " ".join(logged.output), "error class only")
+
+    def load_in_child(self, path):
+        """`codex_catalog.load(path)` in a child process with a 1 GB address
+        space and a time limit, so a loader that reads `/dev/zero` or blocks
+        on a FIFO fails this test instead of eating the machine or the run."""
+        import os
+        import resource
+        import subprocess
+        import sys
+
+        def limit():
+            resource.setrlimit(resource.RLIMIT_AS, (1 << 30, 1 << 30))
+
+        code = ("import sys, json\nfrom jarvis.v2 import codex_catalog as C\n"
+                "print(json.dumps(C.load(sys.argv[1]) is None))")
+        try:
+            run = subprocess.run([sys.executable, "-c", code, str(path)], capture_output=True, text=True,
+                                 timeout=20, preexec_fn=limit, env=dict(os.environ))
+        except subprocess.TimeoutExpired:
+            self.fail(f"loading {path} hung")
+        self.assertEqual((run.returncode, run.stdout.strip()), (0, "true"), run.stderr[-500:])
+        return run
+
+    def test_the_cache_loader_refuses_special_files(self):
+        """PR #20 re-review: the loader runs at daemon start. A FIFO planted at
+        the path hung boot; a symlink to /dev/zero (size 0) read until
+        MemoryError, which `main()` did not catch — a crash loop under
+        systemd. Only a regular file, never followed through a symlink and
+        never read past the cap, is loaded; anything else is the fallback."""
+        import os
+        import time
+        from jarvis.v2 import codex_catalog as C
+        from jarvis.v2 import daemon as D
+        root = Path(self.tmp.name)
+        fifo = root / "fifo.json"
+        os.mkfifo(fifo)
+        self.load_in_child(fifo)        # bounded first: a broken loader fails, not hangs
+        started = time.monotonic()
+        self.assertIsNone(C.load(fifo))
+        self.assertLess(time.monotonic() - started, 2, "a FIFO is refused, not waited on")
+        zero = root / "zero.json"
+        zero.symlink_to("/dev/zero")
+        self.load_in_child(zero)
+        self.assertIsNone(C.load(zero))
+        self.assertIsNone(C.load("/dev/zero"), "a character device is not read")
+        # A symlink is not followed even to a good catalog.
+        R.set_codex_models(live_rows("gpt-7-nova"))
+        good = config.CODEX_CATALOG_PATH
+        link = root / "link.json"
+        link.symlink_to(good)
+        self.assertIsNone(C.load(link))
+        self.assertIn("gpt-7-nova", C.load(good))
+        # Oversized: refused by size before reading, and by count when the
+        # size lies (a file grown past the cap reads as too large).
+        big = root / "big.json"
+        big.write_bytes(b" " * (C.MAX_CACHE_BYTES + 1))
+        self.assertIsNone(C.load(big))
+        with patch.object(C.os, "fstat", side_effect=lambda fd, real=os.fstat: os.stat_result(
+                real(fd)[:6] + (0,) + real(fd)[7:])):
+            self.assertIsNone(C.load(big), "a size of 0 that is not true is still capped")
+        # Whatever the loader raises, the daemon starts on the fallback.
+        self.restart()
+        for exc in (MemoryError(), RuntimeError("odd"), OSError("io")):
+            with patch.object(R, "load_codex_catalog", side_effect=exc), \
+                    self.assertLogs("jarvis.v2.daemon", "WARNING") as logged:
+                self.assertFalse(D.load_codex_catalog_at_start())
+            self.assertIn(f"not loaded ({type(exc).__name__})", " ".join(logged.output))
+            self.assertEqual(set(R.CLI_MODELS["codex"]), set(R.CODEX_FALLBACK))
+        config.CODEX_CATALOG_PATH.unlink()
+        os.mkfifo(config.CODEX_CATALOG_PATH)
+        self.assertFalse(D.load_codex_catalog_at_start())
+        self.assertEqual(set(R.CLI_MODELS["codex"]), set(R.CODEX_FALLBACK))
+
+    def test_a_missing_built_in_default_is_said_not_changed(self):
+        """PR #20 re-review: if the account drops a routing default (astra,
+        5.6-sol), it is still what runs — there is nothing to fall back to —
+        but `GET /route` says so instead of a turn failing unexplained."""
+        R.set_codex_models(live_rows("gpt-6.1-sol", "gpt-5.6-sol"))
+        notes = []
+        self.assertEqual(R.model_settings("orchestrator", "codex", notes=notes), ("gpt-6-astra", "xhigh"))
+        self.assertIn("the built-in default gpt-6-astra is not a codex model the account offers now",
+                      " ".join(notes))
+        self.start()
+        status, view = self.request("GET", "/route")
+        self.assertEqual(status, 200)
+        text = " ".join(view["notes"])
+        self.assertIn("orchestrator.codex: the built-in default gpt-6-astra", text)
+        self.assertIn("reviewer.codex: the built-in default gpt-6-astra", text)
+        self.assertNotIn("implementer.codex", text, "gpt-5.6-sol is offered")
+        self.assertNotIn("claude", text, "roster/default names no model")
+        self.assertEqual(view["table"]["resolved_models"]["orchestrator"]["codex"],
+                         {"model": "gpt-6-astra", "effort": "xhigh"}, "what runs does not change")
+        # An owner's entry for the role silences it.
+        self.router.configure({"action": "models", "role": "orchestrator", "provider": "codex",
+                               "model": "gpt-6.1-sol/high"})
+        status, view = self.request("GET", "/route")
+        self.assertNotIn("orchestrator.codex", " ".join(view["notes"]))
+
+    def test_ultra_never_reaches_claude(self):
+        """`ultra` is Codex's alone: no Claude routing entry carries it, saved
+        or new, roster or not, so no Claude brief is ever built with it."""
+        for value in ("roster/ultra", "claude-opus-5-5/ultra"):
+            with self.assertRaises(ValueError, msg=value):
+                R._cli_model("claude", value)
+        config.ROUTING_PATH.write_text(json.dumps({"models": {
+            "implementer": {"claude": "roster/ultra"}, "reviewer": {"claude": "claude-opus-5-5/ultra"}}}))
+        for role in R.ROLES:
+            self.assertNotEqual(R.model_settings(role, "claude")[1], "ultra", role)
+        self.assertEqual(R.model_settings("reviewer", "claude"), ("claude-opus-5-5", None),
+                         "clamps to nothing on Claude's ladder: the model's own default")
+        self.project.routing.models["orchestrator"] = {"claude": "claude-sonnet-5-5/ultra"}
+        self.assertEqual(R.model_settings("orchestrator", "claude", self.project), ("claude-sonnet-5-5", None))
+
 
 
 if __name__ == "__main__":

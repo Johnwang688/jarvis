@@ -965,6 +965,11 @@ def panels_checks(page, mock):
     page.wait_for_selector('[data-testid="routing-readonly"]')
     check("the routing table is in settings",
           "orchestrator" in page.locator('[data-testid="routing-readonly"]').inner_text())
+    warned = page.locator('[data-testid="route-notes"]')
+    check("a saved route that runs differently now is said in settings, as text",
+          warned.count() == 1 and "gpt-5.5 is not a codex model" in warned.inner_text()
+          and "<b>until</b>" in warned.inner_text() and warned.locator("b").count() == 0,
+          warned.inner_text()[:300] if warned.count() else "missing")
     page.locator('[data-testid="picker-close"]').click()
     until(lambda: page.locator('[data-testid="picker"]').count() == 0)
 
@@ -2191,6 +2196,8 @@ def main():
 
             window_checks(page, mock)
             sidebar_checks(page, mock)
+            from tests.face.hud_v2_activity_check import activity_checks
+            activity_checks(page, mock, check, until, expand, boot)
             chat_checks(page, mock)
             # PR C: the chat's place on Discord, and messages typed there.
             from tests.face.hud_v2_mirror_check import mirror_checks

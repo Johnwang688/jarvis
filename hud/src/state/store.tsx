@@ -9,6 +9,7 @@ import type {
   Thread, ToolOp, Usage, RouteView, DiscordStatus } from "../types";
 import { DEFAULT_MODE, type DictationMode } from "../lib/dictation";
 import { activeProjectId, type Compose } from "../lib/compose";
+import { NO_ACTIVITY, applyActivity, type ActivityView } from "../lib/activity";
 
 export type Tab = "chat" | "task" | "file" | "diff" | "preview";
 export type OrbState =
@@ -21,6 +22,8 @@ export interface State {
   threads: Thread[];
   tasks: Task[];
   taskThreads: Record<string, TaskThread[]>;
+  /** The sidebar dots: what each thread and task is doing (lib/activity.ts). */
+  activity: ActivityView;
   /** The conversation is exactly one of: an existing thread (`threadId`), or
    * a new thread being composed (`compose`). There is no stored project;
    * `currentProject` derives it, so the sidebar cannot drift from where a
@@ -68,7 +71,7 @@ export interface State {
 }
 
 export const initialState: State = {
-  projects: [], platforms: {}, threads: [], tasks: [], taskThreads: {},
+  projects: [], platforms: {}, threads: [], tasks: [], taskThreads: {}, activity: NO_ACTIVITY,
   threadId: null, compose: null, taskId: null, taskFocus: false, turnThreadId: null, tab: "chat",
   messages: [], draft: "", ops: [], approvals: [], usage: null, discord: null, schedules: [],
   route: null, avatar: null, wakePatterns: [], dictation: DEFAULT_MODE,
@@ -90,7 +93,8 @@ export type Action =
   | { type: "approval_add"; request: ApprovalRequest }
   | { type: "approval_drop"; req_id: string }
   | { type: "task_upsert"; task: Task }
-  | { type: "thread_patch"; id: string; patch: Partial<Thread> };
+  | { type: "thread_patch"; id: string; patch: Partial<Thread> }
+  | { type: "activity"; record: any };
 
 export function reduce(s: State, a: Action): State {
   switch (a.type) {
@@ -167,6 +171,12 @@ export function reduce(s: State, a: Action): State {
       // handler's closure) would undo every update that landed in between.
       if (!s.threads.some((t) => t.id === a.id)) return s;
       return { ...s, threads: s.threads.map((t) => (t.id === a.id ? { ...t, ...a.patch, id: t.id } : t)) };
+
+    case "activity": {
+      // Folded into the map as it is now, for the thread_patch reason.
+      const activity = applyActivity(s.activity, a.record);
+      return activity === s.activity ? s : { ...s, activity };
+    }
   }
 }
 

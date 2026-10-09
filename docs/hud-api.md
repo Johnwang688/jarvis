@@ -127,6 +127,22 @@ since the v1 face and the v2 daemon are separate processes.
   own usage endpoint when a subscription login is present. The login
   token is not part of this response. A missing login, a 401, or a body
   without those windows is `quota: null`.
+  *2026-10-09 (PR #20):* Codex's windows are also read without a turn,
+  from the account's `account/rateLimits/read`. `GET /usage` and
+  `GET`/`POST /thread-models` **start** a refresh — one short-lived
+  app-server reading `model/list` and the quota — on a background thread
+  when one is due, and answer at once from the last snapshot; a refresh
+  that changed something publishes `codex_metadata` on `/events`, and the
+  HUD re-reads `/usage` and `/thread-models`. At most one runs at a time,
+  at most every 5 minutes, a failure waits the same 5 minutes, and a turn
+  holding Codex's login lock makes it wait 30 s instead (`MetadataBusy`,
+  decided before the CLI is probed). The whole app-server session has one
+  10 s deadline, since it holds that lock. The two halves are independent:
+  a failed `model/list` still lands the quota, and the reverse. A quota
+  read is merged like a turn's notification: a null or empty report never
+  clears a window, and a limit id learned from a turn is kept. `/usage`
+  reads only `no_new_work` and `allowances` from `routing.json`, never the
+  routing table, so a table at odds with the catalog cannot blank it.
 
 ## Schedules
 
@@ -303,6 +319,29 @@ of a turn. The choice is stored on the Thread record (`model`, `effort`);
   effort}` as stored, `effort: null` = the model's own default; or null) and
   `builtin` (`{model, effort}`, what a reset returns to; null for
   OpenRouter); every model row carries `default_effort`.
+  *2026-10-09 (PR #20):* the Codex list is **dynamic**: the signed-in
+  account's own `model/list` catalog (hidden rows dropped; ids of slug
+  characters only; names one cleaned line of at most 64 characters; only
+  Codex's effort words; `vision` only where `inputModalities` lists
+  `image`), installed whole — never a union — by a background refresh (see
+  `GET /usage`), saved atomically to `config.CODEX_CATALOG_PATH`
+  (`~/.local/share/jarvis/codex-models.json`) and loaded when `daemon2`
+  starts, so a restart and a Discord-only daemon use it too. The file is
+  protected state (no agent write tool may touch it) and is read only if it
+  is a regular file, not through a symlink, and within its cap. Until then,
+  or when the file is missing, corrupt or anything else (it is parsed with
+  the same caps as the live response), the list is the built-in
+  `router.CODEX_FALLBACK`,
+  whose ladders match what the account advertised on 2026-10-08 (astra,
+  both Sols and Terra reach `ultra`). `default_effort` is A4's — `high`,
+  clamped to the model's ladder — never the default Codex advertises.
+  `ultra` is a Codex level only: OpenRouter and Claude refuse it, the HUD
+  never offers it for them, and a record that holds it anyway runs at the
+  model's default. A HUD Codex default naming a model the catalog no longer
+  lists runs routing's default for the turn and says so in `note`; the
+  stored choice is never rewritten and applies again when the model returns.
+  A pinned thread keeps its model; an effort its ladder no longer has is
+  clamped down to the nearest one it has.
 - `POST /thread-models` `{"provider": "claude" | "codex", "model": id,
   "effort"?: level}` → the new `GET /thread-models` payload. Sets the
   default every **default** Claude or Codex chat thread runs on from its
@@ -626,3 +665,77 @@ runs, because the runner retries on exactly that.
   carries `"message_id"` and, when it says something, `"mark"`: `"steering"`,
   `"queued"` (still waiting, in the live queue) or `"not sent"` (dropped — or
   left waiting by a crash or restart, after which nothing waits any more).
+
+## Additions 2026-10-08 (sidebar status dots)
+
+- `GET /activity` → `{"threads": {<id>: status}, "tasks": {<id>: status}}`,
+  every thread and task that is **not** idle. `status` is one of `working`
+  (a turn is running; a task in clarifying, planned, running or verifying),
+  `needs_input` (an approval or provider question is open on the thread, or
+  on any of a task's threads; a task that is blocked, or clarifying with a
+  blocking question — outranks working), `unread` (a chat thread's last
+  turn, or a task that is done, not yet opened), `failed` (the same for a
+  turn that ended `stop: "error"`, or a failed task) or `idle`. An
+  interrupted turn, a cancelled task and a task in intake (waiting for the
+  owner to press Start) are idle. A task's own threads are never unread or
+  failed: the task row carries the outcome. A provider question closes with
+  its turn; a broker approval does not (the escape hatch raises one after
+  `turn_finished`, and an interrupted turn can end with its permit still
+  blocked), so it counts until its `approval_resolved` — published on a
+  resolve, a timeout and a shutdown alike.
+- `POST /threads/{id}/seen` and `POST /tasks/{id}/seen`, body `{}` →
+  `{"status": <its status now>}`. The owner opened it: unread and failed
+  become idle. The HUD calls them on opening a thread (chat tab) or task
+  (task tab), and when one finishes while open in a visible window, and
+  draws the answer at once (the `activity` record may not reach a window
+  whose stream is reconnecting) unless a record for that row, or a snapshot
+  sent after the call, has arrived since. A sidecar that cannot be written
+  is logged, never a 500, and never recreates a deleted thread or task.
+- SSE **`activity`** `{kind: "activity", data: {of: "thread" | "task", id,
+  project_id, status}}`, published whenever a status changes, after the
+  record that caused it. A task is followed from `task_created`; a new
+  task's idle (intake) is not published, since no window holds a status for
+  a task that did not exist. `project_id` is
+  where the thread or task is when the record goes out, so a moved thread's
+  records name its new project. The ids are inside `data` on purpose: a
+  stream filtered by `?thread=` or `?project=` never carries it. Since a
+  status is published on change only, the HUD replays every record that
+  arrives while a `GET /activity` is in flight over that snapshot when it
+  lands; applied as-is, the older snapshot would undo them for good.
+- Running turns and open asks are in memory (a restart ends both); what was
+  last finished and what was seen are in `threads/<id>/activity.json` and
+  `tasks/<id>/activity.json`. No sidecar is idle, so threads and tasks from
+  before this shipped start read.
+
+## Additions 2026-10-09 (PR #20 — routing that drifts from the Codex catalog)
+
+The Codex model table is the account's catalog (see `GET /thread-models`),
+so a model or effort saved in `routing.json` or a project's
+`routing.models` can stop being one the table offers. Nothing that reads
+the table fails because of it, and nothing saved is rewritten:
+
+- `GET /route` gains `"notes": [str]`: every saved setting that does not
+  run as written right now, in words — a model the catalog lacks (that
+  entry runs the role's default until the model returns), an effort its
+  model no longer offers (clamped down to the nearest one it has, `ultra`
+  included), or a malformed part of the file (that part's default). A
+  **built-in** routing default the catalog lacks is noted too: it still
+  runs — there is nothing to fall back to — so a turn that fails on it is
+  explained. The same notes are logged once per process. `table` and
+  `resolved_models` show what actually runs. The HUD's Settings shows the
+  notes as text.
+- `PATCH /projects/{id}` with `routing` judges only the `routing.models`
+  entries that differ from the stored project: an unchanged entry whose
+  model the catalog has since dropped round-trips (it runs as the default
+  until the model returns), and a changed one is held to the table.
+- `POST /route` builds the table it writes from the file's well-formed
+  parts, not from what runs, so it saves over a stale or corrupt table, and
+  an entry it was not asked about is kept verbatim. A **new** choice is
+  still held to the table as it is now (400 naming the model or effort).
+  `roster/<effort>` takes only an effort some model of that CLI offers:
+  `roster/ultra` on Claude is a 400.
+- `GET /usage` never reads the routing table (only `no_new_work` and
+  `allowances`, each degrading to its default).
+- `/events` carries `{"kind": "codex_metadata"}` when a background
+  refresh of Codex's catalog or quota landed; the HUD re-reads `/usage`
+  and `/thread-models`.

@@ -548,8 +548,14 @@ class FastPathProvider:
         # Which model answers is decided here, once per turn, never mid-turn:
         # a default handle follows the global picker; a pinned one stays put.
         native.agent.model = native.model or models.tier("orchestrator")
-        native.agent.effort = native.effort
-        state = _TurnState(thread_id, events, native.agent.model, native.effort)
+        # Only OpenRouter's own ladder goes on the wire: an effort it lacks
+        # (Codex's `ultra`) is dropped here, whatever handed it over, and the
+        # model's v1 default applies (PR #20 review).
+        effort = native.effort
+        if effort and effort not in models.EFFORT_LADDER:
+            effort = None
+        native.agent.effort = effort
+        state = _TurnState(thread_id, events, native.agent.model, effort)
         native.agent.on_event = state.on_event
 
         result: dict[str, Any] = {}

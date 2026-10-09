@@ -300,6 +300,10 @@ export interface RouteView {
   table: Record<string, any>;
   states: Record<string, string>;
   decisions: RoutingDecision[];
+  /** Saved routing that does not run as written right now — a model the
+   * Codex catalog lacks, a clamped effort, a malformed part — each in words
+   * (PR #20 review). routing.json itself is never rewritten. */
+  notes?: string[];
 }
 
 export interface ApprovalRequest {

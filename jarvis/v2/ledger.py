@@ -136,8 +136,10 @@ class UsageLedger:
         inferred subscription quota. No current adapter supplies one (R6).
         """
         if no_new_work is None or allowances is None:
-            from .router import load_routing
-            settings = load_routing()
+            # Only the thresholds: never the chains or models, so a routing
+            # table at odds with the model catalog cannot stop accounting.
+            from .router import usage_settings
+            settings = usage_settings()
             if no_new_work is None:
                 no_new_work = settings["no_new_work"]
             if allowances is None:
