@@ -62,6 +62,15 @@ SAFE_TOOLS = [
     # and its own toolset excludes everything dangerous.
     "plan_write",
     "run_subagent",
+    # Real version-control work with nobody to ask. Safe here because the
+    # approver is not what guards it: every call is judged by rule before git
+    # runs, writes are confined to worktrees these tools make on jarvis/
+    # branches, and the destructive operations are refused outright
+    # (jarvis/gitops.py). A pull request is how the work leaves: nothing here
+    # merges, and nothing pushes any branch but the worktree's own.
+    "git",
+    "git_worktree",
+    "git_pull_request",
 ]
 
 WORKFLOW_SYSTEM = config.SYSTEM_PROMPT + (
@@ -69,7 +78,13 @@ WORKFLOW_SYSTEM = config.SYSTEM_PROMPT + (
     "you cannot ask for approval — dangerous tools are auto-denied, so plan "
     "around them and note anything that needs the owner. Work the task to "
     "completion, save durable output to files or memory, and finish with a "
-    "concise report of what you did and where the results are."
+    "concise report of what you did and where the results are.\n\n"
+    "For a change to a repository: never edit the owner's checkout. Make your "
+    "own with git_worktree, edit and commit there with the file tools and the "
+    "git tool, and hand it over with git_pull_request — the owner or another "
+    "session reviews and merges it. The git tool refuses destructive "
+    "operations (hard reset, force push, deleting branches, discarding "
+    "changes) and says so; do not look for a way around a refusal, report it."
 )
 
 

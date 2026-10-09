@@ -92,7 +92,8 @@ NETWORK_TIMEOUT_S = 180
 MAX_OUTPUT = 20_000
 MAX_ARGS = 256
 MAX_ARG_CHARS = 20_000
-MAX_OUTGOING_COMMITS = 1000
+MAX_OUTGOING_COMMITS = 500
+MAX_PATCH_CHARS = 20_000_000
 
 # How every invocation is pinned, before the caller's arguments. Command-line
 # configuration beats every config file, so none of these can be undone by a
@@ -181,6 +182,7 @@ _PROGRAM_LONG = {
     "gpg-sign": "uses a signing key",
     "extcmd": "runs a command",
     "help": "opens a manual page or a browser",
+    "no-index": "reads files outside any repository",
 }
 _PROGRAM_EXACT_OK = frozenset({"text"})
 
@@ -442,21 +444,9 @@ def _remote_problem(name: str, ctx: RepoContext) -> str:
             "is refused — only the remotes the owner configured")
 
 
-def _read(sub: str, rest: list[str], paths: list[str]) -> Ruling:
-    extra: list[str] = []
-    if sub in _NO_EXT_DIFF:
-        extra.append("--no-ext-diff")
-    if sub in _NO_TEXTCONV:
-        extra.append("--no-textconv")
-    if not extra:
-        return Ruling(READ)
-    tail = rest + (["--"] + paths if paths else [])
-    return Ruling(READ, argv=(sub, *extra, *tail))
-
-
 def _judge_sub(sub: str, rest: list[str], paths: list[str], ctx: RepoContext) -> Ruling:
     if sub in _READS:
-        return _read(sub, rest, paths)
+        return Ruling(READ)
 
     if sub == "grep":
         options, _ = _parse(rest, "efABCm", {"max-depth", "threads", "context",
@@ -488,6 +478,8 @@ def _judge_sub(sub: str, rest: list[str], paths: list[str], ctx: RepoContext) ->
         return Ruling(READ, network=True)
 
     if sub == "config":
+        if _long_hit(rest, ("file", "blob")):
+            return _refuse("--file and --blob read a configuration file of the caller's choosing")
         if not any(t in _WRITE_FLAGS for t in rest) and (
             any(t.split("=", 1)[0] in _CONFIG_READ_FLAGS for t in rest)
             or not rest
@@ -597,10 +589,10 @@ def _judge_sub(sub: str, rest: list[str], paths: list[str], ctx: RepoContext) ->
             if _has(options, "-i", "-x", "--interactive", "--edit-todo", "--update-refs") or \
                     _long_hit(rest, ("interactive", "edit-todo", "update-refs")):
                 return _refuse("interactive rebase, --exec and --update-refs are not available here")
-            return Ruling(OWN)
+            return Ruling(OWN, check="commits")
         if sub == "pull":
             return _judge_fetch(rest, ctx, pull=True)
-        return Ruling(OWN)
+        return Ruling(OWN, check="commits")
 
     if sub == "am":
         options, _ = _parse(rest, "pC", {"directory", "exclude", "include", "patch-format",
@@ -666,15 +658,12 @@ def _judge_stash(rest: list[str]) -> Ruling:
         return Ruling(READ)
     if action in ("drop", "clear"):
         return _refuse(f"'stash {action}' destroys saved work")
-    if action in ("pop", "branch"):
-        return _refuse(f"'stash {action}' drops the entry, and the stash list is shared with "
-                       "the owner's checkout — use 'stash apply'")
-    if action not in ("push", "save", "apply", "create"):
-        return _refuse(f"'stash {action}' is not available here")
-    options, _ = _parse(rest, "m", {"message", "pathspec-from-file"})
-    if _has(options, "-p", "--patch") or _long_hit(rest, ("patch",)):
-        return _refuse("interactive stash needs a terminal")
-    return Ruling(WRITE)
+    if action == "apply":
+        return Ruling(WRITE)
+    return _refuse(f"'stash {action}' writes the stash list, which every worktree of the repository "
+                   "shares with the owner's checkout (their next 'stash pop' would take it). "
+                   "Commit work in progress on your own branch instead; 'stash apply' reads an "
+                   "existing entry")
 
 
 def _judge_switch(rest: list[str], ctx: RepoContext) -> Ruling:
@@ -749,19 +738,33 @@ def _judge_fetch(rest: list[str], ctx: RepoContext, *, pull: bool) -> Ruling:
             if spec.startswith("+") or ":" in spec:
                 return _refuse(f"refspec '{spec}' forces or writes a local branch; "
                                "fetch the remote's branches and merge from origin/<branch>")
-    return Ruling(OWN if pull else WRITE, network=True)
+    if pull:
+        return Ruling(OWN, network=True, check="commits")
+    return Ruling(WRITE, network=True)
 
 
-_PUSH_REFUSED_LONG = ("force", "force-with-lease", "force-if-includes", "delete", "mirror",
-                      "prune", "all", "branches", "tags", "repo")
+# A push is judged by an allowlist of its flags, not a list of the bad ones:
+# `push` has the largest option grammar of anything here, and the options that
+# matter (force in four spellings, delete, mirror, tags, prune, signing, push
+# options a server may act on, which repository to push to) are exactly the ones
+# a denylist forgets one of. A flag that is not named is refused, spelled out
+# in full or abbreviated.
+_PUSH_FLAGS = frozenset({
+    "-u", "--set-upstream", "-n", "--dry-run", "-q", "--quiet", "-v", "--verbose",
+    "--no-verify", "--verify", "--atomic", "--progress", "--no-progress", "--porcelain",
+    "--thin", "--no-thin",
+})
 
 
 def _judge_push(rest: list[str], ctx: RepoContext) -> Ruling:
-    hit = _long_hit(rest, _PUSH_REFUSED_LONG)
-    options, positionals = _parse(rest, "o", {"push-option", "repo", "receive-pack", "exec"})
-    if hit or _has(options, "-f", "-d"):
-        return _refuse("force pushes, deletions, --all/--mirror/--tags/--prune and --repo are not "
-                       "available here; push the worktree's own branch")
+    flags = [t for t in rest if t.startswith("-")]
+    positionals = [t for t in rest if not t.startswith("-")]
+    for flag in flags:
+        if flag not in _PUSH_FLAGS:
+            return _refuse(
+                f"push option '{flag}' is not available here: force pushes, deletions, "
+                "--all/--mirror/--tags/--follow-tags/--prune, signing, push options and "
+                "--repo stay with the owner. Allowed: " + ", ".join(sorted(_PUSH_FLAGS)))
     if len(positionals) > 2:
         return _refuse("push one branch at a time")
     remote = positionals[0] if positionals else ("origin" if "origin" in ctx.remotes else "")
@@ -786,7 +789,6 @@ def _judge_push(rest: list[str], ctx: RepoContext) -> Ruling:
         if colon and dst not in (branch, f"refs/heads/{branch}"):
             return _refuse(f"'{dst}' is not this worktree's branch. Work reaches other branches "
                            "through a pull request — use git_pull_request")
-    flags = [t for t in rest if t not in positionals]
     argv = ("push", *flags, remote, f"HEAD:refs/heads/{branch}")
     return Ruling(OWN, argv=argv, network=True, check="push", remote=remote)
 
@@ -825,7 +827,17 @@ def judge(args: list[str], ctx: RepoContext) -> Ruling:
         from .tools.secrets import refusal
 
         return _refuse(refusal(named).removeprefix("Error: "))
-    return _place(_judge_sub(sub, options, paths, ctx), sub, ctx)
+    ruling = _place(_judge_sub(sub, options, paths, ctx), sub, ctx)
+    if ruling.kind == READ and not ruling.argv:
+        # A diff driver or textconv program is configuration, and the
+        # repository's own is refused up front; the owner's global one is
+        # still switched off for what an agent reads. The original tokens
+        # follow untouched, `--` and all.
+        pins = [flag for names, flag in ((_NO_EXT_DIFF, "--no-ext-diff"),
+                                         (_NO_TEXTCONV, "--no-textconv")) if sub in names]
+        if pins:
+            ruling = Ruling(READ, ruling.reason, (sub, *pins, *rest), ruling.network)
+    return ruling
 
 
 # --- running git ----------------------------------------------------------------
@@ -1044,6 +1056,9 @@ def _outgoing_problem(ctx: RepoContext, remote: str) -> str:
                              f"--remotes={remote}"])
     _, patch, _ = _git(cwd, ["log", "-p", "--no-ext-diff", "--no-textconv", "--format=",
                              "HEAD", "--not", f"--remotes={remote}"])
+    if len(patch) > MAX_PATCH_CHARS:
+        return ("it would send more than the credential check can read "
+                f"({MAX_PATCH_CHARS // 1_000_000} MB of changes); the owner can push this by hand")
     problem = _content_problem(cwd, [n.strip() for n in names.split("\x00")], patch)
     return f"what it would publish: {problem}" if problem else ""
 

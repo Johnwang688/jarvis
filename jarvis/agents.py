@@ -35,8 +35,14 @@ BASE_TOOLS = [
     "read_file", "list_dir", "find_files", "grep_files", "get_datetime",
     "memory_list", "memory_read", "memory_search",
     "skill_list", "skill_read", "run_readonly",
+    # git reads (log, diff, blame …) used to go through run_readonly; the typed
+    # tool replaced that (jarvis/gitops.py). It is judged per call and writes
+    # only inside worktrees made by git_worktree, so a type that holds it but
+    # not git_worktree can read any repository and commit nowhere new.
+    "git",
 ]
 WRITE_TOOLS = ["write_file", "edit_file"]
+GIT_WRITE_TOOLS = ["git_worktree", "git_pull_request"]
 WEB_TOOLS = ["web_search", "fetch_page"]
 BROWSER_TOOLS = [
     "browser_goto", "browser_snapshot", "browser_screenshot",
@@ -137,6 +143,26 @@ TYPES: dict[str, AgentType] = {
         ),
         tools=BASE_TOOLS + WRITE_TOOLS,
         max_steps=16,
+    ),
+    "builder": AgentType(
+        name="builder",
+        description=(
+            "Make a change to a repository in a worktree of its own, commit it, "
+            "and open a pull request for someone else to review. Never touches "
+            "the owner's checkout; nothing it does merges."
+        ),
+        system=(
+            "You are making a code change. Start with git_worktree on the "
+            "repository, work only under the path it returns, read before you "
+            "edit, run the project's checks if it has them, commit in small "
+            "logical steps with the git tool, and finish with git_pull_request "
+            "whose body says what changed, why, and what you ran. The git tool "
+            "refuses destructive operations and says so: do not look for a way "
+            "around a refusal, report it. Report the pull request URL, or the "
+            "reason there is none."
+        ),
+        tools=BASE_TOOLS + WRITE_TOOLS + GIT_WRITE_TOOLS,
+        max_steps=30,
     ),
     "browser": AgentType(
         name="browser",
