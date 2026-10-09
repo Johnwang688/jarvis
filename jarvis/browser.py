@@ -70,40 +70,72 @@ _REF_SCAN_JS = """(max) => {
 # does not see, is text that is rendered but invisible: opacity ~0 (or
 # `filter: opacity(0)`), a near-zero font size, a clip or clip-path that leaves
 # nothing, a transform or `scale` that flattens to nothing, a (nearly) zero-size
-# box that clips its overflow, and anything off the top or the reachable left
-# of the page (left/margin/text-indent: -9999px — the text's own rectangle is
-# measured, so every spelling of "off-screen" counts; on a right-to-left page
-# the reachable left runs negative, and is computed from the scroll width).
-# Those text nodes are hidden for the one innerText read and put back, the same
-# node objects in the same places, in a `finally`.
+# box that clips its overflow, and anything no scrolling can reach: off the top
+# or the reachable left of the page (left/margin/text-indent: -9999px — the
+# text's own rectangle is measured, so every spelling of "off-screen" counts;
+# on a right-to-left page the reachable left runs negative, computed from the
+# scroll width), unless it lies inside the scroll range of a scroll container
+# that is itself in reach (a wide table in an `overflow-x:auto` wrapper, a
+# chat log scrolled to the bottom). Content pushed left of a scroller's own
+# range stays out of reach, so `left:-9999px` inside a scroller is still
+# hidden. Those text nodes are hidden for the one innerText read and put back,
+# the same node objects in the same places, in a `finally`.
 #
 # Kept on purpose, because a reader does see it: an opacity that is an
 # animation's start state (a transition on opacity, or an animation running or
 # pending — scroll reveals and load fade-ins), and aria-hidden text, which means
 # "not for assistive technology", not "invisible".
 #
+# **No page script runs before the read.** Moving a text node or inserting a
+# plain <span> fires no custom-element reaction, so the page text and every
+# label are read first and the `data-jarvis-ref` attributes (which a custom
+# element can observe) are written last. The one element that would have to
+# move — a hidden customized built-in `<select is=…>`, whose connectedCallback
+# runs on a move — fails the snapshot closed instead.
+#
 # Interactive elements follow the same rule: a hidden link or button is not
 # offered at all; a hidden form control is (custom checkboxes and file inputs
-# hide the native control under a visible label), labelled "(hidden control)"
-# and never with page text. A visible element is labelled by its visible text;
-# only one with none (an icon button) falls back to its unseen name, capped.
+# hide the native control under a visible label), named by its visible <label>
+# and marked "(hidden control)", never with its own page text. A visible
+# element is labelled by its visible text (a password field never by its
+# value); only one with none (an icon button) falls back to its unseen name,
+# capped. A select is set aside whole only when the select itself is hidden: a
+# `font-size:0` option inside a visible select does not take the select away.
 #
-# Bounded two ways. Scanning stops once twice the 4000-character slice of
+# Bounded three ways. Scanning stops once twice the 4000-character slice of
 # *visible* text has gone by (innerText follows DOM order, so nothing later can
 # reach the slice); hidden text never spends that budget, or padding a page
-# with hidden nodes would walk a payload past the scan. And past WRAP_CAP
-# hidden pieces the page text is withheld outright — fail closed — rather than
-# returned unfiltered. Nodes innerText already leaves out (display:none
-# subtrees, unrendered content, visibility:hidden) are neither wrapped nor
-# counted.
+# with hidden nodes would walk a payload past the scan. Past WRAP_CAP hiding
+# places — counted per outermost hiding element, so an accessibility MathML
+# copy of one formula is one place however many tokens it has — or past
+# WRAP_NODE_CAP hidden text nodes in all, the page text is withheld outright
+# (fail closed) rather than returned unfiltered. Nodes innerText already leaves
+# out (display:none subtrees, unrendered content, visibility:hidden) are
+# neither wrapped nor counted.
 #
 # Known limits: mask-image and opaque overlays (text under another element is
-# "visible" to every property read here), and a `:has()` rule that restyles an
-# element when its children change can shift the page under the wrap.
+# "visible" to every property read here), a `:has()` rule that restyles an
+# element when its children change can shift the page under the wrap, and
+# `Session._submit` has no timeout.
 WRAP_CAP = 5000
-# A custom element's tag name is the page's to choose; only a plain one is
-# printed into a ref line.
-_TAG = re.compile(r"[a-z][a-z0-9-]*")
+WRAP_NODE_CAP = 50_000
+
+# What may be printed into a ref line. A tag or a `type` attribute is the
+# page's to choose; only a standard HTML element name and a standard input
+# type are printed as they are.
+_HTML_TAGS = frozenset("""
+    a abbr address area article aside audio b bdi bdo blockquote body br button canvas
+    caption cite code col colgroup data datalist dd del details dfn dialog div dl dt em
+    embed fieldset figcaption figure footer form h1 h2 h3 h4 h5 h6 header hgroup hr i
+    iframe img input ins kbd label legend li main map mark menu meter nav object ol
+    optgroup option output p picture pre progress q rp rt ruby s samp search section
+    select slot small source span strong sub summary sup table tbody td textarea tfoot th
+    thead time tr u ul var video wbr svg math
+""".split())
+_INPUT_TYPES = frozenset("""
+    button checkbox color date datetime-local email file hidden image month number
+    password radio range reset search submit tel text time url week
+""".split())
 
 _JUDGE_JS = r"""
     const se = document.scrollingElement || document.documentElement;
@@ -142,8 +174,13 @@ _JUDGE_JS = r"""
     };
     const clipPath = (v) => {
         if (!v || v === 'none') return false;
-        if (/^(circle|ellipse)\(\s*0(px|%)?[\s)]/.test(v)) return true;
-        let m = /^polygon\((?:\s*(?:nonzero|evenodd)\s*,)?([^)]*)\)/.exec(v);
+        let m = /^(circle|ellipse)\(([^)]*)\)/.exec(v);
+        if (m) {
+            // circle(0), or an ellipse with either radius zero: no area.
+            const radii = m[2].split(' at ')[0].trim().split(/\s+/).slice(0, m[1] === 'circle' ? 1 : 2);
+            return radii.some((x) => x !== '' && parseFloat(x) === 0);
+        }
+        m = /^polygon\((?:\s*(?:nonzero|evenodd)\s*,)?([^)]*)\)/.exec(v);
         if (m) {
             const pts = m[1].split(',').map((p) => p.trim().split(/\s+/));
             if (pts.some((p) => p.length !== 2)) return false;
@@ -202,19 +239,43 @@ _JUDGE_JS = r"""
         }
         return !!ruled.get(el);
     };
-    const offPage = (r) => r.right + sx <= minX || r.bottom + sy <= 0;
+    // The outermost element whose hiding hides `el` (one hiding place).
+    const hidingRoot = (el) => {
+        let g = el;
+        while (g.parentElement && ruled.get(g.parentElement)) g = g.parentElement;
+        return g;
+    };
+    // Is rect r, inside element e, out of every reader's reach? Off the top or
+    // the reachable left of the page it is, unless it lies inside the scroll
+    // range of a scroll container that is itself in reach. The range starts at
+    // the scroller's content edge (for RTL, scrollWidth - clientWidth further
+    // left), so content pushed left of it is still out of reach.
+    const offPage = (r, e) => {
+        if (r.right + sx > minX && r.bottom + sy > 0) return false;
+        for (let a = e; a && a !== document.body && a !== document.documentElement; a = a.parentElement) {
+            const cs = css(a);
+            if (!/auto|scroll/.test(cs.overflowX) && !/auto|scroll/.test(cs.overflowY)) continue;
+            const b = a.getBoundingClientRect();
+            const x0 = b.left + a.clientLeft - a.scrollLeft
+                - (cs.direction === 'rtl' ? a.scrollWidth - a.clientWidth : 0);
+            const y0 = b.top + a.clientTop - a.scrollTop;
+            if (r.right <= x0 + 1 || r.bottom <= y0 + 1) return true;
+            return offPage(b, a.parentElement);
+        }
+        return true;
+    };
     const range = document.createRange();
-    const textHidden = (n, p, cs, select) => {
+    const textHidden = (n, p, cs) => {
         if (parseFloat(cs.fontSize) < 2 || hides(p)) return true;
-        if (select) return false;  // option text has no box of its own
         range.selectNodeContents(n);
         const r = range.getBoundingClientRect();
-        return r.width < 1 || r.height < 1 || offPage(r);
+        return r.width < 1 || r.height < 1 || offPage(r, p);
     };
 """
 
 _SNAPSHOT_JS = "(args) => {" + _JUDGE_JS + r"""
-    const {limit, max, cap} = args;
+    const {limit, max, cap, nodeCap} = args;
+    // Reads only: no attribute is written here (see stamp()).
     const scan = (labels) => {
         const out = [];
         const sel = 'a,button,input,select,textarea,[role=button],[role=link],[role=checkbox],[role=radio],[onclick]';
@@ -225,24 +286,34 @@ _SNAPSHOT_JS = "(args) => {" + _JUDGE_JS + r"""
             const st = css(el);
             if (st.visibility === 'hidden' || st.display === 'none') return;
             const control = /^(INPUT|SELECT|TEXTAREA)$/.test(el.tagName);
-            const unseen = hides(el) || offPage(r);
+            const unseen = hides(el) || offPage(r, el.parentElement);
             if (unseen && !control) return;
-            el.setAttribute('data-jarvis-ref', 'e' + i);
+            const password = el.tagName === 'INPUT' && (el.type || '').toLowerCase() === 'password';
             let text;
             if (!labels) text = '(label withheld)';
-            else if (unseen) text = '(hidden control)';
-            else {
-                text = (el.innerText || el.value || el.getAttribute('placeholder') || '').trim().slice(0, 80);
+            else if (unseen) {
+                const named = el.labels && el.labels[0] ? el.labels[0].innerText.trim().slice(0, 40) : '';
+                text = named ? named + ' (hidden control)' : '(hidden control)';
+            } else {
+                text = (el.innerText || (password ? '' : el.value) || el.getAttribute('placeholder') || '')
+                    .trim().slice(0, 80);
                 if (!text) text = (el.getAttribute('aria-label') || el.getAttribute('title')
                                    || el.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 40);
             }
-            out.push({ref: 'e' + i, tag: el.tagName.toLowerCase(), type: el.getAttribute('type') || '',
-                      text, checked: el.checked === true});
+            out.push({el, info: {ref: 'e' + i, tag: el.tagName.toLowerCase(),
+                                 type: el.getAttribute('type') || '', text, checked: el.checked === true}});
         });
         return out;
     };
+    // The only write a custom element can observe, so it comes last, after
+    // the page text and every label have been read.
+    const stamp = (found) => {
+        for (const {el, info} of found) el.setAttribute('data-jarvis-ref', info.ref);
+        return found.map((f) => f.info);
+    };
+    const closed = (reason) => ({elements: stamp(scan(false)), text: '', withheld: reason});
     const body = document.body;
-    if (!body) return {elements: scan(true), text: '', withheld: 0};
+    if (!body) return {elements: stamp(scan(true)), text: '', withheld: ''};
     const SKIP = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE', 'TEXTAREA']);
     const walker = document.createTreeWalker(body, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
         acceptNode(node) {
@@ -262,22 +333,30 @@ _SNAPSHOT_JS = "(args) => {" + _JUDGE_JS + r"""
         },
     });
     let budget = 2 * limit;
-    const hidden = [], queued = new Set();
+    const hidden = [], queued = new Set(), places = new Set();
     for (let n = walker.nextNode(); n && budget > 0; n = walker.nextNode()) {
         const p = n.parentElement;
         if (!p) continue;
         const cs = css(p);
         if (cs.visibility !== 'visible') continue;  // innerText leaves it out; it spends nothing
         const select = p.closest('select');
-        if (textHidden(n, p, cs, select)) {
-            // An option's text is drawn by its <select>, so hiding the text
-            // node does nothing: the whole select is set aside instead.
-            const target = select || n;
-            if (!queued.has(target)) { queued.add(target); hidden.push(target); }
-            if (hidden.length > cap) return {elements: scan(false), text: '', withheld: hidden.length};
-        } else budget -= n.data.replace(/\s+/g, ' ').trim().length;
+        // An option's text is drawn by its <select>: it is hidden when the
+        // select is, and then the whole select is set aside.
+        const h = select ? hides(select) || parseFloat(css(select).fontSize) < 2
+                           || offPage(select.getBoundingClientRect(), select.parentElement)
+                         : textHidden(n, p, cs);
+        if (!h) { budget -= n.data.replace(/\s+/g, ' ').trim().length; continue; }
+        if (select && select.hasAttribute('is')) return closed('custom-select');
+        const target = select || n;
+        if (queued.has(target)) continue;
+        queued.add(target);
+        hidden.push(target);
+        const owner = target === n ? p : select;
+        places.add(hides(owner) ? hidingRoot(owner) : target);
+        if (places.size > cap || hidden.length > nodeCap) return closed('flood');
     }
     const wraps = [];
+    let found, text;
     try {
         for (const n of hidden) {
             const s = document.createElement('span');
@@ -286,10 +365,12 @@ _SNAPSHOT_JS = "(args) => {" + _JUDGE_JS + r"""
             s.appendChild(n);
             wraps.push([s, n]);
         }
-        return {elements: scan(true), text: body.innerText.slice(0, limit), withheld: 0};
+        found = scan(true);
+        text = body.innerText.slice(0, limit);
     } finally {
         for (const [s, n] of wraps) s.replaceWith(n);
     }
+    return {elements: stamp(found), text, withheld: ''};
 }"""
 
 _MARK_JS = """(els) => {
@@ -574,16 +655,25 @@ class Session:
         """
         self.page.wait_for_timeout(150)
         result = self.page.evaluate(
-            _SNAPSHOT_JS, {"limit": 4000, "max": max_elements, "cap": WRAP_CAP}
+            _SNAPSHOT_JS,
+            {"limit": 4000, "max": max_elements, "cap": WRAP_CAP, "nodeCap": WRAP_NODE_CAP},
         )
         elements = result.get("elements") or []
         notes = []
-        if result.get("withheld"):
-            # Fail closed: a page hiding this much is not filtered best-effort.
+        withheld = result.get("withheld")
+        if withheld:
+            # Fail closed: a page hiding this much, or hiding text in an element
+            # that would run page script to be set aside, is not filtered
+            # best-effort.
             body = "(withheld — see the note after the fence)"
+            why = (
+                "it hides text in a custom <select> element, which would run the "
+                "page's own script to be set aside"
+                if withheld == "custom-select"
+                else f"it hides text in more than {WRAP_CAP:,} places, too many to filter"
+            )
             notes.append(
-                f"[page text withheld: this page hides more than {WRAP_CAP:,} pieces of "
-                "text from view, too many to filter, so none of its text is shown. "
+                f"[page text withheld: {why}, so none of its text is shown. "
                 "browser_screenshot shows what a reader sees.]"
             )
         else:
@@ -596,8 +686,9 @@ class Session:
         lines = [f"URL: {self.page.url}", f"Title: {title}", "", "INTERACTIVE:"]
         for el in elements:
             label = untrusted.one_line(el["text"], cap=80) or "(no label)"
-            kind = untrusted.one_line(el["type"], cap=40)
-            tag = el["tag"] if _TAG.fullmatch(el["tag"] or "") else "element"
+            kind = (el["type"] or "").strip().lower()
+            kind = kind if kind in _INPUT_TYPES else ""
+            tag = el["tag"] if el["tag"] in _HTML_TAGS else "element"
             extra = f" type={kind}" if kind else ""
             extra += " checked" if el["checked"] else ""
             lines.append(f"  [{el['ref']}] <{tag}{extra}> {label}")

@@ -106,10 +106,16 @@ _BLACK_FLAG = 0x1F3F4
 # The tag block, including U+E0000, which is unassigned (Cn) rather than Cf but
 # is no more visible than its neighbours. Tag characters spell ASCII invisibly
 # ("ASCII smuggling"), which is the whole reason they are named here. The one
-# visible use is a subdivision flag (England, Scotland, Wales): U+1F3F4, a few
-# tag letters or digits, and the cancel tag U+E007F.
+# visible use is a subdivision flag, and only three are recommended for
+# general interchange: England, Scotland and Wales (U+1F3F4, the tags spelling
+# gbeng / gbsct / gbwls, the cancel tag U+E007F). Exactly those survive; any
+# other spelling — a row of black flags each carrying a few tag letters is a
+# chained smuggling channel — goes.
 _TAG_START, _TAG_END, _TAG_CANCEL = 0xE0000, 0xE007F, 0xE007F
-_FLAG_TAG_MAX = 7
+_FLAG_TAGS = tuple(
+    "".join(chr(0xE0000 + ord(c)) for c in code) + chr(_TAG_CANCEL)
+    for code in ("gbeng", "gbsct", "gbwls")
+)
 
 _ASCII_UNSEEN = re.compile(r"[\x00-\x08\x0e-\x1f\x7f]")
 
@@ -148,17 +154,11 @@ def _joining_letter(ch: str) -> bool:
 
 
 def _flag_tags(text: str, i: int) -> int:
-    """If text[i] is U+1F3F4 starting a subdivision flag, the index of its
-    cancel tag; otherwise -1."""
-    j = i + 1
-    while j < len(text) and j - i <= _FLAG_TAG_MAX:
-        cp = ord(text[j])
-        if 0xE0030 <= cp <= 0xE0039 or 0xE0061 <= cp <= 0xE007A:
-            j += 1
-            continue
-        break
-    if j > i + 1 and j < len(text) and ord(text[j]) == _TAG_CANCEL:
-        return j
+    """If text[i] is U+1F3F4 starting one of the three real subdivision flags,
+    the index of its cancel tag; otherwise -1."""
+    for tags in _FLAG_TAGS:
+        if text.startswith(tags, i + 1):
+            return i + len(tags)
     return -1
 
 
@@ -327,6 +327,11 @@ def _cut_note(shown: int, total: int) -> str:
     return f"[page text cut: showing {shown:,} of {total:,} characters — the page continues]"
 
 
+def has_fence(text: str) -> bool:
+    """Does `text` carry a fenced web page (a real, tagged opener)?"""
+    return _OPENER.search(text) is not None
+
+
 def unclosed_fence(text: str) -> str | None:
     """The closing marker `text` is missing, if its last fence was cut open.
 
@@ -364,10 +369,16 @@ _UNIT_PX = {
     "vw": _VIEWPORT[0] / 100, "vh": _VIEWPORT[1] / 100,
     "vmin": min(_VIEWPORT) / 100, "vmax": max(_VIEWPORT) / 100,
 }
+# A CSS <number>, exactly: `1`, `1.5`, `.5`, `1e3` — never `1.`, `12.px`,
+# `nan`, `inf` or `1_0`, all of which Python's float() would accept and a
+# browser rejects (a rejected declaration overrides nothing).
+_CSS_NUMBER = r"[+-]?(?:\d+(?:\.\d+)?|\.\d+)(?:e[+-]?\d+)?"
+_NUMBER = re.compile(rf"^({_CSS_NUMBER})(%?)$")
 _LENGTH = re.compile(
-    r"^([+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?)"
+    rf"^({_CSS_NUMBER})"
     r"(px|pt|pc|in|cm|mm|q|em|rem|ch|ex|vw|vh|vmin|vmax|%)?$"
 )
+_TIME = re.compile(rf"(?<![\w.-])({_CSS_NUMBER})(ms|s)\b")
 _CSS_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
 _CSS_ESCAPE = re.compile(r"\\(?:([0-9a-fA-F]{1,6})[ \t\r\n\f]?|(.))", re.DOTALL)
 _FUNC = re.compile(r"([a-z0-9-]+)\(([^()]*)\)")
@@ -426,11 +437,13 @@ def _px(value: str, em: float = _ROOT_PX) -> float | None:
 
 
 def _number(value: str) -> float | None:
-    v = value.strip()
-    try:
-        return float(v[:-1]) / 100 if v.endswith("%") else float(v)
-    except ValueError:
+    """A CSS number (a percentage as a fraction), or None if a browser would
+    not read it as one."""
+    m = _NUMBER.match(value.strip())
+    if not m:
         return None
+    n = float(m.group(1))
+    return n / 100 if m.group(2) else n
 
 
 def _percent(value: str) -> float | None:
@@ -441,17 +454,43 @@ def _percent(value: str) -> float | None:
     return None
 
 
+_DISPLAY_OUTER = frozenset({"block", "inline", "run-in"})
+_DISPLAY_INNER = frozenset({"flow", "flow-root", "table", "flex", "grid", "ruby", "math"})
+
+
+def _valid_display(tokens: list[str]) -> bool:
+    if len(tokens) == 1:
+        return tokens[0] in _DISPLAY
+    # Multi-keyword syntax: at most one outer, one inner and `list-item`, no
+    # repeats — `block flex` and `inline list-item` are valid, `block block`
+    # is not; list-item only pairs with a flow inner type.
+    if len(tokens) > 3 or len(set(tokens)) != len(tokens):
+        return False
+    outer = [t for t in tokens if t in _DISPLAY_OUTER]
+    inner = [t for t in tokens if t in _DISPLAY_INNER]
+    item = [t for t in tokens if t == "list-item"]
+    if len(outer) + len(inner) + len(item) != len(tokens) or len(outer) > 1 or len(inner) > 1:
+        return False
+    return not item or all(t in ("flow", "flow-root") for t in inner)
+
+
 def _valid(prop: str, value: str) -> bool:
     """Would a browser accept this declaration? An invalid or empty one is
     dropped and does not override an earlier declaration of the property —
-    so `display:none; display:bogus` is still `display:none`."""
+    so `display:none; display:bogus` is still `display:none`.
+
+    Exact for the properties the hidden-text rules read (display,
+    visibility, opacity, the lengths, font-size, overflow, scale, zoom);
+    approximate for transform, filter and clip (a list of functions is
+    accepted without checking each one); anything else is taken as set.
+    """
     if not value:
         return False
     if value in _GLOBAL or any(f in value for f in _MATH):
         return True  # valid at parse time; its value is a layout question
     tokens = value.split()
     if prop == "display":
-        return all(t in _DISPLAY for t in tokens) and len(tokens) <= 3
+        return _valid_display(tokens)
     if prop == "visibility":
         return value in ("visible", "hidden", "collapse")
     if prop == "content-visibility":
@@ -464,8 +503,10 @@ def _valid(prop: str, value: str) -> bool:
         return (len(tokens) == 1 and (_px(value) is not None or _percent(value) is not None
                                       or value in _LENGTH_WORDS))
     if prop == "font-size":
+        # A negative size is invalid, so it overrides nothing.
+        px, pct = _px(value), _percent(value)
         return (value in _FONT_KEYWORDS or value in ("smaller", "larger")
-                or _px(value) is not None or _percent(value) is not None)
+                or (px is not None and px >= 0) or (pct is not None and pct >= 0))
     if prop in ("transform", "filter"):
         return value == "none" or bool(_FUNC_LIST.match(value))
     if prop == "clip":
@@ -600,9 +641,9 @@ def _clip_path_hidden(value: str) -> bool:
         return False
     kind, inner = m.group(1), m.group(2)
     if kind in ("circle", "ellipse"):
-        # circle(0) / ellipse(0 0): a shape of no size.
-        args = _args(inner.split(" at ")[0])
-        return bool(args) and all(_px(a) == 0 or a == "0%" for a in args)
+        # circle(0), or an ellipse with either radius zero: no area at all.
+        args = _args(inner.split(" at ")[0])[: 1 if kind == "circle" else 2]
+        return any(_px(a) == 0 or _percent(a) == 0 for a in args)
     if kind == "polygon":
         body = re.sub(r"^\s*(nonzero|evenodd)\s*,", "", inner)
         points = [tuple(p.split()) for p in body.split(",")]
@@ -665,16 +706,30 @@ def _transform_hidden(value: str) -> tuple[bool, bool]:
 # an animation or a script to bring it in. Webflow IX2 (`data-w-id` +
 # `opacity:0`), framer-motion's server render (`opacity:0; transform:…`),
 # Framer's appear effects (`opacity:0.001`), AOS, ScrollReveal and friends.
-_MOTION_PROPS = ("transition", "transition-property", "transition-duration", "animation",
-                 "animation-name", "animation-duration", "will-change")
+# A transition or animation only moves anything with a duration: `opacity 0s`
+# and `all 0s` do nothing, and a bare `transition-property` defaults to 0s.
+_TIMED_PROPS = ("transition", "transition-duration", "animation", "animation-duration")
 _MOTION_ATTRS = ("data-w-id", "data-framer-appear-id", "data-aos", "data-sal",
                  "data-scroll", "data-animate", "data-animation", "data-motion",
                  "data-reveal", "data-sr-id", "data-wow-")
 _STILL = frozenset({"none", "0s", "0ms", "initial", "unset", "auto"})
 
 
+def _timed(value: str) -> bool:
+    """Does any comma-separated item have a non-zero duration? In the
+    shorthands the first time of an item is its duration and a second is
+    its delay, so `opacity 0s 1s` does not move anything."""
+    for item in value.split(","):
+        times = _TIME.findall(item)
+        if times and float(times[0][0]) > 0:
+            return True
+    return False
+
+
 def _moving(style: dict[str, str], tag) -> bool:
-    if any(style.get(p, "none") not in _STILL for p in _MOTION_PROPS):
+    if any(_timed(style.get(p, "")) for p in _TIMED_PROPS):
+        return True
+    if style.get("will-change", "auto") not in _STILL:
         return True
     names = getattr(tag, "attrs", {}) or {}
     return any(str(name).lower().startswith(_MOTION_ATTRS) for name in names)
