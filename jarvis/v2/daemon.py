@@ -157,6 +157,11 @@ class Daemon:
         self.providers = {ProviderName(k): v for k, v in providers.items()}
         self.port = port
         self.bus = EventBus()
+        # The sidebar's per-thread and per-task status (activity.py), fed by
+        # every record this bus carries.
+        from .activity import Activity
+        self.activity = Activity(stores, self.bus.publish)
+        self.bus.observe(self.activity.observe)
         # The daemon owns the broker (design §6 layer 5). Its two callbacks
         # publish on the same bus every surface already reads, so a HUD, a
         # Discord thread and the escape hatch all learn about a pending
@@ -1231,6 +1236,10 @@ def _handler(daemon):
                         raise APIError(400, "after must be nonnegative")
                     # after=N skips N records (zero-based resume offset).
                     return 200, stores.threads.read_log(thread_id)[after:]
+                if method == "POST" and action == "seen":
+                    # The owner opened it in the HUD: no longer unread or failed.
+                    _object(self._body(), ())
+                    return 200, {"status": daemon.activity.seen_thread(thread_id)}
                 if method == "POST" and action == "interrupt":
                     _object(self._body(), ())
                     daemon.interrupt(thread_id)
@@ -1257,6 +1266,9 @@ def _handler(daemon):
                 task = daemon.require(stores.tasks, parts[1])
                 if len(parts) == 2 and method == "GET":
                     return 200, to_json(task)
+                if len(parts) == 3 and parts[2] == "seen" and method == "POST":
+                    _object(self._body(), ())
+                    return 200, {"status": daemon.activity.seen_task(task)}
                 if len(parts) == 3 and parts[2] == "worktree":
                     return self._worktree(parts[1], query)
                 if len(parts) == 3 and method == "POST" and parts[2] in _TASK_VERBS:

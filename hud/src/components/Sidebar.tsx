@@ -32,6 +32,13 @@
 // Inbox cannot be renamed or archived, and its menu says why. Archive is the
 // way to put a project or thread away; deleting happens only from the
 // Archive view, and only to what is already archived.
+//
+// **The dot left of each thread and task is what it is doing** (2026-10-08,
+// lib/activity.ts): `·` idle, a pulsing ring and a sweeping row while it
+// works, yellow when it waits for the owner, blue when it finished unread, a
+// red ⚠ when it failed. A task row shows its phase this way too (the phase
+// word is its tooltip), and a collapsed project shows its most urgent one at
+// the row's end. Each dot has a fixed slot: no status moves a name.
 
 import { useEffect, useRef, useState } from "react";
 import type { Project, Task, TaskThread, Thread } from "../types";
@@ -42,6 +49,7 @@ import { projectNamesTaken, threadTitlesTaken } from "../lib/projects";
 import { InlineRename } from "./InlineRename";
 import { CollapseButton } from "./Layout";
 import { toCss } from "../lib/layout";
+import { ACTIVITY_LABEL, NO_ACTIVITY, projectActivity, type ActivityStatus, type ActivityView } from "../lib/activity";
 
 interface ProjectMenuAt {
   projectId: string;
@@ -70,6 +78,8 @@ export function Sidebar(props: {
   threads: Thread[];
   tasks: Task[];
   taskThreads: Record<string, TaskThread[]>;
+  /** What each thread and task is doing (lib/activity.ts). */
+  activity?: ActivityView;
   /** The active conversation's project, derived, never stored. */
   activeProjectId: string | null;
   compose: Compose | null;
@@ -99,6 +109,7 @@ export function Sidebar(props: {
   onCollapse?: () => void;
 }) {
   const z = props.zoom ?? 100;
+  const activity = props.activity ?? NO_ACTIVITY;
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [openTasks, setOpenTasks] = useState<Record<string, boolean>>({});
   const [dragging, setDragging] = useState<string | null>(null);
@@ -256,6 +267,8 @@ export function Sidebar(props: {
           const chats = props.threads.filter((t) => t.project_id === p.id && !t.task_id);
           const tasks = props.tasks.filter((t) => t.project_id === p.id);
           const target = over === p.id;
+          // Folded, the project row carries the most urgent dot of its rows.
+          const folded = open ? "idle" : projectActivity(activity, chats.map((t) => t.id), tasks.map((t) => t.id));
           return (
             <div key={p.id}>
               <div
@@ -319,6 +332,11 @@ export function Sidebar(props: {
                     WIN
                   </span>
                 ) : null}
+                {/* At the row's end, always there: a dot coming or going never
+                    moves the name, and the name stays level with the others. */}
+                <span className="slot end">
+                  {folded !== "idle" ? <Dot status={folded} testid={`project-activity-${p.id}`} /> : null}
+                </span>
                 <button
                   type="button"
                   className="menu"
@@ -358,7 +376,8 @@ export function Sidebar(props: {
                       className={
                         "tree-row indent-1" +
                         (t.id === props.threadId ? " sel" : "") +
-                        (dragging === t.id ? " dragging" : "")
+                        (dragging === t.id ? " dragging" : "") +
+                        (activity.threads[t.id] === "working" ? " act-working" : "")
                       }
                       data-testid={`thread-${t.id}`}
                       draggable={!(renaming?.kind === "thread" && renaming.id === t.id)}
@@ -375,7 +394,9 @@ export function Sidebar(props: {
                       onClick={() => props.onPickThread(t.id)}
                       title={threadTooltip(t, t.cwd)}
                     >
-                      <span className="tw">·</span>
+                      <span className="tw">
+                        <Dot status={activity.threads[t.id] || "idle"} testid={`activity-${t.id}`} />
+                      </span>
                       {renaming?.kind === "thread" && renaming.id === t.id ? (
                         <InlineRename
                           value={t.title || ""}
@@ -428,23 +449,33 @@ export function Sidebar(props: {
                     return (
                       <div key={t.id}>
                         <div
-                          className={"tree-row indent-1" + (t.id === props.taskId ? " sel" : "")}
+                          className={
+                            "tree-row indent-1" +
+                            (t.id === props.taskId ? " sel" : "") +
+                            (activity.tasks[t.id] === "working" ? " act-working" : "")
+                          }
                           data-testid={`task-${t.id}`}
+                          data-state={t.state}
+                          title={t.state}
                           onClick={() => {
                             props.onPickTask(t.id);
                             setOpenTasks((o) => ({ ...o, [t.id]: !tOpen }));
                           }}
                         >
                           <span className="tw">{tOpen ? "▾" : "▸"}</span>
+                          <span className="slot">
+                            <Dot status={activity.tasks[t.id] || "idle"} testid={`activity-${t.id}`} />
+                          </span>
                           <span className="nm">{t.brief.slice(0, 40)}</span>
-                          <span className={`phase ${t.state}`}>{t.state}</span>
                         </div>
                         {tOpen
                           ? kids.map((k) => (
                               <div
                                 key={k.thread_id}
                                 className={
-                                  "tree-row indent-2" + (k.thread_id === props.threadId ? " sel" : "")
+                                  "tree-row indent-2" +
+                                  (k.thread_id === props.threadId ? " sel" : "") +
+                                  (activity.threads[k.thread_id] === "working" ? " act-working" : "")
                                 }
                                 data-testid={`taskthread-${k.thread_id}`}
                                 // Not draggable, and the menu says why: tasks
@@ -452,7 +483,12 @@ export function Sidebar(props: {
                                 onContextMenu={(e) => openMenu(e, k.thread_id, t.id)}
                                 onClick={() => props.onPickThread(k.thread_id)}
                               >
-                                <span className="tw">·</span>
+                                <span className="tw">
+                                  <Dot
+                                    status={activity.threads[k.thread_id] || "idle"}
+                                    testid={`activity-${k.thread_id}`}
+                                  />
+                                </span>
                                 <span className="nm">{k.role}</span>
                                 <span className={`badge ${k.provider}`}>{k.provider}</span>
                                 <button
@@ -623,5 +659,32 @@ export function Sidebar(props: {
         </div>
       ) : null}
     </div>
+  );
+}
+
+/** One row's status. Idle is the plain `·` it always was; the rest carry a
+ * label for the tooltip and for a screen reader. */
+function Dot({ status, testid }: { status: ActivityStatus; testid: string }) {
+  if (status === "idle") {
+    return <span className="act idle" data-testid={testid} data-status="idle">·</span>;
+  }
+  const label = ACTIVITY_LABEL[status];
+  return (
+    <span
+      className={`act ${status}`}
+      data-testid={testid}
+      data-status={status}
+      title={label}
+      role="img"
+      aria-label={label}
+    >
+      {status === "failed" ? (
+        <svg viewBox="0 0 12 12" aria-hidden="true">
+          <path d="M6 0.8 L11.6 11 H0.4 Z" />
+          <rect x="5.25" y="4" width="1.5" height="3.8" rx="0.5" />
+          <rect x="5.25" y="8.6" width="1.5" height="1.5" rx="0.6" />
+        </svg>
+      ) : null}
+    </span>
   );
 }
