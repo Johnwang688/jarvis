@@ -29,7 +29,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from . import config
+from . import config, untrusted
 
 EVICTED_IMAGE = "[screenshot from an earlier step — evicted to save context]"
 TRUNCATED = "\n[...truncated to save context]"
@@ -228,7 +228,13 @@ def truncate_old_results(messages: list[dict[str, Any]], policy: ContextPolicy) 
             if spilled
             else ""
         )
-        message["content"] = body[: policy.max_old_result_chars] + pointer + TRUNCATED
+        kept = body[: policy.max_old_result_chars]
+        # A fenced web page cut here would lose its closing marker, and the
+        # page's words would run on into the pointer and everything after it.
+        # Close the fence (with its own tag) before the harness speaks again.
+        end = untrusted.unclosed_fence(kept)
+        closer = f"\n{end}" if end else ""
+        message["content"] = kept + closer + pointer + TRUNCATED
         truncated += 1
     return truncated
 

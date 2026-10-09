@@ -154,6 +154,15 @@ def web_search(
     return untrusted.fence(listing, f"{backend} search results for {query!r}")
 
 
+def _page_title(soup) -> str:
+    """The document's title as a browser reads it: the first <title> that is
+    not an SVG or MathML one (an inline icon's <title> is not the page's)."""
+    for candidate in soup.find_all("title"):
+        if not candidate.find_parent(["svg", "math"]):
+            return untrusted.one_line(candidate.get_text(" ", strip=True))
+    return ""
+
+
 @tool
 def fetch_page(
     url: Annotated[str, "The full URL to fetch, e.g. https://example.com/article"],
@@ -184,7 +193,12 @@ def fetch_page(
             url, headers={"User-Agent": UA}, timeout=30, follow_redirects=True
         )
     except httpx.HTTPError as exc:
-        return f"Error: could not fetch {url} ({exc})"
+        # Not str(exc): a protocol error quotes the raw header bytes the server
+        # sent, which is page-supplied text arriving outside the fence.
+        return (
+            f"Error: could not fetch {url} ({type(exc).__name__}). The server did not "
+            "return a usable response; it may be down, slow or refusing the request."
+        )
 
     # follow_redirects means the final URL may not be the one just vetted.
     final_host = response.url.host or ""
@@ -196,10 +210,14 @@ def fetch_page(
 
     content_type = response.headers.get("content-type", "")
     if "html" not in content_type and "text" not in content_type:
-        return f"Error: {url} is {content_type or 'unknown type'}, not a readable page."
+        # The header is the server's text: one short line before it is quoted.
+        quoted = untrusted.one_line(content_type, cap=60)
+        return f"Error: {url} is {quoted or 'unknown type'}, not a readable page."
 
-    soup = BeautifulSoup(response.text, "html.parser")
-    title = untrusted.one_line(soup.title.get_text(" ", strip=True)) if soup.title else ""
+    # A second `style=` on one element is ignored by browsers; "ignore" keeps the
+    # first here too, so a page cannot show one style and hand us another.
+    soup = BeautifulSoup(response.text, "html.parser", on_duplicate_attribute="ignore")
+    title = _page_title(soup)
     # The title has been read, so its element and the metadata beside it go:
     # a page with no <body> would otherwise print the title twice.
     for junk in soup(["script", "style", "noscript", "svg", "iframe", "header", "footer",

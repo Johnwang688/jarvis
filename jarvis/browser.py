@@ -62,75 +62,134 @@ _REF_SCAN_JS = """(max) => {
     return out;
 }"""
 
-# The snapshot's PAGE TEXT, minus what a person looking at the page cannot see.
+# The snapshot, minus what a person looking at the page cannot see.
 #
 # innerText already leaves out display:none and visibility:hidden — judged on
 # the *computed* style, so class rules and external stylesheets count here,
 # which fetch_page (no renderer) cannot do. What innerText keeps, and a reader
-# does not see, is text that is rendered but invisible: opacity ~0, a near-zero
-# font size, a clip or clip-path that leaves nothing, a transform that scales to
-# nothing, a (nearly) zero-size box that clips its overflow, and anything
-# pushed off the top or left of the page (left/margin/text-indent: -9999px —
-# the text's own rectangle is measured, so every spelling of "off-screen"
-# counts). Those text nodes are hidden for the one innerText read and put back
-# in a `finally`, so a page without hidden text is never touched, and one with
-# it is left as it was found.
+# does not see, is text that is rendered but invisible: opacity ~0 (or
+# `filter: opacity(0)`), a near-zero font size, a clip or clip-path that leaves
+# nothing, a transform or `scale` that flattens to nothing, a (nearly) zero-size
+# box that clips its overflow, and anything off the top or the reachable left
+# of the page (left/margin/text-indent: -9999px — the text's own rectangle is
+# measured, so every spelling of "off-screen" counts; on a right-to-left page
+# the reachable left runs negative, and is computed from the scroll width).
+# Those text nodes are hidden for the one innerText read and put back, the same
+# node objects in the same places, in a `finally`.
 #
-# aria-hidden is deliberately NOT used here (fetch_page does use it, having
-# nothing better): it means "not for assistive technology", not "invisible",
-# and the renderer can answer the real question directly.
+# Kept on purpose, because a reader does see it: an opacity that is an
+# animation's start state (a transition on opacity, or an animation running or
+# pending — scroll reveals and load fade-ins), and aria-hidden text, which means
+# "not for assistive technology", not "invisible".
 #
-# Interactive-element labels are not filtered: an icon button names itself
-# with exactly the visually-hidden text this would remove ("Close", "Menu").
-# They are capped at 80 characters each and fenced with the rest.
-_PAGE_TEXT_JS = """(limit) => {
-    const body = document.body;
-    if (!body) return '';
-    const SKIP = 'script,style,noscript,template,textarea,select,option,datalist';
-    const sx = window.scrollX, sy = window.scrollY;
-    const ruled = new Map();
+# Interactive elements follow the same rule: a hidden link or button is not
+# offered at all; a hidden form control is (custom checkboxes and file inputs
+# hide the native control under a visible label), labelled "(hidden control)"
+# and never with page text. A visible element is labelled by its visible text;
+# only one with none (an icon button) falls back to its unseen name, capped.
+#
+# Bounded two ways. Scanning stops once twice the 4000-character slice of
+# *visible* text has gone by (innerText follows DOM order, so nothing later can
+# reach the slice); hidden text never spends that budget, or padding a page
+# with hidden nodes would walk a payload past the scan. And past WRAP_CAP
+# hidden pieces the page text is withheld outright — fail closed — rather than
+# returned unfiltered. Nodes innerText already leaves out (display:none
+# subtrees, unrendered content, visibility:hidden) are neither wrapped nor
+# counted.
+#
+# Known limits: mask-image and opaque overlays (text under another element is
+# "visible" to every property read here), and a `:has()` rule that restyles an
+# element when its children change can shift the page under the wrap.
+WRAP_CAP = 5000
+# A custom element's tag name is the page's to choose; only a plain one is
+# printed into a ref line.
+_TAG = re.compile(r"[a-z][a-z0-9-]*")
 
+_JUDGE_JS = r"""
+    const se = document.scrollingElement || document.documentElement;
+    const minX = getComputedStyle(document.documentElement).direction === 'rtl'
+        ? Math.min(0, se.clientWidth - se.scrollWidth) : 0;
+    const sx = window.scrollX, sy = window.scrollY;
+    const styles = new Map();
+    const css = (e) => {
+        let s = styles.get(e);
+        if (!s) { s = getComputedStyle(e); styles.set(e, s); }
+        return s;
+    };
+    const moving = (e, cs, prop) => {
+        const props = cs.transitionProperty.split(',').map((s) => s.trim());
+        const durs = cs.transitionDuration.split(',').map(parseFloat);
+        for (let i = 0; i < props.length; i++)
+            if ((props[i] === prop || props[i] === 'all') && durs[i % durs.length] > 0) return true;
+        try {
+            return e.getAnimations().some((a) => a.playState === 'running' || a.playState === 'pending');
+        } catch (_) { return false; }
+    };
+    const faint = (e, cs) => {
+        if (parseFloat(cs.opacity) <= 0.05 && !moving(e, cs, 'opacity')) return true;
+        const m = /opacity\(([^)]*)\)/.exec(cs.filter || '');
+        if (!m || !m[1].trim()) return false;
+        const v = /%\s*$/.test(m[1]) ? parseFloat(m[1]) / 100 : parseFloat(m[1]);
+        return v <= 0.05 && !moving(e, cs, 'filter');
+    };
     const clipRect = (cs) => {
         if (cs.position !== 'absolute' && cs.position !== 'fixed') return false;
-        const m = /^rect\\((.*)\\)$/.exec(cs.clip || '');
+        const m = /^rect\((.*)\)$/.exec(cs.clip || '');
         if (!m) return false;
-        const n = m[1].split(/[\\s,]+/).map(parseFloat);
+        const n = m[1].split(/[\s,]+/).map(parseFloat);
         return n.length === 4 && n.every(Number.isFinite)
             && (n[1] - n[3] <= 1 || n[2] - n[0] <= 1);
     };
     const clipPath = (v) => {
         if (!v || v === 'none') return false;
-        if (/^(circle|ellipse)\\(\\s*0(px|%)?[\\s)]/.test(v)) return true;
-        const m = /^inset\\(([^)]*)\\)/.exec(v);
+        if (/^(circle|ellipse)\(\s*0(px|%)?[\s)]/.test(v)) return true;
+        let m = /^polygon\((?:\s*(?:nonzero|evenodd)\s*,)?([^)]*)\)/.exec(v);
+        if (m) {
+            const pts = m[1].split(',').map((p) => p.trim().split(/\s+/));
+            if (pts.some((p) => p.length !== 2)) return false;
+            const units = new Set(pts.flat().filter((s) => parseFloat(s) !== 0)
+                .map((s) => (s.endsWith('%') ? '%' : 'px')));
+            if (units.size > 1) return false;
+            let a = 0;
+            for (let i = 0; i < pts.length; i++) {
+                const [x1, y1] = pts[i].map(parseFloat);
+                const [x2, y2] = pts[(i + 1) % pts.length].map(parseFloat);
+                a += x1 * y2 - x2 * y1;
+            }
+            return pts.length < 3 || a === 0;
+        }
+        m = /^inset\(([^)]*)\)/.exec(v);
         if (!m) return false;
-        const p = m[1].split(' round ')[0].trim().split(/\\s+/);
-        if (!p.every((a) => /%$/.test(a) || a === '0' || a === '0px')) return false;
-        const n = p.map(parseFloat);
-        const [t, r, b, l] = n.length === 1 ? [n[0], n[0], n[0], n[0]]
-            : n.length === 2 ? [n[0], n[1], n[0], n[1]]
-            : n.length === 3 ? [n[0], n[1], n[2], n[1]] : n;
-        return t + b >= 100 || l + r >= 100;
+        let s = m[1].split(' round ')[0].trim().split(/\s+/);
+        s = s.length === 1 ? [s[0], s[0], s[0], s[0]] : s.length === 2 ? [s[0], s[1], s[0], s[1]]
+            : s.length === 3 ? [s[0], s[1], s[2], s[1]] : s.slice(0, 4);
+        if (s.some((x) => /px$/.test(x) && parseFloat(x) >= 999)) return true;
+        const pct = (x) => (parseFloat(x) === 0 ? 0 : /%$/.test(x) ? parseFloat(x) : NaN);
+        return pct(s[0]) + pct(s[2]) >= 100 || pct(s[1]) + pct(s[3]) >= 100;
     };
-    const flat = (v) => {
-        const m = /^matrix\\(([^)]*)\\)$/.exec(v || '');
-        if (!m) return false;
-        const [a, b, c, d] = m[1].split(',').map(parseFloat);
-        return a * d - b * c === 0;
+    const flat = (cs) => {
+        const m = /^matrix\(([^)]*)\)$/.exec(cs.transform || '');
+        if (m) {
+            const [a, b, c, d] = m[1].split(',').map(parseFloat);
+            if (a * d - b * c === 0) return true;
+        }
+        if (!cs.scale || cs.scale === 'none') return false;
+        const s = cs.scale.split(/\s+/).map(parseFloat);
+        return s[0] === 0 || s[s.length > 1 ? 1 : 0] === 0;
     };
     // Does this element hide everything inside it? Cached, and resolved
     // top-down without recursion, so a deeply nested page cannot overflow.
+    const ruled = new Map();
     const hides = (el) => {
         const chain = [];
         for (let e = el; e && e !== document.documentElement && !ruled.has(e); e = e.parentElement)
             chain.push(e);
         for (let i = chain.length - 1; i >= 0; i--) {
             const e = chain[i];
-            const up = e.parentElement && ruled.get(e.parentElement);
-            let h = !!up;
+            let h = !!(e.parentElement && ruled.get(e.parentElement));
             if (!h) {
-                const cs = getComputedStyle(e);
-                h = parseFloat(cs.opacity) <= 0.05 || clipRect(cs) || clipPath(cs.clipPath)
-                    || flat(cs.transform);
+                const cs = css(e);
+                h = faint(e, cs) || clipRect(cs) || clipPath(cs.clipPath) || flat(cs);
                 if (!h) {
                     const cx = /hidden|clip/.test(cs.overflowX), cy = /hidden|clip/.test(cs.overflowY);
                     if (cx || cy) {
@@ -143,33 +202,81 @@ _PAGE_TEXT_JS = """(limit) => {
         }
         return !!ruled.get(el);
     };
-
-    // innerText follows DOM order, so once twice `limit` characters of visible
-    // text have gone by, nothing later can reach the slice. Only text judged
-    // visible spends the budget — a count of nodes would let a page pad with
-    // hidden ones and slip the next past the scan.
-    let budget = 2 * limit;
+    const offPage = (r) => r.right + sx <= minX || r.bottom + sy <= 0;
     const range = document.createRange();
-    const hidden = [];
-    const walker = document.createTreeWalker(body, NodeFilter.SHOW_TEXT);
-    for (let n = walker.nextNode(); n && budget > 0; n = walker.nextNode()) {
-        if (!/\\S/.test(n.data)) continue;
-        const p = n.parentElement;
-        if (!p || p.closest(SKIP)) continue;
-        const cs = getComputedStyle(p);
-        // visibility is inherited, so the parent's computed value is the text's.
-        // innerText leaves that text out already; it is ruled hidden here only
-        // so it never spends the budget.
-        let h = cs.visibility !== 'visible' || parseFloat(cs.fontSize) < 2 || hides(p);
-        if (!h) {
-            range.selectNodeContents(n);
-            const r = range.getBoundingClientRect();
-            h = r.width < 1 || r.height < 1 || r.right + sx <= 0 || r.bottom + sy <= 0;
-        }
-        if (h) hidden.push(n);
-        else budget -= n.data.replace(/\\s+/g, ' ').trim().length;
-    }
+    const textHidden = (n, p, cs, select) => {
+        if (parseFloat(cs.fontSize) < 2 || hides(p)) return true;
+        if (select) return false;  // option text has no box of its own
+        range.selectNodeContents(n);
+        const r = range.getBoundingClientRect();
+        return r.width < 1 || r.height < 1 || offPage(r);
+    };
+"""
 
+_SNAPSHOT_JS = "(args) => {" + _JUDGE_JS + r"""
+    const {limit, max, cap} = args;
+    const scan = (labels) => {
+        const out = [];
+        const sel = 'a,button,input,select,textarea,[role=button],[role=link],[role=checkbox],[role=radio],[onclick]';
+        document.querySelectorAll(sel).forEach((el, i) => {
+            if (out.length >= max) return;
+            const r = el.getBoundingClientRect();
+            if (r.width === 0 || r.height === 0) return;
+            const st = css(el);
+            if (st.visibility === 'hidden' || st.display === 'none') return;
+            const control = /^(INPUT|SELECT|TEXTAREA)$/.test(el.tagName);
+            const unseen = hides(el) || offPage(r);
+            if (unseen && !control) return;
+            el.setAttribute('data-jarvis-ref', 'e' + i);
+            let text;
+            if (!labels) text = '(label withheld)';
+            else if (unseen) text = '(hidden control)';
+            else {
+                text = (el.innerText || el.value || el.getAttribute('placeholder') || '').trim().slice(0, 80);
+                if (!text) text = (el.getAttribute('aria-label') || el.getAttribute('title')
+                                   || el.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 40);
+            }
+            out.push({ref: 'e' + i, tag: el.tagName.toLowerCase(), type: el.getAttribute('type') || '',
+                      text, checked: el.checked === true});
+        });
+        return out;
+    };
+    const body = document.body;
+    if (!body) return {elements: scan(true), text: '', withheld: 0};
+    const SKIP = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE', 'TEXTAREA']);
+    const walker = document.createTreeWalker(body, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
+        acceptNode(node) {
+            if (node.nodeType === Node.TEXT_NODE)
+                return /\S/.test(node.data) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP;
+            const tag = node.nodeName.toUpperCase();
+            if (SKIP.has(tag)) return NodeFilter.FILTER_REJECT;
+            const cs = css(node);
+            if (cs.display === 'none') return NodeFilter.FILTER_REJECT;
+            // Not rendered at all (closed <details>, hidden=until-found …):
+            // innerText leaves it out already. display:contents and <option>
+            // have no box of their own but their text is read, so walk in.
+            if (cs.display !== 'contents' && tag !== 'OPTION' && tag !== 'OPTGROUP'
+                && node.checkVisibility && !node.checkVisibility())
+                return NodeFilter.FILTER_REJECT;
+            return NodeFilter.FILTER_SKIP;
+        },
+    });
+    let budget = 2 * limit;
+    const hidden = [], queued = new Set();
+    for (let n = walker.nextNode(); n && budget > 0; n = walker.nextNode()) {
+        const p = n.parentElement;
+        if (!p) continue;
+        const cs = css(p);
+        if (cs.visibility !== 'visible') continue;  // innerText leaves it out; it spends nothing
+        const select = p.closest('select');
+        if (textHidden(n, p, cs, select)) {
+            // An option's text is drawn by its <select>, so hiding the text
+            // node does nothing: the whole select is set aside instead.
+            const target = select || n;
+            if (!queued.has(target)) { queued.add(target); hidden.push(target); }
+            if (hidden.length > cap) return {elements: scan(false), text: '', withheld: hidden.length};
+        } else budget -= n.data.replace(/\s+/g, ' ').trim().length;
+    }
     const wraps = [];
     try {
         for (const n of hidden) {
@@ -179,7 +286,7 @@ _PAGE_TEXT_JS = """(limit) => {
             s.appendChild(n);
             wraps.push([s, n]);
         }
-        return body.innerText.slice(0, limit);
+        return {elements: scan(true), text: body.innerText.slice(0, limit), withheld: 0};
     } finally {
         for (const [s, n] of wraps) s.replaceWith(n);
     }
@@ -462,29 +569,42 @@ class Session:
 
         Every line of it is the page talking (the title, the labels, the body
         text), so the whole snapshot is fenced as untrusted web content, and
-        the body leaves out text a person viewing the page cannot see
-        (`_PAGE_TEXT_JS`). The format inside the fence is unchanged.
+        it leaves out what a person viewing the page cannot see
+        (`_SNAPSHOT_JS`). The format inside the fence is unchanged.
         """
         self.page.wait_for_timeout(150)
-        elements = self.page.evaluate(_REF_SCAN_JS, max_elements)
+        result = self.page.evaluate(
+            _SNAPSHOT_JS, {"limit": 4000, "max": max_elements, "cap": WRAP_CAP}
+        )
+        elements = result.get("elements") or []
+        notes = []
+        if result.get("withheld"):
+            # Fail closed: a page hiding this much is not filtered best-effort.
+            body = "(withheld — see the note after the fence)"
+            notes.append(
+                f"[page text withheld: this page hides more than {WRAP_CAP:,} pieces of "
+                "text from view, too many to filter, so none of its text is shown. "
+                "browser_screenshot shows what a reader sees.]"
+            )
+        else:
+            body = untrusted.strip_invisible(result.get("text") or "")
+            body = re.sub(r"\n{3,}", "\n\n", body).strip()
 
-        body = untrusted.strip_invisible(self.page.evaluate(_PAGE_TEXT_JS, 4000) or "")
-        body = re.sub(r"\n{3,}", "\n\n", body).strip()
-
-        # Title, labels and type attributes are the page's words: one line each,
-        # so a label carrying a newline cannot draw a ref line of its own.
+        # Title, labels, tag names and type attributes are the page's words:
+        # one line each, so none can draw a ref line of its own.
         title = untrusted.one_line(self.page.title())
         lines = [f"URL: {self.page.url}", f"Title: {title}", "", "INTERACTIVE:"]
         for el in elements:
             label = untrusted.one_line(el["text"], cap=80) or "(no label)"
             kind = untrusted.one_line(el["type"], cap=40)
+            tag = el["tag"] if _TAG.fullmatch(el["tag"] or "") else "element"
             extra = f" type={kind}" if kind else ""
             extra += " checked" if el["checked"] else ""
-            lines.append(f"  [{el['ref']}] <{el['tag']}{extra}> {label}")
+            lines.append(f"  [{el['ref']}] <{tag}{extra}> {label}")
         if not elements:
             lines.append("  (none found)")
         lines += ["", "PAGE TEXT:", body or "(empty)"]
-        return untrusted.fence("\n".join(lines), self.page.url)
+        return untrusted.fence("\n".join(lines), self.page.url, notes=notes)
 
     def _locator(self, ref: str):
         locator = self.page.locator(f'[data-jarvis-ref="{ref}"]')
