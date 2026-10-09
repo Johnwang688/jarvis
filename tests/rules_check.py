@@ -60,6 +60,8 @@ MATRIX = [
     ("git stash pop", rules.ALLOW),
     # Excluded from auto-approval at the owner's instruction.
     ("git push origin main", rules.ASK),
+    ("rg --pre=x pattern .", rules.ASK),         # the flag runs a program
+    ("rg -n pattern .", rules.ALLOW),
     ("git clean -fd", rules.ASK),
     ("git reset --hard HEAD~1", rules.ASK),
     ("git reset HEAD~1", rules.ALLOW),          # a mixed reset loses nothing committed
@@ -302,6 +304,11 @@ READONLY_MUST_REFUSE = [
     # token that nothing parsed.
     "env -C /tmp sh -c 'cat .env'",
     "env sh -c 'rm -rf /tmp/x'",
+    # ripgrep's flags that run a program (2026-10-09): the binary is a search,
+    # the flag is not. Placeholder program names only.
+    "rg --pre=x pattern f.txt",
+    "rg --pre x pattern f.txt",
+    "rg --hostname-bin=x --hyperlink-format=default pattern .",
     "nohup sh -c 'touch PWNED'",
     # Writing git subcommands the seven-name denylist never mentioned.
     "git rm -f f.txt",
@@ -431,6 +438,8 @@ READONLY_QUOTED_METACHARACTERS = [
 
 READONLY_MUST_ALLOW = [
     "ls -la /tmp",
+    "rg -n pattern f.txt",
+    "rg --files-with-matches --glob '*.py' pattern .",
     "env",
     "grep -rn foo /tmp",
     "cat /tmp/notes.txt",

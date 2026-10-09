@@ -190,6 +190,8 @@ REFUSED = {
         ["add", "-p"], ["add", "-i"], ["add", "--interactive"], ["add", "-e"],
         ["status", "--help"], ["log", "--help"], ["tag", "-u", "key", "v1"],
         ["init", "--template=x"], ["clone", "--template=x", "r"],
+        ["apply", "--directory=x", "p.patch"], ["apply", "--dir=x", "p.patch"],
+        ["am", "--directory=x", "m.mbox"], ["am", "-i", "m.mbox"],
         ["hash-object", "-w", "f"], ["commit-tree", "x"], ["read-tree", "x"],
         ["checkout-index", "-a"], ["fast-import"], ["merge-file", "a", "b", "c"],
     ],
@@ -479,6 +481,27 @@ def runner_checks() -> None:
         assert "[exit 0]" in run(str(wt), ["add", "new.txt"])
         assert "[exit 0]" in run(str(wt), ["restore", "--staged", "new.txt"])   # unstage only
         assert (wt / "new.txt").read_text(encoding="utf-8") == "changed\n"
+
+        # --- the branch is read again under the lock -------------------------------
+        # (the context is built first; a worktree that moved in between is not
+        # the one that was judged)
+        stale = gitops.repo_context(str(wt))
+        w.sh("switch", "--detach", cwd=wt)
+        out = gitops._execute(stale, ["commit", "--allow-empty", "-m", "late"])[1]
+        assert out.startswith("Refused") and "moved from jarvis/feat to a detached HEAD" in out, out
+        w.sh("switch", "jarvis/feat", cwd=wt)
+
+        # --- a credential in a remote's URL does not reach the transcript ----------
+        w.sh("remote", "add", "tokened", "https://user:s3cr3t-pass-word@example.invalid/r.git")
+        w.sh("remote", "add", "tokenonly", "https://ghp_abcdefghijklmnop@example.invalid/r.git")
+        for args in (["remote", "-v"], ["config", "--get", "remote.tokened.url"],
+                     ["config", "--list"], ["remote", "get-url", "tokenonly"]):
+            out = run(str(wt), args)
+            assert "s3cr3t-pass-word" not in out and "ghp_abcdefghijklmnop" not in out, (args, out)
+        assert "https://[redacted]@example.invalid/r.git" in run(str(wt), ["remote", "-v"])
+        assert "user:" not in run(str(wt), ["remote", "-v"])
+        w.sh("remote", "remove", "tokened")
+        w.sh("remote", "remove", "tokenonly")
 
         # --- an own-branch rule: off the branch, it stops moving ------------------
         assert "[exit 0]" in run(str(wt), ["switch", "--detach"])

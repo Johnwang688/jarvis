@@ -619,11 +619,13 @@ def _judge_sub(sub: str, rest: list[str], paths: list[str], ctx: RepoContext) ->
     if sub == "am":
         options, _ = _parse(rest, "pC", {"directory", "exclude", "include", "patch-format",
                                           "resolvemsg", "quoted-cr", "empty"})
-        if _has(options, "-i", "--interactive") or _long_hit(rest, ("interactive",)):
-            return _refuse("interactive am needs a terminal")
+        if _has(options, "-i", "--interactive") or _long_hit(rest, ("interactive", "directory")):
+            return _refuse("interactive am needs a terminal, and --directory moves where the patch is applied")
         return Ruling(OWN, check="commits")
 
     if sub == "apply":
+        if _long_hit(rest, ("directory",)):
+            return _refuse("--directory moves where the patch is applied")
         return Ruling(WRITE)
 
     if sub == "fetch":
@@ -921,7 +923,15 @@ def _git(cwd: Path, args, *, timeout: float = LOCAL_TIMEOUT_S) -> tuple[int, str
     return proc.returncode, proc.stdout, proc.stderr
 
 
+# `git remote -v`, `git config --list` and a push's "To https://…" line print a
+# remote URL as it is configured, and a URL can carry a token as its userinfo.
+# The scrub in `dispatch()` knows the values in the credential files, not this
+# one, so the userinfo is dropped here, before the text goes anywhere.
+_URL_USERINFO = re.compile(r"(https?://)[^/\s@]+@")
+
+
 def _render(code: int, stdout: str, stderr: str) -> str:
+    stdout, stderr = _URL_USERINFO.sub(r"\1[redacted]@", stdout), _URL_USERINFO.sub(r"\1[redacted]@", stderr)
     parts = []
     if stdout.strip():
         parts.append(stdout.rstrip())
@@ -1111,6 +1121,12 @@ def _execute(ctx: RepoContext, args: list[str]) -> tuple[bool, str]:
     argv = list(ruling.argv or args)
     timeout = NETWORK_TIMEOUT_S if ruling.network else LOCAL_TIMEOUT_S
     with _lock_for(ctx.toplevel):
+        if ruling.kind != READ:
+            code, now, _ = _git(ctx.cwd, ["symbolic-ref", "-q", "--short", "HEAD"])
+            now = now.strip() if code == 0 and now.strip() else None
+            if now != ctx.branch:
+                return False, (f"Refused: the worktree moved from {ctx.branch or 'a detached HEAD'} to "
+                               f"{now or 'a detached HEAD'} while this was being judged. Run it again.")
         before = _head(ctx.cwd) if ruling.check == "commits" else None
         code, out, err = _git(ctx.cwd, argv, timeout=timeout)
         guard = _commit_guard(ctx.cwd, before) if ruling.check == "commits" else ""

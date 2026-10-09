@@ -513,6 +513,8 @@ jarvis/
   goalrunner.py works goals in slices: steering, budgets, progress DMs
   permissions.py  modes (ask/all) + the persistent dangerous-tool allowlist
   workflows.py  background agents on their own threads (safe tools only)
+  gitops.py     git for agents that cannot ask: judge(), the hardened runner,
+                own worktrees, pull requests (tools/gitctl.py exposes it)
   tasks.py      attended background tasks: full-toolset agents on their own
                 threads whose approvals reach the owner's surface, attributed
   sessions.py   saved conversations: transcript, log, meta, titles, summaries
@@ -1374,6 +1376,74 @@ jarvis/
   approvals with a printed note (`_approve` main-thread guard) because two
   threads cannot share one stdin — the face and daemon are the surfaces that
   can answer them.
+- **Agents that cannot ask still do real git work, in worktrees of their own**
+  (`gitops.py` + `tools/gitctl.py`, 2026-10-09; the owner's request: workflows
+  and sub-agents commit and open a pull request for another session to review
+  and merge, and only the destructive operations are off the table). Three
+  tools — `git(path, args)`, `git_worktree(repo, branch, base)`,
+  `git_pull_request(worktree, title, body)` — none `dangerous`, all in
+  `workflows.SAFE_TOOLS`, `git` in every sub-agent type's `BASE_TOOLS` and the
+  other two in the new `builder` type only. **They are safe without an
+  approver because the approver is not what guards them**: `judge()` is a pure
+  function over (arguments, where we are), so every verdict is a table row.
+
+  *Where git may write is a place, not a verb.* Reads run in any repository.
+  Anything that changes one runs only inside a worktree `git_worktree` made
+  under `config.GIT_WORKTREES_DIR` (outside every repository, one directory
+  per repo), and anything that moves a branch only while that worktree is on a
+  `jarvis/` branch. The owner's checkout, `main` and their branches are never
+  written. Three tiers: **refused** whatever else is true (hard reset, force or
+  deleting push, branch/tag delete, `clean`, discarding changes by checkout or
+  restore, stash writes — the stash list is shared with the owner's checkout —
+  gc/prune, history rewriting, config and remote changes, interactive forms,
+  and every option that names a program to run or a file to write, including
+  each abbreviation of it); **runs** (reads, and routine writes in an own
+  worktree; push is an *allowlist of flags* and sends only the worktree's own
+  branch to a configured remote); **reviewed** (a tag, a note, a rename: the
+  `command_review` shape — fenced untrusted data, "safe" or it declines,
+  `JARVIS_GIT_REVIEW=0` declines all). A pull request is how work reaches
+  `main`; nothing here merges.
+
+  *How git runs matters as much as what runs.* No shell; an absolute git
+  (never `/mnt/`, never a user-writable PATH entry); every inherited `GIT_*`
+  variable dropped and editors/pager/prompts pinned; **hooks off**
+  (`core.hooksPath=/dev/null` — a hook is a file git executes); fsmonitor,
+  gc, the `ext::` transport and implicit bare repositories off; diffs run with
+  `--no-ext-diff --no-textconv`; and a repository whose *own* config names a
+  program or moves where git works (`core.sshCommand`, a filter/textconv/merge
+  driver, `url.*.insteadOf`, `include.path` …) is refused outright. Output has
+  URL userinfo redacted. **A commit that names or carries a protected
+  credential is taken back** (`reset --soft`, nothing lost) before the tool
+  returns, and a push is refused if anything outgoing does. The way out — name
+  the file to unstage it — is the one allowed mention of a protected name.
+
+  **The same change closed two holes that made this necessary.**
+  `run_readonly` no longer runs `git` at all (an ungated tool whose allowlist
+  judged the subcommand and let every *flag* through: options that name a
+  program, or a file to write, were all "reads"; its holders included
+  workflows and sub-agents). And **`write_file`/`edit_file` refuse any path
+  with a `.git` component and the owner's global git configuration**
+  (`files._git_internal`): hooks and config are files git executes or obeys,
+  and the write tools could write them — the owner's own next commit would
+  have run an agent's program. `gitops.py` and `tools/gitctl.py` are
+  SELF_PROTECTED. Lessons worth keeping: **judging a program by its subcommand
+  is judging half of it** (the flags are the other half, and `git`, like
+  `make` and `ssh`, is a program with a config-driven escape hatch).
+  Found while writing this up and fixed with it: **`rg` had the same shape**
+  — its preprocessor option runs a program over every file it searches, `rg`
+  was on both `run_readonly`'s allowlist and `rules`' auto-ALLOW list, and
+  neither looked at its flags; it is in `rules._WRITES_ANYWAY` now, which
+  both consult. A suspect left alone: `sort -o` writes a file and is on the
+  auto-ALLOW list (human-backed surfaces only; not on `run_readonly`);
+  **a pure judge is testable and a runner is not**, so the tests assert both —
+  tables for the verdicts, a real repository under a temp HOME for the
+  properties that are about how git is *run*, each with a sanity half proving
+  the trap fires under plain git. Not covered, said plainly: the owner's own
+  global git configuration and credential helpers (they run on push/fetch),
+  `gh` (resolved from PATH, a user-writable place), and anything an *approved*
+  `run_command` does. Workflows still cap at 20 steps, which is tight for a
+  change that needs a worktree, edits, commits and a PR — raise
+  `workflows.start`'s `max_steps` if that bites.
 - **Jarvis may not touch his own control plane.** `config.is_face_origin()` —
   the browser and `fetch_page` refuse it, ahead of `allowed_hosts='*'`.
   Otherwise he could drive his own HUD and approve himself.
@@ -1755,18 +1825,21 @@ jarvis/
   all falling to ASK, quote-aware segmentation keeping `git commit -m 'fix A &
   B'` at ALLOW, and `command_stems` refusing to enumerate a substitution — and
   a **`run_readonly` section**, because that tool is ungated and its allowlist
-  is therefore the whole boundary: 39 escapes (newline and `&` separators,
+  is therefore the whole boundary: 45 escapes (newline and `&` separators,
   `env sh -c` wrappers, the writing git subcommands, `cat<.env`, and `find` in
-  its `-exec`/`-delete` forms) refused and 14 ordinary reads still unattended.
+  its `-exec`/`-delete` forms, and `rg`'s program-running flags) refused and 7 ordinary reads still unattended —
+  and, since 2026-10-09, **every git form refused with a pointer to the `git`
+  tool** (`git` left the allowlist; the grammar the old lists protected is
+  asserted in `tests/gitops_check.py`).
 
   Since the same day it also owns **both narrowing suites**, because a
   boundary is only correct together with the ordinary work it lets through.
   `redirect_shape_checks` grades 21 redirect shapes on whether they write to a
   path — fd-duplication and quoted `>` do not, `&>file`, `>&word`,
   `2>/dev/null` and `2>&1>out.log` do — and pins `2>&1` surviving
-  segmentation intact. `run_readonly_narrowing_checks` pins 21 git reads and 9
-  quoted metacharacters still running unattended, alongside the writing form
-  of every subcommand it names. Since 2026-10-08 `gate_state_checks` owns
+  segmentation intact. `run_readonly_narrowing_checks` pins 9 quoted
+  metacharacters still running unattended (it pinned 21 git reads too, until
+  they moved to the `git` tool). Since 2026-10-08 `gate_state_checks` owns
   **shell writes to the gate's own state**, under a throwaway HOME with an
   allowlist entry for every stem in sight: 85 spellings of a write onto the
   allowlist refused (allowlisted stem, mode "all", and no approver at all),
@@ -1804,6 +1877,34 @@ jarvis/
 - `tests/workflows_check.py` — free checks with a faked `llm.chat`:
   background lifecycle, status/log tools, deny-all approver, safe toolset,
   concurrency cap. Run after touching `workflows.py`.
+- `tests/gitops_check.py` — free checks for the agent git tools; `llm.chat` is
+  a recorder and `gh` a stand-in script, every config path and HOME a temp
+  dir, nothing through a shell. Two layers because they fail differently.
+  **`judge()` is pure, so its verdicts are tables** (placeholder names only):
+  59 reads that run in every context, 49 routine writes that run only in an
+  own worktree on an own branch (and are refused in the owner's checkout,
+  and for the branch-moving half off an own branch), 7 reviewed forms, and
+  ~200 refusals grouped by what each protects — including every abbreviation
+  of the dangerous long options, an alias that tries to be a subcommand,
+  unknown remotes, credential names, and the "shape" cases (global options,
+  non-lists, oversize). **The runner is exercised against real git** in a
+  temp repository with a bare origin: commits land in the worktree and the
+  owner's checkout never moves; a hook that plain git runs does not run
+  through the tool; an external-diff program from the environment or the
+  owner's global config does not run; GIT_* is scrubbed; a repository's own
+  program settings refuse everything; a sweeping commit that stages a
+  credential is taken back without losing the work; a branch carrying one
+  cannot be pushed; a PR needs commits and a worktree of ours, pushes only
+  its branch, calls `gh` with the title and body as `=` arguments, and never
+  merges; every way the reviewer can fail declines; the command cannot close
+  its own fence. Also: `run_readonly` refusing git in every costume, and the
+  write tools refusing `.git` internals (a symlink into one included) and the
+  global git config while `.gitignore`, `.github/` and ordinary worktree
+  files stay writable. **Verified to bite** by an in-process mutation sweep
+  (disable each protection, the matching check must fail) — 14 of 15 at
+  first, the 15th being a mutation that did not mutate, now a structural
+  assertion. Run after touching `gitops.py`, `tools/gitctl.py`,
+  `tools/files.py`'s protection, or `run_readonly`.
 - `tests/tasks_check.py` — free checks for attended background tasks, with
   `llm.chat` scripted, `shell._run` a recorder, the broker on approval_check's
   FakeWindow and the DM sender injected. The headline: a task's dangerous call
@@ -2053,6 +2154,16 @@ Two findings worth keeping:
   behavior depended on which backend OpenRouter routed to.
 
 ## Decisions already made — don't relitigate
+
+- **Agents that cannot ask get a typed git tool, not a broader shell
+  (2026-10-09).** `git` left `run_readonly`; workflows and sub-agents reach
+  git through `gitops.py`, which judges the whole invocation and writes only
+  in worktrees it made, on `jarvis/` branches. The foreground still has
+  `run_command` (asks) for anything else, and v2 tasks (a worktree each, Claude
+  Code's own classifier) remain the better home for large changes — this is for
+  the v1 loop's background agents. Plain push is allowed for the worktree's own
+  branch only; force, delete, tags and anything to `main` are not, and a pull
+  request is the only way work lands.
 
 - **No framework.** See "What this is".
 - **Did not fork Grok Build** (xAI's open-sourced Rust coding agent). Useful to

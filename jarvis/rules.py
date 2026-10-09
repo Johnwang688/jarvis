@@ -140,6 +140,12 @@ _WRITES_ANYWAY: dict[str, tuple[str, ...]] = {
     "find": ("-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint",
              "-fprintf", "-fls"),
     "sed": ("-i", "--in-place"),
+    # ripgrep will run a program of the caller's choosing over every file it
+    # searches (a preprocessor), or to ask for the hostname. It is on
+    # run_readonly's allowlist and on the auto-ALLOW list above, and neither
+    # looked at its flags — the same shape as git (2026-10-09): a binary
+    # allowlisted for what it does by default, with a flag that runs a program.
+    "rg": ("--pre", "--hostname-bin"),
 }
 
 # Wrappers that run *another* command. Judging the wrapper is judging nothing:
