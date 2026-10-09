@@ -142,7 +142,7 @@ class RepoContext:
 
     @property
     def own(self) -> bool:
-        return bool(self.branch) and self.branch.startswith(OWN_PREFIX)
+        return bool(self.branch) and self.branch.startswith(OWN_PREFIX) and len(self.branch) > len(OWN_PREFIX)
 
 
 @dataclass(frozen=True)
@@ -313,6 +313,21 @@ def _protected_named(sub: str, rest: list[str]) -> str:
     if not files:
         return ""
     return protected_in_command(shlex.join(files)) or ""
+
+
+# Naming a credential file is refused (it is how one gets read or staged), with
+# one exception that has to exist: the way out of a commit this module took back
+# is to unstage the file it caught, and that means naming it. These forms only
+# move the file out of the index. They print a name, never contents, and change
+# nothing in the file itself.
+def _only_unstages(sub: str, options: list[str]) -> bool:
+    if sub == "reset":
+        return True
+    if sub == "restore":
+        return any(t in ("--staged", "-S") for t in options) and not any(t in ("--worktree", "-W") for t in options)
+    if sub == "rm":
+        return "--cached" in options
+    return False
 
 
 # --- the subcommands ----------------------------------------------------------
@@ -492,6 +507,12 @@ def _judge_sub(sub: str, rest: list[str], paths: list[str], ctx: RepoContext) ->
     if sub in _SUBSUB_READS:
         action = _subsub(rest)
         if action in _SUBSUB_READS[sub] and not any(t in _WRITE_FLAGS for t in rest):
+            if sub == "remote" and action == "show":
+                names = [t for t in rest if not t.startswith("-") and t.lower() != "show"]
+                for name in names:
+                    problem = _remote_problem(name, ctx)
+                    if problem:
+                        return _refuse(problem)
             return Ruling(READ, network=(sub == "remote" and action == "show"))
         if sub == "remote":
             return _refuse("changing remotes changes where git fetches from and pushes to")
@@ -519,7 +540,8 @@ def _judge_sub(sub: str, rest: list[str], paths: list[str], ctx: RepoContext) ->
                        "(-n shows what it would delete)")
 
     if sub == "format-patch":
-        if "--stdout" in rest:
+        options, _ = _parse(rest, "o", {"output-directory"})
+        if "--stdout" in rest and not _has(options, "-o"):
             return Ruling(READ)
         return _refuse("format-patch writes patch files; use --stdout")
 
@@ -822,7 +844,7 @@ def judge(args: list[str], ctx: RepoContext) -> Ruling:
         name = _long_name(hit)
         full = next(f for f in _PROGRAM_LONG if f == name or f.startswith(name))
         return _refuse(f"'{hit}' {_PROGRAM_LONG[full]}, and this tool decides that, not the caller")
-    named = _protected_named(sub, rest)
+    named = "" if _only_unstages(sub, options) else _protected_named(sub, rest)
     if named:
         from .tools.secrets import refusal
 
