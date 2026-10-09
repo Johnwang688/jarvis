@@ -673,6 +673,15 @@ button.danger:hover:not(:disabled) { background: var(--red-soft); }
 .chat-place a { color: inherit; text-decoration: underline; }
 .msg .who .via { text-transform: none; letter-spacing: 0; opacity: 0.75; }
 
+/* Steering (2026-10-08): a message sent while a turn ran says what became of
+   it. Amber is "pending" — a queued message is exactly that. */
+.msg .who .mark { text-transform: none; letter-spacing: 0; }
+.msg .who .mark.steering { color: var(--accent); }
+.msg .who .mark.queued { color: var(--amber); }
+.msg .who .mark.not-sent { color: var(--text-muted); }
+/* Stop is an action, not an error: no red (Graphite keeps red for errors). */
+#inputrow button.stop { border-color: var(--border-strong); }
+
 /* ---- zoom, folding and resizing (design §18, 2026-10-08) ---- */
 /* The icon button that folds a pane: quiet until hovered, like the "+". */
 button.collapse {

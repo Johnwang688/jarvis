@@ -26,6 +26,24 @@ class SessionLost(BriefRefused):
     """
 
 
+class SteerRefused(Exception):
+    """A provider cannot take a message into the turn it is running right now.
+
+    Raised by the optional `steer()` (see `Provider`). Never fatal: the turn
+    goes on untouched. `fallback` says what the caller should do instead:
+
+    - ``"queue"`` — the message waits and runs as its own turn when this one
+      ends (no turn running yet, one ending, a provider mid-approval);
+    - ``"interrupt"`` — this provider has no way to steer at all (a Codex
+      without `turn/steer`), so the caller interrupts the turn and runs the
+      message next, saying the previous turn was interrupted by the owner.
+    """
+
+    def __init__(self, reason: str, fallback: str = "queue"):
+        super().__init__(reason)
+        self.fallback = fallback if fallback in ("queue", "interrupt") else "queue"
+
+
 @dataclass
 class Brief:
     role: Role
@@ -160,3 +178,19 @@ class Provider(Protocol):
     def usage(self, h: SessionHandle) -> Usage: ...
 
     def close(self, h: SessionHandle) -> None: ...
+
+    # Optional, like `set_model` (2026-10-08, steering). A provider without
+    # `steer` has every message sent during a turn queued behind it.
+    #
+    # def steer(self, h: SessionHandle, message: UserMessage) -> None:
+    #     """Deliver `message` into the turn running on `h`, at the provider's
+    #     next safe point — never inside a tool batch, and never as an answer
+    #     to anything the turn is waiting on. Returns once the provider has
+    #     taken it; raises `SteerRefused` when it cannot. Called from a thread
+    #     other than the one draining `send()`."""
+    #
+    # def undelivered(self, h: SessionHandle) -> list[UserMessage]:
+    #     """Steered messages the provider took but that never reached the
+    #     model before its turn ended (the fast path's final answer came
+    #     first). The very objects passed to `steer`; the caller runs them
+    #     next. Emptied by the call."""

@@ -196,7 +196,10 @@ class DaemonChecks(unittest.TestCase):
         two = self.sse("?project=" + self.project.id)
         turn = self.request("POST", f"/threads/{thread.id}/send", {"text": "block", "images": [{"b64": "eA==", "mime": "image/png"}]}, 202)
         eventually(lambda: self.fake.handles[thread.id].native["entered"].is_set())
-        self.request("POST", f"/threads/{thread.id}/send", {"text": "second"}, 409)
+        # `send` (the runner's and the escape hatch's) still refuses while a
+        # turn runs; the HUD's route steers or queues instead (steer_check).
+        with self.assertRaisesRegex(mod.DaemonError, "already running"):
+            self.d.send(thread.id, UserMessage("second"))
         disconnected = self.sse()
         disconnected.close()
         self.fake.handles[thread.id].native["release"].set()

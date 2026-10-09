@@ -62,6 +62,12 @@ export interface Thread {
   surface?: string | null;
   /** PR C: the same place, named for the chat header (present with a surface). */
   discord?: ThreadDiscord | null;
+  /** Live, never stored (2026-10-08): a turn is running on this thread right
+   * now, and how many owner messages wait behind it. The window reconciles
+   * its busy state against `running`, so a missed `turn_finished` cannot
+   * wedge it. Absent from an older daemon. */
+  running?: boolean;
+  queued?: number;
 }
 
 export interface ThreadDiscord {
@@ -373,6 +379,26 @@ export interface ChatMessage {
   proposal?: { task_id: string; until: number };
   /** PR C: the owner's message came from Discord (a thread or the DM). */
   via?: "discord" | "dm";
+  /** The daemon's id for an owner message that reached a running turn. */
+  message_id?: string;
+  /** This window's id for its own message, until the daemon names it. */
+  local?: string;
+  /** What became of a message sent while a turn ran (2026-10-08): steered
+   * into it, waiting to run after it, or dropped when the owner stopped. */
+  mark?: MessageMark;
+}
+
+export type MessageMark = "steering" | "queued" | "not sent";
+
+/** `POST /threads/{id}/send` (202). `status` is absent from an older daemon. */
+export interface SendResult {
+  status?: "started" | "steered" | "queued";
+  turn_id: string;
+  message_id?: string;
+  /** `interrupt` when the provider could not steer and its turn was stopped
+   * for this message instead. */
+  mode?: "native" | "interrupt" | null;
+  position?: number;
 }
 
 export interface ToolOp {

@@ -568,3 +568,54 @@ footing as `/approvals`.
 - `GET /discord` gains `"mirror": null | {"state": "ok" | "degraded" |
   "down", "reason": str, "queued": int, "last_error": null | {op, status,
   code, at}}`; the light goes amber when it is not ok.
+
+## Additions 2026-10-08 (steering a running turn)
+
+A message sent while a turn runs is never a dead end. `POST
+/threads/{id}/send` (the HUD) and a message typed in the chat's Discord
+thread both go through `Daemon.deliver`; `Daemon.send` (the task runner, the
+escape hatch) still refuses with 409 while a turn runs, because they retry on
+exactly that.
+
+- `POST /threads/{id}/send` → **202** `{"status", "turn_id", ...}`:
+  - `"started"` — no turn was running; `turn_id` is the new turn (as before).
+  - `"steered"` — handed to the running turn, which takes it at its next safe
+    point; `turn_id` is that turn, plus `"message_id"` and `"mode"`:
+    `"native"` (the provider steers: Claude Code's own mid-turn message,
+    Codex's `turn/steer`, the fast path's next step boundary) or
+    `"interrupt"` (a provider that cannot steer had its turn interrupted for
+    this message, which runs next with a note saying why).
+  - `"queued"` — waits to run as its own turn when this one ends: the
+    provider could not take it now (a turn waiting on an approval or a
+    question, a turn just ending, a refused steer), or messages already wait
+    and nothing overtakes them. `"message_id"`, `"position"` (1-based) and
+    `"queued_turn_id"` (the id its turn will run under).
+  - **409** only for a full queue (three waiting: `"Three messages are already
+    waiting on this turn; send this one again once I've answered."`) or a
+    task's thread with a turn running (task turns are the runner's).
+  A steer has a send's authority and no more: it never answers or resolves an
+  approval or a question the turn is waiting on — while one is open the
+  message queues instead. An older daemon answered 409 for every send during
+  a turn and sent no `status`.
+- SSE **`user_message`** for such a message carries `data.message_id` and
+  `data.steer: true` (steered; `turn_id` is the running turn) or
+  `data.queued: true` (waiting; `turn_id` is its own future turn), with
+  `data.interrupting: true` for the interrupt fallback. The `user` log record
+  holds the same `data`.
+- SSE **`queued_started`** `{thread_id, project_id, turn_id, data:
+  {message_id, turn_id}}` — a waiting message has become its turn (logged as
+  a `queued_started` record; the turn's own events follow under `turn_id`).
+- SSE **`queue_cleared`** `{thread_id, project_id, data: {reason, messages:
+  [{message_id, typed, via, attachments, images}]}}` — messages that will not
+  run: the owner pressed Stop (`reason: "stopped"`; stop means stop, and the
+  HUD puts the words it sent back in the box), the thread was closed, could
+  not resume, or Jarvis stopped. Each is also a `queued_dropped` log record.
+- `POST /threads/{id}/interrupt` (the owner's Stop) now also drops what waits
+  behind the turn (`queue_cleared`). Unchanged otherwise.
+- Every thread record (`GET /threads`, `POST /threads`, `thread_updated`)
+  carries live, never-stored `"running": bool` and `"queued": int`. The HUD
+  reconciles its busy state against `running` on every SSE reconnect and
+  every 15 s while busy, so a missed `turn_finished` cannot wedge it.
+- `GET /threads/{id}/transcript`: a user message that reached a running turn
+  carries `"message_id"` and, when it says something, `"mark"`: `"steering"`,
+  `"queued"` (still waiting) or `"not sent"` (dropped).

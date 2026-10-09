@@ -55,6 +55,14 @@ export function InputBar(props: {
   onModeChange: (m: DictationMode) => void;
   onSend: (text: string, attachments: Attachment[]) => void;
   onTranscriptTaken: () => void;
+  /** A turn is running in the open thread (2026-10-08): Enter steers it, and
+   * a Stop button ends it. */
+  running?: boolean;
+  onStop?: () => void;
+  /** Words and files handed back (a failed send, a dropped queued message):
+   * put back in the box ahead of anything typed since. */
+  restore?: { text: string; files: Attachment[]; nonce: number } | null;
+  onRestoreTaken?: () => void;
 }) {
   const [text, setText] = useState("");
   const [files, setFiles] = useState<Attachment[]>([]);
@@ -69,6 +77,17 @@ export function InputBar(props: {
     box.current?.focus();
     props.onTranscriptTaken();
   }, [props.pendingTranscript, props]);
+
+  // A send that failed, or queued words the owner's Stop dropped: nothing
+  // typed is ever lost, files included.
+  useEffect(() => {
+    const back = props.restore;
+    if (!back) return;
+    if (back.text) setText((t) => (t ? `${back.text}\n${t}` : back.text));
+    if (back.files.length) setFiles((f) => [...back.files, ...f].slice(0, MAX_FILES));
+    box.current?.focus();
+    props.onRestoreTaken?.();
+  }, [props.restore, props]);
 
   const stage = async (list: FileList | File[] | null) => {
     if (!list) return;
@@ -132,7 +151,10 @@ export function InputBar(props: {
           id="input"
           data-testid="input"
           value={text}
-          placeholder={props.placeholder || "Message, or @path to attach"}
+          placeholder={
+            props.placeholder ||
+            (props.running ? "Steer him while he works · Enter sends, Stop ends the turn" : "Message, or @path to attach")
+          }
           disabled={props.disabled}
           onChange={(e) => setText(e.target.value)}
           onPaste={(e) => {
@@ -153,8 +175,19 @@ export function InputBar(props: {
           onKeyUp={(e) => e.stopPropagation()}
         />
         <button type="button" data-testid="send" onClick={send} disabled={props.disabled}>
-          Send
+          {props.running ? "Steer" : "Send"}
         </button>
+        {props.running ? (
+          <button
+            type="button"
+            className="stop"
+            data-testid="stop"
+            title="Stop the running turn. Anything queued behind it comes back to this box."
+            onClick={() => props.onStop?.()}
+          >
+            Stop
+          </button>
+        ) : null}
         <label className="chip" style={{ cursor: "pointer" }}>
           Attach
           <input

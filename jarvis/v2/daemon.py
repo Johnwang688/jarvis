@@ -5,6 +5,7 @@ Threads save their Brief beside thread.json so resuming never invents a policy.
 """
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass, field, fields, replace
 import errno
 import http.client
@@ -32,8 +33,8 @@ from .permissions import PermitContext, build_permit
 from .model import (PermissionProfile, Project, ProviderName, Role, Thread,
                     from_json, to_json, utcnow)
 from .provider import (Brief, BriefRefused, Decision, Event, EventKind,
-                       PermissionCallback, Provider, SessionHandle, SessionLost, Usage,
-                       UserMessage)
+                       PermissionCallback, Provider, SessionHandle, SessionLost, SteerRefused,
+                       Usage, UserMessage)
 from .stores import ProjectArchived, Stores, StoreError, _validate, _write_bytes
 from . import worktrees
 
@@ -54,9 +55,26 @@ GATE_KINDS = {EventKind.APPROVAL_REQUESTED: "gate_requested",
               EventKind.APPROVAL_RESOLVED: "gate_resolved"}
 _TASK_VERBS = ("start", "steer", "cancel", "resume", "answer")
 
+# Owner messages that wait on a running chat turn (2026-10-08, steering). One
+# queue and one cap for every surface: the HUD's send and a message typed in
+# the chat's Discord thread land in the same place (the mirror's O-C6 queue
+# moved here). A steered message is delivered, not waiting, so it never counts.
+QUEUE_MAX = 3
+QUEUE_FULL = ("Three messages are already waiting on this turn; send this one again "
+              "once I've answered.")
+# What a provider that cannot steer is told when its turn is interrupted for
+# the owner's message (`SteerRefused(fallback="interrupt")`). The owner's own
+# words stay as they were everywhere they are shown; only the model sees this.
+INTERRUPTED_NOTE = ("[The owner interrupted your previous turn to send this message. "
+                    "Whatever that turn was doing stopped where it was.]\n")
+
 
 class DaemonError(RuntimeError):
     """Lifecycle conflict (HTTP 409)."""
+
+
+class QueueFull(DaemonError):
+    """Three messages already wait on this thread's running turn."""
 
 
 class APIError(Exception):
@@ -123,6 +141,19 @@ def safe_list(store, **filters):
 
 
 @dataclass
+class _Queued:
+    """An owner message that reached a running chat turn: steered into it,
+    or waiting to run as a turn of its own. `turn_id` is the turn it belongs
+    to — the running one for a steer, the one minted for it for a queued
+    message — so its log record and its turn's events share an id."""
+    message: UserMessage
+    data: dict
+    message_id: str
+    turn_id: str
+    interrupting: bool = False
+
+
+@dataclass
 class _Session:
     thread: Thread
     brief: Brief
@@ -146,6 +177,14 @@ class _Session:
     # The provider closed this session under us (a switch that could not even
     # reconnect the old model); it is dropped when its turn ends.
     lost: bool = False
+    # Steering (2026-10-08). The owner pressed stop on the running turn (an
+    # interrupt the daemon makes for a provider that cannot steer is not one);
+    # the owner messages steered into it, for the provider to hand back any it
+    # never delivered; and the provider questions it has open, which a steer
+    # must never be mistaken for the answer to.
+    owner_stopped: bool = False
+    steered: list = field(default_factory=list)
+    questions: set = field(default_factory=set)
 
 
 class Daemon:
@@ -179,6 +218,10 @@ class Daemon:
         self._lock = threading.RLock()
         self._worktree_lock = threading.Lock()
         self._sessions: dict[str, _Session] = {}
+        # thread id -> owner messages waiting on its running turn (QUEUE_MAX).
+        # Per thread rather than per session: a turn that ends by dropping its
+        # session (a fatal error) must not take what waits behind it along.
+        self._queues: dict[str, deque] = {}
         self._stopping = False
         self._server = None
         self._server_thread = None
@@ -605,6 +648,13 @@ class Daemon:
         threads opened before the field existed. Read-only: nothing is
         rewritten, so listing threads can never change one."""
         record = to_json(thread)
+        with self._lock:
+            # Live state, never stored: whether a turn is running and how many
+            # owner messages wait on it. The HUD reconciles its busy state
+            # against `running`, so a missed `turn_finished` cannot wedge it.
+            session = self._sessions.get(thread.id)
+            record["running"] = session is not None and session.worker is not None
+            record["queued"] = len(self._queues.get(thread.id) or ())
         if thread.surface:
             # Where the chat is on Discord (PR C): names and a link, for the
             # chat header. Never a token; the guild id is setup's.
@@ -634,8 +684,118 @@ class Daemon:
         return self._open(thread, brief)
 
     def send(self, thread_id: str, message: UserMessage) -> str:
+        """Start a turn with `message`, or refuse (409) while one runs.
+
+        For callers that drive turns themselves — the task runner, the escape
+        hatch — and retry on "already running". An owner's message to a chat
+        goes through `deliver`, which never dead-ends while a turn runs."""
         _validate(message, UserMessage)
         data = user_data(message)
+        session = self._live_session(thread_id)
+        with self._lock:
+            self._sendable(session)
+            if session.worker is not None or self._queues.get(thread_id):
+                raise DaemonError("a turn is already running on this thread")
+            return self._begin(session, message, data)
+
+    def deliver(self, thread_id: str, message: UserMessage) -> dict:
+        """An owner's message to a thread (2026-10-08): never a dead end.
+
+        No turn running: it starts one (`{"status": "started"}`). A chat turn
+        running: it is **steered** into that turn at the provider's next safe
+        point (`"steered"`), or — when it cannot be (nothing to steer with, a
+        turn waiting on an approval or a question, messages already waiting,
+        a provider that refuses) — **queued** to run as its own turn when this
+        one ends (`"queued"`, up to QUEUE_MAX). A provider that cannot steer
+        at all has its turn interrupted for it instead (`"steered"`, mode
+        `interrupt`). A steer has the authority of a send and no more: it
+        never answers or resolves anything the turn is waiting on. A task's
+        threads are the runner's: a running one still refuses (409).
+        """
+        _validate(message, UserMessage)
+        data = user_data(message)
+        session = self._live_session(thread_id)
+        drain = False
+        with self._lock:
+            self._sendable(session)
+            waiting = self._queues.setdefault(thread_id, deque())
+            if session.worker is None and not waiting:
+                return {"status": "started", "turn_id": self._begin(session, message, data)}
+            from . import thread_model
+            if not thread_model.is_chat(session.thread):
+                raise DaemonError("a turn is already running on this thread")
+            if session.worker is None or waiting or self._waiting_on_owner(session):
+                # Behind what already waits, so nothing overtakes it; and never
+                # into a turn blocked on the owner, where it could read as the
+                # answer to the question the turn is waiting on.
+                item = self._enqueue(session, waiting, message, data)
+                drain = session.worker is None
+                reply = self._queued_reply(session, item)
+            else:
+                reply = None
+                provider, handle = session.provider, session.handle
+        if reply is not None:
+            if drain:
+                self._drain(thread_id)
+            return reply
+        return self._steer(session, provider, handle, message, data)
+
+    def _steer(self, session, provider, handle, message, data) -> dict:
+        """Hand `message` to the provider for the running turn. Outside the
+        daemon lock: a provider may wait on its own turn loop to take it, and
+        that loop records events under this lock."""
+        thread_id = session.thread.id
+        steer = getattr(provider, "steer", None)
+        fallback, reason = "queue", "this provider cannot steer a running turn"
+        if callable(steer):
+            with self._lock:
+                # Known to the turn before the provider can take it: a turn
+                # that ends meanwhile hands it back (`undelivered`) by identity.
+                item = _Queued(message, data, uuid.uuid4().hex, session.turn_id or "")
+                session.steered.append(item)
+            try:
+                steer(handle, message)
+            except SteerRefused as exc:
+                fallback, reason = exc.fallback, str(exc)
+            except Exception as exc:  # noqa: BLE001 — a failed steer queues, never errors
+                LOG.warning("Steering thread %s failed (%s)", thread_id, type(exc).__name__)
+                fallback, reason = "queue", type(exc).__name__
+            else:
+                with self._lock:
+                    self._log_user(session.thread, item, steer=True)
+                return {"status": "steered", "mode": "native", "turn_id": item.turn_id,
+                        "message_id": item.message_id}
+            with self._lock:
+                session.steered = [other for other in session.steered if other is not item]
+        interrupt, drain = False, False
+        with self._lock:
+            waiting = self._queues.setdefault(thread_id, deque())
+            if fallback == "interrupt" and session.worker is not None and not session.closing:
+                # No way to steer: stop the turn for the owner's message and
+                # run it next, telling the model why its turn ended. Not the
+                # owner's stop — what else waits is kept.
+                noted = replace(message, text=INTERRUPTED_NOTE + message.text)
+                item = self._enqueue(session, waiting, noted, data, cap=False, interrupting=True)
+                session.cancelled.set()
+                interrupt = True
+            else:
+                item = self._enqueue(session, waiting, message, data)
+                drain = session.worker is None
+            LOG.info("Thread %s: owner message %s (%s)", thread_id,
+                     "interrupts the turn" if interrupt else "queued", reason)
+            reply = self._queued_reply(session, item)
+        if interrupt:
+            reply.update(status="steered", mode="interrupt")
+            try:
+                provider.interrupt(handle)
+            except Exception:  # noqa: BLE001 — the turn still ends; the message still runs
+                LOG.warning("Interrupting thread %s failed", thread_id, exc_info=True)
+        if drain:
+            self._drain(thread_id)
+        return reply
+
+    def _live_session(self, thread_id) -> "_Session":
+        """The thread's open session, resumed if it has none."""
         with self._lock:
             self._active()
             session = self._sessions.get(thread_id)
@@ -645,22 +805,33 @@ class Daemon:
             if stored.archived or is_archived(self.stores, stored.project_id):
                 raise DaemonError("this thread is archived; restore it from the Archive to continue")
             session = self.resume_thread(thread_id)
-        with self._lock:
-            self._active()
-            if session.handle is None or session.closing:
-                raise DaemonError("thread session is opening or closing")
-            if session.worker is not None:
-                raise DaemonError("a turn is already running on this thread")
-            # Checked under the same lock an archive takes, so a turn cannot
-            # start in a thread the owner is archiving (decisions B1).
-            from .projects import is_archived
-            if session.thread.archived or is_archived(self.stores, session.thread.project_id):
-                raise DaemonError("this thread is archived; restore it from the Archive to continue")
-            session.cancelled.clear()
-            session.turn_id = uuid.uuid4().hex
-            worker = threading.Thread(target=self._turn, args=(session, message),
-                                      name=f"jarvis-turn-{thread_id}", daemon=True)
-            turn_id = session.turn_id
+        return session
+
+    def _sendable(self, session) -> None:
+        """Under the lock: whether anything may reach this session now.
+        Checked under the same lock an archive takes, so a turn cannot start
+        in a thread the owner is archiving (decisions B1)."""
+        self._active()
+        if session.handle is None or session.closing:
+            raise DaemonError("thread session is opening or closing")
+        from .projects import is_archived
+        if session.thread.archived or is_archived(self.stores, session.thread.project_id):
+            raise DaemonError("this thread is archived; restore it from the Archive to continue")
+
+    def _begin(self, session, message, data, *, queued: "_Queued | None" = None) -> str:
+        """Under the lock: start a turn. `queued` is a message that waited:
+        its `user` record is already in the log, so its turn opens with a
+        `queued_started` record instead of a second one."""
+        thread_id = session.thread.id
+        session.cancelled.clear()
+        session.owner_stopped = False
+        session.steered = []
+        session.questions.clear()
+        session.turn_id = queued.turn_id if queued is not None else uuid.uuid4().hex
+        worker = threading.Thread(target=self._turn, args=(session, message),
+                                  name=f"jarvis-turn-{thread_id}", daemon=True)
+        turn_id = session.turn_id
+        if queued is None:
             self.stores.threads._append(thread_id, "log.jsonl",
                                         {"kind": "user", "at": utcnow(), "turn_id": turn_id,
                                          "thread_id": thread_id, "data": data})
@@ -671,9 +842,115 @@ class Daemon:
             self.bus.publish({"kind": "user_message", "thread_id": thread_id,
                               "project_id": session.thread.project_id, "turn_id": turn_id,
                               "at": utcnow(), "data": dict(data)})
-            session.worker = worker
-            worker.start()
-            return turn_id
+        else:
+            record = {"kind": "queued_started", "at": utcnow(), "turn_id": turn_id,
+                      "thread_id": thread_id, "project_id": session.thread.project_id,
+                      "data": {"message_id": queued.message_id, "turn_id": turn_id}}
+            self.stores.threads._append(thread_id, "log.jsonl", record)
+            self.bus.publish(dict(record))
+        session.worker = worker
+        worker.start()
+        return turn_id
+
+    def _waiting_on_owner(self, session) -> bool:
+        """Is the running turn blocked on the owner — a broker approval or a
+        provider question? Then a message waits rather than steers."""
+        if session.questions:
+            return True
+        try:
+            pending = self.approvals.pending()
+        except Exception:  # noqa: BLE001
+            return False
+        return any(getattr(r, "thread_id", None) == session.thread.id for r in pending)
+
+    def _enqueue(self, session, waiting, message, data, *, cap=True, interrupting=False):
+        """Under the lock: one owner message waits on this thread's turn."""
+        if cap and len(waiting) >= QUEUE_MAX:
+            raise QueueFull(QUEUE_FULL)
+        item = _Queued(message, data, uuid.uuid4().hex, uuid.uuid4().hex, interrupting)
+        waiting.append(item)
+        self._log_user(session.thread, item, queued=True, interrupting=interrupting)
+        return item
+
+    def _queued_reply(self, session, item) -> dict:
+        waiting = self._queues.get(session.thread.id) or ()
+        position = next((i for i, other in enumerate(waiting) if other is item), len(waiting))
+        return {"status": "queued", "turn_id": session.turn_id, "message_id": item.message_id,
+                "position": position + 1, "queued_turn_id": item.turn_id}
+
+    def _log_user(self, thread, item, **flags) -> None:
+        """Under the lock: the owner's message in the log and on the bus,
+        marked `steer` or `queued`, with the id later records refer to."""
+        data = {**item.data, "message_id": item.message_id,
+                **{name: True for name, on in flags.items() if on}}
+        at = utcnow()
+        self.stores.threads._append(thread.id, "log.jsonl",
+                                    {"kind": "user", "at": at, "turn_id": item.turn_id,
+                                     "thread_id": thread.id, "data": data})
+        self.bus.publish({"kind": "user_message", "thread_id": thread.id,
+                          "project_id": thread.project_id, "turn_id": item.turn_id,
+                          "at": at, "data": dict(data)})
+
+    def _drop_waiting(self, thread, reason, items=None) -> list:
+        """Under the lock: owner messages that will not run — the owner
+        stopped the turn (stop means stop, as Claude Code returns queued
+        messages to the input rather than sending them), or the thread can no
+        longer take a turn. Logged per message; one `queue_cleared` names
+        them all, so a surface can hand the words back."""
+        if items is None:
+            waiting = self._queues.get(thread.id)
+            items = list(waiting or ())
+            if waiting:
+                waiting.clear()
+        if not items:
+            return []
+        for item in items:
+            self.stores.threads._append(thread.id, "log.jsonl", {
+                "kind": "queued_dropped", "at": utcnow(), "turn_id": item.turn_id,
+                "thread_id": thread.id,
+                "data": {"message_id": item.message_id, "reason": reason}})
+        self.bus.publish({"kind": "queue_cleared", "thread_id": thread.id,
+                          "project_id": thread.project_id, "data": {
+                              "reason": reason,
+                              "messages": [{"message_id": item.message_id,
+                                            "typed": item.data.get("typed"),
+                                            "via": item.data.get("via"),
+                                            "attachments": item.data.get("attachments") or [],
+                                            "images": item.data.get("images") or 0}
+                                           for item in items]}})
+        return items
+
+    def _drain(self, thread_id) -> None:
+        """Run the next waiting message as its own turn, if the thread is idle.
+        Resumes the session if the turn before dropped it."""
+        with self._lock:
+            if self._stopping or not self._queues.get(thread_id):
+                return
+            session = self._sessions.get(thread_id)
+            if session is not None and (session.worker is not None or session.closing
+                                        or session.handle is None):
+                return
+        try:
+            session = session or self._live_session(thread_id)
+        except Exception as exc:  # noqa: BLE001
+            LOG.warning("Thread %s could not resume for its queued message (%s)",
+                        thread_id, type(exc).__name__)
+            with self._lock:
+                stored = self.stores.threads.get(thread_id)
+                if stored is not None:
+                    self._drop_waiting(stored, f"the thread could not resume ({type(exc).__name__})")
+            return
+        with self._lock:
+            waiting = self._queues.get(thread_id)
+            if self._stopping or not waiting or session.worker is not None:
+                return
+            try:
+                self._sendable(session)
+            except DaemonError as exc:
+                self._drop_waiting(session.thread, str(exc))
+                return
+            item = waiting.popleft()
+            self._begin(session, item.message, item.data, queued=item)
 
     # -- approvals (design §6) ---------------------------------------------
 
@@ -744,6 +1021,10 @@ class Daemon:
                 self.stores.threads.save(thread)
             record = {**to_json(event), "project_id": thread.project_id, "turn_id": session.turn_id,
                       "at": utcnow(), "event_id": uuid.uuid4().hex}
+            if event.kind == EventKind.QUESTION and (event.data or {}).get("req_id"):
+                # The turn now waits on the owner: a message sent meanwhile
+                # queues rather than steers (`_waiting_on_owner`).
+                session.questions.add(str(event.data["req_id"]))
             if event.kind == EventKind.USAGE:
                 # Which model answered, per turn, in the durable record: a
                 # chat thread can change model mid-conversation now (A1, A7).
@@ -829,6 +1110,20 @@ class Daemon:
             except Exception:
                 LOG.exception("Cannot record turn error for %s", session.thread.id)
         finally:
+            # Steered messages the provider took but never delivered (the fast
+            # path's final answer came first): they run next, as turns of their
+            # own — unless the owner stopped this one.
+            returned = []
+            undelivered = getattr(session.provider, "undelivered", None)
+            if callable(undelivered) and session.handle is not None:
+                try:
+                    returned = list(undelivered(session.handle) or ())
+                except Exception:  # noqa: BLE001
+                    LOG.warning("Cannot read undelivered steers on %s", session.thread.id,
+                                exc_info=True)
+            with self._lock:
+                leftover = [item for item in session.steered
+                            if any(item.message is message for message in returned)]
             try:
                 stop = "interrupted" if session.cancelled.is_set() else "error" if failed else "end"
                 if terminal is None:
@@ -841,6 +1136,16 @@ class Daemon:
             finally:
                 with self._lock:
                     session.worker = None
+                    session.questions.clear()
+                    if leftover:
+                        if session.owner_stopped:
+                            self._drop_waiting(session.thread, "stopped", leftover)
+                        else:
+                            waiting = self._queues.setdefault(session.thread.id, deque())
+                            for item in reversed(leftover):
+                                item.turn_id = uuid.uuid4().hex
+                                waiting.appendleft(item)
+                    drain = bool(self._queues.get(session.thread.id)) and not session.closing
                     # A fatal turn error, or a provider that closed the session
                     # under us (Codex does on any RpcError), strands the
                     # session: every later send would answer "session is
@@ -860,6 +1165,13 @@ class Daemon:
                         self._sessions.pop(session.thread.id, None)
                 if session.lost:
                     self._cleanup(session)
+                if drain and not session.retired:
+                    # The owner's waiting messages run next, in order — on a
+                    # resumed session if this turn's was dropped.
+                    try:
+                        self._drain(session.thread.id)
+                    except Exception:  # noqa: BLE001
+                        LOG.exception("Cannot start the queued message on %s", session.thread.id)
 
     def _session(self, thread_id):
         self.require(self.stores.threads, thread_id)
@@ -870,16 +1182,25 @@ class Daemon:
             return session
 
     def interrupt(self, thread_id):
+        """The owner's stop. The running turn ends at the provider's next
+        safe point, and the owner messages waiting behind it are dropped
+        (`queue_cleared` hands their words back): stop means stop. A pending
+        approval card goes the way it always went on an interrupt; nothing
+        here answers it."""
         session = self._session(thread_id)
         with self._lock:
             if session.worker is None:
                 raise DaemonError("no turn is running on this thread")
             session.cancelled.set()
+            session.owner_stopped = True
+            self._drop_waiting(session.thread, "stopped")
         session.provider.interrupt(session.handle)
 
     def answer(self, thread_id, req_id, decision):
         session = self._session(thread_id)
         session.provider.answer(session.handle, req_id, decision)
+        with self._lock:
+            session.questions.discard(str(req_id))
         # In the log too, beside the question it closes, so a surface catching
         # up from the log (the Discord mirror) knows the question is no
         # longer open. Nothing the provider sees.
@@ -918,6 +1239,7 @@ class Daemon:
             if cleanup.is_alive() or (worker and worker.is_alive()):
                 raise DaemonError("thread is still closing")
             self._sessions.pop(thread_id, None)
+            self._drop_waiting(session.thread, "the thread was closed")
         self._lifecycle("thread_closed", session.thread)
 
     def _lifecycle(self, kind, obj):
@@ -933,6 +1255,13 @@ class Daemon:
                 return
             self._stopping = True
             sessions = list(self._sessions.values())
+            # The queue is in memory; what waits on a turn at shutdown says so
+            # in the log rather than reading as still waiting after a restart.
+            for session in sessions:
+                try:
+                    self._drop_waiting(session.thread, "Jarvis stopped")
+                except Exception:  # noqa: BLE001
+                    LOG.warning("Cannot record dropped messages on %s", session.thread.id)
             jobs = [s.worker for s in sessions if s.worker is not None]
             for session in sessions:
                 session.closing = True
@@ -1208,7 +1537,7 @@ def _handler(daemon):
                         if body["role"] != "chat":
                             raise APIError(400, "missing fields: provider")
                         body["provider"] = "fast"
-                    return 201, to_json(daemon.open_thread(**body))
+                    return 201, daemon.thread_json(daemon.open_thread(**body))
                 if method == "POST":
                     body = _object(self._body(), ("project_id", "brief"), ("project_id", "brief"))
                     daemon.require(stores.projects, body["project_id"])

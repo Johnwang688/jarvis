@@ -61,6 +61,11 @@ FILES: paths and URLs touched, one per line, with a word on each.
 <<<BEGIN TRANSCRIPT>>>
 """
 
+# What a steered message looks like in the transcript: the goal runner's shape
+# (`goalrunner._steering_message`), so a model reads an owner correction the
+# same way wherever it arrives.
+STEERING_PREFIX = "[owner steering]"
+
 CONTINUE_NUDGE = (
     "[your previous message was cut off at the token limit before you finished it. "
     "Continue from exactly where it stopped — do not repeat what you already said. "
@@ -209,6 +214,11 @@ class Agent:
         # Asked between steps only — see run_turn. A surface that can start a
         # turn should be able to abandon one.
         self.should_stop = should_stop or (lambda: False)
+        # Owner steering, asked at the same boundary and nowhere else (v2's
+        # fast path, 2026-10-08): a callable returning what the owner sent
+        # while this turn ran, as `text` or `(text, images)` items. None —
+        # every v1 surface — means nothing is ever steered in.
+        self.take_steering: Callable[[], list] | None = None
         self.policy = policy or context.ContextPolicy()
         # Turns the provider's reported prompt_tokens into the number the
         # compaction threshold is judged against, so the threshold means what
@@ -546,6 +556,37 @@ class Agent:
                 self.on_event("interim_text", f"[session not saved: {exc}]")
         return turn
 
+    def _take_steering(self) -> None:
+        """Append whatever the owner steered in since the last step, each as
+        its own `[owner steering]` user message. Called only at a step
+        boundary (see `_run_turn`). A steering source that raises costs the
+        steer, never the turn: steering is a bonus, like the handoff."""
+        take = self.take_steering
+        if take is None:
+            return
+        try:
+            items = list(take() or ())
+        except Exception as exc:  # noqa: BLE001
+            self.on_event("interim_text", f"[steering not delivered: {type(exc).__name__}]")
+            return
+        for item in items:
+            text, images = item if isinstance(item, tuple) else (item, None)
+            body = f"{STEERING_PREFIX} {text}".rstrip()
+            if images:
+                self.messages.append(
+                    {
+                        "role": "user",
+                        "content": [{"type": "text", "text": body}]
+                        + [
+                            {"type": "image_url", "image_url": {"url": _image_url(img)}}
+                            for img in images
+                        ],
+                    }
+                )
+            else:
+                self.messages.append({"role": "user", "content": body})
+            self.on_event("steered", text)
+
     @staticmethod
     def _is_compact_request(user_input: str) -> bool:
         normalized = " ".join(user_input.strip().lower().split())
@@ -605,6 +646,13 @@ class Agent:
                 turn.cancelled = True
                 self.on_event("cancelled", step)
                 return turn
+
+            # Owner steering lands here for the same reason cancellation is
+            # checked here: between steps every tool_call already has its
+            # result (invariant 3), so a user message cannot split a batch.
+            # Before the context block is refreshed, so the block is still
+            # lifted to the tail behind it (invariant 7).
+            self._take_steering()
 
             # Re-render the plan into messages[0] before every request, not
             # just once a turn: a long turn is exactly the case the plan exists

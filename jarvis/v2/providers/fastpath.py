@@ -45,6 +45,7 @@ from ..provider import (
     EventKind,
     PermissionCallback,
     SessionHandle,
+    SteerRefused,
     Usage,
     UserMessage,
 )
@@ -245,6 +246,14 @@ class _Native:
     # per-model resolution. Written by `set_model`, read only by `_run`.
     model: str | None = None
     effort: str | None = None
+    # Owner steering (2026-10-08). `steer` appends here while a turn is
+    # accepting; v1's loop takes it at its next step boundary (invariant 3)
+    # as an `[owner steering]` message. What a turn never took — its final
+    # answer came first — moves to `leftover`, which the daemon runs next.
+    inbox: list = field(default_factory=list)
+    inbox_lock: threading.Lock = field(default_factory=threading.Lock)
+    accepting: bool = False
+    leftover: list = field(default_factory=list)
 
 
 # --- the provider -----------------------------------------------------------
@@ -320,6 +329,7 @@ class FastPathProvider:
             effort=brief.effort,
         )
         native.agent.should_stop = native.stop.is_set
+        native.agent.take_steering = lambda: self._take_steering(native)
         return SessionHandle(
             thread_id=thread.id,
             provider=self.name,
@@ -416,6 +426,46 @@ class FastPathProvider:
         if h.native is not None:
             h.native.stop.set()
 
+    # -- steering (2026-10-08)
+
+    def steer(self, h: SessionHandle, message: UserMessage) -> None:
+        """Hand `message` to the running turn: v1's loop appends it as an
+        `[owner steering]` user message at its next step boundary — the only
+        place a message can go without splitting a tool batch (invariant 3).
+        Refused (the daemon queues it) when no turn is accepting, or when a
+        named skill cannot be loaded, which its own turn reports properly."""
+        native = h.native
+        if native is None or native.closed:
+            raise SteerRefused("session closed")
+        from ..commands import SkillRefused
+
+        try:
+            text = _turn_text(message)
+        except SkillRefused as exc:
+            raise SteerRefused(str(exc)) from None
+        with native.inbox_lock:
+            if not native.accepting:
+                raise SteerRefused("no turn is running")
+            native.inbox.append((message, text, list(message.images)))
+
+    def undelivered(self, h: SessionHandle) -> list[UserMessage]:
+        """Steered messages the last turn never took (its final answer came
+        first, or it stopped). Emptied by the call."""
+        native = h.native
+        if native is None:
+            return []
+        with native.inbox_lock:
+            out, native.leftover = native.leftover, []
+        return [message for message, _text, _images in out]
+
+    @staticmethod
+    def _take_steering(native: _Native) -> list:
+        """v1's `Agent.take_steering`: everything steered in since the last
+        step, as `(text, images)`. Called on the turn's worker thread."""
+        with native.inbox_lock:
+            taken, native.inbox = native.inbox, []
+        return [(text, images or None) for _message, text, images in taken]
+
     def answer(self, h: SessionHandle, req_id: str, decision: Decision | str) -> None:
         raise ValueError(
             "the fast path raises no approvals and asks no questions — none of "
@@ -455,10 +505,15 @@ class FastPathProvider:
             yield Event(EventKind.ERROR, h.thread_id, {"message": "session closed", "fatal": True})
             return
         if not native.busy.acquire(blocking=False):
+            # Not fatal: this is a second send refused, not the session
+            # failing. A fatal error makes the daemon drop and close the
+            # session — which here is the one whose turn is still running.
+            # (The daemon never sends twice on one handle; `steer` is how a
+            # message reaches a running turn.)
             yield Event(
                 EventKind.ERROR,
                 h.thread_id,
-                {"message": "a turn is already running on this thread", "fatal": True},
+                {"message": "a turn is already running on this thread", "fatal": False},
             )
             return
         try:
@@ -471,24 +526,15 @@ class FastPathProvider:
         events: queue.Queue = queue.Queue()
         done = object()
 
-        text = message.text
-        if message.skill:
-            # The owner named a skill: its body goes into the turn, which saves
-            # a `skill_read` step and cannot be skipped by the model. Same trust
-            # as `skill_read` — skill bodies are the owner's words. A skill that
-            # is unknown, jarvis-only or over the cap is refused, never cut.
-            from ..commands import SkillRefused, skill_body
+        from ..commands import SkillRefused
 
-            try:
-                body = skill_body(message.skill)
-            except SkillRefused as exc:
-                yield Event(EventKind.TURN_STARTED, thread_id)
-                yield Event(EventKind.ERROR, thread_id, {"message": str(exc), "fatal": False})
-                yield Event(EventKind.TURN_FINISHED, thread_id, {"stop": "error"})
-                return
-            request = message.text.strip() or "(no further request — run the skill)"
-            text = (f'[The owner invoked the skill "{message.skill}". Follow it.]\n{body}'
-                    f"\n\n[Request]\n{request}")
+        try:
+            text = _turn_text(message)
+        except SkillRefused as exc:
+            yield Event(EventKind.TURN_STARTED, thread_id)
+            yield Event(EventKind.ERROR, thread_id, {"message": str(exc), "fatal": False})
+            yield Event(EventKind.TURN_FINISHED, thread_id, {"stop": "error"})
+            return
 
         # A cancel aimed at the *previous* turn must not kill this one — the v1
         # face clears its event under the agent lock right before run_turn for
@@ -524,14 +570,26 @@ class FastPathProvider:
         worker = threading.Thread(
             target=work, name=f"jarvis-fast-{thread_id}", daemon=True
         )
+        with native.inbox_lock:
+            native.accepting = True
         yield Event(EventKind.TURN_STARTED, thread_id)
         worker.start()
-        while True:
-            item = events.get()
-            if item is done:
-                break
-            yield item
-        worker.join()
+        try:
+            while True:
+                item = events.get()
+                if item is done:
+                    break
+                yield item
+            worker.join()
+        finally:
+            # Closed before the last event, which is where the daemon stops
+            # reading: a steer that arrives from here on is refused (and
+            # queued by the daemon), and one the loop never took — the final
+            # answer came first — is handed back through `undelivered`.
+            with native.inbox_lock:
+                native.accepting = False
+                native.leftover.extend(native.inbox)
+                native.inbox = []
 
         error = result.get("error")
         if error is not None:
@@ -550,6 +608,24 @@ class FastPathProvider:
             thread_id,
             {"stop": _stop_reason(turn), "proposal": _proposal(proposal, turn)},
         )
+
+
+def _turn_text(message: UserMessage) -> str:
+    """What the model is given for `message`.
+
+    A named skill's body goes into the turn, which saves a `skill_read` step
+    and cannot be skipped by the model. Same trust as `skill_read` — skill
+    bodies are the owner's words. A skill that is unknown, jarvis-only or
+    over the cap raises `SkillRefused`, never cut.
+    """
+    if not message.skill:
+        return message.text
+    from ..commands import skill_body
+
+    body = skill_body(message.skill)
+    request = message.text.strip() or "(no further request — run the skill)"
+    return (f'[The owner invoked the skill "{message.skill}". Follow it.]\n{body}'
+            f"\n\n[Request]\n{request}")
 
 
 def _stop_reason(turn) -> str:

@@ -9,7 +9,7 @@
 import type {
   ApprovalRequest, AvatarDesc, ChatMessage, Diff, FileRead, ModelRow, Platform,
   Project, RouteView, Schedule, SchedulePreview, Task, TaskThread, Thread, Tree, Usage,
-  VoiceEntry, Attachment, DirListing, DiscordStatus, ProjectChannel, BackfillResult } from "./types";
+  VoiceEntry, Attachment, DirListing, DiscordStatus, ProjectChannel, BackfillResult, SendResult } from "./types";
 import type { ThreadModels } from "./lib/threadmodel";
 import type { RosterView } from "./lib/roster";
 import type { ArchiveView, DeleteResult, ProjectImpact } from "./types";
@@ -84,9 +84,11 @@ export const api = {
   setProviderDefault: (body: { provider: string; model: string; effort?: string }) =>
     req<ThreadModels>("/thread-models", json(body)),
   transcript: (id: string) => req<{ messages: ChatMessage[] }>(`/threads/${id}/transcript`),
-  /** `spoken` (PR C): dictated, so the Discord mirror says "You (HUD, voice)". */
+  /** `spoken` (PR C): dictated, so the Discord mirror says "You (HUD, voice)".
+   * While a turn runs the message is steered into it or queued behind it
+   * (2026-10-08) — never refused; `status` says which. */
   send: (id: string, body: { text: string; images?: string[]; attachments?: Attachment[]; spoken?: boolean }) =>
-    req<{ turn_id: string }>(`/threads/${id}/send`, json(body)),
+    req<SendResult>(`/threads/${id}/send`, json(body)),
   interrupt: (id: string) => req<any>(`/threads/${id}/interrupt`, json({})),
   /** Re-parent a **chat** thread; a task's threads 409 (they move with the task). */
   moveThread: (id: string, projectId: string) =>
@@ -232,12 +234,20 @@ export const api = {
  * rather than per-panel so a late subscriber cannot miss a frame another
  * panel already consumed.
  */
-export function subscribe(onEvent: (e: any) => void): () => void {
+export function subscribe(onEvent: (e: any) => void, onReopen?: () => void): () => void {
   let source: EventSource | null = null;
   let closed = false;
+  let opened = 0;
   const open = () => {
     if (closed) return;
     source = new EventSource("/events");
+    // Every open after the first is a reconnect: whatever was published in
+    // the gap is gone, so the window re-reads what it cannot afford to have
+    // missed (a turn finishing, above all).
+    source.onopen = () => {
+      opened += 1;
+      if (opened > 1) onReopen?.();
+    };
     source.onmessage = (m) => {
       try {
         onEvent(JSON.parse(m.data));

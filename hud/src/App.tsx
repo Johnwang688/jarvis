@@ -76,6 +76,11 @@ export default function App() {
   // one, because the window already holds it: the first message, drawn
   // optimistically, and a reply that may already be streaming.
   const skipReload = useRef<string | null>(null);
+  // This window's own messages, named until the daemon names them; and the
+  // ones waiting behind a turn (daemon id -> words and files), so a Stop that
+  // drops them can put them back in the box (2026-10-08).
+  const localSeq = useRef(0);
+  const waitingHere = useRef(new Map<string, { text: string; files: Attachment[] }>());
   // provider ▾ · model ▾ · effort ▾ in the input bar (decisions 2026-10-06, A).
   const threadModel = useThreadModel(state, dispatch, () => void loadModels());
   const reloadThreadModels = useRef(threadModel.reload);
@@ -151,11 +156,21 @@ export default function App() {
   const send = useCallback(
     async (text: string, attachments: Attachment[], spoken = false) => {
       const at = live.current;
-      const before = at.messages;
       let threadId = at.threadId;
       const compose = at.compose;
-      dispatch({ type: "message", message: { role: "user", text } });
-      dispatch({ type: "patch", patch: { busy: true, orb: "thinking", status: "SENDING", draft: "", error: "" } });
+      const local = `local-${++localSeq.current}`;
+      // A turn already running in this thread: the message steers it
+      // (2026-10-08) — drawn at once, marked, and the box clears. The
+      // window's turn state is left alone: that turn is still the one
+      // running, and Stop and the orb must still reach it.
+      const steering = !!threadId && at.busy && at.turnThreadId === threadId;
+      const prior = { busy: at.busy, turnThreadId: at.turnThreadId, orb: at.orb, status: at.status };
+      dispatch({
+        type: "message",
+        message: { role: "user", text, local, ...(steering ? { mark: "steering" as const } : {}) },
+      });
+      if (steering) dispatch({ type: "patch", patch: { error: "" } });
+      else dispatch({ type: "patch", patch: { busy: true, orb: "thinking", status: "SENDING", draft: "", error: "" } });
       try {
         let projectId = threadId ? at.threads.find((t) => t.id === threadId)?.project_id ?? null : null;
         if (!threadId) {
@@ -179,11 +194,28 @@ export default function App() {
           }
           pendingThread.current = threadId;
         }
-        dispatch({ type: "patch", patch: { turnThreadId: threadId } });
-        await api.send(threadId, {
+        if (!steering) dispatch({ type: "patch", patch: { turnThreadId: threadId } });
+        const result = await api.send(threadId, {
           text, attachments: attachments.length ? attachments : undefined,
           ...(spoken ? { spoken: true } : {}),
         });
+        const status = result?.status ?? "started";
+        if (status === "steered" || status === "queued") {
+          dispatch({
+            type: "mark", local,
+            patch: { mark: status === "queued" ? "queued" : "steering", message_id: result.message_id },
+          });
+          if (status === "queued" && result.message_id) {
+            waitingHere.current.set(result.message_id, { text, files: attachments });
+          }
+          // A turn this window had not heard of (one started from Discord) is
+          // running here: track it, so Stop and its finish reach this window.
+          dispatch({ type: "patch", patch: { busy: true, turnThreadId: threadId } });
+        } else if (steering) {
+          // The turn ended while this was on its way: it started its own.
+          dispatch({ type: "mark", local, patch: { mark: undefined } });
+          dispatch({ type: "patch", patch: { busy: true, turnThreadId: threadId, orb: "thinking", status: "THINKING" } });
+        }
         if (projectId) saveLastProject(projectId);
         if (!at.threadId) {
           // The compose row becomes the thread. Its transcript is already on
@@ -196,20 +228,78 @@ export default function App() {
         if (live.current.busy && live.current.turnThreadId === threadId && live.current.status === "SENDING") {
           dispatch({ type: "patch", patch: { status: "THINKING" } });
         }
+        return true;
       } catch (e: any) {
-        // The words go back in the box, so a failed send costs nothing.
-        dispatch({
-          type: "patch",
-          patch: {
-            busy: false, turnThreadId: null, orb: "error", status: "FAILED",
-            error: `Could not send: ${e.message}`, messages: before, pendingTranscript: text,
-          },
-        });
+        // Only this message comes off the screen — a reply that settled
+        // meanwhile stays — and its words and files go back in the box, so
+        // a failed send costs nothing. Said inline, never as a dead end.
+        dispatch({ type: "unmessage", local });
+        const restore = { text, files: attachments, nonce: Date.now() };
+        const error = `Could not send: ${e.message}`;
+        if (steering) {
+          // A refused steer leaves the running turn as it was: still tracked,
+          // still stoppable.
+          dispatch({ type: "patch", patch: { error, restore } });
+        } else {
+          // Back to whatever the window was tracking before this send (a turn
+          // in another thread keeps running and keeps its Stop).
+          dispatch({
+            type: "patch",
+            patch: {
+              busy: prior.busy, turnThreadId: prior.turnThreadId,
+              orb: prior.busy ? prior.orb : "error", status: prior.busy ? prior.status : "FAILED",
+              error, restore,
+            },
+          });
+        }
+        return false;
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [dispatch],
   );
+
+  /** Stop the turn running in the open thread (the orb does the same). */
+  const stopTurn = useCallback(() => {
+    const at = live.current;
+    const turn = at.turnThreadId ?? at.threadId;
+    if (!turn) return;
+    api.interrupt(turn).catch((e: any) => {
+      // Nothing running there any more: the window was behind. Catch up.
+      if (e?.status === 409) void reconcileBusy();
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  /**
+   * The busy state never wedges (2026-10-08): it follows `turn_finished`, and
+   * when that was missed (an SSE reconnect, a dropped frame) the thread
+   * record's live `running` says the turn is over. Run on every reconnect
+   * and every 15 s while busy. An older daemon sends no `running`: then
+   * nothing is reset, as before.
+   */
+  const reconcileBusy = useCallback(async () => {
+    const turn = live.current.turnThreadId;
+    if (!live.current.busy || !turn) return;
+    let threads: any[];
+    try {
+      threads = await api.threads();
+    } catch {
+      return;
+    }
+    dispatch({ type: "patch", patch: { threads } });
+    const record = threads.find((t) => t.id === turn);
+    const at = live.current;
+    if (record && record.running === false && at.busy && at.turnThreadId === turn) {
+      dispatch({ type: "patch", patch: { busy: false, turnThreadId: null, orb: "idle", status: "" } });
+    }
+  }, [dispatch]);
+
+  useEffect(() => {
+    if (!state.busy) return;
+    const timer = setInterval(() => void reconcileBusy(), 15_000);
+    return () => clearInterval(timer);
+  }, [state.busy, reconcileBusy]);
 
   // ---- events -------------------------------------------------------------
 
@@ -233,12 +323,45 @@ export default function App() {
           // DM) appears in the open chat as theirs, labelled. A HUD message is
           // already on screen from send(), so it is never added twice.
           if (mine && tid && (data.via === "discord" || data.via === "dm")) {
+            const mark = data.steer ? "steering" : data.queued ? "queued" : undefined;
             dispatch({
               type: "message",
-              message: { role: "user", text: ownerLine(data), via: data.via },
+              message: {
+                role: "user", text: ownerLine(data), via: data.via,
+                ...(data.message_id ? { message_id: data.message_id } : {}),
+                ...(mark ? { mark } : {}),
+              },
             });
           }
           break;
+        case "queued_started":
+          // A message that waited is now its own turn: no longer "queued".
+          if (data.message_id) {
+            waitingHere.current.delete(data.message_id);
+            dispatch({ type: "mark", message_id: data.message_id, patch: { mark: undefined } });
+          }
+          break;
+        case "queue_cleared": {
+          // The owner stopped the turn: what waited behind it was not sent.
+          // Words this window sent go back in the box, as Claude Code hands
+          // queued messages back on a stop.
+          const back: string[] = [];
+          const files: Attachment[] = [];
+          for (const m of data.messages || []) {
+            if (!m?.message_id) continue;
+            dispatch({ type: "mark", message_id: m.message_id, patch: { mark: "not sent" } });
+            const mineHere = waitingHere.current.get(m.message_id);
+            if (mineHere) {
+              waitingHere.current.delete(m.message_id);
+              if (mineHere.text) back.push(mineHere.text);
+              files.push(...mineHere.files);
+            }
+          }
+          if (back.length || files.length) {
+            dispatch({ type: "patch", patch: { restore: { text: back.join("\n"), files, nonce: Date.now() } } });
+          }
+          break;
+        }
         case "turn_started":
           if (mine) {
             dispatch({
@@ -281,12 +404,10 @@ export default function App() {
           }
           break;
         case "error":
-          if (ours)
-            dispatch({
-              type: "patch",
-              patch: { busy: false, turnThreadId: null, orb: "error", error: data.message || "error" },
-            });
-          else if (mine) dispatch({ type: "patch", patch: { orb: "error", error: data.message || "error" } });
+          // Shown, but the turn is not over until `turn_finished` (which the
+          // daemon always sends): resetting `busy` here took the Stop and the
+          // orb's interrupt away from a turn that was still running.
+          if (ours || mine) dispatch({ type: "patch", patch: { orb: "error", error: data.message || "error" } });
           break;
         case "approval_requested":
           // Only the broker asks the owner, and every broker question carries
@@ -395,6 +516,10 @@ export default function App() {
         default:
           break;
       }
+    }, () => {
+      // Reconnected: a `turn_finished` published in the gap is gone.
+      void reconcileBusy();
+      void refreshThreads();
     });
     return stop;
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -845,8 +970,11 @@ export default function App() {
       },
       state: () => live.current,
       dispatch,
+      // What a reconnect or the 15 s timer runs: the busy state checked
+      // against the thread record's live `running`.
+      reconcile: () => reconcileBusy(),
     };
-  }, [capture, dispatch, onWakeHit]);
+  }, [capture, dispatch, onWakeHit, reconcileBusy]);
 
   // ---- actions ------------------------------------------------------------
 
@@ -1048,6 +1176,10 @@ export default function App() {
                 onModeChange={setMode}
                 onSend={(text, files) => void send(text, files)}
                 onTranscriptTaken={() => patch({ pendingTranscript: "" })}
+                running={state.busy && !!state.threadId && state.turnThreadId === state.threadId}
+                onStop={stopTurn}
+                restore={state.restore}
+                onRestoreTaken={() => patch({ restore: null })}
               />
             </>
           ) : null}

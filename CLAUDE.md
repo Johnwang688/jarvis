@@ -229,6 +229,27 @@ reads the preview port from `/status` → `workshop_port`, and `hud_v2_check`
 aborts and fails any request to 8402/8403/8405 — it used to load the live
 daemon's preview.
 
+**A message sent while a turn runs is never a dead end (2026-10-08, design
+§5.1/§11.8/§18; free suite `tests/v2/steer_check.py`).** It used to 409, and
+the HUD's catch then dropped its hold on the still-running turn (no Stop, no
+orb interrupt). `Daemon.deliver` — the HUD's send route and Discord's
+`mirror.submit` — starts a turn, **steers** the running chat turn through the
+provider's optional `steer()` (Claude: a stdin user message with a uuid and
+`priority: "next"`, its `--replay-user-messages` echo proving it drained, and
+a steer the CLI ran as a fresh turn read inside the same turn so the next
+send is never shifted by one; Codex: `turn/steer`, in both verified schemas,
+"method not found" → interrupt fallback; fast path: `[owner steering]` at
+v1's next step boundary via `Agent.take_steering`, a missed one handed back
+by `undelivered()` and run next), or **queues** it (three, in order, one
+queue for the HUD and Discord — the mirror's O-C6 queue moved into the
+daemon). A turn waiting on an approval or a question is never steered, so a
+message can never read as its answer. The owner's Stop drops what waits
+(`queue_cleared`; stop means stop). `Daemon.send` — the runner's and the
+escape hatch's — still refuses while a turn runs, because they retry on
+"already running", and task threads still 409. A provider's own "a turn is
+already running" error is **non-fatal**: fatal makes the daemon drop and
+close the session, which there is the running one.
+
 Briefs for every package, including the ones in flight, are in
 `docs/codex-briefs/`; each merged package left a `*-notes.md` beside its
 brief with what its implementer verified and what it proposes.

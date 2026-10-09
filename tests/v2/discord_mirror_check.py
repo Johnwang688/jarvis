@@ -218,6 +218,46 @@ class Scripted:
         pass
 
 
+class Steering(Scripted):
+    """A provider that steers natively (2026-10-08): a message steered into
+    its turn is answered in that turn ("steered by: …")."""
+
+    def __init__(self):
+        super().__init__()
+        self.inbox, self.steered, self.turn = [], [], False
+        self.lock = threading.Lock()
+
+    def send(self, handle, message):
+        self.messages.append(message)
+        tid = handle.thread_id
+        with self.lock:
+            self.turn = True
+        try:
+            yield Event(K.TURN_STARTED, tid)
+            yield Event(K.TEXT, tid, {"text": "starting"})
+            while True:
+                done = self.release.wait(0.01)
+                with self.lock:
+                    taken, self.inbox = self.inbox, []
+                for steered in taken:
+                    yield Event(K.TEXT, tid, {"text": f"steered by: {steered.typed or steered.text}"})
+                if done:
+                    break
+            yield Event(K.TEXT, tid, {"text": "finished"})
+            yield Event(K.TURN_FINISHED, tid, {"stop": "end"})
+        finally:
+            with self.lock:
+                self.turn = False
+
+    def steer(self, handle, message):
+        from jarvis.v2.provider import SteerRefused
+        with self.lock:
+            if not self.turn:
+                raise SteerRefused("no turn is running")
+            self.inbox.append(message)
+            self.steered.append(message)
+
+
 def dm(content="", **extra):
     body = {"id": str(next(_ids)), "channel_id": DM_CHANNEL, "content": content,
             "author": {"id": OWNER}, "mentions": []}
@@ -665,6 +705,50 @@ class InboundChecks(Harness):
         wait_for(lambda: [m.typed for m in self.provider.messages] ==
                  ["long", "one", "two", "three"], timeout=10, what="the queue to drain")
         self.idle(chat.id)
+
+    def test_a_message_during_a_turn_steers_it_from_discord_and_the_hud_alike(self):
+        """2026-10-08: one behaviour for both surfaces. A Discord message and
+        a HUD message sent while a turn runs are steered into it (the daemon's
+        `deliver`), never refused; Discord is told so; the HUD's steer is
+        mirrored, marked, and the Discord one is never echoed."""
+        steering = Steering()
+        self.daemon.providers[ProviderName.FAST] = steering
+        steering.release.clear()
+        chat = self.open_chat()
+        self.hud_send(chat, "long")
+        place = self.place(chat.id)
+        wait_for(lambda: steering.turn, what="the turn")
+        self.listener.feed(guild_message("use pnpm", place))
+        wait_for(lambda: M.STEERED_TEXT in self.transport.texts(place), what="the steer acknowledged")
+        reply = self.request("POST", f"/threads/{chat.id}/send", {"text": "and add tests"}, 202)
+        self.assertEqual(reply["status"], "steered")
+        wait_for(lambda: len(steering.steered) == 2, what="both steers")
+        steering.release.set()
+        self.idle(chat.id)
+        self.settled(chat.id)
+        self.assertEqual([m.typed for m in steering.messages], ["long"], "one turn")
+        self.assertEqual([m.typed for m in steering.steered], ["use pnpm", "and add tests"])
+        texts = "\n".join(self.transport.texts(place))
+        self.assertIn("You (HUD) · steering: and add tests", texts)
+        self.assertNotIn("You (HUD) · steering: use pnpm", texts, "Discord's own words are never echoed")
+        self.assertNotIn(M.QUEUED_TEXT, texts)
+        self.assertIn("finished", texts)
+
+    def test_stop_drops_a_waiting_discord_message_and_says_it_was_not_sent(self):
+        self.provider.plan["long"] = [("wait",), ("text", "cut short")]
+        self.provider.release.clear()
+        chat = self.open_chat()
+        self.hud_send(chat, "long")
+        place = self.place(chat.id)
+        self.listener.feed(guild_message("then do the other thing", place))
+        wait_for(lambda: M.QUEUED_TEXT in self.transport.texts(place), what="queued")
+        self.request("POST", f"/threads/{chat.id}/interrupt", {}, 200)
+        self.idle(chat.id)
+        self.settled(chat.id)
+        self.assertEqual([m.typed for m in self.provider.messages], ["long"], "stop means stop")
+        texts = self.transport.texts(place)
+        self.assertIn("Not sent, the turn was stopped: then do the other thing", texts)
+        self.assertTrue(any("interrupted" in t for t in texts), texts)
 
     def test_a_voice_note_runs_a_turn_speaks_back_and_approves_nothing(self):
         chat = self.open_chat()

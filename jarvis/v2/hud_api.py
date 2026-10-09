@@ -987,11 +987,25 @@ def route(handler, daemon, parts, query):
         if parts[2] == "send" and method == "POST":
             project = daemon.require(stores.projects, thread.project_id)
             message = assemble_turn(project, handler._body())
-            return 202, {"turn_id": daemon.send(thread.id, message)}
+            # Never a dead end while a turn runs (2026-10-08): the message
+            # starts a turn, is steered into the running one, or waits behind
+            # it — `{"status": "started"|"steered"|"queued", "turn_id", ...}`.
+            # Only a full queue (three waiting) or a task's running thread is
+            # still 409.
+            return 202, daemon.deliver(thread.id, message)
         if parts[2] == "transcript" and method == "GET":
             _object(query, ())
             messages = []
-            for row in stores.threads.read_log(thread.id):
+            rows = stores.threads.read_log(thread.id)
+            # What became of each owner message that reached a running turn
+            # (2026-10-08): it ran (`queued_started`) or was dropped.
+            fate = {}
+            for row in rows:
+                if row.get("kind") in ("queued_started", "queued_dropped"):
+                    mid = (row.get("data") or {}).get("message_id")
+                    if isinstance(mid, str):
+                        fate[mid] = row["kind"]
+            for row in rows:
                 kind = row.get("kind")
                 if kind not in (None, "text", "user", "model_set"):
                     continue
@@ -1007,6 +1021,15 @@ def route(handler, daemon, parts, query):
                     if kind == "user" and data.get("via") in ("discord", "dm"):
                         # Typed in Discord (PR C): the HUD labels it "via Discord".
                         message["via"] = data["via"]
+                    mid = data.get("message_id") if kind == "user" else None
+                    if isinstance(mid, str):
+                        message["message_id"] = mid
+                        if fate.get(mid) == "queued_dropped":
+                            message["mark"] = "not sent"
+                        elif data.get("steer"):
+                            message["mark"] = "steering"
+                        elif data.get("queued") and mid not in fate:
+                            message["mark"] = "queued"
                     messages.append(message)
             return 200, {"messages": messages}
     if len(parts) in (3, 4) and parts[0] == "tasks" and method == "GET":
