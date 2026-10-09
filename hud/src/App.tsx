@@ -30,6 +30,8 @@ import { ProjectDialog } from "./components/Pickers";
 import { ArchiveConfirm, ArchiveView } from "./components/Archive";
 import { afterProjectGone, afterThreadGone, forgetLastProject, projectNamesTaken } from "./lib/projects";
 import { guildConfigured, ownerLine } from "./lib/discord";
+import { CollapseButton, Rail, Splitter, ZoomControl, useLayout } from "./components/Layout";
+import { ZOOM_DEFAULT, maxWidth } from "./lib/layout";
 
 const TABS: Tab[] = ["chat", "task", "file", "diff", "preview"];
 const PROPOSAL_WINDOW_MS = 60_000;
@@ -42,6 +44,9 @@ const LIFECYCLE_KINDS = new Set([
 
 export default function App() {
   const { state, dispatch } = useStore();
+  // Zoom, pane widths and folded panes (§18, 2026-10-08): lib/layout.ts.
+  // Every layout key is inert while an authorization card is up (as PTT is).
+  const view = useLayout(state.approvals.length > 0);
   const [avatars, setAvatars] = useState<AvatarDesc[]>([]);
   // The fast path's roster and its default (`GET /models`), re-read on every
   // `model` broadcast so another window's change relabels this one.
@@ -867,14 +872,24 @@ export default function App() {
   const activeProjectId = currentProjectId(state);
   const openThread = state.threadId ? state.threads.find((t) => t.id === state.threadId) || null : null;
   const task = currentTask(state);
+  const drawn = view.fitted;
   const hint =
     state.status ||
     (state.approvals.length ? "ANSWER THE AUTHORIZATION" : HINTS[state.dictation]);
 
   return (
     <>
-      <div id="shell">
+      <div
+        id="shell"
+        className={(drawn.leftFolded ? "left-collapsed " : "") + (drawn.rightFolded ? "right-collapsed" : "")}
+        style={{ ["--left-w" as any]: `${drawn.left}px`, ["--right-w" as any]: `${drawn.right}px` }}
+      >
+        {drawn.leftFolded ? (
+          <Rail side="left" auto={drawn.autoLeft} onExpand={() => view.open("left")} onNewThread={() => newThread()} />
+        ) : null}
         <Sidebar
+          zoom={view.zoom}
+          onCollapse={() => view.fold("left")}
           projects={state.projects}
           archivedNames={state.archivedNames}
           platforms={state.platforms}
@@ -933,9 +948,21 @@ export default function App() {
               patch({ picker: "settings" });
               return;
             }
-            document.querySelector('[data-testid="usage"]')?.scrollIntoView({ block: "nearest" });
+            // The usage meters live in the status pane: a folded one opens first.
+            view.open("right");
+            setTimeout(() => document.querySelector('[data-testid="usage"]')?.scrollIntoView({ block: "nearest" }), 0);
           }}
         />
+        {drawn.leftFolded ? null : (
+          <Splitter
+            side="left"
+            width={drawn.left}
+            max={maxWidth("left", drawn.right, view.available)}
+            zoom={view.zoom}
+            onResize={(w) => view.setWidth("left", w)}
+            onReset={() => view.resetWidth("left")}
+          />
+        )}
 
         <div className="pane" id="main">
           <div id="tabs">
@@ -1044,8 +1071,22 @@ export default function App() {
           {state.tab === "preview" ? <PreviewTab projectId={activeProjectId} /> : null}
         </div>
 
+        {drawn.rightFolded ? null : (
+          <Splitter
+            side="right"
+            width={drawn.right}
+            max={maxWidth("right", drawn.left, view.available)}
+            zoom={view.zoom}
+            onResize={(w) => view.setWidth("right", w)}
+            onReset={() => view.resetWidth("right")}
+          />
+        )}
         <div className="pane" id="right">
-          <h2 className="bar">{task ? "Task" : "Status"}</h2>
+          <div className="barrow">
+            <h2 className="bar">{task ? "Task" : "Status"}</h2>
+            <ZoomControl zoom={view.zoom} onStep={view.zoomBy} onReset={() => view.setZoom(ZOOM_DEFAULT)} />
+            <CollapseButton side="right" onCollapse={() => view.fold("right")} />
+          </div>
           <div className="scroll">
             <ApprovalQueue requests={state.approvals} />
             <TaskView
@@ -1081,6 +1122,15 @@ export default function App() {
             {state.error ? <div className="block err" data-testid="error">{state.error}</div> : null}
           </div>
         </div>
+        {drawn.rightFolded ? (
+          <Rail
+            side="right"
+            auto={drawn.autoRight}
+            onExpand={() => view.open("right")}
+            approvals={state.approvals.length}
+            error={!!state.error}
+          />
+        ) : null}
       </div>
 
       <Orb
@@ -1089,6 +1139,10 @@ export default function App() {
         rings={state.avatar?.rings}
         accent={state.avatar?.accent}
         avatarUrl={state.avatar ? `/avatar.svg?v=${avatarCacheBust}` : null}
+        // A folded sidebar leaves a 36px rail: the orb shrinks into its foot
+        // rather than sitting on top of the input bar.
+        compact={drawn.leftFolded}
+        zoom={view.zoom}
         status={state.orb === "idle" ? "" : state.orb}
         onPress={press}
         onRelease={release}

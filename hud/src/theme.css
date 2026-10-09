@@ -57,9 +57,14 @@
   --shadow-pop: 0 8px 28px rgba(0, 0, 0, 0.55);
   --radius: 6px;
   --mono: ui-monospace, "Cascadia Mono", Consolas, monospace;
+
+  /* The HUD's own zoom (lib/layout.ts), set by the window. Viewport units
+     inside #root are scaled by it too, so every vh/vw cap divides by it. */
+  --ui-zoom: 1;
 }
 
 html, body, #root { height: 100%; overflow: hidden; }
+#root { zoom: var(--ui-zoom, 1); }
 
 body {
   font-family: "Segoe UI", system-ui, sans-serif;
@@ -120,9 +125,12 @@ input:focus, textarea:focus, select:focus { outline: none; box-shadow: var(--foc
   overflow: hidden;
 }
 
-#sidebar { flex: 0 0 236px; border-right: 1px solid var(--border); }
+/* Widths are the window's (lib/layout.ts fits them); the fallbacks are the
+   defaults. A folded pane is hidden, never unmounted, so its state survives. */
+#sidebar { flex: 0 0 var(--left-w, 236px); border-right: 1px solid var(--border); }
 #main { flex: 1 1 auto; }
-#right { flex: 0 0 316px; border-left: 1px solid var(--border); }
+#right { flex: 0 0 var(--right-w, 316px); border-left: 1px solid var(--border); }
+#shell.left-collapsed #sidebar, #shell.right-collapsed #right { display: none; }
 
 /* Section headers: small, quiet capitals — they separate without shouting. */
 h2.bar {
@@ -139,7 +147,9 @@ h2.bar {
 .pad { padding: 10px 12px; }
 
 /* ---- sidebar: the pinned buttons ---- */
-/* The primary action at the very top of the sidebar. */
+/* The primary action at the very top of the sidebar, beside the « that folds it. */
+.sidetop { display: flex; align-items: center; gap: 6px; margin: 10px 10px 6px; flex: 0 0 auto; }
+.sidetop #newthread { width: auto; margin: 0; flex: 1 1 auto; min-width: 0; }
 #newthread {
   display: flex; align-items: center; gap: 8px;
   width: calc(100% - 20px); margin: 10px 10px 6px; padding: 8px 10px;
@@ -148,11 +158,11 @@ h2.bar {
 #newthread .plus { color: var(--accent); font-weight: 600; }
 
 /* The PROJECTS header row: the header plus a compact "+" for a new project. */
-#sidebar .barrow {
-  display: flex; align-items: center; flex: 0 0 auto;
+#sidebar .barrow, #right .barrow {
+  display: flex; align-items: center; gap: 4px; flex: 0 0 auto;
   border-bottom: 1px solid var(--border); padding-right: 8px;
 }
-#sidebar .barrow h2.bar { border-bottom: none; flex: 1 1 auto; min-width: 0; }
+#sidebar .barrow h2.bar, #right .barrow h2.bar { border-bottom: none; flex: 1 1 auto; min-width: 0; }
 
 /* Standalone (the pre-compose markup): a full-width secondary button. */
 #newproject {
@@ -234,13 +244,18 @@ h2.bar {
 .kv .v.phase { align-self: flex-start; }
 
 /* ---- tabs ---- */
-#tabs { display: flex; gap: 0; border-bottom: 1px solid var(--border); flex: 0 0 auto; align-items: stretch; }
+/* Wraps rather than clipping: a narrow centre (a wide pane, a high zoom) puts
+   the Model · Voice · Avatar · Settings group on a second row, never off it. */
+#tabs { display: flex; flex-wrap: wrap; gap: 0; border-bottom: 1px solid var(--border); flex: 0 0 auto; align-items: stretch; }
 #tabs > button {
   border: none; border-bottom: 2px solid transparent; border-radius: 0; background: none;
   padding: 10px 14px; color: var(--text-muted); text-transform: capitalize;
 }
 #tabs > button:hover:not(:disabled) { background: none; color: var(--text); }
 #tabs > button.on { color: var(--text); border-bottom-color: var(--accent); background: none; }
+/* The tools group wraps inside itself too, so on a narrow centre Voice,
+   Avatar and Settings drop a row instead of being clipped. */
+#tabs > div { flex-wrap: wrap; justify-content: flex-end; min-width: 0; max-width: 100%; padding-top: 4px; padding-bottom: 4px; }
 #tabs > div button { padding: 3px 9px; }
 #tabs > div select { padding: 3px 6px; }
 
@@ -296,6 +311,10 @@ h2.bar {
   display: flex; flex-direction: column; gap: 6px;
 }
 #inputrow { display: flex; gap: 8px; align-items: flex-end; }
+/* The chip row wraps rather than crushing a chip to nothing; the hint takes
+   only what is left, so it never forces a wrap of its own. */
+#inputbar > .row { flex-wrap: wrap; }
+#inputbar > .row > .hint { flex: 1 1 0; min-width: 120px; }
 #inputrow textarea { min-height: 36px; max-height: 140px; padding: 7px 9px; }
 #chips { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
 .chip {
@@ -351,6 +370,10 @@ h2.bar {
   position: absolute; left: 50%; top: 50%; width: 52px; height: 52px;
   transform: translate(-50%, -50%); pointer-events: none; user-select: none;
 }
+/* Folded into the left rail's foot (36px) while the sidebar is hidden: the
+   same orb, scaled, still the push-to-talk control. */
+#orbdock.mini { left: 2px; bottom: 8px; transform: scale(0.2424); transform-origin: left bottom; }
+#orbdock.mini .st { display: none; }
 #orbdock .st {
   position: absolute; left: 0; right: 0; bottom: -2px; text-align: center;
   font: 9px var(--mono); letter-spacing: 0.1em; color: var(--text-muted); text-transform: uppercase;
@@ -386,18 +409,25 @@ h2.bar {
   background: var(--bg-2);
   border: 1px solid var(--amber-line); border-top: 3px solid var(--amber);
   border-radius: var(--radius);
-  padding: 0 20px 18px; width: 640px; max-width: 92vw; max-height: 86vh; overflow-y: auto;
+  padding: 0 20px 18px; width: 640px; overflow-y: auto;
+  /* Divided by the zoom: at 160% an undivided 86vh is 138% of the screen,
+     and the buttons on this card are the ones that must never leave it. */
+  max-width: calc(92vw / var(--ui-zoom, 1)); max-height: calc(86vh / var(--ui-zoom, 1));
   box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.6), 0 18px 60px rgba(0, 0, 0, 0.7), 0 0 36px rgba(251, 191, 36, 0.14);
 }
 .auth h3 {
   font: 600 12px var(--mono); letter-spacing: 0.12em; color: var(--amber);
   background: var(--amber-soft); margin: 0 -20px 12px; padding: 12px 20px;
 }
+.auth .headline { font: 600 12px var(--mono); color: var(--red); border: 1px solid var(--red-line); padding: 6px 8px; margin-bottom: 8px; white-space: normal; overflow-wrap: anywhere; letter-spacing: 0.04em; }
 .auth .origin { font: 10px var(--mono); color: var(--accent); margin-bottom: 8px; letter-spacing: 0.06em; }
 .auth .tool { font: 600 13px var(--mono); color: var(--text); margin-bottom: 8px; }
 .auth .arg { font: 11px var(--mono); color: var(--text); margin-bottom: 4px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .auth .arg .k { color: var(--text-muted); }
 .auth .reason { font: 11px var(--mono); color: var(--text-2); margin: 8px 0; }
+/* Not sticky, deliberately: reaching AUTHORIZE means scrolling past the whole
+   command, so the tail of a long one (a `curl … | sh` on line 45) cannot
+   stay out of sight while the button is in reach. */
 .auth .btns { display: flex; gap: 10px; margin-top: 14px; }
 .auth .btns button { background: var(--bg-3); border-color: var(--border-strong); color: var(--text); font-family: var(--mono); letter-spacing: 0.06em; }
 .auth .btns button:hover:not(:disabled) { background: #353532; }
@@ -459,7 +489,8 @@ h2.bar {
 }
 .picker {
   background: var(--bg-2); border: 1px solid var(--border-strong); border-radius: 8px;
-  width: 620px; max-width: 92vw; max-height: 78vh; display: flex; flex-direction: column;
+  width: 620px; max-width: calc(92vw / var(--ui-zoom, 1)); max-height: calc(78vh / var(--ui-zoom, 1));
+  display: flex; flex-direction: column;
   overflow: hidden; box-shadow: var(--shadow-pop);
 }
 .picker h3 {
@@ -641,3 +672,63 @@ button.danger:hover:not(:disabled) { background: var(--red-soft); }
 .chat-place { padding: 4px 12px; border-bottom: 1px solid var(--border); }
 .chat-place a { color: inherit; text-decoration: underline; }
 .msg .who .via { text-transform: none; letter-spacing: 0; opacity: 0.75; }
+
+/* ---- zoom, folding and resizing (design §18, 2026-10-08) ---- */
+/* The icon button that folds a pane: quiet until hovered, like the "+". */
+button.collapse {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 24px; height: 24px; padding: 0; flex: 0 0 24px;
+  font: 13px var(--mono); line-height: 1; color: var(--text-muted);
+  background: transparent; border-color: transparent; border-radius: 4px;
+}
+button.collapse:hover:not(:disabled) { background: var(--bg-3); color: var(--text); }
+.sidetop button.collapse { height: 32px; }
+
+.zoomctl { display: flex; align-items: center; flex: 0 0 auto; }
+.zoomctl button {
+  padding: 0 6px; height: 22px; min-width: 22px; border-radius: 0; margin-left: -1px;
+  font: 10px var(--mono); color: var(--text-2); background: var(--bg-2);
+}
+.zoomctl button:first-child { border-radius: var(--radius) 0 0 var(--radius); margin-left: 0; }
+.zoomctl button:last-child { border-radius: 0 var(--radius) var(--radius) 0; }
+.zoomctl button.pct { min-width: 42px; color: var(--text); }
+
+/* The draggable edge: a 7px hit area over the 1px rule, taking no room. */
+.splitter {
+  flex: 0 0 7px; margin: 0 -3px 0 -4px; position: relative; z-index: 6;
+  cursor: col-resize; touch-action: none; background: transparent;
+}
+.splitter::after {
+  content: ""; position: absolute; top: 0; bottom: 0; left: 2px; width: 3px;
+  background: transparent; transition: background 0.12s ease;
+}
+.splitter:hover::after, .splitter.dragging::after { background: var(--accent-line); }
+.splitter:focus-visible { box-shadow: none; }
+.splitter:focus-visible::after { background: var(--accent); }
+body.resizing, body.resizing * { cursor: col-resize !important; user-select: none !important; }
+/* An iframe under the pointer would swallow the drag. */
+body.resizing iframe { pointer-events: none; }
+
+/* What a folded pane leaves behind. */
+.rail {
+  flex: 0 0 36px; background: var(--bg-1); display: flex; flex-direction: column;
+  align-items: center; gap: 6px; padding: 10px 0 48px; min-width: 0;
+}
+.rail.left { border-right: 1px solid var(--border); }
+.rail.right { border-left: 1px solid var(--border); }
+.rail .railbtn {
+  width: 26px; height: 26px; padding: 0; display: inline-flex; align-items: center; justify-content: center;
+  font: 13px var(--mono); line-height: 1; color: var(--text-muted);
+  background: transparent; border-color: transparent; border-radius: 4px;
+}
+.rail .railbtn:hover:not(:disabled) { background: var(--bg-3); color: var(--text); }
+.rail .railbtn.plus {
+  color: var(--accent); font-weight: 600; font-size: 16px;
+  border-color: var(--border-strong); background: var(--bg-2);
+}
+.rail .railmark {
+  width: 22px; height: 22px; padding: 0; border-radius: 11px;
+  font: 600 10px var(--mono); display: inline-flex; align-items: center; justify-content: center;
+}
+.rail .railmark.amber { color: var(--amber); background: var(--amber-soft); border-color: var(--amber-line); }
+.rail .railmark.red { color: var(--red); background: var(--red-soft); border-color: var(--red-line); }

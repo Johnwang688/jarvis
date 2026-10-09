@@ -230,8 +230,54 @@ broker alone.
 
 - Built on the **app-server JSON-RPC protocol over stdio**, lifting
   `firm/codex_rpc.py`, `codex_config.py` and the usage accounting from
-  `~/projects/jarvis-trading-firm` (D10). Pinned to `codex-cli 0.153.4`; the
-  version check before each session stays.
+  `~/projects/jarvis-trading-firm` (D10). ~~Pinned to `codex-cli 0.153.4`~~
+  **A version floor, not a pin (2026-10-08):** the CLI auto-updates, and the
+  exact pin turned the update to 0.161.0 into "Could not send" for every
+  Codex thread. `providers/codex_cli.py` now accepts `CODEX_MIN` (0.153.4)
+  and newer, warns once per process above `CODEX_VERIFIED` (0.161.0), and
+  refuses older; `JARVIS_CODEX_STRICT=1` restores an exact match against the
+  verified versions. The binary is `JARVIS_CODEX_CLI`, else the first `codex`
+  on PATH outside `/mnt/` (the Windows npm shim must never run), else
+  `~/.local/bin/codex`; its realpath is version-checked and launched, so an
+  update between the two cannot swap it. The version check before each
+  session stays. The 0.153.4 → 0.161.0 protocol diff is
+  `docs/codex-briefs/codex-0.161-protocol-notes.md`.
+
+  **Deliberate differences from the Claude resolver (#14),** so nobody
+  "aligns" them by accident: an override that is relative, under `/mnt/`,
+  `.cmd`/`.bat`/`.exe`, or not executable is **refused** (health fails with a
+  sentence) where Claude warns and falls back or uses it — Codex has a
+  sandbox to protect and no bundled CLI to fall back on, so a wrong binary
+  must be loud. Codex **launches the realpath** it version-checked where
+  Claude launches the symlink (Claude's SDK spawns later and the updater
+  re-points the link; for Codex the check and the spawn are moments apart and
+  must be the same file). And Codex **resolves per session** (every `_open`
+  and every `/status`) where Claude resolves once per process, so an update
+  is picked up by the next Codex thread without a restart.
+- **What actually keeps the floor from loosening the gate** (corrected
+  2026-10-08 after review — the first draft claimed "anything not understood
+  gets an error or a decline", which was not the whole truth). A Codex
+  approval reaches us only *after* its `auto_review` reviewer passed it, and
+  under AUTO `permit`'s layer 5 answered ALLOW, so a sandbox-widening grant
+  riding on an approval (extra permissions, network, a grant root, terminal
+  input) was accepted with no human — and the `{decision}` reply cannot strip
+  it. Now: unknown server methods get an error; malformed approvals and
+  unknown `kind`s are declined unasked; **a widening approval is always asked
+  of a human** (`permit(..., widening=...)`, no Always, headline "SANDBOX
+  WIDENING: …" first on the card and the Discord post; deny-all, timeout or
+  strict declines), and so is one carrying a field outside the verified
+  schema. The headline is one cleaned, capped line on every surface (each
+  part through `approvals.clean_line`, ~400 overall, markdown escaped for
+  Discord, kept inline when the post overflows). Layer 1 judges what a
+  widening opens: a grant that is or contains protected state, a
+  SELF_PROTECTED file, or touches a credential directory is DENY unasked
+  (`permissions.denied_grant`). A command that differs from its item is
+  declined only for a plain approval; for `writeStdin` and `approvalId`
+  subcommands both commands are judged and shown, and a human asked. A
+  `command: null` can no longer erase the item's real command, and
+  a command approval with none is declined; `provider.answer()` can only
+  deny an approval. A plain in-sandbox approval under AUTO is still accepted
+  on the reviewer's word — that is R8, not a regression.
 - Approval requests `item/commandExecution/requestApproval`,
   `item/fileChange/requestApproval`, `item/permissions/requestApproval` are
   **routed to the broker**, where the firm denies them. `requestUserInput`
@@ -1379,7 +1425,8 @@ for everything not under `jarvis/v2/`.
   equivalent removed from the toolset). Until then, a project with
   always-ask additions routes its tasks to Claude.
 - **R6, Codex half answered (WP12a, 2026-09-16):** the app-server protocol
-  on 0.153.4 declares `account/rateLimits/updated` with `usedPercent`,
+  on 0.153.4 (unchanged in 0.161.0 but for an optional `normalModelSlug`)
+  declares `account/rateLimits/updated` with `usedPercent`,
   `windowDurationMins` and `resetsAt` per window (primary/secondary,
   sparse-merged). `CodexProvider` surfaces it as
   `USAGE.provider_reported.rate_limits`; `/usage` shows it as `quota`.
@@ -1540,6 +1587,65 @@ moves Jarvis's records to a trash (`trash.py`: the Recycle Bin for
 never touches the project's folder or a worktree. Archive and delete answer
 only the HUD's own listener, and no tool reaches them (B11). Routes in
 `docs/hud-api.md`.
+
+**Zoom, folding panes and resizable edges (2026-10-08).** The owner asked to
+enlarge or shrink the whole HUD and to fold or resize the side panes. The
+rules live in `hud/src/lib/layout.ts`; `components/Layout.tsx` applies them.
+
+- **Zoom** runs from 70% to 160% in 10% steps, default 100%. It is set from
+  `− 100% +` in the status pane's header (the percentage resets it) or with
+  Ctrl+= / Ctrl+- / Ctrl+0. The keys are the HUD's everywhere, including the
+  input bar and Monaco. Neither binds them, and a key let through is
+  Chrome's page zoom, which the HUD's control cannot see and Chrome
+  remembers per site. It is CSS `zoom` on `#root`, because a page cannot set
+  the browser's zoom and every size in `theme.css` is px. Viewport units
+  inside `#root` scale with it, so every `vh`/`vw` cap divides by
+  `--ui-zoom`. Undivided, the approval card's `86vh` was 138% of the screen
+  at 160%. A menu placed from a screen rect divides by the zoom. Monaco
+  already inverts the scale it measures.
+- **The approval card is not changed otherwise, deliberately.** Its button
+  row is *not* sticky: with AUTHORIZE always in reach, the tail of a long
+  command (the `curl … | sh` on line 45) could stay unread. Reaching
+  AUTHORIZE still means scrolling past the whole command. While a card is up,
+  **every layout key is inert**, as push-to-talk and the wake word already
+  are, so no zoom or fold re-lays the card out under a pointer that has not
+  moved.
+- **Folding.** Each pane has a `«`/`»` button and a shortcut: Ctrl+B for the
+  left pane, Ctrl+Alt+B for the right. The shortcuts work from the input
+  bar. They do nothing inside Monaco, where Ctrl+B completes the Ctrl+K
+  Ctrl+B chord, on auto-repeat, or during IME composition. Ctrl+Shift+B is
+  left to the browser's bookmarks bar, and AltGr's characters never match.
+  A folded pane leaves a 36px rail with an expand button. The left rail also
+  carries **+ (New thread)** and the orb, scaled into the rail's foot so it
+  never sits on the input bar. The right rail shows pending authorizations
+  (amber) and an error (red), so a folded pane hides nothing that wants the
+  owner. A folded pane is hidden, never unmounted, so its expanded projects,
+  selected thread, compose draft and inline renames survive.
+- **Resizing.** The inner edge of each pane is a `role="separator"`. It can
+  be dragged (pointer capture) or moved with the arrows (Shift for a bigger
+  step, Home/End for the ends), and a double-click resets it. Space on a
+  focused separator is not push-to-talk. The left pane runs 180–480px and
+  the right 240–560px, **in the HUD's own unzoomed pixels**, so a pane keeps
+  its proportion to its text as the zoom changes. Monaco relayouts through
+  `automaticLayout`.
+- **A small window keeps a usable centre.** The centre is held at 480px in
+  two steps (`fitLayout`). First, the open panes give back their slack above
+  their minimums. If even the minimums do not fit, the window folds a pane
+  **for the render only**: right first, then left. Examples: the right pane
+  at 150% on 1280px, both panes at 160% on 1024×700. The stored widths and
+  folded flags are never rewritten, so the owner's layout returns when there
+  is room. Opening a pane the window folded opens it and folds the other
+  instead. Only a window under about 552 zoomed px leaves the centre
+  narrower than 480, because both rails are already in place.
+- **Persistence.** Zoom and layout persist in localStorage
+  (`jarvis.hud.zoom`, `jarvis.hud.layout`). Every read and write is guarded,
+  each field falls back to its own default, and only a literal `true` folds
+  a pane, so a mangled value never hides one. Storage that throws on every
+  call still opens at the defaults and simply forgets.
+- **Wrapping.** The tab bar, the tools group inside it and the input bar's
+  chip row wrap instead of clipping. On a narrow centre, Model · Voice ·
+  Avatar · Settings move to another row, and at 1024×700 and 160% every tab
+  and tool is checked to be on screen and clickable.
 
 Remaining: WP13 (the long-bench comparison, the owner's call on cost), a
 native Windows worker, the R8 hook on Codex, and prompt tuning in

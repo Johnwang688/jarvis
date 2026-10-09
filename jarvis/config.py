@@ -260,6 +260,14 @@ V2_DATA_DIR = Path(
     os.environ.get("JARVIS_V2_DATA", Path.home() / ".local" / "share" / "jarvis" / "v2")
 )
 
+# The Codex CLI the v2 Codex provider runs (`jarvis/v2/providers/codex_cli.py`).
+# Empty means "find it": the first `codex` on PATH that is not a Windows shim
+# under /mnt/, then ~/.local/bin/codex. Set it to pin one binary; it wins over
+# PATH. JARVIS_CODEX_STRICT=1 accepts only a protocol-verified version exactly
+# (the old pin's behaviour) instead of any version at or above the floor.
+CODEX_CLI = os.environ.get("JARVIS_CODEX_CLI", "")
+CODEX_STRICT = os.environ.get("JARVIS_CODEX_STRICT", "") == "1"
+
 # Which `claude` binary the v2 Claude provider drives (`providers/claude.py`,
 # `resolve_cli`). Empty means "find it": the first real `claude` on PATH that is
 # not a Windows shim under /mnt/, then ~/.local/bin/claude, and only then the

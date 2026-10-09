@@ -310,7 +310,7 @@ class DiscordRest:
         files = list(files)
         overflow = getattr(content, "overflow", None)
         if overflow is not None:
-            files.append(("report.txt", overflow))
+            files.append((getattr(content, "overflow_name", "report.txt"), overflow))
         if content is not None and len(content) > 2000:
             files.append(("message.txt", content))
             content = "Full message attached (unabridged)."

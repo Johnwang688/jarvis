@@ -5,7 +5,6 @@ import json
 import os
 from pathlib import Path
 import re
-import shutil
 import tempfile
 
 from jarvis import config
@@ -81,7 +80,13 @@ def clean_env(home: Path, auth_home: Path | None = None) -> dict[str, str]:
     return env
 
 
-def prepare(thread_id: str, brief: Brief) -> tuple[list[str], dict[str, str], Path]:
+def prepare(thread_id: str, brief: Brief, binary: str | None = None) -> tuple[list[str], dict[str, str], Path]:
+    """The app-server argv, child environment and private home for a thread.
+
+    ``binary`` is the codex the caller already version-checked; without one
+    it is resolved here the same way (codex_cli.resolve), never from a bare
+    PATH lookup that could land on the Windows shim.
+    """
     validate(brief)
     if not re.fullmatch(r"[A-Za-z0-9_-]+", thread_id):
         raise BriefRefused("Invalid Codex private thread directory id")
@@ -89,9 +94,12 @@ def prepare(thread_id: str, brief: Brief) -> tuple[list[str], dict[str, str], Pa
     auth = auth_home / "auth.json"
     if not auth.is_file():
         raise BriefRefused("Codex ChatGPT login missing; run codex login")
-    binary = shutil.which("codex")
     if binary is None:
-        raise BriefRefused("codex is not on PATH")
+        from .codex_cli import resolve
+
+        binary, reason = resolve()
+        if binary is None:
+            raise BriefRefused(reason)
     root = Path(config.V2_DATA_DIR) / "codex"
     home = root / thread_id
     for directory in (root, home, home / "tmp"):

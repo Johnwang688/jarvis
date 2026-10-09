@@ -329,6 +329,13 @@ class DiscordChecks(unittest.TestCase):
         call = self.fake.calls[-1]
         self.assertLessEqual(len(payload(call)["content"]), 2000)
         self.assertEqual(call["files"][0][1][1].decode(), rendered)
+        # A Codex sandbox widening is the first line, bold, before the tool.
+        line = "SANDBOX WIDENING: network on · write /home · grant root /"
+        widened = approval_text("shell", {"command": "ls", "sandbox_widening": line}, "C45",
+                                "task abc", allowlistable=False, headline=line)
+        self.assertEqual(widened.splitlines()[0], f"**{line}**")
+        self.assertNotIn("/always", widened)
+        self.assertFalse(approval_text("shell", {"command": "ls"}, "C46", "x").startswith("**"))
         short = approval_text("shell", {"command": "pwd"}, "C43", "task abc")
         self.rest.post("t", short)
         self.assertEqual(payload(self.fake.calls[-1])["content"], short)
