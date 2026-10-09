@@ -14,8 +14,9 @@
 import { useMemo, useState } from "react";
 import type { ModelRow, ProviderName } from "../types";
 import {
-  PROVIDERS, PROVIDER_LABELS, SEARCH, applyEffort, applyModel, applyProvider, effective,
-  effortOptions, modelLabel, modelOptions, shortId, type Choice, type ThreadModels,
+  PROVIDERS, PROVIDER_LABELS, SEARCH, applyEffort, applyModel, applyProvider, canSetDefault,
+  defaultChosenHere, defaultEffortOptions, defaultModel, defaultRows, defaultSourceLabel, effective,
+  effortOptions, modelLabel, modelOptions, resetTitle, shortId, type Choice, type ThreadModels,
 } from "../lib/threadmodel";
 
 const stop = (e: React.KeyboardEvent) => e.stopPropagation();
@@ -33,6 +34,8 @@ export function ModelChip(props: {
   onSearch: () => void;
   /** Per provider, why the project cannot use it (greyed out), or null. */
   refusals?: Partial<Record<ProviderName, string | null>>;
+  /** Open this provider's default menu (Claude and Codex, 2026-10-08). */
+  onDefaults?: (provider: ProviderName) => void;
 }) {
   const c = props.choice;
   const refused = props.refusals?.[c.provider] || null;
@@ -104,6 +107,19 @@ export function ModelChip(props: {
                 <option key={o.value} value={o.value}>{o.label}</option>
               ))}
             </select>
+          ) : null}
+          {props.onDefaults && canSetDefault(props.models, c.provider) ? (
+            <button
+              type="button"
+              data-testid="provider-defaults-open"
+              disabled={props.disabled}
+              title={`Choose the model every default ${PROVIDER_LABELS[c.provider]} thread runs on`}
+              onKeyDown={stop}
+              onKeyUp={stop}
+              onClick={() => props.onDefaults?.(c.provider)}
+            >
+              default ▾
+            </button>
           ) : null}
         </>
       ) : (
@@ -202,6 +218,93 @@ export function CatalogPicker(props: {
         </div>
         <div className="foot">
           <button type="button" data-testid="catalog-close" onClick={props.onClose}>Close</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Claude's or Codex's default (2026-10-08): the model every default-following
+ * thread on that provider runs on, chosen here as the OpenRouter one is in the
+ * Model picker. "Set as default" moves the badge and relabels every default
+ * thread at once; pinned threads keep their own model. "Reset to built-in
+ * default" returns Claude to Opus 5.5 and Codex to routing's default. The
+ * Codex default never rewrites routing (Settings) — it wins for chat threads
+ * only. A refusal is shown here in the backend's words, never swallowed.
+ * Every label is text: model names come off the network.
+ */
+export function ProviderDefaults(props: {
+  models: ThreadModels | null;
+  provider: ProviderName;
+  error?: string;
+  onSet: (model: string, effort: string) => void;
+  onReset: () => void;
+  onClose: () => void;
+}) {
+  const p = props.provider;
+  const label = PROVIDER_LABELS[p] || p;
+  const info = props.models?.providers[p];
+  const current = defaultModel(props.models, p);
+  const eff = defaultEffortOptions(props.models, p);
+  return (
+    <div className="pickerveil" data-testid="provider-defaults" onClick={(e) => {
+      if (e.target === e.currentTarget) props.onClose();
+    }}>
+      <div className="picker" onKeyDown={(e) => {
+        e.stopPropagation();
+        if (e.key === "Escape") props.onClose();
+      }} onKeyUp={stop}>
+        <h3>{label} default</h3>
+        <div className="pad col">
+          <span className="muted small" data-testid="pd-now">
+            {`Default ${label} threads run on ${current || "?"}`}
+            {info?.default_effort ? ` · ${info.default_effort}` : ""}
+            {` (${defaultSourceLabel(props.models, p)}). Pinned threads keep their own model.`}
+            {p === "codex" ? " Routing for tasks is unchanged." : ""}
+          </span>
+          {info?.note ? <span className="muted small" data-testid="pd-note">{info.note}</span> : null}
+          {props.error ? <div className="err" data-testid="pd-error">{props.error}</div> : null}
+        </div>
+        <div className="rows">
+          {defaultRows(props.models, p).map((r) => (
+            <div key={r.id} className={"prow" + (r.isDefault ? " sel" : "")} data-testid={`pd-row-${r.id}`}>
+              <span>{r.name}</span>
+              {r.isDefault ? <span className="badge" data-testid={`pd-badge-${r.id}`}>default</span> : null}
+              <span className="sub">{r.id}</span>
+              {r.isDefault ? (
+                eff.options.length ? (
+                  <select
+                    data-testid="pd-effort"
+                    style={{ width: "auto" }}
+                    value={eff.value}
+                    title="The effort a default thread runs at"
+                    onChange={(e) => props.onSet(r.id, e.target.value)}
+                  >
+                    {eff.options.map((o) => (
+                      <option key={o.value} value={o.value}>{o.label}</option>
+                    ))}
+                  </select>
+                ) : null
+              ) : (
+                <button type="button" data-testid={`pd-set-${r.id}`} onClick={() => props.onSet(r.id, "")}>
+                  Set as default
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+        <div className="foot">
+          <button
+            type="button"
+            data-testid="pd-reset"
+            disabled={!defaultChosenHere(props.models, p)}
+            title={resetTitle(props.models, p)}
+            onClick={props.onReset}
+          >
+            Reset to built-in default
+          </button>
+          <button type="button" data-testid="pd-close" onClick={props.onClose}>Close</button>
         </div>
       </div>
     </div>

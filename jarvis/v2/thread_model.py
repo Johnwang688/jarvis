@@ -14,9 +14,13 @@ Where the choice lives, and why there:
 - `Thread.model = None` is **default**. On OpenRouter that is the global
   Model picker (`models.tier("orchestrator")`, i.e. `JARVIS_ORCHESTRATOR` or
   the owner's selection), worked out at the start of *every* turn, so an open
-  default thread follows a global change without a restart. Claude defaults
-  to `claude-opus-5-5`; Codex to its routing default for the orchestrator
-  role (`routing.json`).
+  default thread follows a global change without a restart. Claude and Codex
+  follow **the HUD's default for that provider** when the owner set one
+  (`set_provider_default`, `config.PROVIDER_DEFAULTS_PATH`, 2026-10-08), and
+  otherwise their built-in default: `claude-opus-5-5` for Claude, the routing
+  default for the orchestrator role (`routing.json`) for Codex. The HUD's
+  Codex default wins over routing **for chat threads only**; it never writes
+  routing.json, and tasks keep routing's table.
 - `Thread.effort = None` is **that model's default**: `high`, unless the
   roster pins an effort for it, clamped to the model's own ladder, and
   nothing at all for a model with no reasoning control (A4).
@@ -26,14 +30,19 @@ Where the choice lives, and why there:
   turn, and dropped for a default with no reasoning control. Only an
   explicit model choice pins a model to a thread.
 
-Nothing here is a tool. The agent cannot change its own model or provider;
-only the owner can, through `PATCH /threads/{id}` (asserted by the suites).
+Nothing here is a tool. The agent cannot change its own model or provider,
+nor a provider's default; only the owner can, through `PATCH /threads/{id}`
+and `POST /thread-models` (asserted by the suites).
 """
 from __future__ import annotations
 
+import json
+import os
+import tempfile
+import threading
 from typing import Any
 
-from jarvis import models
+from jarvis import config, models
 from .model import PermissionProfile, ProviderName, Role, Thread
 
 DEFAULT_EFFORT = "high"
@@ -146,22 +155,222 @@ def default_model(provider: ProviderName) -> str | None:
     provider = ProviderName(provider)
     if provider == ProviderName.FAST:
         return models.tier("orchestrator")
-    if provider == ProviderName.CLAUDE:
-        return CLAUDE_DEFAULT
-    from .router import model_settings
-    return model_settings("orchestrator", "codex")[0]
+    return default_choice(provider)[0]
 
 
-def default_choice(provider: ProviderName) -> tuple[str | None, str | None]:
-    """What a thread left on default runs on right now."""
+def builtin_choice(provider: ProviderName) -> tuple[str | None, str | None]:
+    """What a Claude or Codex default thread runs on with no HUD default:
+    Opus 5.5 at its default effort for Claude; for Codex its routing default,
+    model and effort together (A5). "Reset to built-in default" returns here."""
     provider = ProviderName(provider)
     if provider == ProviderName.CODEX:
-        # Codex's existing routing default, model and effort together (A5).
         from .router import model_settings
         model, effort = model_settings("orchestrator", "codex")
         return model, effort if effort is not None else default_effort(provider, model)
-    model = default_model(provider)
+    model = CLAUDE_DEFAULT if provider == ProviderName.CLAUDE else models.tier("orchestrator")
     return model, default_effort(provider, model) if model else None
+
+
+def default_choice(provider: ProviderName) -> tuple[str | None, str | None]:
+    """What a thread left on default runs on right now.
+
+    Claude and Codex: the HUD's default when the owner set one (its effort,
+    or the model's own default effort, within the model's ladder), else the
+    built-in one. OpenRouter: the global Model picker.
+    """
+    provider = ProviderName(provider)
+    return _choice(provider, hud_default(provider))
+
+
+def _choice(provider: ProviderName, chosen) -> tuple[str | None, str | None]:
+    if chosen is None:
+        return builtin_choice(provider)
+    model, effort = chosen
+    if effort:
+        return model, clamp_effort(provider, model, effort)
+    if provider == ProviderName.CODEX:
+        # "No effort" on the model routing already names means routing's
+        # effort for it: setting routing's own model as the default must not
+        # quietly drop it from xhigh to high (PR #15 review).
+        try:
+            routed, routed_effort = builtin_choice(provider)
+        except Exception:
+            routed, routed_effort = None, None
+        if routed == model:
+            return model, routed_effort
+    return model, default_effort(provider, model)
+
+
+def default_source(provider: ProviderName) -> str:
+    """Where the default comes from: "hud" (chosen in the HUD), else "config"
+    (OpenRouter's env model), "built-in" (Claude) or "routing" (Codex)."""
+    provider = ProviderName(provider)
+    if provider == ProviderName.FAST:
+        return "hud" if models.selected() else "config"
+    if hud_default(provider) is not None:
+        return "hud"
+    return "built-in" if provider == ProviderName.CLAUDE else "routing"
+
+
+# ---- the HUD's default for Claude and Codex (2026-10-08) --------------------
+#
+# Stored in its own file (`config.PROVIDER_DEFAULTS_PATH`) as
+# `{"claude": {"model", "effort"}, "codex": {...}}`; `effort: null` is that
+# model's own default effort. Not in models.json, which is the OpenRouter
+# roster rewritten whole by two processes; and **never in routing.json**: the
+# Codex default here is a chat-thread setting, and role routing is Settings'
+# (§12.1). A stored model Jarvis no longer knows is ignored (the built-in
+# default applies, and `describe` says so) rather than sent to a provider.
+
+SETTABLE = (ProviderName.CLAUDE, ProviderName.CODEX)
+_defaults_lock = threading.Lock()
+
+
+def _read_defaults() -> dict[str, Any]:
+    try:
+        payload = json.loads(config.PROVIDER_DEFAULTS_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        # ValueError covers a non-UTF-8 file as well as bad JSON: a corrupt
+        # file degrades to the built-in defaults, never to an error per turn.
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _stored_raw(provider: ProviderName) -> tuple[str, Any] | None:
+    """The stored (model, effort) exactly as the file has them."""
+    entry = _read_defaults().get(ProviderName(provider).value)
+    if not isinstance(entry, dict):
+        return None
+    model = entry.get("model")
+    if not isinstance(model, str) or not model:
+        return None
+    return model, entry.get("effort")
+
+
+def _bad_effort(effort: Any) -> bool:
+    """A stored effort that is not a reasoning effort at all ("turbo", 3)."""
+    if effort is None or (isinstance(effort, str) and not effort.strip()):
+        return False
+    return not isinstance(effort, str) or effort.strip().lower() not in models.EFFORT_LADDER
+
+
+def _stored(provider: ProviderName) -> tuple[str, str | None] | None:
+    """The stored default, its effort sanitized: one that is not a reasoning
+    effort is read as None (the model's own default), never handed to the
+    clamp — which would map an unknown word to the bottom of the ladder."""
+    raw = _stored_raw(provider)
+    if raw is None:
+        return None
+    model, effort = raw
+    if _bad_effort(effort) or not isinstance(effort, str):
+        return model, None
+    return model, effort.strip().lower() or None
+
+
+def hud_default(provider: ProviderName) -> tuple[str, str | None] | None:
+    """The owner's HUD default for Claude or Codex as stored (model, effort),
+    or None: none set, OpenRouter (its default is the Model picker's), or a
+    stored model Jarvis no longer knows."""
+    provider = ProviderName(provider)
+    if provider not in SETTABLE:
+        return None
+    stored = _stored(provider)
+    if stored is None or stored[0] not in _cli(provider):
+        return None
+    return stored
+
+
+def _save_defaults(data: dict[str, Any]) -> None:
+    """Atomically: a temp file beside it, then os.replace (the mode is kept),
+    so a reader sees the old defaults or the new ones, never half a file."""
+    path = config.PROVIDER_DEFAULTS_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = json.dumps(data, indent=2, sort_keys=True) + "\n"
+    try:
+        mode = path.stat().st_mode & 0o777
+    except OSError:
+        mode = 0o644
+    fd, tmp = tempfile.mkstemp(prefix=".provider_defaults-", suffix=".tmp", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def set_provider_default(provider: Any, model: Any, effort: Any = None) -> tuple[str, str | None] | None:
+    """Set — or with `model` "" reset — the default Claude or Codex chat
+    threads run on; return the stored (model, effort), or None after a reset.
+
+    Validated like a thread's choice: a model `router.CLI_MODELS` names for
+    that provider, and an effort on that model's own ladder (refused, never
+    clamped: this is a choice about one named model). `effort` None or ""
+    means the model's own default effort. Raises `ChoiceRefused` with the
+    sentence the HUD shows. Only the HUD's route reaches this — no tool does.
+    """
+    try:
+        provider = ProviderName(provider)
+    except (TypeError, ValueError):
+        raise ChoiceRefused(f"{provider!r} is not a provider (claude or codex)") from None
+    if provider not in SETTABLE:
+        raise ChoiceRefused("the OpenRouter default is the Model picker's (POST /model); "
+                            "this sets Claude's and Codex's")
+    if model is not None and not isinstance(model, str):
+        raise ChoiceRefused("model must be a string ('' resets to the built-in default)")
+    if effort is not None and not isinstance(effort, str):
+        raise ChoiceRefused("effort must be a string or null")
+    model = (model or "").strip()
+    effort = (effort or "").strip().lower() or None
+    if not model:
+        if effort is not None:
+            raise ChoiceRefused("a reset takes no effort: the built-in default brings its own")
+    elif model not in _cli(provider):
+        raise ChoiceRefused(
+            f"{model} is not a {LABELS[provider]} model Jarvis knows "
+            f"(it knows {', '.join(_cli(provider))})")
+    elif effort is not None:
+        ladder = efforts_of(provider, model) or ()
+        if effort not in models.EFFORT_LADDER:
+            raise ChoiceRefused(f"{effort!r} is not a reasoning effort")
+        if not ladder:
+            raise ChoiceRefused(f"{model} has no reasoning effort to set")
+        if effort not in ladder:
+            raise ChoiceRefused(f"{model} does not offer {effort!r} (it offers {', '.join(ladder)})")
+    with _defaults_lock:
+        data = {k: v for k, v in _read_defaults().items() if k in {p.value for p in SETTABLE}}
+        if not model:
+            if provider.value in data:
+                data.pop(provider.value)
+                _save_defaults(data)
+            return None
+        data[provider.value] = {"model": model, "effort": effort}
+        _save_defaults(data)
+    return model, effort
+
+
+def _stale_note(provider: ProviderName) -> str:
+    """A stored default naming a model Jarvis no longer knows, or an effort
+    that is not one: said, not sent."""
+    if provider not in SETTABLE:
+        return ""
+    raw = _stored_raw(provider)
+    if raw is None:
+        return ""
+    model, effort = raw
+    if model not in _cli(provider):
+        fallback = "built-in default" if provider == ProviderName.CLAUDE else "routing default"
+        return (f"the HUD default {model} is not a {LABELS[provider]} model Jarvis knows "
+                f"any more; using the {fallback}")
+    if _bad_effort(effort):
+        return (f"the HUD default's effort {effort!r} is not a reasoning effort; "
+                f"{model} runs at its default effort")
+    return ""
 
 
 def clamp_effort(provider: ProviderName, model: str, wanted: str) -> str | None:
@@ -260,21 +469,52 @@ def provider_models(provider: ProviderName) -> list[dict[str, Any]]:
 
 
 def describe() -> dict[str, Any]:
-    """`GET /thread-models`: per provider, its default and the models to offer."""
+    """`GET /thread-models`: per provider, its default, where that default
+    comes from, and the models to offer.
+
+    Each provider's `default`, `default_source` and `hud_default` come from
+    one read of the HUD's defaults, so a change landing mid-listing cannot
+    make them disagree.
+    """
     result = {}
     for provider in ProviderName:
+        notes = []
+        stored = hud_default(provider)
         try:
-            model, effort = default_choice(provider)
+            model, effort = _choice(provider, stored)
         except Exception as exc:  # a broken routing file must not blank the chip
             model, effort = None, None
-            note = f"{type(exc).__name__}: {exc}"
+            notes.append(f"{type(exc).__name__}: {exc}")
+        builtin = None
+        if provider in SETTABLE:
+            try:
+                b_model, b_effort = builtin_choice(provider)
+                builtin = {"model": b_model, "effort": b_effort}
+            except Exception as exc:
+                text = f"{type(exc).__name__}: {exc}"
+                if text not in notes:
+                    notes.append(text)
+            stale = _stale_note(provider)
+            if stale:
+                notes.append(stale)
+        if provider == ProviderName.FAST:
+            source = default_source(provider)
         else:
-            note = ""
+            source = "hud" if stored else ("built-in" if provider == ProviderName.CLAUDE else "routing")
         rows = provider_models(provider)
         for row in rows:
             row.setdefault("default_effort", default_effort(provider, row["id"]))
         result[provider.value] = {"label": LABELS[provider], "default": model,
-                                  "default_effort": effort, "models": rows, "note": note,
+                                  "default_effort": effort, "models": rows,
+                                  "note": "; ".join(notes),
+                                  "default_source": source,
+                                  # Claude and Codex only: the HUD's stored
+                                  # choice (effort null = the model's own), and
+                                  # what "Reset to built-in default" returns to.
+                                  "settable": provider in SETTABLE,
+                                  "hud_default": ({"model": stored[0], "effort": stored[1]}
+                                                  if stored else None),
+                                  "builtin": builtin,
                                   "profiles": list(PROFILES[provider]),
                                   "always_ask": TAKES_ALWAYS_ASK[provider]}
     return {"providers": result, "effort_default": DEFAULT_EFFORT}

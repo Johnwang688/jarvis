@@ -189,8 +189,13 @@ def protected_paths() -> set[Path]:
     # discord_guild.json (B1) is not permission state but decides where Jarvis
     # may create, rename and move channels: only `jarvis auth discord-guild`
     # writes it.
-    names = ("allowlist.json", "models.json", "routing.json", "discord_guild.json")
+    # provider_defaults.json (2026-10-08) is models.json's sibling for Claude
+    # and Codex: the model every default chat thread runs on, the owner's to
+    # choose in the HUD and nobody else's.
+    names = ("allowlist.json", "models.json", "routing.json", "discord_guild.json",
+             "provider_defaults.json")
     paths = {allow, Path(config.MODELS_PATH).expanduser(),
+             Path(config.PROVIDER_DEFAULTS_PATH).expanduser(),
              Path(config.DISCORD_GUILD_PATH).expanduser()}
     paths |= {directory / name for name in names}
     return {_resolve(p) for p in paths}

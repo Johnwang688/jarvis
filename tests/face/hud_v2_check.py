@@ -1824,6 +1824,184 @@ def thread_model_checks(page, mock):
           str(ro))
 
 
+def provider_default_checks(page, mock):
+    """Claude's and Codex's default, set from the model chip (2026-10-08)."""
+    print("\nClaude and Codex defaults, from the model chip")
+    from tests.face import hud_v2_mock
+    w = mock.world
+    w["cli_defaults"] = {}
+    evil = {"id": "claude-evil", "name": '<img src=x onerror="window.__pwned=true">',
+            "vision": True, "efforts": []}
+    hud_v2_mock.CLI_MODELS["claude"].append(evil)
+    mock.emit("model", {})
+    # A default Claude thread, and one pinned to Opus.
+    for tid, model in (("cd1", None), ("cp1", "claude-opus-5-5")):
+        w["threads"].append({
+            "id": tid, "project_id": "p1", "role": "chat", "provider": "claude",
+            "provider_session_id": None, "task_id": None, "title": f"claude {tid}", "created": "",
+            "updated": "", "turns": 1, "cost_usd": 0, "tokens": 0, "model": model, "effort": None,
+            "cwd": None})
+        mock.emit("thread_opened", {}, thread_id=tid)
+    until(lambda: all(any(t["id"] == tid for t in page.evaluate("window.__hud.state().threads"))
+                      for tid in ("cd1", "cp1")))
+
+    def show(tid):
+        page.evaluate(f"window.__hud.dispatch({{type: 'patch', patch: {{threadId: '{tid}', compose: null}}}})")
+        until(lambda: page.locator('[data-testid="model-chip-select"]').count() > 0)
+
+    def first_option():
+        return page.locator('[data-testid="model-chip-select"] option').first.inner_text()
+
+    show("cd1")
+    check("a default Claude thread is labelled with the built-in default",
+          until(lambda: first_option() == "default · claude-opus-5-5") is True, first_option())
+    opener = page.locator('[data-testid="provider-defaults-open"]')
+    check("the Claude chip offers its default menu", opener.count() == 1)
+    page.locator('[data-testid="tab-chat"]').click()
+    page.locator('[data-testid="new-thread"]').click()
+    until(lambda: page.locator('[data-testid="provider-chip-select"]').count() > 0)
+    page.locator('[data-testid="provider-chip-select"]').select_option("fast")
+    check("the OpenRouter chip does not (its default is the Model picker's)",
+          until(lambda: opener.count() == 0) is True)
+
+    # The chip's dialogs are open pickers: no open mic under them (review).
+    page.locator('[data-testid="dictation-review"]').click()
+
+    def mic_uploads():
+        before = len(mock.sent("POST", "/stt"))
+        page.evaluate("""
+          const m = window.__hud.mic;
+          m.feedMs(2000, 0.001);
+          window.__hud.capture.openFollowUp();
+          m.feedMs(1600, 0.06); m.feedMs(2200, 0.0005);
+        """)
+        return until(lambda: len(mock.sent("POST", "/stt")) > before, timeout=1.0) is True
+
+    page.locator('[data-testid="model-chip-select"]').select_option("__search__")
+    page.wait_for_selector('[data-testid="catalog"]')
+    check("speech under the catalogue is not taken", not mic_uploads())
+    page.locator('[data-testid="catalog-close"]').click()
+    until(lambda: page.locator('[data-testid="catalog"]').count() == 0)
+    page.locator('[data-testid="provider-chip-select"]').select_option("claude")
+    opener.click()
+    page.wait_for_selector('[data-testid="provider-defaults"]')
+    check("nor under the provider-default dialog", not mic_uploads())
+    z = page.evaluate("getComputedStyle(document.querySelector('[data-testid=\"provider-defaults\"]')).zIndex")
+    check("and the dialog stays under the approval veil (z-index 100)", int(z) < 100, z)
+    page.locator('[data-testid="pd-close"]').click()
+    until(lambda: page.locator('[data-testid="provider-defaults"]').count() == 0)
+    check("with both closed, the same speech is taken", mic_uploads())
+    until(lambda: page.locator('[data-testid="input"]').input_value() != "", timeout=2.0)
+    page.locator('[data-testid="input"]').fill("")
+
+    show("cd1")
+    page.evaluate("window.__pwned = false")
+    opener.click()
+    page.wait_for_selector('[data-testid="provider-defaults"]')
+    badge = lambda mid: page.locator(f'[data-testid="pd-badge-{mid}"]').count() == 1  # noqa: E731
+    check("the current default wears the badge", badge("claude-opus-5-5") and not badge("claude-haiku-4-5"))
+    check("and offers no Set as default", page.locator('[data-testid="pd-set-claude-opus-5-5"]').count() == 0)
+    check("Reset is disabled while nothing is chosen here",
+          page.locator('[data-testid="pd-reset"]').is_disabled())
+    row = page.locator('[data-testid="pd-row-claude-evil"]')
+    check("a model name carrying markup renders as text",
+          row.count() == 1 and row.locator("img").count() == 0 and "<img" in row.inner_text()
+          and page.evaluate("window.__pwned") is False, row.inner_text() if row.count() else "no row")
+
+    since = len(mock.calls)
+    page.locator('[data-testid="pd-set-claude-haiku-4-5"]').click()
+    body = until(lambda: mock.sent("POST", "/thread-models")[-1:] or None)
+    check("Set as default posts exactly {provider, model}",
+          bool(body) and body[-1] == {"provider": "claude", "model": "claude-haiku-4-5"}, str(body))
+    check("the badge moves", until(lambda: badge("claude-haiku-4-5") and not badge("claude-opus-5-5")) is True)
+    check("and Reset is enabled", until(lambda: not page.locator('[data-testid="pd-reset"]').is_disabled()) is True)
+    check("the open default thread relabels at once",
+          until(lambda: first_option() == "default · claude-haiku-4-5") is True, first_option())
+    check("and nothing but the default was written",
+          [c[1] for c in writes(mock, since)] == ["/thread-models"], str(writes(mock, since)))
+    page.locator('[data-testid="pd-close"]').click()
+    show("cp1")
+    check("a pinned thread keeps its own model",
+          until(lambda: page.locator('[data-testid="model-chip-select"]').input_value() == "claude-opus-5-5") is True
+          and not mock.sent("PATCH", "/threads/cp1"))
+
+    # The default's effort: the model's own ladder, stored with it.
+    show("cd1")
+    opener.click()
+    page.locator('[data-testid="pd-set-claude-opus-5-5"]').click()
+    until(lambda: badge("claude-opus-5-5"))
+    page.locator('[data-testid="pd-effort"]').select_option("low")
+    body = until(lambda: [b for b in mock.sent("POST", "/thread-models") if b.get("effort")] or None)
+    check("an effort on the default posts {provider, model, effort}",
+          bool(body) and body[-1] == {"provider": "claude", "model": "claude-opus-5-5", "effort": "low"}, str(body))
+    check("and the default thread's effort chip follows it",
+          until(lambda: page.locator('[data-testid="effort-chip-select"] option').first.inner_text()
+                == "default · low") is True)
+
+    # A refusal is shown inline, in the server's words, and changes nothing.
+    w["refuse_default"] = "claude-haiku-4-5 is not allowed here for a reason"
+    page.locator('[data-testid="pd-set-claude-haiku-4-5"]').click()
+    err = until(lambda: page.locator('[data-testid="pd-error"]').count()
+                and page.locator('[data-testid="pd-error"]').inner_text())
+    check("a refused Set as default is shown inline",
+          bool(err) and "Could not set claude-haiku-4-5 as the Claude default" in err
+          and "for a reason" in err, str(err))
+    check("and the badge stays", badge("claude-opus-5-5") and not badge("claude-haiku-4-5"))
+    w["refuse_default"] = None
+
+    # Reset to built-in default.
+    n = len(mock.sent("POST", "/thread-models"))
+    page.locator('[data-testid="pd-reset"]').click()
+    body = until(lambda: mock.sent("POST", "/thread-models")[n:] or None)
+    check("Reset posts {provider, model: ''}", bool(body) and body[-1] == {"provider": "claude", "model": ""},
+          str(body))
+    check("and the built-in default is back, Reset disabled again",
+          until(lambda: page.locator('[data-testid="pd-reset"]').is_disabled()) is True
+          and badge("claude-opus-5-5") and page.locator('[data-testid="pd-error"]').count() == 0)
+    page.locator('[data-testid="pd-close"]').click()
+    check("the dialog closes", until(lambda: page.locator('[data-testid="provider-defaults"]').count() == 0) is True)
+
+    # Another window's change arrives as a `model` event and relabels here.
+    w["cli_defaults"]["claude"] = {"model": "claude-haiku-4-5", "effort": None}
+    mock.emit("model", {"provider": "claude", "default": "claude-haiku-4-5"})
+    check("a change from elsewhere relabels default threads",
+          until(lambda: first_option() == "default · claude-haiku-4-5") is True, first_option())
+    w["cli_defaults"] = {}
+    mock.emit("model", {})
+
+    # Codex: its default wins over routing for chat threads; Reset is routing.
+    page.locator('[data-testid="tab-chat"]').click()
+    page.locator('[data-testid="new-thread"]').click()
+    until(lambda: page.locator('[data-testid="provider-chip-select"]').count() > 0)
+    page.locator('[data-testid="project-chip-select"]').select_option("p1")     # an auto project
+    page.locator('[data-testid="provider-chip-select"]').select_option("codex")
+    until(lambda: first_option() == "default · gpt-6-astra")
+    opener.click()
+    page.wait_for_selector('[data-testid="provider-defaults"]')
+    check("Codex's menu says routing is untouched",
+          "Routing for tasks is unchanged" in page.locator('[data-testid="pd-now"]').inner_text()
+          and "from routing" in page.locator('[data-testid="pd-now"]').inner_text())
+    check("and labels routing's model's effort as routing's",
+          page.locator('[data-testid="pd-effort"] option').first.inner_text() == "routing default · xhigh",
+          page.locator('[data-testid="pd-effort"] option').first.inner_text())
+    page.locator('[data-testid="pd-set-gpt-5.6-sol"]').click()
+    until(lambda: badge("gpt-5.6-sol"))
+    page.locator('[data-testid="pd-set-gpt-6-astra"]').click()
+    check("Set as default on routing's own model keeps routing's effort",
+          until(lambda: badge("gpt-6-astra") and "· xhigh (set here)"
+                in page.locator('[data-testid="pd-now"]').inner_text()) is True,
+          page.locator('[data-testid="pd-now"]').inner_text())
+    page.locator('[data-testid="pd-set-gpt-5.6-sol"]').click()
+    check("Set as default on Codex relabels the compose row",
+          until(lambda: first_option() == "default · gpt-5.6-sol") is True, first_option())
+    page.locator('[data-testid="pd-reset"]').click()
+    check("and Reset returns it to routing's default",
+          until(lambda: first_option() == "default · gpt-6-astra") is True, first_option())
+    page.locator('[data-testid="pd-close"]').click()
+    hud_v2_mock.CLI_MODELS["claude"].remove(evil)
+    mock.emit("model", {})
+
+
 def main():
     if not (DIST / "index.html").exists():
         print("hud/dist is not built. Run: cd hud && npm ci && npm run build")
@@ -1878,6 +2056,7 @@ def main():
             newproject_checks(page, mock)
             move_checks(page, mock)
             thread_model_checks(page, mock)
+            provider_default_checks(page, mock)
             # B1: project channels, before part B archives what they link.
             from tests.face.hud_v2_discord_check import discord_link_checks
             discord_link_checks(page, mock, check, until, expand)
