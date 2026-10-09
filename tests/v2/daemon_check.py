@@ -9,7 +9,7 @@ import tempfile
 import threading
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from jarvis import config
 from jarvis.v2 import daemon as mod
@@ -490,6 +490,22 @@ class DaemonChecks(unittest.TestCase):
         self.request("POST", "/threads", {"project_id": self.project.id, "role": "chat", "provider": "claude", "brief": {}}, 409)
         with patch.object(self.fake, "health", side_effect=RuntimeError("health broke")):
             self.assertFalse(self.request("GET", "/status")["providers"]["fast"]["ok"])
+
+    def test_status_names_the_claude_cli(self):
+        """/status carries the CLI a provider spawns: path and version only."""
+        fake = FakeProvider()
+        fake.name = ProviderName.CLAUDE
+        fake.cli_info = lambda: {"path": "/fake/bin/claude", "version": "2.1.295",
+                                 "source": "path", "extra": object()}
+        self.d.providers[ProviderName.CLAUDE] = fake
+        status = self.request("GET", "/status")["providers"]
+        self.assertEqual(status["claude"]["cli"], {"path": "/fake/bin/claude", "version": "2.1.295"})
+        self.assertNotIn("cli", status["fast"])
+        fake.cli_info = lambda: {"path": None, "version": "2.1.273"}
+        self.assertEqual(self.request("GET", "/status")["providers"]["claude"]["cli"],
+                         {"path": None, "version": "2.1.273"})
+        fake.cli_info = Mock(side_effect=RuntimeError("probe broke"))
+        self.assertNotIn("cli", self.request("GET", "/status")["providers"]["claude"])
 
     def test_cumulative_codex_usage_is_not_double_counted(self):
         fake = FakeProvider()
