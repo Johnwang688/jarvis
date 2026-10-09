@@ -54,6 +54,7 @@ class Sandbox:
         self._saved = {
             "ALLOWLIST_PATH": config.ALLOWLIST_PATH,
             "MODELS_PATH": config.MODELS_PATH,
+            "PROVIDER_DEFAULTS_PATH": config.PROVIDER_DEFAULTS_PATH,
             "V2_DATA_DIR": config.V2_DATA_DIR,
             "V2_ALWAYS_ASK": config.V2_ALWAYS_ASK,
             "DISCORD_GUILD_PATH": config.DISCORD_GUILD_PATH,
@@ -62,6 +63,7 @@ class Sandbox:
         os.environ["HOME"] = str(self.home)
         config.ALLOWLIST_PATH = self.home / ".config" / "jarvis" / "allowlist.json"
         config.MODELS_PATH = self.home / ".config" / "jarvis" / "models.json"
+        config.PROVIDER_DEFAULTS_PATH = self.home / ".config" / "jarvis" / "provider_defaults.json"
         config.V2_DATA_DIR = self.root / "v2data"
         config.V2_ALWAYS_ASK = self.home / ".config" / "jarvis" / "always-ask.json"
         config.DISCORD_GUILD_PATH = self.home / ".config" / "jarvis" / "discord_guild.json"
@@ -353,6 +355,10 @@ def file_deny_checks():
             str(config.MODELS_PATH),
             str(config.ALLOWLIST_PATH.with_name("routing.json")),
             str(config.ALLOWLIST_PATH.with_name("models.json")),
+            # 2026-10-08: the Claude/Codex chat default is the owner's alone.
+            str(config.PROVIDER_DEFAULTS_PATH),
+            str(config.ALLOWLIST_PATH.with_name("provider_defaults.json")),
+            "~/.config/jarvis/provider_defaults.json",
             # B1: where Jarvis may create and move channels is setup's alone.
             str(config.DISCORD_GUILD_PATH),
             str(config.ALLOWLIST_PATH.with_name("discord_guild.json")),

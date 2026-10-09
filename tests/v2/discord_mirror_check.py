@@ -247,7 +247,8 @@ class Harness(unittest.TestCase):
             "archive_category_id": "700000000000000101", "ungrouped_channel_id": UNGROUPED}))
         for name, value in (("DISCORD_TOKEN_PATH", token_path),
                             ("DISCORD_GUILD_PATH", guild_path),
-                            ("ALLOWLIST_PATH", self.root / "allowlist.json")):
+                            ("ALLOWLIST_PATH", self.root / "allowlist.json"),
+                            ("PROVIDER_DEFAULTS_PATH", self.root / "provider_defaults.json")):
             patcher = patch.object(config, name, value)
             patcher.start()
             self.addCleanup(patcher.stop)

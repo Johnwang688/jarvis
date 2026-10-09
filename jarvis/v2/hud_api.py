@@ -923,6 +923,26 @@ def route(handler, daemon, parts, query):
         from . import thread_model
         _object(query, ())
         return 200, thread_model.describe()
+    if parts == ["thread-models"] and method == "POST":
+        # The default Claude or Codex chat threads run on (2026-10-08): the
+        # owner's "Set as default" / "Reset to built-in default" in the model
+        # chip. Exact keys (A6); `model: ""` resets. It never touches
+        # routing.json — role routing is Settings' — and no tool reaches it.
+        from . import thread_model
+        _object(query, ())
+        body = _object(handler._body(), ("provider", "model", "effort"), ("provider", "model"))
+        try:
+            thread_model.set_provider_default(body["provider"], body["model"], body.get("effort"))
+        except thread_model.ChoiceRefused as exc:
+            fail(400, str(exc))
+        payload = thread_model.describe()
+        name = ProviderName(body["provider"]).value
+        provider = payload["providers"][name]
+        daemon.bus.publish({"kind": "model", "data": {
+            "provider": name, "default": provider["default"],
+            "default_effort": provider["default_effort"],
+            "default_source": provider["default_source"]}})
+        return 200, payload
     if len(parts) == 2 and parts[0] == "threads" and method == "PATCH":
         _object(query, ())
         body = _object(handler._body(), ("title", "project_id", "model", "effort"))

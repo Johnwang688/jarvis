@@ -212,6 +212,55 @@ def gate_state_checks(tmp: Path) -> None:
     print("ok  guard: the approval gate's state file is refused by both write tools")
 
 
+def model_state_checks(tmp: Path) -> None:
+    """The files that decide which model answers and where Jarvis may act
+    (PR #15 review, 2026-10-08). v2 already refused them; v1's write_file
+    and edit_file — a background workflow's included — could rewrite
+    provider_defaults.json, models.json and routing.json, which moved every
+    default Claude thread from Opus to Haiku with nobody asked. Every config
+    path here is a temp file (set in `main`); they stay readable."""
+    from jarvis.tools import files
+    from jarvis.v2 import permissions as v2perm
+    from jarvis.v2 import thread_model as tm
+    from jarvis.v2.model import ProviderName
+
+    allow_dir = config.ALLOWLIST_PATH.parent
+    targets = [config.MODELS_PATH, config.PROVIDER_DEFAULTS_PATH, config.DISCORD_GUILD_PATH,
+               allow_dir / "routing.json", allow_dir / "models.json",
+               allow_dir / "provider_defaults.json", allow_dir / "discord_guild.json"]
+    assert len({t.resolve() for t in targets}) == len(targets), "each path must be distinct"
+    assert files._protected_state() == v2perm.protected_paths(), \
+        "v1's protected state drifted from v2's protected_paths"
+    for target in targets:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        original = json.dumps({"claude": {"model": "claude-opus-5-5", "effort": None}})
+        target.write_text(original, encoding="utf-8")
+        seen = call("read_file", path=str(target))
+        assert "claude-opus-5-5" in seen, f"{target} must stay readable: {seen}"
+        out = call("edit_file", path=str(target), old_string="claude-opus-5-5",
+                   new_string="claude-haiku-4-5")
+        assert "safety layer" in out, f"{target}: {out}"
+        out = call("write_file", path=str(target),
+                   content='{"claude": {"model": "claude-haiku-4-5", "effort": null}}')
+        assert "safety layer" in out, f"{target}: {out}"
+        assert target.read_text(encoding="utf-8") == original, f"{target} was rewritten"
+        target.unlink()
+        out = call("write_file", path=str(target), content="{}")
+        assert "safety layer" in out and not target.exists(), f"{target} was created: {out}"
+    # The consequence the review demonstrated, now refused end to end.
+    config.PROVIDER_DEFAULTS_PATH.write_text(
+        json.dumps({"claude": {"model": "claude-opus-5-5", "effort": None}}), encoding="utf-8")
+    call("read_file", path=str(config.PROVIDER_DEFAULTS_PATH))
+    call("write_file", path=str(config.PROVIDER_DEFAULTS_PATH),
+         content='{"claude": {"model": "claude-haiku-4-5", "effort": null}}')
+    assert tm.default_choice(ProviderName.CLAUDE)[0] == "claude-opus-5-5"
+    # An ordinary file beside them is still writable.
+    out = call("write_file", path=str(allow_dir / "notes.txt"), content="fine")
+    assert "Wrote" in out, out
+    print("ok  guard: models.json, provider_defaults.json, routing.json and the guild file "
+          "are refused by both write tools, still readable, and match v2's set")
+
+
 def numbering_guard_checks(tmp: Path) -> None:
     """write_file strips read_file's numbering — and only read_file's."""
     target = tmp / "roundtrip.txt"
@@ -501,10 +550,18 @@ def main() -> int:
         # has to point somewhere disposable before anything here runs — a suite
         # once wrote `apt` onto the owner's real allowlist.
         config.ALLOWLIST_PATH = tmp / "config" / "jarvis" / "allowlist.json"
+        # The model and routing state is protected too (2026-10-08); each
+        # path somewhere of its own, so the config path itself is what is
+        # protected and not only its sibling beside the allowlist.
+        config.MODELS_PATH = tmp / "models-elsewhere" / "models.json"
+        config.PROVIDER_DEFAULTS_PATH = tmp / "defaults-elsewhere" / "provider_defaults.json"
+        config.DISCORD_GUILD_PATH = tmp / "guild-elsewhere" / "discord_guild.json"
+        config.ROUTING_PATH = tmp / "config" / "jarvis" / "routing.json"
         read_checks(tmp)
         edit_checks(tmp)
         protection_checks(tmp)
         gate_state_checks(tmp)
+        model_state_checks(tmp)
         numbering_guard_checks(tmp)
         grep_checks(tmp)
         grep_protected_checks(tmp)

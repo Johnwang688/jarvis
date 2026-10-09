@@ -75,6 +75,11 @@ export default function App() {
   const threadModel = useThreadModel(state, dispatch, () => void loadModels());
   const reloadThreadModels = useRef(threadModel.reload);
   reloadThreadModels.current = threadModel.reload;
+  // The chip's own dialogs (catalogue, provider default) are hook state, not
+  // `state.picker`, but they are open pickers all the same: no open mic under
+  // them (PR #15 review).
+  const chipOverlay = useRef(false);
+  chipOverlay.current = threadModel.overlayOpen;
 
   const patch = useCallback((p: Parameters<typeof dispatch>[0] extends any ? any : never) => {
     dispatch({ type: "patch", patch: p });
@@ -91,7 +96,8 @@ export default function App() {
           live.current.orb === "speaking" ||
           live.current.busy ||
           live.current.approvals.length > 0 ||
-          live.current.picker !== null,
+          live.current.picker !== null ||
+          chipOverlay.current,
         muted: () => isMuted(live.current.dictation),
         onLevel: (level) => dispatch({ type: "patch", patch: { level } }),
         onListening: () =>
@@ -728,7 +734,7 @@ export default function App() {
 
   const onWakeHit = useCallback(() => {
     if (live.current.approvals.length) return; // never talk over a pending authorization
-    if (live.current.picker) return;
+    if (live.current.picker || chipOverlay.current) return;
     capture.onWake();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [capture]);
@@ -737,7 +743,7 @@ export default function App() {
 
   const press = useCallback(() => {
     if (live.current.approvals.length) return; // answer the authorization first
-    if (live.current.picker) return;
+    if (live.current.picker || chipOverlay.current) return;
     // The interrupt half comes first: muting yourself must not take away the
     // orb as the way to shut him up.
     const turn = live.current.turnThreadId;

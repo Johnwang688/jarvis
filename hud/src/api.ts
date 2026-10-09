@@ -78,6 +78,11 @@ export const api = {
     req<Thread>(`/threads/${id}`, patch(body)),
   /** What the provider / model / effort chips offer, per provider. */
   threadModels: () => req<ThreadModels>("/thread-models"),
+  /** Claude's or Codex's default for chat threads (2026-10-08); `model: ""`
+   * resets to the built-in (Claude) or routing (Codex) default. Answers the
+   * new `GET /thread-models`. */
+  setProviderDefault: (body: { provider: string; model: string; effort?: string }) =>
+    req<ThreadModels>("/thread-models", json(body)),
   transcript: (id: string) => req<{ messages: ChatMessage[] }>(`/threads/${id}/transcript`),
   /** `spoken` (PR C): dictated, so the Discord mirror says "You (HUD, voice)". */
   send: (id: string, body: { text: string; images?: string[]; attachments?: Attachment[]; spoken?: boolean }) =>

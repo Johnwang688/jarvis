@@ -297,8 +297,36 @@ of a turn. The choice is stored on the Thread record (`model`, `effort`);
   Codex list `router.CLI_MODELS`, the table the router's capability filter
   reads. The full catalogue stays at `GET /models/catalog`; a model used from
   it is pinned to the roster (`POST /models {add}`) first.
+  *2026-10-08:* each provider also carries `default_source` (`"hud"`, else
+  `"config"` for OpenRouter, `"built-in"` for Claude, `"routing"` for
+  Codex), `settable` (true for Claude and Codex), `hud_default` (`{model,
+  effort}` as stored, `effort: null` = the model's own default; or null) and
+  `builtin` (`{model, effort}`, what a reset returns to; null for
+  OpenRouter); every model row carries `default_effort`.
+- `POST /thread-models` `{"provider": "claude" | "codex", "model": id,
+  "effort"?: level}` → the new `GET /thread-models` payload. Sets the
+  default every **default** Claude or Codex chat thread runs on from its
+  next turn (pinned threads are untouched); `model: ""` is "Reset to
+  built-in default" (Opus 5.5 at high for Claude, routing's orchestrator
+  default for Codex). `effort` absent, null or `""` is the model's own
+  default effort. Exact keys (A6): an unknown key is a 400 naming it;
+  `provider` and `model` are required. Refusals are 400 with the reason: a
+  model `router.CLI_MODELS` does not name for that provider, an effort off
+  its ladder or on a model with none, an effort with a reset, `provider:
+  "fast"` (that default is `POST /model`'s), an unknown provider.
+  **Which wins:** a HUD default beats the built-in Claude default and,
+  for Codex **chat threads only**, `routing.json`'s orchestrator default;
+  routing.json is never written and still decides every task role. Stored
+  atomically in `~/.config/jarvis/provider_defaults.json`
+  (`config.PROVIDER_DEFAULTS_PATH`); like models.json and routing.json it is
+  refused to every agent write tool — v2's permit (`protected_paths`) and v1's
+  `write_file`/`edit_file` (`files._protected_state`, the same set); a
+  stored model Jarvis no longer knows is ignored and named in `note`. A
+  success publishes one `model` event `{provider, default, default_effort,
+  default_source}` (the HUD re-reads `/thread-models` on it); a refusal
+  publishes none.
 - No tool reaches any of this. The agent cannot change its own model or
-  provider.
+  provider, nor a provider's default.
 
 ## Additions 2026-10-06 (projects: rename, edit, archive — decisions part B)
 
