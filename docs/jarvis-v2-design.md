@@ -205,8 +205,21 @@ broker alone.
 
 - Built on the **app-server JSON-RPC protocol over stdio**, lifting
   `firm/codex_rpc.py`, `codex_config.py` and the usage accounting from
-  `~/projects/jarvis-trading-firm` (D10). Pinned to `codex-cli 0.153.4`; the
-  version check before each session stays.
+  `~/projects/jarvis-trading-firm` (D10). ~~Pinned to `codex-cli 0.153.4`~~
+  **A version floor, not a pin (2026-10-08):** the CLI auto-updates, and the
+  exact pin turned the update to 0.161.0 into "Could not send" for every
+  Codex thread. `providers/codex_cli.py` now accepts `CODEX_MIN` (0.153.4)
+  and newer, warns once per process above `CODEX_VERIFIED` (0.161.0), and
+  refuses older; `JARVIS_CODEX_STRICT=1` restores an exact match against the
+  verified versions. The binary is `JARVIS_CODEX_CLI`, else the first `codex`
+  on PATH outside `/mnt/` (the Windows npm shim must never run), else
+  `~/.local/bin/codex`; its realpath is version-checked and launched, so an
+  update between the two cannot swap it. The version check before each
+  session stays. The floor is safe because the gate never depended on knowing
+  every message: an unrecognised server request is answered with an error,
+  and an approval request whose shape does not parse is declined without
+  reaching the broker. The 0.153.4 → 0.161.0 protocol diff is
+  `docs/codex-briefs/codex-0.161-protocol-notes.md`.
 - Approval requests `item/commandExecution/requestApproval`,
   `item/fileChange/requestApproval`, `item/permissions/requestApproval` are
   **routed to the broker**, where the firm denies them. `requestUserInput`
@@ -1342,7 +1355,8 @@ for everything not under `jarvis/v2/`.
   equivalent removed from the toolset). Until then, a project with
   always-ask additions routes its tasks to Claude.
 - **R6, Codex half answered (WP12a, 2026-09-16):** the app-server protocol
-  on 0.153.4 declares `account/rateLimits/updated` with `usedPercent`,
+  on 0.153.4 (unchanged in 0.161.0 but for an optional `normalModelSlug`)
+  declares `account/rateLimits/updated` with `usedPercent`,
   `windowDurationMins` and `resetsAt` per window (primary/secondary,
   sparse-merged). `CodexProvider` surfaces it as
   `USAGE.provider_reported.rate_limits`; `/usage` shows it as `quota`.

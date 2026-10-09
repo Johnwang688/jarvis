@@ -21,10 +21,29 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from jarvis import config
 from jarvis.v2.model import PermissionProfile, ProviderName, Role, Thread
 from jarvis.v2.provider import Brief, BriefRefused, Decision, EventKind as K, UserMessage
-from jarvis.v2.providers import codex, codex_config
+from jarvis.v2.providers import codex, codex_cli, codex_config
 from jarvis.v2.providers.codex_rpc import RpcError, RpcProcess
 
 UNIT = {"inputTokens": 100, "outputTokens": 20, "cachedInputTokens": 40}
+CMD = "item/commandExecution/requestApproval"
+# mode -> (server request method, params(thread, turn)). Every one must be
+# refused or declined, and none may reach the permission callback.
+FAIL_CLOSED = {
+    "unknown_approval": ("item/networkAccess/requestApproval",
+                         lambda t, u: {"threadId": t, "turnId": u, "itemId": "net", "host": "example.com"}),
+    "unknown_permission": ("item/sandboxEscape/requestPermissions",
+                           lambda t, u: {"threadId": t, "turnId": u, "itemId": "x", "permissions": {"network": True}}),
+    "approval_no_item": (CMD, lambda t, u: {"threadId": t, "turnId": u, "command": "rm -rf ~"}),
+    "approval_item_list": (CMD, lambda t, u: {"threadId": t, "turnId": u, "itemId": ["cmd"], "command": "echo ok"}),
+    "approval_command_list": (CMD, lambda t, u: {"threadId": t, "turnId": u, "itemId": "cmd", "command": ["rm", "-rf", "~"]}),
+    "file_approval_bad_root": ("item/fileChange/requestApproval",
+                               lambda t, u: {"threadId": t, "turnId": u, "itemId": "patch", "grantRoot": {"path": "/"}}),
+    "approval_bad_grant": (CMD, lambda t, u: {"threadId": t, "turnId": u, "itemId": "cmd", "command": "echo ok",
+                                              "additionalPermissions": "everything"}),
+    "params_list": (CMD, lambda t, u: ["threadId", t, "turnId", u]),
+    "bad_question": ("item/tool/requestUserInput",
+                     lambda t, u: {"threadId": t, "turnId": u, "itemId": "q", "questions": [{"id": "q1"}]}),
+}
 
 
 def peer(script_path, log_path, thread_name):
@@ -130,6 +149,12 @@ def peer(script_path, log_path, thread_name):
                     time.sleep(0.05)
                     sys.exit(2)
                 continue
+            if mode in FAIL_CLOSED:
+                # Fail-closed shapes (2026-10-08): an approval Codex might add
+                # later, approvals we cannot parse, params that are not an
+                # object, and a question with no question in it.
+                emit({"id": "special", "method": FAIL_CLOSED[mode][0], "params": FAIL_CLOSED[mode][1](native, turn)})
+                continue
             if mode in ("permissions", "unknown", "wrong_identity"):
                 emit({"id": "special", "method": "item/permissions/requestApproval" if mode == "permissions" else "unrecognized/tool",
                       "params": {"threadId": "wrong" if mode == "wrong_identity" else native, "turnId": turn}})
@@ -234,9 +259,8 @@ class Checks(unittest.TestCase):
         self.brain = Brain(self.root)
         self.stack.enter_context(patch.object(config, "V2_DATA_DIR", self.root / "data"))
         self.stack.enter_context(patch.object(codex_config, "owner_home", return_value=self.auth))
-        self.stack.enter_context(patch.object(codex.shutil, "which", return_value="/fake/codex"))
         self.stack.enter_context(patch.object(codex, "RpcProcess", self.brain.rpc))
-        self.health_patch = self.stack.enter_context(patch.object(codex.CodexProvider, "health", return_value=(True, "fake")))
+        self.stack.enter_context(patch.object(codex.CodexProvider, "_probe", return_value=("/fake/codex", "fake")))
         self.provider = codex.CodexProvider()
         self.brief = Brief(Role.IMPLEMENTER, str(self.work), system_append="Append this role", model="fake-model", effort="high")
         self.thread = Thread("test", "p", Role.IMPLEMENTER, ProviderName.CODEX)
@@ -427,6 +451,34 @@ class Checks(unittest.TestCase):
                 else:
                     self.assertIn("error", reply)
                     self.assertTrue(any(e.kind == K.ERROR for e in events))
+
+    def test_unknown_and_malformed_requests_fail_closed(self):
+        """Relaxing the version pin must not weaken the gate: whatever a newer
+        Codex sends that this adapter cannot read is refused or declined, and
+        the permission callback is never asked to judge it."""
+        for mode, (method, _) in FAIL_CLOSED.items():
+            with self.subTest(mode=mode):
+                calls = []
+                h = self.start(mode, lambda *a: calls.append(a) or Decision.ALLOW, thread=replace(self.thread, id=mode))
+                events = self.send(h)
+                self.assertFalse(calls, "the permission callback was asked")
+                replies = [m for m in h.native.rpc.replies if m["id"] == "special"]
+                self.assertEqual(len(replies), 1, replies)
+                reply = replies[0]
+                self.assertNotEqual((reply.get("result") or {}).get("decision"), "accept")
+                kinds = [e.kind for e in events]
+                self.assertNotIn(K.APPROVAL_REQUESTED, kinds)
+                self.assertNotIn(K.APPROVAL_RESOLVED, kinds)
+                self.assertIn(K.ERROR, kinds)
+                if mode.startswith(("approval_", "file_approval_")):
+                    # A known approval we cannot parse is an explicit decline,
+                    # and the turn carries on without it.
+                    self.assertEqual(reply["result"], {"decision": "decline"})
+                    self.assertEqual(events[-1].kind, K.TURN_FINISHED)
+                    self.assertFalse(any(e.data.get("fatal") for e in events if e.kind == K.ERROR))
+                else:
+                    self.assertIn("error", reply)
+                    self.assertIsNone(reply["result"])
 
     def test_questions_both_spellings_and_bundle(self):
         for mode in ("question", "question_old", "multi_question"):
@@ -641,29 +693,213 @@ for line in sys.stdin:
         self.assertTrue(all(not t.is_alive() for t in rpc._readers))
 
 
+FAKE_CODEX = """#!/bin/sh
+echo "$@" >> "$(dirname "$0")/calls.log"
+case "$1" in
+  --version) echo "codex-cli {version}" ;;
+  login) echo "Logged in using ChatGPT" ;;
+  *) exit 64 ;;
+esac
+"""
+
+
 class HealthChecks(unittest.TestCase):
-    def test_health(self):
-        provider = codex.CodexProvider()
-        with patch.object(codex.shutil, "which", return_value=None), patch.object(codex.subprocess, "run") as run:
-            self.assertFalse(provider.health()[0])
-            run.assert_not_called()
+    """The version floor and the binary resolver, against fake executables in a
+    temp dir. Nothing here runs a real codex or touches the network."""
+
+    def setUp(self):
+        self.stack = ExitStack()
+        self.addCleanup(self.stack.close)
+        self.root = Path(self.stack.enter_context(tempfile.TemporaryDirectory(prefix="codex-cli-")))
+        owner = self.root / "owner"
+        owner.mkdir()
+        self.stack.enter_context(patch.object(codex_config, "owner_home", return_value=owner))
+        self.stack.enter_context(patch.object(config, "CODEX_CLI", ""))
+        self.stack.enter_context(patch.object(config, "CODEX_STRICT", False))
+        self.stack.enter_context(patch.object(codex_cli, "_announced", set()))
+        self.stack.enter_context(patch.object(codex_cli, "WINDOWS_ROOTS", (str(self.root / "mnt"),)))
+        self.stack.enter_context(patch.object(codex_cli, "local_bin",
+                                              return_value=str(self.root / "home/.local/bin/codex")))
+        self.path()
+        self.provider = codex.CodexProvider()
+
+    def fake(self, where, version="0.161.0"):
+        path = self.root / where / "codex"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(FAKE_CODEX.format(version=version))
+        path.chmod(0o755)
+        return path
+
+    def path(self, *dirs):
+        self.stack.enter_context(patch.dict(os.environ, {"PATH": os.pathsep.join(str(self.root / d) for d in dirs)}))
+
+    def calls(self, binary):
+        log = Path(binary).parent / "calls.log"
+        return log.read_text().splitlines() if log.exists() else []
+
+    def health(self, version, *, where="bin"):
+        binary = self.fake(where, version)
+        self.path(where)
+        return binary, self.provider.health()
+
+    def test_older_is_refused_before_any_login_probe(self):
+        binary, (ok, reason) = self.health("0.153.3")
+        self.assertFalse(ok)
+        self.assertIn("older than 0.153.4", reason)
+        self.assertIn(str(binary), reason)
+        self.assertEqual(self.calls(binary), ["--version"])
+
+    def test_floor_and_verified_are_accepted_quietly(self):
+        for version in ("0.153.4", "0.158.2", "0.161.0"):
+            with self.subTest(version=version), self.assertNoLogs(codex_cli.log, "WARNING"):
+                binary, (ok, reason) = self.health(version, where=f"bin-{version}")
+                self.assertTrue(ok, reason)
+                self.assertEqual(reason, f"codex {version} ({binary}), ChatGPT login")
+                self.assertEqual(self.calls(binary), ["--version", "login status"])
+
+    def test_newer_is_accepted_with_one_warning_per_process(self):
+        with self.assertLogs(codex_cli.log, "WARNING") as logs:
+            for _ in range(3):
+                binary, (ok, reason) = self.health("0.170.2")
+                self.assertTrue(ok, reason)
+        warnings = [r for r in logs.records if r.levelname == "WARNING"]
+        self.assertEqual(len(warnings), 1, logs.output)
+        message = warnings[0].getMessage()
+        self.assertIn("0.170.2", message)
+        self.assertIn("verified against", message)
+        self.assertIn("0.161.0", message)
+        self.assertIn("protocol verified up to 0.161.0", reason)
+
+    def test_versions_are_parsed_not_string_compared(self):
+        # "0.153.10" < "0.153.4" as strings; as versions it is newer.
+        self.assertGreater(codex_cli.parse("codex-cli 0.153.10"), codex_cli.parse("codex-cli 0.153.4"))
+        self.assertLess(codex_cli.parse("0.161.0-alpha.2"), codex_cli.parse("0.161.0"))
+        self.assertGreater(codex_cli.parse("1.0.0"), codex_cli.parse("0.999.999"))
+        self.assertIsNone(codex_cli.parse("codex-cli dev"))
+        self.assertTrue(codex_cli.check("codex-cli 0.153.10", "/x")[0])
+        self.assertFalse(codex_cli.check("codex-cli 0.153.4-rc.1", "/x")[0], "a pre-release sorts below the floor")
+        ok, reason = codex_cli.check("codex-cli dev-build", "/x")
+        self.assertFalse(ok)
+        self.assertIn("unreadable version", reason)
+
+    def test_strict_mode_restores_the_exact_match(self):
+        with patch.object(config, "CODEX_STRICT", True):
+            binary, (ok, reason) = self.health("0.170.2")
+            self.assertFalse(ok)
+            self.assertIn("JARVIS_CODEX_STRICT=1", reason)
+            self.assertEqual(self.calls(binary), ["--version"])
+            self.assertFalse(self.health("0.158.2", where="b2")[1][0], "strict accepts only a verified version")
+            for version in codex_cli.VERIFIED:
+                self.assertTrue(self.health(version, where=f"s-{version}")[1][0])
+
+    def test_windows_shims_are_skipped(self):
+        shim = self.fake("mnt/c/npm", "0.161.0")
+        linked = self.root / "linkdir" / "codex"
+        linked.parent.mkdir()
+        linked.symlink_to(shim)                       # a Linux name for a /mnt/ target
+        real = self.fake("bin", "0.161.0")
+        self.path("mnt/c/npm", "linkdir", "bin")
+        self.assertEqual(codex_cli.resolve(), (str(real), ""))
+        self.path("mnt/c/npm", "linkdir")
+        found, reason = codex_cli.resolve()
+        self.assertIsNone(found)
+        self.assertIn("not found", reason)
+        self.assertFalse(self.provider.health()[0])
+        self.assertEqual(self.calls(shim), [], "the Windows shim must never run")
+        for name in ("codex.cmd", "codex.bat", "codex.exe"):
+            pinned = self.root / "pins" / name
+            pinned.parent.mkdir(exist_ok=True)
+            pinned.write_text("@echo off\n")
+            pinned.chmod(0o755)
+            with patch.object(config, "CODEX_CLI", str(pinned)):
+                self.assertIsNone(codex_cli.resolve()[0])
+        with patch.object(config, "CODEX_CLI", str(shim)):
+            found, reason = codex_cli.resolve()
+            self.assertIsNone(found)
+            self.assertIn("Windows", reason)
+        self.assertEqual(self.calls(shim), [])
+
+    def test_env_override_wins_and_never_falls_back(self):
+        self.fake("bin", "0.161.0")
+        pinned = self.fake("pinned", "0.160.0")
+        self.path("bin")
+        with patch.object(config, "CODEX_CLI", str(pinned)):
+            self.assertEqual(codex_cli.resolve(), (str(pinned), ""))
+            ok, reason = self.provider.health()
+            self.assertTrue(ok, reason)
+            self.assertIn("0.160.0", reason)
+        with patch.object(config, "CODEX_CLI", str(self.root / "missing" / "codex")):
+            found, reason = codex_cli.resolve()
+            self.assertIsNone(found, "a broken override must not quietly fall back to PATH")
+            self.assertIn("JARVIS_CODEX_CLI", reason)
+        with patch.object(config, "CODEX_CLI", "codex"):
+            found, reason = codex_cli.resolve()
+            self.assertIsNone(found, "a relative override would mean whatever is in the cwd")
+            self.assertIn("absolute", reason)
+        # A relative PATH entry is never searched: chdir to a dir holding a
+        # codex and list it as "." ahead of the real one.
+        decoy = self.fake("decoy", "0.161.0")
+        cwd = os.getcwd()
+        os.chdir(decoy.parent)
+        self.addCleanup(os.chdir, cwd)
+        with patch.dict(os.environ, {"PATH": os.pathsep.join(["", ".", str(self.root / "bin")])}):
+            self.assertEqual(codex_cli.resolve()[0], str(self.root / "bin" / "codex"))
+
+    def test_local_bin_is_the_last_resort(self):
+        self.assertIsNone(codex_cli.resolve()[0])
+        local = self.fake("home/.local/bin", "0.161.0")
+        self.assertEqual(codex_cli.resolve(), (str(local), ""))
+        path_codex = self.fake("bin", "0.161.0")
+        self.path("bin")
+        self.assertEqual(codex_cli.resolve(), (str(path_codex), ""))
+
+    def test_the_checked_binary_is_the_launched_binary(self):
+        """~/.local/bin/codex is a link into the auto-updater's `current`; the
+        realpath is resolved once, version-checked, and handed to prepare."""
+        release = self.fake("releases/0.161.0/bin", "0.161.0")
+        link = self.root / "bin" / "codex"
+        link.parent.mkdir()
+        link.symlink_to(release)
+        self.path("bin")
+        binary, reason = self.provider._probe()
+        self.assertEqual(binary, str(release))
+        self.assertIn(str(link), reason)
+        work = self.root / "work"
+        work.mkdir()
+        (codex_config.owner_home() / "auth.json").write_text("FAKE")
+        with patch.object(config, "V2_DATA_DIR", self.root / "data"):
+            argv, _, _ = codex_config.prepare("t1", Brief(Role.IMPLEMENTER, str(work)), binary)
+            self.assertEqual(argv[:2], [str(release), "app-server"])
+            # Without a caller's binary, prepare resolves the same way.
+            argv, _, _ = codex_config.prepare("t2", Brief(Role.IMPLEMENTER, str(work)))
+            self.assertEqual(argv[0], str(release))
+        self.assertNotIn("app-server", "\n".join(self.calls(release)))
+
+    def test_failures_are_reasons_not_exceptions(self):
         def result(stdout="", stderr="", code=0):
             return subprocess.CompletedProcess([], code, stdout, stderr)
-        for replies, expected in [([result("codex-cli 0.1")], (False, "codex 0.1, pinned 0.153.4")),
-                                  ([result("codex-cli 0.153.4"), result("", "Not logged in", 1)], None),
-                                  ([result("codex-cli 0.153.4"), result("Logged in using API key")], None),
-                                  ([result("codex-cli 0.153.4"), result("", "Logged in using ChatGPT")], True)]:
-            with patch.object(codex.shutil, "which", return_value="/fake/codex"), patch.object(codex.subprocess, "run", side_effect=replies) as run:
-                actual = provider.health()
-                if expected is True:
-                    self.assertTrue(actual[0])
-                elif expected:
-                    self.assertEqual(actual, expected)
-                else:
-                    self.assertFalse(actual[0])
+        self.fake("bin", "0.161.0")
+        self.path("bin")
+        for replies, expected in [([result("codex-cli 0.161.0", code=1)], "failed to report its version"),
+                                  ([result("codex-cli 0.161.0"), result("", "Not logged in", 1)], "ChatGPT login"),
+                                  ([result("codex-cli 0.161.0"), result("Logged in using API key")], "ChatGPT login")]:
+            with patch.object(codex.subprocess, "run", side_effect=replies) as run:
+                ok, reason = self.provider.health()
+                self.assertFalse(ok)
+                self.assertIn(expected, reason)
                 self.assertTrue(all("app-server" not in c.args[0] for c in run.call_args_list))
-        with patch.object(codex.shutil, "which", return_value="/fake/codex"), patch.object(codex.subprocess, "run", side_effect=subprocess.TimeoutExpired("codex", 1)):
-            self.assertFalse(provider.health()[0])
+        with patch.object(codex.subprocess, "run", side_effect=subprocess.TimeoutExpired("codex", 1)):
+            self.assertFalse(self.provider.health()[0])
+        # A refused binary is a refused start: no session, no app-server.
+        work = self.root / "w"
+        work.mkdir()
+        with patch.object(codex.subprocess, "run", side_effect=[result("codex-cli 0.150.0")]), \
+                patch.object(codex, "RpcProcess") as rpc, patch.object(config, "V2_DATA_DIR", self.root / "data"):
+            with self.assertRaises(BriefRefused) as caught:
+                self.provider.start(Thread("t", "p", Role.IMPLEMENTER, ProviderName.CODEX),
+                                    Brief(Role.IMPLEMENTER, str(work)), lambda *_: Decision.ALLOW)
+            self.assertIn("older than 0.153.4", str(caught.exception))
+            rpc.assert_not_called()
 
 
 if __name__ == "__main__":

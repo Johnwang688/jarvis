@@ -1,7 +1,8 @@
 # WP4 — CodexProvider (app-server)
 
 ## Built
-- `providers/codex.py` implements the fixed Provider interface; pin 0.153.4.
+- `providers/codex.py` implements the fixed Provider interface; pin 0.153.4
+  (superseded 2026-10-08 by a version floor — see `codex-0.161-protocol-notes.md`).
 - Credited copy of the firm's RPC transport, with serialized writes, independent
   pipe drains, bounded queues, overflow refusal and bounded SIGINT/TERM/KILL.
 - Private per-thread config/auth link, native tools, workspace-write,

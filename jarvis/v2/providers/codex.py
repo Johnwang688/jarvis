@@ -1,4 +1,11 @@
-"""Codex 0.153.4 app-server adapter, with native tools and broker callbacks.
+"""Codex app-server adapter, with native tools and broker callbacks.
+
+The protocol was generated from and verified against codex-cli 0.153.4 and
+0.161.0 (docs/codex-briefs/codex-0.161-protocol-notes.md). Any version at or
+above codex_cli.CODEX_MIN runs; one newer than CODEX_VERIFIED runs with a
+warning, because the gate does not depend on knowing every message: a server
+request this adapter does not recognise is answered with an error, and an
+approval request it cannot parse is declined, never accepted.
 
 Transport/config/accounting patterns originate in jarvis-trading-firm. No
 model turn is retried automatically: a lost response may have executed tools.
@@ -8,8 +15,8 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass, field, replace
 import json
+import os
 from pathlib import Path
-import shutil
 import subprocess
 import threading
 import time
@@ -19,11 +26,10 @@ from jarvis import config
 from jarvis.v2.model import ProviderName, Thread
 from jarvis.v2.provider import (Brief, BriefRefused, Decision, Event, EventKind,
                                PermissionCallback, SessionHandle, Usage, UserMessage)
-from . import codex_config
+from . import codex_cli, codex_config
 from .codex_rpc import RpcError, RpcProcess, RpcTimeout
 from .codex_usage import Accounting
 
-CODEX_PIN = "0.153.4"
 START_TIMEOUT = 30.0
 INTERRUPT_TIMEOUT = 10.0
 _auth_lock = threading.Lock()
@@ -36,6 +42,32 @@ class _Pending:
     question: bool
     ready: threading.Event = field(default_factory=threading.Event)
     value: Decision | str | None = None
+
+
+@dataclass
+class _Request:
+    """One server request: answered at most once, refused if never answered."""
+    rid: object = None
+    replied: bool = False
+
+
+def _approval_problem(p: dict) -> str | None:
+    """Why a command/file approval request cannot be read, or None.
+
+    Checked against the 0.153.4 and 0.161.0 schemas (identical for both):
+    itemId is a required string; the fields shown to the owner are strings
+    or null; a permission grant riding the approval is an object or null.
+    """
+    if not isinstance(p.get("itemId"), str) or not p["itemId"]:
+        return "missing itemId"
+    for key in ("command", "cwd", "reason", "grantRoot", "approvalId"):
+        if p.get(key) is not None and not isinstance(p[key], str):
+            return f"{key} is not a string"
+    if p.get("additionalPermissions") is not None and not isinstance(p["additionalPermissions"], dict):
+        return "additionalPermissions is not an object"
+    if p.get("availableDecisions") is not None and not isinstance(p["availableDecisions"], list):
+        return "availableDecisions is not a list"
+    return None
 
 
 @dataclass
@@ -62,24 +94,38 @@ class CodexProvider:
     name = ProviderName.CODEX
 
     def health(self) -> tuple[bool, str]:
-        binary = shutil.which("codex")
-        if binary is None:
-            return False, "codex is not on PATH"
+        binary, reason = self._probe()
+        return binary is not None, reason
+
+    def _probe(self) -> tuple[str | None, str]:
+        """``(binary, reason)``: the realpath to launch, or None and why not.
+
+        The binary is resolved once (codex_cli.resolve) and its realpath is
+        what is version-checked *and* launched, so the auto-updater flipping
+        ~/.codex/packages/standalone/current between the two cannot swap the
+        binary that was checked for one that was not.
+        """
+        found, reason = codex_cli.resolve()
+        if found is None:
+            return None, reason
+        binary = os.path.realpath(found)
         # No credential contents are read. login status is a local CLI probe.
         env = codex_config.clean_env(Path.home(), codex_config.owner_home())
         try:
             version = subprocess.run([binary, "--version"], env=env, capture_output=True,
                                      text=True, timeout=10)
-            found = version.stdout.strip().removeprefix("codex-cli ")
-            if version.returncode or found != CODEX_PIN:
-                return False, f"codex {found}, pinned {CODEX_PIN}"
+            if version.returncode:
+                return None, f"codex at {found} failed to report its version"
+            ok, reason = codex_cli.check(version.stdout, found)
+            if not ok:
+                return None, reason
             login = subprocess.run([binary, "login", "status"], env=env, capture_output=True,
                                    text=True, timeout=10)
             if login.returncode or "logged in using chatgpt" not in (login.stdout + login.stderr).lower():
-                return False, "codex requires a ChatGPT login; API-key billing refused"
+                return None, "codex requires a ChatGPT login; API-key billing refused"
         except (OSError, subprocess.TimeoutExpired) as exc:
-            return False, f"codex health failed ({type(exc).__name__})"
-        return True, f"codex {CODEX_PIN}, ChatGPT login"
+            return None, f"codex health failed ({type(exc).__name__})"
+        return binary, f"{reason}, ChatGPT login"
 
     def start(self, thread: Thread, brief: Brief, permit: PermissionCallback) -> SessionHandle:
         return self._open(thread, brief, permit, resume=False)
@@ -92,8 +138,8 @@ class CodexProvider:
         native_id = (thread.provider_session_id or "").removeprefix("codex:")
         if resume and (not (thread.provider_session_id or "").startswith("codex:") or not native_id):
             raise BriefRefused("Codex resume requires a codex:<thread id> session")
-        ok, reason = self.health()
-        if not ok:
+        binary, reason = self._probe()
+        if binary is None:
             raise BriefRefused(reason)
         # Also serialize preparation, account inspection and refresh-prone startup.
         with _auth_lock:
@@ -101,7 +147,7 @@ class CodexProvider:
             with _state_lock:
                 if candidate in _open_homes:
                     raise BriefRefused("Codex thread already has an open session")
-            argv, env, home = codex_config.prepare(thread.id, brief)
+            argv, env, home = codex_config.prepare(thread.id, brief, binary)
             home = home.resolve()
             with _state_lock:
                 if home in _open_homes:
@@ -223,7 +269,7 @@ class CodexProvider:
             start_deadline = time.monotonic() + START_TIMEOUT
             params = {"threadId": s.thread_id, "input": inputs}
             # turn/start's `model` and `effort` override "this turn and
-            # subsequent turns" (TurnStartParams, generated from 0.153.4), so
+            # subsequent turns" (TurnStartParams; unchanged 0.153.4 → 0.161.0), so
             # a change rides the next turn and then sticks to the thread.
             override, s.override = s.override, None
             params.update(override or {})
@@ -264,6 +310,9 @@ class CodexProvider:
                     continue
                 method, params = msg["method"], msg.get("params", {})
                 if "id" in msg:
+                    if not isinstance(params, dict):
+                        s.rpc.reply(msg["id"], error={"code": -32602, "message": "Malformed request params"})
+                        raise RpcError("Codex server request params are not an object")
                     if (params.get("threadId") != s.thread_id
                             or not isinstance(params.get("turnId"), str) or not params["turnId"]
                             or (s.turn_id and params.get("turnId") != s.turn_id)):
@@ -274,7 +323,16 @@ class CodexProvider:
                     if not started:
                         started = True
                         yield self._event(h, EventKind.TURN_STARTED)
-                    yield from self._server_request(h, msg)
+                    pending_request = _Request()
+                    try:
+                        yield from self._server_request(h, msg, pending_request)
+                    except BaseException:
+                        # Whatever broke — a shape we could not read, a dead
+                        # transport, an abandoned generator — the request is
+                        # answered with an error, never left to be guessed at.
+                        if not pending_request.replied:
+                            self._refuse(s, msg["id"])
+                        raise
                     # Human latency is not a turn/start transport timeout.
                     if not response_seen:
                         start_deadline = time.monotonic() + START_TIMEOUT
@@ -354,7 +412,7 @@ class CodexProvider:
         if method == "account/updated" and p.get("authMode") not in (None, "chatgpt"):
             raise RpcError("Codex changed away from ChatGPT authentication")
         if method == "account/rateLimits/updated":
-            # Verified from 0.153.4 generate-ts: AccountRateLimitsUpdatedNotification
+            # Verified from generate-ts (0.153.4, 0.161.0): AccountRateLimitsUpdatedNotification
             # carries a sparse RateLimitSnapshot, independent of any turn id.
             u = s.accounting.usage()
             yield self._event(h, EventKind.USAGE, input=u.input_tokens, output=u.output_tokens,
@@ -407,14 +465,36 @@ class CodexProvider:
             yield self._event(h, EventKind.REVIEWER_DECLINED, tool=name, args=args,
                               command=args.get("command"), reason=p["review"].get("rationale") or "Reviewer declined")
 
-    def _server_request(self, h, msg):
+    @staticmethod
+    def _reply(s, request, result=None, **kwargs):
+        request.replied = True
+        s.rpc.reply(request.rid, result, **kwargs)
+
+    @staticmethod
+    def _refuse(s, rid):
+        try:
+            s.rpc.reply(rid, error={"code": -32603, "message": "Request refused"})
+        except Exception:
+            pass  # the transport is already gone; closing the session refuses it
+
+    def _server_request(self, h, msg, request):
         s = h.native
         method, p, rid = msg["method"], msg.get("params", {}), msg["id"]
+        request.rid = rid
         req_id = str(rid)
         if method == "item/permissions/requestApproval":
-            s.rpc.reply(rid, {"permissions": {}, "scope": "turn"})
+            # An empty grant: a permissions expansion is never approved here.
+            self._reply(s, request, {"permissions": {}, "scope": "turn"})
             return
         if method in ("item/commandExecution/requestApproval", "item/fileChange/requestApproval"):
+            problem = _approval_problem(p)
+            if problem:
+                # Fail closed on a shape we cannot read: decline, and never
+                # put a half-understood request in front of the owner.
+                self._reply(s, request, {"decision": "decline"})
+                yield self._event(h, EventKind.ERROR, fatal=False,
+                                  message=f"Codex approval request declined: {problem}")
+                return
             shell = method == "item/commandExecution/requestApproval"
             item = s.items.get(p.get("itemId"), {})
             name, args = self._tool(item if item else {"type": "commandExecution" if shell else "fileChange"})
@@ -438,7 +518,7 @@ class CodexProvider:
                 if s.closed.is_set() or s.cancelled.is_set() or s.rpc.failed.is_set():
                     decision = Decision.DENY
                 s.pending.pop(req_id, None)
-            s.rpc.reply(rid, {"decision": "accept" if decision == Decision.ALLOW else "decline"})
+            self._reply(s, request, {"decision": "accept" if decision == Decision.ALLOW else "decline"})
             yield self._event(h, EventKind.APPROVAL_RESOLVED, req_id=req_id, decision=decision.value)
             if s.rpc.failed.is_set():
                 raise RpcError("Codex transport failed during approval")
@@ -464,10 +544,13 @@ class CodexProvider:
                 if s.cancelled.is_set():
                     break
                 answers[q["id"]] = {"answers": [pending.value]}
-            s.rpc.reply(rid, {"answers": answers})
+            self._reply(s, request, {"answers": answers})
             return
-        s.rpc.reply(rid, error={"code": -32601, "message": "Unsupported server request"})
-        yield self._event(h, EventKind.ERROR, message=f"Unexpected Codex server request: {method}", fatal=False)
+        # Anything else — including an approval- or permission-shaped method a
+        # newer Codex adds — is refused with an error, never approved.
+        self._reply(s, request, error={"code": -32601, "message": "Unsupported server request"})
+        yield self._event(h, EventKind.ERROR, message=f"Unexpected Codex server request refused: {str(method)[:80]}",
+                          fatal=False)
 
     def set_model(self, h: SessionHandle, model: str | None, effort: str | None) -> None:
         """Change the model and effort from the next turn on (decisions A1).

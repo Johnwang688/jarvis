@@ -20,7 +20,12 @@ v1 session migration (WP1), the fast-path provider with `FAST_TOOLS` and
 `PreToolUse` hook is the gate; the SDK sandbox does **not** confine on this
 WSL2, so Claude workers run unsandboxed and confinement routes to Codex),
 the Codex provider over the app-server (WP4 — lifted from the trading firm's
-transport; its reviewer escalates nothing to us, design R8), a worktree per
+transport; its reviewer escalates nothing to us, design R8; **a version floor,
+not a pin** since 2026-10-08 — `providers/codex_cli.py` runs codex ≥ 0.153.4,
+warns once above the verified 0.161.0, `JARVIS_CODEX_STRICT=1` restores the
+exact match, `JARVIS_CODEX_CLI` picks the binary and nothing under `/mnt/`
+ever runs; the floor is safe only because an unknown server request gets an
+error and an unparseable approval a decline — keep it that way), a worktree per
 task (WP6), the daemon and local API (WP7, `jarvis daemon2`), one skills
 folder for three consumers plus `jarvis-mcp` (WP8), and Discord rendering
 (WP10a), Discord routing with thread-scoped approvals (WP10b), and the
