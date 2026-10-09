@@ -113,13 +113,59 @@ _READERS = frozenset({
     "sort", "cut", "column", "xxd", "od", "hexdump", "strings", "nl", "tac",
     "base64", "sed", "find", "date",
 })
+
 # Copiers read their sources and write one destination, so naming a protected
 # file as a *source* is a read: `cp ~/.config/jarvis/allowlist.json ~/backup/`
 # is a backup, and refusing it would be the over-reach this project keeps
-# warning about. `mv` is not here — moving a file away is a write to it — and
-# neither is `ln`, because a hard link made now is a write path later.
-_COPIERS = frozenset({"cp", "rsync", "scp", "install"})
+# warning about. Only the two whose option grammar is modelled here get that
+# distinction — GNU `cp` and `install`. `rsync` and `scp` have far larger
+# grammars (`--log-file=`, `--backup-dir`, `-T DIR` all write) and are already
+# never auto-approved, so every operand they are given counts as a write. `mv`
+# is not a copier — moving a file away is a write to it — and neither is `ln`,
+# because a hard link made now is a write path later.
+#
+# **The destination has to be parsed, not guessed** (review round 2,
+# 2026-10-08). "The last operand" was the whole rule, and all of these really
+# write the allowlist in bash while the detector read it as a copy *source*:
+# `cp x ~/.config/jarvis/allowlist.json # backup`, `… ${NOTHING}`, `… "$@"`,
+# `… {fd}>/dev/null`, `cp -bt ~/.config/jarvis /tmp/allowlist.json` and
+# `cp -t$HOME/.config/jarvis …`. So: comments and named-fd redirects are
+# stripped, words that expand to nothing are dropped, short-option clusters and
+# long-option abbreviations are parsed as getopt would, and — the part that
+# matters when the model of the grammar is wrong — **anything ambiguous fails
+# closed**: an unresolved expansion, an unparseable line or an option we do
+# not know turns every operand into a write candidate.
+_COPIER_SHORT_ARG = {"cp": "St", "install": "gmoSt"}     # short options with a value
+_COPIER_ALL_WRITE = {"cp": "ls", "install": "d"}         # link / directory modes
+_COPIER_LONG = {                                         # name -> takes a value
+    "cp": {
+        "archive": 0, "attributes-only": 0, "backup": 0, "copy-contents": 0,
+        "debug": 0, "dereference": 0, "force": 0, "interactive": 0, "link": 0,
+        "no-clobber": 0, "no-dereference": 0, "preserve": 0, "no-preserve": 1,
+        "parents": 0, "recursive": 0, "reflink": 0, "remove-destination": 0,
+        "sparse": 0, "strip-trailing-slashes": 0, "symbolic-link": 0,
+        "suffix": 1, "target-directory": 1, "no-target-directory": 0,
+        "update": 0, "verbose": 0, "one-file-system": 0, "context": 0,
+        "keep-directory-symlink": 0, "help": 0, "version": 0,
+    },
+    "install": {
+        "backup": 0, "compare": 0, "directory": 0, "group": 1, "mode": 1,
+        "owner": 1, "preserve-timestamps": 0, "strip": 0, "strip-program": 1,
+        "suffix": 1, "target-directory": 1, "no-target-directory": 0,
+        "verbose": 0, "preserve-context": 0, "context": 0, "debug": 0,
+        "help": 0, "version": 0,
+    },
+}
+_COPIER_ALL_WRITE_LONG = {"cp": {"link", "symbolic-link"}, "install": {"directory"}}
+_COPIERS = frozenset(_COPIER_LONG)
 _GLOB = re.compile(r"[*?\[]")
+
+# Substitution analysis is bounded, and the bound fails closed (review round 2).
+# The first version re-scanned from just past every opener, so `$(` nested or
+# repeated a few thousand times cost cubic time inside the synchronous permit —
+# over a minute, during which nothing else could be approved.
+_MAX_SPANS = 64      # substitutions examined per command line, in total
+_MAX_DEPTH = 3       # nesting of `$(…)` / `sh -c` analysed before giving up
 
 
 @dataclass(frozen=True)
@@ -130,10 +176,13 @@ class Touch:
     it, `cp` onto it, `ln` to it. Uncertain means the line *might*: a
     directory copy into the gate's folder, an unknown program handed the
     path, a relative name under a working directory nobody can track.
+    `opaque` means the line could not be judged at all (too many or too deeply
+    nested substitutions); it is uncertain by construction and always asks.
     """
     path: Path
     certain: bool
     why: str
+    opaque: bool = False
 
     @property
     def name(self) -> str:
@@ -141,9 +190,19 @@ class Touch:
 
 
 @dataclass
+class _Budget:
+    spans: int = 0
+
+
+@dataclass
 class _State:
     cwd: Path | None                       # None: a `cd` we could not follow
     variables: dict[str, str] = field(default_factory=dict)
+    budget: _Budget = field(default_factory=_Budget)
+
+
+def _opaque(why: str) -> Touch:
+    return Touch(_resolve(config.ALLOWLIST_PATH), False, why, opaque=True)
 
 
 def _expand(token: str, state: _State) -> str | None:
@@ -162,6 +221,27 @@ def _expand(token: str, state: _State) -> str | None:
             return None
         text = str(state.cwd / text)
     return os.path.normpath(text)
+
+
+_PURE_EXPANSION = re.compile(r"\$(?:\{([@*]|\w+)\}|([@*])|(\w+))")
+
+
+def _vanishes(token: str, state: _State) -> bool:
+    """A word that is nothing but an expansion of nothing: `$@`/`$*` (no
+    positional parameters under `bash -c`), a positional `$1`, or a variable
+    that is empty or unset on this line and in the environment. bash drops the
+    word, so it must not be mistaken for the copy's destination.
+
+    Empty counts as much as unset: after `X=`, `cp a b $X` is `cp a b`, while
+    a naive expansion turns `$X` into "" — the working directory — and the
+    copy's destination silently becomes `.`."""
+    match = _PURE_EXPANSION.fullmatch(token)
+    if not match:
+        return False
+    name = match.group(1) or match.group(2) or match.group(3)
+    if name in ("@", "*") or name.isdigit():
+        return True
+    return not state.variables.get(name, os.environ.get(name))
 
 
 def _identities(paths: set[Path]) -> dict[tuple[int, int], Path]:
@@ -210,9 +290,19 @@ def _ancestor_of(text: str, protected: set[Path]) -> list[tuple[Path, tuple[str,
             for path in protected if resolved != path and resolved in path.parents]
 
 
+def _strip_comment(segment: str) -> str:
+    """The segment without a trailing `# comment`. A `#` starts a comment only
+    unquoted and at the start of a word — `a#b` and `${#x}` are not comments."""
+    for i in rules.unquoted_indices(segment):
+        if segment[i] == "#" and (i == 0 or segment[i - 1] in " \t"):
+            return segment[:i]
+    return segment
+
+
 def _redirect_targets(segment: str) -> list[str]:
     """Every word the segment redirects output into (`>`, `>>`, `>|`, `&>`,
-    `<>`, glued or spaced). File-descriptor duplication (`2>&1`) is not one."""
+    `<>`, `{fd}>`, glued or spaced). File-descriptor duplication (`2>&1`) is
+    not one."""
     syntax = set(rules.unquoted_indices(segment))
     targets: list[str] = []
     i = 0
@@ -252,13 +342,23 @@ def _redirect_targets(segment: str) -> list[str]:
 
 
 def _operands(tokens: list[str]) -> list[str]:
-    """Arguments that may be paths: plain words, and the value side of
-    `of=…` / `--output=…`. Bare flags are not paths."""
+    """Arguments that may be paths, for a program whose grammar is not
+    modelled: plain words, the value side of `of=…` / `--output=…`, and the
+    path glued onto a short option (`mv -t$HOME/.config/jarvis …`,
+    `-o/tmp/x`). Over-approximating is the safe direction — a candidate that
+    names no protected file costs nothing."""
     out = []
     for token in tokens:
-        if token.startswith("-"):
+        if token.startswith("--"):
             if "=" in token:
                 out.append(token.split("=", 1)[1])
+            continue
+        if token.startswith("-") and len(token) > 2:
+            glued = re.search(r"[/~$.]", token[2:])
+            if glued:
+                out.append(token[2 + glued.start():])
+            continue
+        if token.startswith("-"):
             continue
         if re.match(r"[A-Za-z_]\w*=", token):
             out.append(token.split("=", 1)[1])
@@ -267,24 +367,87 @@ def _operands(tokens: list[str]) -> list[str]:
     return out
 
 
-def _destination(stem: str, tokens: list[str], operands: list[str]) -> str | None:
-    """For a copying program, the one operand it writes; None if it writes
-    every operand (or links them, which is a write by another name)."""
+def _copier_split(stem: str, args: list[str]) -> tuple[list[str], list[str], bool] | None:
+    """(written, read, fully understood) for `cp`/`install`; None otherwise.
+
+    Parsed the way GNU getopt reads it: short-option clusters (`-bt DIR`),
+    glued values (`-tDIR`, `-t$HOME/…`), long options and their unique
+    abbreviations (`--target=DIR`, `--targ DIR`), and `--`. Option values are
+    write candidates (`--suffix`, `-m`: never a protected path in ordinary
+    use, so counting them costs nothing). A link or directory mode writes
+    every operand. An option this table does not know means the parse is not
+    trusted, so the caller fails closed.
+    """
     if stem not in _COPIERS:
         return None
-    if stem == "cp" and any(t in ("-l", "-s", "--link", "--symbolic-link") or
-                            (re.fullmatch(r"-[a-zA-Z]+", t) and ("l" in t or "s" in t))
-                            for t in tokens[1:]):
-        return None
-    for k, token in enumerate(tokens[1:], 1):
-        if token in ("-t", "--target-directory") and k + 1 < len(tokens):
-            return tokens[k + 1]
-        if token.startswith("--target-directory="):
-            return token.split("=", 1)[1]
-    return operands[-1] if operands else None
+    shorts, longs = _COPIER_SHORT_ARG[stem], _COPIER_LONG[stem]
+    all_write, all_write_long = _COPIER_ALL_WRITE[stem], _COPIER_ALL_WRITE_LONG[stem]
+    operands: list[str] = []
+    values: list[str] = []
+    target: str | None = None
+    everything = False
+    understood = True
+    ended = False
+    i = 0
+    while i < len(args):
+        token = args[i]
+        i += 1
+        if ended or token == "-" or not token.startswith("-"):
+            operands.append(token)
+            continue
+        if token == "--":
+            ended = True
+            continue
+        if token.startswith("--"):
+            name, has_value, value = token[2:].partition("=")
+            matches = [o for o in longs if o == name] or [o for o in longs if o.startswith(name)]
+            if len(matches) != 1:
+                understood = False
+                if has_value:
+                    values.append(value)
+                continue
+            option = matches[0]
+            everything = everything or option in all_write_long
+            if longs[option]:
+                if not has_value and i < len(args):
+                    value, i = args[i], i + 1
+                if option == "target-directory":
+                    target = value
+                else:
+                    values.append(value)
+            elif has_value:
+                values.append(value)            # `--backup=numbered` and friends
+            continue
+        for k, letter in enumerate(token[1:], 1):
+            everything = everything or letter in all_write
+            if letter in shorts:
+                value = token[k + 1:]
+                if not value and i < len(args):
+                    value, i = args[i], i + 1
+                if letter == "t":
+                    target = value
+                else:
+                    values.append(value)
+                break
+    if everything:
+        written = operands + values + ([target] if target is not None else [])
+        return written, [], understood
+    if target is not None:
+        return [target] + values, operands, understood
+    if not operands:
+        return values, [], understood
+    return [operands[-1]] + values, operands[:-1], understood
 
 
-_REDIRECT_TOKEN = re.compile(r"^(\d*|&)(>>|>\||>&|>|<<<|<<-|<<|<>|<&|<)(.*)$", re.S)
+@dataclass
+class _Seen:
+    touches: list[Touch] = field(default_factory=list)
+    writes: bool = False                           # runs a writing stem
+    read: set[Path] = field(default_factory=set)   # protected files only read
+
+
+_REDIRECT_TOKEN = re.compile(
+    r"^(\d*|&|\{\w+\})(>>|>\||>&|>|<<<|<<-|<<|<>|<&|<)(.*)$", re.S)
 
 
 def _without_redirects(tokens: list[str]) -> list[str]:
@@ -294,7 +457,7 @@ def _without_redirects(tokens: list[str]) -> list[str]:
     Leaving them in was a hole (found while pinning the 2026-10-08 review): in
     `cp /tmp/x ~/.config/jarvis/allowlist.json 2>&1` the *last* token is
     `2>&1`, so the copier's destination rule took the allowlist for a source,
-    a read, and the line ran. `> /dev/null` did the same thing with a space.
+    a read, and the line ran. `> /dev/null` and `{fd}>/dev/null` did the same.
     """
     out: list[str] = []
     skip = False
@@ -335,18 +498,18 @@ def _peel(tokens: list[str], state: _State) -> tuple[list[str], Path | None]:
     return rules.unwrap(tokens), chdir
 
 
-@dataclass
-class _Seen:
-    touches: list[Touch] = field(default_factory=list)
-    writes: bool = False                           # runs a writing stem
-    read: set[Path] = field(default_factory=set)   # protected files only read
-
-
 def _strip_closers(tokens: list[str]) -> list[str]:
-    """`(cd d; cp a b)` leaves `b)` as the last token; the paren is syntax."""
-    if tokens and tokens[-1].endswith((")", "}")) and tokens[-1] not in (")", "}"):
-        tokens = tokens[:-1] + [tokens[-1].rstrip(")}")]
-    return [t for t in tokens if t not in (")", "}")]
+    """`(cd d; cp a b)` leaves `b)` as the last token; the paren is syntax.
+    Only an *unbalanced* closer is stripped, so `${NOTHING}` keeps its brace."""
+    tokens = [t for t in tokens if t not in (")", "}")]
+    if tokens:
+        last = tokens[-1]
+        while last.endswith(")") and last.count(")") > last.count("("):
+            last = last[:-1]
+        while last.endswith("}") and last.count("}") > last.count("{"):
+            last = last[:-1]
+        tokens[-1] = last
+    return tokens
 
 
 def _kind(stem: str, tokens: list[str]) -> str:
@@ -371,7 +534,13 @@ def _kind(stem: str, tokens: list[str]) -> str:
 def _segment(segment: str, state: _State, protected: set[Path], ids: dict,
              depth: int) -> _Seen:
     seen = _Seen()
-    raw = _strip_closers(rules._tokens(segment))
+    segment = _strip_comment(segment)
+    try:
+        raw = shlex.split(segment)
+        parsed = True
+    except ValueError:
+        raw, parsed = segment.split(), False
+    raw = _strip_closers(raw)
     if not raw:
         return seen
 
@@ -403,7 +572,7 @@ def _segment(segment: str, state: _State, protected: set[Path], ids: dict,
             state.cwd = Path(target) if target else None
         return seen
 
-    local = _State(chdir if chdir is not None else state.cwd, state.variables)
+    local = _State(chdir if chdir is not None else state.cwd, state.variables, state.budget)
 
     # A redirect writes its target whatever the stem is: `echo x>~/…/allowlist.json`.
     for target in _redirect_targets(segment):
@@ -418,7 +587,7 @@ def _segment(segment: str, state: _State, protected: set[Path], ids: dict,
             seen.touches.append(Touch(hit, True, f"a redirect onto {hit.name}"))
 
     # A shell handed a string is a command line in its own right.
-    if stem in _SHELLS and depth < 3:
+    if stem in _SHELLS:
         inline = None
         if stem == "eval":
             inline = " ".join(tokens[1:])
@@ -426,7 +595,12 @@ def _segment(segment: str, state: _State, protected: set[Path], ids: dict,
             idx = tokens.index("-c")
             inline = tokens[idx + 1] if idx + 1 < len(tokens) else None
         if inline:
-            inner = _analyse(inline, _State(local.cwd, dict(state.variables)),
+            if depth >= _MAX_DEPTH or state.budget.spans >= _MAX_SPANS:
+                seen.touches.append(_opaque("shell strings nested too deeply to judge"))
+                seen.writes = True
+                return seen
+            state.budget.spans += 1
+            inner = _analyse(inline, _State(local.cwd, dict(state.variables), state.budget),
                              protected, ids, depth + 1)
             seen.touches += inner.touches
             seen.writes = inner.writes
@@ -439,7 +613,26 @@ def _segment(segment: str, state: _State, protected: set[Path], ids: dict,
         # Name the writing word behind an unknown wrapper, not the wrapper.
         stem = next((rules._basename(t) for t in tokens[1:]
                      if rules._basename(t) in _WRITERS), stem)
-    operands = _operands(tokens[1:])
+
+    # Words that expand to nothing are not arguments, and their presence means
+    # the line is not fully known.
+    args = tokens[1:]
+    kept = [t for t in args if not _vanishes(t, local)]
+    vanished = len(kept) != len(args)
+
+    split = _copier_split(stem, kept)
+    if split is None:
+        written, read_only = _operands(kept), []
+    else:
+        written, read_only, understood = split
+        # Fail closed: if anything about the copy is uncertain, every operand
+        # is a write candidate, as for `mv` and `tee`. A protected path spelled
+        # out is then a certain write; one behind an unknown is uncertain.
+        if (vanished or not parsed or not understood
+                or any(_expand(o, local) is None for o in written + read_only)):
+            written, read_only = written + read_only, []
+    if kind == "reader":
+        written, read_only = [], written + read_only
 
     # Inline source names its files inside a string no tokenizer splits. A
     # full path, or a bare name while standing in the gate's own folder, is a
@@ -447,7 +640,7 @@ def _segment(segment: str, state: _State, protected: set[Path], ids: dict,
     # it asks rather than refuses.
     if stem in _INTERPRETERS:
         suffixes = tuple(p.name for p in protected)
-        source = " ".join(t for t in tokens[1:] if not (t in operands and t.endswith(suffixes)))
+        source = " ".join(t for t in args if not (t in written and t.endswith(suffixes)))
         for path in protected:
             if path.name not in source:
                 continue
@@ -455,27 +648,27 @@ def _segment(segment: str, state: _State, protected: set[Path], ids: dict,
                        or (local.cwd is not None and _resolve(local.cwd) == path.parent))
             seen.touches.append(Touch(path, spelled, f"{stem} source that names {path.name}"))
 
-    destination = _destination(stem, tokens, operands)
-    for operand in operands:
+    for operand in read_only:
+        text = _expand(operand, local)
+        hit = _exact(text, protected, ids) if text is not None else None
+        if hit is not None:
+            seen.read.add(hit)
+
+    everyone = written + read_only
+    for operand in written:
         text = _expand(operand, local)
         if text is None:
             # `$UNSET/allowlist.json`, or a relative name after a `cd` that
             # could not be followed: the right name, an unknowable place.
             for path in protected:
-                if Path(operand).name == path.name and kind != "reader":
+                if Path(operand).name == path.name:
                     seen.touches.append(Touch(path, False, f"{stem} given {operand}"))
             continue
-        is_source = destination is not None and operand != destination
         hit = _exact(text, protected, ids)
         if hit is not None:
-            if kind == "reader" or is_source:
-                seen.read.add(hit)
-            else:
-                seen.touches.append(Touch(hit, kind == "writer", f"{stem} on {hit.name}"))
+            seen.touches.append(Touch(hit, kind == "writer", f"{stem} on {hit.name}"))
             continue
-        if kind == "reader" or is_source:
-            continue
-        others = [o for o in operands if o != operand]
+        others = [o for o in everyone if o is not operand]
         other_names = {rules._basename(o.rstrip("/")) for o in others}
         for path, rel in _ancestor_of(text, protected):
             first = rel[0]
@@ -501,7 +694,7 @@ _ANSI_C = re.compile(r"\$'((?:[^'\\]|\\.)*)'")
 
 
 def _ansi_c(text: str) -> str:
-    """bash's `$'…'` quoting decoded, so `$'allow\x6cist.json'` is read as the
+    """bash's `$'…'` quoting decoded, so `$'allow\\x6cist.json'` is read as the
     name it spells. shlex knows nothing of it and would hand back the escapes."""
     def decode(match: re.Match) -> str:
         try:
@@ -513,8 +706,9 @@ def _ansi_c(text: str) -> str:
     return _ANSI_C.sub(decode, text)
 
 
-def _substitutions(text: str) -> list[str]:
-    """The command lines inside `$(…)`, `<(…)`, `>(…)` and backticks.
+def _substitutions(text: str, limit: int) -> tuple[list[str], bool]:
+    """The command lines inside `$(…)`, `<(…)`, `>(…)` and backticks, at this
+    level only, and whether there were more than `limit` of them.
 
     rules.py already makes a line with command substitution ASK, but a
     substitution that writes the allowlist must be refused, not asked, and a
@@ -522,6 +716,10 @@ def _substitutions(text: str) -> list[str]:
     to rules.py at all. Over-approximate on purpose: quoting is ignored, so a
     `$(` inside single quotes is checked too — checking text that will not run
     can only add a refusal, never remove one.
+
+    The scan resumes **past** each matched span, never just past its opener:
+    a nested substitution is found when its parent's text is analysed one
+    level down, so nesting costs one pass per level instead of one per opener.
     """
     found: list[str] = []
     i = 0
@@ -531,30 +729,40 @@ def _substitutions(text: str) -> list[str]:
             while j < len(text) and depth:
                 depth += {"(": 1, ")": -1}.get(text[j], 0)
                 j += 1
-            found.append(text[i + 2:j - 1] if depth == 0 else text[i + 2:])
-            i = i + 2
-            continue
-        if text[i] == "`" and (i == 0 or text[i - 1] != "\\"):
+            inner = text[i + 2:j - 1] if depth == 0 else text[i + 2:]
+            if inner.strip():
+                found.append(inner)
+            i = j
+        elif text[i] == "`" and (i == 0 or text[i - 1] != "\\"):
             end = text.find("`", i + 1)
-            if end == -1:
-                found.append(text[i + 1:])
-                break
-            found.append(text[i + 1:end])
-            i = end + 1
+            inner = text[i + 1:] if end == -1 else text[i + 1:end]
+            if inner.strip():
+                found.append(inner)
+            i = len(text) if end == -1 else end + 1
+        else:
+            i += 1
             continue
-        i += 1
-    return [f for f in found if f.strip()]
+        if len(found) > limit:
+            return found[:limit], True
+    return found, False
 
 
 def _analyse(command: str, state: _State, protected: set[Path], ids: dict,
              depth: int = 0) -> _Seen:
     total = _Seen()
     command = _ansi_c(command)
-    if depth < 3:
-        for inner in _substitutions(command):
-            nested = _analyse(inner, _State(state.cwd, dict(state.variables)),
+    budget = state.budget
+    inner, overflow = _substitutions(command, max(_MAX_SPANS - budget.spans, 0))
+    if inner and depth >= _MAX_DEPTH:
+        total.touches.append(_opaque("substitutions nested too deeply to judge"))
+    else:
+        for text in inner:
+            budget.spans += 1
+            nested = _analyse(text, _State(state.cwd, dict(state.variables), budget),
                               protected, ids, depth + 1)
             total.touches += nested.touches
+    if overflow:
+        total.touches.append(_opaque(f"more than {_MAX_SPANS} substitutions, too many to judge"))
     parts = [_segment(s, state, protected, ids, depth) for s in rules.segments(command)]
     for k, part in enumerate(parts):
         total.touches += part.touches
@@ -621,5 +829,9 @@ def refusal(touch: Touch) -> str:
 
 
 def ask_reason(touch: Touch) -> str:
+    if touch.opaque:
+        return (f"this line is too complex to judge ({touch.why}), so whether it "
+                "writes Jarvis's own configuration cannot be told; it never runs "
+                "unasked and no allowlist entry covers it")
     return (f"{touch.why}: {touch.name} is Jarvis's own configuration, so this "
             "never runs unasked and no allowlist entry covers it")

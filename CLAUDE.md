@@ -909,6 +909,47 @@ jarvis/
   correct together with the shape of input it was written for, and "the
   last argument" is not the last word on the line.
 
+  **And the next review proved the point by finding thirteen more** (round
+  2, 2026-10-08), every one of which v1 dispatch ran unasked:
+  `cp x ~/.config/jarvis/allowlist.json # backup`, `… ${NOTHING}`, `… "$@"`,
+  `… $*`, `X=; … $X`, `… {fd}>/dev/null`, `… --suffix .bak`, `cp -bt
+  ~/.config/jarvis /tmp/allowlist.json`, `cp -t$HOME/.config/jarvis …`, `cp
+  --targ …`, an unknown option, `install … # x`, and a glued `mv -t$HOME/…`.
+  Patching "the last operand" a word at a time was the wrong shape of fix, so
+  the copier's grammar is now **parsed** — comments and named-fd redirects
+  stripped, words that expand to nothing (unset *or empty*) dropped,
+  short-option clusters, glued values, long-option abbreviations and `--`
+  read as getopt reads them, option values counted as write candidates —
+  and, the part that matters when that model is wrong, **anything ambiguous
+  fails closed**: an unresolved expansion, an unparseable line or an option
+  the table does not know turns every operand into a write candidate, the
+  way `mv` and `tee` were always judged. Only `cp` and `install` get the
+  source/destination distinction at all; `rsync` and `scp` have grammars
+  too large to model (`--log-file=`, `--backup-dir`, `-T DIR` all write) and
+  were never auto-approved anyway, so every operand they name is a write.
+  Several of those rows were also **worse than main in v2** after round 1,
+  whose crude copy refused any `cp` naming the file — v2 was held only by its
+  credential-folder always-ask rule. The lesson is the one this file keeps
+  relearning, stated once more for parsers: **when a parser is a guard, its
+  uncertainty has to be an answer of its own, and that answer is "ask".**
+
+  **The analysis is bounded, and the bound fails closed** (same review).
+  `_substitutions` resumed one character past each `$(` instead of past its
+  match, and recursed on every inner string, so `echo $($($(…` five thousand
+  deep took over a minute — inside the synchronous permit, where nothing else
+  can be approved meanwhile. It now resumes past the matched span (nesting
+  costs one pass per level), analyses at most 64 substitutions and 3 levels
+  of `$(…)`/`sh -c` per line, and past either bound reports the line as
+  **too complex to judge**: ASK in v1, always-ask in v2, never ALLOW, and
+  never covered by an allowlist entry. A guard that can be made slow is a
+  guard that can be made absent.
+
+  **v2 judges relative names where the command runs** (same round):
+  `Brief.cwd` at layers 1, 2 and 4, and the escape hatch's own cwd when it
+  re-checks layer 1 before running — a relative `echo '[]' > allowlist.json`
+  in a worktree that *is* the gate's folder is refused; dropping that
+  argument survived every suite until `hatch_checks` gained the case.
+
   Asked rather than refused, because the write cannot be proven: `git
   checkout`/`--work-tree` naming a gate file, `tar -x -C`/`unzip -d` into
   its folder, `xargs` fed the path from another segment, `ln -sfn`/`mv -T`/
@@ -919,7 +960,10 @@ jarvis/
   (`'allow'+'list.json'`), brace expansion (`allow{list,}.json`), a script
   or Makefile that writes it, a program told where to write by its own
   config, `find -exec` or `xargs` whose target is computed, and an archive
-  extracted anywhere above the folder. A hard link made *outside* Jarvis is
+  extracted anywhere above the folder, a `cp`/`install` option this
+  table does not model that writes a second path (it fails closed only when
+  it does not *recognise* the option), and anything past the substitution
+  bound (asked, never judged). A hard link made *outside* Jarvis is
   seen (by inode); one created and written within a single line under an
   unmentioned name is not. The real boundary would be filesystem
   permissions: the gate's state owned by a user the agent's process is not.
@@ -1404,10 +1448,13 @@ jarvis/
   quoted metacharacters still running unattended, alongside the writing form
   of every subcommand it names. Since 2026-10-08 `gate_state_checks` owns
   **shell writes to the gate's own state**, under a throwaway HOME with an
-  allowlist entry for every stem in sight: 68 spellings of a write onto the
+  allowlist entry for every stem in sight: 85 spellings of a write onto the
   allowlist refused (allowlisted stem, mode "all", and no approver at all),
-  23 gate-state writes asked and never run on a no, and 16 ordinary
+  23 gate-state writes asked and never run on a no, and 20 ordinary
   commands — reads and backups of those same files among them — unchanged.
+  `gate_state_complexity_checks` pins the substitution bound: 5,000 openers,
+  200-deep nesting and 2,500 spans each judged in well under a second as too
+  complex to judge, never ALLOW.
   `gate_state_edge_checks` re-runs the old quoting/separator exploits as
   verdicts (none may move but toward stricter) and pins the symlinked-folder,
   `ROUTING_PATH`-elsewhere and explicit-`cwd` cases.

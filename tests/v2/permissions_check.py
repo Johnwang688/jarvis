@@ -510,6 +510,34 @@ def file_deny_checks():
         finally:
             config.ROUTING_PATH = saved_routing
 
+        # Review round 2: a copier's destination is parsed, not "the last
+        # operand" — every one of these writes the allowlist, so layer 1 refuses.
+        for command in ("cp /tmp/x ~/.config/jarvis/allowlist.json # backup",
+                        "cp /tmp/x ~/.config/jarvis/allowlist.json ${NOTHING}",
+                        'cp /tmp/x ~/.config/jarvis/allowlist.json "$@"',
+                        "cp /tmp/x ~/.config/jarvis/allowlist.json {fd}>/dev/null",
+                        "cp -bt ~/.config/jarvis /tmp/allowlist.json",
+                        "cp -t$HOME/.config/jarvis /tmp/allowlist.json",
+                        "install /tmp/x ~/.config/jarvis/allowlist.json # x"):
+            eq(_command_writes_protected_state(command), "allowlist.json",
+               f"layer 1 sees the copy's real destination: {command}")
+
+        # Review round 2: a line too complex to judge is always-ask with that
+        # reason, under AUTO as under ASK, and is judged in well under a second.
+        for command in ("echo " + "$(" * 5000, "echo " + "$(x) " * 200,
+                        "echo " + "$(" * 200 + "x" + ")" * 200):
+            for profile in (P.AUTO, P.ASK):
+                seen = len(owner.seen)
+                start = time.perf_counter()
+                human(*bash(command), brief_for(profile))
+                spent = time.perf_counter() - start
+                ok(spent < 1.0, f"a pathological line is judged quickly ({spent:.2f}s)")
+                eq(box.decisions[-1]["layer"], "always-ask",
+                   f"{profile.value}: a line too complex to judge is put to the owner")
+                ok("too complex to judge" in box.decisions[-1]["reason"],
+                   f"and says why: {box.decisions[-1]['reason'][:80]!r}")
+                eq(len(owner.seen), seen + 1, "and the owner really is asked")
+
         # A write under a credential directory is always-ask, not a refusal.
         before = len(asker.seen)
         eq(permit("write_file", {"path": str(Path(os.environ["HOME"]) / ".ssh" / "config")}, brief),
@@ -1134,6 +1162,35 @@ def hatch_checks():
         eq(daemon.sent[0][1].origin, "system", "a refusal is a system message")
         ok(any(r["decision"] == "reviewer-declined-refused" for r in box.decisions),
            "the refusal is logged")
+
+        # Layer 1 at the moment of running judges a relative path in the folder
+        # the command will run in, not the daemon's (review round 2: dropping
+        # the cwd argument survived every suite). `_run` is a recorder here, so
+        # nothing is executed whichever way the check goes.
+        gate_dir = config.ALLOWLIST_PATH.parent
+        gate_dir.mkdir(parents=True, exist_ok=True)
+        ok(Path.cwd().resolve() != gate_dir.resolve(), "the daemon is not in the gate's folder")
+        gate_task = stores.tasks.create(project.id, "work in the gate's folder")
+        gate_task.worktree = str(gate_dir)
+        stores.tasks.save(gate_task)
+        gate_thread = stores.threads.create(project.id, Role.IMPLEMENTER,
+                                            ProviderName.CLAUDE, task_id=gate_task.id)
+        relative_write = "echo '[]' > allowlist.json"
+        for where, refused in ((gate_thread, True), (thread, False)):
+            daemon, hatch, broker = hatch_with(Decision.ALLOW)
+            executed = []
+            hatch._run = lambda item, task, executed=executed: (
+                executed.append(item.command) or "[exit 0]")
+            hatch.handle({"kind": "reviewer_declined", "thread_id": where.id,
+                          "data": {"tool": "Bash", "command": relative_write,
+                                   "reason": "denied by the classifier"}})
+            if refused:
+                eq(executed, [], "a relative allowlist write in the gate's folder is refused")
+                ok(daemon.sent[0][1].text.startswith("[refused by Jarvis rules:"),
+                   "and the worker is told why")
+            else:
+                eq(executed, [relative_write],
+                   "the same relative write in a project folder is the owner's to run")
 
         # Timeout -> not run.
         daemon, hatch, broker = hatch_with(None, timeout=0.05)

@@ -881,6 +881,26 @@ GATE_DENY = [
     "builtin echo '[]' > ~/.config/jarvis/allowlist.json",
     "chattr +i ~/.config/jarvis/allowlist.json",
     "cp /tmp/x ~someone/.config/jarvis/allowlist.json",        # ~user
+    # Review round 2 (2026-10-08): a copier's destination used to be "the
+    # last operand", and each of these wrote the allowlist while it was read
+    # as a copy *source* — v1 dispatch ran them with nobody asked.
+    "cp /tmp/x ~/.config/jarvis/allowlist.json # backup",      # a trailing comment
+    "cp /tmp/x ~/.config/jarvis/allowlist.json ${{NOTHING}}",   # expands to nothing
+    "cp /tmp/x ~/.config/jarvis/allowlist.json \"$@\"",
+    "cp /tmp/x ~/.config/jarvis/allowlist.json $*",
+    "X=; cp /tmp/x ~/.config/jarvis/allowlist.json $X",       # set, but empty
+    "cp /tmp/x ~/.config/jarvis/allowlist.json {{fd}}>/dev/null",  # a named-fd redirect
+    "cp -bt ~/.config/jarvis /tmp/allowlist.json",             # combined -t
+    "cp -t$HOME/.config/jarvis /tmp/allowlist.json",           # glued -t
+    "cp -t ~/.config/jarvis -- /tmp/allowlist.json",
+    "cp --targ ~/.config/jarvis /tmp/allowlist.json",          # an abbreviation
+    "cp --target=$HOME/.config/jarvis /tmp/allowlist.json",
+    "cp /tmp/x ~/.config/jarvis/allowlist.json --suffix .bak",  # a value after it
+    "cp --no-such-option /tmp/x ~/.config/jarvis/allowlist.json y",  # unparsed: all writes
+    "install /tmp/x ~/.config/jarvis/allowlist.json # x",
+    "install -d ~/.config/jarvis/allowlist.json",              # directory mode
+    "install -m600 -t ~/.config/jarvis /tmp/allowlist.json",
+    "mv -t$HOME/.config/jarvis /tmp/allowlist.json",           # glued, a non-copier
 ]
 
 # Writes that change what he runs on, or might reach the allowlist: asked,
@@ -923,6 +943,10 @@ GATE_ORDINARY = [
     "ls -la ~/.config/jarvis/",
     "head -n 5 ~/.config/jarvis/models.json",
     "cp ~/.config/jarvis/allowlist.json ~/allowlist.backup.json",  # a backup is a read
+    "cp ~/.config/jarvis/allowlist.json ~/allowlist.backup.json # keep a copy",
+    "cp -t ~/backups ~/.config/jarvis/models.json",             # -t names the destination
+    "cp a b # note",
+    "install -m 600 build/tool ~/bin/tool",
     "cp file ~",
     "echo allowlist.json > notes.txt",                          # the name, not the file
     "echo hi > models.json",                                    # a project's own models.json
@@ -1110,6 +1134,44 @@ def gate_state_edge_checks() -> None:
           "and an explicit cwd all pinned")
 
 
+def gate_state_complexity_checks() -> None:
+    """Review round 2: nested or repeated substitutions cost cubic time (one
+    re-scan per opener, recursing on each), so `$(` five thousand times held
+    the synchronous permit for over a minute. Bounded now, and the bound
+    fails closed: too complex to judge is ASK, never ALLOW, and no allowlist
+    entry covers it."""
+    import time
+
+    from jarvis import permissions, protected_state
+
+    deep_shell = "ls"
+    for _ in range(8):
+        deep_shell = "sh -c " + __import__("shlex").quote(deep_shell)
+    with gate_home():
+        for label, command in (
+            ("5000 unclosed $(", "echo " + "$(" * 5000),
+            ("5000 unclosed <(", "cat " + "<(" * 5000),
+            ("200 nested $(…)", "echo " + "$(" * 200 + "x" + ")" * 200),
+            ("200 sequential $(…)", "echo " + "$(x) " * 200),
+            ("2500 backtick pairs", "echo " + "`x` " * 2500),
+            ("8 nested sh -c", deep_shell),
+        ):
+            start = time.perf_counter()
+            verdict = permissions.static_verdict(command)
+            touch = protected_state.command_touch(command)
+            spent = time.perf_counter() - start
+            assert spent < 1.0, f"{label}: {spent:.2f}s"
+            assert verdict.decision != rules.ALLOW, (label, verdict)
+            assert touch is not None and touch.opaque, (label, touch)
+            assert "too complex to judge" in protected_state.ask_reason(touch), label
+            assert not permissions.allows("run_command", {"command": command}), label
+        # Ordinary substitution is still judged, not waved off as too complex.
+        assert protected_state.command_touch("echo $(date) $(whoami)") is None
+        assert protected_state.command_touch("sh -c 'bash -c \"ls\"'") is None
+    print("ok  gate state: 5000-opener, 200-deep and 2500-span lines judged in well under "
+          "a second, as too complex to judge — never ALLOW")
+
+
 def main() -> int:
     # Never read (or write) the owner's real allowlist from a test: `gate()`
     # consults it, so a stray entry would silently change what this suite
@@ -1138,6 +1200,7 @@ def main() -> int:
     protection_checks()
     gate_state_checks()
     gate_state_edge_checks()
+    gate_state_complexity_checks()
     print("\nall rules checks passed")
     return 0
 

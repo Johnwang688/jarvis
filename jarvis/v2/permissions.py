@@ -630,8 +630,9 @@ def build_permit(ctx: PermitContext, asker) -> PermissionCallback:
         if match is None and command.strip():
             # A line that might write the gate's own state but is not provably
             # a write (layer 1 took those): a copy into the gate's folder, a
-            # path behind an unset variable. Under AUTO it would otherwise go
-            # to the provider's classifier; it goes to the owner instead, in
+            # path behind an unset variable — or a line too complex to judge at
+            # all (past the substitution bound). Under AUTO it would otherwise
+            # go to the provider's classifier; it goes to the owner instead, in
             # every profile.
             touch = protected_state.command_touch(command, cwd)
             if touch is not None:
