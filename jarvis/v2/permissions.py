@@ -19,6 +19,12 @@ handed. The layers are evaluated in order and the first to answer wins:
 5. **Human** — profile ASK asks; profile AUTO returns ALLOW (layer 3 —
    the provider's own classifier still decides); profile STRICT denies.
 
+One exception sits between layers 1 and 2: a call the provider marks as a
+**sandbox widening** (`permit(..., widening="network on · …")`, Codex only)
+is always asked of a human, with no Always, whatever the profile — strict
+denies it — because the provider's reviewer has already passed it by the time
+it reaches us, so an AUTO "the reviewer decides" would mean no one decided.
+
 **`Decision.ALLOW` out of this callback means "not refused by Jarvis", not
 "approved by the owner"** — except when layer 2 or layer 5 produced it, which
 is the only case where a human actually said yes. Which layer answered is
@@ -61,6 +67,8 @@ LOG = logging.getLogger(__name__)
 # Layer names, as they appear in the decision log.
 L_DENY, L_ALWAYS_ASK, L_REVIEWER, L_JARVIS_ALLOW, L_HUMAN = (
     "deny", "always-ask", "reviewer", "jarvis-allow", "human")
+# A provider-reported sandbox widening (see `build_permit`'s `widening`).
+L_WIDENING = "sandbox-widening"
 
 # Tools that carry a shell command line, per provider.
 COMMAND_TOOLS = frozenset({
@@ -544,7 +552,14 @@ def build_permit(ctx: PermitContext, asker) -> PermissionCallback:
     """The §6 callback for one thread. `asker` is a `PendingApprovals` or a
     `DenyAll`; its `human_backed` flag is what layer 4 turns on."""
 
-    def permit(tool: str, args: dict, brief: Brief | None = None) -> Decision:
+    def permit(tool: str, args: dict, brief: Brief | None = None, *,
+               widening: str | None = None) -> Decision:
+        """`widening` is set only by a provider whose approval would widen
+        its own sandbox if accepted (Codex: extra permissions, network, a
+        grant root, terminal input). Such a call is asked of a human every
+        time — never ALLOWed by layer 4 or 5, never Always — and a deny-all
+        asker, no surface or a timeout declines it. It is a keyword the model
+        cannot reach: it never rides in `args`."""
         brief = brief if brief is not None else ctx.brief
         args = dict(args or {})
         profile = brief.profile if brief is not None else PermissionProfile.AUTO
@@ -568,6 +583,22 @@ def build_permit(ctx: PermitContext, asker) -> PermissionCallback:
                 refusal = denied_file(target)
                 if refusal:
                     return finish(Decision.DENY, L_DENY, refusal)
+
+        # --- sandbox widening: a human, every time ------------------------
+        # A Codex approval reaches us only after its own reviewer passed it,
+        # so the AUTO answer below ("the reviewer decides") would mean nobody
+        # decided. Accepting one also accepts the grant riding on it, and the
+        # reply cannot strip that. So this asks whatever the profile, and an
+        # ALWAYS is never offered: a standing yes to a widening is a wider box.
+        if widening:
+            if profile == PermissionProfile.STRICT:
+                return finish(Decision.DENY, L_WIDENING,
+                              f"strict profile refuses a sandbox widening: {widening}")
+            match = always_ask_match(tool, args, brief, ctx.project)
+            reason = widening + (f" (also always-ask rule {match[0]})" if match else "")
+            decision = _ask(asker, ctx, tool, args, command, reason, L_WIDENING,
+                            allowlistable=False, headline=widening)
+            return finish(decision, L_WIDENING, reason)
 
         # --- layer 2: the owner is asked whatever the reviewer thought -----
         match = always_ask_match(tool, args, brief, ctx.project)
@@ -605,11 +636,13 @@ def build_permit(ctx: PermitContext, asker) -> PermissionCallback:
 
 
 def _ask(asker, ctx: PermitContext, tool: str, args: dict, command: str,
-         reason: str, layer: str) -> Decision:
+         reason: str, layer: str, *, allowlistable: bool = True,
+         headline: str = "") -> Decision:
     request = ApprovalRequest(
         tool=tool, args=args, command=command or None, reason=reason, layer=layer,
         thread_id=ctx.thread_id, task_id=ctx.task_id,
-        provider=ctx.provider or None, origin=ctx.origin())
+        provider=ctx.provider or None, origin=ctx.origin(),
+        allowlistable=allowlistable, headline=headline)
     try:
         return Decision(asker.ask(request))
     except Exception:       # an asker that raises has not approved anything

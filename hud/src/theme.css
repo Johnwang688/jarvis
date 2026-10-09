@@ -393,6 +393,7 @@ h2.bar {
   font: 600 12px var(--mono); letter-spacing: 0.12em; color: var(--amber);
   background: var(--amber-soft); margin: 0 -20px 12px; padding: 12px 20px;
 }
+.auth .headline { font: 600 12px var(--mono); color: var(--red); border: 1px solid var(--red-line); padding: 6px 8px; margin-bottom: 8px; white-space: pre-wrap; overflow-wrap: anywhere; letter-spacing: 0.04em; }
 .auth .origin { font: 10px var(--mono); color: var(--accent); margin-bottom: 8px; letter-spacing: 0.06em; }
 .auth .tool { font: 600 13px var(--mono); color: var(--text); margin-bottom: 8px; }
 .auth .arg { font: 11px var(--mono); color: var(--text); margin-bottom: 4px; white-space: pre-wrap; overflow-wrap: anywhere; }

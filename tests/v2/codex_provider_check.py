@@ -149,6 +149,14 @@ def peer(script_path, log_path, thread_name):
                     time.sleep(0.05)
                     sys.exit(2)
                 continue
+            if mode == "scripted":
+                # One server request built by the test; the turn ends when
+                # its reply arrives (the `method is None` branch below).
+                if script.get("item"):
+                    event("item/started", item=script["item"])
+                identity = {"threadId": native} if script.get("no_turn") else {"threadId": native, "turnId": turn}
+                emit({"id": "special", "method": script["method"], "params": {**identity, **script["params"]}})
+                continue
             if mode in FAIL_CLOSED:
                 # Fail-closed shapes (2026-10-08): an approval Codex might add
                 # later, approvals we cannot parse, params that are not an
@@ -243,6 +251,18 @@ class FakeRpc(RpcProcess):
     def reply(self, request_id, result=None, **kwargs):
         self.replies.append({"id": request_id, "result": result, **kwargs})
         return super().reply(request_id, result, **kwargs)
+
+
+class RecordingAsker:
+    """A human-backed surface that answers on cue and keeps what it was shown."""
+    human_backed = True
+
+    def __init__(self, decision):
+        self.decision, self.seen = decision, []
+
+    def ask(self, request):
+        self.seen.append(request)
+        return self.decision
 
 
 class Checks(unittest.TestCase):
@@ -480,6 +500,205 @@ class Checks(unittest.TestCase):
                     self.assertIn("error", reply)
                     self.assertIsNone(reply["result"])
 
+    # -- 2026-10-08 review: approvals that widen the sandbox ------------------
+
+    def real_permit(self, asker):
+        """The daemon's own callback (build_permit), on hermetic config."""
+        from jarvis.v2.permissions import PermitContext, build_permit
+        home = self.root / "cfg"
+        home.mkdir(exist_ok=True)
+        for name, value in {"ALLOWLIST_PATH": home / "allowlist.json", "MODELS_PATH": home / "models.json",
+                            "V2_ALWAYS_ASK": home / "always-ask.json"}.items():
+            self.stack.enter_context(patch.object(config, name, value))
+        return build_permit(PermitContext("abcd1234", self.brief, provider="codex"), asker)
+
+    def scripted(self, method, params, permit, *, item=None, no_turn=False):
+        self.brain.script.update(method=method, params=params, item=item, no_turn=no_turn)
+        name = f"s{len(self.brain.rpcs)}"
+        h = self.start("scripted", permit, thread=replace(self.thread, id=name))
+        events = self.send(h)
+        replies = [m for m in h.native.rpc.replies if m["id"] == "special"]
+        self.assertEqual(len(replies), 1, replies)
+        return h, events, replies[0]
+
+    def test_sandbox_widening_is_asked_of_a_human_and_never_auto_accepted(self):
+        from jarvis.v2.approvals import PendingApprovals
+        from jarvis.v2.permissions import deny_all
+        cmd = {"command": "docker build ."}
+        shapes = [
+            ("extra permissions", CMD, {**cmd, "itemId": "c", "additionalPermissions": {
+                "network": {"enabled": True}, "fileSystem": {"write": ["/home"]}}}, ["network on", "write /home"]),
+            ("entries", CMD, {**cmd, "itemId": "c", "additionalPermissions": {"fileSystem": {"entries": [
+                {"access": "write", "path": {"type": "path", "path": "/etc"}}]}}}, ["write /etc"]),
+            ("terminal input", CMD, {**cmd, "itemId": "c", "kind": "writeStdin"}, ["writeStdin"]),
+            ("network prompt", CMD, {**cmd, "itemId": "c", "networkApprovalContext": {
+                "host": "example.com", "protocol": "https"}}, ["network access to https://example.com"]),
+            ("grant root", "item/fileChange/requestApproval", {"itemId": "f", "grantRoot": "/"}, ["grant root /"]),
+            # A field a later Codex might add: we cannot judge it, so it is a
+            # widening until someone re-diffs the protocol.
+            ("unrecognised field", CMD, {**cmd, "itemId": "c", "sandboxEscape": {"anything": True}},
+             ['unrecognised field sandboxEscape={"anything":true}']),
+        ]
+        for label, method, params, words in shapes:
+            with self.subTest(shape=label):
+                # No human (deny-all), and a human who never answers: decline.
+                for asker in (deny_all("nobody"), PendingApprovals(timeout_s=0.05)):
+                    _, events, reply = self.scripted(method, params, self.real_permit(asker))
+                    self.assertEqual(reply["result"], {"decision": "decline"}, label)
+                    self.assertEqual(events[-1].kind, K.TURN_FINISHED)
+                # A human who says yes: accepted, and what they were shown leads
+                # with the widening, offers no Always, and names every grant.
+                asker = RecordingAsker(Decision.ALLOW)
+                _, events, reply = self.scripted(method, params, self.real_permit(asker))
+                self.assertEqual(reply["result"], {"decision": "accept"})
+                self.assertEqual(len(asker.seen), 1)
+                shown = asker.seen[0]
+                self.assertTrue(shown.headline.startswith("SANDBOX WIDENING: "), shown.headline)
+                for word in words:
+                    self.assertIn(word, shown.headline)
+                self.assertFalse(shown.allowlistable, "a widening must never offer Always")
+                self.assertEqual(shown.args["sandbox_widening"], shown.headline)
+                self.assertEqual(shown.to_json()["headline"], shown.headline)
+                requested = next(e for e in events if e.kind == K.APPROVAL_REQUESTED)
+                self.assertEqual(requested.data["args"]["sandbox_widening"], shown.headline)
+                # A permit callback that cannot take the keyword denies.
+                _, _, reply = self.scripted(method, params, lambda tool, args, brief: Decision.ALLOW)
+                self.assertEqual(reply["result"], {"decision": "decline"})
+
+    def test_plain_command_approvals_are_unchanged(self):
+        from jarvis.v2.permissions import deny_all
+        for params in ({"itemId": "c", "command": "docker build ."},
+                       {"itemId": "c", "command": "docker build .", "kind": "command",
+                        "additionalPermissions": {"network": {"enabled": False}, "fileSystem": None}}):
+            asker = RecordingAsker(Decision.DENY)
+            _, events, reply = self.scripted(CMD, params, self.real_permit(asker))
+            self.assertEqual(reply["result"], {"decision": "accept"}, "AUTO still defers to Codex's reviewer")
+            self.assertEqual(asker.seen, [])
+            self.assertNotIn("sandbox_widening", next(e for e in events if e.kind == K.APPROVAL_REQUESTED).data["args"])
+            _, _, reply = self.scripted(CMD, params, self.real_permit(deny_all("nobody")))
+            self.assertEqual(reply["result"], {"decision": "accept"})
+
+    def test_unknown_kind_is_declined_without_asking(self):
+        asker = RecordingAsker(Decision.ALLOW)
+        calls = []
+        for permit in (self.real_permit(asker), lambda *a, **k: calls.append(a) or Decision.ALLOW):
+            _, events, reply = self.scripted(CMD, {"itemId": "c", "kind": "futureKind", "command": None}, permit)
+            self.assertEqual(reply["result"], {"decision": "decline"})
+            self.assertIn("unknown approval kind", next(e for e in events if e.kind == K.ERROR).data["message"])
+        self.assertEqual((asker.seen, calls), ([], []))
+
+    def test_permit_widening_keyword(self):
+        """The permissions side on its own: strict denies unasked, a deny-all
+        asker declines, a human is always asked even for an allowlisted or
+        rules-ALLOW command, and Always is never offered."""
+        from jarvis.v2.model import PermissionProfile
+        from jarvis.v2.permissions import L_WIDENING, deny_all
+        asker = RecordingAsker(Decision.ALLOW)
+        permit = self.real_permit(asker)
+        line = "SANDBOX WIDENING: network on"
+        self.assertEqual(permit("shell", {"command": "git status"}, self.brief), Decision.ALLOW)
+        self.assertEqual(asker.seen, [], "rules ALLOW still answers an ordinary command")
+        self.assertEqual(permit("shell", {"command": "git status"}, self.brief, widening=line), Decision.ALLOW)
+        self.assertEqual(len(asker.seen), 1, "a widening is asked even for a rules-ALLOW command")
+        self.assertEqual((asker.seen[0].layer, asker.seen[0].allowlistable, asker.seen[0].headline),
+                         (L_WIDENING, False, line))
+        strict = replace(self.brief, profile=PermissionProfile.STRICT)
+        self.assertEqual(permit("shell", {"command": "git status"}, strict, widening=line), Decision.DENY)
+        self.assertEqual(len(asker.seen), 1, "strict refuses a widening without asking")
+        self.assertEqual(permit("shell", {"command": "sudo rm -rf /"}, self.brief, widening=line), Decision.DENY)
+        self.assertEqual(len(asker.seen), 1, "layer 1 still refuses first, unasked")
+        self.assertEqual(self.real_permit(deny_all("x"))("shell", {"command": "ls"}, self.brief, widening=line),
+                         Decision.DENY)
+
+    def test_null_command_cannot_hide_the_items_command(self):
+        """`command: null` on the approval used to overwrite the item's real
+        command, so the never-approvable rules judged "" and AUTO accepted."""
+        item = {"id": "c", "type": "commandExecution", "command": "sudo rm -rf /", "cwd": "/", "status": "inProgress"}
+        asker = RecordingAsker(Decision.ALLOW)
+        _, events, reply = self.scripted(CMD, {"itemId": "c", "command": None, "cwd": None},
+                                         self.real_permit(asker), item=item)
+        self.assertEqual(reply["result"], {"decision": "decline"})
+        requested = next(e for e in events if e.kind == K.APPROVAL_REQUESTED)
+        self.assertEqual(requested.data["args"]["command"], "sudo rm -rf /")
+        self.assertEqual(next(e for e in events if e.kind == K.APPROVAL_RESOLVED).data["decision"], "deny")
+        self.assertEqual(asker.seen, [], "layer 1 refuses without asking")
+        # No command anywhere: declined, nobody asked.
+        calls = []
+        for permit in (self.real_permit(asker), lambda *a: calls.append(a) or Decision.ALLOW):
+            _, events, reply = self.scripted(CMD, {"itemId": "c", "command": None}, permit)
+            self.assertEqual(reply["result"], {"decision": "decline"})
+            self.assertIn("no command", next(e for e in events if e.kind == K.ERROR).data["message"])
+        # The approval naming a different command than the item runs: declined.
+        _, events, reply = self.scripted(CMD, {"itemId": "c", "command": "echo ok"},
+                                         lambda *a: calls.append(a) or Decision.ALLOW, item=item)
+        self.assertEqual(reply["result"], {"decision": "decline"})
+        self.assertEqual(calls, [])
+
+    def test_answer_cannot_override_a_refusal(self):
+        """`POST /threads/<id>/answer {decision: allow}` lands on provider.answer;
+        it must never turn a hard-denied approval into `accept`."""
+        item = {"id": "c", "type": "commandExecution", "command": "sudo rm -rf /", "cwd": "/", "status": "inProgress"}
+        self.brain.script.update(method=CMD, params={"itemId": "c", "command": "sudo rm -rf /"}, item=item, no_turn=False)
+        h = self.start("scripted", self.real_permit(RecordingAsker(Decision.ALLOW)), thread=replace(self.thread, id="race"))
+        raced = []
+        for e in self.provider.send(h, UserMessage("go")):
+            if e.kind == K.APPROVAL_REQUESTED:
+                with self.assertRaises(ValueError):
+                    self.provider.answer(h, e.data["req_id"], Decision.ALLOW)
+                with self.assertRaises(ValueError):
+                    self.provider.answer(h, e.data["req_id"], "allow")
+                raced.append(e)
+        self.assertTrue(raced)
+        reply = next(m for m in h.native.rpc.replies if m["id"] == "special")
+        self.assertEqual(reply["result"], {"decision": "decline"})
+        # A question still takes free text through answer().
+        with self.assertRaises(ValueError):
+            self.provider.answer(h, "nonexistent", "Blue")
+        # Defence in depth: even a yes that reached the pending slot by some
+        # other path never outranks the callback's no.
+        holder = {}
+
+        def refuse_after_a_planted_yes(tool, args, brief):
+            pending = holder["h"].native.pending[args["req_id"]]
+            pending.value = Decision.ALLOW
+            pending.ready.set()
+            return Decision.DENY
+        self.brain.script.update(params={"itemId": "c", "command": "echo ok"}, item=None)
+        holder["h"] = h = self.start("scripted", refuse_after_a_planted_yes, thread=replace(self.thread, id="planted"))
+        self.send(h)
+        reply = next(m for m in h.native.rpc.replies if m["id"] == "special")
+        self.assertEqual(reply["result"], {"decision": "decline"})
+
+    def test_current_time_read_is_answered_not_fatal(self):
+        before = int(time.time())
+        _, events, reply = self.scripted("currentTime/read", {}, lambda *a: Decision.DENY, no_turn=True)
+        self.assertIsNone(reply.get("error"))
+        self.assertTrue(before <= reply["result"]["currentTimeAt"] <= int(time.time()) + 1, reply)
+        self.assertEqual(set(reply["result"]), {"currentTimeAt"})
+        self.assertEqual(events[-1].kind, K.TURN_FINISHED)
+        self.assertEqual(events[-1].data, {"stop": "end"})
+        self.assertNotIn(K.ERROR, [e.kind for e in events])
+        # Another thread's clock read is an identity mismatch: refused, fatal.
+        _, events, reply = self.scripted("currentTime/read", {"threadId": "someone-else"},
+                                         lambda *a: Decision.DENY, no_turn=True)
+        self.assertIn("error", reply)
+        self.assertTrue(events[-1].data.get("fatal"))
+
+    def test_a_request_is_never_answered_twice(self):
+        """A failure after the reply went out (the peer died mid-approval)
+        must not send a second, refusing reply on top of the first."""
+        h = self.start("approval_death", lambda *_: (time.sleep(0.1) or Decision.ALLOW),
+                       thread=replace(self.thread, id="once"))
+        with ThreadPoolExecutor(1) as pool:
+            events = pool.submit(self.send, h).result(3)
+        self.assertTrue(events[-1].data.get("fatal"))
+        self.assertEqual(len([m for m in h.native.rpc.replies if m["id"] == "approval"]), 1,
+                         h.native.rpc.replies)
+        from jarvis.v2.providers.codex import _Request
+        request = _Request(rid="x", replied=True)
+        with self.assertRaises(RpcError):
+            codex.CodexProvider._reply(h.native, request, {"decision": "accept"})
+
     def test_questions_both_spellings_and_bundle(self):
         for mode in ("question", "question_old", "multi_question"):
             h = self.start(mode, thread=replace(self.thread, id=mode))
@@ -703,6 +922,30 @@ esac
 """
 
 
+class CliDefaultsChecks(unittest.TestCase):
+    """Unpatched module defaults and env parsing, in fresh interpreters."""
+
+    def test_the_real_windows_shim_is_refused(self):
+        self.assertEqual(codex_cli.WINDOWS_ROOTS, ("/mnt",))
+        self.assertTrue(codex_cli._windows("/mnt/c/Users/johnw/AppData/Roaming/npm/codex"))
+        self.assertTrue(codex_cli._windows("/mnt"))
+        self.assertTrue(codex_cli._windows("/usr/local/bin/codex.cmd"))
+        self.assertFalse(codex_cli._windows("/mntx/codex"))
+        self.assertFalse(codex_cli._windows("/usr/local/bin/codex"))
+
+    def test_env_is_parsed_into_config(self):
+        code = "from jarvis import config; print(config.CODEX_STRICT, repr(config.CODEX_CLI))"
+        root = str(Path(__file__).resolve().parents[2])
+        for env, expected in [({"JARVIS_CODEX_STRICT": "1", "JARVIS_CODEX_CLI": "/opt/codex"}, "True '/opt/codex'"),
+                              ({"JARVIS_CODEX_STRICT": "0"}, "False ''"),
+                              ({"JARVIS_CODEX_STRICT": "yes"}, "False ''"),
+                              ({}, "False ''")]:
+            base = {k: v for k, v in os.environ.items() if not k.startswith("JARVIS_CODEX_")}
+            out = subprocess.run([sys.executable, "-c", code], cwd=root, env={**base, **env},
+                                 capture_output=True, text=True, timeout=30)
+            self.assertEqual(out.stdout.strip(), expected, (env, out.stderr[-500:]))
+
+
 class HealthChecks(unittest.TestCase):
     """The version floor and the binary resolver, against fake executables in a
     temp dir. Nothing here runs a real codex or touches the network."""
@@ -874,6 +1117,57 @@ class HealthChecks(unittest.TestCase):
             argv, _, _ = codex_config.prepare("t2", Brief(Role.IMPLEMENTER, str(work)))
             self.assertEqual(argv[0], str(release))
         self.assertNotIn("app-server", "\n".join(self.calls(release)))
+
+    def test_newer_by_number_not_by_string(self):
+        """0.1000.0 is newer than 0.161.0, though it sorts lower as text."""
+        with self.assertLogs(codex_cli.log, "WARNING") as logs:
+            _, (ok, reason) = self.health("0.1000.0")
+        self.assertTrue(ok, reason)
+        self.assertIn("protocol verified up to 0.161.0", reason)
+        self.assertEqual(len(logs.records), 1)
+        with self.assertNoLogs(codex_cli.log, "WARNING"):
+            _, (ok, reason) = self.health("0.160.9", where="b9")
+        self.assertNotIn("verified up to", reason)
+
+    def test_the_launch_survives_a_flip_between_check_and_spawn(self):
+        """The updater re-pointing ~/.local/bin/codex after the version check
+        must not change what is launched: the checked realpath is."""
+        good = self.fake("releases/0.161.0/bin", "0.161.0")
+        bad = self.fake("releases/0.100.0/bin", "0.100.0")
+        link = self.root / "bin" / "codex"
+        link.parent.mkdir()
+        link.symlink_to(good)
+        self.path("bin")
+        (codex_config.owner_home() / "auth.json").write_text("FAKE")
+        work = self.root / "work"
+        work.mkdir()
+        real_prepare = codex_config.prepare
+
+        def flip_then_prepare(*args, **kwargs):
+            link.unlink()
+            link.symlink_to(bad)
+            return real_prepare(*args, **kwargs)
+
+        launched = []
+
+        class Capture:
+            def __init__(self, argv, **_):
+                launched.append(argv)
+
+            def start(self):
+                raise RpcError("stop before any protocol")
+
+            def close(self):
+                pass
+
+        with patch.object(config, "V2_DATA_DIR", self.root / "data"), \
+                patch.object(codex_config, "prepare", flip_then_prepare), patch.object(codex, "RpcProcess", Capture):
+            with self.assertRaises(RpcError):
+                self.provider.start(Thread("t", "p", Role.IMPLEMENTER, ProviderName.CODEX),
+                                    Brief(Role.IMPLEMENTER, str(work)), lambda *_: Decision.ALLOW)
+        self.assertEqual(os.path.realpath(link), str(bad), "the link really did flip")
+        self.assertEqual(launched[0][0], str(good))
+        self.assertEqual(self.calls(bad), [])
 
     def test_failures_are_reasons_not_exceptions(self):
         def result(stdout="", stderr="", code=0):

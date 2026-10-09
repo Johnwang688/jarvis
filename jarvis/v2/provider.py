@@ -133,6 +133,9 @@ class UserMessage:
 # is asked. Providers call it for every tool use their native permission system
 # does not settle first (auto mode allow), and MUST call it for anything on the
 # brief's always_ask list regardless of what their reviewer said.
+# Codex also passes `widening="SANDBOX WIDENING: …"` (keyword-only) for an
+# approval that would widen its sandbox; `permissions.build_permit` asks a human
+# for it every time, and a callback that does not take the keyword denies.
 PermissionCallback = Callable[[str, dict, Brief], Decision]   # (tool_name, args, brief)
 
 

@@ -86,15 +86,18 @@ def report_text(report: Report) -> ReportText:
     )))
 
 
-def approval_text(tool: str, args, code: str, origin: str, *, allowlistable: bool = True) -> str:
+def approval_text(tool: str, args, code: str, origin: str, *, allowlistable: bool = True,
+                  headline: str = "") -> str:
     """Never truncate. DiscordRest.post attaches this verbatim when >2000 chars.
 
     `/always` is offered only where it can mint a standing rule: the owner is
-    never shown an answer that would be refused (S1)."""
+    never shown an answer that would be refused (S1). A `headline` (a Codex
+    sandbox widening) is the first line, above everything else."""
     # A shell command must be visible with literal newlines, not JSON escapes.
     command = args.get("command") if isinstance(args, dict) else args
     answers = f"`/yes {code}` · `/no {code}`" + (f" · `/always {code}`" if allowlistable else "")
-    parts = [f"Approval required: {tool}", f"Origin: {origin}",
+    parts = [f"**{headline}**"] if headline else []
+    parts += [f"Approval required: {tool}", f"Origin: {origin}",
              f"Answer here: tap a button, or {answers}."]
     if isinstance(command, str):
         parts += ["Command:", command]

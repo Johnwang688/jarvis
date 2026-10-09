@@ -38,7 +38,22 @@ The 11 server requests in both: `item/commandExecution/requestApproval`,
 `item/fileChange/requestApproval`, `item/permissions/requestApproval`,
 `item/tool/requestUserInput`, `item/tool/call`, `mcpServer/elicitation/request`,
 `account/chatgptAuthTokens/refresh`, `attestation/generate`, `currentTime/read`,
-and the legacy `applyPatchApproval` / `execCommandApproval`.
+and the legacy `applyPatchApproval` / `execCommandApproval`. The method set is
+the same, but one *params* type changed that the first pass missed (found in
+review): **`McpServerElicitationRequestParams` gained an
+`openai/userVerification` mode** — a device-authenticated approval whose
+accepted response carries a proof. It has no effect on us: every
+`mcpServer/elicitation/request` is refused (it carries no `turnId`, so the
+identity check answers it with an error; with one, it falls to the
+unsupported-request error). Nothing ever answers an elicitation with
+`accept`.
+
+`currentTime/read` appears only in the `--experimental` schema, which is the
+one that applies: `initialize` opts into `experimentalApi: true`. It is a
+side-effect-free clock read that carries a `threadId` and no `turnId`. Before
+2026-10-08 that made it fail the turn-identity check and kill the turn; it is
+now answered `{"currentTimeAt": <unix seconds>}` after checking only that the
+`threadId` is ours (another thread's read is still refused and fatal).
 
 ## What we use, field by field
 
@@ -90,44 +105,81 @@ string in the 0.161.0 binary, and the schema's `Config` view is identical for
 the subset it covers. If 0.161.0 rejected one, `thread/start` would fail
 closed at startup with "Codex RPC … failed", not run unconfigured.
 
-## Fail-closed hardening shipped with the floor
+## What the gate does with a newer Codex — exactly
 
-The floor is only as safe as what happens to a message the adapter does not
-understand, so that was re-checked and tightened (`tests/v2/codex_provider_check.py`,
-`test_unknown_and_malformed_requests_fail_closed`, run against a fake
-app-server over real pipes):
+The first draft of this file said the floor was safe "because anything not
+understood gets an error or a decline". Review (2026-10-08) showed that was
+not true, and that the real hole predated the floor: **an approval that
+reached us was accepted with nobody deciding.** A request only reaches the
+adapter after Codex's own `auto_review` reviewer has passed it, and on an AUTO
+brief `permit`'s layer 5 answers ALLOW ("the provider's reviewer decides") — so
+the reviewer's yes was taken as ours. The reviewer drove the real
+`_server_request` with a real `build_permit`, an AUTO brief and a deny-all
+asker, and every one of these came back `accept`: `additionalPermissions`
+{network on, write /home}, `kind: writeStdin`, an unknown future `kind` with
+`command: null`, a fileChange with `grantRoot: "/"`, and a request carrying
+`networkApprovalContext`. The reply is a bare `{decision}`, so a grant riding
+on an approval cannot be stripped: it is accepted whole or not at all.
 
-- An unrecognised server request — including an approval- or
-  permission-shaped method a newer Codex might add — is answered with a
-  JSON-RPC error and an ERROR event; the permission callback is never asked.
-  (This was already true; the test now pins it for two such methods.)
-- **New:** a command/file approval whose shape does not parse (no `itemId`,
-  a non-string `command`/`cwd`/`reason`/`grantRoot`/`approvalId`, a
-  non-object `additionalPermissions`, a non-list `availableDecisions`) is
-  answered `{"decision": "decline"}` and never reaches the owner. Before, a
-  request with no `itemId` and `command: "rm -rf ~"` was put to the callback,
-  so an ALLOW-returning callback would have accepted it.
-- **New:** server-request params that are not an object get an error reply
-  before the session closes (before, an AttributeError closed the session
-  with Codex left waiting on an unanswered request).
-- **New:** any exception while handling a server request — a question with no
-  `question`, a dead transport, an abandoned generator — answers that request
-  with an error if it had not been answered, then fails the turn as before.
+What is true now (`tests/v2/codex_provider_check.py`, fake app-server over
+real pipes, the daemon's own `build_permit` where it matters):
 
-Both new paths were verified to bite: with `_approval_problem` stubbed to
-accept everything, five malformed-approval subtests fail (four by reaching the
-callback); with the refusal stubbed out, the malformed-question subtest fails
-with no reply sent.
+- **Unknown server methods** get a JSON-RPC error and never reach the permit
+  callback (true before; now pinned for two approval/permission-shaped
+  methods). `item/permissions/requestApproval` is still answered with an
+  empty grant.
+- **Malformed approvals are declined, unasked**: no `itemId`; a non-string
+  `command`/`cwd`/`reason`/`grantRoot`/`approvalId`/`kind`; a non-object
+  `additionalPermissions`/`networkApprovalContext`; a non-list
+  `availableDecisions`. Params that are not an object get an error; any
+  exception while handling a request answers it with an error, exactly once.
+- **An unknown `kind`** is declined outright — we cannot describe it to the
+  owner.
+- **A sandbox-widening approval is asked of a human every time.** Widening
+  means: non-empty `additionalPermissions` (`network: {enabled: false}` is
+  not), `networkApprovalContext`, `grantRoot`, `kind: writeStdin`, or any
+  non-null field outside the verified schema (a new field might be a new
+  grant). Codex calls `permit(..., widening="SANDBOX WIDENING: network on ·
+  write /home · grant root /")`; `build_permit` then skips layers 2–5, asks
+  with `allowlistable=False` (no Always) and the line as the request's
+  `headline`, which the HUD card and the Discord post show first. A deny-all
+  asker, no surface, a timeout, or a strict profile declines. Layer 1 still
+  refuses first. It is a keyword, not an arg, so the model cannot set it; a
+  callback that does not accept it raises, which denies.
+- **A null `command` cannot hide the real one.** Approval params are merged
+  over the item's fields non-null values only, so `command: null` no longer
+  erases an item's `sudo rm -rf /` and leaves the never-approvable rules
+  judging "". A command approval with no command string anywhere is declined,
+  and so is one whose `command` differs from the item it names.
+- **`answer()` can only withdraw an approval.** `POST /threads/<id>/answer`
+  lands on `provider.answer`; it used to replace whatever `permit` returned,
+  so a racing `allow` turned a hard-denied `sudo rm -rf /` into `accept`. It
+  now raises for anything but DENY on an approval, and the handler honours a
+  pending DENY only. Questions still take free text.
+- **`currentTime/read`** is answered (above).
+
+**What is still not covered.** A plain in-sandbox approval under AUTO is
+still accepted on the strength of Codex's reviewer — that is the AUTO
+contract (design R8), not something this adapter can fix. A field we *know*
+whose meaning a later Codex broadens is judged by its old meaning. And
+`proposedExecpolicyAmendment` / `proposedNetworkPolicyAmendments` are treated
+as inert because they apply only to an `acceptWith…Amendment` answer, which we
+never send — verified in the schema, not at runtime.
+
+Each new path was verified to bite by mutation (16 mutants, all killed): no
+widening detected, the `widening` keyword ignored, a widening offered Always,
+an unrecognised field ignored,
+an unknown kind treated as plain, `args.update(p)` restored, the differs
+check removed, `answer()` allowing, a planted pending yes honoured,
+`currentTime/read` unhandled or not thread-checked, a second reply after the
+first, a string version compare, `prepare` re-resolving the binary, a loose
+`JARVIS_CODEX_STRICT` parse, and a changed `/mnt` default.
 
 ## Not verified
 
-- No real turn was run on 0.161.0 (no paid calls). Runtime behaviour that the
-  schema does not describe — e.g. whether `auto_review` now escalates more or
-  fewer approvals, or what `tooManyDenials` is triggered by — is unobserved.
-- `currentTime/read` carries a `threadId` but no `turnId`, so if 0.161.0
-  starts sending it mid-turn, the identity check refuses it and closes the
-  turn. That is fail-closed and unchanged from 0.153.4, but it would surface
-  as a failed turn rather than a working one.
-- Command approvals carry an optional `additionalPermissions` grant (both
-  versions). An owner's "allow" accepts the command with it; it is shown in
-  the approval's args, but nothing strips it. Unchanged by this work.
+- No real turn was run on 0.161.0 (no paid calls), and no app-server was
+  started. Runtime behaviour the schema does not describe — whether
+  `auto_review` escalates more or fewer approvals, what `tooManyDenials` is
+  triggered by, whether the item's `command` and the approval's `command` are
+  ever spelled differently for the same exec (if so, such approvals are now
+  declined) — is unobserved. R4 saw no approval escalate live at all.

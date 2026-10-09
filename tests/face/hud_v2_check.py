@@ -478,6 +478,28 @@ def approval_checks(page, mock):
     until(lambda: page.locator('[data-testid="approval-card"]').count() > 0)
     check("ALWAYS is absent when the request forbids it",
           page.locator('[data-testid="approval-card"] button.always').count() == 0)
+    check("an ordinary request has no headline",
+          page.locator('[data-testid="approval-headline"]').count() == 0)
+    page.keyboard.press("Escape")
+    until(lambda: page.locator('[data-testid="approval-card"]').count() == 0)
+
+    # A Codex approval that widens its sandbox leads with what it widens
+    # (2026-10-08), above the tool and the command, and never offers ALWAYS.
+    line = "SANDBOX WIDENING: network on · write /home · grant root /"
+    mock.emit("approval_requested", {**request, "req_id": "r6", "allowlistable": False,
+                                     "layer": "sandbox-widening", "headline": line})
+    until(lambda: page.locator('[data-testid="approval-headline"]').count() > 0)
+    headline = page.locator('[data-testid="approval-headline"]')
+    check("a sandbox widening leads the card", headline.count() == 1
+          and headline.inner_text() == line, headline.inner_text() if headline.count() else "")
+    above = page.evaluate("""() => {
+        const h = document.querySelector('[data-testid="approval-headline"]');
+        const t = document.querySelector('[data-testid="approval-tool"]');
+        return !!(h && t && (h.compareDocumentPosition(t) & Node.DOCUMENT_POSITION_FOLLOWING));
+    }""")
+    check("the widening line sits above the tool", above)
+    check("and offers no ALWAYS",
+          page.locator('[data-testid="approval-card"] button.always').count() == 0)
     page.keyboard.press("Escape")
     until(lambda: page.locator('[data-testid="approval-card"]').count() == 0)
 

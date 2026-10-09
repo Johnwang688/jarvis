@@ -36,8 +36,17 @@ transport; its reviewer escalates nothing to us, design R8; **a version floor,
 not a pin** since 2026-10-08 — `providers/codex_cli.py` runs codex ≥ 0.153.4,
 warns once above the verified 0.161.0, `JARVIS_CODEX_STRICT=1` restores the
 exact match, `JARVIS_CODEX_CLI` picks the binary and nothing under `/mnt/`
-ever runs; the floor is safe only because an unknown server request gets an
-error and an unparseable approval a decline — keep it that way), a worktree per
+ever runs. Unlike Claude's resolver it *refuses* a relative/Windows/broken
+override rather than warning, launches the realpath it checked rather than
+the symlink, and resolves per session rather than per process — on purpose,
+design §5.4. **A Codex approval arrives already passed by Codex's reviewer,
+so under AUTO nobody decides it** unless we make someone: a sandbox-widening
+approval — extra permissions, network, grant root, `writeStdin`, or any field
+outside the verified schema — goes to a human via `permit(...,
+widening=...)` with no Always and a "SANDBOX WIDENING: …" headline, and
+declines with no human; unknown methods get an error, malformed approvals
+and unknown `kind`s a decline; null fields never overwrite the item's
+command; `answer()` can only deny an approval — keep all of it), a worktree per
 task (WP6), the daemon and local API (WP7, `jarvis daemon2`), one skills
 folder for three consumers plus `jarvis-mcp` (WP8), and Discord rendering
 (WP10a), Discord routing with thread-scoped approvals (WP10b), and the

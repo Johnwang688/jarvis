@@ -753,7 +753,8 @@ class DiscordRouter:
         # The whole command is shown, minus any secret value pasted into it:
         # the transcript scrub runs over the text Discord receives.
         body = scrub(approval_text(tool, args, code, str(data.get("origin") or ""),
-                                   allowlistable=self.allowlistable(request)[0]))
+                                   allowlistable=self.allowlistable(request)[0],
+                                   headline=str(data.get("headline") or "")))
         posted = None
         if channel:
             posted = self._ask_in(req_id, str(channel), body, code)

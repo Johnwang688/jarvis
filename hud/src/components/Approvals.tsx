@@ -69,6 +69,9 @@ export function ApprovalCard(props: {
   return (
     <div className="auth" data-testid="approval-card" data-req={r.req_id}>
       <h3>AUTHORIZATION REQUIRED</h3>
+      {r.headline ? (
+        <div className="headline" data-testid="approval-headline">{r.headline}</div>
+      ) : null}
       {r.origin ? (
         <div className="origin" data-testid="approval-origin">REQUESTED BY {r.origin}</div>
       ) : null}

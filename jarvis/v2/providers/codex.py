@@ -3,9 +3,34 @@
 The protocol was generated from and verified against codex-cli 0.153.4 and
 0.161.0 (docs/codex-briefs/codex-0.161-protocol-notes.md). Any version at or
 above codex_cli.CODEX_MIN runs; one newer than CODEX_VERIFIED runs with a
-warning, because the gate does not depend on knowing every message: a server
-request this adapter does not recognise is answered with an error, and an
-approval request it cannot parse is declined, never accepted.
+warning. What keeps a newer version from loosening the gate is narrower than
+"anything not understood is refused", and worth stating exactly:
+
+- an unrecognised server *method* gets a JSON-RPC error and never reaches the
+  permit callback; a request whose params are not an object, or whose
+  handling raises, is answered with an error too;
+- a command/file approval whose fields have the wrong types, or that names
+  an approval `kind` we cannot describe, is declined without asking anyone;
+- a command approval is judged on the item's real command (a null field
+  never erases it) and declined if there is none, or if it names a different
+  command from the item;
+- an approval that would **widen the sandbox** (extra permissions, a
+  managed-network prompt, a grant root, terminal input) is put to a human
+  every time, with no Always (`permit(..., widening=...)`), and declined with
+  no human. The reply is a bare `{decision}`, so the grant cannot be split
+  off; and a request reaches us only after Codex's reviewer passed it, so
+  without this an AUTO brief's "the reviewer decides" meant nobody did;
+- a plain in-sandbox approval under AUTO is still accepted on the strength
+  of Codex's reviewer (design R8) — that is the AUTO contract, not a gap
+  this adapter closes;
+- a non-null approval field outside the verified schema
+  (`_KNOWN_APPROVAL_FIELDS`) counts as a widening — it may be a new grant —
+  so a human is asked, shown it, and offered no Always.
+
+What is *not* covered: a field we know whose *meaning* a newer Codex
+broadens, and runtime behaviour the schema does not describe. Re-diff the
+protocol (the notes say how) before trusting a version far past
+CODEX_VERIFIED.
 
 Transport/config/accounting patterns originate in jarvis-trading-firm. No
 model turn is retried automatically: a lost response may have executed tools.
@@ -65,9 +90,120 @@ def _approval_problem(p: dict) -> str | None:
             return f"{key} is not a string"
     if p.get("additionalPermissions") is not None and not isinstance(p["additionalPermissions"], dict):
         return "additionalPermissions is not an object"
+    if p.get("networkApprovalContext") is not None and not isinstance(p["networkApprovalContext"], dict):
+        return "networkApprovalContext is not an object"
+    if p.get("kind") is not None and not isinstance(p["kind"], str):
+        return "kind is not a string"
     if p.get("availableDecisions") is not None and not isinstance(p["availableDecisions"], list):
         return "availableDecisions is not a list"
     return None
+
+
+# Approval kinds that are a plain command run inside the sandbox. Anything
+# else widens what the sandbox lets through; a kind not listed at all is one
+# this adapter cannot describe to the owner, so it is declined outright.
+_PLAIN_KINDS = (None, "command")
+_WIDENING_KINDS = {"writeStdin": "input to a running terminal (writeStdin)"}
+# Every approval field in the 0.153.4 and 0.161.0 schemas (identical in both).
+# A non-null field outside this set is one a newer Codex added and we cannot
+# judge — it might be another grant riding the accept — so it counts as a
+# widening: a human is asked, shown the field, and offered no Always.
+_KNOWN_APPROVAL_FIELDS = frozenset({
+    "threadId", "turnId", "itemId", "startedAtMs", "approvalId", "reason",
+    "command", "cwd", "commandActions", "environmentId", "kind", "availableDecisions",
+    "additionalPermissions", "networkApprovalContext",
+    "proposedExecpolicyAmendment", "proposedNetworkPolicyAmendments",   # proposals only:
+    # they apply only on an acceptWith…Amendment answer, which we never send.
+    "grantRoot",
+})
+
+
+def _content(value) -> bool:
+    """Whether a permission overlay asks for anything. None, False, and empty
+    containers ask for nothing; `network: {enabled: false}` narrows."""
+    if value is None or value is False:
+        return False
+    if isinstance(value, dict):
+        return any(_content(v) for v in value.values())
+    if isinstance(value, (list, tuple, str)):
+        return len(value) > 0
+    return True
+
+
+def _compact(value) -> str:
+    text = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return text if len(text) <= 300 else text[:299] + "…"
+
+
+def _fs_path(path) -> str:
+    """One FileSystemPath (0.161.0 schema) in words."""
+    if isinstance(path, dict):
+        if path.get("type") == "path" and isinstance(path.get("path"), str):
+            return path["path"]
+        if path.get("type") == "glob_pattern" and isinstance(path.get("pattern"), str):
+            return path["pattern"]
+        if path.get("type") == "special" and isinstance(path.get("value"), dict):
+            value = path["value"]
+            sub = value.get("subpath") or value.get("path")
+            return f"<{value.get('kind')}>" + (f"/{sub}" if isinstance(sub, str) else "")
+    return _compact(path)
+
+
+def _describe_permissions(extra: dict) -> list[str]:
+    parts = []
+    for key, value in extra.items():
+        if not _content(value):
+            continue
+        if key == "network" and isinstance(value, dict) and set(value) <= {"enabled"}:
+            parts.append("network on" if value.get("enabled") is True else f"network {_compact(value)}")
+        elif key == "fileSystem" and isinstance(value, dict):
+            for sub, paths in value.items():
+                if not _content(paths) or sub == "globScanMaxDepth":
+                    continue
+                if sub in ("read", "write") and isinstance(paths, list) and all(isinstance(x, str) for x in paths):
+                    parts.append(f"{sub} {', '.join(paths)}")
+                elif sub == "entries" and isinstance(paths, list):
+                    for entry in paths:
+                        if isinstance(entry, dict) and isinstance(entry.get("access"), str):
+                            parts.append(f"{entry['access']} {_fs_path(entry.get('path'))}")
+                        else:
+                            parts.append(f"filesystem {_compact(entry)}")
+                else:
+                    parts.append(f"filesystem {sub} {_compact(paths)}")
+        else:
+            parts.append(f"{key} {_compact(value)}")
+    return parts or [f"additional permissions {_compact(extra)}"]
+
+
+def _widening(p: dict) -> tuple[str | None, str | None]:
+    """``(line, refusal)`` for one approval request.
+
+    ``line`` is "SANDBOX WIDENING: …" when accepting would let more through
+    than the sandbox does (extra permissions riding on the approval, a
+    managed-network prompt, a grant root, terminal input). The reply is a
+    bare ``{decision}``, so such a grant cannot be stripped — it is accepted
+    whole or not at all. ``refusal`` is set for a kind this adapter cannot
+    describe, which is declined without asking anyone.
+    """
+    parts = []
+    kind = p.get("kind")
+    if kind not in _PLAIN_KINDS:
+        if kind not in _WIDENING_KINDS:
+            return None, f"unknown approval kind {str(kind)[:40]!r}"
+        parts.append(_WIDENING_KINDS[kind])
+    if _content(p.get("additionalPermissions")):
+        parts.extend(_describe_permissions(p["additionalPermissions"]))
+    net = p.get("networkApprovalContext")
+    if net is not None:
+        host, protocol = net.get("host"), net.get("protocol")
+        parts.append(f"network access to {protocol or '?'}://{host or '?'}"
+                     if isinstance(host, str) and (protocol is None or isinstance(protocol, str))
+                     else f"network access {_compact(net)}")
+    if p.get("grantRoot") is not None:
+        parts.append(f"grant root {p['grantRoot']}")
+    for key in sorted(k for k, v in p.items() if v is not None and k not in _KNOWN_APPROVAL_FIELDS):
+        parts.append(f"unrecognised field {str(key)[:60]}={_compact(p[key])}")
+    return ("SANDBOX WIDENING: " + " · ".join(parts)) if parts else None, None
 
 
 @dataclass
@@ -313,6 +449,15 @@ class CodexProvider:
                     if not isinstance(params, dict):
                         s.rpc.reply(msg["id"], error={"code": -32602, "message": "Malformed request params"})
                         raise RpcError("Codex server request params are not an object")
+                    if method == "currentTime/read":
+                        # A side-effect-free clock read (experimental API). It
+                        # carries a threadId and no turnId, so it is answered
+                        # here rather than failing the turn-identity check.
+                        if params.get("threadId") != s.thread_id:
+                            s.rpc.reply(msg["id"], error={"code": -32602, "message": "Request identity mismatch"})
+                            raise RpcError("Codex server request identity mismatch")
+                        s.rpc.reply(msg["id"], {"currentTimeAt": int(time.time())})
+                        continue
                     if (params.get("threadId") != s.thread_id
                             or not isinstance(params.get("turnId"), str) or not params["turnId"]
                             or (s.turn_id and params.get("turnId") != s.turn_id)):
@@ -467,6 +612,8 @@ class CodexProvider:
 
     @staticmethod
     def _reply(s, request, result=None, **kwargs):
+        if request.replied:
+            raise RpcError("Codex server request answered twice")
         request.replied = True
         s.rpc.reply(request.rid, result, **kwargs)
 
@@ -495,10 +642,32 @@ class CodexProvider:
                 yield self._event(h, EventKind.ERROR, fatal=False,
                                   message=f"Codex approval request declined: {problem}")
                 return
+            line, refusal = _widening(p)
+            if refusal:
+                self._reply(s, request, {"decision": "decline"})
+                yield self._event(h, EventKind.ERROR, fatal=False,
+                                  message=f"Codex approval request declined: {refusal}")
+                return
             shell = method == "item/commandExecution/requestApproval"
             item = s.items.get(p.get("itemId"), {})
             name, args = self._tool(item if item else {"type": "commandExecution" if shell else "fileChange"})
-            args.update(p)
+            # Only non-null values: a `command: null` must not erase the item's
+            # real command and leave the never-approvable rules judging "".
+            args.update({k: v for k, v in p.items() if v is not None})
+            declined = None
+            if shell and (not isinstance(args.get("command"), str) or not args["command"].strip()):
+                declined = "no command to judge"
+            elif shell and isinstance(item.get("command"), str) and item["command"] != args["command"]:
+                # The approval names one command and the item runs another:
+                # judging either alone could pass the one that runs.
+                declined = "its command differs from the item's"
+            if declined:
+                self._reply(s, request, {"decision": "decline"})
+                yield self._event(h, EventKind.ERROR, fatal=False,
+                                  message=f"Codex approval request declined: {declined}")
+                return
+            if line:
+                args["sandbox_widening"] = line
             args["req_id"] = req_id
             pending = _Pending(False)
             with s.mutex:
@@ -508,13 +677,18 @@ class CodexProvider:
             yield self._event(h, EventKind.APPROVAL_REQUESTED, req_id=req_id, tool=name, args=args, command=args.get("command"))
             try:
                 # Deliberately on the send caller's thread: broker context survives.
-                decision = s.permit(name, args, s.brief)
+                # A widening goes as a keyword the model cannot reach; a
+                # callback that does not take it raises, and that denies.
+                decision = (s.permit(name, args, s.brief, widening=line) if line
+                            else s.permit(name, args, s.brief))
                 decision = Decision(decision)
             except Exception:
                 decision = Decision.DENY
             with s.mutex:
-                if pending.ready.is_set():
-                    decision = pending.value
+                # answer() can only take an approval *back* (DENY); a yes comes
+                # from the permit callback alone, never from a racing answer.
+                if pending.ready.is_set() and pending.value == Decision.DENY:
+                    decision = Decision.DENY
                 if s.closed.is_set() or s.cancelled.is_set() or s.rpc.failed.is_set():
                     decision = Decision.DENY
                 s.pending.pop(req_id, None)
@@ -589,7 +763,13 @@ class CodexProvider:
                 if type(decision) is not str:
                     raise ValueError("A Codex question requires text")
             else:
+                # Approvals are decided by the permit callback (the broker),
+                # which runs the never-approvable rules. A direct answer may
+                # only withdraw one; it can never turn a refusal into a yes.
                 decision = Decision(decision)
+                if decision != Decision.DENY:
+                    raise ValueError("A Codex approval is decided by the approval broker; "
+                                     "answer() can only deny it")
             pending.value = decision
             pending.ready.set()
 

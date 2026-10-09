@@ -105,6 +105,10 @@ class ApprovalRequest:
     provider: str | None = None
     origin: str = ""                    # sanitized attribution (see `label`)
     allowlistable: bool = True          # False from the escape hatch (§6.1)
+    # A line every surface shows *first*, above the tool and its arguments —
+    # set only for a Codex approval that widens the sandbox ("SANDBOX
+    # WIDENING: network on · write /home"), which is never allowlistable.
+    headline: str = ""
     # Where on Discord to ask, when the asker is not a task (B2: `/project
     # new` asks in the channel it was typed in). Set by daemon code only — no
     # provider or tool builds a request with it — and still the DM if that
@@ -123,6 +127,7 @@ class ApprovalRequest:
             "task_id": self.task_id, "provider": self.provider,
             "origin": self.origin, "asked_at": self.asked_at,
             "allowlistable": self.allowlistable, "timeout_s": self.timeout_s,
+            "headline": self.headline,
             "discord_channel_id": self.discord_channel_id,
         }
 

@@ -240,11 +240,36 @@ broker alone.
   on PATH outside `/mnt/` (the Windows npm shim must never run), else
   `~/.local/bin/codex`; its realpath is version-checked and launched, so an
   update between the two cannot swap it. The version check before each
-  session stays. The floor is safe because the gate never depended on knowing
-  every message: an unrecognised server request is answered with an error,
-  and an approval request whose shape does not parse is declined without
-  reaching the broker. The 0.153.4 → 0.161.0 protocol diff is
+  session stays. The 0.153.4 → 0.161.0 protocol diff is
   `docs/codex-briefs/codex-0.161-protocol-notes.md`.
+
+  **Deliberate differences from the Claude resolver (#14),** so nobody
+  "aligns" them by accident: an override that is relative, under `/mnt/`,
+  `.cmd`/`.bat`/`.exe`, or not executable is **refused** (health fails with a
+  sentence) where Claude warns and falls back or uses it — Codex has a
+  sandbox to protect and no bundled CLI to fall back on, so a wrong binary
+  must be loud. Codex **launches the realpath** it version-checked where
+  Claude launches the symlink (Claude's SDK spawns later and the updater
+  re-points the link; for Codex the check and the spawn are moments apart and
+  must be the same file). And Codex **resolves per session** (every `_open`
+  and every `/status`) where Claude resolves once per process, so an update
+  is picked up by the next Codex thread without a restart.
+- **What actually keeps the floor from loosening the gate** (corrected
+  2026-10-08 after review — the first draft claimed "anything not understood
+  gets an error or a decline", which was not the whole truth). A Codex
+  approval reaches us only *after* its `auto_review` reviewer passed it, and
+  under AUTO `permit`'s layer 5 answered ALLOW, so a sandbox-widening grant
+  riding on an approval (extra permissions, network, a grant root, terminal
+  input) was accepted with no human — and the `{decision}` reply cannot strip
+  it. Now: unknown server methods get an error; malformed approvals and
+  unknown `kind`s are declined unasked; **a widening approval is always asked
+  of a human** (`permit(..., widening=...)`, no Always, headline "SANDBOX
+  WIDENING: …" first on the card and the Discord post; deny-all, timeout or
+  strict declines), and so is one carrying a field outside the verified
+  schema; a `command: null` can no longer erase the item's real command, and
+  a command approval with none is declined; `provider.answer()` can only
+  deny an approval. A plain in-sandbox approval under AUTO is still accepted
+  on the reviewer's word — that is R8, not a regression.
 - Approval requests `item/commandExecution/requestApproval`,
   `item/fileChange/requestApproval`, `item/permissions/requestApproval` are
   **routed to the broker**, where the firm denies them. `requestUserInput`

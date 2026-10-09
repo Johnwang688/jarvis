@@ -311,11 +311,11 @@ class DiscordRoutingChecks(unittest.TestCase):
                 return session is None or session.worker is None
         wait_for(done)
 
-    def ask(self, tool="Bash", command="pnpm run deploy --prod", task_id=None):
+    def ask(self, tool="Bash", command="pnpm run deploy --prod", task_id=None, **extra):
         """Ask for an approval from another thread, as a provider would."""
         result = {}
         request = ApprovalRequest(tool=tool, args={"command": command},
-                                  command=command, task_id=task_id, origin="task test")
+                                  command=command, task_id=task_id, origin="task test", **extra)
         thread = threading.Thread(
             target=lambda: result.update(decision=self.approvals.ask(request)), daemon=True)
         posted = len(self.posts())
@@ -374,6 +374,19 @@ class DiscordRoutingChecks(unittest.TestCase):
         worker.join(2)
         self.assertEqual(result["decision"], Decision.ALLOW)
         self.assertTrue(any("Authorized" in t for t in self.texts(TASK_THREAD)))
+
+    def test_a_sandbox_widening_post_leads_with_it_and_offers_no_always(self):
+        """2026-10-08: the headline travels daemon → bus → gateway and is the
+        first line of the post; a widening is never allowlistable."""
+        line = "SANDBOX WIDENING: network on · write /home"
+        request, result, worker = self.ask(tool="shell", command="docker build .", task_id=self.task.id,
+                                           headline=line, allowlistable=False, layer="sandbox-widening")
+        content = self.posts(TASK_THREAD)[0][1]["content"]
+        self.assertEqual(content.splitlines()[0], f"**{line}**")
+        self.assertNotIn("/always", content)
+        self.listener.feed(message(f"no {request.code}", channel=TASK_THREAD))
+        worker.join(2)
+        self.assertEqual(result["decision"], Decision.DENY)
 
     def test_approval_without_a_task_goes_to_the_owner_dm(self):
         request, result, worker = self.ask(command="rm -rf build")
