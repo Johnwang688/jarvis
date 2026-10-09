@@ -198,6 +198,18 @@ MODELS_PATH = Path(
         "JARVIS_MODELS", Path.home() / ".config" / "jarvis" / "models.json"
     )
 )
+# The default model and effort for Claude and Codex chat threads, chosen in the
+# HUD (v2/thread_model.py, 2026-10-08). Its own small file rather than a key in
+# models.json: that file is the OpenRouter roster, rewritten whole by the v1
+# face and the v2 daemon from a dataclass that knows nothing of CLI models, so
+# a key added there would be erased by the next roster edit in either process.
+# No agent may write it (`jarvis.v2.permissions.protected_paths`).
+PROVIDER_DEFAULTS_PATH = Path(
+    os.environ.get(
+        "JARVIS_PROVIDER_DEFAULTS",
+        Path.home() / ".config" / "jarvis" / "provider_defaults.json",
+    )
+)
 # Where the fetched OpenRouter catalog is cached. A cache, not state: deleting
 # it costs one HTTP request. TTL is generous because the catalog changes on the
 # order of days, and a stale copy is served indefinitely when the fetch fails —

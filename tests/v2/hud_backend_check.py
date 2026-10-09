@@ -162,6 +162,7 @@ class Backend(unittest.TestCase):
         git(self.project_root, "commit", "-qm", "base")
         for name, value in dict(V2_DATA_DIR=self.root / "data", ALLOWLIST_PATH=self.extra / "allowlist.json",
                                 MODELS_PATH=self.extra / "models.json", REPO_ROOT=self.project_root,
+                                PROVIDER_DEFAULTS_PATH=self.extra / "provider_defaults.json",
                                 AVATAR_STATE_PATH=self.root / "avatar.json", AVATARS_DIR=self.root / "avatars",
                                 AVATAR_ENV="",
                                 # Never the owner's real Discord files: the guild
@@ -1676,6 +1677,119 @@ class Backend(unittest.TestCase):
         self.assertEqual(fakes[P.FAST].changes, [], "the resume opened on the pin; nothing to change")
         # An effort change on the off-roster pin is still allowed (A3).
         self.request("PATCH", f"/threads/{tid}", {"effort": "low"})
+
+    def test_the_hud_sets_the_claude_and_codex_defaults(self):
+        """2026-10-08: the default Claude and Codex chat threads run on is the
+        owner's to set in the HUD (`POST /thread-models`), as the OpenRouter
+        one is. A default thread picks it up at its next turn; a pinned one
+        does not; reset returns to Opus 5.5 / routing; the Codex default never
+        writes routing.json; every refusal is a 400 with a sentence; one
+        `model` event per change and none per refusal."""
+        from jarvis.v2 import router, thread_model
+        fakes = self.model_fakes()
+        default_tid = self.chat("claude")["id"]
+        pinned_tid = self.chat("claude", model="claude-opus-5-5")["id"]
+        effort_tid = self.chat("claude", effort="max")["id"]
+        codex_tid = self.chat("codex")["id"]
+        saved = {tid: self.brief_bytes(tid) for tid in (default_tid, pinned_tid, effort_tid, codex_tid)}
+        for tid in (default_tid, pinned_tid, effort_tid, codex_tid):
+            self.send_and_settle(tid)
+        self.assertEqual(fakes[P.CLAUDE].changes, [])
+        body = self.request("GET", "/thread-models")["providers"]
+        self.assertEqual((body["claude"]["default"], body["claude"]["default_source"],
+                          body["claude"]["hud_default"], body["claude"]["builtin"]),
+                         ("claude-opus-5-5", "built-in", None,
+                          {"model": "claude-opus-5-5", "effort": "high"}))
+        self.assertEqual((body["codex"]["default"], body["codex"]["default_source"]),
+                         ("gpt-6-astra", "routing"))
+        self.assertEqual((body["fast"]["default_source"], body["fast"]["settable"]), ("config", False))
+        self.events_all()
+
+        # Refusals first: each a 400 naming the problem, none writes anything.
+        for bad, words in (({"provider": "claude", "model": "claude-sonnet-5-5", "extra": 1}, "unknown fields: extra"),
+                           ({"provider": "claude"}, "missing fields: model"),
+                           ({"model": "claude-sonnet-5-5"}, "missing fields: provider"),
+                           ({"provider": "fast", "model": "test/model"}, "Model picker"),
+                           ({"provider": "gemini", "model": "x"}, "not a provider"),
+                           ({"provider": "claude", "model": "claude-opus-9"}, "not a Claude model"),
+                           ({"provider": "codex", "model": "gpt-6-astra", "effort": "max"}, "does not offer 'max'"),
+                           ({"provider": "claude", "model": "claude-haiku-4-5", "effort": "low"}, "no reasoning effort"),
+                           ({"provider": "claude", "model": "", "effort": "low"}, "takes no effort"),
+                           ({"provider": "claude", "model": 5}, "must be a string")):
+            error = self.request("POST", "/thread-models", bad, status=400)["error"]
+            self.assertIn(words, error, bad)
+        self.assertFalse(config.PROVIDER_DEFAULTS_PATH.exists(), "a refusal writes nothing")
+        self.assertEqual([e for e in self.events_all() if e["kind"] == "model"], [], "and publishes nothing")
+
+        # Set as default: the payload names it, the source is the HUD.
+        body = self.request("POST", "/thread-models", {"provider": "claude", "model": "claude-sonnet-5-5"})
+        claude = body["providers"]["claude"]
+        self.assertEqual((claude["default"], claude["default_effort"], claude["default_source"],
+                          claude["hud_default"]),
+                         ("claude-sonnet-5-5", "high", "hud", {"model": "claude-sonnet-5-5", "effort": None}))
+        self.assertEqual(json.loads(config.PROVIDER_DEFAULTS_PATH.read_text()),
+                         {"claude": {"model": "claude-sonnet-5-5", "effort": None}})
+        # The default thread follows it at its next turn; the pinned one does not.
+        self.send_and_settle(default_tid)
+        self.send_and_settle(pinned_tid)
+        self.assertEqual(fakes[P.CLAUDE].changes, [("claude-sonnet-5-5", "high")])
+        lines = [m["text"] for m in self.request("GET", f"/threads/{default_tid}/transcript")["messages"]
+                 if m["role"] == "system"]
+        self.assertEqual(lines, ["model → claude-sonnet-5-5 · high (follows the default)"])
+        self.assertEqual(self.stores.threads.get(default_tid).model, None, "still following, not pinned")
+        # A default's effort, and an effort-only thread re-clamped to a new default.
+        self.request("POST", "/thread-models", {"provider": "claude", "model": "claude-sonnet-5-5",
+                                                "effort": "LOW"})
+        self.send_and_settle(default_tid)
+        self.assertEqual(fakes[P.CLAUDE].changes[-1], ("claude-sonnet-5-5", "low"))
+        self.request("POST", "/thread-models", {"provider": "claude", "model": "claude-haiku-4-5"})
+        self.send_and_settle(effort_tid)
+        self.assertEqual(fakes[P.CLAUDE].changes[-1], ("claude-haiku-4-5", None),
+                         "an effort-only thread drops its effort on a default with no control")
+        self.assertEqual(self.stores.threads.get(effort_tid).effort, "max", "the owner's choice is kept")
+        self.assertIn("no reasoning effort", self.request(
+            "PATCH", f"/threads/{default_tid}", {"effort": "low"}, status=400)["error"])
+        # The Codex default overrides routing for chat threads only.
+        body = self.request("POST", "/thread-models", {"provider": "codex", "model": "gpt-5.6-sol"})
+        self.assertEqual((body["providers"]["codex"]["default"], body["providers"]["codex"]["default_effort"],
+                          body["providers"]["codex"]["default_source"]), ("gpt-5.6-sol", "high", "hud"))
+        self.assertFalse(config.ROUTING_PATH.exists(), "routing.json is never written")
+        self.assertEqual(router.model_settings("orchestrator", "codex"), ("gpt-6-astra", "xhigh"),
+                         "role routing still answers tasks with its own table")
+        self.send_and_settle(codex_tid)
+        self.assertEqual(fakes[P.CODEX].changes, [("gpt-5.6-sol", "high")])
+        # Reset: back to Opus 5.5 at high, and to routing's Codex default.
+        body = self.request("POST", "/thread-models", {"provider": "claude", "model": ""})
+        self.assertEqual((body["providers"]["claude"]["default"], body["providers"]["claude"]["default_source"],
+                          body["providers"]["claude"]["hud_default"]), ("claude-opus-5-5", "built-in", None))
+        body = self.request("POST", "/thread-models", {"provider": "codex", "model": ""})
+        self.assertEqual((body["providers"]["codex"]["default"], body["providers"]["codex"]["default_effort"],
+                          body["providers"]["codex"]["default_source"]), ("gpt-6-astra", "xhigh", "routing"))
+        self.assertEqual(json.loads(config.PROVIDER_DEFAULTS_PATH.read_text()), {})
+        self.send_and_settle(default_tid)
+        self.send_and_settle(codex_tid)
+        self.assertEqual(fakes[P.CLAUDE].changes[-1], ("claude-opus-5-5", "high"))
+        self.assertEqual(fakes[P.CODEX].changes[-1], ("gpt-6-astra", "xhigh"))
+        self.assertEqual([c for c in fakes[P.CLAUDE].changes if c == ("claude-sonnet-5-5", "high")],
+                         [("claude-sonnet-5-5", "high")], "the pinned thread never moved")
+        # One `model` broadcast per change, naming the provider and its default.
+        published = [e for e in self.events_all() if e["kind"] == "model"]
+        self.assertEqual([(e["data"]["provider"], e["data"]["default"], e["data"]["default_source"])
+                          for e in published],
+                         [("claude", "claude-sonnet-5-5", "hud"), ("claude", "claude-sonnet-5-5", "hud"),
+                          ("claude", "claude-haiku-4-5", "hud"), ("codex", "gpt-5.6-sol", "hud"),
+                          ("claude", "claude-opus-5-5", "built-in"), ("codex", "gpt-6-astra", "routing")])
+        for tid, before in saved.items():
+            self.assertEqual(self.brief_bytes(tid), before, "brief.json is never rewritten")
+        # A provider is still fixed at its first message, a refused provider
+        # still refused, and an archived thread still cannot change model.
+        self.request("PATCH", f"/threads/{default_tid}", {"provider": "codex"}, status=400)
+        self.assertEqual(self.stores.threads.get(default_tid).provider, P.CLAUDE)
+        self.request("PATCH", self.url, {"profile": "ask"})
+        self.assertIn("auto profile", self.chat("codex", status=400)["error"])
+        self.assertEqual(thread_model.set_provider_default("codex", "gpt-5.6-terra"), ("gpt-5.6-terra", None))
+        self.assertIn("auto profile", self.chat("codex", status=400)["error"],
+                      "a HUD default does not open a door the profile closes")
 
     def test_patch_mid_turn_lands_on_the_next_turn(self):
         fakes = self.model_fakes()

@@ -334,15 +334,62 @@ def _default_effort(w, provider, model):
     return ladder[0]
 
 
+# Claude's and Codex's defaults with nothing chosen in the HUD (2026-10-08):
+# Opus 5.5 built in, and routing's Codex default.
+_BUILTIN = {"claude": ("claude-opus-5-5", "high"), "codex": ("gpt-6-astra", "xhigh")}
+
+
 def _thread_models(w):
-    defaults = {"fast": _models(w)["current"], "claude": "claude-opus-5-5", "codex": "gpt-6-astra"}
     labels = {"fast": "OpenRouter", "claude": "Claude", "codex": "Codex"}
-    return {"effort_default": "high", "providers": {
-        p: {"label": labels[p], "default": defaults[p],
-            "default_effort": "xhigh" if p == "codex" else _default_effort(w, p, defaults[p]),
-            "models": _rows(w, p), "note": "",
+    hud = w.setdefault("cli_defaults", {})
+    providers = {}
+    for p in labels:
+        if p == "fast":
+            default, source = _models(w)["current"], _models(w)["default_source"]
+            effort = _default_effort(w, p, default)
+        elif p in hud:
+            default, source = hud[p]["model"], "hud"
+            effort = hud[p]["effort"] or _default_effort(w, p, default)
+        else:
+            (default, effort), source = _BUILTIN[p], ("built-in" if p == "claude" else "routing")
+        providers[p] = {
+            "label": labels[p], "default": default, "default_effort": effort,
+            "models": [dict(r, default_effort=_default_effort(w, p, r["id"])) for r in _rows(w, p)],
+            "note": "", "default_source": source, "settable": p != "fast",
+            "hud_default": dict(hud[p]) if p in hud else None,
+            "builtin": ({"model": _BUILTIN[p][0], "effort": _BUILTIN[p][1]} if p in _BUILTIN else None),
             # `thread_model.PROFILES` / `TAKES_ALWAYS_ASK`, as the daemon sends them.
-            "profiles": list(_PROFILES[p]), "always_ask": p != "codex"} for p in labels}}
+            "profiles": list(_PROFILES[p]), "always_ask": p != "codex"}
+    return {"effort_default": "high", "providers": providers}
+
+
+def _set_provider_default(w, body):
+    """`thread_model.set_provider_default`'s refusals, in short: (status, error)
+    on a refusal, else None."""
+    if w.get("refuse_default"):
+        return 400, w["refuse_default"]
+    unknown = sorted(set(body) - {"provider", "model", "effort"})
+    if unknown:
+        return 400, "unknown fields: " + ", ".join(unknown)
+    missing = sorted({"provider", "model"} - set(body))
+    if missing:
+        return 400, "missing fields: " + ", ".join(missing)
+    provider, model, effort = body["provider"], body["model"], body.get("effort") or None
+    if provider not in _BUILTIN:
+        return 400, "the OpenRouter default is the Model picker's (POST /model)"
+    hud = w.setdefault("cli_defaults", {})
+    if not model:
+        if effort:
+            return 400, "a reset takes no effort: the built-in default brings its own"
+        hud.pop(provider, None)
+        return None
+    row = next((r for r in CLI_MODELS[provider] if r["id"] == model), None)
+    if row is None:
+        return 400, f"{model} is not a {provider} model Jarvis knows"
+    if effort and effort not in (row.get("efforts") or []):
+        return 400, f"{model} does not offer {effort!r}"
+    hud[provider] = {"model": model, "effort": effort}
+    return None
 
 
 _PROFILES = {"fast": ("auto", "ask"), "claude": ("auto", "ask"), "codex": ("auto",)}
@@ -730,6 +777,18 @@ class MockDaemon:
                     return self._json({"ok": True})
                 if len(parts) == 3 and parts[0] == "schedules" and parts[2] == "run-now":
                     return self._json({"ok": True})
+                if path == "/thread-models":
+                    # Claude's or Codex's default (2026-10-08): the daemon's
+                    # keys and refusals, and one `model` event per change.
+                    refused = _set_provider_default(w, body)
+                    if refused:
+                        return self._err(*refused)
+                    payload = _thread_models(w)
+                    info = payload["providers"][body["provider"]]
+                    mock.emit("model", {"provider": body["provider"], "default": info["default"],
+                                        "default_effort": info["default_effort"],
+                                        "default_source": info["default_source"]})
+                    return self._json(payload)
                 if path in PICKER_KEYS:
                     # The real daemon's keys, enforced the way it enforces
                     # them: an unknown key is a 400 naming it. The mock used

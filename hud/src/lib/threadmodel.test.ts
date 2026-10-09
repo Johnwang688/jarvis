@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
-  applyEffort, applyModel, applyProvider, chipEditable, chipState, defaultEffort, effective, effortOptions,
+  applyEffort, applyModel, applyProvider, canSetDefault, chipEditable, chipState, defaultBody, defaultChosenHere,
+  defaultEffort, defaultEffortOptions, defaultRows, defaultSourceLabel, effective, effortOptions, resetTitle,
   modelLabel, modelOptions, offRoster, patchBody, providerRefusal, SEARCH, shortId, threadBody, threadTooltip,
   visionNote, type Choice, type ThreadModels,
 } from "./threadmodel";
@@ -270,5 +271,84 @@ describe("chipState (Bugbot 2026-10-08)", () => {
     const open = chipState({ threadId: "t1", compose: null, threads: [t] });
     expect(open.targetId).toBe("t1");
     expect(chipState({ threadId: null, compose: null, threads: [t] }).choice).toBeNull();
+  });
+});
+
+describe("a provider's default, set from the chip (2026-10-08)", () => {
+  // The daemon's answer after "Set as default" on Sonnet at low.
+  const SET: ThreadModels = {
+    ...TM,
+    providers: {
+      ...TM.providers,
+      claude: {
+        ...TM.providers.claude!, default: "claude-sonnet-5-5", default_effort: "low",
+        default_source: "hud", settable: true,
+        hud_default: { model: "claude-sonnet-5-5", effort: "low" },
+        builtin: { model: "claude-opus-5-5", effort: "high" },
+        models: [
+          { id: "claude-opus-5-5", name: "Claude Opus 5.5", efforts: ["low", "medium", "high", "xhigh", "max"],
+            default_effort: "high" },
+          { id: "claude-sonnet-5-5", name: "Claude Sonnet 5.5", efforts: ["low", "medium", "high", "xhigh", "max"],
+            default_effort: "high" },
+          { id: "claude-haiku-4-5", name: "<img src=x onerror=alert(1)>", efforts: [], default_effort: null },
+        ],
+      },
+      codex: { ...TM.providers.codex!, default_source: "routing", settable: true, hud_default: null,
+               builtin: { model: "gpt-6-astra", effort: "xhigh" } },
+    },
+  };
+  const claude = (model: string | null = null, effort: string | null = null): Choice => ({ provider: "claude", model, effort });
+
+  it("is offered for Claude and Codex only, and only by a backend that says so", () => {
+    expect(canSetDefault(SET, "claude")).toBe(true);
+    expect(canSetDefault(SET, "codex")).toBe(true);
+    expect(canSetDefault(SET, "fast")).toBe(false);
+    expect(canSetDefault(TM, "claude")).toBe(false);   // an older backend: no route
+    expect(canSetDefault(null, "claude")).toBe(false);
+  });
+
+  it("badges the default and relabels default threads, never pinned ones", () => {
+    expect(defaultRows(SET, "claude").filter((r) => r.isDefault).map((r) => r.id)).toEqual(["claude-sonnet-5-5"]);
+    expect(modelLabel(SET, claude())).toBe("default · claude-sonnet-5-5");
+    expect(modelOptions(SET, claude())[0].label).toBe("default · claude-sonnet-5-5");
+    expect(effective(SET, claude())).toEqual({ model: "claude-sonnet-5-5", effort: "low" });
+    expect(modelLabel(SET, claude("claude-opus-5-5"))).toBe("claude-opus-5-5");
+    expect(effective(SET, claude("claude-opus-5-5"))).toEqual({ model: "claude-opus-5-5", effort: "high" });
+    // An effort-only default thread runs its effort on the new default.
+    expect(effective(SET, claude(null, "max"))).toEqual({ model: "claude-sonnet-5-5", effort: "max" });
+  });
+
+  it("keeps a model name as text, never markup", () => {
+    const row = defaultRows(SET, "claude").find((r) => r.id === "claude-haiku-4-5");
+    expect(row?.name).toBe("<img src=x onerror=alert(1)>");
+  });
+
+  it("says where the default comes from, and what Reset returns to", () => {
+    expect(defaultSourceLabel(SET, "claude")).toBe("set here");
+    expect(defaultSourceLabel(SET, "codex")).toBe("from routing");
+    expect(defaultSourceLabel(TM, "claude")).toBe("built-in");
+    expect(defaultChosenHere(SET, "claude")).toBe(true);
+    expect(defaultChosenHere(SET, "codex")).toBe(false);
+    expect(resetTitle(SET, "claude")).toBe("Back to the built-in default: claude-opus-5-5 · high");
+    expect(resetTitle(SET, "codex")).toBe("Back to routing's Codex default: gpt-6-astra · xhigh");
+  });
+
+  it("offers the default model's own ladder, on the stored effort", () => {
+    const eff = defaultEffortOptions(SET, "claude");
+    expect(eff.value).toBe("low");
+    expect(eff.options.map((o) => o.value)).toEqual(["", "low", "medium", "high", "xhigh", "max"]);
+    expect(eff.options[0].label).toBe("model default · high");
+    expect(defaultEffortOptions(SET, "codex").value).toBe("");
+    const haiku: ThreadModels = { ...SET, providers: { ...SET.providers,
+      claude: { ...SET.providers.claude!, default: "claude-haiku-4-5",
+                hud_default: { model: "claude-haiku-4-5", effort: null } } } };
+    expect(defaultEffortOptions(haiku, "claude").options).toEqual([]);
+  });
+
+  it("sends exactly the keys the route takes", () => {
+    expect(defaultBody("claude", "claude-sonnet-5-5", "")).toEqual({ provider: "claude", model: "claude-sonnet-5-5" });
+    expect(defaultBody("claude", "claude-sonnet-5-5", "low"))
+      .toEqual({ provider: "claude", model: "claude-sonnet-5-5", effort: "low" });
+    expect(defaultBody("codex", "", "low")).toEqual({ provider: "codex", model: "" });
   });
 });

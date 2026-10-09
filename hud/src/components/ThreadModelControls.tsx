@@ -11,10 +11,11 @@ import { api } from "../api";
 import type { Action, State } from "../state/store";
 import type { ModelRow } from "../types";
 import {
-  chipState, patchBody, PROVIDERS, providerRefusal, visionNote,
+  chipState, defaultBody, patchBody, PROVIDER_LABELS, PROVIDERS, providerRefusal, visionNote,
   type Choice, type ThreadModels,
 } from "../lib/threadmodel";
-import { CatalogPicker, ModelChip } from "./ModelChip";
+import type { ProviderName } from "../types";
+import { CatalogPicker, ModelChip, ProviderDefaults } from "./ModelChip";
 import { refusal, rosterIds } from "../lib/roster";
 
 export function useThreadModel(state: State, dispatch: React.Dispatch<Action>, onRosterChange?: () => void) {
@@ -26,6 +27,9 @@ export function useThreadModel(state: State, dispatch: React.Dispatch<Action>, o
   // "roster" when opened from the Model picker (pin/unpin only).
   const [catalogMode, setCatalogMode] = useState<"thread" | "roster">("thread");
   const [catalogError, setCatalogError] = useState("");
+  // Claude's or Codex's default menu (2026-10-08), and its refusal.
+  const [defaultsFor, setDefaultsFor] = useState<ProviderName | null>(null);
+  const [defaultsError, setDefaultsError] = useState("");
 
   const reload = useCallback(async () => {
     try {
@@ -117,6 +121,19 @@ export function useThreadModel(state: State, dispatch: React.Dispatch<Action>, o
     [reload, onRosterChange],
   );
 
+  // Set (or with "" reset) a provider's default. The answer is the new
+  // `GET /thread-models`, so every default thread's label moves at once; the
+  // `model` event that follows tells the other windows.
+  const setDefault = useCallback((provider: ProviderName, model: string, effort: string) => {
+    setDefaultsError("");
+    const label = PROVIDER_LABELS[provider] || provider;
+    const what = model ? `set ${model} as the ${label} default` : `reset the ${label} default`;
+    api
+      .setProviderDefault(defaultBody(provider, model, effort))
+      .then((payload) => setModels(payload))
+      .catch((e) => setDefaultsError(refusal(what, e)));
+  }, []);
+
   const chip =
     choice !== null ? (
       <ModelChip
@@ -129,10 +146,25 @@ export function useThreadModel(state: State, dispatch: React.Dispatch<Action>, o
         onChange={change}
         onSearch={() => openCatalog("thread")}
         refusals={refusals}
+        onDefaults={(provider) => {
+          setDefaultsError("");
+          setDefaultsFor(provider);
+        }}
       />
     ) : null;
 
-  const picker = catalogOpen ? (
+  const defaults = defaultsFor ? (
+    <ProviderDefaults
+      models={models}
+      provider={defaultsFor}
+      error={defaultsError}
+      onSet={(model, effort) => setDefault(defaultsFor, model, effort)}
+      onReset={() => setDefault(defaultsFor, "", "")}
+      onClose={() => setDefaultsFor(null)}
+    />
+  ) : null;
+
+  const catalogPicker = catalogOpen ? (
     <CatalogPicker
       catalog={catalog}
       roster={roster}
@@ -154,6 +186,8 @@ export function useThreadModel(state: State, dispatch: React.Dispatch<Action>, o
       onClose={() => setCatalogOpen(false)}
     />
   ) : null;
+
+  const picker = catalogPicker || defaults ? <>{catalogPicker}{defaults}</> : null;
 
   return {
     models,

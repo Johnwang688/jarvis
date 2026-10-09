@@ -40,6 +40,7 @@ class ThreadModel(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         root = Path(tmp.name)
         for name, value in dict(MODELS_PATH=root / "models.json", ROUTING_PATH=root / "routing.json",
+                                PROVIDER_DEFAULTS_PATH=root / "provider_defaults.json",
                                 MODEL_CACHE_PATH=root / "catalog.json").items():
             guard = patch.object(config, name, value)
             guard.start()
@@ -164,6 +165,84 @@ class ThreadModel(unittest.TestCase):
         # The router's vision filter reads the same table.
         self.assertTrue(all(router.CLI_MODELS["codex"][m]["vision"] for m in
                             ("gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5")))
+
+    def test_the_hud_default_for_claude_and_codex(self):
+        """2026-10-08: a HUD-chosen default per CLI provider. It moves every
+        default thread (and re-clamps an effort-only one), never a pinned one;
+        reset returns to the built-in default; the Codex one never touches
+        routing; a stale or corrupt file degrades to the built-in default."""
+        default = Thread("abcdef01", "p", Role.CHAT, P.CLAUDE)
+        effort_only = Thread("abcdef02", "p", Role.CHAT, P.CLAUDE, effort="max")
+        pinned = Thread("abcdef03", "p", Role.CHAT, P.CLAUDE, model="claude-opus-5-5")
+        self.assertEqual((tm.default_source(P.CLAUDE), tm.default_source(P.CODEX)), ("built-in", "routing"))
+        self.assertEqual(tm.set_provider_default("claude", "claude-sonnet-5-5"), ("claude-sonnet-5-5", None))
+        self.assertEqual(tm.default_choice(P.CLAUDE), ("claude-sonnet-5-5", "high"))
+        self.assertEqual(tm.default_source(P.CLAUDE), "hud")
+        self.assertEqual(tm.effective(default), ("claude-sonnet-5-5", "high"))
+        self.assertEqual(tm.effective(effort_only), ("claude-sonnet-5-5", "max"))
+        self.assertEqual(tm.effective(pinned), ("claude-opus-5-5", "high"), "a pin ignores the default")
+        tm.set_provider_default(P.CLAUDE, " claude-sonnet-5-5 ", "Medium")
+        self.assertEqual(tm.effective(default), ("claude-sonnet-5-5", "medium"))
+        # A default with no reasoning control: an effort-only thread drops it,
+        # and an effort chosen now is checked against that default.
+        tm.set_provider_default("claude", "claude-haiku-4-5")
+        self.assertEqual(tm.effective(effort_only), ("claude-haiku-4-5", None))
+        self.assertEqual(effort_only.effort, "max", "the stored choice is not rewritten")
+        with self.assertRaises(tm.ChoiceRefused):
+            tm.check(P.CLAUDE, None, "low")
+        # Codex: the HUD default wins over routing for chat threads only.
+        config.ROUTING_PATH.write_text(json.dumps({"models": {"orchestrator": {"codex": "gpt-5.6-sol/default"}}}))
+        routing = config.ROUTING_PATH.read_bytes()
+        tm.set_provider_default("codex", "gpt-5.6-terra", "low")
+        self.assertEqual(tm.default_choice(P.CODEX), ("gpt-5.6-terra", "low"))
+        self.assertEqual(router.model_settings("orchestrator", "codex"), ("gpt-5.6-sol", None))
+        self.assertEqual(config.ROUTING_PATH.read_bytes(), routing, "routing.json is never rewritten")
+        described = tm.describe()["providers"]
+        self.assertEqual((described["codex"]["default"], described["codex"]["default_source"],
+                          described["codex"]["hud_default"], described["codex"]["builtin"]),
+                         ("gpt-5.6-terra", "hud", {"model": "gpt-5.6-terra", "effort": "low"},
+                          {"model": "gpt-5.6-sol", "effort": "high"}))
+        # Reset, per provider.
+        self.assertIsNone(tm.set_provider_default("codex", ""))
+        self.assertEqual((tm.default_choice(P.CODEX), tm.default_source(P.CODEX)),
+                         (("gpt-5.6-sol", "high"), "routing"))
+        self.assertEqual(tm.default_source(P.CLAUDE), "hud", "resetting Codex leaves Claude alone")
+        tm.set_provider_default("claude", None)
+        self.assertEqual((tm.default_choice(P.CLAUDE), tm.default_source(P.CLAUDE)),
+                         (("claude-opus-5-5", "high"), "built-in"))
+        # Refused, never stored: the file is what it was.
+        tm.set_provider_default("claude", "claude-sonnet-5-5")
+        before = config.PROVIDER_DEFAULTS_PATH.read_bytes()
+        for args, words in ((("fast", "openai/gpt-5.6-luna"), "Model picker"),
+                            (("nope", "x"), "not a provider"),
+                            ((["claude"], "x"), "not a provider"),
+                            (("claude", "claude-opus-9"), "not a Claude model"),
+                            (("codex", "claude-opus-5-5"), "not a Codex model"),
+                            (("codex", "gpt-5.6-sol", "max"), "does not offer 'max'"),
+                            (("codex", "gpt-5.6-sol", "turbo"), "not a reasoning effort"),
+                            (("claude", "claude-haiku-4-5", "low"), "no reasoning effort"),
+                            (("claude", "", "low"), "takes no effort"),
+                            (("claude", 7), "must be a string"),
+                            (("claude", "claude-opus-5-5", 3), "must be a string or null")):
+            with self.assertRaises(tm.ChoiceRefused, msg=args) as caught:
+                tm.set_provider_default(*args)
+            self.assertIn(words, str(caught.exception), args)
+        self.assertEqual(config.PROVIDER_DEFAULTS_PATH.read_bytes(), before)
+        # A stored model Jarvis no longer knows is said, not sent.
+        config.PROVIDER_DEFAULTS_PATH.write_text(json.dumps({"claude": {"model": "claude-opus-9", "effort": None}}))
+        self.assertEqual((tm.default_choice(P.CLAUDE), tm.default_source(P.CLAUDE)),
+                         (("claude-opus-5-5", "high"), "built-in"))
+        self.assertIn("claude-opus-9 is not a Claude model", tm.describe()["providers"]["claude"]["note"])
+        # A corrupt or non-UTF-8 file degrades to the built-in default too.
+        for raw in (b"{ not json", b'{"claude": {"model": "\xff"}}', b"[]"):
+            config.PROVIDER_DEFAULTS_PATH.write_bytes(raw)
+            self.assertEqual(tm.default_choice(P.CLAUDE), ("claude-opus-5-5", "high"), raw)
+        # Written atomically: the mode is kept and no temp file is left behind.
+        config.PROVIDER_DEFAULTS_PATH.chmod(0o640)
+        tm.set_provider_default("claude", "claude-sonnet-5-5")
+        self.assertEqual(config.PROVIDER_DEFAULTS_PATH.stat().st_mode & 0o777, 0o640)
+        self.assertEqual([p.name for p in config.PROVIDER_DEFAULTS_PATH.parent.iterdir()
+                          if p.name.startswith(".provider_defaults-")], [])
 
     def test_only_owner_chat_threads_have_a_choice(self):
         self.assertTrue(tm.is_chat(Thread("abcdef01", "p", Role.CHAT, P.FAST)))

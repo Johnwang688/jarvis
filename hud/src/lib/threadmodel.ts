@@ -20,6 +20,8 @@ export interface ModelEntry {
   /** The roster's per-model pin (OpenRouter only). */
   effort?: string | null;
   vision?: boolean;
+  /** The effort this model runs at when none is chosen (A4). */
+  default_effort?: string | null;
   prompt_usd?: number | null;
   completion_usd?: number | null;
   unlisted?: boolean;
@@ -35,6 +37,16 @@ export interface ProviderModels {
   profiles?: string[];
   /** Whether it can enforce a project's always-ask commands. */
   always_ask?: boolean;
+  /** Where `default` comes from (2026-10-08): "hud" when the owner chose it
+   * here, else "config" (OpenRouter), "built-in" (Claude) or "routing"
+   * (Codex). */
+  default_source?: string;
+  /** Claude and Codex: the owner can set the default from the model chip. */
+  settable?: boolean;
+  /** The HUD's stored default; `effort: null` is the model's own default. */
+  hud_default?: { model: string; effort: string | null } | null;
+  /** What "Reset to built-in default" returns to. */
+  builtin?: { model: string | null; effort: string | null } | null;
 }
 
 /** `GET /thread-models`. */
@@ -314,4 +326,79 @@ export function chipState(
              editable: { provider: false, model: true } };
   }
   return { choice: null, thread: null, targetId: null, composing, editable: chipEditable(null, false) };
+}
+
+// --- a provider's default, set from the chip (2026-10-08) -------------------
+//
+// Claude's and Codex's default (what every default-following thread on that
+// provider runs on) is the owner's to choose here, as the OpenRouter one is
+// in the Model picker. The daemon stores it (`POST /thread-models`), never a
+// thread, and pinned threads ignore it. The Codex default wins over routing
+// for chat threads only; routing.json is never written.
+
+/** True when the chip can set this provider's default: Claude or Codex, and
+ * a backend that says so (an older one has no route for it). */
+export function canSetDefault(tm: ThreadModels | null, provider: ProviderName): boolean {
+  return provider !== "fast" && tm?.providers[provider]?.settable === true;
+}
+
+/** The phrase for where a default comes from. */
+export function defaultSourceLabel(tm: ThreadModels | null, provider: ProviderName): string {
+  const source = tm?.providers[provider]?.default_source;
+  if (source === "hud") return "set here";
+  if (source === "routing") return "from routing";
+  if (source === "config") return "config default";
+  return "built-in";
+}
+
+/** True when the default was chosen here, so Reset has something to undo. */
+export function defaultChosenHere(tm: ThreadModels | null, provider: ProviderName): boolean {
+  return tm?.providers[provider]?.default_source === "hud";
+}
+
+/** The Reset button's tooltip names what it goes back to. */
+export function resetTitle(tm: ThreadModels | null, provider: ProviderName): string {
+  const b = tm?.providers[provider]?.builtin;
+  const what = provider === "codex" ? "routing's Codex default" : "the built-in default";
+  return b?.model ? `Back to ${what}: ${b.model}${b.effort ? ` · ${b.effort}` : ""}` : `Back to ${what}`;
+}
+
+export interface DefaultRow {
+  id: string;
+  /** Text only: the model's name, else its id. */
+  name: string;
+  isDefault: boolean;
+}
+
+/** The rows of a provider's default menu: every model it can run, with the
+ * current default marked. */
+export function defaultRows(tm: ThreadModels | null, provider: ProviderName): DefaultRow[] {
+  const current = defaultModel(tm, provider);
+  return (tm?.providers[provider]?.models || []).map((m) => ({
+    id: m.id,
+    name: m.name || shortId(m.id),
+    isDefault: m.id === current,
+  }));
+}
+
+/** The effort select for the default model. "" is the model's own default
+ * effort; no options when the model has no reasoning control. The value is
+ * the effort stored here for that model, else "". */
+export function defaultEffortOptions(tm: ThreadModels | null, provider: ProviderName): { value: string; options: Option[] } {
+  const model = defaultModel(tm, provider);
+  const ladder = effortsFor(tm, provider, model);
+  if (!model || !ladder || !ladder.length) return { value: "", options: [] };
+  const stored = tm?.providers[provider]?.hud_default;
+  const value = stored && stored.model === model && stored.effort ? stored.effort : "";
+  const own = entry(tm, provider, model)?.default_effort || defaultEffort(tm, provider, model) || DEFAULT_EFFORT;
+  const options: Option[] = [{ value: "", label: `model default · ${own}` }];
+  for (const level of ladder) options.push({ value: level, label: level });
+  return { value, options };
+}
+
+/** The `POST /thread-models` body. `model: ""` resets; an effort rides only
+ * with a model, and "" (the model's own default) is not sent. */
+export function defaultBody(provider: ProviderName, model: string, effort?: string | null):
+    { provider: ProviderName; model: string; effort?: string } {
+  return model && effort ? { provider, model, effort } : { provider, model };
 }

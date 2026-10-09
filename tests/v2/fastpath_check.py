@@ -44,6 +44,7 @@ _ROOT = Path(_TMP.name)
 config.SESSIONS_DIR = _ROOT / "sessions"
 config.ALLOWLIST_PATH = _ROOT / "allowlist.json"
 config.MODELS_PATH = _ROOT / "models.json"
+config.PROVIDER_DEFAULTS_PATH = _ROOT / "provider_defaults.json"
 config.MODEL_CACHE_PATH = _ROOT / "catalog.json"
 config.SKILLS_DIR = _ROOT / "skills"
 config.SKILLS_DIR.mkdir(parents=True, exist_ok=True)
@@ -790,7 +791,8 @@ def no_self_switch_checks() -> None:
     for name in sorted(reachable):
         assert not any(word in name for word in ("model", "provider", "effort")), name
     for name, tool in tools.REGISTRY.items():
-        assert not any(word in name for word in ("set_model", "thread_model", "set_provider")), name
+        assert not any(word in name for word in ("set_model", "thread_model", "set_provider",
+                                                 "provider_default")), name
     roots = [Path(fastpath.__file__).parents[1] / "tools", Path(tools.__file__).parent]
     for root in roots:
         for path in root.rglob("*.py"):
@@ -799,9 +801,13 @@ def no_self_switch_checks() -> None:
                            # The roster and the global default: every write.
                            "models.select(", "models.set_effort(", "models.remove(", "models.add(",
                            "models_mod.select(", "models_mod.set_effort(", "models_mod.remove(",
-                           "models_mod.add(", "models._save(", "MODELS_PATH"):
+                           "models_mod.add(", "models._save(", "MODELS_PATH",
+                           # The Claude/Codex chat default (2026-10-08).
+                           "set_provider_default(", "_save_defaults(", "PROVIDER_DEFAULTS_PATH",
+                           "provider_defaults", "/thread-models"):
                 assert needle not in text, f"{path} reaches {needle}"
-    print("ok  guard: no fast-path, MCP or registered tool can change a thread's model or provider")
+    print("ok  guard: no fast-path, MCP or registered tool can change a thread's model, "
+          "provider or a provider's default")
 
 
 def main() -> int:

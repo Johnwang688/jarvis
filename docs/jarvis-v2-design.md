@@ -400,7 +400,11 @@ rewritten. The daemon hands the provider the thread's effective choice when
 it opens or resumes the session and, at the start of each turn, calls the
 provider's `set_model` if the choice moved. A default thread therefore
 follows the global Model picker on every turn (it used to keep the model it
-was opened with until the daemon restarted). The WP2 note above changes in
+was opened with until the daemon restarted). Claude and Codex default
+threads follow their provider's HUD default the same way (2026-10-08,
+`POST /thread-models`): that default, when set, beats the built-in Opus 5.5
+and, for Codex chat threads, routing's orchestrator default — which still
+decides every task role. The WP2 note above changes in
 one place: the fast path **honours `effort`** now (`Agent.effort`; `None`
 keeps v1's per-model resolution, so v1 surfaces are unchanged), and the
 v2 default is `high` within the model's own ladder, or the roster's pin for
@@ -1153,8 +1157,15 @@ providers, and dictation with an adjustable send mode.
   chosen, with "Reset to config default". The catalogue's pinned rows offer
   Unpin. Any model unpins, the env model included; the backend refuses
   (409, shown inline) only an unpin that would empty the roster or leave a
-  default thread on an unlisted model. Claude's and Codex's chat defaults
-  are unchanged and not HUD-editable.
+  default thread on an unlisted model. ~~Claude's and Codex's chat defaults
+  are unchanged and not HUD-editable.~~
+  *Amended again 2026-10-08:* Claude's and Codex's chat defaults are
+  HUD-editable too, from the model chip's `default ▾` menu (Set as default
+  per model, a `default` badge, the default's effort, "Reset to built-in
+  default"). Stored in `~/.config/jarvis/provider_defaults.json`, beside
+  models.json and agent-unwritable like it. The Codex one **wins over
+  routing for chat threads only** and never writes routing.json; role
+  routing stays Settings', and "Reset" returns to it.
 - **Permissions default to `auto`** (D6); the project header carries the
   profile switch (auto / ask / strict) and the always-ask additions.
 - **Previews and agent-written pages are a separate origin**

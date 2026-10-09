@@ -143,7 +143,7 @@ class DaemonChecks(unittest.TestCase):
         self.addCleanup(self.config_patch.stop)
         # WP12 mounts real picker routes; never let legacy negative probes
         # touch the owner's roster or catalog.
-        for name in ("MODELS_PATH", "ALLOWLIST_PATH"):
+        for name in ("MODELS_PATH", "PROVIDER_DEFAULTS_PATH", "ALLOWLIST_PATH"):
             local = patch.object(config, name, self.root / name.lower())
             local.start()
             self.addCleanup(local.stop)
