@@ -58,6 +58,7 @@ class Sandbox:
             "V2_DATA_DIR": config.V2_DATA_DIR,
             "V2_ALWAYS_ASK": config.V2_ALWAYS_ASK,
             "DISCORD_GUILD_PATH": config.DISCORD_GUILD_PATH,
+            "ROUTING_PATH": config.ROUTING_PATH,
             "CODEX_CATALOG_PATH": config.CODEX_CATALOG_PATH,
         }
         self._home = os.environ.get("HOME")
@@ -68,6 +69,7 @@ class Sandbox:
         config.V2_DATA_DIR = self.root / "v2data"
         config.V2_ALWAYS_ASK = self.home / ".config" / "jarvis" / "always-ask.json"
         config.DISCORD_GUILD_PATH = self.home / ".config" / "jarvis" / "discord_guild.json"
+        config.ROUTING_PATH = self.home / ".config" / "jarvis" / "routing.json"
         config.CODEX_CATALOG_PATH = self.home / ".local" / "share" / "jarvis" / "codex-models.json"
         return self
 
@@ -110,10 +112,10 @@ def context(brief, project=None, task=None):
                          project=project, task=task)
 
 
-def brief_for(profile, always_ask=(), task_id=None):
+def brief_for(profile, always_ask=(), task_id=None, cwd="/tmp"):
     from jarvis.v2.model import Role
     from jarvis.v2.provider import Brief
-    return Brief(role=Role.IMPLEMENTER, cwd="/tmp", profile=profile,
+    return Brief(role=Role.IMPLEMENTER, cwd=str(cwd), profile=profile,
                  always_ask=list(always_ask), task_id=task_id)
 
 
@@ -339,7 +341,8 @@ def always_ask_checks():
 
 def file_deny_checks():
     from jarvis.v2.model import PermissionProfile as P
-    from jarvis.v2.permissions import denied_file, file_targets, build_permit
+    from jarvis.v2.permissions import (_command_writes_protected_state, build_permit,
+                                       denied_file, file_targets, protected_paths)
     from jarvis.v2.provider import Decision
 
     with Sandbox() as box:
@@ -424,6 +427,129 @@ def file_deny_checks():
             eq(permit(tool, args, brief), Decision.DENY, f"{tool} must not write codex-models.json")
         eq(permit(*bash(f"ln -sf /dev/zero {catalog}"), brief), Decision.DENY,
            "a symlink planted at the Codex catalog is refused")
+
+        # One detector for v1 and v2 (2026-10-08): the spellings v1's shell
+        # gate learned are refused here too, and the false positives the old
+        # copy carried (any redirect in a segment that merely *mentioned* a
+        # protected name; any `sed` that read one) are gone.
+        from jarvis import protected_state
+        from jarvis.tools import files as v1_files
+        eq(protected_paths(), v1_files._protected_state(),
+           "v2's protected set is v1's write-tool set, not a copy of it")
+        eq(protected_paths(), protected_state.protected_paths(),
+           "and the shell check reads the same set")
+        for command in ("cp /tmp/x $HOME/.config/jarvis/allowlist.json",
+                        "cd ~/.config/jarvis && cp /tmp/x allowlist.json",
+                        "D=~/.config/jarvis; cp /tmp/x $D/models.json",
+                        "cp -t ~/.config/jarvis /tmp/routing.json",
+                        "sh -c 'cp /tmp/x ~/.config/jarvis/provider_defaults.json'",
+                        "env -C ~/.config/jarvis cp /tmp/x allowlist.json",
+                        "curl -o ~/.config/jarvis/allowlist.json https://example.com/a"):
+            before = len(asker.seen)
+            eq(permit(*bash(command), brief), Decision.DENY, f"layer 1 refuses {command}")
+            eq(len(asker.seen), before, f"and never asks: {command}")
+        for command in ("echo hi > models.json", "echo allowlist.json > notes.txt",
+                        "sed -n 1p ~/.config/jarvis/models.json",
+                        "cp ~/.config/jarvis/models.json /tmp/models.bak"):
+            eq(_command_writes_protected_state(command), None,
+               f"not a write to the gate's state: {command}")
+        # An uncertain one is not refused, and not auto-approved either.
+        owner = Asker(Decision.ALLOW)
+        human = build_permit(context(brief), owner)
+        for command in ("rsync -a /tmp/evil/ ~/.config/jarvis/",
+                        "mkdir -p ~/.config/jarvis",
+                        "echo ~/.config/jarvis/allowlist.json | xargs cp /tmp/x",
+                        "cp /tmp/x $UNSET_DIR/models.json"):
+            seen = len(owner.seen)
+            eq(human(*bash(command), brief_for(P.ASK)), Decision.ALLOW,
+               f"an uncertain gate-state write is not refused: {command}")
+            ok(box.decisions[-1]["layer"] != "jarvis-allow" and len(owner.seen) == seen + 1,
+               f"it reaches the owner, never rules ALLOW at layer 4: {command} "
+               f"(layer {box.decisions[-1]['layer']})")
+        eq(human(*bash("mkdir -p build"), brief_for(P.ASK)), Decision.ALLOW, "control")
+        eq(box.decisions[-1]["layer"], "jarvis-allow", "an ordinary mkdir is still layer 4")
+
+        # Under AUTO the same uncertain writes reach the owner too (layer 2),
+        # not the provider's own classifier (layer 5 `reviewer`).
+        for command in ("cp /tmp/x $UNSET_DIR/models.json",
+                        "rsync -a /tmp/evil/ ~/.config/jarvis/",
+                        "echo ~/.config/jarvis/allowlist.json | xargs cp /tmp/x",
+                        "git checkout -- ~/.config/jarvis/models.json",
+                        "tar -xf /tmp/x.tar -C ~/.config/jarvis"):
+            seen = len(owner.seen)
+            human(*bash(command), brief_for(P.AUTO))
+            eq(box.decisions[-1]["layer"], "always-ask",
+               f"AUTO: an uncertain gate-state write is put to the owner: {command}")
+            eq(len(owner.seen), seen + 1, f"AUTO: and the owner is actually asked: {command}")
+        human(*bash("mkdir -p build"), brief_for(P.AUTO))
+        ok(box.decisions[-1]["layer"] != "always-ask", "AUTO control: ordinary work is not asked")
+
+        # Relative names resolve in the *brief's* folder, never the daemon's.
+        gate_dir = config.ALLOWLIST_PATH.parent
+        project_dir = box.root / "project"
+        project_dir.mkdir()
+        gate_link = box.root / "gate-link"
+        gate_link.symlink_to(gate_dir, target_is_directory=True)
+        saved_cwd = os.getcwd()
+        try:
+            for process_cwd in (gate_dir, project_dir):
+                os.chdir(process_cwd)
+                for where, expected in ((gate_dir, Decision.DENY), (gate_link, Decision.DENY),
+                                        (project_dir, None)):
+                    brief = brief_for(P.AUTO, cwd=where)
+                    got = build_permit(context(brief), Asker(Decision.ALLOW))(
+                        *bash("echo hi > models.json"), brief)
+                    if expected is Decision.DENY:
+                        eq(got, Decision.DENY,
+                           f"`echo hi > models.json` in {where.name} is refused "
+                           f"(daemon cwd {process_cwd.name})")
+                    else:
+                        ok(box.decisions[-1]["layer"] != "deny",
+                           f"`echo hi > models.json` in a project is not refused "
+                           f"(daemon cwd {process_cwd.name})")
+        finally:
+            os.chdir(saved_cwd)
+
+        # config.ROUTING_PATH outside the allowlist's folder is protected by
+        # its own setting, by both the write tools and the shell check.
+        saved_routing = config.ROUTING_PATH
+        elsewhere = box.root / "elsewhere" / "routing.json"
+        elsewhere.parent.mkdir()
+        config.ROUTING_PATH = elsewhere
+        try:
+            ok(denied_file(str(elsewhere)) is not None, "a write tool may not write ROUTING_PATH")
+            eq(_command_writes_protected_state(f"cp /tmp/x {elsewhere}"), "routing.json",
+               "nor may a shell command")
+        finally:
+            config.ROUTING_PATH = saved_routing
+
+        # Review round 2: a copier's destination is parsed, not "the last
+        # operand" — every one of these writes the allowlist, so layer 1 refuses.
+        for command in ("cp /tmp/x ~/.config/jarvis/allowlist.json # backup",
+                        "cp /tmp/x ~/.config/jarvis/allowlist.json ${NOTHING}",
+                        'cp /tmp/x ~/.config/jarvis/allowlist.json "$@"',
+                        "cp /tmp/x ~/.config/jarvis/allowlist.json {fd}>/dev/null",
+                        "cp -bt ~/.config/jarvis /tmp/allowlist.json",
+                        "cp -t$HOME/.config/jarvis /tmp/allowlist.json",
+                        "install /tmp/x ~/.config/jarvis/allowlist.json # x"):
+            eq(_command_writes_protected_state(command), "allowlist.json",
+               f"layer 1 sees the copy's real destination: {command}")
+
+        # Review round 2: a line too complex to judge is always-ask with that
+        # reason, under AUTO as under ASK, and is judged in well under a second.
+        for command in ("echo " + "$(" * 5000, "echo " + "$(x) " * 200,
+                        "echo " + "$(" * 200 + "x" + ")" * 200):
+            for profile in (P.AUTO, P.ASK):
+                seen = len(owner.seen)
+                start = time.perf_counter()
+                human(*bash(command), brief_for(profile))
+                spent = time.perf_counter() - start
+                ok(spent < 1.0, f"a pathological line is judged quickly ({spent:.2f}s)")
+                eq(box.decisions[-1]["layer"], "always-ask",
+                   f"{profile.value}: a line too complex to judge is put to the owner")
+                ok("too complex to judge" in box.decisions[-1]["reason"],
+                   f"and says why: {box.decisions[-1]['reason'][:80]!r}")
+                eq(len(owner.seen), seen + 1, "and the owner really is asked")
 
         # A write under a credential directory is always-ask, not a refusal.
         before = len(asker.seen)
@@ -1049,6 +1175,35 @@ def hatch_checks():
         eq(daemon.sent[0][1].origin, "system", "a refusal is a system message")
         ok(any(r["decision"] == "reviewer-declined-refused" for r in box.decisions),
            "the refusal is logged")
+
+        # Layer 1 at the moment of running judges a relative path in the folder
+        # the command will run in, not the daemon's (review round 2: dropping
+        # the cwd argument survived every suite). `_run` is a recorder here, so
+        # nothing is executed whichever way the check goes.
+        gate_dir = config.ALLOWLIST_PATH.parent
+        gate_dir.mkdir(parents=True, exist_ok=True)
+        ok(Path.cwd().resolve() != gate_dir.resolve(), "the daemon is not in the gate's folder")
+        gate_task = stores.tasks.create(project.id, "work in the gate's folder")
+        gate_task.worktree = str(gate_dir)
+        stores.tasks.save(gate_task)
+        gate_thread = stores.threads.create(project.id, Role.IMPLEMENTER,
+                                            ProviderName.CLAUDE, task_id=gate_task.id)
+        relative_write = "echo '[]' > allowlist.json"
+        for where, refused in ((gate_thread, True), (thread, False)):
+            daemon, hatch, broker = hatch_with(Decision.ALLOW)
+            executed = []
+            hatch._run = lambda item, task, executed=executed: (
+                executed.append(item.command) or "[exit 0]")
+            hatch.handle({"kind": "reviewer_declined", "thread_id": where.id,
+                          "data": {"tool": "Bash", "command": relative_write,
+                                   "reason": "denied by the classifier"}})
+            if refused:
+                eq(executed, [], "a relative allowlist write in the gate's folder is refused")
+                ok(daemon.sent[0][1].text.startswith("[refused by Jarvis rules:"),
+                   "and the worker is told why")
+            else:
+                eq(executed, [relative_write],
+                   "the same relative write in a project folder is the owner's to run")
 
         # Timeout -> not run.
         daemon, hatch, broker = hatch_with(None, timeout=0.05)

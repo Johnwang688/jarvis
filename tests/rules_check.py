@@ -735,9 +735,441 @@ def prompt_hygiene_checks() -> None:
 def protection_checks() -> None:
     from jarvis.tools.files import SELF_PROTECTED
 
-    for rel in ("jarvis/rules.py", "jarvis/command_review.py"):
+    for rel in ("jarvis/rules.py", "jarvis/command_review.py", "jarvis/protected_state.py"):
         assert rel in SELF_PROTECTED, f"{rel} must be self-protected"
-    print("ok  guard: rules.py and command_review.py are self-protected")
+    print("ok  guard: rules.py, command_review.py and protected_state.py are self-protected")
+
+
+# --- the gate's own state, written by a shell command (2026-10-08) -----------
+#
+# The hole: `cp /tmp/x ~/.config/jarvis/allowlist.json` is a plain `cp`, which
+# rules.py calls ALLOW, so every human-backed v1 surface ran it with nobody
+# asked and replaced the allowlist. Same for models.json and routing.json.
+# Every case here goes through the real `dispatch()` and a real
+# `permissions.gate`, with `shell._run` a recorder, an allowlist entry for
+# every stem in sight, and HOME plus every config path pointed at a temp dir.
+
+_GATE_STEMS = ("cp", "mv", "tee", "sed", "install", "rsync", "ln", "rm", "chmod",
+               "chown", "python3", "sh", "bash", "env", "nohup", "timeout", "curl",
+               "echo", "find", "cat", "git", "xargs", "mkdir", "touch", "ls", "head",
+               "make")
+
+
+@contextlib.contextmanager
+def gate_home():
+    """A throwaway HOME holding a fake ~/.config/jarvis, with every gate-state
+    path in config pointed into it and cwd inside a project. Restored after."""
+    import os
+    import tempfile
+
+    from jarvis import config
+
+    saved = {k: getattr(config, k) for k in (
+        "ALLOWLIST_PATH", "MODELS_PATH", "ROUTING_PATH", "DISCORD_GUILD_PATH",
+        "PROVIDER_DEFAULTS_PATH")}
+    import pwd
+
+    old_home, old_cwd = os.environ.get("HOME"), os.getcwd()
+    real_getpwnam = pwd.getpwnam
+    with tempfile.TemporaryDirectory() as tmp:
+        home = Path(tmp)
+        gate = home / ".config" / "jarvis"
+        gate.mkdir(parents=True)
+        os.environ["HOME"] = str(home)
+        config.ALLOWLIST_PATH = gate / "allowlist.json"
+        config.MODELS_PATH = gate / "models.json"
+        config.ROUTING_PATH = gate / "routing.json"
+        config.DISCORD_GUILD_PATH = gate / "discord_guild.json"
+        config.PROVIDER_DEFAULTS_PATH = gate / "provider_defaults.json"
+        config.ALLOWLIST_PATH.write_text(json.dumps(
+            [{"tool": "run_command", "prefix": s} for s in _GATE_STEMS]))
+        config.MODELS_PATH.write_text("{}")
+        os.symlink(config.ALLOWLIST_PATH, home / "allow-link.json")
+        # A symlink to the gate's *folder*, through which a file that does not
+        # exist yet is named: only resolving the link finds it.
+        os.symlink(gate, home / "gate-link", target_is_directory=True)
+        os.link(config.MODELS_PATH, home / "models-hard.json")
+        project = home / "projects" / "app"
+        project.mkdir(parents=True)
+        # `~someone` must expand to this throwaway home, never a real one.
+        pwd.getpwnam = lambda name: (type("Pw", (), {"pw_dir": str(home)})()
+                                     if name == "someone" else real_getpwnam(name))
+        os.chdir(project)
+        try:
+            yield home
+        finally:
+            pwd.getpwnam = real_getpwnam
+            os.chdir(old_cwd)
+            if old_home is None:
+                os.environ.pop("HOME", None)
+            else:
+                os.environ["HOME"] = old_home
+            for key, value in saved.items():
+                setattr(config, key, value)
+
+
+# Writes that provably land on the allowlist: refused outright, never asked,
+# never run — under an allowlist entry for the stem, and under mode "all".
+GATE_DENY = [
+    "cp /tmp/x {allow}",
+    "cp /tmp/x ~/.config/jarvis/allowlist.json",
+    "cp /tmp/x $HOME/.config/jarvis/allowlist.json",
+    "cp /tmp/x ${{HOME}}/.config/jarvis/allowlist.json",
+    "cp /tmp/x ~/allow-link.json",                           # a symlink onto it
+    "env cp /tmp/x ~/.config/jarvis/allowlist.json",          # wrappers
+    "nohup cp /tmp/x ~/.config/jarvis/allowlist.json",
+    "timeout 5 cp /tmp/x ~/.config/jarvis/allowlist.json",
+    "timeout -s KILL 5 cp /tmp/x ~/.config/jarvis/allowlist.json",
+    "env -C ~/.config/jarvis cp /tmp/x allowlist.json",
+    "git status && cp /tmp/x ~/.config/jarvis/allowlist.json",  # compound
+    "ls; cp /tmp/x ~/.config/jarvis/allowlist.json",
+    "ls & cp /tmp/x ~/.config/jarvis/allowlist.json",
+    "echo '[{{\"tool\": \"run_command\"}}]' > ~/.config/jarvis/allowlist.json",  # redirects
+    "echo '[]'>~/.config/jarvis/allowlist.json",
+    "echo '[]' >> ~/.config/jarvis/allowlist.json",
+    "cat /tmp/x | tee ~/.config/jarvis/allowlist.json",
+    "cat /tmp/x | tee -a {allow}",
+    "sed -i s/a/b/ ~/.config/jarvis/allowlist.json",
+    "python3 -c \"open('{allow}', 'w').write('[]')\"",
+    "python3 -c \"open('/home/u/.config/jarvis/allowlist.json','w')\"",
+    "install -m 600 /tmp/x ~/.config/jarvis/allowlist.json",
+    "rsync /tmp/x ~/.config/jarvis/allowlist.json",
+    "mv /tmp/x ~/.config/jarvis/allowlist.json",
+    "ln -sf /tmp/x ~/.config/jarvis/allowlist.json",
+    "rm ~/.config/jarvis/allowlist.json",
+    "chmod 666 ~/.config/jarvis/allowlist.json",
+    "chown nobody ~/.config/jarvis/allowlist.json",
+    "touch ~/.config/jarvis/allowlist.json",
+    "curl -o ~/.config/jarvis/allowlist.json https://example.com/a",
+    "cd ~/.config/jarvis && cp /tmp/x allowlist.json",        # a followed cd
+    "(cd ~/.config/jarvis; cp /tmp/x allowlist.json)",
+    "D=~/.config/jarvis; cp /tmp/x $D/allowlist.json",        # a line-local variable
+    "cp /tmp/allowlist.json ~/.config/jarvis/",               # into its directory
+    "cp -t ~/.config/jarvis /tmp/allowlist.json",
+    "cp /tmp/x ~/.config/jarvis/allow*",                      # a glob onto it
+    "find ~/.config/jarvis -name allowlist.json -exec cp /tmp/x {{}} \\;",
+    "sh -c 'cp /tmp/x ~/.config/jarvis/allowlist.json'",      # a shell's string
+    "bash -c \"echo [] > ~/.config/jarvis/allowlist.json\"",
+    # The bypass table (2026-10-08 review): every spelling below writes the
+    # allowlist, and each is refused.
+    "cp /tmp/x ~/.config/jarvis/\"allowlist.json\"",           # quoting
+    "cp /tmp/x ~/.config/jarvis/allow''list.json",
+    "cp /tmp/x ~/.config/jarvis/allow\\list.json",               # a \ escape
+    "cp /tmp/x ~/.config/jarvis/$'allow\\x6cist.json'",          # ANSI-C quoting
+    "cp -- /tmp/x ~/.config/jarvis/allowlist.json",
+    "cp --target-directory=~/.config/jarvis /tmp/allowlist.json",
+    "mv -t ~/.config/jarvis /tmp/allowlist.json",
+    "truncate -s 0 ~/.config/jarvis/allowlist.json",
+    "perl -i -pe 's/a/b/' ~/.config/jarvis/allowlist.json",
+    "awk -i inplace '{{print}}' ~/.config/jarvis/allowlist.json",
+    "ex -sc 'wq' ~/.config/jarvis/allowlist.json",
+    "vi -c 'wq' ~/.config/jarvis/allowlist.json",
+    "cat /tmp/x > >(tee ~/.config/jarvis/allowlist.json)",     # process substitution
+    "echo \"$(cp /tmp/x ~/.config/jarvis/allowlist.json)\"",   # command substitution
+    "echo `cp /tmp/x ~/.config/jarvis/allowlist.json`",
+    "grep \"it's $(cp /tmp/x ~/.config/jarvis/allowlist.json)\" f",
+    "cat > ~/.config/jarvis/allowlist.json <<'EOF'\n[]\nEOF",  # a here-doc
+    "exec 3>~/.config/jarvis/allowlist.json",
+    "exec 3<>~/.config/jarvis/allowlist.json",
+    "ls\ncp /tmp/x ~/.config/jarvis/allowlist.json",           # a newline separator
+    "cp /tmp/x ~/.config/jarvis/allowlist.json 2>&1",          # a trailing redirect
+    "cp /tmp/x ~/.config/jarvis/allowlist.json > /dev/null",   # is not the destination
+    "cp /tmp/x ~/.config/jarvis/allowlist.json >/dev/null 2>&1 < /dev/null",
+    "parallel cp /tmp/x ::: ~/.config/jarvis/allowlist.json",
+    "busybox cp /tmp/x ~/.config/jarvis/allowlist.json",
+    "command cp /tmp/x ~/.config/jarvis/allowlist.json",
+    "builtin echo '[]' > ~/.config/jarvis/allowlist.json",
+    "chattr +i ~/.config/jarvis/allowlist.json",
+    "cp /tmp/x ~someone/.config/jarvis/allowlist.json",        # ~user
+    # Review round 2 (2026-10-08): a copier's destination used to be "the
+    # last operand", and each of these wrote the allowlist while it was read
+    # as a copy *source* — v1 dispatch ran them with nobody asked.
+    "cp /tmp/x ~/.config/jarvis/allowlist.json # backup",      # a trailing comment
+    "cp /tmp/x ~/.config/jarvis/allowlist.json ${{NOTHING}}",   # expands to nothing
+    "cp /tmp/x ~/.config/jarvis/allowlist.json \"$@\"",
+    "cp /tmp/x ~/.config/jarvis/allowlist.json $*",
+    "X=; cp /tmp/x ~/.config/jarvis/allowlist.json $X",       # set, but empty
+    "cp /tmp/x ~/.config/jarvis/allowlist.json {{fd}}>/dev/null",  # a named-fd redirect
+    "cp -bt ~/.config/jarvis /tmp/allowlist.json",             # combined -t
+    "cp -t$HOME/.config/jarvis /tmp/allowlist.json",           # glued -t
+    "cp -t ~/.config/jarvis -- /tmp/allowlist.json",
+    "cp --targ ~/.config/jarvis /tmp/allowlist.json",          # an abbreviation
+    "cp --target=$HOME/.config/jarvis /tmp/allowlist.json",
+    "cp /tmp/x ~/.config/jarvis/allowlist.json --suffix .bak",  # a value after it
+    "cp --no-such-option /tmp/x ~/.config/jarvis/allowlist.json y",  # unparsed: all writes
+    "install /tmp/x ~/.config/jarvis/allowlist.json # x",
+    "install -d ~/.config/jarvis/allowlist.json",              # directory mode
+    "install -m600 -t ~/.config/jarvis /tmp/allowlist.json",
+    "mv -t$HOME/.config/jarvis /tmp/allowlist.json",           # glued, a non-copier
+]
+
+# Writes that change what he runs on, or might reach the allowlist: asked,
+# whatever the allowlist says, and never run on a "no".
+GATE_ASK = [
+    "cp /tmp/x ~/.config/jarvis/models.json",
+    "cp /tmp/x ~/models-hard.json",                            # a hard link to it
+    "mv /tmp/x {models}",
+    "echo '{{}}' > ~/.config/jarvis/routing.json",
+    "cp /tmp/x ~/.config/jarvis/provider_defaults.json",
+    "tee ~/.config/jarvis/discord_guild.json",
+    "sed -i s/a/b/ $HOME/.config/jarvis/models.json",
+    "rsync -a /tmp/evil/ ~/.config/jarvis/",                  # a tree into its folder
+    "cp -r /tmp/evil/. ~/.config/jarvis",
+    "mkdir -p ~/.config/jarvis",
+    "echo ~/.config/jarvis/allowlist.json | xargs cp /tmp/x",  # named here, written there
+    "cp /tmp/x $UNSET_DIR/allowlist.json",                     # a place nobody can know
+    "git checkout -- ~/.config/jarvis/allowlist.json",
+    "python3 -c \"import json; json.dump({{}}, open('models.json', 'w'))\"",
+    # The bypass table's rows that cannot be proven, so are asked.
+    "git --git-dir=/tmp/r/.git --work-tree=~/.config/jarvis checkout -- allowlist.json",
+    "tar -xf /tmp/x.tar -C ~/.config/jarvis",
+    "unzip /tmp/x.zip -d ~/.config/jarvis",
+    "echo ~/.config/jarvis/allowlist.json | xargs -I{{}} cp /tmp/x {{}}",
+    "ln -sfn /tmp/evil ~/.config/jarvis",
+    "mv -T /tmp/evil ~/.config/jarvis",
+    "mount --bind /tmp/evil ~/.config/jarvis",
+    "cp /tmp/x ~someone/.config/jarvis/models.json",
+    "cp /tmp/x ~/gate-link/provider_defaults.json",           # see gate_home
+]
+
+# Ordinary work that must stay exactly as it was: the verdict rules.py gives it,
+# and — with the stem allowlisted, as it is here — run once, unasked.
+GATE_ORDINARY = [
+    "cp a b",
+    "cp -r src dst",
+    "mv build/old.json build/new.json",
+    "cat ~/.config/jarvis/allowlist.json",
+    "ls ~/.config/jarvis",
+    "ls -la ~/.config/jarvis/",
+    "head -n 5 ~/.config/jarvis/models.json",
+    "cp ~/.config/jarvis/allowlist.json ~/allowlist.backup.json",  # a backup is a read
+    "cp ~/.config/jarvis/allowlist.json ~/allowlist.backup.json # keep a copy",
+    "cp -t ~/backups ~/.config/jarvis/models.json",             # -t names the destination
+    "cp a b # note",
+    "install -m 600 build/tool ~/bin/tool",
+    "cp file ~",
+    "echo allowlist.json > notes.txt",                          # the name, not the file
+    "echo hi > models.json",                                    # a project's own models.json
+    "cp x routing.json",
+    "python3 -m json.tool models.json",
+    "git commit -m 'edit allowlist.json'",
+    "make build 2>&1",
+    "mkdir -p ~/.config/other",
+]
+
+
+def gate_state_checks() -> None:
+    from jarvis import config, permissions
+
+    with gate_home() as home:
+        fill = {"allow": str(config.ALLOWLIST_PATH), "models": str(config.MODELS_PATH)}
+        asked: list[str] = []
+
+        def says_yes(tool, args):
+            asked.append(args.get("command", ""))
+            return True
+
+        def says_no(tool, args):
+            asked.append(args.get("command", ""))
+            return False
+
+        before = config.ALLOWLIST_PATH.read_text()
+        for raw in GATE_DENY:
+            command = raw.format(**fill)
+            for mode in ("ask", "all"):
+                permissions.set_mode(mode)
+                try:
+                    with recorded() as ran:
+                        asked.clear()
+                        out = tools.dispatch(
+                            "run_command", json.dumps({"command": command, "reason": "r"}),
+                            approve=permissions.gate(says_yes))
+                finally:
+                    permissions.set_mode("ask")
+                assert "Refused" in out.text and "allowlist.json" in out.text, (command, out.text)
+                assert not ran, f"[{mode}] a write onto the allowlist ran: {command}"
+                assert not asked, f"[{mode}] a write onto the allowlist was asked: {command}"
+            assert permissions.static_verdict(command).decision == rules.DENY, command
+            assert not permissions.allows("run_command", {"command": command}), command
+            # And with no approver at all — the path dispatch() calls unguarded.
+            with recorded() as ran:
+                out = tools.dispatch("run_command",
+                                     json.dumps({"command": command, "reason": "r"}))
+            assert not ran and "Refused" in out.text, f"run_command itself ran: {command}"
+        assert config.ALLOWLIST_PATH.read_text() == before
+        print(f"ok  gate state: {len(GATE_DENY)} spellings of a write onto the allowlist "
+              "refused, never asked, never run — allowlisted stem, mode all, no approver")
+
+        for raw in GATE_ASK:
+            command = raw.format(**fill)
+            with recorded() as ran:
+                asked.clear()
+                out = tools.dispatch(
+                    "run_command", json.dumps({"command": command, "reason": "r"}),
+                    approve=permissions.gate(says_no))
+            assert "declined" in out.text, (command, out.text)
+            assert not ran, f"a gate-state write ran on a no: {command}"
+            assert asked == [command], f"a gate-state write was not asked: {command} {asked}"
+            assert permissions.static_verdict(command).decision == rules.ASK, command
+            assert not permissions.allows("run_command", {"command": command}), (
+                f"an allowlist entry covered a gate-state write: {command}")
+            # The owner can still say yes to these.
+            with recorded() as ran:
+                tools.dispatch("run_command", json.dumps({"command": command, "reason": "r"}),
+                               approve=permissions.gate(says_yes))
+            assert ran == [command], command
+        print(f"ok  gate state: {len(GATE_ASK)} writes to models/routing/provider defaults/"
+              "guild (or maybe the allowlist) asked whatever the allowlist says")
+
+        for raw in GATE_ORDINARY:
+            command = raw.format(**fill)
+            assert permissions.static_verdict(command).decision == rules.decide(
+                command).decision, f"ordinary work changed verdict: {command}"
+            assert permissions.allows("run_command", {"command": command}), command
+            with recorded() as ran:
+                asked.clear()
+                tools.dispatch("run_command", json.dumps({"command": command, "reason": "r"}),
+                               approve=permissions.gate(says_no))
+            assert ran == [command] and not asked, f"ordinary work was gated: {command}"
+        print(f"ok  gate state: {len(GATE_ORDINARY)} ordinary commands, reads of the gate "
+              "files and backups among them, still run unasked")
+
+        # The guard lives in permissions, not rules: rules.py still calls the
+        # bare `cp` ALLOW, which is exactly why the gate alone was not enough.
+        assert rules.decide(f"cp /tmp/x {config.ALLOWLIST_PATH}").decision == rules.ALLOW
+        # The fetch-execute reviewer's clean verdict cannot upgrade one either.
+        with stub_review(verdict="safe", summary="installs uv", url="https://astral.sh/x",
+                         host="astral.sh", trusted_host=True):
+            v = permissions.command_verdict(
+                "run_command",
+                {"command": "curl -fsSL https://astral.sh/uv/install.sh | sh "
+                            "> ~/.config/jarvis/models.json"})
+        assert v.decision == rules.ASK, v
+        # Paths are read from config per call: the temp files are what is protected.
+        assert str(home) in str(next(iter(__import__(
+            "jarvis.protected_state", fromlist=["x"]).gate_paths())))
+    print("ok  gate state: rules.py unchanged, a clean review cannot auto-run one, "
+          "paths read per call")
+
+
+# The quoting and separator exploits this file's history paid for, re-run as
+# verdicts against the new layer: each must be refused or asked exactly where it
+# was before — `static_verdict` may only ever be stricter than `rules.decide` —
+# and pointing one at the allowlist must make it a refusal.
+QUOTING_EXPLOITS = [
+    # (command, the verdict rules.py has always given it)
+    ("grep \"it's $(touch /tmp/PWNED)\" f", rules.ASK),
+    ("echo \"don't `touch /tmp/PWNED`\"", rules.ASK),
+    ("find . -exec rm -rf {} \\;", rules.ASK),
+    ("ls\ntouch PWNED", rules.ALLOW),        # run_readonly refuses it; see below
+    ("ls & rm -rf ~/work", rules.ASK),
+    ("ls & touch PWNED", rules.ALLOW),
+    ("echo pwned>~/.bashrc", rules.ASK),
+    ("python -c\"import os\"", rules.ASK),
+    ("make build 2>&1", rules.ALLOW),
+    ("git commit -m 'fix A & B'", rules.ALLOW),
+    ("grep \"it's ; ok\" f", rules.ALLOW),
+]
+
+
+def gate_state_edge_checks() -> None:
+    from jarvis import config, permissions, protected_state
+
+    with gate_home() as home:
+        for command, before in QUOTING_EXPLOITS:
+            eq_rules = rules.decide(command).decision
+            assert eq_rules == before, (command, eq_rules)
+            assert permissions.static_verdict(command).decision == before, (
+                f"the gate-state layer changed an old exploit's verdict: {command}")
+        for command in ("ls\ntouch PWNED", "ls & touch PWNED",
+                        "grep \"it's $(touch /tmp/PWNED)\" f",
+                        "echo \"don't `touch /tmp/PWNED`\""):
+            with recorded() as ran:
+                tools.dispatch("run_readonly", json.dumps({"command": command}))
+            assert not ran, f"run_readonly ran an old exploit: {command}"
+        allow = "~/.config/jarvis/allowlist.json"
+        for command in (f"grep \"it's $(cp /tmp/x {allow})\" f",
+                        f"echo \"don't `cp /tmp/x {allow}`\"",
+                        f"ls\ncp /tmp/x {allow}", f"ls & cp /tmp/x {allow}",
+                        f"echo '[]'>{allow}", f"cp /tmp/x {allow} 2>&1",
+                        f"find ~/.config/jarvis -name allowlist.json -exec cp /tmp/x {{}} \\;"):
+            assert permissions.static_verdict(command).decision == rules.DENY, command
+        print(f"ok  gate state: {len(QUOTING_EXPLOITS)} quoting/separator exploits keep "
+              "their verdicts, and aimed at the allowlist each is refused")
+
+        # Mutation pin: `_resolve` must follow symlinks. Through a link to the
+        # gate's folder, a file that does not exist yet has no inode to match
+        # and no lexical path in the set — only resolving the link finds it.
+        missing = config.PROVIDER_DEFAULTS_PATH
+        assert not missing.exists()
+        touch = protected_state.command_touch("cp /tmp/x ~/gate-link/provider_defaults.json")
+        assert touch is not None and touch.certain and touch.path.name == missing.name, touch
+        touch = protected_state.command_touch("cp /tmp/x ~/gate-link/allowlist.json")
+        assert touch is not None and touch.certain, touch
+
+        # Mutation pin: config.ROUTING_PATH is protected by its own setting,
+        # not only as a sibling of the allowlist.
+        elsewhere = home / "elsewhere" / "routing.json"
+        elsewhere.parent.mkdir()
+        saved = config.ROUTING_PATH
+        config.ROUTING_PATH = elsewhere
+        try:
+            out = tools.dispatch("write_file", json.dumps(
+                {"path": str(elsewhere), "content": "{}"}))
+            assert "safety layer" in out.text and not elsewhere.exists(), out.text
+            touch = protected_state.command_touch(f"cp /tmp/x {elsewhere}")
+            assert touch is not None and touch.certain and touch.path.name == "routing.json"
+            assert permissions.static_verdict(f"cp /tmp/x {elsewhere}").decision == rules.ASK
+        finally:
+            config.ROUTING_PATH = saved
+
+        # v1 resolves relative names against its own process cwd; an explicit
+        # cwd (v2's brief) wins over it.
+        gate = config.ALLOWLIST_PATH.parent
+        assert protected_state.command_touch("echo hi > models.json") is None
+        assert protected_state.command_touch("echo hi > models.json", cwd=gate) is not None
+        assert protected_state.command_touch("echo hi > models.json",
+                                             cwd=home / "gate-link") is not None
+    print("ok  gate state: symlinked folder with a missing file, ROUTING_PATH elsewhere, "
+          "and an explicit cwd all pinned")
+
+
+def gate_state_complexity_checks() -> None:
+    """Review round 2: nested or repeated substitutions cost cubic time (one
+    re-scan per opener, recursing on each), so `$(` five thousand times held
+    the synchronous permit for over a minute. Bounded now, and the bound
+    fails closed: too complex to judge is ASK, never ALLOW, and no allowlist
+    entry covers it."""
+    import time
+
+    from jarvis import permissions, protected_state
+
+    deep_shell = "ls"
+    for _ in range(8):
+        deep_shell = "sh -c " + __import__("shlex").quote(deep_shell)
+    with gate_home():
+        for label, command in (
+            ("5000 unclosed $(", "echo " + "$(" * 5000),
+            ("5000 unclosed <(", "cat " + "<(" * 5000),
+            ("200 nested $(…)", "echo " + "$(" * 200 + "x" + ")" * 200),
+            ("200 sequential $(…)", "echo " + "$(x) " * 200),
+            ("2500 backtick pairs", "echo " + "`x` " * 2500),
+            ("8 nested sh -c", deep_shell),
+        ):
+            start = time.perf_counter()
+            verdict = permissions.static_verdict(command)
+            touch = protected_state.command_touch(command)
+            spent = time.perf_counter() - start
+            assert spent < 1.0, f"{label}: {spent:.2f}s"
+            assert verdict.decision != rules.ALLOW, (label, verdict)
+            assert touch is not None and touch.opaque, (label, touch)
+            assert "too complex to judge" in protected_state.ask_reason(touch), label
+            assert not permissions.allows("run_command", {"command": command}), label
+        # Ordinary substitution is still judged, not waved off as too complex.
+        assert protected_state.command_touch("echo $(date) $(whoami)") is None
+        assert protected_state.command_touch("sh -c 'bash -c \"ls\"'") is None
+    print("ok  gate state: 5000-opener, 200-deep and 2500-span lines judged in well under "
+          "a second, as too complex to judge — never ALLOW")
 
 
 def main() -> int:
@@ -766,6 +1198,9 @@ def main() -> int:
     review_failure_checks()
     prompt_hygiene_checks()
     protection_checks()
+    gate_state_checks()
+    gate_state_edge_checks()
+    gate_state_complexity_checks()
     print("\nall rules checks passed")
     return 0
 

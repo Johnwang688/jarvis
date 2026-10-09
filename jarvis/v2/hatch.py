@@ -199,7 +199,7 @@ class EscapeHatch:
 
         # Layer 1 again, at the moment of running. The owner's yes does not
         # reach past DENY.
-        refusal = denied_command(item.command)
+        refusal = denied_command(item.command, self._cwd_for(item.thread_id, task))
         if refusal:
             return self._finish(item, HatchResult(
                 decision="allow", refusal=refusal,

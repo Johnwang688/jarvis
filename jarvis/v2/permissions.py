@@ -56,7 +56,7 @@ import re
 import threading
 from typing import Iterable
 
-from jarvis import config, permissions as v1_permissions, rules
+from jarvis import config, permissions as v1_permissions, protected_state, rules
 from jarvis.tools import files as v1_files, secrets as v1_secrets
 from .approvals import ApprovalRequest, DenyAll, clean_line, label, v1_request
 from .model import PermissionProfile, Project, Task, utcnow
@@ -178,30 +178,18 @@ def log_decision(record: ApprovalRecord, path: Path | None = None) -> None:
 
 
 def protected_paths() -> set[Path]:
-    """The v2 config trio, v1's allowlist and the Discord guild file, resolved.
+    """The gate-state files — v1's allowlist, `models.json`, `routing.json`,
+    `provider_defaults.json`, the Discord guild file and the saved Codex
+    catalog (`codex-models.json`, PR #20) — resolved.
 
-    Derived from `config.ALLOWLIST_PATH`'s directory rather than hard-coded at
-    `~/.config/jarvis`, so a test that repoints the allowlist repoints the trio
-    with it and never writes near the owner's real files.
+    One set for v1 and v2 (2026-10-08): it is `jarvis.tools.files._protected_state`,
+    which v1's write tools refuse, reached through `jarvis.protected_state`,
+    which v1's shell gate and v2's layer 1 both ask. It used to be a second copy
+    kept equal by a suite; a second copy is how two rules drift. Still derived
+    from `config.ALLOWLIST_PATH`'s directory, so a test that repoints the
+    allowlist repoints the set with it.
     """
-    allow = Path(config.ALLOWLIST_PATH).expanduser()
-    directory = allow.parent
-    # discord_guild.json (B1) is not permission state but decides where Jarvis
-    # may create, rename and move channels: only `jarvis auth discord-guild`
-    # writes it.
-    # provider_defaults.json (2026-10-08) is models.json's sibling for Claude
-    # and Codex: the model every default chat thread runs on, the owner's to
-    # choose in the HUD and nobody else's.
-    # codex-models.json (PR #20) is loaded at daemon start as the Codex table,
-    # so writing it would change which model tasks and default threads run on.
-    names = ("allowlist.json", "models.json", "routing.json", "discord_guild.json",
-             "provider_defaults.json")
-    paths = {allow, Path(config.MODELS_PATH).expanduser(),
-             Path(config.PROVIDER_DEFAULTS_PATH).expanduser(),
-             Path(config.DISCORD_GUILD_PATH).expanduser(),
-             Path(config.CODEX_CATALOG_PATH).expanduser()}
-    paths |= {directory / name for name in names}
-    return {_resolve(p) for p in paths}
+    return protected_state.protected_paths()
 
 
 def _resolve(path: str | Path) -> Path:
@@ -300,7 +288,7 @@ def _command_of(args: dict) -> str:
     return ""
 
 
-def denied_command(command: str) -> str | None:
+def denied_command(command: str, cwd: str | None = None) -> str | None:
     """The reason this command may not run at all, or None.
 
     Two sources, both v1's and both unchanged: the never-approvable verdicts
@@ -316,54 +304,32 @@ def denied_command(command: str) -> str | None:
     name = v1_secrets.protected_in_command(command)
     if name:
         return v1_secrets.refusal(name)
-    touched = _command_writes_protected_state(command)
+    touched = _command_writes_protected_state(command, cwd)
     if touched:
         return (f"{touched} is Jarvis's own permission state; a command that "
                 "writes it would widen what runs without anyone being asked.")
     return None
 
 
-_STATE_WRITERS = frozenset({
-    "tee", "sed", "cp", "mv", "rm", "install", "truncate", "dd", "shred",
-    "chmod", "chown", "ln", "touch", "python", "python3", "perl", "node",
-})
+def _command_writes_protected_state(command: str, cwd: str | None = None) -> str | None:
+    """The protected file this command provably writes, or None.
 
-
-def _command_writes_protected_state(command: str) -> str | None:
-    """A narrow, honest check: a redirect onto the allowlist, or a writing stem
-    given it as an argument.
+    The detector is v1's (`jarvis.protected_state.command_touch`): one copy for
+    both, after v1 was found to have none at all. v2 refuses every *certain*
+    write at layer 1, the allowlist and its siblings alike, as it always has.
+    An uncertain one — a copy into the gate's folder, an unknown program handed
+    the path — is not refused here; `v1_permissions.static_verdict` turns it
+    into an ASK, so layer 4 never auto-approves it.
 
     It is not a boundary and the code says so — a shell has more spellings than
     any matcher has patterns, which is the same caveat `rules.py`'s DENY
-    section already carries. It closes the obvious spelling of the hole the v1
-    round found in `edit_file`; the real protection is that the file's *tool*
+    section already carries. The real protection is that the file's *tool*
     path is refused above and that nothing auto-approves an unrecognised
     command.
     """
-    protected = protected_paths()
-    for segment in rules.segments(command):
-        tokens = rules._tokens(segment)
-        named = None
-        for token in tokens:
-            candidate = token.strip("\"'><")
-            if not candidate or candidate.startswith("-"):
-                continue
-            if _resolve(candidate) in protected:
-                named = Path(candidate).name
-                break
-        if named is None:
-            # A redirect glues the path to the operator (`>~/.config/...`).
-            for protected_path in protected:
-                if protected_path.name in segment and rules.redirects_to_file(segment):
-                    named = protected_path.name
-                    break
-            if named is None:
-                continue
-        if rules.redirects_to_file(segment):
-            return named
-        stems = [stem for stem, _ in rules.command_targets(segment)]
-        if any(stem in _STATE_WRITERS for stem in stems):
-            return named
+    touch = protected_state.command_touch(command, cwd)
+    if touch is not None and touch.certain:
+        return touch.name
     return None
 
 
@@ -613,6 +579,9 @@ def build_permit(ctx: PermitContext, asker) -> PermissionCallback:
         args = dict(args or {})
         profile = brief.profile if brief is not None else PermissionProfile.AUTO
         command = _command_of(args) if tool in COMMAND_TOOLS else ""
+        # Where the command will run: the brief's folder, never the daemon's
+        # own cwd, or a relative `models.json` names the wrong file.
+        cwd = (brief.cwd or None) if brief is not None else None
 
         def finish(decision: Decision, layer: str, reason: str) -> Decision:
             log_decision(ApprovalRecord(
@@ -624,7 +593,7 @@ def build_permit(ctx: PermitContext, asker) -> PermissionCallback:
 
         # --- layer 1: never approvable, never asked of anyone --------------
         if tool in COMMAND_TOOLS and command.strip():
-            refusal = denied_command(command)
+            refusal = denied_command(command, cwd)
             if refusal:
                 return finish(Decision.DENY, L_DENY, refusal)
         if tool in FILE_TOOLS:
@@ -659,6 +628,16 @@ def build_permit(ctx: PermitContext, asker) -> PermissionCallback:
 
         # --- layer 2: the owner is asked whatever the reviewer thought -----
         match = always_ask_match(tool, args, brief, ctx.project)
+        if match is None and command.strip():
+            # A line that might write the gate's own state but is not provably
+            # a write (layer 1 took those): a copy into the gate's folder, a
+            # path behind an unset variable — or a line too complex to judge at
+            # all (past the substitution bound). Under AUTO it would otherwise
+            # go to the provider's classifier; it goes to the owner instead, in
+            # every profile.
+            touch = protected_state.command_touch(command, cwd)
+            if touch is not None:
+                match = ("gate-state", protected_state.ask_reason(touch))
         if match is not None:
             rule_id, why = match
             reason = f"always-ask rule {rule_id}" + (f": {why}" if why else "")
@@ -670,10 +649,11 @@ def build_permit(ctx: PermitContext, asker) -> PermissionCallback:
         # docstring for what an ALLOW out of this callback does and does not
         # mean.
         if getattr(asker, "human_backed", False):
-            if v1_permissions.allows(*v1_request(tool, args)):
+            if v1_permissions.allows(*v1_request(tool, args), cwd=cwd):
                 return finish(Decision.ALLOW, L_JARVIS_ALLOW,
                               "covered by the owner's persistent allowlist")
-            if command.strip() and rules.decide(command).decision == rules.ALLOW:
+            if (command.strip() and
+                    v1_permissions.static_verdict(command, cwd).decision == rules.ALLOW):
                 return finish(Decision.ALLOW, L_JARVIS_ALLOW,
                               "ordinary development command (rules ALLOW)")
 
