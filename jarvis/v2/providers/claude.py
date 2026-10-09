@@ -1,7 +1,8 @@
 """ClaudeProvider — Claude Code behind the v2 provider interface (design §5.3).
 
-The SDK (`claude-agent-sdk` 0.2.153) spawns the installed `claude` binary and
-inherits its subscription login, so a worker here is the owner's own Claude
+The SDK (`claude-agent-sdk` 0.2.153) spawns a `claude` binary — the owner's
+installed one, because `resolve_cli()` says so — and inherits its subscription
+login, so a worker here is the owner's own Claude
 Code running headless in a task worktree. Three things about that shape decide
 almost every line below.
 
@@ -28,6 +29,14 @@ call, not in a list at the end. The turn coroutine's `finally` always posts the
 sentinel, so the generator cannot hang, and an SDK exception becomes
 `ERROR{fatal: True}` and then stops.
 
+**Which `claude` runs is chosen here, never left to the SDK** (2026-10-08).
+With `cli_path` unset the SDK spawns the CLI bundled inside its wheel (2.1.273
+in 0.2.153), which lags the owner's self-updating install and refuses newer
+models outright ("does not support this model; version 2.1.280 or newer is
+required"). `resolve_cli()` picks the owner's real install once per process,
+and every `ClaudeAgentOptions` this module builds carries it. The version is
+deliberately not pinned: the install updates itself, and that is the point.
+
 A note on money: `ResultMessage.total_cost_usd` is reported even on a
 subscription, where nothing is billed (R1: 0.28 for a three-tool turn). It is
 passed through unchanged as an **equivalent** figure; what it means is the
@@ -38,9 +47,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
-import shutil
 import subprocess
 import threading
 import queue
@@ -67,6 +76,7 @@ from claude_agent_sdk import (
     UserMessage as SdkUserMessage,
 )
 
+from ... import config
 from ...tools import secrets
 from ..model import PermissionProfile, ProviderName, Thread
 from ..provider import (
@@ -82,11 +92,18 @@ from ..provider import (
     UserMessage,
 )
 
-# major.minor is the pin; the patch moves weekly and breaks nothing we use.
-# health() reports the exact version it found, because "2.1.233" in this
-# constant and 2.1.273 on the machine is the sort of gap a reason string
-# should state rather than hide behind an ok.
-CLAUDE_PIN = "2.1.233"
+# A floor, never a pin (owner, 2026-10-08): the installed CLI updates itself,
+# so health accepts anything at or above CLAUDE_MIN — 2.2 and 3.x included —
+# and only warns, once per process, past CLAUDE_VERIFIED. CLAUDE_MIN is the
+# oldest CLI the default model (`claude-opus-5-5`) accepts — it answers older
+# ones with "version 2.1.280 or newer is required" — which also puts the SDK's
+# bundled 2.1.273 below the floor, so that fallback reads as unhealthy rather
+# than healthy-but-failing. (The R1–R3 spikes and the classifier-denial text
+# were verified on 2.1.273.) CLAUDE_VERIFIED is the newest version known to
+# work end to end.
+# `JARVIS_CLAUDE_STRICT=1` restores the old major.minor match.
+CLAUDE_MIN = "2.1.280"
+CLAUDE_VERIFIED = "2.1.295"
 
 # The CLI kills a hook that does not answer in time and treats it as no
 # decision, so a slow owner would read as "the gate did not fire". The broker's
@@ -157,6 +174,246 @@ def _safe(text: Any) -> str:
 # process goes through here, so a suite never needs one.
 def _client_factory(options: ClaudeAgentOptions) -> Any:
     return ClaudeSDKClient(options=options)
+
+
+# --- which claude -----------------------------------------------------------
+
+LOG = logging.getLogger(__name__)
+
+# Never a Windows binary or shim. `/mnt/<drive>` is the Windows side of WSL,
+# where npm's `claude` is a shell script that launches the *Windows* CLI with a
+# Windows home and a Windows login; these suffixes are its other spellings.
+_FOREIGN_SUFFIXES = (".cmd", ".bat", ".ps1", ".exe")
+_FOREIGN_ROOTS = ("/mnt",)  # a tuple so the free suite can point it at a temp dir
+
+
+def _under_mnt(path: Path) -> bool:
+    text = str(path)
+    return any(text == root or text.startswith(root.rstrip("/") + "/") for root in _FOREIGN_ROOTS)
+
+
+def _usable(path: Path) -> bool:
+    """A real, executable `claude` on the Linux side, and nothing else."""
+    try:
+        for candidate in (path, path.resolve()):
+            if candidate.name.lower().endswith(_FOREIGN_SUFFIXES) or _under_mnt(candidate):
+                return False
+        return path.is_file() and os.access(path, os.X_OK)
+    except OSError:
+        return False
+
+
+def find_cli(
+    *,
+    configured: str | None = None,
+    path_env: str | None = None,
+    home: Path | None = None,
+) -> tuple[str | None, str]:
+    """(path, source) for the `claude` to drive. Only looks at files.
+
+    Order: an explicit `config.CLAUDE_CLI` (env `JARVIS_CLAUDE_CLI`) that is an
+    executable file; the first usable `claude` on PATH (relative entries and
+    anything under `/mnt/` are skipped); `~/.local/bin/claude`, because a
+    systemd unit's PATH rarely has it; else `(None, "bundled")`, which leaves
+    the SDK to its own bundled CLI. The three inputs default to the live
+    config, PATH and home; a test passes its own.
+    """
+    configured = config.CLAUDE_CLI if configured is None else configured
+    path_env = os.environ.get("PATH", "") if path_env is None else path_env
+    home = Path.home() if home is None else home
+    if configured:
+        explicit = Path(configured).expanduser()
+        if not explicit.is_absolute():
+            # Checked here against the daemon's cwd, but the SDK spawns it with
+            # `cwd=<task worktree>`: a relative path would run whatever `claude`
+            # the worktree holds — model-writable, and outside the PreToolUse
+            # gate. Refused rather than made absolute against an arbitrary cwd.
+            LOG.warning("JARVIS_CLAUDE_CLI=%s is not an absolute path; ignoring it", configured)
+        elif explicit.is_file() and os.access(explicit, os.X_OK):
+            # Never `resolve()`d: a self-updating install is a symlink that the
+            # updater re-points, and the link is what should be run.
+            if any(_under_mnt(p) or p.name.lower().endswith(_FOREIGN_SUFFIXES)
+                   for p in (explicit, explicit.resolve())):
+                LOG.warning("JARVIS_CLAUDE_CLI=%s looks like a Windows binary or shim; "
+                            "using it because it was set explicitly", configured)
+            return str(explicit), "config"
+        else:
+            LOG.warning("JARVIS_CLAUDE_CLI=%s is not an executable file; ignoring it", configured)
+    for entry in path_env.split(os.pathsep):
+        if not entry or not os.path.isabs(entry):
+            continue
+        candidate = Path(entry) / "claude"
+        if _usable(candidate):
+            return str(candidate), "path"
+    local = home / ".local" / "bin" / "claude"
+    if _usable(local):
+        return str(local), "local-bin"
+    return None, "bundled"
+
+
+def bundled_version() -> str | None:
+    """The SDK's bundled CLI version, read from its own constant. No process."""
+    try:
+        from claude_agent_sdk._cli_version import __cli_version__
+
+        return str(__cli_version__)
+    except Exception:  # noqa: BLE001 — a private module may move; this feeds a log line
+        return None
+
+
+_cli_lock = threading.Lock()
+_cli_resolved: tuple[str | None, str] | None = None
+# realpath -> version. `~/.local/bin/claude` is a symlink into a versioned
+# directory that the CLI's own updater re-points, so the key is the real file:
+# an update is noticed at the next look, and nothing is re-probed otherwise.
+_cli_versions: dict[str, str | None] = {}
+
+
+# While nothing is found, look again this often, so installing Claude Code
+# after the daemon started does not need a restart. A found CLI is kept for
+# the life of the process.
+RESOLVE_RETRY_S = 60.0
+_cli_resolved_at = 0.0
+
+
+def resolve_cli() -> str | None:
+    """The `cli_path` every client in this module is built with.
+
+    A found CLI is resolved once per process. None means the SDK's bundled
+    CLI: one warning is logged, and the search is repeated at most every
+    `RESOLVE_RETRY_S` until something turns up.
+    """
+    global _cli_resolved, _cli_resolved_at
+    with _cli_lock:
+        first = _cli_resolved is None
+        retry = (not first and _cli_resolved[0] is None
+                 and _clock() - _cli_resolved_at >= RESOLVE_RETRY_S)
+        if first or retry:
+            path, source = find_cli()
+            _cli_resolved, _cli_resolved_at = (path, source), _clock()
+            if path is None and first:
+                version = bundled_version()
+                LOG.warning(
+                    "no installed claude found (JARVIS_CLAUDE_CLI, PATH, ~/.local/bin); "
+                    "falling back to the SDK's bundled CLI%s, which may refuse newer models; "
+                    "looking again every %d s",
+                    f" {version}" if version else "", int(RESOLVE_RETRY_S),
+                )
+            elif path is not None:
+                LOG.info("claude CLI: %s (from %s)", path, source)
+        return _cli_resolved[0]
+
+
+# realpath -> monotonic time of the last failed probe. A failure is never
+# cached as an answer: a one-off timeout must not read as "broken" until the
+# daemon restarts. It only holds off the next attempt for this long, so a
+# genuinely broken binary is not re-spawned on every `/status`.
+PROBE_RETRY_S = 60.0
+_cli_failed: dict[str, float] = {}
+_warned_newer = False
+
+
+def _clock() -> float:
+    """The probe backoff's clock. A seam, so the free suite can move time."""
+    import time
+
+    return time.monotonic()
+
+
+def reset_cli_cache() -> None:
+    """Forget the resolution, the probes and the warning. For tests."""
+    global _cli_resolved, _warned_newer
+    with _cli_lock:
+        _cli_resolved = None
+        _cli_versions.clear()
+        _cli_failed.clear()
+        _warned_newer = False
+
+
+def _probe_version(path: str) -> str | None:
+    """`<path> --version`: a success once per real binary, a failure retried
+    after `PROBE_RETRY_S`."""
+    key = os.path.realpath(path)
+    with _cli_lock:
+        if key in _cli_versions:
+            return _cli_versions[key]
+        failed_at = _cli_failed.get(key)
+        if failed_at is not None and _clock() - failed_at < PROBE_RETRY_S:
+            return None
+    try:
+        probe = subprocess.run([path, "--version"], capture_output=True, text=True, timeout=20)
+        found = (probe.stdout or "").strip().split(" ")[0] if probe.returncode == 0 else ""
+    except (OSError, subprocess.TimeoutExpired):
+        found = ""
+    with _cli_lock:
+        if found:
+            _cli_versions[key] = found
+            _cli_failed.pop(key, None)
+        else:
+            _cli_failed[key] = _clock()
+    return found or None
+
+
+_VERSION = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)(?:[-+.][0-9A-Za-z.+-]*)?$")
+
+
+def parse_version(text: str | None) -> tuple[int, int, int] | None:
+    """`"2.1.295"` -> (2, 1, 295). None for anything that is not a version."""
+    match = _VERSION.match((text or "").strip())
+    return tuple(int(part) for part in match.groups()) if match else None  # type: ignore[return-value]
+
+
+def _version_problem(found: str) -> str | None:
+    """Why this CLI version is not acceptable, or None if it is.
+
+    A floor, not a pin: anything at or above `CLAUDE_MIN` is healthy, 2.2 and
+    3.x included, because the install updates itself and a health check that
+    failed on every minor release would route Claude away for no reason. A
+    version newer than `CLAUDE_VERIFIED` logs one warning per process. With
+    `JARVIS_CLAUDE_STRICT=1`, the old rule returns: the major.minor must match
+    the verified one.
+    """
+    global _warned_newer
+    version = parse_version(found)
+    if version is None:
+        return f"could not read a version from `claude --version` (got {found!r})"
+    minimum, verified = parse_version(CLAUDE_MIN), parse_version(CLAUDE_VERIFIED)
+    if version < minimum:
+        return (f"claude {found} is older than {CLAUDE_MIN}, the oldest version "
+                "Jarvis was verified with; update Claude Code")
+    if config.CLAUDE_STRICT and version[:2] != verified[:2]:
+        return (f"claude {found}: JARVIS_CLAUDE_STRICT=1 requires "
+                f"{verified[0]}.{verified[1]}.x (verified {CLAUDE_VERIFIED})")
+    if version > verified:
+        with _cli_lock:
+            first, _warned_newer = not _warned_newer, True
+        if first:
+            LOG.warning("claude %s is newer than %s, the last version Jarvis was "
+                        "verified with; running it anyway", found, CLAUDE_VERIFIED)
+    return None
+
+
+def cli_info() -> dict:
+    """`{path, version, source}` of the CLI in use, as `/status` reports it.
+
+    `path` is None when the SDK's bundled CLI is in use; its version then comes
+    from the SDK's constant rather than a process.
+    """
+    path = resolve_cli()
+    source = _cli_resolved[1] if _cli_resolved else "bundled"
+    version = _probe_version(path) if path else bundled_version()
+    return {"path": path, "version": version, "source": source}
+
+
+def usage_agent_version() -> str:
+    """The version the usage meter's User-Agent claims: the CLI actually in
+    use, or `CLAUDE_VERIFIED` when that cannot be read as a version. Never
+    raises — a User-Agent is not worth failing the meter over."""
+    try:
+        version = cli_info().get("version")
+    except Exception:  # noqa: BLE001
+        version = None
+    return version if parse_version(version) else CLAUDE_VERIFIED
 
 
 # --- health -----------------------------------------------------------------
@@ -265,8 +522,13 @@ class ClaudeProvider:
 
     # -- health
 
+    def cli_info(self) -> dict:
+        """`{path, version, source}` of the CLI this provider spawns. The daemon
+        reads this for `/status` and its start-up log."""
+        return cli_info()
+
     def health(self) -> tuple[bool, str]:
-        """(ok, reason). Binary, version pin, login. Never spends a token.
+        """(ok, reason). Binary, version floor, login. Never spends a token.
 
         The login check reads one integer out of the credential bundle and
         nothing else — see `_login_expiry_ms`. A bundle with no expiry field at
@@ -275,29 +537,34 @@ class ClaudeProvider:
         keychain) has no bundle to read, and refusing to run because a file
         this provider does not own has changed shape would be a worse failure
         than the one it is guarding against.
+
+        The binary is `resolve_cli()`'s, the same one every session spawns, and
+        its `--version` runs once per real file (see `_probe_version`), not on
+        every `/status`; a failed probe is retried after `PROBE_RETRY_S`. The
+        version is judged against a floor, never a pin (`_version_problem`).
         """
-        binary = shutil.which("claude")
-        if binary is None:
-            return False, "claude is not on PATH"
-        try:
-            probe = subprocess.run(
-                [binary, "--version"], capture_output=True, text=True, timeout=20
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            return False, f"claude --version failed ({type(exc).__name__})"
-        if probe.returncode:
-            return False, f"claude --version exited {probe.returncode}"
-        found = (probe.stdout or "").strip().split(" ")[0]
-        if _series(found) != _series(CLAUDE_PIN):
-            return False, f"claude {found or '?'}, pinned {CLAUDE_PIN}"
+        info = cli_info()
+        found = info["version"]
+        if info["path"] is None:
+            if not found:
+                return False, "no claude CLI found (JARVIS_CLAUDE_CLI, PATH, ~/.local/bin)"
+            label = f"{found} (SDK bundled)"
+        elif not found:
+            return False, (f"`{info['path']} --version` failed; "
+                           f"retrying in {int(PROBE_RETRY_S)} s")
+        else:
+            label = found
+        problem = _version_problem(found)
+        if problem is not None:
+            return False, problem + (" (SDK bundled)" if info["path"] is None else "")
         expiry = _login_expiry_ms()
         if expiry is None:
             if not _credentials_path().exists():
-                return False, f"claude {found}: no login found; run `claude login`"
-            return True, f"claude {found}, login expiry unknown"
+                return False, f"claude {label}: no login found; run `claude login`"
+            return True, f"claude {label}, login expiry unknown"
         if expiry <= _now_ms():
-            return False, f"claude {found}: login expired; run `claude login`"
-        return True, f"claude {found}, subscription login"
+            return False, f"claude {label}: login expired; run `claude login`"
+        return True, f"claude {label}, subscription login"
 
     # -- lifecycle
 
@@ -387,6 +654,12 @@ class ClaudeProvider:
             },
             "stderr": session.stderr.append,
         }
+        cli_path = resolve_cli()
+        if cli_path is not None:
+            # The owner's own install, never the SDK's bundled copy, which
+            # lags it and refuses newer models. None leaves the SDK to its
+            # bundled CLI — the last resort `resolve_cli` already warned of.
+            kwargs["cli_path"] = cli_path
         if brief.model:
             kwargs["model"] = brief.model
         if brief.effort:
@@ -865,11 +1138,6 @@ def _native(h: SessionHandle) -> _Session:
     if h.native is None:
         raise ValueError("this Claude session is closed")
     return h.native
-
-
-def _series(version: str) -> str:
-    parts = (version or "").split(".")
-    return ".".join(parts[:2])
 
 
 def _run_loop(loop: asyncio.AbstractEventLoop) -> None:
