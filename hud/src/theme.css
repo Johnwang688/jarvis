@@ -253,6 +253,9 @@ h2.bar {
 }
 #tabs > button:hover:not(:disabled) { background: none; color: var(--text); }
 #tabs > button.on { color: var(--text); border-bottom-color: var(--accent); background: none; }
+/* The tools group wraps inside itself too, so on a narrow centre Voice,
+   Avatar and Settings drop a row instead of being clipped. */
+#tabs > div { flex-wrap: wrap; justify-content: flex-end; min-width: 0; max-width: 100%; padding-top: 4px; padding-bottom: 4px; }
 #tabs > div button { padding: 3px 9px; }
 #tabs > div select { padding: 3px 6px; }
 
@@ -421,12 +424,10 @@ h2.bar {
 .auth .arg { font: 11px var(--mono); color: var(--text); margin-bottom: 4px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .auth .arg .k { color: var(--text-muted); }
 .auth .reason { font: 11px var(--mono); color: var(--text-2); margin: 8px 0; }
-/* Sticky: a long command scrolls under the buttons, never pushes them off the
-   card — at 160% a command that fits at 100% can be twice as tall. */
-.auth .btns {
-  display: flex; gap: 10px; margin-top: 4px; padding: 10px 0 4px;
-  position: sticky; bottom: 0; background: var(--bg-2); z-index: 1;
-}
+/* Not sticky, deliberately: reaching AUTHORIZE means scrolling past the whole
+   command, so the tail of a long one (a `curl … | sh` on line 45) cannot
+   stay out of sight while the button is in reach. */
+.auth .btns { display: flex; gap: 10px; margin-top: 14px; }
 .auth .btns button { background: var(--bg-3); border-color: var(--border-strong); color: var(--text); font-family: var(--mono); letter-spacing: 0.06em; }
 .auth .btns button:hover:not(:disabled) { background: #353532; }
 .auth .btns button.deny { background: var(--bg-2); border-color: var(--red-line); color: var(--red); }

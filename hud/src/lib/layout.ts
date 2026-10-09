@@ -20,9 +20,12 @@
 // proportion to its own text as the zoom changes: zooming in makes the
 // sidebar wider on screen along with its words, rather than truncating more
 // of them. What zoom *does* change is how much room there is, so the rendered
-// widths are fitted to the window (`fitPanes`) without touching what is
+// widths are fitted to the window (`fitLayout`) without touching what is
 // stored — shrinking the window and growing it back returns the panes to the
-// widths the owner chose.
+// widths the owner chose. When even the panes' minimums would leave the
+// centre under MAIN_MIN, a pane is folded *for this render only* (the right
+// one first): a small window at a high zoom gets a usable centre, and the
+// owner's own folded flags are never rewritten by it.
 //
 // Every storage read and write is guarded and falls back to the default: a
 // window with storage blocked, or a value written by hand, still opens.
@@ -42,7 +45,11 @@ export const PANE: Record<Side, { min: number; max: number; def: number }> = {
   left: { min: 180, max: 480, def: 236 },
   right: { min: 240, max: 560, def: 316 },
 };
-/** The centre pane (chat, file, diff, Monaco) never gets narrower than this. */
+/**
+ * The centre pane (chat, file, diff, Monaco) is kept at least this wide —
+ * by shrinking the panes, then by folding them for the render — unless the
+ * window is too small even with both panes folded.
+ */
 export const MAIN_MIN = 480;
 /** A folded pane's rail. */
 export const RAIL = 36;
@@ -158,26 +165,67 @@ export function saveLayout(layout: PaneLayout, storage?: Setter) {
   }
 }
 
+/** What a render draws: the widths, and which panes are folded for it. */
+export interface Fitted {
+  left: number;
+  right: number;
+  leftFolded: boolean;
+  rightFolded: boolean;
+  /** Folded by the window, not by the owner — not stored, gone when there is room. */
+  autoLeft: boolean;
+  autoRight: boolean;
+}
+
 /**
- * The widths to draw in a window `available` px wide (zoomed space). Only the
- * render changes: when the panes and the centre's minimum do not fit, the open
- * panes give back their slack above their minimums in proportion to it, so
- * neither one is the only one to lose. If even the minimums do not fit, the
- * minimums are drawn and the centre takes what is left.
+ * The widths to draw with the given panes folded, in a window `available` px
+ * wide (zoomed space). When the panes and the centre's minimum do not fit,
+ * the open panes give back their slack above their minimums in proportion to
+ * it, so neither is the only one to lose; past that, the minimums are drawn.
  */
-export function fitPanes(layout: PaneLayout, available: number): { left: number; right: number } {
-  const left = layout.leftCollapsed ? RAIL : clampWidth("left", layout.left);
-  const right = layout.rightCollapsed ? RAIL : clampWidth("right", layout.right);
+function widths(layout: PaneLayout, leftFolded: boolean, rightFolded: boolean, available: number) {
+  const left = leftFolded ? RAIL : clampWidth("left", layout.left);
+  const right = rightFolded ? RAIL : clampWidth("right", layout.right);
   if (!Number.isFinite(available) || available <= 0) return { left, right };
   const over = left + right + MAIN_MIN - available;
   if (over <= 0) return { left, right };
-  const slackL = layout.leftCollapsed ? 0 : left - PANE.left.min;
-  const slackR = layout.rightCollapsed ? 0 : right - PANE.right.min;
+  const slackL = leftFolded ? 0 : left - PANE.left.min;
+  const slackR = rightFolded ? 0 : right - PANE.right.min;
   const slack = slackL + slackR;
   if (slack <= 0) return { left, right };
   const take = Math.min(over, slack);
   const takeL = Math.round((take * slackL) / slack);
   return { left: left - takeL, right: right - (take - takeL) };
+}
+
+/**
+ * The layout one render draws. Only the render changes, never what is stored:
+ *
+ *   1. the owner's folded flags are applied;
+ *   2. if the open panes' *minimums* still leave the centre under MAIN_MIN,
+ *      a pane is folded for this render — the right one first (the status
+ *      pane is the one that can say "something here wants you" from its
+ *      rail), then the left;
+ *   3. the open panes shrink toward their minimums to give the centre room.
+ *
+ * `prefer` is a pane the owner opened by hand while the window had folded it:
+ * it is never folded by the window, and the other pane folds first instead.
+ */
+export function fitLayout(layout: PaneLayout, available: number, prefer: Side | null = null): Fitted {
+  let leftFolded = layout.leftCollapsed;
+  let rightFolded = layout.rightCollapsed;
+  let autoLeft = false;
+  let autoRight = false;
+  if (Number.isFinite(available) && available > 0) {
+    const fits = () =>
+      (leftFolded ? RAIL : PANE.left.min) + (rightFolded ? RAIL : PANE.right.min) + MAIN_MIN <= available;
+    const order: Side[] = prefer === "left" ? ["right"] : prefer === "right" ? ["left"] : ["right", "left"];
+    for (const side of order) {
+      if (fits()) break;
+      if (side === "right" && !rightFolded) rightFolded = autoRight = true;
+      if (side === "left" && !leftFolded) leftFolded = autoLeft = true;
+    }
+  }
+  return { ...widths(layout, leftFolded, rightFolded, available), leftFolded, rightFolded, autoLeft, autoRight };
 }
 
 /**
@@ -228,16 +276,20 @@ export type Shortcut = "zoomIn" | "zoomOut" | "zoomReset" | "toggleLeft" | "togg
 
 /**
  * Ctrl+= / Ctrl+- / Ctrl+0 zoom (with the numpad and shifted spellings), Ctrl+B
- * folds the left pane and Ctrl+Alt+B the right. Matched on `key`, not `code`:
- * AltGr arrives as Ctrl+Alt, and AltGr+B on a layout that types a letter
- * there reports that letter, so it can never fold a pane mid-word.
+ * folds the left pane and Ctrl+Alt+B the right. Ctrl+Shift+B is left alone:
+ * it is the browser's bookmarks bar. Matched on `key`, not `code`: AltGr
+ * arrives as Ctrl+Alt, and AltGr+B on a layout that types a letter there
+ * reports that letter, so it can never fold a pane mid-word.
  */
 export function shortcutFor(e: {
   key: string; ctrlKey: boolean; metaKey?: boolean; altKey: boolean; shiftKey?: boolean;
 }): Shortcut | null {
   if (!(e.ctrlKey || e.metaKey)) return null;
   const k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
-  if (k === "b") return e.altKey ? "toggleRight" : "toggleLeft";
+  if (k === "b") {
+    if (e.shiftKey) return null;
+    return e.altKey ? "toggleRight" : "toggleLeft";
+  }
   if (e.altKey) return null;
   if (k === "=" || k === "+") return "zoomIn";
   if (k === "-" || k === "_") return "zoomOut";
@@ -246,20 +298,14 @@ export function shortcutFor(e: {
 }
 
 /**
- * Whether keystrokes are going into something the owner is typing in: a text
- * input, a textarea, a select, anything contenteditable, or Monaco. The zoom
- * shortcuts stand aside there and the browser keeps its own.
+ * Whether keys are going into Monaco. Ctrl+B stands aside there: it is the
+ * second half of Monaco's Ctrl+K Ctrl+B chord. The zoom keys do not — neither
+ * Monaco nor the input bar binds them, and letting them through would be
+ * Chrome's page zoom, which the HUD's control cannot see and the browser
+ * remembers per site.
  */
-export function isTypingTarget(target: EventTarget | null): boolean {
+export function inMonaco(target: EventTarget | null): boolean {
   const el = target as HTMLElement | null;
   if (!el || typeof (el as any).closest !== "function") return false;
-  if (el.closest(".monaco-editor")) return true;
-  if (el.isContentEditable) return true;
-  const tag = el.tagName;
-  if (tag === "TEXTAREA" || tag === "SELECT") return true;
-  if (tag === "INPUT") {
-    const type = ((el as HTMLInputElement).type || "text").toLowerCase();
-    return !["button", "checkbox", "radio", "range", "color", "file", "submit", "reset", "image"].includes(type);
-  }
-  return false;
+  return !!el.closest(".monaco-editor");
 }

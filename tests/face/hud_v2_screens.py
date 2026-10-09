@@ -26,9 +26,11 @@ PORT = int(os.environ.get("HUD_V2_CHECK_PORT", "8481"))
 BASE = f"http://127.0.0.1:{PORT}"
 
 SHOTS = [
-    ("hud-zoom-100.png", 100, {}),
-    ("hud-zoom-140.png", 140, {}),
-    ("hud-panes-collapsed.png", 100, {"leftCollapsed": True, "rightCollapsed": True}),
+    ("hud-zoom-100.png", 100, {}, (1280, 800)),
+    ("hud-zoom-140.png", 140, {}, (1280, 800)),
+    ("hud-panes-collapsed.png", 100, {"leftCollapsed": True, "rightCollapsed": True}, (1280, 800)),
+    # A small window at a high zoom: the window folds both panes for the render.
+    ("hud-1024x700-zoom-160.png", 160, {}, (1024, 700)),
 ]
 
 
@@ -42,8 +44,8 @@ def main():
     try:
         with sync_playwright() as pw:
             browser = pw.chromium.launch(headless=True)
-            for name, zoom, layout in SHOTS:
-                ctx = browser.new_context(viewport={"width": 1280, "height": 800})
+            for name, zoom, layout, (w, h) in SHOTS:
+                ctx = browser.new_context(viewport={"width": w, "height": h})
                 ctx.add_init_script(
                     "try { localStorage.setItem('jarvis.hud.zoom', %s);"
                     " localStorage.setItem('jarvis.hud.layout', %s); } catch (e) {}"

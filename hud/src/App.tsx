@@ -45,7 +45,8 @@ const LIFECYCLE_KINDS = new Set([
 export default function App() {
   const { state, dispatch } = useStore();
   // Zoom, pane widths and folded panes (§18, 2026-10-08): lib/layout.ts.
-  const view = useLayout();
+  // Every layout key is inert while an authorization card is up (as PTT is).
+  const view = useLayout(state.approvals.length > 0);
   const [avatars, setAvatars] = useState<AvatarDesc[]>([]);
   // The fast path's roster and its default (`GET /models`), re-read on every
   // `model` broadcast so another window's change relabels this one.
@@ -871,7 +872,7 @@ export default function App() {
   const activeProjectId = currentProjectId(state);
   const openThread = state.threadId ? state.threads.find((t) => t.id === state.threadId) || null : null;
   const task = currentTask(state);
-  const { drawn, layout } = view;
+  const drawn = view.fitted;
   const hint =
     state.status ||
     (state.approvals.length ? "ANSWER THE AUTHORIZATION" : HINTS[state.dictation]);
@@ -880,15 +881,15 @@ export default function App() {
     <>
       <div
         id="shell"
-        className={(layout.leftCollapsed ? "left-collapsed " : "") + (layout.rightCollapsed ? "right-collapsed" : "")}
+        className={(drawn.leftFolded ? "left-collapsed " : "") + (drawn.rightFolded ? "right-collapsed" : "")}
         style={{ ["--left-w" as any]: `${drawn.left}px`, ["--right-w" as any]: `${drawn.right}px` }}
       >
-        {layout.leftCollapsed ? (
-          <Rail side="left" onExpand={() => view.setCollapsed("left", false)} onNewThread={() => newThread()} />
+        {drawn.leftFolded ? (
+          <Rail side="left" auto={drawn.autoLeft} onExpand={() => view.open("left")} onNewThread={() => newThread()} />
         ) : null}
         <Sidebar
           zoom={view.zoom}
-          onCollapse={() => view.setCollapsed("left", true)}
+          onCollapse={() => view.fold("left")}
           projects={state.projects}
           archivedNames={state.archivedNames}
           platforms={state.platforms}
@@ -948,11 +949,11 @@ export default function App() {
               return;
             }
             // The usage meters live in the status pane: a folded one opens first.
-            view.setCollapsed("right", false);
+            view.open("right");
             setTimeout(() => document.querySelector('[data-testid="usage"]')?.scrollIntoView({ block: "nearest" }), 0);
           }}
         />
-        {layout.leftCollapsed ? null : (
+        {drawn.leftFolded ? null : (
           <Splitter
             side="left"
             width={drawn.left}
@@ -1070,7 +1071,7 @@ export default function App() {
           {state.tab === "preview" ? <PreviewTab projectId={activeProjectId} /> : null}
         </div>
 
-        {layout.rightCollapsed ? null : (
+        {drawn.rightFolded ? null : (
           <Splitter
             side="right"
             width={drawn.right}
@@ -1084,7 +1085,7 @@ export default function App() {
           <div className="barrow">
             <h2 className="bar">{task ? "Task" : "Status"}</h2>
             <ZoomControl zoom={view.zoom} onStep={view.zoomBy} onReset={() => view.setZoom(ZOOM_DEFAULT)} />
-            <CollapseButton side="right" onCollapse={() => view.setCollapsed("right", true)} />
+            <CollapseButton side="right" onCollapse={() => view.fold("right")} />
           </div>
           <div className="scroll">
             <ApprovalQueue requests={state.approvals} />
@@ -1121,10 +1122,11 @@ export default function App() {
             {state.error ? <div className="block err" data-testid="error">{state.error}</div> : null}
           </div>
         </div>
-        {layout.rightCollapsed ? (
+        {drawn.rightFolded ? (
           <Rail
             side="right"
-            onExpand={() => view.setCollapsed("right", false)}
+            auto={drawn.autoRight}
+            onExpand={() => view.open("right")}
             approvals={state.approvals.length}
             error={!!state.error}
           />
@@ -1139,7 +1141,7 @@ export default function App() {
         avatarUrl={state.avatar ? `/avatar.svg?v=${avatarCacheBust}` : null}
         // A folded sidebar leaves a 36px rail: the orb shrinks into its foot
         // rather than sitting on top of the input bar.
-        compact={layout.leftCollapsed}
+        compact={drawn.leftFolded}
         zoom={view.zoom}
         status={state.orb === "idle" ? "" : state.orb}
         onPress={press}

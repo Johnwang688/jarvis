@@ -8,27 +8,35 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  DEFAULT_LAYOUT, PANE, ZOOM_DEFAULT, ZOOM_MAX, ZOOM_MIN, dragWidth, fitPanes, isTypingTarget, isZoom, keyWidth,
+  DEFAULT_LAYOUT, PANE, ZOOM_DEFAULT, ZOOM_MAX, ZOOM_MIN, dragWidth, fitLayout, inMonaco, isZoom, keyWidth,
   loadLayout, loadZoom, saveLayout, saveZoom, shortcutFor, stepZoom, toCss,
-  type PaneLayout, type Side,
+  type Fitted, type PaneLayout, type Side,
 } from "../lib/layout";
 
 export interface LayoutControl {
   zoom: number;
+  /** What the owner chose (and what is stored). */
   layout: PaneLayout;
-  /** The widths actually drawn, fitted to the window. */
-  drawn: { left: number; right: number };
+  /** What this render draws: widths fitted to the window, panes it folded. */
+  fitted: Fitted;
   available: number;
   setZoom: (level: number) => void;
   zoomBy: (dir: 1 | -1) => void;
   setWidth: (side: Side, width: number) => void;
   resetWidth: (side: Side) => void;
-  setCollapsed: (side: Side, collapsed: boolean) => void;
+  open: (side: Side) => void;
+  fold: (side: Side) => void;
   toggle: (side: Side) => void;
 }
 
-/** The zoom and pane state, persisted, with the keyboard shortcuts bound. */
-export function useLayout(): LayoutControl {
+/**
+ * The zoom and pane state, persisted, with the keyboard shortcuts bound.
+ * `blocked` is true while an authorization card is up: every layout key is
+ * then swallowed and does nothing, as push-to-talk and the wake word already
+ * do — a zoom or a fold would re-lay the card out under a pointer that has
+ * not moved, which is how a click meant for DENY lands on something else.
+ */
+export function useLayout(blocked = false): LayoutControl {
   // Applied in the initializer too, so a window reopened at 140% does not
   // draw its first frame at 100% and then jump.
   const [zoom, setZoomState] = useState(() => {
@@ -38,6 +46,9 @@ export function useLayout(): LayoutControl {
   });
   const [layout, setLayout] = useState<PaneLayout>(() => loadLayout());
   const [viewport, setViewport] = useState(() => window.innerWidth);
+  // A pane the owner opened while the window had folded it: the window folds
+  // the other one first from then on (lib/layout.ts, fitLayout). Not stored.
+  const [prefer, setPrefer] = useState<Side | null>(null);
 
   useEffect(() => {
     document.documentElement.style.setProperty("--ui-zoom", String(zoom / 100));
@@ -51,7 +62,11 @@ export function useLayout(): LayoutControl {
   }, []);
 
   const available = viewport / (zoom / 100);
-  const drawn = fitPanes(layout, available);
+  const fitted = fitLayout(layout, available, prefer);
+  const fittedRef = useRef(fitted);
+  fittedRef.current = fitted;
+  const blockedRef = useRef(blocked);
+  blockedRef.current = blocked;
 
   const setZoom = useCallback((level: number) => setZoomState(isZoom(level) ? level : ZOOM_DEFAULT), []);
   const zoomBy = useCallback((dir: 1 | -1) => setZoomState((z) => stepZoom(z, dir)), []);
@@ -63,34 +78,48 @@ export function useLayout(): LayoutControl {
     (side: Side) => setLayout((l) => ({ ...l, [side]: DEFAULT_LAYOUT[side] })),
     [],
   );
-  const setCollapsed = useCallback(
-    (side: Side, collapsed: boolean) =>
-      setLayout((l) => ({ ...l, [side === "left" ? "leftCollapsed" : "rightCollapsed"]: collapsed })),
-    [],
-  );
+  const open = useCallback((side: Side) => {
+    const f = fittedRef.current;
+    if (side === "left" ? f.autoLeft : f.autoRight) setPrefer(side);
+    setLayout((l) => ({ ...l, [side === "left" ? "leftCollapsed" : "rightCollapsed"]: false }));
+  }, []);
+  const fold = useCallback((side: Side) => {
+    setPrefer((p) => (p === side ? null : p));
+    setLayout((l) => ({ ...l, [side === "left" ? "leftCollapsed" : "rightCollapsed"]: true }));
+  }, []);
   const toggle = useCallback(
-    (side: Side) =>
-      setLayout((l) =>
-        side === "left" ? { ...l, leftCollapsed: !l.leftCollapsed } : { ...l, rightCollapsed: !l.rightCollapsed },
-      ),
-    [],
+    (side: Side) => {
+      const f = fittedRef.current;
+      if (side === "left" ? f.leftFolded : f.rightFolded) open(side);
+      else fold(side);
+    },
+    [open, fold],
   );
 
   // Capture phase on the window: the input bar stops its keys from bubbling
-  // (so Space typed there is not push-to-talk), and Ctrl+B should still fold
-  // a pane from the box the owner's cursor usually sits in. The zoom keys
-  // stand aside while the owner is typing — the browser keeps its own there —
-  // and everywhere else they are the HUD's, not the browser's page zoom.
+  // (so Space typed there is not push-to-talk), and these keys must work from
+  // the box the owner's cursor usually sits in. The zoom keys are the HUD's
+  // everywhere, Monaco and the input bar included — neither binds them, and
+  // letting one through is Chrome's page zoom, which this control cannot see
+  // and the browser remembers per site. Ctrl+B stands aside in Monaco (its
+  // Ctrl+K Ctrl+B chord), ignores auto-repeat (holding it would flap the
+  // pane), and nothing fires mid-composition.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (e.isComposing) return;
       const what = shortcutFor(e);
       if (!what) return;
-      if (what === "toggleLeft" || what === "toggleRight") {
+      if (blockedRef.current) {
         e.preventDefault();
+        return;
+      }
+      if (what === "toggleLeft" || what === "toggleRight") {
+        if (inMonaco(e.target)) return;
+        e.preventDefault();
+        if (e.repeat) return;
         toggle(what === "toggleLeft" ? "left" : "right");
         return;
       }
-      if (isTypingTarget(e.target)) return;
       e.preventDefault();
       if (what === "zoomReset") setZoomState(ZOOM_DEFAULT);
       else setZoomState((z) => stepZoom(z, what === "zoomIn" ? 1 : -1));
@@ -99,7 +128,7 @@ export function useLayout(): LayoutControl {
     return () => window.removeEventListener("keydown", onKey, true);
   }, [toggle]);
 
-  return { zoom, layout, drawn, available, setZoom, zoomBy, setWidth, resetWidth, setCollapsed, toggle };
+  return { zoom, layout, fitted, available, setZoom, zoomBy, setWidth, resetWidth, open, fold, toggle };
 }
 
 /**
@@ -170,7 +199,17 @@ export function Splitter(props: {
         setDragging(false);
       }}
       onDoubleClick={props.onReset}
+      // Space on a focused separator is not push-to-talk (the document-level
+      // handler would otherwise hear it), and does nothing here either.
+      onKeyUp={(e) => {
+        if (e.code === "Space" || e.key === " ") e.stopPropagation();
+      }}
       onKeyDown={(e) => {
+        if (e.code === "Space" || e.key === " ") {
+          e.preventDefault();
+          e.stopPropagation();
+          return;
+        }
         const w = keyWidth(props.side, props.width, e.key, e.shiftKey, props.max);
         if (w === null) return;
         e.preventDefault();
@@ -188,10 +227,18 @@ export function Rail(props: {
   onNewThread?: () => void;
   approvals?: number;
   error?: boolean;
+  /** Folded by the window (too narrow for it), not by the owner. */
+  auto?: boolean;
 }) {
   const left = props.side === "left";
   return (
-    <div className={"rail " + props.side} id={`rail-${props.side}`} data-testid={`rail-${props.side}`}>
+    <div
+      className={"rail " + props.side}
+      id={`rail-${props.side}`}
+      data-testid={`rail-${props.side}`}
+      data-auto={props.auto ? "true" : undefined}
+      title={props.auto ? "Folded to give the centre room; opening it folds the other pane first" : undefined}
+    >
       <button
         type="button"
         className="railbtn"

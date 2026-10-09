@@ -1547,42 +1547,58 @@ rules live in `hud/src/lib/layout.ts`; `components/Layout.tsx` applies them.
 
 - **Zoom** runs from 70% to 160% in 10% steps, default 100%. It is set from
   `− 100% +` in the status pane's header (the percentage resets it) or with
-  Ctrl+= / Ctrl+- / Ctrl+0. The keys stand aside in an input, a textarea, a
-  select and Monaco, where the browser keeps its own. Everywhere else they
-  are the HUD's, not the browser's page zoom. It is CSS `zoom` on `#root`,
-  because a page cannot set the browser's zoom and every size in `theme.css`
-  is px. Viewport units inside `#root` scale with it, so every `vh`/`vw` cap
-  divides by `--ui-zoom`. Undivided, the approval card's `86vh` was 138% of
-  the screen at 160%. The card's button row is also sticky, so a long
-  command scrolls under the buttons and never pushes them off the card. A
-  menu placed from a screen rect divides by the zoom. Monaco already inverts
-  the scale it measures.
+  Ctrl+= / Ctrl+- / Ctrl+0. The keys are the HUD's everywhere, including the
+  input bar and Monaco. Neither binds them, and a key let through is
+  Chrome's page zoom, which the HUD's control cannot see and Chrome
+  remembers per site. It is CSS `zoom` on `#root`, because a page cannot set
+  the browser's zoom and every size in `theme.css` is px. Viewport units
+  inside `#root` scale with it, so every `vh`/`vw` cap divides by
+  `--ui-zoom`. Undivided, the approval card's `86vh` was 138% of the screen
+  at 160%. A menu placed from a screen rect divides by the zoom. Monaco
+  already inverts the scale it measures.
+- **The approval card is not changed otherwise, deliberately.** Its button
+  row is *not* sticky: with AUTHORIZE always in reach, the tail of a long
+  command (the `curl … | sh` on line 45) could stay unread. Reaching
+  AUTHORIZE still means scrolling past the whole command. While a card is up,
+  **every layout key is inert**, as push-to-talk and the wake word already
+  are, so no zoom or fold re-lays the card out under a pointer that has not
+  moved.
 - **Folding.** Each pane has a `«`/`»` button and a shortcut: Ctrl+B for the
-  left pane, Ctrl+Alt+B for the right. A shortcut works even from the input
-  bar, and AltGr's characters never match it. A folded pane leaves a 36px
-  rail with an expand button. The left rail also carries **+ (New thread)**
-  and the orb, scaled into the rail's foot so it never sits on the input
-  bar. The right rail shows pending authorizations (amber) and an error (red),
-  so a folded pane hides nothing that wants the owner. A folded pane is
-  hidden, never unmounted, so its expanded projects, selected thread,
-  compose draft and inline renames survive.
-- **Resizing.** The inner edge of each pane is a `role="separator"` that can
+  left pane, Ctrl+Alt+B for the right. The shortcuts work from the input
+  bar. They do nothing inside Monaco, where Ctrl+B completes the Ctrl+K
+  Ctrl+B chord, on auto-repeat, or during IME composition. Ctrl+Shift+B is
+  left to the browser's bookmarks bar, and AltGr's characters never match.
+  A folded pane leaves a 36px rail with an expand button. The left rail also
+  carries **+ (New thread)** and the orb, scaled into the rail's foot so it
+  never sits on the input bar. The right rail shows pending authorizations
+  (amber) and an error (red), so a folded pane hides nothing that wants the
+  owner. A folded pane is hidden, never unmounted, so its expanded projects,
+  selected thread, compose draft and inline renames survive.
+- **Resizing.** The inner edge of each pane is a `role="separator"`. It can
   be dragged (pointer capture) or moved with the arrows (Shift for a bigger
-  step, Home/End for the ends). Double-click resets it. The left pane runs
-  180–480px and the right 240–560px, **in the HUD's own unzoomed pixels**,
-  so a pane keeps its proportion to its text as the zoom changes. The centre
-  keeps at least 480px. When the panes and that minimum do not fit, as with
-  both panes open at 150% on a 1280px screen, the open panes give back their
-  slack in proportion and the stored widths are left alone, so folding a
-  pane or zooming out returns them. Monaco relayouts through
+  step, Home/End for the ends), and a double-click resets it. Space on a
+  focused separator is not push-to-talk. The left pane runs 180–480px and
+  the right 240–560px, **in the HUD's own unzoomed pixels**, so a pane keeps
+  its proportion to its text as the zoom changes. Monaco relayouts through
   `automaticLayout`.
+- **A small window keeps a usable centre.** The centre is held at 480px in
+  two steps (`fitLayout`). First, the open panes give back their slack above
+  their minimums. If even the minimums do not fit, the window folds a pane
+  **for the render only**: right first, then left. Examples: the right pane
+  at 150% on 1280px, both panes at 160% on 1024×700. The stored widths and
+  folded flags are never rewritten, so the owner's layout returns when there
+  is room. Opening a pane the window folded opens it and folds the other
+  instead. Only a window under about 552 zoomed px leaves the centre
+  narrower than 480, because both rails are already in place.
 - **Persistence.** Zoom and layout persist in localStorage
   (`jarvis.hud.zoom`, `jarvis.hud.layout`). Every read and write is guarded,
   each field falls back to its own default, and only a literal `true` folds
-  a pane, so a mangled value never hides one.
-- **Wrapping.** The tab bar and the input bar's chip row now wrap instead of
-  clipping, so a narrow centre puts Model · Voice · Avatar · Settings on a
-  second row rather than off the edge.
+  a pane, so a mangled value never hides one. Storage that throws on every
+  call still opens at the defaults and simply forgets.
+- **Wrapping.** The tab bar, the tools group inside it and the input bar's
+  chip row wrap instead of clipping. On a narrow centre, Model · Voice ·
+  Avatar · Settings move to another row, and at 1024×700 and 160% every tab
+  and tool is checked to be on screen and clickable.
 
 Remaining: WP13 (the long-bench comparison, the owner's call on cost), a
 native Windows worker, the R8 hook on Codex, and prompt tuning in

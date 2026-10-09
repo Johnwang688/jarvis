@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  DEFAULT_LAYOUT, LAYOUT_KEY, MAIN_MIN, PANE, RAIL, ZOOM_KEY, clampWidth, dragWidth, fitPanes, isTypingTarget,
+  DEFAULT_LAYOUT, LAYOUT_KEY, MAIN_MIN, PANE, RAIL, ZOOM_KEY, clampWidth, dragWidth, fitLayout, inMonaco,
   isZoom, keyWidth, loadLayout, loadZoom, maxWidth, parseLayout, parseZoom, saveLayout, saveZoom, shortcutFor,
   stepZoom, toCss,
 } from "./layout";
@@ -140,41 +140,76 @@ describe("pane widths", () => {
 
 describe("fitting the panes to the window", () => {
   const roomy = 1280;
+  const wl = (f: { left: number; right: number }) => ({ left: f.left, right: f.right });
   it("draws what was chosen when it fits", () => {
-    expect(fitPanes(DEFAULT_LAYOUT, roomy)).toEqual({ left: 236, right: 316 });
+    expect(fitLayout(DEFAULT_LAYOUT, roomy)).toEqual({
+      left: 236, right: 316, leftFolded: false, rightFolded: false, autoLeft: false, autoRight: false,
+    });
   });
 
   it("draws a folded pane as its rail", () => {
-    expect(fitPanes({ ...DEFAULT_LAYOUT, leftCollapsed: true }, roomy)).toEqual({ left: RAIL, right: 316 });
-    expect(fitPanes({ ...DEFAULT_LAYOUT, rightCollapsed: true }, roomy)).toEqual({ left: 236, right: RAIL });
+    expect(wl(fitLayout({ ...DEFAULT_LAYOUT, leftCollapsed: true }, roomy))).toEqual({ left: RAIL, right: 316 });
+    expect(wl(fitLayout({ ...DEFAULT_LAYOUT, rightCollapsed: true }, roomy))).toEqual({ left: 236, right: RAIL });
   });
 
   it("shrinks both panes by their slack when the centre would go under its minimum", () => {
     const layout = { ...DEFAULT_LAYOUT, left: 480, right: 560 };
     const available = 1280 / 1.2; // 120% on a 1280px window
-    const { left, right } = fitPanes(layout, available);
-    expect(left + right + MAIN_MIN).toBeLessThanOrEqual(available);
-    expect(left).toBeGreaterThanOrEqual(PANE.left.min);
-    expect(right).toBeGreaterThanOrEqual(PANE.right.min);
-    expect(left).toBeLessThan(480);
-    expect(right).toBeLessThan(560);
+    const f = fitLayout(layout, available);
+    expect(f.leftFolded || f.rightFolded).toBe(false);
+    expect(f.left + f.right + MAIN_MIN).toBeLessThanOrEqual(available);
+    expect(f.left).toBeGreaterThanOrEqual(PANE.left.min);
+    expect(f.right).toBeGreaterThanOrEqual(PANE.right.min);
+    expect(f.left).toBeLessThan(480);
+    expect(f.right).toBeLessThan(560);
   });
 
-  it("stops at the minimums when even they do not fit", () => {
-    expect(fitPanes({ ...DEFAULT_LAYOUT, left: 400, right: 400 }, 500))
-      .toEqual({ left: PANE.left.min, right: PANE.right.min });
+  it("folds the right pane for the render when even the minimums do not fit", () => {
+    // 150% on 1280: 853px, and 180 + 240 + 480 = 900.
+    const f = fitLayout(DEFAULT_LAYOUT, 1280 / 1.5);
+    expect(f.rightFolded && f.autoRight).toBe(true);
+    expect(f.leftFolded).toBe(false);
+    expect(f.right).toBe(RAIL);
+    expect(f.left + f.right + MAIN_MIN).toBeLessThanOrEqual(1280 / 1.5);
+  });
+
+  it("then the left pane, when one fold is not enough", () => {
+    // 160% on 1024: 640px. 180 + 36 + 480 = 696 still does not fit.
+    const f = fitLayout(DEFAULT_LAYOUT, 1024 / 1.6);
+    expect(f).toMatchObject({ leftFolded: true, rightFolded: true, autoLeft: true, autoRight: true });
+    expect(f.left).toBe(RAIL);
+    expect(f.right).toBe(RAIL);
+  });
+
+  it("never marks a pane the owner folded as folded by the window", () => {
+    const f = fitLayout({ ...DEFAULT_LAYOUT, rightCollapsed: true }, 1024 / 1.6);
+    expect(f.autoRight).toBe(false);
+    expect(f.autoLeft).toBe(true);
+  });
+
+  it("folds the other pane first when the owner opened one by hand", () => {
+    const f = fitLayout(DEFAULT_LAYOUT, 1280 / 1.5, "right");
+    expect(f).toMatchObject({ leftFolded: true, autoLeft: true, rightFolded: false, autoRight: false });
+    // And never folds the preferred one, even when that leaves the centre short.
+    const g = fitLayout(DEFAULT_LAYOUT, 1024 / 1.6, "left");
+    expect(g).toMatchObject({ leftFolded: false, rightFolded: true });
+    expect(g.left).toBe(PANE.left.min);
   });
 
   it("takes nothing from a folded pane", () => {
-    const { left, right } = fitPanes({ ...DEFAULT_LAYOUT, leftCollapsed: true, right: 560 }, 800);
-    expect(left).toBe(RAIL);
-    expect(right).toBe(800 - MAIN_MIN - RAIL);
+    const f = fitLayout({ ...DEFAULT_LAYOUT, leftCollapsed: true, right: 560 }, 800);
+    expect(f.left).toBe(RAIL);
+    expect(f.right).toBe(800 - MAIN_MIN - RAIL);
   });
 
   it("does not touch what is stored", () => {
     const layout = { ...DEFAULT_LAYOUT, left: 480 };
-    fitPanes(layout, 600);
-    expect(layout.left).toBe(480);
+    fitLayout(layout, 600);
+    expect(layout).toEqual({ ...DEFAULT_LAYOUT, left: 480 });
+  });
+
+  it("leaves everything alone with no window to fit", () => {
+    expect(fitLayout(DEFAULT_LAYOUT, NaN)).toMatchObject({ left: 236, right: 316, autoLeft: false, autoRight: false });
   });
 });
 
@@ -232,8 +267,14 @@ describe("shortcuts", () => {
 
   it("folds the left pane with Ctrl+B and the right with Ctrl+Alt+B", () => {
     expect(k("b")).toBe("toggleLeft");
-    expect(k("B", { shiftKey: true })).toBe("toggleLeft");
+    expect(k("B")).toBe("toggleLeft");
     expect(k("b", { altKey: true })).toBe("toggleRight");
+  });
+
+  it("leaves Ctrl+Shift+B to the browser's bookmarks bar", () => {
+    expect(k("B", { shiftKey: true })).toBeNull();
+    expect(k("b", { shiftKey: true })).toBeNull();
+    expect(k("B", { shiftKey: true, altKey: true })).toBeNull();
   });
 
   it("ignores keys without Ctrl, and AltGr's characters", () => {
@@ -245,24 +286,20 @@ describe("shortcuts", () => {
     expect(k("a")).toBeNull();
   });
 
-  it("knows when the owner is typing", () => {
+  it("knows when keys are going into Monaco", () => {
     const make = (html: string) => {
       const host = document.createElement("div");
       host.innerHTML = html;
       document.body.appendChild(host);
       return host.firstElementChild as HTMLElement;
     };
-    expect(isTypingTarget(make("<textarea></textarea>"))).toBe(true);
-    expect(isTypingTarget(make('<input type="text">'))).toBe(true);
-    expect(isTypingTarget(make("<input>"))).toBe(true);
-    expect(isTypingTarget(make('<input type="search">'))).toBe(true);
-    expect(isTypingTarget(make("<select></select>"))).toBe(true);
-    const monaco = make('<div class="monaco-editor"><div><span id="m">x</span></div></div>');
-    expect(isTypingTarget(monaco.querySelector("#m"))).toBe(true);
-    expect(isTypingTarget(make('<input type="checkbox">'))).toBe(false);
-    expect(isTypingTarget(make("<button>x</button>"))).toBe(false);
-    expect(isTypingTarget(document.body)).toBe(false);
-    expect(isTypingTarget(null)).toBe(false);
-    expect(isTypingTarget(window)).toBe(false);
+    const monaco = make('<div class="monaco-editor"><div><textarea id="m"></textarea></div></div>');
+    expect(inMonaco(monaco.querySelector("#m"))).toBe(true);
+    expect(inMonaco(monaco)).toBe(true);
+    expect(inMonaco(make("<textarea></textarea>"))).toBe(false);
+    expect(inMonaco(make("<input>"))).toBe(false);
+    expect(inMonaco(document.body)).toBe(false);
+    expect(inMonaco(null)).toBe(false);
+    expect(inMonaco(window)).toBe(false);
   });
 });
