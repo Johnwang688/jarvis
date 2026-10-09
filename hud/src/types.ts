@@ -396,7 +396,10 @@ export type MessageMark = "steering" | "queued" | "not sent";
 
 /** `POST /threads/{id}/send` (202). `status` is absent from an older daemon. */
 export interface SendResult {
-  status?: "started" | "steered" | "queued";
+  /** `dropped`: the owner stopped the turn while this steer was on its way
+   * and the turn would not take it — not sent, its words handed back. */
+  status?: "started" | "steered" | "queued" | "dropped";
+  reason?: string;
   turn_id: string;
   message_id?: string;
   /** `interrupt` when the provider could not steer and its turn was stopped

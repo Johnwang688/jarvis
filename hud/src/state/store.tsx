@@ -10,6 +10,7 @@ import type {
 import { DEFAULT_MODE, type DictationMode } from "../lib/dictation";
 import { activeProjectId, type Compose } from "../lib/compose";
 import { NO_ACTIVITY, applyActivity, type ActivityView } from "../lib/activity";
+import { pendingAfter, type GiveBack } from "../lib/giveback";
 
 export type Tab = "chat" | "task" | "file" | "diff" | "preview";
 export type OrbState =
@@ -56,10 +57,12 @@ export interface State {
   busy: boolean;
   /** Set by REVIEW dictation: text handed to the input box, never sent. */
   pendingTranscript: string;
-  /** Words (and files) handed back to the input box: a send that failed, or
-   * queued messages dropped when the owner stopped the turn. `nonce` makes
-   * the same words handed back twice still arrive twice. */
-  restore: { text: string; files: Attachment[]; nonce: number } | null;
+  /** Words (and files) handed back to the input box — a send that failed, or
+   * messages dropped when the owner stopped the turn — for the thread on
+   * screen, oldest first, until the box takes them (lib/giveback.ts). A
+   * fresh `nonce` each, so the same words handed back twice arrive twice and
+   * one hand-back is never taken twice. */
+  restore: GiveBack[];
   error: string;
   /** A refused thread move, shown beside the tree it was reverted in. */
   moveError: string;
@@ -75,7 +78,7 @@ export const initialState: State = {
   threadId: null, compose: null, taskId: null, taskFocus: false, turnThreadId: null, tab: "chat",
   messages: [], draft: "", ops: [], approvals: [], usage: null, discord: null, schedules: [],
   route: null, avatar: null, wakePatterns: [], dictation: DEFAULT_MODE,
-  level: 0, orb: "idle", status: "", busy: false, pendingTranscript: "", restore: null,
+  level: 0, orb: "idle", status: "", busy: false, pendingTranscript: "", restore: [],
   error: "", moveError: "", picker: null, archivedNames: [],
 };
 
@@ -94,7 +97,11 @@ export type Action =
   | { type: "approval_drop"; req_id: string }
   | { type: "task_upsert"; task: Task }
   | { type: "thread_patch"; id: string; patch: Partial<Thread> }
-  | { type: "activity"; record: any };
+  | { type: "activity"; record: any }
+  /** Hand words back to the box of the thread on screen. */
+  | { type: "give_back"; text: string; files: Attachment[]; nonce: number }
+  /** The box took every hand-back up to `nonce`. */
+  | { type: "given_back"; nonce: number };
 
 export function reduce(s: State, a: Action): State {
   switch (a.type) {
@@ -176,6 +183,15 @@ export function reduce(s: State, a: Action): State {
       // Folded into the map as it is now, for the thread_patch reason.
       const activity = applyActivity(s.activity, a.record);
       return activity === s.activity ? s : { ...s, activity };
+    }
+
+    case "give_back":
+      if (!a.text && !a.files.length) return s;
+      return { ...s, restore: [...s.restore, { text: a.text, files: a.files, nonce: a.nonce }] };
+
+    case "given_back": {
+      const left = pendingAfter(s.restore, a.nonce);
+      return left.length === s.restore.length ? s : { ...s, restore: left };
     }
   }
 }

@@ -25,6 +25,7 @@ import type { RosterView } from "./lib/roster";
 import { moveThreadTo } from "./lib/threads";
 import { lastProject, loadLastProject, saveLastProject } from "./lib/compose";
 import { composeChoice, threadBody } from "./lib/threadmodel";
+import { HeldBack, nextNonce } from "./lib/giveback";
 import { useThreadModel } from "./components/ThreadModelControls";
 import { ProjectDialog } from "./components/Pickers";
 import { ArchiveConfirm, ArchiveView } from "./components/Archive";
@@ -85,6 +86,18 @@ export default function App() {
   // drops them can put them back in the box (2026-10-08).
   const localSeq = useRef(0);
   const waitingHere = useRef(new Map<string, { text: string; files: Attachment[] }>());
+  // Words handed back for a thread that is not on screen wait here until the
+  // owner opens it: never in another thread's box (Bugbot on PR #22).
+  const heldBack = useRef(new HeldBack());
+  const giveBack = useCallback(
+    (threadId: string | null, text: string, files: Attachment[]) => {
+      const at = live.current;
+      const shown = at.threadId ?? at.compose?.openedId ?? pendingThread.current;
+      if (threadId && threadId !== shown) heldBack.current.hold(threadId, text, files);
+      else dispatch({ type: "give_back", text, files, nonce: nextNonce() });
+    },
+    [dispatch],
+  );
   // provider ▾ · model ▾ · effort ▾ in the input bar (decisions 2026-10-06, A).
   const threadModel = useThreadModel(state, dispatch, () => void loadModels());
   const reloadThreadModels = useRef(threadModel.reload);
@@ -207,6 +220,23 @@ export default function App() {
           ...(spoken ? { spoken: true } : {}),
         });
         const status = result?.status ?? "started";
+        if (status === "dropped") {
+          // The owner pressed Stop while this steer was on its way and the
+          // turn would not take it: stop means stop, so it is not sent, and
+          // its words go back to where they were typed (review of PR #22).
+          dispatch({
+            type: "mark", local,
+            patch: { mark: "not sent", ...(result.message_id ? { message_id: result.message_id } : {}) },
+          });
+          giveBack(threadId, text, attachments);
+          if (!steering) {
+            dispatch({
+              type: "patch",
+              patch: { busy: prior.busy, turnThreadId: prior.turnThreadId, orb: prior.orb, status: prior.status },
+            });
+          }
+          return true;
+        }
         if (status === "steered" || status === "queued") {
           dispatch({
             type: "mark", local,
@@ -247,12 +277,12 @@ export default function App() {
         // meanwhile stays — and its words and files go back in the box, so
         // a failed send costs nothing. Said inline, never as a dead end.
         dispatch({ type: "unmessage", local });
-        const restore = { text, files: attachments, nonce: Date.now() };
+        giveBack(threadId, text, attachments);
         const error = `Could not send: ${e.message}`;
         if (steering) {
           // A refused steer leaves the running turn as it was: still tracked,
           // still stoppable.
-          dispatch({ type: "patch", patch: { error, restore } });
+          dispatch({ type: "patch", patch: { error } });
         } else {
           // Back to whatever the window was tracking before this send (a turn
           // in another thread keeps running and keeps its Stop).
@@ -261,7 +291,7 @@ export default function App() {
             patch: {
               busy: prior.busy, turnThreadId: prior.turnThreadId,
               orb: prior.busy ? prior.orb : "error", status: prior.busy ? prior.status : "FAILED",
-              error, restore,
+              error,
             },
           });
         }
@@ -374,9 +404,8 @@ export default function App() {
               files.push(...mineHere.files);
             }
           }
-          if (back.length || files.length) {
-            dispatch({ type: "patch", patch: { restore: { text: back.join("\n"), files, nonce: Date.now() } } });
-          }
+          // Into the box only when that thread is on screen; else held for it.
+          if (back.length || files.length) giveBack(tid ?? null, back.join("\n"), files);
           break;
         }
         case "turn_started":
@@ -842,6 +871,13 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.threadId]);
 
+  // Words handed back while this thread was not on screen come back now.
+  useEffect(() => {
+    if (!state.threadId) return;
+    const held = heldBack.current.take(state.threadId);
+    if (held) dispatch({ type: "give_back", text: held.text, files: held.files, nonce: nextNonce() });
+  }, [state.threadId, dispatch]);
+
   // Reading clears blue and red (2026-10-08): a thread open in the chat tab,
   // or a task open in the task tab, while the window is visible — on opening
   // it, and when it finishes with the owner watching. The answer carries the
@@ -1267,7 +1303,7 @@ export default function App() {
                 running={state.busy && !!state.threadId && state.turnThreadId === state.threadId}
                 onStop={stopTurn}
                 restore={state.restore}
-                onRestoreTaken={() => patch({ restore: null })}
+                onRestoreTaken={(nonce) => dispatch({ type: "given_back", nonce })}
               />
             </>
           ) : null}

@@ -60,7 +60,7 @@ from ..router import (FastPath, Incoming, NewTask, Steer, Verb,
                       classify)
 from ..stores import StoreError, _write_bytes
 from .commands import SyncResult
-from .mirror import FULL_TEXT, INTERRUPTING_TEXT, QUEUED_TEXT, STEERED_TEXT
+from .mirror import FULL_TEXT, INTERRUPTING_TEXT, QUEUED_TEXT, STEERED_TEXT, STOPPED_TEXT
 from .render import _cap, approval_components, approval_post, approval_text, status_embed
 from .reporter import thread_for
 from .rest import describe
@@ -1100,6 +1100,9 @@ class DiscordRouter:
             self._post(channel, INTERRUPTING_TEXT)
         elif outcome == "full":
             self._post(channel, FULL_TEXT)
+        elif outcome == "dropped":
+            # The owner stopped the turn while this was being steered in.
+            self._post(channel, STOPPED_TEXT)
         if slash:
             # An interaction must be answered; the reply itself follows from
             # the mirror, in the chat's own place.

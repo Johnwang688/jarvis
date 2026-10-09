@@ -263,7 +263,12 @@ into the daemon). Per provider:
 A steer is logged before the provider has it; one the provider refuses waits
 under the same id (`steer_queued`). A turn waiting on an approval or a
 question is never steered, so a message can never read as its answer. The
-owner's Stop drops what waits (`queue_cleared`; stop means stop). A
+owner's Stop drops what waits (`queue_cleared`; stop means stop), and so
+does a steer the provider still held when Stop landed and then refused
+(`"dropped"`, judged by `stopped_turns`, the turn it was aimed at — never
+requeued). The HUD hands words back only into the box of the thread they
+were typed in (`lib/giveback.ts`: held per thread until it is opened, each
+taken once by nonce). A
 `turn_finished` with `next` (messages about to run) keeps the HUD on the
 thread: no idle flash, no follow-up mic window. `Daemon.send`
 — the task runner's — still refuses while a turn runs, because the runner

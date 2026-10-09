@@ -760,6 +760,44 @@ class InboundChecks(Harness):
         self.assertEqual([m.typed for m in provider.messages], ["long", "stop and do this"])
         self.assertTrue(provider.messages[-1].text.startswith(INTERRUPTED_NOTE))
 
+    def test_a_steer_the_owner_stopped_in_flight_says_not_sent(self):
+        """Bugbot on PR #22: Stop pressed while the provider still holds a
+        Discord steer, which it then refuses. Stop means stop: no new turn
+        runs it, and Discord says it was not sent — never "I'll take this
+        next"."""
+        from jarvis.v2.provider import SteerRefused
+        holding, refuse = threading.Event(), threading.Event()
+
+        class Held(Steering):
+            def steer(self, handle, message):
+                holding.set()
+                refuse.wait(5)
+                raise SteerRefused("the turn ended first")
+
+        provider = Held()
+        self.daemon.providers[ProviderName.FAST] = provider
+        provider.release.clear()
+        chat = self.open_chat()
+        self.hud_send(chat, "long")
+        place = self.place(chat.id)
+        wait_for(lambda: provider.turn, what="the turn")
+        # The gateway's handler blocks in the steer, as a real one would.
+        feeding = threading.Thread(
+            target=self.listener.feed, args=(guild_message("do it differently", place),), daemon=True)
+        feeding.start()
+        self.assertTrue(holding.wait(5))
+        try:
+            self.request("POST", f"/threads/{chat.id}/interrupt", {}, 200)
+            self.idle(chat.id)
+        finally:
+            refuse.set()
+        feeding.join(5)
+        self.idle(chat.id)
+        self.settled(chat.id)
+        self.assertEqual([m.typed for m in provider.messages], ["long"], "stop means stop")
+        self.assertNotIn(M.QUEUED_TEXT, self.transport.texts(place))
+        wait_for(lambda: M.STOPPED_TEXT in self.transport.texts(place), what="the notice")
+
     def test_stop_drops_a_waiting_discord_message_and_says_it_was_not_sent(self):
         self.provider.plan["long"] = [("wait",), ("text", "cut short")]
         self.provider.release.clear()

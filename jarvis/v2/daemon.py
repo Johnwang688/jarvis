@@ -185,6 +185,10 @@ class _Session:
     owner_stopped: bool = False
     steered: list = field(default_factory=list)
     questions: set = field(default_factory=set)
+    # The turns the owner stopped, newest last: a steer still in the
+    # provider's hands when Stop landed is judged by the turn it was aimed at,
+    # even after a later turn has started (Bugbot on PR #22).
+    stopped_turns: deque = field(default_factory=lambda: deque(maxlen=8))
 
 
 class Daemon:
@@ -713,7 +717,8 @@ class Daemon:
         a provider that refuses) — **queued** to run as its own turn when this
         one ends (`"queued"`, up to QUEUE_MAX). A provider that cannot steer
         at all has its turn interrupted for it instead (`"steered"`, mode
-        `interrupt`). A steer has the authority of a send and no more: it
+        `interrupt`). A steer the provider refuses after the owner stopped
+        its turn is not sent at all (`"dropped"`, its words handed back). A steer has the authority of a send and no more: it
         never answers or resolves anything the turn is waiting on. A task's
         threads are the runner's: a running one still refuses (409).
         """
@@ -784,6 +789,17 @@ class Daemon:
         interrupt, drain = False, False
         with self._lock:
             session.steered = [other for other in session.steered if other is not item]
+            if item.turn_id and item.turn_id in session.stopped_turns:
+                # The owner pressed Stop while the provider held this steer,
+                # and it was not taken: stop means stop. Dropped as Stop drops
+                # what waits (`queue_cleared` hands the words back) — never
+                # requeued to start a turn, never an interrupt (Bugbot on PR
+                # #22: it used to run as a new turn after the Stop).
+                self._drop_waiting(session.thread, "stopped", [item])
+                LOG.info("Thread %s: owner message not sent (the turn was stopped; %s)",
+                         thread_id, reason)
+                return {"status": "dropped", "reason": "stopped", "turn_id": item.turn_id,
+                        "message_id": item.message_id}
             waiting = self._queues.setdefault(thread_id, deque())
             if fallback == "interrupt" and session.worker is not None and not session.closing:
                 # No way to steer: stop the turn for the owner's message and
@@ -1234,6 +1250,8 @@ class Daemon:
                 raise DaemonError("no turn is running on this thread")
             session.cancelled.set()
             session.owner_stopped = True
+            if session.turn_id:
+                session.stopped_turns.append(session.turn_id)
             self._drop_waiting(session.thread, "stopped")
         session.provider.interrupt(session.handle)
 

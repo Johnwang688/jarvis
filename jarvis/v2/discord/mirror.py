@@ -101,6 +101,7 @@ INTERRUPTING_TEXT = ("This one can't take a message mid-turn, so I've stopped wh
                      "doing and I'll take this next.")
 FULL_TEXT = ("Three messages are already waiting on this turn; send this one again once "
              "I've answered.")
+STOPPED_TEXT = "You stopped that turn before it could take this, so I didn't send it."
 _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_.]{0,60}$")
 
 
@@ -553,8 +554,9 @@ class ChatMirror:
         """Run an owner message from Discord in this chat: "sent" (a turn
         started), "steered" (into the turn running, at its next safe point),
         "interrupting" (a provider that cannot steer: the turn is stopped and
-        this runs next), "queued" (it goes next, O-C6) or "full" (three wait
-        already). The daemon decides, with the same queue and cap the HUD's
+        this runs next), "queued" (it goes next, O-C6), "full" (three wait
+        already) or "dropped" (the owner stopped the turn while it was being
+        steered in: not sent). The daemon decides, with the same queue and cap the HUD's
         send uses (`Daemon.deliver`). Anything else it refuses is raised."""
         from ..daemon import QueueFull
         try:
@@ -564,7 +566,7 @@ class ChatMirror:
         status = result.get("status")
         if status == "steered" and result.get("mode") == "interrupt":
             return "interrupting"
-        return {"started": "sent", "steered": "steered"}.get(status, "queued")
+        return {"started": "sent", "steered": "steered", "dropped": "dropped"}.get(status, "queued")
 
     def pending_question(self, chat_id) -> str | None:
         with self._lock:

@@ -629,6 +629,11 @@ runs, because the runner retries on exactly that.
     question, a turn just ending, a refused steer), or messages already wait
     and nothing overtakes them. `"message_id"`, `"position"` (1-based) and
     `"queued_turn_id"` (the id its turn will run under).
+  - `"dropped"` (`"reason": "stopped"`, `"message_id"`) — the owner pressed
+    Stop while the provider still held this steer, and it was not taken:
+    stop means stop, so it is not sent and never starts a turn. It is a
+    `queued_dropped` record and a `queue_cleared`, as Stop's other drops are;
+    the HUD marks it *not sent* and puts its words back.
   - **409** only for a full queue (three waiting: `"Three messages are already
     waiting on this turn; send this one again once I've answered."`) or a
     task's thread with a turn running (task turns are the runner's).
@@ -658,7 +663,8 @@ runs, because the runner retries on exactly that.
 - SSE **`queue_cleared`** `{thread_id, project_id, data: {reason, messages:
   [{message_id, typed, via, attachments, images}]}}` — messages that will not
   run: the owner pressed Stop (`reason: "stopped"`; stop means stop, and the
-  HUD puts the words it sent back in the box), the thread was closed, could
+  HUD puts the words it sent back in that thread's box — held until the
+  thread is opened if another is on screen), the thread was closed, could
   not resume, or Jarvis stopped. Each is also a `queued_dropped` log record.
 - `POST /threads/{id}/interrupt` (the owner's Stop) now also drops what waits
   behind the turn (`queue_cleared`). Unchanged otherwise.

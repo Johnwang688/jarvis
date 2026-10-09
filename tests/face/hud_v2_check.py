@@ -448,6 +448,58 @@ def steer_checks(page, mock):
           bool(until(lambda: state()["busy"] is False)))
     thread.pop("running", None)
     page.evaluate("window.__hud.dispatch({type: 'patch', patch: {error: ''}})")
+    handed_back_checks(page, mock)
+
+
+def handed_back_checks(page, mock):
+    """Review of PR #22 (Bugbot): words handed back go where they were typed.
+    A steer the owner's Stop overtook comes back as not sent; a queue cleared
+    on a thread that is not on screen never lands in this thread's box, and
+    comes back once when that thread is opened."""
+    w = mock.world
+    state = lambda: page.evaluate("window.__hud.state()")  # noqa: E731
+    box = page.locator('[data-testid="input"]')
+    mock.emit("turn_started", {}, thread_id="t1")
+    until(lambda: state()["busy"] and state()["turnThreadId"] == "t1")
+
+    # The daemon answers `dropped`: Stop landed while the steer was in flight.
+    w["send_status"] = "dropped"
+    box.fill("a steer the owner stopped")
+    box.press("Enter")
+    dropped = page.locator('[data-testid="msg-user"]').last
+    check("a steer a Stop overtook is marked not sent",
+          bool(until(lambda: "not sent" in dropped.inner_text())), dropped.inner_text())
+    check("and its words come back to the box",
+          bool(until(lambda: box.input_value() == "a steer the owner stopped")), box.input_value())
+    box.fill("")
+
+    # Queued on t1, then the owner looks at another thread; t1's queue clears.
+    w["send_status"] = "queued"
+    box.fill("words for thread one")
+    box.press("Enter")
+    waiting = page.locator('[data-testid="msg-user"]').last
+    until(lambda: "queued" in waiting.inner_text())
+    queued_id = f"msg-{w['sends']}"
+    page.locator('[data-testid="new-thread"]').click()
+    until(lambda: state()["threadId"] is None)
+    mock.emit("queue_cleared", {"reason": "stopped", "messages": [
+        {"message_id": queued_id, "typed": "words for thread one", "via": "hud"}]}, thread_id="t1")
+    page.wait_for_timeout(400)
+    check("words cleared on another thread never land in this box", box.input_value() == "",
+          box.input_value())
+    page.locator('[data-testid="thread-t1"]').click()
+    check("they come back when that thread is opened",
+          bool(until(lambda: box.input_value() == "words for thread one")), box.input_value())
+    box.fill("")
+    page.locator('[data-testid="new-thread"]').click()
+    until(lambda: state()["threadId"] is None)
+    page.locator('[data-testid="thread-t1"]').click()
+    until(lambda: state()["threadId"] == "t1")
+    page.wait_for_timeout(300)
+    check("and only once", box.input_value() == "", box.input_value())
+    w.pop("send_status", None)
+    mock.emit("turn_finished", {"stop": "interrupted"}, thread_id="t1")
+    until(lambda: state()["busy"] is False)
 
 
 def dictation_checks(page, mock):

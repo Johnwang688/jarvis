@@ -1724,7 +1724,13 @@ now.)
   runner's) still answers "already running", which it retries on.
 - **Stop means stop.** The owner's interrupt drops what waits
   (`queue_cleared`), as Claude Code hands queued messages back to the input
-  on Esc; the HUD puts the words it sent back in the box. A steer already in
+  on Esc; the HUD puts the words it sent back in the box — into the box of
+  the thread they were typed in: words for a thread not on screen wait until
+  the owner opens it, and each hand-back is taken exactly once. A steer the
+  provider still held when Stop landed, and then refused, is dropped the
+  same way (`"dropped"`), judged by the turn it was aimed at even if a newer
+  turn has started — never requeued, never an interrupt (Bugbot on PR
+  #22). A steer already in
   the CLI's own queue when Stop lands makes a fresh CLI turn, which Claude's
   provider interrupts too — and when that turn starts only after the stopped
   turn has ended, the next send that reads it interrupts it and drops its

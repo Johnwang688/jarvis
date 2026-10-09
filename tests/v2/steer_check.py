@@ -387,6 +387,71 @@ class SteerChecks(Harness):
         self.assertEqual(self.send(thread, "fresh start")["status"], "started")
         self.idle(thread)
 
+    def test_a_steer_refused_after_the_owner_stopped_its_turn_is_dropped_not_run(self):
+        """Bugbot on PR #22: `steer()` runs outside the lock, so the owner can
+        press Stop while the provider holds a steer. When it then refuses (or
+        fails, or falls back to an interrupt), the message must not be
+        requeued to start a turn after the Stop: it is dropped as Stop drops
+        what waits, its words handed back — whether the thread is idle by then
+        or a newer turn the owner started is running."""
+        from concurrent.futures import ThreadPoolExecutor
+        for mode in ("refuse", "interrupt", "raise"):
+            for later in ("idle", "new turn"):
+                with self.subTest(mode=mode, later=later):
+                    self.fake.messages.clear()
+                    self.fake.interrupted.clear()
+                    self.seen.clear()
+                    thread = self.chat()
+                    self.send(thread, "block")
+                    self.running(thread)
+                    in_steer, release = threading.Event(), threading.Event()
+
+                    def hold(_h, _message):
+                        in_steer.set()
+                        self.assertTrue(release.wait(4))
+
+                    self.fake.on_steer, self.fake.steer_mode = hold, mode
+                    with ThreadPoolExecutor(1) as pool:
+                        pending = pool.submit(self.send, thread, "do it differently")
+                        try:
+                            self.assertTrue(in_steer.wait(4))
+                            self.post(f"/threads/{thread.id}/interrupt", {}, 200)
+                            self.idle(thread)
+                            if later == "new turn":
+                                self.fake.handles[thread.id].native["release"].clear()
+                                self.fake.handles[thread.id].native["entered"].clear()
+                                self.assertEqual(self.send(thread, "block")["status"], "started")
+                                self.running(thread)
+                            stops = list(self.fake.interrupted)
+                        finally:
+                            release.set()
+                        reply = pending.result(5)
+                    self.fake.on_steer = None
+                    self.assertEqual(reply["status"], "dropped")
+                    self.assertEqual(reply["reason"], "stopped")
+                    if later == "new turn":
+                        with self.d._lock:
+                            self.assertFalse(self.d._queues.get(thread.id), "nothing waits")
+                        self.release(thread)
+                    self.idle(thread)
+                    texts = [m.text for m in self.fake.messages]
+                    self.assertFalse([t for t in texts if "do it differently" in t],
+                                     f"the stopped message never runs: {texts}")
+                    self.assertEqual(self.fake.interrupted, stops,
+                                     "no interrupt after the owner's Stop (the fallback's included)")
+                    self.assertEqual(self.log(thread, "steer_queued"), [])
+                    dropped = [r for r in self.log(thread, "queued_dropped")
+                               if r["data"]["message_id"] == reply["message_id"]]
+                    self.assertEqual([r["data"]["reason"] for r in dropped], ["stopped"])
+                    cleared = [m for e in self.bus("queue_cleared") for m in e["data"]["messages"]
+                               if m["message_id"] == reply["message_id"]]
+                    self.assertEqual([m["typed"] for m in cleared], ["do it differently"],
+                                     "its words are handed back, once")
+                    marks = [m.get("mark") for m in
+                             self.get(f"/threads/{thread.id}/transcript")["messages"]
+                             if m.get("message_id") == reply["message_id"]]
+                    self.assertEqual(marks, ["not sent"])
+
     def test_an_undelivered_steer_runs_next_unless_the_owner_stopped(self):
         """The fast path's race: a steer taken while the final answer was
         being written never reaches the model; it runs as the next turn."""
