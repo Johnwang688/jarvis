@@ -1504,6 +1504,49 @@ never touches the project's folder or a worktree. Archive and delete answer
 only the HUD's own listener, and no tool reaches them (B11). Routes in
 `docs/hud-api.md`.
 
+**Zoom, folding panes and resizable edges (2026-10-08).** The owner asked to
+enlarge or shrink the whole HUD and to fold or resize the side panes. The
+rules live in `hud/src/lib/layout.ts`; `components/Layout.tsx` applies them.
+
+- **Zoom** runs from 70% to 160% in 10% steps, default 100%. It is set from
+  `− 100% +` in the status pane's header (the percentage resets it) or with
+  Ctrl+= / Ctrl+- / Ctrl+0. The keys stand aside in an input, a textarea, a
+  select and Monaco, where the browser keeps its own. Everywhere else they
+  are the HUD's, not the browser's page zoom. It is CSS `zoom` on `#root`,
+  because a page cannot set the browser's zoom and every size in `theme.css`
+  is px. Viewport units inside `#root` scale with it, so every `vh`/`vw` cap
+  divides by `--ui-zoom`. Undivided, the approval card's `86vh` was 138% of
+  the screen at 160%. The card's button row is also sticky, so a long
+  command scrolls under the buttons and never pushes them off the card. A
+  menu placed from a screen rect divides by the zoom. Monaco already inverts
+  the scale it measures.
+- **Folding.** Each pane has a `«`/`»` button and a shortcut: Ctrl+B for the
+  left pane, Ctrl+Alt+B for the right. A shortcut works even from the input
+  bar, and AltGr's characters never match it. A folded pane leaves a 36px
+  rail with an expand button. The left rail also carries **+ (New thread)**
+  and the orb, scaled into the rail's foot so it never sits on the input
+  bar. The right rail shows pending authorizations (amber) and an error (red),
+  so a folded pane hides nothing that wants the owner. A folded pane is
+  hidden, never unmounted, so its expanded projects, selected thread,
+  compose draft and inline renames survive.
+- **Resizing.** The inner edge of each pane is a `role="separator"` that can
+  be dragged (pointer capture) or moved with the arrows (Shift for a bigger
+  step, Home/End for the ends). Double-click resets it. The left pane runs
+  180–480px and the right 240–560px, **in the HUD's own unzoomed pixels**,
+  so a pane keeps its proportion to its text as the zoom changes. The centre
+  keeps at least 480px. When the panes and that minimum do not fit, as with
+  both panes open at 150% on a 1280px screen, the open panes give back their
+  slack in proportion and the stored widths are left alone, so folding a
+  pane or zooming out returns them. Monaco relayouts through
+  `automaticLayout`.
+- **Persistence.** Zoom and layout persist in localStorage
+  (`jarvis.hud.zoom`, `jarvis.hud.layout`). Every read and write is guarded,
+  each field falls back to its own default, and only a literal `true` folds
+  a pane, so a mangled value never hides one.
+- **Wrapping.** The tab bar and the input bar's chip row now wrap instead of
+  clipping, so a narrow centre puts Model · Voice · Avatar · Settings on a
+  second row rather than off the edge.
+
 Remaining: WP13 (the long-bench comparison, the owner's call on cost), a
 native Windows worker, the R8 hook on Codex, and prompt tuning in
 `roles.py` (§17's over-planning note). The daemon started by hand for the

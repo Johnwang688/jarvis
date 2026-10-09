@@ -217,6 +217,24 @@ thread** is pinned at the top of the sidebar and starts in the last project
 worked in. A moved thread keeps the folder and permission rules it was
 opened with (`Thread.cwd`); a move re-labels, it never re-roots.
 
+**HUD zoom and panes (2026-10-08, design §18).** The rules are in
+`hud/src/lib/layout.ts`. Zoom is 70–160% in 10% steps: `− 100% +` in the
+status header, or Ctrl+= / Ctrl+- / Ctrl+0, which stand aside while typing
+(input, textarea, select, Monaco). It is **CSS `zoom` on `#root`**, so
+**every `vh`/`vw` in `theme.css` must divide by `--ui-zoom`**, and a menu
+positioned from a screen rect must go through `toCss()`. An undivided
+`86vh` put the approval card's buttons off screen at 160%. Each side pane
+folds to a 36px rail: `«`/`»`, Ctrl+B for the left pane, Ctrl+Alt+B for the
+right. The left rail keeps **+ New thread** and a shrunken orb, and the
+right rail shows pending approvals and errors. A folded pane is hidden,
+**never unmounted**, so its state survives. The inner edges are
+`role="separator"`: drag them, use the arrows, or double-click to reset.
+Widths are unzoomed px (left 180–480, right 240–560, centre ≥ 480), and the
+drawn widths are fitted to the window without rewriting the stored ones.
+Zoom and layout persist in localStorage behind try/catch. The free checks
+are `tests/face/hud_v2_layout_check.py`, run first by `hud_v2_check.py` in
+a context of its own, plus `hud/src/lib/layout.test.ts`.
+
 Per-thread model (2026-10-06, decisions A, design §8.1/§12.1/§18): **a chat
 thread runs on OpenRouter (the fast path), Claude or Codex**, picked with
 provider ▾ · model ▾ · effort ▾ beside `in: <project>`. The provider is fixed
