@@ -95,10 +95,14 @@ from ..provider import (
 # A floor, never a pin (owner, 2026-10-08): the installed CLI updates itself,
 # so health accepts anything at or above CLAUDE_MIN — 2.2 and 3.x included —
 # and only warns, once per process, past CLAUDE_VERIFIED. CLAUDE_MIN is the
-# CLI the R1–R3 spikes and the classifier-denial text were verified against;
-# CLAUDE_VERIFIED is the newest version known to work end to end.
+# oldest CLI the default model (`claude-opus-5-5`) accepts — it answers older
+# ones with "version 2.1.280 or newer is required" — which also puts the SDK's
+# bundled 2.1.273 below the floor, so that fallback reads as unhealthy rather
+# than healthy-but-failing. (The R1–R3 spikes and the classifier-denial text
+# were verified on 2.1.273.) CLAUDE_VERIFIED is the newest version known to
+# work end to end.
 # `JARVIS_CLAUDE_STRICT=1` restores the old major.minor match.
-CLAUDE_MIN = "2.1.273"
+CLAUDE_MIN = "2.1.280"
 CLAUDE_VERIFIED = "2.1.295"
 
 # The CLI kills a hook that does not answer in time and treats it as no
@@ -219,9 +223,22 @@ def find_cli(
     home = Path.home() if home is None else home
     if configured:
         explicit = Path(configured).expanduser()
-        if explicit.is_file() and os.access(explicit, os.X_OK):
+        if not explicit.is_absolute():
+            # Checked here against the daemon's cwd, but the SDK spawns it with
+            # `cwd=<task worktree>`: a relative path would run whatever `claude`
+            # the worktree holds — model-writable, and outside the PreToolUse
+            # gate. Refused rather than made absolute against an arbitrary cwd.
+            LOG.warning("JARVIS_CLAUDE_CLI=%s is not an absolute path; ignoring it", configured)
+        elif explicit.is_file() and os.access(explicit, os.X_OK):
+            # Never `resolve()`d: a self-updating install is a symlink that the
+            # updater re-points, and the link is what should be run.
+            if any(_under_mnt(p) or p.name.lower().endswith(_FOREIGN_SUFFIXES)
+                   for p in (explicit, explicit.resolve())):
+                LOG.warning("JARVIS_CLAUDE_CLI=%s looks like a Windows binary or shim; "
+                            "using it because it was set explicitly", configured)
             return str(explicit), "config"
-        LOG.warning("JARVIS_CLAUDE_CLI=%s is not an executable file; ignoring it", configured)
+        else:
+            LOG.warning("JARVIS_CLAUDE_CLI=%s is not an executable file; ignoring it", configured)
     for entry in path_env.split(os.pathsep):
         if not entry or not os.path.isabs(entry):
             continue
@@ -252,22 +269,37 @@ _cli_resolved: tuple[str | None, str] | None = None
 _cli_versions: dict[str, str | None] = {}
 
 
+# While nothing is found, look again this often, so installing Claude Code
+# after the daemon started does not need a restart. A found CLI is kept for
+# the life of the process.
+RESOLVE_RETRY_S = 60.0
+_cli_resolved_at = 0.0
+
+
 def resolve_cli() -> str | None:
-    """The `cli_path` every client in this module is built with. Resolved once
-    per process; None means the SDK's bundled CLI, with one warning logged."""
-    global _cli_resolved
+    """The `cli_path` every client in this module is built with.
+
+    A found CLI is resolved once per process. None means the SDK's bundled
+    CLI: one warning is logged, and the search is repeated at most every
+    `RESOLVE_RETRY_S` until something turns up.
+    """
+    global _cli_resolved, _cli_resolved_at
     with _cli_lock:
-        if _cli_resolved is None:
+        first = _cli_resolved is None
+        retry = (not first and _cli_resolved[0] is None
+                 and _clock() - _cli_resolved_at >= RESOLVE_RETRY_S)
+        if first or retry:
             path, source = find_cli()
-            _cli_resolved = (path, source)
-            if path is None:
+            _cli_resolved, _cli_resolved_at = (path, source), _clock()
+            if path is None and first:
                 version = bundled_version()
                 LOG.warning(
                     "no installed claude found (JARVIS_CLAUDE_CLI, PATH, ~/.local/bin); "
-                    "falling back to the SDK's bundled CLI%s, which may refuse newer models",
-                    f" {version}" if version else "",
+                    "falling back to the SDK's bundled CLI%s, which may refuse newer models; "
+                    "looking again every %d s",
+                    f" {version}" if version else "", int(RESOLVE_RETRY_S),
                 )
-            else:
+            elif path is not None:
                 LOG.info("claude CLI: %s (from %s)", path, source)
         return _cli_resolved[0]
 
@@ -371,6 +403,17 @@ def cli_info() -> dict:
     source = _cli_resolved[1] if _cli_resolved else "bundled"
     version = _probe_version(path) if path else bundled_version()
     return {"path": path, "version": version, "source": source}
+
+
+def usage_agent_version() -> str:
+    """The version the usage meter's User-Agent claims: the CLI actually in
+    use, or `CLAUDE_VERIFIED` when that cannot be read as a version. Never
+    raises — a User-Agent is not worth failing the meter over."""
+    try:
+        version = cli_info().get("version")
+    except Exception:  # noqa: BLE001
+        version = None
+    return version if parse_version(version) else CLAUDE_VERIFIED
 
 
 # --- health -----------------------------------------------------------------
@@ -478,6 +521,11 @@ class ClaudeProvider:
     name = ProviderName.CLAUDE
 
     # -- health
+
+    def cli_info(self) -> dict:
+        """`{path, version, source}` of the CLI this provider spawns. The daemon
+        reads this for `/status` and its start-up log."""
+        return cli_info()
 
     def health(self) -> tuple[bool, str]:
         """(ok, reason). Binary, version floor, login. Never spends a token.

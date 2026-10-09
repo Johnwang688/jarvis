@@ -181,15 +181,22 @@ broker alone.
   CLI bundled in its wheel (2.1.273 in SDK 0.2.153), which lags the owner's
   self-updating install and refused a newer model live ("version 2.1.280 or
   newer is required"). `providers/claude.py:resolve_cli()` picks, once per
-  process: `JARVIS_CLAUDE_CLI` if executable; else the first executable
-  `claude` on PATH that is not under `/mnt/` (never the Windows npm shim, nor
-  a `.cmd`/`.bat`/`.exe` behind a symlink); else `~/.local/bin/claude` (a
-  systemd unit's PATH rarely has it); else the bundled CLI, with one warning.
+  process: `JARVIS_CLAUDE_CLI` if it is an absolute path to an executable (a
+  relative one is refused: it is checked against the daemon's cwd but the SDK
+  spawns it with `cwd=<task worktree>`, where a planted `bin/claude` would run
+  outside the `PreToolUse` gate; an explicit `/mnt/` or `.cmd` path is used,
+  with a warning); else the first executable `claude` on an absolute PATH
+  entry that is not under `/mnt/` (never the Windows npm shim, nor a
+  `.cmd`/`.bat`/`.exe` behind a symlink); else `~/.local/bin/claude` (a
+  systemd unit's PATH rarely has it); else the bundled CLI, with one warning,
+  and the search is repeated at most every 60 s so a later install needs no
+  restart.
   Every `ClaudeAgentOptions` — start, resume and `set_model`'s reconnect —
   carries it. The version is not pinned. `health()` probes `--version` once
   per real binary rather than per `/status`; a failed probe is not cached and
   is retried after 60 s. The version is judged against a floor:
-  `CLAUDE_MIN` (2.1.273, the CLI the R1–R3 spikes ran on) or newer is
+  `CLAUDE_MIN` (2.1.280, what `claude-opus-5-5` requires — so the bundled
+  2.1.273 reads as unhealthy instead of healthy-but-failing) or newer is
   healthy, 2.2 and 3.x included, and anything past `CLAUDE_VERIFIED` (2.1.295)
   logs one warning per process. An older or unparseable version is not-ok.
   `JARVIS_CLAUDE_STRICT=1` restores the old major.minor match. `/status`
