@@ -229,6 +229,25 @@ reads the preview port from `/status` → `workshop_port`, and `hud_v2_check`
 aborts and fails any request to 8402/8403/8405 — it used to load the live
 daemon's preview.
 
+**The Codex model table is a union that never shrinks (PR #20, 2026-10-09).**
+HUD reads (`/usage`, `/thread-models`) refresh Codex's quota and the
+account's `model/list` without a turn (5 min TTL; 30 s when a turn holds the
+login lock — `MetadataBusy`, checked before the CLI is probed). The catalog
+is saved (`config.CODEX_CATALOG_PATH`) and loaded by `daemon2`'s `main()`;
+`router.CLI_MODELS["codex"]` is the offline `CODEX_FALLBACK` (ladders synced
+to the live catalog: astra, both Sols and Terra reach `ultra`) **plus** every
+model a catalog offered, and one a catalog drops is marked `available:
+false`, never removed — a table that shrank under routing.json turned every
+`/usage`, `/route`, task resolve and Codex default thread into a
+ValueError. **`load_routing` never raises**: a bad entry falls back to the
+role's default with a once-logged note (`GET /route` → `notes`), a project's
+bad entry falls back to the global table, and `POST /route` keeps other
+well-formed entries as written. A catalog's advertised default effort is
+**not** used (A4 stands), and `ultra` is Codex's alone — never on
+`models.EFFORT_LADDER` (a cold OpenRouter catalog sends an effort as asked);
+`thread_model.EFFORT_ORDER` has it for clamping. Tests that refresh the
+catalog point `config.CODEX_CATALOG_PATH` at a temp file.
+
 Briefs for every package, including the ones in flight, are in
 `docs/codex-briefs/`; each merged package left a `*-notes.md` beside its
 brief with what its implementer verified and what it proposes.

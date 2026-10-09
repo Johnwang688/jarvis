@@ -256,8 +256,10 @@ def stale_reason() -> str:
 
 # OpenRouter's reasoning ladder, hardest first. A model advertises the subset
 # it understands in `reasoning.supported_efforts`; the ones here are every
-# level seen across the live catalog (2026-08-22).
-EFFORT_LADDER = ("ultra", "max", "xhigh", "high", "medium", "low", "minimal", "none")
+# level seen across the live catalog (2026-08-22). Codex's `ultra` is not one:
+# a cold catalog sends an effort as asked, so a level OpenRouter does not take
+# must not pass as a valid one here (v2 `thread_model.EFFORT_ORDER` has it).
+EFFORT_LADDER = ("max", "xhigh", "high", "medium", "low", "minimal", "none")
 
 _effort_warned = False
 

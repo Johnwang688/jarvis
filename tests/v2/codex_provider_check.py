@@ -101,9 +101,14 @@ def peer(script_path, log_path, thread_name):
                 "supportedReasoningEfforts": [{"reasoningEffort": "high"}],
                 "defaultReasoningEffort": "high",
             }]])
-            index = int(p.get("cursor", "0"))
+            cursor = str(p.get("cursor", "0"))
+            index = int(cursor) % len(pages) if cursor.isdigit() else 0
             result = {"data": pages[index],
                       "nextCursor": str(index + 1) if index + 1 < len(pages) else None}
+            if "model_next" in script:      # a cursor that repeats
+                result["nextCursor"] = script["model_next"]
+            elif script.get("model_endless"):
+                result["nextCursor"] = str(int(cursor) + 1 if cursor.isdigit() else 1)
         elif method == "account/rateLimits/read":
             result = script.get("rate_limits", {"rateLimits": None, "rateLimitsByLimitId": {}})
         elif method == "config/read":
@@ -425,6 +430,54 @@ class Checks(unittest.TestCase):
         cfg = tomllib.loads((self.root / "data" / "codex" / "_metadata" / "config.toml").read_text())
         self.assertNotIn("model", cfg)
         self.assertNotIn("mcp_servers", cfg)
+
+    def test_account_metadata_holds_the_login_lock_and_never_waits_on_a_turn(self):
+        """PR #20 review: the metadata peer shares Codex's login lock with
+        session start-up; a turn holds that lock for its whole length, so a
+        HUD read during one is refused at once (`MetadataBusy`), before the
+        CLI is probed or anything is spawned."""
+        seen, original = [], self.brain.rpc
+
+        def factory(argv, **kwargs):
+            rpc = original(argv, **kwargs)
+            real = rpc.request
+
+            def request(method, *args, **kw):
+                seen.append((method, codex._auth_lock.locked()))
+                return real(method, *args, **kw)
+            rpc.request = request
+            return rpc
+
+        with patch.object(codex, "RpcProcess", factory):
+            self.provider.account_metadata()
+        self.assertIn(("model/list", True), seen)
+        self.assertTrue(all(locked for _, locked in seen), seen)
+        self.assertFalse(codex._auth_lock.locked(), "released afterwards")
+        spawned, probes = len(self.brain.rpcs), []
+        with patch.object(codex.CodexProvider, "_probe",
+                          lambda _self: (probes.append(1), ("/fake/codex", "fake"))[1]):
+            self.assertTrue(codex._auth_lock.acquire(timeout=5))
+            try:
+                started = time.monotonic()
+                with self.assertRaises(codex.MetadataBusy):
+                    self.provider.account_metadata()
+                self.assertLess(time.monotonic() - started, 1)
+            finally:
+                codex._auth_lock.release()
+        self.assertEqual((probes, len(self.brain.rpcs)), ([], spawned))
+
+    def test_account_metadata_refuses_a_looping_or_endless_catalog(self):
+        # A cursor seen before is caught at its second use; one that never
+        # repeats stops at the page cap. Either way the lock is released.
+        for script, words, pages in (({"model_next": "again"}, "pagination is invalid", 2),
+                                     ({"model_endless": True}, "pagination limit", codex.MODEL_PAGE_CAP)):
+            self.brain.script = {"mode": "normal", **script}
+            before = len(self.brain.calls("model/list"))
+            with self.subTest(script=script), self.assertRaises(codex.RpcError) as caught:
+                self.provider.account_metadata()
+            self.assertIn(words, str(caught.exception))
+            self.assertEqual(len(self.brain.calls("model/list")) - before, pages)
+            self.assertFalse(codex._auth_lock.locked())
 
     def test_full_exact_events(self):
         h = self.start("full")

@@ -36,6 +36,10 @@ HUD_DIST = Path(__file__).resolve().parents[2] / "hud" / "dist"
 CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 CLAUDE_USAGE_TTL_S = 300
 CODEX_METADATA_TTL_S = 300
+# A turn holds Codex's login lock for its whole length; a HUD read then waits
+# this long before asking again (not the full TTL: the turn may end soon).
+CODEX_METADATA_BUSY_S = 30
+CODEX_LIMIT_IDS_CAP = 16
 _CLAUDE_WINDOWS = (("five_hour", "5h"), ("seven_day", "week"))
 
 
@@ -321,27 +325,39 @@ def assemble_turn(project, body, *, paths: bool = True):
 
 class HUDLedger(UsageLedger):
     """Keep sparse provider reports in ledger rows without changing its interface."""
+    # When the last Codex metadata read ended and how long to wait after it:
+    # the TTL after an answer or a failure, CODEX_METADATA_BUSY_S after a busy
+    # login lock. Class defaults so a ledger built without __init__ has them.
+    _codex_metadata_at = 0.0
+    _codex_wait_s = CODEX_METADATA_TTL_S
+
     def __init__(self, *args, **kwargs):
         self.rate_limits = {}
         self._reported = None
         self._claude_quota = None
         self._claude_quota_at = 0.0
         self._codex_metadata_at = 0.0
+        self._codex_wait_s = CODEX_METADATA_TTL_S
         self._codex_refresh = threading.Lock()
         super().__init__(*args, **kwargs)
+
+    def _merge_rate_limits(self, report, key=None):
+        """One Codex rate-limit report into the keyed snapshot. Reports are
+        sparse, from a turn's notifications and from an account read alike:
+        a null or absent field never clears a known value."""
+        key = key or report.get("limitId") or "codex"
+        previous = self.rate_limits.setdefault(key, {})
+        for k, v in report.items():
+            if v is not None:
+                if isinstance(v, dict) and isinstance(previous.get(k), dict):
+                    previous[k].update({a: b for a, b in v.items() if b is not None})
+                else:
+                    previous[k] = copy.deepcopy(v)
 
     def _apply(self, row):
         super()._apply(row)
         if isinstance(row.get("rate_limits"), dict):
-            # Notifications are sparse; null metadata never clears known values.
-            key = row["rate_limits"].get("limitId") or "codex"
-            previous = self.rate_limits.setdefault(key, {})
-            for k, v in row["rate_limits"].items():
-                if v is not None:
-                    if isinstance(v, dict) and isinstance(previous.get(k), dict):
-                        previous[k].update({a: b for a, b in v.items() if b is not None})
-                    else:
-                        previous[k] = copy.deepcopy(v)
+            self._merge_rate_limits(row["rate_limits"])
 
     def _append(self, row):
         if self._reported is not None and row["provider"] == "codex":
@@ -381,56 +397,49 @@ class HUDLedger(UsageLedger):
                     windows.append(dict(name=label, used_percent=used, resets_at=window.get("resetsAt")))
         return {"windows": windows} if windows else None
 
+    def _codex_due(self) -> bool:
+        with self._lock:
+            return time.monotonic() - self._codex_metadata_at >= self._codex_wait_s
+
     def refresh_codex(self, provider) -> None:
-        """Refresh models and quota once per TTL, without starting a turn.
+        """Refresh models and quota at most once per TTL, without a turn.
 
         Only the first concurrent HUD request launches the metadata peer.
-        Failures retain the last good snapshot and are throttled by the same
-        TTL, keeping status reads cheap while Codex is busy or unavailable.
+        A failure keeps the last good catalog and meters and waits the TTL;
+        a turn holding Codex's login lock (`MetadataBusy`) waits
+        CODEX_METADATA_BUSY_S, so a HUD polled during a long turn neither
+        probes the CLI on every read nor hides fresh metadata for a TTL.
         """
         read = getattr(provider, "account_metadata", None)
-        if not callable(read):
+        if not callable(read) or not self._codex_due():
             return
-        now = time.monotonic()
-        with self._lock:
-            if now - self._codex_metadata_at < CODEX_METADATA_TTL_S:
-                return
         if not self._codex_refresh.acquire(blocking=False):
             return
         try:
-            now = time.monotonic()
-            with self._lock:
-                if now - self._codex_metadata_at < CODEX_METADATA_TTL_S:
-                    return
+            if not self._codex_due():
+                return
+            from .providers.codex import MetadataBusy
+            wait, reports = CODEX_METADATA_TTL_S, None
             try:
                 metadata = read()
-            except Exception as exc:
-                # A turn is briefly preparing under Codex's auth lock. Let the
-                # next HUD request retry instead of hiding metadata for a TTL.
-                from .providers.codex_rpc import RpcTimeout
-                if isinstance(exc, RpcTimeout) and "metadata is busy" in str(exc):
-                    return
-                with self._lock:
-                    self._codex_metadata_at = time.monotonic()
-                return
-            if not isinstance(metadata, dict):
-                with self._lock:
-                    self._codex_metadata_at = time.monotonic()
-                return
-
-            # The catalog and quota are independent useful results: retain the
-            # previous half if a future app-server changes only the other.
-            try:
-                from .router import set_codex_models
-                set_codex_models(metadata.get("models"))
-            except (TypeError, ValueError):
-                pass
-            body = metadata.get("rate_limits")
-            reports = _codex_rate_limits(body) if isinstance(body, dict) else None
+            except MetadataBusy:
+                metadata, wait = None, CODEX_METADATA_BUSY_S
+            except Exception:
+                metadata = None
+            if isinstance(metadata, dict):
+                # The catalog and quota are independent results: either half
+                # failing keeps the previous one.
+                try:
+                    from .router import set_codex_models
+                    set_codex_models(metadata.get("models"))
+                except (TypeError, ValueError):
+                    pass
+                reports = _codex_rate_limits(metadata.get("rate_limits"))
             with self._lock:
-                if reports is not None:
-                    self.rate_limits = reports
+                for key, report in (reports or {}).items():
+                    self._merge_rate_limits(report, key)
                 self._codex_metadata_at = time.monotonic()
+                self._codex_wait_s = wait
         finally:
             self._codex_refresh.release()
 
@@ -475,12 +484,14 @@ class HUDLedger(UsageLedger):
 def usage(daemon):
     from .router import daemon_router, load_routing
     router = daemon_router(daemon)
+    # Refresh first: a catalog read can make a routing entry valid again, and
+    # nothing about the table may stand between the HUD and the meters.
+    if isinstance(router.ledger, HUDLedger):
+        router.ledger.refresh_codex(daemon.providers.get(ProviderName.CODEX))
     settings = load_routing()
     result = {}
     for provider in ProviderName:
         instance = daemon.providers.get(provider)
-        if provider == ProviderName.CODEX and isinstance(router.ledger, HUDLedger):
-            router.ledger.refresh_codex(instance)
         ok, reason = router.health.check(instance) if instance else (False, "provider not in roster")
         router.ledger.set_health(provider.value, ok, reason)
         state = router.ledger.state(provider.value, no_new_work=settings["no_new_work"],
@@ -492,13 +503,14 @@ def usage(daemon):
 
 
 def _codex_rate_limits(body) -> dict[str, dict] | None:
-    """Normalize `account/rateLimits/read` into HUDLedger's keyed snapshots."""
+    """Normalize `account/rateLimits/read` into HUDLedger's keyed snapshots;
+    None when it carries no report, so an empty read changes nothing."""
     if not isinstance(body, dict):
         return None
     reports = {}
     by_id = body.get("rateLimitsByLimitId")
     if isinstance(by_id, dict):
-        for limit_id, report in by_id.items():
+        for limit_id, report in list(by_id.items())[:CODEX_LIMIT_IDS_CAP]:
             if isinstance(limit_id, str) and limit_id and isinstance(report, dict):
                 reports[limit_id] = copy.deepcopy(report)
                 reports[limit_id].setdefault("limitId", limit_id)
@@ -507,7 +519,7 @@ def _codex_rate_limits(body) -> dict[str, dict] | None:
         limit_id = current.get("limitId") or "codex"
         if isinstance(limit_id, str) and limit_id and limit_id not in reports:
             reports[limit_id] = copy.deepcopy(current)
-    return reports
+    return reports or None
 
 
 def _refresh_codex_metadata(daemon) -> None:

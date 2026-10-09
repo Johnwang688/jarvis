@@ -1519,6 +1519,10 @@ def main() -> int:
     from .runner import TaskRunner
 
     configure_logging()
+    # The Codex models the account offered last time, before anything reads
+    # routing: an entry only that catalog offers must not degrade on restart.
+    from .router import load_codex_catalog
+    load_codex_catalog()
 
     remote = discord_connected()
     approvals = None

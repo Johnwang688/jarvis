@@ -127,6 +127,13 @@ since the v1 face and the v2 daemon are separate processes.
   own usage endpoint when a subscription login is present. The login
   token is not part of this response. A missing login, a 401, or a body
   without those windows is `quota: null`.
+  *2026-10-09 (PR #20):* Codex's windows are also read without a turn:
+  `GET /usage` and `GET`/`POST /thread-models` run one short-lived
+  app-server for `account/rateLimits/read` and `model/list` at most every
+  5 minutes, keep the last good reading on a failure, and wait 30 s instead
+  when a turn holds Codex's login lock (`MetadataBusy`, decided before the
+  CLI is probed). A read is merged like a turn's notification: a null or
+  empty report never clears a window.
 
 ## Schedules
 
@@ -303,6 +310,23 @@ of a turn. The choice is stored on the Thread record (`model`, `effort`);
   effort}` as stored, `effort: null` = the model's own default; or null) and
   `builtin` (`{model, effort}`, what a reset returns to; null for
   OpenRouter); every model row carries `default_effort`.
+  *2026-10-09 (PR #20):* Claude and Codex rows also carry `available`. The
+  Codex list is the union of the offline table (`router.CODEX_FALLBACK`)
+  and every model the signed-in account's `model/list` has offered, in the
+  account's order first; the last catalog is saved
+  (`config.CODEX_CATALOG_PATH`, `~/.local/share/jarvis/codex-models.json`)
+  and loaded when `daemon2` starts. A model the catalog drops stays,
+  `available: false`: routing, a project's `routing.models`, a pinned thread
+  and a HUD default naming it stay valid (the HUD offers it only where it is
+  already the pin or default, marked "not offered by your account", and
+  `note` says so for a HUD default). `default_effort` is A4's (`high`
+  within the ladder), never the catalog's advertised default. `ultra` is a
+  Codex level only; OpenRouter and Claude refuse it. Routing reads are
+  lenient: an entry in `routing.json` or a project that names something
+  Jarvis cannot run falls back to that role's default and is reported in
+  `GET /route`'s `notes` (and logged once) instead of failing `/usage`,
+  `/route` or a task; `POST /route` rewrites only what it was asked to,
+  keeping other well-formed entries as written.
 - `POST /thread-models` `{"provider": "claude" | "codex", "model": id,
   "effort"?: level}` → the new `GET /thread-models` payload. Sets the
   default every **default** Claude or Codex chat thread runs on from its

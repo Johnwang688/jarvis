@@ -21,10 +21,12 @@ Where the choice lives, and why there:
   default for the orchestrator role (`routing.json`) for Codex. The HUD's
   Codex default wins over routing **for chat threads only**; it never writes
   routing.json, and tasks keep routing's table.
-- `Thread.effort = None` is **that model's default**: the provider-advertised
-  default when known, otherwise `high`; an OpenRouter roster pin wins. It is
-  clamped to the model's own ladder, and omitted for a model with no reasoning
-  control (A4).
+- `Thread.effort = None` is **that model's default**: `high`, unless the
+  roster pins an effort for it, clamped to the model's own ladder, and
+  nothing at all for a model with no reasoning control (A4). A Codex
+  catalog's advertised default effort is not used: A4 is the rule, and an
+  effective effort that moved whenever the HUD refreshed the catalog would
+  make one thread's turns incomparable (PR #20 review).
 - An effort on a thread with `model = None` is stored **on its own**, and the
   thread keeps following the default model (A4 amendment, 2026-10-07): the
   effort is clamped to whatever the default supports at the start of each
@@ -47,6 +49,12 @@ from jarvis import config, models
 from .model import PermissionProfile, ProviderName, Role, Thread
 
 DEFAULT_EFFORT = "high"
+# Every effort level, hardest first: OpenRouter's ladder (`models.EFFORT_LADDER`)
+# with Codex's `ultra` above `max`. `ultra` is Codex's alone — OpenRouter does
+# not take it, and a cold OpenRouter catalog sends an effort as asked — so it
+# is a reasoning effort only for a CLI provider (`_vocabulary`), and the order
+# is what a clamp walks.
+EFFORT_ORDER = ("ultra",) + tuple(models.EFFORT_LADDER)
 CLAUDE_DEFAULT = "claude-opus-5-5"
 LABELS = {ProviderName.FAST: "OpenRouter", ProviderName.CLAUDE: "Claude", ProviderName.CODEX: "Codex"}
 
@@ -122,10 +130,15 @@ def efforts_of(provider: ProviderName, model: str) -> tuple[str, ...] | None:
     return None if entry is None else tuple(entry["efforts"])
 
 
+def _vocabulary(provider: ProviderName) -> tuple[str, ...]:
+    """The words that are reasoning efforts on this provider."""
+    return tuple(models.EFFORT_LADDER) if ProviderName(provider) == ProviderName.FAST else EFFORT_ORDER
+
+
 def _clamp(wanted: str, ladder: tuple[str, ...]) -> str | None:
     if wanted in ladder:
         return wanted
-    order = models.EFFORT_LADDER
+    order = EFFORT_ORDER
     if wanted in order:
         index = order.index(wanted)
         # Down the ladder first (never ask for more than was meant), then up.
@@ -136,7 +149,7 @@ def _clamp(wanted: str, ladder: tuple[str, ...]) -> str | None:
 
 
 def default_effort(provider: ProviderName, model: str) -> str | None:
-    """The provider's advertised default, otherwise A4's high, in its ladder."""
+    """A4: high, or the roster's pin for this model, within its ladder."""
     provider = ProviderName(provider)
     wanted = DEFAULT_EFFORT
     if provider == ProviderName.FAST:
@@ -144,10 +157,6 @@ def default_effort(provider: ProviderName, model: str) -> str | None:
             wanted = models.roster().efforts.get(model) or DEFAULT_EFFORT
         except Exception:
             wanted = DEFAULT_EFFORT
-    else:
-        entry = _cli(provider).get(model)
-        if entry and entry.get("default_effort"):
-            wanted = entry["default_effort"]
     ladder = efforts_of(provider, model)
     if ladder is None:
         # Cold catalog: sent as asked, the v1 rule (an effort a model does not
@@ -256,7 +265,7 @@ def _bad_effort(effort: Any) -> bool:
     """A stored effort that is not a reasoning effort at all ("turbo", 3)."""
     if effort is None or (isinstance(effort, str) and not effort.strip()):
         return False
-    return not isinstance(effort, str) or effort.strip().lower() not in models.EFFORT_LADDER
+    return not isinstance(effort, str) or effort.strip().lower() not in EFFORT_ORDER
 
 
 def _stored(provider: ProviderName) -> tuple[str, str | None] | None:
@@ -341,7 +350,7 @@ def set_provider_default(provider: Any, model: Any, effort: Any = None) -> tuple
             f"(it knows {', '.join(_cli(provider))})")
     elif effort is not None:
         ladder = efforts_of(provider, model) or ()
-        if effort not in models.EFFORT_LADDER:
+        if effort not in _vocabulary(provider):
             raise ChoiceRefused(f"{effort!r} is not a reasoning effort")
         if not ladder:
             raise ChoiceRefused(f"{model} has no reasoning effort to set")
@@ -375,6 +384,9 @@ def _stale_note(provider: ProviderName) -> str:
     if _bad_effort(effort):
         return (f"the HUD default's effort {effort!r} is not a reasoning effort; "
                 f"{model} runs at its default effort")
+    if _cli(provider)[model].get("available", True) is False:
+        return (f"the HUD default {model} is no longer in your {LABELS[provider]} account's "
+                "model list; it is kept, but a turn on it may be refused")
     return ""
 
 
@@ -448,7 +460,7 @@ def check(provider: ProviderName, model: str | None, effort: str | None, *,
         if target is None:
             raise ChoiceRefused("an effort needs a model")
         ladder = efforts_of(provider, target)
-        if effort not in models.EFFORT_LADDER:
+        if effort not in _vocabulary(provider):
             raise ChoiceRefused(f"{effort!r} is not a reasoning effort")
         if ladder is not None and not ladder:
             raise ChoiceRefused(f"{target} has no reasoning effort to set")
@@ -468,8 +480,11 @@ def provider_models(provider: ProviderName) -> list[dict[str, Any]]:
         return models.describe()["models"]
     rows = []
     for model_id, entry in _cli(provider).items():
+        # `available: false` is a Codex model the account's catalog no longer
+        # lists: kept, so what names it stays valid, but not offered anew.
         rows.append({"id": model_id, "name": entry["name"], "efforts": list(entry["efforts"]),
-                     "vision": entry["vision"], "default_effort": default_effort(provider, model_id)})
+                     "vision": entry["vision"], "available": entry.get("available", True) is not False,
+                     "default_effort": default_effort(provider, model_id)})
     return rows
 
 

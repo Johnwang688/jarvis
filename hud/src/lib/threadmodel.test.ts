@@ -82,6 +82,50 @@ describe("the model list", () => {
   });
 });
 
+describe("a Codex model the account no longer lists (PR #20 review)", () => {
+  const DROPPED: ThreadModels = {
+    ...TM,
+    providers: {
+      ...TM.providers,
+      codex: {
+        label: "Codex", default: "gpt-5.5", default_effort: "high", settable: true,
+        default_source: "hud", hud_default: { model: "gpt-5.5", effort: null },
+        models: [
+          { id: "gpt-6.1-sol", efforts: ["low", "medium", "high", "xhigh", "max", "ultra"], vision: true, available: true },
+          { id: "gpt-6-astra", efforts: ["low", "medium", "high", "xhigh", "max", "ultra"], vision: true, available: true },
+          { id: "gpt-5.5", efforts: ["low", "medium", "high", "xhigh"], vision: true, available: false },
+        ],
+      },
+    },
+  };
+  const codex = (model: string | null = null, effort: string | null = null): Choice => ({ provider: "codex", model, effort });
+
+  it("is not offered as a new choice, but a thread pinned to it keeps it, marked", () => {
+    expect(modelOptions(DROPPED, codex()).map((o) => o.value)).toEqual(["", "gpt-6.1-sol", "gpt-6-astra"]);
+    const pinned = modelOptions(DROPPED, codex("gpt-5.5"));
+    expect(pinned.map((o) => o.value)).toEqual(["", "gpt-6.1-sol", "gpt-6-astra", "gpt-5.5"]);
+    expect(pinned[3].label).toBe("gpt-5.5 (not offered by your account)");
+    // Its ladder is still known: the effort chip works on the pin.
+    expect(effortOptions(DROPPED, codex("gpt-5.5")).map((o) => o.value)).toEqual(["", "low", "medium", "high", "xhigh"]);
+  });
+
+  it("stays in the default menu only while it is the default, marked", () => {
+    const rows = defaultRows(DROPPED, "codex");
+    expect(rows.map((r) => [r.id, r.isDefault, r.unavailable])).toEqual([
+      ["gpt-6.1-sol", false, false], ["gpt-6-astra", false, false], ["gpt-5.5", true, true]]);
+    const moved = { ...DROPPED, providers: { ...DROPPED.providers, codex: { ...DROPPED.providers.codex!, default: "gpt-6-astra" } } };
+    expect(defaultRows(moved, "codex").map((r) => r.id)).toEqual(["gpt-6.1-sol", "gpt-6-astra"]);
+  });
+
+  it("offers ultra only from a Codex ladder, and clamps it down one", () => {
+    expect(effortOptions(DROPPED, codex("gpt-6.1-sol")).map((o) => o.value)).toContain("ultra");
+    expect(effortOptions(TM, fast()).map((o) => o.value)).not.toContain("ultra");
+    // A default thread whose stored ultra meets a ladder that stops at xhigh.
+    expect(effective(DROPPED, codex(null, "ultra"))).toEqual({ model: "gpt-5.5", effort: "xhigh" });
+    expect(defaultEffort(DROPPED, "codex", "gpt-6.1-sol")).toBe("high");
+  });
+});
+
 describe("effort (A4)", () => {
   it("defaults to high, or the model's own roster setting, within its ladder", () => {
     expect(defaultEffort(TM, "fast", "deepseek/deepseek-v4-flash-0731")).toBe("high");
@@ -107,7 +151,8 @@ describe("effort (A4)", () => {
       expect(defaultEffort(TM, "fast", model)).toBe("high");
       const opts = effortOptions(TM, fast(model));
       expect(opts[0].label).toBe("default · high");
-      expect(opts.map((o) => o.value)).toEqual(["", "ultra", "max", "xhigh", "high", "medium", "low", "minimal", "none"]);
+      // OpenRouter's levels only: `ultra` is Codex's (PR #20 review).
+      expect(opts.map((o) => o.value)).toEqual(["", "max", "xhigh", "high", "medium", "low", "minimal", "none"]);
       expect(effective(TM, fast(model)).effort).toBe("high");
     }
   });

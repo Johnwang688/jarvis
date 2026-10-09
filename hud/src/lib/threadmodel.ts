@@ -25,6 +25,9 @@ export interface ModelEntry {
   prompt_usd?: number | null;
   completion_usd?: number | null;
   unlisted?: boolean;
+  /** Codex: false when the account's model list no longer offers it. Kept,
+   * so a pin or default naming it stays valid, but not offered anew. */
+  available?: boolean;
 }
 
 export interface ProviderModels {
@@ -69,7 +72,24 @@ export const PROVIDER_LABELS: Record<ProviderName, string> = {
   claude: "Claude",
   codex: "Codex",
 };
-export const EFFORT_LADDER = ["ultra", "max", "xhigh", "high", "medium", "low", "minimal", "none"];
+/** OpenRouter's levels, hardest first (`models.EFFORT_LADDER`). */
+export const EFFORT_LADDER = ["max", "xhigh", "high", "medium", "low", "minimal", "none"];
+/** Every level, hardest first: Codex's `ultra` sits above `max`. It is not
+ * OpenRouter's, so it is offered only by a Codex model's own ladder; this is
+ * the order a clamp walks (`thread_model.EFFORT_ORDER`). */
+export const EFFORT_ORDER = ["ultra", ...EFFORT_LADDER];
+
+/** The levels a provider takes when a model's own ladder is unknown. */
+function vocabulary(provider: ProviderName): string[] {
+  return provider === "fast" ? EFFORT_LADDER : EFFORT_ORDER;
+}
+
+/** A Codex model the account no longer lists (never a Claude or OpenRouter one). */
+export function unavailable(e: ModelEntry | undefined): boolean {
+  return e?.available === false;
+}
+
+export const UNAVAILABLE = "not offered by your account";
 export const DEFAULT_EFFORT = "high";
 /** The model select's last entry on OpenRouter. */
 export const SEARCH = "__search__";
@@ -98,8 +118,8 @@ export function effortsFor(tm: ThreadModels | null, provider: ProviderName, mode
 
 function clamp(wanted: string, ladder: string[]): string | null {
   if (ladder.includes(wanted)) return wanted;
-  const i = EFFORT_LADDER.indexOf(wanted);
-  const order = i < 0 ? [] : [...EFFORT_LADDER.slice(i + 1), ...EFFORT_LADDER.slice(0, i).reverse()];
+  const i = EFFORT_ORDER.indexOf(wanted);
+  const order = i < 0 ? [] : [...EFFORT_ORDER.slice(i + 1), ...EFFORT_ORDER.slice(0, i).reverse()];
   return order.find((level) => ladder.includes(level)) ?? ladder[0] ?? null;
 }
 
@@ -204,6 +224,12 @@ export interface Option {
 export function modelOptions(tm: ThreadModels | null, c: Choice): Option[] {
   const out: Option[] = [{ value: "", label: `default · ${shortId(defaultModel(tm, c.provider)) || "?"}` }];
   for (const m of tm?.providers[c.provider]?.models || []) {
+    // A model the account dropped is listed only where it is already the
+    // thread's pin, marked, as an off-roster pin is (A3).
+    if (unavailable(m)) {
+      if (m.id === c.model) out.push({ value: m.id, label: `${shortId(m.id)} (${UNAVAILABLE})` });
+      continue;
+    }
     const p = c.provider === "fast" ? price(m) : "";
     out.push({ value: m.id, label: shortId(m.id) + (p ? ` · ${p}` : "") });
   }
@@ -230,7 +256,7 @@ export function effortOptions(tm: ThreadModels | null, c: Choice): Option[] {
     : defaultEffort(tm, c.provider, c.model);
   if (ladder !== null && ladder.length === 0) return [];
   const out: Option[] = [{ value: "", label: `default · ${dflt || "none"}` }];
-  for (const level of ladder ?? EFFORT_LADDER) out.push({ value: level, label: level });
+  for (const level of ladder ?? vocabulary(c.provider)) out.push({ value: level, label: level });
   if (c.effort && !out.some((o) => o.value === c.effort)) {
     const runs = eff.effort && eff.effort !== c.effort ? ` (runs as ${eff.effort})` : "";
     out.push({ value: c.effort, label: c.effort + runs });
@@ -368,16 +394,20 @@ export interface DefaultRow {
   /** Text only: the model's name, else its id. */
   name: string;
   isDefault: boolean;
+  /** The account no longer offers it; listed only while it is the default. */
+  unavailable?: boolean;
 }
 
 /** The rows of a provider's default menu: every model it can run, with the
- * current default marked. */
+ * current default marked. A model the account dropped is listed only while
+ * it is still the default, so it can be seen and replaced, not chosen anew. */
 export function defaultRows(tm: ThreadModels | null, provider: ProviderName): DefaultRow[] {
   const current = defaultModel(tm, provider);
-  return (tm?.providers[provider]?.models || []).map((m) => ({
+  return (tm?.providers[provider]?.models || []).filter((m) => !unavailable(m) || m.id === current).map((m) => ({
     id: m.id,
     name: m.name || shortId(m.id),
     isDefault: m.id === current,
+    unavailable: unavailable(m),
   }));
 }
 

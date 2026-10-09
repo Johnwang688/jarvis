@@ -201,6 +201,14 @@ class Backend(unittest.TestCase):
         routing = patch.object(config, "ROUTING_PATH", self.root / "routing.json")
         routing.start()
         self.addCleanup(routing.stop)
+        # A HUD read saves the Codex catalog it got: never over the owner's
+        # file, and never leaking one test's catalog into the next.
+        saved_catalog = patch.object(config, "CODEX_CATALOG_PATH", self.root / "codex-models.json")
+        saved_catalog.start()
+        self.addCleanup(saved_catalog.stop)
+        from jarvis.v2 import router as _router
+        codex_table = _router.CLI_MODELS["codex"]
+        self.addCleanup(lambda: _router.CLI_MODELS.__setitem__("codex", codex_table))
         always = patch.object(config, "V2_ALWAYS_ASK", self.root / "always-ask.json")
         always.start()
         self.addCleanup(always.stop)
@@ -803,8 +811,6 @@ class Backend(unittest.TestCase):
 
     def test_codex_metadata_populates_quota_and_the_account_model_catalog(self):
         from jarvis.v2 import router
-        previous = {key: value.copy() for key, value in router.CLI_MODELS["codex"].items()}
-        self.addCleanup(lambda: router.CLI_MODELS.__setitem__("codex", previous))
         calls = []
 
         def metadata():
@@ -817,7 +823,7 @@ class Backend(unittest.TestCase):
                                                     {"reasoningEffort": "medium"},
                                                     {"reasoningEffort": "max"},
                                                     {"reasoningEffort": "ultra"}],
-                     "defaultReasoningEffort": "medium"},
+                     "defaultReasoningEffort": "low"},
                     {"model": "gpt-6-sol", "displayName": "GPT-6 Sol", "hidden": False,
                      "inputModalities": ["text", "image"],
                      "supportedReasoningEfforts": [{"reasoningEffort": "none"},
@@ -838,7 +844,13 @@ class Backend(unittest.TestCase):
         self.providers[P.CODEX].account_metadata = metadata
         described = self.request("GET", "/thread-models")["providers"]["codex"]
         rows = {row["id"]: row for row in described["models"]}
-        self.assertEqual(set(rows), {"gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna"})
+        live = ["gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna"]
+        self.assertEqual([row["id"] for row in described["models"]][:3], live, "the account's order first")
+        self.assertEqual({m for m, row in rows.items() if row["available"]}, set(live))
+        # The offline models the account no longer lists are kept, marked.
+        self.assertEqual(set(rows) - set(live), set(router.CODEX_FALLBACK) - set(live))
+        # A4 (high, clamped down its ladder to medium), not the catalog's
+        # advertised default, low (PR #20 review).
         self.assertEqual((rows["gpt-6.1-sol"]["efforts"], rows["gpt-6.1-sol"]["default_effort"]),
                          (["low", "medium", "max", "ultra"], "medium"))
         self.assertFalse(rows["gpt-6-luna"]["vision"])
@@ -846,6 +858,8 @@ class Backend(unittest.TestCase):
         self.assertEqual([(row["name"], row["used_percent"]) for row in quota["windows"]],
                          [("5h", 19), ("weekly", 25)])
         self.assertEqual(len(calls), 1, "model and quota endpoints share one TTL cache")
+        saved = json.loads(config.CODEX_CATALOG_PATH.read_text())
+        self.assertEqual([r["id"] for r in saved["models"] if r["available"]], live, "saved for a restart")
 
         # The refreshed table is also the validator used by the model picker.
         selected = self.request("POST", "/thread-models", {
@@ -853,13 +867,121 @@ class Backend(unittest.TestCase):
         self.assertEqual(selected["providers"]["codex"]["hud_default"],
                          {"model": "gpt-6.1-sol", "effort": "ultra"})
 
-        # A temporary app-server failure keeps the last good meters/catalog.
+        # A temporary app-server failure keeps the last good meters/catalog,
+        # and is not retried before the TTL.
         ledger = self.daemon.router.ledger
         ledger._codex_metadata_at = 0
-        self.providers[P.CODEX].account_metadata = lambda: (_ for _ in ()).throw(RuntimeError("offline"))
-        quota = self.request("GET", "/usage")["providers"]["codex"]["quota"]
+        failed = []
+        self.providers[P.CODEX].account_metadata = lambda: (failed.append(1), (_ for _ in ()).throw(
+            RuntimeError("offline")))[1]
+        for _ in range(3):
+            quota = self.request("GET", "/usage")["providers"]["codex"]["quota"]
+        self.assertEqual(len(failed), 1, "a failure waits the TTL")
         self.assertEqual(quota["windows"][0]["used_percent"], 19)
         self.assertIn("gpt-6.1-sol", router.CLI_MODELS["codex"])
+        ledger._codex_metadata_at -= H.CODEX_METADATA_BUSY_S + 1
+        self.request("GET", "/usage")
+        self.assertEqual(len(failed), 1, "a failure is not a busy lock: still the TTL")
+
+    def test_a_busy_codex_backs_off_without_probing(self):
+        """PR #20 review: a turn holds Codex's login lock for its whole length,
+        and every HUD read during it ran `codex --version` and `codex login
+        status` and gave up without throttling."""
+        from jarvis.v2.providers import codex
+        provider = codex.CodexProvider()
+        probes = []
+        ledger = self.daemon.router.ledger
+        with patch.object(codex.CodexProvider, "_probe",
+                          lambda _self: (probes.append(1), (None, "should not be asked"))[1]):
+            self.assertTrue(codex._auth_lock.acquire(timeout=5))
+            try:
+                with self.assertRaises(codex.MetadataBusy):
+                    provider.account_metadata()
+                ledger._codex_metadata_at = 0
+                for _ in range(10):
+                    ledger.refresh_codex(provider)
+            finally:
+                codex._auth_lock.release()
+        self.assertEqual(probes, [], "the lock is tested before the CLI is probed")
+        self.assertEqual(ledger._codex_wait_s, H.CODEX_METADATA_BUSY_S)
+        # Busy is a short wait, not the TTL: once it passes, the next read asks.
+        asked = []
+        fake = SimpleNamespace(account_metadata=lambda: (asked.append(1), {"models": [], "rate_limits": None})[1])
+        ledger.refresh_codex(fake)
+        self.assertEqual(asked, [], "inside the busy window nothing is asked")
+        ledger._codex_metadata_at -= H.CODEX_METADATA_BUSY_S + 1
+        ledger.refresh_codex(fake)
+        self.assertEqual(asked, [1])
+        self.assertEqual(ledger._codex_wait_s, H.CODEX_METADATA_TTL_S)
+
+    def test_an_empty_quota_read_keeps_the_meters_a_turn_reported(self):
+        self.providers[P.CODEX].report = {"limitId": "codex", "primary": {
+            "usedPercent": 42, "windowDurationMins": 300, "resetsAt": 1900000000}}
+        thread = self.thread(P.CODEX)
+        self.request("POST", f"/threads/{thread.id}/send", {"text": "usage"}, status=202)
+        self.settled(thread)
+        self.assertEqual(H._codex_rate_limits({"rateLimits": None, "rateLimitsByLimitId": {}}), None)
+        ledger = self.daemon.router.ledger
+        for body in ({"rateLimits": None, "rateLimitsByLimitId": {}}, {},
+                     {"rateLimits": {"limitId": "codex", "primary": None, "secondary": None}}):
+            ledger._codex_metadata_at = 0
+            self.providers[P.CODEX].account_metadata = lambda body=body: {"models": None, "rate_limits": body}
+            quota = self.request("GET", "/usage")["providers"]["codex"]["quota"]
+            self.assertEqual(quota["windows"], [{"name": "5h", "used_percent": 42, "resets_at": 1900000000}], body)
+        # A real reading still moves them.
+        ledger._codex_metadata_at = 0
+        self.providers[P.CODEX].account_metadata = lambda: {"models": None, "rate_limits": {
+            "rateLimits": {"limitId": "codex", "primary": {"usedPercent": 50}}}}
+        quota = self.request("GET", "/usage")["providers"]["codex"]["quota"]
+        self.assertEqual(quota["windows"], [{"name": "5h", "used_percent": 50, "resets_at": 1900000000}])
+
+    def test_codex_catalog_drift_never_breaks_usage_or_route(self):
+        """PR #20 review, end to end. A: routing names gpt-6-astra/max, which
+        only the live catalog offered then; after a restart (offline table
+        again, nobody opening the chip) /usage and /route still answer, and
+        the saved catalog brings it back. B: the catalog hides gpt-5.5, which
+        routing names; nothing breaks, and POST /route still writes."""
+        from jarvis.v2 import router
+        live = [{"model": m, "displayName": m, "hidden": False, "inputModalities": ["text", "image"],
+                 "supportedReasoningEfforts": [{"reasoningEffort": e} for e in
+                                               ("low", "medium", "high", "xhigh", "max", "ultra")]}
+                for m in ("gpt-7-nova", "gpt-6.1-sol", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna",
+                          "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna")]
+        self.providers[P.CODEX].account_metadata = lambda: {"models": live, "rate_limits": {}}
+        self.request("GET", "/thread-models")
+        self.request("POST", "/route", {"action": "models", "role": "implementer",
+                                        "provider": "codex", "model": "gpt-7-nova/ultra"})
+        self.request("POST", "/thread-models", {"provider": "codex", "model": "gpt-7-nova"})
+        router._install_codex(None, {})                      # a restart, before the load
+        del self.providers[P.CODEX].account_metadata          # and nobody opens the chip
+        for path in ("/usage", "/route", "/thread-models"):
+            self.request("GET", path)
+        self.assertIn("gpt-7-nova is not a codex model", " ".join(self.request("GET", "/route")["notes"]))
+        router.load_codex_catalog()                           # what daemon2's main() does
+        view = self.request("GET", "/route")
+        self.assertEqual((view["table"]["resolved_models"]["implementer"]["codex"], view["notes"]),
+                         ({"model": "gpt-7-nova", "effort": "ultra"}, []))
+        codex = self.request("GET", "/thread-models")["providers"]["codex"]
+        self.assertEqual((codex["default"], codex["default_source"]), ("gpt-7-nova", "hud"))
+        rows = {row["id"]: row for row in codex["models"]}
+        self.assertEqual((rows["gpt-7-nova"]["available"], rows["gpt-5.5"]["available"]), (True, False),
+                         "the saved catalog is the account's, not just a list of names")
+
+        # B: a refresh that hides a model routing names.
+        self.request("POST", "/route", {"action": "models", "role": "reviewer",
+                                        "provider": "codex", "model": "gpt-5.5/high"})
+        self.daemon.router.ledger._codex_metadata_at = 0
+        self.providers[P.CODEX].account_metadata = lambda: {"models": live[1:], "rate_limits": {}}
+        codex = self.request("GET", "/thread-models")["providers"]["codex"]
+        rows = {row["id"]: row for row in codex["models"]}
+        self.assertEqual((rows["gpt-5.5"]["available"], rows["gpt-7-nova"]["available"]), (False, False))
+        self.assertEqual(codex["default"], "gpt-7-nova", "the HUD default is not silently swapped")
+        for path in ("/usage", "/route"):
+            self.request("GET", path)
+        view = self.request("POST", "/route", {"action": "set", "role": "reviewer", "chain": "codex"})
+        self.assertEqual(view["table"]["resolved_models"]["reviewer"]["codex"],
+                         {"model": "gpt-5.5", "effort": "high"})
+        self.assertEqual(view["notes"], [])
 
     def test_claude_subscription_quota_is_reported_not_invented(self):
         token = "oat-hud-test-token-value"
@@ -1402,9 +1524,9 @@ class Backend(unittest.TestCase):
         self.assertEqual(made["routing"]["models"], good)
         # PATCH is held to the same rule, and a refusal changes nothing.
         error = self.request("PATCH", f"/projects/{made['id']}", {"routing": {"models": {
-            "implementer": {"claude": "claude-opus-5-5/xhigh", "codex": "gpt-5.6-luna/max"}}}}, status=400)["error"]
+            "implementer": {"claude": "claude-opus-5-5/xhigh", "codex": "gpt-5.6-luna/ultra"}}}}, status=400)["error"]
         self.assertIn("routing.models.implementer.codex", error)
-        self.assertIn("does not offer effort 'max'", error)
+        self.assertIn("does not offer effort 'ultra'", error)
         self.assertEqual(self.stores.projects.get(made["id"]).routing.models, good)
         self.request("PATCH", f"/projects/{made['id']}", {"routing": {"models": {
             "implementer": {"claude": "claude-opus-5-5/xhigh"}}}})
@@ -1772,7 +1894,7 @@ class Backend(unittest.TestCase):
                            ({"provider": "fast", "model": "test/model"}, "Model picker"),
                            ({"provider": "gemini", "model": "x"}, "not a provider"),
                            ({"provider": "claude", "model": "claude-opus-9"}, "not a Claude model"),
-                           ({"provider": "codex", "model": "gpt-6-astra", "effort": "max"}, "does not offer 'max'"),
+                           ({"provider": "codex", "model": "gpt-6-luna", "effort": "ultra"}, "does not offer 'ultra'"),
                            ({"provider": "claude", "model": "claude-haiku-4-5", "effort": "low"}, "no reasoning effort"),
                            ({"provider": "claude", "model": "", "effort": "low"}, "takes no effort"),
                            ({"provider": "claude", "model": 5}, "must be a string")):

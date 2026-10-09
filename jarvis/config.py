@@ -259,6 +259,16 @@ SESSIONS_DIR = Path(
 V2_DATA_DIR = Path(
     os.environ.get("JARVIS_V2_DATA", Path.home() / ".local" / "share" / "jarvis" / "v2")
 )
+# The last model catalog the signed-in Codex account offered (v2
+# `router.set_codex_models`, saved atomically on every good HUD read and loaded
+# at daemon start), so a routing entry only the live catalog offers survives a
+# restart. Account metadata, not a choice: deleting it means the offline table
+# until the next HUD read. Its own path rather than one under V2_DATA_DIR, so a
+# test points it at a temp file by name.
+CODEX_CATALOG_PATH = Path(
+    os.environ.get("JARVIS_CODEX_CATALOG",
+                   Path.home() / ".local" / "share" / "jarvis" / "codex-models.json")
+)
 
 # The Codex CLI the v2 Codex provider runs (`jarvis/v2/providers/codex_cli.py`).
 # Empty means "find it": the first `codex` on PATH that is not a Windows shim

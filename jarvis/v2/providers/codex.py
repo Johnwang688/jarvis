@@ -73,6 +73,12 @@ _state_lock = threading.Lock()
 _open_homes: set[Path] = set()
 
 
+class MetadataBusy(RpcError):
+    """`account_metadata` declined: a turn holds the shared login lock. The
+    HUD backs off briefly (`hud_api.CODEX_METADATA_BUSY_S`) instead of the
+    full TTL, and never by matching this message."""
+
+
 @dataclass
 class _Pending:
     question: bool
@@ -342,11 +348,16 @@ class CodexProvider:
         Preparation and account inspection share the same lock as session
         startup, but a HUD read never waits behind a turn that is opening.
         """
+        # A turn holds the lock for its whole length (`send`), so test it
+        # before the probe: probing first ran `codex --version` and `codex
+        # login status` on every HUD read during a turn, to give up anyway.
+        if _auth_lock.locked():
+            raise MetadataBusy("a Codex turn is running")
         binary, reason = self._probe()
         if binary is None:
             raise BriefRefused(reason)
         if not _auth_lock.acquire(timeout=METADATA_LOCK_TIMEOUT):
-            raise RpcTimeout("Codex account metadata is busy")
+            raise MetadataBusy("a Codex turn is starting")
         rpc = None
         try:
             argv, env, home = codex_config.prepare_metadata(binary)
