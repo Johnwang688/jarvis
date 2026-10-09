@@ -645,20 +645,31 @@ def pickers(handler, daemon, parts, query):
         payload = {"voice": voice.set_voice(str(body.get("voice", "")))}
         daemon.bus.publish({"kind": "voice", "data": payload})
         return 200, payload
-    if name == "model":
-        models.select(str(body.get("model", "")))
-    elif name == "models":
-        add, remove, model = (str(body.get(k) or "").strip() for k in ("add", "remove", "model"))
-        if sum(bool(v) for v in (add, remove, model)) != 1:
-            fail(400, "expected exactly one of add, remove, or model with effort")
-        if add:
-            models.add(add)
-        elif remove:
-            models.remove(remove)
-        else:
-            models.set_effort(model, str(body.get("effort") or ""))
-    else:
+    if name not in ("model", "models"):
         return None
+    try:
+        if name == "model":
+            models.select(str(body.get("model", "")))
+        else:
+            add, remove, model = (str(body.get(k) or "").strip() for k in ("add", "remove", "model"))
+            if sum(bool(v) for v in (add, remove, model)) != 1:
+                fail(400, "expected exactly one of add, remove, or model with effort")
+            if add:
+                models.add(add)
+            elif remove:
+                models.remove(remove)
+            else:
+                models.set_effort(model, str(body.get("effort") or ""))
+    # The picker shows a refusal in the backend's own words (an unpin that
+    # would leave the default unlisted says "choose another default first"),
+    # and the dispatcher only reflects an APIError's text — anything else
+    # would arrive as "request failed (RosterRefused)".
+    except models.RosterRefused as exc:
+        fail(409, str(exc))
+    except models.NotEligible as exc:
+        fail(400, str(exc))
+    except LookupError as exc:
+        fail(404, str(exc))
     payload = models.describe()
     daemon.bus.publish({"kind": "model", "data": payload})
     return 200, payload

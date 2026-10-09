@@ -15,6 +15,7 @@ import {
   type Choice, type ThreadModels,
 } from "../lib/threadmodel";
 import { CatalogPicker, ModelChip } from "./ModelChip";
+import { refusal, rosterIds } from "../lib/roster";
 
 export function useThreadModel(state: State, dispatch: React.Dispatch<Action>, onRosterChange?: () => void) {
   const [models, setModels] = useState<ThreadModels | null>(null);
@@ -103,6 +104,16 @@ export function useThreadModel(state: State, dispatch: React.Dispatch<Action>, o
     [reload, onRosterChange],
   );
 
+  const unpin = useCallback(
+    async (id: string) => {
+      const r = await api.removeModel(id);
+      setRoster(rosterIds(r));
+      await reload();
+      onRosterChange?.();
+    },
+    [reload, onRosterChange],
+  );
+
   const chip =
     choice !== null ? (
       <ModelChip
@@ -123,7 +134,11 @@ export function useThreadModel(state: State, dispatch: React.Dispatch<Action>, o
       catalog={catalog}
       roster={roster}
       error={catalogError}
-      onPin={(id) => pin(id).catch((e) => setCatalogError(e.message))}
+      onPin={(id) => pin(id).catch((e) => setCatalogError(refusal(`pin ${id}`, e)))}
+      onUnpin={(id) => {
+        setCatalogError("");
+        unpin(id).catch((e) => setCatalogError(refusal(`unpin ${id}`, e)));
+      }}
       onUse={(id) =>
         pin(id)
           .then(() => {

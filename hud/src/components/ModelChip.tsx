@@ -122,8 +122,10 @@ export function ModelChip(props: {
 
 /**
  * The OpenRouter catalogue, searched (A2). "Use" pins the model to the roster
- * and puts this thread on it; "Pin" only adds it to the roster. Eligibility
- * is the backend's refusal: a model that cannot call tools is never listed.
+ * and puts this thread on it; "Pin" only adds it to the roster, and "Unpin"
+ * takes a pinned one off it (2026-10-08) — refused by the backend, with its
+ * reason shown, when that would leave the default unlisted. Eligibility is
+ * the backend's refusal: a model that cannot call tools is never listed.
  */
 export function CatalogPicker(props: {
   catalog: ModelRow[] | null;
@@ -131,6 +133,7 @@ export function CatalogPicker(props: {
   error?: string;
   onUse: (id: string) => void;
   onPin: (id: string) => void;
+  onUnpin: (id: string) => void;
   onClose: () => void;
 }) {
   const [q, setQ] = useState("");
@@ -179,7 +182,10 @@ export function CatalogPicker(props: {
                   Use
                 </button>
                 {pinned ? (
-                  <span className="muted small">on roster</span>
+                  <button type="button" data-testid={`catalog-unpin-${m.id}`}
+                          title="Take it off your roster" onClick={() => props.onUnpin(m.id)}>
+                    Unpin
+                  </button>
                 ) : (
                   <button type="button" data-testid={`catalog-pin-${m.id}`} onClick={() => props.onPin(m.id)}>
                     Pin

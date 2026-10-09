@@ -339,6 +339,14 @@ class NotEligible(ValueError):
     """The requested model cannot run this loop (or could not be verified)."""
 
 
+class RosterRefused(ValueError):
+    """A roster edit that would leave the default unlisted, or nothing listed.
+
+    The sentence says what to do instead ("choose another default first"),
+    because the picker shows it to the owner verbatim.
+    """
+
+
 @dataclass
 class Roster:
     models: list[str] = field(default_factory=list)
@@ -347,6 +355,12 @@ class Roster:
     # `config.REASONING_EFFORT`; the levels are the model's own, because the
     # ladder is not the same everywhere.
     efforts: dict[str, str] = field(default_factory=dict)
+    # The configured default (`config.TIERS["orchestrator"]`) the owner took
+    # off the roster, or "". Without it `_load` would seed that model straight
+    # back on the next read, which made the env model impossible to unpin. It
+    # names the model, not just "removed", so a *different* configured default
+    # (a changed JARVIS_ORCHESTRATOR) is seeded as before.
+    removed_default: str = ""
 
 
 _roster_lock = threading.Lock()
@@ -368,10 +382,18 @@ def _load() -> Roster:
 
     saved = payload.get("models")
     models = [m for m in saved if isinstance(m, str) and m] if isinstance(saved, list) else []
-    if default not in models:
-        models.insert(0, default)
     selected = payload.get("selected")
     selected = selected if isinstance(selected, str) and selected in models else ""
+    removed = payload.get("removed_default")
+    removed = removed if isinstance(removed, str) and removed == default else ""
+    # The configured default is seeded unless the owner unpinned it — and even
+    # then it comes back whenever nothing is selected, because with no
+    # selection it *is* what the loop runs on, and the picker must list the
+    # model that is answering. That one rule also keeps the roster from ever
+    # being empty: a selection is always a roster member.
+    if default not in models and not (removed and selected):
+        models.insert(0, default)
+        removed = ""
 
     saved_efforts = payload.get("efforts")
     efforts = {}
@@ -383,7 +405,8 @@ def _load() -> Roster:
             # is a setting the owner did not make twice.
             if model_id in models and isinstance(level, str) and level in EFFORT_LADDER:
                 efforts[model_id] = level
-    return Roster(models=models, selected=selected, efforts=efforts)
+    return Roster(models=models, selected=selected, efforts=efforts,
+                  removed_default=removed if default not in models else "")
 
 
 def _save(roster: Roster) -> None:
@@ -394,6 +417,7 @@ def _save(roster: Roster) -> None:
                 "models": roster.models,
                 "selected": roster.selected,
                 "efforts": roster.efforts,
+                "removed_default": roster.removed_default,
             },
             indent=2,
         )
@@ -430,30 +454,61 @@ def add(model_id: str) -> Roster:
         current = _load()
         if model_id not in current.models:
             current.models.append(model_id)
+            if model_id == current.removed_default:
+                current.removed_default = ""  # pinned back on: seed rules resume
             _save(current)
         return current
 
 
 def remove(model_id: str) -> Roster:
-    """Take a model off the roster.
+    """Take a model off the roster — the configured default included.
 
     Removing the selected one clears the selection back to the configured
     default rather than leaving a pointer at something no longer listed — the
     picker would show nothing selected while the loop kept running it.
+
+    Two refusals, both about the same rule — **the model a default thread runs
+    on is always listed**:
+
+    * the last model on the roster cannot go (there would be nothing to run);
+    * a removal that would leave the *effective* default off the roster is
+      refused with "choose another default first": removing the configured
+      default while nothing is selected, or removing the selection while the
+      configured default has already been unpinned.
+
+    The model's effort pin goes with it, so a re-add starts from the default.
     """
     with _roster_lock:
         current = _load()
         if model_id not in current.models:
             raise LookupError(f"{model_id!r} is not on the roster")
-        current.models = [m for m in current.models if m != model_id]
-        if current.selected == model_id:
-            current.selected = ""
+        remaining = [m for m in current.models if m != model_id]
+        if not remaining:
+            raise RosterRefused(
+                f"{model_id} is the only model on the roster; pin another one before unpinning it")
+        default = config.TIERS["orchestrator"]
+        selected = "" if current.selected == model_id else current.selected
+        if not selected and default not in remaining:
+            raise RosterRefused(
+                f"{model_id} is the default every default thread runs on; "
+                "choose another default first")
+        current.models = remaining
+        current.selected = selected
+        current.efforts.pop(model_id, None)
+        if model_id == default:
+            current.removed_default = default
         _save(current)
         return current
 
 
 def select(model_id: str) -> Roster:
     """Choose the model the loop runs on; '' returns to the configured default.
+
+    This is **the default** the owner sees: the HUD's "Set as default" lands
+    here, it persists across restarts in models.json, and it beats
+    `JARVIS_ORCHESTRATOR` (see `tier`). Every default-following v2 fast-path
+    thread reads it at the start of each turn. '' ("Reset to config default")
+    hands the decision back to the configuration.
 
     Only a roster member can be selected. The roster is the point of the
     feature — a shortlist the owner curated — and a select-anything endpoint
@@ -465,6 +520,13 @@ def select(model_id: str) -> Roster:
         if model_id and model_id not in current.models:
             raise LookupError(f"{model_id!r} is not on the roster")
         current.selected = model_id
+        if not model_id:
+            # Back to the configured default: it is what answers now, so it is
+            # listed again even if the owner had unpinned it.
+            default = config.TIERS["orchestrator"]
+            if default not in current.models:
+                current.models.insert(0, default)
+            current.removed_default = ""
         _save(current)
         return current
 
@@ -557,7 +619,11 @@ def describe() -> dict[str, Any]:
     return {
         "models": entries,
         "selected": current.selected,
+        # The configured default (JARVIS_ORCHESTRATOR) — used only while
+        # nothing is selected. `current` is what the loop runs on now, i.e.
+        # the default the owner sees; `default_source` says which one it is.
         "default": config.TIERS["orchestrator"],
         "current": tier("orchestrator"),
+        "default_source": "hud" if current.selected else "config",
         "default_effort": (config.REASONING_EFFORT or "").strip().lower(),
     }

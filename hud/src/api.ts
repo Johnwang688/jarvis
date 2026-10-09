@@ -11,6 +11,7 @@ import type {
   Project, RouteView, Schedule, SchedulePreview, Task, TaskThread, Thread, Tree, Usage,
   VoiceEntry, Attachment, DirListing, DiscordStatus, ProjectChannel, BackfillResult } from "./types";
 import type { ThreadModels } from "./lib/threadmodel";
+import type { RosterView } from "./lib/roster";
 import type { ArchiveView, DeleteResult, ProjectImpact } from "./types";
 
 export class ApiError extends Error {
@@ -176,16 +177,21 @@ export const api = {
   voices: () => req<{ voices: VoiceEntry[]; override?: string }>("/voices"),
   /** `""` clears the override. The key is `voice` (the daemon refuses any other). */
   setVoice: (name: string) => req<any>("/voice", json({ voice: name })),
-  models: () => req<{ models: ModelRow[]; selected?: string | null }>("/models"),
+  /** The fast path's roster and its default (`models.describe()`). */
+  models: () => req<RosterView>("/models"),
   catalog: () => req<{ models: ModelRow[]; stale?: string }>("/models/catalog"),
-  /** Select the fast path's global model; `""` returns to the config default. */
-  setModel: (id: string) => req<any>("/model", json({ model: id })),
+  /** Set the fast path's default (persisted, beats JARVIS_ORCHESTRATOR);
+   * `""` returns to the config default. */
+  setModel: (id: string) => req<RosterView>("/model", json({ model: id })),
   /** Pin one roster model's effort; `""` follows the global default. Never selects it. */
   setModelEffort: (model: string, effort: string) =>
     req<any>("/models", json({ model, effort })),
   mute: (on: boolean) => req<any>("/mute", json({ muted: on })),
   /** Pin a catalogue model to the roster (refused unless it can call tools). */
-  addModel: (id: string) => req<any>("/models", json({ add: id })),
+  addModel: (id: string) => req<RosterView>("/models", json({ add: id })),
+  /** Unpin a model from the roster (the config default included). Refused
+   * with a sentence when it would leave the default unlisted. Never selects. */
+  removeModel: (id: string) => req<RosterView>("/models", json({ remove: id })),
 
   // --- speech -------------------------------------------------------------
   async stt(blob: Blob): Promise<string> {

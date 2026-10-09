@@ -1106,6 +1106,44 @@ class Backend(unittest.TestCase):
         self.request("POST", "/models", {"model": "test/model", "effort": ""})
         self.assertEqual(models.selected(), "test/model")
 
+    def test_the_hud_unpins_any_model_and_chooses_the_default(self):
+        """2026-10-08: the owner could not unpin a model (the env default was
+        re-seeded on every read) and saw the default as env-only. The HUD's
+        choice is now *the* default, any model unpins, and every refusal is a
+        sentence the picker can show — never "request failed (…)"."""
+        default = config.TIERS["orchestrator"]
+        self.request("POST", "/models", {"add": "test/model"})
+        self.events_all()
+        # The env model while nothing is chosen is what a default thread runs.
+        error = self.request("POST", "/models", {"remove": default}, status=409)["error"]
+        self.assertIn("choose another default first", error)
+        self.assertIn(default, models.roster().models)
+        # Set as default: the global pick, which the fast chips name as default.
+        body = self.request("POST", "/model", {"model": "test/model"})
+        self.assertEqual((body["current"], body["default_source"]), ("test/model", "hud"))
+        self.assertEqual(self.request("GET", "/thread-models")["providers"]["fast"]["default"], "test/model")
+        # Now the env model unpins like any other, and stays unpinned on reload.
+        body = self.request("POST", "/models", {"remove": default})
+        self.assertEqual([m["id"] for m in body["models"]], ["test/model"])
+        self.assertEqual(models.roster().models, ["test/model"])
+        self.assertEqual([m["id"] for m in self.request("GET", "/models")["models"]], ["test/model"])
+        # The roster is never empty.
+        self.assertIn("only model", self.request(
+            "POST", "/models", {"remove": "test/model"}, status=409)["error"])
+        # Reset to config default: the env model is listed and answers again.
+        body = self.request("POST", "/model", {"model": ""})
+        self.assertEqual((body["current"], body["default_source"]), (default, "config"))
+        self.assertIn(default, [m["id"] for m in body["models"]])
+        self.assertEqual(self.request("GET", "/thread-models")["providers"]["fast"]["default"], default)
+        # The other refusals carry their reasons too.
+        self.assertIn("not on the roster", self.request(
+            "POST", "/models", {"remove": "nope/missing"}, status=404)["error"])
+        self.assertIn("tool calling", self.request(
+            "POST", "/models", {"add": "nope/missing"}, status=400)["error"])
+        # One `model` broadcast per change, none for a refusal.
+        kinds = [e["kind"] for e in self.events_all()]
+        self.assertEqual(kinds.count("model"), 3, kinds)
+
     # -- the model a chat thread runs on (decisions 2026-10-06, part A) ------
 
     def model_fakes(self):

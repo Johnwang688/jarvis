@@ -24,11 +24,30 @@ change). An unknown key is a 400 that names it; it is never read as absent.
 
 | route | body |
 |---|---|
-| `POST /model` | `{"model": id}` — `""` returns to the config default |
+| `POST /model` | `{"model": id}` — "Set as default"; `""` is "Reset to config default" (re-lists the env model if it was unpinned) |
 | `POST /models` | exactly one of `{"add": id}`, `{"remove": id}`, `{"model": id, "effort": level}` (`""` = AUTO) |
 | `POST /voice` | `{"voice": name}` — `""` clears the override |
 | `POST /mute` | `{"muted": bool}` |
 | `POST /avatar` | `{"slug": slug}` |
+
+The fast path's default (2026-10-08). `POST /model {model}` is **the**
+default the owner sees: it persists in `models.json`, beats
+`JARVIS_ORCHESTRATOR` and is what every default-following fast-path thread
+runs on (`GET /thread-models` names it as `providers.fast.default`). The env
+model is the *config default*, used only while nothing is selected.
+`GET /models` (and every `POST /model(s)` answer) carries `selected` (the
+HUD's choice or `""`), `default` (the config default), `current` (what
+answers now) and `default_source` (`"hud"` or `"config"`).
+
+`{"remove": id}` unpins any roster model, the config default included (it
+stays unpinned across restarts — `removed_default` in `models.json`), and
+drops its effort pin. Two refusals, both **409** with a sentence the picker
+shows verbatim: the last model on the roster, and any removal that would
+leave the effective default unlisted ("choose another default first" —
+the config default while nothing is selected, or the selection while the
+config default is unpinned). Removing the selected model otherwise falls
+back to the config default. Unknown id: 404; ineligible `add`: 400 with the
+reason. Every change publishes one `model` event; a refusal publishes none.
 
 ## Projects (additions to WP7)
 

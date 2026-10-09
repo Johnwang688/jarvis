@@ -224,7 +224,8 @@ by the first message; model and effort change from the next message. The
 choice lives on the Thread record (`jarvis/v2/thread_model.py`) — **never
 rewrite `brief.json`** — and the daemon hands it to the provider per turn
 (`set_model` on all three providers). A default thread follows the global
-Model picker **every turn**; Claude defaults to `claude-opus-5-5` at high,
+Model picker **every turn** (whose choice is *the* default — set, reset and
+unpinned in the HUD's Model picker, 2026-10-08; see *Model selector*); Claude defaults to `claude-opus-5-5` at high,
 Codex to its routing default; effort defaults to `high` (or the roster's pin)
 within the model's ladder. **Only an explicit model pins a thread** (A4
 amendment, 2026-10-07): an effort-only change on a default thread stores the
@@ -3748,6 +3749,25 @@ owner who picks a bad model and closes the window changes it back by reopening
 the window (CONFIG DEFAULT is the first row) or by editing
 `~/.config/jarvis/models.json`. A `jarvis model` CLI is the obvious follow-up
 and was left out rather than guessed at.
+
+**The HUD's choice is the default, and any model unpins (2026-10-08).** The
+owner could not remove a pinned model in the v2 HUD (no control), could not
+remove the env model at all (`_load` re-seeded it on every read), and read
+the default as env-only. Now: the v2 Model picker's "Set as default" is
+`select()` — persisted, beating `JARVIS_ORCHESTRATOR`, followed by every
+default fast-path thread — and the env model is labelled "config default
+(JARVIS_ORCHESTRATOR)", used only while nothing is selected, with "Reset to
+config default" (`select("")`, which re-lists it). Every row has an × and
+the catalogue's pinned rows say Unpin. **The rule that holds it together:
+the effective default is always on the roster.** `remove()` raises
+`RosterRefused` (409, its sentence shown in the picker) for the last model
+and for any removal that would leave the effective default unlisted
+("choose another default first"); an unpinned env model is remembered as
+`removed_default` (naming the model, so a changed env var still seeds), and
+`_load` re-seeds it anyway whenever nothing is selected. `describe()` gained
+`default_source`. The v2 route maps `RosterRefused`/`NotEligible`/
+`LookupError` to `fail()` because the daemon reflects only an `APIError`'s
+text — a bare exception reads "request failed (RosterRefused)".
 
 **Schoolwork integration shipped (2026-08-23).** The owner's Windows-side
 schoolwork dashboard (`C:\myday\schoolwork` — Canvas + MySchoolApp merged into
