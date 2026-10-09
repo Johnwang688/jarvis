@@ -63,7 +63,7 @@ import json
 import threading
 from typing import Any, Callable
 
-from . import command_review, config, rules
+from . import command_review, config, protected_state, rules
 
 _mode = "ask"
 _lock = threading.Lock()
@@ -167,6 +167,11 @@ def allows(tool_name: str, args: dict[str, Any]) -> bool:
     # Remote code the entries never saw. The reviewer and the owner decide.
     if command_review.is_fetch_execute(command):
         return False
+    # A line that writes the gate's own state is never covered: an entry for
+    # `cp` was a yes to copying files, not to rewriting this file's
+    # neighbours. See `protected_state_verdict`.
+    if protected_state.command_touch(command) is not None:
+        return False
     targets = rules.command_targets(command)
     if not targets:
         return False
@@ -184,6 +189,48 @@ def allows(tool_name: str, args: dict[str, Any]) -> bool:
     )
 
 
+def protected_state_verdict(command: str) -> rules.Verdict | None:
+    """DENY or ASK for a line that writes the gate's own state, else None.
+
+    **The hole this closes (2026-10-08).** `cp /tmp/x ~/.config/jarvis/allowlist.json`
+    is a plain `cp`, and `cp` is ALLOW in rules.py — so on every human-backed
+    surface (the face, the CLI, Discord, goals, attended tasks) it ran with
+    nobody asked and replaced the allowlist. The write *tools* had refused that
+    file since 2026-08-17; a shell command was the same write with no check.
+
+    A write that provably lands on the **allowlist** is DENY: the approver
+    reads that file on every call, so a yes to `cp backup.json allowlist.json`
+    is a yes to entries the owner never saw — the `.env` rule, approving a
+    command is not consent to what it does. It is also never put to the owner,
+    which keeps it out of the HUD card and the Discord DM where a tired "yes"
+    lands. Everything else the detector sees — `models.json`, `routing.json`,
+    `provider_defaults.json`, `discord_guild.json`, or a line that only *might*
+    reach the allowlist — is ASK: those change what he runs on rather than
+    what runs unasked, the owner can see and undo the effect, and restoring a
+    backup is a legitimate request.
+    """
+    touch = protected_state.command_touch(command)
+    if touch is None:
+        return None
+    if touch.certain and touch.path in protected_state.gate_paths():
+        return rules.Verdict(rules.DENY, protected_state.refusal(touch))
+    return rules.Verdict(rules.ASK, protected_state.ask_reason(touch))
+
+
+def static_verdict(command: str) -> rules.Verdict:
+    """rules.decide() with the gate-state check folded in, worst verdict wins.
+
+    No network: the fetch-execute review is `command_verdict`'s alone. v2's
+    layer 4 calls this rather than `rules.decide` so a v2 worker's ALLOW is the
+    same ALLOW v1 grants.
+    """
+    verdict = rules.decide(command)
+    if verdict.decision == rules.DENY:
+        return verdict
+    guard = protected_state_verdict(command)
+    return guard if guard is not None else verdict
+
+
 def command_verdict(tool_name: str, args: dict[str, Any]) -> rules.Verdict:
     """deny / allow / ask for one dangerous-tool request.
 
@@ -191,12 +238,18 @@ def command_verdict(tool_name: str, args: dict[str, Any]) -> rules.Verdict:
     dangerous tool keeps the old behaviour and asks. Evaluated once, by
     `dispatch()`, because the fetch-execute review costs a network round trip
     and a model call — doing it again inside the approver would double both.
+
+    Evaluated **before** the approver, which is what makes a DENY hold under
+    the allowlist and under `--dangerously-skip-permissions` alike: mode "all"
+    lives inside the approver, and the approver is never reached. An ASK is
+    different — mode "all" answers it yes, which is that flag's documented
+    meaning.
     """
     if tool_name != "run_command":
         return rules.Verdict(rules.ASK)
 
     command = str(args.get("command", ""))
-    verdict = rules.decide(command)
+    verdict = static_verdict(command)
     if verdict.decision == rules.DENY:
         return verdict
 
@@ -206,7 +259,12 @@ def command_verdict(tool_name: str, args: dict[str, Any]) -> rules.Verdict:
     # alone is not enough to auto-approve.
     if command_review.is_fetch_execute(command):
         decision, reason = command_review.verdict_for(command)
-        return rules.Verdict(decision, reason)
+        review = rules.Verdict(decision, reason)
+        # A clean script does not make writing the gate's state routine.
+        guard = protected_state_verdict(command)
+        if guard is not None and review.decision == rules.ALLOW:
+            return guard
+        return review
     return verdict
 
 

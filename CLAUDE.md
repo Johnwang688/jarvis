@@ -781,7 +781,83 @@ jarvis/
   routing.json and the Discord guild file, each by its `config` path and
   beside the allowlist — because a v1 `write_file` (a background workflow's
   included) could rewrite which model every default v2 thread runs on.
-  `tests/files_check.py` asserts the v1 and v2 sets are equal.
+  `tests/files_check.py` asserts the v1 and v2 sets are equal — and since
+  the shell fix below they are the same object: v2's `protected_paths()` and
+  `jarvis/protected_state.py` both return `files._protected_state()`, which
+  also gained `config.ROUTING_PATH` (`JARVIS_ROUTING` can put the live file
+  elsewhere).
+
+  **A shell command could still write it, unasked** (found and fixed
+  2026-10-08). The write *tools* refused the allowlist; `run_command` did
+  not, and `cp` is ALLOW in rules.py. So `cp /tmp/x
+  ~/.config/jarvis/allowlist.json` scored ALLOW, and under a real
+  `permissions.gate` it ran with **zero approver calls** and replaced the
+  allowlist — confirmed by execution against temp paths, and the same for
+  models.json, routing.json and provider_defaults.json. Every human-backed
+  v1 surface was affected (face, CLI, Discord, goals, attended tasks): any
+  of them could widen its own allowlist or change the model it thinks with,
+  nobody asked. v2 had a detector (`_command_writes_protected_state`); v1
+  had none — the two-copies failure in its purest form, where the second
+  copy is *missing*.
+
+  The fix is one detector, `jarvis/protected_state.py` (SELF_PROTECTED),
+  asked by v1's gate and v2's layer 1 alike. `permissions.static_verdict` is
+  `rules.decide` with it folded in, worst wins; `command_verdict` (evaluated
+  in `dispatch()` **before** the approver) uses it, `allows()` never covers
+  a line it flags, and `run_command` itself refuses the allowlist case so it
+  holds even with no approver. Two verdicts, deliberately different:
+
+  - **A write that provably lands on the allowlist is DENY** — never run,
+    never asked, under an allowlist entry for the stem *and* under
+    `--dangerously-skip-permissions` (mode "all" lives inside the approver,
+    which a DENY never reaches). The `.env` reasoning: the approver reads
+    that file on every call, so a yes to `cp backup.json allowlist.json` is
+    a yes to entries the owner never saw, typed into a Discord DM as
+    readily as a HUD card. Restoring a backup is the owner's own shell's
+    job. This **reverses** the older rule in `tools/files.py` that an
+    approved `run_command` may change it; that exception now covers the
+    code files in SELF_PROTECTED only. It includes `rm`, `mv` away and `chmod` — not
+    because those widen anything, but because "Jarvis never changes this
+    file by command" is a rule with no cases to argue.
+  - **Everything else it sees is ASK, whatever the allowlist says**: writes
+    to models/routing/provider defaults/the guild file, and lines that only
+    *might* reach the allowlist (a tree copied into `~/.config/jarvis`, a
+    path behind an unset variable, a name in one pipeline segment written by
+    another). Those change what he runs on rather than what runs unasked,
+    the effect is visible and undoable, and "restore my models.json" is a
+    reasonable request. Mode "all" does answer these yes — that is the
+    flag's documented meaning. In v2, *certain* writes to any of the files
+    stay DENY at layer 1 as before, and layer 4 asks `static_verdict` so an
+    uncertain one is never auto-approved there either.
+
+  What it sees: absolute, `~`, `$HOME`/`${HOME}` and line-local `D=…`
+  spellings; relative names after a followed `cd`/`pushd`/`env -C`; symlinks
+  (resolved) and existing hard links (by inode); wrappers, compound lines,
+  `sh -c`/`bash -c`/`eval` strings (recursively); redirects glued or spaced,
+  `tee`, `sed -i`, `cp`/`mv`/`install`/`rsync`/`ln`/`curl -o`/`dd of=`,
+  `cp -t DIR`, a source copied *into* the gate's folder under the file's
+  name, globs onto it, and inline interpreter source naming the full path.
+  Copy *sources* and plain readers (`cat`, `cp allowlist.json ~/backup`)
+  are reads and stay ALLOW. **It is not a boundary** — the DENY caveat in
+  rules.py applies word for word: a path assembled at run time
+  (`'allow'+'list.json'`), command substitution (already ASK), brace
+  expansion, a script or Makefile that writes it, a program told where to
+  write by its own config. The real boundary would be filesystem
+  permissions: the gate's state owned by a user the agent's process is not.
+  That is the residual gap, recorded rather than pretended away.
+
+  Evidence: a differential sweep of ~1,500 commands (every command-like
+  string in the repo's tests, skills and docs, plus a generated
+  cross-product of ordinary file work) under two working directories, a
+  project and `$HOME`, moved **zero** ordinary verdicts — every change names
+  the gate's folder. The same sweep against v2's old detector found it had
+  been *denying* ordinary work (`echo hi > models.json` in any project, any
+  `sed` that read a gate file, a backup `cp`) — gone now. Against the old
+  wiring, 35 of the 39 allowlist spellings and all 14 ASK spellings in
+  `tests/rules_check.py:gate_state_checks` ran with nobody asked.
+  Generalises: **protecting a file means protecting every verb that reaches
+  it** — a refusal on the write tool and silence on the shell is a door
+  with a lock and no wall.
 - **Desktop control is confined to an app allowlist** (2026-07-31).
   `config.DESKTOP_APPS` is the whole door: no desktop tool accepts a window
   title, handle, or executable path, only a registered app name, so the model
@@ -1246,8 +1322,14 @@ jarvis/
   `2>/dev/null` and `2>&1>out.log` do — and pins `2>&1` surviving
   segmentation intact. `run_readonly_narrowing_checks` pins 21 git reads and 9
   quoted metacharacters still running unattended, alongside the writing form
-  of every subcommand it names. Run after touching `rules.py`,
-  `tools/shell.py`, `command_review.py`, `permissions.gate`, or `dispatch()`.
+  of every subcommand it names. Since 2026-10-08 `gate_state_checks` owns
+  **shell writes to the gate's own state**, under a throwaway HOME with an
+  allowlist entry for every stem in sight: 39 spellings of a write onto the
+  allowlist refused (allowlisted stem, mode "all", and no approver at all),
+  14 gate-state writes asked and never run on a no, and 16 ordinary
+  commands — reads and backups of those same files among them — unchanged.
+  Run after touching `rules.py`, `tools/shell.py`, `command_review.py`,
+  `protected_state.py`, `permissions.gate`, or `dispatch()`.
 - `tests/permissions_check.py` — free checks for modes and the allowlist:
   gate ordering, stem vs whole-tool matching, persistence without
   duplicates, mode "all" bypass, and the broker's ALWAYS path writing an

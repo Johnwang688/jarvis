@@ -61,6 +61,9 @@ SELF_PROTECTED = frozenset(
         # itself, which is why they join the list rather than sitting beside it.
         "jarvis/rules.py",
         "jarvis/command_review.py",
+        # Decides which shell commands may write the gate's own state files
+        # (2026-10-08). Editing it is editing what never runs.
+        "jarvis/protected_state.py",
     }
 )
 
@@ -101,8 +104,10 @@ _NUMBER_FIELD = 6
 # ALLOWLIST_PATH at a temp file protects the temp file — the real one must never
 # be what a suite exercises.
 #
-# Still reachable by an *approved* run_command, which is the same deliberate
-# exception SELF_PROTECTED makes: that is the owner consenting per edit.
+# No longer reachable by run_command either (2026-10-08): a shell command that
+# writes these files is ASK whatever the allowlist says, and one that provably
+# writes the allowlist is refused outright — jarvis/protected_state.py. That
+# reverses the older exception here; SELF_PROTECTED's *code* files keep it.
 #
 # Widened 2026-10-08 (PR #15 review) to the set v2 already protects
 # (`jarvis.v2.permissions.protected_paths`): the model roster, the Claude and
@@ -113,12 +118,17 @@ _NUMBER_FIELD = 6
 # package; a suite asserts the two sets are equal, so they cannot drift. The
 # no-tool guards (models_check, fastpath_check) let this one function name
 # those files — it only ever refuses them — and nothing else in the tools.
+#
+# Since 2026-10-08 it is the only copy: `jarvis.protected_state` (the shell
+# check) and `jarvis.v2.permissions.protected_paths` both return this set, and
+# `config.ROUTING_PATH` joined it — `JARVIS_ROUTING` can put the live routing
+# file outside the allowlist's directory.
 def _protected_state() -> set[Path]:
     names = ("allowlist.json", "models.json", "routing.json", "discord_guild.json",
              "provider_defaults.json")
     allow = config.ALLOWLIST_PATH.expanduser()
     paths = {allow, config.MODELS_PATH.expanduser(), config.PROVIDER_DEFAULTS_PATH.expanduser(),
-             config.DISCORD_GUILD_PATH.expanduser()}
+             config.DISCORD_GUILD_PATH.expanduser(), config.ROUTING_PATH.expanduser()}
     paths |= {allow.parent / name for name in names}
     return {p.resolve() for p in paths}
 

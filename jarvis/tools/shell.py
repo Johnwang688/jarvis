@@ -12,7 +12,7 @@ import shlex
 import subprocess
 from typing import Annotated
 
-from .. import rules
+from .. import protected_state, rules
 from . import tool
 from .secrets import protected_in_command, refusal
 
@@ -299,5 +299,13 @@ def run_command(
     protected = protected_in_command(command)
     if protected:
         return refusal(protected)
+
+    # The allowlist is refused here as well as in dispatch()'s verdict, so the
+    # refusal holds on a path that never consults one (an approver of None,
+    # which dispatch() treats as "run unguarded"). One detector, two callers —
+    # see jarvis/protected_state.py.
+    gate_write = protected_state.refused(command)
+    if gate_write is not None:
+        return f"Refused: {protected_state.refusal(gate_write)}."
 
     return _run(command)

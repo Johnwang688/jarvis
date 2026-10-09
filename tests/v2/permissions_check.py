@@ -58,6 +58,7 @@ class Sandbox:
             "V2_DATA_DIR": config.V2_DATA_DIR,
             "V2_ALWAYS_ASK": config.V2_ALWAYS_ASK,
             "DISCORD_GUILD_PATH": config.DISCORD_GUILD_PATH,
+            "ROUTING_PATH": config.ROUTING_PATH,
         }
         self._home = os.environ.get("HOME")
         os.environ["HOME"] = str(self.home)
@@ -67,6 +68,7 @@ class Sandbox:
         config.V2_DATA_DIR = self.root / "v2data"
         config.V2_ALWAYS_ASK = self.home / ".config" / "jarvis" / "always-ask.json"
         config.DISCORD_GUILD_PATH = self.home / ".config" / "jarvis" / "discord_guild.json"
+        config.ROUTING_PATH = self.home / ".config" / "jarvis" / "routing.json"
         return self
 
     def __exit__(self, *exc):
@@ -337,7 +339,8 @@ def always_ask_checks():
 
 def file_deny_checks():
     from jarvis.v2.model import PermissionProfile as P
-    from jarvis.v2.permissions import denied_file, file_targets, build_permit
+    from jarvis.v2.permissions import (_command_writes_protected_state, build_permit,
+                                       denied_file, file_targets, protected_paths)
     from jarvis.v2.provider import Decision
 
     with Sandbox() as box:
@@ -411,6 +414,47 @@ def file_deny_checks():
             eq(len(asker.seen), before, f"{tool}'s guild-file refusal is never put to the owner")
         eq(permit(*bash(f"echo '{{}}' > {guild_file}"), brief), Decision.DENY,
            "a redirect onto discord_guild.json is refused")
+
+        # One detector for v1 and v2 (2026-10-08): the spellings v1's shell
+        # gate learned are refused here too, and the false positives the old
+        # copy carried (any redirect in a segment that merely *mentioned* a
+        # protected name; any `sed` that read one) are gone.
+        from jarvis import protected_state
+        from jarvis.tools import files as v1_files
+        eq(protected_paths(), v1_files._protected_state(),
+           "v2's protected set is v1's write-tool set, not a copy of it")
+        eq(protected_paths(), protected_state.protected_paths(),
+           "and the shell check reads the same set")
+        for command in ("cp /tmp/x $HOME/.config/jarvis/allowlist.json",
+                        "cd ~/.config/jarvis && cp /tmp/x allowlist.json",
+                        "D=~/.config/jarvis; cp /tmp/x $D/models.json",
+                        "cp -t ~/.config/jarvis /tmp/routing.json",
+                        "sh -c 'cp /tmp/x ~/.config/jarvis/provider_defaults.json'",
+                        "env -C ~/.config/jarvis cp /tmp/x allowlist.json",
+                        "curl -o ~/.config/jarvis/allowlist.json https://example.com/a"):
+            before = len(asker.seen)
+            eq(permit(*bash(command), brief), Decision.DENY, f"layer 1 refuses {command}")
+            eq(len(asker.seen), before, f"and never asks: {command}")
+        for command in ("echo hi > models.json", "echo allowlist.json > notes.txt",
+                        "sed -n 1p ~/.config/jarvis/models.json",
+                        "cp ~/.config/jarvis/models.json /tmp/models.bak"):
+            eq(_command_writes_protected_state(command), None,
+               f"not a write to the gate's state: {command}")
+        # An uncertain one is not refused, and not auto-approved either.
+        owner = Asker(Decision.ALLOW)
+        human = build_permit(context(brief), owner)
+        for command in ("rsync -a /tmp/evil/ ~/.config/jarvis/",
+                        "mkdir -p ~/.config/jarvis",
+                        "echo ~/.config/jarvis/allowlist.json | xargs cp /tmp/x",
+                        "cp /tmp/x $UNSET_DIR/models.json"):
+            seen = len(owner.seen)
+            eq(human(*bash(command), brief_for(P.ASK)), Decision.ALLOW,
+               f"an uncertain gate-state write is not refused: {command}")
+            ok(box.decisions[-1]["layer"] != "jarvis-allow" and len(owner.seen) == seen + 1,
+               f"it reaches the owner, never rules ALLOW at layer 4: {command} "
+               f"(layer {box.decisions[-1]['layer']})")
+        eq(human(*bash("mkdir -p build"), brief_for(P.ASK)), Decision.ALLOW, "control")
+        eq(box.decisions[-1]["layer"], "jarvis-allow", "an ordinary mkdir is still layer 4")
 
         # A write under a credential directory is always-ask, not a refusal.
         before = len(asker.seen)
