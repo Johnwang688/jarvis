@@ -66,6 +66,7 @@ def guard_checks() -> None:
 
 
 STATE_PATHS = ("ALLOWLIST_PATH", "MODELS_PATH", "PROVIDER_DEFAULTS_PATH", "DISCORD_GUILD_PATH",
+               "CODEX_CATALOG_PATH",
                "ROUTING_PATH")
 
 

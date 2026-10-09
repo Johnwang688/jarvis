@@ -157,6 +157,11 @@ class Daemon:
         self.providers = {ProviderName(k): v for k, v in providers.items()}
         self.port = port
         self.bus = EventBus()
+        # The sidebar's per-thread and per-task status (activity.py), fed by
+        # every record this bus carries.
+        from .activity import Activity
+        self.activity = Activity(stores, self.bus.publish)
+        self.bus.observe(self.activity.observe)
         # The daemon owns the broker (design §6 layer 5). Its two callbacks
         # publish on the same bus every surface already reads, so a HUD, a
         # Discord thread and the escape hatch all learn about a pending
@@ -941,6 +946,7 @@ class Daemon:
                     job = threading.Thread(target=self._cleanup, args=(session,), daemon=True)
                     job.start()
                     jobs.append(job)
+        self._stop_codex_metadata(deadline)
         for job in jobs:
             job.join(max(0, deadline - time.monotonic()))
         with self._lock:
@@ -956,6 +962,29 @@ class Daemon:
         self._server = None
         if any(job.is_alive() for job in jobs):
             LOG.warning("Shutdown bound reached; provider work remains on daemon threads")
+
+    def _stop_codex_metadata(self, deadline: float) -> None:
+        """Shutdown for the background Codex models/quota refresh (PR #20
+        re-review): the provider's app-server in flight is cancelled, the
+        ledger stops saving the catalog or swapping the table, and the worker
+        is waited for within the stop bound. In that order: the ledger is
+        stopped first, so a read the cancel cuts short cannot land after."""
+        ledger = getattr(getattr(self, "router", None), "ledger", None)
+        stop = getattr(ledger, "stop_codex", None)
+        if callable(stop):
+            stop(0)
+        codex = self.providers.get(ProviderName.CODEX)
+        cancel = getattr(codex, "cancel_metadata", None)
+        if callable(cancel):
+            try:
+                cancel()
+            except Exception as exc:
+                LOG.warning("Codex metadata cancel failed (%s)", type(exc).__name__)
+        wait = getattr(ledger, "wait_codex_refresh", None)
+        if callable(wait):
+            from .providers.codex import METADATA_DEADLINE_S
+            if not wait(min(METADATA_DEADLINE_S + 2, max(0.0, deadline - time.monotonic()))):
+                LOG.warning("Codex metadata refresh still running at shutdown; it saves nothing")
 
 
 def _object(value, allowed, required=()):
@@ -977,12 +1006,15 @@ def _no_channel_field(body):
     return body
 
 
-def _routing_models(project):
+def _routing_models(project, before=None):
     """A project's per-role model overrides name only models Jarvis knows for
-    that CLI, the same rule `routing.json` and `/route` follow (400 if not)."""
+    that CLI, the same rule `routing.json` and `/route` follow (400 if not).
+    On a PATCH, `before` is the stored project: an entry it already holds
+    unchanged is not re-judged, so a stale one round-trips."""
     from .router import check_project_models
     try:
-        check_project_models(project.routing.models)
+        check_project_models(project.routing.models,
+                             before.routing.models if before is not None else None)
     except ValueError as exc:
         raise APIError(400, str(exc)) from exc
 
@@ -1137,8 +1169,10 @@ def _handler(daemon):
                         _validate(project, Project)
                         if "routing" in body:
                             # Only when written: a project saved before the
-                            # check must stay renameable.
-                            _routing_models(project)
+                            # check must stay renameable. Only what changed
+                            # is a new choice: an unchanged entry the Codex
+                            # catalog has since dropped round-trips.
+                            _routing_models(project, before)
                         _text(project.name, "name")
                         if not Path(project.root).is_absolute():
                             raise APIError(400, "root must be absolute")
@@ -1231,6 +1265,10 @@ def _handler(daemon):
                         raise APIError(400, "after must be nonnegative")
                     # after=N skips N records (zero-based resume offset).
                     return 200, stores.threads.read_log(thread_id)[after:]
+                if method == "POST" and action == "seen":
+                    # The owner opened it in the HUD: no longer unread or failed.
+                    _object(self._body(), ())
+                    return 200, {"status": daemon.activity.seen_thread(thread_id)}
                 if method == "POST" and action == "interrupt":
                     _object(self._body(), ())
                     daemon.interrupt(thread_id)
@@ -1257,6 +1295,9 @@ def _handler(daemon):
                 task = daemon.require(stores.tasks, parts[1])
                 if len(parts) == 2 and method == "GET":
                     return 200, to_json(task)
+                if len(parts) == 3 and parts[2] == "seen" and method == "POST":
+                    _object(self._body(), ())
+                    return 200, {"status": daemon.activity.seen_task(task)}
                 if len(parts) == 3 and parts[2] == "worktree":
                     return self._worktree(parts[1], query)
                 if len(parts) == 3 and method == "POST" and parts[2] in _TASK_VERBS:
@@ -1511,6 +1552,23 @@ def configure_logging() -> None:
         logging.getLogger(name).setLevel(logging.WARNING)
 
 
+def load_codex_catalog_at_start() -> bool:
+    """Install the saved Codex catalog, or keep the built-in table. Nothing
+    about that file may stop the daemon from starting (PR #20 re-review):
+    under systemd a crash here is a crash loop, so every failure — a
+    MemoryError included — is one log line and the fallback."""
+    from .router import load_codex_catalog
+    try:
+        loaded = load_codex_catalog()
+    except Exception as exc:
+        LOG.warning("Codex model catalog not loaded (%s); using the built-in table",
+                    type(exc).__name__)
+        return False
+    if loaded:
+        LOG.info("Codex model catalog loaded from %s", config.CODEX_CATALOG_PATH)
+    return bool(loaded)
+
+
 def main() -> int:
     # Imported here, not at module scope: the hatch reads the daemon it is
     # given and nothing in the daemon needs it, so keeping the edge one-way
@@ -1519,6 +1577,12 @@ def main() -> int:
     from .runner import TaskRunner
 
     configure_logging()
+    # The Codex models the account offered last time, before anything reads
+    # routing (PR #20 review): a restart, or a Discord-only daemon no HUD ever
+    # reads, routes and offers against them rather than the built-in fallback.
+    # Missing or corrupt leaves the fallback. Here and not in `Daemon.start`,
+    # so no embedded or test daemon reads the owner's file.
+    load_codex_catalog_at_start()
 
     remote = discord_connected()
     approvals = None

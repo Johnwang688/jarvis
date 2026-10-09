@@ -42,7 +42,17 @@ class EventBus:
         self.capacity = capacity
         self._lock = threading.Lock()
         self._subscribers: dict[Subscription, dict | Callable | None] = {}
+        self._observers: list[Callable[[dict], None]] = []
         self._closed = False
+
+    def observe(self, observer: Callable[[dict], None]) -> None:
+        """Call `observer(record)` synchronously on every publish, after the
+        fan-out and outside the bus lock, so it may publish in turn (what it
+        publishes follows the record that caused it) and can never miss a
+        record the way a full subscription can. It must not block, and an
+        exception it raises is swallowed."""
+        with self._lock:
+            self._observers.append(observer)
 
     def subscribe(self, filter=None) -> Subscription:
         with self._lock:
@@ -62,6 +72,7 @@ class EventBus:
         with self._lock:
             if self._closed:
                 return
+            observers = list(self._observers)
             for q, predicate in self._subscribers.items():
                 try:
                     matches = (predicate is None or
@@ -71,6 +82,11 @@ class EventBus:
                     matches = False
                 if matches:
                     q.offer(deepcopy(record))
+        for observer in observers:
+            try:
+                observer(record)
+            except Exception:
+                pass
 
     def close(self) -> None:
         with self._lock:
