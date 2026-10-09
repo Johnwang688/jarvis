@@ -11,6 +11,7 @@ import { useEffect, useRef, useState } from "react";
 import type { Attachment, Project } from "../types";
 import { DICTATION_MODES, HINTS, type DictationMode } from "../lib/dictation";
 import { folderName } from "../lib/compose";
+import { joined, pendingAfter, type GiveBack } from "../lib/giveback";
 
 /**
  * `in: <project>`, where this conversation lives. Editable only while a new
@@ -55,6 +56,15 @@ export function InputBar(props: {
   onModeChange: (m: DictationMode) => void;
   onSend: (text: string, attachments: Attachment[]) => void;
   onTranscriptTaken: () => void;
+  /** A turn is running in the open thread (2026-10-08): Enter steers it, and
+   * a Stop button ends it. */
+  running?: boolean;
+  onStop?: () => void;
+  /** Words and files handed back (a failed send, a dropped message): put back
+   * in the box ahead of anything typed since, each exactly once. */
+  restore?: GiveBack[];
+  /** Every hand-back up to this nonce is in the box. */
+  onRestoreTaken?: (nonce: number) => void;
 }) {
   const [text, setText] = useState("");
   const [files, setFiles] = useState<Attachment[]>([]);
@@ -69,6 +79,28 @@ export function InputBar(props: {
     box.current?.focus();
     props.onTranscriptTaken();
   }, [props.pendingTranscript, props]);
+
+  // A send that failed, or words the owner's Stop dropped: nothing typed is
+  // ever lost, files included. Each hand-back is taken once, by its nonce: a
+  // parent render while one is still pending must not prepend the same words
+  // again (Bugbot on PR #22 — the effect used to rerun on every render).
+  const restoreTaken = useRef(0);
+  const restore = props.restore ?? [];
+  const newest = restore.length ? restore[restore.length - 1].nonce : 0;
+  const onRestoreTaken = props.onRestoreTaken;
+  useEffect(() => {
+    const fresh = pendingAfter(restore, restoreTaken.current);
+    if (!fresh.length) return;
+    restoreTaken.current = fresh[fresh.length - 1].nonce;
+    const back = joined(fresh);
+    if (back.text) setText((t) => (t ? `${back.text}\n${t}` : back.text));
+    if (back.files.length) setFiles((f) => [...back.files, ...f].slice(0, MAX_FILES));
+    box.current?.focus();
+    onRestoreTaken?.(restoreTaken.current);
+    // Keyed by the newest nonce alone: a new callback or props object is not
+    // a new hand-back.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [newest]);
 
   const stage = async (list: FileList | File[] | null) => {
     if (!list) return;
@@ -132,7 +164,10 @@ export function InputBar(props: {
           id="input"
           data-testid="input"
           value={text}
-          placeholder={props.placeholder || "Message, or @path to attach"}
+          placeholder={
+            props.placeholder ||
+            (props.running ? "Steer him while he works · Enter sends, Stop ends the turn" : "Message, or @path to attach")
+          }
           disabled={props.disabled}
           onChange={(e) => setText(e.target.value)}
           onPaste={(e) => {
@@ -153,8 +188,19 @@ export function InputBar(props: {
           onKeyUp={(e) => e.stopPropagation()}
         />
         <button type="button" data-testid="send" onClick={send} disabled={props.disabled}>
-          Send
+          {props.running ? "Steer" : "Send"}
         </button>
+        {props.running ? (
+          <button
+            type="button"
+            className="stop"
+            data-testid="stop"
+            title="Stop the running turn. Anything queued behind it comes back to this box."
+            onClick={() => props.onStop?.()}
+          >
+            Stop
+          </button>
+        ) : null}
         <label className="chip" style={{ cursor: "pointer" }}>
           Attach
           <input

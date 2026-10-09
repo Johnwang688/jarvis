@@ -130,6 +130,47 @@ class ActivityChecks(unittest.TestCase):
         # Seeing it again, with nothing new, changes nothing.
         self.assertEqual(self.request("POST", f"/threads/{thread.id}/seen", {}), {"status": "idle"})
 
+    def test_a_queued_message_keeps_the_thread_working_between_turns(self):
+        """Steering (#22): a message waiting behind a turn runs the moment it
+        ends, so the dot never flashes unread in between — and a stop that
+        drops it never leaves the thread working for ever."""
+        thread = self.chat()
+        self.block(thread)
+        self.send(thread, "queued behind it")           # FakeProvider: no steer, so it waits
+        statuses = []
+        self.d.bus.observe(lambda r: statuses.append(r["data"]["status"])
+                           if r.get("kind") == "activity" and r["data"].get("id") == thread.id
+                           else None)
+        self.release(thread)
+        eventually(lambda: [m.text for m in self.fake.messages] == ["block", "queued behind it"])
+        self.finish(thread)
+        self.assertNotIn("unread", statuses[:-1], statuses)
+        self.assertEqual(self.status(thread), "unread")
+
+        other = self.chat()
+        self.block(other)
+        self.send(other, "dropped by the stop")
+        self.request("POST", f"/threads/{other.id}/interrupt", {})
+        self.finish(other)
+        self.assertEqual(self.status(other), "idle", "an interrupted turn; nothing left running")
+
+    def test_a_queue_that_cannot_run_never_leaves_the_thread_working(self):
+        """A turn ends with a message waiting (`next`), and that message is
+        then dropped (the thread could not resume): the dot comes back."""
+        thread = self.chat()
+        publish = self.d.bus.publish
+        publish({"kind": "user_message", "thread_id": thread.id, "turn_id": "a" * 32, "data": {}})
+        publish({"kind": "turn_started", "thread_id": thread.id, "turn_id": "a" * 32, "data": {}})
+        publish({"kind": "queue_cleared", "thread_id": thread.id,
+                 "data": {"reason": "stopped", "messages": []}})
+        self.assertEqual(self.status(thread), "working", "mid-turn, a cleared queue changes nothing")
+        publish({"kind": "turn_finished", "thread_id": thread.id, "turn_id": "a" * 32,
+                 "data": {"stop": "end", "next": 1}})
+        self.assertEqual(self.status(thread), "working", "the next turn is about to start")
+        publish({"kind": "queue_cleared", "thread_id": thread.id,
+                 "data": {"reason": "the thread could not resume", "messages": []}})
+        self.assertEqual(self.status(thread), "unread", "it never will: the last turn is unread")
+
     def test_a_failed_turn_is_failed_until_seen(self):
         thread = self.chat()
         self.send(thread, "raise")

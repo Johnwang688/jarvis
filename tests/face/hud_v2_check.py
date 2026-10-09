@@ -291,6 +291,217 @@ def input_checks(page, mock):
     check("an empty Enter sends nothing", len(mock.sent("POST", "/threads/t1/send")) == n)
 
 
+def steer_checks(page, mock):
+    """2026-10-08: "I can't steer claude or codex sessions while they are
+    working ... it just throws an error and I can't continue the session."
+    A message sent while a turn runs steers it (or waits behind it); a
+    refusal is inline and costs nothing typed; the window keeps tracking the
+    running turn, with a Stop; and the busy state cannot wedge."""
+    print("\nsteering a running turn")
+    w = mock.world
+    page.locator('[data-testid="tab-chat"]').click()
+    page.locator('[data-testid="thread-t1"]').click()
+    state = lambda: page.evaluate("window.__hud.state()")  # noqa: E731
+    mock.emit("turn_finished", {"stop": "end"}, thread_id="t1")
+    until(lambda: state()["busy"] is False)
+    stop = page.locator('[data-testid="stop"]')
+    check("an idle thread shows no Stop", stop.count() == 0)
+
+    # A turn running in the open thread — started anywhere — is tracked.
+    mock.emit("turn_started", {}, thread_id="t1")
+    until(lambda: state()["busy"] and state()["turnThreadId"] == "t1")
+    check("a running thread offers a Stop button", bool(until(lambda: stop.count() == 1)))
+
+    # A non-fatal error mid-turn is shown, and the turn is still the turn.
+    mock.emit("error", {"message": "Codex model cooling", "fatal": False}, thread_id="t1")
+    until(lambda: "cooling" in (state()["error"] or ""))
+    check("an error mid-turn does not end the turn in the window",
+          state()["busy"] and state()["turnThreadId"] == "t1" and stop.count() == 1,
+          str({k: state()[k] for k in ("busy", "turnThreadId")}))
+
+    # Enter while it runs steers: drawn at once, marked, the box clears.
+    w["send_status"] = "steered"
+    box = page.locator('[data-testid="input"]')
+    before = len(mock.sent("POST", "/threads/t1/send"))
+    box.fill("use the other file")
+    box.press("Enter")
+    sent = until(lambda: mock.sent("POST", "/threads/t1/send")[before:] or None)
+    check("Enter during a turn sends the message", bool(sent) and sent[-1].get("text") == "use the other file",
+          str(sent))
+    steered = page.locator('[data-testid="msg-user"]').last
+    check("it appears at once, marked steering",
+          bool(until(lambda: "use the other file" in steered.inner_text()
+                     and steered.locator('[data-testid="msg-mark"]').count() == 1
+                     and "steering" in steered.locator('[data-testid="msg-mark"]').inner_text())),
+          steered.inner_text())
+    check("the box clears", box.input_value() == "")
+    st = state()
+    check("the window still tracks the running turn",
+          st["busy"] and st["turnThreadId"] == "t1" and st["status"] != "FAILED", str(st["status"]))
+    check("and still offers Stop", stop.count() == 1)
+
+    # Queued: says so, and stops saying so once it runs.
+    w["send_status"] = "queued"
+    box.fill("then the docs")
+    box.press("Enter")
+    queued = page.locator('[data-testid="msg-user"]').last
+    check("a queued message says it will run when this turn ends",
+          bool(until(lambda: "queued · will run when this turn ends" in queued.inner_text())),
+          queued.inner_text())
+    # The turn ends with that message waiting (`next`): it runs at once, so
+    # the window stays on the thread — no idle flash, no follow-up mic window
+    # (review of PR #22, round 2).
+    # Counted at the call: the fake mic's own tone can open and close the
+    # window by itself, so `conversing()` would not say who opened it.
+    page.evaluate("""() => {
+      const c = window.__hud.capture;
+      if (!c.__counted) {
+        const open = c.openFollowUp.bind(c);
+        window.__followUps = 0;
+        c.openFollowUp = () => { window.__followUps++; return open(); };
+        c.__counted = true;
+      }
+    }""")
+    page.evaluate("window.__hud.capture.closeFollowUp()")
+    follow_ups = page.evaluate("window.__followUps")
+    mock.emit("turn_finished", {"stop": "end", "next": 1}, thread_id="t1")
+    page.wait_for_timeout(300)
+    st = state()
+    check("a turn ending with a message waiting keeps the window on the thread",
+          st["busy"] and st["turnThreadId"] == "t1" and stop.count() == 1, str(st["busy"]))
+    check("and opens no follow-up mic window",
+          page.evaluate("window.__followUps") == follow_ups)
+    mock.emit("queued_started", {"message_id": f"msg-{w['sends']}", "turn_id": "turn-2"},
+              thread_id="t1", turn_id="turn-2")
+    check("and stops saying so once it runs",
+          bool(until(lambda: "queued" not in queued.inner_text())), queued.inner_text())
+
+    # A refused send (a full queue): inline, its words back, the turn tracked.
+    w["fail_send"] = 1
+    w["fail_send_error"] = "Three messages are already waiting on this turn"
+    count = page.locator('[data-testid="msg-user"]').count()
+    box.fill("one too many")
+    box.press("Enter")
+    error = page.locator('[data-testid="error"]')
+    check("a refused send is said inline, in the backend's words",
+          bool(until(lambda: error.count() == 1 and "Could not send: Three messages" in error.inner_text())))
+    check("the typed words come back to the box",
+          bool(until(lambda: box.input_value() == "one too many")), box.input_value())
+    check("its bubble is taken back, nothing else",
+          page.locator('[data-testid="msg-user"]').count() == count)
+    st = state()
+    check("and the running turn is still tracked and stoppable",
+          st["busy"] and st["turnThreadId"] == "t1" and stop.count() == 1)
+    w.pop("fail_send_error", None)
+    box.fill("")
+
+    # A steer the turn never delivered (the fast path's final answer came
+    # first) that a Stop drops comes back to the box too (review of PR #22).
+    w["send_status"] = "steered"
+    steer_id = f"msg-{w.get('sends', 0) + 1}"
+    box.fill("in French, please")
+    box.press("Enter")
+    undelivered = page.locator('[data-testid="msg-user"]').last
+    until(lambda: page.evaluate("window.__hud.state().messages.some(m => m.message_id === "
+                                f"'{steer_id}')"))
+    mock.emit("queue_cleared", {"reason": "stopped", "messages": [
+        {"message_id": steer_id, "typed": "in French, please", "via": "hud"}]},
+        thread_id="t1")
+    check("a dropped steer is marked not sent",
+          bool(until(lambda: "not sent" in undelivered.inner_text())), undelivered.inner_text())
+    check("and its words come back to the box too",
+          bool(until(lambda: "in French, please" in box.input_value())), box.input_value())
+    box.fill("")
+
+    # Stop: the thread is interrupted; what waited comes back to the box.
+    w["send_status"] = "queued"
+    box.fill("later, please")
+    box.press("Enter")
+    later = page.locator('[data-testid="msg-user"]').last
+    until(lambda: "queued" in later.inner_text())
+    dropped_id = f"msg-{w['sends']}"           # read once the send has landed
+    interrupts = len(mock.sent("POST", "/threads/t1/interrupt"))
+    stop.click()
+    check("Stop interrupts the running thread",
+          bool(until(lambda: len(mock.sent("POST", "/threads/t1/interrupt")) > interrupts)))
+    mock.emit("queue_cleared", {"reason": "stopped", "messages": [
+        {"message_id": dropped_id, "typed": "later, please", "via": "hud"}]}, thread_id="t1")
+    check("what the stop dropped is marked not sent",
+          bool(until(lambda: "not sent" in later.inner_text())), later.inner_text())
+    check("and its words come back to the box",
+          bool(until(lambda: "later, please" in box.input_value())), box.input_value())
+    box.fill("")
+    mock.emit("turn_finished", {"stop": "interrupted"}, thread_id="t1")
+    check("the turn's end frees the window", bool(until(lambda: state()["busy"] is False)))
+    check("and opens the follow-up mic window (nothing waits behind it)",
+          page.evaluate("window.__followUps") > follow_ups)
+    check("and the Stop button goes", bool(until(lambda: stop.count() == 0)))
+    w.pop("send_status", None)
+
+    # Never wedged: a missed turn_finished is caught from the live record.
+    mock.emit("turn_started", {}, thread_id="t1")
+    until(lambda: state()["busy"])
+    thread = next(t for t in w["threads"] if t["id"] == "t1")
+    thread["running"] = False
+    page.evaluate("window.__hud.reconcile()")
+    check("a missed turn_finished cannot wedge the window",
+          bool(until(lambda: state()["busy"] is False)))
+    thread.pop("running", None)
+    page.evaluate("window.__hud.dispatch({type: 'patch', patch: {error: ''}})")
+    handed_back_checks(page, mock)
+
+
+def handed_back_checks(page, mock):
+    """Review of PR #22 (Bugbot): words handed back go where they were typed.
+    A steer the owner's Stop overtook comes back as not sent; a queue cleared
+    on a thread that is not on screen never lands in this thread's box, and
+    comes back once when that thread is opened."""
+    w = mock.world
+    state = lambda: page.evaluate("window.__hud.state()")  # noqa: E731
+    box = page.locator('[data-testid="input"]')
+    mock.emit("turn_started", {}, thread_id="t1")
+    until(lambda: state()["busy"] and state()["turnThreadId"] == "t1")
+
+    # The daemon answers `dropped`: Stop landed while the steer was in flight.
+    w["send_status"] = "dropped"
+    box.fill("a steer the owner stopped")
+    box.press("Enter")
+    dropped = page.locator('[data-testid="msg-user"]').last
+    check("a steer a Stop overtook is marked not sent",
+          bool(until(lambda: "not sent" in dropped.inner_text())), dropped.inner_text())
+    check("and its words come back to the box",
+          bool(until(lambda: box.input_value() == "a steer the owner stopped")), box.input_value())
+    box.fill("")
+
+    # Queued on t1, then the owner looks at another thread; t1's queue clears.
+    w["send_status"] = "queued"
+    box.fill("words for thread one")
+    box.press("Enter")
+    waiting = page.locator('[data-testid="msg-user"]').last
+    until(lambda: "queued" in waiting.inner_text())
+    queued_id = f"msg-{w['sends']}"
+    page.locator('[data-testid="new-thread"]').click()
+    until(lambda: state()["threadId"] is None)
+    mock.emit("queue_cleared", {"reason": "stopped", "messages": [
+        {"message_id": queued_id, "typed": "words for thread one", "via": "hud"}]}, thread_id="t1")
+    page.wait_for_timeout(400)
+    check("words cleared on another thread never land in this box", box.input_value() == "",
+          box.input_value())
+    page.locator('[data-testid="thread-t1"]').click()
+    check("they come back when that thread is opened",
+          bool(until(lambda: box.input_value() == "words for thread one")), box.input_value())
+    box.fill("")
+    page.locator('[data-testid="new-thread"]').click()
+    until(lambda: state()["threadId"] is None)
+    page.locator('[data-testid="thread-t1"]').click()
+    until(lambda: state()["threadId"] == "t1")
+    page.wait_for_timeout(300)
+    check("and only once", box.input_value() == "", box.input_value())
+    w.pop("send_status", None)
+    mock.emit("turn_finished", {"stop": "interrupted"}, thread_id="t1")
+    until(lambda: state()["busy"] is False)
+
+
 def dictation_checks(page, mock):
     print("\ndictation modes")
     # He does not answer himself: the detector is suppressed while a turn is in
@@ -2070,6 +2281,7 @@ def main():
             mirror_checks(page, mock, check, until, mock.await_reconnect)
             safety_render_checks(page, mock)
             input_checks(page, mock)
+            steer_checks(page, mock)
             dictation_checks(page, mock)
             wake_checks(page, mock)
             approval_checks(page, mock)

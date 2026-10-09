@@ -29,3 +29,30 @@ describe("thread_patch", () => {
     expect(reduce(s, { type: "thread_patch", id: "gone", patch: { model: "m" } })).toBe(s);
   });
 });
+
+describe("steering marks (2026-10-08)", () => {
+  const sent: State = {
+    ...initialState,
+    messages: [
+      { role: "user", text: "first" },
+      { role: "assistant", text: "working on it" },
+      { role: "user", text: "do it in rust instead", local: "local-1", mark: "steering" },
+    ],
+  };
+
+  it("marks this window's message by its local id, then by the daemon's id", () => {
+    const queued = reduce(sent, { type: "mark", local: "local-1", patch: { mark: "queued", message_id: "m1" } });
+    expect(queued.messages[2]).toMatchObject({ mark: "queued", message_id: "m1", text: "do it in rust instead" });
+    const ran = reduce(queued, { type: "mark", message_id: "m1", patch: { mark: undefined } });
+    expect(ran.messages[2].mark).toBeUndefined();
+    expect(reduce(queued, { type: "mark", message_id: "nope", patch: { mark: "not sent" } })).toBe(queued);
+  });
+
+  it("takes back only the failed message, never a reply that settled meanwhile", () => {
+    const settled = reduce(sent, { type: "settle", text: "a reply that landed during the send" });
+    const after = reduce(settled, { type: "unmessage", local: "local-1" });
+    expect(after.messages.map((m) => m.text)).toEqual([
+      "first", "working on it", "a reply that landed during the send",
+    ]);
+  });
+});

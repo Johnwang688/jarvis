@@ -58,20 +58,30 @@ from typing import Iterator
 from jarvis import config
 from jarvis.v2.model import ProviderName, Thread
 from jarvis.v2.provider import (Brief, BriefRefused, Decision, Event, EventKind,
-                               PermissionCallback, SessionHandle, Usage, UserMessage)
+                               PermissionCallback, SessionHandle, SteerRefused, Usage,
+                               UserMessage)
 from ..approvals import clean_line
 from . import codex_cli, codex_config
 from .codex_rpc import RpcCancelled, RpcError, RpcProcess, RpcTimeout
 from .codex_usage import Accounting
 
+LOG = logging.getLogger(__name__)
 START_TIMEOUT = 30.0
 INTERRUPT_TIMEOUT = 10.0
+# How long `steer` waits for Codex to answer `turn/steer`. The app-server
+# answers at once (it only appends to the active turn's input), so this is a
+# backstop for a wedged transport, not a latency.
+STEER_TIMEOUT = 10.0
+# JSON-RPC's "method not found": a Codex without `turn/steer` (both verified
+# schemas, 0.153.4 and 0.161.0, have it), which the daemon steers by
+# interrupting instead.
+_NO_METHOD = -32601
+_STALE_STEERS = 64
 # One deadline for a whole account-metadata session, which holds `_auth_lock`
 # and so keeps every Codex turn from starting while it runs.
 METADATA_DEADLINE_S = 10.0
 MODEL_PAGE_LIMIT = 100
 MODEL_PAGE_CAP = 20
-LOG = logging.getLogger(__name__)
 # Held while a session prepares and starts, and by `send` for a whole turn.
 _auth_lock = threading.Lock()
 _state_lock = threading.Lock()
@@ -89,6 +99,17 @@ class _Pending:
     question: bool
     ready: threading.Event = field(default_factory=threading.Event)
     value: Decision | str | None = None
+
+
+@dataclass
+class _Steer:
+    """One `turn/steer` in flight, answered by the turn loop that reads the
+    transport."""
+    ready: threading.Event = field(default_factory=threading.Event)
+    ok: bool = False
+    unsupported: bool = False
+    reason: str = ""
+    abandoned: bool = False     # its waiter timed out and counted it as delivered
 
 
 @dataclass
@@ -307,6 +328,13 @@ class _Session:
     interrupt_at: float | None = None
     # A model/effort change waiting for the next turn/start (set_model).
     override: dict | None = None
+    # Owner steering (2026-10-08): `turn/steer` requests the turn loop has
+    # yet to see answered, by request id; ids whose waiter gave up, so a late
+    # answer is ignored rather than failing a later turn; and whether this
+    # Codex lacks the method.
+    steers: dict = field(default_factory=dict)
+    stale_steers: deque = field(default_factory=lambda: deque(maxlen=_STALE_STEERS))
+    steer_unsupported: bool = False
 
 
 class CodexProvider:
@@ -582,17 +610,7 @@ class CodexProvider:
                 yield self._event(h, EventKind.ERROR, message="Codex model cooling", fatal=False, **cooldown)
                 yield self._event(h, EventKind.TURN_FINISHED, stop="error")
                 return
-            text = message.text
-            if message.skill:
-                # Codex has the skill installed (`jarvis skills link`), so it is
-                # told to use it — the same directive Claude gets. A native
-                # skill input item on turn/start is the S1 spike still pending.
-                from ..commands import skill_directive
-
-                text = skill_directive(message.skill, message.text)
-            inputs = [{"type": "text", "text": text, "text_elements": []}]
-            for img in message.images:
-                inputs.append({"type": "image", "url": f"data:{img['mime']};base64,{img['b64']}"})
+            inputs = self._inputs(message)
             s.accounting.complete = False
             s.accounting.turns += 1
             s.accounting.save()
@@ -637,6 +655,8 @@ class CodexProvider:
                         if not started:
                             started = True
                             yield self._event(h, EventKind.TURN_STARTED)
+                    elif self._steer_answered(s, msg):
+                        pass    # a steer's answer, refused or not: never the turn's failure
                     elif "error" in msg:
                         raise RpcError("Codex control request failed")
                     continue
@@ -731,11 +751,24 @@ class CodexProvider:
             # files while another session acquires the shared-login lock.
             if submitted and not completed:
                 self.close(h)
-            s.turn_id = None
+            with s.mutex:
+                # Under the lock `steer` checks the turn id with, so a steer is
+                # either sent into this turn or refused (the daemon queues it).
+                s.turn_id = None
+                s.pending.clear()
+                for rid, waiter in s.steers.items():
+                    waiter.reason = "the turn ended first"
+                    if waiter.abandoned:
+                        # Counted as delivered when its waiter gave up, and
+                        # never answered since: only the log can say so
+                        # (review of PR #22, round 2).
+                        LOG.warning("Codex steer %s was unanswered when the turn ended; "
+                                    "it may not have reached the model", rid)
+                    waiter.ready.set()
+                    s.stale_steers.append(rid)
+                s.steers.clear()
             s.interrupt_at = None
             s.cancelled.clear()
-            with s.mutex:
-                s.pending.clear()
             if acquired:
                 _auth_lock.release()
             s.sending.release()
@@ -952,6 +985,116 @@ class CodexProvider:
         with s.mutex:
             s.override = {"model": model, **({"effort": effort} if effort else {})}
             s.brief = replace(s.brief, model=model, effort=effort)
+
+    @staticmethod
+    def _inputs(message: UserMessage) -> list[dict]:
+        """A message as `UserInput` items (turn/start and turn/steer take the
+        same shape in 0.153.4 and 0.161.0)."""
+        text = message.text
+        if message.skill:
+            # Codex has the skill installed (`jarvis skills link`), so it is
+            # told to use it — the same directive Claude gets. A native
+            # skill input item on turn/start is the S1 spike still pending.
+            from ..commands import skill_directive
+
+            text = skill_directive(message.skill, message.text)
+        inputs = [{"type": "text", "text": text, "text_elements": []}]
+        for img in message.images:
+            inputs.append({"type": "image", "url": f"data:{img['mime']};base64,{img['b64']}"})
+        return inputs
+
+    def steer(self, h: SessionHandle, message: UserMessage) -> None:
+        """Append `message` to the running turn with `turn/steer`.
+
+        The request is the app-server's own (verified in the 0.153.4 and
+        0.161.0 schemas: `{threadId, input, expectedTurnId}` → `{turnId}`):
+        Codex adds the input to the active turn and the model takes it at its
+        next step — what typing while it works does in the Codex TUI. It is
+        sent from the caller's thread and answered on the turn loop's, which
+        is the one reading the transport; this waits for that answer.
+
+        Refused, for the daemon to queue, when no turn is running or the turn
+        is waiting on an approval or a question (a steer must never read as
+        an answer), and when Codex refuses it (the turn ended first, a
+        compaction turn). A Codex without the method is refused with the
+        `interrupt` fallback, so the daemon interrupts the turn and runs the
+        message next instead. No answer within STEER_TIMEOUT is *unknown*,
+        not refused: it is taken as delivered and logged, never queued too.
+        """
+        s = h.native
+        if s is None or s.closed.is_set():
+            raise SteerRefused("Codex session is closed")
+        if s.steer_unsupported:
+            raise SteerRefused("this Codex has no turn/steer", fallback="interrupt")
+        inputs = self._inputs(message)
+        waiter = _Steer()
+        with s.mutex:
+            if s.turn_id is None or s.cancelled.is_set():
+                raise SteerRefused("no Codex turn is running")
+            if s.pending:
+                raise SteerRefused("the turn is waiting on an approval or a question")
+            try:
+                rid = s.rpc.send("turn/steer", {"threadId": s.thread_id, "input": inputs,
+                                                "expectedTurnId": s.turn_id})
+            except RpcError as exc:
+                raise SteerRefused(f"Codex did not take the message ({type(exc).__name__})") from None
+            # Registered under the lock the turn loop answers it under, so its
+            # answer cannot be read before there is anyone to give it to.
+            s.steers[rid] = waiter
+        if not waiter.ready.wait(STEER_TIMEOUT):
+            with s.mutex:
+                if not waiter.ready.is_set():
+                    # Unknown, not refused: Codex may have taken it and only
+                    # its answer is late. Queueing it as well could deliver it
+                    # twice, so it counts as steered; the waiter stays
+                    # registered and the turn loop logs the answer when it
+                    # comes (review of PR #22).
+                    waiter.abandoned = True
+                    LOG.warning("Codex did not answer turn/steer %s within %.0f s; "
+                                "taken as delivered", rid, STEER_TIMEOUT)
+                    return
+        if waiter.ok:
+            return
+        if waiter.unsupported:
+            s.steer_unsupported = True
+            raise SteerRefused("this Codex has no turn/steer", fallback="interrupt")
+        raise SteerRefused(f"Codex refused the steer: {waiter.reason or 'no reason given'}")
+
+    @staticmethod
+    def _steer_answered(s: _Session, msg: dict) -> bool:
+        """True when `msg` answers a `turn/steer` (handed to its waiter), or a
+        steer whose waiter already gave up (ignored: a late refusal must not
+        fail whatever turn is reading the transport now)."""
+        rid = msg.get("id")
+        with s.mutex:
+            waiter = s.steers.pop(rid, None)
+            if waiter is None:
+                return rid in s.stale_steers
+        if "error" in msg:
+            error = msg["error"] if isinstance(msg["error"], dict) else {}
+            code = error.get("code") if isinstance(error.get("code"), int) else None
+            text = error.get("message") if isinstance(error.get("message"), str) else ""
+            # Only "this Codex has no such method" switches the session to the
+            # interrupt fallback: JSON-RPC's method-not-found, or an invalid
+            # request that names `turn/steer` itself. An unknown variant of
+            # anything else (an input item) is a refusal like any other, and
+            # so are 0.161.0's own steer errors — "no active turn to steer",
+            # "expected active turn id … but found …", "cannot steer a
+            # review/compact turn" — all of which queue the message.
+            waiter.unsupported = code == _NO_METHOD or (code == -32600 and "turn/steer" in text)
+            waiter.reason = clean_line(text, 160) if text else f"code {code}"
+        else:
+            waiter.ok = True
+        if waiter.abandoned:
+            # The steer's waiter gave up (`STEER_TIMEOUT`) and counted it as
+            # delivered; only the log can say how it really went.
+            if waiter.ok:
+                LOG.info("Codex took the late-answered steer %s", rid)
+            else:
+                LOG.warning("Codex refused the late-answered steer %s (%s); the message "
+                            "did not reach the turn", rid, waiter.reason)
+        waiter.ready.set()
+        return True
 
     def interrupt(self, h: SessionHandle) -> None:
         s = h.native

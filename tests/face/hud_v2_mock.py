@@ -783,12 +783,21 @@ class MockDaemon:
                 if len(parts) == 3 and parts[0] == "threads" and parts[2] == "send":
                     if w.get("fail_send"):
                         w["fail_send"] -= 1
-                        return self._err(409, "thread session is opening or closing")
+                        return self._err(409, w.get("fail_send_error") or "thread session is opening or closing")
                     # The daemon logs the user line before it answers 202, so a
                     # transcript read right after a send already has it.
                     w["transcripts"].setdefault(parts[1], []).append(
                         {"role": "user", "text": body.get("text", ""), "at": "2026-09-15T00:00:02+00:00"})
-                    return self._json({"turn_id": "turn-1"}, 202)
+                    # `Daemon.deliver` (2026-10-08): `send_status` scripts what
+                    # a send during a running turn became.
+                    status = w.get("send_status") or "started"
+                    w["sends"] = w.get("sends", 0) + 1
+                    reply = {"status": status, "turn_id": "turn-1"}
+                    if status != "started":
+                        reply.update(message_id=f"msg-{w['sends']}",
+                                     mode="native" if status == "steered" else None,
+                                     position=1)
+                    return self._json(reply, 202)
                 if len(parts) == 3 and parts[0] == "threads" and parts[2] == "interrupt":
                     return self._json({"ok": True})
                 if len(parts) == 3 and parts[0] in ("threads", "tasks") and parts[2] == "seen":

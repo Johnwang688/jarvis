@@ -2,8 +2,9 @@
 
 One status per chat thread, task thread and task, drawn as the dot beside it:
 
-    working      a turn is running (a task: clarifying, planned, running or
-                 verifying)
+    working      a turn is running, or an owner message waits to run as the
+                 next one (`turn_finished.data.next`, steering 2026-10-08)
+                 (a task: clarifying, planned, running or verifying)
     needs_input  blocked on the owner: an approval, an open question, a
                  BLOCKED task, or a CLARIFYING task with a blocking question.
                  Outranks working, because both arrive mid-turn.
@@ -51,7 +52,8 @@ LOG = logging.getLogger(__name__)
 WORKING, NEEDS_INPUT, UNREAD, FAILED, IDLE = "working", "needs_input", "unread", "failed", "idle"
 
 _THREAD_KINDS = frozenset({"user_message", "turn_started", "turn_finished", "approval_requested",
-                           "approval_resolved", "question", "question_answered"})
+                           "approval_resolved", "question", "question_answered",
+                           "queue_cleared"})
 _TASK_KINDS = frozenset({"task_created", "task_status_changed"})
 _ACTIVE_TASK = frozenset({TaskState.CLARIFYING, TaskState.PLANNED, TaskState.RUNNING,
                           TaskState.VERIFYING})
@@ -64,6 +66,11 @@ class Activity:
         self._publish = publish
         self._lock = threading.RLock()
         self._running: set[str] = set()
+        # Threads between a `turn_started` and its `turn_finished`. `_running`
+        # is wider: it also covers an owner message that will start a turn —
+        # a send, or one waiting behind the turn just finished (steering,
+        # 2026-10-08) — so the dot stays working across that gap.
+        self._turn_open: set[str] = set()
         self._asks: dict[str, dict[str, str]] = {}  # thread id -> {open req id: approval | question}
         self._meta: dict[str, tuple] = {}           # thread id -> (role, task_id); neither ever changes
         self._shown: dict[tuple[str, str], str] = {}  # last status published per (kind, id)
@@ -197,8 +204,20 @@ class Activity:
         with self._lock:
             if kind in ("user_message", "turn_started"):
                 self._running.add(thread_id)
+                if kind == "turn_started":
+                    self._turn_open.add(thread_id)
+            elif kind == "queue_cleared":
+                # Messages that will not run (a stop, a thread that could not
+                # resume): with no turn under way nothing else is coming, and
+                # the thread must not stay working for ever.
+                if thread_id not in self._turn_open:
+                    self._running.discard(thread_id)
             elif kind == "turn_finished":
-                self._running.discard(thread_id)
+                self._turn_open.discard(thread_id)
+                if not data.get("next"):
+                    # `next`: owner messages waiting to run as the next turn,
+                    # which starts at once — still working, not unread.
+                    self._running.discard(thread_id)
                 # A provider question belonged to the turn that just ended. A
                 # broker approval may outlive it (the module docstring): only
                 # its own `approval_resolved` closes it.

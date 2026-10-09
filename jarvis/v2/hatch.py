@@ -239,8 +239,15 @@ class EscapeHatch:
             decision=log_event, reason=result.refusal or item.reason,
             command=_safe_command(item.command), thread_id=item.thread_id,
             task_id=item.task_id, provider=None))
+        # Through `deliver` (2026-10-08): on a chat the result steers the turn
+        # running there, or waits behind it, rather than being lost because a
+        # turn happened to be running when the owner answered. A task's
+        # running thread still refuses (its turns are the runner's), and that
+        # is logged, as before.
+        deliver = getattr(self.daemon, "deliver", None)
         try:
-            self.daemon.send(item.thread_id, UserMessage(text=result.message, origin=origin))
+            (deliver if callable(deliver) else self.daemon.send)(
+                item.thread_id, UserMessage(text=result.message, origin=origin))
         except Exception as exc:
             LOG.warning("Cannot deliver the escape-hatch result to %s: %s",
                         item.thread_id, exc)

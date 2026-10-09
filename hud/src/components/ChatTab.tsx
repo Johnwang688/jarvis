@@ -12,6 +12,14 @@ import type { ChatMessage, Thread, ToolOp } from "../types";
 import { chatPlace } from "../lib/discord";
 import { Markdown } from "./Markdown";
 
+/** What became of a message sent while a turn ran (2026-10-08). */
+const MARKS: Record<string, string> = {
+  steering: "steering",
+  queued: "queued · will run when this turn ends",
+  // A Stop, almost always; a thread that could not take its turn otherwise.
+  "not sent": "not sent",
+};
+
 function Proposal({ msg, onCancel }: { msg: ChatMessage; onCancel: (id: string) => void }) {
   const [left, setLeft] = useState(() => Math.max(0, Math.round((msg.proposal!.until - Date.now()) / 1000)));
   useEffect(() => {
@@ -77,6 +85,12 @@ export function ChatTab(props: {
                 {m.role === "user" ? "YOU" : m.role === "system" ? "SYSTEM" : "JARVIS"}
                 {m.role === "user" && m.via ? (
                   <span className="via" data-testid="via-discord"> · via Discord</span>
+                ) : null}
+                {m.role === "user" && m.mark ? (
+                  <span className={`mark ${m.mark.replace(" ", "-")}`} data-testid="msg-mark">
+                    {" · "}
+                    {MARKS[m.mark]}
+                  </span>
                 ) : null}
               </div>
               {m.role === "assistant" ? (
