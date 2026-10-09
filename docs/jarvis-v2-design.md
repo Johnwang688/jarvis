@@ -187,8 +187,13 @@ broker alone.
   systemd unit's PATH rarely has it); else the bundled CLI, with one warning.
   Every `ClaudeAgentOptions` — start, resume and `set_model`'s reconnect —
   carries it. The version is not pinned. `health()` probes `--version` once
-  per real binary rather than per `/status`, and `/status` reports the CLI's
-  path and version under `providers.claude.cli`.
+  per real binary rather than per `/status`; a failed probe is not cached and
+  is retried after 60 s. The version is judged against a floor:
+  `CLAUDE_MIN` (2.1.273, the CLI the R1–R3 spikes ran on) or newer is
+  healthy, 2.2 and 3.x included, and anything past `CLAUDE_VERIFIED` (2.1.295)
+  logs one warning per process. An older or unparseable version is not-ok.
+  `JARVIS_CLAUDE_STRICT=1` restores the old major.minor match. `/status`
+  reports the CLI's path and version under `providers.claude.cli`.
 - Permission mode `auto`. **Jarvis's rules (§6) live in a `PreToolUse`
   hook, not in `can_use_tool`** — verified 2026-09-15 (R2): under `auto`
   the classifier settles every call and the callback is never consulted,

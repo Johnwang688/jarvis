@@ -251,6 +251,10 @@ V2_DATA_DIR = Path(
 # not a Windows shim under /mnt/, then ~/.local/bin/claude, and only then the
 # SDK's bundled CLI — which lags the installed one and refuses newer models.
 CLAUDE_CLI = os.environ.get("JARVIS_CLAUDE_CLI", "")
+# Health judges that CLI against a floor (CLAUDE_MIN), never a pin, because the
+# install updates itself. `1` restores the old rule: major.minor must match the
+# last verified version, so a 2.2 release reads as unhealthy until checked.
+CLAUDE_STRICT = os.environ.get("JARVIS_CLAUDE_STRICT", "") == "1"
 
 # The v2 always-ask list (design §6, layer 2; jarvis/v2/permissions.py).
 #

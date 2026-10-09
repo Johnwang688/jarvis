@@ -31,7 +31,7 @@ HUD_DIST = Path(__file__).resolve().parents[2] / "hud" / "dist"
 # Claude Code's own `/usage` command. Undocumented, so a failure is "not
 # reported", never a number invented from the ledger. The User-Agent has to
 # look like the CLI: a bare client is the bucket this endpoint 429s. The
-# version tracks `providers/claude.py` `CLAUDE_PIN`.
+# version tracks `providers/claude.py` `CLAUDE_VERIFIED`.
 CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 CLAUDE_USAGE_TTL_S = 300
 _CLAUDE_WINDOWS = (("five_hour", "5h"), ("seven_day", "week"))
@@ -70,7 +70,7 @@ def fetch_claude_usage(token):
     exception, a log line, or the value this returns.
     """
     import httpx
-    from .providers.claude import CLAUDE_PIN
+    from .providers.claude import CLAUDE_VERIFIED
     try:
         response = httpx.get(
             CLAUDE_USAGE_URL,
@@ -78,7 +78,7 @@ def fetch_claude_usage(token):
                 "Authorization": "Bearer " + token,
                 "anthropic-beta": "oauth-2025-04-20",
                 "Accept": "application/json",
-                "User-Agent": "claude-code/" + CLAUDE_PIN,
+                "User-Agent": "claude-code/" + CLAUDE_VERIFIED,
             },
             timeout=8,
         )

@@ -92,11 +92,14 @@ from ..provider import (
     UserMessage,
 )
 
-# major.minor is the pin; the patch moves weekly and breaks nothing we use.
-# health() reports the exact version it found, because "2.1.233" in this
-# constant and 2.1.273 on the machine is the sort of gap a reason string
-# should state rather than hide behind an ok.
-CLAUDE_PIN = "2.1.233"
+# A floor, never a pin (owner, 2026-10-08): the installed CLI updates itself,
+# so health accepts anything at or above CLAUDE_MIN — 2.2 and 3.x included —
+# and only warns, once per process, past CLAUDE_VERIFIED. CLAUDE_MIN is the
+# CLI the R1–R3 spikes and the classifier-denial text were verified against;
+# CLAUDE_VERIFIED is the newest version known to work end to end.
+# `JARVIS_CLAUDE_STRICT=1` restores the old major.minor match.
+CLAUDE_MIN = "2.1.273"
+CLAUDE_VERIFIED = "2.1.295"
 
 # The CLI kills a hook that does not answer in time and treats it as no
 # decision, so a slow owner would read as "the gate did not fire". The broker's
@@ -269,28 +272,93 @@ def resolve_cli() -> str | None:
         return _cli_resolved[0]
 
 
+# realpath -> monotonic time of the last failed probe. A failure is never
+# cached as an answer: a one-off timeout must not read as "broken" until the
+# daemon restarts. It only holds off the next attempt for this long, so a
+# genuinely broken binary is not re-spawned on every `/status`.
+PROBE_RETRY_S = 60.0
+_cli_failed: dict[str, float] = {}
+_warned_newer = False
+
+
+def _clock() -> float:
+    """The probe backoff's clock. A seam, so the free suite can move time."""
+    import time
+
+    return time.monotonic()
+
+
 def reset_cli_cache() -> None:
-    """Forget the resolution and the probed versions. For tests."""
-    global _cli_resolved
+    """Forget the resolution, the probes and the warning. For tests."""
+    global _cli_resolved, _warned_newer
     with _cli_lock:
         _cli_resolved = None
         _cli_versions.clear()
+        _cli_failed.clear()
+        _warned_newer = False
 
 
 def _probe_version(path: str) -> str | None:
-    """`<path> --version`, at most once per real binary."""
+    """`<path> --version`: a success once per real binary, a failure retried
+    after `PROBE_RETRY_S`."""
     key = os.path.realpath(path)
     with _cli_lock:
         if key in _cli_versions:
             return _cli_versions[key]
+        failed_at = _cli_failed.get(key)
+        if failed_at is not None and _clock() - failed_at < PROBE_RETRY_S:
+            return None
     try:
         probe = subprocess.run([path, "--version"], capture_output=True, text=True, timeout=20)
         found = (probe.stdout or "").strip().split(" ")[0] if probe.returncode == 0 else ""
     except (OSError, subprocess.TimeoutExpired):
         found = ""
     with _cli_lock:
-        _cli_versions[key] = found or None
+        if found:
+            _cli_versions[key] = found
+            _cli_failed.pop(key, None)
+        else:
+            _cli_failed[key] = _clock()
     return found or None
+
+
+_VERSION = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)(?:[-+.][0-9A-Za-z.+-]*)?$")
+
+
+def parse_version(text: str | None) -> tuple[int, int, int] | None:
+    """`"2.1.295"` -> (2, 1, 295). None for anything that is not a version."""
+    match = _VERSION.match((text or "").strip())
+    return tuple(int(part) for part in match.groups()) if match else None  # type: ignore[return-value]
+
+
+def _version_problem(found: str) -> str | None:
+    """Why this CLI version is not acceptable, or None if it is.
+
+    A floor, not a pin: anything at or above `CLAUDE_MIN` is healthy, 2.2 and
+    3.x included, because the install updates itself and a health check that
+    failed on every minor release would route Claude away for no reason. A
+    version newer than `CLAUDE_VERIFIED` logs one warning per process. With
+    `JARVIS_CLAUDE_STRICT=1`, the old rule returns: the major.minor must match
+    the verified one.
+    """
+    global _warned_newer
+    version = parse_version(found)
+    if version is None:
+        return f"could not read a version from `claude --version` (got {found!r})"
+    minimum, verified = parse_version(CLAUDE_MIN), parse_version(CLAUDE_VERIFIED)
+    if version < minimum:
+        return (f"claude {found} is older than {CLAUDE_MIN}, the oldest version "
+                "Jarvis was verified with; update Claude Code")
+    if config.CLAUDE_STRICT and version[:2] != verified[:2]:
+        return (f"claude {found}: JARVIS_CLAUDE_STRICT=1 requires "
+                f"{verified[0]}.{verified[1]}.x (verified {CLAUDE_VERIFIED})")
+    if version > verified:
+        with _cli_lock:
+            first, _warned_newer = not _warned_newer, True
+        if first:
+            LOG.warning("claude %s is newer than %s, the last version Jarvis was "
+                        "verified with; running it anyway", found, CLAUDE_VERIFIED)
+    return None
 
 
 def cli_info() -> dict:
@@ -412,7 +480,7 @@ class ClaudeProvider:
     # -- health
 
     def health(self) -> tuple[bool, str]:
-        """(ok, reason). Binary, version pin, login. Never spends a token.
+        """(ok, reason). Binary, version floor, login. Never spends a token.
 
         The login check reads one integer out of the credential bundle and
         nothing else — see `_login_expiry_ms`. A bundle with no expiry field at
@@ -424,7 +492,8 @@ class ClaudeProvider:
 
         The binary is `resolve_cli()`'s, the same one every session spawns, and
         its `--version` runs once per real file (see `_probe_version`), not on
-        every `/status`.
+        every `/status`; a failed probe is retried after `PROBE_RETRY_S`. The
+        version is judged against a floor, never a pin (`_version_problem`).
         """
         info = cli_info()
         found = info["version"]
@@ -433,11 +502,13 @@ class ClaudeProvider:
                 return False, "no claude CLI found (JARVIS_CLAUDE_CLI, PATH, ~/.local/bin)"
             label = f"{found} (SDK bundled)"
         elif not found:
-            return False, f"{info['path']} --version failed"
+            return False, (f"`{info['path']} --version` failed; "
+                           f"retrying in {int(PROBE_RETRY_S)} s")
         else:
             label = found
-        if _series(found) != _series(CLAUDE_PIN):
-            return False, f"claude {label}, pinned {CLAUDE_PIN}"
+        problem = _version_problem(found)
+        if problem is not None:
+            return False, problem + (" (SDK bundled)" if info["path"] is None else "")
         expiry = _login_expiry_ms()
         if expiry is None:
             if not _credentials_path().exists():
@@ -1019,11 +1090,6 @@ def _native(h: SessionHandle) -> _Session:
     if h.native is None:
         raise ValueError("this Claude session is closed")
     return h.native
-
-
-def _series(version: str) -> str:
-    parts = (version or "").split(".")
-    return ".".join(parts[:2])
 
 
 def _run_loop(loop: asyncio.AbstractEventLoop) -> None:

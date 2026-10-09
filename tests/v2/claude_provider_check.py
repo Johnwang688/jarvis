@@ -304,11 +304,11 @@ def health_checks() -> None:
     future = int((time.time() + 86_400) * 1000)
     past = int((time.time() - 86_400) * 1000)
 
-    with cli("2.1.240", on_path=False), credentials({"claudeAiOauth": {"expiresAt": future}}):
+    with cli("2.1.290", on_path=False), credentials({"claudeAiOauth": {"expiresAt": future}}):
         ok, reason = provider.health()
         check(not ok and "PATH" in reason, f"missing binary is unavailable: {reason}")
 
-    with cli("2.1.240", on_path=False, bundled="2.1.273"), \
+    with cli("2.1.290", on_path=False, bundled="2.1.273"), \
             credentials({"claudeAiOauth": {"expiresAt": future}}):
         ok, reason = provider.health()
         check(ok and "2.1.273" in reason and "bundled" in reason,
@@ -317,21 +317,21 @@ def health_checks() -> None:
     with cli("1.9.0"), credentials({"claudeAiOauth": {"expiresAt": future}}):
         ok, reason = provider.health()
         check(
-            not ok and claude.CLAUDE_PIN in reason and "1.9.0" in reason,
-            f"wrong version names both: {reason}",
+            not ok and claude.CLAUDE_MIN in reason and "1.9.0" in reason and "older" in reason,
+            f"an older version is refused, naming both: {reason}",
         )
 
-    with cli("2.1.240"), credentials({"claudeAiOauth": {"expiresAt": future}}):
+    with cli("2.1.290"), credentials({"claudeAiOauth": {"expiresAt": future}}):
         ok, reason = provider.health()
-        check(ok and "2.1.240" in reason, f"patch drift inside the pinned series is ok: {reason}")
+        check(ok and "2.1.290" in reason, f"a version between floor and verified is ok: {reason}")
 
-    with cli("2.1.240"), credentials(
+    with cli("2.1.290"), credentials(
         {"claudeAiOauth": {"expiresAt": past, "refreshTokenExpiresAt": past}}
     ):
         ok, reason = provider.health()
         check(not ok and "expired" in reason, f"expired login is unavailable: {reason}")
 
-    with cli("2.1.240"), credentials(
+    with cli("2.1.290"), credentials(
         # The access token lapses every hour and is refreshed silently; the
         # grant is what "logged in" means. A health check that cried wolf
         # hourly would be one nobody reads.
@@ -340,21 +340,21 @@ def health_checks() -> None:
         ok, reason = provider.health()
         check(ok, f"a lapsed access token is not an expired login: {reason}")
 
-    with cli("2.1.240"), credentials({"claudeAiOauth": {"subscriptionType": "max"}}):
+    with cli("2.1.290"), credentials({"claudeAiOauth": {"subscriptionType": "max"}}):
         ok, reason = provider.health()
         check(ok and "unknown" in reason, f"absent expiry is unknown, not refused: {reason}")
 
-    with cli("2.1.240"), credentials(None):
+    with cli("2.1.290"), credentials(None):
         ok, reason = provider.health()
         check(not ok and "login" in reason, f"no bundle at all is unavailable: {reason}")
 
-    with cli("2.1.240"), credentials({"claudeAiOauth": {"expiresAt": future}}):
+    with cli("2.1.290"), credentials({"claudeAiOauth": {"expiresAt": future}}):
         ok, _ = provider.health()
         check(ok, "binary + pin + live login is available")
 
     # Never spends tokens: the only subprocess is `--version`.
     seen: list = []
-    with cli("2.1.240"), credentials({"claudeAiOauth": {"expiresAt": future}}):
+    with cli("2.1.290"), credentials({"claudeAiOauth": {"expiresAt": future}}):
         run = claude.subprocess.run
 
         def spy(argv, **kw):
@@ -369,6 +369,106 @@ def health_checks() -> None:
         len(seen) == 1 and seen[0][1:] == ["--version"],
         f"health spawns only `claude --version`, once however often /status asks: {seen}",
     )
+    version_checks()
+
+
+@contextlib.contextmanager
+def strict(on: bool):
+    previous = claude.config.CLAUDE_STRICT
+    claude.config.CLAUDE_STRICT = on
+    try:
+        yield
+    finally:
+        claude.config.CLAUDE_STRICT = previous
+
+
+def version_checks() -> None:
+    print("\n-- the version is a floor, never a pin")
+    provider = claude.ClaudeProvider()
+    future = int((time.time() + 86_400) * 1000)
+    login = {"claudeAiOauth": {"expiresAt": future}}
+
+    eq(claude.parse_version("2.1.295"), (2, 1, 295), "parse: a plain version")
+    eq(claude.parse_version("3.0.0-beta.1"), (3, 0, 0), "parse: a pre-release suffix is tolerated")
+    check(claude.parse_version("2.1.10") > claude.parse_version("2.1.9"),
+          "parse: compared as numbers, not strings")
+    for junk in ("", "2.1", "claude", "v", "2.x.1"):
+        check(claude.parse_version(junk) is None, f"parse: {junk!r} is not a version")
+    check(claude.parse_version(claude.CLAUDE_MIN) <= claude.parse_version(claude.CLAUDE_VERIFIED),
+          "the floor is not above the verified version")
+
+    for newer in ("2.2.0", "3.0.0"):
+        with cli(newer), credentials(login), strict(False), captured_log() as logs:
+            first = provider.health()
+            second = provider.health()
+        warnings = [r.getMessage() for r in logs if r.levelno == logging.WARNING]
+        check(first[0] and second[0] and newer in first[1],
+              f"{newer} (newer than verified) is healthy: {first[1]}")
+        check(len(warnings) == 1 and newer in warnings[0] and claude.CLAUDE_VERIFIED in warnings[0],
+              f"{newer} warns exactly once per process: {warnings}")
+
+    with cli(claude.CLAUDE_VERIFIED), credentials(login), strict(False), captured_log() as logs:
+        ok, _ = provider.health()
+    check(ok and not [r for r in logs if r.levelno == logging.WARNING],
+          "the verified version itself is healthy and warns nothing")
+
+    with cli("2.1.272"), credentials(login), strict(False):
+        ok, reason = provider.health()
+    check(not ok and "2.1.272" in reason and claude.CLAUDE_MIN in reason
+          and "update Claude Code" in reason, f"one patch below the floor is refused: {reason}")
+
+    with cli("garbage"), credentials(login), strict(False):
+        ok, reason = provider.health()
+    check(not ok and "could not read a version" in reason and "garbage" in reason,
+          f"an unparseable --version is refused with a sentence: {reason}")
+
+    with cli("2.2.0"), credentials(login), strict(True):
+        ok, reason = provider.health()
+    check(not ok and "JARVIS_CLAUDE_STRICT" in reason and "2.2.0" in reason,
+          f"strict mode refuses a newer minor: {reason}")
+    with cli("2.1.400"), credentials(login), strict(True):
+        ok, reason = provider.health()
+    check(ok, f"strict mode accepts the verified major.minor: {reason}")
+    with cli("2.1.1"), credentials(login), strict(True):
+        ok, reason = provider.health()
+    check(not ok and "older" in reason, f"strict mode still enforces the floor: {reason}")
+
+    # A failed probe is retried after the backoff, never cached as the answer.
+    now = [1000.0]
+    clock = claude._clock
+    claude._clock = lambda: now[0]
+    try:
+        with cli("2.1.290", returncode=1), credentials(login), strict(False):
+            calls: list = []
+            failing = claude.subprocess.run
+
+            def counted(argv, **kw):
+                calls.append(list(argv))
+                return failing(argv, **kw)
+
+            claude.subprocess.run = counted
+            ok, reason = provider.health()
+            check(not ok and "--version" in reason and "retrying" in reason,
+                  f"a failed probe is not-ok and says it will retry: {reason}")
+            provider.health()
+            now[0] += claude.PROBE_RETRY_S - 1
+            provider.health()
+            eq(len(calls), 1, "inside the backoff, a failed probe is not re-spawned")
+
+            def recovered(argv, **kw):
+                calls.append(list(argv))
+                return subprocess.CompletedProcess(argv, 0, "2.1.290 (Claude Code)\n", "")
+
+            claude.subprocess.run = recovered
+            now[0] += 2
+            ok, reason = provider.health()
+            check(ok and "2.1.290" in reason, f"after the backoff the probe is retried and recovers: {reason}")
+            provider.health()
+            now[0] += 10 * claude.PROBE_RETRY_S
+            provider.health()
+            eq(len(calls), 2, "a successful probe stays cached")
+    finally:
+        claude._clock = clock
 
 
 # --- which claude -------------------------------------------------------------
@@ -531,7 +631,7 @@ def cli_options_checks(cli_path: str) -> None:
         handle = provider.resume(thread(session_id=SESSION_ID), brief(), allow)
         eq(str(FakeClient.instances[-1].options.cli_path), cli_path, "resume: options carry cli_path")
         provider.close(handle)
-    with fake(), cli("2.1.240", on_path=False):
+    with fake(), cli("2.1.290", on_path=False):
         handle = provider.start(thread(), brief(), allow)
         check(FakeClient.instances[-1].options.cli_path is None,
               "nothing found: cli_path is left unset, so the SDK uses its bundled CLI")
@@ -1208,7 +1308,7 @@ def secrets_checks() -> None:
     with credentials({"claudeAiOauth": {"accessToken": FAKE_TOKEN, "expiresAt": 1}}):
         expiry = claude._login_expiry_ms()
         eq(expiry, 1, "the credential bundle yields one integer and nothing else")
-        with cli("2.1.240"):
+        with cli("2.1.290"):
             ok, reason = claude.ClaudeProvider().health()
             check(
                 FAKE_TOKEN not in reason and not ok,
