@@ -208,7 +208,7 @@ class Ladder(Fixture):
         brief = Brief(Role.ORCHESTRATOR, self.tmp.name, mcp_servers={"git": {}})
         self.assertIn("missing MCP servers git", self.resolve(brief=brief).reason)
         with patch.dict(R.CLI_MODELS["codex"], {"gpt-text": {"name": "Text", "efforts": ("high",),
-                                                             "vision": False, "available": True}}):
+                                                             "vision": False}}):
             self.project.routing.models["implementer"] = {"codex": "gpt-text/high"}
             self.assertEqual(self.resolve("implementer", images=[{}]).provider, P.CLAUDE)
         # A project entry naming a model Jarvis does not know degrades to the
@@ -641,6 +641,103 @@ class CodexCatalog(Controls):
         self.assertIn("gpt-7-nova", R.CLI_MODELS["codex"])
         self.assertIn("not written (StoreError)", " ".join(logged.output))
         self.assertNotIn("disk full", " ".join(logged.output), "error class only")
+
+    def load_in_child(self, path):
+        """`codex_catalog.load(path)` in a child process with a 1 GB address
+        space and a time limit, so a loader that reads `/dev/zero` or blocks
+        on a FIFO fails this test instead of eating the machine or the run."""
+        import os
+        import resource
+        import subprocess
+        import sys
+
+        def limit():
+            resource.setrlimit(resource.RLIMIT_AS, (1 << 30, 1 << 30))
+
+        code = ("import sys, json\nfrom jarvis.v2 import codex_catalog as C\n"
+                "print(json.dumps(C.load(sys.argv[1]) is None))")
+        try:
+            run = subprocess.run([sys.executable, "-c", code, str(path)], capture_output=True, text=True,
+                                 timeout=20, preexec_fn=limit, env=dict(os.environ))
+        except subprocess.TimeoutExpired:
+            self.fail(f"loading {path} hung")
+        self.assertEqual((run.returncode, run.stdout.strip()), (0, "true"), run.stderr[-500:])
+        return run
+
+    def test_the_cache_loader_refuses_special_files(self):
+        """PR #20 re-review: the loader runs at daemon start. A FIFO planted at
+        the path hung boot; a symlink to /dev/zero (size 0) read until
+        MemoryError, which `main()` did not catch — a crash loop under
+        systemd. Only a regular file, never followed through a symlink and
+        never read past the cap, is loaded; anything else is the fallback."""
+        import os
+        import time
+        from jarvis.v2 import codex_catalog as C
+        from jarvis.v2 import daemon as D
+        root = Path(self.tmp.name)
+        fifo = root / "fifo.json"
+        os.mkfifo(fifo)
+        started = time.monotonic()
+        self.assertIsNone(C.load(fifo))
+        self.assertLess(time.monotonic() - started, 2, "a FIFO is refused, not waited on")
+        self.load_in_child(fifo)
+        zero = root / "zero.json"
+        zero.symlink_to("/dev/zero")
+        self.load_in_child(zero)
+        self.assertIsNone(C.load(zero))
+        self.assertIsNone(C.load("/dev/zero"), "a character device is not read")
+        # A symlink is not followed even to a good catalog.
+        R.set_codex_models(live_rows("gpt-7-nova"))
+        good = config.CODEX_CATALOG_PATH
+        link = root / "link.json"
+        link.symlink_to(good)
+        self.assertIsNone(C.load(link))
+        self.assertIn("gpt-7-nova", C.load(good))
+        # Oversized: refused by size before reading, and by count when the
+        # size lies (a file grown past the cap reads as too large).
+        big = root / "big.json"
+        big.write_bytes(b" " * (C.MAX_CACHE_BYTES + 1))
+        self.assertIsNone(C.load(big))
+        with patch.object(C.os, "fstat", side_effect=lambda fd, real=os.fstat: os.stat_result(
+                real(fd)[:6] + (0,) + real(fd)[7:])):
+            self.assertIsNone(C.load(big), "a size of 0 that is not true is still capped")
+        # Whatever the loader raises, the daemon starts on the fallback.
+        self.restart()
+        for exc in (MemoryError(), RuntimeError("odd"), OSError("io")):
+            with patch.object(R, "load_codex_catalog", side_effect=exc), \
+                    self.assertLogs("jarvis.v2.daemon", "WARNING") as logged:
+                self.assertFalse(D.load_codex_catalog_at_start())
+            self.assertIn(f"not loaded ({type(exc).__name__})", " ".join(logged.output))
+            self.assertEqual(set(R.CLI_MODELS["codex"]), set(R.CODEX_FALLBACK))
+        config.CODEX_CATALOG_PATH.unlink()
+        os.mkfifo(config.CODEX_CATALOG_PATH)
+        self.assertFalse(D.load_codex_catalog_at_start())
+        self.assertEqual(set(R.CLI_MODELS["codex"]), set(R.CODEX_FALLBACK))
+
+    def test_a_missing_built_in_default_is_said_not_changed(self):
+        """PR #20 re-review: if the account drops a routing default (astra,
+        5.6-sol), it is still what runs — there is nothing to fall back to —
+        but `GET /route` says so instead of a turn failing unexplained."""
+        R.set_codex_models(live_rows("gpt-6.1-sol", "gpt-5.6-sol"))
+        notes = []
+        self.assertEqual(R.model_settings("orchestrator", "codex", notes=notes), ("gpt-6-astra", "xhigh"))
+        self.assertIn("the built-in default gpt-6-astra is not a codex model the account offers now",
+                      " ".join(notes))
+        self.start()
+        status, view = self.request("GET", "/route")
+        self.assertEqual(status, 200)
+        text = " ".join(view["notes"])
+        self.assertIn("orchestrator.codex: the built-in default gpt-6-astra", text)
+        self.assertIn("reviewer.codex: the built-in default gpt-6-astra", text)
+        self.assertNotIn("implementer.codex", text, "gpt-5.6-sol is offered")
+        self.assertNotIn("claude", text, "roster/default names no model")
+        self.assertEqual(view["table"]["resolved_models"]["orchestrator"]["codex"],
+                         {"model": "gpt-6-astra", "effort": "xhigh"}, "what runs does not change")
+        # An owner's entry for the role silences it.
+        self.router.configure({"action": "models", "role": "orchestrator", "provider": "codex",
+                               "model": "gpt-6.1-sol/high"})
+        status, view = self.request("GET", "/route")
+        self.assertNotIn("orchestrator.codex", " ".join(view["notes"]))
 
     def test_ultra_never_reaches_claude(self):
         """`ultra` is Codex's alone: no Claude routing entry carries it, saved

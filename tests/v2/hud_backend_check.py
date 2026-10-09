@@ -919,6 +919,34 @@ class Backend(unittest.TestCase):
         self.refreshed()
         self.assertEqual(self.request("GET", "/usage")["providers"]["codex"]["quota"]["windows"][0]["used_percent"], 19)
 
+    def test_daemon_stop_cancels_the_refresh_and_it_saves_nothing(self):
+        """PR #20 re-review: after `stop()` the worker could still save the
+        catalog and swap the table, with its app-server left to exit on EOF.
+        Stop cancels the provider's read, and a read that returns anyway —
+        here, because the cancel itself released it — lands nothing."""
+        from jarvis.v2 import router
+        before = dict(router.CLI_MODELS["codex"])
+        released, cancelled = threading.Event(), []
+        self.addCleanup(released.set)
+        provider = self.providers[P.CODEX]
+
+        def read():
+            released.wait(10)
+            return {"models": self.ACCOUNT_ROWS, "rate_limits": self.QUOTA}
+        provider.account_metadata = read
+        provider.cancel_metadata = lambda: (cancelled.append(1), released.set())
+        self.request("GET", "/usage")
+        ledger = self.daemon.router.ledger
+        started = time.monotonic()
+        self.daemon.stop()
+        self.assertLess(time.monotonic() - started, 5)
+        self.assertEqual(cancelled, [1], "the provider's read is cancelled")
+        self.assertTrue(ledger.wait_codex_refresh(5), "and the worker has ended")
+        self.assertEqual(router.CLI_MODELS["codex"], before, "a stopped daemon swaps nothing")
+        self.assertFalse(config.CODEX_CATALOG_PATH.exists(), "and saves nothing")
+        self.assertIsNone(ledger.quota("codex"), "nor moves a meter")
+        self.assertFalse(ledger.refresh_codex(provider), "and starts nothing")
+
     def test_one_refresh_at_a_time_and_failures_are_throttled(self):
         from jarvis.v2 import router
         ledger = self.daemon.router.ledger
@@ -1716,6 +1744,24 @@ class Backend(unittest.TestCase):
         legacy.routing.models = {"implementer": {"codex": "gpt-9/high"}}
         self.stores.projects.save(legacy)
         self.assertEqual(self.request("PATCH", f"/projects/{made['id']}", {"name": "renamed"})["name"], "renamed")
+        # PR #20 re-review: only what changed is a new choice. An entry the
+        # catalog has since dropped round-trips unchanged — the HUD sends the
+        # whole routing object back — while a changed one is still judged.
+        from jarvis.v2 import router
+        self.request("PATCH", f"/projects/{made['id']}", {"routing": {"models": {
+            "implementer": {"codex": "gpt-5.5/high"}}}})
+        router.CLI_MODELS["codex"] = {m: dict(e) for m, e in router.CODEX_FALLBACK.items() if m != "gpt-5.5"}
+        stale = {"implementer": {"codex": "gpt-5.5/high", "claude": "claude-opus-5-5/max"}}
+        body = self.request("PATCH", f"/projects/{made['id']}", {"routing": {
+            "chains": {"reviewer": ["codex"]}, "models": stale}})
+        self.assertEqual(body["routing"]["models"], stale)
+        error = self.request("PATCH", f"/projects/{made['id']}", {"routing": {"models": {
+            "implementer": {"codex": "gpt-5.5/xhigh"}}}}, status=400)["error"]
+        self.assertIn("gpt-5.5 is not a codex model Jarvis knows", error, "a changed entry is a new choice")
+        error = self.request("PATCH", f"/projects/{made['id']}", {"routing": {"models": {
+            "implementer": {"codex": "gpt-5.5/high"}, "reviewer": {"codex": "gpt-9/high"}}}}, status=400)["error"]
+        self.assertIn("routing.models.reviewer.codex", error)
+        self.assertEqual(self.stores.projects.get(made["id"]).routing.models, stale)
 
     def test_open_thread_checks_the_model_before_anything_exists(self):
         fakes = self.model_fakes()

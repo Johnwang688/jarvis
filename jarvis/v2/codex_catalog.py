@@ -29,8 +29,10 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import json
 import logging
+import os
 from pathlib import Path
 import re
+import stat
 
 from jarvis import config
 from .approvals import clean_line
@@ -123,20 +125,46 @@ def save(table: dict[str, dict], path=None) -> bool:
     return True
 
 
+def _read_capped(target: Path) -> bytes:
+    """The file's bytes, or an error. It runs at daemon start, so nothing
+    planted at the path may hang or exhaust it (PR #20 re-review): a symlink
+    is not followed (`/dev/zero` reports size 0 and never ends), a FIFO is
+    opened without blocking and refused, only a regular file is read, and
+    never more than `MAX_CACHE_BYTES` + 1 bytes of it."""
+    flags = (os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+             | getattr(os, "O_CLOEXEC", 0))
+    fd = os.open(target, flags)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise ValueError("cache is not a regular file")
+        if info.st_size > MAX_CACHE_BYTES:
+            raise ValueError("cache file too large")
+        data = b""
+        while len(data) <= MAX_CACHE_BYTES:
+            chunk = os.read(fd, MAX_CACHE_BYTES + 1 - len(data))
+            if not chunk:
+                break
+            data += chunk
+        if len(data) > MAX_CACHE_BYTES:
+            raise ValueError("cache file too large")
+        return data
+    finally:
+        os.close(fd)
+
+
 def load(path=None) -> dict[str, dict] | None:
     """The cached catalog, parsed as the live one is; None when it is
-    missing, too big, unreadable or holds nothing usable (the built-in
-    fallback then stands)."""
+    missing, not a regular file, too big, unreadable or holds nothing usable
+    (the built-in fallback then stands)."""
     target = _cache_path(path)
     try:
-        if target.stat().st_size > MAX_CACHE_BYTES:
-            raise ValueError("cache file too large")
-        payload = json.loads(target.read_bytes().decode("utf-8"))
+        payload = json.loads(_read_capped(target).decode("utf-8"))
         if not isinstance(payload, dict) or payload.get("version") != CACHE_VERSION:
             raise ValueError("unknown cache format")
         return parse(payload.get("models"))
     except FileNotFoundError:
         return None
-    except (OSError, ValueError, RecursionError) as exc:
+    except (OSError, ValueError, RecursionError, MemoryError) as exc:
         LOG.warning("Codex model catalog cache ignored (%s)", type(exc).__name__)
         return None

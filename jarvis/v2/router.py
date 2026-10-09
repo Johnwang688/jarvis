@@ -266,12 +266,13 @@ def _model(value, provider=None):
     return model, None if effort == "default" else effort
 
 
-def _offered(provider) -> tuple[str, ...]:
+def _offered(provider, known=None) -> tuple[str, ...]:
     """Every effort some model of this CLI takes, in `EFFORTS` order: what
     `roster/<effort>` may name, since the roster's model is not known here.
     Claude Code takes low..max, so `roster/ultra` (or `minimal`) is never
     Claude's."""
-    known = {e for entry in CLI_MODELS[provider].values() for e in entry["efforts"]}
+    table = CLI_MODELS[provider] if known is None else known
+    known = {e for entry in table.values() for e in entry["efforts"]}
     return tuple(e for e in EFFORTS if e in known)
 
 
@@ -304,12 +305,15 @@ def _show(value) -> str:
     return text if len(text) <= 60 else text[:59] + "…"
 
 
-def _saved_entry(provider, value, where, notes=None):
+def _saved_entry(provider, value, where, notes=None, known=None):
     """A saved routing entry as it can run on the table as it is now, or None
     for "use the default". Never raises, never writes (PR #20 review): a
     model the table lacks falls back with a note — and comes back when the
     table has it again — and an effort the model no longer offers is clamped
-    down to the nearest one it does (option 1), with a note."""
+    down to the nearest one it does (option 1), with a note. `known` is the
+    caller's snapshot of `CLI_MODELS[provider]`, so one decision reads one
+    table even while a refresh swaps it."""
+    known = CLI_MODELS[provider] if known is None else known
     try:
         model, effort = _model(value)
     except ValueError:
@@ -317,11 +321,10 @@ def _saved_entry(provider, value, where, notes=None):
                      "using the default")
         return None
     if model == "roster":
-        if effort is not None and effort not in _offered(provider):
+        if effort is not None and effort not in _offered(provider, known):
             _note(notes, f"{where}: {provider} takes no effort {effort!r}; using the default")
             return None
         return value
-    known = CLI_MODELS[provider]
     if model not in known:
         _note(notes, f"{where}: {model} is not a {provider} model the account offers now; "
                      "using the default until it does (the setting is kept as written)")
@@ -334,21 +337,34 @@ def _saved_entry(provider, value, where, notes=None):
     _note(notes, f"{where}: {model} does not offer effort {effort!r} now; "
                  f"running at {clamped or 'its default'}")
     return f"{model}/{clamped or 'default'}"
-def check_project_models(models):
+
+
+def check_project_models(models, previous=None):
     """A project's own `routing.models`, held to the rule a new `/route`
     choice is held to: a known role, claude/codex only, and each entry a
     model `CLI_MODELS` names (or `roster`) with an effort that model offers.
     Raises ValueError naming the entry; called when `/projects` writes a
-    project's routing."""
+    project's routing.
+
+    `previous` is the project's stored `routing.models` on a PATCH: an entry
+    equal to the stored one is not a new choice, so it is only held to
+    `_model`'s syntax — a stale one round-trips (it runs as the default until
+    its model returns, `model_settings`), as `POST /route` keeps the entries
+    it was not asked about (PR #20 re-review)."""
     if not isinstance(models, dict):
         raise ValueError("routing.models must be an object")
+    previous = previous if isinstance(previous, dict) else {}
     for role, value in models.items():
         _role(role)
         if not isinstance(value, dict) or value.keys() - set(CLI_PROVIDERS):
             raise ValueError(f"routing.models.{role} must map claude/codex to model/effort")
+        stored = previous.get(role) if isinstance(previous.get(role), dict) else {}
         for provider, setting in value.items():
             try:
-                _cli_model(provider, setting)
+                if provider in stored and stored[provider] == setting:
+                    _model(setting)
+                else:
+                    _cli_model(provider, setting)
             except ValueError as exc:
                 raise ValueError(f"routing.models.{role}.{provider}: {exc}") from exc
 
@@ -530,21 +546,31 @@ def model_settings(role, provider, project=None, settings=None, notes=None):
     table's to the built-in default — with a note, and an effort its model no
     longer offers is clamped, as `load_routing` does for routing.json.
     Nothing is ever written back. A table handed in rather than loaded is held
-    to the same rule."""
+    to the same rule. A built-in default the table lacks is still what runs
+    (there is nothing to fall back to), and a note says so. The Codex table
+    is read once, so a refresh swapping it mid-call cannot split a decision."""
     settings = settings or load_routing(notes=notes)
     provider = ProviderName(provider).value
+    known = CLI_MODELS[provider]
     entries = project.routing.models.get(role) if project else None
     value = (entries.get(provider) if isinstance(entries, dict) else None) or None
     if value is not None:
         value = _saved_entry(provider, value, f"project {project.id} routing.models.{role}.{provider}",
-                             notes)
+                             notes, known)
     if value is None:
         fallback = defaults()["models"][role][provider]
         value = settings["models"][role][provider]
         if value != fallback:
-            value = _saved_entry(provider, value, f"routing models.{role}.{provider}", notes) or fallback
+            value = _saved_entry(provider, value, f"routing models.{role}.{provider}", notes,
+                                 known) or fallback
+        if value == fallback:
+            name = fallback.rsplit("/", 1)[0]
+            if name != "roster" and name not in known:
+                _note(notes, f"routing models.{role}.{provider}: the built-in default {name} is "
+                             f"not a {provider} model the account offers now; it is still what "
+                             "runs — choose another in routing")
     model, effort = _model(value)
-    entry = CLI_MODELS[provider].get(model)
+    entry = known.get(model)
     if entry is not None and effort is not None and effort not in entry["efforts"]:
         # The built-in default meeting a ladder that lacks its level: clamped
         # like a saved one, silently (nobody chose it).

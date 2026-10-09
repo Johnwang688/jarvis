@@ -326,9 +326,12 @@ of a turn. The choice is stored on the Thread record (`model`, `effort`);
   `image`), installed whole — never a union — by a background refresh (see
   `GET /usage`), saved atomically to `config.CODEX_CATALOG_PATH`
   (`~/.local/share/jarvis/codex-models.json`) and loaded when `daemon2`
-  starts, so a restart and a Discord-only daemon use it too. Until then, or
-  when the file is missing or corrupt (it is parsed with the same caps as
-  the live response), the list is the built-in `router.CODEX_FALLBACK`,
+  starts, so a restart and a Discord-only daemon use it too. The file is
+  protected state (no agent write tool may touch it) and is read only if it
+  is a regular file, not through a symlink, and within its cap. Until then,
+  or when the file is missing, corrupt or anything else (it is parsed with
+  the same caps as the live response), the list is the built-in
+  `router.CODEX_FALLBACK`,
   whose ladders match what the account advertised on 2026-10-08 (astra,
   both Sols and Terra reach `ultra`). `default_effort` is A4's — `high`,
   clamped to the model's ladder — never the default Codex advertises.
@@ -616,9 +619,16 @@ the table fails because of it, and nothing saved is rewritten:
   run as written right now, in words — a model the catalog lacks (that
   entry runs the role's default until the model returns), an effort its
   model no longer offers (clamped down to the nearest one it has, `ultra`
-  included), or a malformed part of the file (that part's default). The
-  same notes are logged once per process. `table` and `resolved_models` show
-  what actually runs. The HUD's Settings shows the notes as text.
+  included), or a malformed part of the file (that part's default). A
+  **built-in** routing default the catalog lacks is noted too: it still
+  runs — there is nothing to fall back to — so a turn that fails on it is
+  explained. The same notes are logged once per process. `table` and
+  `resolved_models` show what actually runs. The HUD's Settings shows the
+  notes as text.
+- `PATCH /projects/{id}` with `routing` judges only the `routing.models`
+  entries that differ from the stored project: an unchanged entry whose
+  model the catalog has since dropped round-trips (it runs as the default
+  until the model returns), and a changed one is held to the table.
 - `POST /route` builds the table it writes from the file's well-formed
   parts, not from what runs, so it saves over a stale or corrupt table, and
   an entry it was not asked about is kept verbatim. A **new** choice is

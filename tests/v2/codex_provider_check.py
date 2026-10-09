@@ -519,6 +519,37 @@ class Checks(unittest.TestCase):
         self.assertFalse(codex._auth_lock.locked())
         self.assertEqual(codex.METADATA_DEADLINE_S, 10.0)
 
+    def test_cancel_metadata_ends_a_read_in_flight(self):
+        """PR #20 re-review: `Daemon.stop` left a metadata app-server running
+        to exit on EOF. `cancel_metadata` ends the read at the transport's
+        next poll; the session closes its app-server and frees the lock, and
+        no new read starts — not even a probe."""
+        self.brain.script = {"mode": "normal", "model_stall": True}
+        outcome = {}
+
+        def read():
+            try:
+                outcome["result"] = self.provider.account_metadata()
+            except Exception as exc:
+                outcome["error"] = exc
+        worker = threading.Thread(target=read, daemon=True)
+        worker.start()
+        self.brain.wait_call("model/list")
+        started = time.monotonic()
+        self.provider.cancel_metadata()
+        worker.join(5)
+        self.assertFalse(worker.is_alive())
+        self.assertLess(time.monotonic() - started, 2, "well inside the 10 s deadline")
+        self.assertIsInstance(outcome.get("error"), RpcError)
+        self.assertFalse(codex._auth_lock.locked())
+        self.assertTrue(self.brain.rpcs[-1]._closed.is_set(), "its app-server is closed")
+        probes = []
+        with patch.object(codex.CodexProvider, "_probe",
+                          lambda _self: (probes.append(1), ("/fake/codex", "fake"))[1]):
+            with self.assertRaises(codex.RpcCancelled):
+                self.provider.account_metadata()
+        self.assertEqual(probes, [])
+
     def test_the_login_lock_is_released_even_if_close_raises(self):
         original = self.brain.rpc
 

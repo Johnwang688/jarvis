@@ -259,8 +259,17 @@ refused for the fast path and Claude (`roster/ultra` on Claude too), never
 offered by the HUD for them, and a record holding it runs the model's
 default — the fast path drops it before `llm.chat`. The default effort
 stays **`high`** within the ladder (A4); Codex's advertised per-model default
-is kept only as `advertised_effort`. Tests point `config.CODEX_CATALOG_PATH`
-at a temp file and restore the table.
+is kept only as `advertised_effort`. Re-review round (same day): the catalog
+file is **protected state** (v2 `protected_paths`, v1 `_protected_state`);
+it is loaded with `O_NOFOLLOW|O_NONBLOCK`, a regular file only and never
+read past its cap — a FIFO or a `/dev/zero` symlink planted there hung or
+crashed boot — and `main()` falls back on *any* load failure;
+`Daemon.stop` stops the ledger first (nothing saved or swapped after), then
+`CodexProvider.cancel_metadata()` ends the read in flight, then waits;
+`PATCH /projects` judges only the `routing.models` entries that changed, so a
+stale one round-trips; and `GET /route` notes a built-in default the catalog
+lacks (it still runs — there is nothing to fall back to). Tests point
+`config.CODEX_CATALOG_PATH` at a temp file and restore the table.
 
 Briefs for every package, including the ones in flight, are in
 `docs/codex-briefs/`; each merged package left a `*-notes.md` beside its
@@ -326,7 +335,7 @@ effort?}`, `model: ""` resets; stored atomically in
 its own file because models.json is rewritten whole by two processes, and
 refused to every agent write tool — v2's `permissions.protected_paths` and
 v1's `files._protected_state`, one set asserted equal, which since this
-change also covers models.json, routing.json and the guild file for v1), else Claude defaults
+change also covers models.json, routing.json and the guild file for v1, and since PR #20 the saved Codex catalog), else Claude defaults
 to `claude-opus-5-5` at high and Codex to its routing default. **A HUD Codex
 default beats routing for chat threads only and never writes routing.json**;
 tasks keep routing's table. Effort defaults to `high` (or the roster's pin)
@@ -862,7 +871,10 @@ jarvis/
   routing.json and the Discord guild file, each by its `config` path and
   beside the allowlist — because a v1 `write_file` (a background workflow's
   included) could rewrite which model every default v2 thread runs on.
-  `tests/files_check.py` asserts the v1 and v2 sets are equal.
+  `tests/files_check.py` asserts the v1 and v2 sets are equal. **And the
+  saved Codex catalog** (`config.CODEX_CATALOG_PATH`, PR #20): daemon2
+  installs it as the Codex model table at start, so writing it would move
+  which Codex model and effort tasks and default threads run on.
 - **Desktop control is confined to an app allowlist** (2026-07-31).
   `config.DESKTOP_APPS` is the whole door: no desktop tool accepts a window
   title, handle, or executable path, only a registered app name, so the model

@@ -339,6 +339,11 @@ class HUDLedger(UsageLedger):
         self.metadata_clock = time.monotonic
         self._codex_next: float | None = None
         self._codex_worker: threading.Thread | None = None
+        # Set by `stop_codex` (daemon shutdown) under `_codex_gate`, which a
+        # refresh also holds while it installs what it read: once stopped,
+        # nothing is saved or swapped, however late the read returns.
+        self._codex_stopped = threading.Event()
+        self._codex_gate = threading.Lock()
         super().__init__(*args, **kwargs)
 
     def _merge_rate_limits(self, key, report):
@@ -408,7 +413,7 @@ class HUDLedger(UsageLedger):
         only `CODEX_METADATA_BUSY_S`. Nothing here starts a model turn.
         """
         read = getattr(provider, "account_metadata", None)
-        if not callable(read):
+        if not callable(read) or self._codex_stopped.is_set():
             return False
         with self._lock:
             now = self.metadata_clock()
@@ -434,8 +439,20 @@ class HUDLedger(UsageLedger):
             return not worker.is_alive()
         return True
 
+    def stop_codex(self, timeout: float | None = None) -> bool:
+        """Daemon shutdown: no refresh starts, none in flight saves the
+        catalog or swaps the table or the meters from here on, and the one in
+        flight (if any) is waited for up to `timeout`. True when none is left
+        running. The caller cancels the provider's app-server first
+        (`CodexProvider.cancel_metadata`), so the wait is short."""
+        with self._codex_gate:
+            self._codex_stopped.set()
+        return self.wait_codex_refresh(timeout)
+
     def _refresh_codex(self, read, on_change) -> None:
         from .providers.codex import MetadataBusy
+        if self._codex_stopped.is_set():
+            return
         try:
             metadata = read()
         except MetadataBusy:
@@ -451,25 +468,28 @@ class HUDLedger(UsageLedger):
             LOG.warning("Codex metadata refresh failed (%s)", type(metadata).__name__)
             return
         changed = False
-        # The two halves are independent: either may be None (it failed) and
-        # the other still lands.
-        rows = metadata.get("models")
-        if rows is not None:
-            try:
-                from .router import set_codex_models
-                set_codex_models(rows)          # installs it and saves it
-            except (TypeError, ValueError) as exc:
-                LOG.warning("Codex model catalog refused (%s)", type(exc).__name__)
-            else:
+        with self._codex_gate:
+            if self._codex_stopped.is_set():
+                return          # the daemon stopped while this read ran
+            # The two halves are independent: either may be None (it failed)
+            # and the other still lands.
+            rows = metadata.get("models")
+            if rows is not None:
+                try:
+                    from .router import set_codex_models
+                    set_codex_models(rows)          # installs it and saves it
+                except (TypeError, ValueError) as exc:
+                    LOG.warning("Codex model catalog refused (%s)", type(exc).__name__)
+                else:
+                    changed = True
+            reports = _codex_rate_limits(metadata.get("rate_limits"))
+            if reports:
+                # Merged, never swapped: an empty or partial read keeps the
+                # windows (and the limit ids turn notifications taught us).
+                with self._lock:
+                    for limit_id, report in reports.items():
+                        self._merge_rate_limits(limit_id, report)
                 changed = True
-        reports = _codex_rate_limits(metadata.get("rate_limits"))
-        if reports:
-            # Merged, never swapped: an empty or partial read keeps the
-            # windows (and the limit ids turn notifications taught us).
-            with self._lock:
-                for limit_id, report in reports.items():
-                    self._merge_rate_limits(limit_id, report)
-            changed = True
         if changed and on_change is not None:
             try:
                 on_change()

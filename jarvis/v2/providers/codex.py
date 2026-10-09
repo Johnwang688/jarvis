@@ -61,7 +61,7 @@ from jarvis.v2.provider import (Brief, BriefRefused, Decision, Event, EventKind,
                                PermissionCallback, SessionHandle, Usage, UserMessage)
 from ..approvals import clean_line
 from . import codex_cli, codex_config
-from .codex_rpc import RpcError, RpcProcess, RpcTimeout
+from .codex_rpc import RpcCancelled, RpcError, RpcProcess, RpcTimeout
 from .codex_usage import Accounting
 
 START_TIMEOUT = 30.0
@@ -312,6 +312,17 @@ class _Session:
 class CodexProvider:
     name = ProviderName.CODEX
 
+    def __init__(self) -> None:
+        # Set by `cancel_metadata` at daemon shutdown: an account-metadata
+        # app-server in flight stops at its next poll and is closed.
+        self._metadata_stop = threading.Event()
+
+    def cancel_metadata(self) -> None:
+        """Daemon shutdown: stop any account-metadata read in flight (its
+        transport polls this between messages, so it ends within ~50 ms and
+        its own `finally` closes the app-server) and refuse new ones."""
+        self._metadata_stop.set()
+
     def health(self) -> tuple[bool, str]:
         binary, reason = self._probe()
         return binary is not None, reason
@@ -359,17 +370,24 @@ class CodexProvider:
         - once it has the lock, the whole session has one deadline
           (`deadline_s`, ~10 s), so a stalled app-server cannot keep a turn
           from starting for longer than that;
-        - the lock is released whatever `close()` does.
+        - the lock is released whatever `close()` does;
+        - `cancel_metadata()` (daemon shutdown) ends a read in flight at the
+          transport's next poll, and refuses a new one.
 
         The catalog and the quota are independent: either half failing is
         `None` in the result, with the other kept; both failing raises.
         Failures are logged by operation and error class only.
         """
+        stop = self._metadata_stop
+        if stop.is_set():
+            raise RpcCancelled("Codex account metadata cancelled (shutting down)")
         if _auth_lock.locked():
             raise MetadataBusy("a Codex session holds the login lock")
         binary, reason = self._probe()
         if binary is None:
             raise BriefRefused(reason)
+        if stop.is_set():
+            raise RpcCancelled("Codex account metadata cancelled (shutting down)")
         if not _auth_lock.acquire(blocking=False):
             raise MetadataBusy("a Codex session holds the login lock")
         try:
@@ -377,7 +395,7 @@ class CodexProvider:
             try:
                 deadline = time.monotonic() + deadline_s
                 argv, env, home = codex_config.prepare_metadata(binary)
-                rpc = RpcProcess(argv, cwd=str(home), env=env)
+                rpc = RpcProcess(argv, cwd=str(home), env=env, stop=stop.is_set)
                 rpc.start().initialize(deadline=deadline)
                 account_result = rpc.request("account/read", {"refreshToken": False}, deadline=deadline)
                 if not isinstance(account_result, dict):
