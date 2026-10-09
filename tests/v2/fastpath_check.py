@@ -767,6 +767,13 @@ def model_checks() -> None:
         provider.set_model(pinned, "third/model", "")
         drain(provider, pinned)
         assert seen == [("third/model", None)], seen
+        # Codex's `ultra` never reaches an OpenRouter request, whatever handed
+        # it over (PR #20 review): the model's v1 default goes instead.
+        seen.clear()
+        provider.set_model(pinned, "third/model", "ultra")
+        drain(provider, pinned)
+        assert seen == [("third/model", models.effort_for("third/model"))], seen
+        assert all(effort != "ultra" for _, effort in seen), seen
     for h in (default, pinned):
         provider.close(h)
     try:

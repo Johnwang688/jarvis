@@ -286,12 +286,15 @@ class RpcProcess:
             raise RpcError("Codex app-server has too many unhandled messages")
         self._pending.append(message)
 
-    def initialize(self, *, timeout: float = config.CODEX_RPC_TIMEOUT_SECONDS) -> dict:
+    def initialize(
+        self, *, timeout: float = config.CODEX_RPC_TIMEOUT_SECONDS, deadline: float | None = None,
+    ) -> dict:
+        end = deadline if deadline is not None else time.monotonic() + timeout
         result = self.request("initialize", {
             "clientInfo": {"name": config.CODEX_RPC_CLIENT_NAME, "version": config.CODEX_RPC_CLIENT_VERSION},
             "capabilities": {"experimentalApi": True},
-        }, timeout=timeout)
-        self.notify("initialized")
+        }, deadline=end)
+        self.notify("initialized", deadline=end)
         return result
 
     def close(self) -> None:

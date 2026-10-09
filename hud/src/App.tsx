@@ -352,6 +352,12 @@ export default function App() {
         case "usage_updated":
           api.usage().then((usage) => dispatch({ type: "patch", patch: { usage } })).catch(() => {});
           break;
+        case "codex_metadata":
+          // A background refresh of Codex's account catalog and quota landed
+          // (the daemon never makes a HUD read wait for one): re-read both.
+          api.usage().then((usage) => dispatch({ type: "patch", patch: { usage } })).catch(() => {});
+          void reloadThreadModels.current();
+          break;
         case "schedule_fired":
           api.schedules().then((schedules) => dispatch({ type: "patch", patch: { schedules } })).catch(() => {});
           break;

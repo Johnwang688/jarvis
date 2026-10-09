@@ -25,9 +25,6 @@ export interface ModelEntry {
   prompt_usd?: number | null;
   completion_usd?: number | null;
   unlisted?: boolean;
-  /** Codex: false when the account's model list no longer offers it. Kept,
-   * so a pin or default naming it stays valid, but not offered anew. */
-  available?: boolean;
 }
 
 export interface ProviderModels {
@@ -72,25 +69,18 @@ export const PROVIDER_LABELS: Record<ProviderName, string> = {
   claude: "Claude",
   codex: "Codex",
 };
-/** OpenRouter's levels, hardest first (`models.EFFORT_LADDER`). */
+/** OpenRouter's reasoning ladder, hardest first (`models.EFFORT_LADDER`):
+ * what the fast path and Claude can be asked for. */
 export const EFFORT_LADDER = ["max", "xhigh", "high", "medium", "low", "minimal", "none"];
-/** Every level, hardest first: Codex's `ultra` sits above `max`. It is not
- * OpenRouter's, so it is offered only by a Codex model's own ladder; this is
- * the order a clamp walks (`thread_model.EFFORT_ORDER`). */
-export const EFFORT_ORDER = ["ultra", ...EFFORT_LADDER];
-
-/** The levels a provider takes when a model's own ladder is unknown. */
-function vocabulary(provider: ProviderName): string[] {
-  return provider === "fast" ? EFFORT_LADDER : EFFORT_ORDER;
-}
-
-/** A Codex model the account no longer lists (never a Claude or OpenRouter one). */
-export function unavailable(e: ModelEntry | undefined): boolean {
-  return e?.available === false;
-}
-
-export const UNAVAILABLE = "not offered by your account";
+/** Codex's own ladder (`router.CODEX_EFFORT_LADDER`): OpenRouter's with
+ * `ultra` on top. `ultra` is Codex's alone and is never offered elsewhere. */
+export const CODEX_EFFORT_LADDER = ["ultra", ...EFFORT_LADDER];
 export const DEFAULT_EFFORT = "high";
+
+/** Every effort `provider` can be asked for, hardest first. */
+export function effortWords(provider: ProviderName): string[] {
+  return provider === "codex" ? CODEX_EFFORT_LADDER : EFFORT_LADDER;
+}
 /** The model select's last entry on OpenRouter. */
 export const SEARCH = "__search__";
 
@@ -116,22 +106,30 @@ export function effortsFor(tm: ThreadModels | null, provider: ProviderName, mode
   return e && Array.isArray(e.efforts) ? e.efforts : null;
 }
 
-function clamp(wanted: string, ladder: string[]): string | null {
-  if (ladder.includes(wanted)) return wanted;
-  const i = EFFORT_ORDER.indexOf(wanted);
-  const order = i < 0 ? [] : [...EFFORT_ORDER.slice(i + 1), ...EFFORT_ORDER.slice(0, i).reverse()];
+/** Down the ladder first, then up, in the provider's own order
+ * (`thread_model._clamp`). A word that is not one of its efforts at all is
+ * read as the default, never shown as if it ran. */
+function clamp(wanted: string, ladder: string[], provider: ProviderName): string | null {
+  if (!ladder.length) return null;
+  const words = effortWords(provider);
+  const w = words.includes(wanted) ? wanted : DEFAULT_EFFORT;
+  if (ladder.includes(w)) return w;
+  const i = words.indexOf(w);
+  const order = [...words.slice(i + 1), ...words.slice(0, i).reverse()];
   return order.find((level) => ladder.includes(level)) ?? ladder[0] ?? null;
 }
 
 /** A4: high for every model, or the roster's own effort for it, within its
- * ladder; nothing for a model with no reasoning control. */
+ * ladder; nothing for a model with no reasoning control. Never the effort
+ * Codex advertises as a model's default (owner's decision, PR #20 review),
+ * so the label says what the backend actually runs. */
 export function defaultEffort(tm: ThreadModels | null, provider: ProviderName, model: string | null): string | null {
   const e = entry(tm, provider, model);
   const wanted = (provider === "fast" && e?.effort) || tm?.effort_default || DEFAULT_EFFORT;
   const ladder = effortsFor(tm, provider, model);
   // An unknown ladder is sent as asked, as the backend does.
   if (ladder === null) return wanted;
-  return ladder.length ? clamp(wanted, ladder) : null;
+  return ladder.length ? clamp(wanted, ladder, provider) : null;
 }
 
 /** What `model: null` means right now for this provider. */
@@ -145,22 +143,29 @@ export function defaultModel(tm: ThreadModels | null, provider: ProviderName): s
 export function clampEffort(tm: ThreadModels | null, provider: ProviderName, model: string | null, wanted: string): string | null {
   const ladder = effortsFor(tm, provider, model);
   if (ladder === null) return wanted;
-  return ladder.length ? clamp(wanted, ladder) : null;
+  return ladder.length ? clamp(wanted, ladder, provider) : null;
 }
 
 /** The model and effort the thread's next message runs on. A default thread
  * follows the default model, and an effort chosen on it is clamped to
- * whatever that model is now (A4 amendment). */
+ * whatever that model is now (A4 amendment); a pinned model's effort is
+ * clamped the same way when its ladder changed since. A stored word that is
+ * not one of the provider's efforts (`ultra` off Codex) counts as no choice,
+ * as `thread_model.effective` does. */
 export function effective(tm: ThreadModels | null, c: Choice): { model: string | null; effort: string | null } {
+  const chosen = c.effort !== null && effortWords(c.provider).includes(c.effort) ? c.effort : null;
   if (c.model === null) {
     const p = tm?.providers[c.provider];
     const model = p?.default ?? null;
-    const effort = c.effort === null
+    const effort = chosen === null
       ? p?.default_effort ?? null
-      : model === null ? c.effort : clampEffort(tm, c.provider, model, c.effort);
+      : model === null ? chosen : clampEffort(tm, c.provider, model, chosen);
     return { model, effort };
   }
-  return { model: c.model, effort: c.effort ?? defaultEffort(tm, c.provider, c.model) };
+  return {
+    model: c.model,
+    effort: chosen === null ? defaultEffort(tm, c.provider, c.model) : clampEffort(tm, c.provider, c.model, chosen),
+  };
 }
 
 /** Why `provider` cannot run a chat thread in this project, or null when it
@@ -224,12 +229,6 @@ export interface Option {
 export function modelOptions(tm: ThreadModels | null, c: Choice): Option[] {
   const out: Option[] = [{ value: "", label: `default · ${shortId(defaultModel(tm, c.provider)) || "?"}` }];
   for (const m of tm?.providers[c.provider]?.models || []) {
-    // A model the account dropped is listed only where it is already the
-    // thread's pin, marked, as an off-roster pin is (A3).
-    if (unavailable(m)) {
-      if (m.id === c.model) out.push({ value: m.id, label: `${shortId(m.id)} (${UNAVAILABLE})` });
-      continue;
-    }
     const p = c.provider === "fast" ? price(m) : "";
     out.push({ value: m.id, label: shortId(m.id) + (p ? ` · ${p}` : "") });
   }
@@ -256,7 +255,8 @@ export function effortOptions(tm: ThreadModels | null, c: Choice): Option[] {
     : defaultEffort(tm, c.provider, c.model);
   if (ladder !== null && ladder.length === 0) return [];
   const out: Option[] = [{ value: "", label: `default · ${dflt || "none"}` }];
-  for (const level of ladder ?? vocabulary(c.provider)) out.push({ value: level, label: level });
+  // An unknown ladder offers the provider's own words: `ultra` only on Codex.
+  for (const level of ladder ?? effortWords(c.provider)) out.push({ value: level, label: level });
   if (c.effort && !out.some((o) => o.value === c.effort)) {
     const runs = eff.effort && eff.effort !== c.effort ? ` (runs as ${eff.effort})` : "";
     out.push({ value: c.effort, label: c.effort + runs });
@@ -394,20 +394,16 @@ export interface DefaultRow {
   /** Text only: the model's name, else its id. */
   name: string;
   isDefault: boolean;
-  /** The account no longer offers it; listed only while it is the default. */
-  unavailable?: boolean;
 }
 
 /** The rows of a provider's default menu: every model it can run, with the
- * current default marked. A model the account dropped is listed only while
- * it is still the default, so it can be seen and replaced, not chosen anew. */
+ * current default marked. */
 export function defaultRows(tm: ThreadModels | null, provider: ProviderName): DefaultRow[] {
   const current = defaultModel(tm, provider);
-  return (tm?.providers[provider]?.models || []).filter((m) => !unavailable(m) || m.id === current).map((m) => ({
+  return (tm?.providers[provider]?.models || []).map((m) => ({
     id: m.id,
     name: m.name || shortId(m.id),
     isDefault: m.id === current,
-    unavailable: unavailable(m),
   }));
 }
 

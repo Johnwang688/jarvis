@@ -91,34 +91,44 @@ class ThreadModel(unittest.TestCase):
         row = next(r for r in tm.describe()["providers"]["codex"]["models"] if r["id"] == "gpt-5.6-sol")
         self.assertEqual(row["default_effort"], "high")
 
-    def test_a_model_the_catalog_drops_stays_valid_and_is_marked(self):
+    def test_a_model_the_catalog_drops_degrades_and_is_kept(self):
         """PR #20 review, scenario B: the account's catalog hides gpt-5.5. The
-        HUD default, a pinned thread and routing that name it must not
-        silently move or break; the chip is told it is unavailable."""
+        table is replaced whole (no union), so routing and the HUD default
+        that name it fall back for the turn, with a note, and neither file is
+        rewritten: the choice returns with the model. A thread pinned to it
+        keeps it (A3) — Codex decides whether it still runs."""
         tm.set_provider_default("codex", "gpt-5.5", None)
-        config.ROUTING_PATH.write_text(json.dumps({"models": {"implementer": {"codex": "gpt-5.5/high"}}}))
+        routing = json.dumps({"models": {"implementer": {"codex": "gpt-5.5/high"}}})
+        config.ROUTING_PATH.write_text(routing)
+        defaults_file = config.PROVIDER_DEFAULTS_PATH.read_text()
         pinned = Thread("abcdef0a", "p", Role.CHAT, P.CODEX, model="gpt-5.5", effort="low")
-        before = (tm.default_choice(P.CODEX), tm.effective(pinned), router.model_settings("implementer", "codex"))
+        self.assertEqual((tm.default_choice(P.CODEX), router.model_settings("implementer", "codex")),
+                         (("gpt-5.5", "high"), ("gpt-5.5", "high")))
         router.set_codex_models([{"model": "gpt-6-astra", "inputModalities": ["text", "image"],
                                   "supportedReasoningEfforts": [{"reasoningEffort": "high"}]},
+                                 {"model": "gpt-5.6-sol", "inputModalities": ["text", "image"],
+                                  "supportedReasoningEfforts": [{"reasoningEffort": "high"}]},
                                  {"model": "gpt-5.5", "hidden": True}])
-        self.assertIn("gpt-5.5", router.CLI_MODELS["codex"], "never removed")
-        self.assertEqual((tm.default_choice(P.CODEX), tm.effective(pinned),
-                          router.model_settings("implementer", "codex")), before)
-        self.assertEqual(before, (("gpt-5.5", "high"), ("gpt-5.5", "low"), ("gpt-5.5", "high")))
-        self.assertEqual(tm.check(P.CODEX, "gpt-5.5", "medium", current="gpt-5.5"), ("gpt-5.5", "medium"))
+        self.assertNotIn("gpt-5.5", router.CLI_MODELS["codex"], "replaced whole")
+        self.assertEqual(tm.default_choice(P.CODEX), ("gpt-6-astra", "high"), "routing's default, clamped")
+        self.assertEqual(router.model_settings("implementer", "codex"), ("gpt-5.6-sol", "high"))
+        self.assertEqual(tm.effective(pinned), ("gpt-5.5", "low"))
         codex = tm.describe()["providers"]["codex"]
-        rows = {r["id"]: r for r in codex["models"]}
-        self.assertEqual((rows["gpt-6-astra"]["available"], rows["gpt-5.5"]["available"]), (True, False))
-        self.assertEqual(codex["hud_default"], {"model": "gpt-5.5", "effort": None})
-        self.assertIn("no longer in your Codex account's model list", codex["note"])
-        # Claude's table has no catalog: every row is available.
-        self.assertTrue(all(r["available"] for r in tm.describe()["providers"]["claude"]["models"]))
+        self.assertEqual((codex["default_source"], codex["hud_default"]), ("routing", None))
+        self.assertIn("gpt-5.5 is not a Codex model", codex["note"])
+        self.assertEqual((config.ROUTING_PATH.read_text(), config.PROVIDER_DEFAULTS_PATH.read_text()),
+                         (routing, defaults_file), "never rewritten")
+        # The account lists it again: both choices are back.
+        router.CLI_MODELS["codex"]["gpt-5.5"] = dict(router.CODEX_FALLBACK["gpt-5.5"])
+        self.assertEqual((tm.default_choice(P.CODEX), router.model_settings("implementer", "codex")),
+                         (("gpt-5.5", "high"), ("gpt-5.5", "high")))
 
     def test_ultra_is_codexs_alone(self):
         """PR #20 review: `ultra` was added to OpenRouter's ladder, so a cold
-        catalog (or JARVIS_REASONING_EFFORT=ultra) sent it to OpenRouter."""
+        catalog (or JARVIS_REASONING_EFFORT=ultra) sent it to OpenRouter, and
+        Claude's chip offered it."""
         self.assertNotIn("ultra", models.EFFORT_LADDER)
+        self.assertEqual(router.CODEX_EFFORT_LADDER[1:], models.EFFORT_LADDER)
         with patch.object(models, "cached_info", return_value=None), \
                 patch.object(config, "REASONING_EFFORT", "ultra"):
             self.assertIsNone(models.effort_for("x/y", {}))
@@ -126,6 +136,38 @@ class ThreadModel(unittest.TestCase):
         tm.set_provider_default("codex", "gpt-6-astra", "ultra")
         self.assertEqual(tm.default_choice(P.CODEX), ("gpt-6-astra", "ultra"))
         self.assertEqual(tm.describe()["providers"]["codex"]["note"], "", "ultra is a real Codex effort")
+        # Refused for the fast path — on a cold catalog too — and for Claude.
+        with patch.object(models, "cached_info", return_value=None):
+            for provider, model in ((P.FAST, None), (P.FAST, "unknown/cold"), (P.CLAUDE, "claude-opus-5-5")):
+                with self.assertRaises(tm.ChoiceRefused, msg=(provider, model)):
+                    tm.check(provider, model, "ultra")
+        # A record that holds it anyway (written before this rule) never
+        # sends it: it reads as no choice, i.e. the model's default.
+        self.roster("moonshotai/kimi-k3")
+        for thread in (Thread("abcdef0b", "p", Role.CHAT, P.FAST, model="moonshotai/kimi-k3", effort="ultra"),
+                       Thread("abcdef0c", "p", Role.CHAT, P.FAST, effort="ultra"),
+                       Thread("abcdef0d", "p", Role.CHAT, P.FAST, model="unknown/cold", effort="ultra"),
+                       Thread("abcdef0e", "p", Role.CHAT, P.CLAUDE, effort="ultra"),
+                       Thread("abcdef0f", "p", Role.CHAT, P.CLAUDE, model="claude-opus-5-5", effort="ultra")):
+            self.assertNotEqual(tm.effective(thread)[1], "ultra", thread)
+        config.PROVIDER_DEFAULTS_PATH.write_text(json.dumps({"claude": {"model": "claude-opus-5-5",
+                                                                        "effort": "ultra"}}))
+        self.assertEqual(tm.default_choice(P.CLAUDE), ("claude-opus-5-5", "high"))
+        self.assertIn("is not a reasoning effort", tm.describe()["providers"]["claude"]["note"])
+        # And the HUD's effort list for an unknown ladder offers it only on Codex.
+        self.assertNotIn("ultra", [r for p in (P.FAST, P.CLAUDE)
+                                   for row in tm.provider_models(p) for r in row.get("efforts") or []])
+
+    def test_a_pinned_effort_is_clamped_when_its_ladder_shrinks(self):
+        """Option 1 for threads: a pinned Codex model whose ladder lost the
+        stored level runs the nearest one below; the record keeps its choice."""
+        thread = Thread("abcdef10", "p", Role.CHAT, P.CODEX, model="gpt-6-astra", effort="ultra")
+        self.assertEqual(tm.effective(thread), ("gpt-6-astra", "ultra"))
+        router.set_codex_models([{"model": "gpt-6-astra", "inputModalities": ["text", "image"],
+                                  "supportedReasoningEfforts": [{"reasoningEffort": e}
+                                                                for e in ("low", "medium", "high", "xhigh")]}])
+        self.assertEqual(tm.effective(thread), ("gpt-6-astra", "xhigh"))
+        self.assertEqual(thread.effort, "ultra")
 
     def test_defaults_per_provider(self):
         """A5: OpenRouter follows the global picker (read, not hard-coded);
@@ -202,7 +244,8 @@ class ThreadModel(unittest.TestCase):
             # catalog would send it as asked (PR #20 review).
             ((P.FAST, None, "ultra"), "not a reasoning effort"),
             ((P.FAST, "moonshotai/kimi-k3", "ultra"), "not a reasoning effort"),
-            ((P.CLAUDE, "claude-opus-5-5", "ultra"), "does not offer 'ultra'"),
+            ((P.CLAUDE, "claude-opus-5-5", "ultra"), "not a reasoning effort Claude takes"),
+            ((P.CLAUDE, "claude-unknown-9", "ultra"), "not a Claude model"),
             ((P.FAST, 42, None), "must be a string"),
         ]
         for args, reason in cases:
@@ -285,7 +328,7 @@ class ThreadModel(unittest.TestCase):
                             (("claude", "claude-opus-9"), "not a Claude model"),
                             (("codex", "claude-opus-5-5"), "not a Codex model"),
                             (("codex", "gpt-5.6-luna", "ultra"), "does not offer 'ultra'"),
-                            (("claude", "claude-opus-5-5", "ultra"), "does not offer 'ultra'"),
+                            (("claude", "claude-opus-5-5", "ultra"), "not a reasoning effort Claude takes"),
                             (("codex", "gpt-5.6-sol", "turbo"), "not a reasoning effort"),
                             (("claude", "claude-haiku-4-5", "low"), "no reasoning effort"),
                             (("claude", "", "low"), "takes no effort"),

@@ -14,7 +14,7 @@
 import { useMemo, useState } from "react";
 import type { ModelRow, ProviderName } from "../types";
 import {
-  PROVIDERS, PROVIDER_LABELS, SEARCH, UNAVAILABLE, applyEffort, applyModel, applyProvider, canSetDefault,
+  PROVIDERS, PROVIDER_LABELS, SEARCH, applyEffort, applyModel, applyProvider, canSetDefault,
   defaultChosenHere, defaultEffortOptions, defaultModel, defaultRows, defaultSourceLabel, effective,
   effortOptions, modelLabel, modelOptions, resetTitle, shortId, type Choice, type ThreadModels,
 } from "../lib/threadmodel";
@@ -271,7 +271,7 @@ export function ProviderDefaults(props: {
             <div key={r.id} className={"prow" + (r.isDefault ? " sel" : "")} data-testid={`pd-row-${r.id}`}>
               <span>{r.name}</span>
               {r.isDefault ? <span className="badge" data-testid={`pd-badge-${r.id}`}>default</span> : null}
-              <span className="sub">{r.id}{r.unavailable ? ` · ${UNAVAILABLE}` : ""}</span>
+              <span className="sub">{r.id}</span>
               {r.isDefault ? (
                 eff.options.length ? (
                   <select

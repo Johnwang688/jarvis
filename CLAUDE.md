@@ -229,24 +229,38 @@ reads the preview port from `/status` → `workshop_port`, and `hud_v2_check`
 aborts and fails any request to 8402/8403/8405 — it used to load the live
 daemon's preview.
 
-**The Codex model table is a union that never shrinks (PR #20, 2026-10-09).**
-HUD reads (`/usage`, `/thread-models`) refresh Codex's quota and the
-account's `model/list` without a turn (5 min TTL; 30 s when a turn holds the
-login lock — `MetadataBusy`, checked before the CLI is probed). The catalog
-is saved (`config.CODEX_CATALOG_PATH`) and loaded by `daemon2`'s `main()`;
-`router.CLI_MODELS["codex"]` is the offline `CODEX_FALLBACK` (ladders synced
-to the live catalog: astra, both Sols and Terra reach `ultra`) **plus** every
-model a catalog offered, and one a catalog drops is marked `available:
-false`, never removed — a table that shrank under routing.json turned every
-`/usage`, `/route`, task resolve and Codex default thread into a
-ValueError. **`load_routing` never raises**: a bad entry falls back to the
-role's default with a once-logged note (`GET /route` → `notes`), a project's
-bad entry falls back to the global table, and `POST /route` keeps other
-well-formed entries as written. A catalog's advertised default effort is
-**not** used (A4 stands), and `ultra` is Codex's alone — never on
-`models.EFFORT_LADDER` (a cold OpenRouter catalog sends an effort as asked);
-`thread_model.EFFORT_ORDER` has it for clamping. Tests that refresh the
-catalog point `config.CODEX_CATALOG_PATH` at a temp file.
+**The Codex model table is the account's catalog, and drift degrades — never
+breaks, never rewrites (PR #20, 2026-10-09; owner's decisions: options
+1+2+3, no union).** `router.CLI_MODELS["codex"]` is the signed-in account's
+last good `model/list` (`codex_catalog.parse`: slug ids, one capped name
+line, Codex's effort words, hidden rows dropped, vision only when
+`inputModalities` says `image`), **replaced whole**, else the built-in
+`CODEX_FALLBACK` (ladders synced to what the account advertised 2026-10-08:
+astra, both Sols and Terra reach `ultra`). It is saved atomically to
+`config.CODEX_CATALOG_PATH` and loaded by `daemon2`'s `main()` (not
+`Daemon.start`, so no test daemon reads the owner's file); a missing or
+corrupt file is the fallback. The refresh runs on a **background thread**
+from HUD reads (`/usage`, `/thread-models`), which answer from the last
+snapshot at once; one at a time, 5 min TTL (failures too), 30 s when a turn
+holds the login lock (`MetadataBusy`, checked **before** the CLI is probed —
+`send` holds `_auth_lock` for a whole turn), one 10 s deadline for the whole
+app-server session, the lock released in a nested `finally`, the catalog and
+quota halves independent, and quota reads **merged** (an empty read wipes
+nothing). **`load_routing` never raises**: a saved entry naming a model the
+table lacks runs the role's default, an effort the model lost is clamped down
+the provider's ladder, a malformed part takes its default — each with a note
+(`GET /route` → `notes`, logged once) and **routing.json is never rewritten**,
+so the owner's choice returns with the model. A project's entry and a HUD
+Codex default degrade the same way; `POST /route` builds what it writes from
+the file's well-formed parts (it repairs a bad file and keeps untouched
+entries verbatim); `/usage` reads only the allowances. **`ultra` is Codex's
+alone** (`router.CODEX_EFFORT_LADDER`; never on `models.EFFORT_LADDER`):
+refused for the fast path and Claude (`roster/ultra` on Claude too), never
+offered by the HUD for them, and a record holding it runs the model's
+default — the fast path drops it before `llm.chat`. The default effort
+stays **`high`** within the ladder (A4); Codex's advertised per-model default
+is kept only as `advertised_effort`. Tests point `config.CODEX_CATALOG_PATH`
+at a temp file and restore the table.
 
 Briefs for every package, including the ones in flight, are in
 `docs/codex-briefs/`; each merged package left a `*-notes.md` beside its
@@ -333,7 +347,7 @@ runs, writes `switch to X refused: …; still on Y`, and sends the message on
 the old model. An archived thread, or one in an archived project, cannot
 change model (409, as with rename and move). The CLI model lists are `router.CLI_MODELS`, the one table the
 router's vision filter, the chip, `routing.json`/`/route` validation and a
-project's own `routing.models` (on `POST`/`PATCH /projects`) all read. **No tool can change a thread's model or provider, or a provider's default** (asserted in
+project's own `routing.models` (on `POST`/`PATCH /projects`) all read; **its Codex half is the signed-in account's catalog** (cached at `config.CODEX_CATALOG_PATH`, loaded at start, else `CODEX_FALLBACK`), a new choice is held to it, and a saved model or effort that drifts from it degrades to the default or clamps down, with a note, and is never rewritten. **`ultra` is Codex-only** and the default effort stays `high` within the ladder (PR #20). **No tool can change a thread's model or provider, or a provider's default** (asserted in
 `tests/v2/fastpath_check.py` and `tests/models_check.py`). The picker controls take exactly `{model}`,
 `{model, effort}` (on `/models`), `{voice}`, `{muted}`, and refuse any other
 key — the HUD sent the wrong keys for weeks and every click reset itself (A6).

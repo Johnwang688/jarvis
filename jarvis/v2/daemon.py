@@ -1520,9 +1520,13 @@ def main() -> int:
 
     configure_logging()
     # The Codex models the account offered last time, before anything reads
-    # routing: an entry only that catalog offers must not degrade on restart.
+    # routing (PR #20 review): a restart, or a Discord-only daemon no HUD ever
+    # reads, routes and offers against them rather than the built-in fallback.
+    # Missing or corrupt leaves the fallback. Here and not in `Daemon.start`,
+    # so no embedded or test daemon reads the owner's file.
     from .router import load_codex_catalog
-    load_codex_catalog()
+    if load_codex_catalog():
+        LOG.info("Codex model catalog loaded from %s", config.CODEX_CATALOG_PATH)
 
     remote = discord_connected()
     approvals = None
