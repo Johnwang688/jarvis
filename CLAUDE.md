@@ -18,7 +18,19 @@ Merged on `main` so far, each with a free suite under `tests/v2/`: stores +
 v1 session migration (WP1), the fast-path provider with `FAST_TOOLS` and
 `task_propose` (WP2), the Claude provider over the Agent SDK (WP3 — the
 `PreToolUse` hook is the gate; the SDK sandbox does **not** confine on this
-WSL2, so Claude workers run unsandboxed and confinement routes to Codex),
+WSL2, so Claude workers run unsandboxed and confinement routes to Codex;
+and every client is built with an explicit `cli_path` from `resolve_cli()` —
+`JARVIS_CLAUDE_CLI` (absolute paths only — a relative one would be spawned in
+the task worktree, outside the hook), else the first real `claude` on an
+absolute PATH entry not under `/mnt/`, else `~/.local/bin/claude`, else the
+SDK's bundled CLI with a warning, re-searched every 60 s — because unset, the
+SDK runs its own lagging bundled copy, which refused a newer model live on
+2026-10-08; never pin the version, it self-updates: `health()` checks a
+floor, `CLAUDE_MIN` = 2.1.280 (the default model's requirement, so the bundled
+2.1.273 reads unhealthy), and only warns once per process
+past `CLAUDE_VERIFIED`, with `JARVIS_CLAUDE_STRICT=1` restoring the old
+major.minor match, and a failed `--version` probe is retried after 60 s
+rather than cached),
 the Codex provider over the app-server (WP4 — lifted from the trading firm's
 transport; its reviewer escalates nothing to us, design R8), a worktree per
 task (WP6), the daemon and local API (WP7, `jarvis daemon2`), one skills
@@ -243,8 +255,18 @@ choice lives on the Thread record (`jarvis/v2/thread_model.py`) — **never
 rewrite `brief.json`** — and the daemon hands it to the provider per turn
 (`set_model` on all three providers). A default thread follows the global
 Model picker **every turn** (whose choice is *the* default — set, reset and
-unpinned in the HUD's Model picker, 2026-10-08; see *Model selector*); Claude defaults to `claude-opus-5-5` at high,
-Codex to its routing default; effort defaults to `high` (or the roster's pin)
+unpinned in the HUD's Model picker, 2026-10-08; see *Model selector*); Claude
+and Codex default threads follow **their provider's HUD default** when one is
+set (the chip's `default ▾` menu → `POST /thread-models {provider, model,
+effort?}`, `model: ""` resets; stored atomically in
+`~/.config/jarvis/provider_defaults.json`, `config.PROVIDER_DEFAULTS_PATH`,
+its own file because models.json is rewritten whole by two processes, and
+refused to every agent write tool — v2's `permissions.protected_paths` and
+v1's `files._protected_state`, one set asserted equal, which since this
+change also covers models.json, routing.json and the guild file for v1), else Claude defaults
+to `claude-opus-5-5` at high and Codex to its routing default. **A HUD Codex
+default beats routing for chat threads only and never writes routing.json**;
+tasks keep routing's table. Effort defaults to `high` (or the roster's pin)
 within the model's ladder. **Only an explicit model pins a thread** (A4
 amendment, 2026-10-07): an effort-only change on a default thread stores the
 effort and leaves `model` null, and `thread_model.effective` clamps it to
@@ -262,14 +284,15 @@ runs, writes `switch to X refused: …; still on Y`, and sends the message on
 the old model. An archived thread, or one in an archived project, cannot
 change model (409, as with rename and move). The CLI model lists are `router.CLI_MODELS`, the one table the
 router's vision filter, the chip, `routing.json`/`/route` validation and a
-project's own `routing.models` (on `POST`/`PATCH /projects`) all read. **No tool can change a thread's model or provider** (asserted in
-`tests/v2/fastpath_check.py`). The picker controls take exactly `{model}`,
+project's own `routing.models` (on `POST`/`PATCH /projects`) all read. **No tool can change a thread's model or provider, or a provider's default** (asserted in
+`tests/v2/fastpath_check.py` and `tests/models_check.py`). The picker controls take exactly `{model}`,
 `{model, effort}` (on `/models`), `{voice}`, `{muted}`, and refuse any other
 key — the HUD sent the wrong keys for weeks and every click reset itself (A6).
 
 **Bench comparability, from the same change:** a v2 default chat thread now
-switches model mid-conversation when the global picker changes, and a pinned
-thread ignores the picker entirely, and v2 chat effort defaults to `high`
+switches model mid-conversation when the global picker changes — and a Claude
+or Codex default thread when its provider's HUD default changes — and a pinned
+thread ignores both entirely, and v2 chat effort defaults to `high`
 rather than v1's `JARVIS_REASONING_EFFORT` (`max`). Any v2 bench run must pin
 the thread's model and effort and record both (each turn's usage record now
 carries `model` and `effort`), or its numbers are not comparable across runs.
@@ -770,7 +793,13 @@ jarvis/
   **The gate's state file is not agent-writable** (same day). `write_file`
   and `edit_file` refuse `config.ALLOWLIST_PATH` by resolved path. This is
   the data half of SELF_PROTECTED, and the reason it needed its own
-  mechanism is in *Nothing froze the gate's data* below.
+  mechanism is in *Nothing froze the gate's data* below. **Widened
+  2026-10-08** (PR #15 review): `files._protected_state()` is now the set v2
+  protects — the allowlist, models.json, provider_defaults.json,
+  routing.json and the Discord guild file, each by its `config` path and
+  beside the allowlist — because a v1 `write_file` (a background workflow's
+  included) could rewrite which model every default v2 thread runs on.
+  `tests/files_check.py` asserts the v1 and v2 sets are equal.
 - **Desktop control is confined to an app allowlist** (2026-07-31).
   `config.DESKTOP_APPS` is the whole door: no desktop tool accepts a window
   title, handle, or executable path, only a registered app name, so the model

@@ -198,6 +198,20 @@ MODELS_PATH = Path(
         "JARVIS_MODELS", Path.home() / ".config" / "jarvis" / "models.json"
     )
 )
+# The default model and effort for Claude and Codex chat threads, chosen in the
+# HUD (v2/thread_model.py, 2026-10-08). Its own small file rather than a key in
+# models.json: that file is the OpenRouter roster, rewritten whole by the v1
+# face and the v2 daemon from a dataclass that knows nothing of CLI models, so
+# a key added there would be erased by the next roster edit in either process.
+# No agent may write it: v2 workers are refused by
+# `jarvis.v2.permissions.protected_paths`, v1's write_file/edit_file by
+# `jarvis.tools.files._protected_state` (the same set, asserted equal).
+PROVIDER_DEFAULTS_PATH = Path(
+    os.environ.get(
+        "JARVIS_PROVIDER_DEFAULTS",
+        Path.home() / ".config" / "jarvis" / "provider_defaults.json",
+    )
+)
 # Where the fetched OpenRouter catalog is cached. A cache, not state: deleting
 # it costs one HTTP request. TTL is generous because the catalog changes on the
 # order of days, and a stale copy is served indefinitely when the fetch fails —
@@ -245,6 +259,16 @@ SESSIONS_DIR = Path(
 V2_DATA_DIR = Path(
     os.environ.get("JARVIS_V2_DATA", Path.home() / ".local" / "share" / "jarvis" / "v2")
 )
+
+# Which `claude` binary the v2 Claude provider drives (`providers/claude.py`,
+# `resolve_cli`). Empty means "find it": the first real `claude` on PATH that is
+# not a Windows shim under /mnt/, then ~/.local/bin/claude, and only then the
+# SDK's bundled CLI — which lags the installed one and refuses newer models.
+CLAUDE_CLI = os.environ.get("JARVIS_CLAUDE_CLI", "")
+# Health judges that CLI against a floor (CLAUDE_MIN), never a pin, because the
+# install updates itself. `1` restores the old rule: major.minor must match the
+# last verified version, so a 2.2 release reads as unhealthy until checked.
+CLAUDE_STRICT = os.environ.get("JARVIS_CLAUDE_STRICT", "") == "1"
 
 # The v2 always-ask list (design §6, layer 2; jarvis/v2/permissions.py).
 #
@@ -382,7 +406,8 @@ DISCORD_API = "https://discord.com/api/v10"
 # `jarvis auth discord-guild` and read by the daemon whenever it needs it, so
 # setup takes effect without a restart. Ids only, no secret — but it decides
 # where Jarvis may create and move channels, so no agent may write it
-# (`jarvis.v2.permissions.protected_paths`).
+# (`jarvis.v2.permissions.protected_paths`, and v1's write tools through
+# `jarvis.tools.files._protected_state`).
 DISCORD_GUILD_PATH = Path(
     os.environ.get(
         "JARVIS_DISCORD_GUILD", Path.home() / ".config" / "jarvis" / "discord_guild.json"

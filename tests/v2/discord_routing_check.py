@@ -235,7 +235,8 @@ class DiscordRoutingChecks(unittest.TestCase):
         for name, value in (("DISCORD_TOKEN_PATH", token_path),
                             # Never the owner's real guild file (B1).
                             ("DISCORD_GUILD_PATH", root / "discord_guild.json"),
-                            ("ALLOWLIST_PATH", root / "allowlist.json")):
+                            ("ALLOWLIST_PATH", root / "allowlist.json"),
+                            ("PROVIDER_DEFAULTS_PATH", root / "provider_defaults.json")):
             patcher = patch.object(config, name, value)
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -1027,7 +1028,8 @@ class SurfaceChecks(unittest.TestCase):
         for name, value in (("DISCORD_TOKEN_PATH", token_path),
                             # Never the owner's real guild file (B1).
                             ("DISCORD_GUILD_PATH", root / "discord_guild.json"),
-                            ("ALLOWLIST_PATH", root / "allowlist.json")):
+                            ("ALLOWLIST_PATH", root / "allowlist.json"),
+                            ("PROVIDER_DEFAULTS_PATH", root / "provider_defaults.json")):
             patcher = patch.object(config, name, value)
             patcher.start()
             self.addCleanup(patcher.stop)

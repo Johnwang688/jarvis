@@ -331,7 +331,26 @@ def roster_edit_checks() -> None:
 
 ROSTER_WRITES = ("models.select(", "models.set_effort(", "models.remove(", "models.add(",
                  "models_mod.select(", "models_mod.set_effort(", "models_mod.remove(",
-                 "models_mod.add(", "models._save(", "MODELS_PATH")
+                 "models_mod.add(", "models._save(", "MODELS_PATH",
+                 # The Claude/Codex chat default (2026-10-08): its write
+                 # function, its saver, its file and its route.
+                 "set_provider_default(", "_save_defaults(", "PROVIDER_DEFAULTS_PATH",
+                 "provider_defaults", "/thread-models")
+
+
+def guarded_text(path: Path) -> str:
+    """A tool file's source as the no-tool guards read it. One exemption:
+    `files._protected_state` names the roster, the chat defaults and routing
+    in order to *refuse* writes to them (PR #15 review), so its body is left
+    out; anything else in the tools that names them still fails."""
+    import inspect
+    from jarvis.tools import files
+    text = path.read_text(encoding="utf-8")
+    if path.resolve() == Path(files.__file__).resolve():
+        body = inspect.getsource(files._protected_state)
+        assert body in text, "files._protected_state moved; the exemption must follow it"
+        text = text.replace(body, "")
+    return text
 
 
 def no_tool_checks() -> None:
@@ -341,13 +360,15 @@ def no_tool_checks() -> None:
     from jarvis import tools
 
     for name in tools.REGISTRY:
-        assert not any(w in name for w in ("model", "roster")), f"registered tool {name!r}"
-    root = Path(tools.__file__).parent
-    for path in sorted(root.rglob("*.py")):
-        text = path.read_text(encoding="utf-8")
-        for needle in ROSTER_WRITES:
-            assert needle not in text, f"{path} reaches {needle}"
-    print("ok  guard: no tool can change the roster, the default or an effort pin")
+        assert not any(w in name for w in ("model", "roster", "default")), f"registered tool {name!r}"
+    roots = [Path(tools.__file__).parent, Path(tools.__file__).parents[1] / "v2" / "tools"]
+    for root in roots:
+        for path in sorted(root.rglob("*.py")):
+            text = guarded_text(path)
+            for needle in ROSTER_WRITES:
+                assert needle not in text, f"{path} reaches {needle}"
+    print("ok  guard: no tool can change the roster, the default, an effort pin, "
+          "or the Claude/Codex chat default")
 
 
 def robustness_checks() -> None:

@@ -31,7 +31,7 @@ HUD_DIST = Path(__file__).resolve().parents[2] / "hud" / "dist"
 # Claude Code's own `/usage` command. Undocumented, so a failure is "not
 # reported", never a number invented from the ledger. The User-Agent has to
 # look like the CLI: a bare client is the bucket this endpoint 429s. The
-# version tracks `providers/claude.py` `CLAUDE_PIN`.
+# version is the CLI in use (`providers/claude.py` `usage_agent_version`).
 CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 CLAUDE_USAGE_TTL_S = 300
 _CLAUDE_WINDOWS = (("five_hour", "5h"), ("seven_day", "week"))
@@ -70,7 +70,7 @@ def fetch_claude_usage(token):
     exception, a log line, or the value this returns.
     """
     import httpx
-    from .providers.claude import CLAUDE_PIN
+    from .providers.claude import usage_agent_version
     try:
         response = httpx.get(
             CLAUDE_USAGE_URL,
@@ -78,7 +78,7 @@ def fetch_claude_usage(token):
                 "Authorization": "Bearer " + token,
                 "anthropic-beta": "oauth-2025-04-20",
                 "Accept": "application/json",
-                "User-Agent": "claude-code/" + CLAUDE_PIN,
+                "User-Agent": "claude-code/" + usage_agent_version(),
             },
             timeout=8,
         )
@@ -923,6 +923,26 @@ def route(handler, daemon, parts, query):
         from . import thread_model
         _object(query, ())
         return 200, thread_model.describe()
+    if parts == ["thread-models"] and method == "POST":
+        # The default Claude or Codex chat threads run on (2026-10-08): the
+        # owner's "Set as default" / "Reset to built-in default" in the model
+        # chip. Exact keys (A6); `model: ""` resets. It never touches
+        # routing.json — role routing is Settings' — and no tool reaches it.
+        from . import thread_model
+        _object(query, ())
+        body = _object(handler._body(), ("provider", "model", "effort"), ("provider", "model"))
+        try:
+            thread_model.set_provider_default(body["provider"], body["model"], body.get("effort"))
+        except thread_model.ChoiceRefused as exc:
+            fail(400, str(exc))
+        payload = thread_model.describe()
+        name = ProviderName(body["provider"]).value
+        provider = payload["providers"][name]
+        daemon.bus.publish({"kind": "model", "data": {
+            "provider": name, "default": provider["default"],
+            "default_effort": provider["default_effort"],
+            "default_source": provider["default_source"]}})
+        return 200, payload
     if len(parts) == 2 and parts[0] == "threads" and method == "PATCH":
         _object(query, ())
         body = _object(handler._body(), ("title", "project_id", "model", "effort"))

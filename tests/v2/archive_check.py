@@ -130,7 +130,8 @@ class Base(unittest.TestCase):
         env.start()
         self.addCleanup(env.stop)
         for name, value in dict(V2_DATA_DIR=self.root / "data", ALLOWLIST_PATH=self.root / "allow.json",
-                                MODELS_PATH=self.root / "models.json").items():
+                                MODELS_PATH=self.root / "models.json",
+                                PROVIDER_DEFAULTS_PATH=self.root / "provider_defaults.json").items():
             guard = patch.object(config, name, value)
             guard.start()
             self.addCleanup(guard.stop)
