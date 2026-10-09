@@ -743,44 +743,57 @@ class Daemon:
     def _steer(self, session, provider, handle, message, data) -> dict:
         """Hand `message` to the provider for the running turn. Outside the
         daemon lock: a provider may wait on its own turn loop to take it, and
-        that loop records events under this lock."""
+        that loop records events under this lock.
+
+        The message is in the log (and on the bus) as a steer *before* the
+        provider has it, so nothing it causes is ever logged ahead of it. If
+        the provider refuses, the same message — same id, no second record —
+        waits instead, and a `steer_queued` record says so."""
         thread_id = session.thread.id
         steer = getattr(provider, "steer", None)
-        fallback, reason = "queue", "this provider cannot steer a running turn"
-        if callable(steer):
+        if not callable(steer):
             with self._lock:
-                # Known to the turn before the provider can take it: a turn
-                # that ends meanwhile hands it back (`undelivered`) by identity.
-                item = _Queued(message, data, uuid.uuid4().hex, session.turn_id or "")
-                session.steered.append(item)
-            try:
-                steer(handle, message)
-            except SteerRefused as exc:
-                fallback, reason = exc.fallback, str(exc)
-            except Exception as exc:  # noqa: BLE001 — a failed steer queues, never errors
-                LOG.warning("Steering thread %s failed (%s)", thread_id, type(exc).__name__)
-                fallback, reason = "queue", type(exc).__name__
-            else:
-                with self._lock:
-                    self._log_user(session.thread, item, steer=True)
-                return {"status": "steered", "mode": "native", "turn_id": item.turn_id,
-                        "message_id": item.message_id}
-            with self._lock:
-                session.steered = [other for other in session.steered if other is not item]
+                waiting = self._queues.setdefault(thread_id, deque())
+                item = self._enqueue(session, waiting, message, data)
+                drain = session.worker is None
+                reply = self._queued_reply(session, item)
+            if drain:
+                self._drain(thread_id)
+            return reply
+        with self._lock:
+            # Known to the turn before the provider can take it: a turn that
+            # ends meanwhile hands it back (`undelivered`) by identity.
+            item = _Queued(message, data, uuid.uuid4().hex, session.turn_id or "")
+            session.steered.append(item)
+            self._log_user(session.thread, item, steer=True)
+        try:
+            steer(handle, message)
+        except SteerRefused as exc:
+            fallback, reason = exc.fallback, str(exc)
+        except Exception as exc:  # noqa: BLE001 — a failed steer queues, never errors
+            LOG.warning("Steering thread %s failed (%s)", thread_id, type(exc).__name__)
+            fallback, reason = "queue", type(exc).__name__
+        else:
+            return {"status": "steered", "mode": "native", "turn_id": item.turn_id,
+                    "message_id": item.message_id}
         interrupt, drain = False, False
         with self._lock:
+            session.steered = [other for other in session.steered if other is not item]
             waiting = self._queues.setdefault(thread_id, deque())
             if fallback == "interrupt" and session.worker is not None and not session.closing:
                 # No way to steer: stop the turn for the owner's message and
                 # run it next, telling the model why its turn ended. Not the
                 # owner's stop — what else waits is kept.
-                noted = replace(message, text=INTERRUPTED_NOTE + message.text)
-                item = self._enqueue(session, waiting, noted, data, cap=False, interrupting=True)
+                item.message = replace(message, text=INTERRUPTED_NOTE + message.text)
+                item.interrupting = True
                 session.cancelled.set()
                 interrupt = True
+            elif len(waiting) >= QUEUE_MAX:
+                self._drop_waiting(session.thread, "three messages were already waiting", [item])
+                raise QueueFull(QUEUE_FULL)
             else:
-                item = self._enqueue(session, waiting, message, data)
                 drain = session.worker is None
+            self._requeue(session.thread, item, waiting)
             LOG.info("Thread %s: owner message %s (%s)", thread_id,
                      "interrupts the turn" if interrupt else "queued", reason)
             reply = self._queued_reply(session, item)
@@ -793,6 +806,23 @@ class Daemon:
         if drain:
             self._drain(thread_id)
         return reply
+
+    def _requeue(self, thread, item, waiting, *, front=False) -> None:
+        """Under the lock: a message already logged as a steer waits instead,
+        as its own turn — refused by the provider, or never delivered before
+        the turn ended. Same id, a turn id of its own, and one `steer_queued`
+        record (and event) rather than a second `user` record."""
+        item.turn_id = uuid.uuid4().hex
+        if front:
+            waiting.appendleft(item)
+        else:
+            waiting.append(item)
+        record = {"kind": "steer_queued", "at": utcnow(), "turn_id": item.turn_id,
+                  "thread_id": thread.id, "project_id": thread.project_id,
+                  "data": {"message_id": item.message_id, "turn_id": item.turn_id,
+                           "interrupting": item.interrupting}}
+        self.stores.threads._append(thread.id, "log.jsonl", record)
+        self.bus.publish(dict(record))
 
     def _live_session(self, thread_id) -> "_Session":
         """The thread's open session, resumed if it has none."""
@@ -1143,8 +1173,7 @@ class Daemon:
                         else:
                             waiting = self._queues.setdefault(session.thread.id, deque())
                             for item in reversed(leftover):
-                                item.turn_id = uuid.uuid4().hex
-                                waiting.appendleft(item)
+                                self._requeue(session.thread, item, waiting, front=True)
                     drain = bool(self._queues.get(session.thread.id)) and not session.closing
                     # A fatal turn error, or a provider that closed the session
                     # under us (Codex does on any RpcError), strands the
@@ -1256,12 +1285,17 @@ class Daemon:
             self._stopping = True
             sessions = list(self._sessions.values())
             # The queue is in memory; what waits on a turn at shutdown says so
-            # in the log rather than reading as still waiting after a restart.
-            for session in sessions:
+            # in the log rather than reading as still waiting after a restart —
+            # every thread's, including one whose session a fatal turn dropped
+            # while its queue waited to resume it.
+            for thread_id in [t for t, waiting in self._queues.items() if waiting]:
                 try:
-                    self._drop_waiting(session.thread, "Jarvis stopped")
+                    live = self._sessions.get(thread_id)
+                    thread = live.thread if live is not None else self.stores.threads.get(thread_id)
+                    if thread is not None:
+                        self._drop_waiting(thread, "Jarvis stopped")
                 except Exception:  # noqa: BLE001
-                    LOG.warning("Cannot record dropped messages on %s", session.thread.id)
+                    LOG.warning("Cannot record dropped messages on %s", thread_id)
             jobs = [s.worker for s in sessions if s.worker is not None]
             for session in sessions:
                 session.closing = True

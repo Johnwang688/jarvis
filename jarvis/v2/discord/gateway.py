@@ -60,7 +60,7 @@ from ..router import (FastPath, Incoming, NewTask, Steer, Verb,
                       classify)
 from ..stores import StoreError, _write_bytes
 from .commands import SyncResult
-from .mirror import FULL_TEXT, QUEUED_TEXT, STEERED_TEXT
+from .mirror import FULL_TEXT, INTERRUPTING_TEXT, QUEUED_TEXT, STEERED_TEXT
 from .render import _cap, approval_components, approval_post, approval_text, status_embed
 from .reporter import thread_for
 from .rest import describe
@@ -1094,6 +1094,10 @@ class DiscordRouter:
             # Into the turn already running, as typing while it works does in
             # Claude Code. A voice note steers too; it answers nothing (D7).
             self._post(channel, STEERED_TEXT)
+        elif outcome == "interrupting":
+            # Not a steer: the turn was stopped for this message (review of
+            # PR #22, which said "I'll work that in" here too).
+            self._post(channel, INTERRUPTING_TEXT)
         elif outcome == "full":
             self._post(channel, FULL_TEXT)
         if slash:

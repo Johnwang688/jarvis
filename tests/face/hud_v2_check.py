@@ -372,6 +372,24 @@ def steer_checks(page, mock):
     w.pop("fail_send_error", None)
     box.fill("")
 
+    # A steer the turn never delivered (the fast path's final answer came
+    # first) that a Stop drops comes back to the box too (review of PR #22).
+    w["send_status"] = "steered"
+    steer_id = f"msg-{w.get('sends', 0) + 1}"
+    box.fill("in French, please")
+    box.press("Enter")
+    undelivered = page.locator('[data-testid="msg-user"]').last
+    until(lambda: page.evaluate("window.__hud.state().messages.some(m => m.message_id === "
+                                f"'{steer_id}')"))
+    mock.emit("queue_cleared", {"reason": "stopped", "messages": [
+        {"message_id": steer_id, "typed": "in French, please", "via": "hud"}]},
+        thread_id="t1")
+    check("a dropped steer is marked not sent",
+          bool(until(lambda: "not sent" in undelivered.inner_text())), undelivered.inner_text())
+    check("and its words come back to the box too",
+          bool(until(lambda: "in French, please" in box.input_value())), box.input_value())
+    box.fill("")
+
     # Stop: the thread is interrupted; what waited comes back to the box.
     w["send_status"] = "queued"
     box.fill("later, please")

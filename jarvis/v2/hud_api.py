@@ -998,13 +998,21 @@ def route(handler, daemon, parts, query):
             messages = []
             rows = stores.threads.read_log(thread.id)
             # What became of each owner message that reached a running turn
-            # (2026-10-08): it ran (`queued_started`) or was dropped.
-            fate = {}
+            # (2026-10-08): a steer the provider refused waits instead
+            # (`steer_queued`); a waiting one ran (`queued_started`) or was
+            # dropped. One still waiting must be in the live queue: after a
+            # crash or restart nothing is, and it never ran.
+            fate, requeued = {}, set()
             for row in rows:
+                mid = (row.get("data") or {}).get("message_id")
+                if not isinstance(mid, str):
+                    continue
                 if row.get("kind") in ("queued_started", "queued_dropped"):
-                    mid = (row.get("data") or {}).get("message_id")
-                    if isinstance(mid, str):
-                        fate[mid] = row["kind"]
+                    fate[mid] = row["kind"]
+                elif row.get("kind") == "steer_queued":
+                    requeued.add(mid)
+            with daemon._lock:
+                live = {item.message_id for item in daemon._queues.get(thread.id) or ()}
             for row in rows:
                 kind = row.get("kind")
                 if kind not in (None, "text", "user", "model_set"):
@@ -1024,12 +1032,13 @@ def route(handler, daemon, parts, query):
                     mid = data.get("message_id") if kind == "user" else None
                     if isinstance(mid, str):
                         message["message_id"] = mid
+                        waited = bool(data.get("queued")) or mid in requeued
                         if fate.get(mid) == "queued_dropped":
                             message["mark"] = "not sent"
-                        elif data.get("steer"):
+                        elif waited and mid not in fate:
+                            message["mark"] = "queued" if mid in live else "not sent"
+                        elif data.get("steer") and mid not in requeued:
                             message["mark"] = "steering"
-                        elif data.get("queued") and mid not in fate:
-                            message["mark"] = "queued"
                     messages.append(message)
             return 200, {"messages": messages}
     if len(parts) in (3, 4) and parts[0] == "tasks" and method == "GET":

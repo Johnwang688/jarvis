@@ -77,6 +77,7 @@ class Steerable:
         self.answers = []
         self.steer_mode = "native"
         self.consume = True
+        self.on_steer = None        # called as the provider takes a steer
 
     def health(self):
         return True, "fake"
@@ -127,6 +128,8 @@ class Steerable:
 
     def steer(self, h, message):
         self.steers.append(message)
+        if self.on_steer is not None:
+            self.on_steer(h, message)
         if self.steer_mode == "refuse":
             raise SteerRefused("the provider is busy")
         if self.steer_mode == "interrupt":
@@ -443,6 +446,89 @@ class SteerChecks(Harness):
         self.assertIs(self.d._sessions.get(thread.id), session)
         self.assertFalse(session.lost)
         self.assertEqual(self.fake.closed, [])
+
+    def test_a_steer_is_in_the_log_before_the_provider_has_it(self):
+        """Review of PR #22, finding 10: nothing the steer causes may be logged
+        ahead of it (the mirror split a reply around a late-logged steer)."""
+        thread = self.chat()
+        self.send(thread, "block")
+        self.running(thread)
+        seen = []
+        self.fake.on_steer = lambda h, message: seen.append(
+            [r["data"].get("typed") for r in self.log(thread, "user") if r["data"].get("steer")])
+        self.send(thread, "redirect")
+        self.assertEqual(seen, [["redirect"]])
+        self.release(thread)
+        self.idle(thread)
+
+    def test_a_refused_steer_waits_under_the_same_id_with_one_user_record(self):
+        """A steer the provider refuses was already logged as one; it waits
+        under that id (`steer_queued`), with no second `user` record, and the
+        transcript says queued until it runs."""
+        self.fake.steer_mode = "refuse"
+        thread = self.chat()
+        self.send(thread, "block")
+        self.running(thread)
+        reply = self.send(thread, "later, please")
+        self.assertEqual(reply["status"], "queued")
+        users = [r for r in self.log(thread, "user") if r["data"].get("message_id") == reply["message_id"]]
+        self.assertEqual(len(users), 1)
+        self.assertTrue(users[0]["data"]["steer"])
+        requeued = self.log(thread, "steer_queued")
+        self.assertEqual([(r["data"]["message_id"], r["turn_id"]) for r in requeued],
+                         [(reply["message_id"], reply["queued_turn_id"])])
+        self.assertTrue(any(e["data"].get("message_id") == reply["message_id"]
+                            for e in self.bus("steer_queued")))
+        marks = [m.get("mark") for m in self.get(f"/threads/{thread.id}/transcript")["messages"]
+                 if m["role"] == "user"]
+        self.assertEqual(marks, [None, "queued"])
+        self.release(thread)
+        self.idle(thread)
+        self.assertEqual([m.text for m in self.fake.messages], ["block", "later, please"])
+        marks = [m.get("mark") for m in self.get(f"/threads/{thread.id}/transcript")["messages"]
+                 if m["role"] == "user"]
+        self.assertEqual(marks, [None, None], "it ran: neither steering nor queued")
+
+    def test_a_queued_mark_never_outlives_its_queue(self):
+        """Review of PR #22, finding 8: after a crash nothing waits any more,
+        so a `queued` record with no fate reads "not sent", not queued for
+        ever; and a stop logs the drop even for a queue whose session a fatal
+        turn dropped."""
+        thread = self.chat()
+        self.stores.threads._append(thread.id, "log.jsonl", {
+            "kind": "user", "at": "2026-10-08T00:00:00+00:00", "turn_id": "f" * 32,
+            "thread_id": thread.id, "data": {"text": "left by a crash", "typed": "left by a crash",
+                                             "via": "hud", "message_id": "m" * 32, "queued": True}})
+        marks = [m.get("mark") for m in self.get(f"/threads/{thread.id}/transcript")["messages"]
+                 if m["role"] == "user"]
+        self.assertEqual(marks, ["not sent"])
+
+        orphan = self.chat()
+        item = mod._Queued(UserMessage("orphaned"), {"typed": "orphaned", "via": "hud"},
+                           "a" * 32, "b" * 32)
+        with self.d._lock:
+            self.d._sessions.pop(orphan.id, None)   # as a fatal turn leaves it
+            self.d._queues[orphan.id] = mod.deque([item])
+        self.d.stop()
+        dropped = [r["data"] for r in self.log(orphan, "queued_dropped")]
+        self.assertEqual(dropped, [{"message_id": "a" * 32, "reason": "Jarvis stopped"}])
+
+    def test_the_escape_hatch_result_steers_or_waits_instead_of_being_lost(self):
+        """Review of PR #22, finding 6: the hatch's result reaches a chat whose
+        turn is running (steered here) rather than failing on "already
+        running" and being logged away."""
+        from jarvis.v2.hatch import EscapeHatch, HatchResult, _Declined
+        thread = self.chat()
+        self.send(thread, "block")
+        self.running(thread)
+        hatch = EscapeHatch(self.d, self.d.approvals)
+        item = _Declined(thread_id=thread.id, command="npm test", tool="Bash", args={}, reason="net")
+        hatch._finish(item, HatchResult(decision="allow", ran=True, output="all green",
+                                        message="[owner ran: npm test]\nall green"),
+                      "owner-ran", "reviewer-declined-owner-ran")
+        self.assertEqual([m.text for m in self.fake.steers], ["[owner ran: npm test]\nall green"])
+        self.release(thread)
+        self.idle(thread)
 
     def test_task_threads_and_the_runner_path_still_refuse(self):
         """Task turns are the runner's: a running task thread still answers

@@ -734,6 +734,32 @@ class InboundChecks(Harness):
         self.assertNotIn(M.QUEUED_TEXT, texts)
         self.assertIn("finished", texts)
 
+    def test_an_interrupting_steer_says_so_rather_than_claiming_a_steer(self):
+        """Review of PR #22, finding 7: when the provider cannot steer, the
+        turn is stopped for the message — Discord is told that, not "I'll
+        work that into what I'm doing"."""
+        from jarvis.v2.daemon import INTERRUPTED_NOTE
+        from jarvis.v2.provider import SteerRefused
+
+        class Interrupting(Steering):
+            def steer(self, handle, message):
+                raise SteerRefused("no way to steer", fallback="interrupt")
+
+        provider = Interrupting()
+        self.daemon.providers[ProviderName.FAST] = provider
+        provider.release.clear()
+        chat = self.open_chat()
+        self.hud_send(chat, "long")
+        place = self.place(chat.id)
+        wait_for(lambda: provider.turn, what="the turn")
+        self.listener.feed(guild_message("stop and do this", place))
+        wait_for(lambda: M.INTERRUPTING_TEXT in self.transport.texts(place), what="the notice")
+        self.idle(chat.id)
+        self.settled(chat.id)
+        self.assertNotIn(M.STEERED_TEXT, self.transport.texts(place))
+        self.assertEqual([m.typed for m in provider.messages], ["long", "stop and do this"])
+        self.assertTrue(provider.messages[-1].text.startswith(INTERRUPTED_NOTE))
+
     def test_stop_drops_a_waiting_discord_message_and_says_it_was_not_sent(self):
         self.provider.plan["long"] = [("wait",), ("text", "cut short")]
         self.provider.release.clear()

@@ -130,7 +130,8 @@ def peer(script_path, log_path, thread_name):
             if mode == "malformed":
                 print("not json -- private text", flush=True)
                 continue
-            if (mode in ("hold", "interrupt_stall", "steer", "steer_unsupported")
+            if (mode in ("hold", "interrupt_stall", "steer", "steer_unsupported", "steer_errors",
+                         "steer_silent")
                     or (mode == "steer_late" and count == 1)):
                 continue
             if mode in ("approval", "flood", "deny", "approval_death", "file_approval"):
@@ -203,6 +204,19 @@ def peer(script_path, log_path, thread_name):
             if mode == "steer_unsupported":
                 emit({"id": m["id"], "error": {"code": -32601, "message": "Method not found"}})
                 continue
+            if mode == "steer_errors":
+                # 0.161.0's own steer refusals, and an unknown variant that is
+                # not the method: each in turn, then the turn completes.
+                errors = script["steer_errors"]
+                n = script["_seen"] = script.get("_seen", 0) + 1
+                code, text = errors[min(n, len(errors)) - 1]
+                emit({"id": m["id"], "error": {"code": code, "message": text}})
+                if n == len(errors):
+                    usage()
+                    finish()
+                continue
+            if mode == "steer_silent":
+                continue                    # never answered
             if mode == "steer_late":
                 # The turn completes first; the refusal arrives after it.
                 usage()
@@ -966,6 +980,48 @@ class Checks(unittest.TestCase):
             events = running.result(5)
         self.assertEqual(events[-1].data, {"stop": "interrupted"})
         self.assertFalse(any(e.kind == K.ERROR for e in events), "a refused steer is not the turn's failure")
+
+    def test_steer_refusals_queue_and_never_mark_codex_unable_to_steer(self):
+        """Review of PR #22, finding 4: 0.161.0's own steer errors, and an
+        unknown variant that is not the method, are refusals (queue) — none of
+        them may switch the session to the interrupt fallback for good."""
+        from jarvis.v2.provider import SteerRefused
+        errors = [(-32600, "no active turn to steer"),
+                  (-32600, "expected active turn id `turn-1` but found `turn-2`"),
+                  (-32600, "cannot steer a review/compact turn"),
+                  (-32600, "Invalid request: unknown variant `localVideo`, expected one of `text`, `image`")]
+        self.brain.script["steer_errors"] = errors
+        h = self.start("steer_errors")
+        with ThreadPoolExecutor(1) as pool:
+            running = pool.submit(self.send, h)
+            self._running(h)
+            for code, text in errors:
+                with self.subTest(text=text):
+                    with self.assertRaises(SteerRefused) as refused:
+                        self.provider.steer(h, UserMessage("redirect"))
+                    self.assertEqual(refused.exception.fallback, "queue")
+                    self.assertFalse(h.native.steer_unsupported)
+            self.assertEqual(running.result(5)[-1].data, {"stop": "end"})
+        self.assertEqual(len(self.brain.calls("turn/steer")), len(errors), "asked every time")
+
+    def test_a_steer_codex_never_answers_is_unknown_not_requeued(self):
+        """Review of PR #22, finding 3: no answer within STEER_TIMEOUT may mean
+        Codex took it and answered late. Counted as delivered (logged), never
+        refused — a refusal would have the daemon queue it and deliver it
+        twice."""
+        h = self.start("steer_silent")
+        with patch.object(codex, "STEER_TIMEOUT", 0.2), ThreadPoolExecutor(1) as pool:
+            running = pool.submit(self.send, h)
+            self._running(h)
+            try:
+                with self.assertLogs(codex.LOG, level="WARNING") as logged:
+                    self.assertIsNone(self.provider.steer(h, UserMessage("maybe taken")))
+            finally:
+                self.provider.interrupt(h)      # whatever happened, the held turn ends
+            self.assertIn("taken as delivered", "\n".join(logged.output))
+            self.assertFalse(h.native.steer_unsupported)
+            self.assertEqual(running.result(5)[-1].data, {"stop": "interrupted"})
+        self.assertEqual(len(self.brain.calls("turn/steer")), 1)
 
     def test_a_late_steer_refusal_never_fails_the_next_turn(self):
         """The turn completes before Codex answers the steer: the waiter is

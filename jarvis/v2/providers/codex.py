@@ -46,6 +46,7 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass, field, replace
 import json
+import logging
 import os
 from pathlib import Path
 import re
@@ -64,6 +65,7 @@ from . import codex_cli, codex_config
 from .codex_rpc import RpcError, RpcProcess, RpcTimeout
 from .codex_usage import Accounting
 
+LOG = logging.getLogger(__name__)
 START_TIMEOUT = 30.0
 INTERRUPT_TIMEOUT = 10.0
 # How long `steer` waits for Codex to answer `turn/steer`. The app-server
@@ -95,6 +97,7 @@ class _Steer:
     ok: bool = False
     unsupported: bool = False
     reason: str = ""
+    abandoned: bool = False     # its waiter timed out and counted it as delivered
 
 
 @dataclass
@@ -881,9 +884,11 @@ class CodexProvider:
 
         Refused, for the daemon to queue, when no turn is running or the turn
         is waiting on an approval or a question (a steer must never read as
-        an answer), and when Codex refuses it (the turn ended first). A Codex
-        without the method is refused with the `interrupt` fallback, so the
-        daemon interrupts the turn and runs the message next instead.
+        an answer), and when Codex refuses it (the turn ended first, a
+        compaction turn). A Codex without the method is refused with the
+        `interrupt` fallback, so the daemon interrupts the turn and runs the
+        message next instead. No answer within STEER_TIMEOUT is *unknown*,
+        not refused: it is taken as delivered and logged, never queued too.
         """
         s = h.native
         if s is None or s.closed.is_set():
@@ -907,10 +912,16 @@ class CodexProvider:
             s.steers[rid] = waiter
         if not waiter.ready.wait(STEER_TIMEOUT):
             with s.mutex:
-                if s.steers.pop(rid, None) is not None:
-                    s.stale_steers.append(rid)
-            if not waiter.ready.is_set():
-                raise SteerRefused("Codex did not answer the steer in time")
+                if not waiter.ready.is_set():
+                    # Unknown, not refused: Codex may have taken it and only
+                    # its answer is late. Queueing it as well could deliver it
+                    # twice, so it counts as steered; the waiter stays
+                    # registered and the turn loop logs the answer when it
+                    # comes (review of PR #22).
+                    waiter.abandoned = True
+                    LOG.warning("Codex did not answer turn/steer %s within %.0f s; "
+                                "taken as delivered", rid, STEER_TIMEOUT)
+                    return
         if waiter.ok:
             return
         if waiter.unsupported:
@@ -932,11 +943,25 @@ class CodexProvider:
             error = msg["error"] if isinstance(msg["error"], dict) else {}
             code = error.get("code") if isinstance(error.get("code"), int) else None
             text = error.get("message") if isinstance(error.get("message"), str) else ""
-            waiter.unsupported = code == _NO_METHOD or (
-                code == -32600 and ("unknown variant" in text or "turn/steer" in text))
+            # Only "this Codex has no such method" switches the session to the
+            # interrupt fallback: JSON-RPC's method-not-found, or an invalid
+            # request that names `turn/steer` itself. An unknown variant of
+            # anything else (an input item) is a refusal like any other, and
+            # so are 0.161.0's own steer errors — "no active turn to steer",
+            # "expected active turn id … but found …", "cannot steer a
+            # review/compact turn" — all of which queue the message.
+            waiter.unsupported = code == _NO_METHOD or (code == -32600 and "turn/steer" in text)
             waiter.reason = clean_line(text, 160) if text else f"code {code}"
         else:
             waiter.ok = True
+        if waiter.abandoned:
+            # The steer's waiter gave up (`STEER_TIMEOUT`) and counted it as
+            # delivered; only the log can say how it really went.
+            if waiter.ok:
+                LOG.info("Codex took the late-answered steer %s", rid)
+            else:
+                LOG.warning("Codex refused the late-answered steer %s (%s); the message "
+                            "did not reach the turn", rid, waiter.reason)
         waiter.ready.set()
         return True
 

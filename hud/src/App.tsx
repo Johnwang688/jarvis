@@ -35,6 +35,9 @@ import { ZOOM_DEFAULT, maxWidth } from "./lib/layout";
 
 const TABS: Tab[] = ["chat", "task", "file", "diff", "preview"];
 const PROPOSAL_WINDOW_MS = 60_000;
+/** How many of this window's steered or queued messages it remembers, to hand
+ * their words back if a Stop drops them. */
+const WAITING_KEPT = 20;
 /** Events after which an open confirmation or the Archive reads again. */
 const LIFECYCLE_KINDS = new Set([
   "task_created", "task_status_changed", "project_created", "project_updated", "project_archived",
@@ -205,8 +208,14 @@ export default function App() {
             type: "mark", local,
             patch: { mark: status === "queued" ? "queued" : "steering", message_id: result.message_id },
           });
-          if (status === "queued" && result.message_id) {
-            waitingHere.current.set(result.message_id, { text, files: attachments });
+          if (result.message_id) {
+            // Queued *or* steered: a steer the turn never delivered (the fast
+            // path's final answer came first) is dropped by a Stop too, and
+            // its words come back the same way (review of PR #22). Bounded:
+            // a delivered steer is never named again, so the oldest go.
+            const mine = waitingHere.current;
+            mine.set(result.message_id, { text, files: attachments });
+            while (mine.size > WAITING_KEPT) mine.delete(mine.keys().next().value as string);
           }
           // A turn this window had not heard of (one started from Discord) is
           // running here: track it, so Stop and its finish reach this window.
@@ -333,6 +342,10 @@ export default function App() {
               },
             });
           }
+          break;
+        case "steer_queued":
+          // A steer the provider could not take: it waits as its own turn.
+          if (data.message_id) dispatch({ type: "mark", message_id: data.message_id, patch: { mark: "queued" } });
           break;
         case "queued_started":
           // A message that waited is now its own turn: no longer "queued".

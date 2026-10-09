@@ -573,9 +573,9 @@ footing as `/approvals`.
 
 A message sent while a turn runs is never a dead end. `POST
 /threads/{id}/send` (the HUD) and a message typed in the chat's Discord
-thread both go through `Daemon.deliver`; `Daemon.send` (the task runner, the
-escape hatch) still refuses with 409 while a turn runs, because they retry on
-exactly that.
+thread both go through `Daemon.deliver`, and so does the escape hatch's
+result; `Daemon.send` (the task runner) still refuses with 409 while a turn
+runs, because the runner retries on exactly that.
 
 - `POST /threads/{id}/send` → **202** `{"status", "turn_id", ...}`:
   - `"started"` — no turn was running; `turn_id` is the new turn (as before).
@@ -598,10 +598,16 @@ exactly that.
   message queues instead. An older daemon answered 409 for every send during
   a turn and sent no `status`.
 - SSE **`user_message`** for such a message carries `data.message_id` and
-  `data.steer: true` (steered; `turn_id` is the running turn) or
-  `data.queued: true` (waiting; `turn_id` is its own future turn), with
-  `data.interrupting: true` for the interrupt fallback. The `user` log record
-  holds the same `data`.
+  `data.steer: true` (handed to the running turn; `turn_id` is that turn) or
+  `data.queued: true` (waiting; `turn_id` is its own future turn). A steer is
+  logged and published *before* the provider has it, so nothing it causes
+  comes ahead of it. The `user` log record holds the same `data`.
+- SSE **`steer_queued`** `{thread_id, project_id, turn_id, data: {message_id,
+  turn_id, interrupting}}` — a message published as a steer waits instead,
+  under the same `message_id` and with no second `user` record: the provider
+  refused it (`interrupting: true` for the interrupt fallback), or the turn
+  ended before it was delivered (the fast path's final answer came first).
+  `turn_id` is the turn it will run as. Also a log record.
 - SSE **`queued_started`** `{thread_id, project_id, turn_id, data:
   {message_id, turn_id}}` — a waiting message has become its turn (logged as
   a `queued_started` record; the turn's own events follow under `turn_id`).
@@ -618,4 +624,5 @@ exactly that.
   every 15 s while busy, so a missed `turn_finished` cannot wedge it.
 - `GET /threads/{id}/transcript`: a user message that reached a running turn
   carries `"message_id"` and, when it says something, `"mark"`: `"steering"`,
-  `"queued"` (still waiting) or `"not sent"` (dropped).
+  `"queued"` (still waiting, in the live queue) or `"not sent"` (dropped — or
+  left waiting by a crash or restart, after which nothing waits any more).

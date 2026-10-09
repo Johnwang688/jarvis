@@ -84,7 +84,7 @@ RETRY_MAX_S = 60.0
 DOWN_AFTER = 3
 FORBIDDEN = frozenset({MISSING_ACCESS, MISSING_PERMISSIONS})
 KINDS = frozenset({"user_message", "turn_finished", "question", "question_answered",
-                   "thread_updated", "queued_started", "queue_cleared",
+                   "thread_updated", "queued_started", "queue_cleared", "steer_queued",
                    "thread_moved", "thread_archived", "thread_restored", "thread_deleted",
                    "proposal_reply"})
 # Records of a turn the walk composes into posts; anything else is skipped.
@@ -97,6 +97,8 @@ TURN_KINDS = frozenset({"turn_started", "text", "thinking", "tool_started", "too
 MESSAGE_KINDS = frozenset({"user", "text"})
 QUEUED_TEXT = "I'll take this next."
 STEERED_TEXT = "Got it. I'll work that into what I'm doing."
+INTERRUPTING_TEXT = ("This one can't take a message mid-turn, so I've stopped what I was "
+                     "doing and I'll take this next.")
 FULL_TEXT = ("Three messages are already waiting on this turn; send this one again once "
              "I've answered.")
 _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_.]{0,60}$")
@@ -201,11 +203,23 @@ def _asked(log, turn) -> dict:
     return {}
 
 
+def _requeued(log, row) -> bool:
+    """A message logged as a steer that the provider refused: it waited and
+    ran as a turn of its own (`steer_queued`), never inside this one."""
+    message_id = (row.get("data") or {}).get("message_id")
+    return bool(message_id) and any(
+        other.get("kind") == "steer_queued"
+        and (other.get("data") or {}).get("message_id") == message_id for other in log)
+
+
 def _owner_line(log, row) -> str | None:
     """`user_line` for a record in its log, knowing whether a message that
-    waited on a turn was dropped before it ran."""
+    waited on a turn was dropped before it ran, and whether a steer was
+    refused and waited instead (then it is no steer)."""
     data = row.get("data") or {}
     message_id = data.get("message_id")
+    if data.get("steer") and _requeued(log, row):
+        data = {key: value for key, value in data.items() if key != "steer"}
     drop = next((other for other in log if message_id
                  and other.get("kind") == "queued_dropped"
                  and (other.get("data") or {}).get("message_id") == message_id), None)
@@ -538,15 +552,19 @@ class ChatMirror:
     def submit(self, chat_id, message) -> str:
         """Run an owner message from Discord in this chat: "sent" (a turn
         started), "steered" (into the turn running, at its next safe point),
-        "queued" (it goes next, O-C6) or "full" (three wait already). The
-        daemon decides, with the same queue and cap the HUD's send uses
-        (`Daemon.deliver`). Anything else it refuses is raised."""
+        "interrupting" (a provider that cannot steer: the turn is stopped and
+        this runs next), "queued" (it goes next, O-C6) or "full" (three wait
+        already). The daemon decides, with the same queue and cap the HUD's
+        send uses (`Daemon.deliver`). Anything else it refuses is raised."""
         from ..daemon import QueueFull
         try:
             result = self.daemon.deliver(chat_id, message)
         except QueueFull:
             return "full"
-        return {"started": "sent", "steered": "steered"}.get(result.get("status"), "queued")
+        status = result.get("status")
+        if status == "steered" and result.get("mode") == "interrupt":
+            return "interrupting"
+        return {"started": "sent", "steered": "steered"}.get(status, "queued")
 
     def pending_question(self, chat_id) -> str | None:
         with self._lock:
@@ -741,7 +759,7 @@ class ChatMirror:
             return
         if thread is None or not _is_chat(thread):
             return
-        if kind in ("user_message", "queued_started", "queue_cleared"):
+        if kind in ("user_message", "queued_started", "queue_cleared", "steer_queued"):
             with self._lock:
                 self._dirty.add(chat_id)
         elif kind == "turn_finished":
@@ -906,7 +924,8 @@ class ChatMirror:
             # while it ran; they are posted after it, which is when they ran.
             waited = [_Post(chat_id, target, content=line)
                       for r in log[cursor:end + 1]
-                      if r.get("kind") == "user" and r.get("turn_id") != turn
+                      if r.get("kind") == "user"
+                      and (r.get("turn_id") != turn or _requeued(log, r))
                       for line in (_owner_line(log, r),) if line]
             if waited:
                 for post in turn_posts:
@@ -1033,7 +1052,7 @@ class ChatMirror:
         parts, steers, tools, stop, error = [[]], [], [], None, None
         for row in segment:
             kind, data = row.get("kind"), row.get("data") or {}
-            if kind == "user" and data.get("steer"):
+            if kind == "user" and data.get("steer") and not _requeued(log, row):
                 steers.append(row)
                 parts.append([])
             elif kind == "text" and isinstance(data.get("text"), str):

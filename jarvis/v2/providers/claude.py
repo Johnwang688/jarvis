@@ -121,12 +121,19 @@ HOOK_TIMEOUT_S = 660.0
 CONNECT_TIMEOUT_S = 120.0
 CONTROL_TIMEOUT_S = 60.0
 
-# How long a turn whose result frame arrived while a steer was still queued in
-# the CLI waits for the fresh turn the CLI starts for it. The CLI starts it at
-# once and echoes the steer first (`--replay-user-messages`), so this is only
-# reached by a CLI that folded the steer without echoing it, and then it is the
-# whole cost: a few seconds before the turn reads as finished.
-STEER_GRACE_S = 5.0
+# Steering (2026-10-08, review of PR #22). When a turn's result arrives while
+# one of its steers has not been seen to drain, the CLI either folded it in
+# without saying so or will run it as a fresh turn. The turn waits for that
+# fresh turn while the CLI shows any sign of life, ending after
+# STEER_QUIET_S of silence or STEER_HOLD_MAX_S in all. Correctness does not
+# rest on these numbers: a fresh turn that starts later still is recognised and
+# absorbed by the next send (`_read`), never mistaken for that send's answer.
+STEER_QUIET_S = 3.0
+STEER_HOLD_MAX_S = 120.0
+# After a result frame that may have been a leftover steer turn's rather than
+# the message's own (one whose start the CLI did not echo), how long to wait
+# for the message's own turn to show itself before taking that result as its.
+LEFTOVER_WAIT_S = 10.0
 
 # How much of a tool result goes into TOOL_FINISHED.summary. A surface renders
 # this in a ticker; the transcript already holds the whole thing.
@@ -509,11 +516,19 @@ class _Session:
     # Whether the CLI holds this session on disk yet — true after a resume or
     # once a turn has produced a result. Decides how `set_model` reconnects.
     resumable: bool = False
-    # Owner steering (2026-10-08). `accepting` is true while a turn can still
-    # take a steer; `steering` holds the uuid of every steer written to the
-    # CLI whose replay echo (it drained into a turn) has not come back yet.
+    # Owner steering (2026-10-08). `accepting` is true while the turn's own
+    # CLI turn is under way and can still take a steer. `steering` maps the
+    # uuid of every steer written to the CLI and not yet seen to drain to the
+    # turn (`generation`) that wrote it; it outlives that turn, so a steer the
+    # CLI runs late is recognised by the next one. `prompt_echo` is whether
+    # this CLI echoes the message that starts a turn (seen once is enough):
+    # without it nothing can be told apart, and the provider behaves as if
+    # every steer folded. `pump` is the one reader of the client's stream.
     accepting: bool = False
-    steering: set = field(default_factory=set)
+    steering: dict = field(default_factory=dict)
+    generation: int = 0
+    prompt_echo: bool = False
+    pump: Any = None
 
     def emit(self, kind: EventKind, **data: Any) -> None:
         """Put an event on the turn's queue. Silent outside a turn by design.
@@ -864,7 +879,6 @@ class ClaudeProvider:
             session.events = None
             with session.mutex:
                 session.accepting = False
-                session.steering.clear()
             session.sending.release()
 
     def _run(self, h: SessionHandle, session: _Session, message: UserMessage) -> Iterator[Event]:
@@ -873,14 +887,20 @@ class ClaudeProvider:
         session.interrupted = False
         session.tools_seen.clear()
         with session.mutex:
-            session.steering.clear()
-            session.accepting = True
+            session.accepting = False
+            session.generation += 1
+            # A steer an earlier turn wrote and never saw drain may still be
+            # waiting in the CLI: then this message goes in at priority
+            # `later`, which the CLI never folds into a running turn, so it
+            # starts a turn of its own after whatever runs first.
+            behind = self._leftover_possible(session, session.generation)
+        prompt_uid = str(uuid.uuid4())
         done = object()
 
         async def turn() -> None:
             try:
-                await session.client.query(_prompt(message))
-                await self._read(session, events)
+                await session.client.query(_prompt(message, prompt_uid, later=behind))
+                await self._read(session, events, prompt_uid)
             except BaseException as exc:  # noqa: BLE001 — reported, never swallowed
                 events.put(
                     Event(
@@ -892,14 +912,15 @@ class ClaudeProvider:
             finally:
                 with session.mutex:
                     session.accepting = False
-                    session.steering.clear()
                 # The generator must never hang, whatever happened above.
                 events.put(done)
 
-        yield Event(EventKind.TURN_STARTED, h.thread_id)
+        # Scheduled before TURN_STARTED is handed out, so the message reaches
+        # the CLI whatever the consumer does next.
         future = asyncio.run_coroutine_threadsafe(turn(), session.loop)
         finished = False
         try:
+            yield Event(EventKind.TURN_STARTED, h.thread_id)
             while True:
                 item = events.get()
                 if item is done:
@@ -926,8 +947,10 @@ class ClaudeProvider:
         — never inside a tool call, never as an answer to the PreToolUse hook
         the turn may be blocked in. A turn that ends before that boundary has
         the CLI run it as a fresh turn instead, which `_read` keeps inside
-        this one. Refused (the daemon queues it) when no turn is accepting or
-        the write fails.
+        this turn (or, if it starts late, the next send absorbs). Accepted
+        only once the turn's own CLI turn has visibly begun, so a steer can
+        never reach the CLI ahead of the message it steers; refused (the
+        daemon queues it) otherwise, or when the write fails.
         """
         session = h.native
         if session is None or session.closed:
@@ -946,135 +969,175 @@ class ClaudeProvider:
 
         with session.mutex:
             if not session.accepting:
-                raise SteerRefused("no turn is running")
+                raise SteerRefused("no turn of this message's is under way")
             # Registered before the write, so a result frame read while the
             # write is in flight already knows a steer is on its way.
-            session.steering.add(uid)
+            session.steering[uid] = session.generation
         try:
             _await(session.loop, session.client.query(one()), CONTROL_TIMEOUT_S)
         except Exception as exc:  # noqa: BLE001 — the turn goes on; the daemon queues it
             with session.mutex:
-                session.steering.discard(uid)
+                session.steering.pop(uid, None)
             raise SteerRefused(f"claude did not take the message: {_safe(exc)}") from None
 
-    async def _read(self, session: _Session, events: queue.Queue) -> None:
-        """Read the turn off the CLI, steers included.
+    @staticmethod
+    def _leftover_possible(session: _Session, generation: int) -> bool:
+        """Could a CLI turn for an earlier turn's steer still come? Only when
+        this CLI is known to echo the messages that start turns — without
+        that, nothing could tell such a turn from the message's own."""
+        return session.prompt_echo and any(g < generation for g in session.steering.values())
 
-        A steer is either folded into this turn or, when the turn finished
-        first, run by the CLI as a fresh turn with a result frame of its own.
-        Both belong to *this* turn: the daemon sent one message and waits for
-        one TURN_FINISHED, and a fresh CLI turn left unread would be read by
-        the next send instead — every later turn shifted by one. So a result
-        that arrives while a steer has not been echoed back (it has not
-        drained into any turn yet) does not end the turn: its TURN_FINISHED
-        is held while the fresh turn is read as well. A CLI that folded a
-        steer without echoing it leaves nothing more to read; the hold then
-        ends after STEER_GRACE_S of silence.
+    async def _read(self, session: _Session, events: queue.Queue, prompt_uid: str) -> None:
+        """Read this message's turn off the CLI, steers included.
+
+        The CLI runs turns one after another, and with `--replay-user-messages`
+        echoes, under our uuid, each stdin message as it drains: the one that
+        starts a turn first, before anything that turn says. So every CLI turn
+        has an owner, and this tracks it:
+
+        - **the message's own** — its echo starts the turn (`started`); its
+          result frame is the result this send is waiting for;
+        - **a steer of this turn's** that the CLI ran as a fresh turn because
+          the turn ended before it could fold it — read as part of this turn;
+        - **a leftover**: a steer an earlier turn wrote whose fresh turn
+          started too late for that turn to see. It is read here, its words
+          reach the owner, and its result does not end this turn — so a late
+          steer never shifts every later send by one (review of PR #22).
+
+        When this turn's result arrives with one of its steers not yet seen to
+        drain, the turn holds while the CLI shows any sign of life, for its
+        fresh turn: STEER_QUIET_S of silence or STEER_HOLD_MAX_S in all end
+        the hold, and the steer then counts as folded in silently — or, if its
+        turn is merely late, as the next send's leftover. A CLI that never
+        echoes leaves nothing to tell apart: every turn is the message's own,
+        every unseen steer is taken as folded, as before.
+
+        Reads go through the session's pump, one message per request, never
+        cancelled mid-read: a hold that ends leaves its read outstanding for
+        the next turn, and nothing the CLI said is ever lost.
         """
-        grace = None
-        held = None
+        loop = asyncio.get_running_loop()
+        generation = session.generation
+        started = False          # the message's own CLI turn has begun
+        owner = None             # who opened the CLI turn under way (None: none is)
+        held = None              # the TURN_FINISHED this send hands back
+        candidate = None         # a result that was a leftover's, or this message's
+        candidate_until = None
+        hold_began = hold_quiet = None
+        restarted = False
         while True:
-            status, finished = await self._response(session, events, grace)
-            if status != "result":
-                break                        # silence after a result, or the stream ended
+            timeout = None
+            if hold_began is not None:
+                timeout = max(0.0, min(hold_quiet, hold_began + STEER_HOLD_MAX_S) - loop.time())
+            elif candidate_until is not None:
+                timeout = max(0.0, candidate_until - loop.time())
+            pump = self._pump(session)
+            try:
+                item = await pump.next(timeout)
+            except asyncio.TimeoutError:
+                if hold_began is None and candidate is not None:
+                    # The message's own start never showed: the CLI did not
+                    # echo it, so the result taken for a leftover's was its.
+                    held = candidate
+                break
+            if item is _END:
+                session.pump = None
+                if not restarted:
+                    # A reader whose stream ended is replaced once (a test
+                    # double ends with its script); a dead CLI ends again.
+                    restarted = True
+                    continue
+                break
+            if isinstance(item, _Raised):
+                session.pump = None
+                raise item.exc
+            restarted = False
+            msg = item
+            if hold_began is not None:
+                hold_quiet = loop.time() + STEER_QUIET_S       # any frame is life
+            uid = str(msg.uuid).lower() if isinstance(msg, SdkUserMessage) and msg.uuid else None
+            if uid is not None and uid == prompt_uid:
+                started, owner, candidate, candidate_until = True, "prompt", None, None
+                with session.mutex:
+                    session.prompt_echo = True
+                    # Every `next` steer drains before a message that starts a
+                    # turn: an earlier one still unseen now was folded silently.
+                    for other, written in list(session.steering.items()):
+                        if written < generation:
+                            del session.steering[other]
+                    session.accepting = True
+                await self._stop_if_interrupted(session)
+                continue
+            if uid is not None:
+                with session.mutex:
+                    written = session.steering.pop(uid, None)
+                if written is not None:
+                    if owner is None:
+                        # Not folded: the steer starts a CLI turn of its own.
+                        owner = "steer" if written == generation else "leftover"
+                        hold_began = None
+                        await self._stop_if_interrupted(session)
+                    continue
+            if owner is None and isinstance(msg, (AssistantMessage, StreamEvent)):
+                owner = "unknown"                  # a turn whose start was not echoed
+                hold_began = None
+                if not started and not self._leftover_possible(session, generation):
+                    started = True
+                    with session.mutex:
+                        session.accepting = True
+                await self._stop_if_interrupted(session)
+            finished = self._take(session, events, msg)
+            if finished is None:
+                continue
+            ended, owner = owner, None
+            if not started:
+                if ended == "leftover":
+                    continue                       # the message's own turn is still to come
+                if self._leftover_possible(session, generation):
+                    candidate, candidate_until = finished, loop.time() + LEFTOVER_WAIT_S
+                    continue
+                started = True                     # nothing else could have run
             held = finished
             with session.mutex:
-                if not session.steering:
-                    # Nothing on its way: closed under the same lock `steer`
-                    # takes, so a steer is either in this turn or refused.
-                    session.accepting = False
-                    break
-            grace = STEER_GRACE_S
+                session.accepting = False
+                pending = any(g == generation for g in session.steering.values())
+            if not pending:
+                break
+            hold_began = loop.time()
+            hold_quiet = hold_began + STEER_QUIET_S
         with session.mutex:
             session.accepting = False
-            session.steering.clear()
+            if not session.prompt_echo:
+                session.steering.clear()           # nothing to recognise them by later
         if held is not None:
             events.put(held)
 
-    async def _response(
-        self, session: _Session, events: queue.Queue, grace: float | None
-    ) -> tuple[str, Event | None]:
-        """One CLI response, up to and including its result frame.
+    async def _stop_if_interrupted(self, session: _Session) -> None:
+        """A CLI turn has just begun after the owner pressed stop (a steer the
+        CLI held, or the message itself queued behind a leftover). Stop means
+        stop: that turn is interrupted too, and read to its end."""
+        if session.interrupted:
+            with contextlib.suppress(Exception):
+                await session.client.interrupt()
 
-        -> ("result", the held TURN_FINISHED), ("ended", None) when the stream
-        stopped without one, or ("silent", None) when `grace` seconds passed
-        with no fresh turn starting. Only the wait for a fresh turn is timed,
-        and it is timed on our own queue — never by cancelling a read the SDK
-        is in the middle of.
-        """
-        stream = session.client.receive_response()
-        if grace is None:
-            async for msg in stream:
-                finished = self._take(session, events, msg)
-                if finished is not None:
-                    return "result", finished
-            return "ended", None
-        inbox: asyncio.Queue = asyncio.Queue()
-        end = object()
+    def _pump(self, session: _Session) -> "_Pump":
+        """The session's reader of its client's stream (on the session's loop)."""
+        pump = session.pump
+        if pump is None or pump.ended or pump.client is not session.client:
+            pump = _Pump(session.client)
+            session.pump = pump
+        return pump
 
-        async def pump() -> None:
-            try:
-                async for msg in stream:
-                    inbox.put_nowait(msg)
-            except Exception as exc:  # noqa: BLE001 — re-raised by the reader
-                inbox.put_nowait(_Raised(exc))
-            finally:
-                inbox.put_nowait(end)
-
-        task = asyncio.ensure_future(pump())
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + grace
-        started = False
-        try:
-            while True:
-                # Timed until a fresh turn has visibly started: a stray
-                # message (a rate-limit event, a notification) is no turn,
-                # and waiting on it for a result would hang the turn.
-                timeout = None if started else max(0.0, deadline - loop.time())
-                try:
-                    item = await asyncio.wait_for(inbox.get(), timeout)
-                except asyncio.TimeoutError:
-                    return "silent", None
-                if item is end:
-                    return "ended", None
-                if isinstance(item, _Raised):
-                    raise item.exc
-                if not started and self._starts_turn(session, item):
-                    started = True
-                    if session.interrupted:
-                        # The owner stopped the turn while a steer was still
-                        # queued in the CLI, and the CLI started a fresh turn
-                        # for it. Stop means stop: that turn is interrupted
-                        # too, and read to its end.
-                        with contextlib.suppress(Exception):
-                            await session.client.interrupt()
-                finished = self._take(session, events, item)
-                if finished is not None:
-                    return "result", finished
-        finally:
-            if not task.done():
-                task.cancel()
-
-    @staticmethod
-    def _starts_turn(session: _Session, msg: Any) -> bool:
-        """Is `msg` a sign that the CLI is running a turn: a steer's echo, the
-        model speaking, or a result frame?"""
-        if isinstance(msg, (AssistantMessage, StreamEvent, ResultMessage)):
-            return True
-        if isinstance(msg, SdkUserMessage) and msg.uuid:
-            with session.mutex:
-                return str(msg.uuid).lower() in session.steering
-        return False
+    def _stop_pump(self, session: _Session) -> None:
+        """Stop the reader before its client goes away (switch or close)."""
+        pump, session.pump = session.pump, None
+        if pump is not None and pump.task is not None:
+            with contextlib.suppress(RuntimeError):
+                session.loop.call_soon_threadsafe(pump.task.cancel)
 
     def _take(self, session: _Session, events: queue.Queue, msg: Any) -> Event | None:
         """Translate one message onto the turn's queue. -> the TURN_FINISHED
         of a result frame, held back for `_read` to place; else None."""
-        if isinstance(msg, SdkUserMessage) and msg.uuid:
-            with session.mutex:
-                if str(msg.uuid).lower() in session.steering:
-                    # The replay echo of a steer: it has drained into a turn.
-                    session.steering.discard(str(msg.uuid).lower())
-                    return None
         finished = None
         for event in self._translate(session, msg):
             if event.kind is EventKind.TURN_FINISHED:
@@ -1261,6 +1324,11 @@ class ClaudeProvider:
                 _await(session.loop, client.connect(), CONNECT_TIMEOUT_S)
                 return client
 
+            # The old client's reader goes with it, and so does anything the old
+            # CLI process still held: a steer queued there dies with it.
+            self._stop_pump(session)
+            with session.mutex:
+                session.steering.clear()
             try:
                 _await(session.loop, old_client.disconnect(), CONTROL_TIMEOUT_S)
             except Exception:  # noqa: BLE001 — an old client that will not go quietly still goes
@@ -1323,6 +1391,8 @@ class ClaudeProvider:
                     pending.value = Decision.DENY
                     pending.ready.set()
             session.pending.clear()
+            session.steering.clear()
+        self._stop_pump(session)
         try:
             _await(session.loop, session.client.disconnect(), CONTROL_TIMEOUT_S)
         except Exception:  # noqa: BLE001 — close must not raise
@@ -1393,27 +1463,31 @@ def _command(args: dict) -> str | None:
     return value if isinstance(value, str) else None
 
 
-def _prompt(message: UserMessage) -> Any:
-    """A v2 `UserMessage` as what `client.query()` accepts.
-
-    Text alone goes as a plain string (the SDK's own fast path); anything with
-    an image becomes a streamed content-block message.
+def _prompt(message: UserMessage, uid: str, *, later: bool = False) -> Any:
+    """A v2 `UserMessage` as what `client.query()` accepts: one stdin user
+    message carrying `uid`, which the CLI echoes back when the message starts
+    its turn (`--replay-user-messages`) — how `_read` knows which CLI turn is
+    this message's. `later` sends it at priority `later`, which the CLI never
+    folds into a turn already running (2.1.295 folds only `now`/`next`), for
+    when a late steer turn may still be ahead of it; otherwise the CLI's own
+    default applies, as before.
 
     A named skill (`/skill`) becomes a directive: Claude Code has the skill
     installed natively (`jarvis skills link`), so it is told to use it and its
     Skill tool loads it. Whether a headless `/<name>` prompt would invoke it
     directly is the S1 spike still pending; the directive works either way.
     """
-    content = _content(message)
-    if isinstance(content, str):
-        return content
+    payload = {
+        "type": "user",
+        "message": {"role": "user", "content": _content(message)},
+        "parent_tool_use_id": None,
+        "uuid": uid,
+    }
+    if later:
+        payload["priority"] = "later"
 
     async def one() -> Any:
-        yield {
-            "type": "user",
-            "message": {"role": "user", "content": content},
-            "parent_tool_use_id": None,
-        }
+        yield payload
 
     return one()
 
@@ -1450,6 +1524,57 @@ class _Raised:
     """An exception the reading pump caught, carried to the reader to raise."""
 
     exc: BaseException
+
+
+_END = object()   # the client's stream ended
+
+
+class _Pump:
+    """The one reader of a client's message stream, on the session's loop.
+
+    It reads one message per request and never ahead: the stream advances only
+    when the turn asks for the next message, exactly as iterating it directly
+    did, so nothing the SDK runs while producing a message (a hook, in a test
+    double) moves relative to the events before it. A turn that stops waiting
+    (a hold ending) leaves its request outstanding, and the next turn takes
+    the answer: a wait is timed on our own queue, never by cancelling a read
+    the SDK is in the middle of, so nothing the CLI says is lost between turns.
+    Cancelled only when its client goes away.
+    """
+
+    def __init__(self, client: Any):
+        self.client = client
+        self.requests: asyncio.Queue = asyncio.Queue()
+        self.items: asyncio.Queue = asyncio.Queue()
+        self.asked = False
+        self.ended = False
+        self.task = asyncio.ensure_future(self._run())
+
+    async def _run(self) -> None:
+        stream = self.client.receive_messages().__aiter__()
+        while True:
+            await self.requests.get()
+            try:
+                item = await stream.__anext__()
+            except StopAsyncIteration:
+                self.items.put_nowait(_END)
+                return
+            except Exception as exc:  # noqa: BLE001 — handed to the reader to raise
+                self.items.put_nowait(_Raised(exc))
+                return
+            self.items.put_nowait(item)
+
+    async def next(self, timeout: float | None) -> Any:
+        """The next message; `asyncio.TimeoutError` after `timeout` seconds,
+        with the request left standing for whoever asks next."""
+        if not self.asked:
+            self.requests.put_nowait(None)
+            self.asked = True
+        item = await asyncio.wait_for(self.items.get(), timeout)
+        self.asked = False
+        if item is _END or isinstance(item, _Raised):
+            self.ended = True
+        return item
 
 
 def _delta_text(event: Any) -> str:

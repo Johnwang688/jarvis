@@ -158,16 +158,33 @@ provider's next safe point — never inside a tool batch, never as the answer
 to anything the turn waits on — or raises `SteerRefused(reason,
 fallback="queue"|"interrupt")`. `undelivered(h)` hands back steers taken but
 never delivered (the fast path's final answer came first). Each provider
-uses its CLI's own mechanism: **Claude** writes a stdin user message with a
-uuid and `priority: "next"` (Claude Code folds it in at its next boundary,
-"The user sent a new message while you were working"; the CLI's
-`--replay-user-messages` echo tells the provider it drained, and a steer the
-CLI ran as a fresh turn after the result is read inside the same turn, so
-nothing shifts the next send by one); **Codex** sends `turn/steer
-{threadId, input, expectedTurnId}` (in both the 0.153.4 and 0.161.0
-schemas), answered on the turn loop's thread, a late refusal ignored, and
-"method not found" means the interrupt fallback; the **fast path** appends
-`[owner steering] …` at v1's next step boundary (invariant 3). A second
+uses its CLI's own mechanism:
+
+- **Claude** writes a stdin user message with a uuid and `priority: "next"`
+  (Claude Code 2.1.295 folds `now`/`next` messages in at its next boundary,
+  "The user sent a new message while you were working", and never `later`
+  ones). It does so only once the turn's own CLI turn has begun, so a steer
+  never reaches stdin ahead of the message it steers. Every turn message
+  carries a uuid too, and `--replay-user-messages` echoes each message as it
+  starts a turn, so the reader knows whose every CLI turn is: a steer the CLI
+  ran as a fresh turn after the result is read inside the same turn; one
+  whose turn starts later than the hold (STEER_QUIET_S of silence, any frame
+  extending it, STEER_HOLD_MAX_S in all) is remembered on the session and
+  absorbed by the next send, which goes in at `later` so it cannot be folded
+  into that late turn. Nothing shifts the next send by one (review of PR #22:
+  it used to, for good). One pull-based reader per client, never cancelled
+  mid-read, keeps anything the CLI says between turns. A CLI that does not
+  echo leaves nothing to tell apart, and every unseen steer counts as folded.
+- **Codex** sends `turn/steer {threadId, input, expectedTurnId}` (in both the
+  0.153.4 and 0.161.0 schemas), answered on the turn loop's thread, a late
+  refusal ignored. "Method not found" (or an invalid request naming
+  `turn/steer`) means the interrupt fallback; 0.161.0's own steer errors queue;
+  no answer within STEER_TIMEOUT counts as delivered, logged, never requeued.
+- The **fast path** appends `[owner steering] …` at v1's next step boundary
+  (invariant 3).
+
+The daemon logs a steer before the provider has it; one the provider refuses
+waits under the same id (`steer_queued`). A second
 `send` on a busy handle is refused with a **non-fatal** error, never a fatal
 one: a fatal error makes the daemon drop and close the session, which here
 is the one still running.
@@ -1696,9 +1713,10 @@ now.)
   on an approval or a question is never steered, so a message can never read
   as its answer — the card stays until the owner answers it). A provider with
   no way to steer has its turn interrupted for the message, which runs next
-  with a note to the model. A task's threads keep refusing: their turns are
-  the runner's, and `Daemon.send` (runner, escape hatch) still answers
-  "already running", which they retry on.
+  with a note to the model. The escape hatch's result goes the same way, so
+  it is no longer lost when a chat turn happens to be running. A task's
+  threads keep refusing: their turns are the runner's, and `Daemon.send` (the
+  runner's) still answers "already running", which it retries on.
 - **Stop means stop.** The owner's interrupt drops what waits
   (`queue_cleared`), as Claude Code hands queued messages back to the input
   on Esc; the HUD puts the words it sent back in the box. A steer already in

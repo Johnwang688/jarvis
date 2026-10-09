@@ -232,23 +232,38 @@ daemon's preview.
 **A message sent while a turn runs is never a dead end (2026-10-08, design
 §5.1/§11.8/§18; free suite `tests/v2/steer_check.py`).** It used to 409, and
 the HUD's catch then dropped its hold on the still-running turn (no Stop, no
-orb interrupt). `Daemon.deliver` — the HUD's send route and Discord's
-`mirror.submit` — starts a turn, **steers** the running chat turn through the
-provider's optional `steer()` (Claude: a stdin user message with a uuid and
-`priority: "next"`, its `--replay-user-messages` echo proving it drained, and
-a steer the CLI ran as a fresh turn read inside the same turn so the next
-send is never shifted by one; Codex: `turn/steer`, in both verified schemas,
-"method not found" → interrupt fallback; fast path: `[owner steering]` at
-v1's next step boundary via `Agent.take_steering`, a missed one handed back
-by `undelivered()` and run next), or **queues** it (three, in order, one
-queue for the HUD and Discord — the mirror's O-C6 queue moved into the
-daemon). A turn waiting on an approval or a question is never steered, so a
-message can never read as its answer. The owner's Stop drops what waits
-(`queue_cleared`; stop means stop). `Daemon.send` — the runner's and the
-escape hatch's — still refuses while a turn runs, because they retry on
-"already running", and task threads still 409. A provider's own "a turn is
-already running" error is **non-fatal**: fatal makes the daemon drop and
-close the session, which there is the running one.
+orb interrupt). `Daemon.deliver` — the HUD's send route, Discord's
+`mirror.submit` and the escape hatch — starts a turn, **steers** the running
+chat turn through the provider's optional `steer()`, or **queues** it (three,
+in order, one queue for the HUD and Discord — the mirror's O-C6 queue moved
+into the daemon). Per provider:
+- **Claude:** a stdin user message with a uuid and `priority: "next"`, taken
+  only once the turn's own CLI turn has visibly begun (so it never reaches
+  stdin ahead of the message it steers). Every turn message carries a uuid
+  too, and `--replay-user-messages` echoes each as it starts a turn, so
+  `_read` knows which CLI turn is whose: a steer the CLI runs as a fresh turn
+  is read inside the turn that sent it, and one that starts too late for that
+  is absorbed by the next send — never mistaken for its answer. The session
+  remembers unseen steers across turns, and a message that may be queued
+  behind one goes in at `priority: "later"`, which 2.1.295 never folds. A
+  single pull-based reader per client is never cancelled mid-read, so
+  nothing the CLI says between turns is lost.
+- **Codex:** `turn/steer`, in both verified schemas. "Method not found" means
+  the interrupt fallback; 0.161.0's own steer errors queue; no answer in time
+  counts as delivered (logged), never requeued.
+- **Fast path:** `[owner steering]` at v1's next step boundary via
+  `Agent.take_steering`; a steer the turn never takes is handed back by
+  `undelivered()` and run next.
+
+A steer is logged before the provider has it; one the provider refuses waits
+under the same id (`steer_queued`). A turn waiting on an approval or a
+question is never steered, so a message can never read as its answer. The
+owner's Stop drops what waits (`queue_cleared`; stop means stop). `Daemon.send`
+— the task runner's — still refuses while a turn runs, because the runner
+retries on "already running", and a task's running thread still 409s
+(through `deliver` too). A provider's own "a turn is already running" error is
+**non-fatal**: fatal makes the daemon drop and close the session, which there
+is the running one.
 
 Briefs for every package, including the ones in flight, are in
 `docs/codex-briefs/`; each merged package left a `*-notes.md` beside its
@@ -464,7 +479,14 @@ jarvis/
    Consequence worth knowing: a cut point must be a `user` message, and a
    single turn contains none after the one that started it — so **inside one
    long turn, pruning is eviction and truncation only.** Compaction can only
-   fire across turns (or at an image-carrier boundary).
+   fire across turns (or at an image-carrier boundary). **Except under
+   steering** (v2's fast path, 2026-10-08): `Agent.take_steering` appends an
+   `[owner steering]` user message at a step boundary, mid-turn, and that is
+   a legal cut point, so compaction can now cut *inside* a turn. Still safe for
+   the same reason as everywhere: the steer lands only where every tool_call
+   already has its result, and `find_cut_point` walks the pending ids anyway,
+   so the cut never orphans one; `messages[1]` stays pinned. What it can cost
+   is the turn's own request being summarised while the turn still runs.
 
 2. **The assistant turn goes back verbatim.** Append `response.content` plus
    `tool_calls` unchanged. Reconstructing it loses the ids.
