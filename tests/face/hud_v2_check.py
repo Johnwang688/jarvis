@@ -93,13 +93,17 @@ def until(fn, timeout=6.0, step=0.05):
 
 
 def boot(page, mock: MockDaemon, path: str = "/"):
+    # The connection count before loading, not 0: the layout section's page
+    # connected first, and a frame emitted before this window's own `/events`
+    # opens would go to that closed page's handler.
+    before = mock.sse_connections()
     page.goto(BASE + path)
     page.wait_for_selector('[data-testid="sidebar"]')
     # The window loads projects, threads, tasks and the panels before it is
     # meaningfully alive; waiting on the sidebar's first project is the cheapest
     # signal that the first wave of calls has landed.
     until(lambda: page.locator('[data-testid="project-p1"]').count() > 0)
-    mock.await_reconnect(0)
+    mock.await_reconnect(before)
     return page
 
 
@@ -1992,7 +1996,6 @@ def main():
                 headless=True,
                 args=["--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream"],
             )
-            ctx = browser.new_context(permissions=["microphone"])
             # The owner's live daemon listens on these. Nothing this suite
             # loads may reach it: a hard-coded preview port once did, and its
             # log filled with `GET /p/p1/index.html -> 400`.
@@ -2002,6 +2005,12 @@ def main():
                 FAILURES.append(f"the HUD under test reached a live daemon port: {route.request.url}")
                 route.abort()
 
+            # Zoom, folding panes and resizing (2026-10-08) first, in a context
+            # of its own: its localStorage and its reloads stay out of the rest.
+            from tests.face.hud_v2_layout_check import layout_checks
+            layout_checks(browser, mock, BASE, check, until, (live, refuse_live), FAKE_RECOGNIZER)
+
+            ctx = browser.new_context(permissions=["microphone"])
             ctx.route(live, refuse_live)
             ctx.add_init_script(FAKE_RECOGNIZER)
             page = ctx.new_page()

@@ -67,6 +67,10 @@ export function Orb(props: {
   accent?: string | null;
   avatarUrl?: string | null;
   status?: string;
+  /** Folded into the left rail's foot while the sidebar is hidden. */
+  compact?: boolean;
+  /** The HUD zoom in percent: the canvas is drawn at that many more pixels. */
+  zoom?: number;
   onPress: () => void;
   onRelease: () => void;
 }) {
@@ -79,7 +83,8 @@ export function Orb(props: {
     if (!canvas) return;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    // Drawn at the zoom as well as the screen's density, or 160% is a blur.
+    const dpr = Math.min(window.devicePixelRatio || 1, 2) * Math.max(0.5, (props.zoom || 100) / 100);
     canvas.width = canvas.height = SIZE * dpr;
     let raf = 0;
     const t0 = performance.now();
@@ -171,10 +176,10 @@ export function Orb(props: {
     raf = requestAnimationFrame(draw);
     return () => cancelAnimationFrame(raf);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [props.avatarUrl]);
+  }, [props.avatarUrl, props.zoom]);
 
   return (
-    <div id="orbdock">
+    <div id="orbdock" className={props.compact ? "mini" : undefined}>
       <canvas
         ref={canvasRef}
         id="orb"

@@ -40,6 +40,8 @@ import { composeMovable, folderName, movedAway, type Compose } from "../lib/comp
 import { shortId, threadTooltip } from "../lib/threadmodel";
 import { projectNamesTaken, threadTitlesTaken } from "../lib/projects";
 import { InlineRename } from "./InlineRename";
+import { CollapseButton } from "./Layout";
+import { toCss } from "../lib/layout";
 
 interface ProjectMenuAt {
   projectId: string;
@@ -91,7 +93,12 @@ export function Sidebar(props: {
   onRenameThread?: (threadId: string, title: string) => Promise<Thread>;
   onArchiveThread?: (threadId: string) => Promise<unknown>;
   onOpenArchive?: () => void;
+  /** The HUD zoom in percent: a menu placed from a screen rect is placed in zoomed space. */
+  zoom?: number;
+  /** Folds the sidebar to its rail (2026-10-08). */
+  onCollapse?: () => void;
 }) {
+  const z = props.zoom ?? 100;
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [openTasks, setOpenTasks] = useState<Record<string, boolean>>({});
   const [dragging, setDragging] = useState<string | null>(null);
@@ -148,7 +155,7 @@ export function Sidebar(props: {
     e.preventDefault();
     e.stopPropagation();
     const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    setMenu({ threadId: id, taskId, x: Math.round(r.left), y: Math.round(r.bottom) });
+    setMenu({ threadId: id, taskId, x: Math.round(toCss(r.left, z)), y: Math.round(toCss(r.bottom, z)) });
   };
 
   // The project menu: same closing rules as the thread menu, plus focus goes
@@ -178,8 +185,9 @@ export function Sidebar(props: {
     const el = e.currentTarget as HTMLElement;
     pmenuOpener.current = el.querySelector?.("button.menu") || el;
     const r = el.getBoundingClientRect();
-    const x = e.type === "contextmenu" ? e.clientX : Math.round(r.left);
-    const y = e.type === "contextmenu" ? e.clientY : Math.round(r.bottom);
+    // Screen pixels in, zoomed pixels out: the menu's `left` is scaled again.
+    const x = Math.round(toCss(e.type === "contextmenu" ? e.clientX : r.left, z));
+    const y = Math.round(toCss(e.type === "contextmenu" ? e.clientY : r.bottom, z));
     setMenu(null);
     setPmenu({ projectId: id, x, y });
   };
@@ -213,9 +221,12 @@ export function Sidebar(props: {
 
   return (
     <div className="pane" id="sidebar">
-      <button type="button" id="newthread" data-testid="new-thread" onClick={props.onNewThread}>
-        <span className="plus">+</span> New thread
-      </button>
+      <div className="sidetop">
+        <button type="button" id="newthread" data-testid="new-thread" onClick={props.onNewThread}>
+          <span className="plus">+</span> New thread
+        </button>
+        {props.onCollapse ? <CollapseButton side="left" onCollapse={props.onCollapse} /> : null}
+      </div>
       <div className="barrow">
         <h2 className="bar">Projects</h2>
         <button
