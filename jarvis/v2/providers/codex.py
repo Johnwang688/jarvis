@@ -46,6 +46,7 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass, field, replace
 import json
+import logging
 import os
 from pathlib import Path
 import re
@@ -60,14 +61,27 @@ from jarvis.v2.provider import (Brief, BriefRefused, Decision, Event, EventKind,
                                PermissionCallback, SessionHandle, Usage, UserMessage)
 from ..approvals import clean_line
 from . import codex_cli, codex_config
-from .codex_rpc import RpcError, RpcProcess, RpcTimeout
+from .codex_rpc import RpcCancelled, RpcError, RpcProcess, RpcTimeout
 from .codex_usage import Accounting
 
 START_TIMEOUT = 30.0
 INTERRUPT_TIMEOUT = 10.0
+# One deadline for a whole account-metadata session, which holds `_auth_lock`
+# and so keeps every Codex turn from starting while it runs.
+METADATA_DEADLINE_S = 10.0
+MODEL_PAGE_LIMIT = 100
+MODEL_PAGE_CAP = 20
+LOG = logging.getLogger(__name__)
+# Held while a session prepares and starts, and by `send` for a whole turn.
 _auth_lock = threading.Lock()
 _state_lock = threading.Lock()
 _open_homes: set[Path] = set()
+
+
+class MetadataBusy(RuntimeError):
+    """A Codex session holds the login lock (a turn runs, or one is
+    starting): account metadata is not read now. The HUD backs off and keeps
+    its last snapshot."""
 
 
 @dataclass
@@ -298,6 +312,17 @@ class _Session:
 class CodexProvider:
     name = ProviderName.CODEX
 
+    def __init__(self) -> None:
+        # Set by `cancel_metadata` at daemon shutdown: an account-metadata
+        # app-server in flight stops at its next poll and is closed.
+        self._metadata_stop = threading.Event()
+
+    def cancel_metadata(self) -> None:
+        """Daemon shutdown: stop any account-metadata read in flight (its
+        transport polls this between messages, so it ends within ~50 ms and
+        its own `finally` closes the app-server) and refuse new ones."""
+        self._metadata_stop.set()
+
     def health(self) -> tuple[bool, str]:
         binary, reason = self._probe()
         return binary is not None, reason
@@ -331,6 +356,108 @@ class CodexProvider:
         except (OSError, subprocess.TimeoutExpired) as exc:
             return None, f"codex health failed ({type(exc).__name__})"
         return binary, f"{reason}, ChatGPT login"
+
+    def account_metadata(self, *, deadline_s: float = METADATA_DEADLINE_S) -> dict:
+        """Read the logged-in account's model catalog and quota snapshot.
+
+        A short-lived app-server, never a model turn. It prepares and talks to
+        the account under `_auth_lock`, the lock session startup takes — and
+        `send` holds that lock for a whole turn — so:
+
+        - a held lock is `MetadataBusy` at once, **before** the probe (no
+          `codex --version` / `login status` spawned behind a running turn),
+          and the caller backs off (`HUDLedger`, ~30 s);
+        - once it has the lock, the whole session has one deadline
+          (`deadline_s`, ~10 s), so a stalled app-server cannot keep a turn
+          from starting for longer than that;
+        - the lock is released whatever `close()` does;
+        - `cancel_metadata()` (daemon shutdown) ends a read in flight at the
+          transport's next poll, and refuses a new one.
+
+        The catalog and the quota are independent: either half failing is
+        `None` in the result, with the other kept; both failing raises.
+        Failures are logged by operation and error class only.
+        """
+        stop = self._metadata_stop
+        if stop.is_set():
+            raise RpcCancelled("Codex account metadata cancelled (shutting down)")
+        if _auth_lock.locked():
+            raise MetadataBusy("a Codex session holds the login lock")
+        binary, reason = self._probe()
+        if binary is None:
+            raise BriefRefused(reason)
+        if stop.is_set():
+            raise RpcCancelled("Codex account metadata cancelled (shutting down)")
+        if not _auth_lock.acquire(blocking=False):
+            raise MetadataBusy("a Codex session holds the login lock")
+        try:
+            rpc = None
+            try:
+                deadline = time.monotonic() + deadline_s
+                argv, env, home = codex_config.prepare_metadata(binary)
+                rpc = RpcProcess(argv, cwd=str(home), env=env, stop=stop.is_set)
+                rpc.start().initialize(deadline=deadline)
+                account_result = rpc.request("account/read", {"refreshToken": False}, deadline=deadline)
+                if not isinstance(account_result, dict):
+                    raise RpcError("Codex account response is invalid")
+                account = account_result.get("account") or {}
+                if not isinstance(account, dict):
+                    raise RpcError("Codex account response is invalid")
+                if account.get("type") != "chatgpt":
+                    raise BriefRefused("Codex requires ChatGPT authentication; API-key billing refused")
+                rows = self._metadata_half("model/list", lambda: self._model_rows(rpc, deadline))
+                rate_limits = self._metadata_half("account/rateLimits/read",
+                                                  lambda: self._rate_limits(rpc, deadline))
+                if rows is None and rate_limits is None:
+                    raise RpcError("Codex account metadata unavailable")
+                return {"models": rows, "rate_limits": rate_limits}
+            finally:
+                if rpc is not None:
+                    rpc.close()
+        finally:
+            _auth_lock.release()
+
+    @staticmethod
+    def _metadata_half(operation, read):
+        try:
+            return read()
+        except (RpcError, OSError, ValueError, TypeError) as exc:
+            LOG.warning("Codex metadata %s failed (%s)", operation, type(exc).__name__)
+            return None
+
+    @staticmethod
+    def _model_rows(rpc, deadline) -> list[dict]:
+        rows, cursor, seen = [], None, set()
+        for _ in range(MODEL_PAGE_CAP):
+            params = {"includeHidden": False, "limit": MODEL_PAGE_LIMIT}
+            if cursor is not None:
+                params["cursor"] = cursor
+            page = rpc.request("model/list", params, deadline=deadline)
+            if not isinstance(page, dict) or not isinstance(page.get("data"), list):
+                raise RpcError("Codex model catalog response is invalid")
+            if any(not isinstance(row, dict) for row in page["data"]):
+                raise RpcError("Codex model catalog contains an invalid row")
+            rows.extend(page["data"])
+            next_cursor = page.get("nextCursor")
+            if next_cursor is None:
+                break
+            # A cursor seen before would page forever: refuse it at once.
+            if not isinstance(next_cursor, str) or not next_cursor or next_cursor in seen:
+                raise RpcError("Codex model catalog pagination is invalid")
+            seen.add(next_cursor)
+            cursor = next_cursor
+        else:
+            raise RpcError("Codex model catalog exceeded the pagination limit")
+        if not rows:
+            raise RpcError("Codex model catalog is empty")
+        return rows
+
+    @staticmethod
+    def _rate_limits(rpc, deadline) -> dict:
+        rate_limits = rpc.request("account/rateLimits/read", deadline=deadline)
+        if not isinstance(rate_limits, dict):
+            raise RpcError("Codex rate-limit response is invalid")
+        return rate_limits
 
     def start(self, thread: Thread, brief: Brief, permit: PermissionCallback) -> SessionHandle:
         return self._open(thread, brief, permit, resume=False)

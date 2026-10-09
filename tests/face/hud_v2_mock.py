@@ -212,6 +212,9 @@ def _world() -> dict:
                                  "implementer": ["codex", "claude"],
                                  "reviewer": ["claude"]}},
             "states": {"claude": "available", "codex": "over_threshold", "fast": "available"},
+            # PR #20 review: saved routing that runs differently now, in words.
+            "notes": ["routing.json models.reviewer.codex: gpt-5.5 is not a codex model the "
+                         "account offers now; using the default <b>until</b> it does"],
             "decisions": [
                 {"task_id": "k1", "role": "orchestrator", "provider": "claude",
                  "reason": "project table", "at": "2026-09-15T00:00:11+00:00"},

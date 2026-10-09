@@ -229,6 +229,48 @@ reads the preview port from `/status` → `workshop_port`, and `hud_v2_check`
 aborts and fails any request to 8402/8403/8405 — it used to load the live
 daemon's preview.
 
+**The Codex model table is the account's catalog, and drift degrades — never
+breaks, never rewrites (PR #20, 2026-10-09; owner's decisions: options
+1+2+3, no union).** `router.CLI_MODELS["codex"]` is the signed-in account's
+last good `model/list` (`codex_catalog.parse`: slug ids, one capped name
+line, Codex's effort words, hidden rows dropped, vision only when
+`inputModalities` says `image`), **replaced whole**, else the built-in
+`CODEX_FALLBACK` (ladders synced to what the account advertised 2026-10-08:
+astra, both Sols and Terra reach `ultra`). It is saved atomically to
+`config.CODEX_CATALOG_PATH` and loaded by `daemon2`'s `main()` (not
+`Daemon.start`, so no test daemon reads the owner's file); a missing or
+corrupt file is the fallback. The refresh runs on a **background thread**
+from HUD reads (`/usage`, `/thread-models`), which answer from the last
+snapshot at once; one at a time, 5 min TTL (failures too), 30 s when a turn
+holds the login lock (`MetadataBusy`, checked **before** the CLI is probed —
+`send` holds `_auth_lock` for a whole turn), one 10 s deadline for the whole
+app-server session, the lock released in a nested `finally`, the catalog and
+quota halves independent, and quota reads **merged** (an empty read wipes
+nothing). **`load_routing` never raises**: a saved entry naming a model the
+table lacks runs the role's default, an effort the model lost is clamped down
+the provider's ladder, a malformed part takes its default — each with a note
+(`GET /route` → `notes`, logged once) and **routing.json is never rewritten**,
+so the owner's choice returns with the model. A project's entry and a HUD
+Codex default degrade the same way; `POST /route` builds what it writes from
+the file's well-formed parts (it repairs a bad file and keeps untouched
+entries verbatim); `/usage` reads only the allowances. **`ultra` is Codex's
+alone** (`router.CODEX_EFFORT_LADDER`; never on `models.EFFORT_LADDER`):
+refused for the fast path and Claude (`roster/ultra` on Claude too), never
+offered by the HUD for them, and a record holding it runs the model's
+default — the fast path drops it before `llm.chat`. The default effort
+stays **`high`** within the ladder (A4); Codex's advertised per-model default
+is kept only as `advertised_effort`. Re-review round (same day): the catalog
+file is **protected state** (v2 `protected_paths`, v1 `_protected_state`);
+it is loaded with `O_NOFOLLOW|O_NONBLOCK`, a regular file only and never
+read past its cap — a FIFO or a `/dev/zero` symlink planted there hung or
+crashed boot — and `main()` falls back on *any* load failure;
+`Daemon.stop` stops the ledger first (nothing saved or swapped after), then
+`CodexProvider.cancel_metadata()` ends the read in flight, then waits;
+`PATCH /projects` judges only the `routing.models` entries that changed, so a
+stale one round-trips; and `GET /route` notes a built-in default the catalog
+lacks (it still runs — there is nothing to fall back to). Tests point
+`config.CODEX_CATALOG_PATH` at a temp file and restore the table.
+
 Briefs for every package, including the ones in flight, are in
 `docs/codex-briefs/`; each merged package left a `*-notes.md` beside its
 brief with what its implementer verified and what it proposes.
@@ -322,7 +364,7 @@ effort?}`, `model: ""` resets; stored atomically in
 its own file because models.json is rewritten whole by two processes, and
 refused to every agent write tool — v2's `permissions.protected_paths` and
 v1's `files._protected_state`, one set asserted equal, which since this
-change also covers models.json, routing.json and the guild file for v1), else Claude defaults
+change also covers models.json, routing.json and the guild file for v1, and since PR #20 the saved Codex catalog), else Claude defaults
 to `claude-opus-5-5` at high and Codex to its routing default. **A HUD Codex
 default beats routing for chat threads only and never writes routing.json**;
 tasks keep routing's table. Effort defaults to `high` (or the roster's pin)
@@ -343,7 +385,7 @@ runs, writes `switch to X refused: …; still on Y`, and sends the message on
 the old model. An archived thread, or one in an archived project, cannot
 change model (409, as with rename and move). The CLI model lists are `router.CLI_MODELS`, the one table the
 router's vision filter, the chip, `routing.json`/`/route` validation and a
-project's own `routing.models` (on `POST`/`PATCH /projects`) all read. **No tool can change a thread's model or provider, or a provider's default** (asserted in
+project's own `routing.models` (on `POST`/`PATCH /projects`) all read; **its Codex half is the signed-in account's catalog** (cached at `config.CODEX_CATALOG_PATH`, loaded at start, else `CODEX_FALLBACK`), a new choice is held to it, and a saved model or effort that drifts from it degrades to the default or clamps down, with a note, and is never rewritten. **`ultra` is Codex-only** and the default effort stays `high` within the ladder (PR #20). **No tool can change a thread's model or provider, or a provider's default** (asserted in
 `tests/v2/fastpath_check.py` and `tests/models_check.py`). The picker controls take exactly `{model}`,
 `{model, effort}` (on `/models`), `{voice}`, `{muted}`, and refuse any other
 key — the HUD sent the wrong keys for weeks and every click reset itself (A6).
@@ -858,7 +900,10 @@ jarvis/
   routing.json and the Discord guild file, each by its `config` path and
   beside the allowlist — because a v1 `write_file` (a background workflow's
   included) could rewrite which model every default v2 thread runs on.
-  `tests/files_check.py` asserts the v1 and v2 sets are equal.
+  `tests/files_check.py` asserts the v1 and v2 sets are equal. **And the
+  saved Codex catalog** (`config.CODEX_CATALOG_PATH`, PR #20): daemon2
+  installs it as the Codex model table at start, so writing it would move
+  which Codex model and effort tasks and default threads run on.
 - **Desktop control is confined to an app allowlist** (2026-07-31).
   `config.DESKTOP_APPS` is the whole door: no desktop tool accepts a window
   title, handle, or executable path, only a registered app name, so the model

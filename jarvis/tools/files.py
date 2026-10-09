@@ -113,12 +113,14 @@ _NUMBER_FIELD = 6
 # package; a suite asserts the two sets are equal, so they cannot drift. The
 # no-tool guards (models_check, fastpath_check) let this one function name
 # those files — it only ever refuses them — and nothing else in the tools.
+# The saved Codex catalog joined it in PR #20: it is loaded as the Codex model
+# table at daemon start.
 def _protected_state() -> set[Path]:
     names = ("allowlist.json", "models.json", "routing.json", "discord_guild.json",
              "provider_defaults.json")
     allow = config.ALLOWLIST_PATH.expanduser()
     paths = {allow, config.MODELS_PATH.expanduser(), config.PROVIDER_DEFAULTS_PATH.expanduser(),
-             config.DISCORD_GUILD_PATH.expanduser()}
+             config.DISCORD_GUILD_PATH.expanduser(), config.CODEX_CATALOG_PATH.expanduser()}
     paths |= {allow.parent / name for name in names}
     return {p.resolve() for p in paths}
 

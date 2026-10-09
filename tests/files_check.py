@@ -226,6 +226,7 @@ def model_state_checks(tmp: Path) -> None:
 
     allow_dir = config.ALLOWLIST_PATH.parent
     targets = [config.MODELS_PATH, config.PROVIDER_DEFAULTS_PATH, config.DISCORD_GUILD_PATH,
+               config.CODEX_CATALOG_PATH,
                allow_dir / "routing.json", allow_dir / "models.json",
                allow_dir / "provider_defaults.json", allow_dir / "discord_guild.json"]
     assert len({t.resolve() for t in targets}) == len(targets), "each path must be distinct"
@@ -556,6 +557,7 @@ def main() -> int:
         config.MODELS_PATH = tmp / "models-elsewhere" / "models.json"
         config.PROVIDER_DEFAULTS_PATH = tmp / "defaults-elsewhere" / "provider_defaults.json"
         config.DISCORD_GUILD_PATH = tmp / "guild-elsewhere" / "discord_guild.json"
+        config.CODEX_CATALOG_PATH = tmp / "catalog-elsewhere" / "codex-models.json"
         config.ROUTING_PATH = tmp / "config" / "jarvis" / "routing.json"
         read_checks(tmp)
         edit_checks(tmp)

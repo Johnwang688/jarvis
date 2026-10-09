@@ -259,6 +259,17 @@ SESSIONS_DIR = Path(
 V2_DATA_DIR = Path(
     os.environ.get("JARVIS_V2_DATA", Path.home() / ".local" / "share" / "jarvis" / "v2")
 )
+# The last model catalog the signed-in Codex account offered (v2
+# `router.set_codex_models`, saved atomically on every good refresh, loaded by
+# daemon2's `main()` through `v2/codex_catalog.py`), so a restart — or a
+# Discord-only daemon no HUD ever reads — uses the account's catalog rather
+# than the built-in fallback. Account metadata, not a choice: deleting it, or
+# a corrupt file, means the fallback until the next refresh. Its own path
+# rather than one under V2_DATA_DIR, so a test points it at a temp file by name.
+CODEX_CATALOG_PATH = Path(
+    os.environ.get("JARVIS_CODEX_CATALOG",
+                   Path.home() / ".local" / "share" / "jarvis" / "codex-models.json")
+)
 
 # The Codex CLI the v2 Codex provider runs (`jarvis/v2/providers/codex_cli.py`).
 # Empty means "find it": the first `codex` on PATH that is not a Windows shim

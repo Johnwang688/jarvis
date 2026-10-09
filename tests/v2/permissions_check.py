@@ -58,6 +58,7 @@ class Sandbox:
             "V2_DATA_DIR": config.V2_DATA_DIR,
             "V2_ALWAYS_ASK": config.V2_ALWAYS_ASK,
             "DISCORD_GUILD_PATH": config.DISCORD_GUILD_PATH,
+            "CODEX_CATALOG_PATH": config.CODEX_CATALOG_PATH,
         }
         self._home = os.environ.get("HOME")
         os.environ["HOME"] = str(self.home)
@@ -67,6 +68,7 @@ class Sandbox:
         config.V2_DATA_DIR = self.root / "v2data"
         config.V2_ALWAYS_ASK = self.home / ".config" / "jarvis" / "always-ask.json"
         config.DISCORD_GUILD_PATH = self.home / ".config" / "jarvis" / "discord_guild.json"
+        config.CODEX_CATALOG_PATH = self.home / ".local" / "share" / "jarvis" / "codex-models.json"
         return self
 
     def __exit__(self, *exc):
@@ -363,6 +365,9 @@ def file_deny_checks():
             str(config.DISCORD_GUILD_PATH),
             str(config.ALLOWLIST_PATH.with_name("discord_guild.json")),
             "~/.config/jarvis/discord_guild.json",
+            # PR #20: the saved Codex catalog becomes the Codex table at start.
+            str(config.CODEX_CATALOG_PATH),
+            "~/.local/share/jarvis/codex-models.json",
             "~/.config/jarvis/allowlist.json",                # spelled with a ~
             str(repo / "jarvis" / "tools" / ".." / "rules.py"),   # spelled with a ..
             "/tmp/somewhere/.env",
@@ -411,6 +416,14 @@ def file_deny_checks():
             eq(len(asker.seen), before, f"{tool}'s guild-file refusal is never put to the owner")
         eq(permit(*bash(f"echo '{{}}' > {guild_file}"), brief), Decision.DENY,
            "a redirect onto discord_guild.json is refused")
+        # PR #20: the saved Codex catalog is loaded as the Codex table at
+        # start; planting /dev/zero or a FIFO there was one ALLOW-ed `ln`.
+        catalog = config.CODEX_CATALOG_PATH
+        for tool, args in (("Write", {"file_path": str(catalog), "content": "{}"}),
+                           ("write_file", {"path": str(catalog), "content": "{}"})):
+            eq(permit(tool, args, brief), Decision.DENY, f"{tool} must not write codex-models.json")
+        eq(permit(*bash(f"ln -sf /dev/zero {catalog}"), brief), Decision.DENY,
+           "a symlink planted at the Codex catalog is refused")
 
         # A write under a credential directory is always-ask, not a refusal.
         before = len(asker.seen)
