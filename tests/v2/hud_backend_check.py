@@ -876,8 +876,12 @@ class Backend(unittest.TestCase):
         self.assertIsNone(self.request("GET", "/usage")["providers"]["codex"]["quota"])
         gate.set()
         self.refreshed()
-        self.assertTrue(any(e["kind"] == "codex_metadata" for e in self.events_all()),
-                        "a refresh that changed something tells the HUD to re-read")
+        published = [e for e in self.events_all() if e["kind"] == "codex_metadata"]
+        self.assertTrue(published, "a refresh that changed something tells the HUD to re-read")
+        # It names no thread or task, so the sidebar's activity observer
+        # (PR #21) ignores it: no row turns busy or unread over a refresh.
+        self.assertFalse(any(e.get("thread_id") or e.get("task_id") for e in published), published)
+        self.assertEqual(self.request("GET", "/activity"), {"threads": {}, "tasks": {}})
         described = self.request("GET", "/thread-models")["providers"]["codex"]
         rows = {row["id"]: row for row in described["models"]}
         self.assertEqual(set(rows), self.ACCOUNT_IDS, "replaced whole, never a union; hidden rows dropped")

@@ -677,10 +677,10 @@ class CodexCatalog(Controls):
         root = Path(self.tmp.name)
         fifo = root / "fifo.json"
         os.mkfifo(fifo)
+        self.load_in_child(fifo)        # bounded first: a broken loader fails, not hangs
         started = time.monotonic()
         self.assertIsNone(C.load(fifo))
         self.assertLess(time.monotonic() - started, 2, "a FIFO is refused, not waited on")
-        self.load_in_child(fifo)
         zero = root / "zero.json"
         zero.symlink_to("/dev/zero")
         self.load_in_child(zero)
