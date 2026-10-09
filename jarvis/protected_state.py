@@ -28,8 +28,9 @@ told where to write by its own config — none of those is visible here.
 (Symlinks and existing hard links *are* seen: paths are resolved and
 compared by inode.)
 What it buys is that the **obvious** spellings are never auto-approved and the
-allowlist's are never put to the owner as a yes/no; command substitution was
-already ASK, so nothing hidden that way auto-runs either. The real boundary is
+allowlist's are never put to the owner as a yes/no. The insides of `$(…)`,
+backticks and process substitution are analysed as command lines of their
+own, and rules.py already makes any substitution ASK. The real boundary is
 filesystem permissions — the gate's state owned by someone the agent's process
 is not — and that is recorded as the residual gap.
 
@@ -43,6 +44,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 from dataclasses import dataclass, field
 from fnmatch import fnmatch
 from pathlib import Path
@@ -282,6 +284,32 @@ def _destination(stem: str, tokens: list[str], operands: list[str]) -> str | Non
     return operands[-1] if operands else None
 
 
+_REDIRECT_TOKEN = re.compile(r"^(\d*|&)(>>|>\||>&|>|<<<|<<-|<<|<>|<&|<)(.*)$", re.S)
+
+
+def _without_redirects(tokens: list[str]) -> list[str]:
+    """The command's own arguments, with redirections and their targets taken
+    out — they are judged by `_redirect_targets`, on the raw text.
+
+    Leaving them in was a hole (found while pinning the 2026-10-08 review): in
+    `cp /tmp/x ~/.config/jarvis/allowlist.json 2>&1` the *last* token is
+    `2>&1`, so the copier's destination rule took the allowlist for a source,
+    a read, and the line ran. `> /dev/null` did the same thing with a space.
+    """
+    out: list[str] = []
+    skip = False
+    for token in tokens:
+        if skip:
+            skip = False
+            continue
+        match = _REDIRECT_TOKEN.match(token)
+        if match:
+            skip = not match.group(3)   # `>` alone: its target is the next token
+            continue
+        out.append(token)
+    return out
+
+
 def _peel(tokens: list[str], state: _State) -> tuple[list[str], Path | None]:
     """Strip subshell punctuation and wrappers; return the real command and
     any directory `env -C` would run it in."""
@@ -360,7 +388,7 @@ def _segment(segment: str, state: _State, protected: set[Path], ids: dict,
                 state.variables.pop(name, None)
         return seen
 
-    tokens, chdir = _peel(raw, state)
+    tokens, chdir = _peel(_without_redirects(raw), state)
     if not tokens:
         return seen
     stem = rules._basename(tokens[0])
@@ -469,9 +497,64 @@ def _segment(segment: str, state: _State, protected: set[Path], ids: dict,
     return seen
 
 
+_ANSI_C = re.compile(r"\$'((?:[^'\\]|\\.)*)'")
+
+
+def _ansi_c(text: str) -> str:
+    """bash's `$'…'` quoting decoded, so `$'allow\x6cist.json'` is read as the
+    name it spells. shlex knows nothing of it and would hand back the escapes."""
+    def decode(match: re.Match) -> str:
+        try:
+            value = match.group(1).encode("latin-1", "backslashreplace").decode(
+                "unicode_escape")
+        except (UnicodeError, ValueError):
+            return match.group(0)
+        return shlex.quote(value)
+    return _ANSI_C.sub(decode, text)
+
+
+def _substitutions(text: str) -> list[str]:
+    """The command lines inside `$(…)`, `<(…)`, `>(…)` and backticks.
+
+    rules.py already makes a line with command substitution ASK, but a
+    substitution that writes the allowlist must be refused, not asked, and a
+    process substitution (`cat x > >(tee allowlist.json)`) is not substitution
+    to rules.py at all. Over-approximate on purpose: quoting is ignored, so a
+    `$(` inside single quotes is checked too — checking text that will not run
+    can only add a refusal, never remove one.
+    """
+    found: list[str] = []
+    i = 0
+    while i < len(text):
+        if text[i] in "$<>" and text[i + 1:i + 2] == "(":
+            depth, j = 1, i + 2
+            while j < len(text) and depth:
+                depth += {"(": 1, ")": -1}.get(text[j], 0)
+                j += 1
+            found.append(text[i + 2:j - 1] if depth == 0 else text[i + 2:])
+            i = i + 2
+            continue
+        if text[i] == "`" and (i == 0 or text[i - 1] != "\\"):
+            end = text.find("`", i + 1)
+            if end == -1:
+                found.append(text[i + 1:])
+                break
+            found.append(text[i + 1:end])
+            i = end + 1
+            continue
+        i += 1
+    return [f for f in found if f.strip()]
+
+
 def _analyse(command: str, state: _State, protected: set[Path], ids: dict,
              depth: int = 0) -> _Seen:
     total = _Seen()
+    command = _ansi_c(command)
+    if depth < 3:
+        for inner in _substitutions(command):
+            nested = _analyse(inner, _State(state.cwd, dict(state.variables)),
+                              protected, ids, depth + 1)
+            total.touches += nested.touches
     parts = [_segment(s, state, protected, ids, depth) for s in rules.segments(command)]
     for k, part in enumerate(parts):
         total.touches += part.touches
@@ -485,36 +568,47 @@ def _analyse(command: str, state: _State, protected: set[Path], ids: dict,
     return total
 
 
-def command_touches(command: str) -> list[Touch]:
-    """Every protected file this command line reaches, as far as can be seen."""
+def command_touches(command: str, cwd: str | Path | None = None) -> list[Touch]:
+    """Every protected file this command line reaches, as far as can be seen.
+
+    `cwd` is where the command will run. v1 runs commands in its own process,
+    so it passes nothing and the process cwd is used; a v2 worker runs in its
+    brief's folder, which is not the daemon's, and relative names have to be
+    resolved there or `echo hi > models.json` means a different file.
+    """
     if not command or not command.strip():
         return []
     protected = protected_paths()
-    try:
-        cwd: Path | None = Path.cwd()
-    except OSError:
-        cwd = None
-    return _analyse(command, _State(cwd), protected, _identities(protected)).touches
+    if cwd is None:
+        try:
+            base: Path | None = Path.cwd()
+        except OSError:
+            base = None
+    else:
+        base = Path(os.path.expanduser(str(cwd)))
+        if not base.is_absolute():
+            base = None  # a relative cwd is relative to nothing we know
+    return _analyse(command, _State(base), protected, _identities(protected)).touches
 
 
-def command_touch(command: str) -> Touch | None:
+def command_touch(command: str, cwd: str | Path | None = None) -> Touch | None:
     """The most serious protected file this line reaches, or None.
 
     Order: a certain write to the allowlist, any other certain write, then the
     uncertain ones in the same order.
     """
-    touches = command_touches(command)
+    touches = command_touches(command, cwd)
     if not touches:
         return None
     gate = gate_paths()
     return min(touches, key=lambda t: (not t.certain, t.path not in gate))
 
 
-def refused(command: str) -> Touch | None:
+def refused(command: str, cwd: str | Path | None = None) -> Touch | None:
     """The touch that makes this line unrunnable by Jarvis, or None: a write
     that provably lands on the allowlist. Everything else this module sees is
     an ASK, decided by the caller."""
-    touch = command_touch(command)
+    touch = command_touch(command, cwd)
     if touch is not None and touch.certain and touch.path in gate_paths():
         return touch
     return None

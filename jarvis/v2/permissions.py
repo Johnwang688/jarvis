@@ -245,7 +245,7 @@ def _command_of(args: dict) -> str:
     return ""
 
 
-def denied_command(command: str) -> str | None:
+def denied_command(command: str, cwd: str | None = None) -> str | None:
     """The reason this command may not run at all, or None.
 
     Two sources, both v1's and both unchanged: the never-approvable verdicts
@@ -261,14 +261,14 @@ def denied_command(command: str) -> str | None:
     name = v1_secrets.protected_in_command(command)
     if name:
         return v1_secrets.refusal(name)
-    touched = _command_writes_protected_state(command)
+    touched = _command_writes_protected_state(command, cwd)
     if touched:
         return (f"{touched} is Jarvis's own permission state; a command that "
                 "writes it would widen what runs without anyone being asked.")
     return None
 
 
-def _command_writes_protected_state(command: str) -> str | None:
+def _command_writes_protected_state(command: str, cwd: str | None = None) -> str | None:
     """The protected file this command provably writes, or None.
 
     The detector is v1's (`jarvis.protected_state.command_touch`): one copy for
@@ -284,7 +284,7 @@ def _command_writes_protected_state(command: str) -> str | None:
     path is refused above and that nothing auto-approves an unrecognised
     command.
     """
-    touch = protected_state.command_touch(command)
+    touch = protected_state.command_touch(command, cwd)
     if touch is not None and touch.certain:
         return touch.name
     return None
@@ -522,6 +522,9 @@ def build_permit(ctx: PermitContext, asker) -> PermissionCallback:
         args = dict(args or {})
         profile = brief.profile if brief is not None else PermissionProfile.AUTO
         command = _command_of(args) if tool in COMMAND_TOOLS else ""
+        # Where the command will run: the brief's folder, never the daemon's
+        # own cwd, or a relative `models.json` names the wrong file.
+        cwd = (brief.cwd or None) if brief is not None else None
 
         def finish(decision: Decision, layer: str, reason: str) -> Decision:
             log_decision(ApprovalRecord(
@@ -533,7 +536,7 @@ def build_permit(ctx: PermitContext, asker) -> PermissionCallback:
 
         # --- layer 1: never approvable, never asked of anyone --------------
         if tool in COMMAND_TOOLS and command.strip():
-            refusal = denied_command(command)
+            refusal = denied_command(command, cwd)
             if refusal:
                 return finish(Decision.DENY, L_DENY, refusal)
         if tool in FILE_TOOLS:
@@ -544,6 +547,15 @@ def build_permit(ctx: PermitContext, asker) -> PermissionCallback:
 
         # --- layer 2: the owner is asked whatever the reviewer thought -----
         match = always_ask_match(tool, args, brief, ctx.project)
+        if match is None and command.strip():
+            # A line that might write the gate's own state but is not provably
+            # a write (layer 1 took those): a copy into the gate's folder, a
+            # path behind an unset variable. Under AUTO it would otherwise go
+            # to the provider's classifier; it goes to the owner instead, in
+            # every profile.
+            touch = protected_state.command_touch(command, cwd)
+            if touch is not None:
+                match = ("gate-state", protected_state.ask_reason(touch))
         if match is not None:
             rule_id, why = match
             reason = f"always-ask rule {rule_id}" + (f": {why}" if why else "")
@@ -555,11 +567,11 @@ def build_permit(ctx: PermitContext, asker) -> PermissionCallback:
         # docstring for what an ALLOW out of this callback does and does not
         # mean.
         if getattr(asker, "human_backed", False):
-            if v1_permissions.allows(*v1_request(tool, args)):
+            if v1_permissions.allows(*v1_request(tool, args), cwd=cwd):
                 return finish(Decision.ALLOW, L_JARVIS_ALLOW,
                               "covered by the owner's persistent allowlist")
             if (command.strip() and
-                    v1_permissions.static_verdict(command).decision == rules.ALLOW):
+                    v1_permissions.static_verdict(command, cwd).decision == rules.ALLOW):
                 return finish(Decision.ALLOW, L_JARVIS_ALLOW,
                               "ordinary development command (rules ALLOW)")
 

@@ -110,10 +110,10 @@ def context(brief, project=None, task=None):
                          project=project, task=task)
 
 
-def brief_for(profile, always_ask=(), task_id=None):
+def brief_for(profile, always_ask=(), task_id=None, cwd="/tmp"):
     from jarvis.v2.model import Role
     from jarvis.v2.provider import Brief
-    return Brief(role=Role.IMPLEMENTER, cwd="/tmp", profile=profile,
+    return Brief(role=Role.IMPLEMENTER, cwd=str(cwd), profile=profile,
                  always_ask=list(always_ask), task_id=task_id)
 
 
@@ -455,6 +455,60 @@ def file_deny_checks():
                f"(layer {box.decisions[-1]['layer']})")
         eq(human(*bash("mkdir -p build"), brief_for(P.ASK)), Decision.ALLOW, "control")
         eq(box.decisions[-1]["layer"], "jarvis-allow", "an ordinary mkdir is still layer 4")
+
+        # Under AUTO the same uncertain writes reach the owner too (layer 2),
+        # not the provider's own classifier (layer 5 `reviewer`).
+        for command in ("cp /tmp/x $UNSET_DIR/models.json",
+                        "rsync -a /tmp/evil/ ~/.config/jarvis/",
+                        "echo ~/.config/jarvis/allowlist.json | xargs cp /tmp/x",
+                        "git checkout -- ~/.config/jarvis/models.json",
+                        "tar -xf /tmp/x.tar -C ~/.config/jarvis"):
+            seen = len(owner.seen)
+            human(*bash(command), brief_for(P.AUTO))
+            eq(box.decisions[-1]["layer"], "always-ask",
+               f"AUTO: an uncertain gate-state write is put to the owner: {command}")
+            eq(len(owner.seen), seen + 1, f"AUTO: and the owner is actually asked: {command}")
+        human(*bash("mkdir -p build"), brief_for(P.AUTO))
+        ok(box.decisions[-1]["layer"] != "always-ask", "AUTO control: ordinary work is not asked")
+
+        # Relative names resolve in the *brief's* folder, never the daemon's.
+        gate_dir = config.ALLOWLIST_PATH.parent
+        project_dir = box.root / "project"
+        project_dir.mkdir()
+        gate_link = box.root / "gate-link"
+        gate_link.symlink_to(gate_dir, target_is_directory=True)
+        saved_cwd = os.getcwd()
+        try:
+            for process_cwd in (gate_dir, project_dir):
+                os.chdir(process_cwd)
+                for where, expected in ((gate_dir, Decision.DENY), (gate_link, Decision.DENY),
+                                        (project_dir, None)):
+                    brief = brief_for(P.AUTO, cwd=where)
+                    got = build_permit(context(brief), Asker(Decision.ALLOW))(
+                        *bash("echo hi > models.json"), brief)
+                    if expected is Decision.DENY:
+                        eq(got, Decision.DENY,
+                           f"`echo hi > models.json` in {where.name} is refused "
+                           f"(daemon cwd {process_cwd.name})")
+                    else:
+                        ok(box.decisions[-1]["layer"] != "deny",
+                           f"`echo hi > models.json` in a project is not refused "
+                           f"(daemon cwd {process_cwd.name})")
+        finally:
+            os.chdir(saved_cwd)
+
+        # config.ROUTING_PATH outside the allowlist's folder is protected by
+        # its own setting, by both the write tools and the shell check.
+        saved_routing = config.ROUTING_PATH
+        elsewhere = box.root / "elsewhere" / "routing.json"
+        elsewhere.parent.mkdir()
+        config.ROUTING_PATH = elsewhere
+        try:
+            ok(denied_file(str(elsewhere)) is not None, "a write tool may not write ROUTING_PATH")
+            eq(_command_writes_protected_state(f"cp /tmp/x {elsewhere}"), "routing.json",
+               "nor may a shell command")
+        finally:
+            config.ROUTING_PATH = saved_routing
 
         # A write under a credential directory is always-ask, not a refusal.
         before = len(asker.seen)

@@ -827,22 +827,53 @@ jarvis/
     the effect is visible and undoable, and "restore my models.json" is a
     reasonable request. Mode "all" does answer these yes — that is the
     flag's documented meaning. In v2, *certain* writes to any of the files
-    stay DENY at layer 1 as before, and layer 4 asks `static_verdict` so an
-    uncertain one is never auto-approved there either.
+    stay DENY at layer 1 as before, and an uncertain one is **always-ask at
+    layer 2** in every profile — under AUTO it used to fall through to the
+    provider's own classifier. Layer 4 asks `static_verdict` as well.
+  - **v2 resolves relative names in the brief's folder** (`Brief.cwd`, and
+    the escape hatch's own cwd), never the daemon's: `command_touch(...,
+    cwd=)`. Without it `echo hi > models.json` meant whatever file sat
+    beside the daemon process. v1 runs commands in its own process, so it
+    uses the process cwd.
 
   What it sees: absolute, `~`, `$HOME`/`${HOME}` and line-local `D=…`
   spellings; relative names after a followed `cd`/`pushd`/`env -C`; symlinks
   (resolved) and existing hard links (by inode); wrappers, compound lines,
   `sh -c`/`bash -c`/`eval` strings (recursively); redirects glued or spaced,
   `tee`, `sed -i`, `cp`/`mv`/`install`/`rsync`/`ln`/`curl -o`/`dd of=`,
-  `cp -t DIR`, a source copied *into* the gate's folder under the file's
-  name, globs onto it, and inline interpreter source naming the full path.
-  Copy *sources* and plain readers (`cat`, `cp allowlist.json ~/backup`)
-  are reads and stay ALLOW. **It is not a boundary** — the DENY caveat in
-  rules.py applies word for word: a path assembled at run time
-  (`'allow'+'list.json'`), command substitution (already ASK), brace
-  expansion, a script or Makefile that writes it, a program told where to
-  write by its own config. The real boundary would be filesystem
+  `cp -t DIR`/`--target-directory=`/`mv -t`, `truncate`, `perl -i`, `awk
+  -i inplace`, `ex`/`vi`, `chattr`, `~user`, a source copied *into* the
+  gate's folder under the file's name, globs onto it, inline interpreter
+  source naming the full path, `$'…'` ANSI-C quoting (decoded), the insides
+  of `$(…)`, backticks and `<(…)`/`>(…)` process substitution (analysed as
+  command lines), here-docs and `exec 3>file`, and unknown wrappers
+  (`busybox`, `parallel`) by the writing word behind them. Copy *sources*
+  and plain readers (`cat`, `cp allowlist.json ~/backup`) are reads and
+  stay ALLOW.
+
+  **A bug the review round found in the detector itself, worth keeping:**
+  redirections were left among a command's arguments, so in `cp /tmp/x
+  ~/.config/jarvis/allowlist.json 2>&1` the copier's "last operand is the
+  destination" rule picked `2>&1` and read the allowlist as a *source* —
+  ALLOW, and in v2 a regression against main's cruder copy, which had
+  refused it. `> /dev/null` did the same. Redirect tokens are stripped
+  before operands are judged now. Same lesson as `_READONLY`: a rule is only
+  correct together with the shape of input it was written for, and "the
+  last argument" is not the last word on the line.
+
+  Asked rather than refused, because the write cannot be proven: `git
+  checkout`/`--work-tree` naming a gate file, `tar -x -C`/`unzip -d` into
+  its folder, `xargs` fed the path from another segment, `ln -sfn`/`mv -T`/
+  `mount --bind` onto the folder itself, a path behind an unset variable.
+
+  **It is not a boundary** — the DENY caveat in rules.py applies word for
+  word. Not seen at all: a path assembled at run time
+  (`'allow'+'list.json'`), brace expansion (`allow{list,}.json`), a script
+  or Makefile that writes it, a program told where to write by its own
+  config, `find -exec` or `xargs` whose target is computed, and an archive
+  extracted anywhere above the folder. A hard link made *outside* Jarvis is
+  seen (by inode); one created and written within a single line under an
+  unmentioned name is not. The real boundary would be filesystem
   permissions: the gate's state owned by a user the agent's process is not.
   That is the residual gap, recorded rather than pretended away.
 
@@ -853,8 +884,9 @@ jarvis/
   the gate's folder. The same sweep against v2's old detector found it had
   been *denying* ordinary work (`echo hi > models.json` in any project, any
   `sed` that read a gate file, a backup `cp`) — gone now. Against the old
-  wiring, 35 of the 39 allowlist spellings and all 14 ASK spellings in
-  `tests/rules_check.py:gate_state_checks` ran with nobody asked.
+  wiring, 35 of the first 39 allowlist spellings and all 14 ASK spellings in
+  `tests/rules_check.py:gate_state_checks` ran with nobody asked. The PR
+  body carries the full bypass table (main / first round / now, v1 and v2).
   Generalises: **protecting a file means protecting every verb that reaches
   it** — a refusal on the write tool and silence on the shell is a door
   with a lock and no wall.
@@ -1324,10 +1356,13 @@ jarvis/
   quoted metacharacters still running unattended, alongside the writing form
   of every subcommand it names. Since 2026-10-08 `gate_state_checks` owns
   **shell writes to the gate's own state**, under a throwaway HOME with an
-  allowlist entry for every stem in sight: 39 spellings of a write onto the
+  allowlist entry for every stem in sight: 68 spellings of a write onto the
   allowlist refused (allowlisted stem, mode "all", and no approver at all),
-  14 gate-state writes asked and never run on a no, and 16 ordinary
+  23 gate-state writes asked and never run on a no, and 16 ordinary
   commands — reads and backups of those same files among them — unchanged.
+  `gate_state_edge_checks` re-runs the old quoting/separator exploits as
+  verdicts (none may move but toward stricter) and pins the symlinked-folder,
+  `ROUTING_PATH`-elsewhere and explicit-`cwd` cases.
   Run after touching `rules.py`, `tools/shell.py`, `command_review.py`,
   `protected_state.py`, `permissions.gate`, or `dispatch()`.
 - `tests/permissions_check.py` — free checks for modes and the allowlist:

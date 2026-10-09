@@ -155,7 +155,7 @@ def add_allow(tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
     return entry
 
 
-def allows(tool_name: str, args: dict[str, Any]) -> bool:
+def allows(tool_name: str, args: dict[str, Any], cwd: str | None = None) -> bool:
     """True if a persistent allowlist entry covers this exact request."""
     entries = [e for e in load_allowlist() if isinstance(e, dict) and e.get("tool") == tool_name]
     if not entries:
@@ -170,7 +170,7 @@ def allows(tool_name: str, args: dict[str, Any]) -> bool:
     # A line that writes the gate's own state is never covered: an entry for
     # `cp` was a yes to copying files, not to rewriting this file's
     # neighbours. See `protected_state_verdict`.
-    if protected_state.command_touch(command) is not None:
+    if protected_state.command_touch(command, cwd) is not None:
         return False
     targets = rules.command_targets(command)
     if not targets:
@@ -189,7 +189,7 @@ def allows(tool_name: str, args: dict[str, Any]) -> bool:
     )
 
 
-def protected_state_verdict(command: str) -> rules.Verdict | None:
+def protected_state_verdict(command: str, cwd: str | None = None) -> rules.Verdict | None:
     """DENY or ASK for a line that writes the gate's own state, else None.
 
     **The hole this closes (2026-10-08).** `cp /tmp/x ~/.config/jarvis/allowlist.json`
@@ -209,7 +209,7 @@ def protected_state_verdict(command: str) -> rules.Verdict | None:
     what runs unasked, the owner can see and undo the effect, and restoring a
     backup is a legitimate request.
     """
-    touch = protected_state.command_touch(command)
+    touch = protected_state.command_touch(command, cwd)
     if touch is None:
         return None
     if touch.certain and touch.path in protected_state.gate_paths():
@@ -217,7 +217,7 @@ def protected_state_verdict(command: str) -> rules.Verdict | None:
     return rules.Verdict(rules.ASK, protected_state.ask_reason(touch))
 
 
-def static_verdict(command: str) -> rules.Verdict:
+def static_verdict(command: str, cwd: str | None = None) -> rules.Verdict:
     """rules.decide() with the gate-state check folded in, worst verdict wins.
 
     No network: the fetch-execute review is `command_verdict`'s alone. v2's
@@ -227,7 +227,7 @@ def static_verdict(command: str) -> rules.Verdict:
     verdict = rules.decide(command)
     if verdict.decision == rules.DENY:
         return verdict
-    guard = protected_state_verdict(command)
+    guard = protected_state_verdict(command, cwd)
     return guard if guard is not None else verdict
 
 
