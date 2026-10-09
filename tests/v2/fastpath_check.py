@@ -779,6 +779,17 @@ def model_checks() -> None:
     print("ok  model: default follows the global per turn, a pin does not, a change waits for the next turn")
 
 
+def guarded_text(path: Path) -> str:
+    import inspect
+    from jarvis.tools import files
+    text = path.read_text()
+    if path.resolve() == Path(files.__file__).resolve():
+        body = inspect.getsource(files._protected_state)
+        assert body in text, "files._protected_state moved; the exemption must follow it"
+        text = text.replace(body, "")
+    return text
+
+
 def no_self_switch_checks() -> None:
     """The agent has no lever on its own model or provider (decisions A1).
 
@@ -796,7 +807,9 @@ def no_self_switch_checks() -> None:
     roots = [Path(fastpath.__file__).parents[1] / "tools", Path(tools.__file__).parent]
     for root in roots:
         for path in root.rglob("*.py"):
-            text = path.read_text()
+            # `files._protected_state` names the state files only to refuse
+            # writes to them; the same exemption models_check makes.
+            text = guarded_text(path)
             for needle in ("set_thread_model", "thread_model", ".set_model(",
                            # The roster and the global default: every write.
                            "models.select(", "models.set_effort(", "models.remove(", "models.add(",

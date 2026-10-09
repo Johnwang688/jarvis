@@ -349,7 +349,9 @@ def _thread_models(w):
             effort = _default_effort(w, p, default)
         elif p in hud:
             default, source = hud[p]["model"], "hud"
-            effort = hud[p]["effort"] or _default_effort(w, p, default)
+            # No effort on routing's own Codex model is routing's effort.
+            effort = hud[p]["effort"] or (_BUILTIN[p][1] if p == "codex" and default == _BUILTIN[p][0]
+                                          else _default_effort(w, p, default))
         else:
             (default, effort), source = _BUILTIN[p], ("built-in" if p == "claude" else "routing")
         providers[p] = {

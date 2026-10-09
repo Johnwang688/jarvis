@@ -318,7 +318,9 @@ of a turn. The choice is stored on the Thread record (`model`, `effort`);
   for Codex **chat threads only**, `routing.json`'s orchestrator default;
   routing.json is never written and still decides every task role. Stored
   atomically in `~/.config/jarvis/provider_defaults.json`
-  (`config.PROVIDER_DEFAULTS_PATH`, agent-unwritable like models.json); a
+  (`config.PROVIDER_DEFAULTS_PATH`); like models.json and routing.json it is
+  refused to every agent write tool — v2's permit (`protected_paths`) and v1's
+  `write_file`/`edit_file` (`files._protected_state`, the same set); a
   stored model Jarvis no longer knows is ignored and named in `note`. A
   success publishes one `model` event `{provider, default, default_effort,
   default_source}` (the HUD re-reads `/thread-models` on it); a refusal

@@ -203,7 +203,9 @@ MODELS_PATH = Path(
 # models.json: that file is the OpenRouter roster, rewritten whole by the v1
 # face and the v2 daemon from a dataclass that knows nothing of CLI models, so
 # a key added there would be erased by the next roster edit in either process.
-# No agent may write it (`jarvis.v2.permissions.protected_paths`).
+# No agent may write it: v2 workers are refused by
+# `jarvis.v2.permissions.protected_paths`, v1's write_file/edit_file by
+# `jarvis.tools.files._protected_state` (the same set, asserted equal).
 PROVIDER_DEFAULTS_PATH = Path(
     os.environ.get(
         "JARVIS_PROVIDER_DEFAULTS",
@@ -404,7 +406,8 @@ DISCORD_API = "https://discord.com/api/v10"
 # `jarvis auth discord-guild` and read by the daemon whenever it needs it, so
 # setup takes effect without a restart. Ids only, no secret — but it decides
 # where Jarvis may create and move channels, so no agent may write it
-# (`jarvis.v2.permissions.protected_paths`).
+# (`jarvis.v2.permissions.protected_paths`, and v1's write tools through
+# `jarvis.tools.files._protected_state`).
 DISCORD_GUILD_PATH = Path(
     os.environ.get(
         "JARVIS_DISCORD_GUILD", Path.home() / ".config" / "jarvis" / "discord_guild.json"

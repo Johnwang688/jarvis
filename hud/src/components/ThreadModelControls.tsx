@@ -194,6 +194,9 @@ export function useThreadModel(state: State, dispatch: React.Dispatch<Action>, o
     reload,
     chip,
     picker,
+    /** The catalogue or a provider-default dialog is open: an open picker,
+     * for the mic's suppression and push-to-talk. */
+    overlayOpen: catalogOpen || defaultsFor !== null,
     /** The catalogue for the Model picker's "Pin a model…". */
     openRosterCatalog: () => openCatalog("roster"),
     imageNote: choice ? visionNote(models, choice) : null,

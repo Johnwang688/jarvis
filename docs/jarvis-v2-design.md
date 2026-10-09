@@ -1188,7 +1188,8 @@ providers, and dictation with an adjustable send mode.
   HUD-editable too, from the model chip's `default ▾` menu (Set as default
   per model, a `default` badge, the default's effort, "Reset to built-in
   default"). Stored in `~/.config/jarvis/provider_defaults.json`, beside
-  models.json and agent-unwritable like it. The Codex one **wins over
+  models.json and refused to agent writes like it (v2's permit and v1's
+  write tools alike). The Codex one **wins over
   routing for chat threads only** and never writes routing.json; role
   routing stays Settings', and "Reset" returns to it.
 - **Permissions default to `auto`** (D6); the project header carries the

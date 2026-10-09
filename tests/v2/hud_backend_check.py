@@ -1791,6 +1791,18 @@ class Backend(unittest.TestCase):
         self.assertIn("auto profile", self.chat("codex", status=400)["error"],
                       "a HUD default does not open a door the profile closes")
 
+    def test_routings_own_codex_model_as_default_keeps_its_effort(self):
+        """PR #15 review: Set as default on routing's own Codex model used to
+        drop a default Codex thread from xhigh to high."""
+        fakes = self.model_fakes()
+        tid = self.chat("codex")["id"]
+        self.send_and_settle(tid)
+        body = self.request("POST", "/thread-models", {"provider": "codex", "model": "gpt-6-astra"})
+        self.assertEqual((body["providers"]["codex"]["default"], body["providers"]["codex"]["default_effort"],
+                          body["providers"]["codex"]["default_source"]), ("gpt-6-astra", "xhigh", "hud"))
+        self.send_and_settle(tid)
+        self.assertEqual(fakes[P.CODEX].changes, [], "same model, same effort: nothing to switch")
+
     def test_patch_mid_turn_lands_on_the_next_turn(self):
         fakes = self.model_fakes()
         self.request("POST", "/models", {"add": "test/thinker"})

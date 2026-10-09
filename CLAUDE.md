@@ -243,7 +243,9 @@ set (the chip's `default ▾` menu → `POST /thread-models {provider, model,
 effort?}`, `model: ""` resets; stored atomically in
 `~/.config/jarvis/provider_defaults.json`, `config.PROVIDER_DEFAULTS_PATH`,
 its own file because models.json is rewritten whole by two processes, and
-agent-unwritable via `v2.permissions.protected_paths`), else Claude defaults
+refused to every agent write tool — v2's `permissions.protected_paths` and
+v1's `files._protected_state`, one set asserted equal, which since this
+change also covers models.json, routing.json and the guild file for v1), else Claude defaults
 to `claude-opus-5-5` at high and Codex to its routing default. **A HUD Codex
 default beats routing for chat threads only and never writes routing.json**;
 tasks keep routing's table. Effort defaults to `high` (or the roster's pin)
@@ -773,7 +775,13 @@ jarvis/
   **The gate's state file is not agent-writable** (same day). `write_file`
   and `edit_file` refuse `config.ALLOWLIST_PATH` by resolved path. This is
   the data half of SELF_PROTECTED, and the reason it needed its own
-  mechanism is in *Nothing froze the gate's data* below.
+  mechanism is in *Nothing froze the gate's data* below. **Widened
+  2026-10-08** (PR #15 review): `files._protected_state()` is now the set v2
+  protects — the allowlist, models.json, provider_defaults.json,
+  routing.json and the Discord guild file, each by its `config` path and
+  beside the allowlist — because a v1 `write_file` (a background workflow's
+  included) could rewrite which model every default v2 thread runs on.
+  `tests/files_check.py` asserts the v1 and v2 sets are equal.
 - **Desktop control is confined to an app allowlist** (2026-07-31).
   `config.DESKTOP_APPS` is the whole door: no desktop tool accepts a window
   title, handle, or executable path, only a registered app name, so the model

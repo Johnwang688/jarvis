@@ -103,8 +103,24 @@ _NUMBER_FIELD = 6
 #
 # Still reachable by an *approved* run_command, which is the same deliberate
 # exception SELF_PROTECTED makes: that is the owner consenting per edit.
+#
+# Widened 2026-10-08 (PR #15 review) to the set v2 already protects
+# (`jarvis.v2.permissions.protected_paths`): the model roster, the Claude and
+# Codex chat defaults, role routing and the Discord guild file decide which
+# model answers and where Jarvis may act, and a v1 `write_file` — a
+# background workflow's included — could rewrite every one of them. Built
+# here rather than imported from v2 so the v1 tools never import the daemon's
+# package; a suite asserts the two sets are equal, so they cannot drift. The
+# no-tool guards (models_check, fastpath_check) let this one function name
+# those files — it only ever refuses them — and nothing else in the tools.
 def _protected_state() -> set[Path]:
-    return {config.ALLOWLIST_PATH.expanduser().resolve()}
+    names = ("allowlist.json", "models.json", "routing.json", "discord_guild.json",
+             "provider_defaults.json")
+    allow = config.ALLOWLIST_PATH.expanduser()
+    paths = {allow, config.MODELS_PATH.expanduser(), config.PROVIDER_DEFAULTS_PATH.expanduser(),
+             config.DISCORD_GUILD_PATH.expanduser()}
+    paths |= {allow.parent / name for name in names}
+    return {p.resolve() for p in paths}
 
 
 def _self_protected(target: Path) -> bool:

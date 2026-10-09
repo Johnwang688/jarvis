@@ -381,17 +381,24 @@ export function defaultRows(tm: ThreadModels | null, provider: ProviderName): De
   }));
 }
 
-/** The effort select for the default model. "" is the model's own default
- * effort; no options when the model has no reasoning control. The value is
- * the effort stored here for that model, else "". */
+/** The effort select for the default model. "" is "no effort chosen here",
+ * labelled with what that runs at — the effective default effort, which for
+ * routing's own Codex model is routing's effort (PR #15 review), not the
+ * model's generic default. No options when the model has no reasoning
+ * control. The value is the effort stored here for that model, else "". */
 export function defaultEffortOptions(tm: ThreadModels | null, provider: ProviderName): { value: string; options: Option[] } {
+  const p = tm?.providers[provider];
   const model = defaultModel(tm, provider);
   const ladder = effortsFor(tm, provider, model);
   if (!model || !ladder || !ladder.length) return { value: "", options: [] };
-  const stored = tm?.providers[provider]?.hud_default;
+  const stored = p?.hud_default;
   const value = stored && stored.model === model && stored.effort ? stored.effort : "";
-  const own = entry(tm, provider, model)?.default_effort || defaultEffort(tm, provider, model) || DEFAULT_EFFORT;
-  const options: Option[] = [{ value: "", label: `model default · ${own}` }];
+  const routed = provider === "codex" && !!p?.builtin?.model && p.builtin.model === model;
+  const runs = value === ""
+    ? p?.default_effort || null
+    : routed ? p?.builtin?.effort || null : null;
+  const own = runs || entry(tm, provider, model)?.default_effort || defaultEffort(tm, provider, model) || DEFAULT_EFFORT;
+  const options: Option[] = [{ value: "", label: `${routed ? "routing default" : "model default"} · ${own}` }];
   for (const level of ladder) options.push({ value: level, label: level });
   return { value, options };
 }

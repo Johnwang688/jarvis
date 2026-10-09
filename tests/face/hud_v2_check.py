@@ -1842,6 +1842,36 @@ def provider_default_checks(page, mock):
     check("the OpenRouter chip does not (its default is the Model picker's)",
           until(lambda: opener.count() == 0) is True)
 
+    # The chip's dialogs are open pickers: no open mic under them (review).
+    page.locator('[data-testid="dictation-review"]').click()
+
+    def mic_uploads():
+        before = len(mock.sent("POST", "/stt"))
+        page.evaluate("""
+          const m = window.__hud.mic;
+          m.feedMs(2000, 0.001);
+          window.__hud.capture.openFollowUp();
+          m.feedMs(1600, 0.06); m.feedMs(2200, 0.0005);
+        """)
+        return until(lambda: len(mock.sent("POST", "/stt")) > before, timeout=1.0) is True
+
+    page.locator('[data-testid="model-chip-select"]').select_option("__search__")
+    page.wait_for_selector('[data-testid="catalog"]')
+    check("speech under the catalogue is not taken", not mic_uploads())
+    page.locator('[data-testid="catalog-close"]').click()
+    until(lambda: page.locator('[data-testid="catalog"]').count() == 0)
+    page.locator('[data-testid="provider-chip-select"]').select_option("claude")
+    opener.click()
+    page.wait_for_selector('[data-testid="provider-defaults"]')
+    check("nor under the provider-default dialog", not mic_uploads())
+    z = page.evaluate("getComputedStyle(document.querySelector('[data-testid=\"provider-defaults\"]')).zIndex")
+    check("and the dialog stays under the approval veil (z-index 100)", int(z) < 100, z)
+    page.locator('[data-testid="pd-close"]').click()
+    until(lambda: page.locator('[data-testid="provider-defaults"]').count() == 0)
+    check("with both closed, the same speech is taken", mic_uploads())
+    until(lambda: page.locator('[data-testid="input"]').input_value() != "", timeout=2.0)
+    page.locator('[data-testid="input"]').fill("")
+
     show("cd1")
     page.evaluate("window.__pwned = false")
     opener.click()
@@ -1929,6 +1959,16 @@ def provider_default_checks(page, mock):
     check("Codex's menu says routing is untouched",
           "Routing for tasks is unchanged" in page.locator('[data-testid="pd-now"]').inner_text()
           and "from routing" in page.locator('[data-testid="pd-now"]').inner_text())
+    check("and labels routing's model's effort as routing's",
+          page.locator('[data-testid="pd-effort"] option').first.inner_text() == "routing default · xhigh",
+          page.locator('[data-testid="pd-effort"] option').first.inner_text())
+    page.locator('[data-testid="pd-set-gpt-5.6-sol"]').click()
+    until(lambda: badge("gpt-5.6-sol"))
+    page.locator('[data-testid="pd-set-gpt-6-astra"]').click()
+    check("Set as default on routing's own model keeps routing's effort",
+          until(lambda: badge("gpt-6-astra") and "· xhigh (set here)"
+                in page.locator('[data-testid="pd-now"]').inner_text()) is True,
+          page.locator('[data-testid="pd-now"]').inner_text())
     page.locator('[data-testid="pd-set-gpt-5.6-sol"]').click()
     check("Set as default on Codex relabels the compose row",
           until(lambda: first_option() == "default · gpt-5.6-sol") is True, first_option())

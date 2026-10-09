@@ -244,6 +244,69 @@ class ThreadModel(unittest.TestCase):
         self.assertEqual([p.name for p in config.PROVIDER_DEFAULTS_PATH.parent.iterdir()
                           if p.name.startswith(".provider_defaults-")], [])
 
+    def test_a_stored_effort_that_is_not_one_is_said_not_sent(self):
+        """PR #15 review: "turbo" used to clamp to the bottom of the ladder
+        (`low`), silently, with the HUD echoing "turbo". It now reads as the
+        model's own default, and the note says why."""
+        for bad in ("turbo", 3, ["high"]):
+            config.PROVIDER_DEFAULTS_PATH.write_text(
+                json.dumps({"claude": {"model": "claude-sonnet-5-5", "effort": bad}}))
+            self.assertEqual(tm.default_choice(P.CLAUDE), ("claude-sonnet-5-5", "high"), bad)
+            claude = tm.describe()["providers"]["claude"]
+            self.assertEqual(claude["hud_default"], {"model": "claude-sonnet-5-5", "effort": None}, bad)
+            self.assertIn("is not a reasoning effort", claude["note"], bad)
+        # A real level the model lacks still clamps down, with no note.
+        config.PROVIDER_DEFAULTS_PATH.write_text(
+            json.dumps({"codex": {"model": "gpt-5.6-sol", "effort": "max"}}))
+        self.assertEqual(tm.default_choice(P.CODEX), ("gpt-5.6-sol", "xhigh"))
+        self.assertEqual(tm.describe()["providers"]["codex"]["note"], "")
+
+    def test_routings_own_codex_model_keeps_routings_effort(self):
+        """PR #15 review: "Set as default" on the model routing already names
+        dropped it from xhigh to high. No effort now means routing's effort
+        for routing's model, and the model's own default for any other."""
+        self.assertEqual(tm.default_choice(P.CODEX), ("gpt-6-astra", "xhigh"))
+        tm.set_provider_default("codex", "gpt-6-astra")
+        self.assertEqual(tm.default_choice(P.CODEX), ("gpt-6-astra", "xhigh"))
+        self.assertEqual(tm.describe()["providers"]["codex"]["default_effort"], "xhigh")
+        tm.set_provider_default("codex", "gpt-6-astra", "low")
+        self.assertEqual(tm.default_choice(P.CODEX), ("gpt-6-astra", "low"), "an explicit effort wins")
+        tm.set_provider_default("codex", "gpt-5.6-sol")
+        self.assertEqual(tm.default_choice(P.CODEX), ("gpt-5.6-sol", "high"), "another model: its own default")
+        # Routing moving under it moves "routing's effort" with it.
+        tm.set_provider_default("codex", "gpt-6-astra")
+        config.ROUTING_PATH.write_text(json.dumps({"models": {"orchestrator": {"codex": "gpt-6-astra/medium"}}}))
+        self.assertEqual(tm.default_choice(P.CODEX), ("gpt-6-astra", "medium"))
+        # Claude has no routing: no effort is the model's own default.
+        tm.set_provider_default("claude", "claude-opus-5-5")
+        self.assertEqual(tm.default_choice(P.CLAUDE), ("claude-opus-5-5", "high"))
+
+    def test_the_defaults_file_is_replaced_never_written_in_place(self):
+        """PR #15 review: a direct `write_text` passed every suite. A write
+        that fails before the replace leaves the old file whole and no temp
+        file behind; a successful one hands os.replace a complete file."""
+        tm.set_provider_default("claude", "claude-sonnet-5-5")
+        before = config.PROVIDER_DEFAULTS_PATH.read_bytes()
+        with patch.object(tm.os, "replace", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                tm.set_provider_default("claude", "claude-haiku-4-5")
+        self.assertEqual(config.PROVIDER_DEFAULTS_PATH.read_bytes(), before, "the old file must be intact")
+        self.assertEqual(tm.default_choice(P.CLAUDE)[0], "claude-sonnet-5-5")
+        self.assertEqual([p.name for p in config.PROVIDER_DEFAULTS_PATH.parent.iterdir()
+                          if p.name.startswith(".provider_defaults-")], [], "no temp file left behind")
+        seen = []
+        real = tm.os.replace
+
+        def spy(src, dst):
+            # At the moment of the swap the target still holds the old
+            # defaults and the source holds the whole new file.
+            seen.append((Path(dst).read_bytes(), json.loads(Path(src).read_text())))
+            return real(src, dst)
+
+        with patch.object(tm.os, "replace", side_effect=spy):
+            tm.set_provider_default("claude", "claude-haiku-4-5")
+        self.assertEqual(seen, [(before, {"claude": {"model": "claude-haiku-4-5", "effort": None}})])
+
     def test_only_owner_chat_threads_have_a_choice(self):
         self.assertTrue(tm.is_chat(Thread("abcdef01", "p", Role.CHAT, P.FAST)))
         self.assertFalse(tm.is_chat(Thread("abcdef01", "p", Role.CHAT, P.FAST, task_id="12345678")))

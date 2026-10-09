@@ -183,11 +183,22 @@ def default_choice(provider: ProviderName) -> tuple[str | None, str | None]:
 
 
 def _choice(provider: ProviderName, chosen) -> tuple[str | None, str | None]:
-    if chosen is not None:
-        model, effort = chosen
-        return model, (clamp_effort(provider, model, effort) if effort
-                       else default_effort(provider, model))
-    return builtin_choice(provider)
+    if chosen is None:
+        return builtin_choice(provider)
+    model, effort = chosen
+    if effort:
+        return model, clamp_effort(provider, model, effort)
+    if provider == ProviderName.CODEX:
+        # "No effort" on the model routing already names means routing's
+        # effort for it: setting routing's own model as the default must not
+        # quietly drop it from xhigh to high (PR #15 review).
+        try:
+            routed, routed_effort = builtin_choice(provider)
+        except Exception:
+            routed, routed_effort = None, None
+        if routed == model:
+            return model, routed_effort
+    return model, default_effort(provider, model)
 
 
 def default_source(provider: ProviderName) -> str:
@@ -225,14 +236,35 @@ def _read_defaults() -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
-def _stored(provider: ProviderName) -> tuple[str, str | None] | None:
+def _stored_raw(provider: ProviderName) -> tuple[str, Any] | None:
+    """The stored (model, effort) exactly as the file has them."""
     entry = _read_defaults().get(ProviderName(provider).value)
     if not isinstance(entry, dict):
         return None
-    model, effort = entry.get("model"), entry.get("effort")
+    model = entry.get("model")
     if not isinstance(model, str) or not model:
         return None
-    return model, (effort.strip().lower() or None) if isinstance(effort, str) else None
+    return model, entry.get("effort")
+
+
+def _bad_effort(effort: Any) -> bool:
+    """A stored effort that is not a reasoning effort at all ("turbo", 3)."""
+    if effort is None or (isinstance(effort, str) and not effort.strip()):
+        return False
+    return not isinstance(effort, str) or effort.strip().lower() not in models.EFFORT_LADDER
+
+
+def _stored(provider: ProviderName) -> tuple[str, str | None] | None:
+    """The stored default, its effort sanitized: one that is not a reasoning
+    effort is read as None (the model's own default), never handed to the
+    clamp — which would map an unknown word to the bottom of the ladder."""
+    raw = _stored_raw(provider)
+    if raw is None:
+        return None
+    model, effort = raw
+    if _bad_effort(effort) or not isinstance(effort, str):
+        return model, None
+    return model, effort.strip().lower() or None
 
 
 def hud_default(provider: ProviderName) -> tuple[str, str | None] | None:
@@ -323,15 +355,22 @@ def set_provider_default(provider: Any, model: Any, effort: Any = None) -> tuple
 
 
 def _stale_note(provider: ProviderName) -> str:
-    """A stored default naming a model Jarvis no longer knows: said, not sent."""
+    """A stored default naming a model Jarvis no longer knows, or an effort
+    that is not one: said, not sent."""
     if provider not in SETTABLE:
         return ""
-    stored = _stored(provider)
-    if stored is None or stored[0] in _cli(provider):
+    raw = _stored_raw(provider)
+    if raw is None:
         return ""
-    fallback = "built-in default" if provider == ProviderName.CLAUDE else "routing default"
-    return (f"the HUD default {stored[0]} is not a {LABELS[provider]} model Jarvis knows "
-            f"any more; using the {fallback}")
+    model, effort = raw
+    if model not in _cli(provider):
+        fallback = "built-in default" if provider == ProviderName.CLAUDE else "routing default"
+        return (f"the HUD default {model} is not a {LABELS[provider]} model Jarvis knows "
+                f"any more; using the {fallback}")
+    if _bad_effort(effort):
+        return (f"the HUD default's effort {effort!r} is not a reasoning effort; "
+                f"{model} runs at its default effort")
+    return ""
 
 
 def clamp_effort(provider: ProviderName, model: str, wanted: str) -> str | None:

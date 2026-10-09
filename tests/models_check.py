@@ -338,6 +338,21 @@ ROSTER_WRITES = ("models.select(", "models.set_effort(", "models.remove(", "mode
                  "provider_defaults", "/thread-models")
 
 
+def guarded_text(path: Path) -> str:
+    """A tool file's source as the no-tool guards read it. One exemption:
+    `files._protected_state` names the roster, the chat defaults and routing
+    in order to *refuse* writes to them (PR #15 review), so its body is left
+    out; anything else in the tools that names them still fails."""
+    import inspect
+    from jarvis.tools import files
+    text = path.read_text(encoding="utf-8")
+    if path.resolve() == Path(files.__file__).resolve():
+        body = inspect.getsource(files._protected_state)
+        assert body in text, "files._protected_state moved; the exemption must follow it"
+        text = text.replace(body, "")
+    return text
+
+
 def no_tool_checks() -> None:
     """The agent has no tool for the model he thinks with (2026-08-22), and
     that now covers the roster too: unpinning the model a turn runs on, or
@@ -349,7 +364,7 @@ def no_tool_checks() -> None:
     roots = [Path(tools.__file__).parent, Path(tools.__file__).parents[1] / "v2" / "tools"]
     for root in roots:
         for path in sorted(root.rglob("*.py")):
-            text = path.read_text(encoding="utf-8")
+            text = guarded_text(path)
             for needle in ROSTER_WRITES:
                 assert needle not in text, f"{path} reaches {needle}"
     print("ok  guard: no tool can change the roster, the default, an effort pin, "

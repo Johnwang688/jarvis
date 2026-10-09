@@ -345,6 +345,30 @@ describe("a provider's default, set from the chip (2026-10-08)", () => {
     expect(defaultEffortOptions(haiku, "claude").options).toEqual([]);
   });
 
+  it("labels routing's own Codex model with routing's effort, not the generic default", () => {
+    // Following routing: "" runs at routing's xhigh.
+    expect(defaultEffortOptions(SET, "codex").options[0].label).toBe("routing default · xhigh");
+    const codex = (over: object): ThreadModels => ({ ...SET, providers: { ...SET.providers,
+      codex: { ...SET.providers.codex!, models: [
+        { id: "gpt-6-astra", efforts: ["low", "medium", "high", "xhigh"], default_effort: "high" },
+        { id: "gpt-5.6-sol", efforts: ["low", "medium", "high", "xhigh"], default_effort: "high" },
+      ], ...over } } });
+    // Set as default on routing's model, no effort: still xhigh, said as such.
+    const same = codex({ default_source: "hud", default_effort: "xhigh",
+                         hud_default: { model: "gpt-6-astra", effort: null } });
+    expect(defaultEffortOptions(same, "codex")).toEqual({ value: "", options: expect.any(Array) });
+    expect(defaultEffortOptions(same, "codex").options[0].label).toBe("routing default · xhigh");
+    // An explicit effort on it: "" still means routing's effort.
+    const low = codex({ default_source: "hud", default_effort: "low",
+                        hud_default: { model: "gpt-6-astra", effort: "low" } });
+    expect(defaultEffortOptions(low, "codex").value).toBe("low");
+    expect(defaultEffortOptions(low, "codex").options[0].label).toBe("routing default · xhigh");
+    // Another model: its own default.
+    const sol = codex({ default: "gpt-5.6-sol", default_source: "hud", default_effort: "high",
+                        hud_default: { model: "gpt-5.6-sol", effort: null } });
+    expect(defaultEffortOptions(sol, "codex").options[0].label).toBe("model default · high");
+  });
+
   it("sends exactly the keys the route takes", () => {
     expect(defaultBody("claude", "claude-sonnet-5-5", "")).toEqual({ provider: "claude", model: "claude-sonnet-5-5" });
     expect(defaultBody("claude", "claude-sonnet-5-5", "low"))
