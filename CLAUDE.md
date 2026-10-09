@@ -245,12 +245,17 @@ into the daemon). Per provider:
   is read inside the turn that sent it, and one that starts too late for that
   is absorbed by the next send — never mistaken for its answer. The session
   remembers unseen steers across turns, and a message that may be queued
-  behind one goes in at `priority: "later"`, which 2.1.295 never folds. A
-  single pull-based reader per client is never cancelled mid-read, so
-  nothing the CLI says between turns is lost.
+  behind one goes in at `priority: "later"`, which 2.1.295 never folds. Once
+  the CLI is known to echo, a CLI turn nobody sent (a background notice)
+  before a message's own echo is never its answer, and a stopped turn's steer
+  whose CLI turn starts late is interrupted when read, its words dropped
+  (round 2; it still goes through `permit` in the gap, so a card can appear
+  on an idle-looking thread). A single pull-based reader per client is never
+  cancelled mid-read, so nothing the CLI says between turns is lost.
 - **Codex:** `turn/steer`, in both verified schemas. "Method not found" means
   the interrupt fallback; 0.161.0's own steer errors queue; no answer in time
-  counts as delivered (logged), never requeued.
+  counts as delivered (logged), never requeued — and still unanswered at the
+  turn's end, the log says it may not have reached the model.
 - **Fast path:** `[owner steering]` at v1's next step boundary via
   `Agent.take_steering`; a steer the turn never takes is handed back by
   `undelivered()` and run next.
@@ -258,7 +263,9 @@ into the daemon). Per provider:
 A steer is logged before the provider has it; one the provider refuses waits
 under the same id (`steer_queued`). A turn waiting on an approval or a
 question is never steered, so a message can never read as its answer. The
-owner's Stop drops what waits (`queue_cleared`; stop means stop). `Daemon.send`
+owner's Stop drops what waits (`queue_cleared`; stop means stop). A
+`turn_finished` with `next` (messages about to run) keeps the HUD on the
+thread: no idle flash, no follow-up mic window. `Daemon.send`
 — the task runner's — still refuses while a turn runs, because the runner
 retries on "already running", and a task's running thread still 409s
 (through `deliver` too). A provider's own "a turn is already running" error is

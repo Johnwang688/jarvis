@@ -1932,6 +1932,67 @@ def late_steer_checks() -> None:
         eq(text_of(third), ["answer to third"], "turn 3: its own answer — no lasting off-by-one")
         provider.close(handle)
 
+    unsent_turn_checks()
+    stopped_late_steer_checks()
+
+
+def unsent_turn_checks() -> None:
+    """Review of PR #22, round 2, finding 1: a CLI turn nobody sent (a
+    background task's notice) between two sends. Once the CLI is known to
+    echo, an unechoed turn before a message's own echo is not that message's:
+    it used to be taken as the answer, and every later send read the one
+    before it."""
+    provider = claude.ClaudeProvider()
+    with steer_fake([PromptEcho(), assistant("one"), result_message(),
+                     assistant("background notice"), result_message()]):
+        handle = provider.start(thread(), brief(), allow)
+        client = FakeClient.instances[0]
+        eq(text_of(drain(provider, handle, "one")), ["one"], "unsent turn: the first send's own answer")
+        client.script.extend([PromptEcho(), assistant("two"), result_message()])
+        second = drain(provider, handle, "two")
+        eq(text_of(second)[-1:], ["two"], "unsent turn: the next send ends on its own answer")
+        eq(kinds(second).count("turn_finished"), 1, "unsent turn: and finishes once")
+        client.script.extend([PromptEcho(), assistant("three"), result_message()])
+        eq(text_of(drain(provider, handle, "three")), ["three"],
+           "unsent turn: the send after it is aligned — no lasting off-by-one")
+        provider.close(handle)
+
+
+def stopped_late_steer_checks() -> None:
+    """Review of PR #22, round 2, finding 2: the owner steers, then stops, and
+    the steer's fresh CLI turn starts only after the hold. Stop means stop:
+    when the next send reads that late turn, it is interrupted and its words
+    never reach the owner. It used to run to the end and be shown as part of
+    the next answer."""
+    provider = claude.ClaudeProvider()
+    gate, late = threading.Event(), threading.Event()
+    with timings(STEER_QUIET_S=0.2), \
+            steer_fake([PromptEcho(), Pause(gate),
+                        result_message(terminal_reason="aborted_streaming"),
+                        Pause(late), Echo(), assistant("the stopped steer ran anyway"),
+                        result_message()]):
+        handle = provider.start(thread(), brief(), allow)
+        client = FakeClient.instances[0]
+        stream = provider.send(handle, UserMessage(text="go"))
+        next(stream)
+        accepting(handle)
+        provider.steer(handle, UserMessage(text="a steer the owner then stopped"))
+        provider.interrupt(handle)
+        gate.set()
+        first = list(stream)
+        eq(first[-1].data["stop"], "interrupted", "stopped steer: the turn finishes as interrupted")
+        late.set()
+        time.sleep(0.2)
+        client.script.extend([PromptEcho(), assistant("two"), result_message()])
+        second = drain(provider, handle, "two")
+        eq(client.interrupts, 2, "stopped steer: its late CLI turn is interrupted too")
+        eq(text_of(second), ["two"], "stopped steer: its words never reach the owner")
+        eq(kinds(second).count("turn_finished"), 1, "stopped steer: the next send finishes once")
+        eq(second[-1].data["stop"], "end", "stopped steer: and on its own result")
+        client.script.extend([PromptEcho(), assistant("three"), result_message()])
+        eq(text_of(drain(provider, handle, "three")), ["three"], "stopped steer: later sends aligned")
+        provider.close(handle)
+
 
 def main() -> int:
     # Hermetic: every client in this suite resolves to a fake executable in a

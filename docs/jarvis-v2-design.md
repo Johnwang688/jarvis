@@ -172,14 +172,19 @@ uses its CLI's own mechanism:
   extending it, STEER_HOLD_MAX_S in all) is remembered on the session and
   absorbed by the next send, which goes in at `later` so it cannot be folded
   into that late turn. Nothing shifts the next send by one (review of PR #22:
-  it used to, for good). One pull-based reader per client, never cancelled
-  mid-read, keeps anything the CLI says between turns. A CLI that does not
-  echo leaves nothing to tell apart, and every unseen steer counts as folded.
+  it used to, for good). Once the CLI is known to echo, a CLI turn nobody
+  sent (a background task's notice) before a message's own echo is read but
+  never taken as that message's answer. One pull-based reader per client,
+  never cancelled mid-read, keeps anything the CLI says between turns. A CLI
+  that does not echo leaves nothing to tell apart, and every unseen steer
+  counts as folded.
 - **Codex** sends `turn/steer {threadId, input, expectedTurnId}` (in both the
   0.153.4 and 0.161.0 schemas), answered on the turn loop's thread, a late
   refusal ignored. "Method not found" (or an invalid request naming
   `turn/steer`) means the interrupt fallback; 0.161.0's own steer errors queue;
-  no answer within STEER_TIMEOUT counts as delivered, logged, never requeued.
+  no answer within STEER_TIMEOUT counts as delivered, logged, never requeued
+  — and if the turn then ends with it still unanswered, the log says it may
+  not have reached the model.
 - The **fast path** appends `[owner steering] …` at v1's next step boundary
   (invariant 3).
 
@@ -1721,7 +1726,12 @@ now.)
   (`queue_cleared`), as Claude Code hands queued messages back to the input
   on Esc; the HUD puts the words it sent back in the box. A steer already in
   the CLI's own queue when Stop lands makes a fresh CLI turn, which Claude's
-  provider interrupts too.
+  provider interrupts too — and when that turn starts only after the stopped
+  turn has ended, the next send that reads it interrupts it and drops its
+  words (review of PR #22, round 2). Such a late turn still runs every tool
+  call through `permit`, so in that gap an approval card can appear on a
+  thread that looks idle: it is the stopped steer asking. Deny is the safe
+  answer, and the next send stops that turn.
 - **HUD.** While a turn runs in the open thread, Enter steers it: the line
   is drawn at once marked *steering* (or *queued · will run when this turn
   ends*, cleared by `queued_started`; *not sent* after
@@ -1732,7 +1742,9 @@ now.)
   words and files return to the box. An `error` event no longer ends the
   window's turn — `turn_finished` does — and a missed `turn_finished` is
   caught from the thread record's live `running`, on every SSE reconnect and
-  every 15 s while busy.
+  every 15 s while busy. A `turn_finished` carrying `next` (messages that
+  run at once) keeps the window on the thread: no idle flash, no follow-up
+  mic window.
 
 Remaining: WP13 (the long-bench comparison, the owner's call on cost), a
 native Windows worker, the R8 hook on Codex, and prompt tuning in

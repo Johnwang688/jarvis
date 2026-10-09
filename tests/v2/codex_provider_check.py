@@ -1176,32 +1176,41 @@ class Checks(unittest.TestCase):
         with ThreadPoolExecutor(1) as pool:
             running = pool.submit(self.send, h)
             self._running(h)
-            for code, text in errors:
-                with self.subTest(text=text):
-                    with self.assertRaises(SteerRefused) as refused:
-                        self.provider.steer(h, UserMessage("redirect"))
-                    self.assertEqual(refused.exception.fallback, "queue")
-                    self.assertFalse(h.native.steer_unsupported)
-            self.assertEqual(running.result(5)[-1].data, {"stop": "end"})
+            try:
+                for code, text in errors:
+                    with self.subTest(text=text):
+                        with self.assertRaises(SteerRefused) as refused:
+                            self.provider.steer(h, UserMessage("redirect"))
+                        self.assertEqual(refused.exception.fallback, "queue")
+                        self.assertFalse(h.native.steer_unsupported)
+                self.assertEqual(running.result(5)[-1].data, {"stop": "end"})
+            except BaseException:
+                # A failure must not leave the held turn (and the pool) hanging.
+                self.provider.interrupt(h)
+                raise
         self.assertEqual(len(self.brain.calls("turn/steer")), len(errors), "asked every time")
 
     def test_a_steer_codex_never_answers_is_unknown_not_requeued(self):
         """Review of PR #22, finding 3: no answer within STEER_TIMEOUT may mean
         Codex took it and answered late. Counted as delivered (logged), never
         refused — a refusal would have the daemon queue it and deliver it
-        twice."""
+        twice. Round 2: still unanswered when the turn ends, the log says it
+        may not have reached the model."""
         h = self.start("steer_silent")
         with patch.object(codex, "STEER_TIMEOUT", 0.2), ThreadPoolExecutor(1) as pool:
             running = pool.submit(self.send, h)
             self._running(h)
-            try:
-                with self.assertLogs(codex.LOG, level="WARNING") as logged:
+            with self.assertLogs(codex.LOG, level="WARNING") as logged:
+                try:
                     self.assertIsNone(self.provider.steer(h, UserMessage("maybe taken")))
-            finally:
-                self.provider.interrupt(h)      # whatever happened, the held turn ends
-            self.assertIn("taken as delivered", "\n".join(logged.output))
+                finally:
+                    self.provider.interrupt(h)      # whatever happened, the held turn ends
+                events = running.result(5)
+            log = "\n".join(logged.output)
+            self.assertIn("taken as delivered", log)
+            self.assertIn("unanswered when the turn ended; it may not have reached the model", log)
             self.assertFalse(h.native.steer_unsupported)
-            self.assertEqual(running.result(5)[-1].data, {"stop": "interrupted"})
+            self.assertEqual(events[-1].data, {"stop": "interrupted"})
         self.assertEqual(len(self.brain.calls("turn/steer")), 1)
 
     def test_a_late_steer_refusal_never_fails_the_next_turn(self):

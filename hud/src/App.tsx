@@ -413,6 +413,11 @@ export default function App() {
             });
           break;
         case "turn_finished":
+          // A message waits behind this turn (`next`) and runs as the thread's
+          // next turn at once: the window stays on it — no flash of idle, no
+          // follow-up mic window over a turn about to start. Its own
+          // `turn_finished` (or the 15 s reconcile) frees the window.
+          if (ours && data.next) break;
           if (ours) {
             dispatch({ type: "patch", patch: { busy: false, turnThreadId: null, orb: "idle", status: "" } });
             // Only this window's own turn opens the follow-up window. A Discord

@@ -348,6 +348,29 @@ def steer_checks(page, mock):
     check("a queued message says it will run when this turn ends",
           bool(until(lambda: "queued · will run when this turn ends" in queued.inner_text())),
           queued.inner_text())
+    # The turn ends with that message waiting (`next`): it runs at once, so
+    # the window stays on the thread — no idle flash, no follow-up mic window
+    # (review of PR #22, round 2).
+    # Counted at the call: the fake mic's own tone can open and close the
+    # window by itself, so `conversing()` would not say who opened it.
+    page.evaluate("""() => {
+      const c = window.__hud.capture;
+      if (!c.__counted) {
+        const open = c.openFollowUp.bind(c);
+        window.__followUps = 0;
+        c.openFollowUp = () => { window.__followUps++; return open(); };
+        c.__counted = true;
+      }
+    }""")
+    page.evaluate("window.__hud.capture.closeFollowUp()")
+    follow_ups = page.evaluate("window.__followUps")
+    mock.emit("turn_finished", {"stop": "end", "next": 1}, thread_id="t1")
+    page.wait_for_timeout(300)
+    st = state()
+    check("a turn ending with a message waiting keeps the window on the thread",
+          st["busy"] and st["turnThreadId"] == "t1" and stop.count() == 1, str(st["busy"]))
+    check("and opens no follow-up mic window",
+          page.evaluate("window.__followUps") == follow_ups)
     mock.emit("queued_started", {"message_id": f"msg-{w['sends']}", "turn_id": "turn-2"},
               thread_id="t1", turn_id="turn-2")
     check("and stops saying so once it runs",
@@ -410,6 +433,8 @@ def steer_checks(page, mock):
     box.fill("")
     mock.emit("turn_finished", {"stop": "interrupted"}, thread_id="t1")
     check("the turn's end frees the window", bool(until(lambda: state()["busy"] is False)))
+    check("and opens the follow-up mic window (nothing waits behind it)",
+          page.evaluate("window.__followUps") > follow_ups)
     check("and the Stop button goes", bool(until(lambda: stop.count() == 0)))
     w.pop("send_status", None)
 

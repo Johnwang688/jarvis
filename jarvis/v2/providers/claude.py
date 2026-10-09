@@ -529,6 +529,10 @@ class _Session:
     generation: int = 0
     prompt_echo: bool = False
     pump: Any = None
+    # Unseen steers of a turn the owner stopped. If the CLI still runs one
+    # as a late turn, it is interrupted and its words dropped (review of PR
+    # #22, round 2): stop means stop, even across sends.
+    stopped: set = field(default_factory=set)
 
     def emit(self, kind: EventKind, **data: Any) -> None:
         """Put an event on the turn's queue. Silent outside a turn by design.
@@ -1002,7 +1006,12 @@ class ClaudeProvider:
         - **a leftover**: a steer an earlier turn wrote whose fresh turn
           started too late for that turn to see. It is read here, its words
           reach the owner, and its result does not end this turn — so a late
-          steer never shifts every later send by one (review of PR #22).
+          steer never shifts every later send by one (review of PR #22). A
+          leftover of a turn the owner stopped is interrupted as it starts
+          and its words dropped: stop means stop (round 2);
+        - **nobody's**: once this CLI is known to echo, a CLI turn with no
+          echo before the message's own (a background task's notice) is read,
+          but its result is never taken for this message's (round 2).
 
         When this turn's result arrives with one of its steers not yet seen to
         drain, the turn holds while the CLI shows any sign of life, for its
@@ -1058,6 +1067,7 @@ class ClaudeProvider:
             uid = str(msg.uuid).lower() if isinstance(msg, SdkUserMessage) and msg.uuid else None
             if uid is not None and uid == prompt_uid:
                 started, owner, candidate, candidate_until = True, "prompt", None, None
+                hold_began = None
                 with session.mutex:
                     session.prompt_echo = True
                     # Every `next` steer drains before a message that starts a
@@ -1065,6 +1075,7 @@ class ClaudeProvider:
                     for other, written in list(session.steering.items()):
                         if written < generation:
                             del session.steering[other]
+                            session.stopped.discard(other)
                     session.accepting = True
                 await self._stop_if_interrupted(session)
                 continue
@@ -1072,28 +1083,61 @@ class ClaudeProvider:
                 with session.mutex:
                     written = session.steering.pop(uid, None)
                 if written is not None:
+                    with session.mutex:
+                        was_stopped = uid in session.stopped
+                        session.stopped.discard(uid)
                     if owner is None:
                         # Not folded: the steer starts a CLI turn of its own.
                         owner = "steer" if written == generation else "leftover"
                         hold_began = None
-                        await self._stop_if_interrupted(session)
+                        if was_stopped:
+                            # The owner stopped the turn that sent it, and the
+                            # CLI ran it late anyway: stopped again, unheard.
+                            owner = "stopped"
+                            with contextlib.suppress(Exception):
+                                await session.client.interrupt()
+                        else:
+                            await self._stop_if_interrupted(session)
                     continue
             if owner is None and isinstance(msg, (AssistantMessage, StreamEvent)):
                 owner = "unknown"                  # a turn whose start was not echoed
                 hold_began = None
-                if not started and not self._leftover_possible(session, generation):
+                # Once this CLI is known to echo the message that starts a
+                # turn, an unechoed turn before this message's echo is someone
+                # else's: a background task's notice, a late steer (review of
+                # PR #22, round 2). Only a CLI that never echoes starts here.
+                if (not started and not session.prompt_echo
+                        and not self._leftover_possible(session, generation)):
                     started = True
                     with session.mutex:
                         session.accepting = True
                 await self._stop_if_interrupted(session)
+            if owner == "stopped" and not isinstance(msg, ResultMessage):
+                # A stopped steer's late turn: its words never reach the owner
+                # (what it did — a tool, its cost — still does).
+                for event in self._translate(session, msg):
+                    if event.kind not in (EventKind.TEXT, EventKind.TEXT_DELTA, EventKind.THINKING):
+                        events.put(event)
+                continue
             finished = self._take(session, events, msg)
             if finished is None:
                 continue
             ended, owner = owner, None
-            if not started:
-                if ended == "leftover":
+            if ended in ("leftover", "stopped"):
+                # An earlier turn's steer never ends this message's turn.
+                if held is None:
                     continue                       # the message's own turn is still to come
-                if self._leftover_possible(session, generation):
+                # It ran in this turn's hold: the result stays the message's,
+                # and the hold goes on while a steer of this turn is unseen.
+                with session.mutex:
+                    pending = any(g == generation for g in session.steering.values())
+                if not pending:
+                    break
+                hold_began = loop.time()
+                hold_quiet = hold_began + STEER_QUIET_S
+                continue
+            if not started:
+                if session.prompt_echo or self._leftover_possible(session, generation):
                     candidate, candidate_until = finished, loop.time() + LEFTOVER_WAIT_S
                     continue
                 started = True                     # nothing else could have run
@@ -1109,6 +1153,8 @@ class ClaudeProvider:
             session.accepting = False
             if not session.prompt_echo:
                 session.steering.clear()           # nothing to recognise them by later
+            elif session.interrupted:
+                session.stopped.update(u for u, g in session.steering.items() if g == generation)
         if held is not None:
             events.put(held)
 
@@ -1329,6 +1375,7 @@ class ClaudeProvider:
             self._stop_pump(session)
             with session.mutex:
                 session.steering.clear()
+                session.stopped.clear()
             try:
                 _await(session.loop, old_client.disconnect(), CONTROL_TIMEOUT_S)
             except Exception:  # noqa: BLE001 — an old client that will not go quietly still goes
@@ -1392,6 +1439,7 @@ class ClaudeProvider:
                     pending.ready.set()
             session.pending.clear()
             session.steering.clear()
+            session.stopped.clear()
         self._stop_pump(session)
         try:
             _await(session.loop, session.client.disconnect(), CONTROL_TIMEOUT_S)

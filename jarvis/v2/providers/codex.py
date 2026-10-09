@@ -758,6 +758,12 @@ class CodexProvider:
                 s.pending.clear()
                 for rid, waiter in s.steers.items():
                     waiter.reason = "the turn ended first"
+                    if waiter.abandoned:
+                        # Counted as delivered when its waiter gave up, and
+                        # never answered since: only the log can say so
+                        # (review of PR #22, round 2).
+                        LOG.warning("Codex steer %s was unanswered when the turn ended; "
+                                    "it may not have reached the model", rid)
                     waiter.ready.set()
                     s.stale_steers.append(rid)
                 s.steers.clear()

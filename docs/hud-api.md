@@ -650,6 +650,11 @@ runs, because the runner retries on exactly that.
 - SSE **`queued_started`** `{thread_id, project_id, turn_id, data:
   {message_id, turn_id}}` — a waiting message has become its turn (logged as
   a `queued_started` record; the turn's own events follow under `turn_id`).
+- SSE **`turn_finished`** carries `"next": n` when n owner messages run as
+  the thread's next turns at once (queued, or steers the turn never took;
+  absent when none, or after a Stop). The HUD stays on the thread — busy,
+  Stop shown, no follow-up mic window — and the sidebar keeps it `working`
+  across the gap.
 - SSE **`queue_cleared`** `{thread_id, project_id, data: {reason, messages:
   [{message_id, typed, via, attachments, images}]}}` — messages that will not
   run: the owner pressed Stop (`reason: "stopped"`; stop means stop, and the

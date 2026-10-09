@@ -575,6 +575,12 @@ class QueueChecks(Harness):
             self.assertEqual(users[row["data"]["message_id"]], row["turn_id"])
         turns = [r["turn_id"] for r in self.log(thread, "turn_finished")]
         self.assertEqual(turns[1:], [r["queued_turn_id"] for r in replies])
+        # Each turn's end says how many messages run next (the HUD and the
+        # sidebar stay on the thread across the gap), on the bus and the log.
+        self.assertEqual([r["data"].get("next") for r in self.log(thread, "turn_finished")],
+                         [3, 2, 1, None])
+        self.assertEqual([e["data"].get("next") for e in self.bus("turn_finished")
+                          if e.get("thread_id") == thread.id], [3, 2, 1, None])
         marks = [m.get("mark") for m in self.get(f"/threads/{thread.id}/transcript")["messages"]
                  if m["role"] == "user"]
         self.assertEqual(marks, [None, None, None, None], "they ran: none still reads queued")
