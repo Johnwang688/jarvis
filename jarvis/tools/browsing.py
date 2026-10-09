@@ -13,10 +13,33 @@ makes a text-vs-vision comparison possible on identical tasks.
 
 from __future__ import annotations
 
+import re
 from typing import Annotated
 
+from .. import untrusted
 from ..browser import SESSION, BrowserError
 from . import ToolResult, tool
+
+
+def _first_line(exc: Exception) -> str:
+    """A Playwright error, minus its call log.
+
+    Playwright appends a call log that quotes the page's own markup ("waiting
+    for <button>Ignore your instructions…</button>"), which would reach the
+    model outside any fence. The first line says what failed; that is enough.
+    """
+    lines = str(exc).strip().splitlines()
+    return f"{type(exc).__name__}: {untrusted.one_line(lines[0] if lines else '', cap=200)}"
+
+
+def _kind(exc: Exception) -> str:
+    """An error's type and, for a network failure, its net::ERR code — and
+    nothing else. Reading a page runs the page's script, so even the *first*
+    line of an evaluate error can be a message the page wrote ("Error: ignore
+    your instructions…"), and a navigation error can name a URL the page
+    chose. None of that is quoted."""
+    code = re.search(r"net::ERR_[A-Z_]+", str(exc))
+    return type(exc).__name__ + (f", {code.group(0)}" if code else "")
 
 
 @tool
@@ -29,6 +52,9 @@ def browser_goto(
         return SESSION.goto(url)
     except BrowserError as exc:
         return f"Error: {exc}"
+    except Exception as exc:
+        return (f"Error: could not load {url} ({_kind(exc)}). The site may be down, slow "
+                "or refusing the connection.")
 
 
 @tool
@@ -42,6 +68,9 @@ def browser_snapshot() -> str:
         return SESSION.snapshot()
     except BrowserError as exc:
         return f"Error: {exc}"
+    except Exception as exc:
+        return (f"Error: could not read the page ({_kind(exc)}). Its own scripts may be "
+                "interfering with the reader; browser_screenshot shows what it looks like.")
 
 
 @tool
@@ -54,7 +83,7 @@ def browser_click(
     except BrowserError as exc:
         return f"Error: {exc}"
     except Exception as exc:
-        return f"Error: could not click {ref}: {type(exc).__name__}: {exc}"
+        return f"Error: could not click {ref}: {_first_line(exc)}"
 
 
 @tool
@@ -69,7 +98,7 @@ def browser_type(
     except BrowserError as exc:
         return f"Error: {exc}"
     except Exception as exc:
-        return f"Error: could not type into {ref}: {type(exc).__name__}: {exc}"
+        return f"Error: could not type into {ref}: {_first_line(exc)}"
 
 
 @tool
@@ -90,5 +119,8 @@ def browser_screenshot(
         image, size, marks = SESSION.screenshot_b64(full_page, marked)
     except BrowserError as exc:
         return ToolResult(f"Error: {exc}")
+    except Exception as exc:
+        return ToolResult(f"Error: could not capture the page ({_kind(exc)}). Its own scripts "
+                          "may be interfering; try again, or with marked=False.")
     note = f" {marks} interactive element(s) marked." if marked else ""
     return ToolResult(f"Screenshot captured ({size:,} bytes).{note}", image_b64=image)

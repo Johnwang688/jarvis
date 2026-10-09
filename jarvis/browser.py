@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse
 
-from . import config
+from . import config, untrusted
 
 
 class BrowserError(RuntimeError):
@@ -37,29 +37,332 @@ class BrowserError(RuntimeError):
 
 # One scan, two consumers: snapshot() renders these elements as text, and
 # screenshot_b64(marked=True) draws their refs onto the page as badges. Both
-# set the same data-jarvis-ref attribute, so a ref from either channel is
-# clickable — that is what lets a vision run work without text snapshots.
-_REF_SCAN_JS = """(max) => {
-    const out = [];
-    const sel = 'a,button,input,select,textarea,[role=button],[role=link],[role=checkbox],[role=radio],[onclick]';
-    document.querySelectorAll(sel).forEach((el, i) => {
-        if (out.length >= max) return;
-        const r = el.getBoundingClientRect();
-        if (r.width === 0 || r.height === 0) return;
-        const style = getComputedStyle(el);
-        if (style.visibility === 'hidden' || style.display === 'none') return;
-        el.setAttribute('data-jarvis-ref', 'e' + i);
-        out.push({
-            ref: 'e' + i,
-            tag: el.tagName.toLowerCase(),
-            type: el.getAttribute('type') || '',
-            text: (el.innerText || el.value || el.getAttribute('aria-label')
-                   || el.getAttribute('placeholder') || '').trim().slice(0, 80),
-            checked: el.checked === true,
-            rect: {x: r.x, y: r.y},
+# run `_SNAPSHOT_JS` — the same hidden-text judgement, the same element rules,
+# the same cap — so the two channels offer the same refs for the same page,
+# and each stamping first clears every older `data-jarvis-ref`, so a ref the
+# other channel (or an earlier page state) handed out cannot still be clicked
+# once the element it named is no longer offered.
+
+# The snapshot, minus what a person looking at the page cannot see.
+#
+# innerText already leaves out display:none and visibility:hidden — judged on
+# the *computed* style, so class rules and external stylesheets count here,
+# which fetch_page (no renderer) cannot do. What innerText keeps, and a reader
+# does not see, is text that is rendered but invisible: opacity ~0 (or
+# `filter: opacity(0)`), a near-zero font size, a clip or clip-path that leaves
+# nothing, a transform or `scale` that flattens to nothing, a (nearly) zero-size
+# box that clips its overflow, and anything no scrolling can reach: off the top
+# or the reachable left of the page (left/margin/text-indent: -9999px — the
+# text's own rectangle is measured, so every spelling of "off-screen" counts;
+# on a right-to-left page the reachable left runs negative, computed from the
+# scroll width), unless it lies inside the scroll range of a scroll container
+# that is itself in reach (a wide table in an `overflow-x:auto` wrapper, a
+# chat log scrolled to the bottom). Content pushed left of a scroller's own
+# range stays out of reach, so `left:-9999px` inside a scroller is still
+# hidden. Those text nodes are hidden for the one innerText read and put back,
+# the same node objects in the same places, in a `finally`.
+#
+# Kept on purpose, because a reader does see it: an opacity that is an
+# animation's start state (a transition on opacity, or an animation running or
+# pending — scroll reveals and load fade-ins), and aria-hidden text, which means
+# "not for assistive technology", not "invisible".
+#
+# **No page script runs before the read.** Moving a text node or inserting a
+# plain <span> fires no custom-element reaction, so the page text and every
+# label are read first and the `data-jarvis-ref` attributes (which a custom
+# element can observe) are written last. The one element that would have to
+# move — a hidden customized built-in `<select is=…>`, whose connectedCallback
+# runs on a move — fails the snapshot closed instead.
+#
+# Interactive elements follow the same rule: a hidden link or button is not
+# offered at all; a hidden form control is (custom checkboxes and file inputs
+# hide the native control under a visible label), named by its visible <label>
+# and marked "(hidden control)", never with its own page text. A visible
+# element is labelled by its visible text (a password field never by its
+# value); only one with none (an icon button) falls back to its unseen name,
+# capped. A select is set aside whole only when the select itself is hidden: a
+# `font-size:0` option inside a visible select does not take the select away.
+#
+# Bounded three ways. Scanning stops once twice the 4000-character slice of
+# *visible* text has gone by (innerText follows DOM order, so nothing later can
+# reach the slice); hidden text never spends that budget, or padding a page
+# with hidden nodes would walk a payload past the scan. Past WRAP_CAP hiding
+# places — counted per outermost hiding element, so an accessibility MathML
+# copy of one formula is one place however many tokens it has — or past
+# WRAP_NODE_CAP hidden text nodes in all, the page text is withheld outright
+# (fail closed) rather than returned unfiltered. Nodes innerText already leaves
+# out (display:none subtrees, unrendered content, visibility:hidden) are
+# neither wrapped nor counted.
+#
+# Known limits: mask-image and opaque overlays (text under another element is
+# "visible" to every property read here), a `:has()` rule that restyles an
+# element when its children change can shift the page under the wrap, and
+# `Session._submit` has no timeout. And this runs in the page's own JavaScript
+# world (Playwright's evaluate), so a page that patches the built-ins it reads
+# (getComputedStyle, innerText, getBoundingClientRect) can make hidden text
+# look visible, or make the reader throw — the throw is reported by type only
+# (tools/browsing.py), the lie is not caught.
+WRAP_CAP = 5000
+WRAP_NODE_CAP = 50_000
+
+# What may be printed into a ref line. A tag or a `type` attribute is the
+# page's to choose; only a standard HTML element name and a standard input
+# type are printed as they are.
+_HTML_TAGS = frozenset("""
+    a abbr address area article aside audio b bdi bdo blockquote body br button canvas
+    caption cite code col colgroup data datalist dd del details dfn dialog div dl dt em
+    embed fieldset figcaption figure footer form h1 h2 h3 h4 h5 h6 header hgroup hr i
+    iframe img input ins kbd label legend li main map mark menu meter nav object ol
+    optgroup option output p picture pre progress q rp rt ruby s samp search section
+    select slot small source span strong sub summary sup table tbody td textarea tfoot th
+    thead time tr u ul var video wbr svg math
+""".split())
+_INPUT_TYPES = frozenset("""
+    button checkbox color date datetime-local email file hidden image month number
+    password radio range reset search submit tel text time url week
+""".split())
+
+_JUDGE_JS = r"""
+    const se = document.scrollingElement || document.documentElement;
+    const minX = getComputedStyle(document.documentElement).direction === 'rtl'
+        ? Math.min(0, se.clientWidth - se.scrollWidth) : 0;
+    const sx = window.scrollX, sy = window.scrollY;
+    const styles = new Map();
+    const css = (e) => {
+        let s = styles.get(e);
+        if (!s) { s = getComputedStyle(e); styles.set(e, s); }
+        return s;
+    };
+    const moving = (e, cs, prop) => {
+        const props = cs.transitionProperty.split(',').map((s) => s.trim());
+        const durs = cs.transitionDuration.split(',').map(parseFloat);
+        for (let i = 0; i < props.length; i++)
+            if ((props[i] === prop || props[i] === 'all') && durs[i % durs.length] > 0) return true;
+        try {
+            return e.getAnimations().some((a) => a.playState === 'running' || a.playState === 'pending');
+        } catch (_) { return false; }
+    };
+    const faint = (e, cs) => {
+        if (parseFloat(cs.opacity) <= 0.05 && !moving(e, cs, 'opacity')) return true;
+        const m = /opacity\(([^)]*)\)/.exec(cs.filter || '');
+        if (!m || !m[1].trim()) return false;
+        const v = /%\s*$/.test(m[1]) ? parseFloat(m[1]) / 100 : parseFloat(m[1]);
+        return v <= 0.05 && !moving(e, cs, 'filter');
+    };
+    const clipRect = (cs) => {
+        if (cs.position !== 'absolute' && cs.position !== 'fixed') return false;
+        const m = /^rect\((.*)\)$/.exec(cs.clip || '');
+        if (!m) return false;
+        const n = m[1].split(/[\s,]+/).map(parseFloat);
+        return n.length === 4 && n.every(Number.isFinite)
+            && (n[1] - n[3] <= 1 || n[2] - n[0] <= 1);
+    };
+    const clipPath = (v) => {
+        if (!v || v === 'none') return false;
+        let m = /^(circle|ellipse)\(([^)]*)\)/.exec(v);
+        if (m) {
+            // circle(0), or an ellipse with either radius zero: no area.
+            const radii = m[2].split(' at ')[0].trim().split(/\s+/).slice(0, m[1] === 'circle' ? 1 : 2);
+            return radii.some((x) => x !== '' && parseFloat(x) === 0);
+        }
+        m = /^polygon\((?:\s*(?:nonzero|evenodd)\s*,)?([^)]*)\)/.exec(v);
+        if (m) {
+            const pts = m[1].split(',').map((p) => p.trim().split(/\s+/));
+            if (pts.some((p) => p.length !== 2)) return false;
+            const units = new Set(pts.flat().filter((s) => parseFloat(s) !== 0)
+                .map((s) => (s.endsWith('%') ? '%' : 'px')));
+            if (units.size > 1) return false;
+            let a = 0;
+            for (let i = 0; i < pts.length; i++) {
+                const [x1, y1] = pts[i].map(parseFloat);
+                const [x2, y2] = pts[(i + 1) % pts.length].map(parseFloat);
+                a += x1 * y2 - x2 * y1;
+            }
+            return pts.length < 3 || a === 0;
+        }
+        m = /^inset\(([^)]*)\)/.exec(v);
+        if (!m) return false;
+        let s = m[1].split(' round ')[0].trim().split(/\s+/);
+        s = s.length === 1 ? [s[0], s[0], s[0], s[0]] : s.length === 2 ? [s[0], s[1], s[0], s[1]]
+            : s.length === 3 ? [s[0], s[1], s[2], s[1]] : s.slice(0, 4);
+        if (s.some((x) => /px$/.test(x) && parseFloat(x) >= 999)) return true;
+        const pct = (x) => (parseFloat(x) === 0 ? 0 : /%$/.test(x) ? parseFloat(x) : NaN);
+        return pct(s[0]) + pct(s[2]) >= 100 || pct(s[1]) + pct(s[3]) >= 100;
+    };
+    const flat = (cs) => {
+        const m = /^matrix\(([^)]*)\)$/.exec(cs.transform || '');
+        if (m) {
+            const [a, b, c, d] = m[1].split(',').map(parseFloat);
+            if (a * d - b * c === 0) return true;
+        }
+        if (!cs.scale || cs.scale === 'none') return false;
+        const s = cs.scale.split(/\s+/).map(parseFloat);
+        return s[0] === 0 || s[s.length > 1 ? 1 : 0] === 0;
+    };
+    // Does this element hide everything inside it? Cached, and resolved
+    // top-down without recursion, so a deeply nested page cannot overflow.
+    const ruled = new Map();
+    const hides = (el) => {
+        const chain = [];
+        for (let e = el; e && e !== document.documentElement && !ruled.has(e); e = e.parentElement)
+            chain.push(e);
+        for (let i = chain.length - 1; i >= 0; i--) {
+            const e = chain[i];
+            let h = !!(e.parentElement && ruled.get(e.parentElement));
+            if (!h) {
+                const cs = css(e);
+                h = faint(e, cs) || clipRect(cs) || clipPath(cs.clipPath) || flat(cs);
+                if (!h) {
+                    const cx = /hidden|clip/.test(cs.overflowX), cy = /hidden|clip/.test(cs.overflowY);
+                    if (cx || cy) {
+                        const r = e.getBoundingClientRect();
+                        h = (cx && r.width <= 1) || (cy && r.height <= 1);
+                    }
+                }
+            }
+            ruled.set(e, h);
+        }
+        return !!ruled.get(el);
+    };
+    // The outermost element whose hiding hides `el` (one hiding place).
+    const hidingRoot = (el) => {
+        let g = el;
+        while (g.parentElement && ruled.get(g.parentElement)) g = g.parentElement;
+        return g;
+    };
+    // Is rect r, inside element e, out of every reader's reach? Off the top or
+    // the reachable left of the page it is, unless it lies inside the scroll
+    // range of a scroll container that is itself in reach. The range starts at
+    // the scroller's content edge (for RTL, scrollWidth - clientWidth further
+    // left), so content pushed left of it is still out of reach.
+    const offPage = (r, e) => {
+        if (r.right + sx > minX && r.bottom + sy > 0) return false;
+        for (let a = e; a && a !== document.body && a !== document.documentElement; a = a.parentElement) {
+            const cs = css(a);
+            if (!/auto|scroll/.test(cs.overflowX) && !/auto|scroll/.test(cs.overflowY)) continue;
+            const b = a.getBoundingClientRect();
+            const x0 = b.left + a.clientLeft - a.scrollLeft
+                - (cs.direction === 'rtl' ? a.scrollWidth - a.clientWidth : 0);
+            const y0 = b.top + a.clientTop - a.scrollTop;
+            if (r.right <= x0 + 1 || r.bottom <= y0 + 1) return true;
+            return offPage(b, a.parentElement);
+        }
+        return true;
+    };
+    const range = document.createRange();
+    const textHidden = (n, p, cs) => {
+        if (parseFloat(cs.fontSize) < 2 || hides(p)) return true;
+        range.selectNodeContents(n);
+        const r = range.getBoundingClientRect();
+        return r.width < 1 || r.height < 1 || offPage(r, p);
+    };
+"""
+
+_SNAPSHOT_JS = "(args) => {" + _JUDGE_JS + r"""
+    const {limit, max, cap, nodeCap, text: wantText} = args;
+    // Reads only: no attribute is written here (see stamp()).
+    const scan = (labels) => {
+        const out = [];
+        const sel = 'a,button,input,select,textarea,[role=button],[role=link],[role=checkbox],[role=radio],[onclick]';
+        document.querySelectorAll(sel).forEach((el, i) => {
+            if (out.length >= max) return;
+            const r = el.getBoundingClientRect();
+            if (r.width === 0 || r.height === 0) return;
+            const st = css(el);
+            if (st.visibility === 'hidden' || st.display === 'none') return;
+            const control = /^(INPUT|SELECT|TEXTAREA)$/.test(el.tagName);
+            const unseen = hides(el) || offPage(r, el.parentElement);
+            if (unseen && !control) return;
+            const password = el.tagName === 'INPUT' && (el.type || '').toLowerCase() === 'password';
+            let text;
+            if (!labels) text = '(label withheld)';
+            else if (unseen) {
+                const named = el.labels && el.labels[0] ? el.labels[0].innerText.trim().slice(0, 40) : '';
+                text = named ? named + ' (hidden control)' : '(hidden control)';
+            } else {
+                text = (el.innerText || (password ? '' : el.value) || el.getAttribute('placeholder') || '')
+                    .trim().slice(0, 80);
+                if (!text) text = (el.getAttribute('aria-label') || el.getAttribute('title')
+                                   || el.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 40);
+            }
+            out.push({el, info: {ref: 'e' + i, tag: el.tagName.toLowerCase(),
+                                 type: el.getAttribute('type') || '', text, checked: el.checked === true}});
         });
+        return out;
+    };
+    // The only writes a custom element can observe, so they come last, after
+    // the page text and every label have been read. Older stamps go first:
+    // a ref is clickable only while the latest scan, of either channel,
+    // offers it. Badge positions are taken here, with the page restored.
+    const stamp = (found) => {
+        for (const old of document.querySelectorAll('[data-jarvis-ref]'))
+            old.removeAttribute('data-jarvis-ref');
+        for (const {el, info} of found) el.setAttribute('data-jarvis-ref', info.ref);
+        return found.map(({el, info}) => {
+            const r = el.getBoundingClientRect();
+            return {...info, rect: {x: r.x, y: r.y}};
+        });
+    };
+    const closed = (reason) => ({elements: stamp(scan(false)), text: '', withheld: reason});
+    const body = document.body;
+    if (!body) return {elements: stamp(scan(true)), text: '', withheld: ''};
+    const SKIP = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE', 'TEXTAREA']);
+    const walker = document.createTreeWalker(body, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
+        acceptNode(node) {
+            if (node.nodeType === Node.TEXT_NODE)
+                return /\S/.test(node.data) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP;
+            const tag = node.nodeName.toUpperCase();
+            if (SKIP.has(tag)) return NodeFilter.FILTER_REJECT;
+            const cs = css(node);
+            if (cs.display === 'none') return NodeFilter.FILTER_REJECT;
+            // Not rendered at all (closed <details>, hidden=until-found …):
+            // innerText leaves it out already. display:contents and <option>
+            // have no box of their own but their text is read, so walk in.
+            if (cs.display !== 'contents' && tag !== 'OPTION' && tag !== 'OPTGROUP'
+                && node.checkVisibility && !node.checkVisibility())
+                return NodeFilter.FILTER_REJECT;
+            return NodeFilter.FILTER_SKIP;
+        },
     });
-    return out;
+    let budget = 2 * limit;
+    const hidden = [], queued = new Set(), places = new Set();
+    for (let n = walker.nextNode(); n && budget > 0; n = walker.nextNode()) {
+        const p = n.parentElement;
+        if (!p) continue;
+        const cs = css(p);
+        if (cs.visibility !== 'visible') continue;  // innerText leaves it out; it spends nothing
+        const select = p.closest('select');
+        // An option's text is drawn by its <select>: it is hidden when the
+        // select is, and then the whole select is set aside.
+        const h = select ? hides(select) || parseFloat(css(select).fontSize) < 2
+                           || offPage(select.getBoundingClientRect(), select.parentElement)
+                         : textHidden(n, p, cs);
+        if (!h) { budget -= n.data.replace(/\s+/g, ' ').trim().length; continue; }
+        if (select && select.hasAttribute('is')) return closed('custom-select');
+        const target = select || n;
+        if (queued.has(target)) continue;
+        queued.add(target);
+        hidden.push(target);
+        const owner = target === n ? p : select;
+        places.add(hides(owner) ? hidingRoot(owner) : target);
+        if (places.size > cap || hidden.length > nodeCap) return closed('flood');
+    }
+    const wraps = [];
+    let found, text;
+    try {
+        for (const n of hidden) {
+            const s = document.createElement('span');
+            s.style.setProperty('display', 'none', 'important');
+            n.parentNode.insertBefore(s, n);
+            s.appendChild(n);
+            wraps.push([s, n]);
+        }
+        found = scan(true);
+        text = wantText ? body.innerText.slice(0, limit) : '';
+    } finally {
+        for (const [s, n] of wraps) s.replaceWith(n);
+    }
+    return {elements: stamp(found), text, withheld: ''};
 }"""
 
 _MARK_JS = """(els) => {
@@ -309,7 +612,9 @@ class Session:
         self._spend()
         self.page.goto(url, wait_until="domcontentloaded", timeout=30_000)
         self._guard_landing()
-        return f"Loaded {self.page.url}\nTitle: {self.page.title()}"
+        # The title is the page's own words, so it is fenced like the snapshot.
+        title = untrusted.fence(f"Title: {untrusted.one_line(self.page.title())}", self.page.url)
+        return f"Loaded {self.page.url}\n{title}"
 
     def _guard_landing(self) -> None:
         """Re-check policy on wherever the page actually ended up.
@@ -329,30 +634,63 @@ class Session:
                 "backed out to about:blank."
             )
 
+    @staticmethod
+    def _scan_args(max_elements: int, text: bool) -> dict:
+        """The one set of scan arguments both channels use (see _SNAPSHOT_JS)."""
+        return {"limit": 4000, "max": max_elements, "cap": WRAP_CAP,
+                "nodeCap": WRAP_NODE_CAP, "text": text}
+
     def _snapshot(self, max_elements: int = 120) -> str:
         """Text view of the page: interactive elements with stable refs.
 
         This is the channel text-only models use. Refs are exact, so there is
         no coordinate guessing — usually more reliable than vision for the web.
+
+        Every line of it is the page talking (the title, the labels, the body
+        text), so the whole snapshot is fenced as untrusted web content, and
+        it leaves out what a person viewing the page cannot see
+        (`_SNAPSHOT_JS`). The format inside the fence is unchanged.
         """
         self.page.wait_for_timeout(150)
-        elements = self.page.evaluate(_REF_SCAN_JS, max_elements)
+        result = self.page.evaluate(_SNAPSHOT_JS, self._scan_args(max_elements, text=True))
+        elements = result.get("elements") or []
+        notes = []
+        withheld = result.get("withheld")
+        if withheld:
+            # Fail closed: a page hiding this much, or hiding text in an element
+            # that would run page script to be set aside, is not filtered
+            # best-effort.
+            body = "(withheld — see the note after the fence)"
+            why = (
+                "it hides text in a custom <select> element, which would run the "
+                "page's own script to be set aside"
+                if withheld == "custom-select"
+                else f"it hides text in more than {WRAP_CAP:,} places, too many to filter"
+            )
+            notes.append(
+                f"[page text withheld: {why}, so none of its text is shown. "
+                "browser_screenshot shows what a reader sees.]"
+            )
+        else:
+            body = untrusted.strip_invisible(result.get("text") or "")
+            body = re.sub(r"\n{3,}", "\n\n", body).strip()
 
-        body = self.page.evaluate(
-            "() => document.body ? document.body.innerText.slice(0, 4000) : ''"
-        )
-        body = re.sub(r"\n{3,}", "\n\n", body or "").strip()
-
-        lines = [f"URL: {self.page.url}", f"Title: {self.page.title()}", "", "INTERACTIVE:"]
+        # Title, labels, tag names and type attributes are the page's words:
+        # one line each, so none can draw a ref line of its own.
+        title = untrusted.one_line(self.page.title())
+        lines = [f"URL: {self.page.url}", f"Title: {title}", "", "INTERACTIVE:"]
         for el in elements:
-            label = el["text"] or "(no label)"
-            extra = f" type={el['type']}" if el["type"] else ""
+            label = untrusted.one_line(el["text"], cap=80) or "(no label)"
+            kind = (el["type"] or "").strip().lower()
+            kind = kind if kind in _INPUT_TYPES else ""
+            tag = el["tag"] if el["tag"] in _HTML_TAGS else "element"
+            extra = f" type={kind}" if kind else ""
             extra += " checked" if el["checked"] else ""
-            lines.append(f"  [{el['ref']}] <{el['tag']}{extra}> {label}")
+            lines.append(f"  [{el['ref']}] <{tag}{extra}> {label}")
         if not elements:
             lines.append("  (none found)")
         lines += ["", "PAGE TEXT:", body or "(empty)"]
-        return "\n".join(lines)
+        return untrusted.fence("\n".join(lines), self.page.url, notes=notes)
 
     def _locator(self, ref: str):
         locator = self.page.locator(f'[data-jarvis-ref="{ref}"]')
@@ -395,7 +733,10 @@ class Session:
         marks = 0
         if marked:
             self.page.wait_for_timeout(150)
-            elements = self.page.evaluate(_REF_SCAN_JS, 120)
+            # The snapshot's own scan (text not read), so the badges name
+            # exactly the refs a snapshot of this page would offer.
+            elements = self.page.evaluate(_SNAPSHOT_JS, self._scan_args(120, text=False))
+            elements = elements.get("elements") or []
             marks = len(elements)
             self.page.evaluate(_MARK_JS, elements)
         try:

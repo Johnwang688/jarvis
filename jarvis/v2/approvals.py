@@ -36,9 +36,8 @@ import secrets as _secrets
 import threading
 import time
 from typing import Any, Callable
-import unicodedata
 
-from jarvis import permissions
+from jarvis import permissions, untrusted
 from .model import utcnow
 from .provider import Decision
 
@@ -55,10 +54,12 @@ def clean_line(text, cap: int = 120) -> str:
     rule generalised: every run of whitespace, control or format characters
     (newlines, NUL, zero-width and bidi overrides) becomes one space, backticks
     go, and the result is capped with "…". Markdown is left alone here — the
-    HUD renders text literally — and escaped by the Discord renderer."""
+    HUD renders text literally — and escaped by the Discord renderer. The
+    character set is `untrusted.UNSEEN_CATEGORIES`, shared with the folder
+    check and fetched web text."""
     out, space = [], False
     for ch in str(text).replace("`", ""):
-        if ch.isspace() or unicodedata.category(ch) in ("Cc", "Cf", "Zl", "Zp"):
+        if ch.isspace() or untrusted.unseen(ch):
             space = True
             continue
         if space and out:
