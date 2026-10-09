@@ -23,6 +23,9 @@ The checks worth keeping, each written to bite:
   - at 1024x700 and 160% the window folds both panes for the render, without
     storing it, and every tab and tool and the input stay usable;
   - a drag at 150% moves the edge by the pointer's travel in *zoomed* pixels;
+  - every control in the provider · model · effort chip stays on screen and
+    clickable at any width and zoom — the chip wraps, it never clips (a capped
+    width with overflow hidden hid the effort select behind dictation);
   - every one of those settings survives a reload, garbage in storage opens at
     the defaults, and storage that throws on every call still opens.
 """
@@ -48,7 +51,7 @@ def layout_checks(browser, mock, base, check, until, guard, init_script):
         _boot(page, mock, base, until)
         for section in (_zoom_checks, _fold_checks, _resize_checks, _approval_zoom_checks,
                         _blocked_checks, _small_window_checks, _picker_zoom_checks,
-                        _monaco_zoom_checks, _menu_zoom_checks):
+                        _monaco_zoom_checks, _menu_zoom_checks, _model_chip_checks):
             try:
                 section(page, mock, check, until)
             except Exception as e:  # a section that cannot run is a failure, and the rest still run
@@ -672,6 +675,29 @@ def _small_window_checks(page, mock, check, until):
     _boot(page, mock, None, until, reload=True)
     bad = [f"{sel}: {why}" for sel in TOOLS for ok, why in [_reachable(page, sel)] if not ok]
     check("at 130% on 1280x800 every tab and tool is reachable, Settings included", not bad, "; ".join(bad))
+    _set_storage(page, zoom="100", layout="{}")
+    _boot(page, mock, None, until, reload=True)
+
+
+CHIP_CONTROLS = ['[data-testid="provider-chip-select"]', '[data-testid="model-chip-select"]',
+                 '[data-testid="effort-chip-select"]']
+
+
+def _model_chip_checks(page, mock, check, until):
+    """The chip's own controls, not just the chip: the chip's centre was
+    reachable while its right half was clipped away behind dictation."""
+    for (w, h), zoom, layout in (((1280, 800), "100", '{"left":480,"right":560}'),
+                                 ((1280, 800), "160", "{}"),
+                                 ((1024, 700), "160", "{}"),
+                                 ((760, 700), "100", "{}")):
+        page.set_viewport_size({"width": w, "height": h})
+        _set_storage(page, zoom=zoom, layout=layout)
+        _boot(page, mock, None, until, reload=True)
+        until(lambda: page.locator(CHIP_CONTROLS[-1]).count() > 0, timeout=3)
+        bad = [f"{sel}: {why}" for sel in CHIP_CONTROLS for ok, why in [_reachable(page, sel)] if not ok]
+        check(f"at {w}x{h} and {zoom}% provider, model and effort are all on screen and clickable",
+              not bad, "; ".join(bad))
+    page.set_viewport_size({"width": 1280, "height": 800})
     _set_storage(page, zoom="100", layout="{}")
     _boot(page, mock, None, until, reload=True)
 

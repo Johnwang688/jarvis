@@ -619,7 +619,13 @@ details.decisions[open] summary { color: var(--text); margin-bottom: 8px; }
 .movenote { padding: 4px 12px; }
 
 /* ---- per-thread model (decisions 2026-10-06, A): provider · model · effort ---- */
-.modelchip { gap: 4px; max-width: 46%; overflow: hidden; }
+/* The chip never clips: a capped width with overflow hidden used to cut off
+   the effort select and default ▾ behind the dictation buttons once the
+   window narrowed or zoomed. The row wraps the whole chip onto its own line
+   first; if even a full line is too narrow, the chip wraps its own controls
+   and the model select ellipsizes. Every control stays reachable. */
+.modelchip { gap: 4px; flex-wrap: wrap; min-width: 0; max-width: 100%; }
+.modelchip select { min-width: 0; max-width: 100%; text-overflow: ellipsis; }
 .modelchip .err { color: var(--red); white-space: normal; }
 .badge.pin { color: var(--text-2); text-transform: none; max-width: 110px; overflow: hidden;
              text-overflow: ellipsis; white-space: nowrap; }
