@@ -32,6 +32,7 @@ import { afterProjectGone, afterThreadGone, forgetLastProject, projectNamesTaken
 import { guildConfigured, ownerLine } from "./lib/discord";
 import { CollapseButton, Rail, Splitter, ZoomControl, useLayout } from "./components/Layout";
 import { ZOOM_DEFAULT, maxWidth } from "./lib/layout";
+import { ActivitySync, clearsOnRead } from "./lib/activity";
 
 const TABS: Tab[] = ["chat", "task", "file", "diff", "preview"];
 const PROPOSAL_WINDOW_MS = 60_000;
@@ -85,6 +86,9 @@ export default function App() {
   // them (PR #15 review).
   const chipOverlay = useRef(false);
   chipOverlay.current = threadModel.overlayOpen;
+  // The sidebar dots: a snapshot or a `/seen` answer older than a record
+  // already heard must not undo it (lib/activity.ts, review 2026-10-09).
+  const [activitySync] = useState(() => new ActivitySync());
 
   const patch = useCallback((p: Parameters<typeof dispatch>[0] extends any ? any : never) => {
     dispatch({ type: "patch", patch: p });
@@ -398,6 +402,14 @@ export default function App() {
         case "thread_deleted":
           threadGone(e.thread_id || data.thread_id);
           break;
+        case "activity":
+          // The sidebar dots (lib/activity.ts). Marking read is the effect below.
+          activitySync.heard(e);
+          dispatch({ type: "activity", record: e });
+          break;
+        case "_connected":
+          void refreshActivity();
+          break;
         default:
           break;
       }
@@ -421,6 +433,18 @@ export default function App() {
       /* the window keeps what it had rather than blanking */
     }
   }, [dispatch]);
+
+  const refreshActivity = useCallback(async () => {
+    // Records heard while this is in flight are newer than the snapshot may
+    // be, and the daemon never sends one twice: they are replayed over it.
+    const pending = activitySync.begin();
+    try {
+      const snapshot = await api.activity();
+      dispatch({ type: "patch", patch: { activity: activitySync.land(pending, snapshot) } });
+    } catch {
+      activitySync.drop(pending); /* keep what we had */
+    }
+  }, [dispatch, activitySync]);
 
   const refreshThreads = useCallback(async () => {
     try {
@@ -643,6 +667,7 @@ export default function App() {
           compose: { projectId: lastProject(projects, threads, loadLastProject()) },
         },
       });
+      void refreshActivity();
       const [usage, schedules, route, approvals, discord] = await Promise.all([
         api.usage().catch(() => null),
         api.schedules().catch(() => []),
@@ -673,6 +698,44 @@ export default function App() {
       .catch(() => dispatch({ type: "patch", patch: { messages: [], draft: "", ops: [], status } }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.threadId]);
+
+  // Reading clears blue and red (2026-10-08): a thread open in the chat tab,
+  // or a task open in the task tab, while the window is visible — on opening
+  // it, and when it finishes with the owner watching. The answer carries the
+  // status now, and is drawn at once — the daemon's `activity` record may not
+  // reach a window whose stream is reconnecting — unless something newer
+  // about that row has arrived meanwhile (ActivitySync).
+  const [visible, setVisible] = useState(() => document.visibilityState !== "hidden");
+  useEffect(() => {
+    const on = () => setVisible(document.visibilityState !== "hidden");
+    document.addEventListener("visibilitychange", on);
+    return () => document.removeEventListener("visibilitychange", on);
+  }, []);
+  const marking = useRef(new Set<string>());
+  useEffect(() => {
+    if (!visible) return;
+    const mark = (of: "thread" | "task", id: string, call: (id: string) => Promise<{ status: string }>) => {
+      const key = `${of}:${id}`;
+      if (marking.current.has(key)) return;
+      marking.current.add(key);
+      const ticket = activitySync.ask(of, id);
+      call(id)
+        .then((answer) => {
+          const record = activitySync.answered(ticket, answer?.status);
+          if (record) dispatch({ type: "activity", record });
+        })
+        .catch(() => {})
+        .finally(() => marking.current.delete(key));
+    };
+    const t = state.threadId;
+    if (t && state.tab === "chat" && clearsOnRead(state.activity.threads[t])) {
+      mark("thread", t, api.seenThread);
+    }
+    const k = state.taskId;
+    if (k && state.tab === "task" && clearsOnRead(state.activity.tasks[k])) {
+      mark("task", k, api.seenTask);
+    }
+  }, [visible, state.threadId, state.taskId, state.tab, state.activity, activitySync, dispatch]);
 
   useEffect(() => {
     if (!state.taskId) return;
@@ -902,6 +965,7 @@ export default function App() {
           threads={state.threads}
           tasks={state.tasks}
           taskThreads={state.taskThreads}
+          activity={state.activity}
           activeProjectId={activeProjectId}
           compose={state.compose}
           threadId={state.threadId}

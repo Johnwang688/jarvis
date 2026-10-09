@@ -2062,6 +2062,8 @@ def main():
 
             window_checks(page, mock)
             sidebar_checks(page, mock)
+            from tests.face.hud_v2_activity_check import activity_checks
+            activity_checks(page, mock, check, until, expand, boot)
             chat_checks(page, mock)
             # PR C: the chat's place on Discord, and messages typed there.
             from tests.face.hud_v2_mirror_check import mirror_checks
