@@ -748,8 +748,12 @@ jarvis/
   (ASCII smuggling), stray controls and variation selectors — but keeps
   what is drawn: the format characters that render (Arabic number signs,
   end of ayah, Syriac and Kaithi signs, Egyptian hieroglyph controls),
-  ZWNJ/ZWJ between letters of a joining script (Persian, Hindi, Sinhala,
-  Malayalam chillu), ZWJ inside emoji sequences, keycaps, one VS15/VS16
+  ZWNJ/ZWJ between letters of a script they actually shape — the joining
+  scripts (Arabic and so Persian, Syriac, N'Ko, Mandaic, Mongolian) and the
+  Brahmic ones (Devanagari through Malayalam, Sinhala, Tibetan, Myanmar,
+  Khmer), the Malayalam chillu included; never between CJK, Hangul, Thai,
+  Hebrew, Latin or Greek letters, where they draw nothing and would be a
+  zero-width channel — ZWJ inside emoji sequences, keycaps, one VS15/VS16
   after an emoji-capable base, one variation selector after a CJK
   ideograph, and the **three** RGI subdivision flags (England, Scotland,
   Wales) — any other tag sequence goes, because a row of black flags each
@@ -780,7 +784,15 @@ jarvis/
   whose connectedCallback would run on the move, fails the snapshot closed.
   An `<option>`'s text is drawn by its `<select>`, so a select is set aside
   whole — only when the select itself is hidden, never because one option
-  is `font-size:0`. Hidden links and buttons are not offered as refs; a
+  is `font-size:0`. **Marked screenshots run the very same scan** (text not
+  read), so both channels offer the same refs for the same page, and every
+  stamping first clears all older `data-jarvis-ref` stamps — a ref is
+  clickable only while the latest scan of either channel offers it. If the
+  page's own script makes the reader throw, `browser_snapshot`,
+  `browser_screenshot` and `browser_goto` report the error's *type* (and a
+  `net::ERR_…` code) with a fixed sentence: an evaluate error's first line
+  can be a message the page wrote, and a navigation error can name a URL the
+  page chose. Click and type keep their first line, cleaned and capped. Hidden links and buttons are not offered as refs; a
   hidden form control is, named by its visible `<label>` and marked
   `(hidden control)` (custom checkboxes hide the native input); a visible
   element is labelled by its visible text (a password field never by its
@@ -828,7 +840,11 @@ jarvis/
   (MathML beside an aria-hidden image) are dropped, as the rule says. The
   snapshot does not see `mask-image` or an opaque overlay, a `:has()` rule
   can restyle the page when nodes are set aside, and `Session._submit` has no
-  timeout. An injection in plain visible text is shown in full, fenced. The
+  timeout. The snapshot's script runs in the page's own JavaScript world
+  (Playwright's `evaluate`), so a page that patches the built-ins it reads
+  (`getComputedStyle`, `innerText`, `getBoundingClientRect`) can make hidden
+  text look visible or make the reader throw; the throw is handled, the lie
+  is not. An injection in plain visible text is shown in full, fenced. The
   real boundary is still the approval gate: a dangerous tool needs the
   owner's yes whatever a page managed to say.
 - **`grep_files` does not respect `.gitignore`, deliberately** (fixed
@@ -1381,14 +1397,15 @@ jarvis/
   scrub while still printing the "withheld" counter. Run it after touching
   `secrets.py`, `dispatch()`, or either shell tool.
 - `tests/web_hygiene_check.py` — free checks for hidden-text stripping and
-  the untrusted-content fence (2026-10-08/09, three review rounds), loopback
+  the untrusted-content fence (2026-10-08/09, four review rounds), loopback
   HTTP server on an ephemeral port and headless Playwright, no live
-  internet, 309 checks. Its rule cuts both ways, so most sections have a
+  internet, 324 checks. Its rule cuts both ways, so most sections have a
   *kept* half that fails as loudly as the *removed* half: every
   invisible-Unicode class removed, the visible exceptions (Persian ZWNJ,
   Indic ZWJ, emoji sequences, the three RGI subdivision flags, keycaps,
-  format characters that draw) byte-for-byte, a row of tag-carrying black
-  flags stripped, and idempotence fuzzed over 20,000 strings; **v2's
+  format characters that draw) byte-for-byte, joiners stripped between CJK,
+  Hangul, Thai, Hebrew and Greek letters, a row of tag-carrying black flags
+  stripped, and idempotence fuzzed over 20,000 strings; **v2's
   `clean_line` and `folders._control` compared with main's code on all
   1,114,112 code points**; 79 hidden markup forms removed and 43
   look-alikes, overrides and animation start states kept (KaTeX's
@@ -1409,7 +1426,10 @@ jarvis/
   select; hidden links not offered; labels from visible text, never a
   password's value; only standard tags and input types printed; page script
   fired by the ref attributes or a hidden `<select is>` unable to add
-  unjudged text; the very same DOM nodes put back; fail-closed past the
+  unjudged text; a snapshot and a marked screenshot offering the same refs,
+  with a stale stamp cleared; a reader the page makes throw (snapshot,
+  screenshot) and a failed navigation reported by type only, never by the
+  page's message; the very same DOM nodes put back; fail-closed past the
   wrap cap, counted per hiding place (a 320-formula MathML page survives)
   and per node; padding unable to walk a payload past the scan; and 100k
   hidden nodes timed against a main-equivalent snapshot (at most ~2x;
@@ -1417,7 +1437,8 @@ jarvis/
   by reverting each of 11 fixes in a scratch copy, round 3 by running the
   suite against the previous commit (28 failures) and by reverting the
   guard halves that commit already had right (the scroller range, the
-  scroller-in-reach recursion, the node cap, ref attributes written last).
+  scroller-in-reach recursion, the node cap, ref attributes written last),
+  round 4 by running the suite against round 3's commit (13 failures).
   Run after touching `untrusted.py`, `tools/web.py`, `tools/browsing.py`,
   `browser._snapshot` / `_SNAPSHOT_JS`, `context.truncate_old_results`, v2
   `clean_line` / `folders._control`, or the fence wording in

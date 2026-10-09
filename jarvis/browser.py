@@ -37,30 +37,11 @@ class BrowserError(RuntimeError):
 
 # One scan, two consumers: snapshot() renders these elements as text, and
 # screenshot_b64(marked=True) draws their refs onto the page as badges. Both
-# set the same data-jarvis-ref attribute, so a ref from either channel is
-# clickable — that is what lets a vision run work without text snapshots.
-_REF_SCAN_JS = """(max) => {
-    const out = [];
-    const sel = 'a,button,input,select,textarea,[role=button],[role=link],[role=checkbox],[role=radio],[onclick]';
-    document.querySelectorAll(sel).forEach((el, i) => {
-        if (out.length >= max) return;
-        const r = el.getBoundingClientRect();
-        if (r.width === 0 || r.height === 0) return;
-        const style = getComputedStyle(el);
-        if (style.visibility === 'hidden' || style.display === 'none') return;
-        el.setAttribute('data-jarvis-ref', 'e' + i);
-        out.push({
-            ref: 'e' + i,
-            tag: el.tagName.toLowerCase(),
-            type: el.getAttribute('type') || '',
-            text: (el.innerText || el.value || el.getAttribute('aria-label')
-                   || el.getAttribute('placeholder') || '').trim().slice(0, 80),
-            checked: el.checked === true,
-            rect: {x: r.x, y: r.y},
-        });
-    });
-    return out;
-}"""
+# run `_SNAPSHOT_JS` — the same hidden-text judgement, the same element rules,
+# the same cap — so the two channels offer the same refs for the same page,
+# and each stamping first clears every older `data-jarvis-ref`, so a ref the
+# other channel (or an earlier page state) handed out cannot still be clicked
+# once the element it named is no longer offered.
 
 # The snapshot, minus what a person looking at the page cannot see.
 #
@@ -116,7 +97,11 @@ _REF_SCAN_JS = """(max) => {
 # Known limits: mask-image and opaque overlays (text under another element is
 # "visible" to every property read here), a `:has()` rule that restyles an
 # element when its children change can shift the page under the wrap, and
-# `Session._submit` has no timeout.
+# `Session._submit` has no timeout. And this runs in the page's own JavaScript
+# world (Playwright's evaluate), so a page that patches the built-ins it reads
+# (getComputedStyle, innerText, getBoundingClientRect) can make hidden text
+# look visible, or make the reader throw — the throw is reported by type only
+# (tools/browsing.py), the lie is not caught.
 WRAP_CAP = 5000
 WRAP_NODE_CAP = 50_000
 
@@ -274,7 +259,7 @@ _JUDGE_JS = r"""
 """
 
 _SNAPSHOT_JS = "(args) => {" + _JUDGE_JS + r"""
-    const {limit, max, cap, nodeCap} = args;
+    const {limit, max, cap, nodeCap, text: wantText} = args;
     // Reads only: no attribute is written here (see stamp()).
     const scan = (labels) => {
         const out = [];
@@ -305,11 +290,18 @@ _SNAPSHOT_JS = "(args) => {" + _JUDGE_JS + r"""
         });
         return out;
     };
-    // The only write a custom element can observe, so it comes last, after
-    // the page text and every label have been read.
+    // The only writes a custom element can observe, so they come last, after
+    // the page text and every label have been read. Older stamps go first:
+    // a ref is clickable only while the latest scan, of either channel,
+    // offers it. Badge positions are taken here, with the page restored.
     const stamp = (found) => {
+        for (const old of document.querySelectorAll('[data-jarvis-ref]'))
+            old.removeAttribute('data-jarvis-ref');
         for (const {el, info} of found) el.setAttribute('data-jarvis-ref', info.ref);
-        return found.map((f) => f.info);
+        return found.map(({el, info}) => {
+            const r = el.getBoundingClientRect();
+            return {...info, rect: {x: r.x, y: r.y}};
+        });
     };
     const closed = (reason) => ({elements: stamp(scan(false)), text: '', withheld: reason});
     const body = document.body;
@@ -366,7 +358,7 @@ _SNAPSHOT_JS = "(args) => {" + _JUDGE_JS + r"""
             wraps.push([s, n]);
         }
         found = scan(true);
-        text = body.innerText.slice(0, limit);
+        text = wantText ? body.innerText.slice(0, limit) : '';
     } finally {
         for (const [s, n] of wraps) s.replaceWith(n);
     }
@@ -642,6 +634,12 @@ class Session:
                 "backed out to about:blank."
             )
 
+    @staticmethod
+    def _scan_args(max_elements: int, text: bool) -> dict:
+        """The one set of scan arguments both channels use (see _SNAPSHOT_JS)."""
+        return {"limit": 4000, "max": max_elements, "cap": WRAP_CAP,
+                "nodeCap": WRAP_NODE_CAP, "text": text}
+
     def _snapshot(self, max_elements: int = 120) -> str:
         """Text view of the page: interactive elements with stable refs.
 
@@ -654,10 +652,7 @@ class Session:
         (`_SNAPSHOT_JS`). The format inside the fence is unchanged.
         """
         self.page.wait_for_timeout(150)
-        result = self.page.evaluate(
-            _SNAPSHOT_JS,
-            {"limit": 4000, "max": max_elements, "cap": WRAP_CAP, "nodeCap": WRAP_NODE_CAP},
-        )
+        result = self.page.evaluate(_SNAPSHOT_JS, self._scan_args(max_elements, text=True))
         elements = result.get("elements") or []
         notes = []
         withheld = result.get("withheld")
@@ -738,7 +733,10 @@ class Session:
         marks = 0
         if marked:
             self.page.wait_for_timeout(150)
-            elements = self.page.evaluate(_REF_SCAN_JS, 120)
+            # The snapshot's own scan (text not read), so the badges name
+            # exactly the refs a snapshot of this page would offer.
+            elements = self.page.evaluate(_SNAPSHOT_JS, self._scan_args(120, text=False))
+            elements = elements.get("elements") or []
             marks = len(elements)
             self.page.evaluate(_MARK_JS, elements)
         try:

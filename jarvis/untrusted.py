@@ -142,15 +142,29 @@ def _cjk(ch: str) -> bool:
             or 0x20000 <= cp <= 0x3134F)
 
 
+# Scripts in which ZWNJ/ZWJ actually change how letters join or stack: the
+# cursive joining scripts (Arabic — Persian and Urdu included — Syriac, N'Ko,
+# Mandaic, Mongolian) and the Brahmic ones (Devanagari through Malayalam,
+# Sinhala, Tibetan, Myanmar, Khmer). Everywhere else — Latin, Greek, Cyrillic,
+# Hebrew, Thai, Hangul, CJK — a joiner between letters draws nothing, and
+# keeping it would be a zero-width channel.
+_JOINING_SCRIPTS = (
+    (0x0600, 0x06FF), (0x0700, 0x074F), (0x0750, 0x077F), (0x07C0, 0x07FF),
+    (0x0840, 0x085F), (0x0860, 0x086F), (0x0870, 0x089F), (0x08A0, 0x08FF),
+    (0x0900, 0x0DFF), (0x0F00, 0x0FFF), (0x1000, 0x109F), (0x1780, 0x17FF),
+    (0x1800, 0x18AF), (0x19E0, 0x19FF), (0x1CD0, 0x1CFF), (0xA8E0, 0xA8FF),
+    (0xA9E0, 0xA9FF), (0xAA60, 0xAA7F), (0xFB50, 0xFDFF), (0xFE70, 0xFEFF),
+    (0x10EC0, 0x10EFF), (0x11660, 0x1167F),
+)
+
+
 def _joining_letter(ch: str) -> bool:
-    # A letter or mark in a script where ZWNJ/ZWJ change how letters join or
-    # stack: Hebrew onwards (Arabic, Syriac, the Indic scripts, Sinhala …),
-    # never Latin, Greek or Cyrillic, where a joiner between letters draws
-    # nothing and is the steganography shape. Variation selectors are marks
-    # too, but are stripped, so they never count (or a joiner kept for one
-    # would lose its reason on a second pass).
+    # A letter or mark of a joining script (above). Variation selectors are
+    # marks too, but are stripped, so they never count (or a joiner kept for
+    # one would lose its reason on a second pass).
     cp = ord(ch)
-    return cp >= 0x0590 and unicodedata.category(ch)[0] in "LM" and not _variation_selector(cp)
+    return (unicodedata.category(ch)[0] in "LM"
+            and any(lo <= cp <= hi for lo, hi in _JOINING_SCRIPTS))
 
 
 def _flag_tags(text: str, i: int) -> int:
