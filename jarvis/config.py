@@ -256,6 +256,15 @@ VOICES_DIR = Path(
 SESSIONS_DIR = Path(
     os.environ.get("JARVIS_SESSIONS", Path.home() / ".local" / "share" / "jarvis" / "sessions")
 )
+# Where `git_worktree` makes the checkouts background workflows and sub-agents
+# commit in (jarvis/gitops.py): one directory per repository, one worktree per
+# jarvis/ branch. Outside every repository on purpose, so a worktree is never
+# searched or committed as part of the project it is a copy of — and the git
+# tool's write tier is defined as "inside this directory", so moving it moves
+# where unattended git may write. Read from config per call; tests repoint it.
+GIT_WORKTREES_DIR = Path(
+    os.environ.get("JARVIS_GIT_WORKTREES", Path.home() / ".local" / "share" / "jarvis" / "worktrees")
+)
 V2_DATA_DIR = Path(
     os.environ.get("JARVIS_V2_DATA", Path.home() / ".local" / "share" / "jarvis" / "v2")
 )
