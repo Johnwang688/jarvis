@@ -1090,7 +1090,6 @@ export default function App() {
 
       <ApprovalVeil requests={state.approvals} onDecide={decide} />
 
-      {threadModel.picker}
       {state.picker === "model" ? (
         <ModelPicker
           view={roster}
@@ -1100,11 +1099,17 @@ export default function App() {
           // propagates to the picker, which shows it.
           onPick={(id) => api.setModel(id).then(rosterChanged)}
           onEffort={(id, effort) => api.setModelEffort(id, effort).then(rosterChanged)}
-          onRemove={(id) => api.removeModel(id).then(rosterChanged)}
+          onRemove={(id) => api.removeModel(id).then((r) => {
+            rosterChanged(r);
+            return r;
+          })}
           onReset={() => api.setModel("").then(rosterChanged)}
+          onPinMore={threadModel.openRosterCatalog}
           onClose={() => patch({ picker: null })}
         />
       ) : null}
+      {/* After the Model picker, so its "Pin a model…" opens on top of it. */}
+      {threadModel.picker}
       {state.picker === "voice" ? (
         <VoicePicker
           voices={voices}

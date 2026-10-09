@@ -654,6 +654,10 @@ def pickers(handler, daemon, parts, query):
             add, remove, model = (str(body.get(k) or "").strip() for k in ("add", "remove", "model"))
             if sum(bool(v) for v in (add, remove, model)) != 1:
                 fail(400, "expected exactly one of add, remove, or model with effort")
+            if "effort" in body and not model:
+                # {add, effort} / {remove, effort} used to drop the effort
+                # silently; an effort is set with {model, effort} only.
+                fail(400, "effort goes with {model, effort}, not with add or remove")
             if add:
                 models.add(add)
             elif remove:
@@ -668,7 +672,8 @@ def pickers(handler, daemon, parts, query):
         fail(409, str(exc))
     except models.NotEligible as exc:
         fail(400, str(exc))
-    except LookupError as exc:
+    except models.NotOnRoster as exc:
+        # Only this: a bare LookupError would also catch a real bug's KeyError.
         fail(404, str(exc))
     payload = models.describe()
     daemon.bus.publish({"kind": "model", "data": payload})

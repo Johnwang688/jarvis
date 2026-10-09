@@ -60,6 +60,17 @@ export function configDefaultLine(r: RosterView | null): string {
   return `config default (${CONFIG_ENV}): ${id} · ${use}${listed ? "" : " · unpinned"}`;
 }
 
+/** What a successful unpin changed beyond the row, or "" — the one case is
+ * unpinning the model chosen as the default, which hands the default back to
+ * the config default. Said out loud: the × on the env model in the same
+ * position is refused, and both rows wear the same badge. */
+export function removeNotice(before: RosterView | null, after: RosterView | null, id: string): string {
+  if (!before?.selected || before.selected !== id || after?.selected) return "";
+  const name = before.models?.find((m) => m.id === id)?.name || id;
+  const fallback = after?.default || after?.current || before.default || "?";
+  return `Unpinned ${name}; the default is now the config default, ${fallback}.`;
+}
+
 /** The ids on the roster, for the catalogue's Pin / Unpin. */
 export function rosterIds(r: { models?: ModelRow[] } | null | undefined): string[] {
   return (r?.models || []).map((m) => m.id);

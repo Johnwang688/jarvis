@@ -817,6 +817,15 @@ def roster_edit_checks(page, mock):
     check("and the badge moves to it", until(lambda: _badge_on(page, luna)) is True)
     check("the current default offers no Set as default",
           page.locator(f'[data-testid="model-setdefault-{luna}"]').count() == 0)
+    time.sleep(0.3)
+    check("Set as default sent exactly one /model (the row click did not add one)",
+          len(mock.sent("POST", "/model")) == sent + 1, str(mock.sent("POST", "/model")[sent:]))
+    # Clicking the row that already is the default sends nothing.
+    sent = len(mock.sent("POST", "/model"))
+    page.locator(f'[data-testid="model-{luna}"] .sub').click()
+    time.sleep(0.3)
+    check("clicking the current default's row sends nothing",
+          len(mock.sent("POST", "/model")) == sent, str(mock.sent("POST", "/model")[sent:]))
 
     # Reset to config default: `{model: ""}`, and the line says it is in use.
     sent = len(mock.sent("POST", "/model"))
@@ -847,6 +856,35 @@ def roster_edit_checks(page, mock):
     check("a model broadcast redraws the roster",
           until(lambda: page.locator(f'[data-testid="model-{kimi}"]').count() == 1) is True)
 
+    # The × on the HUD-chosen default succeeds and hands the default back to
+    # the config one — and says so, since the env row's × is refused.
+    page.locator(f'[data-testid="model-setdefault-{kimi}"]').click()
+    until(lambda: _badge_on(page, kimi))
+    page.locator(f'[data-testid="model-remove-{kimi}"]').click()
+    note = until(lambda: page.locator('[data-testid="model-picker-notice"]').count()
+                 and page.locator('[data-testid="model-picker-notice"]').inner_text())
+    check("unpinning the chosen default says the default fell back",
+          bool(note) and "Unpinned Kimi K3" in note and f"config default, {luna}" in note, str(note))
+    check("and the badge is back on the config default", until(lambda: _badge_on(page, luna)) is True)
+
+    # "Pin a model…" opens the catalogue on top of the picker, pin-only.
+    page.locator('[data-testid="model-pin-more"]').click()
+    page.wait_for_selector('[data-testid="catalog"]')
+    until(lambda: page.locator(f'[data-testid="catalog-pin-{kimi}"]').count() > 0)
+    check("Pin a model… opens the catalogue over the picker",
+          page.locator('[data-testid="catalog"]').count() == 1 and page.locator('[data-testid="picker"]').count() == 1)
+    check("from the picker it pins only (no Use, which would move the open thread)",
+          page.locator('[data-testid^="catalog-use-"]').count() == 0)
+    adds = len(mock.sent("POST", "/models"))
+    page.locator(f'[data-testid="catalog-pin-{kimi}"]').click()
+    body = until(lambda: mock.sent("POST", "/models")[adds:] or None)
+    check("pinning there posts /models {add}", bool(body) and body[-1] == {"add": kimi}, str(body))
+    check("and the picker lists it",
+          until(lambda: page.locator(f'[data-testid="model-{kimi}"]').count() == 1) is True)
+    page.locator('[data-testid="catalog-close"]').click()
+    until(lambda: page.locator('[data-testid="catalog"]').count() == 0)
+    check("closing the catalogue leaves the picker open", page.locator('[data-testid="picker"]').count() == 1)
+
     # The × unpins a row without selecting it.
     sent = len(mock.sent("POST", "/model"))
     removes = len(mock.sent("POST", "/models"))
@@ -859,6 +897,8 @@ def roster_edit_checks(page, mock):
           str(mock.sent("POST", "/model")[sent:]))
     check("a successful action clears the refusal",
           page.locator('[data-testid="model-picker-error"]').count() == 0)
+    check("and an ordinary unpin carries no fallback notice",
+          page.locator('[data-testid="model-picker-notice"]').count() == 0)
 
     # Another window sets the default: the broadcast moves the badge here.
     w["models"]["selected"] = "evil/model"
@@ -1709,7 +1749,7 @@ def thread_model_checks(page, mock):
     page.locator('[data-testid="catalog-use-deepseek/deepseek-v4-flash-0731"]').click()
     # Wait for *this* add: earlier sections already POSTed /models (the global
     # picker's {model, effort}), so "any POST" raced the click.
-    added = until(lambda: [b for b in mock.sent("POST", "/models") if "add" in b] or None)
+    added = until(lambda: [b for b in mock.sent("POST", "/models") if b.get("add", "").startswith("deepseek")] or None)
     check("using a catalogue model pins it to the roster",
           bool(added) and added[-1] == {"add": "deepseek/deepseek-v4-flash-0731"}, str(added))
     sent = until(lambda: [b for b in mock.sent("PATCH", f"/threads/{tid}") if (b.get("model") or "").startswith("deepseek")] or None)

@@ -329,6 +329,97 @@ def roster_edit_checks() -> None:
           "the effective default is always listed, reset re-lists it")
 
 
+ROSTER_WRITES = ("models.select(", "models.set_effort(", "models.remove(", "models.add(",
+                 "models_mod.select(", "models_mod.set_effort(", "models_mod.remove(",
+                 "models_mod.add(", "models._save(", "MODELS_PATH")
+
+
+def no_tool_checks() -> None:
+    """The agent has no tool for the model he thinks with (2026-08-22), and
+    that now covers the roster too: unpinning the model a turn runs on, or
+    choosing the default, is the owner's, in the window."""
+    from jarvis import tools
+
+    for name in tools.REGISTRY:
+        assert not any(w in name for w in ("model", "roster")), f"registered tool {name!r}"
+    root = Path(tools.__file__).parent
+    for path in sorted(root.rglob("*.py")):
+        text = path.read_text(encoding="utf-8")
+        for needle in ROSTER_WRITES:
+            assert needle not in text, f"{path} reaches {needle}"
+    print("ok  guard: no tool can change the roster, the default or an effort pin")
+
+
+def robustness_checks() -> None:
+    """A non-UTF-8 file, an atomic save, one snapshot per listing, and the
+    404 class that catches only "not on the roster" (review of PR #13)."""
+    _reset_catalog()
+    _serve(FIXTURE)
+    default = config.TIERS["orchestrator"]
+    opus = "anthropic/claude-opus-5"
+
+    # Not UTF-8: degrades to the seed like any corrupt file. It used to raise
+    # UnicodeDecodeError out of effort_for — i.e. out of every v1 turn.
+    config.MODELS_PATH.write_bytes(b'{"models": ["\xff\xfe"], "selected": ""}')
+    assert models.roster().models == [default]
+    models.effort_for(default)
+    assert [m["id"] for m in models.describe()["models"]] == [default]
+    _refused(models.remove, default, needle="only model")
+    models.add(opus)  # and a write replaces it cleanly
+    assert json.loads(config.MODELS_PATH.read_text(encoding="utf-8"))["models"] == [default, opus]
+
+    # Atomic, and the file keeps its mode: no temp file left behind.
+    config.MODELS_PATH.chmod(0o640)
+    models.select(opus)
+    assert config.MODELS_PATH.stat().st_mode & 0o777 == 0o640, oct(config.MODELS_PATH.stat().st_mode)
+    leftovers = [p.name for p in config.MODELS_PATH.parent.iterdir() if p.name.startswith(".models-")]
+    assert not leftovers, leftovers
+    config.MODELS_PATH.chmod(0o644)
+
+    # One snapshot per describe(): a change landing between two reads must
+    # not make `selected` and `current` disagree, nor list a removed model.
+    snapshots = [models.Roster(models=[default, opus], selected=opus),
+                 models.Roster(models=[default], selected="")]
+    reads = {"n": 0}
+    real_roster = models.roster
+
+    def racing():
+        reads["n"] += 1
+        return snapshots[min(reads["n"] - 1, 1)]
+
+    models.roster = racing
+    try:
+        payload = models.describe()
+    finally:
+        models.roster = real_roster
+    assert reads["n"] == 1, f"describe read the roster {reads['n']} times"
+    assert payload["selected"] == opus and payload["current"] == opus, payload
+    assert [m["id"] for m in payload["models"]] == [default, opus], payload
+    assert payload["default_source"] == "hud"
+
+    # The 404 class is exactly "not on the roster".
+    for call in (lambda: models.remove("never/listed"), lambda: models.select("never/listed"),
+                 lambda: models.set_effort("never/listed", "low")):
+        try:
+            call()
+        except models.NotOnRoster as exc:
+            assert isinstance(exc, LookupError) and "not on the roster" in str(exc)
+        else:
+            raise AssertionError("a model off the roster was not refused")
+
+    # The pure refusal rule the HUD mock imports agrees with remove().
+    rule = models.removal_refusal
+    assert rule([default], "", default, default) and "only model" in rule([default], "", default, default)
+    assert "choose another default first" in rule([default, opus], "", default, default)
+    assert rule([default, opus], opus, default, default) is None
+    assert rule([default, opus], opus, default, opus) is None
+    assert "choose another default first" in rule([opus, "tiny/free-model"], opus, default, opus)
+    models.select("")
+    config.MODELS_PATH.unlink()
+    print("ok  robustness: non-UTF-8 file seeds, atomic save keeps its mode, "
+          "describe reads one snapshot, 404 is NotOnRoster only")
+
+
 def tier_checks() -> None:
     _reset_catalog()
     _serve(FIXTURE)
@@ -595,6 +686,10 @@ def route_checks() -> None:
         assert _request("POST", "/models", {"add": "x", "remove": "y"})[0] == 400
         assert _request("POST", "/models", {"remove": "not/listed"})[0] == 404
         assert _request("POST", "/models", {"model": "x", "add": "y"})[0] == 400
+        # An effort riding an add or a remove is refused, not dropped.
+        assert _request("POST", "/models", {"add": "tiny/free-model", "effort": "low"})[0] == 400
+        assert _request("POST", "/models", {"remove": default, "effort": "low"})[0] == 400
+        assert "tiny/free-model" not in models.roster().models
 
         status, data = _request("POST", "/models", {"add": "anthropic/claude-opus-5"})
         assert status == 200 and "anthropic/claude-opus-5" in [m["id"] for m in data["models"]]
@@ -657,6 +752,8 @@ def main() -> int:
             config.MODEL_CACHE_PATH = Path(tmp) / "cache" / "models.json"
             roster_checks()
             roster_edit_checks()
+            robustness_checks()
+            no_tool_checks()
             tier_checks()
             effort_checks()
             byok_cost_checks()

@@ -779,7 +779,7 @@ class FaceHandler(SimpleHTTPRequestHandler):
         try:
             data = self._read_json()
             chosen = models_mod.select(str(data.get("model", "")))
-        except LookupError as exc:
+        except models_mod.NotOnRoster as exc:
             self._json_error(404, str(exc))
             return
         except Exception as exc:
@@ -817,6 +817,10 @@ class FaceHandler(SimpleHTTPRequestHandler):
                 '{"model": id, "effort": level}',
             )
             return
+        if "effort" in data and not effort_id:
+            # An effort riding an add or a remove used to be dropped silently.
+            self._json_error(400, 'effort goes with {"model": id, "effort": level} only')
+            return
         try:
             if add_id:
                 models_mod.add(add_id)
@@ -833,7 +837,7 @@ class FaceHandler(SimpleHTTPRequestHandler):
         except models_mod.NotEligible as exc:
             self._json_error(400, str(exc))
             return
-        except LookupError as exc:
+        except models_mod.NotOnRoster as exc:
             self._json_error(404, str(exc))
             return
         payload = models_mod.describe()

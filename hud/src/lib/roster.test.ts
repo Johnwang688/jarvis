@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  chosenHere, configDefaultLine, CONFIG_ENV, effectiveDefault, refusal, rosterIds, rowBadges,
+  chosenHere, configDefaultLine, CONFIG_ENV, effectiveDefault, refusal, removeNotice, rosterIds, rowBadges,
   type RosterView,
 } from "./roster";
 
@@ -54,6 +54,22 @@ describe("the config default line", () => {
   });
   it("says when the env model has been unpinned", () => {
     expect(configDefaultLine(unpinned)).toContain("unpinned");
+  });
+});
+
+describe("the notice after an unpin", () => {
+  const after: RosterView = { ...following, models: [{ id: ENV, name: "Luna" }] };
+  it("says the default fell back when the chosen default was unpinned", () => {
+    expect(removeNotice(chosen, after, KIMI)).toBe(`Unpinned Kimi; the default is now the config default, ${ENV}.`);
+  });
+  it("is silent for any other unpin", () => {
+    expect(removeNotice(following, after, KIMI)).toBe("");
+    expect(removeNotice(chosen, chosen, ENV)).toBe("");
+    expect(removeNotice(null, after, KIMI)).toBe("");
+  });
+  it("falls back to the id when the row had no name", () => {
+    const bare: RosterView = { ...chosen, models: [{ id: KIMI, name: "" }] };
+    expect(removeNotice(bare, after, KIMI)).toContain(`Unpinned ${KIMI};`);
   });
 });
 

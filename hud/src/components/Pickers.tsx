@@ -15,7 +15,9 @@ import { DirPicker } from "./DirPicker";
 import { DiscordLink } from "./DiscordLink";
 import { api } from "../api";
 import { editEffects, formFrom, nameKey, projectEditBody, uniqueName, type ProjectForm } from "../lib/projects";
-import { chosenHere, configDefaultLine, effectiveDefault, refusal, rowBadges, type RosterView } from "../lib/roster";
+import {
+  chosenHere, configDefaultLine, effectiveDefault, refusal, removeNotice, rowBadges, type RosterView,
+} from "../lib/roster";
 
 function Shell(props: { title: string; onClose: () => void; children: React.ReactNode; foot?: React.ReactNode }) {
   return (
@@ -71,22 +73,38 @@ export function ModelPicker(props: {
   onPick: (id: string) => Promise<unknown>;
   /** `""` is AUTO. Setting effort must not also switch him onto that model. */
   onEffort: (id: string, effort: string) => Promise<unknown>;
-  /** Unpin from the roster (`POST /models {remove}`). Never selects. */
-  onRemove: (id: string) => Promise<unknown>;
+  /** Unpin from the roster (`POST /models {remove}`). Never selects.
+   * Resolves to the roster after the change. */
+  onRemove: (id: string) => Promise<RosterView>;
   /** Back to the config default (`POST /model {model: ""}`). */
   onReset: () => Promise<unknown>;
+  /** Open the catalogue to pin a model, on top of this picker. */
+  onPinMore?: () => void;
   onClose: () => void;
 }) {
   const [error, setError] = useState("");
+  // A successful action that changed more than it says: unpinning the
+  // model chosen as the default hands the default back to the config one.
+  const [notice, setNotice] = useState("");
   const view = props.view;
   const models = view?.models || [];
   const current = effectiveDefault(view);
-  const run = (what: string, go: () => Promise<unknown>) => {
+  const run = (what: string, go: () => Promise<unknown>, then?: (result: unknown) => void) => {
     setError("");
-    go().catch((e) => setError(refusal(what, e)));
+    setNotice("");
+    go().then((result) => then?.(result)).catch((e) => setError(refusal(what, e)));
   };
   return (
-    <Shell title="Fast-path model" onClose={props.onClose}>
+    <Shell
+      title="Fast-path model"
+      onClose={props.onClose}
+      foot={props.onPinMore ? (
+        // The way out of "pin another one first", on the same screen.
+        <button type="button" data-testid="model-pin-more" onClick={props.onPinMore}>
+          Pin a model…
+        </button>
+      ) : null}
+    >
       <div className="pad small muted" data-testid="model-scope-note">
         This picks the <b>fast path's</b> model only. Who runs each role is in Settings and is
         never changed here — the picker cannot touch Claude or Codex.
@@ -104,6 +122,7 @@ export function ModelPicker(props: {
         </button>
       </div>
       {error ? <div className="pad err" data-testid="model-picker-error">{error}</div> : null}
+      {notice ? <div className="pad small" data-testid="model-picker-notice">{notice}</div> : null}
       {models.map((m) => (
         <div
           key={m.id}
@@ -160,7 +179,9 @@ export function ModelPicker(props: {
             onClick={(e) => {
               // Unpinning must not also set the row as the default.
               e.stopPropagation();
-              run(`unpin ${m.id}`, () => props.onRemove(m.id));
+              const before = view;
+              run(`unpin ${m.id}`, () => props.onRemove(m.id),
+                  (after) => setNotice(removeNotice(before, after as RosterView, m.id)));
             }}
           >
             ×

@@ -46,8 +46,13 @@ shows verbatim: the last model on the roster, and any removal that would
 leave the effective default unlisted ("choose another default first" —
 the config default while nothing is selected, or the selection while the
 config default is unpinned). Removing the selected model otherwise falls
-back to the config default. Unknown id: 404; ineligible `add`: 400 with the
-reason. Every change publishes one `model` event; a refusal publishes none.
+back to the config default (the picker then says "Unpinned X; the default is
+now the config default, Y."). Unknown id: 404 (`models.NotOnRoster` only — a
+bug's `KeyError` is not a 404); ineligible `add`: 400 with the reason; an
+`effort` beside `add` or `remove`: 400. Every change publishes one `model`
+event; a refusal publishes none. `describe()` is built from one roster read,
+and models.json is written atomically (temp file + `os.replace`, mode kept),
+since the v1 face and the v2 daemon are separate processes.
 
 ## Projects (additions to WP7)
 

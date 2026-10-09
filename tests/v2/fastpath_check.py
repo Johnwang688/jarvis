@@ -795,7 +795,11 @@ def no_self_switch_checks() -> None:
     for root in roots:
         for path in root.rglob("*.py"):
             text = path.read_text()
-            for needle in ("set_thread_model", "thread_model", ".set_model(", "models.select(", "models.set_effort("):
+            for needle in ("set_thread_model", "thread_model", ".set_model(",
+                           # The roster and the global default: every write.
+                           "models.select(", "models.set_effort(", "models.remove(", "models.add(",
+                           "models_mod.select(", "models_mod.set_effort(", "models_mod.remove(",
+                           "models_mod.add(", "models._save(", "MODELS_PATH"):
                 assert needle not in text, f"{path} reaches {needle}"
     print("ok  guard: no fast-path, MCP or registered tool can change a thread's model or provider")
 

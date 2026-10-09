@@ -30,7 +30,9 @@ a tier the owner pointed somewhere else stays where they put it.
 from __future__ import annotations
 
 import json
+import os
 import sys
+import tempfile
 import threading
 import time
 from dataclasses import dataclass, field
@@ -277,7 +279,7 @@ def cached_info(model_id: str) -> ModelInfo | None:
     return None
 
 
-def effort_for(model_id: str) -> str | None:
+def effort_for(model_id: str, efforts: dict[str, str] | None = None) -> str | None:
     """The reasoning effort to ask `model_id` for, or None to send nothing.
 
     Clamped to what the model publishes, because the ladder is not the same
@@ -288,8 +290,11 @@ def effort_for(model_id: str) -> str | None:
     """
     global _effort_warned
     # A pin made about this model wins over the global default — it is the
-    # more specific statement, and the only reason to make one.
-    pinned = roster().efforts.get(model_id, "")
+    # more specific statement, and the only reason to make one. `efforts` is
+    # a roster snapshot the caller already holds (`describe` builds its whole
+    # payload from one), so a listing never mixes two reads of the file.
+    pins = roster().efforts if efforts is None else efforts
+    pinned = pins.get(model_id, "")
     wanted = (pinned or config.REASONING_EFFORT or "").strip().lower()
     if not wanted or wanted == "default":
         return None
@@ -339,6 +344,15 @@ class NotEligible(ValueError):
     """The requested model cannot run this loop (or could not be verified)."""
 
 
+class NotOnRoster(LookupError):
+    """The model named is not on the roster (a 404, and nothing else is).
+
+    Its own class so the routes can catch exactly this: a bare LookupError
+    also catches the KeyError or IndexError of a real bug, and reporting that
+    as "not on the roster" would hide it.
+    """
+
+
 class RosterRefused(ValueError):
     """A roster edit that would leave the default unlisted, or nothing listed.
 
@@ -375,7 +389,10 @@ def _load() -> Roster:
     default = config.TIERS["orchestrator"]
     try:
         payload = json.loads(config.MODELS_PATH.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except (OSError, ValueError):
+        # ValueError covers JSONDecodeError *and* UnicodeDecodeError: a file
+        # that is not UTF-8 must degrade to the seed like any corrupt one,
+        # not raise out of effort_for on every turn.
         return Roster(models=[default], selected="")
     if not isinstance(payload, dict):
         return Roster(models=[default], selected="")
@@ -410,20 +427,40 @@ def _load() -> Roster:
 
 
 def _save(roster: Roster) -> None:
-    config.MODELS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    config.MODELS_PATH.write_text(
-        json.dumps(
-            {
-                "models": roster.models,
-                "selected": roster.selected,
-                "efforts": roster.efforts,
-                "removed_default": roster.removed_default,
-            },
-            indent=2,
-        )
-        + "\n",
-        encoding="utf-8",
-    )
+    """Write the roster atomically: a temp file beside it, then os.replace.
+
+    The v1 face and the v2 daemon are separate processes reading the same
+    file, so a reader must see the old roster or the new one, never half a
+    file (which `_load` would read as corrupt and re-seed). The file keeps
+    the mode it had.
+    """
+    path = config.MODELS_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = json.dumps(
+        {
+            "models": roster.models,
+            "selected": roster.selected,
+            "efforts": roster.efforts,
+            "removed_default": roster.removed_default,
+        },
+        indent=2,
+    ) + "\n"
+    try:
+        mode = path.stat().st_mode & 0o777
+    except OSError:
+        mode = 0o644
+    fd, tmp = tempfile.mkstemp(prefix=".models-", suffix=".tmp", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def roster() -> Roster:
@@ -460,6 +497,25 @@ def add(model_id: str) -> Roster:
         return current
 
 
+def removal_refusal(roster_ids: list[str], selected: str, default: str, model_id: str) -> str | None:
+    """Why unpinning `model_id` is refused, or None — the rule, as data.
+
+    Pure, so the HUD mock imports it rather than keeping a copy that drifts.
+    The rule: the model a default thread runs on is always listed. So the
+    last model cannot go, and neither can a removal that would leave the
+    effective default (the selection, or with none the configured default)
+    off the roster.
+    """
+    remaining = [m for m in roster_ids if m != model_id]
+    if not remaining:
+        return f"{model_id} is the only model on the roster; pin another one before unpinning it"
+    still_selected = "" if selected == model_id else selected
+    if not still_selected and default not in remaining:
+        return (f"{model_id} is the default every default thread runs on; "
+                "choose another default first")
+    return None
+
+
 def remove(model_id: str) -> Roster:
     """Take a model off the roster — the configured default included.
 
@@ -481,17 +537,13 @@ def remove(model_id: str) -> Roster:
     with _roster_lock:
         current = _load()
         if model_id not in current.models:
-            raise LookupError(f"{model_id!r} is not on the roster")
-        remaining = [m for m in current.models if m != model_id]
-        if not remaining:
-            raise RosterRefused(
-                f"{model_id} is the only model on the roster; pin another one before unpinning it")
+            raise NotOnRoster(f"{model_id} is not on the roster")
         default = config.TIERS["orchestrator"]
+        why = removal_refusal(current.models, current.selected, default, model_id)
+        if why:
+            raise RosterRefused(why)
+        remaining = [m for m in current.models if m != model_id]
         selected = "" if current.selected == model_id else current.selected
-        if not selected and default not in remaining:
-            raise RosterRefused(
-                f"{model_id} is the default every default thread runs on; "
-                "choose another default first")
         current.models = remaining
         current.selected = selected
         current.efforts.pop(model_id, None)
@@ -518,7 +570,7 @@ def select(model_id: str) -> Roster:
     with _roster_lock:
         current = _load()
         if model_id and model_id not in current.models:
-            raise LookupError(f"{model_id!r} is not on the roster")
+            raise NotOnRoster(f"{model_id} is not on the roster")
         current.selected = model_id
         if not model_id:
             # Back to the configured default: it is what answers now, so it is
@@ -544,7 +596,7 @@ def set_effort(model_id: str, level: str) -> Roster:
     with _roster_lock:
         current = _load()
         if model_id not in current.models:
-            raise LookupError(f"{model_id!r} is not on the roster")
+            raise NotOnRoster(f"{model_id} is not on the roster")
         if not level:
             current.efforts.pop(model_id, None)
             _save(current)
@@ -597,10 +649,18 @@ def tier(name: str) -> str:
 
 
 def describe() -> dict[str, Any]:
-    """The roster as the HUD draws it: entries decorated from the catalog."""
-    current = roster()
+    """The roster as the HUD draws it: entries decorated from the catalog.
+
+    Built from **one** roster read. Reading the file again per field (as
+    `tier()` and `effort_for()` would) let a change landing mid-listing from
+    the other process produce a payload whose `selected` and `current`
+    disagree, or that lists a model the same payload's selection says was
+    removed.
+    """
+    snap = roster()
+    configured = config.TIERS["orchestrator"]
     entries = []
-    for model_id in current.models:
+    for model_id in snap.models:
         info = find(model_id)
         entry = (
             info.describe()
@@ -613,17 +673,18 @@ def describe() -> dict[str, Any]:
         # What this model is pinned to, and what it will actually be asked for
         # once the global default has been clamped to its ladder. The picker
         # needs both: one is the setting, the other is the consequence.
-        entry["effort"] = current.efforts.get(model_id, "")
-        entry["effective_effort"] = effort_for(model_id) or ""
+        entry["effort"] = snap.efforts.get(model_id, "")
+        entry["effective_effort"] = effort_for(model_id, snap.efforts) or ""
         entries.append(entry)
     return {
         "models": entries,
-        "selected": current.selected,
+        "selected": snap.selected,
         # The configured default (JARVIS_ORCHESTRATOR) — used only while
         # nothing is selected. `current` is what the loop runs on now, i.e.
-        # the default the owner sees; `default_source` says which one it is.
-        "default": config.TIERS["orchestrator"],
-        "current": tier("orchestrator"),
-        "default_source": "hud" if current.selected else "config",
+        # the default the owner sees (tier()'s rule, from the same snapshot);
+        # `default_source` says which one it is.
+        "default": configured,
+        "current": snap.selected or configured,
+        "default_source": "hud" if snap.selected else "config",
         "default_effort": (config.REASONING_EFFORT or "").strip().lower(),
     }

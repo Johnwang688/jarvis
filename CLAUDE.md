@@ -3768,6 +3768,17 @@ and for any removal that would leave the effective default unlisted
 `default_source`. The v2 route maps `RosterRefused`/`NotEligible`/
 `LookupError` to `fail()` because the daemon reflects only an `APIError`'s
 text — a bare exception reads "request failed (RosterRefused)".
+Review round (same day): 404 is `NotOnRoster` only (a bare `LookupError`
+also caught real bugs' `KeyError`s); the refusal rule is the pure
+`models.removal_refusal`, which the HUD mock imports instead of copying;
+`describe()` reads the roster **once** (it used to re-read per field and per
+row, so a concurrent change could make `selected` and `current` disagree);
+`_load` treats a non-UTF-8 file as corrupt (it raised out of `effort_for`,
+i.e. every v1 turn); `_save` is atomic; an `effort` beside add/remove is a
+400; × on the HUD-chosen default succeeds but says the default fell back;
+and the picker's "Pin a model…" opens the catalogue pin-only on top of it.
+The no-tool guards (`fastpath_check`, `models_check`) cover every roster
+write.
 
 **Schoolwork integration shipped (2026-08-23).** The owner's Windows-side
 schoolwork dashboard (`C:\myday\schoolwork` — Canvas + MySchoolApp merged into

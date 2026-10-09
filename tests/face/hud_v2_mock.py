@@ -284,16 +284,12 @@ def _models(w) -> dict:
 
 
 def _remove_refusal(w, model_id) -> str | None:
-    """`models.remove`'s two refusals (2026-10-08): never an empty roster,
-    and never a default thread left on a model the roster does not list."""
+    """`models.remove`'s refusals (2026-10-08), from the backend's own pure
+    rule rather than a copy here that could drift from it."""
+    from jarvis.models import removal_refusal
     m = w["models"]
-    remaining = [r["id"] for r in m["models"] if r["id"] != model_id]
-    if not remaining:
-        return f"{model_id} is the only model on the roster; pin another one before unpinning it"
-    selected = "" if m.get("selected") == model_id else m.get("selected")
-    if not selected and m["default"] not in remaining:
-        return f"{model_id} is the default every default thread runs on; choose another default first"
-    return None
+    return removal_refusal([r["id"] for r in m["models"]], m.get("selected") or "",
+                           m["default"], model_id)
 
 
 # --- a chat thread's model (decisions 2026-10-06, A) -----------------------
@@ -774,6 +770,8 @@ class MockDaemon:
                     given = [k for k in ("add", "remove", "model") if body.get(k)]
                     if len(given) != 1:
                         return self._err(400, "expected exactly one of add, remove, or model with effort")
+                    if "effort" in body and not body.get("model"):
+                        return self._err(400, "effort goes with {model, effort}, not with add or remove")
                     rows = w["models"]["models"]
                     if body.get("add"):
                         if not any(m["id"] == body["add"] for m in rows):

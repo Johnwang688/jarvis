@@ -1140,6 +1140,14 @@ class Backend(unittest.TestCase):
             "POST", "/models", {"remove": "nope/missing"}, status=404)["error"])
         self.assertIn("tool calling", self.request(
             "POST", "/models", {"add": "nope/missing"}, status=400)["error"])
+        # An effort riding an add or a remove is refused, never dropped.
+        self.assertIn("effort goes with", self.request(
+            "POST", "/models", {"add": "test/thinker", "effort": "low"}, status=400)["error"])
+        self.request("POST", "/models", {"remove": "test/model", "effort": "low"}, status=400)
+        self.assertNotIn("test/thinker", models.roster().models)
+        # 404 is "not on the roster" only: a real bug's KeyError is not one.
+        with patch.object(models, "remove", side_effect=KeyError("boom")):
+            self.request("POST", "/models", {"remove": "test/model"}, status=400)
         # One `model` broadcast per change, none for a refusal.
         kinds = [e["kind"] for e in self.events_all()]
         self.assertEqual(kinds.count("model"), 3, kinds)

@@ -134,6 +134,9 @@ export function CatalogPicker(props: {
   onUse: (id: string) => void;
   onPin: (id: string) => void;
   onUnpin: (id: string) => void;
+  /** Opened from the Model picker: pin and unpin only — "Use" would also
+   * move the open thread, which that picker is not about. */
+  pinOnly?: boolean;
   onClose: () => void;
 }) {
   const [q, setQ] = useState("");
@@ -165,7 +168,7 @@ export function CatalogPicker(props: {
             onKeyUp={stop}
           />
           <span className="muted small">
-            Only models that can call tools are listed. Using one pins it to your roster.
+            Only models that can call tools are listed.{props.pinOnly ? "" : " Using one pins it to your roster."}
             {total > rows.length ? ` Showing ${rows.length} of ${total}; narrow the search.` : ""}
           </span>
           {props.catalog === null ? <span className="muted small">loading…</span> : null}
@@ -178,9 +181,11 @@ export function CatalogPicker(props: {
               <div key={m.id} className="prow" data-testid={`catalog-row-${m.id}`}>
                 <span>{m.name || shortId(m.id)}</span>
                 <span className="sub">{m.id}{m.vision === false ? " · text-only" : ""}</span>
-                <button type="button" data-testid={`catalog-use-${m.id}`} onClick={() => props.onUse(m.id)}>
-                  Use
-                </button>
+                {props.pinOnly ? null : (
+                  <button type="button" data-testid={`catalog-use-${m.id}`} onClick={() => props.onUse(m.id)}>
+                    Use
+                  </button>
+                )}
                 {pinned ? (
                   <button type="button" data-testid={`catalog-unpin-${m.id}`}
                           title="Take it off your roster" onClick={() => props.onUnpin(m.id)}>
