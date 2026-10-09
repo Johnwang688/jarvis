@@ -152,6 +152,48 @@ working directory (the worktree), permission profile, model, effort. A
 provider maps it onto its own flags and refuses a brief it cannot honour
 rather than silently narrowing it.
 
+**Steering (2026-10-08), optional like `set_model`.** `steer(h, message)`
+hands an owner message to the turn running on `h`, to be taken at the
+provider's next safe point — never inside a tool batch, never as the answer
+to anything the turn waits on — or raises `SteerRefused(reason,
+fallback="queue"|"interrupt")`. `undelivered(h)` hands back steers taken but
+never delivered (the fast path's final answer came first). Each provider
+uses its CLI's own mechanism:
+
+- **Claude** writes a stdin user message with a uuid and `priority: "next"`
+  (Claude Code 2.1.295 folds `now`/`next` messages in at its next boundary,
+  "The user sent a new message while you were working", and never `later`
+  ones). It does so only once the turn's own CLI turn has begun, so a steer
+  never reaches stdin ahead of the message it steers. Every turn message
+  carries a uuid too, and `--replay-user-messages` echoes each message as it
+  starts a turn, so the reader knows whose every CLI turn is: a steer the CLI
+  ran as a fresh turn after the result is read inside the same turn; one
+  whose turn starts later than the hold (STEER_QUIET_S of silence, any frame
+  extending it, STEER_HOLD_MAX_S in all) is remembered on the session and
+  absorbed by the next send, which goes in at `later` so it cannot be folded
+  into that late turn. Nothing shifts the next send by one (review of PR #22:
+  it used to, for good). Once the CLI is known to echo, a CLI turn nobody
+  sent (a background task's notice) before a message's own echo is read but
+  never taken as that message's answer. One pull-based reader per client,
+  never cancelled mid-read, keeps anything the CLI says between turns. A CLI
+  that does not echo leaves nothing to tell apart, and every unseen steer
+  counts as folded.
+- **Codex** sends `turn/steer {threadId, input, expectedTurnId}` (in both the
+  0.153.4 and 0.161.0 schemas), answered on the turn loop's thread, a late
+  refusal ignored. "Method not found" (or an invalid request naming
+  `turn/steer`) means the interrupt fallback; 0.161.0's own steer errors queue;
+  no answer within STEER_TIMEOUT counts as delivered, logged, never requeued
+  — and if the turn then ends with it still unanswered, the log says it may
+  not have reached the model.
+- The **fast path** appends `[owner steering] …` at v1's next step boundary
+  (invariant 3).
+
+The daemon logs a steer before the provider has it; one the provider refuses
+waits under the same id (`steer_queued`). A second
+`send` on a busy handle is refused with a **non-fatal** error, never a fatal
+one: a fatal error makes the daemon drop and close the session, which here
+is the one still running.
+
 ### 5.2 Events (the one stream every surface reads)
 
 ```
@@ -562,6 +604,10 @@ what happens when its provider stops being available:
   needs to continue is, by construction, on disk (§10.3).
 - **Ceilings** (dollars, hours, per-task tokens) park the task as in v1
   goals, spend shown; `resume` requeues it on the same provider if available.
+- **An owner message while a chat turn runs** (2026-10-08) is steered into
+  it or queued behind it on the same provider, never refused and never
+  routed elsewhere (§5.1 for the mechanism, §18 for the surfaces). A task's
+  threads are unchanged: the owner steers a task through the task verbs.
 
 ### 8.5 Owner controls
 
@@ -1141,9 +1187,17 @@ worker) is the one place a chat meets Discord, both ways.
   files follow `assemble_turn`'s caps and protected names (`paths=False`:
   no @path read), anything else is refused with a note and never
   downloaded. Voice notes run with `spoken=True` and get speech back; they
-  never approve and never answer. While a turn runs, up to three wait
-  ("I'll take this next."), the fourth is refused. The last 500 message ids
-  are remembered. An open provider question is answered by the next *typed*
+  never approve and never answer. While a turn runs, a message is **steered**
+  into it ("Got it. I'll work that into what I'm doing.") or waits behind it
+  ("I'll take this next."), up to three; the fourth is refused. Since
+  2026-10-08 the queue is the daemon's (`Daemon.deliver`), one queue and one
+  cap for Discord and the HUD alike; the mirror's own O-C6 queue and its
+  polling drain are gone. A voice note steers like a typed message and
+  still answers nothing (D7). The owner's Stop drops what waits, and the
+  mirror says so after the turn: "Not sent, the turn was stopped: …". A HUD
+  steer is mirrored where it landed in the reply ("You (HUD) · steering:
+  …"); waiting messages are posted after the turn they waited on, which is
+  when they ran. The last 500 message ids are remembered. An open provider question is answered by the next *typed*
   message (`daemon.answer`).
 - **Questions, Bugbot fixes (2026-10-08).** A Discord message with files and
   no words now reaches the turn path in an owned place (v1's `should_respond`
@@ -1646,6 +1700,57 @@ rules live in `hud/src/lib/layout.ts`; `components/Layout.tsx` applies them.
   chip row wrap instead of clipping. On a narrow centre, Model · Voice ·
   Avatar · Settings move to another row, and at 1024×700 and 160% every tab
   and tool is checked to be on screen and clickable.
+
+**Steering a running turn (2026-10-08).** The owner: "I can't steer claude or codex sessions while they are working
+if I want them to do something differently or whatnot and it just throws an
+error and I can't continue the session." A send during a turn answered 409,
+and the HUD's catch reset `busy` and `turnThreadId`: the running turn lost
+its Stop (the orb interrupts only while busy), the mic was unsuppressed under
+it, and the window believed nothing was running until the turn ended on its
+own — minutes, for a Claude or Codex turn. (The daemon itself never wedged,
+and the providers' fatal "already running" error was unreachable through it,
+but it would have dropped and closed the running session; it is non-fatal
+now.)
+
+- **One rule, every surface.** `POST /threads/{id}/send` and a Discord
+  message go through `Daemon.deliver`: start a turn, **steer** the running
+  one (§5.1), or **queue** behind it (three at most, in order; a turn waiting
+  on an approval or a question is never steered, so a message can never read
+  as its answer — the card stays until the owner answers it). A provider with
+  no way to steer has its turn interrupted for the message, which runs next
+  with a note to the model. The escape hatch's result goes the same way, so
+  it is no longer lost when a chat turn happens to be running. A task's
+  threads keep refusing: their turns are the runner's, and `Daemon.send` (the
+  runner's) still answers "already running", which it retries on.
+- **Stop means stop.** The owner's interrupt drops what waits
+  (`queue_cleared`), as Claude Code hands queued messages back to the input
+  on Esc; the HUD puts the words it sent back in the box — into the box of
+  the thread they were typed in: words for a thread not on screen wait until
+  the owner opens it, and each hand-back is taken exactly once. A steer the
+  provider still held when Stop landed, and then refused, is dropped the
+  same way (`"dropped"`), judged by the turn it was aimed at even if a newer
+  turn has started — never requeued, never an interrupt (Bugbot on PR
+  #22). A steer already in
+  the CLI's own queue when Stop lands makes a fresh CLI turn, which Claude's
+  provider interrupts too — and when that turn starts only after the stopped
+  turn has ended, the next send that reads it interrupts it and drops its
+  words (review of PR #22, round 2). Such a late turn still runs every tool
+  call through `permit`, so in that gap an approval card can appear on a
+  thread that looks idle: it is the stopped steer asking. Deny is the safe
+  answer, and the next send stops that turn.
+- **HUD.** While a turn runs in the open thread, Enter steers it: the line
+  is drawn at once marked *steering* (or *queued · will run when this turn
+  ends*, cleared by `queued_started`; *not sent* after
+  a Stop), the box clears, and the window keeps tracking the running turn. A
+  **Stop** button sits beside the input while a turn runs (the orb still
+  interrupts too). A refused send is said inline and costs nothing: its
+  bubble alone is taken back (a reply that settled meanwhile stays) and its
+  words and files return to the box. An `error` event no longer ends the
+  window's turn — `turn_finished` does — and a missed `turn_finished` is
+  caught from the thread record's live `running`, on every SSE reconnect and
+  every 15 s while busy. A `turn_finished` carrying `next` (messages that
+  run at once) keeps the window on the thread: no idle flash, no follow-up
+  mic window.
 
 Remaining: WP13 (the long-bench comparison, the owner's call on cost), a
 native Windows worker, the R8 hook on Codex, and prompt tuning in

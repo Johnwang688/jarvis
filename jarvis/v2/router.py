@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import copy
 import json
+import logging
 import re
 import threading
 import time
@@ -26,8 +27,69 @@ PROPOSAL_GRACE_S = 60
 HEALTH_CACHE_S = 60
 ROLES = ("orchestrator", "implementer", "reviewer", "researcher")
 CLI_PROVIDERS = ("claude", "codex")
-EFFORTS = ("default", "none", "minimal", "low", "medium", "high", "xhigh", "max")
+# Every effort word a routing entry may carry: "default", OpenRouter's ladder
+# and Codex's `ultra`. Which of them a provider or model takes is checked per
+# entry (`_cli_model`, `_saved_entry`): `ultra` only where a Codex ladder has it.
+EFFORTS = ("default", "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
+# Codex's own ladder, hardest first: OpenRouter's with `ultra` on top. `ultra`
+# is Codex's alone (PR #20 review): it never joins `models.EFFORT_LADDER`, so
+# the fast path and Claude can neither offer nor send it.
+CODEX_EFFORT_LADDER = ("ultra", "max", "xhigh", "high", "medium", "low", "minimal", "none")
 _CONFIG_LOCK = threading.RLock()
+LOG = logging.getLogger(__name__)
+# Each distinct note about a setting that does not run as written is logged
+# once per process (routing is read on every resolve and HUD poll), bounded.
+_NOTED: dict[str, None] = {}
+NOTE_CAP = 300
+
+
+def warn_once(text: str) -> None:
+    """Log a degraded setting once per process. The text names models and
+    settings only — routing and the HUD defaults hold no secrets."""
+    with _CONFIG_LOCK:
+        if text in _NOTED:
+            return
+        _NOTED[text] = None
+        while len(_NOTED) > 256:
+            _NOTED.pop(next(iter(_NOTED)))
+    LOG.warning("routing: %s", text)
+
+
+def _note(notes, text: str) -> None:
+    text = text if len(text) <= NOTE_CAP else text[:NOTE_CAP - 1] + "…"
+    warn_once(text)
+    if notes is not None and text not in notes:
+        notes.append(text)
+
+
+def effort_words(provider) -> tuple[str, ...]:
+    """Every effort `provider` can be asked for, hardest first: Codex's
+    ladder for Codex, OpenRouter's for the fast path and Claude."""
+    if getattr(provider, "value", provider) == "codex":
+        return CODEX_EFFORT_LADDER
+    from jarvis import models
+    return models.EFFORT_LADDER
+
+
+def clamp_effort(wanted: str, ladder, provider) -> str | None:
+    """`wanted` as a model with `ladder` can run it: itself, else the nearest
+    level the ladder offers — down first (never ask for more than was meant),
+    then up. None for an empty ladder or a word that is not one of
+    `provider`'s efforts."""
+    ladder = tuple(ladder or ())
+    if not ladder:
+        return None
+    if wanted in ladder:
+        return wanted
+    order = effort_words(provider)
+    if wanted not in order:
+        return None
+    index = order.index(wanted)
+    for level in order[index + 1:] + tuple(reversed(order[:index])):
+        if level in ladder:
+            return level
+    return None
+
 
 # The models each CLI provider can be asked for by name, with the efforts each
 # one takes and whether it can see an image. One table, read by the
@@ -37,16 +99,37 @@ _CONFIG_LOCK = threading.RLock()
 #
 # Claude: Claude Code's own model ids; `--effort` is the SDK's `EffortLevel`
 # (`providers/claude.py` `EFFORT_LEVELS`), and Haiku 4.5 has no effort control.
-# Codex: the models the routing defaults and the vision filter already named;
-# the app-server's ReasoningEffort is "a value advertised by the model", so
-# the ladder here is the one the routing defaults use (high, xhigh) and its
-# neighbours. Both lists are a statement of what Jarvis will ask for, not a
-# live probe; a model missing here is refused by name rather than guessed at —
-# by the chip, and by the routing table too: `load_routing` and `/route`
-# accept a claude/codex model only from this table (`_cli_model`), plus
-# `roster`, the routing table's own spelling of "the configured default".
+#
+# Codex: the signed-in account's own catalog (`model/list`, installed by
+# `set_codex_models` after a HUD read refreshes it), saved to
+# `config.CODEX_CATALOG_PATH` and loaded at daemon start
+# (`load_codex_catalog`). `CODEX_FALLBACK` stands until then, and whenever the
+# cache is missing or corrupt; its ladders are the ones the account advertised
+# on 2026-10-08. The table is replaced whole, never unioned: a model the
+# account stops offering is gone from it. What was saved naming that model —
+# a routing.json entry, a project's routing.models, the HUD's Codex default —
+# is **never rewritten**: it degrades to the default with a note while the
+# model is absent, an effort the model no longer offers is clamped, and the
+# owner's choice comes back when the model does (PR #20 review).
+#
+# A new choice (`/route`, a project write, the chip) is held to the table as
+# it is now; a model missing from it is refused by name, never guessed at.
 _CLAUDE_EFFORTS = ("low", "medium", "high", "xhigh", "max")
 _CODEX_EFFORTS = ("low", "medium", "high", "xhigh")
+_CODEX_MAX = ("low", "medium", "high", "xhigh", "max")
+_CODEX_ULTRA = ("low", "medium", "high", "xhigh", "max", "ultra")
+CODEX_FALLBACK: dict[str, dict] = {
+    "gpt-6.1-sol": {"name": "GPT-6.1 Sol", "efforts": _CODEX_ULTRA, "vision": True},
+    "gpt-6-sol": {"name": "GPT-6 Sol", "efforts": _CODEX_ULTRA, "vision": True},
+    "gpt-6-luna": {"name": "GPT-6 Luna", "efforts": _CODEX_MAX, "vision": True},
+    "gpt-6-astra": {"name": "GPT-6 Astra", "efforts": _CODEX_ULTRA, "vision": True},
+    "gpt-5.6-sol": {"name": "GPT-5.6 Sol", "efforts": _CODEX_ULTRA, "vision": True},
+    "gpt-5.6-terra": {"name": "GPT-5.6 Terra", "efforts": _CODEX_ULTRA, "vision": True},
+    "gpt-5.6-luna": {"name": "GPT-5.6 Luna", "efforts": _CODEX_MAX, "vision": True},
+    # Hidden from the account's listing on 2026-10-08, so its ladder is the
+    # one this table always carried rather than an advertised one.
+    "gpt-5.5": {"name": "GPT-5.5", "efforts": _CODEX_EFFORTS, "vision": True},
+}
 CLI_MODELS: dict[str, dict[str, dict]] = {
     "claude": {
         "claude-opus-5-5": {"name": "Claude Opus 5.5", "efforts": _CLAUDE_EFFORTS, "vision": True},
@@ -56,14 +139,35 @@ CLI_MODELS: dict[str, dict[str, dict]] = {
         "claude-sonnet-5": {"name": "Claude Sonnet 5", "efforts": _CLAUDE_EFFORTS, "vision": True},
         "claude-haiku-4-5": {"name": "Claude Haiku 4.5", "efforts": (), "vision": True},
     },
-    "codex": {
-        "gpt-6-astra": {"name": "GPT-6 Astra", "efforts": _CODEX_EFFORTS, "vision": True},
-        "gpt-5.6-sol": {"name": "GPT-5.6 Sol", "efforts": _CODEX_EFFORTS, "vision": True},
-        "gpt-5.6-terra": {"name": "GPT-5.6 Terra", "efforts": _CODEX_EFFORTS, "vision": True},
-        "gpt-5.6-luna": {"name": "GPT-5.6 Luna", "efforts": _CODEX_EFFORTS, "vision": True},
-        "gpt-5.5": {"name": "GPT-5.5", "efforts": _CODEX_EFFORTS, "vision": True},
-    },
+    "codex": {model: dict(entry) for model, entry in CODEX_FALLBACK.items()},
 }
+
+
+def set_codex_models(rows) -> dict[str, dict]:
+    """Install the account's `model/list` rows as the Codex table, replacing
+    it whole, save them for the next start (`config.CODEX_CATALOG_PATH`), and
+    return the parsed table (`codex_catalog.parse`). A catalog with nothing
+    usable raises ValueError and changes and saves nothing; a save that fails
+    is logged and the installed table stands."""
+    from . import codex_catalog
+    parsed = codex_catalog.parse(rows)
+    with _CONFIG_LOCK:
+        CLI_MODELS["codex"] = parsed
+        codex_catalog.save(parsed)
+    return {m: dict(e) for m, e in parsed.items()}
+
+
+def load_codex_catalog(path=None) -> dict[str, dict] | None:
+    """At daemon start: install the last saved account catalog and return it,
+    or None — no file, or one that cannot be used — leaving the built-in
+    fallback in place."""
+    from . import codex_catalog
+    parsed = codex_catalog.load(path)
+    if parsed is None:
+        return None
+    with _CONFIG_LOCK:
+        CLI_MODELS["codex"] = parsed
+    return {m: dict(e) for m, e in parsed.items()}
 
 
 @dataclass(frozen=True)
@@ -150,7 +254,10 @@ def _chain(chain):
     return chain
 
 
-def _model(value):
+def _model(value, provider=None):
+    """Split a routing entry into (model, effort or None). Syntax only: which
+    efforts a provider and a model take is `_cli_model`'s and
+    `_saved_entry`'s to judge (`ultra` is Codex's alone)."""
     if not isinstance(value, str) or "/" not in value:
         raise ValueError("expected model/effort")
     model, effort = value.rsplit("/", 1)
@@ -159,11 +266,27 @@ def _model(value):
     return model, None if effort == "default" else effort
 
 
+def _offered(provider, known=None) -> tuple[str, ...]:
+    """Every effort some model of this CLI takes, in `EFFORTS` order: what
+    `roster/<effort>` may name, since the roster's model is not known here.
+    Claude Code takes low..max, so `roster/ultra` (or `minimal`) is never
+    Claude's."""
+    table = CLI_MODELS[provider] if known is None else known
+    known = {e for entry in table.values() for e in entry["efforts"]}
+    return tuple(e for e in EFFORTS if e in known)
+
+
 def _cli_model(provider, value):
     """`_model`, for one CLI provider's routing entry: the model must be one
-    `CLI_MODELS` names (or `roster`) and the effort one that model offers."""
+    `CLI_MODELS` names (or `roster`) and the effort one that model offers —
+    for `roster`, one some model of that CLI offers. The rule for a **new**
+    choice; a saved one degrades instead (`_saved_entry`)."""
     model, effort = _model(value)
     if model == "roster":
+        offered = _offered(provider)
+        if effort is not None and effort not in offered:
+            raise ValueError(f"{provider} takes no effort {effort!r} "
+                             f"(it takes {', '.join(offered)}; or 'default')")
         return model, effort
     known = CLI_MODELS[provider]
     if model not in known:
@@ -176,62 +299,199 @@ def _cli_model(provider, value):
     return model, effort
 
 
-def check_project_models(models):
-    """A project's own `routing.models`, held to the rule `load_routing` holds
-    `routing.json` to: a known role, claude/codex only, and each entry a model
-    `CLI_MODELS` names (or `roster`) with an effort that model offers. Raises
-    ValueError naming the entry; called when `/projects` writes a project."""
+def _show(value) -> str:
+    """A saved value, quoted and capped, for a note."""
+    text = repr(value)
+    return text if len(text) <= 60 else text[:59] + "…"
+
+
+def _saved_entry(provider, value, where, notes=None, known=None):
+    """A saved routing entry as it can run on the table as it is now, or None
+    for "use the default". Never raises, never writes (PR #20 review): a
+    model the table lacks falls back with a note — and comes back when the
+    table has it again — and an effort the model no longer offers is clamped
+    down to the nearest one it does (option 1), with a note. `known` is the
+    caller's snapshot of `CLI_MODELS[provider]`, so one decision reads one
+    table even while a refresh swaps it."""
+    known = CLI_MODELS[provider] if known is None else known
+    try:
+        model, effort = _model(value)
+    except ValueError:
+        _note(notes, f"{where}: {_show(value)} is not a model/effort Jarvis can run; "
+                     "using the default")
+        return None
+    if model == "roster":
+        if effort is not None and effort not in _offered(provider, known):
+            _note(notes, f"{where}: {provider} takes no effort {effort!r}; using the default")
+            return None
+        return value
+    if model not in known:
+        _note(notes, f"{where}: {model} is not a {provider} model the account offers now; "
+                     "using the default until it does (the setting is kept as written)")
+        return None
+    ladder = known[model]["efforts"]
+    if effort is None or effort in ladder:
+        return value
+    # `ultra` on a Claude ladder clamps to nothing: the model's own default.
+    clamped = clamp_effort(effort, ladder, provider)
+    _note(notes, f"{where}: {model} does not offer effort {effort!r} now; "
+                 f"running at {clamped or 'its default'}")
+    return f"{model}/{clamped or 'default'}"
+
+
+def check_project_models(models, previous=None):
+    """A project's own `routing.models`, held to the rule a new `/route`
+    choice is held to: a known role, claude/codex only, and each entry a
+    model `CLI_MODELS` names (or `roster`) with an effort that model offers.
+    Raises ValueError naming the entry; called when `/projects` writes a
+    project's routing.
+
+    `previous` is the project's stored `routing.models` on a PATCH: an entry
+    equal to the stored one is not a new choice, so it is only held to
+    `_model`'s syntax — a stale one round-trips (it runs as the default until
+    its model returns, `model_settings`), as `POST /route` keeps the entries
+    it was not asked about (PR #20 re-review)."""
     if not isinstance(models, dict):
         raise ValueError("routing.models must be an object")
+    previous = previous if isinstance(previous, dict) else {}
     for role, value in models.items():
         _role(role)
         if not isinstance(value, dict) or value.keys() - set(CLI_PROVIDERS):
             raise ValueError(f"routing.models.{role} must map claude/codex to model/effort")
+        stored = previous.get(role) if isinstance(previous.get(role), dict) else {}
         for provider, setting in value.items():
             try:
-                _cli_model(provider, setting)
+                if provider in stored and stored[provider] == setting:
+                    _model(setting)
+                else:
+                    _cli_model(provider, setting)
             except ValueError as exc:
                 raise ValueError(f"routing.models.{role}.{provider}: {exc}") from exc
 
 
-def load_routing(path=None):
-    path = path or config.ROUTING_PATH
-    result = defaults()
+def _read_saved(path, notes=None) -> dict:
+    """routing.json as a dict; {} when missing, unreadable or not an object
+    (with a note). Never raises."""
     try:
-        saved = json.loads(path.read_text())
+        text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
-        return result
-    if not isinstance(saved, dict) or saved.keys() - result.keys():
-        raise ValueError("unknown routing configuration fields")
+        return {}
+    except (OSError, UnicodeError) as exc:
+        _note(notes, f"routing.json could not be read ({type(exc).__name__}); using the defaults")
+        return {}
+    try:
+        saved = json.loads(text)
+    except (ValueError, RecursionError):
+        _note(notes, "routing.json is not valid JSON; using the defaults")
+        return {}
+    if not isinstance(saved, dict):
+        _note(notes, "routing.json is not an object; using the defaults")
+        return {}
+    return saved
+
+
+def _limits(saved, result, notes=None) -> None:
+    """Overlay `no_new_work` and `allowances` from `saved` onto `result`,
+    keeping the default for whatever is malformed."""
+    if "no_new_work" in saved:
+        fraction = saved["no_new_work"]
+        if isinstance(fraction, bool) or not isinstance(fraction, (int, float)) or not 0 < fraction <= 1:
+            _note(notes, "routing.json no_new_work must be in (0, 1]; using the default")
+        else:
+            result["no_new_work"] = fraction
+    allowances = saved.get("allowances", {})
+    if not isinstance(allowances, dict):
+        _note(notes, "routing.json allowances must be an object; using the defaults")
+        return
+    for provider, limits in allowances.items():
+        if provider not in DEFAULT_ALLOWANCES:
+            _note(notes, f"routing.json allowances.{provider}: not a provider; ignored")
+            continue
+        metric = next(iter(DEFAULT_ALLOWANCES[provider]))
+        if (not isinstance(limits, dict) or set(limits) != {metric} or
+                isinstance(limits[metric], bool) or not isinstance(limits[metric], (int, float)) or
+                not 0 < limits[metric] < float("inf")):
+            _note(notes, f"routing.json allowances.{provider} needs a positive {metric}; "
+                         "using the default")
+            continue
+        result["allowances"][provider] = limits
+
+
+def _overlay(saved, notes=None, *, as_saved=False) -> dict:
+    """`defaults()` with every well-formed part of `saved` on top.
+
+    `as_saved=False` (reading, `load_routing`): each model entry as it can run
+    now (`_saved_entry`). `as_saved=True` (writing, `configure`): a
+    well-formed entry is carried verbatim, even one naming a model the table
+    lacks today — it is the owner's choice, and a write of something else must
+    not quietly turn it into the default."""
+    result = defaults()
+    for key in sorted(saved.keys() - result.keys(), key=str):
+        _note(notes, f"routing.json field {_show(key)} ignored: not a routing setting")
     for key in ("chains", "models"):
         entries = saved.get(key, {})
         if not isinstance(entries, dict):
-            raise ValueError(f"{key} must be an object")
+            _note(notes, f"routing.json {key} must be an object; using the defaults")
+            continue
         for role, value in entries.items():
-            _role(role)
+            if role not in ROLES:
+                _note(notes, f"routing.json {key}.{role}: not a role; ignored")
+                continue
             if key == "chains":
-                result[key][role] = _chain(value)
-            else:
-                if not isinstance(value, dict) or value.keys() - set(CLI_PROVIDERS):
-                    raise ValueError("models must map claude/codex to model/effort")
-                for provider, setting in value.items():
-                    _cli_model(provider, setting)
-                result[key][role].update(value)
-    fraction = saved.get("no_new_work", result["no_new_work"])
-    if isinstance(fraction, bool) or not isinstance(fraction, (int, float)) or not 0 < fraction <= 1:
-        raise ValueError("no_new_work must be in (0, 1]")
-    result["no_new_work"] = fraction
-    allowances = saved.get("allowances", {})
-    if not isinstance(allowances, dict) or allowances.keys() - DEFAULT_ALLOWANCES.keys():
-        raise ValueError("invalid allowance providers")
-    for provider, limits in allowances.items():
-        metric = next(iter(DEFAULT_ALLOWANCES[provider]))
-        if (not isinstance(limits, dict) or set(limits) != {metric} or
-            isinstance(limits[metric], bool) or not isinstance(limits[metric], (int, float)) or
-            not 0 < limits[metric] < float("inf")):
-            raise ValueError(f"{provider} allowance needs a positive {metric}")
-        result["allowances"][provider] = limits
+                try:
+                    result[key][role] = _chain(value)
+                except ValueError as exc:
+                    _note(notes, f"routing.json chains.{role}: {exc}; using the default")
+                continue
+            if not isinstance(value, dict):
+                _note(notes, f"routing.json models.{role} must map claude/codex to "
+                             "model/effort; using the defaults")
+                continue
+            for provider, setting in value.items():
+                if provider not in CLI_PROVIDERS:
+                    _note(notes, f"routing.json models.{role}.{provider}: "
+                                 "not claude/codex; ignored")
+                    continue
+                if as_saved:
+                    try:
+                        _model(setting)
+                    except ValueError:
+                        _note(notes, f"routing.json models.{role}.{provider}: "
+                                     f"{_show(setting)} is not model/effort; dropped")
+                        continue
+                    entry = setting
+                elif setting == result[key][role][provider]:
+                    # The default, written out by an earlier save: nothing to
+                    # degrade to, and nothing the owner chose to warn about.
+                    entry = setting
+                else:
+                    entry = _saved_entry(provider, setting, f"routing.json models.{role}.{provider}", notes)
+                if entry is not None:
+                    result[key][role][provider] = entry
+    _limits(saved, result, notes)
     return result
+
+
+def load_routing(path=None, *, notes=None):
+    """The routing table: the defaults, with routing.json's settings on top.
+
+    Never raises for what the file holds (PR #20 review): a malformed part, a
+    model the Codex table lacks now, or an effort a model no longer offers
+    degrades — to the default, or clamped — with a note appended to `notes`
+    and logged once. The file is never rewritten to match, so the owner's
+    choice comes back when the model does."""
+    path = path or config.ROUTING_PATH
+    return _overlay(_read_saved(path, notes), notes)
+
+
+def usage_settings(path=None, *, notes=None):
+    """Only what `/usage` and the ledger's thresholds need from routing.json:
+    `no_new_work` and `allowances`, each degrading to its default. Reads no
+    chains and no models, so a routing table at odds with the model catalog
+    can never stop the status column (PR #20 review)."""
+    result = defaults()
+    _limits(_read_saved(path or config.ROUTING_PATH, notes), result, notes)
+    return {"no_new_work": result["no_new_work"], "allowances": result["allowances"]}
 
 
 class HealthCache:
@@ -279,12 +539,44 @@ def apply_override(task, text, stores):
     return re.sub(r"[ \t]{2,}", " ", _USE.sub(strip, text)).strip(" \t\n,;")
 
 
-def model_settings(role, provider, project=None, settings=None):
-    settings = settings or load_routing()
-    value = (project.routing.models.get(role, {}).get(provider) if project else None)
-    model, effort = _model(value or settings["models"][role][provider])
+def model_settings(role, provider, project=None, settings=None, notes=None):
+    """(model, effort) a fresh `role` thread on `provider` runs on: the
+    project's own entry, else the routing table's. An entry naming a model the
+    Codex table lacks now falls back — a project's to the table's, the
+    table's to the built-in default — with a note, and an effort its model no
+    longer offers is clamped, as `load_routing` does for routing.json.
+    Nothing is ever written back. A table handed in rather than loaded is held
+    to the same rule. A built-in default the table lacks is still what runs
+    (there is nothing to fall back to), and a note says so. The Codex table
+    is read once, so a refresh swapping it mid-call cannot split a decision."""
+    settings = settings or load_routing(notes=notes)
+    provider = ProviderName(provider).value
+    known = CLI_MODELS[provider]
+    entries = project.routing.models.get(role) if project else None
+    value = (entries.get(provider) if isinstance(entries, dict) else None) or None
+    if value is not None:
+        value = _saved_entry(provider, value, f"project {project.id} routing.models.{role}.{provider}",
+                             notes, known)
+    if value is None:
+        fallback = defaults()["models"][role][provider]
+        value = settings["models"][role][provider]
+        if value != fallback:
+            value = _saved_entry(provider, value, f"routing models.{role}.{provider}", notes,
+                                 known) or fallback
+        if value == fallback:
+            name = fallback.rsplit("/", 1)[0]
+            if name != "roster" and name not in known:
+                _note(notes, f"routing models.{role}.{provider}: the built-in default {name} is "
+                             f"not a {provider} model the account offers now; it is still what "
+                             "runs — choose another in routing")
+    model, effort = _model(value)
+    entry = known.get(model)
+    if entry is not None and effort is not None and effort not in entry["efforts"]:
+        # The built-in default meeting a ladder that lacks its level: clamped
+        # like a saved one, silently (nobody chose it).
+        effort = clamp_effort(effort, entry["efforts"], provider)
     if model == "roster":
-        if provider in ("claude", getattr(provider, "value", None)) or str(provider) == "claude":
+        if provider == "claude":
             # The v1 roster holds OpenRouter ids; Claude Code takes Anthropic
             # names. "roster/default" on Claude means "no model argument" — the
             # CLI's own configured default — and effort from routing.json only.
@@ -530,7 +822,11 @@ class Router:
         return text, durable
 
     def view(self, project_id=None):
-        settings = load_routing()
+        # `notes`: every saved setting that does not run as written right
+        # now — a model the Codex table lacks, a clamped effort, a malformed
+        # part — in words the HUD shows (PR #20 review). Nothing is rewritten.
+        notes: list[str] = []
+        settings = load_routing(notes=notes)
         project = self._project(project_id) if project_id else None
         effective = copy.deepcopy(settings)
         if project:
@@ -539,7 +835,8 @@ class Router:
                 effective["models"][role].update(models)
             if project.routing.no_new_work is not None:
                 effective["no_new_work"] = project.routing.no_new_work
-        effective["resolved_models"] = {role: {p: dict(zip(("model", "effort"), model_settings(role, p, project, settings)))
+        effective["resolved_models"] = {role: {p: dict(zip(("model", "effort"),
+                                                           model_settings(role, p, project, settings, notes)))
                                               for p in CLI_PROVIDERS} for role in ROLES}
         states = {}
         for name in ProviderName:
@@ -549,7 +846,8 @@ class Router:
             states[name.value] = self.ledger.state(name, no_new_work=effective["no_new_work"], allowances=settings["allowances"])
         decisions = [{"task_id": t.id, **to_json(d)} for t in self.stores.tasks.list()
                      if not project_id or t.project_id == project_id for d in t.status.routing]
-        return {"table": effective, "states": states, "decisions": sorted(decisions, key=lambda d: d["at"])[-10:]}
+        return {"table": effective, "states": states, "decisions": sorted(decisions, key=lambda d: d["at"])[-10:],
+                "notes": notes}
 
     def _project(self, project_id):
         try:
@@ -584,7 +882,12 @@ class Router:
                 project.routing.chains[role] = chain
                 self.stores.projects.save(project)
             else:
-                settings = load_routing()
+                # Built from what the file holds, not from `load_routing`: a
+                # stored table that no longer runs as written (a model the
+                # Codex catalog dropped, a corrupt part) must not stop the
+                # owner saving a fresh one, and an entry this write does not
+                # touch is kept verbatim rather than saved as its fallback.
+                settings = _overlay(_read_saved(config.ROUTING_PATH), as_saved=True)
                 if action == "set":
                     settings["chains"][role] = chain
                 else:

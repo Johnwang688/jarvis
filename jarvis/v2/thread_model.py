@@ -23,7 +23,11 @@ Where the choice lives, and why there:
   routing.json, and tasks keep routing's table.
 - `Thread.effort = None` is **that model's default**: `high`, unless the
   roster pins an effort for it, clamped to the model's own ladder, and
-  nothing at all for a model with no reasoning control (A4).
+  nothing at all for a model with no reasoning control (A4). Never the
+  default Codex advertises for a model (PR #20 review, owner's decision).
+- Effort words are per provider: `ultra` is Codex's alone
+  (`router.CODEX_EFFORT_LADDER`); the fast path and Claude take OpenRouter's
+  ladder (`models.EFFORT_LADDER`) and refuse it.
 - An effort on a thread with `model = None` is stored **on its own**, and the
   thread keeps following the default model (A4 amendment, 2026-10-07): the
   effort is clamped to whatever the default supports at the start of each
@@ -121,21 +125,31 @@ def efforts_of(provider: ProviderName, model: str) -> tuple[str, ...] | None:
     return None if entry is None else tuple(entry["efforts"])
 
 
-def _clamp(wanted: str, ladder: tuple[str, ...]) -> str | None:
-    if wanted in ladder:
-        return wanted
-    order = models.EFFORT_LADDER
-    if wanted in order:
-        index = order.index(wanted)
-        # Down the ladder first (never ask for more than was meant), then up.
-        for level in order[index + 1:] + tuple(reversed(order[:index])):
-            if level in ladder:
-                return level
-    return ladder[0] if ladder else None
+def _words(provider: ProviderName) -> tuple[str, ...]:
+    """The efforts `provider` can be asked for at all: Codex's ladder (with
+    `ultra`) for Codex, OpenRouter's for the fast path and Claude."""
+    from .router import effort_words
+    return effort_words(ProviderName(provider))
+
+
+def _clamp(wanted: str, ladder: tuple[str, ...], provider: ProviderName) -> str | None:
+    """Down the ladder first (never ask for more than was meant), then up, in
+    `provider`'s own order. A word that is not one of its efforts at all is
+    read as the default (A4's high), never sent."""
+    from .router import clamp_effort
+    if not ladder:
+        return None
+    if wanted not in _words(provider):
+        wanted = DEFAULT_EFFORT
+    return clamp_effort(wanted, ladder, provider) or ladder[0]
 
 
 def default_effort(provider: ProviderName, model: str) -> str | None:
-    """A4: high, or the roster's pin for this model, within its ladder."""
+    """A4: high, or the roster's pin for this model, within its ladder.
+
+    Never the effort Codex advertises as a model's default (PR #20 review,
+    owner's decision): the catalog keeps that as `advertised_effort`, for
+    information only."""
     provider = ProviderName(provider)
     wanted = DEFAULT_EFFORT
     if provider == ProviderName.FAST:
@@ -148,7 +162,7 @@ def default_effort(provider: ProviderName, model: str) -> str | None:
         # Cold catalog: sent as asked, the v1 rule (an effort a model does not
         # publish is clamped upstream, not refused).
         return wanted
-    return _clamp(wanted, ladder) if ladder else None
+    return _clamp(wanted, ladder, provider) if ladder else None
 
 
 def default_model(provider: ProviderName) -> str | None:
@@ -247,11 +261,12 @@ def _stored_raw(provider: ProviderName) -> tuple[str, Any] | None:
     return model, entry.get("effort")
 
 
-def _bad_effort(effort: Any) -> bool:
-    """A stored effort that is not a reasoning effort at all ("turbo", 3)."""
+def _bad_effort(provider: ProviderName, effort: Any) -> bool:
+    """A stored effort that is not one of `provider`'s reasoning efforts at
+    all ("turbo", 3, or `ultra` anywhere but Codex)."""
     if effort is None or (isinstance(effort, str) and not effort.strip()):
         return False
-    return not isinstance(effort, str) or effort.strip().lower() not in models.EFFORT_LADDER
+    return not isinstance(effort, str) or effort.strip().lower() not in _words(provider)
 
 
 def _stored(provider: ProviderName) -> tuple[str, str | None] | None:
@@ -262,7 +277,7 @@ def _stored(provider: ProviderName) -> tuple[str, str | None] | None:
     if raw is None:
         return None
     model, effort = raw
-    if _bad_effort(effort) or not isinstance(effort, str):
+    if _bad_effort(provider, effort) or not isinstance(effort, str):
         return model, None
     return model, effort.strip().lower() or None
 
@@ -270,12 +285,20 @@ def _stored(provider: ProviderName) -> tuple[str, str | None] | None:
 def hud_default(provider: ProviderName) -> tuple[str, str | None] | None:
     """The owner's HUD default for Claude or Codex as stored (model, effort),
     or None: none set, OpenRouter (its default is the Model picker's), or a
-    stored model Jarvis no longer knows."""
+    stored model Jarvis does not know right now — the built-in default runs
+    for that turn, a note says so (`describe`), and the file is never
+    rewritten, so the choice comes back with the model (PR #20 review)."""
     provider = ProviderName(provider)
     if provider not in SETTABLE:
         return None
     stored = _stored(provider)
-    if stored is None or stored[0] not in _cli(provider):
+    if stored is None:
+        return None
+    note = _stale_note(provider)
+    if note:
+        from .router import warn_once
+        warn_once(note)
+    if stored[0] not in _cli(provider):
         return None
     return stored
 
@@ -336,8 +359,8 @@ def set_provider_default(provider: Any, model: Any, effort: Any = None) -> tuple
             f"(it knows {', '.join(_cli(provider))})")
     elif effort is not None:
         ladder = efforts_of(provider, model) or ()
-        if effort not in models.EFFORT_LADDER:
-            raise ChoiceRefused(f"{effort!r} is not a reasoning effort")
+        if effort not in _words(provider):
+            raise ChoiceRefused(f"{effort!r} is not a reasoning effort {LABELS[provider]} takes")
         if not ladder:
             raise ChoiceRefused(f"{model} has no reasoning effort to set")
         if effort not in ladder:
@@ -366,10 +389,13 @@ def _stale_note(provider: ProviderName) -> str:
     if model not in _cli(provider):
         fallback = "built-in default" if provider == ProviderName.CLAUDE else "routing default"
         return (f"the HUD default {model} is not a {LABELS[provider]} model Jarvis knows "
-                f"any more; using the {fallback}")
-    if _bad_effort(effort):
+                f"any more; using the {fallback} until it is (the choice is kept)")
+    if _bad_effort(provider, effort):
         return (f"the HUD default's effort {effort!r} is not a reasoning effort; "
                 f"{model} runs at its default effort")
+    # A real level the model lacks (now) clamps down, unannounced, as an
+    # effort on a default thread does (PR #15 review); the stored choice is
+    # kept and returns with the ladder.
     return ""
 
 
@@ -380,7 +406,7 @@ def clamp_effort(provider: ProviderName, model: str, wanted: str) -> str | None:
     ladder = efforts_of(provider, model)
     if ladder is None:
         return wanted
-    return _clamp(wanted, ladder) if ladder else None
+    return _clamp(wanted, ladder, ProviderName(provider)) if ladder else None
 
 
 def effective(thread: Thread) -> tuple[str | None, str | None]:
@@ -389,14 +415,23 @@ def effective(thread: Thread) -> tuple[str | None, str | None]:
     A default thread follows the default model every turn, and an effort the
     owner chose for it is re-clamped to whatever that model is now (A4
     amendment), so a default that moves is never sent a level it lacks.
+
+    A pinned model's effort is clamped the same way when its ladder has
+    changed since (a Codex catalog refresh), and a stored word that is not
+    one of the provider's efforts at all (`ultra` on the fast path or Claude)
+    is read as no choice — it never reaches a provider (PR #20 review).
     """
+    chosen = thread.effort
+    if chosen is not None and chosen not in _words(thread.provider):
+        chosen = None
     if thread.model is None:
         model, effort = default_choice(thread.provider)
-        if thread.effort is not None and model is not None:
-            effort = clamp_effort(thread.provider, model, thread.effort)
+        if chosen is not None and model is not None:
+            effort = clamp_effort(thread.provider, model, chosen)
         return model, effort
-    effort = thread.effort if thread.effort is not None else default_effort(thread.provider, thread.model)
-    return thread.model, effort
+    if chosen is None:
+        return thread.model, default_effort(thread.provider, thread.model)
+    return thread.model, clamp_effort(thread.provider, thread.model, chosen)
 
 
 def _roster() -> list[str]:
@@ -443,8 +478,10 @@ def check(provider: ProviderName, model: str | None, effort: str | None, *,
         if target is None:
             raise ChoiceRefused("an effort needs a model")
         ladder = efforts_of(provider, target)
-        if effort not in models.EFFORT_LADDER:
-            raise ChoiceRefused(f"{effort!r} is not a reasoning effort")
+        if effort not in _words(provider):
+            # `ultra` is Codex's alone: refused for the fast path and Claude
+            # even when the model's ladder is unknown (PR #20 review).
+            raise ChoiceRefused(f"{effort!r} is not a reasoning effort {LABELS[provider]} takes")
         if ladder is not None and not ladder:
             raise ChoiceRefused(f"{target} has no reasoning effort to set")
         if ladder is not None and effort not in ladder:

@@ -38,10 +38,19 @@ function Shell(props: { title: string; onClose: () => void; children: React.Reac
 
 export function SettingsDialog(props: { route: RouteView | null; onClose: () => void }) {
   const chains = props.route?.table?.chains || {};
+  const notes = (props.route?.notes || []).filter((w) => typeof w === "string");
   return (
     <Shell title="Settings" onClose={props.onClose}>
       <div className="pad" data-testid="routing-readonly">
         <div className="muted small" style={{ marginBottom: 6 }}>Routing</div>
+        {notes.length ? (
+          // Saved routing that runs differently right now; text only.
+          <div className="small" data-testid="route-notes" style={{ marginBottom: 6 }}>
+            {notes.map((w, i) => (
+              <div key={i} className="muted" style={{ overflowWrap: "anywhere" }}>{w}</div>
+            ))}
+          </div>
+        ) : null}
         <table className="plain" data-testid="route-table">
           <tbody>
             {Object.entries(chains).map(([role, chain]) => (

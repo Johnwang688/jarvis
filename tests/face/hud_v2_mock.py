@@ -161,6 +161,9 @@ def _world() -> dict:
             "test_calc.py": {"before": "", "after": "import unittest\n"},
         },
         "approvals": [],
+        # The sidebar dots (2026-10-08): what `GET /activity` answers. A seen
+        # call sets the row idle and says so on SSE, as the daemon does.
+        "activity": {"threads": {}, "tasks": {}},
         "usage": {
             "providers": {
                 "claude": {
@@ -209,6 +212,9 @@ def _world() -> dict:
                                  "implementer": ["codex", "claude"],
                                  "reviewer": ["claude"]}},
             "states": {"claude": "available", "codex": "over_threshold", "fast": "available"},
+            # PR #20 review: saved routing that runs differently now, in words.
+            "notes": ["routing.json models.reviewer.codex: gpt-5.5 is not a codex model the "
+                         "account offers now; using the default <b>until</b> it does"],
             "decisions": [
                 {"task_id": "k1", "role": "orchestrator", "provider": "claude",
                  "reason": "project table", "at": "2026-09-15T00:00:11+00:00"},
@@ -489,6 +495,14 @@ class MockDaemon:
         self.calls: list[tuple[str, str, dict]] = []
         self.httpd: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
+        # The sidebar dots' races (2026-10-09): while `activity_gate` is an
+        # Event, `GET /activity` takes its snapshot on arrival and answers
+        # only once the Event is set, so a record emitted in between was
+        # published while the snapshot was in flight. `activity_seen_quiet`
+        # makes `/seen` answer with no SSE record behind it, as when the
+        # window's stream is reconnecting.
+        self.activity_gate: threading.Event | None = None
+        self.activity_seen_quiet = False
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -579,6 +593,12 @@ class MockDaemon:
                     return self._json([t for t in w["tasks"] if not pid or t["project_id"] == pid])
                 if path == "/approvals":
                     return self._json(w["approvals"])
+                if path == "/activity":
+                    snapshot = json.loads(json.dumps(w["activity"]))
+                    gate = mock.activity_gate
+                    if gate is not None:
+                        gate.wait(5)
+                    return self._json(snapshot)
                 if path == "/usage":
                     return self._json(w["usage"])
                 if path == "/discord":
@@ -763,14 +783,33 @@ class MockDaemon:
                 if len(parts) == 3 and parts[0] == "threads" and parts[2] == "send":
                     if w.get("fail_send"):
                         w["fail_send"] -= 1
-                        return self._err(409, "thread session is opening or closing")
+                        return self._err(409, w.get("fail_send_error") or "thread session is opening or closing")
                     # The daemon logs the user line before it answers 202, so a
                     # transcript read right after a send already has it.
                     w["transcripts"].setdefault(parts[1], []).append(
                         {"role": "user", "text": body.get("text", ""), "at": "2026-09-15T00:00:02+00:00"})
-                    return self._json({"turn_id": "turn-1"}, 202)
+                    # `Daemon.deliver` (2026-10-08): `send_status` scripts what
+                    # a send during a running turn became.
+                    status = w.get("send_status") or "started"
+                    w["sends"] = w.get("sends", 0) + 1
+                    reply = {"status": status, "turn_id": "turn-1"}
+                    if status != "started":
+                        reply.update(message_id=f"msg-{w['sends']}",
+                                     mode="native" if status == "steered" else None,
+                                     position=1)
+                    return self._json(reply, 202)
                 if len(parts) == 3 and parts[0] == "threads" and parts[2] == "interrupt":
                     return self._json({"ok": True})
+                if len(parts) == 3 and parts[0] in ("threads", "tasks") and parts[2] == "seen":
+                    of = parts[0]
+                    status = w["activity"][of].get(parts[1], "idle")
+                    if status in ("unread", "failed"):
+                        w["activity"][of].pop(parts[1], None)
+                        if not mock.activity_seen_quiet:
+                            mock.emit("activity", {"of": of[:-1], "id": parts[1], "project_id": "p1",
+                                                   "status": "idle"})
+                        status = "idle"
+                    return self._json({"status": status})
                 if len(parts) == 3 and parts[0] == "tasks":
                     return self._json({"ok": True})
                 if len(parts) == 2 and parts[0] == "approvals":
@@ -1013,6 +1052,15 @@ class MockDaemon:
             self.workshop.server_close()
 
     # -- driving -----------------------------------------------------------
+
+    def activity(self, of: str, object_id: str, status: str):
+        """Set one row's status in the world and say so on SSE."""
+        table = self.world["activity"][of + "s"]
+        if status == "idle":
+            table.pop(object_id, None)
+        else:
+            table[object_id] = status
+        self.emit("activity", {"of": of, "id": object_id, "project_id": "p1", "status": status})
 
     def emit(self, kind: str, data: dict | None = None, **extra):
         """Release one SSE frame."""

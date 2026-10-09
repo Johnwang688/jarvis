@@ -82,6 +82,59 @@ describe("the model list", () => {
   });
 });
 
+describe("ultra is Codex's alone, and the default stays high (PR #20 review)", () => {
+  const ACCOUNT: ThreadModels = {
+    ...TM,
+    providers: {
+      ...TM.providers,
+      codex: {
+        label: "Codex", default: "gpt-5.5", default_effort: "high", settable: true,
+        default_source: "hud", hud_default: { model: "gpt-5.5", effort: null },
+        models: [
+          // The backend sends A4's default, never Codex's advertised one.
+          { id: "gpt-6.1-sol", efforts: ["low", "medium", "high", "xhigh", "max", "ultra"], vision: true, default_effort: "high" },
+          { id: "gpt-6-astra", efforts: ["low", "medium", "max", "ultra"], vision: true, default_effort: "medium" },
+          { id: "gpt-5.5", efforts: ["low", "medium", "high", "xhigh"], vision: true, default_effort: "high" },
+        ],
+      },
+    },
+  };
+  const codex = (model: string | null = null, effort: string | null = null): Choice => ({ provider: "codex", model, effort });
+
+  it("offers ultra from a Codex ladder, and for a Codex model whose ladder is unknown", () => {
+    expect(effortOptions(ACCOUNT, codex("gpt-6.1-sol")).map((o) => o.value)).toContain("ultra");
+    expect(effortOptions(ACCOUNT, codex("gone-model")).map((o) => o.value))
+      .toEqual(["", "ultra", "max", "xhigh", "high", "medium", "low", "minimal", "none"]);
+  });
+
+  it("never offers ultra to the fast path or Claude, even with no ladder known", () => {
+    expect(effortOptions(TM, fast("new/unlisted")).map((o) => o.value)).not.toContain("ultra");
+    expect(effortOptions(TM, fast("gone/model")).map((o) => o.value)).not.toContain("ultra");
+    const claude = (model: string | null): Choice => ({ provider: "claude", model, effort: null });
+    expect(effortOptions(TM, claude("claude-opus-5-5")).map((o) => o.value)).not.toContain("ultra");
+    expect(effortOptions(TM, claude("claude-unknown")).map((o) => o.value)).not.toContain("ultra");
+  });
+
+  it("reads a stored ultra off Codex as no choice, never as what runs", () => {
+    expect(effective(TM, fast("moonshotai/kimi-k3", "ultra")).effort).toBe("low");
+    expect(effective(TM, fast(null, "ultra")).effort).toBe("high");
+    expect(effective(TM, { provider: "claude", model: "claude-opus-5-5", effort: "ultra" }).effort).toBe("high");
+  });
+
+  it("clamps ultra down a Codex ladder like any level, pinned or default", () => {
+    expect(effective(ACCOUNT, codex(null, "ultra"))).toEqual({ model: "gpt-5.5", effort: "xhigh" });
+    expect(effective(ACCOUNT, codex("gpt-5.5", "ultra"))).toEqual({ model: "gpt-5.5", effort: "xhigh" });
+    expect(effective(ACCOUNT, codex("gpt-6.1-sol", "ultra"))).toEqual({ model: "gpt-6.1-sol", effort: "ultra" });
+  });
+
+  it("labels the default effort as what actually runs: high within the ladder", () => {
+    expect(defaultEffort(ACCOUNT, "codex", "gpt-6.1-sol")).toBe("high");
+    expect(defaultEffort(ACCOUNT, "codex", "gpt-6-astra")).toBe("medium");
+    expect(effortOptions(ACCOUNT, codex("gpt-6.1-sol"))[0].label).toBe("default · high");
+    expect(effortOptions(ACCOUNT, codex("gpt-6-astra"))[0].label).toBe("default · medium");
+  });
+});
+
 describe("effort (A4)", () => {
   it("defaults to high, or the model's own roster setting, within its ladder", () => {
     expect(defaultEffort(TM, "fast", "deepseek/deepseek-v4-flash-0731")).toBe("high");
@@ -107,6 +160,7 @@ describe("effort (A4)", () => {
       expect(defaultEffort(TM, "fast", model)).toBe("high");
       const opts = effortOptions(TM, fast(model));
       expect(opts[0].label).toBe("default · high");
+      // OpenRouter's levels only: `ultra` is Codex's (PR #20 review).
       expect(opts.map((o) => o.value)).toEqual(["", "max", "xhigh", "high", "medium", "low", "minimal", "none"]);
       expect(effective(TM, fast(model)).effort).toBe("high");
     }

@@ -179,7 +179,8 @@ def log_decision(record: ApprovalRecord, path: Path | None = None) -> None:
 
 def protected_paths() -> set[Path]:
     """The gate-state files — v1's allowlist, `models.json`, `routing.json`,
-    `provider_defaults.json` and the Discord guild file — resolved.
+    `provider_defaults.json`, the Discord guild file and the saved Codex
+    catalog (`codex-models.json`, PR #20) — resolved.
 
     One set for v1 and v2 (2026-10-08): it is `jarvis.tools.files._protected_state`,
     which v1's write tools refuse, reached through `jarvis.protected_state`,

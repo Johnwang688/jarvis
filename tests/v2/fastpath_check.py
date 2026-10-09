@@ -462,6 +462,109 @@ def interrupt_checks() -> None:
     print("ok  interrupt: stop=interrupted, transcript wire-valid, next turn unaffected")
 
 
+def steering_checks() -> None:
+    """2026-10-08: a message steered into a running fast-path turn reaches the
+    model at its next step boundary as `[owner steering] …` — after every
+    result of the batch it interrupted (invariant 3), never inside it; one that
+    arrives as the final answer is being written is handed back undelivered;
+    and a second send is refused without being fatal."""
+    from jarvis.v2.provider import SteerRefused
+
+    provider = FastPathProvider()
+    handle = provider.start(thread("steer"), brief(), allow_all)
+    try:
+        provider.steer(handle, UserMessage(text="nothing is running"))
+        raise AssertionError("a steer with no turn running must be refused")
+    except SteerRefused as exc:
+        assert exc.fallback == "queue", exc.fallback
+
+    real = tools.REGISTRY["get_datetime"].func
+    steered = UserMessage(text="use UTC", images=[{"b64": "YWJj", "mime": "image/png"}])
+
+    def steering_tool():
+        # From inside the batch: the steer must wait for the batch to finish.
+        if not getattr(steering_tool, "done", False):
+            steering_tool.done = True
+            provider.steer(handle, steered)
+        return "the time is now"
+
+    tools.REGISTRY["get_datetime"].func = steering_tool
+    seen = []
+
+    def fake(model, messages, tools=None, on_delta=None, **kw):
+        seen.append([dict(m) for m in messages])
+        if len(seen) == 1:
+            return reply("", [("get_datetime", "{}"), ("get_datetime", "{}")])
+        return reply("done, in UTC")
+
+    try:
+        with scripted(fake):
+            events = drain(provider, handle, "what time is it")
+    finally:
+        tools.REGISTRY["get_datetime"].func = real
+
+    assert one(events, EventKind.TEXT).data["text"] == "done, in UTC"
+    assert one(events, EventKind.TURN_FINISHED).data["stop"] == "end"
+    second = seen[1]
+    roles = [m["role"] for m in second]
+    at = next(i for i, m in enumerate(second) if m["role"] == "user"
+              and isinstance(m.get("content"), list)
+              and m["content"][0].get("text") == "[owner steering] use UTC")
+    assert roles[at - 3:at] == ["assistant", "tool", "tool"], roles
+    assert [p["type"] for p in second[at]["content"]] == ["text", "image_url"], second[at]["content"]
+    # Invariant 7: the working-context block is still lifted to the tail,
+    # behind the steering message, and there is one of it.
+    from jarvis.agent import CONTEXT_BLOCK_PREFIX
+    blocks = [i for i, m in enumerate(second)
+              if isinstance(m.get("content"), str) and m["content"].startswith(CONTEXT_BLOCK_PREFIX)]
+    assert len(blocks) <= 1 and all(i == len(second) - 1 and i > at for i in blocks), (blocks, at)
+    assert_wire_valid(handle.native.agent.messages)
+    assert provider.undelivered(handle) == [], "a delivered steer is not handed back"
+    print("ok  steering: delivered at the next step boundary, after the whole batch, with its image")
+
+    # Steered while the final answer is being written: never seen by this
+    # turn, so handed back for the daemon to run next.
+    late = UserMessage(text="and in French")
+
+    def answering(model, messages, tools=None, on_delta=None, **kw):
+        provider.steer(handle, late)
+        return reply("it is noon")
+
+    with scripted(answering):
+        events = drain(provider, handle, "and now?")
+    assert one(events, EventKind.TEXT).data["text"] == "it is noon"
+    left = provider.undelivered(handle)
+    assert len(left) == 1 and left[0] is late, left
+    assert provider.undelivered(handle) == [], "handed back once"
+    assert not any("and in French" in str(m.get("content")) for m in handle.native.agent.messages)
+    try:
+        provider.steer(handle, UserMessage(text="after the turn"))
+        raise AssertionError("a steer after the turn must be refused")
+    except SteerRefused:
+        pass
+    print("ok  steering: one that misses the final answer is handed back, not lost")
+
+    # A second send while a turn runs is refused — and not fatal, because a
+    # fatal error makes the daemon drop the session that is still running.
+    gate = threading.Event()
+
+    def slow(model, messages, tools=None, on_delta=None, **kw):
+        gate.wait(5)
+        return reply("first finished")
+
+    with scripted(slow):
+        first = provider.send(handle, UserMessage(text="one"))
+        assert next(first).kind is EventKind.TURN_STARTED
+        second_events = list(provider.send(handle, UserMessage(text="two")))
+        gate.set()
+        rest = list(first)
+    assert kinds(second_events) == [EventKind.ERROR], second_events
+    assert second_events[0].data["fatal"] is False, second_events[0].data
+    assert one(rest, EventKind.TEXT).data["text"] == "first finished"
+    provider.close(handle)
+    print("ok  steering: a concurrent send is refused, never fatal, and the running turn finishes")
+
+
 def error_checks() -> None:
     provider = FastPathProvider()
     handle = provider.start(thread("boom"), brief(), allow_all)
@@ -767,6 +870,13 @@ def model_checks() -> None:
         provider.set_model(pinned, "third/model", "")
         drain(provider, pinned)
         assert seen == [("third/model", None)], seen
+        # Codex's `ultra` never reaches an OpenRouter request, whatever handed
+        # it over (PR #20 review): the model's v1 default goes instead.
+        seen.clear()
+        provider.set_model(pinned, "third/model", "ultra")
+        drain(provider, pinned)
+        assert seen == [("third/model", models.effort_for("third/model"))], seen
+        assert all(effort != "ultra" for _, effort in seen), seen
     for h in (default, pinned):
         provider.close(h)
     try:
@@ -834,6 +944,7 @@ def main() -> int:
     propose_replace_checks()
     exhaustion_checks()
     interrupt_checks()
+    steering_checks()
     error_checks()
     skill_checks()
     close_checks()

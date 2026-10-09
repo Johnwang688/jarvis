@@ -191,8 +191,14 @@ class RpcProcess:
         timeout: float = config.CODEX_RPC_TIMEOUT_SECONDS, deadline: float | None = None,
     ) -> int:
         request_id = next(self._ids)
-        self._write({"id": request_id, "method": method, "params": params or {}},
-                    deadline=deadline if deadline is not None else time.monotonic() + timeout)
+        message: dict[str, Any] = {"id": request_id, "method": method}
+        # No-params methods in older app-server schemas require `params` to be
+        # absent/null.  Do not turn an intentional None into {}, which is a
+        # different JSON-RPC shape (notably for account/rateLimits/read on
+        # codex-cli 0.153.4).
+        if params is not None:
+            message["params"] = params
+        self._write(message, deadline=deadline if deadline is not None else time.monotonic() + timeout)
         return request_id
 
     def notify(
@@ -280,12 +286,15 @@ class RpcProcess:
             raise RpcError("Codex app-server has too many unhandled messages")
         self._pending.append(message)
 
-    def initialize(self, *, timeout: float = config.CODEX_RPC_TIMEOUT_SECONDS) -> dict:
+    def initialize(
+        self, *, timeout: float = config.CODEX_RPC_TIMEOUT_SECONDS, deadline: float | None = None,
+    ) -> dict:
+        end = deadline if deadline is not None else time.monotonic() + timeout
         result = self.request("initialize", {
             "clientInfo": {"name": config.CODEX_RPC_CLIENT_NAME, "version": config.CODEX_RPC_CLIENT_VERSION},
             "capabilities": {"experimentalApi": True},
-        }, timeout=timeout)
-        self.notify("initialized")
+        }, deadline=end)
+        self.notify("initialized", deadline=end)
         return result
 
     def close(self) -> None:

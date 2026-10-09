@@ -94,6 +94,31 @@ def peer(script_path, log_path, thread_name):
             continue
         elif method == "account/read":
             result = {"account": {"type": script.get("account", "chatgpt")}}
+        elif method == "model/list":
+            if script.get("model_stall"):       # never answers: the deadline must
+                continue
+            if script.get("model_error"):
+                emit({"id": m["id"], "error": {"code": -32000, "message": "private detail"}})
+                continue
+            pages = script.get("model_pages", [[{
+                "id": "fake-model", "model": "fake-model", "displayName": "Fake Model",
+                "hidden": False, "inputModalities": ["text"],
+                "supportedReasoningEfforts": [{"reasoningEffort": "high"}],
+                "defaultReasoningEffort": "high",
+            }]])
+            cursor = str(p.get("cursor", "0"))
+            index = int(cursor) % len(pages) if cursor.isdigit() else 0
+            result = {"data": pages[index],
+                      "nextCursor": str(index + 1) if index + 1 < len(pages) else None}
+            if "model_next" in script:      # a cursor that repeats
+                result["nextCursor"] = script["model_next"]
+            elif script.get("model_endless"):
+                result["nextCursor"] = str(int(cursor) + 1 if cursor.isdigit() else 1)
+        elif method == "account/rateLimits/read":
+            if script.get("rate_error"):
+                emit({"id": m["id"], "error": {"code": -32000, "message": "private detail"}})
+                continue
+            result = script.get("rate_limits", {"rateLimits": None, "rateLimitsByLimitId": {}})
         elif method == "config/read":
             result = {"config": settings}
         elif method in ("thread/start", "thread/resume"):
@@ -130,7 +155,9 @@ def peer(script_path, log_path, thread_name):
             if mode == "malformed":
                 print("not json -- private text", flush=True)
                 continue
-            if mode in ("hold", "interrupt_stall"):
+            if (mode in ("hold", "interrupt_stall", "steer", "steer_unsupported", "steer_errors",
+                         "steer_silent")
+                    or (mode == "steer_late" and count == 1)):
                 continue
             if mode in ("approval", "flood", "deny", "approval_death", "file_approval"):
                 item = {"id": "cmd", "type": "commandExecution", "command": "echo ok", "cwd": os.getcwd(), "status": "inProgress"}
@@ -194,6 +221,41 @@ def peer(script_path, log_path, thread_name):
                 event("thread/tokenUsage/updated", tokenUsage={"total": {k: v * 2 for k, v in UNIT.items()}, "last": UNIT})
             if mode == "duplicate_usage":
                 event("thread/tokenUsage/updated", tokenUsage={"total": raw, "last": UNIT})
+            finish()
+            continue
+        elif method == "turn/steer":
+            # The 0.153.4/0.161.0 shape: {threadId, input, expectedTurnId} ->
+            # {turnId}, refused when there is no such active turn.
+            if mode == "steer_unsupported":
+                emit({"id": m["id"], "error": {"code": -32601, "message": "Method not found"}})
+                continue
+            if mode == "steer_errors":
+                # 0.161.0's own steer refusals, and an unknown variant that is
+                # not the method: each in turn, then the turn completes.
+                errors = script["steer_errors"]
+                n = script["_seen"] = script.get("_seen", 0) + 1
+                code, text = errors[min(n, len(errors)) - 1]
+                emit({"id": m["id"], "error": {"code": code, "message": text}})
+                if n == len(errors):
+                    usage()
+                    finish()
+                continue
+            if mode == "steer_silent":
+                continue                    # never answered
+            if mode == "steer_late":
+                # The turn completes first; the refusal arrives after it.
+                usage()
+                finish()
+                emit({"id": m["id"], "error": {"code": -32600, "message": "no active turn to steer"}})
+                continue
+            if turn is None or p.get("expectedTurnId") != turn:
+                emit({"id": m["id"], "error": {"code": -32600, "message": "no active turn to steer"}})
+                continue
+            emit({"id": m["id"], "result": {"turnId": turn}})
+            text = p["input"][0]["text"]
+            event("item/completed", item={"type": "agentMessage", "id": "steered",
+                                          "text": f"steered: {text}", "phase": "final_answer"})
+            usage()
             finish()
             continue
         elif method == "turn/interrupt":
@@ -385,6 +447,162 @@ class Checks(unittest.TestCase):
         self.assertEqual(reports[0].data["provider_reported"]["rate_limits"]["primary"]["usedPercent"], 42)
         self.assertEqual(events[-1].data["stop"], "end")
         self.assertEqual(self.provider.usage(h).work_tokens, 80)
+
+    def test_account_metadata_reads_paginated_models_and_quota_without_a_turn(self):
+        self.brain.script.update(model_pages=[
+            [{"id": "gpt-6.1-sol", "model": "gpt-6.1-sol", "displayName": "GPT-6.1 Sol",
+              "hidden": False, "inputModalities": ["text", "image"],
+              "supportedReasoningEfforts": [{"reasoningEffort": "low"}, {"reasoningEffort": "max"}],
+              "defaultReasoningEffort": "low"}],
+            [{"id": "gpt-6-luna", "model": "gpt-6-luna", "displayName": "GPT-6 Luna",
+              "hidden": False, "inputModalities": ["text"],
+              "supportedReasoningEfforts": [{"reasoningEffort": "medium"}],
+              "defaultReasoningEffort": "medium"}],
+        ], rate_limits={"rateLimits": {"limitId": "codex", "primary": {
+            "usedPercent": 19, "windowDurationMins": 300, "resetsAt": 1900000000}}})
+
+        metadata = self.provider.account_metadata()
+
+        self.assertEqual([row["model"] for row in metadata["models"]],
+                         ["gpt-6.1-sol", "gpt-6-luna"])
+        self.assertEqual(metadata["rate_limits"]["rateLimits"]["primary"]["usedPercent"], 19)
+        calls = self.brain.calls()
+        model_calls = [call for call in calls if call.get("method") == "model/list"]
+        self.assertEqual([call["params"].get("cursor") for call in model_calls], [None, "1"])
+        rate_call = next(call for call in calls if call.get("method") == "account/rateLimits/read")
+        self.assertNotIn("params", rate_call, "old app-servers require a no-params request")
+        self.assertFalse(self.brain.calls("thread/start"), "metadata must not spend a model turn")
+        cfg = tomllib.loads((self.root / "data" / "codex" / "_metadata" / "config.toml").read_text())
+        self.assertNotIn("model", cfg)
+        self.assertNotIn("mcp_servers", cfg)
+
+    def test_account_metadata_holds_the_login_lock_and_never_waits_on_a_turn(self):
+        """PR #20 review: the metadata peer shares Codex's login lock with
+        session start-up; a turn holds that lock for its whole length, so a
+        HUD read during one is refused at once (`MetadataBusy`), before the
+        CLI is probed or anything is spawned."""
+        seen, original = [], self.brain.rpc
+
+        def factory(argv, **kwargs):
+            rpc = original(argv, **kwargs)
+            real = rpc.request
+
+            def request(method, *args, **kw):
+                seen.append((method, codex._auth_lock.locked()))
+                return real(method, *args, **kw)
+            rpc.request = request
+            return rpc
+
+        with patch.object(codex, "RpcProcess", factory):
+            self.provider.account_metadata()
+        self.assertIn(("model/list", True), seen)
+        self.assertTrue(all(locked for _, locked in seen), seen)
+        self.assertFalse(codex._auth_lock.locked(), "released afterwards")
+        spawned, probes = len(self.brain.rpcs), []
+        with patch.object(codex.CodexProvider, "_probe",
+                          lambda _self: (probes.append(1), ("/fake/codex", "fake"))[1]):
+            self.assertTrue(codex._auth_lock.acquire(timeout=5))
+            try:
+                started = time.monotonic()
+                with self.assertRaises(codex.MetadataBusy):
+                    self.provider.account_metadata()
+                self.assertLess(time.monotonic() - started, 1)
+            finally:
+                codex._auth_lock.release()
+        self.assertEqual((probes, len(self.brain.rpcs)), ([], spawned))
+
+    QUOTA = {"rateLimits": {"limitId": "codex", "primary": {"usedPercent": 11, "windowDurationMins": 300}}}
+
+    def test_account_metadata_refuses_a_looping_or_endless_catalog(self):
+        # A cursor seen before is caught at its second use; one that never
+        # repeats stops at the page cap. Either way the catalog half is
+        # refused (logged by operation and class), the quota half still
+        # lands, and the lock is released.
+        for script, pages in (({"model_next": "again"}, 2),
+                              ({"model_endless": True}, codex.MODEL_PAGE_CAP)):
+            self.brain.script = {"mode": "normal", "rate_limits": self.QUOTA, **script}
+            before = len(self.brain.calls("model/list"))
+            with self.subTest(script=script), self.assertLogs("jarvis.v2.providers.codex", "WARNING") as logged:
+                result = self.provider.account_metadata()
+            self.assertIsNone(result["models"])
+            self.assertEqual(result["rate_limits"], self.QUOTA, "a failed model/list keeps the quota")
+            self.assertEqual(" ".join(logged.output).count("model/list failed (RpcError)"), 1)
+            self.assertEqual(len(self.brain.calls("model/list")) - before, pages)
+            self.assertFalse(codex._auth_lock.locked())
+
+    def test_account_metadata_halves_are_independent(self):
+        self.brain.script = {"mode": "normal", "rate_limits": self.QUOTA, "model_error": True}
+        with self.assertLogs("jarvis.v2.providers.codex", "WARNING") as logged:
+            result = self.provider.account_metadata()
+        self.assertEqual((result["models"], result["rate_limits"]), (None, self.QUOTA))
+        self.assertNotIn("private detail", " ".join(logged.output), "operation and class only")
+        self.brain.script = {"mode": "normal", "rate_error": True}
+        result = self.provider.account_metadata()
+        self.assertEqual(([r["model"] for r in result["models"]], result["rate_limits"]), (["fake-model"], None))
+        self.brain.script = {"mode": "normal", "rate_error": True, "model_error": True}
+        with self.assertRaises(codex.RpcError):
+            self.provider.account_metadata()
+        self.assertFalse(codex._auth_lock.locked())
+
+    def test_account_metadata_has_one_overall_deadline(self):
+        """PR #20 review: the session held the login lock across up to 23
+        RPCs at 30 s each. One deadline now bounds all of it, so a stalled
+        app-server keeps a turn from starting for seconds, not minutes."""
+        self.brain.script = {"mode": "normal", "model_stall": True}
+        started = time.monotonic()
+        with self.assertRaises(codex.RpcError):
+            self.provider.account_metadata(deadline_s=1.0)
+        self.assertLess(time.monotonic() - started, 4, "bounded by the deadline, not 30 s per call")
+        self.assertFalse(codex._auth_lock.locked())
+        self.assertEqual(codex.METADATA_DEADLINE_S, 10.0)
+
+    def test_cancel_metadata_ends_a_read_in_flight(self):
+        """PR #20 re-review: `Daemon.stop` left a metadata app-server running
+        to exit on EOF. `cancel_metadata` ends the read at the transport's
+        next poll; the session closes its app-server and frees the lock, and
+        no new read starts — not even a probe."""
+        self.brain.script = {"mode": "normal", "model_stall": True}
+        outcome = {}
+
+        def read():
+            try:
+                outcome["result"] = self.provider.account_metadata()
+            except Exception as exc:
+                outcome["error"] = exc
+        worker = threading.Thread(target=read, daemon=True)
+        worker.start()
+        self.brain.wait_call("model/list")
+        started = time.monotonic()
+        self.provider.cancel_metadata()
+        worker.join(5)
+        self.assertFalse(worker.is_alive())
+        self.assertLess(time.monotonic() - started, 2, "well inside the 10 s deadline")
+        self.assertIsInstance(outcome.get("error"), RpcError)
+        self.assertFalse(codex._auth_lock.locked())
+        self.assertTrue(self.brain.rpcs[-1]._closed.is_set(), "its app-server is closed")
+        probes = []
+        with patch.object(codex.CodexProvider, "_probe",
+                          lambda _self: (probes.append(1), ("/fake/codex", "fake"))[1]):
+            with self.assertRaises(codex.RpcCancelled):
+                self.provider.account_metadata()
+        self.assertEqual(probes, [])
+
+    def test_the_login_lock_is_released_even_if_close_raises(self):
+        original = self.brain.rpc
+
+        def factory(argv, **kwargs):
+            rpc = original(argv, **kwargs)
+            real_close = rpc.close
+
+            def close():
+                real_close()
+                raise OSError("close failed")
+            rpc.close = close
+            return rpc
+
+        with patch.object(codex, "RpcProcess", factory), self.assertRaises(OSError):
+            self.provider.account_metadata()
+        self.assertFalse(codex._auth_lock.locked(), "a raising close() cannot leak the lock")
 
     def test_full_exact_events(self):
         h = self.start("full")
@@ -867,6 +1085,149 @@ class Checks(unittest.TestCase):
             self.assertEqual(events[-1].data, {"stop": "interrupted"})
             self.assertEqual(self.provider.usage(h).input_tokens, 100)
         self.assertEqual(len(self.brain.calls("turn/start")), 1)
+
+    # -- steering (2026-10-08) ------------------------------------------------
+
+    def _running(self, h):
+        deadline = time.monotonic() + 3
+        while h.native.turn_id is None:
+            if time.monotonic() >= deadline:
+                raise AssertionError("the turn never started")
+            time.sleep(0.01)
+
+    def test_steer_appends_to_the_running_turn(self):
+        """`turn/steer` with the verified shape lands in the turn that is
+        running: one turn/start, the model answers the steer, one finish."""
+        h = self.start("steer")
+        with ThreadPoolExecutor(1) as pool:
+            running = pool.submit(self.send, h)
+            self._running(h)
+            self.provider.steer(h, UserMessage("use the other file", [{"b64": "YWJj", "mime": "image/png"}]))
+            events = running.result(5)
+        params = self.brain.calls("turn/steer")[0]["params"]
+        self.assertEqual(params, {"threadId": "native-0", "expectedTurnId": "turn-1", "input": [
+            {"type": "text", "text": "use the other file", "text_elements": []},
+            {"type": "image", "url": "data:image/png;base64,YWJj"}]})
+        self.assertEqual([e.data["text"] for e in events if e.kind == K.TEXT], ["steered: use the other file"])
+        self.assertEqual(events[-1].data, {"stop": "end"})
+        self.assertEqual(len(self.brain.calls("turn/start")), 1)
+        self.assertFalse(any(e.kind == K.ERROR for e in events), events)
+
+    def test_steer_is_refused_with_no_turn_or_mid_approval(self):
+        """No turn running, or a turn waiting on an approval: refused (the
+        daemon queues it), and nothing is sent — a steer must never read as
+        the answer to what the turn is waiting on."""
+        from jarvis.v2.provider import SteerRefused
+        h = self.start("approval", permit=lambda *_: Decision.ALLOW)
+        with self.assertRaises(SteerRefused) as idle:
+            self.provider.steer(h, UserMessage("too early"))
+        self.assertEqual(idle.exception.fallback, "queue")
+        asked, release = threading.Event(), threading.Event()
+
+        def permit(*_a, **_k):
+            asked.set()
+            self.assertTrue(release.wait(3))
+            return Decision.ALLOW
+
+        h2 = self.start("approval", permit=permit, thread=replace(self.thread, id="asking"))
+        with ThreadPoolExecutor(1) as pool:
+            running = pool.submit(self.send, h2)
+            self.assertTrue(asked.wait(3))
+            with self.assertRaises(SteerRefused) as waiting:
+                self.provider.steer(h2, UserMessage("actually do X"))
+            self.assertEqual(waiting.exception.fallback, "queue")
+            release.set()
+            events = running.result(5)
+        self.assertEqual(self.brain.calls("turn/steer"), [])
+        self.assertEqual(events[-1].kind, K.TURN_FINISHED)
+
+    def test_a_codex_without_turn_steer_falls_back_to_interrupt(self):
+        """A Codex that answers "method not found" (none verified so far;
+        0.153.4 and 0.161.0 both have turn/steer) is steered by interrupting:
+        refused with the `interrupt` fallback, and not asked again."""
+        from jarvis.v2.provider import SteerRefused
+        h = self.start("steer_unsupported")
+        with ThreadPoolExecutor(1) as pool:
+            running = pool.submit(self.send, h)
+            self._running(h)
+            with self.assertRaises(SteerRefused) as first:
+                self.provider.steer(h, UserMessage("redirect"))
+            self.assertEqual(first.exception.fallback, "interrupt")
+            with self.assertRaises(SteerRefused) as second:
+                self.provider.steer(h, UserMessage("again"))
+            self.assertEqual(second.exception.fallback, "interrupt")
+            self.assertEqual(len(self.brain.calls("turn/steer")), 1, "asked once, then remembered")
+            self.provider.interrupt(h)
+            events = running.result(5)
+        self.assertEqual(events[-1].data, {"stop": "interrupted"})
+        self.assertFalse(any(e.kind == K.ERROR for e in events), "a refused steer is not the turn's failure")
+
+    def test_steer_refusals_queue_and_never_mark_codex_unable_to_steer(self):
+        """Review of PR #22, finding 4: 0.161.0's own steer errors, and an
+        unknown variant that is not the method, are refusals (queue) — none of
+        them may switch the session to the interrupt fallback for good."""
+        from jarvis.v2.provider import SteerRefused
+        errors = [(-32600, "no active turn to steer"),
+                  (-32600, "expected active turn id `turn-1` but found `turn-2`"),
+                  (-32600, "cannot steer a review/compact turn"),
+                  (-32600, "Invalid request: unknown variant `localVideo`, expected one of `text`, `image`")]
+        self.brain.script["steer_errors"] = errors
+        h = self.start("steer_errors")
+        with ThreadPoolExecutor(1) as pool:
+            running = pool.submit(self.send, h)
+            self._running(h)
+            try:
+                for code, text in errors:
+                    with self.subTest(text=text):
+                        with self.assertRaises(SteerRefused) as refused:
+                            self.provider.steer(h, UserMessage("redirect"))
+                        self.assertEqual(refused.exception.fallback, "queue")
+                        self.assertFalse(h.native.steer_unsupported)
+                self.assertEqual(running.result(5)[-1].data, {"stop": "end"})
+            except BaseException:
+                # A failure must not leave the held turn (and the pool) hanging.
+                self.provider.interrupt(h)
+                raise
+        self.assertEqual(len(self.brain.calls("turn/steer")), len(errors), "asked every time")
+
+    def test_a_steer_codex_never_answers_is_unknown_not_requeued(self):
+        """Review of PR #22, finding 3: no answer within STEER_TIMEOUT may mean
+        Codex took it and answered late. Counted as delivered (logged), never
+        refused — a refusal would have the daemon queue it and deliver it
+        twice. Round 2: still unanswered when the turn ends, the log says it
+        may not have reached the model."""
+        h = self.start("steer_silent")
+        with patch.object(codex, "STEER_TIMEOUT", 0.2), ThreadPoolExecutor(1) as pool:
+            running = pool.submit(self.send, h)
+            self._running(h)
+            with self.assertLogs(codex.LOG, level="WARNING") as logged:
+                try:
+                    self.assertIsNone(self.provider.steer(h, UserMessage("maybe taken")))
+                finally:
+                    self.provider.interrupt(h)      # whatever happened, the held turn ends
+                events = running.result(5)
+            log = "\n".join(logged.output)
+            self.assertIn("taken as delivered", log)
+            self.assertIn("unanswered when the turn ended; it may not have reached the model", log)
+            self.assertFalse(h.native.steer_unsupported)
+            self.assertEqual(events[-1].data, {"stop": "interrupted"})
+        self.assertEqual(len(self.brain.calls("turn/steer")), 1)
+
+    def test_a_late_steer_refusal_never_fails_the_next_turn(self):
+        """The turn completes before Codex answers the steer: the waiter is
+        released (refused, so the daemon queues the message), and the late
+        refusal is ignored by the next turn rather than failing it."""
+        from jarvis.v2.provider import SteerRefused
+        h = self.start("steer_late")
+        with ThreadPoolExecutor(1) as pool:
+            running = pool.submit(self.send, h)
+            self._running(h)
+            with self.assertRaises(SteerRefused):
+                self.provider.steer(h, UserMessage("too late"))
+            self.assertEqual(running.result(5)[-1].data, {"stop": "end"})
+        events = self.send(h)
+        self.assertEqual(events[-1].data, {"stop": "end"}, events)
+        self.assertFalse(any(e.kind == K.ERROR for e in events), events)
 
     def test_resume_offsets_retained_reset_replay(self):
         for retained in (True, False):

@@ -186,6 +186,12 @@ class FakeClient:
                 continue
             yield item
 
+    async def receive_messages(self):
+        """What the provider reads (one reader per client, across turns): the
+        script, then the end of the stream. A new reader takes a new script."""
+        async for item in self.receive_response():
+            yield item
+
 
 @contextlib.contextmanager
 def fake(script=None):
@@ -236,6 +242,19 @@ def result_message(**kw) -> ResultMessage:
     )
     base.update(kw)
     return ResultMessage(**base)
+
+
+def prompt_texts(client) -> list:
+    """The text of every turn's own message the client was given, in order
+    (steers, which carry priority `next`, left out)."""
+    out = []
+    for q in client.queries:
+        if isinstance(q, list) and q and isinstance(q[0], dict):
+            if q[0].get("priority") != "next":
+                out.append(q[0]["message"]["content"])
+        else:
+            out.append(q)
+    return out
 
 
 def drain(provider, handle, text: str = "hello") -> list:
@@ -947,7 +966,12 @@ def sequence_checks() -> None:
             all(e.thread_id == "t1" for e in events),
             "every event carries the thread id",
         )
-        eq(FakeClient.instances[0].queries, ["hello"], "text-only turns go as a plain prompt")
+        sent = FakeClient.instances[0].queries
+        eq(prompt_texts(FakeClient.instances[0]), ["hello"], "the turn's message is its text")
+        check(len(sent) == 1 and len(str(sent[0][0].get("uuid") or "")) == 36
+              and "priority" not in sent[0][0],
+              "one stdin message, carrying the uuid its echo is matched by, at the CLI's "
+              "default priority")
         provider.close(handle)
 
     print("\n-- tool results that did not succeed")
@@ -1249,8 +1273,14 @@ def error_checks() -> None:
         next(first)
         second = list(provider.send(handle, UserMessage(text="b")))
         eq(kinds(second), ["error"], "a second concurrent turn on one handle is refused")
+        # 2026-10-08: never fatal. A fatal error makes the daemon drop and
+        # close the session, and the session here is the one still running.
+        check(second[0].data.get("fatal") is False,
+              "the refusal is not fatal, so it can never drop the running session")
         gate.set()
-        list(first)
+        rest = list(first)
+        check(rest and rest[-1].kind is EventKind.TURN_FINISHED,
+              "the running turn carries on to its own finish")
         provider.close(handle)
 
     print("\n-- a failed start leaves nothing running")
@@ -1332,16 +1362,16 @@ def skill_checks() -> None:
         handle = provider.start(thread("sk"), brief(), lambda n, a, b: Decision.ALLOW)
         FakeClient.instances[0].script = [result_message()]
         list(provider.send(handle, UserMessage(text="keep it short", skill="morning-briefing")))
-        eq(FakeClient.instances[0].queries[-1],
+        eq(prompt_texts(FakeClient.instances[0])[-1],
            'Use the "morning-briefing" skill for this request.\n\nkeep it short',
            "the prompt is the directive, then the request")
         FakeClient.instances[0].script = [result_message()]
         list(provider.send(handle, UserMessage(text="", skill="morning-briefing")))
-        eq(FakeClient.instances[0].queries[-1],
+        eq(prompt_texts(FakeClient.instances[0])[-1],
            'Use the "morning-briefing" skill for this request.', "no request: the directive alone")
         FakeClient.instances[0].script = [result_message()]
         list(provider.send(handle, UserMessage(text="plain")))
-        eq(FakeClient.instances[0].queries[-1], "plain", "no skill: the text, untouched")
+        eq(prompt_texts(FakeClient.instances[0])[-1], "plain", "no skill: the text, untouched")
         provider.close(handle)
 
 
@@ -1457,7 +1487,7 @@ def set_model_checks() -> None:
               "set_model: the PreToolUse gate travels to the new client, allowed_tools stays empty")
         eq(second.options.permission_mode, "auto", "set_model: the profile's permission mode is unchanged")
         drain(provider, handle, "two")
-        eq(second.queries, ["two"], "set_model: the next turn goes to the new client")
+        eq(prompt_texts(second), ["two"], "set_model: the next turn goes to the new client")
         eq(handle.native.brief.model, "claude-sonnet-5-5", "set_model: the session's brief carries the new model")
 
         count = len(FakeClient.instances)
@@ -1549,6 +1579,421 @@ def set_model_checks() -> None:
         claude._client_factory = original
 
 
+class Echo:
+    """The CLI's replay echo (`--replay-user-messages`) of the newest steer
+    written to stdin: it has drained into a turn."""
+
+
+class PromptEcho:
+    """The CLI's replay echo of the newest turn message: its turn has begun."""
+
+
+class SteerClient(FakeClient):
+    """A CLI-shaped stream: like the real one, `receive_messages` never ends on
+    its own between turns. It plays the script as items appear and otherwise
+    waits, so a frame the CLI sends late is read by whichever turn reads next."""
+
+    def steers(self) -> list[dict]:
+        return [q[0] for q in self.queries
+                if isinstance(q, list) and q and q[0].get("priority") == "next"]
+
+    def prompts(self) -> list[dict]:
+        return [q[0] if isinstance(q, list) else {"message": {"content": q}}
+                for q in self.queries
+                if not (isinstance(q, list) and q and q[0].get("priority") == "next")]
+
+    async def receive_response(self):
+        """The SDK's own: the stream up to and including a result frame."""
+        async for item in self.receive_messages():
+            yield item
+            if isinstance(item, ResultMessage):
+                return
+
+    async def receive_messages(self):
+        while True:
+            if not self.script:
+                await asyncio.sleep(0.01)
+                continue
+            item = self.script.pop(0)
+            if isinstance(item, Raise):
+                raise item.exc
+            if isinstance(item, Pause):
+                while not item.event.is_set():
+                    await asyncio.sleep(0.02)
+                continue
+            if isinstance(item, Echo):
+                yield SdkUserMessage(content="(the steer)", uuid=self.steers()[-1]["uuid"])
+                continue
+            if isinstance(item, PromptEcho):
+                prompts = self.prompts()
+                yield SdkUserMessage(content="(the message)",
+                                     uuid=prompts[-1].get("uuid") if prompts else None)
+                continue
+            yield item
+
+
+@contextlib.contextmanager
+def steer_fake(script):
+    original = claude._client_factory
+    FakeClient.instances = []
+    claude._client_factory = lambda options: SteerClient(options, script)
+    try:
+        yield
+    finally:
+        claude._client_factory = original
+
+
+@contextlib.contextmanager
+def timings(**values):
+    """Shorten the provider's waits for a check."""
+    missing = object()
+    saved = {name: getattr(claude, name, missing) for name in values}
+    for name, value in values.items():
+        setattr(claude, name, value)
+    try:
+        yield
+    finally:
+        for name, value in saved.items():
+            if value is missing:
+                delattr(claude, name)
+            else:
+                setattr(claude, name, value)
+
+
+def text_of(events) -> list[str]:
+    return [e.data["text"] for e in events if e.kind is EventKind.TEXT]
+
+
+def assistant(text: str) -> AssistantMessage:
+    return AssistantMessage(content=[TextBlock(text=text)], model="claude-test")
+
+
+def accepting(handle, timeout: float = 3.0) -> bool:
+    """Until the turn's own CLI turn has begun and it takes steers."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if handle.native.accepting:
+            return True
+        time.sleep(0.005)
+    return False
+
+
+def steering_checks() -> None:
+    """2026-10-08: a message sent while a turn runs is written into it (the
+    CLI folds it in at its next boundary); a steer the CLI runs as a fresh
+    turn stays inside the turn that took it; and one whose turn starts too
+    late for that is absorbed by the next send, never mistaken for its answer
+    (review of PR #22: the session used to stay off by one for good)."""
+    print("\n-- steering a running turn")
+    from jarvis.v2.provider import SteerRefused
+
+    provider = claude.ClaudeProvider()
+    with steer_fake([]), cli("2.1.290"):
+        handle = provider.start(thread(), brief(), allow)
+        client = FakeClient.instances[0]
+        extra = client.options.extra_args or {}
+        check("replay-user-messages" in extra and extra["replay-user-messages"] is None,
+              "the CLI is asked to echo stdin messages (how a turn's start is known)")
+        try:
+            provider.steer(handle, UserMessage(text="too early"))
+            check(False, "a steer with no turn running is refused")
+        except SteerRefused as exc:
+            check(exc.fallback == "queue", "a steer with no turn running is refused, to be queued")
+        provider.close(handle)
+
+    steer_order_checks()
+    late_steer_checks()
+    steering_more_checks()
+
+
+def steer_order_checks() -> None:
+    """Review of PR #22, finding 2: the turn's own message reaches stdin first.
+    A steer is taken only once its CLI turn has begun; it used to be written
+    ahead of the message it steers."""
+    from jarvis.v2.provider import SteerRefused
+
+    provider = claude.ClaudeProvider()
+    gate, gate2 = threading.Event(), threading.Event()
+    with timings(STEER_QUIET_S=0.2), \
+            steer_fake([Pause(gate), PromptEcho(), Pause(gate2), assistant("ok"), result_message()]):
+        handle = provider.start(thread(), brief(), allow)
+        client = FakeClient.instances[0]
+        stream = provider.send(handle, UserMessage(text="the turn's own message"))
+        eq(next(stream).kind.value, "turn_started", "the turn starts")
+        try:
+            provider.steer(handle, UserMessage(text="sent as the turn starts"))
+            check(False, "a steer before the turn's CLI turn began is refused")
+        except SteerRefused:
+            check(True, "a steer before the turn's CLI turn began is refused (the daemon queues it)")
+        gate.set()
+        check(accepting(handle), "once the message's echo is in, the turn takes steers")
+        provider.steer(handle, UserMessage(text="and now a steer"))
+        gate2.set()
+        list(stream)
+        order = [("steer" if q[0].get("priority") == "next" else "message", q[0]["message"]["content"])
+                 if isinstance(q, list) else ("message", q) for q in client.queries]
+        eq(order, [("message", "the turn's own message"), ("steer", "and now a steer")],
+           "stdin order: the message, then the steer")
+        provider.close(handle)
+
+
+
+def steering_more_checks() -> None:
+    """Folded, fresh, unechoed, a CLI that stops echoing, a failed write and
+    a stop: each ends the turn once, with nothing read by the wrong send."""
+    from jarvis.v2.provider import SteerRefused
+
+    provider = claude.ClaudeProvider()
+
+    # Folded into the turn: echoed while it runs, so its result ends it.
+    gate = threading.Event()
+    with steer_fake([PromptEcho(), Pause(gate), Echo(), assistant("switching to the other file"),
+                     result_message()]):
+        handle = provider.start(thread(), brief(), allow)
+        client = FakeClient.instances[0]
+        stream = provider.send(handle, UserMessage(text="fix the bug"))
+        next(stream)
+        check(accepting(handle), "the turn takes steers")
+        provider.steer(handle, UserMessage(text="use the other file"))
+        gate.set()
+        events = list(stream)
+        payload = client.steers()[0]
+        eq((payload["type"], payload["message"], payload["priority"], payload["parent_tool_use_id"]),
+           ("user", {"role": "user", "content": "use the other file"}, "next", None),
+           "the steer is a stdin user message with priority next")
+        check(isinstance(payload.get("uuid"), str) and len(payload["uuid"]) == 36,
+              "carrying the uuid its echo is matched by")
+        eq(kinds(events), ["text", "usage", "turn_finished"], "a folded steer: one finish")
+        eq(text_of(events), ["switching to the other file"], "the echoes themselves are no event")
+        provider.close(handle)
+
+    # Not folded: the CLI ran it as a fresh turn right after the result.
+    gate = threading.Event()
+    with steer_fake([PromptEcho(), Pause(gate), assistant("done with the first ask"),
+                     result_message(), Echo(), assistant("and now the steer"), result_message()]):
+        handle = provider.start(thread(), brief(), allow)
+        client = FakeClient.instances[0]
+        stream = provider.send(handle, UserMessage(text="first"))
+        next(stream)
+        accepting(handle)
+        provider.steer(handle, UserMessage(text="then this"))
+        gate.set()
+        events = list(stream)
+        eq(kinds(events), ["text", "usage", "text", "usage", "turn_finished"],
+           "the CLI's fresh turn for the steer is read inside the turn that took it")
+        eq(text_of(events), ["done with the first ask", "and now the steer"],
+           "both answers, in order")
+        client.script.extend([PromptEcho(), assistant("the next message's answer"), result_message()])
+        following = drain(provider, handle, "next")
+        eq(text_of(following), ["the next message's answer"],
+           "the next send reads its own response: nothing shifted by one turn")
+        provider.close(handle)
+
+    # Folded with no echo: the hold ends after quiet, a stray frame extending
+    # it; the unseen steer is remembered, and the next message's own echo
+    # settles it as folded.
+    gate = threading.Event()
+    with timings(STEER_QUIET_S=0.2), \
+            steer_fake([PromptEcho(), Pause(gate), assistant("ok"), result_message(),
+                        SystemMessage(subtype="status", data={})]):
+        handle = provider.start(thread(), brief(), allow)
+        client = FakeClient.instances[0]
+        stream = provider.send(handle, UserMessage(text="go"))
+        next(stream)
+        accepting(handle)
+        provider.steer(handle, UserMessage(text="quietly folded"))
+        gate.set()
+        started = time.monotonic()
+        events = list(stream)
+        waited = time.monotonic() - started
+        eq(kinds(events), ["text", "usage", "turn_finished"],
+           "an unechoed steer: the turn still finishes once")
+        check(waited < 2, f"after the quiet window, not forever ({waited:.2f}s)")
+        eq(len(handle.native.steering), 1, "the unseen steer is remembered past the turn")
+        client.script.extend([PromptEcho(), assistant("two"), result_message()])
+        second = drain(provider, handle, "second")
+        eq(client.prompts()[-1].get("priority"), "later",
+           "with a steer unaccounted for, the next message goes in at priority later")
+        eq(text_of(second), ["two"], "and its own echo shows the steer folded: its turn reads normally")
+        eq(handle.native.steering, {}, "the folded steer is forgotten once settled")
+        provider.close(handle)
+
+    # A CLI that echoed before but not this time: a result that might have
+    # been a leftover's is taken as the message's own after LEFTOVER_WAIT_S.
+    gate = threading.Event()
+    with timings(STEER_QUIET_S=0.1, LEFTOVER_WAIT_S=0.2), \
+            steer_fake([PromptEcho(), Pause(gate), assistant("one"), result_message()]):
+        handle = provider.start(thread(), brief(), allow)
+        client = FakeClient.instances[0]
+        stream = provider.send(handle, UserMessage(text="go"))
+        next(stream)
+        accepting(handle)
+        provider.steer(handle, UserMessage(text="unseen"))
+        gate.set()
+        list(stream)
+        client.script.extend([assistant("two, unannounced"), result_message()])
+        started = time.monotonic()
+        second = drain(provider, handle, "second")
+        eq(text_of(second), ["two, unannounced"], "a turn with no echo still ends")
+        check(time.monotonic() - started < 2, "within the leftover wait, never a hang")
+        provider.close(handle)
+
+    # A write that fails is refused (queued by the daemon) and leaves no hold.
+    gate = threading.Event()
+    with steer_fake([PromptEcho(), Pause(gate), assistant("fine"), result_message()]):
+        handle = provider.start(thread(), brief(), allow)
+        client = FakeClient.instances[0]
+
+        async def broken(prompt, session_id="default"):
+            raise RuntimeError("stdin closed")
+
+        stream = provider.send(handle, UserMessage(text="go"))
+        next(stream)
+        accepting(handle)
+        original_query, client.query = client.query, broken
+        try:
+            provider.steer(handle, UserMessage(text="lost?"))
+            check(False, "a steer whose write fails is refused")
+        except SteerRefused as exc:
+            check(exc.fallback == "queue" and "stdin closed" in str(exc),
+                  f"a steer whose write fails is refused, to be queued: {exc}")
+        client.query = original_query
+        gate.set()
+        started = time.monotonic()
+        events = list(stream)
+        check(time.monotonic() - started < 1 and kinds(events)[-1] == "turn_finished",
+              "and the turn ends at its result, with no hold for a steer never sent")
+        try:
+            provider.steer(handle, UserMessage(text="after the end"))
+            check(False, "a steer after the turn ended is refused")
+        except SteerRefused:
+            check(True, "a steer after the turn ended is refused")
+        provider.close(handle)
+
+    # Stop means stop: the owner interrupts while a steer waits in the CLI;
+    # the fresh turn the CLI starts for it is interrupted as well.
+    gate, gate2 = threading.Event(), threading.Event()
+    with steer_fake([PromptEcho(), Pause(gate), result_message(terminal_reason="aborted_streaming"),
+                     Echo(), Pause(gate2), result_message(terminal_reason="aborted_streaming")]):
+        handle = provider.start(thread(), brief(), allow)
+        client = FakeClient.instances[0]
+        stream = provider.send(handle, UserMessage(text="go"))
+        next(stream)
+        accepting(handle)
+        provider.steer(handle, UserMessage(text="queued in the CLI"))
+        provider.interrupt(handle)
+        gate.set()
+
+        def release():
+            deadline = time.monotonic() + 3
+            while client.interrupts < 2 and time.monotonic() < deadline:
+                time.sleep(0.01)
+            gate2.set()
+
+        threading.Thread(target=release, daemon=True).start()
+        events = list(stream)
+        eq(client.interrupts, 2, "the steer's fresh turn is interrupted too")
+        eq(events[-1].data["stop"], "interrupted", "and the turn finishes as interrupted")
+        eq(kinds(events).count("turn_finished"), 1, "once")
+        provider.close(handle)
+
+
+
+def late_steer_checks() -> None:
+    """Review of PR #22, finding 1: the steer's fresh turn starts later than
+    the hold (autocompact, hooks, a slow first token). The next send absorbs
+    it — the owner still sees its answer — and reads its own, and every send
+    after that is aligned. Before, every later turn read the one before it."""
+    provider = claude.ClaudeProvider()
+    # Review #1: the steer's fresh turn starts later than the hold. The next
+    # send absorbs it — the owner still sees its answer — and reads its own,
+    # and every send after that is aligned.
+    gate, late = threading.Event(), threading.Event()
+    with timings(STEER_QUIET_S=0.3), \
+            steer_fake([PromptEcho(), Pause(gate), assistant("answer to first"), result_message(),
+                        Pause(late), Echo(), assistant("answer to the steer"), result_message()]):
+        handle = provider.start(thread(), brief(), allow)
+        client = FakeClient.instances[0]
+        stream = provider.send(handle, UserMessage(text="first"))
+        next(stream)
+        accepting(handle)
+        provider.steer(handle, UserMessage(text="steer"))
+        gate.set()
+        first = list(stream)
+        eq(text_of(first), ["answer to first"], "turn 1: its own answer")
+        late.set()
+        client.script.extend([PromptEcho(), assistant("answer to second"), result_message()])
+        second = drain(provider, handle, "second")
+        eq(text_of(second), ["answer to the steer", "answer to second"],
+           "turn 2: the late steer's answer is absorbed, then its own")
+        eq(kinds(second).count("turn_finished"), 1, "turn 2 finishes once, on its own result")
+        client.script.extend([PromptEcho(), assistant("answer to third"), result_message()])
+        third = drain(provider, handle, "third")
+        eq(text_of(third), ["answer to third"], "turn 3: its own answer — no lasting off-by-one")
+        provider.close(handle)
+
+    unsent_turn_checks()
+    stopped_late_steer_checks()
+
+
+def unsent_turn_checks() -> None:
+    """Review of PR #22, round 2, finding 1: a CLI turn nobody sent (a
+    background task's notice) between two sends. Once the CLI is known to
+    echo, an unechoed turn before a message's own echo is not that message's:
+    it used to be taken as the answer, and every later send read the one
+    before it."""
+    provider = claude.ClaudeProvider()
+    with steer_fake([PromptEcho(), assistant("one"), result_message(),
+                     assistant("background notice"), result_message()]):
+        handle = provider.start(thread(), brief(), allow)
+        client = FakeClient.instances[0]
+        eq(text_of(drain(provider, handle, "one")), ["one"], "unsent turn: the first send's own answer")
+        client.script.extend([PromptEcho(), assistant("two"), result_message()])
+        second = drain(provider, handle, "two")
+        eq(text_of(second)[-1:], ["two"], "unsent turn: the next send ends on its own answer")
+        eq(kinds(second).count("turn_finished"), 1, "unsent turn: and finishes once")
+        client.script.extend([PromptEcho(), assistant("three"), result_message()])
+        eq(text_of(drain(provider, handle, "three")), ["three"],
+           "unsent turn: the send after it is aligned — no lasting off-by-one")
+        provider.close(handle)
+
+
+def stopped_late_steer_checks() -> None:
+    """Review of PR #22, round 2, finding 2: the owner steers, then stops, and
+    the steer's fresh CLI turn starts only after the hold. Stop means stop:
+    when the next send reads that late turn, it is interrupted and its words
+    never reach the owner. It used to run to the end and be shown as part of
+    the next answer."""
+    provider = claude.ClaudeProvider()
+    gate, late = threading.Event(), threading.Event()
+    with timings(STEER_QUIET_S=0.2), \
+            steer_fake([PromptEcho(), Pause(gate),
+                        result_message(terminal_reason="aborted_streaming"),
+                        Pause(late), Echo(), assistant("the stopped steer ran anyway"),
+                        result_message()]):
+        handle = provider.start(thread(), brief(), allow)
+        client = FakeClient.instances[0]
+        stream = provider.send(handle, UserMessage(text="go"))
+        next(stream)
+        accepting(handle)
+        provider.steer(handle, UserMessage(text="a steer the owner then stopped"))
+        provider.interrupt(handle)
+        gate.set()
+        first = list(stream)
+        eq(first[-1].data["stop"], "interrupted", "stopped steer: the turn finishes as interrupted")
+        late.set()
+        time.sleep(0.2)
+        client.script.extend([PromptEcho(), assistant("two"), result_message()])
+        second = drain(provider, handle, "two")
+        eq(client.interrupts, 2, "stopped steer: its late CLI turn is interrupted too")
+        eq(text_of(second), ["two"], "stopped steer: its words never reach the owner")
+        eq(kinds(second).count("turn_finished"), 1, "stopped steer: the next send finishes once")
+        eq(second[-1].data["stop"], "end", "stopped steer: and on its own result")
+        client.script.extend([PromptEcho(), assistant("three"), result_message()])
+        eq(text_of(drain(provider, handle, "three")), ["three"], "stopped steer: later sends aligned")
+        provider.close(handle)
+
+
 def main() -> int:
     # Hermetic: every client in this suite resolves to a fake executable in a
     # temp dir, never the owner's real `claude` (which nothing here may run).
@@ -1566,6 +2011,7 @@ def main() -> int:
     answer_checks()
     reviewer_declined_checks()
     interrupt_checks()
+    steering_checks()
     error_checks()
     usage_checks()
     isolation_checks()

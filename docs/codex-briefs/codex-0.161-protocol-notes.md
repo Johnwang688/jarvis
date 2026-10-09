@@ -93,6 +93,22 @@ and the `ThreadItem` variants we read (`commandExecution`, `fileChange`,
 New notifications fall through `_notification` without effect, as every
 unrecognised notification always has.
 
+**`turn/steer` (used since 2026-10-08, owner steering).** Present and stable
+(in the schema generated without `--experimental` too) in both versions:
+`TurnSteerParams {threadId, input: UserInput[], expectedTurnId}` (required;
+optional `clientUserMessageId`, `additionalContext`,
+`responsesapiClientMetadata`, none sent) → `TurnSteerResponse {turnId}`. The
+only difference between the two is the `UserInput` image change above, and we
+send the same `{type: "image", url: "data:…"}` as on `turn/start`. Codex
+answers with an error when the expected turn is not the active one; the
+provider then queues the message for its own turn. A "method not found"
+(-32601) answer — not seen on either verified version — makes the provider
+interrupt the turn instead and remember that this Codex cannot steer. Not
+verified live: whether a steer accepted at the very end of a turn is always
+consumed by that turn (the provider relies on Codex's own pending-input
+handling for that), and the exact error code Codex gives a stale
+`expectedTurnId`.
+
 ## Config keys (`--strict-config`)
 
 Not verifiable without starting an app-server, which this change did not do.

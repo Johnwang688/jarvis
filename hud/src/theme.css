@@ -187,6 +187,38 @@ h2.bar {
 .tree-row:hover { background: var(--hover); }
 .tree-row.sel { background: var(--selected); color: var(--text); box-shadow: inset 2px 0 var(--accent); }
 .tree-row .tw { flex: 0 0 10px; color: var(--text-muted); font: 10px var(--mono); }
+
+/* ---- what a row is doing (2026-10-08, lib/activity.ts) ----
+   Idle is the plain `·`. Working is a hollow ring that pulses, with a band
+   sweeping across the row, so it reads without motion too; unread is a solid
+   accent dot; waiting on the owner is amber (amber means pending); failed is
+   a red triangle with a `!`. Motion stops under reduced-motion. */
+/* A task's and a folded project's dot sit in a slot of their own, as wide as
+   the widest dot (failed), so no status ever moves the name beside it. The
+   project's is at the row's end, before its menu, so project names keep
+   their place. */
+.tree-row .slot { flex: 0 0 11px; display: inline-flex; align-items: center; justify-content: center; }
+.tree-row .slot.end { margin-left: auto; }
+.tree-row .slot.end + .menu { margin-left: 0; }
+.act { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; }
+.act:not(.idle) { width: 8px; height: 8px; border-radius: 50%; }
+.act.working { border: 1.5px solid var(--accent); animation: act-pulse 1.4s ease-in-out infinite; }
+.act.unread { background: var(--accent); }
+.act.needs_input { background: var(--amber); box-shadow: 0 0 0 2px var(--amber-soft); }
+.act.failed { width: 11px; height: 11px; border-radius: 0; }
+.act.failed svg { width: 11px; height: 11px; display: block; }
+.act.failed path { fill: var(--red); }
+.act.failed rect { fill: var(--bg-0); }
+.tree-row.act-working {
+  background-image: linear-gradient(90deg, transparent 0%, var(--accent-soft) 50%, transparent 100%);
+  background-size: 200% 100%; background-repeat: no-repeat;
+  animation: act-sweep 2.2s linear infinite;
+}
+@keyframes act-pulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.45; transform: scale(0.8); } }
+@keyframes act-sweep { from { background-position: 200% 0; } to { background-position: -100% 0; } }
+@media (prefers-reduced-motion: reduce) {
+  .act.working, .tree-row.act-working { animation: none; }
+}
 .tree-row .nm { overflow: hidden; text-overflow: ellipsis; }
 .indent-1 { padding-left: 26px; }
 .indent-2 { padding-left: 40px; }
@@ -619,7 +651,13 @@ details.decisions[open] summary { color: var(--text); margin-bottom: 8px; }
 .movenote { padding: 4px 12px; }
 
 /* ---- per-thread model (decisions 2026-10-06, A): provider · model · effort ---- */
-.modelchip { gap: 4px; max-width: 46%; overflow: hidden; }
+/* The chip never clips: a capped width with overflow hidden used to cut off
+   the effort select and default ▾ behind the dictation buttons once the
+   window narrowed or zoomed. The row wraps the whole chip onto its own line
+   first; if even a full line is too narrow, the chip wraps its own controls
+   and the model select ellipsizes. Every control stays reachable. */
+.modelchip { gap: 4px; flex-wrap: wrap; min-width: 0; max-width: 100%; }
+.modelchip select { min-width: 0; max-width: 100%; text-overflow: ellipsis; }
 .modelchip .err { color: var(--red); white-space: normal; }
 .badge.pin { color: var(--text-2); text-transform: none; max-width: 110px; overflow: hidden;
              text-overflow: ellipsis; white-space: nowrap; }
@@ -672,6 +710,15 @@ button.danger:hover:not(:disabled) { background: var(--red-soft); }
 .chat-place { padding: 4px 12px; border-bottom: 1px solid var(--border); }
 .chat-place a { color: inherit; text-decoration: underline; }
 .msg .who .via { text-transform: none; letter-spacing: 0; opacity: 0.75; }
+
+/* Steering (2026-10-08): a message sent while a turn ran says what became of
+   it. Amber is "pending" — a queued message is exactly that. */
+.msg .who .mark { text-transform: none; letter-spacing: 0; }
+.msg .who .mark.steering { color: var(--accent); }
+.msg .who .mark.queued { color: var(--amber); }
+.msg .who .mark.not-sent { color: var(--text-muted); }
+/* Stop is an action, not an error: no red (Graphite keeps red for errors). */
+#inputrow button.stop { border-color: var(--border-strong); }
 
 /* ---- zoom, folding and resizing (design §18, 2026-10-08) ---- */
 /* The icon button that folds a pane: quiet until hovered, like the "+". */

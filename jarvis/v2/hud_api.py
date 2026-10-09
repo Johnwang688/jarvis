@@ -5,11 +5,13 @@ import base64
 import copy
 import difflib
 import json
+import logging
 import math
 import mimetypes
 import os
 from pathlib import Path
 import re
+import threading
 import time
 from urllib.parse import unquote, urlsplit
 
@@ -26,6 +28,7 @@ SKIP_DIRS = SEARCH_SKIP_DIRS | {".jarvis"}
 FILE_CAP = 2 * 1024 * 1024
 PATCH_CAP = 1024 * 1024
 ATTACH_CAP = 4 * 1024 * 1024
+LOG = logging.getLogger(__name__)
 HUD_DIST = Path(__file__).resolve().parents[2] / "hud" / "dist"
 
 # Claude Code's own `/usage` command. Undocumented, so a failure is "not
@@ -34,6 +37,11 @@ HUD_DIST = Path(__file__).resolve().parents[2] / "hud" / "dist"
 # version is the CLI in use (`providers/claude.py` `usage_agent_version`).
 CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 CLAUDE_USAGE_TTL_S = 300
+# Codex's account models and quota: refreshed at most once per TTL (a failure
+# waits the same), and only CODEX_METADATA_BUSY_S after a turn held the lock.
+CODEX_METADATA_TTL_S = 300
+CODEX_METADATA_BUSY_S = 30
+CODEX_LIMIT_IDS_CAP = 16
 _CLAUDE_WINDOWS = (("five_hour", "5h"), ("seven_day", "week"))
 
 
@@ -324,20 +332,36 @@ class HUDLedger(UsageLedger):
         self._reported = None
         self._claude_quota = None
         self._claude_quota_at = 0.0
+        # The Codex account metadata refresh (models + quota). `_codex_next`
+        # is when the next one may start — None until the first (never a 0.0
+        # compared against a monotonic clock, which could be under the TTL for
+        # minutes after boot). One runs at a time, on its own thread.
+        self.metadata_clock = time.monotonic
+        self._codex_next: float | None = None
+        self._codex_worker: threading.Thread | None = None
+        # Set by `stop_codex` (daemon shutdown) under `_codex_gate`, which a
+        # refresh also holds while it installs what it read: once stopped,
+        # nothing is saved or swapped, however late the read returns.
+        self._codex_stopped = threading.Event()
+        self._codex_gate = threading.Lock()
         super().__init__(*args, **kwargs)
+
+    def _merge_rate_limits(self, key, report):
+        """Fold one sparse snapshot into the meters: a null never clears a
+        known value, and a limit id not in this snapshot is kept."""
+        previous = self.rate_limits.setdefault(key, {})
+        for k, v in report.items():
+            if v is not None:
+                if isinstance(v, dict) and isinstance(previous.get(k), dict):
+                    previous[k].update({a: b for a, b in v.items() if b is not None})
+                else:
+                    previous[k] = copy.deepcopy(v)
 
     def _apply(self, row):
         super()._apply(row)
         if isinstance(row.get("rate_limits"), dict):
             # Notifications are sparse; null metadata never clears known values.
-            key = row["rate_limits"].get("limitId") or "codex"
-            previous = self.rate_limits.setdefault(key, {})
-            for k, v in row["rate_limits"].items():
-                if v is not None:
-                    if isinstance(v, dict) and isinstance(previous.get(k), dict):
-                        previous[k].update({a: b for a, b in v.items() if b is not None})
-                    else:
-                        previous[k] = copy.deepcopy(v)
+            self._merge_rate_limits(row["rate_limits"].get("limitId") or "codex", row["rate_limits"])
 
     def _append(self, row):
         if self._reported is not None and row["provider"] == "codex":
@@ -376,6 +400,101 @@ class HUDLedger(UsageLedger):
                         label = f"{report.get('limitName') or limit_id}: {label}"
                     windows.append(dict(name=label, used_percent=used, resets_at=window.get("resetsAt")))
         return {"windows": windows} if windows else None
+
+    def refresh_codex(self, provider, on_change=None) -> bool:
+        """Start a background refresh of Codex's models and quota when one is
+        due; never wait for it. True when one was started.
+
+        The caller — a HUD read — serves the snapshot it already has; a
+        refresh that changed something calls `on_change` (the daemon publishes
+        `codex_metadata`, and the HUD re-reads). At most one runs at a time.
+        A success or a failure waits `CODEX_METADATA_TTL_S` before the next;
+        a busy provider (a Codex turn holds its login lock — `MetadataBusy`)
+        only `CODEX_METADATA_BUSY_S`. Nothing here starts a model turn.
+        """
+        read = getattr(provider, "account_metadata", None)
+        if not callable(read) or self._codex_stopped.is_set():
+            return False
+        with self._lock:
+            now = self.metadata_clock()
+            if self._codex_next is not None and now < self._codex_next:
+                return False
+            if self._codex_worker is not None and self._codex_worker.is_alive():
+                return False
+            # Reserve the slot before the thread exists, so a second request
+            # arriving now neither starts another nor finds nothing running.
+            self._codex_next = now + CODEX_METADATA_TTL_S
+            worker = threading.Thread(target=self._refresh_codex, args=(read, on_change),
+                                      name="jarvis-codex-metadata", daemon=True)
+            self._codex_worker = worker
+        worker.start()
+        return True
+
+    def wait_codex_refresh(self, timeout: float | None = None) -> bool:
+        """Block until the refresh in flight (if any) is done; False on
+        timeout. For tests and shutdown — request handlers never wait."""
+        worker = self._codex_worker
+        if worker is not None:
+            worker.join(timeout)
+            return not worker.is_alive()
+        return True
+
+    def stop_codex(self, timeout: float | None = None) -> bool:
+        """Daemon shutdown: no refresh starts, none in flight saves the
+        catalog or swaps the table or the meters from here on, and the one in
+        flight (if any) is waited for up to `timeout`. True when none is left
+        running. The caller cancels the provider's app-server first
+        (`CodexProvider.cancel_metadata`), so the wait is short."""
+        with self._codex_gate:
+            self._codex_stopped.set()
+        return self.wait_codex_refresh(timeout)
+
+    def _refresh_codex(self, read, on_change) -> None:
+        from .providers.codex import MetadataBusy
+        if self._codex_stopped.is_set():
+            return
+        try:
+            metadata = read()
+        except MetadataBusy:
+            with self._lock:
+                self._codex_next = self.metadata_clock() + CODEX_METADATA_BUSY_S
+            return
+        except Exception as exc:
+            # The TTL set at the start throttles a failure too; the last good
+            # catalog and meters stand.
+            LOG.warning("Codex metadata refresh failed (%s)", type(exc).__name__)
+            return
+        if not isinstance(metadata, dict):
+            LOG.warning("Codex metadata refresh failed (%s)", type(metadata).__name__)
+            return
+        changed = False
+        with self._codex_gate:
+            if self._codex_stopped.is_set():
+                return          # the daemon stopped while this read ran
+            # The two halves are independent: either may be None (it failed)
+            # and the other still lands.
+            rows = metadata.get("models")
+            if rows is not None:
+                try:
+                    from .router import set_codex_models
+                    set_codex_models(rows)          # installs it and saves it
+                except (TypeError, ValueError) as exc:
+                    LOG.warning("Codex model catalog refused (%s)", type(exc).__name__)
+                else:
+                    changed = True
+            reports = _codex_rate_limits(metadata.get("rate_limits"))
+            if reports:
+                # Merged, never swapped: an empty or partial read keeps the
+                # windows (and the limit ids turn notifications taught us).
+                with self._lock:
+                    for limit_id, report in reports.items():
+                        self._merge_rate_limits(limit_id, report)
+                changed = True
+        if changed and on_change is not None:
+            try:
+                on_change()
+            except Exception as exc:
+                LOG.warning("Codex metadata notification failed (%s)", type(exc).__name__)
 
     def _claude_subscription(self):
         """The subscription windows, cached. A miss is null, never a guess.
@@ -416,9 +535,15 @@ class HUDLedger(UsageLedger):
 
 
 def usage(daemon):
-    from .router import daemon_router, load_routing
+    # Only the allowances and the no-new-work threshold: never the routing
+    # table, so a table at odds with the Codex catalog cannot blank the
+    # status column (PR #20 review).
+    from .router import daemon_router, usage_settings
     router = daemon_router(daemon)
-    settings = load_routing()
+    settings = usage_settings()
+    # Kicks off a background refresh when one is due; this read serves the
+    # meters as they are now.
+    _refresh_codex_metadata(daemon)
     result = {}
     for provider in ProviderName:
         instance = daemon.providers.get(provider)
@@ -430,6 +555,39 @@ def usage(daemon):
         result[provider.value] = dict(state=state["state"], reason=state["reason"], today=state["totals"],
                                       allowance=settings["allowances"][provider.value], quota=quota)
     return {"providers": result}
+
+
+def _codex_rate_limits(body) -> dict[str, dict] | None:
+    """Normalize `account/rateLimits/read` into HUDLedger's keyed snapshots;
+    None when it carries no report, so an empty read changes nothing. At most
+    CODEX_LIMIT_IDS_CAP limit ids are taken from one read."""
+    if not isinstance(body, dict):
+        return None
+    reports = {}
+    by_id = body.get("rateLimitsByLimitId")
+    if isinstance(by_id, dict):
+        for limit_id, report in list(by_id.items())[:CODEX_LIMIT_IDS_CAP]:
+            if isinstance(limit_id, str) and limit_id and isinstance(report, dict):
+                reports[limit_id] = copy.deepcopy(report)
+                reports[limit_id].setdefault("limitId", limit_id)
+    current = body.get("rateLimits")
+    if isinstance(current, dict):
+        limit_id = current.get("limitId") or "codex"
+        if isinstance(limit_id, str) and limit_id and limit_id not in reports:
+            reports[limit_id] = copy.deepcopy(current)
+    return reports or None
+
+
+def _refresh_codex_metadata(daemon) -> None:
+    """Start a background Codex models/quota refresh if one is due. Never
+    blocks: the handler answers from what it has, and a refresh that changed
+    something publishes `codex_metadata` so the HUD re-reads."""
+    from .router import daemon_router
+    ledger = daemon_router(daemon).ledger
+    if isinstance(ledger, HUDLedger):
+        ledger.refresh_codex(daemon.providers.get(ProviderName.CODEX),
+                             on_change=lambda: daemon.bus.publish(
+                                 {"kind": "codex_metadata", "data": {"provider": "codex"}}))
 
 
 def _scrub_source(text):
@@ -840,6 +998,10 @@ def route(handler, daemon, parts, query):
     mounted = _discord_routes.route(handler, daemon, parts, query)
     if mounted is not None:
         return mounted
+    if parts == ["activity"] and method == "GET":
+        # The sidebar's dots: every thread and task that is not idle.
+        _object(query, ())
+        return 200, daemon.activity.snapshot()
     if parts == ["usage"] and method == "GET":
         _object(query, ())
         return 200, usage(daemon)
@@ -922,6 +1084,7 @@ def route(handler, daemon, parts, query):
         # What the input bar's provider/model/effort chips offer (decisions A2).
         from . import thread_model
         _object(query, ())
+        _refresh_codex_metadata(daemon)
         return 200, thread_model.describe()
     if parts == ["thread-models"] and method == "POST":
         # The default Claude or Codex chat threads run on (2026-10-08): the
@@ -931,6 +1094,7 @@ def route(handler, daemon, parts, query):
         from . import thread_model
         _object(query, ())
         body = _object(handler._body(), ("provider", "model", "effort"), ("provider", "model"))
+        _refresh_codex_metadata(daemon)
         try:
             thread_model.set_provider_default(body["provider"], body["model"], body.get("effort"))
         except thread_model.ChoiceRefused as exc:
@@ -987,11 +1151,33 @@ def route(handler, daemon, parts, query):
         if parts[2] == "send" and method == "POST":
             project = daemon.require(stores.projects, thread.project_id)
             message = assemble_turn(project, handler._body())
-            return 202, {"turn_id": daemon.send(thread.id, message)}
+            # Never a dead end while a turn runs (2026-10-08): the message
+            # starts a turn, is steered into the running one, or waits behind
+            # it — `{"status": "started"|"steered"|"queued", "turn_id", ...}`.
+            # Only a full queue (three waiting) or a task's running thread is
+            # still 409.
+            return 202, daemon.deliver(thread.id, message)
         if parts[2] == "transcript" and method == "GET":
             _object(query, ())
             messages = []
-            for row in stores.threads.read_log(thread.id):
+            rows = stores.threads.read_log(thread.id)
+            # What became of each owner message that reached a running turn
+            # (2026-10-08): a steer the provider refused waits instead
+            # (`steer_queued`); a waiting one ran (`queued_started`) or was
+            # dropped. One still waiting must be in the live queue: after a
+            # crash or restart nothing is, and it never ran.
+            fate, requeued = {}, set()
+            for row in rows:
+                mid = (row.get("data") or {}).get("message_id")
+                if not isinstance(mid, str):
+                    continue
+                if row.get("kind") in ("queued_started", "queued_dropped"):
+                    fate[mid] = row["kind"]
+                elif row.get("kind") == "steer_queued":
+                    requeued.add(mid)
+            with daemon._lock:
+                live = {item.message_id for item in daemon._queues.get(thread.id) or ()}
+            for row in rows:
                 kind = row.get("kind")
                 if kind not in (None, "text", "user", "model_set"):
                     continue
@@ -1007,6 +1193,16 @@ def route(handler, daemon, parts, query):
                     if kind == "user" and data.get("via") in ("discord", "dm"):
                         # Typed in Discord (PR C): the HUD labels it "via Discord".
                         message["via"] = data["via"]
+                    mid = data.get("message_id") if kind == "user" else None
+                    if isinstance(mid, str):
+                        message["message_id"] = mid
+                        waited = bool(data.get("queued")) or mid in requeued
+                        if fate.get(mid) == "queued_dropped":
+                            message["mark"] = "not sent"
+                        elif waited and mid not in fate:
+                            message["mark"] = "queued" if mid in live else "not sent"
+                        elif data.get("steer") and mid not in requeued:
+                            message["mark"] = "steering"
                     messages.append(message)
             return 200, {"messages": messages}
     if len(parts) in (3, 4) and parts[0] == "tasks" and method == "GET":

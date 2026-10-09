@@ -69,8 +69,18 @@ export const PROVIDER_LABELS: Record<ProviderName, string> = {
   claude: "Claude",
   codex: "Codex",
 };
+/** OpenRouter's reasoning ladder, hardest first (`models.EFFORT_LADDER`):
+ * what the fast path and Claude can be asked for. */
 export const EFFORT_LADDER = ["max", "xhigh", "high", "medium", "low", "minimal", "none"];
+/** Codex's own ladder (`router.CODEX_EFFORT_LADDER`): OpenRouter's with
+ * `ultra` on top. `ultra` is Codex's alone and is never offered elsewhere. */
+export const CODEX_EFFORT_LADDER = ["ultra", ...EFFORT_LADDER];
 export const DEFAULT_EFFORT = "high";
+
+/** Every effort `provider` can be asked for, hardest first. */
+export function effortWords(provider: ProviderName): string[] {
+  return provider === "codex" ? CODEX_EFFORT_LADDER : EFFORT_LADDER;
+}
 /** The model select's last entry on OpenRouter. */
 export const SEARCH = "__search__";
 
@@ -96,22 +106,30 @@ export function effortsFor(tm: ThreadModels | null, provider: ProviderName, mode
   return e && Array.isArray(e.efforts) ? e.efforts : null;
 }
 
-function clamp(wanted: string, ladder: string[]): string | null {
-  if (ladder.includes(wanted)) return wanted;
-  const i = EFFORT_LADDER.indexOf(wanted);
-  const order = i < 0 ? [] : [...EFFORT_LADDER.slice(i + 1), ...EFFORT_LADDER.slice(0, i).reverse()];
+/** Down the ladder first, then up, in the provider's own order
+ * (`thread_model._clamp`). A word that is not one of its efforts at all is
+ * read as the default, never shown as if it ran. */
+function clamp(wanted: string, ladder: string[], provider: ProviderName): string | null {
+  if (!ladder.length) return null;
+  const words = effortWords(provider);
+  const w = words.includes(wanted) ? wanted : DEFAULT_EFFORT;
+  if (ladder.includes(w)) return w;
+  const i = words.indexOf(w);
+  const order = [...words.slice(i + 1), ...words.slice(0, i).reverse()];
   return order.find((level) => ladder.includes(level)) ?? ladder[0] ?? null;
 }
 
 /** A4: high for every model, or the roster's own effort for it, within its
- * ladder; nothing for a model with no reasoning control. */
+ * ladder; nothing for a model with no reasoning control. Never the effort
+ * Codex advertises as a model's default (owner's decision, PR #20 review),
+ * so the label says what the backend actually runs. */
 export function defaultEffort(tm: ThreadModels | null, provider: ProviderName, model: string | null): string | null {
   const e = entry(tm, provider, model);
   const wanted = (provider === "fast" && e?.effort) || tm?.effort_default || DEFAULT_EFFORT;
   const ladder = effortsFor(tm, provider, model);
   // An unknown ladder is sent as asked, as the backend does.
   if (ladder === null) return wanted;
-  return ladder.length ? clamp(wanted, ladder) : null;
+  return ladder.length ? clamp(wanted, ladder, provider) : null;
 }
 
 /** What `model: null` means right now for this provider. */
@@ -125,22 +143,29 @@ export function defaultModel(tm: ThreadModels | null, provider: ProviderName): s
 export function clampEffort(tm: ThreadModels | null, provider: ProviderName, model: string | null, wanted: string): string | null {
   const ladder = effortsFor(tm, provider, model);
   if (ladder === null) return wanted;
-  return ladder.length ? clamp(wanted, ladder) : null;
+  return ladder.length ? clamp(wanted, ladder, provider) : null;
 }
 
 /** The model and effort the thread's next message runs on. A default thread
  * follows the default model, and an effort chosen on it is clamped to
- * whatever that model is now (A4 amendment). */
+ * whatever that model is now (A4 amendment); a pinned model's effort is
+ * clamped the same way when its ladder changed since. A stored word that is
+ * not one of the provider's efforts (`ultra` off Codex) counts as no choice,
+ * as `thread_model.effective` does. */
 export function effective(tm: ThreadModels | null, c: Choice): { model: string | null; effort: string | null } {
+  const chosen = c.effort !== null && effortWords(c.provider).includes(c.effort) ? c.effort : null;
   if (c.model === null) {
     const p = tm?.providers[c.provider];
     const model = p?.default ?? null;
-    const effort = c.effort === null
+    const effort = chosen === null
       ? p?.default_effort ?? null
-      : model === null ? c.effort : clampEffort(tm, c.provider, model, c.effort);
+      : model === null ? chosen : clampEffort(tm, c.provider, model, chosen);
     return { model, effort };
   }
-  return { model: c.model, effort: c.effort ?? defaultEffort(tm, c.provider, c.model) };
+  return {
+    model: c.model,
+    effort: chosen === null ? defaultEffort(tm, c.provider, c.model) : clampEffort(tm, c.provider, c.model, chosen),
+  };
 }
 
 /** Why `provider` cannot run a chat thread in this project, or null when it
@@ -230,7 +255,8 @@ export function effortOptions(tm: ThreadModels | null, c: Choice): Option[] {
     : defaultEffort(tm, c.provider, c.model);
   if (ladder !== null && ladder.length === 0) return [];
   const out: Option[] = [{ value: "", label: `default · ${dflt || "none"}` }];
-  for (const level of ladder ?? EFFORT_LADDER) out.push({ value: level, label: level });
+  // An unknown ladder offers the provider's own words: `ultra` only on Codex.
+  for (const level of ladder ?? effortWords(c.provider)) out.push({ value: level, label: level });
   if (c.effort && !out.some((o) => o.value === c.effort)) {
     const runs = eff.effort && eff.effort !== c.effort ? ` (runs as ${eff.effort})` : "";
     out.push({ value: c.effort, label: c.effort + runs });

@@ -122,13 +122,15 @@ _NUMBER_FIELD = 6
 # Since 2026-10-08 it is the only copy: `jarvis.protected_state` (the shell
 # check) and `jarvis.v2.permissions.protected_paths` both return this set, and
 # `config.ROUTING_PATH` joined it — `JARVIS_ROUTING` can put the live routing
-# file outside the allowlist's directory.
+# file outside the allowlist's directory. The saved Codex catalog joined it in
+# PR #20: it is loaded as the Codex model table at daemon start.
 def _protected_state() -> set[Path]:
     names = ("allowlist.json", "models.json", "routing.json", "discord_guild.json",
              "provider_defaults.json")
     allow = config.ALLOWLIST_PATH.expanduser()
     paths = {allow, config.MODELS_PATH.expanduser(), config.PROVIDER_DEFAULTS_PATH.expanduser(),
-             config.DISCORD_GUILD_PATH.expanduser(), config.ROUTING_PATH.expanduser()}
+             config.DISCORD_GUILD_PATH.expanduser(), config.ROUTING_PATH.expanduser(),
+             config.CODEX_CATALOG_PATH.expanduser()}
     paths |= {allow.parent / name for name in names}
     return {p.resolve() for p in paths}
 
