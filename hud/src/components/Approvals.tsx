@@ -16,6 +16,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { ApprovalRequest } from "../types";
+import { headlineLine } from "../lib/approval";
 
 export function approvalChime(ctx?: AudioContext | null) {
   try {
@@ -69,8 +70,8 @@ export function ApprovalCard(props: {
   return (
     <div className="auth" data-testid="approval-card" data-req={r.req_id}>
       <h3>AUTHORIZATION REQUIRED</h3>
-      {r.headline ? (
-        <div className="headline" data-testid="approval-headline">{r.headline}</div>
+      {headlineLine(r.headline) ? (
+        <div className="headline" data-testid="approval-headline">{headlineLine(r.headline)}</div>
       ) : null}
       {r.origin ? (
         <div className="origin" data-testid="approval-origin">REQUESTED BY {r.origin}</div>

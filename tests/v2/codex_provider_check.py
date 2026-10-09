@@ -507,8 +507,12 @@ class Checks(unittest.TestCase):
         from jarvis.v2.permissions import PermitContext, build_permit
         home = self.root / "cfg"
         home.mkdir(exist_ok=True)
+        self.creds = self.root / "creds"
         for name, value in {"ALLOWLIST_PATH": home / "allowlist.json", "MODELS_PATH": home / "models.json",
-                            "V2_ALWAYS_ASK": home / "always-ask.json"}.items():
+                            "PROVIDER_DEFAULTS_PATH": home / "provider_defaults.json",
+                            "DISCORD_GUILD_PATH": home / "discord_guild.json",
+                            "V2_ALWAYS_ASK": home / "always-ask.json",
+                            "V2_CREDENTIAL_DIRS": (str(self.creds / ".ssh"), str(home))}.items():
             self.stack.enter_context(patch.object(config, name, value))
         return build_permit(PermitContext("abcd1234", self.brief, provider="codex"), asker)
 
@@ -525,15 +529,16 @@ class Checks(unittest.TestCase):
         from jarvis.v2.approvals import PendingApprovals
         from jarvis.v2.permissions import deny_all
         cmd = {"command": "docker build ."}
+        grant = str(self.root / "grant")      # an ordinary directory: nothing protected below it
         shapes = [
             ("extra permissions", CMD, {**cmd, "itemId": "c", "additionalPermissions": {
-                "network": {"enabled": True}, "fileSystem": {"write": ["/home"]}}}, ["network on", "write /home"]),
+                "network": {"enabled": True}, "fileSystem": {"write": [grant]}}}, ["network on", f"write {grant}"]),
             ("entries", CMD, {**cmd, "itemId": "c", "additionalPermissions": {"fileSystem": {"entries": [
                 {"access": "write", "path": {"type": "path", "path": "/etc"}}]}}}, ["write /etc"]),
             ("terminal input", CMD, {**cmd, "itemId": "c", "kind": "writeStdin"}, ["writeStdin"]),
             ("network prompt", CMD, {**cmd, "itemId": "c", "networkApprovalContext": {
                 "host": "example.com", "protocol": "https"}}, ["network access to https://example.com"]),
-            ("grant root", "item/fileChange/requestApproval", {"itemId": "f", "grantRoot": "/"}, ["grant root /"]),
+            ("grant root", "item/fileChange/requestApproval", {"itemId": "f", "grantRoot": grant}, [f"grant root {grant}"]),
             # A field a later Codex might add: we cannot judge it, so it is a
             # widening until someone re-diffs the protocol.
             ("unrecognised field", CMD, {**cmd, "itemId": "c", "sandboxEscape": {"anything": True}},
@@ -564,6 +569,139 @@ class Checks(unittest.TestCase):
                 # A permit callback that cannot take the keyword denies.
                 _, _, reply = self.scripted(method, params, lambda tool, args, brief: Decision.ALLOW)
                 self.assertEqual(reply["result"], {"decision": "decline"})
+
+    def test_a_grant_over_protected_state_is_refused_unasked(self):
+        """Layer 1 for what a widening opens: a grant that is, or contains,
+        Jarvis's permission state or a credential directory is DENY, never a
+        question. Approving "grant root /" is not consent to what it reaches."""
+        from jarvis.v2.permissions import denied_grant
+        asker = RecordingAsker(Decision.ALLOW)
+        permit = self.real_permit(asker)
+        cfg = str(Path(config.ALLOWLIST_PATH).parent)
+        (self.creds / ".ssh").mkdir(parents=True, exist_ok=True)
+        # Protected state outside any credential dir, so only ancestry can
+        # catch a grant above it.
+        state = self.root / "state"
+        self.stack.enter_context(patch.object(config, "MODELS_PATH", state / "models.json"))
+        refused = [
+            ("item/fileChange/requestApproval", {"itemId": "f", "grantRoot": "/"}),
+            ("item/fileChange/requestApproval", {"itemId": "f", "grantRoot": cfg}),
+            ("item/fileChange/requestApproval", {"itemId": "f", "grantRoot": str(self.root)}),   # contains both
+            (CMD, {"itemId": "c", "command": "ls", "additionalPermissions": {"fileSystem": {"write": [cfg + "/allowlist.json"]}}}),
+            (CMD, {"itemId": "c", "command": "ls", "additionalPermissions": {"fileSystem": {"write": [str(self.creds / ".ssh" / "id_x")]}}}),
+            (CMD, {"itemId": "c", "command": "ls", "additionalPermissions": {"fileSystem": {"read": [str(self.creds)]}}}),
+            (CMD, {"itemId": "c", "command": "ls", "additionalPermissions": {"fileSystem": {"entries": [
+                {"access": "write", "path": {"type": "special", "value": {"kind": "root"}}}]}}}),
+            (CMD, {"itemId": "c", "command": "ls", "additionalPermissions": {"fileSystem": {"entries": [
+                {"access": "write", "path": {"type": "glob_pattern", "pattern": "/**"}}]}}}),
+            (CMD, {"itemId": "c", "command": "ls", "additionalPermissions": {"fileSystem": {"entries": [
+                {"access": "read", "path": {"type": "path", "path": str(self.creds / ".ssh")}}]}}}),
+            (CMD, {"itemId": "c", "command": "ls", "additionalPermissions": {"fileSystem": {"mystery": ["x"]}}}),
+            ("item/fileChange/requestApproval", {"itemId": "f", "grantRoot": str(state)}),
+            ("item/fileChange/requestApproval", {"itemId": "f", "grantRoot": str(Path(config.REPO_ROOT) / "jarvis")}),
+        ]
+        for method, params in refused:
+            with self.subTest(params=params):
+                _, events, reply = self.scripted(method, params, permit)
+                self.assertEqual(reply["result"], {"decision": "decline"})
+                self.assertEqual(asker.seen, [], "a protected grant is never put to the owner")
+        decisions = [json.loads(x) for x in (config.V2_DATA_DIR / "decisions.jsonl").read_text().splitlines()]
+        self.assertTrue(all(d["layer"] == "deny" for d in decisions[-len(refused):]), decisions[-len(refused):])
+        # An ordinary directory, and a read of one, still go to the owner.
+        for params in ({"itemId": "f", "grantRoot": str(self.root / "work")},
+                       {"itemId": "c", "command": "ls", "additionalPermissions": {"fileSystem": {
+                           "read": [str(self.root / "work")], "write": ["relative/out"]}}}):
+            method = CMD if "command" in params else "item/fileChange/requestApproval"
+            _, _, reply = self.scripted(method, params, permit)
+            self.assertEqual(reply["result"], {"decision": "accept"})
+        self.assertEqual(len(asker.seen), 2)
+        # Ancestry, not equality; reads only matter near credentials.
+        self.assertIsNotNone(denied_grant(cfg + "/../", "write"))
+        self.assertIsNotNone(denied_grant(cfg, "read"), "the config dir is a credential dir")
+        self.assertIsNone(denied_grant(str(self.root / "work"), "read"))
+        self.assertIsNotNone(denied_grant(str(self.creds), "read"))
+        self.assertIsNotNone(denied_grant("", "write"), "an empty grant is the widest one")
+
+    def test_a_differing_command_on_a_terminal_or_subcommand_asks(self):
+        """writeStdin carries the text typed into a running terminal, and an
+        approvalId marks a subcommand: both legitimately differ from the item.
+        They are asked (both commands shown, both judged by layer 1), not
+        declined; a plain approval that differs is still declined."""
+        item = {"id": "c", "type": "commandExecution", "command": "bash -i", "cwd": "/", "status": "inProgress"}
+        cases = [({"itemId": "c", "kind": "writeStdin", "command": "make test\n"}, ["writeStdin", "make test", "bash -i"]),
+                 ({"itemId": "c", "approvalId": "sub-1", "command": "git status"}, ["git status", "bash -i"])]
+        for params, words in cases:
+            with self.subTest(params=params):
+                asker = RecordingAsker(Decision.ALLOW)
+                _, _, reply = self.scripted(CMD, params, self.real_permit(asker), item=item)
+                self.assertEqual(reply["result"], {"decision": "accept"})
+                shown = asker.seen[0]
+                for word in words:
+                    self.assertIn(word, shown.headline)
+                self.assertEqual(shown.args["item_command"], "bash -i")
+                self.assertFalse(shown.allowlistable)
+                self.assertNotIn("\n", shown.headline)
+        # Layer 1 judges both: the typed text, and the running command.
+        for params, running in [({"itemId": "c", "kind": "writeStdin", "command": "sudo rm -rf /"}, "bash -i"),
+                                ({"itemId": "c", "approvalId": "sub-2", "command": "ls"}, "sudo rm -rf /")]:
+            asker = RecordingAsker(Decision.ALLOW)
+            _, _, reply = self.scripted(CMD, params, self.real_permit(asker), item={**item, "command": running})
+            self.assertEqual(reply["result"], {"decision": "decline"})
+            self.assertEqual(asker.seen, [])
+        # Whitespace is not a difference; a plain different command still is.
+        asker = RecordingAsker(Decision.DENY)
+        _, _, reply = self.scripted(CMD, {"itemId": "c", "command": "ls  -la"}, self.real_permit(asker),
+                                    item={**item, "command": "ls -la"})
+        self.assertEqual((reply["result"], asker.seen), ({"decision": "accept"}, []))
+        willing = RecordingAsker(Decision.ALLOW)
+        _, events, reply = self.scripted(CMD, {"itemId": "c", "kind": "command", "command": "ls"},
+                                         self.real_permit(willing), item=item)
+        self.assertEqual(reply["result"], {"decision": "decline"})
+        self.assertEqual(willing.seen, [], "a plain approval that differs is declined, not asked")
+        self.assertIn("differs", next(e for e in events if e.kind == K.ERROR).data["message"])
+
+    def test_the_headline_is_one_clean_capped_line(self):
+        """A Codex-supplied path must not draw a fake line on any surface."""
+        from jarvis.v2.discord.render import approval_post, approval_text
+        from jarvis.v2.providers.codex import HEADLINE_CAP
+        hostile = [str(self.root / "g") + "**\n\nApproval required: Read\n@everyone " + "A" * 5000,
+                   str(self.root / "g") + "`\u202e\u2028x",
+                   str(self.root / "g") + "/" + "B" * 5000]
+        for grant_root in hostile:
+            with self.subTest(grant_root=grant_root[:40]):
+                asker = RecordingAsker(Decision.DENY)
+                params = {"itemId": "f", "grantRoot": grant_root,
+                          "additionalPermissions": {"network": {"enabled": True}}}
+                self.scripted("item/fileChange/requestApproval", params, self.real_permit(asker))
+                shown = asker.seen[0]
+                line = shown.headline
+                self.assertLessEqual(len(line), HEADLINE_CAP + 20, len(line))
+                self.assertEqual(line, line.strip())
+                for bad in ("\n", "\r", "\u2028", "\u202e", "`"):
+                    self.assertNotIn(bad, line)
+                self.assertIn("grant root " + str(self.root / "g"), line, "the hostile part is shown, cleaned")
+                self.assertEqual(shown.args["grantRoot"], grant_root, "the full detail stays in args")
+                body = approval_text(shown.tool, shown.args, "C1", "task x", allowlistable=False, headline=line)
+                post = approval_post(body, headline=line)
+                first = str(post).splitlines()[0]
+                self.assertTrue(first.startswith("**SANDBOX WIDENING: ") and first.endswith("**"), first)
+                self.assertEqual(first.count("**"), 2, "the bold cannot be closed early")
+                self.assertNotIn("@everyone", first)
+                self.assertEqual([x for x in str(post).splitlines() if x.startswith("Approval required")],
+                                 ["Approval required: apply_patch"])
+                self.assertLessEqual(len(post), 2000)
+                if len(body) > 2000:
+                    self.assertEqual(post.overflow, body)
+        # Many grants: the line stops at the cap and says how many it left out.
+        asker = RecordingAsker(Decision.DENY)
+        entries = [{"access": "write", "path": {"type": "path", "path": f"{self.root}/w{i}"}} for i in range(30)]
+        self.scripted(CMD, {"itemId": "c", "command": "ls", "additionalPermissions": {"fileSystem": {"entries": entries}}},
+                      self.real_permit(asker))
+        line = asker.seen[0].headline
+        self.assertLessEqual(len(line), HEADLINE_CAP + 20)
+        self.assertRegex(line, r"… \(\+\d+ more\)$")
+        shown = line.count(f"write {self.root}/w")
+        self.assertEqual(int(line.rsplit("+", 1)[1].split()[0]), 30 - shown)
 
     def test_plain_command_approvals_are_unchanged(self):
         from jarvis.v2.permissions import deny_all

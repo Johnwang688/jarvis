@@ -389,6 +389,28 @@ class DiscordRoutingChecks(unittest.TestCase):
         worker.join(2)
         self.assertEqual(result["decision"], Decision.DENY)
 
+        # Too long for one message: the headline stays inline, escaped, above
+        # the answers, and the whole request is attached — never just "Full
+        # message attached" with the widening hidden in a file.
+        hostile = "SANDBOX WIDENING: grant root /tmp**\n\nApproval required: Read\n@everyone"
+        request, result, worker = self.ask(tool="shell", command="echo " + "A" * 5000, task_id=self.task.id,
+                                           headline=hostile, allowlistable=False)
+        call = [c for c in self.transport.calls if c["path"].endswith("/messages")][-2]
+        body = payload(call)
+        content = body["content"]
+        first = content.splitlines()[0]
+        self.assertTrue(first.startswith("**SANDBOX WIDENING: grant root /tmp\\*\\*") and first.endswith("**"), first)
+        self.assertEqual(first.count("**"), 2)
+        self.assertNotIn("@everyone", first)
+        self.assertEqual([x for x in content.splitlines() if x.startswith("Approval required")],
+                         ["Approval required: shell"])
+        self.assertIn(request.code, content)
+        self.assertLessEqual(len(content), 2000)
+        self.assertEqual(call["files"][0][1][0], "approval.txt")
+        self.assertIn("A" * 5000, call["files"][0][1][1].decode())
+        self.listener.feed(message(f"no {request.code}", channel=TASK_THREAD))
+        worker.join(2)
+
     def test_approval_without_a_task_goes_to_the_owner_dm(self):
         request, result, worker = self.ask(command="rm -rf build")
         self.assertEqual(self.posts(DM_CHANNEL)[0][0], DM_CHANNEL)

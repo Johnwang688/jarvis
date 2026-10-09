@@ -44,7 +44,10 @@ so under AUTO nobody decides it** unless we make someone: a sandbox-widening
 approval — extra permissions, network, grant root, `writeStdin`, or any field
 outside the verified schema — goes to a human via `permit(...,
 widening=...)` with no Always and a "SANDBOX WIDENING: …" headline, and
-declines with no human; unknown methods get an error, malformed approvals
+declines with no human, and its grants pass layer 1 first — a grant that is
+or contains protected state or touches a credential dir is DENY unasked
+(`denied_grant`); the headline is Codex-supplied text, so it is one cleaned,
+capped line everywhere; unknown methods get an error, malformed approvals
 and unknown `kind`s a decline; null fields never overwrite the item's
 command; `answer()` can only deny an approval — keep all of it), a worktree per
 task (WP6), the daemon and local API (WP7, `jarvis daemon2`), one skills

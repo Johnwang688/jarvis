@@ -61,7 +61,7 @@ from ..router import (FastPath, Incoming, NewTask, Steer, Verb,
 from ..stores import StoreError, _write_bytes
 from .commands import SyncResult
 from .mirror import FULL_TEXT, QUEUED_TEXT
-from .render import _cap, approval_components, approval_text, status_embed
+from .render import _cap, approval_components, approval_post, approval_text, status_embed
 from .reporter import thread_for
 from .rest import describe
 
@@ -752,9 +752,10 @@ class DiscordRouter:
                          allowlistable=data.get("allowlistable", True) is not False)
         # The whole command is shown, minus any secret value pasted into it:
         # the transcript scrub runs over the text Discord receives.
-        body = scrub(approval_text(tool, args, code, str(data.get("origin") or ""),
-                                   allowlistable=self.allowlistable(request)[0],
-                                   headline=str(data.get("headline") or "")))
+        headline = str(data.get("headline") or "")
+        body = approval_post(scrub(approval_text(tool, args, code, str(data.get("origin") or ""),
+                                                 allowlistable=self.allowlistable(request)[0],
+                                                 headline=headline)), headline=headline)
         posted = None
         if channel:
             posted = self._ask_in(req_id, str(channel), body, code)

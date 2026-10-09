@@ -12,8 +12,14 @@ warning. What keeps a newer version from loosening the gate is narrower than
 - a command/file approval whose fields have the wrong types, or that names
   an approval `kind` we cannot describe, is declined without asking anyone;
 - a command approval is judged on the item's real command (a null field
-  never erases it) and declined if there is none, or if it names a different
-  command from the item;
+  never erases it) and declined if there is none; a plain approval naming a
+  different command from its item is declined, while a `writeStdin` or
+  `approvalId` one (where a difference is expected) is a widening with both
+  commands judged by layer 1 and shown;
+- every filesystem grant a widening opens is judged by layer 1 first: one
+  that is or contains protected state or touches a credential directory is
+  DENY, unasked; and the headline, built from Codex-supplied strings, is one
+  cleaned and capped line;
 - an approval that would **widen the sandbox** (extra permissions, a
   managed-network prompt, a grant root, terminal input) is put to a human
   every time, with no Always (`permit(..., widening=...)`), and declined with
@@ -42,6 +48,7 @@ from dataclasses import dataclass, field, replace
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import threading
 import time
@@ -51,6 +58,7 @@ from jarvis import config
 from jarvis.v2.model import ProviderName, Thread
 from jarvis.v2.provider import (Brief, BriefRefused, Decision, Event, EventKind,
                                PermissionCallback, SessionHandle, Usage, UserMessage)
+from ..approvals import clean_line
 from . import codex_cli, codex_config
 from .codex_rpc import RpcError, RpcProcess, RpcTimeout
 from .codex_usage import Accounting
@@ -135,22 +143,66 @@ def _compact(value) -> str:
     return text if len(text) <= 300 else text[:299] + "…"
 
 
-def _fs_path(path) -> str:
-    """One FileSystemPath (0.161.0 schema) in words."""
+# The headline is built from Codex-supplied strings (paths, hosts, commands)
+# and lands first on an authorization surface, so every part is one cleaned
+# line (approvals.clean_line: no newlines or control characters, no
+# backticks) and the whole is capped. The full detail stays in `args`.
+PART_CAP, HEADLINE_CAP = 120, 400
+_GLOB = re.compile(r"[*?\[{]")
+
+
+def _headline(parts: list[str]) -> str | None:
+    if not parts:
+        return None
+    parts = [clean_line(part, PART_CAP) for part in parts]
+    line, shown = "SANDBOX WIDENING: ", 0
+    for part in parts:
+        joined = line + (" · " if shown else "") + part
+        if shown and len(joined) > HEADLINE_CAP - 16:
+            break
+        line, shown = joined, shown + 1
+    if shown < len(parts):
+        line += f" … (+{len(parts) - shown} more)"
+    return line
+
+
+def _place(path: str, cwd: str) -> str:
+    return path if os.path.isabs(os.path.expanduser(path)) else os.path.join(cwd, path)
+
+
+def _fs_path(path, cwd: str) -> tuple[str, str | None]:
+    """One FileSystemPath (0.161.0 schema): its words, and the directory or
+    file it covers (None for the sandbox's own minimal set). A shape we cannot
+    place covers "/", so layer 1 judges it as the widest grant it could be."""
     if isinstance(path, dict):
         if path.get("type") == "path" and isinstance(path.get("path"), str):
-            return path["path"]
+            return path["path"], _place(path["path"], cwd)
         if path.get("type") == "glob_pattern" and isinstance(path.get("pattern"), str):
-            return path["pattern"]
+            literal = _GLOB.split(path["pattern"], 1)[0]
+            base = literal if literal.endswith("/") or not literal else os.path.dirname(literal) or ""
+            return path["pattern"], _place(base or ".", cwd)
         if path.get("type") == "special" and isinstance(path.get("value"), dict):
             value = path["value"]
-            sub = value.get("subpath") or value.get("path")
-            return f"<{value.get('kind')}>" + (f"/{sub}" if isinstance(sub, str) else "")
-    return _compact(path)
+            kind = value.get("kind")
+            sub = value.get("subpath") if isinstance(value.get("subpath"), str) else None
+            words = f"<{kind}>" + (f"/{sub}" if sub else "")
+            if kind == "minimal":
+                return words, None
+            if kind == "root":
+                return words, "/" + (sub or "")
+            if kind == "project_roots":
+                return words, os.path.join(cwd, sub) if sub else cwd
+            if kind in ("tmpdir", "slash_tmp"):
+                return words, "/tmp"
+            if kind == "unknown" and isinstance(value.get("path"), str):
+                return f"{value['path']}" + (f"/{sub}" if sub else ""), _place(value["path"], cwd)
+    return _compact(path), "/"
 
 
-def _describe_permissions(extra: dict) -> list[str]:
-    parts = []
+def _describe_permissions(extra: dict, cwd: str) -> tuple[list[str], list[tuple[str, str]]]:
+    """Words for each grant in an AdditionalPermissionProfile, and each
+    filesystem grant as (access, path) for layer 1's ancestor check."""
+    parts, grants = [], []
     for key, value in extra.items():
         if not _content(value):
             continue
@@ -162,37 +214,49 @@ def _describe_permissions(extra: dict) -> list[str]:
                     continue
                 if sub in ("read", "write") and isinstance(paths, list) and all(isinstance(x, str) for x in paths):
                     parts.append(f"{sub} {', '.join(paths)}")
+                    grants.extend((sub, _place(x, cwd)) for x in paths)
                 elif sub == "entries" and isinstance(paths, list):
                     for entry in paths:
                         if isinstance(entry, dict) and isinstance(entry.get("access"), str):
-                            parts.append(f"{entry['access']} {_fs_path(entry.get('path'))}")
+                            words, where = _fs_path(entry.get("path"), cwd)
+                            parts.append(f"{entry['access']} {words}")
+                            if where is not None and entry["access"] != "deny":
+                                access = "read" if entry["access"] == "read" else "write"
+                                grants.append((access, where))
                         else:
                             parts.append(f"filesystem {_compact(entry)}")
+                            grants.append(("write", "/"))
                 else:
                     parts.append(f"filesystem {sub} {_compact(paths)}")
+                    grants.append(("write", "/"))
         else:
             parts.append(f"{key} {_compact(value)}")
-    return parts or [f"additional permissions {_compact(extra)}"]
+    if not parts:
+        parts.append(f"additional permissions {_compact(extra)}")
+    return parts, grants
 
 
-def _widening(p: dict) -> tuple[str | None, str | None]:
-    """``(line, refusal)`` for one approval request.
+def _widening(p: dict, cwd: str) -> tuple[list[str], list[tuple[str, str]], str | None]:
+    """``(parts, grants, refusal)`` for one approval request.
 
-    ``line`` is "SANDBOX WIDENING: …" when accepting would let more through
-    than the sandbox does (extra permissions riding on the approval, a
-    managed-network prompt, a grant root, terminal input). The reply is a
-    bare ``{decision}``, so such a grant cannot be stripped — it is accepted
-    whole or not at all. ``refusal`` is set for a kind this adapter cannot
-    describe, which is declined without asking anyone.
+    ``parts`` describe what accepting would let through beyond the sandbox
+    (extra permissions riding on the approval, a managed-network prompt, a
+    grant root, terminal input, a field we do not know); the reply is a bare
+    ``{decision}``, so such a grant is accepted whole or not at all.
+    ``grants`` are the filesystem paths it would open, for layer 1.
+    ``refusal`` is set for a kind this adapter cannot describe, which is
+    declined without asking anyone.
     """
-    parts = []
+    parts, grants = [], []
     kind = p.get("kind")
     if kind not in _PLAIN_KINDS:
         if kind not in _WIDENING_KINDS:
-            return None, f"unknown approval kind {str(kind)[:40]!r}"
+            return [], [], f"unknown approval kind {clean_line(kind, 40)!r}"
         parts.append(_WIDENING_KINDS[kind])
     if _content(p.get("additionalPermissions")):
-        parts.extend(_describe_permissions(p["additionalPermissions"]))
+        words, more = _describe_permissions(p["additionalPermissions"], cwd)
+        parts.extend(words)
+        grants.extend(more)
     net = p.get("networkApprovalContext")
     if net is not None:
         host, protocol = net.get("host"), net.get("protocol")
@@ -201,9 +265,14 @@ def _widening(p: dict) -> tuple[str | None, str | None]:
                      else f"network access {_compact(net)}")
     if p.get("grantRoot") is not None:
         parts.append(f"grant root {p['grantRoot']}")
+        grants.append(("write", _place(p["grantRoot"], cwd)))
     for key in sorted(k for k, v in p.items() if v is not None and k not in _KNOWN_APPROVAL_FIELDS):
         parts.append(f"unrecognised field {str(key)[:60]}={_compact(p[key])}")
-    return ("SANDBOX WIDENING: " + " · ".join(parts)) if parts else None, None
+    return parts, grants, None
+
+
+def _same_command(a: str, b: str) -> bool:
+    return " ".join(a.split()) == " ".join(b.split())
 
 
 @dataclass
@@ -642,7 +711,8 @@ class CodexProvider:
                 yield self._event(h, EventKind.ERROR, fatal=False,
                                   message=f"Codex approval request declined: {problem}")
                 return
-            line, refusal = _widening(p)
+            cwd = p.get("cwd") if isinstance(p.get("cwd"), str) and p["cwd"] else s.brief.cwd
+            parts, grants, refusal = _widening(p, cwd)
             if refusal:
                 self._reply(s, request, {"decision": "decline"})
                 yield self._event(h, EventKind.ERROR, fatal=False,
@@ -654,18 +724,29 @@ class CodexProvider:
             # Only non-null values: a `command: null` must not erase the item's
             # real command and leave the never-approvable rules judging "".
             args.update({k: v for k, v in p.items() if v is not None})
-            declined = None
+            declined, also = None, []
+            item_command = item.get("command") if isinstance(item.get("command"), str) else None
             if shell and (not isinstance(args.get("command"), str) or not args["command"].strip()):
                 declined = "no command to judge"
-            elif shell and isinstance(item.get("command"), str) and item["command"] != args["command"]:
-                # The approval names one command and the item runs another:
-                # judging either alone could pass the one that runs.
-                declined = "its command differs from the item's"
+            elif shell and item_command is not None and not _same_command(item_command, args["command"]):
+                if p.get("kind") in _PLAIN_KINDS and p.get("approvalId") is None:
+                    # A plain approval naming a different command than the
+                    # item runs: judging either alone could pass the one that runs.
+                    declined = "its command differs from the item's"
+                else:
+                    # Expected shapes: writeStdin carries the text typed into a
+                    # running terminal, and an approvalId marks a subcommand
+                    # (the zsh exec bridge). Both commands are judged by layer
+                    # 1 and a human sees both.
+                    args["item_command"] = item_command
+                    also.append(item_command)
+                    parts.append(f"command {args['command']} (in running {item_command})")
             if declined:
                 self._reply(s, request, {"decision": "decline"})
                 yield self._event(h, EventKind.ERROR, fatal=False,
                                   message=f"Codex approval request declined: {declined}")
                 return
+            line = _headline(parts)
             if line:
                 args["sandbox_widening"] = line
             args["req_id"] = req_id
@@ -679,7 +760,8 @@ class CodexProvider:
                 # Deliberately on the send caller's thread: broker context survives.
                 # A widening goes as a keyword the model cannot reach; a
                 # callback that does not take it raises, and that denies.
-                decision = (s.permit(name, args, s.brief, widening=line) if line
+                decision = (s.permit(name, args, s.brief, widening=line, grants=tuple(grants),
+                                     also_commands=tuple(also)) if line
                             else s.permit(name, args, s.brief))
                 decision = Decision(decision)
             except Exception:

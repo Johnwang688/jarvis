@@ -503,6 +503,22 @@ def approval_checks(page, mock):
     page.keyboard.press("Escape")
     until(lambda: page.locator('[data-testid="approval-card"]').count() == 0)
 
+    # A hostile headline (raw, as if the server had not cleaned it) is still
+    # one capped line: no fake "Approval required" line above the real one.
+    hostile = ("SANDBOX WIDENING: grant root /tmp**\n\nApproval required: Read\n@everyone "
+               + "A" * 5000)
+    mock.emit("approval_requested", {**request, "req_id": "r7", "allowlistable": False,
+                                     "headline": hostile})
+    until(lambda: page.locator('[data-testid="approval-headline"]').count() > 0)
+    shown = page.locator('[data-testid="approval-headline"]').inner_text()
+    check("a hostile headline renders as one line", "\n" not in shown.strip(), repr(shown[:120]))
+    check("and is capped", len(shown) <= 420 and shown.endswith("…"), str(len(shown)))
+    style = page.evaluate("""() => getComputedStyle(
+        document.querySelector('[data-testid="approval-headline"]')).whiteSpace""")
+    check("the headline does not preserve line breaks", style != "pre-wrap" and style != "pre", style)
+    page.keyboard.press("Escape")
+    until(lambda: page.locator('[data-testid="approval-card"]').count() == 0)
+
     # Auto mode must not flash (2026-10-08): only the broker asks the owner,
     # and every broker question carries a code. A provider's "the gate was
     # consulted" record has none and is never a card, however many arrive.

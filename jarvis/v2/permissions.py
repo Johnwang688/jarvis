@@ -58,7 +58,7 @@ from typing import Iterable
 
 from jarvis import config, permissions as v1_permissions, rules
 from jarvis.tools import files as v1_files, secrets as v1_secrets
-from .approvals import ApprovalRequest, DenyAll, label, v1_request
+from .approvals import ApprovalRequest, DenyAll, clean_line, label, v1_request
 from .model import PermissionProfile, Project, Task, utcnow
 from .provider import Brief, Decision, PermissionCallback
 
@@ -249,6 +249,40 @@ def denied_file(target: str) -> str | None:
     except Exception:
         LOG.warning("SELF_PROTECTED check failed for %s", target, exc_info=True)
     return None
+
+
+def denied_grant(target: str, access: str = "write") -> str | None:
+    """Why a sandbox grant on `target` may not be approved by anyone, or None.
+
+    A grant opens a whole subtree, so the test is ancestry, not equality:
+    "write /" or "write ~/.config" covers the allowlist as surely as naming
+    it. Any grant touching a credential directory (on it, inside it, or
+    above it) is refused, reads included — a read is how a key leaves. A
+    write grant that is or contains Jarvis's own permission state
+    (`protected_paths()`, `files._protected_state()`), a SELF_PROTECTED file,
+    or a credential bundle is refused too. Approving a grant is not consent
+    to what it lets through.
+    """
+    if not isinstance(target, str) or not target.strip():
+        target = "/"
+    path = _resolve(target)
+    for directory in _credential_dirs():
+        if path == directory or directory in path.parents or path in directory.parents:
+            return (f"a grant on {path} would reach {directory}, which holds "
+                    "credentials; no approval can open it")
+    if access == "read":
+        return None
+    try:
+        protected = set(protected_paths()) | set(v1_files._protected_state())
+        protected |= {_resolve(Path(config.REPO_ROOT) / rel) for rel in v1_files.SELF_PROTECTED}
+    except Exception:       # cannot tell what it covers: refuse
+        LOG.warning("protected-state lookup failed for a grant on %s", target, exc_info=True)
+        return f"a grant on {path} cannot be checked against Jarvis's own state; refused"
+    for item in protected:
+        if path == item or path in item.parents:
+            return (f"a grant on {path} would cover {item}, part of Jarvis's own "
+                    "permission state; only the owner edits it, by hand")
+    return denied_file(str(path))
 
 
 def _command_of(args: dict) -> str:
@@ -558,13 +592,20 @@ def build_permit(ctx: PermitContext, asker) -> PermissionCallback:
     `DenyAll`; its `human_backed` flag is what layer 4 turns on."""
 
     def permit(tool: str, args: dict, brief: Brief | None = None, *,
-               widening: str | None = None) -> Decision:
+               widening: str | None = None, grants: Iterable[tuple[str, str]] = (),
+               also_commands: Iterable[str] = ()) -> Decision:
         """`widening` is set only by a provider whose approval would widen
         its own sandbox if accepted (Codex: extra permissions, network, a
         grant root, terminal input). Such a call is asked of a human every
         time — never ALLOWed by layer 4 or 5, never Always — and a deny-all
         asker, no surface or a timeout declines it. It is a keyword the model
-        cannot reach: it never rides in `args`."""
+        cannot reach: it never rides in `args`.
+
+        `grants` are the (access, path) pairs such an approval would open and
+        `also_commands` any further command it would run (a running
+        terminal's, beside the text typed into it). Layer 1 judges both: a
+        grant that is or contains protected state or a credential directory,
+        or a command that is never approvable, is refused unasked."""
         brief = brief if brief is not None else ctx.brief
         args = dict(args or {})
         profile = brief.profile if brief is not None else PermissionProfile.AUTO
@@ -588,6 +629,14 @@ def build_permit(ctx: PermitContext, asker) -> PermissionCallback:
                 refusal = denied_file(target)
                 if refusal:
                     return finish(Decision.DENY, L_DENY, refusal)
+        for extra in also_commands:
+            refusal = denied_command(extra) if isinstance(extra, str) and extra.strip() else None
+            if refusal:
+                return finish(Decision.DENY, L_DENY, refusal)
+        for access, target in grants:
+            refusal = denied_grant(target, access)
+            if refusal:
+                return finish(Decision.DENY, L_DENY, refusal)
 
         # --- sandbox widening: a human, every time ------------------------
         # A Codex approval reaches us only after its own reviewer passed it,
@@ -647,7 +696,7 @@ def _ask(asker, ctx: PermitContext, tool: str, args: dict, command: str,
         tool=tool, args=args, command=command or None, reason=reason, layer=layer,
         thread_id=ctx.thread_id, task_id=ctx.task_id,
         provider=ctx.provider or None, origin=ctx.origin(),
-        allowlistable=allowlistable, headline=headline)
+        allowlistable=allowlistable, headline=clean_line(headline, 420) if headline else "")
     try:
         return Decision(asker.ask(request))
     except Exception:       # an asker that raises has not approved anything
@@ -675,6 +724,6 @@ def deny_all(reason: str = "nobody is watching this thread") -> DenyAll:
 
 __all__ = [
     "ApprovalRecord", "PermitContext", "always_ask_for", "always_ask_match",
-    "build_permit", "denied_command", "denied_file", "deny_all", "file_targets",
+    "build_permit", "denied_command", "denied_file", "denied_grant", "deny_all", "file_targets",
     "log_decision", "protected_paths", "COMMAND_TOOLS", "FILE_TOOLS",
 ]

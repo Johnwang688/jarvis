@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 
+from ..approvals import clean_line
 from ..model import Project, Report, Task
 
 
@@ -86,6 +87,44 @@ def report_text(report: Report) -> ReportText:
     )))
 
 
+_MD = str.maketrans({c: "\\" + c for c in "\\*_~|>#[]()<"})
+
+
+def headline_markdown(headline: str) -> str:
+    """A headline as one inert Discord line: cleaned like `label()` (no
+    newlines, controls or backticks; capped), markdown escaped so it cannot
+    close the bold or start a quote, and `@` defused even though
+    allowed_mentions already parses nothing."""
+    line = clean_line(headline, 420).translate(_MD)
+    return line.replace("@", "@\u200b")
+
+
+class ApprovalPost(str):
+    """An approval too long for one message: the headline and the answers
+    inline, the whole request attached (`DiscordRest` reads `overflow`)."""
+
+    overflow: str
+    overflow_name = "approval.txt"
+
+    def __new__(cls, inline: str, full: str):
+        result = super().__new__(cls, inline)
+        result.overflow = full
+        return result
+
+
+def approval_post(body: str, *, headline: str = "") -> str:
+    """`body` as posted. Over 2000 characters DiscordRest attaches the whole
+    text and shows only "Full message attached" — fine for an ordinary
+    request, wrong for a sandbox widening, whose headline must be read before
+    anyone answers. So a long widening keeps its first four lines (headline,
+    tool, origin, answers) inline and attaches the rest."""
+    if not headline or len(body) <= 2000:
+        return body
+    head = "\n".join(body.splitlines()[:4])
+    return ApprovalPost(head + "\nThe full request is attached (unabridged); read it before answering.",
+                        body)
+
+
 def approval_text(tool: str, args, code: str, origin: str, *, allowlistable: bool = True,
                   headline: str = "") -> str:
     """Never truncate. DiscordRest.post attaches this verbatim when >2000 chars.
@@ -96,7 +135,7 @@ def approval_text(tool: str, args, code: str, origin: str, *, allowlistable: boo
     # A shell command must be visible with literal newlines, not JSON escapes.
     command = args.get("command") if isinstance(args, dict) else args
     answers = f"`/yes {code}` · `/no {code}`" + (f" · `/always {code}`" if allowlistable else "")
-    parts = [f"**{headline}**"] if headline else []
+    parts = [f"**{headline_markdown(headline)}**"] if headline else []
     parts += [f"Approval required: {tool}", f"Origin: {origin}",
              f"Answer here: tap a button, or {answers}."]
     if isinstance(command, str):

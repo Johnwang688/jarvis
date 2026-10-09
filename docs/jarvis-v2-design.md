@@ -266,7 +266,15 @@ broker alone.
   of a human** (`permit(..., widening=...)`, no Always, headline "SANDBOX
   WIDENING: …" first on the card and the Discord post; deny-all, timeout or
   strict declines), and so is one carrying a field outside the verified
-  schema; a `command: null` can no longer erase the item's real command, and
+  schema. The headline is one cleaned, capped line on every surface (each
+  part through `approvals.clean_line`, ~400 overall, markdown escaped for
+  Discord, kept inline when the post overflows). Layer 1 judges what a
+  widening opens: a grant that is or contains protected state, a
+  SELF_PROTECTED file, or touches a credential directory is DENY unasked
+  (`permissions.denied_grant`). A command that differs from its item is
+  declined only for a plain approval; for `writeStdin` and `approvalId`
+  subcommands both commands are judged and shown, and a human asked. A
+  `command: null` can no longer erase the item's real command, and
   a command approval with none is declined; `provider.answer()` can only
   deny an approval. A plain in-sandbox approval under AUTO is still accepted
   on the reviewer's word — that is R8, not a regression.

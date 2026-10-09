@@ -146,11 +146,37 @@ real pipes, the daemon's own `build_permit` where it matters):
   asker, no surface, a timeout, or a strict profile declines. Layer 1 still
   refuses first. It is a keyword, not an arg, so the model cannot set it; a
   callback that does not accept it raises, which denies.
+- **The headline is one clean, capped line** (re-review). It is built from
+  Codex-supplied strings — `grantRoot`, file-system paths, the network host,
+  commands — so each part goes through `approvals.clean_line` (`label()`'s
+  rule: whitespace, control and format characters collapse to one space,
+  backticks go) capped at 120, and the line at ~400 with "… (+N more)"; the
+  full detail stays in `args`. `permit` cleans it again, the HUD card
+  (`lib/approval.ts` `headlineLine`, no `pre-wrap`) cleans it again, and the
+  Discord renderer escapes `\ * _ ~ | > # [ ] ( ) <` and defuses `@`. A widening
+  too long for one Discord message keeps its headline, tool, origin and
+  answers inline and attaches the whole request as `approval.txt` — before,
+  a 5,000-char `grantRoot` drew a fake "Approval required: Read" line above
+  the real one, or hid the headline in `message.txt`.
+- **Layer 1 judges what a widening opens.** Codex passes each filesystem
+  grant as `(access, path)` (`grants=`; relative paths placed under the
+  approval's cwd, a shape it cannot place as "/") and `build_permit` refuses,
+  unasked, any grant that **is or contains** Jarvis's permission state
+  (`protected_paths()`, `files._protected_state()`), a SELF_PROTECTED file, or
+  that touches a credential directory at all — reads included, since a read
+  is how a key leaves (`permissions.denied_grant`). "grant root /" and
+  "write ~/.config/jarvis" are DENY, not a question.
 - **A null `command` cannot hide the real one.** Approval params are merged
   over the item's fields non-null values only, so `command: null` no longer
   erases an item's `sudo rm -rf /` and leaves the never-approvable rules
-  judging "". A command approval with no command string anywhere is declined,
-  and so is one whose `command` differs from the item it names.
+  judging "". A command approval with no command string anywhere is declined.
+- **A command that differs from its item** (whitespace aside) is declined
+  only for a plain approval (`kind` null/`command`, no `approvalId`). For
+  `writeStdin` — on by default in 0.161.0 with `unified_exec`, carrying the
+  text typed into a running terminal — and for an `approvalId` subcommand
+  (the zsh exec bridge) a difference is expected: both commands go in the
+  headline and `args` (`item_command`), layer 1 judges both
+  (`also_commands=`), and a human is asked, no Always.
 - **`answer()` can only withdraw an approval.** `POST /threads/<id>/answer`
   lands on `provider.answer`; it used to replace whatever `permit` returned,
   so a racing `allow` turned a hard-denied `sudo rm -rf /` into `accept`. It
@@ -165,6 +191,12 @@ whose meaning a later Codex broadens is judged by its old meaning. And
 `proposedExecpolicyAmendment` / `proposedNetworkPolicyAmendments` are treated
 as inert because they apply only to an `acceptWith…Amendment` answer, which we
 never send — verified in the schema, not at runtime.
+
+The re-review's fixes add 10 more (all killed): the Discord headline
+unescaped, `@` not defused, the headline cleaned nowhere, a long widening
+attached whole, the grant check by equality only, grants not passed, the
+extra commands not judged, a differing command always or never declined, and
+whitespace counting as a difference.
 
 Each new path was verified to bite by mutation (16 mutants, all killed): no
 widening detected, the `widening` keyword ignored, a widening offered Always,
