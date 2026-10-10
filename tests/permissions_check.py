@@ -302,7 +302,8 @@ def gate_state_coverage_checks() -> None:
         # check can be what refuses coverage.
         cfg.ALLOWLIST_PATH.write_text(json.dumps(
             [{"tool": "run_command", "prefix": s}
-             for s in ("cp", "sed", "bash", "sh", "env", "echo", "builtin", "find")]))
+             for s in ("cp", "sed", "bash", "sh", "env", "echo", "builtin", "find",
+                       "grep")]))
         for command in (
             f"bash -lc 'cp /tmp/x {allow}'",
             f"env '-Scp /tmp/x {allow}'",
@@ -311,6 +312,7 @@ def gate_state_coverage_checks() -> None:
             f"sed 'w {allow}' f.txt",
             f"sed -ni 's/a/b/' {allow}",
             f"cp /tmp/x \\\n{allow}",
+            f"grep --save-config={allow} x",      # ugrep, in Claude Code's shell
         ):
             assert not permissions.allows("run_command", {"command": command}), command
         # A genuine read of a gate file, with the stem allowlisted, is covered.

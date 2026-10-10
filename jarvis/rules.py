@@ -703,6 +703,23 @@ def _first_word_arg(tokens: list[str]) -> str:
 # none. Every stem in the three sets is either here or in `_NO_HAZARD`, which
 # records that its options were audited and none writes, runs or reads past
 # its operands; `tests/rules_check.py` fails if a set gains a stem in neither.
+#
+# **What the audit was made against, and why it is a union** (2026-10-09, PR
+# #24 review). The first pass read GNU documentation and missed that one name
+# is two programs here. Ubuntu 26.04's PATH has GNU grep 3.12, GNU findutils
+# 4.10, GNU sed 4.9, ripgrep 15.1, uutils coreutils 0.8.0 (GNU 9.7 for `df` and
+# `true`), procps-ng 4.0.4, util-linux 2.41.3, GNU diffutils 3.12, binutils
+# strings 2.46, file 5.46, less 668, xxd, iproute2 6.19 `ss` and net-tools
+# hostname 3.25 — but in Claude Code's shell, which v2 Claude workers run their
+# commands through, `grep` is a function running **ugrep 7.8.4** and `find` one
+# running **bfs 4.1.1**. Two backends, two answers is a lesson this file already
+# carries (grep_files and its gitignore bug), so every entry is the **union** of
+# the GNU program's dangerous forms and each installed implementation's: a
+# verdict never depends on which one answers. Audited from each installed
+# binary's own `--help`/`man` (run by argv, never through a shell); `jq`,
+# `tree` and `bat` are not installed and were audited from their upstream
+# documentation. `AUDITED_IMPLEMENTATIONS` below names them, and the rules
+# suite prints AUDIT NOT VERIFIED when a binary reports something else.
 
 
 @dataclass(frozen=True)
@@ -786,8 +803,12 @@ class _Getopt:
         return ""
 
 
+# GNU findutils 4.10 and bfs 4.1.1 together. bfs adds `-rm`, an alias of
+# `-delete` (bfs -help: "Delete any found files"); its other extras — `-exit`,
+# `-limit`, `-printx`, `-status`, `-unique`, `-files0-from`, the `-S`/`-j`/`-O`
+# flags — print, stop or read.
 _FIND_HAZARDS = {
-    "-delete": "-delete deletes files",
+    "-delete": "-delete deletes files", "-rm": "-rm deletes files",
     "-exec": "-exec runs a program", "-execdir": "-execdir runs a program",
     "-ok": "-ok runs a program", "-okdir": "-okdir runs a program",
     "-fprint": "-fprint writes a file", "-fprint0": "-fprint0 writes a file",
@@ -799,6 +820,69 @@ def _find_hazard(args: list[str]) -> str:
     """find's predicates are whole words: `-executable` (a test of the mode
     bits) is not `-exec`, which the old prefix match made it."""
     return next((_FIND_HAZARDS[t] for t in args if t in _FIND_HAZARDS), "")
+
+
+# grep is GNU grep 3.12 on PATH and ugrep 7.8.4 in Claude Code's shell; GNU
+# grep has no option that writes or runs anything, ugrep has several (its
+# `--help`, 2026-10-09):
+#   --filter=COMMANDS     runs COMMANDS on every file searched — not gated on a
+#                         terminal, so the closest thing to rg's --pre;
+#   --pager[=COMMAND]     runs COMMAND (on a terminal);
+#   --view[=COMMAND], -Q  the query TUI, which runs COMMAND to view or edit;
+#   --save-config[=FILE]  writes FILE (default `.ugrep`);
+#   --config[=FILE], ---[FILE]   loads options from FILE (default `.ugrep`),
+#                         and a configuration file can carry `filter=`.
+# Long names are matched as prefixes (getopt_long-style abbreviation is assumed
+# rather than relied on), so `--filt=…` counts; `--no-config` and `--no-pager`
+# do not. Only letters that take a value in **both** greps end a short cluster
+# (`-A -B -C -D -d -e -f -m`): a letter that takes one in only one of them is
+# scanned through, so `-XQ` (ugrep: hex, then query) still finds the Q.
+_GREP_DANGER = {
+    "filter": "--filter runs a command on every file it searches",
+    "pager": "--pager runs a program",
+    "view": "--view runs a program from the query screen",
+    "query": "--query starts a screen whose view command runs a program",
+    "save-config": "--save-config writes a configuration file",
+    "config": "--config loads options from a file, which can name a filter command",
+}
+_GREP_VALUE_SHORTS = "ABCDdefm"
+
+
+def _grep_hazard(args: list[str]) -> str | Hazard:
+    i = 0
+    while i < len(args):
+        token = args[i]
+        i += 1
+        if token == "--":
+            break
+        if token.startswith("---"):          # ugrep's short spelling of --config
+            return _GREP_DANGER["config"]
+        if token.startswith("--"):
+            name, eq, value = token[2:].partition("=")
+            for long, why in _GREP_DANGER.items():
+                if name and long.startswith(name):
+                    if long == "save-config":
+                        return Hazard(why, writes=(value if eq and value else ".ugrep",))
+                    return why
+            continue
+        if token.startswith("-") and len(token) > 1:
+            letters = token[1:]
+            for k, letter in enumerate(letters):
+                if letter == "Q":
+                    return "-Q starts a screen whose view command runs a program"
+                if letter in _GREP_VALUE_SHORTS:
+                    if k == len(letters) - 1:
+                        i += 1
+                    break
+    return ""
+
+
+def _ug_hazard(args: list[str]) -> str | Hazard:
+    """`ug` is ugrep that loads `.ugrep` from the working or home directory on
+    its own — options from a file, filter included — unless told not to."""
+    if "--no-config" in args:
+        return _grep_hazard(args)
+    return _grep_hazard(args) or "loads a .ugrep configuration file, which can name a filter command"
 
 
 # ripgrep runs a program of the caller's choosing over every file it searches
@@ -820,7 +904,8 @@ def _less_hazard(args: list[str]) -> str:
     files that can set LESSOPEN — a program run on every file (`-k`,
     `--lesskey-*`) — and runs its own commands at start-up (`+cmd`). Its
     clusters are not modelled letter by letter: any of those letters anywhere
-    in a short option counts, which can only add a refusal."""
+    in a short option counts, which can only add a refusal. `--save-marks`
+    (less 668) writes its history file."""
     for token in args:
         if token == "--":
             break
@@ -829,9 +914,9 @@ def _less_hazard(args: list[str]) -> str:
         if token.startswith("--"):
             name = token[2:].split("=", 1)[0]
             for long in ("log-file", "LOG-FILE", "lesskey-file", "lesskey-src",
-                         "lesskey-content"):
+                         "lesskey-content", "save-marks"):
                 if name and long.startswith(name):
-                    return f"--{long} writes a log or loads key bindings"
+                    return f"--{long} writes a file or loads key bindings"
         elif token.startswith("-") and any(c in token[1:] for c in "oOk"):
             return "-o/-O write a log file and -k loads key bindings"
     return ""
@@ -916,7 +1001,9 @@ def _sed_hazard(args: list[str]) -> str | Hazard:
     conservative where it is not exact: addresses (`N`, `$`, `first~step`,
     `/re/I`, `\\cREc`, `addr,+N`, `addr,~N`), `!`, `{ }`, `;` and newline
     separators, labels and branches, `s` and `y` with any delimiter and
-    backslash escapes (brackets are not special, as in GNU sed), and the
+    backslash escapes, POSIX bracket expressions in `s`'s pattern and in
+    addresses (a delimiter inside `[…]` is text, as GNU sed reads it — see
+    `_sed_until`), and the
     `a`/`i`/`c` text commands, whose text runs to the end of the line and may
     contain any letters — `1a write w x` appends text, it writes nothing.
     Anything it does not recognise is "not provably a read".
@@ -1000,10 +1087,23 @@ def _sed_hazard(args: list[str]) -> str | Hazard:
     return ""
 
 
-def _sed_until(script: str, i: int, delim: str) -> int | None:
-    """Index just past the closing `delim`, or None. GNU sed's rule: a
-    backslash carries the next character, an unescaped newline ends the
-    command unfinished, and brackets are not special."""
+def _sed_until(script: str, i: int, delim: str, regex: bool = False) -> int | None:
+    """Index just past the closing `delim`, or None if the part never closes.
+
+    GNU sed's rule outside a bracket: a backslash carries the next character
+    and an unescaped newline ends the command unfinished. **In a regex part**
+    (`s`'s pattern, an address) a bracket expression is read whole first, so
+    a delimiter inside one is text: `s/[/]/X/` matches a slash. The
+    replacement and both halves of `y` are not bracket-aware — there the
+    first unescaped delimiter ends the part, `[` or not.
+
+    Pinned against GNU sed 4.9 itself (2026-10-09, argv only, `--sandbox -n`,
+    input on stdin, BRE and ERE alike): `[/]`, `[^/]`, `[]/]`, `[^]/]`,
+    `[[:alpha:]/]`, `[[=/=]]`, `[[./.]]`, `[\\/]` and `,[,],` in `s` and in
+    `/re/` and `\\%re%` addresses all delimit after the bracket; `[a/…`,
+    `[]/…`, `[[:/]/…` and a newline inside a bracket are unterminated; a
+    delimiter that *is* `[` is a delimiter; and the replacement `s/x/[/]/`
+    ends at the first `/`."""
     n = len(script)
     while i < n:
         ch = script[i]
@@ -1014,7 +1114,41 @@ def _sed_until(script: str, i: int, delim: str) -> int | None:
             return None
         if ch == delim:
             return i + 1
+        if ch == "[" and regex:
+            end = _sed_bracket_end(script, i)
+            if end is None:
+                return None
+            i = end
+            continue
         i += 1
+    return None
+
+
+def _sed_bracket_end(script: str, i: int) -> int | None:
+    """Index just past the bracket expression opening at `script[i] == "["`,
+    or None if it never closes. POSIX, as GNU sed reads it: an optional `^`,
+    then a `]` that would otherwise close it is a literal; `[:class:]`,
+    `[=x=]` and `[.x.]` run to their own closer whatever they contain; a
+    backslash is an ordinary character (`[\\]` is a bracket holding `\\`); a
+    raw newline leaves it unterminated."""
+    n, j = len(script), i + 1
+    if j < n and script[j] == "^":
+        j += 1
+    if j < n and script[j] == "]":
+        j += 1
+    while j < n:
+        ch = script[j]
+        if ch == "\n":
+            return None
+        if ch == "[" and j + 1 < n and script[j + 1] in ":=.":
+            close = script.find(script[j + 1] + "]", j + 2)
+            if close == -1 or "\n" in script[j + 2:close]:
+                return None
+            j = close + 2
+            continue
+        if ch == "]":
+            return j + 1
+        j += 1
     return None
 
 
@@ -1049,7 +1183,7 @@ def _sed_address(script: str, i: int, second: bool = False) -> int | None:
             delim, j = script[i + 1], i + 2
         else:
             delim, j = "/", i + 1
-        end = _sed_until(script, j, delim)
+        end = _sed_until(script, j, delim, regex=True)
         if end is None:
             return None
         while end < n and script[end] in "IM":
@@ -1168,7 +1302,9 @@ def _sed_script(script: str) -> tuple[list[str], list[str], bool, bool]:
             if i >= n or script[i] in "\n\\":
                 return fail
             delim = script[i]
-            k = _sed_until(script, i + 1, delim)
+            # `s`'s pattern is a regex (bracket-aware); its replacement and
+            # both halves of `y` are not.
+            k = _sed_until(script, i + 1, delim, regex=command == "s")
             k = _sed_until(script, k, delim) if k is not None else None
             if k is None:
                 return fail
@@ -1255,20 +1391,47 @@ READER_HAZARDS: dict[str, Callable[[list[str]], "str | Hazard"]] = {
         danger_shorts={"S": "-S runs its argument as a command line"},
         arg_longs=frozenset({"chdir", "file", "unset", "argv0"}),
         danger_longs={"split-string": "--split-string runs its argument as a command line"}),
+    # GNU grep ∪ ugrep (see `_grep_hazard`); egrep/fgrep are GNU's `grep -E`/
+    # `grep -F` wrappers, and ugrep installs under the same names.
+    "grep": _grep_hazard,
+    "egrep": _grep_hazard,
+    "fgrep": _grep_hazard,
+    "ugrep": _grep_hazard,
+    "ug": _ug_hazard,
+    "bfs": _find_hazard,
 }
 
-# Audited, with nothing that writes, runs a program or reads past its operands
-# (local man pages, 2026-10-09; jq from its documentation, it is not
-# installed). Options that only *read* a named file — `grep -f`, `sort
-# --files0-from`, `date -f`, `du -X`, `hexdump -f` — are not listed as
-# hazards: the file is named on the line, where the secrets layer sees it.
+# Audited against the installed binaries' own `--help`/`man` (2026-10-09, see
+# the section comment for the versions; `jq` from its documentation, it is not
+# installed), with nothing that writes, runs a program or reads past its
+# operands. Options that only *read* a named file — `grep -f`, `sort
+# --files0-from`, `date -f`, `du -X`, `hexdump -f`, `diff --from-file` — are
+# not hazards: the file is named on the line, where the secrets layer sees it.
+# Two that run a *fixed* program are not hazards either, as with rg's and
+# file's built-in decompression: `diff -l` pipes through `pr`. And two that
+# write state no one else reads are recorded, not listed: `sort -T DIR`
+# (temporary files it deletes) and `file -p` (restores the atime it changed).
 _NO_HAZARD = frozenset({
-    "ls", "cat", "head", "tail", "wc", "grep", "egrep", "fgrep", "stat", "echo",
+    "ls", "cat", "head", "tail", "wc", "stat", "echo",
     "pwd", "which", "true", "test", "[", "cut", "printf", "dirname", "basename",
     "du", "df", "whoami", "uname", "ps", "uptime", "more", "jq", "diff", "cmp",
     "md5sum", "sha1sum", "sha256sum", "sha512sum", "b2sum", "cksum", "realpath",
     "readlink", "column", "od", "hexdump", "strings", "nl", "tac", "base64",
 })
+
+# What `READER_HAZARDS` and `_NO_HAZARD` were audited against: for each probe
+# binary, the implementation names its `--version` may report. The rules suite
+# runs each `--version` (argv, no shell) and prints AUDIT NOT VERIFIED when the
+# installed one is not listed — informational, never a failure: a new
+# implementation needs its options read before the table can claim it.
+AUDITED_IMPLEMENTATIONS = {
+    "grep": ("GNU grep", "ugrep"),
+    "find": ("GNU findutils", "bfs"),
+    "sed": ("GNU sed",),
+    "ls": ("uutils coreutils", "GNU coreutils"),
+    "sort": ("uutils coreutils", "GNU coreutils"),
+    "rg": ("ripgrep",),
+}
 
 
 def reader_hazard(tokens: list[str]) -> Hazard | None:

@@ -395,6 +395,31 @@ READER_HAZARDS_ASK = [
     "find . -fprint0 /tmp/out",
     "find . -fls /tmp/out",
     "find . -okdir PLACEHOLDER_PROGRAM {} ;",
+    # The union with the implementations Claude Code's shell runs (PR #24
+    # review): `find` there is bfs, whose `-rm` deletes; `grep` there is
+    # ugrep, which runs a filter on every file, runs a pager or a viewer,
+    # writes a configuration file, and loads options from one.
+    "find . -rm",
+    "bfs . -delete",
+    "grep --filter='*:PLACEHOLDER_PROGRAM %' x .",
+    "grep --filter '*:PLACEHOLDER_PROGRAM' x .",
+    "grep --filt='*:PLACEHOLDER_PROGRAM' x .",   # a prefix of --filter
+    "grep --pager=PLACEHOLDER_PROGRAM x f.txt",
+    "grep --view=PLACEHOLDER_PROGRAM -e x",
+    "grep -Q x",
+    "grep -nQ x",                                 # Q inside a cluster
+    "grep --query x",
+    "grep --save-config=/tmp/cfg x",
+    "grep --save-config x",
+    "grep --config=/tmp/cfg x f.txt",
+    "grep ---/tmp/cfg x f.txt",                   # ugrep's short --config
+    "egrep --filter='*:PLACEHOLDER_PROGRAM' x .",
+    "fgrep --pager=PLACEHOLDER_PROGRAM x f.txt",
+    "ugrep --filter='*:PLACEHOLDER_PROGRAM' x .",
+    "ug x f.txt",                                 # ug loads .ugrep on its own
+    # A delimiter inside a bracket expression is text, so the w flag after
+    # the real end of the pattern is still found.
+    "sed 's/[/]/X/w /tmp/out' f.txt",
 ]
 
 # The reading forms of the very same stems: every one must stay ALLOW, because
@@ -446,6 +471,29 @@ READER_HAZARDS_ALLOW = [
     "find . -type f -newer x -print",
     "find . -executable",               # not -exec
     "find . -path './x' -prune",
+    "bfs . -name '*.py'",
+    # grep reads, in both implementations' spellings: none of these options
+    # writes or runs anything, and none is a prefix of one that does.
+    "grep -rn foo .",
+    "grep --color=auto -E 'a|b' f.txt",
+    "grep --context=3 x f.txt",
+    "grep -A3 -B2 x f.txt",
+    "grep --include='*.py' -rn x .",
+    "grep --files-with-matches x .",
+    "grep --fixed-strings --file=pats f.txt",
+    "grep -e -Q f.txt",                 # -Q is the pattern, not an option
+    "grep -- --filter=x f.txt",         # after --, a pattern
+    "grep --no-config x f.txt",
+    "grep -c x f.txt",
+    "ug --no-config x f.txt",
+    # sed: a bracket expression holding the delimiter, as GNU sed reads it.
+    "sed 's/[/]/X/g' f.txt",
+    "sed 's/[^/]*$//' f.txt",
+    "sed 's/[]/]/X/' f.txt",
+    "sed 's/[[:alpha:]/]/X/' f.txt",
+    "sed 's,[,],X,' f.txt",
+    "sed -n '/[/]/p' f.txt",
+    "sed 's/[/w out/]/X/' f.txt",       # 'w out' is inside the bracket
 ]
 
 
@@ -495,6 +543,41 @@ def reader_hazard_checks() -> None:
         assert not missing, f"{name} has unaudited reader stems: {sorted(missing)}"
     print(f"ok  rules: {len(READER_HAZARDS_ASK)} reader hazards caught, "
           f"{len(READER_HAZARDS_ALLOW)} reads clean, every read-only stem audited")
+
+
+def audit_implementation_checks() -> None:
+    """Informational, never a failure: is each probe binary on PATH one the
+    hazard audit was made against (`rules.AUDITED_IMPLEMENTATIONS`)?
+
+    The table is the union of the GNU programs and the implementations this
+    machine runs (uutils coreutils, and ugrep/bfs in Claude Code's shell), read
+    from each one's own `--help`. A binary reporting something else may have
+    options nobody read, so say so loudly — the way files_check prints PARITY
+    NOT VERIFIED when ripgrep is missing. Each `--version` runs by argv with
+    no shell, so no interactive-shell function can stand in for the binary.
+    """
+    import shutil
+    import subprocess
+
+    path = "/usr/local/bin:/usr/bin:/bin"
+    for stem, known in rules.AUDITED_IMPLEMENTATIONS.items():
+        exe = shutil.which(stem, path=path)
+        if exe is None:
+            print(f"    note: {stem} is not installed; its entry is from documentation")
+            continue
+        try:
+            proc = subprocess.run([exe, "--version"], capture_output=True, text=True,
+                                  timeout=10, stdin=subprocess.DEVNULL)
+            first = (proc.stdout or proc.stderr).strip().splitlines()[:1]
+        except (OSError, subprocess.SubprocessError) as exc:
+            first = [f"(could not run --version: {exc})"]
+        line = first[0] if first else "(no --version output)"
+        if any(name in line for name in known):
+            print(f"    audit verified for {stem}: {line}")
+        else:
+            print(f"    AUDIT NOT VERIFIED FOR {stem.upper()}: {line!r} is not one of "
+                  f"{known} — read its --help before trusting READER_HAZARDS for it")
+    print("ok  rules: hazard audit's implementations reported (informational)")
 
 
 # (command, verdict) — the inline-source rule generalised (2026-10-09).
@@ -609,6 +692,15 @@ READONLY_MUST_REFUSE = [
     "file -C -m magic",
     "find . -fprint PWNED_FIND",
     "find . -execdir PLACEHOLDER_PROGRAM {} +",
+    # grep and find as Claude Code's shell runs them (ugrep, bfs): a filter
+    # run on every file, a pager, the query screen, a written configuration
+    # file, a loaded one, and bfs's delete alias (PR #24 review).
+    "grep --filter='*:PLACEHOLDER_PROGRAM' x .",
+    "grep --pager=PLACEHOLDER_PROGRAM x f.txt",
+    "grep -Q x",
+    "grep --save-config=PWNED_CFG x",
+    "grep --config=PWNED_CFG x f.txt",
+    "find . -rm",
     # A backslash-newline continuation hiding a substitution (2026-10-09):
     # run_readonly ran this, because the substitution scan saw `$(` only once
     # the pair was joined.
@@ -763,6 +855,8 @@ READONLY_MUST_ALLOW = [
     "ss -s",
     "find . -name '*.py' -type f",
     "find . -executable -print",            # -executable is not -exec
+    "grep --context=3 x f.txt",
+    "grep -e -Q f.txt",                     # -Q is the pattern here
 ]
 
 
@@ -1468,6 +1562,9 @@ def gate_state_edge_checks() -> None:
             # neighbours: a continuation before the target, find -exec sh.
             f"cp /tmp/x \\\n{allow}",
             f"find ~/.config/jarvis -name allowlist.json -execdir sh -c 'cp /tmp/x {{}}' \\;",
+            # ugrep (Claude Code's grep) writing its configuration onto it.
+            f"grep --save-config={allow} x",
+            f"grep --save-config={allow}",
         ]
         before = config.ALLOWLIST_PATH.read_text()
         for command in gap:
@@ -1598,7 +1695,28 @@ def fails_against_old_code_checks() -> None:
     #    scan got wrong so a regression is legible.
     for shape in ("echo x >& out", "echo x 2>&1>out", "echo x >&2>out"):
         assert R.redirects_to_file(shape), shape
-    print("ok  rules: the three findings each fail against the pre-change rule")
+
+    # 4. (PR #24 review) grep was audited clean from GNU documentation alone;
+    #    the old table had no grep entry, so a ugrep filter, pager or written
+    #    configuration was a plain read. bfs's `-rm` was not in find's list.
+    old_no_hazard = {"grep", "egrep", "fgrep"}
+    for command in ("grep --filter='*:PLACEHOLDER_PROGRAM' x .", "grep --save-config=c x",
+                    "egrep --pager=PLACEHOLDER_PROGRAM x f", "grep -Q x"):
+        toks = R._tokens(command)
+        assert R._stem(toks) in old_no_hazard          # old: audited clean
+        assert R.reader_hazard(toks) is not None, command   # new: a hazard
+    assert "-rm" not in ("-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint",
+                         "-fprint0", "-fprintf", "-fls")       # old find list
+    assert R.reader_hazard(["find", ".", "-rm"]) is not None
+
+    # 5. (PR #24 review) the sed scanner was bracket-unaware, so a bracket
+    #    holding the delimiter cut the pattern short: a read asked, and the
+    #    real flags were read from the wrong place. GNU sed reads the bracket.
+    w, r, e, parsed = R._sed_script("s/[/]/X/g")
+    assert parsed and not (w or r or e)
+    w, r, e, parsed = R._sed_script("s/[/]/X/w out")
+    assert w == ["out"], w
+    print("ok  rules: the findings each fail against the pre-change rule")
 
 
 def main() -> int:
@@ -1617,6 +1735,7 @@ def main() -> int:
     separator_checks()
     redirect_shape_checks()
     reader_hazard_checks()
+    audit_implementation_checks()
     inline_source_checks()
     continuation_checks()
     run_readonly_checks()

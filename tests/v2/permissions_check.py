@@ -584,6 +584,10 @@ def file_deny_checks():
             # neighbours: a continuation before the target, a find -exec shell.
             f"cp /tmp/x \\\n{allow}",
             f"find ~/.config/jarvis -name allowlist.json -execdir sh -c 'cp /tmp/x {{}}' \\;",
+            # PR #24 review: `grep` in Claude Code's shell — the one a v2
+            # Claude worker's commands run through — is ugrep, which writes
+            # its configuration wherever --save-config names.
+            f"grep --save-config={allow} x",
         ]
         human_auto = build_permit(context(brief_for(P.AUTO)), Asker(Decision.ALLOW))
         owner2 = Asker(Decision.ALLOW)
@@ -597,9 +601,18 @@ def file_deny_checks():
             eq(human_ask(*bash(command), brief_for(P.ASK)), Decision.DENY,
                f"ASK: refused at layer 1: {command}")
             eq(len(owner2.seen), seen, f"and never asked: {command}")
+        # A ugrep filter is a program run per file: never layer 4's ALLOW, so
+        # under ASK the owner is asked rather than the rules auto-approving.
+        seen = len(owner2.seen)
+        human_ask(*bash("grep --filter='*:PLACEHOLDER_PROGRAM' x ."), brief_for(P.ASK))
+        ok(box.decisions[-1]["layer"] != "jarvis-allow",
+           "a filter-running grep is not an ordinary rules ALLOW at layer 4")
+        eq(len(owner2.seen), seen + 1, "and reaches the owner")
         # A sed *read* of the allowlist is an ordinary read, not a write.
         eq(_command_writes_protected_state(f"sed -n '1,5p' {allow}"), None,
            "a sed read of a gate file is not a write")
+        eq(_command_writes_protected_state(f"grep -n x {allow}"), None,
+           "nor is a grep of it")
         eq(_command_writes_protected_state(f"sort {allow}"), None,
            "nor is sorting it to stdout")
 
