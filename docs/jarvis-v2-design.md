@@ -1736,11 +1736,13 @@ title bar.
   unmounted**. Edges are stored as fractions per preset and clamped to a
   360×200 pane minimum when drawn; they drag, take the arrows (Shift for a
   bigger step, Home/End) and reset to equal on a double-click. Ctrl+Alt+1 … 4
-  focus a drawn pane (AltGr+digit types a symbol, so it never fires
-  mid-word); the focused pane of a split has an accent line under its
-  header.
+  focus a pane of the preset, bringing back one the window dropped
+  (AltGr+digit types a symbol, so it never fires mid-word); the focused pane
+  of a split has an accent line under its header.
 - **Chat stays a singleton in WP-A**: choosing chat in another pane swaps
-  the two panes' views. A sidebar click goes to the pane already showing
+  the two panes' **whole specs** (view, pin, preview URL, terminal), so the
+  pane that takes the other view never brings back a stale URL or pin of its
+  own. A sidebar click goes to the pane already showing
   that kind of thing, else to the focused pane — a task click leaves a drawn
   task or diff pane following the selection. "Read" means shown in any
   drawn pane. The profile select rides the chat pane's header (the focused
@@ -1751,7 +1753,14 @@ title bar.
   project when it opens a file (Preview when it loads the project root),
   `FileTab` is keyed by that project, and the header says `in: <project> ·
   follow chat` whenever the pin differs from the chat's. Preview keeps its
-  URL per pane and judges it again before loading it again.
+  URL per pane and judges it again before loading it again. **An unsaved
+  edit is never dropped silently** (the minimal guard, before the editor
+  plan): `FileTab` reports a dirty buffer, "follow chat" is disabled while
+  it is (its tooltip says why), a pinned project that goes away keeps the
+  pane pinned with "project gone · unsaved edit kept · discard edit" until
+  the owner discards it, and closing the window asks (`beforeunload`).
+  Switching a pane's view away from File still closes the buffer, as the
+  old tab switch did.
 - **Fitting** (`fitWorkspace`) changes only the render. Across, the side
   panes give back their slack and fold first (right, then left, `prefer`
   honoured, now against the drawn shape's own centre minimum: 480 / 720 /
@@ -1762,6 +1771,12 @@ title bar.
   differs from the plan's table and follows its stated order: 2×2 plus the
   panel at 1024×700 and 160% draws the focused column (two stacked) with the
   panel folded; opening the panel by hand gives one pane and the panel.
+  **A dropped set is sticky**: which panes survive a drop is chosen from the
+  focused pane, and focus follows every click, so clicking the other pane
+  of three-columns-drawn-as-two used to redraw a different pair under the
+  pointer. The last render's set (a render-only ref, never stored) is kept
+  while the preset and the drawn shape are the same and it still holds the
+  focused pane; focusing a pane it does not draw draws one that does.
 - **The bottom panel is an empty dock until WP-D**: ⬓ and Ctrl+` (no Alt —
   AltGr+7 is a backtick on French layouts; a dead backtick matches on `code`)
   show and hide it under the panes, between the side panes; its top edge is
@@ -1771,13 +1786,24 @@ title bar.
   rail button is disabled (the veil stops the pointer, but a button that kept
   focus still answered Enter — on main it folded a pane behind the card), an
   open menu closes, a focused separator ignores its keys, and Ctrl+` and
-  Ctrl+Alt+N are swallowed like the other layout keys. A 2×2 grid with Monaco
-  and a preview frame under the card, at 160% and 70%, keeps the card wholly
-  on screen with AUTHORIZE below the fold for a long command.
+  Ctrl+Alt+N are swallowed like the other layout keys. **The card takes the
+  keys**: a focused preview iframe got its own key events, so Escape never
+  reached the card and keys went on into the framed page, and Monaco kept
+  typing into the buffer behind it. When a card comes up while focus is in a
+  frame, the workspace or the panel, the card container (`tabIndex=-1`, an
+  `alertdialog`) takes focus — never a button, nothing is keyboard-defaulted
+  — and gives it back when the last card goes. A 2×2 grid with Monaco and a
+  preview frame under the card keeps the card wholly on screen with every
+  button topmost, at 160% and 70%; that AUTHORIZE is below the fold for a
+  long command is asserted at 160%.
 - **Free checks**: `workspace.test.ts`, `layout.test.ts` (the new keys,
   AltGr symbols, `keyStep`) and `hud_v2_layout_check`'s `_titlebar_checks`,
-  `_workspace_checks` and `_grid_card_checks`. Every existing suite passes
-  unchanged in the single layout.
+  `_workspace_checks`, `_grid_card_checks`, `_sticky_checks`,
+  `_card_focus_checks` and `_seen_checks` — the last three were each shown
+  to fail against the bug they guard. The layout section runs against a
+  `MockDaemon` of its own on an ephemeral port, so its saves, `/seen` posts,
+  approval decisions and preview hits never reach the world the main suite
+  asserts on. Every existing suite passes unchanged in the single layout.
 
 **Steering a running turn (2026-10-08).** The owner: "I can't steer claude or codex sessions while they are working
 if I want them to do something differently or whatnot and it just throws an
