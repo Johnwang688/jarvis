@@ -84,6 +84,11 @@ def run_readonly(
 
     Rejects anything outside a known-safe allowlist; use run_command for the rest.
     """
+    # Judged as bash will read it. A backslash-newline is deleted before bash
+    # splits anything, so `$\<newline>(` is a command substitution: this tool
+    # ran one (2026-10-09), because the substitution scan below looked for
+    # `$(` in text that only contained it once joined.
+    command = rules.join_continuations(command)
     try:
         tokens = shlex.split(command)
     except ValueError as exc:
@@ -130,11 +135,19 @@ def run_readonly(
     # `find / -delete` and `find . -exec rm {} +` carry no separator at all and
     # had never been caught. Judged by name and flag now, where it belongs, and
     # by `rules.py`'s list rather than a second copy of it.
+    #
+    # That list is `rules.READER_HAZARDS` since 2026-10-09, the one table of
+    # every reader's writing and running forms, and the audit that built it
+    # found five on this allowlist that nothing here looked at: `tree -o`/`-R`
+    # and `ss -D` write files, `date -s` and `hostname NAME` set system state,
+    # `file -C` writes a compiled magic file, `ss -K` closes sockets — and
+    # `env` with `-S`/`--split-string` glued into one word runs that word as a
+    # command line, which this tool executed.
     writing = rules.writes_anyway(tokens)
     if writing:
         return (
-            f"Error: '{binary} {writing}' writes to the filesystem, so it is not a "
-            "read. Use run_command if this really needs to change things."
+            f"Error: {binary} {writing}, so it is not a read. Use run_command if "
+            "this really needs to change things."
         )
 
     return _run(command)
