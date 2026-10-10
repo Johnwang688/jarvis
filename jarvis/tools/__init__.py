@@ -425,6 +425,7 @@ from . import (  # noqa: E402,F401  (registers the tools)
     files,
     avatarctl,
     gmail,
+    gitctl,
     goalctl,
     drive,
     google_workspace,
