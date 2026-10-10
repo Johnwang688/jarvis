@@ -1752,6 +1752,34 @@ now.)
   run at once) keeps the window on the thread: no idle flash, no follow-up
   mic window.
 
+**The terminal backend (2026-10-09, WP-C of
+`docs/plans/2026-10-09-hud-workspace-plan.md`; decisions W-2, W-3, W-5).**
+The owner's terminals now exist on the daemon; the panel and view are WP-D.
+A terminal is the owner's login shell on a real PTY, started through
+util-linux `setsid --ctty` (never `pty.fork()` in a threaded daemon), in a
+clean environment (nothing from `.env`, no `OPENROUTER_API_KEY`,
+`HF_HUB_OFFLINE`, `VIRTUAL_ENV` or venv `PATH`), in the folder of a
+thread, task, project or home — resolved from ids, never a path. At most
+six; each keeps 1 MiB of output in memory, replayed when a window
+reattaches; closing one SIGHUPs its whole session, then SIGKILLs; they end
+with the daemon (no tmux). The transport is a WebSocket on the HUD listener,
+hand-rolled (`jarvis/v2/ws.py`, no new dependency). **The agent never gets a
+lever on a terminal**: no tool names the module or its routes (asserted in
+`tests/v2/terminal_check.py`), every route is owner-only, the socket also
+needs a single-use 30-second ticket bound to one terminal, and moving a
+terminal to another window asks the window that shows it (refused after
+20 s). That is stricter than `/approvals`, which accepts a local client that
+sends no Origin, and it is still not a boundary against a program running as
+the owner, which can forge an Origin and fetch a ticket — the takeover
+question and `sudo -k` are what limit such a program. Output exists in the
+ring and the browser only: never on the bus, in a log, a thread log,
+Discord or disk. The startup file (`terminal_rc.sh`) reads the login files,
+sets `alias sudo='sudo -k'`, and emits OSC 133 marks signed with a
+per-terminal nonce, which the daemon turns into per-command spans over the
+ring — what WP-F's `terminal_read` needs to refuse the output of `env`,
+`gh auth token` and the rest (W-2, item 3). Each terminal carries the
+owner's `readable` switch, on by default. Contract: `docs/hud-api.md`.
+
 Remaining: WP13 (the long-bench comparison, the owner's call on cost), a
 native Windows worker, the R8 hook on Codex, and prompt tuning in
 `roles.py` (§17's over-planning note). The daemon started by hand for the

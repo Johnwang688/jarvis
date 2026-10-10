@@ -319,6 +319,42 @@ stale one round-trips; and `GET /route` notes a built-in default the catalog
 lacks (it still runs — there is nothing to fall back to). Tests point
 `config.CODEX_CATALOG_PATH` at a temp file and restore the table.
 
+**HUD terminals, backend (2026-10-09, WP-C; plan
+`docs/plans/2026-10-09-hud-workspace-plan.md` §2.4, decisions W-2/W-3/W-5;
+design §18; contract in `docs/hud-api.md`).** `jarvis/v2/terminals.py` runs
+the owner's login shell (`JARVIS_TERMINAL_SHELL`, absolute only, overrides)
+on a real PTY through util-linux `setsid --ctty` — **never `pty.fork()`** in
+this threaded daemon — in a **clean environment** built from an allowlist
+(never a `.env` name, `OPENROUTER_API_KEY`, `HF_HUB_OFFLINE`, `VIRTUAL_ENV`,
+venv `PATH`, `JARVIS_*`/`ANTHROPIC_*`/`CLAUDE_*`/`CODEX_*`), in a folder
+resolved **from ids, never a path**. Six at most, a 1 MiB ring each,
+replayed on reattach; close = SIGHUP to the whole session (found in /proc),
+then SIGKILL; **`Daemon.stop` ends them all** (W-3, no tmux). The socket is a
+hand-rolled RFC 6455 endpoint (`jarvis/v2/ws.py`): masked client frames,
+64 KiB messages, no extensions, 20 s pings, 60 s silence drops it, the `101`
+written as `HTTP/1.1` by hand, and the handler's 2 s timeout lifted. **The
+agent never gets a lever on a terminal**: every route is
+`projects.owner_only` (HUD listener + an Origin that must be present), the
+attach also needs a **single-use 30 s ticket bound to one terminal**, and a
+terminal another window shows is only taken after that window says yes
+(refused after 20 s) — stricter than `/approvals`, and still not a boundary
+against a program running as the owner (it can forge an Origin and fetch a
+ticket). **No tool, MCP tool, fast-path tool or Discord verb may reach
+`terminals`**; `tests/v2/terminal_check.py` greps every module under
+`jarvis/` but the daemon, `hud_api` and the module itself. **Terminal output
+never leaves memory**: no bus record (terminals publish nothing), no log line
+(lifecycle only, and `/terminals` paths are logged without their query — the
+ticket rides in it), no thread log, Discord or disk. The startup file
+`jarvis/v2/terminal_rc.sh` (bash `--rcfile` with login emulation, else
+`$ENV`) sets `alias sudo='sudo -k'` (W-5) and emits OSC 133 A/B/C(with the
+`cmdline_url`)/D marks **signed with a per-terminal nonce**, parsed into
+`CommandSpan`s over the ring (`Terminal.history()`, for WP-F's
+`terminal_read`, which does not exist yet — when it lands, `terminal_check`'s
+no-tool test must allow exactly it). Each terminal has the owner's
+`readable` switch, **on by default**. Tests point `config.TERMINAL_SHELL` at
+`tests/v2/terminal_fake_shell.py` with a temp HOME, and never use
+8402/8403/8405.
+
 Briefs for every package, including the ones in flight, are in
 `docs/codex-briefs/`; each merged package left a `*-notes.md` beside its
 brief with what its implementer verified and what it proposes.

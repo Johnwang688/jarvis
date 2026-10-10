@@ -750,3 +750,102 @@ the table fails because of it, and nothing saved is rewritten:
 - `/events` carries `{"kind": "codex_metadata"}` when a background
   refresh of Codex's catalog or quota landed; the HUD re-reads `/usage`
   and `/thread-models`.
+
+## Additions 2026-10-09 (terminal backend — WP-C)
+
+The owner's terminals (HUD plan §2.4, decisions W-2, W-3, W-5; code in
+`jarvis/v2/terminals.py` and `jarvis/v2/ws.py`). Each is the owner's login
+shell on a real PTY. **Every route is owner-only**: it answers only on the
+HUD's listener (`FACE_PORT`) and only to a request whose `Origin` is present
+and equals `http://<Host>`, with `Host` exactly `127.0.0.1:<port>` or
+`localhost:<port>`. Anything else is 403: the API listener (8405, every
+tool's client), a missing Origin, `null`, the workshop origin, any other
+site. The preview listener (8403) serves only `/p/...` and answers 404. No
+tool, MCP tool, fast-path tool or Discord verb names these routes.
+
+- `GET /terminals` → `[row]`, where `row` is `{id, title, folder,
+  project_id, created, cols, rows, shown, exited, exit_code, readable,
+  busy, integrated}`. `id` is eight hex characters. `title` is `<shell> ·
+  <project name | ~>`. `shown`: a window is attached. `exited`/`exit_code`:
+  the shell ended (killed by signal n reads 128+n). `readable`: the owner's
+  "Jarvis can read" switch (W-2), **on for every new terminal**; nothing
+  reads it yet (WP-F's `terminal_read` will refuse a terminal with it off).
+  `busy`: the PTY's foreground process is not the shell — the HUD asks
+  before closing then. `integrated`: the shell emits the startup file's
+  shell-integration marks.
+- `POST /terminals` `{in, cols?, rows?}` → 201 `row`. `in` is `"home"`,
+  `{"thread": id}` (that thread's own folder, `cwd`), `{"project": id}` (its
+  root) or `{"task": id}` (its worktree if it exists, else the root it was
+  started under). **The folder is resolved from ids, never from a path
+  string.** `cols` 2–1000 (default 80), `rows` 1–500 (default 24); anything
+  else, an unknown key or a missing `in` is 400; an unknown id 404; a folder
+  that no longer exists 409. At most **6** terminals (exited ones count
+  until closed): the seventh is 409 with a sentence. A bad
+  `JARVIS_TERMINAL_SHELL` (relative, under `/mnt/`, not executable) is 409.
+- `PATCH /terminals/{id}` `{readable: bool}` → `row`. Exactly that key.
+- `POST /terminals/{id}/ticket` `{}` → `{ticket, expires_in: 30}`. **Single
+  use, 30 seconds, valid for this terminal only**; it is spent the moment it
+  is presented, whatever the answer. Fetch one right before each attach.
+- `GET /terminals/{id}/attach?ticket=…` — the WebSocket. Build the URL from
+  `location.host` (never a fixed port). The checks run in this order: the
+  owner-only gate (a refused Origin does not spend the ticket), a
+  well-formed version-13 upgrade (else 400), the ticket (else 403). Then
+  `HTTP/1.1 101`. No extension (no compression) and no subprotocol is
+  agreed. Client frames must be masked; a message is at most 64 KiB (send
+  pastes in 16 KiB chunks); the server pings every 20 s and drops a socket
+  that has said nothing for 60 s; a socket more than 4 MiB behind on output
+  is dropped (reattach to replay). Close codes: 1002 protocol error, 1007
+  text not UTF-8, 1009 too big, 1008 refused, 1001 Jarvis stopped.
+  - **Binary frames are bytes, both ways**: keystrokes and pastes in, PTY
+    output out.
+  - **Text frames are JSON control.** Server → window, in order on attach:
+    `{"type": "attached", "terminal": row, "replay": n}`, then `n` bytes of
+    replay as binary frames (the last 1 MiB of output, starting at a line
+    boundary once anything has been dropped), then `{"type": "replayed"}` —
+    send a `resize` then, so full-screen programs redraw — and
+    `{"type": "exit", "code"}` if the shell has already ended. Later:
+    `{"type": "exit", "code"}` when the shell exits (the socket stays open;
+    offer Restart and Close); `{"type": "exit", "code", "reason": "closed"}`
+    then a close when the terminal is closed; `{"type": "exit", "code",
+    "reason": "ended"}` then close 1001 when Jarvis stops (terminals do not
+    survive a restart, W-3).
+  - Window → server: `{"type": "resize", "cols", "rows"}` (same ranges;
+    anything else is ignored) and the takeover answer below. Unknown
+    messages are ignored.
+  - **One window at a time.** Attaching to a terminal another window shows
+    sends that window `{"type": "takeover_request", "id", "timeout_s": 20}`
+    and the newcomer `{"type": "waiting", "timeout_s": 20}`. The holder
+    answers `{"type": "takeover", "id", "allow": true | false}`. Allowed:
+    the holder gets `{"type": "taken"}` and a close, and the newcomer
+    attaches with the replay. Kept, or no answer in 20 s: the newcomer gets
+    `{"type": "refused", "reason"}` and close 1008. A holder whose socket is
+    gone is not asked. While one window is asking, a third is refused.
+- `DELETE /terminals/{id}` → `{ok, id, exit_code}`. SIGHUP to every process
+  in the terminal's session (background jobs included), SIGKILL after 3 s,
+  then the PTY is released; the attached window gets the `closed` exit.
+
+**Environment.** The shell starts from a clean login environment, not the
+daemon's: `HOME`, `USER`, `LOGNAME`, `LANG`/`LC_*`, `TZ`, the WSL interop
+and display variables, `TERM=xterm-256color`, `COLORTERM=truecolor`,
+`SHELL`, and the daemon's `PATH` without any Python virtualenv. Never a name
+`.env` defines, `OPENROUTER_API_KEY`, `HF_HUB_OFFLINE`, `VIRTUAL_ENV`,
+`PYTHONPATH`, `BASH_ENV`, `PROMPT_COMMAND`, or anything `JARVIS_*`,
+`ANTHROPIC_*`, `CLAUDE_*`, `CODEX_*`, `OPENAI_*`.
+
+**The startup file** (`jarvis/v2/terminal_rc.sh`, bash's `--rcfile`, any
+other shell's `$ENV`): bash first reads what a login shell reads
+(`/etc/profile`, then the first of `~/.bash_profile`, `~/.bash_login`,
+`~/.profile`); then `alias sudo='sudo -k'` (W-5: sudo never caches here);
+then OSC 133 marks, each carrying `jarvis=<per-terminal nonce>` — A (prompt
+start), B (prompt end), C with `cmdline_url=<percent-encoded command line>`
+(the command runs), D with its exit status. The daemon records them as
+per-command spans over the output ring (`Terminal.history()`, for WP-F);
+a mark without the nonce is ignored. xterm ignores OSC 133, so the HUD
+needs to do nothing with them.
+
+**Output never leaves memory**: it is not on the bus (terminals publish no
+event at all; the HUD lists them with `GET /terminals` and learns of an
+exit over the socket), not in any log (the daemon logs opened / attached /
+exited / closed with the folder as a project name or `~`, and logs
+`/terminals` paths without their query, so never a ticket), not in a
+thread log, not on Discord, not on disk.
