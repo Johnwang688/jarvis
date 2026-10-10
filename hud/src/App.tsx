@@ -56,6 +56,27 @@ export default function App() {
   // is up (as PTT is), and every layout button is disabled.
   const blocked = state.approvals.length > 0;
   const view = useLayout(blocked);
+  // File panes holding an unsaved edit (FileTab's `onDirty`): such a buffer
+  // is never closed behind the owner's back — "follow chat" waits, a project
+  // that goes away keeps the pane pinned until the owner discards the edit,
+  // and closing the window asks (2026-10-09, the minimal guard).
+  const [dirtyPanes, setDirtyPanes] = useState<Record<number, boolean>>({});
+  const dirtyNow = useRef(dirtyPanes);
+  dirtyNow.current = dirtyPanes;
+  const markDirty = useCallback(
+    (pane: PaneNo, dirty: boolean) => setDirtyPanes((m) => (!!m[pane] === dirty ? m : { ...m, [pane]: dirty })),
+    [],
+  );
+  const anyDirty = Object.values(dirtyPanes).some(Boolean);
+  useEffect(() => {
+    if (!anyDirty) return;
+    const ask = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", ask);
+    return () => window.removeEventListener("beforeunload", ask);
+  }, [anyDirty]);
   const [avatars, setAvatars] = useState<AvatarDesc[]>([]);
   // The fast path's roster and its default (`GET /models`), re-read on every
   // `model` broadcast so another window's change relabels this one.
@@ -678,8 +699,9 @@ export default function App() {
         if (at.picker === "editProject") patchOut.error = `${name} was ${how} while you were editing it.`;
       }
       dispatch({ type: "patch", patch: patchOut as any });
-      // A File or Preview pane pinned to it follows the chat again.
-      view.unpinProject(id);
+      // A File or Preview pane pinned to it follows the chat again — except
+      // one holding an unsaved edit, which waits for the owner to discard it.
+      view.unpinProject(id, ([1, 2, 3, 4] as PaneNo[]).filter((n) => dirtyNow.current[n]));
       if (next.displaced) view.show("chat");
       void refreshThreads();
       void refreshTasks();
@@ -1157,11 +1179,19 @@ export default function App() {
   // pane's header, or the focused pane's when no drawn pane shows the chat —
   // in the single layout, pane 1's, where it always was.
   const profilePane: PaneNo = chatPane ?? (fit.panes.includes(view.ws.focused) ? view.ws.focused : fit.panes[0]);
-  /** A File or Preview pane's project: its pin, while that project exists, else the chat's. */
-  const paneProject = (spec: PaneSpec): string | null =>
-    spec.projectId && state.projects.some((p) => p.id === spec.projectId) ? spec.projectId : activeProjectId;
-  const pinnedElsewhere = (spec: PaneSpec) =>
-    (spec.view === "file" || spec.view === "preview") && paneProject(spec) !== activeProjectId;
+  /** The pane's pinned project went away (archived, deleted). */
+  const pinGone = (spec: PaneSpec) => !!spec.projectId && !state.projects.some((p) => p.id === spec.projectId);
+  /**
+   * A File or Preview pane's project: its pin while that project exists, else
+   * the chat's. A File pane whose pinned project went away while it held an
+   * unsaved edit keeps it — FileTab is keyed by this, so following the chat
+   * would remount it and drop the edit; the header asks first instead.
+   */
+  const paneProject = (spec: PaneSpec, pane: PaneNo): string | null =>
+    spec.projectId && (!pinGone(spec) || (spec.view === "file" && dirtyPanes[pane]))
+      ? spec.projectId : activeProjectId;
+  const pinnedElsewhere = (spec: PaneSpec, pane: PaneNo) =>
+    (spec.view === "file" || spec.view === "preview") && paneProject(spec, pane) !== activeProjectId;
 
   const renderView = (spec: PaneSpec, info: PaneInfo) => {
     const n = info.pane;
@@ -1226,9 +1256,15 @@ export default function App() {
         );
       case "file": {
         // Keyed by its project: a save can only ever go where the file was read.
-        const pid = paneProject(spec);
+        const pid = paneProject(spec, n);
         return (
-          <FileTab key={pid ?? "none"} projectId={pid} narrow={info.narrow} onOpened={(id) => view.pin(n, id)} />
+          <FileTab
+            key={pid ?? "none"}
+            projectId={pid}
+            narrow={info.narrow}
+            onOpened={(id) => view.pin(n, id)}
+            onDirty={(dirty) => markDirty(n, dirty)}
+          />
         );
       }
       case "diff":
@@ -1236,7 +1272,7 @@ export default function App() {
       case "preview":
         return (
           <PreviewTab
-            projectId={paneProject(spec)}
+            projectId={paneProject(spec, n)}
             url={spec.previewUrl}
             onLoaded={(url) => view.setPreviewUrl(n, url)}
             onProjectRoot={(id) => view.pin(n, id)}
@@ -1249,12 +1285,37 @@ export default function App() {
 
   const paneExtras = (spec: PaneSpec, info: PaneInfo) => {
     const n = info.pane;
+    const dirty = spec.view === "file" && !!dirtyPanes[n];
     return (
       <>
-        {pinnedElsewhere(spec) ? (
+        {dirty && pinGone(spec) ? (
+          // The one remount nothing can avoid: ask before it drops the edit.
+          <span className="chip panepin warn" data-testid={`pane-${n}-gone`}
+                title="The project this file was read from is gone; the unsaved edit is kept here until you discard it">
+            project gone · unsaved edit kept
+            <button
+              type="button"
+              className="quiet"
+              data-testid={`pane-${n}-discard`}
+              onClick={() => {
+                markDirty(n, false);
+                view.pin(n, null);
+              }}
+            >
+              discard edit
+            </button>
+          </span>
+        ) : pinnedElsewhere(spec, n) ? (
           <span className="chip panepin" data-testid={`pane-${n}-project`} title="This pane stays in its project">
-            in: {projectName(paneProject(spec))}
-            <button type="button" className="quiet" data-testid={`pane-${n}-follow`} onClick={() => view.pin(n, null)}>
+            in: {projectName(paneProject(spec, n))}
+            <button
+              type="button"
+              className="quiet"
+              data-testid={`pane-${n}-follow`}
+              disabled={dirty}
+              title={dirty ? "Save or reload the file first: following the chat closes it" : "Follow the chat's project"}
+              onClick={() => view.pin(n, null)}
+            >
               follow chat
             </button>
           </span>
@@ -1284,7 +1345,7 @@ export default function App() {
     );
   };
 
-  const paneContext = (spec: PaneSpec): string => {
+  const paneContext = (spec: PaneSpec, info: PaneInfo): string => {
     switch (spec.view) {
       case "chat":
         return openThread?.title || (state.compose ? `New thread in ${project?.name || "…"}` : "");
@@ -1292,7 +1353,7 @@ export default function App() {
       case "diff":
         return task?.brief || "";
       case "file":
-        return `in: ${projectName(paneProject(spec))}`;
+        return `in: ${projectName(paneProject(spec, info.pane))}`;
       case "preview":
         return spec.previewUrl || "";
       default:

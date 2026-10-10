@@ -5,7 +5,7 @@ import {
   clampRow, columnWidths, defaultWorkspace, dropColumn, dropRow, equalSplit, fitWorkspace, focusPane,
   loadWorkspace, maxPanelHeight, moveColEdge, panesOf, parseWorkspace, pinPane, resetWorkspace, saveWorkspace,
   setPanel, setPreset, setPreviewUrl, setSplit, setView, show, unpinProject,
-  type PaneNo, type Preset, type Workspace,
+  type DrawnSet, type PaneNo, type Preset, type Workspace,
 } from "./workspace";
 
 const memory = (seed: Record<string, string> = {}) => {
@@ -212,6 +212,21 @@ describe("what each pane shows", () => {
     expect(show(t, "task", [1, 2])).toBe(t);
   });
 
+  it("swaps the whole spec with the chat, never leaving a stale URL or pin behind", () => {
+    let w = setPreviewUrl(defaultWorkspace(), 1, "http://localhost:9999/stale"); // pane 1's own, from before
+    w = pinPane(w, 1, "p-stale");
+    w = setView(w, 1, "chat");
+    w = setPreviewUrl(w, 2, "http://localhost:5173/");
+    w = pinPane(w, 2, "p2");
+    w = { ...w, panes: w.panes.map((p, i) => (i === 1 ? { ...p, terminalId: "term-b" } : p)) as Workspace["panes"] };
+    const after = setView(w, 2, "chat");
+    expect(after.panes[0]).toEqual(
+      { view: "preview", projectId: "p2", terminalId: "term-b", previewUrl: "http://localhost:5173/" });
+    expect(after.panes[1]).toEqual(w.panes[0]);
+    expect(after.panes[1].view).toBe("chat");
+    expect(after.focused).toBe(2);
+  });
+
   it("pins and unpins a pane's project", () => {
     let w = pinPane(defaultWorkspace(), 3, "p1");
     expect(w.panes[2].projectId).toBe("p1");
@@ -221,6 +236,9 @@ describe("what each pane shows", () => {
     const gone = unpinProject(w, "p1");
     expect(gone.panes.map((p) => p.projectId)).toEqual([null, null, null, "p2"]);
     expect(unpinProject(gone, "p9")).toBe(gone);
+    // A pane holding an unsaved edit keeps its pin until the owner discards it.
+    expect(unpinProject(w, "p1", [3]).panes.map((p) => p.projectId)).toEqual([null, null, "p1", "p2"]);
+    expect(unpinProject(pinPane(defaultWorkspace(), 3, "p1"), "p1", [3]).panes[2].projectId).toBe("p1");
   });
 
   it("keeps a preview URL per pane", () => {
@@ -391,6 +409,65 @@ describe("fitting: what is dropped, and what never is", () => {
   it("leaves everything as chosen with no window to fit", () => {
     const f = fitWorkspace(DEFAULT_LAYOUT, ws({ preset: "grid4", panel: { open: true, height: 300 } }), NaN, NaN);
     expect(f).toMatchObject({ drawn: "grid4", dropped: 0, panel: { open: true, height: 300, auto: false } });
+  });
+});
+
+describe("fitting: a dropped set is sticky while focus moves inside it", () => {
+  // 1280×800 at 150%: three columns draw as two.
+  const [aw, ah] = room(1280, 800, 150);
+  const fit = (w: Workspace, previous: DrawnSet | null) =>
+    fitWorkspace(DEFAULT_LAYOUT, w, aw, ah, null, false, previous);
+  const drawn = (w: Workspace, f: ReturnType<typeof fit>): DrawnSet => ({ preset: w.preset, drawn: f.drawn, panes: f.panes });
+
+  it("keeps the drawn pair when focus moves to the other pane in it", () => {
+    const at3 = focusPane(ws({ preset: "cols3" }), 3);
+    const first = fit(at3, null);
+    expect(first).toMatchObject({ drawn: "cols2", panes: [2, 3] });
+    // The owner clicks into pane 2, the pair's other pane: nothing moves.
+    const at2 = focusPane(at3, 2);
+    expect(fit(at2, drawn(at3, first)).panes).toEqual([2, 3]);
+    // Without the last render's set it would have redrawn [1, 2] — the jump.
+    expect(fit(at2, null).panes).toEqual([1, 2]);
+  });
+
+  it("draws a set that includes a pane focused from outside it (Ctrl+Alt+N)", () => {
+    const at3 = focusPane(ws({ preset: "cols3" }), 3);
+    const first = fit(at3, null);
+    const at1 = focusPane(at3, 1);
+    expect(fit(at1, drawn(at3, first)).panes).toEqual([1, 2]);
+  });
+
+  it("does the same for one large plus two stacked, dropped to two columns", () => {
+    // Too short for the stacked column: main2 draws [1, focused-of-2-or-3].
+    const w3 = focusPane(ws({ preset: "main2" }), 3);
+    const f3 = fitWorkspace(DEFAULT_LAYOUT, w3, 1600, 300, null, false, null);
+    expect(f3).toMatchObject({ drawn: "cols2", panes: [1, 3] });
+    const w1 = focusPane(w3, 1);
+    expect(fitWorkspace(DEFAULT_LAYOUT, w1, 1600, 300, null, false, drawn(w3, f3)).panes).toEqual([1, 3]);
+    expect(fitWorkspace(DEFAULT_LAYOUT, w1, 1600, 300, null, false, null).panes).toEqual([1, 2]);
+    const w2 = focusPane(w3, 2);
+    expect(fitWorkspace(DEFAULT_LAYOUT, w2, 1600, 300, null, false, drawn(w3, f3)).panes).toEqual([1, 2]);
+  });
+
+  it("is not sticky across a different preset or a different drawn shape", () => {
+    const at3 = focusPane(ws({ preset: "cols3" }), 3);
+    const stale: DrawnSet = { preset: "grid4", drawn: "cols2", panes: [3, 4] };
+    expect(fit(at3, stale).panes).toEqual([2, 3]);
+    // The window grew: three columns fit again, all three are drawn.
+    const wide = fitWorkspace(DEFAULT_LAYOUT, focusPane(at3, 2), 1920, 1000, null, false,
+                              { preset: "cols3", drawn: "cols2", panes: [2, 3] });
+    expect(wide).toMatchObject({ drawn: "cols3", panes: [1, 2, 3] });
+  });
+
+  it("only reads what it is given", () => {
+    const prev: DrawnSet = { preset: "cols3", drawn: "cols2", panes: [2, 3] };
+    const copy = JSON.parse(JSON.stringify(prev));
+    const w = focusPane(ws({ preset: "cols3" }), 2);
+    const wcopy = JSON.parse(JSON.stringify(w));
+    const f = fit(w, prev);
+    f.panes.push(4 as PaneNo);
+    expect(prev).toEqual(copy);
+    expect(w).toEqual(wcopy);
   });
 });
 

@@ -252,17 +252,25 @@ export function focusPane(ws: Workspace, pane: PaneNo): Workspace {
 
 /**
  * Show `view` in `pane`, and focus it. Chat is a singleton: choosing it here
- * swaps with the pane that had it, whether or not that pane is drawn.
+ * swaps with the pane that had it, whether or not that pane is drawn — the
+ * **whole spec** (view, pin, preview URL, terminal), so the pane that takes
+ * this one's view takes what it was showing too, never a stale URL or pin of
+ * its own from before.
  */
 export function setView(ws: Workspace, pane: PaneNo, view: View): Workspace {
   if (!isView(view)) return ws;
   const panes = ws.panes.map((p) => ({ ...p })) as Panes;
-  const here = panes[pane - 1];
-  if (view === "chat" && here.view !== "chat") {
+  const here = pane - 1;
+  if (view === "chat" && panes[here].view !== "chat") {
     const other = panes.findIndex((p) => p.view === "chat");
-    if (other >= 0) panes[other].view = here.view;
+    if (other >= 0) {
+      const mine = panes[here];
+      panes[here] = panes[other];
+      panes[other] = mine;
+      return { ...ws, panes, focused: pane };
+    }
   }
-  here.view = view;
+  panes[here].view = view;
   return { ...ws, panes, focused: pane };
 }
 
@@ -298,10 +306,15 @@ export function pinPane(ws: Workspace, pane: PaneNo, projectId: string | null): 
   return { ...ws, panes };
 }
 
-/** A project went away: every pane pinned to it follows the chat again. */
-export function unpinProject(ws: Workspace, projectId: string): Workspace {
-  if (!ws.panes.some((p) => p.projectId === projectId)) return ws;
-  return { ...ws, panes: ws.panes.map((p) => (p.projectId === projectId ? { ...p, projectId: null } : p)) as Panes };
+/**
+ * A project went away: every pane pinned to it follows the chat again —
+ * except the panes in `keep` (a File pane holding an unsaved edit), which
+ * stay pinned until the owner says to discard it.
+ */
+export function unpinProject(ws: Workspace, projectId: string, keep: readonly PaneNo[] = []): Workspace {
+  const hit = (p: PaneSpec, i: number) => p.projectId === projectId && !keep.includes((i + 1) as PaneNo);
+  if (!ws.panes.some(hit)) return ws;
+  return { ...ws, panes: ws.panes.map((p, i) => (hit(p, i) ? { ...p, projectId: null } : p)) as Panes };
 }
 
 export function setPreviewUrl(ws: Workspace, pane: PaneNo, url: string): Workspace {
@@ -424,6 +437,13 @@ export function dropRow(shape: Preset, panes: readonly PaneNo[], focused: PaneNo
   }
 }
 
+/** What one render drew, handed to the next as `fitWorkspace`'s `previous`. */
+export interface DrawnSet {
+  preset: Preset;
+  drawn: Preset;
+  panes: readonly PaneNo[];
+}
+
 export interface WorkspaceFit {
   /** The side panes, as `fitLayout` draws them for the drawn shape. */
   sides: Fitted;
@@ -456,10 +476,20 @@ export interface WorkspaceFit {
  * rows dropped. With `preferPanel` (the owner opened a panel the window had
  * folded) rows drop first and the panel is never folded, as `prefer` does
  * for the side panes.
+ *
+ * **A dropped set is sticky** (`previous`, what the last render drew). Which
+ * panes survive a drop is chosen from the focused pane, and focus follows
+ * every click — so without this, clicking into the *other* drawn pane of
+ * three-columns-drawn-as-two redrew a different pair, and the pane under the
+ * pointer jumped. The last render's panes are kept while the preset and the
+ * drawn shape are the same (the same shape fits the same room) and they
+ * still hold the focused pane; focus moving to a pane they do not draw
+ * (Ctrl+Alt+N) draws a set that includes it. Pure: `previous` is read, never
+ * written, and nothing here is stored.
  */
 export function fitWorkspace(
   layout: PaneLayout, ws: Workspace, available: number, availableH: number,
-  prefer: Side | null = null, preferPanel = false,
+  prefer: Side | null = null, preferPanel = false, previous: DrawnSet | null = null,
 ): WorkspaceFit {
   let shape = ws.preset;
   let panes = panesOf(shape);
@@ -512,6 +542,12 @@ export function fitWorkspace(
   }
   // A row dropped can need less width: give the side panes back what it frees.
   if (shape !== before) sides = fitLayout(layout, available, prefer, SHAPES[shape].minW);
+  // Sticky: the same shape as last render, and focus still inside what it drew.
+  if (previous && previous.preset === ws.preset && previous.drawn === shape && shape !== ws.preset
+      && previous.panes.length === panes.length && previous.panes.includes(focused)
+      && previous.panes.every((n) => panesOf(ws.preset).includes(n))) {
+    panes = previous.panes.slice();
+  }
 
   const width = wide ? available - sides.left - sides.right : NaN;
   const height = tall ? availableH - panel.height : NaN;

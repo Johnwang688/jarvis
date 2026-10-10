@@ -19,7 +19,7 @@
 // component by that project: a different project is a fresh mount with
 // nothing open, so a save can never land anywhere but where it was read.
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api, ApiError } from "../api";
 import type { Tree, TreeEntry } from "../types";
 import { CodeEditor } from "./Editor";
@@ -105,6 +105,8 @@ export function FileTab(props: {
   onOpened?: (projectId: string) => void;
   /** A narrow split pane: the tree folds behind a toggle. */
   narrow?: boolean;
+  /** The buffer holds an unsaved edit (or no longer does). Told false on unmount. */
+  onDirty?: (dirty: boolean) => void;
 }) {
   const [file, setFile] = useState<Open | null>(null);
   const [text, setText] = useState("");
@@ -153,6 +155,15 @@ export function FileTab(props: {
       }
     }
   };
+
+  // An unsaved edit is said out loud, so App can refuse to close this
+  // buffer behind the owner's back (a "follow chat", a project that went
+  // away, a window closing). The minimal guard; the editor plan does more.
+  const dirty = !!file && !file.protected && text !== file.content;
+  const tell = useRef(props.onDirty);
+  tell.current = props.onDirty;
+  useEffect(() => tell.current?.(dirty), [dirty]);
+  useEffect(() => () => tell.current?.(false), []);
 
   if (!pid) return <div className="pad muted">Pick a project.</div>;
 

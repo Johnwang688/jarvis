@@ -465,6 +465,13 @@ h2.bar {
   max-width: calc(92vw / var(--ui-zoom, 1)); max-height: calc(86vh / var(--ui-zoom, 1));
   box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.6), 0 18px 60px rgba(0, 0, 0, 0.7), 0 0 36px rgba(251, 191, 36, 0.14);
 }
+/* The card takes focus off a frame or an editor behind it (2026-10-09): it
+   keeps its own glow rather than the focus ring, which would read as a
+   focused button — and nothing on this card is ever keyboard-defaulted. */
+.auth:focus, .auth:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.6), 0 18px 60px rgba(0, 0, 0, 0.7), 0 0 36px rgba(251, 191, 36, 0.14);
+}
 .auth h3 {
   font: 600 12px var(--mono); letter-spacing: 0.12em; color: var(--amber);
   background: var(--amber-soft); margin: 0 -20px 12px; padding: 12px 20px;

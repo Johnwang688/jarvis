@@ -68,7 +68,10 @@ export function ApprovalCard(props: {
   const args = Object.entries(r.args || {});
 
   return (
-    <div className="auth" data-testid="approval-card" data-req={r.req_id}>
+    // Focusable (tabIndex -1) so the veil can take focus off a frame or an
+    // editor behind it — but no button on it is ever focused for the owner.
+    <div className="auth" data-testid="approval-card" data-req={r.req_id} tabIndex={-1}
+         role="alertdialog" aria-modal="true" aria-label="Authorization required">
       <h3>AUTHORIZATION REQUIRED</h3>
       {headlineLine(r.headline) ? (
         <div className="headline" data-testid="approval-headline">{headlineLine(r.headline)}</div>
@@ -119,12 +122,43 @@ export function ApprovalCard(props: {
   );
 }
 
+/**
+ * Where keys were going when a card came up, if that is somewhere the card's
+ * rules cannot reach: a frame (a preview iframe gets its own key events, so
+ * Escape never reached the card, and keys went on into the framed page), or
+ * anything inside the workspace or the panel (Monaco kept typing into the
+ * buffer behind the card).
+ */
+export function behindTheCard(el: Element | null): boolean {
+  if (!el || el === document.body) return false;
+  if (el.tagName === "IFRAME") return true;
+  return typeof (el as HTMLElement).closest === "function" && !!(el as HTMLElement).closest("#workspace, .panel");
+}
+
 /** The veil holds the newest card; the rest are listed in the right pane. */
 export function ApprovalVeil(props: {
   requests: ApprovalRequest[];
   onDecide: (reqId: string, allow: boolean, always?: boolean) => void;
 }) {
   const top = props.requests[0];
+  const up = !!top;
+  // A card coming up takes focus off a frame, Monaco or anything else in the
+  // workspace or panel, onto the card itself (never a button: nothing here is
+  // keyboard-defaulted), and gives it back when the last card goes.
+  const restore = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    if (!up) return;
+    const was = document.activeElement as HTMLElement | null;
+    if (behindTheCard(was)) {
+      restore.current = was;
+      document.querySelector<HTMLElement>('[data-testid="approval-card"]')?.focus({ preventScroll: true });
+    }
+    return () => {
+      const back = restore.current;
+      restore.current = null;
+      if (back && back.isConnected) back.focus({ preventScroll: true });
+    };
+  }, [up]);
   useEffect(() => {
     if (!top) return;
     const onKey = (e: KeyboardEvent) => {

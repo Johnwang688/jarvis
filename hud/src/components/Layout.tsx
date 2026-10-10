@@ -24,7 +24,7 @@ import {
   PANEL, PRESETS, SHAPES, TITLEBAR_H, equalSplit as equalSplitOf, fitWorkspace, focusPane, loadWorkspace,
   pinPane, resetWorkspace, saveWorkspace, setPanel, setPreset as setPresetOf, setPreviewUrl as setPreviewUrlOf,
   setSplit as setSplitOf, setView as setViewOf, show as showOf, unpinProject as unpinProjectOf,
-  type PaneNo, type Preset, type Split, type View, type Workspace, type WorkspaceFit,
+  type DrawnSet, type PaneNo, type Preset, type Split, type View, type Workspace, type WorkspaceFit,
 } from "../lib/workspace";
 
 export interface LayoutControl {
@@ -52,7 +52,8 @@ export interface LayoutControl {
   /** A sidebar click: the pane already showing that kind of thing, else the focused pane. */
   show: (view: View) => void;
   pin: (pane: PaneNo, projectId: string | null) => void;
-  unpinProject: (projectId: string) => void;
+  /** A project went away; panes in `keep` (holding an unsaved edit) stay pinned. */
+  unpinProject: (projectId: string, keep?: readonly PaneNo[]) => void;
   setPreviewUrl: (pane: PaneNo, url: string) => void;
   setSplit: (preset: Preset, split: Partial<Split>) => void;
   equalSplit: (preset: Preset) => void;
@@ -113,7 +114,12 @@ export function useLayout(blocked = false): LayoutControl {
 
   const available = viewport.w / (zoom / 100);
   const availableH = viewport.h / (zoom / 100) - TITLEBAR_H;
-  const fit = fitWorkspace(layout, ws, available, availableH, prefer, preferPanel);
+  // What the last render drew, so a dropped set stays put while focus moves
+  // inside it (fitWorkspace, "sticky"). Render-only: never stored, and
+  // writing it here is idempotent, so a repeated render draws the same.
+  const drawnBefore = useRef<DrawnSet | null>(null);
+  const fit = fitWorkspace(layout, ws, available, availableH, prefer, preferPanel, drawnBefore.current);
+  drawnBefore.current = { preset: ws.preset, drawn: fit.drawn, panes: fit.panes };
   const fitted = fit.sides;
   const now = useRef({ fit, ws, layout, available, availableH, prefer });
   now.current = { fit, ws, layout, available, availableH, prefer };
@@ -153,7 +159,9 @@ export function useLayout(blocked = false): LayoutControl {
   const focus = useCallback((pane: PaneNo) => setWs((w) => focusPane(w, pane)), []);
   const show = useCallback((view: View) => setWs((w) => showOf(w, view, now.current.fit.panes)), []);
   const pin = useCallback((pane: PaneNo, projectId: string | null) => setWs((w) => pinPane(w, pane, projectId)), []);
-  const unpinProject = useCallback((projectId: string) => setWs((w) => unpinProjectOf(w, projectId)), []);
+  const unpinProject = useCallback(
+    (projectId: string, keep: readonly PaneNo[] = []) => setWs((w) => unpinProjectOf(w, projectId, keep)), [],
+  );
   const setPreviewUrl = useCallback((pane: PaneNo, url: string) => setWs((w) => setPreviewUrlOf(w, pane, url)), []);
   const setSplit = useCallback(
     (preset: Preset, split: Partial<Split>) => setWs((w) => setSplitOf(w, preset, split)), [],
