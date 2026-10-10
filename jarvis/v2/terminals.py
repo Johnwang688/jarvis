@@ -278,6 +278,7 @@ class Ring:
         self._chunks: collections.deque[bytes] = collections.deque()
         self._size = 0
         self.start = 0
+        self._before = b""                     # the last byte dropped, if any
 
     @property
     def end(self) -> int:
@@ -288,6 +289,10 @@ class Ring:
             return
         data = bytes(data)
         if len(data) >= self.cap:
+            if len(data) > self.cap:
+                self._before = data[-self.cap - 1:-self.cap]
+            elif self._chunks:
+                self._before = self._chunks[-1][-1:]
             self.start = self.end + len(data) - self.cap
             self._chunks.clear()
             self._chunks.append(data[-self.cap:])
@@ -305,17 +310,19 @@ class Ring:
                 self._chunks.popleft()
                 self._size -= len(first)
                 self.start += len(first)
+                self._before = first[-1:]
             else:
                 self._chunks[0] = first[excess:]
                 self._size -= excess
                 self.start += excess
+                self._before = first[excess - 1:excess]
 
     def snapshot(self) -> tuple[int, bytes]:
         """(offset, bytes) to replay. Once anything has been dropped, the
-        replay starts at the next line, never mid-line or mid-sequence."""
+        replay starts at a line boundary, never mid-line or mid-sequence."""
         data = b"".join(self._chunks)
         start = self.start
-        if start > 0:
+        if start > 0 and self._before != b"\n":
             cut = data.find(b"\n", 0, 64 * 1024)
             if cut >= 0:
                 data = data[cut + 1:]

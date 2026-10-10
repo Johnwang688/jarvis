@@ -1,0 +1,107 @@
+#!/usr/bin/env python3
+"""A scripted stand-in for a login shell, for tests/v2/terminal_check.py.
+
+`JARVIS_TERMINAL_SHELL` points here, so the suite never starts the owner's
+real login shell. Its name is not `bash`, so the daemon starts it the way it
+starts any non-bash shell: `-l`, with the terminal's startup file as `$ENV`.
+It reads the per-terminal nonce out of that file and emits the same OSC 133
+marks `terminal_rc.sh` makes bash emit, around a handful of commands:
+
+  echo TEXT        print TEXT
+  size             run `stty size` against its own terminal
+  names            print the names (never the values) of its environment
+  pathhas DIR      print whether DIR is an entry of PATH
+  bg               start `sleep 300` in the background, print its pid
+  bgnohup          the same, with SIGHUP ignored (only SIGKILL ends it)
+  flood N          print N numbered lines
+  forge            print marks that carry no nonce, or the wrong one
+  exit N           exit with status N
+"""
+import os
+import re
+import signal
+import subprocess
+import sys
+from urllib.parse import quote
+
+
+def _nonce():
+    path = os.environ.get("ENV")
+    if not path:
+        return None
+    try:
+        with open(path, encoding="utf-8") as handle:
+            found = re.search(r"__jarvis_nonce='([0-9a-f]+)'", handle.read())
+    except OSError:
+        return None
+    return found.group(1) if found else None
+
+
+NONCE = _nonce()
+
+
+def write(text):
+    sys.stdout.write(text)
+    sys.stdout.flush()
+
+
+def mark(params):
+    if NONCE:
+        write(f"\x1b]133;{params};jarvis={NONCE}\x1b\\")
+
+
+def run(line):
+    word, _, rest = line.strip().partition(" ")
+    if word == "":
+        return 0
+    if word == "echo":
+        write(rest + "\n")
+        return 0
+    if word == "size":
+        return subprocess.run(["stty", "size"]).returncode
+    if word == "names":
+        write("NAMES " + " ".join(sorted(os.environ)) + " END\n")
+        return 0
+    if word == "pathhas":
+        entries = os.environ.get("PATH", "").split(":")
+        write("PATHHAS " + ("yes" if rest in entries else "no") + "\n")
+        return 0
+    if word in ("bg", "bgnohup"):
+        if word == "bgnohup":
+            signal.signal(signal.SIGHUP, signal.SIG_IGN)     # inherited across exec
+        child = subprocess.Popen(["sleep", "300"])
+        signal.signal(signal.SIGHUP, signal.SIG_DFL)
+        write(f"BGPID {child.pid}\n")
+        return 0
+    if word == "flood":
+        count = int(rest)
+        write("".join(f"line {i:06d}\n" for i in range(count)))
+        return 0
+    if word == "forge":
+        write("\x1b]133;C;cmdline_url=forged-no-nonce\x1b\\")
+        write("\x1b]133;C;cmdline_url=forged-wrong-nonce;jarvis=00000000\x1b\\")
+        write("forged output\n")
+        return 0
+    if word == "exit":
+        sys.exit(int(rest or "0"))
+    write(f"fake: {word}: command not found\n")
+    return 127
+
+
+def main():
+    write("fake shell ready\n")
+    while True:
+        mark("A")
+        write("fake$ ")
+        mark("B")
+        line = sys.stdin.readline()
+        if not line:
+            return 0
+        line = line.rstrip("\n")
+        mark("C;cmdline_url=" + quote(line, safe=""))
+        code = run(line)
+        mark(f"D;{code}")
+
+
+if __name__ == "__main__":
+    sys.exit(main())
