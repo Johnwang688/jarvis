@@ -5,8 +5,12 @@
 #
 # The daemon reads this file once, puts one line in front of it that sets
 # __jarvis_nonce, and writes the result for each terminal into a private
-# directory (mode 700); bash is started with that copy as its --rcfile. It
-# does three things and nothing else.
+# directory (mode 700); bash is started with that copy as its --rcfile. bash
+# reads the whole file before running it, and its first act is to delete
+# that copy — before the login files below, or anything they start, can run —
+# so the nonce is left only in an unexported shell variable (PS1 names it
+# rather than holding it, and is kept unexported too). It does three things
+# and nothing else.
 #
 # 1. What a login shell would have read. --rcfile makes bash an interactive
 #    *non-login* shell, so /etc/profile and the first of ~/.bash_profile,
@@ -26,13 +30,19 @@
 #                                                  the command runs: output starts
 #      ESC ] 133 ; D ; <exit status> ; jarvis=<nonce> ESC \
 #                                                  the command ended
-#    The nonce is per terminal and never exported, so a program's output
-#    cannot forge a mark the daemon believes.
+#    The nonce is per terminal, and a program started in the terminal has no
+#    ordinary way to learn it (above), so it cannot print a mark the daemon
+#    believes. The marks are still **advisory**, not a boundary: a program
+#    can print any bytes between two real marks, and a nested shell, `sudo
+#    -i`, `ssh` or `python` puts everything under the outer command's span.
 #
 #    The command line comes from `history 1`. When the line did not enter the
 #    history (HISTCONTROL=ignorespace, a duplicate under ignoredups, history
 #    off), it is bash's $BASH_COMMAND instead: the first simple command of the
 #    line, not the whole line.
+
+command rm -f -- "${BASH_SOURCE[0]}"
+export -n __jarvis_nonce 2>/dev/null
 
 if [ -r /etc/profile ]; then . /etc/profile; fi
 if [ -r "$HOME/.bash_profile" ]; then . "$HOME/.bash_profile"
@@ -90,10 +100,14 @@ __jarvis_precmd() {
     fi
     __jarvis_histnum
     __jarvis_mark A
+    # PS1 names ${__jarvis_nonce} (expanded at each prompt) rather than
+    # holding it, and is kept unexported whatever the owner's dotfiles (an
+    # `export PS1`, a `set -a`) asked for: no child inherits the nonce.
     case $PS1 in
         *"133;B;jarvis="*) ;;
-        *) PS1="$PS1"'\[\033]133;B;jarvis='"$__jarvis_nonce"'\033\\\]' ;;
+        *) PS1="$PS1"'\[\033]133;B;jarvis=${__jarvis_nonce}\033\\\]' ;;
     esac
+    export -n PS1 __jarvis_nonce 2>/dev/null
     __jarvis_state=ready
 }
 

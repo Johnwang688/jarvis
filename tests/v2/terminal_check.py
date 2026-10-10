@@ -3,7 +3,7 @@
 Free and hermetic. Every daemon here listens on three ephemeral loopback
 ports — never 8402, 8403 or 8405, which the owner's daemon holds (8403
 appears only as an Origin *string* a socket presents). `JARVIS_TERMINAL_SHELL`
-points at `terminal_fake_shell.py`, a scripted stand-in, so no test starts
+points at `terminal_fake/sh`, a scripted stand-in, so no test starts
 the owner's login shell; the one case that runs real bash (to prove the
 shipped startup file's marks) runs it with a temp HOME. Every config path
 and HOME are temp. The environment checks compare variable *names* and
@@ -23,6 +23,8 @@ import os
 from pathlib import Path
 import re
 import secrets
+import shutil
+import signal
 import socket
 import struct
 import sys
@@ -44,7 +46,7 @@ from jarvis.v2.model import ProviderName as PN  # noqa: E402
 from jarvis.v2.provider import Decision, Event, EventKind as K, SessionHandle, Usage  # noqa: E402
 from jarvis.v2.stores import Stores  # noqa: E402
 
-FAKE_SHELL = Path(__file__).resolve().with_name("terminal_fake_shell.py")
+FAKE_SHELL = Path(__file__).resolve().parent / "terminal_fake" / "sh"
 LIVE_PORTS = {8402, 8403, 8405}
 # Any OSC sequence: the marks, and whatever else a system's own startup files
 # print (Ubuntu's systemd context marks, OSC 3008, for one).
@@ -570,6 +572,63 @@ class Frames(Base):
         sock.sendall(frame(W.CLOSE, struct.pack("!H", 1000)))
         self.closed_with(sock, 1000)
 
+    def test_a_close_code_is_echoed_and_an_empty_close_answered_empty(self):
+        _, sock = self.attach_raw()
+        sock.sendall(frame(W.CLOSE, struct.pack("!H", 4000) + "bye".encode()))
+        self.closed_with(sock, 4000)
+        _, sock = self.attach_raw()
+        sock.sendall(frame(W.CLOSE, b""))
+        seen = frames_until(sock, lambda f: f[0] == W.CLOSE)
+        self.assertEqual(seen[-1][1], b"")                                     # never a 1005 on the wire
+
+    def test_a_bad_close_frame_is_a_protocol_error(self):
+        for body, code in ((struct.pack("!H", 1005), W.PROTOCOL_ERROR),       # may not be sent
+                           (struct.pack("!H", 1006), W.PROTOCOL_ERROR),
+                           (struct.pack("!H", 1015), W.PROTOCOL_ERROR),
+                           (struct.pack("!H", 999), W.PROTOCOL_ERROR),        # out of range
+                           (struct.pack("!H", 2000), W.PROTOCOL_ERROR),
+                           (struct.pack("!H", 5000), W.PROTOCOL_ERROR),
+                           (b"\x03", W.PROTOCOL_ERROR),                       # one byte
+                           (struct.pack("!H", 1000) + b"\xff\xfe", W.BAD_DATA)):
+            with self.subTest(body=body):
+                tid, sock = self.attach_raw()
+                sock.sendall(frame(W.CLOSE, body))
+                self.closed_with(sock, code)
+                self.owner("DELETE", f"/terminals/{tid}")                     # six at most
+
+    def test_control_frames_are_short_and_never_fragmented(self):
+        _, sock = self.attach_raw()
+        sock.sendall(frame(W.PING, b"p" * 126))                                # over 125 bytes
+        self.closed_with(sock, W.PROTOCOL_ERROR)
+        _, sock = self.attach_raw()
+        sock.sendall(frame(W.PING, b"p", fin=False))                           # fragmented
+        self.closed_with(sock, W.PROTOCOL_ERROR)
+        _, sock = self.attach_raw()
+        sock.sendall(frame(W.PING, b"p" * 125))                                # the limit itself is fine
+        frames_until(sock, lambda f: f[0] == W.PONG and f[1] == b"p" * 125)
+
+    def test_nothing_is_queued_after_our_close(self):
+        left, right = socket.socketpair()
+        self.addCleanup(left.close)
+        self.addCleanup(right.close)
+        left.settimeout(0.0)
+        sock = W.WebSocket(left)
+        sock.start()
+        self.assertTrue(sock.send_text("before"))
+        sock.close(W.NORMAL)
+        self.assertFalse(sock.send_text("after"))
+        self.assertFalse(sock.send_binary(b"after"))
+        self.assertFalse(sock._put(W.PONG, b"after"))
+        right.settimeout(3)
+        close = W.encode_frame(W.CLOSE, struct.pack("!H", W.NORMAL))
+        got = b""
+        while not got.endswith(close):
+            chunk = right.recv(4096)
+            self.assertTrue(chunk, got)
+            got += chunk
+        self.assertEqual(got, W.encode_frame(W.TEXT, b"before") + close)
+        sock.abort()
+
     def test_websocket_client_round_trips_and_answers_pings(self):
         with patch.object(W, "PING_INTERVAL_S", 0.2), patch.object(W, "PONG_TIMEOUT_S", 0.8):
             tid, client = self.session()
@@ -616,7 +675,7 @@ class Lifecycle(Base):
         self.assertEqual(self.owner("GET", "/terminals"), [])
 
     def test_a_relative_or_windows_shell_override_is_refused(self):
-        for shell in ("terminal_fake_shell.py", "/mnt/c/Windows/System32/cmd.exe", str(self.root / "nope")):
+        for shell in ("terminal_fake/sh", "/mnt/c/Windows/System32/cmd.exe", str(self.root / "nope")):
             with self.subTest(shell=shell), patch.object(config, "TERMINAL_SHELL", shell):
                 self.request("POST", "/terminals", {"in": "home"}, status=409)
 
@@ -772,6 +831,88 @@ class Lifecycle(Base):
         self.assertEqual(self.owner("GET", "/terminals"), [])
         self.request("DELETE", f"/terminals/{tid}", status=404)
 
+    def test_sighup_goes_out_before_sigkill(self):
+        tid, client = self.session()
+        client.type("bgnohup")
+        found = client.until(lambda c: re.findall(r"BGPID (\d+)", c.text()), what="a job")
+        job, shell = int(found[0]), self.term(tid)._proc.pid
+        real, sent = os.kill, []
+
+        def spy(pid, sig):
+            sent.append((pid, sig))
+            return real(pid, sig)
+        with patch.object(os, "kill", spy), patch.object(T, "CLOSE_GRACE_S", 0.4):
+            self.owner("DELETE", f"/terminals/{tid}")
+        eventually(lambda: dead(job) and dead(shell), what="gone")
+        to_job = [sig for pid, sig in sent if pid == job]
+        self.assertIn(signal.SIGHUP, to_job)
+        self.assertIn(signal.SIGKILL, to_job)                                   # it ignored the HUP
+        self.assertLess(to_job.index(signal.SIGHUP), to_job.index(signal.SIGKILL))
+        self.assertEqual([sig for pid, sig in sent if pid == shell][:1], [signal.SIGHUP])
+
+    def test_signals_the_daemon_ignores_are_default_in_the_shell(self):
+        previous = signal.signal(signal.SIGHUP, signal.SIG_IGN)               # as under nohup
+        try:
+            tid, _ = self.session()
+        finally:
+            signal.signal(signal.SIGHUP, previous)
+        status = Path(f"/proc/{self.term(tid)._proc.pid}/status").read_text()
+        ignored = int(re.search(r"SigIgn:\s*([0-9a-f]+)", status).group(1), 16)
+        self.assertFalse(ignored & (1 << (signal.SIGHUP - 1)), "the shell inherited SIGHUP ignored")
+
+    def test_two_deletes_at_once_close_it_once(self):
+        tid = self.open_terminal()["id"]
+        results = []
+        workers = [threading.Thread(target=lambda: results.append(
+            self.request("DELETE", f"/terminals/{tid}")[0])) for _ in range(4)]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(10)
+        self.assertEqual(sorted(results), [200, 404, 404, 404])
+        self.open_terminal()                                                    # the daemon is fine
+
+    def test_the_shell_is_its_realpath(self):
+        bindir = self.root / "bin"
+        bindir.mkdir()
+        (bindir / "myshell").symlink_to(FAKE_SHELL)
+        (bindir / "winshell").symlink_to("/mnt/c/Windows/System32/cmd.exe")
+        with patch.object(config, "TERMINAL_SHELL", str(bindir / "myshell")):
+            row = self.open_terminal()
+        self.assertEqual((row["title"], row["integration"]), ("sh · Calc", "posix"))
+        with patch.object(config, "TERMINAL_SHELL", str(bindir / "winshell")):
+            status, body = self.request("POST", "/terminals", {"in": "home"})
+        self.assertEqual(status, 409)
+        self.assertIn("/mnt/", body["error"])
+
+    def test_a_program_that_does_not_read_never_stalls_the_socket(self):
+        self.assertEqual(T.INPUT_CAP, 256 * 1024)
+        with patch.object(T, "INPUT_CAP", 32 * 1024), patch.object(W, "PING_INTERVAL_S", 0.3), \
+                patch.object(W, "PONG_TIMEOUT_S", 2.0):
+            tid, client = self.session()
+            client.type("deaf")
+            client.wait_text("DEAF")
+            for _ in range(64):                                                 # 1 MiB it never reads
+                client.conn.send_binary(b"x" * 16384)
+            client.until(lambda c: c.message("input_dropped"), what="the paste is refused")
+            self.assertIn("not reading", client.message("input_dropped")["reason"])
+            client.control({"type": "resize", "cols": 101, "rows": 33})         # control still lands
+            eventually(lambda: self.term(tid).cols == 101, what="resized while stuck")
+            client.drain(2.5)                                                   # pings still answered
+            self.assertIsNone(client.closed)
+            self.assertTrue(self.term(tid).row()["shown"])
+
+    def test_ctrl_c_throws_away_queued_input(self):
+        terminal = T.Terminal("0000000c", shell="/bin/sh", folder="/", project_id=None, label="~",
+                              cols=80, rows=24, nonce="0" * 32, rcfile=None)
+        self.addCleanup(terminal.finish)
+        with patch.object(T, "INPUT_CAP", 100):
+            self.assertTrue(terminal.queue_input(b"a" * 60))
+            self.assertFalse(terminal.queue_input(b"b" * 60))                   # over the cap: refused
+            self.assertTrue(terminal.queue_input(b"\x03"))
+            self.assertEqual(list(terminal._inbox), [b"\x03"])
+            self.assertTrue(terminal.queue_input(b"c" * 90))
+
     def test_daemon_stop_ends_every_terminal(self):
         pids, clients = [], []
         for _ in range(2):
@@ -834,7 +975,8 @@ class Environment(Base):
         names = self.names(client)
         self.assertFalse(names & self.FORBIDDEN, sorted(names & self.FORBIDDEN))
         self.assertFalse({n for n in names if n.startswith(("JARVIS_", "ANTHROPIC_", "CLAUDE_", "CODEX_"))})
-        self.assertTrue({"HOME", "PATH", "TERM", "SHELL", "LANG", "ENV"} <= names, sorted(names))
+        self.assertTrue({"HOME", "PATH", "TERM", "SHELL", "LANG"} <= names, sorted(names))
+        self.assertNotIn("ENV", names)                                          # read, then unset
         for entry, answer in [(e, "no") for e in self.venv_bins] + [("/usr/bin", "yes")]:
             client.output.clear()
             client.type(f"pathhas {entry}")
@@ -845,8 +987,14 @@ class Environment(Base):
         self.assertFalse(set(env) & self.FORBIDDEN, sorted(set(env) & self.FORBIDDEN))
         self.assertEqual((env["TERM"], env["SHELL"], env["HOME"]), ("xterm-256color", "/bin/bash", str(self.home)))
         self.assertFalse(set(env["PATH"].split(":")) & set(self.venv_bins))
-        self.assertEqual(T.shell_command("/bin/bash", "/rc")[0], ["/bin/bash", "--rcfile", "/rc", "-i"])
-        self.assertEqual(T.shell_command("/usr/bin/dash", "/rc"), (["/usr/bin/dash", "-l"], {"ENV": "/rc"}))
+        self.assertEqual(T.shell_command("/bin/bash", "bash", "/rc"),
+                         (["/bin/bash", "--rcfile", "/rc", "-i"], {}))
+        self.assertEqual(T.shell_command("/usr/bin/dash", "posix", "/rc"),
+                         (["/usr/bin/dash", "-i"], {"ENV": "/rc"}))
+        self.assertEqual(T.shell_command("/usr/bin/zsh", "none", None), (["/usr/bin/zsh", "-l"], {}))
+        self.assertEqual([T.shell_kind(s) for s in ("/usr/bin/bash", "/usr/bin/dash", "/bin/sh",
+                                                    "/bin/busybox", "/usr/bin/zsh", "/usr/bin/fish")],
+                         ["bash", "posix", "posix", "posix", "none", "none"])
 
 
 # -- what never leaves memory --------------------------------------------------------------
@@ -896,7 +1044,15 @@ class Leaks(Base):
                 drained.append(events.get_nowait())
             except Exception:
                 break
-        self.assertEqual(drained, [], "a bus subscriber saw a record during a terminal session")
+        # Lifecycle ids only, never output: one `terminal_attached` per attach
+        # (two here), each exactly {terminal_id, at}.
+        self.assertEqual([r["kind"] for r in drained], ["terminal_attached"] * 2, drained)
+        for record in drained:
+            self.assertEqual(set(record), {"kind", "data"})
+            self.assertEqual(set(record["data"]), {"terminal_id", "at"})
+            self.assertEqual(record["data"]["terminal_id"], tid)
+            self.assertRegex(record["data"]["at"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d")
+        self.assertNotIn(marker, json.dumps(drained))
         text = "\n".join(records)
         self.assertIn(f"terminal {tid} opened", text)                           # the capture worked
         self.assertIn(f"terminal {tid} closed", text)
@@ -1016,6 +1172,73 @@ class Marks(unittest.TestCase):
         marks.prune(10_000)
         self.assertEqual(list(marks.spans), [])
 
+    def test_evicted_spans_leave_their_bytes_unattributed(self):
+        self.assertEqual(T.SPAN_CAP, 2000)
+        data = b""
+        with patch.object(T, "SPAN_CAP", 3):
+            marks = T.Marks(NONCE)
+            for i in range(5):
+                chunk = (mark(b"A") + b"$ " + mark(b"C;cmdline_url=c%d" % i) + b"out%d\n" % i
+                         + mark(b"D;0"))
+                marks.feed(chunk)
+                data += chunk
+        self.assertEqual([s.command for s in marks.spans], ["c2", "c3", "c4"])
+        # c0 and c1 are gone, but their output may still be in the ring: every
+        # byte before the end of c1's output is unattributed now.
+        self.assertEqual(marks.spans_from, data.index(b"out1\n") + len(b"out1\n"))
+        self.assertLessEqual(marks.spans_from, marks.spans[0].start)
+
+
+class SessionReuse(unittest.TestCase):
+    """A session id outlives its processes only as a number: once the last
+    member is gone it can lead somebody else's session. A fake /proc."""
+
+    def setUp(self):
+        self.stats: dict[int, tuple] = {}
+        self.kills: list[tuple[int, int]] = []
+        for patcher in (patch.object(T, "_proc_stat", lambda pid: self.stats.get(pid)),
+                        patch.object(T, "_proc_pids", lambda: list(self.stats)),
+                        patch.object(os, "kill", lambda pid, sig: self.kills.append((pid, sig)))):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def terminal(self, start=1000):
+        terminal = T.Terminal("0000000d", shell="/bin/sh", folder="/", project_id=None, label="~",
+                              cols=80, rows=24, nonce="0" * 32, rcfile=None)
+        terminal._proc = SimpleNamespace(pid=4242, poll=lambda: 0, wait=lambda timeout=None: 0,
+                                         returncode=0)
+        terminal._start_time = start
+        return terminal
+
+    def test_live_members_are_found_by_session(self):
+        self.stats.update({4242: (b"S", 4242, 1000), 4300: (b"S", 4242, 2000),
+                           4301: (b"Z", 4242, 2001), 4400: (b"S", 4400, 3000)})
+        terminal = self.terminal()
+        self.assertEqual(terminal._members(), [4242, 4300])                    # never the zombie
+        terminal.hangup("closed")
+        self.assertEqual({pid for pid, _ in self.kills}, {4242, 4300})
+        terminal.finish()
+
+    def test_a_reused_session_number_is_never_signalled(self):
+        # The shell is gone; its number now leads an unrelated session.
+        self.stats.update({4242: (b"S", 4242, 5555), 4243: (b"S", 4242, 5556)})
+        terminal = self.terminal(start=1000)
+        self.assertEqual(terminal._members(), [])
+        terminal.hangup("closed")
+        terminal.finish()
+        self.assertEqual(self.kills, [])
+
+    def test_a_session_seen_empty_stays_empty(self):
+        terminal = self.terminal()
+        self.assertEqual(terminal._members(), [])                               # nothing left
+        # Later a session with that number (and, by bad luck, that start
+        # time) appears: still never signalled.
+        self.stats.update({4242: (b"S", 4242, 1000), 4243: (b"S", 4242, 1001)})
+        self.assertEqual(terminal._members(), [])
+        terminal.hangup("closed")
+        terminal.finish()
+        self.assertEqual(self.kills, [])
+
 
 class FakeShellMarks(Base):
     def test_spans_from_the_fake_shell_and_forged_marks_ignored(self):
@@ -1028,6 +1251,8 @@ class FakeShellMarks(Base):
                    and terminal.history().spans[-1].exit_code == 0, what="the last D mark")
         history = terminal.history()
         self.assertTrue(history.integrated)
+        self.assertEqual(history.spans_from, 0)
+        self.assertIsNotNone(history.prompt)
         self.assertEqual([s.command for s in history.spans], ["echo one", "forge", "echo two"])
 
         def out(span):
@@ -1037,16 +1262,92 @@ class FakeShellMarks(Base):
         self.assertTrue(history.readable)
 
 
-class RealBashStartupFile(Base):
+class OtherShells(Base):
+    """A shell that reads no $ENV (zsh, fish, …) runs as a plain login shell:
+    no startup file, so no `sudo -k` and no marks — and the listing says so."""
+
+    def test_a_shell_without_env_runs_unintegrated(self):
+        fish = self.root / "bin" / "fish"
+        fish.parent.mkdir()
+        shutil.copy(FAKE_SHELL, fish)                          # a copy named fish, not a link
+        fish.chmod(0o755)
+        with patch.object(config, "TERMINAL_SHELL", str(fish)):
+            row = self.open_terminal()
+        self.assertEqual((row["integration"], row["title"]), ("none", "fish · Calc"))
+        tid, client = self.session(row["id"])
+        client.type("names")
+        names = client.until(lambda c: re.search(r"NAMES (.*?) END", c.text()), what="names")
+        self.assertNotIn("ENV", names.group(1).split())
+        client.type("echo plain")
+        client.wait_text("plain\n")
+        history = self.term(tid).history()
+        self.assertFalse(history.integrated)
+        self.assertIsNone(history.prompt)
+        self.assertEqual(history.spans, ())
+        rc_dir = self.daemon.terminals._rc_dir
+        self.assertTrue(rc_dir is None or not list(rc_dir.glob(f"rc-{tid}.*")))
+
+
+# A child process run in the terminal, hunting for the nonce everywhere a
+# program could ordinarily look: its environment, its parent shell's argv and
+# initial environment (/proc), every file either of those names, and every
+# file in the daemon's startup-file directory. It writes what it found to a
+# file for the test to search; nothing is printed.
+HUNT = r'''
+import glob, os, sys
+dump, rc_dir = sys.argv[1], sys.argv[2]
+seen = ["\n".join(f"{k}={v}" for k, v in os.environ.items())]
+for name in ("environ", "cmdline"):
+    try:
+        with open(f"/proc/{os.getppid()}/{name}", "rb") as handle:
+            seen.append(handle.read().decode("latin-1"))
+    except OSError:
+        pass
+paths = set(glob.glob(os.path.join(rc_dir, "*")))
+for text in list(seen):
+    for token in text.replace("\0", "\n").replace("=", "\n").replace(":", "\n").split("\n"):
+        if token.startswith("/"):
+            paths.add(token)
+for path in sorted(paths):
+    try:
+        if os.path.isfile(path):
+            with open(path, "rb") as handle:
+                seen.append(handle.read(1 << 16).decode("latin-1"))
+    except OSError:
+        pass
+with open(dump + ".part", "w") as handle:
+    handle.write("\n".join(seen))
+os.replace(dump + ".part", dump)
+'''
+
+
+class NonceHunt:
+    """Mixed into the real-shell cases: the nonce must be out of a child's reach."""
+
+    def hunt(self, client, terminal):
+        script, dump = self.root / "hunt.py", self.root / "hunt.txt"
+        script.write_text(HUNT)
+        self.assertFalse(terminal._rcfile.exists(), "the startup file outlived its reading")
+        client.type(f"python3 {script} {dump} {self.daemon.terminals._rc_dir}")
+        eventually(dump.exists, timeout=15, what="the hunt")
+        found = dump.read_text(encoding="latin-1")
+        # Booleans only: a failure must not print what the child read.
+        self.assertTrue("HOME=" in found, "the hunt read nothing")              # it really looked
+        self.assertFalse(terminal._marks._nonce.decode() in found, "a child found the nonce")
+
+
+class RealBashStartupFile(NonceHunt, Base):
     """The shipped startup file, in real bash, with a temp HOME and no
-    profile files of the owner's: the marks WP-F depends on, `sudo -k`, and a
-    clean environment by name."""
+    profile files of the owner's but one that exports PS1: the marks WP-F
+    depends on, `sudo -k`, a clean environment by name, and a nonce no
+    program in the terminal can find."""
 
     def setUp(self):
         super().setUp()
         bindir = self.root / "bin"
         bindir.mkdir()
         (bindir / "bash").symlink_to("/bin/bash")              # named bash: --rcfile mode
+        (self.home / ".profile").write_text("export PS1='custom$ '\n")
         guard = patch.object(config, "TERMINAL_SHELL", str(bindir / "bash"))
         guard.start()
         self.addCleanup(guard.stop)
@@ -1066,6 +1367,7 @@ class RealBashStartupFile(Base):
     def test_bash_emits_marks_and_never_caches_sudo(self):
         tid = self.open_terminal()["id"]
         terminal = self.term(tid)
+        self.assertEqual(terminal.row()["integration"], "bash")
         client = self.connect(tid)
         eventually(lambda: b"133;B;jarvis=" in terminal.history().data, timeout=15,
                    what="the first prompt")
@@ -1091,32 +1393,50 @@ class RealBashStartupFile(Base):
         names = set(out(spans[6]).split())
         self.assertIn("HOME", names)
         self.assertFalse(names & {"OPENROUTER_API_KEY", "HF_HUB_OFFLINE", "VIRTUAL_ENV",
-                                  "__jarvis_nonce", "ENV"}, sorted(names))
+                                  "__jarvis_nonce", "ENV", "PS1"}, sorted(names))
         self.assertEqual(out(spans[7]).strip(), "24 80")
         nonce = re.search(rb"jarvis=([0-9a-f]{32})", history.data).group(1)
         self.assertNotIn(nonce.decode(), out(spans[6]))
+        self.hunt(client, terminal)
         # A foreground job other than the shell reads as busy (the HUD asks before closing).
-        self.assertFalse(terminal.row()["busy"])
+        eventually(lambda: not terminal.row()["busy"], what="idle")
         client.type("sleep 3")
         eventually(lambda: terminal.row()["busy"], what="busy")
 
 
-class RealDashStartupFile(Base):
-    """The POSIX startup file, in real dash (temp HOME): it parses — a POSIX
-    shell reads every line of it — it keeps sudo from caching, and its
-    prompt marks carry the nonce, but it marks no command."""
+class RealDashStartupFile(NonceHunt, Base):
+    """The POSIX startup file, in real dash (temp HOME, a ~/.profile that
+    exports PS1): it parses — a POSIX shell reads every line of it — it keeps
+    sudo from caching, its prompt marks are well formed and carry the nonce,
+    it marks no command, and the nonce is out of a child's reach."""
 
     def test_dash_reads_the_posix_file(self):
         if not os.access("/usr/bin/dash", os.X_OK):
             self.skipTest("no dash on this machine")
+        (self.home / ".profile").write_text("export PS1='custom$ '\n")
         with patch.object(config, "TERMINAL_SHELL", "/usr/bin/dash"):
             tid = self.open_terminal()["id"]
         terminal = self.term(tid)
+        self.assertEqual(terminal.row()["integration"], "posix")
         client = self.connect(tid)
-        eventually(lambda: b"133;B;jarvis=" in terminal.history().data, timeout=15, what="the prompt")
+        eventually(lambda: terminal.history().prompt is not None, timeout=15,
+                   what="a prompt mark, parsed")
+        nonce = terminal._marks._nonce
+        data = terminal.history().data
+        self.assertIn(b"\x1b]133;A;jarvis=" + nonce + b"\x07custom$ \x1b]133;B;jarvis=" + nonce
+                      + b"\x07", data)                                         # well formed, whole
         client.type("alias sudo")
         client.wait_text("sudo -k", timeout=10)
+        client.output.clear()
+        client.type("env | cut -d= -f1 | sed 's/^/N:/'; echo DONE-$((40+2))")
+        client.wait_text("DONE-42\n")
+        names = set(re.findall(r"^N:(\S+)$", client.text(), re.M))
+        self.assertIn("HOME", names)
+        # dash cannot un-export PS1 (the ~/.profile here exports it), so PS1
+        # names the nonce instead of holding it: the hunt below proves it.
+        self.assertFalse(names & {"ENV", "__jarvis_nonce"}, sorted(names))
         self.assertNotIn("Syntax error", client.text())
+        self.hunt(client, terminal)
         history = terminal.history()
         self.assertFalse(history.integrated)
         self.assertEqual(history.spans, ())

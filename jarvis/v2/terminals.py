@@ -36,39 +36,58 @@ and the takeover question. For a browser-based attack two independent
 checks would have to fail at once.
 
 **Not a boundary against a program running as the owner.** Such a program
-(a script an agent wrote and got run, say) can send any Origin it likes and
-fetch a ticket. What limits it: an agent has to get that program run first
-(`curl`/`wget` never auto-run, Claude workers pass the PreToolUse permit,
-Codex workers have no network in their sandbox); a terminal a window is
-showing asks that window before it moves; and `sudo` in a HUD terminal never
-caches (the startup file's `alias sudo='sudo -k'`, W-5), so an injected line
+(a script an agent wrote and got run, say) can send any Origin it likes,
+fetch a ticket, and attach to a terminal no window is showing. What limits
+it: an agent has to get that program run first (`curl`/`wget` never
+auto-run, Claude workers pass the PreToolUse permit, Codex workers have no
+network in their sandbox); a terminal a window is showing asks that window
+before it moves; **every attach publishes `terminal_attached`** on the bus
+(the terminal's id and the time, nothing else), so the HUD can say when a
+terminal was attached by something other than itself; and `sudo` in a HUD
+terminal never caches (`alias sudo='sudo -k'`, W-5), so an injected line
 cannot ride a `sudo` the owner just typed.
 
 **Lifecycle (W-3, plan decision 12).** The owner's login shell
-(`JARVIS_TERMINAL_SHELL`, an absolute path, overrides it), started through
-util-linux `setsid --ctty` so it leads its own session with the PTY as its
-controlling terminal — never `pty.fork()` in this threaded daemon. A clean
-environment, not the daemon's: nothing from `.env`, no `OPENROUTER_API_KEY`,
-`HF_HUB_OFFLINE`, `VIRTUAL_ENV` or venv `PATH`, no `ANTHROPIC_*`,
-`CLAUDE_*`, `CODEX_*` or `JARVIS_*`. At most six. Each keeps 1 MiB of output
-in memory, replayed when a window reattaches. Closing one sends SIGHUP to
-every process in its session (found in /proc, so background jobs are
-included), then SIGKILL. **Terminals end with the daemon** (`Daemon.stop`
-closes them all); there is no tmux.
+(`JARVIS_TERMINAL_SHELL`, an absolute path, overrides it; the realpath is
+what is checked and launched), started through util-linux `setsid --ctty`
+so it leads its own session with the PTY as its controlling terminal —
+never `pty.fork()` in this threaded daemon — with HUP, INT, QUIT, TERM and
+TSTP back at their defaults (`env --default-signal`), whatever the daemon
+inherited. A clean environment, not the daemon's: nothing from `.env`, no
+`OPENROUTER_API_KEY`, `HF_HUB_OFFLINE`, `VIRTUAL_ENV` or venv `PATH`, no
+`ANTHROPIC_*`, `CLAUDE_*`, `CODEX_*` or `JARVIS_*`. At most six. Each keeps
+1 MiB of output in memory, replayed when a window reattaches. Input goes
+through a bounded queue and a writer thread of its own, so a program that
+does not read its input never stalls the window's socket. Closing one sends
+SIGHUP to every process in its session (found in /proc, so background jobs
+are included), then SIGKILL; the session's leader is matched on its start
+time, so a session whose pid was reused is never signalled. **Terminals end
+with the daemon** (`Daemon.stop` closes them all); there is no tmux.
 
 **Output never leaves memory.** It exists in two places: this ring and the
-owner's browser. It never goes to the bus, a log (the daemon log gets
-lifecycle lines only: opened, attached, exited, closed, with the folder as a
-project name or `~`), a session or thread log, Discord, or disk.
+owner's browser. It never goes to the bus (the only record there is
+`terminal_attached`: ids and a time), a log (the daemon log gets lifecycle
+lines only: opened, attached, exited, closed, with the folder as a project
+name or `~`), a session or thread log, Discord, or disk.
 
-**Shell integration (W-2, item 3).** The startup file (`terminal_rc.bash`
-for bash, `terminal_rc.sh` as `$ENV` for any other shell) emits OSC 133
-marks carrying a per-terminal nonce; `Marks` turns them into
-`CommandSpan`s over the ring's byte offsets, so WP-F's `terminal_read` can
-refuse a read covering a secret-printing command's output. Only bash marks
-commands (C and D); `integrated` says whether this terminal has. `readable`
-is the owner's "Jarvis can read" switch, on by default; nothing reads it
-yet.
+**Shell integration (W-2, item 3).** bash reads `terminal_rc.bash` as its
+--rcfile; a POSIX `sh`-family shell (sh, dash, ash, ksh, mksh, …) reads
+`terminal_rc.sh` as `$ENV`; any other shell (zsh, fish, …) runs as a plain
+login shell with **no** startup file — no `sudo -k` and no marks — and the
+listing says so (`integration`). The startup file sets `sudo -k` and emits
+OSC 133 marks signed with a per-terminal nonce; `Marks` turns them into
+`CommandSpan`s over the ring's byte offsets for WP-F's `terminal_read`.
+The nonce lives only in the startup file's copy, which **deletes itself
+before anything else runs** (and `$ENV` is unset), and in an unexported
+shell variable that PS1 names rather than holds (an exported PS1 carries no
+nonce), so a program started in the terminal has no ordinary way to learn
+it. **Spans are advisory, never a
+boundary**: a program in the terminal still writes whatever bytes it likes
+between the marks; a nested shell, `sudo -i`, `ssh` or `python` puts
+everything under the outer command's span; a line kept out of history
+records only its first command. WP-F's text-pattern refusals must always
+apply, marks or no marks. `readable` is the owner's "Jarvis can read"
+switch, on by default; nothing reads it yet.
 """
 from __future__ import annotations
 
@@ -108,12 +127,18 @@ TAKEOVER_TIMEOUT_S = 20.0
 CLOSE_GRACE_S = 3.0
 STOP_GRACE_S = 1.0
 REPLAY_CHUNK = 32 * 1024
+INPUT_CAP = 256 * 1024         # queued input a program is not reading, before a paste is refused
 MARK_CAP = 16 * 1024           # an OSC 133 longer than this is not one of ours
 SPAN_CAP = 2000
 COMMAND_CAP = 4096
-# The startup files: bash's --rcfile, and $ENV for any other shell.
+CTRL_C = b"\x03"
+# The startup files: bash's --rcfile, and $ENV for a POSIX sh-family shell.
 RC_PATHS = {"bash": Path(__file__).with_name("terminal_rc.bash"),
             "posix": Path(__file__).with_name("terminal_rc.sh")}
+# Shells that read $ENV when interactive. busybox is what /bin/sh resolves to
+# on some systems.
+POSIX_SHELLS = frozenset({"sh", "dash", "ash", "ksh", "ksh93", "mksh", "posh", "yash", "busybox"})
+_RESET_SIGNALS = "HUP,INT,QUIT,TERM,TSTP"
 _ID = re.compile(r"[0-9a-f]{8}")
 
 # The environment a terminal starts from: names that pass, and names that
@@ -144,25 +169,72 @@ def _fail(status, text):
 # -- the shell and its environment --------------------------------------------------
 
 def resolve_shell() -> str:
-    """The owner's login shell, or `JARVIS_TERMINAL_SHELL`. An override must
-    be an absolute path (a relative one would be resolved in the terminal's
+    """The owner's login shell, or `JARVIS_TERMINAL_SHELL`, as the realpath
+    that is checked and launched (the Codex resolver's rule). An override
+    must be absolute (a relative one would be resolved in the terminal's
     folder), and nothing under /mnt/ is a Linux shell."""
     override = (config.TERMINAL_SHELL or "").strip()
     if override:
         if not os.path.isabs(override):
             raise TerminalError("JARVIS_TERMINAL_SHELL must be an absolute path")
-        path = override
+        given = override
     else:
         try:
-            path = pwd.getpwuid(os.getuid()).pw_shell
+            given = pwd.getpwuid(os.getuid()).pw_shell
         except KeyError:
-            path = ""
-        path = path or "/bin/bash"
-    if path.startswith("/mnt/"):
+            given = ""
+        given = given or "/bin/bash"
+    path = os.path.realpath(given)
+    if given.startswith("/mnt/") or path.startswith("/mnt/"):
         raise TerminalError("the terminal shell must be a Linux program, not one under /mnt/")
     if not (os.path.isfile(path) and os.access(path, os.X_OK)):
-        raise TerminalError(f"the terminal shell {path} is not an executable file")
+        raise TerminalError(f"the terminal shell {given} is not an executable file")
     return path
+
+
+def shell_kind(shell: str) -> str:
+    """"bash", "posix" (reads $ENV when interactive) or "none" (zsh, fish,
+    anything else: no startup file, so no `sudo -k` and no marks)."""
+    name = os.path.basename(shell)
+    if name == "bash":
+        return "bash"
+    return "posix" if name in POSIX_SHELLS else "none"
+
+
+def shell_command(shell: str, kind: str, rcfile: str | None) -> tuple[list[str], dict]:
+    """argv and extra environment. bash takes `terminal_rc.bash` as its
+    --rcfile and a POSIX shell starts interactive with `terminal_rc.sh` as
+    $ENV; each file reads the login files itself, after deleting itself. Any
+    other shell starts as a plain login shell."""
+    if kind == "bash":
+        return [shell, "--rcfile", rcfile, "-i"], {}
+    if kind == "posix":
+        return [shell, "-i"], {"ENV": rcfile}
+    return [shell, "-l"], {}
+
+
+_signal_reset: list[str] | None = None
+
+
+def signal_reset() -> list[str]:
+    """`env --default-signal=…` when this system's env has it (GNU coreutils
+    8.31+, uutils): a signal the daemon inherited as ignored would stay
+    ignored in the shell and every job, and a SIGHUP close would not land.
+    Probed once; without it the shell starts as it would have."""
+    global _signal_reset
+    if _signal_reset is None:
+        env = shutil.which("env", path="/usr/bin:/bin")
+        argv = [env, f"--default-signal={_RESET_SIGNALS}", "--"] if env else []
+        try:
+            ok = bool(argv) and subprocess.run([*argv, "true"], capture_output=True,
+                                               timeout=5).returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            ok = False
+        if not ok:
+            LOG.warning("env --default-signal is unavailable; terminal shells inherit the "
+                        "daemon's ignored signals")
+        _signal_reset = argv if ok else []
+    return _signal_reset
 
 
 def _dotenv_names(path: Path) -> set[str]:
@@ -235,40 +307,43 @@ def clean_environment(shell: str, *, source=None, env_file: Path | None = None) 
     return env
 
 
-def rc_kind(shell: str) -> str:
-    return "bash" if os.path.basename(shell) == "bash" else "posix"
+# -- sessions in /proc ---------------------------------------------------------------
 
-
-def shell_command(shell: str, rcfile: str) -> tuple[list[str], dict]:
-    """argv and extra environment. bash takes `terminal_rc.bash` as its
-    --rcfile (the file then reads the login files itself); any other shell
-    starts as a login shell and reads `terminal_rc.sh` as $ENV (POSIX)."""
-    if rc_kind(shell) == "bash":
-        return [shell, "--rcfile", rcfile, "-i"], {}
-    return [shell, "-l"], {"ENV": rcfile}
-
-
-def session_members(sid: int) -> list[int]:
-    """Every live process in session `sid`, background jobs included."""
-    members = []
+def _proc_pids() -> list[int]:
     try:
-        entries = os.listdir("/proc")
+        return [int(name) for name in os.listdir("/proc") if name.isdigit()]
     except OSError:
-        return members
-    for name in entries:
-        if not name.isdigit():
-            continue
-        try:
-            with open(f"/proc/{name}/stat", "rb") as handle:
-                stat = handle.read()
-        except OSError:
-            continue
-        fields = stat[stat.rfind(b")") + 2:].split()
-        try:
-            if int(fields[3]) == sid and fields[0] != b"Z":
-                members.append(int(name))
-        except (IndexError, ValueError):
-            continue
+        return []
+
+
+def _proc_stat(pid: int):
+    """(state, session id, start time) from /proc/<pid>/stat, or None."""
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as handle:
+            stat = handle.read()
+    except OSError:
+        return None
+    fields = stat[stat.rfind(b")") + 2:].split()
+    try:
+        return fields[0], int(fields[3]), int(fields[19])
+    except (IndexError, ValueError):
+        return None
+
+
+def session_members(sid: int, leader_start: int | None) -> list[int]:
+    """Every live process in session `sid`, background jobs included — but
+    nothing at all once the number `sid` belongs to another process (its
+    start time is not the one the shell had): a session id is only kept from
+    reuse while some member of the session lives, so after the last one is
+    gone a new, unrelated session could carry the same number."""
+    leader = _proc_stat(sid)
+    if leader is not None and leader_start is not None and leader[2] != leader_start:
+        return []
+    members = []
+    for pid in _proc_pids():
+        stat = _proc_stat(pid)
+        if stat is not None and stat[1] == sid and stat[0] != b"Z":
+            members.append(pid)
     return members
 
 
@@ -327,8 +402,11 @@ class Ring:
                 self._before = first[excess - 1:excess]
 
     def snapshot(self) -> tuple[int, bytes]:
-        """(offset, bytes) to replay. Once anything has been dropped, the
-        replay starts at a line boundary, never mid-line or mid-sequence."""
+        """(offset, bytes) to replay. Once anything has been dropped and the
+        cut did not fall just after a newline, the replay starts just after
+        the first newline in its first 64 KiB, so it does not begin
+        mid-line; with no newline there it starts at the cut. An escape
+        sequence that spans the cut, or that newline, can still be split."""
         data = b"".join(self._chunks)
         start = self.start
         if start > 0 and self._before != b"\n":
@@ -343,7 +421,8 @@ class Ring:
 class CommandSpan:
     """One command line and the output it produced, as absolute offsets into
     the terminal's output stream: `start` is the first byte after its C mark,
-    `end` the first byte of its D mark (None while it runs)."""
+    `end` the first byte of its D mark (None while it runs). Advisory: see
+    the module note."""
     command: str
     start: int
     end: int | None = None
@@ -354,7 +433,9 @@ class CommandSpan:
 class Marks:
     """Parses OSC 133 shell-integration marks out of the output stream, across
     chunk boundaries, and keeps the per-command spans. A mark without this
-    terminal's nonce is ignored, so a program's output cannot forge one."""
+    terminal's nonce is ignored. The nonce is kept from programs started in
+    the terminal (the module note says how), but a span is still only
+    advisory: a program can write any bytes between real marks."""
 
     PREFIX = b"\x1b]133;"
 
@@ -362,8 +443,11 @@ class Marks:
         self._nonce = nonce.encode()
         self._carry = b""
         self._offset = 0
-        self._prompt: int | None = None
-        self.spans: collections.deque[CommandSpan] = collections.deque(maxlen=SPAN_CAP)
+        self.prompt: int | None = None            # where the last signed prompt (A) began
+        self.spans: collections.deque[CommandSpan] = collections.deque()
+        # Bytes before this offset lost their spans to SPAN_CAP: read them as
+        # unattributed, whoever printed them.
+        self.spans_from = 0
         self.integrated = False
 
     def feed(self, data: bytes) -> None:
@@ -426,12 +510,16 @@ class Marks:
         if kind == b"A":
             if open_span is not None:           # a prompt with no D: it ended there
                 open_span.end = start
-            self._prompt = start
+            self.prompt = start
         elif kind == b"C":
             if open_span is not None:
                 open_span.end = start
             command = unquote_to_bytes(values.get(b"cmdline_url", b"")).decode("utf-8", "replace")
-            self.spans.append(CommandSpan(command[:COMMAND_CAP], start=end, prompt=self._prompt))
+            while len(self.spans) >= SPAN_CAP:
+                evicted = self.spans.popleft()
+                self.spans_from = max(self.spans_from,
+                                      evicted.end if evicted.end is not None else start)
+            self.spans.append(CommandSpan(command[:COMMAND_CAP], start=end, prompt=self.prompt))
             self.integrated = True              # output is attributed to commands from here on
         elif kind == b"D" and open_span is not None:
             open_span.end = start
@@ -446,15 +534,20 @@ class Marks:
 
 @dataclass(frozen=True)
 class History:
-    """What WP-F's `terminal_read` will read: the ring's bytes from `start`,
-    the command spans overlapping them, and whether this terminal's shell
-    emits marks at all (`integrated`; without them a read falls back to
-    matching command lines in the text, W-2)."""
+    """What WP-F's `terminal_read` will read: the ring's bytes from `start`
+    and the command spans overlapping them. Bytes before `spans_from` lost
+    their spans to the span cap and are unattributed. `integrated`: this
+    terminal has marked a command; without it a reader has text patterns
+    only. Spans are advisory either way (module note): the text-pattern
+    refusals apply to every read. `prompt` is where the last signed prompt
+    mark began, None if there was none."""
     start: int
     data: bytes
     spans: tuple
+    spans_from: int
     integrated: bool
     readable: bool
+    prompt: int | None = None
 
 
 # -- one terminal --------------------------------------------------------------------
@@ -469,12 +562,14 @@ class _Takeover:
 
 class Terminal:
     def __init__(self, tid: str, *, shell: str, folder: str, project_id: str | None,
-                 label: str, cols: int, rows: int, nonce: str, rcfile: Path):
+                 label: str, cols: int, rows: int, nonce: str, rcfile: Path | None,
+                 integration: str = "none"):
         self.id = tid
         self.shell = shell
         self.folder = folder
         self.project_id = project_id
         self.label = label
+        self.integration = integration
         self.title = f"{os.path.basename(shell)} · {label}"
         self.created = utcnow()
         self.cols, self.rows = cols, rows
@@ -489,10 +584,20 @@ class Terminal:
         self._attachment: ws.WebSocket | None = None
         self._takeover: _Takeover | None = None
         self._closing = False
+        self._finished = False
         self._master: int | None = None
         self._proc: subprocess.Popen | None = None
+        self._start_time: int | None = None     # the shell's, from /proc: guards pid reuse
+        self._session_gone = False              # seen empty once: never signalled again
         self._wake_r, self._wake_w = os.pipe()
         self._reader: threading.Thread | None = None
+        # Input: queued by the window's socket, written by a thread of its own.
+        self._inbox: collections.deque[bytes] = collections.deque()
+        self._in_bytes = 0
+        self._in_flight = 0
+        self._in_gen = 0
+        self._in_cond = threading.Condition()
+        self._writer: threading.Thread | None = None
 
     # -- spawning ---------------------------------------------------------------------
 
@@ -509,20 +614,26 @@ class Terminal:
                 termios.tcsetattr(slave, termios.TCSANOW, attrs)
             # setsid --ctty: a new session led by the shell, with this PTY as
             # its controlling terminal. The child is never a process-group
-            # leader here, so setsid does not fork and the pid is the shell's.
-            self._proc = subprocess.Popen([setsid, "--ctty", "--", *argv], stdin=slave,
-                                          stdout=slave, stderr=slave, cwd=self.folder,
-                                          env=env, close_fds=True)
+            # leader here, so setsid does not fork, and `env` execs in place:
+            # the pid is the shell's.
+            self._proc = subprocess.Popen([setsid, "--ctty", "--", *signal_reset(), *argv],
+                                          stdin=slave, stdout=slave, stderr=slave,
+                                          cwd=self.folder, env=env, close_fds=True)
         except BaseException:
             os.close(master)
             raise
         finally:
             os.close(slave)
+        stat = _proc_stat(self._proc.pid)       # unreaped, so still ours to read
+        self._start_time = stat[2] if stat is not None else None
         os.set_blocking(master, False)
         self._master = master
         self._reader = threading.Thread(target=self._read_loop, name=f"jarvis-terminal-{self.id}",
                                         daemon=True)
+        self._writer = threading.Thread(target=self._input_loop,
+                                        name=f"jarvis-terminal-in-{self.id}", daemon=True)
         self._reader.start()
+        self._writer.start()
 
     # -- output ---------------------------------------------------------------------
 
@@ -584,11 +695,48 @@ class Terminal:
 
     # -- input and size ------------------------------------------------------------
 
-    def write_input(self, data: bytes, alive) -> None:
-        """Owner keystrokes and pastes into the PTY. Never blocks for good on a
-        program that is not reading: it waits in slices while `alive()`."""
+    def queue_input(self, data: bytes) -> bool:
+        """Owner keystrokes and pastes, for the writer thread. Never blocks:
+        False (the paste is dropped, and the window is told) when more than
+        INPUT_CAP is already waiting on a program that is not reading. A
+        lone Ctrl-C throws away what is still queued and goes next."""
+        with self._in_cond:
+            if self._closing:
+                return False
+            if data == CTRL_C and (self._inbox or self._in_flight):
+                self._inbox.clear()
+                self._in_gen += 1              # the writer abandons the chunk in hand
+                self._in_bytes = self._in_flight
+            if self._in_bytes + len(data) > INPUT_CAP:
+                return False
+            self._inbox.append(data)
+            self._in_bytes += len(data)
+            self._in_cond.notify()
+        return True
+
+    def _input_loop(self) -> None:
+        while True:
+            with self._in_cond:
+                while not self._inbox and not self._closing:
+                    self._in_cond.wait()
+                if self._closing:
+                    return
+                data = self._inbox.popleft()
+                generation = self._in_gen
+                self._in_flight = len(data)
+            try:
+                self._write(data, lambda: self._in_gen == generation and not self._closing)
+            finally:
+                with self._in_cond:
+                    if self._in_gen == generation:
+                        self._in_bytes -= len(data)
+                    else:
+                        self._in_bytes = max(0, self._in_bytes - self._in_flight)
+                    self._in_flight = 0
+
+    def _write(self, data: bytes, keep) -> None:
         view = memoryview(data)
-        while view and alive():
+        while view and keep():
             with self._io_lock:
                 if self._master is None or self._closing:
                     return
@@ -629,7 +777,8 @@ class Terminal:
                 "cols": self.cols, "rows": self.rows,
                 "shown": self._attachment is not None, "exited": self.exited,
                 "exit_code": self.exit_code, "readable": self.readable,
-                "busy": self.busy(), "integrated": self._marks.integrated}
+                "busy": self.busy(), "integration": self.integration,
+                "integrated": self._marks.integrated}
 
     def history(self) -> History:
         """The ring and its command spans, for WP-F. No route reaches this."""
@@ -637,7 +786,8 @@ class Terminal:
             start, data = self._ring.snapshot()
             spans = tuple(replace(s) for s in self._marks.spans
                           if s.end is None or s.end > start)
-            return History(start, data, spans, self._marks.integrated, self.readable)
+            return History(start, data, spans, self._marks.spans_from, self._marks.integrated,
+                           self.readable, self._marks.prompt)
 
     # -- windows ---------------------------------------------------------------------
 
@@ -737,6 +887,8 @@ class Terminal:
             self._closing = True
             attached, self._attachment = self._attachment, None
             request = self._takeover
+        with self._in_cond:
+            self._in_cond.notify_all()
         if request is not None:
             request.event.set()
         if attached is not None:
@@ -751,12 +903,16 @@ class Terminal:
                     pass
 
     def _members(self) -> list[int]:
+        """The session's live processes. Once it has been seen empty it stays
+        empty: nothing is signalled after that, whoever has the number now."""
         proc = self._proc
-        if proc is None:
+        if proc is None or self._session_gone:
             return []
-        members = set(session_members(proc.pid))
+        members = set(session_members(proc.pid, self._start_time))
         if proc.poll() is None:
             members.add(proc.pid)
+        if not members:
+            self._session_gone = True
         return sorted(members)
 
     def alive(self) -> bool:
@@ -764,7 +920,14 @@ class Terminal:
 
     def finish(self) -> None:
         """SIGKILL whatever outlived the hangup, reap the shell, stop the
-        reader and release the PTY."""
+        threads and release the PTY. Runs once."""
+        with self._lock:
+            if self._finished:
+                return
+            self._finished = True
+            self._closing = True
+        with self._in_cond:
+            self._in_cond.notify_all()
         for pid in self._members():
             try:
                 os.kill(pid, signal.SIGKILL)
@@ -779,8 +942,9 @@ class Terminal:
             os.write(self._wake_w, b"x")
         except OSError:
             pass
-        if self._reader is not None and self._reader is not threading.current_thread():
-            self._reader.join(1.0)
+        for thread in (self._reader, self._writer):
+            if thread is not None and thread is not threading.current_thread():
+                thread.join(1.0)
         with self._io_lock:
             if self._master is not None:
                 os.close(self._master)
@@ -790,10 +954,11 @@ class Terminal:
                 os.close(fd)
             except OSError:
                 pass
-        try:
-            self._rcfile.unlink()
-        except OSError:
-            pass
+        if self._rcfile is not None:
+            try:
+                self._rcfile.unlink()           # already gone if the shell read it
+            except OSError:
+                pass
         if not self.exited and self._proc is not None and self._proc.returncode is not None:
             code = self._proc.returncode
             self.exited, self.exit_code = True, code if code >= 0 else 128 - code
@@ -806,20 +971,25 @@ def _size_ok(cols, rows) -> bool:
 # -- every terminal ------------------------------------------------------------------
 
 class Terminals:
-    """The daemon's terminals, their tickets, and the attach sessions."""
+    """The daemon's terminals, their tickets, and the attach sessions.
 
-    def __init__(self, *, clock=time.monotonic):
+    `publish` is the daemon bus's: the only record it is ever handed is
+    `terminal_attached` with the terminal's id and the time."""
+
+    def __init__(self, *, clock=time.monotonic, publish=None):
         self._lock = threading.Lock()
         self._terminals: dict[str, Terminal] = {}
         self._tickets: dict[str, tuple[str, float]] = {}
         self._clock = clock
+        self._publish = publish
         self._rc_text: dict[str, str] = {}
         self._rc_dir: Path | None = None
         self._stopped = False
 
     def _rcfile(self, tid: str, nonce: str, kind: str) -> Path:
         """This terminal's private copy of its startup file, with its nonce.
-        Each shipped file is read once per daemon, like the code beside it."""
+        The shell deletes it as its first act. Each shipped file is read once
+        per daemon, like the code beside it."""
         if kind not in self._rc_text:
             self._rc_text[kind] = RC_PATHS[kind].read_text(encoding="utf-8")
         if self._rc_dir is None:
@@ -835,6 +1005,7 @@ class Terminals:
         if not _size_ok(cols, rows):
             raise ValueError("cols must be 2-1000 and rows 1-500")
         shell = resolve_shell()
+        kind = shell_kind(shell)
         with self._lock:
             if self._stopped:
                 raise TerminalError("Jarvis is stopping")
@@ -844,10 +1015,11 @@ class Terminals:
             while tid in self._terminals:
                 tid = secrets.token_hex(4)
             nonce = secrets.token_hex(16)
-            rcfile = self._rcfile(tid, nonce, rc_kind(shell))
+            rcfile = self._rcfile(tid, nonce, kind) if kind != "none" else None
             terminal = Terminal(tid, shell=shell, folder=folder, project_id=project_id,
-                                label=label, cols=cols, rows=rows, nonce=nonce, rcfile=rcfile)
-            argv, extra = shell_command(shell, str(rcfile))
+                                label=label, cols=cols, rows=rows, nonce=nonce, rcfile=rcfile,
+                                integration=kind)
+            argv, extra = shell_command(shell, kind, str(rcfile) if rcfile else None)
             env = clean_environment(shell)
             env.update(extra)
             try:
@@ -901,6 +1073,17 @@ class Terminals:
 
     # -- an attach session (the HTTP handler's thread) -----------------------------
 
+    def _attached(self, terminal: Terminal) -> None:
+        """`terminal_attached`, so the HUD can tell an attach that was not its
+        own. The id and the time: never output, a command or a ticket."""
+        if self._publish is None:
+            return
+        try:
+            self._publish({"kind": "terminal_attached",
+                           "data": {"terminal_id": terminal.id, "at": utcnow()}})
+        except Exception as exc:  # noqa: BLE001 — a bus problem never ends a session
+            LOG.warning("terminal %s: attach not published (%s)", terminal.id, type(exc).__name__)
+
     def serve(self, terminal: Terminal, sock) -> None:
         try:
             refused = terminal.attach(sock, TAKEOVER_TIMEOUT_S)
@@ -908,7 +1091,7 @@ class Terminals:
                 sock.send_text(json.dumps({"type": "refused", "reason": refused}))
                 sock.close(ws.POLICY, "refused")
                 return
-            alive = lambda: not sock.closed.is_set() and terminal.holds(sock)  # noqa: E731
+            self._attached(terminal)
             while True:
                 message = sock.receive()
                 if message is None:
@@ -917,7 +1100,11 @@ class Terminals:
                 if not terminal.holds(sock):
                     break
                 if kind == ws.BINARY:
-                    terminal.write_input(data, alive)
+                    if not terminal.queue_input(data):
+                        sock.send_text(json.dumps({
+                            "type": "input_dropped", "bytes": len(data),
+                            "reason": "the program in this terminal is not reading its input; "
+                                      "this input was dropped"}))
                 else:
                     terminal.control(sock, data)
         except Exception as exc:
@@ -931,9 +1118,11 @@ class Terminals:
     # -- closing ---------------------------------------------------------------------
 
     def close(self, tid: str, grace: float | None = None) -> dict:
-        terminal = self.get(tid)
+        self.get(tid)                           # 400 / 404 in words
         with self._lock:
-            self._terminals.pop(tid, None)
+            terminal = self._terminals.pop(tid, None)
+        if terminal is None:                    # another DELETE got here first
+            _fail(404, f"terminal {tid} not found")
         terminal.hangup("closed")
         until = time.monotonic() + (CLOSE_GRACE_S if grace is None else grace)
         while terminal.alive() and time.monotonic() < until:

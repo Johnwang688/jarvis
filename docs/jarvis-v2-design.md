@@ -1770,16 +1770,29 @@ needs a single-use 30-second ticket bound to one terminal, and moving a
 terminal to another window asks the window that shows it (refused after
 20 s). That is stricter than `/approvals`, which accepts a local client that
 sends no Origin, and it is still not a boundary against a program running as
-the owner, which can forge an Origin and fetch a ticket — the takeover
-question and `sudo -k` are what limit such a program. Output exists in the
-ring and the browser only: never on the bus, in a log, a thread log,
-Discord or disk. The startup file (`terminal_rc.bash`; a POSIX
-`terminal_rc.sh` for any other shell, which marks only the prompt) reads the
-login files, sets `alias sudo='sudo -k'`, and emits OSC 133 marks signed
-with a per-terminal nonce, which the daemon turns into per-command spans
-over the ring — what WP-F's `terminal_read` needs to refuse the output of
-`env`, `gh auth token` and the rest (W-2, item 3). Each terminal carries the
-owner's `readable` switch, on by default. Contract: `docs/hud-api.md`.
+the owner, which can forge an Origin, fetch a ticket and attach to a
+terminal no window shows. Three things limit such a program: the takeover
+question, `sudo -k`, and a `terminal_attached` bus record on every attach
+(the terminal's id and the time, nothing else), so the HUD can say when an
+attach was not its own. Output exists in the ring and the browser only:
+never on the bus (lifecycle ids only), in a log, a thread log, Discord or
+disk. Input goes through a bounded queue and a writer thread per terminal,
+so a program that never reads cannot stall the socket. A closed session is
+matched on its leader's start time, so a reused pid is never signalled. The
+startup file (`terminal_rc.bash` for bash; the POSIX `terminal_rc.sh` as
+`$ENV` for an `sh`-family shell, which marks only the prompt; nothing for
+zsh, fish and the like, which the listing reports as `integration: "none"`)
+deletes itself before anything else runs, reads the login files, sets
+`alias sudo='sudo -k'`, and emits OSC 133 marks signed with a per-terminal
+nonce that no child process can find. The daemon turns them into
+per-command spans over the ring for WP-F's `terminal_read`. **The spans are
+advisory, not a boundary**: a program can print any bytes between real
+marks, a nested shell, `sudo -i`, `ssh` or `python` puts everything under
+the outer span, and a line kept out of history records only its first
+command — so WP-F's text-pattern refusals of `env`, `gh auth token` and the
+rest (W-2, item 3) must apply to **every** read, not only when no marks
+were seen. Each terminal carries the owner's `readable` switch, on by
+default. Contract: `docs/hud-api.md`.
 
 Remaining: WP13 (the long-bench comparison, the owner's call on cost), a
 native Windows worker, the R8 hook on Codex, and prompt tuning in

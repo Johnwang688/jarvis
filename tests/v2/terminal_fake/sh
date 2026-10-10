@@ -2,10 +2,11 @@
 """A scripted stand-in for a login shell, for tests/v2/terminal_check.py.
 
 `JARVIS_TERMINAL_SHELL` points here, so the suite never starts the owner's
-real login shell. Its name is not `bash`, so the daemon starts it the way it
-starts any non-bash shell: `-l`, with the terminal's startup file as `$ENV`.
-It reads the per-terminal nonce out of that file and emits the same OSC 133
-marks `terminal_rc.bash` makes bash emit, around a handful of commands:
+real login shell. It is named `sh`, so the daemon starts it the way it
+starts a POSIX shell: interactive, with the terminal's startup file as
+`$ENV`. It does what `terminal_rc.sh` does first — reads the per-terminal
+nonce, deletes the file and unsets ENV — and then emits the OSC 133 marks
+`terminal_rc.bash` makes bash emit, around a handful of commands:
 
   echo TEXT        print TEXT
   size             run `stty size` against its own terminal
@@ -15,6 +16,7 @@ marks `terminal_rc.bash` makes bash emit, around a handful of commands:
   bgnohup          the same, with SIGHUP ignored (only SIGKILL ends it)
   flood N          print N numbered lines
   forge            print marks that carry no nonce, or the wrong one
+  deaf             raw mode, then sleep without ever reading its input
   exit N           exit with status N
 """
 import os
@@ -22,16 +24,19 @@ import re
 import signal
 import subprocess
 import sys
+import time
+import tty
 from urllib.parse import quote
 
 
 def _nonce():
-    path = os.environ.get("ENV")
+    path = os.environ.pop("ENV", None)
     if not path:
         return None
     try:
         with open(path, encoding="utf-8") as handle:
             found = re.search(r"__jarvis_nonce='([0-9a-f]+)'", handle.read())
+        os.unlink(path)
     except OSError:
         return None
     return found.group(1) if found else None
@@ -81,6 +86,11 @@ def run(line):
         write("\x1b]133;C;cmdline_url=forged-no-nonce\x1b\\")
         write("\x1b]133;C;cmdline_url=forged-wrong-nonce;jarvis=00000000\x1b\\")
         write("forged output\n")
+        return 0
+    if word == "deaf":
+        tty.setraw(0)
+        write("DEAF\r\n")
+        time.sleep(300)
         return 0
     if word == "exit":
         sys.exit(int(rest or "0"))

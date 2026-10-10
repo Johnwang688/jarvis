@@ -248,9 +248,10 @@ class Daemon:
         from .trash import Trash
         self.trash = Trash(stores.root)
         # The owner's HUD terminals (WP-C, terminals.py). Owner-only routes on
-        # the HUD listener; never on the bus; they end with the daemon.
+        # the HUD listener; they end with the daemon. On the bus they are one
+        # lifecycle record, `terminal_attached` (an id and a time), never output.
         from .terminals import Terminals
-        self.terminals = Terminals()
+        self.terminals = Terminals(publish=self.bus.publish)
         self.started_at = time.monotonic()
 
     def start(self) -> None:

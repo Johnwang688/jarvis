@@ -141,6 +141,28 @@ class _ProtocolError(Exception):
         self.reason = reason
 
 
+# Codes that must never appear in a close frame on the wire (RFC 6455 §7.4.1).
+_NOT_ON_THE_WIRE = frozenset({1004, 1005, 1006, 1015})
+
+
+def _close_code(payload: bytes) -> int | None:
+    """The code of a close frame the peer sent, None when it carried none;
+    a protocol error for a one-byte body, a code that may not be sent (1005,
+    1006, 1015, reserved or out of range) or a reason that is not UTF-8."""
+    if not payload:
+        return None
+    if len(payload) == 1:
+        raise _ProtocolError(PROTOCOL_ERROR, "bad close frame")
+    code = struct.unpack("!H", payload[:2])[0]
+    if not ((1000 <= code <= 1014 and code not in _NOT_ON_THE_WIRE) or 3000 <= code <= 4999):
+        raise _ProtocolError(PROTOCOL_ERROR, "invalid close code")
+    try:
+        payload[2:].decode("utf-8")
+    except UnicodeDecodeError:
+        raise _ProtocolError(BAD_DATA, "close reason is not UTF-8") from None
+    return code
+
+
 class WebSocket:
     """One server-side connection. `receive()` runs on the caller's thread
     (the HTTP handler's); `send_*` and `close` may be called from any thread
@@ -159,7 +181,8 @@ class WebSocket:
         self._clock = clock
         self._queue: queue.Queue = queue.Queue()
         self._pending = 0
-        self._pending_lock = threading.Lock()
+        # "Is our close queued?" and the put, as one step; also guards _pending.
+        self._send_lock = threading.Lock()
         self._heard = clock()
         self._pinged = clock()
         self.closed = threading.Event()        # no more frames will be read or written
@@ -184,29 +207,40 @@ class WebSocket:
     def _enqueue(self, opcode: int, payload: bytes) -> bool:
         """Queue a data frame. False when the socket is closing, or when it is
         so far behind that it is dropped here (the window reattaches)."""
-        if self.closed.is_set() or self._close_queued:
-            return False
-        with self._pending_lock:
-            if self._pending + len(payload) > self.max_pending:
-                slow = True
-            else:
-                slow = False
+        with self._send_lock:
+            if self.closed.is_set() or self._close_queued:
+                return False
+            slow = self._pending + len(payload) > self.max_pending
+            if not slow:
                 self._pending += len(payload)
+                self._queue.put((opcode, payload))
         if slow:
             LOG.info("WebSocket dropped: the browser fell too far behind")
             self.abort()
             return False
-        self._queue.put((opcode, payload))
         return True
 
-    def close(self, code: int = NORMAL, reason: str = "") -> None:
-        """Send a close frame after what is already queued, then drop the
-        socket once the browser answers or CLOSE_WAIT_S passes."""
-        if self.closed.is_set() or self._close_queued:
-            return
-        self._close_queued = True
-        self.close_code, self.close_reason = code, reason
-        self._queue.put((CLOSE, struct.pack("!H", code) + reason.encode("utf-8")[:120]))
+    def _put(self, opcode: int, payload: bytes) -> bool:
+        """Queue a control frame, unless our close is already queued: nothing
+        follows a close frame. The check and the put are one step."""
+        with self._send_lock:
+            if self.closed.is_set() or self._close_queued:
+                return False
+            self._queue.put((opcode, payload))
+            return True
+
+    def close(self, code: int | None = NORMAL, reason: str = "") -> None:
+        """Send a close frame after what is already queued (with no body when
+        `code` is None, the answer to a close that carried none), then drop
+        the socket once the browser answers or CLOSE_WAIT_S passes."""
+        with self._send_lock:
+            if self.closed.is_set() or self._close_queued:
+                return
+            self._close_queued = True
+            self.close_code, self.close_reason = code, reason
+            body = b"" if code is None else (struct.pack("!H", code)
+                                             + reason.encode("utf-8")[:120])
+            self._queue.put((CLOSE, body))
 
     def abort(self) -> None:
         """Drop the connection now, unblocking both threads."""
@@ -235,9 +269,11 @@ class WebSocket:
                 if item is None or self.closed.is_set():
                     continue
                 opcode, payload = item
+                if self._close_sent_at is not None:
+                    continue                    # nothing is ever sent after our close
                 self._send_all(encode_frame(opcode, payload))
                 if opcode in _DATA:
-                    with self._pending_lock:
+                    with self._send_lock:
                         self._pending -= len(payload)
                 if opcode == CLOSE:
                     self._close_sent_at = self._clock()
@@ -357,16 +393,15 @@ class WebSocket:
                     return None
                 fin, opcode, payload = frame
                 if opcode == PING:
-                    self._queue.put((PONG, payload))
+                    self._put(PONG, payload)            # nothing once our close is queued
                     continue
                 if opcode == PONG:
                     continue
                 if opcode == CLOSE:
                     self._peer_closed = True
-                    if len(payload) == 1:
-                        raise _ProtocolError(PROTOCOL_ERROR, "bad close frame")
+                    code = _close_code(payload)         # raises on a bad one
                     if not self._close_queued:
-                        self.close(struct.unpack("!H", payload[:2])[0] if payload else NORMAL)
+                        self.close(code)                # echo it; an empty close, empty
                     elif self._close_sent_at is not None:
                         self.abort()
                     return None
