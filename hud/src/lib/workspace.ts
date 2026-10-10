@@ -31,8 +31,10 @@ import { MAIN_MIN, fitLayout, type Fitted, type PaneLayout, type Side } from "./
 export const WORKSPACE_KEY = "jarvis.hud.workspace";
 
 export type View = "chat" | "task" | "file" | "diff" | "preview" | "terminal";
-/** What a pane offers in this release. The terminal view arrives with WP-D. */
-export const PANE_VIEWS: readonly View[] = ["chat", "task", "file", "diff", "preview"];
+/** What a pane offers. The terminal view (WP-D) shows one of the owner's
+ * terminals, chosen per pane (`terminalId`); one terminal is drawn in one
+ * place at a time (lib/terminal.ts, `placeTerminals`). */
+export const PANE_VIEWS: readonly View[] = ["chat", "task", "file", "diff", "preview", "terminal"];
 
 export type Preset = "single" | "cols2" | "rows2" | "cols3" | "main2" | "grid4";
 export const PRESETS: readonly Preset[] = ["single", "cols2", "rows2", "cols3", "main2", "grid4"];
@@ -79,7 +81,7 @@ export interface PaneSpec {
   view: View;
   /** File and Preview panes: the project they are pinned to, or null to follow the chat. */
   projectId: string | null;
-  /** WP-D: the terminal a terminal pane shows. */
+  /** The terminal a terminal pane shows (WP-D), or null to choose one. */
   terminalId: string | null;
   /** Preview: the URL last loaded here, judged again before it is loaded again. */
   previewUrl?: string;
@@ -315,6 +317,28 @@ export function unpinProject(ws: Workspace, projectId: string, keep: readonly Pa
   const hit = (p: PaneSpec, i: number) => p.projectId === projectId && !keep.includes((i + 1) as PaneNo);
   if (!ws.panes.some(hit)) return ws;
   return { ...ws, panes: ws.panes.map((p, i) => (hit(p, i) ? { ...p, projectId: null } : p)) as Panes };
+}
+
+/**
+ * Show terminal `id` in `pane` (null: the pane chooses again). A terminal is
+ * drawn in one place at a time, so any *other* pane holding it lets it go —
+ * its view stays "terminal" and it offers the choice again.
+ */
+export function setPaneTerminal(ws: Workspace, pane: PaneNo, id: string | null): Workspace {
+  const here = ws.panes[pane - 1];
+  const elsewhere = id !== null && ws.panes.some((p, i) => i !== pane - 1 && p.terminalId === id);
+  if (here.terminalId === id && !elsewhere) return ws;
+  const panes = ws.panes.map((p, i) => {
+    if (i === pane - 1) return { ...p, terminalId: id };
+    return id !== null && p.terminalId === id ? { ...p, terminalId: null } : p;
+  }) as Panes;
+  return { ...ws, panes };
+}
+
+/** A terminal was closed or ended: no pane holds it any more. */
+export function forgetTerminal(ws: Workspace, id: string): Workspace {
+  if (!ws.panes.some((p) => p.terminalId === id)) return ws;
+  return { ...ws, panes: ws.panes.map((p) => (p.terminalId === id ? { ...p, terminalId: null } : p)) as Panes };
 }
 
 export function setPreviewUrl(ws: Workspace, pane: PaneNo, url: string): Workspace {

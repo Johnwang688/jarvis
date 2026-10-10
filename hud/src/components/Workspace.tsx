@@ -14,14 +14,49 @@
 // context, the compact view menu) is drawn only when there is more than one
 // pane, so the default window renders as it did.
 
-import { useRef, type ReactNode } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 import { keyStep } from "../lib/layout";
 import {
   PANEL, PANE_MIN_H, PANE_MIN_W, PANE_VIEWS, SHAPES, columnWidths, maxPanelHeight, moveColEdge,
   type PaneNo, type PaneSpec, type View,
 } from "../lib/workspace";
+import { placeTerminals, type InSpec } from "../lib/terminal";
+import type { Project } from "../types";
 import { Separator, type LayoutControl } from "./Layout";
 import { Panel } from "./Panel";
+import { TerminalPane, TerminalToasts, terminals, useTerminals } from "./Terminal";
+
+/**
+ * The terminals' view of the workspace (WP-D), handed over after each render:
+ * which drawn pane shows which terminal, whether a card is up (input held),
+ * the zoom (the terminal's font follows it), whether the panel is open, and
+ * how to put a terminal in a pane or the panel.
+ */
+function useTerminalBridge(v: LayoutControl, blocked: boolean, place: Map<string, number>,
+                           terminalIn?: () => InSpec) {
+  const latest = useRef({ v, terminalIn });
+  latest.current = { v, terminalIn };
+  useEffect(() => {
+    terminals.defaultIn = () => latest.current.terminalIn?.() ?? "home";
+    terminals.setPaneTerminal = (pane, id) => latest.current.v.setTerminal(pane, id);
+    terminals.forgetTerminal = (id) => latest.current.v.forgetTerminal(id);
+    terminals.focusPane = (pane) => {
+      latest.current.v.focus(pane);
+      requestAnimationFrame(() =>
+        document.querySelector<HTMLElement>(`[data-testid="pane-${pane}"]`)?.focus({ preventScroll: true }));
+    };
+    terminals.showPanel = () => {
+      if (!latest.current.v.fit.panel.open) latest.current.v.togglePanel();
+    };
+    void terminals.refresh();
+  }, []);
+  const key = [...place].map(([id, n]) => `${id}:${n}`).join(",");
+  useEffect(() => terminals.setBlocked(blocked), [blocked]);
+  useEffect(() => terminals.setZoom(v.zoom), [v.zoom]);
+  useEffect(() => terminals.setPanelOpen(v.fit.panel.open), [v.fit.panel.open]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => terminals.setPlace(place), [key]);
+}
 
 /** Under this, a split pane's File and Diff views hide their tree behind a toggle. */
 export const NARROW_W = 560;
@@ -61,10 +96,25 @@ export function Workspace(props: {
   extras: (spec: PaneSpec, info: PaneInfo) => ReactNode;
   /** The pane's context in a split: the thread title, the file path, the URL. */
   context: (spec: PaneSpec, info: PaneInfo) => string;
+  /** Where `+` opens a terminal: the focused pane's folder, as an id (lib/terminal.ts, terminalSpecFor). */
+  terminalIn?: () => InSpec;
+  /** `+ ▾`'s choices besides Home. */
+  projects?: Project[];
 }) {
   const v = props.view;
   const { fit, ws } = v;
   const grid = useRef<HTMLDivElement>(null);
+  // One terminal is drawn in one place at a time (W-1): the first drawn pane
+  // holding it, else the panel.
+  const place = placeTerminals(ws.panes, fit.panes);
+  useTerminalBridge(v, props.blocked, place, props.terminalIn);
+  const mgr = useTerminals();
+  /** A terminal pane's header: the title its program set (text, capped), else its own. */
+  const terminalContext = (spec: PaneSpec) => {
+    const id = spec.terminalId;
+    if (!id) return "terminal";
+    return mgr.sessions.get(id)?.title || mgr.row(id)?.title || `terminal ${id}`;
+  };
   // Every pane any render has drawn stays mounted (hidden when not drawn).
   const ever = useRef<Set<PaneNo>>(new Set<PaneNo>([1]));
   for (const n of fit.panes) ever.current.add(n);
@@ -113,7 +163,7 @@ export function Workspace(props: {
         {([1, 2, 3, 4] as PaneNo[]).filter((n) => ever.current.has(n)).map((n) => {
           const spec = ws.panes[n - 1];
           const at = info(n);
-          const ctx = at.split ? props.context(spec, at) : "";
+          const ctx = at.split ? (spec.view === "terminal" ? terminalContext(spec) : props.context(spec, at)) : "";
           return (
             <section
               key={n}
@@ -160,7 +210,11 @@ export function Workspace(props: {
                 {ctx ? <span className="panectx" title={ctx}>{ctx}</span> : null}
                 <div className="paneextras">{props.extras(spec, at)}</div>
               </div>
-              {props.render(spec, at)}
+              {spec.view === "terminal" ? (
+                <TerminalPane pane={n} terminalId={spec.terminalId} drawn={at.drawn} />
+              ) : (
+                props.render(spec, at)
+              )}
             </section>
           );
         })}
@@ -256,7 +310,9 @@ export function Workspace(props: {
           onReset={v.resetPanelHeight}
         />
       ) : null}
-      <Panel open={fit.panel.open} height={fit.panel.height} blocked={props.blocked} onHide={v.togglePanel} />
+      <Panel open={fit.panel.open} height={fit.panel.height} blocked={props.blocked} zoom={v.zoom}
+             projects={props.projects ?? []} onHide={v.togglePanel} />
+      <TerminalToasts blocked={props.blocked} />
     </>
   );
 }

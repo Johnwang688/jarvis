@@ -33,6 +33,10 @@ try:  # rename, edit, archive, restore, delete (decisions part B)
     from tests.face import hud_v2_mock_projects as mock_projects
 except ImportError:  # run as a script from tests/face
     import hud_v2_mock_projects as mock_projects  # type: ignore[no-redef]
+try:  # the terminals' HTTP routes (WP-C/WP-D); the socket is the test's fake PTY
+    from tests.face import hud_v2_mock_terminals as mock_terminals
+except ImportError:
+    import hud_v2_mock_terminals as mock_terminals  # type: ignore[no-redef]
 
 # A hostile avatar, checked for what it does rather than what it says: the art
 # is drawn in the window that gates approvals, so an `onload` in it must never
@@ -549,6 +553,8 @@ class MockDaemon:
                 w = mock.world
                 if mock_projects.handle(self, mock, "GET", path, {}):
                     return
+                if mock_terminals.handle(self, mock, "GET", path, {}):
+                    return
 
                 if path == "/events":
                     self.send_response(200)
@@ -716,6 +722,8 @@ class MockDaemon:
                 body = self._body()
                 self._record("POST", path, body)
                 if mock_projects.handle(self, mock, "POST", path, body):
+                    return
+                if mock_terminals.handle(self, mock, "POST", path, body):
                     return
 
                 if path == "/projects":
@@ -900,6 +908,8 @@ class MockDaemon:
                 body = self._body()
                 path = urlparse(self.path).path
                 self._record("PATCH", path, body)
+                if mock_terminals.handle(self, mock, "PATCH", path, body):
+                    return
                 parts = [p for p in path.split("/") if p]
                 if len(parts) == 2 and parts[0] == "threads" and isinstance(body, dict):
                     # The daemon's rule: rename, move and model change are
@@ -1004,6 +1014,8 @@ class MockDaemon:
                 path = urlparse(self.path).path
                 self._record("DELETE", path, {})
                 if mock_projects.handle(self, mock, "DELETE", path, {}):
+                    return
+                if mock_terminals.handle(self, mock, "DELETE", path, {}):
                     return
                 parts = [p for p in path.split("/") if p]
                 w = mock.world

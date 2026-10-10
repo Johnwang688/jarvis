@@ -33,6 +33,8 @@ import { afterProjectGone, afterThreadGone, forgetLastProject, projectNamesTaken
 import { guildConfigured, ownerLine } from "./lib/discord";
 import { CollapseButton, Rail, Splitter, TitleBar, useLayout } from "./components/Layout";
 import { Workspace, type PaneInfo } from "./components/Workspace";
+import { terminalAttached } from "./components/Terminal";
+import { terminalSpecFor } from "./lib/terminal";
 import { maxWidth } from "./lib/layout";
 import { SHAPES, type PaneNo, type PaneSpec } from "./lib/workspace";
 import { ActivitySync, clearsOnRead } from "./lib/activity";
@@ -602,6 +604,11 @@ export default function App() {
           break;
         case "_connected":
           void refreshActivity();
+          break;
+        case "terminal_attached":
+          // `{terminal_id, at}` only: the terminals say so when it was not
+          // this window's own attach (components/Terminal.tsx).
+          terminalAttached(data);
           break;
         default:
           break;
@@ -1463,7 +1470,17 @@ export default function App() {
         )}
 
         <div className="pane" id="main">
-          <Workspace view={view} blocked={blocked} render={renderView} extras={paneExtras} context={paneContext} />
+          <Workspace view={view} blocked={blocked} render={renderView} extras={paneExtras} context={paneContext}
+                     projects={state.projects}
+                     // Where `+` opens a terminal: the focused pane's folder, as an id.
+                     terminalIn={() => {
+                       const n = view.ws.focused;
+                       const spec = view.ws.panes[n - 1];
+                       return terminalSpecFor(spec.view, {
+                         thread: state.threadId, compose: state.compose?.projectId ?? null,
+                         project: paneProject(spec, n), task: state.taskId,
+                       });
+                     }} />
         </div>
 
         {drawn.rightFolded ? null : (

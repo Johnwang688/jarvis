@@ -61,8 +61,12 @@ LONG_COMMAND = "rm -rf /home/johnw/projects/scratch && " + " && ".join(
 def layout_checks(browser, mock, base, check, until, guard, init_script):
     print("\nzoom, folding and resizing")
     ctx = browser.new_context(viewport={"width": 1280, "height": 800}, permissions=["microphone"])
-    ctx.route(guard[0], guard[1])
+    guard(ctx)                      # live ports refused, HTTP and WebSocket alike
     ctx.add_init_script(init_script)
+    # Ctrl+` opens a terminal when there is none, and the 2×2 grid shows one:
+    # the PTY is played in the browser (no shell), on this mock's own port.
+    from tests.face.hud_v2_terminal_check import FakePty
+    mock.fake_pty = FakePty(ctx, mock)
     page = ctx.new_page()
     errors: list[str] = []
     page.on("pageerror", lambda e: errors.append(str(e)))
@@ -106,7 +110,7 @@ THROWING_STORAGE = """
 
 def _throwing_storage_checks(browser, mock, base, check, until, guard, init_script):
     ctx = browser.new_context(viewport={"width": 1280, "height": 800}, permissions=["microphone"])
-    ctx.route(guard[0], guard[1])
+    guard(ctx)
     ctx.add_init_script(init_script)
     ctx.add_init_script(THROWING_STORAGE)
     page = ctx.new_page()
@@ -1019,7 +1023,8 @@ def _titlebar_checks(page, mock, check, until):
           abs(panel_box["x"] - main_box["x"]) < 1 and abs(panel_box["width"] - main_box["width"]) < 1
           and abs(panel_box["y"] + panel_box["height"] - (main_box["y"] + main_box["height"])) < 1,
           f"{panel_box} in {main_box}")
-    check("it says where the terminal will be", _visible(page, '[data-testid="panel-empty"]'))
+    check("it says no terminal is open, and ⬓ opened none", _visible(page, '[data-testid="panel-empty"]')
+          and not mock.world.get("terminals"))
     psep = page.locator('[data-testid="panel-split"]')
     check("its top edge is a horizontal separator",
           psep.get_attribute("role") == "separator" and psep.get_attribute("aria-orientation") == "horizontal")
@@ -1442,10 +1447,17 @@ def _workspace_checks(page, mock, check, until):
 
 
 def _grid_card_checks(page, mock, check, until):
-    """A 2×2 grid with Monaco and a preview frame under the card (the
-    terminal joins it with WP-D): the card stays global and on top."""
+    """A 2×2 grid with Monaco, a preview frame and a terminal (WP-D) under
+    the card: the card stays global and on top, and the terminal behind it
+    takes no key."""
+    from tests.face.hud_v2_mock_terminals import row
+    tid = "0a0b0c0d"
+    if not any(r["id"] == tid for r in mock.world.setdefault("terminals", [])):
+        mock.world["terminals"].append(row(tid, "bash · jarvis"))
+    fake = mock.fake_pty
+    term = f'[data-testid="terminal-{tid}"]'
     grid = json.dumps({"preset": "grid4", "panes": [{"view": "chat"}, {"view": "file"}, {"view": "preview"},
-                                                     {"view": "task"}]})
+                                                     {"view": "terminal", "terminalId": tid}]})
     for zoom in ("160", "70"):
         page.set_viewport_size({"width": 1280, "height": 800})
         _set_storage(page, zoom=zoom, layout="{}")
@@ -1458,8 +1470,12 @@ def _grid_card_checks(page, mock, check, until):
               or page.locator(_pane(2, '[data-testid="editor-fallback"]')).count() > 0, timeout=10)
         page.locator(_pane(3, '[data-testid="preview-project"]')).click()
         until(lambda: page.locator(_pane(3, "iframe")).count() > 0, timeout=4)
-        check(f"at {zoom}% Monaco and a preview frame are on screen",
-              _visible(page, _pane(2, '[data-testid="editor"]')) and _visible(page, _pane(3, "iframe")))
+        until(lambda: page.locator(term).count() > 0 and _attr(page, term, "data-state") == "attached", timeout=6)
+        check(f"at {zoom}% Monaco, a preview frame and a terminal are on screen",
+              _visible(page, _pane(2, '[data-testid="editor"]')) and _visible(page, _pane(3, "iframe"))
+              and _visible(page, _pane(4, f"{term} .xterm-screen")) and _attr(page, term, "data-state") == "attached")
+        page.locator(_pane(4, f"{term} .xterm-screen")).click(position={"x": 20, "y": 8})
+        sent = len(fake.sent(tid))
         req = f"grid{zoom}"
         _approval(mock, req, LONG_COMMAND)
         until(lambda: page.locator('[data-testid="approval-card"]').count() > 0, timeout=4)
@@ -1471,6 +1487,11 @@ def _grid_card_checks(page, mock, check, until):
         ok, why = _card_on_screen(page)
         check(f"at {zoom}% over the grid, the card is wholly on screen and every button topmost at its point",
               ok, why)
+        page.keyboard.type("y")
+        page.keyboard.press("Enter")
+        page.wait_for_timeout(150)
+        check(f"at {zoom}% a y⏎ typed with a terminal in the grid reaches no shell",
+              fake.sent(tid)[sent:] == b"", repr(fake.sent(tid)[sent:]))
         page.locator('[data-testid="approval-card"] button.deny').click()
         until(lambda: page.locator('[data-testid="approval-card"]').count() == 0, timeout=4)
     _reset_all(page, mock, until)

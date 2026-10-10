@@ -1,10 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_LAYOUT, PANE, RAIL } from "./layout";
 import {
-  PANEL, PANE_MIN_H, PANE_MIN_W, PRESETS, SHAPES, TITLEBAR_H, WORKSPACE_KEY, clampCols, clampPanelHeight,
-  clampRow, columnWidths, defaultWorkspace, dropColumn, dropRow, equalSplit, fitWorkspace, focusPane,
-  loadWorkspace, maxPanelHeight, moveColEdge, panesOf, parseWorkspace, pinPane, resetWorkspace, saveWorkspace,
-  setPanel, setPreset, setPreviewUrl, setSplit, setView, show, unpinProject,
+  PANEL, PANE_MIN_H, PANE_MIN_W, PANE_VIEWS, PRESETS, SHAPES, TITLEBAR_H, WORKSPACE_KEY, clampCols,
+  clampPanelHeight, clampRow, columnWidths, defaultWorkspace, dropColumn, dropRow, equalSplit, fitWorkspace,
+  focusPane, forgetTerminal, loadWorkspace, maxPanelHeight, moveColEdge, panesOf, parseWorkspace, pinPane,
+  resetWorkspace, saveWorkspace, setPaneTerminal, setPanel, setPreset, setPreviewUrl, setSplit, setView, show,
+  unpinProject,
   type DrawnSet, type PaneNo, type Preset, type Workspace,
 } from "./workspace";
 
@@ -80,8 +81,24 @@ describe("parsing what was stored", () => {
     expect(w.panes[3].previewUrl).toBeUndefined();
   });
 
-  it("does not offer the terminal view before it exists", () => {
-    expect(parseWorkspace(JSON.stringify({ panes: [{ view: "terminal" }] })).panes[0].view).toBe("chat");
+  it("offers the terminal view (WP-D), with the terminal a pane shows", () => {
+    const w = parseWorkspace(JSON.stringify({ panes: [{ view: "terminal", terminalId: "0a1b2c3d" }] }));
+    expect(w.panes[0].view).toBe("terminal");
+    expect(w.panes[0].terminalId).toBe("0a1b2c3d");
+    expect(PANE_VIEWS).toContain("terminal");
+  });
+
+  it("draws one terminal in one pane: showing it here makes any other pane let it go", () => {
+    let w = setView(setView(setPreset(defaultWorkspace(), "grid4"), 2, "terminal"), 3, "terminal");
+    w = setPaneTerminal(w, 2, "aaaa0001");
+    expect(setPaneTerminal(w, 2, "aaaa0001")).toBe(w);
+    w = setPaneTerminal(w, 3, "aaaa0001");
+    expect(w.panes.map((p) => p.terminalId)).toEqual([null, null, "aaaa0001", null]);
+    expect(w.panes[1].view).toBe("terminal");                 // pane 2 offers the choice again
+    w = setPaneTerminal(w, 2, "bbbb0002");
+    expect(forgetTerminal(w, "aaaa0001").panes.map((p) => p.terminalId)).toEqual([null, "bbbb0002", null, null]);
+    expect(forgetTerminal(w, "cccc0003")).toBe(w);
+    expect(setPaneTerminal(w, 2, null).panes[1].terminalId).toBeNull();
   });
 
   it("keeps the chat a singleton: a second chat goes back to its pane's default", () => {
