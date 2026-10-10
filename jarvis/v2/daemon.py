@@ -247,6 +247,11 @@ class Daemon:
         # entries in it are ever purged: `owned` is this daemon's data root.
         from .trash import Trash
         self.trash = Trash(stores.root)
+        # The owner's HUD terminals (WP-C, terminals.py). Owner-only routes on
+        # the HUD listener; they end with the daemon. On the bus they are one
+        # lifecycle record, `terminal_attached` (an id and a time), never output.
+        from .terminals import Terminals
+        self.terminals = Terminals(publish=self.bus.publish)
         self.started_at = time.monotonic()
 
     def start(self) -> None:
@@ -1313,6 +1318,10 @@ class Daemon:
             if self._stopping:
                 return
             self._stopping = True
+            # Terminals end with the daemon (decision W-3): every window is
+            # told and every session gets SIGHUP now; what outlives it is
+            # SIGKILLed below, before the listeners close.
+            self.terminals.hangup_all()
             sessions = list(self._sessions.values())
             # The queue is in memory; what waits on a turn at shutdown says so
             # in the log rather than reading as still waiting after a restart —
@@ -1341,6 +1350,7 @@ class Daemon:
             for session in sessions:
                 session.retired = True
             self._sessions.clear()
+        self.terminals.finish_all(max(deadline, time.monotonic() + 0.2))
         self.bus.close()
         for server, worker in self._listeners:
             server.shutdown()
@@ -1413,6 +1423,13 @@ def _text(value, name):
     return value
 
 
+def _log_path(path: str) -> str:
+    """A request path for the daemon log. A terminal attach carries its
+    ticket in the query string, so `/terminals` paths are logged without one."""
+    url = urlsplit(path)
+    return url.path if url.path.startswith("/terminals") else path
+
+
 def _handler(daemon):
     class Handler(BaseHTTPRequestHandler):
         # No CORS: the preview origin must never invoke this approval surface.
@@ -1467,7 +1484,7 @@ def _handler(daemon):
                     return
                 if isinstance(exc, APIError):
                     status = exc.status
-                    LOG.warning("%s %s -> %d %s", self.command, self.path, status, exc)
+                    LOG.warning("%s %s -> %d %s", self.command, _log_path(self.path), status, exc)
                 elif isinstance(exc, (DaemonError, BriefRefused, worktrees.WorktreeError, ProjectArchived)):
                     status = 409
                 elif isinstance(exc, (FileNotFoundError, LookupError)) and not isinstance(exc, KeyError):
@@ -1478,7 +1495,7 @@ def _handler(daemon):
                     status = 400
                 else:
                     status = 409
-                    LOG.exception("HTTP %s %s failed", self.command, self.path)
+                    LOG.exception("HTTP %s %s failed", self.command, _log_path(self.path))
                 try:
                     from jarvis.tools.secrets import scrub
                     # Only intentional, bounded API errors are reflected. JSON

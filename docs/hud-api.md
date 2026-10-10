@@ -752,3 +752,175 @@ the table fails because of it, and nothing saved is rewritten:
 - `/events` carries `{"kind": "codex_metadata"}` when a background
   refresh of Codex's catalog or quota landed; the HUD re-reads `/usage`
   and `/thread-models`.
+
+## Additions 2026-10-09 (terminal backend — WP-C)
+
+The owner's terminals (HUD plan §2.4, decisions W-2, W-3, W-5; code in
+`jarvis/v2/terminals.py` and `jarvis/v2/ws.py`). Each is the owner's login
+shell on a real PTY. **Every route is owner-only**: it answers only on the
+HUD's listener (`FACE_PORT`) and only to a request whose `Origin` is present
+and equals `http://<Host>`, with `Host` exactly `127.0.0.1:<port>` or
+`localhost:<port>`. Anything else is 403: the API listener (8405, every
+tool's client), a missing Origin, `null`, the workshop origin, any other
+site. The preview listener (8403) serves only `/p/...` and answers 404. No
+tool, MCP tool, fast-path tool or Discord verb names these routes. A
+program running as the owner can still forge an Origin and fetch a ticket:
+that is why every attach is announced (`terminal_attached`, below).
+
+- `GET /terminals` → `[row]`, where `row` is `{id, title, folder,
+  project_id, created, cols, rows, shown, exited, exit_code, readable,
+  busy, integration, integrated}`. `id` is eight hex characters. `title` is
+  `<shell> · <project name | ~>`. `shown`: a window is attached.
+  `exited`/`exit_code`: the shell ended (killed by signal n reads 128+n).
+  `readable`: the owner's "Jarvis can read" switch (W-2), **on for every new
+  terminal**; nothing reads it yet (WP-F's `terminal_read` will refuse a
+  terminal with it off). `busy`: the PTY's foreground process is not the
+  shell — the HUD asks before closing then. `integration`: `"bash"`
+  (startup file, `sudo -k`, prompt and command marks), `"posix"` (an
+  `sh`-family shell: startup file, `sudo -k`, prompt marks only) or
+  `"none"` (zsh, fish, any shell that reads no `$ENV`: **no startup file —
+  no `sudo -k` and no marks**; the HUD should say so). `integrated`: the
+  shell has marked a command (bash only).
+- `POST /terminals` `{in, cols?, rows?}` → 201 `row`. `in` is `"home"`,
+  `{"thread": id}` (that thread's own folder, `cwd`), `{"project": id}` (its
+  root) or `{"task": id}` (its worktree if it exists, else the root it was
+  started under). **The folder is resolved from ids, never from a path
+  string.** `cols` 2–1000 (default 80), `rows` 1–500 (default 24); anything
+  else, an unknown key or a missing `in` is 400; an unknown id 404; a folder
+  that no longer exists 409. At most **6** terminals (exited ones count
+  until closed): the seventh is 409 with a sentence. A bad
+  `JARVIS_TERMINAL_SHELL` (relative, resolving under `/mnt/`, not
+  executable) is 409. The shell's realpath is what runs, under the name it
+  was given as its argv[0] (`env --argv0`), so `/usr/bin/rbash`, a link to
+  bash, still runs restricted; `title` uses that name.
+- `PATCH /terminals/{id}` `{readable: bool}` → `row`. Exactly that key.
+- `POST /terminals/{id}/ticket` `{}` → `{ticket, expires_in: 30}`. **Single
+  use, 30 seconds, valid for this terminal only**; it is spent the moment it
+  is presented, whatever the answer. Fetch one right before each attach.
+- `GET /terminals/{id}/attach?ticket=…` — the WebSocket. Build the URL from
+  `location.host` (never a fixed port). The checks run in this order: the
+  owner-only gate (a refused Origin does not spend the ticket), a
+  well-formed version-13 upgrade (else 400), the ticket (else 403). Then
+  `HTTP/1.1 101`. No extension (no compression) and no subprotocol is
+  agreed. Client frames must be masked; a message is at most 64 KiB (send
+  pastes in 16 KiB chunks); control frames are at most 125 bytes and never
+  fragmented; the server pings every 20 s and drops a socket that has said
+  nothing for 60 s; a socket more than 4 MiB behind on output is dropped
+  (reattach to replay). Close codes: 1002 protocol error (also a close frame
+  with a code that may not be sent — 1005, 1006, 1015, reserved or out of
+  range), 1007 text or a close reason not UTF-8, 1009 too big, 1008
+  refused, 1001 Jarvis stopped. A close is echoed with its code (an empty
+  one with an empty one), and nothing is ever sent after the server's own
+  close.
+  - **Binary frames are bytes, both ways**: keystrokes and pastes in, PTY
+    output out. Input goes through a queue (256 KiB) that a writer thread
+    of the terminal's own drains, so a program that does not read its input
+    never stalls the socket: resize, takeover answers and pongs still land.
+  - **A dropped frame latches the socket's input.** When the queue is full
+    the frame is dropped and the window gets `{"type": "input_dropped",
+    "bytes": n, "latched": true, "reason"}`. From then on **every** input
+    frame on that socket is refused the same way — a frame that is exactly
+    Ctrl-C (`\x03`) excepted — so a paste reaches the program as a prefix,
+    never a prefix with a later chunk spliced on (accepting the next frame
+    once room freed is what cut a `cat > file` paste mid-line). WP-D, on the
+    first `input_dropped`: **stop sending the rest of the paste**, say what
+    happened, and when the owner types again send `{"type":
+    "input_resume"}`. The answer is `{"type": "input_resumed"}` once the
+    queue has drained, else `{"type": "input_resume_refused", "reason"}`
+    (send it again shortly; a program that never reads never drains, and
+    Ctrl-C is the way out). A Ctrl-C frame throws away whatever input is
+    still queued and the paste chunk being written, keeping one Ctrl-C that
+    was already waiting, so two quick ones are never collapsed into one. The
+    latch is per socket: a reattached window starts unlatched.
+  - **Text frames are JSON control.** Server → window, in order on attach:
+    `{"type": "attached", "terminal": row, "replay": n}`, then `n` bytes of
+    replay as binary frames (the last 1 MiB of output, starting just after
+    a newline once anything has been dropped), then `{"type": "replayed"}` —
+    send a `resize` then, so full-screen programs redraw — and
+    `{"type": "exit", "code"}` if the shell has already ended. Later:
+    `{"type": "exit", "code"}` when the shell exits (the socket stays open;
+    offer Restart and Close); `{"type": "exit", "code", "reason": "closed"}`
+    then a close when the terminal is closed; `{"type": "exit", "code",
+    "reason": "ended"}` then close 1001 when Jarvis stops (terminals do not
+    survive a restart, W-3); `input_dropped`, `input_resumed` and
+    `input_resume_refused` (above).
+  - Window → server: `{"type": "resize", "cols", "rows"}` (same ranges;
+    anything else is ignored), `{"type": "input_resume"}` (above) and the
+    takeover answer below. Unknown messages are ignored.
+  - **One window at a time.** Attaching to a terminal another window shows
+    sends that window `{"type": "takeover_request", "id", "timeout_s": 20}`
+    and the newcomer `{"type": "waiting", "timeout_s": 20}`. The holder
+    answers `{"type": "takeover", "id", "allow": true | false}`. Allowed:
+    the holder gets `{"type": "taken"}` and a close, and the newcomer
+    attaches with the replay. Kept, or no answer in 20 s: the newcomer gets
+    `{"type": "refused", "reason"}` and close 1008. A holder whose socket is
+    gone is not asked. While one window is asking, a third is refused.
+- `DELETE /terminals/{id}` → `{ok, id, exit_code}`. SIGHUP to every process
+  in the terminal's session (background jobs included), SIGKILL after 3 s,
+  then the PTY is released; the attached window gets the `closed` exit. Two
+  DELETEs at once: one 200, the rest 404. The session's leader is matched on
+  its start time, and a session once seen empty is never signalled again,
+  so a pid the system has since reused is never hit.
+- SSE **`terminal_attached`** `{kind: "terminal_attached", data:
+  {terminal_id, at}}` — exactly those keys — whenever a socket attaches
+  (a takeover included). It is the **only** terminal record on the bus,
+  and it carries no output, command or ticket. A same-uid program can mint a
+  ticket with a forged Origin and attach to a terminal no window shows, and
+  over HTTP that cannot be told apart from the HUD; this makes it visible.
+  WP-D shows a notice when the attach was not the window's own.
+
+**Environment.** The shell starts from a clean login environment, not the
+daemon's: `HOME`, `USER`, `LOGNAME`, `LANG`/`LC_*`, `TZ`, the WSL interop
+and display variables, `TERM=xterm-256color`, `COLORTERM=truecolor`,
+`SHELL`, and the daemon's `PATH` without any Python virtualenv. Never a name
+`.env` defines, `OPENROUTER_API_KEY`, `HF_HUB_OFFLINE`, `VIRTUAL_ENV`,
+`PYTHONPATH`, `BASH_ENV`, `PROMPT_COMMAND`, or anything `JARVIS_*`,
+`ANTHROPIC_*`, `CLAUDE_*`, `CODEX_*`, `OPENAI_*`. SIGHUP, SIGINT, SIGQUIT,
+SIGTERM and SIGTSTP start at their defaults (`env --default-signal`), even
+if the daemon inherited them ignored.
+
+**The startup files.** bash gets `jarvis/v2/terminal_rc.bash` as its
+`--rcfile`; an `sh`-family shell (sh, dash, ash, ksh, mksh, …, and bash
+called `sh`) starts interactive with `jarvis/v2/terminal_rc.sh` as `$ENV`;
+any other shell runs as a plain login shell with neither. **The file never
+touches disk**: the daemon writes it, nonce and all, into a pipe, closes the
+write end, and hands the shell the read end as `/dev/fd/<n>`. The shell's
+first read drains it, before it runs anything, so whatever opens that pipe
+later — a program started from `~/.profile` reading the shell's own
+descriptor through `/proc`, say — reads nothing; bash also closes the
+descriptor at once, and the POSIX file unsets `ENV`. Each file then reads the
+login files (`/etc/profile`, then `~/.bash_profile` / `~/.bash_login` /
+`~/.profile` for bash, `~/.profile` for sh). What is left is a race only a
+program running as the owner *outside* the terminal could run: read the
+pipe before the shell does. It would get the nonce and leave the shell with
+no startup file at all — the same-uid limit stated at the top, not a new
+one. Both files then set `alias sudo='sudo -k'` (W-5: sudo never caches here) and
+emit OSC 133 marks carrying `jarvis=<per-terminal nonce>`: A (prompt start)
+and B (prompt end), and in bash also C with `cmdline_url=<percent-encoded
+command line>` (the command runs) and D with its exit status. The nonce is
+kept in an unexported shell variable; PS1 names it (`${__jarvis_nonce}`,
+expanded at each prompt) rather than holding it, and bash keeps PS1
+unexported, so even dotfiles that export PS1 hand no child the nonce. A mark
+without it is ignored. xterm ignores OSC 133; the HUD needs to do nothing
+with the marks.
+
+**Spans are advisory — WP-F, read this.** The daemon turns the marks into
+per-command spans over the output ring (`Terminal.history()`: the bytes, the
+spans, `spans_from`, `integrated`, `readable`, `prompt`). They tell a reader
+which command line probably produced which output, and they are **not a
+boundary**: a program running in the terminal can write any bytes between
+two real marks; a nested shell, `sudo -i`, `ssh`, `python` or anything else
+that runs commands of its own puts all of their output under the outer
+command's span; and a line kept out of history (a leading space under
+`ignorespace`) records only its first simple command. Bytes before
+`spans_from` lost their spans to the 2000-span cap and are unattributed. So
+**`terminal_read`'s text-pattern refusals (W-2) must apply to every read**,
+whether or not the terminal is `integrated`; spans can add refusals, never
+remove one.
+
+**Output never leaves memory**: on the bus there are lifecycle ids only
+(`terminal_attached`), never output; the HUD lists terminals with `GET
+/terminals` and learns of an exit over the socket. Output is not in any log
+(the daemon logs opened / attached / exited / closed with the folder as a
+project name or `~`, and logs `/terminals` paths without their query, so
+never a ticket), not in a thread log, not on Discord, not on disk.

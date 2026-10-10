@@ -319,6 +319,74 @@ stale one round-trips; and `GET /route` notes a built-in default the catalog
 lacks (it still runs — there is nothing to fall back to). Tests point
 `config.CODEX_CATALOG_PATH` at a temp file and restore the table.
 
+**HUD terminals, backend (2026-10-09, WP-C; plan
+`docs/plans/2026-10-09-hud-workspace-plan.md` §2.4, decisions W-2/W-3/W-5;
+design §18; contract in `docs/hud-api.md`).** `jarvis/v2/terminals.py` runs
+the owner's login shell (`JARVIS_TERMINAL_SHELL`, absolute only, overrides;
+the **realpath** is checked and launched, under the given name as argv[0]
+via `env --argv0`, so `rbash` stays restricted) on a real PTY through util-linux
+`setsid --ctty` — **never `pty.fork()`** in this threaded daemon — with
+HUP/INT/QUIT/TERM/TSTP reset to default (`env --default-signal`), in a
+**clean environment** built from an allowlist (never a `.env` name,
+`OPENROUTER_API_KEY`, `HF_HUB_OFFLINE`, `VIRTUAL_ENV`, venv `PATH`,
+`JARVIS_*`/`ANTHROPIC_*`/`CLAUDE_*`/`CODEX_*`), in a folder resolved **from
+ids, never a path**. Six at most, a 1 MiB ring each, replayed on reattach;
+input goes through a 256 KiB queue and a writer thread per terminal (a full
+queue drops the frame with `input_dropped`, never blocks the socket, and
+**latches** the socket: every later frame but a lone Ctrl-C is refused until
+the queue drains and the window sends `input_resume`, so a paste arrives as
+a prefix, never spliced; a Ctrl-C flush keeps one waiting Ctrl-C); close
+= SIGHUP to the whole session (found in /proc), then SIGKILL — the leader is
+matched on its **start time** and a session once seen empty is never
+signalled again, so a reused pid is never hit; two DELETEs pop it once;
+**`Daemon.stop` ends them all** (W-3, no tmux). The socket is a hand-rolled
+RFC 6455 endpoint (`jarvis/v2/ws.py`): masked client frames, 64 KiB
+messages, control frames ≤125 bytes and unfragmented, no extensions, 20 s
+pings, 60 s silence drops it, close codes validated (1005/1006/1015 and
+out-of-range are protocol errors), **nothing sent after our close** (one
+lock for the check and the put), the `101` written as `HTTP/1.1` by hand,
+and the handler's 2 s timeout lifted. **The agent never gets a lever on a
+terminal**: every route is `projects.owner_only` (HUD listener + an Origin
+that must be present), the attach also needs a **single-use 30 s ticket
+bound to one terminal**, and a terminal another window shows is only taken
+after that window says yes (refused after 20 s) — stricter than
+`/approvals`, and still not a boundary against a program running as the
+owner (it can forge an Origin, fetch a ticket and attach to a terminal no
+window shows), which is why **every attach publishes `terminal_attached`
+with exactly `{terminal_id, at}`** for WP-D to flag. **No tool, MCP tool,
+fast-path tool or Discord verb may reach `terminals`**;
+`tests/v2/terminal_check.py` greps every module under `jarvis/` but the
+daemon, `hud_api` and the module itself. **Terminal output never leaves
+memory**: on the bus lifecycle ids only, no log line (lifecycle only, and
+`/terminals` paths are logged without their query — the ticket rides in it),
+no thread log, Discord or disk. Startup files: `terminal_rc.bash` (bash
+`--rcfile`, login emulation) and the POSIX `terminal_rc.sh` (`$ENV` for an
+`sh`-family shell started `-i`; kept apart because a dash parses every line,
+so bash syntax cannot hide behind an `if`); **zsh, fish and other shells get
+none — no `sudo -k`, no marks — and the listing says `integration:
+"none"`**. Each file **never touches disk**: it reaches the shell through a
+pipe (`--rcfile /dev/fd/N`, `ENV=/dev/fd/N`) whose write end is closed
+first, so the shell's first read drains it (bash closes the fd; POSIX
+unsets `ENV`). It then reads the login files, sets `alias sudo='sudo -k'`
+(W-5) and emits OSC 133 A/B (+ C with the `cmdline_url`, D in bash) marks
+**signed with a per-terminal nonce** held only in an unexported variable
+that PS1 *names* (`${__jarvis_nonce}`), never holds — nothing the terminal
+runs can find it (the suite hunts from `~/.profile` mid-startup and later,
+in real bash and dash, and scans the disk); a same-uid program outside the
+terminal could only race the shell for the pipe. POSIX marks end in BEL (dash's
+PS1 expansion eats the backslash of `ESC \`). They become `CommandSpan`s
+(`Terminal.history()`: spans, `spans_from` — bytes before it lost their spans
+to the 2000 cap — `integrated`, `readable`, `prompt`) for WP-F's
+`terminal_read`, which does not exist yet. **Spans are advisory**: a
+program can print bytes between real marks, nested shells/`sudo -i`/`ssh`/
+`python` sit under the outer span, an `ignorespace` line records its first
+command only — so WP-F's text-pattern refusals apply to every read. When
+`terminal_read` lands, `terminal_check`'s no-tool test must allow exactly
+it. Each terminal has the owner's `readable` switch, **on by default**.
+Tests point `config.TERMINAL_SHELL` at `tests/v2/terminal_fake/sh` (named
+`sh` so it is started as a POSIX shell) with a temp HOME, and never use
+8402/8403/8405.
+
 Briefs for every package, including the ones in flight, are in
 `docs/codex-briefs/`; each merged package left a `*-notes.md` beside its
 brief with what its implementer verified and what it proposes.

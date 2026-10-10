@@ -1,0 +1,154 @@
+# Jarvis HUD terminal startup file for bash (WP-C; HUD plan §2.4, decisions
+# W-2 and W-5). Any other shell gets terminal_rc.sh, the POSIX one, instead:
+# a POSIX shell parses a whole `if` before running it, so bash syntax cannot
+# hide behind a bash check in a file a dash reads.
+#
+# The daemon reads this file once, puts one line in front of it that sets
+# __jarvis_nonce, and writes the result for each terminal into a pipe, never
+# to disk: bash gets `--rcfile /dev/fd/<n>` and reads the whole pipe before
+# running anything, and its first act is to close that descriptor, so
+# nothing it starts inherits it (it would read nothing anyway: the pipe is
+# drained and its write end closed). The nonce is then left only in an
+# unexported shell variable (PS1 names it rather than holding it, and is
+# kept unexported too). It does three things and nothing else.
+#
+# 1. What a login shell would have read. --rcfile makes bash an interactive
+#    *non-login* shell, so /etc/profile and the first of ~/.bash_profile,
+#    ~/.bash_login and ~/.profile are read here, exactly as a fresh WSL tab
+#    reads them (and Ubuntu's ~/.profile reads ~/.bashrc).
+#
+# 2. sudo never caches in a HUD terminal (W-5). `sudo -k cmd` ignores the
+#    cached credential and does not refresh it, so every sudo asks for the
+#    password, and a line injected by a local program cannot ride a sudo the
+#    owner just typed.
+#
+# 3. Shell-integration marks (OSC 133), so the daemon knows which output
+#    belongs to which command line (W-2, item 3):
+#      ESC ] 133 ; A ; jarvis=<nonce> ESC \        a prompt starts
+#      ESC ] 133 ; B ; jarvis=<nonce> ESC \        the prompt ends, input starts
+#      ESC ] 133 ; C ; cmdline_url=<%-encoded line> ; jarvis=<nonce> ESC \
+#                                                  the command runs: output starts
+#      ESC ] 133 ; D ; <exit status> ; jarvis=<nonce> ESC \
+#                                                  the command ended
+#    The nonce is per terminal, and a program started in the terminal has no
+#    ordinary way to learn it (above), so it cannot print a mark the daemon
+#    believes. The marks are still **advisory**, not a boundary: a program
+#    can print any bytes between two real marks, and a nested shell, `sudo
+#    -i`, `ssh` or `python` puts everything under the outer command's span.
+#
+#    The command line comes from `history 1`. When the line did not enter the
+#    history (HISTCONTROL=ignorespace, a duplicate under ignoredups, history
+#    off), it is bash's $BASH_COMMAND instead: the first simple command of the
+#    line, not the whole line.
+
+case ${BASH_SOURCE[0]} in
+    /dev/fd/[0-9]*) eval "exec ${BASH_SOURCE[0]#/dev/fd/}<&-" ;;   # the pipe it came in
+    *) [ -f "${BASH_SOURCE[0]}" ] && command rm -f -- "${BASH_SOURCE[0]}" ;;
+esac
+export -n __jarvis_nonce 2>/dev/null
+
+if [ -r /etc/profile ]; then . /etc/profile; fi
+if [ -r "$HOME/.bash_profile" ]; then . "$HOME/.bash_profile"
+elif [ -r "$HOME/.bash_login" ]; then . "$HOME/.bash_login"
+elif [ -r "$HOME/.profile" ]; then . "$HOME/.profile"
+fi
+
+alias sudo='sudo -k'
+
+__jarvis_mark() {
+    builtin printf '\033]133;%s;jarvis=%s\033\\' "$1" "$__jarvis_nonce"
+}
+
+# Percent-encode $1 byte by byte into __jarvis_encoded (no subshell), so a
+# mark can carry any command line without an ESC, BEL or ';' inside it.
+__jarvis_urlencode() {
+    local LC_ALL=C s="$1" c i
+    __jarvis_encoded=
+    for (( i = 0; i < ${#s}; i++ )); do
+        c=${s:i:1}
+        case $c in
+            [a-zA-Z0-9.~_/-]) __jarvis_encoded+=$c ;;
+            *) builtin printf -v c '%%%02X' "'$c"; __jarvis_encoded+=$c ;;
+        esac
+    done
+}
+
+__jarvis_histnum() {
+    local entry
+    entry=$(HISTTIMEFORMAT= builtin history 1 2>/dev/null)
+    if [[ $entry =~ ^[[:space:]]*([0-9]+) ]]; then
+        __jarvis_hist=${BASH_REMATCH[1]}
+    else
+        __jarvis_hist=
+    fi
+}
+
+__jarvis_state=start        # start | prompt | ready | running
+__jarvis_ran=
+__jarvis_status=0
+__jarvis_hist=
+
+# First in PROMPT_COMMAND: the status of the command that just ended, before
+# anything else in PROMPT_COMMAND can change $?.
+__jarvis_capture() {
+    __jarvis_status=$?
+    __jarvis_ran=$__jarvis_state
+    __jarvis_state=prompt
+}
+
+# Last in PROMPT_COMMAND, so it sees the PS1 every other hook has built.
+__jarvis_precmd() {
+    if [ "$__jarvis_ran" = running ]; then
+        __jarvis_mark "D;$__jarvis_status"
+    fi
+    __jarvis_histnum
+    __jarvis_mark A
+    # PS1 names ${__jarvis_nonce} (expanded at each prompt) rather than
+    # holding it, and is kept unexported whatever the owner's dotfiles (an
+    # `export PS1`, a `set -a`) asked for: no child inherits the nonce.
+    case $PS1 in
+        *"133;B;jarvis="*) ;;
+        *) PS1="$PS1"'\[\033]133;B;jarvis=${__jarvis_nonce}\033\\\]' ;;
+    esac
+    export -n PS1 __jarvis_nonce 2>/dev/null
+    __jarvis_state=ready
+}
+
+# The DEBUG trap fires before every simple command; only the first one after
+# a prompt is the start of the owner's command line.
+__jarvis_preexec() {
+    [ "$__jarvis_state" = ready ] || return 0
+    [ -n "${COMP_LINE:-}" ] && return 0
+    case $BASH_COMMAND in __jarvis_*) return 0 ;; esac
+    __jarvis_state=running
+    local entry line=
+    entry=$(HISTTIMEFORMAT= builtin history 1 2>/dev/null)
+    if [[ $entry =~ ^[[:space:]]*([0-9]+)[*]?[[:space:]]+(.*)$ ]]; then
+        if [ "${BASH_REMATCH[1]}" != "$__jarvis_hist" ]; then
+            line=${BASH_REMATCH[2]}
+        fi
+    fi
+    [ -n "$line" ] || line=$BASH_COMMAND
+    __jarvis_urlencode "$line"
+    __jarvis_mark "C;cmdline_url=$__jarvis_encoded"
+}
+
+# Keep a DEBUG trap the owner's own startup files set, and run it after ours.
+__jarvis_prev_debug=
+__jarvis_third() { __jarvis_prev_debug=$3; }
+__jarvis_trap=$(trap -p DEBUG)
+if [ -n "$__jarvis_trap" ]; then eval "__jarvis_third $__jarvis_trap"; fi
+unset __jarvis_trap
+__jarvis_debug() {
+    __jarvis_preexec
+    if [ -n "$__jarvis_prev_debug" ]; then eval "$__jarvis_prev_debug"; fi
+}
+trap '__jarvis_debug' DEBUG
+
+# Newlines, not ';', join the hooks: a PROMPT_COMMAND that already ends in ';'
+# would otherwise become a syntax error.
+if [[ $(declare -p PROMPT_COMMAND 2>/dev/null) == "declare -a"* ]]; then
+    PROMPT_COMMAND=(__jarvis_capture "${PROMPT_COMMAND[@]}" __jarvis_precmd)
+else
+    PROMPT_COMMAND=$'__jarvis_capture\n'"${PROMPT_COMMAND:-}"$'\n__jarvis_precmd'
+fi
