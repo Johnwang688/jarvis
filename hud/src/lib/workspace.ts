@@ -255,7 +255,7 @@ export function setView(ws: Workspace, pane: PaneNo, view: View): Workspace {
  *
  *   - chat: a drawn chat pane gets focus (the focused one if it is one);
  *     else the focused pane switches to chat. Which chat pane a *thread*
- *     lands in — the one showing it, the focused chat pane, the voice target
+ *     lands in — the one showing it, the focused chat pane, the selected chat
  *     — is lib/chats.ts `chatTarget`, which the window uses for threads;
  *   - task: a drawn task or diff pane follows the selected task by itself, so
  *     nothing moves; with none drawn the focused pane switches to task — in

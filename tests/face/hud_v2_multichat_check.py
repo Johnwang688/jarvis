@@ -15,9 +15,9 @@ The checks worth keeping, each written to bite:
   - a turn running in pane A while the owner types and sends in pane B: B's
     message goes to B's thread, and A keeps running and keeps its Stop;
   - **every event kind lands in the pane showing its thread** (or tracking
-    its turn), and an event with no thread in the voice target's;
+    its turn), and an event with no thread in the selected chat's;
   - A's Stop interrupts A's thread and never B's;
-  - voice goes to the voice target, the chat pane used last: its header
+  - voice goes to the selected chat, the chat pane most recently clicked: its header
     carries the mic mark, only its input bar draws the dictation strip, REVIEW
     puts the transcript in its box, AUTO sends to its thread, the orb follows
     and interrupts its turn, the follow-up window opens only when its turn
@@ -34,6 +34,28 @@ The checks worth keeping, each written to bite:
   - a File pane holding an unsaved edit refuses every way of being switched
     away — its own tabs, Open beside, a sidebar thread, a task, New thread —
     and says why.
+
+Review of PR #27 — words or a transcript attached to the wrong thread; each
+of these failed on dbd2096:
+  - words handed back while a hidden pane held their thread, and a draft
+    typed for a thread, follow that thread when another pane opens it, and a
+    pane opening another thread does not carry its draft into it;
+  - a first send finds its pane again after every await, so a trade of
+    conversations or another thread opened meanwhile is never undone;
+  - a late transcript lands in the pane showing its thread, or nowhere;
+  - with a card up Tab and Shift+Tab never leave it, and nothing behind the
+    veil can be reached (it is inert);
+  - a pane running its own turn that opens a running thread trades turns
+    with the pane that left it, so that thread has its Stop;
+  - a capture status leaves a pane that stops being the selected chat, and an
+    Open beside refusal is said where the owner can see it.
+
+The owner's rule (decisions W-6): ambiguous input — voice, push-to-talk, an
+event with no thread — goes to the selected chat, the chat pane most
+recently clicked, as it is when the input is delivered; a click on a Preview
+or File pane does not change it; a selected pane the window drops falls back
+to the one selected before it; one chat pane is selected; with none drawn
+nothing is sent; and input that belongs to a thread stays with it.
 """
 from __future__ import annotations
 
@@ -75,7 +97,14 @@ def multichat_checks(browser, mock, base, check, until, guard, init_script):
         mock.await_reconnect(before)
         for section in (_side_by_side_checks, _never_twice_checks, _two_turns_checks, _moved_turn_checks,
                         _voice_checks, _seen_checks, _steer_pane2_checks, _giveback_pane2_checks,
-                        _card_focus_checks, _dirty_file_checks):
+                        _card_focus_checks, _dirty_file_checks,
+                        # review of PR #27
+                        _rv_giveback_hidden_swap_checks, _rv_draft_checks, _rv_compose_swap_race_checks,
+                        _rv_newthread_during_send_checks, _rv_transcript_race_checks, _rv_tab_behind_card_checks,
+                        _rv_handoff_trade_checks, _rv_stt_lands_selected_checks, _rv_stale_status_checks,
+                        _rv_beside_refusal_checks,
+                        # the owner's rule: ambiguous input goes to the selected chat (decisions W-6)
+                        _w6_grid_checks, _w6_fallback_checks, _w6_one_and_none_checks, _w6_handback_held_checks):
             try:
                 section(page, mock, check, until)
             except Exception as e:  # a section that cannot run is a failure, and the rest still run
@@ -154,7 +183,7 @@ def _expand(page, until, project_id: str, child: str):
 
 
 def _focus(page, until, n: int):
-    """Use pane N's chat: a click in its box focuses it (and makes it the voice target)."""
+    """Use pane N's chat: a click in its box focuses it (and makes it the selected chat)."""
     _box(page, n).click()
     until(lambda: _attr(page, _pane(n), "data-focused") == "true", timeout=2)
 
@@ -377,10 +406,10 @@ def _two_turns_checks(page, mock, check, until):
     check("error: said, and neither pane's turn ends", c["2"]["busy"] and c["1"]["busy"] and stop1.count() == 1
           and stop2.count() == 1)
     page.evaluate("window.__hud.dispatch({type: 'patch', patch: {error: ''}})")
-    # No thread: the voice target's pane (pane 2, used last).
+    # No thread: the selected chat's pane (pane 2, used last).
     mock.emit("text_delta", {"text": "unthreaded words"})
     until(lambda: "unthreaded" in _chat(page, 2)["draft"], timeout=3)
-    check("an event with no thread goes to the voice target's pane",
+    check("an event with no thread goes to the selected chat's pane",
           "unthreaded" in _chat(page, 2)["draft"] and "unthreaded" not in _chat(page, 1)["draft"])
     mock.emit("text", {"text": "unthreaded words"})
     until(lambda: _chat(page, 2)["draft"] == "", timeout=3)
@@ -427,10 +456,10 @@ def _voice_checks(page, mock, check, until):
     _open(page, until, 1, "t1")
     _open(page, until, 2, "t2")
     _count_follow_ups(page)
-    check("the chat pane used last is the voice target: its pane says so, with a mic mark",
-          page.evaluate("window.__hud.state().voiceTarget") == 2 and _attr(page, _pane(2), "data-voice") == "true"
+    check("the chat pane used last is the selected chat: its pane says so, with a mic mark",
+          page.evaluate("window.__hud.state().selectedChat") == 2 and _attr(page, _pane(2), "data-selected") == "true"
           and page.locator('[data-testid="pane-2-mic"]').count() == 1
-          and _attr(page, _pane(1), "data-voice") is None and page.locator('[data-testid="pane-1-mic"]').count() == 0)
+          and _attr(page, _pane(1), "data-selected") is None and page.locator('[data-testid="pane-1-mic"]').count() == 0)
     check("only its input bar draws the dictation strip; the other shows its own status",
           page.locator(_pane(2, '[data-testid="dictation"]')).count() == 1
           and page.locator(_pane(2, '[data-testid="level"]')).count() == 1
@@ -444,36 +473,36 @@ def _voice_checks(page, mock, check, until):
     until(lambda: _chat(page, 1)["busy"], timeout=3)
     time.sleep(0.2)
     orb = lambda: page.locator('[data-testid="orb"]').get_attribute("data-state")  # noqa: E731
-    check("the orb follows the voice target's turn: pane 1's running tool does not light it",
+    check("the orb follows the selected chat's turn: pane 1's running tool does not light it",
           orb() not in ("thinking", "tool"), str(orb()))
     stt = len(mock.sent("POST", "/stt"))
     page.evaluate(UTTERANCE)
     until(lambda: len(mock.sent("POST", "/stt")) > stt, timeout=4)
     check("a long turn in another pane no longer silences the mic", len(mock.sent("POST", "/stt")) > stt)
     until(lambda: _box(page, 2).input_value() != "", timeout=4)
-    check("REVIEW puts the transcript in the voice target's box",
+    check("REVIEW puts the transcript in the selected chat's box",
           "what is the weather" in _box(page, 2).input_value(), _box(page, 2).input_value())
     check("and not in the other pane's", _box(page, 1).input_value() == "", _box(page, 1).input_value())
     _box(page, 2).fill("")
 
-    # AUTO sends to the voice target's thread.
+    # AUTO sends to the selected chat's thread.
     page.locator(_pane(2, '[data-testid="dictation-auto"]')).click()
     s1, s2 = len(_sent(mock, "t1")), len(_sent(mock, "t2"))
     page.evaluate(UTTERANCE)
     sent = until(lambda: _sent(mock, "t2")[s2:] or None, timeout=5)
-    check("AUTO sends the utterance to the voice target's thread",
+    check("AUTO sends the utterance to the selected chat's thread",
           bool(sent) and sent[-1].get("text") == "what is the weather" and sent[-1].get("spoken") is True, str(sent))
     check("and nothing to the other pane's", len(_sent(mock, "t1")) == s1)
     page.locator(_pane(2, '[data-testid="dictation-review"]')).click()
     until(lambda: _chat(page, 2)["busy"], timeout=3)
-    check("the orb now shows the voice target's own turn", bool(until(lambda: orb() == "thinking", timeout=2)),
+    check("the orb now shows the selected chat's own turn", bool(until(lambda: orb() == "thinking", timeout=2)),
           str(orb()))
     stt = len(mock.sent("POST", "/stt"))
     page.evaluate(UTTERANCE)
     time.sleep(1.0)
-    check("while the voice target's own turn runs, the mic is suppressed", len(mock.sent("POST", "/stt")) == stt)
+    check("while the selected chat's own turn runs, the mic is suppressed", len(mock.sent("POST", "/stt")) == stt)
 
-    # The orb's press interrupts the voice target's turn, never another pane's.
+    # The orb's press interrupts the selected chat's turn, never another pane's.
     i1, i2 = len(mock.sent("POST", "/threads/t1/interrupt")), len(mock.sent("POST", "/threads/t2/interrupt"))
     page.evaluate("document.activeElement && document.activeElement.blur()")
     page.keyboard.down("Space")
@@ -481,13 +510,13 @@ def _voice_checks(page, mock, check, until):
     page.keyboard.up("Space")
     until(lambda: len(mock.sent("POST", "/threads/t2/interrupt")) > i2, timeout=3)
     time.sleep(0.2)
-    check("push-to-talk interrupts the voice target's turn", len(mock.sent("POST", "/threads/t2/interrupt")) == i2 + 1)
+    check("push-to-talk interrupts the selected chat's turn", len(mock.sent("POST", "/threads/t2/interrupt")) == i2 + 1)
     check("and leaves the other pane's turn running", len(mock.sent("POST", "/threads/t1/interrupt")) == i1
           and _chat(page, 1)["busy"])
     time.sleep(1.5)  # whatever the press recorded settles before the counts below
     _box(page, 2).fill("")
 
-    # The follow-up window opens only when the voice target's turn ends.
+    # The follow-up window opens only when the selected chat's turn ends.
     page.evaluate("window.__hud.capture.closeFollowUp()")
     ups = page.evaluate("window.__followUps")
     mock.emit("turn_finished", {"stop": "end"}, thread_id="t1")
@@ -496,12 +525,12 @@ def _voice_checks(page, mock, check, until):
     check("another pane's turn finishing opens no follow-up mic window", page.evaluate("window.__followUps") == ups)
     mock.emit("turn_finished", {"stop": "interrupted"}, thread_id="t2")
     until(lambda: _chat(page, 2)["busy"] is False, timeout=3)
-    check("the voice target's own turn finishing does", page.evaluate("window.__followUps") > ups)
+    check("the selected chat's own turn finishing does", page.evaluate("window.__followUps") > ups)
 
-    # Using the other pane moves the voice target, the mark and the strip with it.
+    # Using the other pane moves the selected chat, the mark and the strip with it.
     _focus(page, until, 1)
-    until(lambda: page.evaluate("window.__hud.state().voiceTarget") == 1, timeout=2)
-    check("using pane 1 makes it the voice target: the mark and the strip move with it",
+    until(lambda: page.evaluate("window.__hud.state().selectedChat") == 1, timeout=2)
+    check("using pane 1 makes it the selected chat: the mark and the strip move with it",
           page.locator('[data-testid="pane-1-mic"]').count() == 1 and page.locator('[data-testid="pane-2-mic"]').count() == 0
           and page.locator(_pane(1, '[data-testid="dictation"]')).count() == 1
           and page.locator(_pane(2, '[data-testid="dictation"]')).count() == 0)
@@ -645,7 +674,7 @@ def _steer_pane2_checks(page, mock, check, until):
     box.fill("")
     mock.emit("turn_finished", {"stop": "interrupted"}, thread_id="t2")
     check("pane 2: the turn's end frees the pane", bool(until(lambda: _chat(page, 2)["busy"] is False, timeout=3)))
-    check("pane 2: and, as the voice target's, opens the follow-up mic window",
+    check("pane 2: and, as the selected chat's, opens the follow-up mic window",
           page.evaluate("window.__followUps") > ups)
     check("pane 2: and the Stop button goes", bool(until(lambda: stop.count() == 0, timeout=2)))
     w.pop("send_status", None)
@@ -806,6 +835,487 @@ def _dirty_file_checks(page, mock, check, until):
     page.locator(_pane(2, '[data-testid="tab-chat"]')).click()
     until(lambda: _attr(page, _pane(2), "data-view") == "chat", timeout=2)
     check("once saved, the pane switches as asked", _attr(page, _pane(2), "data-view") == "chat")
+
+
+# ---------------------------------------------------------------------------
+# Review of PR #27: words or a transcript attached to the wrong thread. Each
+# of these failed on dbd2096 (the reviewer's probes, made permanent).
+
+def _pumped(page) -> bool:
+    """Let Playwright run its route callbacks: the sync API only does so
+    inside a call, so a plain poll would never see a request being held."""
+    page.wait_for_timeout(1)
+    return True
+
+
+SINGLE = json.dumps({"preset": "single", "focused": 1,
+                     "panes": [{"view": "chat"}, {"view": "chat"}, {"view": "file"}, {"view": "task"}]})
+SEND_URL = re.compile(r".*/threads/t\d+/send$")
+OPEN_URL = re.compile(r".*/threads$")
+
+
+def _rv_giveback_hidden_swap_checks(page, mock, check, until):
+    """Words handed back while a hidden pane held their thread: they must
+    come back in that thread's box, never stay behind in a box that a trade
+    of conversations then gives another thread."""
+    w = mock.world
+    _fresh(page, mock, until, TWO)
+    _open(page, until, 1, "t1")
+    _open(page, until, 2, "t2")
+    mock.emit("turn_started", {}, thread_id="t2")
+    until(lambda: _chat(page, 2)["busy"], timeout=3)
+    w["send_status"] = "queued"
+    _box(page, 2).fill("words meant for t2")
+    _box(page, 2).press("Enter")
+    until(lambda: any(m.get("message_id") for m in _chat(page, 2)["messages"]), timeout=3)
+    qid = f"msg-{w['sends']}"
+    w.pop("send_status", None)
+    _focus(page, until, 1)
+    _choose(page, until, "single")
+    until(lambda: not _visible(page, _pane(2)), timeout=2)
+    mock.emit("queue_cleared", {"reason": "stopped", "messages": [
+        {"message_id": qid, "typed": "words meant for t2", "via": "hud"}]}, thread_id="t2")
+    time.sleep(0.6)
+    page.locator('[data-testid="thread-t2"]').click()
+    until(lambda: _chat(page, 1)["threadId"] == "t2", timeout=3)
+    time.sleep(0.5)
+    check("review: words handed back while a hidden pane held their thread come back in its box when it opens",
+          "words meant for t2" in _box(page, 1).input_value(), repr(_box(page, 1).input_value()))
+    check("review: and are never left in a box that now shows another thread",
+          "words meant for t2" not in _box(page, 2).input_value(), repr(_box(page, 2).input_value()))
+    _choose(page, until, "cols2")
+    before = len(_sent(mock, "t1"))
+    _box(page, 2).press("Enter")
+    time.sleep(0.4)
+    check("review: so Enter in the other pane sends none of them to t1",
+          not any("meant for t2" in (b.get("text") or "") for b in _sent(mock, "t1")[before:]))
+    _box(page, 1).fill("")
+    mock.emit("turn_finished", {"stop": "interrupted"}, thread_id="t2")
+
+
+def _rv_draft_checks(page, mock, check, until):
+    """An unsent draft belongs to its conversation: it follows its thread into
+    another pane, and a pane that opens another thread does not keep it."""
+    _fresh(page, mock, until, TWO)
+    _open(page, until, 1, "t1")
+    _open(page, until, 2, "t2")
+    _box(page, 2).fill("half-typed for t2")
+    _focus(page, until, 1)
+    _choose(page, until, "single")
+    page.locator('[data-testid="thread-t2"]').click()
+    until(lambda: _chat(page, 1)["threadId"] == "t2", timeout=3)
+    time.sleep(0.3)
+    check("review: an unsent draft follows its thread into the pane that opens it",
+          _box(page, 1).input_value() == "half-typed for t2", repr(_box(page, 1).input_value()))
+    check("review: and stays nowhere else", "half-typed" not in _box(page, 2).input_value(),
+          repr(_box(page, 2).input_value()))
+    _box(page, 1).fill("")
+
+    _fresh(page, mock, until, SINGLE)
+    _open(page, until, 1, "t1")
+    _box(page, 1).fill("draft for t1")
+    page.locator('[data-testid="thread-t2"]').click()
+    until(lambda: _chat(page, 1)["threadId"] == "t2", timeout=3)
+    time.sleep(0.3)
+    check("review: one pane opening another thread does not carry the draft into it",
+          _box(page, 1).input_value() == "", repr(_box(page, 1).input_value()))
+    page.locator('[data-testid="thread-t1"]').click()
+    until(lambda: _chat(page, 1)["threadId"] == "t1", timeout=3)
+    check("review: and the draft is back when its thread is",
+          bool(until(lambda: _box(page, 1).input_value() == "draft for t1", timeout=2)),
+          repr(_box(page, 1).input_value()))
+    _box(page, 1).fill("")
+
+
+def _rv_compose_swap_race_checks(page, mock, check, until):
+    """A first send whose conversation is traded into another pane while its
+    `/send` is in flight writes only where that conversation is."""
+    _fresh(page, mock, until, TWO)
+    _open(page, until, 2, "t2")
+    _focus(page, until, 1)
+    held = []
+    page.route(SEND_URL, lambda r: held.append(r))
+    try:
+        _box(page, 1).fill("first words of a new thread")
+        _box(page, 1).press("Enter")
+        until(lambda: _pumped(page) and len(held) > 0, timeout=3)
+        new = (_chat(page, 1).get("compose") or {}).get("openedId")
+        check("setup: pane 1's first send has opened its thread and is in flight", bool(new) and len(held) == 1, str(new))
+        _focus(page, until, 2)
+        page.set_viewport_size({"width": 700, "height": 900})
+        until(lambda: not _visible(page, _pane(1)), timeout=3)
+        mock.emit("thread_opened", {}, thread_id=new)
+        if page.locator('[data-testid="expand-left"]').count():
+            page.locator('[data-testid="expand-left"]').click()
+        _expand(page, until, "p1", f"thread-{new}")
+        page.locator(f'[data-testid="thread-{new}"]').click()
+        until(lambda: _chat(page, 2)["threadId"] == new, timeout=3)
+        held[0].continue_()
+    finally:
+        page.unroute(SEND_URL)
+    time.sleep(0.8)
+    c = _chats(page)
+    check("review: a first send that finishes after its thread moved panes leaves it open in one pane",
+          sum(1 for k in "1234" if c[k]["threadId"] == new) == 1, str({k: c[k]["threadId"] for k in "12"}))
+    check("review: and the pane it left keeps the conversation it was given (t2)", c["1"]["threadId"] == "t2",
+          str(c["1"]["threadId"]))
+    page.set_viewport_size({"width": 1600, "height": 900})
+
+
+def _rv_newthread_during_send_checks(page, mock, check, until):
+    """Opening another thread while a first send opens its thread: the pane
+    stays where the owner put it (on main too, in one pane)."""
+    for ws, label in ((TWO, "two panes"), (SINGLE, "one pane")):
+        _fresh(page, mock, until, ws)
+        if ws == TWO:
+            _open(page, until, 2, "t3", "p2")
+            _focus(page, until, 1)
+        held = []
+        page.route(OPEN_URL, lambda r: held.append(r) if r.request.method == "POST" else r.continue_())
+        try:
+            _box(page, 1).fill("brand new")
+            _box(page, 1).press("Enter")
+            until(lambda: _pumped(page) and len(held) > 0, timeout=3)
+            _expand(page, until, "p1", "thread-t2")
+            page.locator('[data-testid="thread-t2"]').click()
+            until(lambda: _chat(page, 1)["threadId"] == "t2", timeout=3)
+            held[0].continue_()
+        finally:
+            page.unroute(OPEN_URL)
+        time.sleep(1.0)
+        check(f"review ({label}): opening another thread during a first send keeps the pane on it",
+              _chat(page, 1)["threadId"] == "t2", str(_chat(page, 1)["threadId"]))
+        check(f"review ({label}): and the pane draws that thread's transcript",
+              "second thread question" in _log(page, 1) and "brand new" not in _log(page, 1), _log(page, 1)[:80])
+
+
+def _rv_transcript_race_checks(page, mock, check, until):
+    """A transcript lands in the pane showing its thread when it arrives, or
+    nowhere: never in the pane number it was asked for."""
+    _fresh(page, mock, until, TWO)
+    _open(page, until, 1, "t3", "p2")
+    _open(page, until, 2, "t2")
+    held = []
+    page.route("**/threads/t1/transcript", lambda r: held.append(r))
+    try:
+        _focus(page, until, 1)
+        _choose(page, until, "single")
+        until(lambda: not _visible(page, _pane(2)), timeout=2)
+        _expand(page, until, "p1", "thread-t1")
+        page.locator('[data-testid="thread-t1"]').click()
+        until(lambda: _pumped(page) and len(held) > 0, timeout=3)
+        page.locator('[data-testid="thread-t2"]').click()
+        until(lambda: _chat(page, 1)["threadId"] == "t2", timeout=3)
+        time.sleep(0.2)
+        held[0].continue_()
+    finally:
+        page.unroute("**/threads/t1/transcript")
+    time.sleep(0.8)
+    log1 = _log(page, 1)
+    check("review: a late transcript never lands in a pane that moved on (swap)",
+          _chat(page, 1)["threadId"] == "t2" and "second thread question" in log1 and "what is the plan" not in log1,
+          log1[:80])
+    c2 = _chat(page, 2)
+    texts = " ".join(m.get("text", "") for m in c2["messages"])
+    check("review: it lands in the pane showing its thread now (the hidden one that took t1)",
+          c2["threadId"] == "t1" and "what is the plan" in texts and "homework" not in texts, texts[:80])
+
+    _fresh(page, mock, until, SINGLE)
+    held = []
+    page.route("**/threads/t1/transcript", lambda r: held.append(r))
+    try:
+        _expand(page, until, "p1", "thread-t1")
+        page.locator('[data-testid="thread-t1"]').click()
+        until(lambda: _pumped(page) and len(held) > 0, timeout=3)
+        page.locator('[data-testid="thread-t2"]').click()
+        until(lambda: "second thread question" in _log(page, 1), timeout=3)
+        held[0].continue_()
+    finally:
+        page.unroute("**/threads/t1/transcript")
+    time.sleep(0.6)
+    check("review: one pane — a late transcript for the thread it left does not overwrite the one it shows",
+          "what is the plan" not in _log(page, 1) and "second thread question" in _log(page, 1), _log(page, 1)[:80])
+
+
+def _rv_tab_behind_card_checks(page, mock, check, until):
+    """With a card up, Tab and Shift+Tab never leave it: Shift+Tab used to
+    walk onto a Stop behind the veil, and Enter interrupted the turn."""
+    _fresh(page, mock, until, TWO)
+    _open(page, until, 1, "t1")
+    _open(page, until, 2, "t2")
+    mock.emit("turn_started", {}, thread_id="t1")
+    mock.emit("turn_started", {}, thread_id="t2")
+    until(lambda: page.locator('[data-testid="stop"]').count() == 2, timeout=3)
+    page.evaluate("document.activeElement && document.activeElement.blur()")
+    calls = len(mock.calls)
+    _approval(mock, "tabtrap1")
+    until(lambda: page.locator('[data-testid="approval-card"]').count() > 0, timeout=4)
+    time.sleep(0.3)
+    outside = []
+    for key in ["Shift+Tab"] * 16 + ["Tab"] * 16:
+        page.keyboard.press(key)
+        where = page.evaluate("""() => { const a = document.activeElement;
+            return a ? [a.getAttribute('data-testid') || a.tagName, !!a.closest('#authveil')] : null; }""")
+        if not where or not where[1]:
+            outside.append(where)
+    check("review: with a card up, Tab and Shift+Tab never leave the card", not outside, str(outside[:4]))
+    stops_live = page.evaluate("""() => Array.from(document.querySelectorAll('[data-testid="stop"]'))
+                                   .filter(b => !b.closest('[inert]')).length""")
+    check("review: and nothing behind it can be reached: everything outside the veil is inert",
+          stops_live == 0 and page.evaluate("""() => Array.from(document.getElementById('root').children)
+              .filter(el => el.id !== 'authveil').every(el => el.hasAttribute('inert'))"""), str(stops_live))
+    sent = [c for c in mock.calls[calls:] if c[0] == "POST" and c[1] != "/stt"]
+    check("review: and no request went out", not sent, str(sent[:3]))
+    page.keyboard.press("Escape")
+    until(lambda: page.locator('[data-testid="approval-card"]').count() == 0, timeout=4)
+    check("review: once it is answered nothing stays inert",
+          bool(until(lambda: page.evaluate("!document.querySelector('#root > [inert]')"), timeout=2)))
+    mock.emit("turn_finished", {"stop": "end"}, thread_id="t1")
+    mock.emit("turn_finished", {"stop": "end"}, thread_id="t2")
+
+
+def _rv_handoff_trade_checks(page, mock, check, until):
+    """Pane 1 left t1 running; pane 2, running t2, opens t1: they trade, so
+    t1 on screen has its Stop and t2's turn is still heard."""
+    _fresh(page, mock, until, TWO)
+    _open(page, until, 1, "t1")
+    mock.emit("turn_started", {}, thread_id="t1")
+    until(lambda: _chat(page, 1)["busy"], timeout=3)
+    _open(page, until, 1, "t3", "p2")
+    _open(page, until, 2, "t2")
+    mock.emit("turn_started", {}, thread_id="t2")
+    until(lambda: _chat(page, 2)["busy"], timeout=3)
+    _focus(page, until, 2)
+    page.locator('[data-testid="thread-t1"]').click()
+    until(lambda: _chat(page, 2)["threadId"] == "t1", timeout=3)
+    check("review: a pane running its own turn that opens a running thread has that thread's Stop",
+          bool(until(lambda: page.locator(_pane(2, '[data-testid="stop"]')).count() == 1, timeout=2)),
+          str(page.locator('[data-testid="stop"]').count()))
+    c = _chats(page)
+    check("review: and the other pane takes its turn off screen, so its finish is still heard",
+          c["1"]["busy"] and c["1"]["turnThreadId"] == "t2", str((c["1"]["busy"], c["1"]["turnThreadId"])))
+    mock.emit("turn_finished", {"stop": "end"}, thread_id="t2")
+    check("review: t2's finish frees pane 1", bool(until(lambda: _chat(page, 1)["busy"] is False, timeout=3)))
+    i1 = len(mock.sent("POST", "/threads/t1/interrupt"))
+    page.locator(_pane(2, '[data-testid="stop"]')).click()
+    check("review: and pane 2's Stop stops t1",
+          bool(until(lambda: len(mock.sent("POST", "/threads/t1/interrupt")) > i1, timeout=3)))
+    mock.emit("turn_finished", {"stop": "interrupted"}, thread_id="t1")
+
+
+def _rv_stt_lands_selected_checks(page, mock, check, until):
+    """Decisions W-6: voice goes to the selected chat as it is when the
+    transcript lands — clicking pane 2 during STT sends the words there."""
+    _fresh(page, mock, until, TWO)
+    _open(page, until, 1, "t1")
+    _open(page, until, 2, "t2")
+    _focus(page, until, 1)
+    page.locator(_pane(1, '[data-testid="dictation-auto"]')).click()
+    held = []
+    page.route("**/stt", lambda r: held.append(r))
+    try:
+        page.evaluate(UTTERANCE)
+        until(lambda: _pumped(page) and len(held) > 0, timeout=6)
+        check("setup: an utterance spoken to pane 1 is being transcribed", len(held) > 0)
+        page.locator(_pane(2, '[data-testid="log"]')).click()
+        until(lambda: _attr(page, _pane(2), "data-focused") == "true", timeout=2)
+        s1, s2 = len(_sent(mock, "t1")), len(_sent(mock, "t2"))
+        held[0].continue_()
+    finally:
+        page.unroute("**/stt")
+    sent = until(lambda: _sent(mock, "t2")[s2:] or None, timeout=5)
+    check("W-6: clicking pane 2 during STT sends the words to pane 2's chat",
+          bool(sent) and sent[-1].get("text") == "what is the weather", str(sent))
+    check("W-6: and none to the pane they were spoken in", len(_sent(mock, "t1")) == s1)
+    page.locator(_pane(2, '[data-testid="dictation-review"]')).click()
+    mock.emit("turn_finished", {"stop": "end"}, thread_id="t2")
+
+
+def _rv_stale_status_checks(page, mock, check, until):
+    """What the microphone says moves with the selected chat: a pane that is
+    no longer selected never keeps LISTENING · SPEAK NOW."""
+    _fresh(page, mock, until, TWO)
+    _open(page, until, 1, "t1")
+    _open(page, until, 2, "t2")
+    page.evaluate("""() => { const m = window.__hud.mic; m.feedMs(2000, 0.001);
+        window.__hud.capture.openFollowUp(); m.feedMs(800, 0.06); return true; }""")
+    until(lambda: _chat(page, 2)["status"].startswith("LISTENING"), timeout=3)
+    check("setup: the selected chat (pane 2) says it is listening", _chat(page, 2)["status"].startswith("LISTENING"))
+    page.locator(_pane(1, '[data-testid="log"]')).click()
+    time.sleep(0.2)
+    st = page.locator(_pane(2, '[data-testid="pane-status"]'))
+    txt = st.inner_text() if st.count() else ""
+    check("review: a pane that stops being the selected chat does not go on saying LISTENING",
+          "LISTENING" not in txt.upper(), txt)
+    page.evaluate("() => { const m = window.__hud.mic; m.feedMs(800, 0.06); m.feedMs(2200, 0.0005); return true; }")
+    check("W-6: the utterance's transcript lands in the chat selected when it lands (pane 1)",
+          bool(until(lambda: "what is the weather" in _box(page, 1).input_value(), timeout=5))
+          and "what is the weather" not in _box(page, 2).input_value())
+    _box(page, 1).fill("")
+    page.evaluate("window.__hud.capture.closeFollowUp()")
+
+
+def _rv_beside_refusal_checks(page, mock, check, until):
+    """Open beside into a dirty File pane the layout hides: the refusal is
+    said where the owner is, not in the hidden pane."""
+    _fresh(page, mock, until, CHAT_FILE)
+    _open(page, until, 1, "t1")
+    page.locator(_pane(2, '[data-testid="file-calc.py"]')).click()
+    until(lambda: page.locator(_pane(2, '[data-testid="file-path"]')).inner_text() == "calc.py", timeout=4)
+    _edit(page, until, 2, "\n# hidden and dirty")
+    save = page.locator(_pane(2, '[data-testid="file-save"]'))
+    until(lambda: not save.is_disabled(), timeout=4)
+    _focus(page, until, 1)
+    _choose(page, until, "single")
+    until(lambda: not _visible(page, _pane(2)), timeout=2)
+    _expand(page, until, "p2", "thread-t3")
+    page.locator('[data-testid="thread-t3"]').click(modifiers=["Alt"])
+    shown = page.locator('[data-testid="pane-1-refused"]')
+    check("review: Open beside into a hidden dirty File pane is refused where the owner can see it",
+          bool(until(lambda: shown.count() == 1 and shown.is_visible(), timeout=2))
+          and "pane 2" in shown.inner_text(), shown.inner_text() if shown.count() else "")
+    check("review: and nothing moved", _attr(page, '[data-testid="workspace"]', "data-preset") == "single"
+          and _chat(page, 2)["threadId"] is None)
+    _choose(page, until, "cols2")
+    save.click()
+    until(lambda: save.is_disabled(), timeout=4)
+
+
+# ---------------------------------------------------------------------------
+# The owner's rule (decisions W-6): ambiguous input goes to the selected chat.
+
+GRID_CHATS = json.dumps({"preset": "grid4", "focused": 1,
+                         "panes": [{"view": "chat"}, {"view": "chat"}, {"view": "chat"}, {"view": "chat"}]})
+THREE = json.dumps({"preset": "cols3", "focused": 1,
+                    "panes": [{"view": "chat"}, {"view": "chat"}, {"view": "preview"}, {"view": "task"}]})
+
+
+def _sel(page):
+    return page.evaluate("window.__hud.state().selectedChat")
+
+
+def _w6_grid_checks(page, mock, check, until):
+    _fresh(page, mock, until, GRID_CHATS)
+    _open(page, until, 3, "t3", "p2")
+    _focus(page, until, 1)
+    check("setup: four chat panes in a 2×2 grid, pane 1 selected",
+          all(_attr(page, _pane(n), "data-view") == "chat" for n in (1, 2, 3, 4)) and _sel(page) == 1)
+    page.locator(_pane(3, '[data-testid="log"]')).click()
+    until(lambda: _sel(page) == 3, timeout=2)
+    check("W-6: a click in pane 3's transcript selects pane 3",
+          _sel(page) == 3 and _attr(page, _pane(3), "data-selected") == "true"
+          and page.locator('[data-testid="pane-3-mic"]').count() == 1
+          and "selected" in (_attr(page, _pane(3), "class") or ""))
+    check("W-6: only the selected chat draws the dictation strip",
+          [page.locator(_pane(n, '[data-testid="dictation"]')).count() for n in (1, 2, 3, 4)] == [0, 0, 1, 0])
+    page.locator(_pane(4, '[data-testid="tab-preview"]')).click()
+    until(lambda: _attr(page, _pane(4), "data-view") == "preview", timeout=2)
+    page.locator(_pane(4, '[data-testid="tab-file"]')).click()
+    until(lambda: _attr(page, _pane(4), "data-view") == "file", timeout=2)
+    page.locator(_pane(4)).click(position={"x": 40, "y": 80})
+    time.sleep(0.2)
+    check("W-6: clicking Preview or File in pane 4 leaves pane 3 selected",
+          _sel(page) == 3 and _attr(page, _pane(4), "data-focused") == "true")
+    page.evaluate(UTTERANCE)
+    check("W-6: REVIEW puts what was said in the selected chat's box (pane 3)",
+          bool(until(lambda: "what is the weather" in _box(page, 3).input_value(), timeout=5))
+          and all(_box(page, n).input_value() == "" for n in (1, 2)))
+    _box(page, 3).fill("")
+    page.locator(_pane(3, '[data-testid="dictation-auto"]')).click()
+    s3 = len(_sent(mock, "t3"))
+    page.evaluate(UTTERANCE)
+    sent = until(lambda: _sent(mock, "t3")[s3:] or None, timeout=5)
+    check("W-6: AUTO sends it to the selected chat's thread (pane 3)",
+          bool(sent) and sent[-1].get("spoken") is True, str(sent))
+    page.locator(_pane(3, '[data-testid="dictation-review"]')).click()
+    mock.emit("turn_finished", {"stop": "end"}, thread_id="t3")
+    until(lambda: _chat(page, 3)["busy"] is False, timeout=3)
+    mock.emit("text_delta", {"text": "no thread of its own"})
+    check("W-6: an event with no thread lands in the selected chat (pane 3)",
+          bool(until(lambda: "no thread of its own" in _chat(page, 3)["draft"], timeout=3))
+          and all("no thread" not in _chat(page, n)["draft"] for n in (1, 2)))
+    mock.emit("text", {"text": "no thread of its own"})
+
+
+def _w6_fallback_checks(page, mock, check, until):
+    _fresh(page, mock, until, THREE)
+    _focus(page, until, 2)
+    _focus(page, until, 1)
+    # Three columns are narrow: pane 3's views are a menu, so click its URL box.
+    page.locator(_pane(3, '[data-testid="preview-url"]')).click()
+    until(lambda: _attr(page, _pane(3), "data-focused") == "true", timeout=2)
+    check("setup: pane 1 selected last, pane 2 before it; pane 3 (Preview) focused", _sel(page) == 1)
+    page.set_viewport_size({"width": 1100, "height": 900})
+    until(lambda: not _visible(page, _pane(1)), timeout=3)
+    check("W-6: the selected pane dropped by a narrow window falls back to the one selected before it, still drawn",
+          bool(until(lambda: _sel(page) == 2, timeout=2))
+          and page.locator(_pane(2, '[data-testid="dictation"]')).count() == 1, str(_sel(page)))
+    page.set_viewport_size({"width": 1600, "height": 900})
+    check("W-6: and the selection is pane 1 again once it is drawn again",
+          bool(until(lambda: _sel(page) == 1 and _visible(page, _pane(1)), timeout=3)), str(_sel(page)))
+
+
+def _w6_one_and_none_checks(page, mock, check, until):
+    _fresh(page, mock, until, SINGLE)
+    check("W-6: with one chat open, that chat is selected",
+          _sel(page) == 1 and page.locator(_pane(1, '[data-testid="dictation"]')).count() == 1)
+    two = json.dumps({"preset": "cols2", "focused": 1,
+                      "panes": [{"view": "preview"}, {"view": "chat"}, {"view": "file"}, {"view": "task"}]})
+    _fresh(page, mock, until, two)
+    check("W-6: the one chat pane on screen is selected though never clicked", _sel(page) == 2)
+
+    _fresh(page, mock, until, SINGLE)
+    _open(page, until, 1, "t1")
+    page.locator(_pane(1, '[data-testid="tab-file"]')).click()
+    until(lambda: _attr(page, _pane(1), "data-view") == "file", timeout=2)
+    check("setup: no chat pane on screen", _sel(page) is None)
+    stt, calls = len(mock.sent("POST", "/stt")), len(mock.calls)
+    page.evaluate("document.activeElement && document.activeElement.blur()")
+    page.keyboard.down("Space")
+    time.sleep(0.15)
+    page.keyboard.up("Space")
+    err = page.evaluate("window.__hud.state().error") or ""
+    check("W-6: with no chat on screen, push-to-talk is refused and says why",
+          "No chat is open" in err and page.evaluate("window.__hud.capture.ptt") is None, err)
+    page.evaluate(UTTERANCE)
+    time.sleep(1.0)
+    sends = [c for c in mock.calls[calls:] if c[0] == "POST" and (c[1].endswith("/send") or c[1] == "/threads")]
+    check("W-6: and nothing is transcribed or sent", len(mock.sent("POST", "/stt")) == stt and not sends, str(sends))
+    mock.emit("text_delta", {"text": "for nobody"})
+    time.sleep(0.4)
+    check("W-6: an event with no thread lands in no pane",
+          all("for nobody" not in _chat(page, n)["draft"] for n in (1, 2, 3, 4)))
+    page.evaluate("window.__hud.dispatch({type: 'patch', patch: {error: ''}})")
+    page.evaluate("window.__hud.capture.closeFollowUp()")
+
+
+def _w6_handback_held_checks(page, mock, check, until):
+    w = mock.world
+    _fresh(page, mock, until, TWO)
+    _open(page, until, 1, "t1")
+    _open(page, until, 2, "t2")
+    mock.emit("turn_started", {}, thread_id="t2")
+    until(lambda: _chat(page, 2)["busy"], timeout=3)
+    w["send_status"] = "queued"
+    _box(page, 2).fill("words for t2 only")
+    _box(page, 2).press("Enter")
+    until(lambda: any(m.get("message_id") for m in _chat(page, 2)["messages"]), timeout=3)
+    qid = f"msg-{w['sends']}"
+    w.pop("send_status", None)
+    page.locator(_pane(2, '[data-testid="tab-file"]')).click()
+    until(lambda: _attr(page, _pane(2), "data-view") == "file", timeout=2)
+    _focus(page, until, 1)
+    mock.emit("queue_cleared", {"reason": "stopped", "messages": [
+        {"message_id": qid, "typed": "words for t2 only", "via": "hud"}]}, thread_id="t2")
+    time.sleep(0.6)
+    check("W-6: a hand-back for a thread off screen is held, never put in the selected chat",
+          _sel(page) == 1 and _box(page, 1).input_value() == "", repr(_box(page, 1).input_value()))
+    page.locator(_pane(2, '[data-testid="tab-chat"]')).click()
+    check("W-6: and comes back in its own thread's box when that is on screen",
+          bool(until(lambda: _box(page, 2).input_value() == "words for t2 only", timeout=3)),
+          repr(_box(page, 2).input_value()))
+    _box(page, 2).fill("")
+    mock.emit("turn_finished", {"stop": "interrupted"}, thread_id="t2")
 
 
 # ---------------------------------------------------------------------------

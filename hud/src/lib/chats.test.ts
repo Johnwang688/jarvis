@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   besideTarget, chatProjectId, chatTarget, composeRows, drawnShowing, eitherPane, emptyChat, emptyChats,
-  giveBackPane, heldElsewhere, isEmptyChat, openRows, routeEvent, runningHere, shownThread, sidebarPanes,
-  voiceTargetOf, type ChatState, type Chats,
+  giveBackPane, heldElsewhere, isEmptyChat, openRows, routeEvent, runningHere, selectedChatOf, shownThread,
+  sidebarPanes, type ChatState, type Chats,
 } from "./chats";
 import { defaultWorkspace, focusPane, setPreset, setView, type PaneNo, type View, type Workspace } from "./workspace";
 import type { Thread } from "../types";
@@ -109,35 +109,46 @@ describe("handing words back", () => {
     expect(giveBackPane(null, c, none, 3)).toBe(3);
   });
 
+  it("holds words for a thread only a pane off screen shows (review of PR #27)", () => {
+    // A hidden box could be carried to another thread when two panes trade.
+    expect(giveBackPane("b", c, none, 1, null, [1])).toBeNull();
+    expect(giveBackPane("b", c, none, 1, 2, [1])).toBeNull();
+    expect(giveBackPane("b", c, none, 1, null, [1, 2])).toBe(2);
+  });
+
   it("prefers the pane they were typed in when it shows the thread", () => {
     const both = chats({ 1: { threadId: "a" }, 2: { compose: { projectId: "p", openedId: "a" } } });
     expect(giveBackPane("a", both, none, 1, 2)).toBe(2);
   });
 });
 
-describe("the voice target: the chat pane used last", () => {
-  it("is the focused pane when it shows chat", () => {
-    expect(voiceTargetOf(shaped(["chat", "chat"], "cols2", 2), [1, 2], 1)).toBe(2);
+describe("the selected chat: the chat pane most recently clicked (decisions W-6)", () => {
+  it("is the focused pane when it is a drawn chat pane", () => {
+    expect(selectedChatOf(shaped(["chat", "chat"], "cols2", 2), [1, 2], [1])).toBe(2);
   });
 
-  it("stays put while the owner works in a pane that is not a chat", () => {
+  it("stays put while the owner clicks a pane that is not a chat", () => {
     const w = shaped(["chat", "chat", "file"], "cols3", 3);
-    expect(voiceTargetOf(w, [1, 2, 3], 2)).toBe(2);
-    expect(voiceTargetOf(w, [1, 2, 3], 1)).toBe(1);
+    expect(selectedChatOf(w, [1, 2, 3], [2, 1])).toBe(2);
+    expect(selectedChatOf(w, [1, 2, 3], [1, 2])).toBe(1);
   });
 
-  it("moves to a drawn chat pane when its own pane stops showing chat or is not drawn", () => {
-    expect(voiceTargetOf(shaped(["chat", "preview"], "cols2", 2), [1, 2], 2)).toBe(1);
-    expect(voiceTargetOf(shaped(["preview", "chat", "chat"], "cols3", 1), [1, 2], 3)).toBe(2);
+  it("falls back to the most recently selected chat pane still drawn", () => {
+    const w = shaped(["chat", "chat", "chat", "preview"], "grid4", 4);
+    // pane 3 selected last, then the window dropped it: pane 1 was selected before pane 2
+    expect(selectedChatOf(w, [2, 4], [3, 2, 1])).toBe(2);
+    expect(selectedChatOf(w, [1, 4], [3, 2, 1])).toBe(1);
+    expect(selectedChatOf(w, [1, 2, 3, 4], [3, 2, 1])).toBe(3);
   });
 
-  it("with no chat drawn, keeps the conversation it had (the single pane showing a file)", () => {
-    expect(voiceTargetOf(shaped(["file"], "single", 1), [1], 1)).toBe(1);
-    expect(voiceTargetOf(shaped(["file", "chat"], "single", 1), [1], 2)).toBe(2);
+  it("is the one chat pane drawn, never selected before", () => {
+    expect(selectedChatOf(shaped(["preview", "chat"], "cols2", 1), [1, 2], [])).toBe(2);
+    expect(selectedChatOf(defaultWorkspace(), [1], [])).toBe(1);
   });
 
-  it("is pane 1 in the default window", () => {
-    expect(voiceTargetOf(defaultWorkspace(), [1], 1)).toBe(1);
+  it("is none with no chat pane drawn: ambiguous input has nowhere to go", () => {
+    expect(selectedChatOf(shaped(["file"], "single", 1), [1], [1])).toBeNull();
+    expect(selectedChatOf(shaped(["file", "chat"], "single", 1), [1], [2])).toBeNull();
   });
 });
 

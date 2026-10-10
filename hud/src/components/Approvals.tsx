@@ -14,7 +14,7 @@
 //   - a chime, best-effort: a browser may block audio before the owner has
 //     interacted with the window.
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ApprovalRequest } from "../types";
 import { headlineLine } from "../lib/approval";
 
@@ -145,17 +145,29 @@ export function ApprovalVeil(props: {
   const up = !!top;
   // A card coming up takes focus off whatever had it — a frame, Monaco, a
   // sidebar button — onto the card itself (never a button: nothing here is
-  // keyboard-defaulted), and gives it back when the last card goes.
+  // keyboard-defaulted), and **everything outside the veil goes inert**: the
+  // title bar, the shell with its panes and panel, the orb, any picker. The
+  // veil stops the pointer; inert stops Tab and Shift+Tab, which used to walk
+  // focus back onto a Stop behind the card for Enter to press (review of
+  // PR #27). On the way out inert comes off first, then focus goes back to
+  // where it was (WP-A's restore). A layout effect, so nothing behind the
+  // card can take a key between the card drawing and this.
   const restore = useRef<HTMLElement | null>(null);
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!up) return;
+    const veil = document.getElementById("authveil");
+    const card = veil?.querySelector<HTMLElement>('[data-testid="approval-card"]') ?? null;
     const was = document.activeElement as HTMLElement | null;
-    const card = document.querySelector<HTMLElement>('[data-testid="approval-card"]');
-    if (behindTheCard(was, card)) {
-      restore.current = was;
-      card?.focus({ preventScroll: true });
+    if (behindTheCard(was, card)) restore.current = was;
+    card?.focus({ preventScroll: true });
+    const made: Element[] = [];
+    for (const el of Array.from(veil?.parentElement?.children ?? [])) {
+      if (el === veil || el.hasAttribute("inert")) continue;
+      el.setAttribute("inert", "");
+      made.push(el);
     }
     return () => {
+      for (const el of made) el.removeAttribute("inert");
       const back = restore.current;
       restore.current = null;
       if (back && back.isConnected) back.focus({ preventScroll: true });
@@ -167,6 +179,24 @@ export function ApprovalVeil(props: {
       if (e.key === "Escape") {
         e.preventDefault();
         props.onDecide(top.req_id, false);
+      }
+      // Tab and Shift+Tab go round the card's own buttons and never leave it
+      // (everything else is inert; this keeps focus off the browser's own UI
+      // too). The card itself is not in the order: nothing is focused for the
+      // owner, a key only moves focus.
+      if (e.key === "Tab") {
+        e.preventDefault();
+        const card = document.querySelector<HTMLElement>('[data-testid="approval-card"]');
+        const items = Array.from(card?.querySelectorAll<HTMLButtonElement>("button") ?? []).filter((b) => !b.disabled);
+        if (!items.length) {
+          card?.focus({ preventScroll: true });
+          return;
+        }
+        const at = items.indexOf(document.activeElement as HTMLButtonElement);
+        const next = e.shiftKey
+          ? (at <= 0 ? items.length - 1 : at - 1)
+          : (at < 0 || at === items.length - 1 ? 0 : at + 1);
+        items[next].focus({ preventScroll: true });
       }
       // Enter is deliberately not handled: authorize takes a click.
     };

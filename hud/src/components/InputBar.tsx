@@ -29,10 +29,10 @@ export interface ProjectChip {
   onNewProject: () => void;
 }
 
-const MAX_FILES = 8;
+export const MAX_FILES = 8;
 const MAX_BYTES = 4 * 1024 * 1024;
 
-async function toAttachment(file: File): Promise<Attachment | string> {
+export async function toAttachment(file: File): Promise<Attachment | string> {
   if (file.size > MAX_BYTES) return `[${file.name} skipped: over 4MB]`;
   const buf = await file.arrayBuffer();
   let bin = "";
@@ -65,13 +65,43 @@ export function InputBar(props: {
   restore?: GiveBack[];
   /** Every hand-back up to this nonce is in the box. */
   onRestoreTaken?: (nonce: number) => void;
-  /** This pane is the voice target (WP-B): it alone draws the dictation strip —
+  /** This pane is the selected chat (WP-B, decisions W-6): it alone draws the dictation strip —
    * AUTO / REVIEW / OFF, the level meter and the hint. False draws only this
    * pane's own turn status in its place. */
   strip?: boolean;
+  /** The unsent words and staged files, when the caller keeps them (WP-B):
+   * they belong to the conversation, so a pane that trades conversations, or
+   * opens another thread, shows that conversation's draft (review of PR #27).
+   * Absent, the box keeps its own. */
+  text?: string;
+  files?: Attachment[];
+  onText?: (text: string) => void;
+  onFiles?: (files: Attachment[]) => void;
 }) {
-  const [text, setText] = useState("");
-  const [files, setFiles] = useState<Attachment[]>([]);
+  const [ownText, setOwnText] = useState("");
+  const [ownFiles, setOwnFiles] = useState<Attachment[]>([]);
+  const textControlled = props.text !== undefined;
+  const filesControlled = props.files !== undefined;
+  const text = textControlled ? props.text! : ownText;
+  const files = filesControlled ? props.files! : ownFiles;
+  // Several changes can land before a render (a hand-back and a transcript at
+  // once): each reads what the one before it wrote, not the last render's.
+  const textNow = useRef(text);
+  textNow.current = text;
+  const filesNow = useRef(files);
+  filesNow.current = files;
+  const setText = (next: string | ((t: string) => string)) => {
+    const value = typeof next === "function" ? next(textNow.current) : next;
+    textNow.current = value;
+    if (textControlled) props.onText?.(value);
+    else setOwnText(value);
+  };
+  const setFiles = (next: Attachment[] | ((f: Attachment[]) => Attachment[])) => {
+    const value = typeof next === "function" ? next(filesNow.current) : next;
+    filesNow.current = value;
+    if (filesControlled) props.onFiles?.(value);
+    else setOwnFiles(value);
+  };
   const [notes, setNotes] = useState<string[]>([]);
   const box = useRef<HTMLTextAreaElement>(null);
 
@@ -110,7 +140,7 @@ export function InputBar(props: {
     if (!list) return;
     const incoming = Array.from(list);
     const msgs: string[] = [];
-    const next = [...files];
+    const next = [...filesNow.current];
     for (const f of incoming) {
       if (next.length >= MAX_FILES) {
         msgs.push(`[${f.name} skipped: 8 files per turn]`);
@@ -220,7 +250,7 @@ export function InputBar(props: {
         {props.projectChip ? <Chip chip={props.projectChip} /> : null}
         {props.modelChip ?? null}
         {props.strip === false ? (
-          // Not the voice target: no dictation strip, so the strip itself shows
+          // Not the selected chat: no dictation strip, so the strip itself shows
           // where speech lands. This pane's own turn still says what it is doing.
           <span className="hint" data-testid="pane-status">{props.hint}</span>
         ) : (

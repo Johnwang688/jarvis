@@ -9,20 +9,24 @@
 // that drove the single conversation, keyed by pane: in the single layout
 // pane 1 is that conversation, unchanged. An SSE event with a `thread_id`
 // reaches the pane showing that thread or tracking its turn; approvals,
-// activity and lifecycle events stay window-wide. Voice goes to the **voice
-// target**, the chat pane used last: the orb follows and interrupts its turn,
-// the follow-up mic window opens only when its turn ends, and only its turn
-// keeps the mic suppressed.
+// activity and lifecycle events stay window-wide. **Ambiguous input goes to
+// the selected chat** (decisions W-6): the chat pane most recently clicked,
+// always one on screen, none with no chat drawn. Voice lands there when its
+// transcript does, the orb follows and interrupts its turn, the follow-up mic
+// window opens only when its turn ends, only its turn keeps the mic
+// suppressed, and files dropped outside a chat pane are staged in its box.
+// Input that belongs to a thread — typed words, a steer, a hand-back, a first
+// send, a transcript — stays with that thread.
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { api, subscribe } from "./api";
 import {
-  useStore, activeChat, compatActions, currentProjectId, currentTask, flatState,
+  useStore, activePane, compatActions, currentProjectId, currentTask, flatState,
   type ChatPatch,
 } from "./state/store";
 import { Sidebar } from "./components/Sidebar";
 import { ChatTab } from "./components/ChatTab";
-import { InputBar } from "./components/InputBar";
+import { InputBar, MAX_FILES, toAttachment } from "./components/InputBar";
 import { TaskView } from "./components/TaskView";
 import { FileTab } from "./components/FileTab";
 import { DiffTab } from "./components/DiffTab";
@@ -35,7 +39,7 @@ import { Orb } from "./components/Orb";
 import { Capture } from "./lib/capture";
 import { HINTS, isMuted, loadMode, outcomeFor, saveMode, type DictationMode } from "./lib/dictation";
 import { WakeGate, compileWake, matchesWake, WAKE_PATTERNS } from "./lib/wake";
-import type { Attachment, AvatarDesc, Schedule, VoiceEntry } from "./types";
+import type { Attachment, AvatarDesc, ChatMessage, Schedule, VoiceEntry } from "./types";
 import type { RosterView } from "./lib/roster";
 import { moveThreadTo } from "./lib/threads";
 import { lastProject, loadLastProject, saveLastProject } from "./lib/compose";
@@ -53,7 +57,7 @@ import { PANE_NOS, SHAPES, show as showOf, type PaneNo, type PaneSpec, type View
 import { ActivitySync, clearsOnRead } from "./lib/activity";
 import {
   besideTarget, chatProjectId, chatTarget, composeRows, drawnShowing, eitherPane, giveBackPane, heldElsewhere,
-  isEmptyChat, openRows, routeEvent, runningHere, voiceTargetOf,
+  isEmptyChat, openRows, routeEvent, runningHere, selectedChatOf, shownThread,
 } from "./lib/chats";
 
 const PROPOSAL_WINDOW_MS = 60_000;
@@ -103,10 +107,13 @@ export default function App() {
     window.addEventListener("beforeunload", ask);
     return () => window.removeEventListener("beforeunload", ask);
   }, [anyDirty]);
-  // A pane that refused to switch away from an unsaved edit says why, briefly.
-  const [refused, setRefused] = useState<Partial<Record<PaneNo, number>>>({});
+  // A refused switch away from an unsaved edit says why, briefly, in a pane
+  // the owner can see (by where it is shown): the File pane itself when it
+  // is drawn, else the focused pane, naming the File pane — Open beside can
+  // aim at a pane the layout hides (review of PR #27).
+  const [refused, setRefused] = useState<Partial<Record<PaneNo, { at: number; pane: PaneNo }>>>({});
   useEffect(() => {
-    const live = Object.values(refused).filter(Boolean) as number[];
+    const live = Object.values(refused).filter(Boolean).map((r) => r!.at);
     if (!live.length) return;
     const t = setTimeout(() => setRefused({}), Math.max(0, Math.min(...live) + REFUSED_MS - Date.now()));
     return () => clearTimeout(t);
@@ -142,11 +149,10 @@ export default function App() {
   // Per pane: a thread opened for a compose send, before it becomes the
   // pane's `threadId` — its events are that pane's from the moment it exists.
   const pendingThread = useRef(perPane());
-  // Per pane: the thread whose transcript must not be reloaded when it becomes
-  // the pane's open one, because the pane already holds it — the first
-  // message, drawn optimistically, and a reply that may already be streaming;
-  // or a conversation that moved here from another pane.
-  const skipReload = useRef(perPane());
+  // Transcripts on their way, by thread: one load per thread at a time, and
+  // it lands in whichever pane shows that thread when it arrives
+  // (`ChatState.loadedThread`; review of PR #27).
+  const loading = useRef(new Set<string>());
   // This window's own messages, named until the daemon names them; and the
   // ones waiting behind a turn (daemon id -> words and files), so a Stop that
   // drops them can put them back in the box (2026-10-08).
@@ -159,24 +165,34 @@ export default function App() {
   const patch = useCallback((p: Parameters<typeof dispatch>[0] extends any ? any : never) => {
     dispatch({ type: "patch", patch: p });
   }, [dispatch]);
-  /** One pane's conversation fields; an `orb` in it lands only for the voice target. */
+  /** One pane's conversation fields; an `orb` in it lands only for the selected chat. */
   const chatPatch = useCallback((pane: PaneNo, p: ChatPatch) => {
     dispatch({ type: "chat", pane, patch: p });
   }, [dispatch]);
 
+  /** The chat panes the owner can see: drawn, and showing chat. */
+  const chatsOnScreen = (): PaneNo[] => {
+    const lay = layoutNow.current;
+    return lay.fit.panes.filter((n) => lay.ws.panes[n - 1].view === "chat");
+  };
+
   /**
-   * Words and files back to a box: the box of the pane showing that thread
-   * (`from`, where they were typed, first), else held until the owner opens
-   * the thread — never another thread's box. With no thread yet (a compose
-   * send that failed before it opened one), back where they were typed.
+   * Words and files back to a box: the box of a chat pane **on screen**
+   * showing that thread (`from`, where they were typed, first), else held
+   * until a drawn chat pane shows the thread — never another thread's box,
+   * and never a hidden box a trade of conversations could carry to another
+   * thread (review of PR #27). With no thread yet (a compose send that failed
+   * before it opened one), back to the pane holding that compose row.
    */
   const giveBack = useCallback(
     (threadId: string | null, text: string, files: Attachment[], from: PaneNo | null = null) => {
       const at = live.current;
-      const pane = giveBackPane(threadId, at.chats, pendingThread.current, at.voiceTarget, from);
-      if (pane === null) heldBack.current.hold(threadId!, text, files);
+      const pane = giveBackPane(threadId, at.chats, pendingThread.current, at.selectedChat, from, chatsOnScreen());
+      if (pane === null && threadId) heldBack.current.hold(threadId, text, files);
+      else if (pane === null) dispatch({ type: "patch", patch: { error: "Words that were not sent had no chat to go back to: open a chat." } });
       else dispatch({ type: "give_back", pane, text, files, nonce: nextNonce() });
     },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [dispatch],
   );
   // provider ▾ · model ▾ · effort ▾ in each chat pane's input bar (decisions 2026-10-06, A).
@@ -192,16 +208,26 @@ export default function App() {
   // already heard must not undo it (lib/activity.ts, review 2026-10-09).
   const [activitySync] = useState(() => new ActivitySync());
 
-  // ---- the voice target ----------------------------------------------------
+  // ---- the selected chat ---------------------------------------------------
 
-  // The chat pane used last (lib/chats `voiceTargetOf`): the focused pane when
-  // it shows chat, else the target so far while it is a drawn chat pane, else
-  // the first drawn chat pane. Synced into the store before paint, so the
-  // callbacks below (capture, the orb, the SSE routing) read it from `live`.
-  const voicePane = voiceTargetOf(view.ws, view.fit.panes, state.voiceTarget);
+  // Where ambiguous input goes (decisions W-6, lib/chats `selectedChatOf`):
+  // the chat pane most recently clicked — a pointer or keyboard focus into a
+  // chat pane focuses it, and that heads the order — always one the layout
+  // draws (a dropped one gives way to the next most recently selected), and
+  // none at all with no chat pane drawn. Synced into the store before paint,
+  // so the callbacks below (capture, the orb, the SSE routing) read it from
+  // `live`. `activeNow` is the chat the window is about: the selected one,
+  // else the one selected last.
+  const focusedChat: PaneNo | null =
+    view.fit.panes.includes(view.ws.focused) && view.ws.panes[view.ws.focused - 1].view === "chat"
+      ? view.ws.focused : null;
+  const selected = selectedChatOf(view.ws, view.fit.panes, state.selectedOrder);
+  const activeNow: PaneNo = selected ?? state.selectedOrder[0] ?? 1;
   useLayoutEffect(() => {
-    if (voicePane !== live.current.voiceTarget) dispatch({ type: "voice_target", pane: voicePane });
-  }, [voicePane, state.voiceTarget, dispatch]);
+    const at = live.current;
+    const front = focusedChat !== null && focusedChat === selected && at.selectedOrder[0] !== focusedChat;
+    if (selected !== at.selectedChat || front) dispatch({ type: "select", pane: selected, front });
+  }, [selected, focusedChat, state.selectedChat, state.selectedOrder, dispatch]);
 
   // ---- capture ------------------------------------------------------------
 
@@ -209,63 +235,98 @@ export default function App() {
     () =>
       new Capture({
         // He does not answer himself, and never talks over a pending
-        // authorization or an open picker. Only the voice target's turn
-        // suppresses the mic: a long turn in another pane must not silence it.
+        // authorization or an open picker. Only the selected chat's turn
+        // suppresses the mic — a long turn in another pane must not silence
+        // it — and with no chat on screen there is nobody to talk to.
         suppressed: () =>
           live.current.orb === "speaking" ||
-          activeChat(live.current).busy ||
+          live.current.selectedChat === null ||
+          live.current.chats[live.current.selectedChat].busy ||
           live.current.approvals.length > 0 ||
           live.current.picker !== null ||
           chipOverlay.current,
         muted: () => isMuted(live.current.dictation),
         onLevel: (level) => dispatch({ type: "patch", patch: { level } }),
-        onListening: () =>
-          dispatch({
-            type: "chat", pane: live.current.voiceTarget,
-            patch: { orb: "listening", status: "LISTENING · SPEAK NOW" },
-          }),
-        onIdle: (note) =>
-          dispatch({ type: "chat", pane: live.current.voiceTarget, patch: { orb: "idle", status: note || "" } }),
+        onListening: () => {
+          const n = live.current.selectedChat;
+          if (n !== null) dispatch({ type: "chat", pane: n, patch: { orb: "listening", status: "LISTENING · SPEAK NOW" } });
+        },
+        onIdle: (note) => {
+          const n = live.current.selectedChat;
+          if (n !== null) dispatch({ type: "chat", pane: n, patch: { orb: "idle", status: note || "" } });
+          else dispatch({ type: "patch", patch: { orb: "idle" } });
+        },
         onUtterance: (wav) => void onUtterance(wav),
       }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [dispatch],
   );
 
+  // Words spoken while no chat pane was on screen: they wait, unsent, for the
+  // next chat selected (decisions W-6: ambiguous input goes to the selected
+  // chat as it is when it is delivered, and there was none).
+  const unplaced = useRef<string[]>([]);
+
   const onUtterance = useCallback(
     async (wav: Blob) => {
-      // The words go where the owner was talking to when they stopped: the
-      // voice target now, whatever it is by the time the transcript lands.
-      const pane = live.current.voiceTarget;
+      // Ambiguous input (decisions W-6): what was said goes to **the selected
+      // chat as it is when the transcript lands** — the chat pane most
+      // recently clicked, whatever thread it shows by then. Clicking another
+      // chat during STT sends the words there: the owner's call. What the
+      // microphone is doing is said in the selected chat's input bar.
+      const say = (p: ChatPatch) => {
+        const n = live.current.selectedChat;
+        if (n !== null) chatPatch(n, p);
+        else if (p.error !== undefined) dispatch({ type: "patch", patch: { error: p.error } });
+      };
       const mode = live.current.dictation;
       const what = outcomeFor(mode);
       // OFF never reaches here (Capture refuses to claim while muted), but the
       // mode is checked again rather than assumed: the fail-closed direction
       // costs a discarded utterance and the other costs an upload.
       if (what === "discard") return;
-      chatPatch(pane, { orb: "transcribing", status: "TRANSCRIBING" });
+      say({ orb: "transcribing", status: "TRANSCRIBING" });
       let text = "";
       try {
         text = await api.stt(wav);
       } catch (e: any) {
-        chatPatch(pane, { orb: "error", status: "STT FAILED", error: e.message });
+        say({ orb: "error", status: "STT FAILED", error: e.message });
         return;
       }
       if (!text.trim()) {
-        chatPatch(pane, { orb: "idle", status: "DIDN'T CATCH THAT" });
+        say({ orb: "idle", status: "DIDN'T CATCH THAT" });
         return;
       }
+      const n = live.current.selectedChat;
+      if (n === null) {
+        // No chat on screen: never sent anywhere. It waits for the next chat
+        // selected, in its box, unsent — and the window says so.
+        unplaced.current.push(text);
+        dispatch({
+          type: "patch",
+          patch: { orb: "idle", error: "No chat is open, so what you said was not sent. It will be in the box of the next chat you select." },
+        });
+        return;
+      }
+      // REVIEW never sends on its own: the transcript lands in the box.
       if (what === "review") {
-        // REVIEW never sends on its own: the transcript lands in the box.
-        chatPatch(pane, { orb: "idle", status: "", pendingTranscript: text });
+        chatPatch(n, { orb: "idle", status: "", pendingTranscript: text });
         return;
       }
       // Dictated: the Discord mirror labels it "You (HUD, voice)" (PR C).
-      await send(pane, text, [], true);
+      await send(n, text, [], true);
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [dispatch],
   );
+
+  // Words that had no chat to go to come back, unsent, in the next one selected.
+  useEffect(() => {
+    if (state.selectedChat === null || !unplaced.current.length) return;
+    const text = unplaced.current.join("\n");
+    unplaced.current = [];
+    dispatch({ type: "give_back", pane: state.selectedChat, text, files: [], nonce: nextNonce() });
+  }, [state.selectedChat, dispatch]);
 
   // ---- sending ------------------------------------------------------------
 
@@ -282,12 +343,46 @@ export default function App() {
       // Stop and the orb must still reach it.
       const steering = !!threadId && chat.busy && chat.turnThreadId === threadId;
       const prior = { busy: chat.busy, turnThreadId: chat.turnThreadId, orb: at.orb, status: chat.status };
+      // What this send tracks until it knows its thread: a compose row's turn
+      // is tracked under this send's own id, then under the thread it opens.
+      let tracked = threadId ?? local;
       dispatch({
         type: "message", pane,
         message: { role: "user", text, local, ...(steering ? { mark: "steering" as const } : {}) },
       });
       if (steering) chatPatch(pane, { error: "" });
-      else chatPatch(pane, { busy: true, orb: "thinking", status: "SENDING", draft: "", error: "" });
+      else {
+        chatPatch(pane, {
+          busy: true, orb: "thinking", status: "SENDING", draft: "", error: "", turnThreadId: tracked,
+          // The compose row carries this send's id, so the send finds it again.
+          ...(compose && !threadId ? { compose: { ...compose, sending: local } } : {}),
+        });
+      }
+      /**
+       * After every await, the pane is found again by what it holds (review of
+       * PR #27): the owner may have traded this conversation into another
+       * pane, or opened another thread in this one. `conversation`: the pane
+       * holding this compose row or showing this thread — for what is drawn.
+       * `turn`: the pane tracking this send's turn — for busy and Stop. Null:
+       * nothing on screen is this send's any more, and no pane is touched.
+       */
+      const conversation = (): PaneNo | null => {
+        const now = live.current.chats;
+        const pend = pendingThread.current;
+        return PANE_NOS.find((n) =>
+          (!!compose && now[n].compose?.sending === local)
+          || (!!threadId && (now[n].threadId === threadId || now[n].compose?.openedId === threadId
+                             || pend[n] === threadId)),
+        ) ?? null;
+      };
+      const turn = (): PaneNo | null => {
+        const now = live.current.chats;
+        return PANE_NOS.find((n) => now[n].busy && now[n].turnThreadId === tracked) ?? conversation();
+      };
+      const onPane = (which: () => PaneNo | null, p: ChatPatch) => {
+        const n = which();
+        if (n !== null) chatPatch(n, p);
+      };
       try {
         let projectId = threadId ? at.threads.find((t) => t.id === threadId)?.project_id ?? null : null;
         if (!threadId) {
@@ -303,15 +398,26 @@ export default function App() {
             const t = await api.openThread({
               project_id: projectId, role: "chat", ...threadBody(composeChoice(compose)),
             });
+            const n = conversation();
             threadId = t.id;
             // Remembered, so a retry after a failed send reuses this thread.
             // The whole compose row is kept, provider, model and effort with
             // it, so a failed first send retries on the same choice.
-            chatPatch(pane, { compose: { ...compose, projectId, openedId: t.id } });
+            if (n !== null) {
+              const row = live.current.chats[n].compose;
+              chatPatch(n, { compose: { ...(row ?? compose), projectId, openedId: t.id } });
+            }
           }
-          pendingThread.current[pane] = threadId;
+          const n = conversation();
+          if (n !== null) pendingThread.current[n] = threadId;
+          // The turn is now this thread's, wherever the pane tracking it is.
+          const tracking = turn();
+          const was = tracked;
+          tracked = threadId;
+          if (!steering && tracking !== null && live.current.chats[tracking].turnThreadId === was) {
+            chatPatch(tracking, { turnThreadId: threadId });
+          }
         }
-        if (!steering) chatPatch(pane, { turnThreadId: threadId });
         const result = await api.send(threadId, {
           text, attachments: attachments.length ? attachments : undefined,
           ...(spoken ? { spoken: true } : {}),
@@ -325,9 +431,9 @@ export default function App() {
             type: "mark", local,
             patch: { mark: "not sent", ...(result.message_id ? { message_id: result.message_id } : {}) },
           });
-          giveBack(threadId, text, attachments, pane);
+          giveBack(threadId, text, attachments, conversation());
           if (!steering) {
-            chatPatch(pane, { busy: prior.busy, turnThreadId: prior.turnThreadId, orb: prior.orb, status: prior.status });
+            onPane(turn, { busy: prior.busy, turnThreadId: prior.turnThreadId, orb: prior.orb, status: prior.status });
           }
           return true;
         }
@@ -347,24 +453,31 @@ export default function App() {
           }
           // A turn this pane had not heard of (one started from Discord) is
           // running here: track it, so Stop and its finish reach this pane.
-          chatPatch(pane, { busy: true, turnThreadId: threadId });
+          onPane(conversation, { busy: true, turnThreadId: threadId });
         } else if (steering) {
           // The turn ended while this was on its way: it started its own.
           dispatch({ type: "mark", local, patch: { mark: undefined } });
-          chatPatch(pane, { busy: true, turnThreadId: threadId, orb: "thinking", status: "THINKING" });
+          onPane(conversation, { busy: true, turnThreadId: threadId, orb: "thinking", status: "THINKING" });
         }
         if (projectId) saveLastProject(projectId);
         if (!chat.threadId) {
-          // The compose row becomes the thread. Its transcript is already on
-          // screen; reloading it here is what used to wipe the first message.
-          skipReload.current[pane] = threadId;
+          // The compose row becomes the thread — in the pane that still holds
+          // it, and only there: one the owner moved on is left where it is. Its
+          // transcript is already on screen; reloading it here is what used to
+          // wipe the first message.
           await refreshThreads();
-          chatPatch(pane, { threadId, compose: null });
-          pendingThread.current[pane] = null;
+          const n = conversation();
+          if (n !== null) {
+            if (live.current.chats[n].threadId !== threadId) {
+              chatPatch(n, { threadId, compose: null, loadedThread: threadId });
+            }
+            pendingThread.current[n] = null;
+          }
         }
-        const now = live.current.chats[pane];
-        if (now.busy && now.turnThreadId === threadId && now.status === "SENDING") {
-          chatPatch(pane, { status: "THINKING" });
+        const n = turn();
+        const now = n !== null ? live.current.chats[n] : null;
+        if (n !== null && now && now.busy && now.turnThreadId === threadId && now.status === "SENDING") {
+          chatPatch(n, { status: "THINKING" });
         }
         return true;
       } catch (e: any) {
@@ -372,7 +485,7 @@ export default function App() {
         // meanwhile stays — and its words and files go back in the box, so
         // a failed send costs nothing. Said inline, never as a dead end.
         dispatch({ type: "unmessage", local });
-        giveBack(threadId, text, attachments, pane);
+        giveBack(threadId, text, attachments, conversation());
         const error = `Could not send: ${e.message}`;
         if (steering) {
           // A refused steer leaves the running turn as it was: still tracked,
@@ -381,11 +494,13 @@ export default function App() {
         } else {
           // Back to whatever the pane was tracking before this send (a turn
           // in another thread keeps running and keeps its Stop).
-          chatPatch(pane, {
+          const p: ChatPatch = {
             busy: prior.busy, turnThreadId: prior.turnThreadId,
             orb: prior.busy ? prior.orb : "error", status: prior.busy ? prior.status : "FAILED",
-            error,
-          });
+          };
+          const n = turn();
+          if (n !== null) chatPatch(n, { ...p, error });
+          else dispatch({ type: "patch", patch: { error } });
         }
         return false;
       }
@@ -394,7 +509,7 @@ export default function App() {
     [dispatch],
   );
 
-  /** Stop the turn running in a pane's thread (the orb does the same for the voice target's). */
+  /** Stop the turn running in a pane's thread (the orb does the same for the selected chat's). */
   const stopTurn = useCallback((pane: PaneNo) => {
     const chat = live.current.chats[pane];
     const turn = chat.turnThreadId ?? chat.threadId;
@@ -455,11 +570,11 @@ export default function App() {
       // Per pane (lib/chats `routeEvent`). Mine: the panes showing the thread
       // (or about to). Ours: the panes whose turn this is. They differ when
       // the owner switches a pane's thread mid-turn, and that pane must still
-      // hear the turn finish, or it waits on THINKING — and, as the voice
-      // target, keeps the mic suppressed — for good. No thread: the voice
-      // target's, as it was the one conversation's.
+      // hear the turn finish, or it waits on THINKING — and, as the selected
+      // chat, keeps the mic suppressed — for good. No thread: the selected
+      // chat's (ambiguous input, decisions W-6), or no pane's with none.
       const tid: string | undefined = e.thread_id;
-      const route = routeEvent(tid, at.chats, pendingThread.current, at.voiceTarget);
+      const route = routeEvent(tid, at.chats, pendingThread.current, at.selectedChat);
       const { mine, ours } = route;
       if (LIFECYCLE_KINDS.has(kind)) setLifecycle((n) => n + 1);
       switch (kind) {
@@ -557,9 +672,9 @@ export default function App() {
           let followUp = false;
           for (const n of ours) {
             chatPatch(n, { busy: false, turnThreadId: null, orb: "idle", status: "" });
-            if (n === at.voiceTarget) followUp = true;
+            if (n === at.selectedChat) followUp = true;
           }
-          // Only the voice target's own turn opens the follow-up window. A
+          // Only the selected chat's own turn opens the follow-up window. A
           // Discord turn, or a turn in another pane, finishing must not start
           // the HUD listening.
           if (followUp) capture.openFollowUp();
@@ -771,9 +886,11 @@ export default function App() {
    * pane says why. True when `pane` may show `next`.
    */
   const mayShow = useCallback((pane: PaneNo, next: View): boolean => {
-    const spec = layoutNow.current.ws.panes[pane - 1];
+    const { ws, fit } = layoutNow.current;
+    const spec = ws.panes[pane - 1];
     if (spec.view !== "file" || next === "file" || !dirtyNow.current[pane]) return true;
-    setRefused((r) => ({ ...r, [pane]: Date.now() }));
+    const shownIn: PaneNo = fit.panes.includes(pane) ? pane : fit.panes.includes(ws.focused) ? ws.focused : fit.panes[0];
+    setRefused((r) => ({ ...r, [shownIn]: { at: Date.now(), pane } }));
     return false;
   }, []);
 
@@ -814,7 +931,7 @@ export default function App() {
   /** The pane a chat with no thread yet lands in (lib/chats `chatTarget`). */
   const chatPaneNow = (): PaneNo => {
     const lay = layoutNow.current;
-    return chatTarget(lay.ws, lay.fit.panes, live.current.voiceTarget).pane;
+    return chatTarget(lay.ws, lay.fit.panes, live.current.selectedChat).pane;
   };
 
   /**
@@ -826,19 +943,19 @@ export default function App() {
   const openIn = useCallback((pane: PaneNo, id: string) => {
     const at = live.current;
     const pend = pendingThread.current;
-    pend[pane] = null;
     dispatch({ type: "patch", patch: { taskFocus: false } });
     const holder = heldElsewhere(at.chats, pane, id, pend);
     if (holder === null) {
+      pend[pane] = null;
       dispatch({ type: "open_thread", pane, threadId: id });
       return;
     }
-    const here = at.chats[pane];
     const there = at.chats[holder];
+    // Everything a conversation holds moves with it — its transcript and
+    // whether that has arrived yet (`loadedThread`), its draft, its turn, a
+    // first send in flight — so neither pane reloads what it already has, and
+    // one still loading keeps loading for the pane it is in now.
     [pend[pane], pend[holder]] = [pend[holder], pend[pane]];
-    // Each conversation moves with its transcript: no reload for either.
-    if (there.threadId === id) skipReload.current[pane] = id;
-    if (here.threadId) skipReload.current[holder] = here.threadId;
     dispatch({ type: "chat_swap", a: pane, b: holder });
     // Held through a compose row that opened it: it is now the open thread.
     if (there.threadId !== id) dispatch({ type: "open_thread", pane, threadId: id });
@@ -847,8 +964,8 @@ export default function App() {
   /**
    * A thread picked in the sidebar (plan §2.2, "Where a sidebar click goes").
    * Already on screen in a chat pane: that pane is focused — a thread is open
-   * in one pane at most. Otherwise the focused chat pane, else the voice
-   * target, else the focused pane switches to chat. `beside` (Alt+click, or
+   * in one pane at most. Otherwise the focused chat pane, else the selected
+   * chat, else the focused pane switches to chat. `beside` (Alt+click, or
    * "Open beside"): the next pane to the right, from one pane two columns.
    */
   const pickThread = useCallback((id: string, beside = false) => {
@@ -919,10 +1036,12 @@ export default function App() {
         if (!gone) continue;
         displaced = true;
         if (pendingThread.current[n] && after.threadId === null) pendingThread.current[n] = null;
-        chatPatch(n, { threadId: after.threadId, compose: after.compose, messages: [], draft: "", ops: [], status });
+        chatPatch(n, {
+          threadId: after.threadId, compose: after.compose, messages: [], loadedThread: null, draft: "", ops: [], status,
+        });
       }
       // The task view it showed is empty now: the status line says why.
-      if (taskGone && !displaced) chatPatch(at.voiceTarget, { status });
+      if (taskGone && !displaced) chatPatch(activePane(at), { status });
       // A File or Preview pane pinned to it follows the chat again — except
       // one holding an unsaved edit, which waits for the owner to discard it.
       view.unpinProject(id, PANE_NOS.filter((n) => dirtyNow.current[n]));
@@ -950,7 +1069,9 @@ export default function App() {
         const after = next[n - 1];
         if (!after.displaced) continue;
         pendingThread.current[n] = null;
-        chatPatch(n, { threadId: after.threadId, compose: after.compose, messages: [], draft: "", ops: [] });
+        chatPatch(n, {
+          threadId: after.threadId, compose: after.compose, messages: [], loadedThread: null, draft: "", ops: [],
+        });
       }
       void refreshThreads();
     },
@@ -1002,6 +1123,7 @@ export default function App() {
         threadId: null,
         compose: { projectId: projectId ?? lastProject(at.projects, at.threads, loadLastProject()) },
         messages: [],
+        loadedThread: null,
         draft: "",
         ops: [],
         status: chat.turnThreadId ? chat.status : "",
@@ -1095,7 +1217,7 @@ export default function App() {
       // and in the pane the conversation is put on screen in. Nothing is sent
       // until the owner speaks.
       const lay = layoutNow.current;
-      const pane = chatTarget(lay.ws, lay.fit.panes, live.current.voiceTarget).pane;
+      const pane = chatTarget(lay.ws, lay.fit.panes, live.current.selectedChat).pane;
       const projectId = lastProject(projects, threads, loadLastProject());
       for (const n of PANE_NOS) {
         if (n === pane || lay.ws.panes[n - 1].view === "chat") {
@@ -1137,45 +1259,58 @@ export default function App() {
     }
   }, [booted, emptyChatPanes, chatPatch]);
 
-  // A thread's transcript is loaded when it becomes a pane's open one, so
-  // switching redraws from the saved conversation rather than from whatever
-  // is on screen.
-  const loadedFor = useRef(perPane());
-  const openThreads = PANE_NOS.map((n) => state.chats[n].threadId ?? "").join("|");
+  // A thread's transcript is loaded when a pane opens it, so switching redraws
+  // from the saved conversation rather than from whatever is on screen. A
+  // load lands in **whichever pane shows that thread when it arrives**, and
+  // is dropped if none does: the pane it was asked for may have moved on, or
+  // traded conversations with another, meanwhile (review of PR #27 — a late
+  // transcript used to land in the pane number it was asked for, drawing one
+  // thread's messages under another). `loadedThread` says whose transcript a
+  // pane's messages are; a conversation that moves between panes takes it
+  // along, so one that has arrived is never loaded twice and one still on its
+  // way is still loaded.
+  const toLoad = PANE_NOS.map((n) => `${state.chats[n].threadId ?? ""}:${state.chats[n].loadedThread ?? ""}`).join("|");
   useEffect(() => {
-    for (const n of PANE_NOS) {
-      const id = live.current.chats[n].threadId;
-      if (id === loadedFor.current[n]) continue;
-      loadedFor.current[n] = id;
-      if (!id) continue;
-      if (skipReload.current[n] === id) {
-        skipReload.current[n] = null;
-        continue;
-      }
+    const land = (id: string, messages: ChatMessage[]) => {
+      const at = live.current;
+      const n = PANE_NOS.find((p) => at.chats[p].threadId === id);
+      if (n === undefined) return;
       // A turn running in another thread keeps the pane busy, but its status
       // line is about that thread, not this one.
-      const chat = live.current.chats[n];
+      const chat = at.chats[n];
       const status = chat.turnThreadId === id ? chat.status : "";
+      chatPatch(n, { messages, draft: "", ops: [], status, loadedThread: id });
+    };
+    for (const n of PANE_NOS) {
+      const chat = live.current.chats[n];
+      const id = chat.threadId;
+      if (!id || chat.loadedThread === id || loading.current.has(id)) continue;
+      loading.current.add(id);
       api
         .transcript(id)
-        .then((r) => chatPatch(n, { messages: r.messages || [], draft: "", ops: [], status }))
-        .catch(() => chatPatch(n, { messages: [], draft: "", ops: [], status }));
+        .then((r) => land(id, r.messages || []))
+        .catch(() => land(id, []))
+        .finally(() => loading.current.delete(id));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [openThreads]);
+  }, [toLoad]);
 
-  // Words handed back while a thread was not on screen come back when a pane opens it.
-  const heldFor = useRef(perPane());
+  // Words handed back while a thread was not on screen come back when a
+  // **drawn** chat pane shows it — on opening it, and when a pane already
+  // holding it comes on screen again (review of PR #27).
+  const onScreenThreads = view.fit.panes
+    .filter((n) => view.ws.panes[n - 1].view === "chat")
+    .map((n) => `${n}:${shownThread(state.chats[n]) ?? ""}`)
+    .join("|");
   useEffect(() => {
-    for (const n of PANE_NOS) {
-      const id = live.current.chats[n].threadId;
-      if (id === heldFor.current[n]) continue;
-      heldFor.current[n] = id;
+    for (const n of chatsOnScreen()) {
+      const id = shownThread(live.current.chats[n]);
       if (!id) continue;
       const held = heldBack.current.take(id);
       if (held) dispatch({ type: "give_back", pane: n, text: held.text, files: held.files, nonce: nextNonce() });
     }
-  }, [openThreads, dispatch]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [onScreenThreads, dispatch]);
 
   // Reading clears blue and red (2026-10-08): a thread shown in a chat pane,
   // or a task shown in a task pane, while the window is visible — on opening
@@ -1306,10 +1441,17 @@ export default function App() {
   const press = useCallback(() => {
     if (live.current.approvals.length) return; // answer the authorization first
     if (live.current.picker || chipOverlay.current) return;
+    // Push-to-talk and the orb act on the selected chat (decisions W-6): with
+    // no chat pane on screen there is no turn to interrupt and nobody to
+    // talk to, and the window says so rather than recording for nobody.
+    const pane = live.current.selectedChat;
+    if (pane === null) {
+      dispatch({ type: "patch", patch: { error: "No chat is open to talk to: open a chat first." } });
+      return;
+    }
     // The interrupt half comes first: muting yourself must not take away the
-    // orb as the way to shut him up. It interrupts the voice target's turn —
+    // orb as the way to shut him up. It interrupts the selected chat's turn —
     // a turn running in another pane keeps running, and keeps its Stop.
-    const pane = live.current.voiceTarget;
     const chat = live.current.chats[pane];
     if (chat.busy && chat.turnThreadId) api.interrupt(chat.turnThreadId).catch(() => {});
     if (isMuted(live.current.dictation)) {
@@ -1317,7 +1459,7 @@ export default function App() {
       return;
     }
     capture.press();
-  }, [capture, chatPatch]);
+  }, [capture, chatPatch, dispatch]);
 
   const release = useCallback(() => capture.release(), [capture]);
 
@@ -1387,6 +1529,54 @@ export default function App() {
     };
   }, [capture]);
 
+  // ---- files dropped on the window -----------------------------------------
+
+  // Files dropped anywhere but a box (which stages its own): on a chat pane,
+  // into that pane's box; anywhere else — the sidebar, the status pane, a File
+  // or Preview pane — they are ambiguous input and go to the selected chat's
+  // box (decisions W-6), staged, never sent. With no chat on screen the window
+  // says so. Without this, the browser opened the dropped file in place of
+  // the HUD.
+  useEffect(() => {
+    const over = (e: DragEvent) => {
+      if (e.dataTransfer?.types?.includes("Files")) e.preventDefault();
+    };
+    const drop = (e: DragEvent) => {
+      const dropped = Array.from(e.dataTransfer?.files || []);
+      if (!dropped.length || e.defaultPrevented) return;
+      e.preventDefault();
+      const el = e.target instanceof Element ? e.target : null;
+      const own = el?.closest('[data-testid^="pane-"][data-view="chat"]');
+      const ownNo = own ? (Number(own.getAttribute("data-testid")!.slice(5)) as PaneNo) : null;
+      const pane = ownNo ?? live.current.selectedChat;
+      if (pane === null) {
+        dispatch({ type: "patch", patch: { error: "No chat is open to attach files to: open a chat first." } });
+        return;
+      }
+      void (async () => {
+        const notes: string[] = [];
+        const staged = [...live.current.chats[pane].files];
+        for (const f of dropped) {
+          if (staged.length >= MAX_FILES) {
+            notes.push(`[${f.name} skipped: 8 files per turn]`);
+            continue;
+          }
+          const a = await toAttachment(f);
+          if (typeof a === "string") notes.push(a);
+          else staged.push(a);
+        }
+        dispatch({ type: "input", pane, files: staged });
+        if (notes.length) dispatch({ type: "patch", patch: { error: notes.join(" ") } });
+      })();
+    };
+    document.addEventListener("dragover", over);
+    document.addEventListener("drop", drop);
+    return () => {
+      document.removeEventListener("dragover", over);
+      document.removeEventListener("drop", drop);
+    };
+  }, [dispatch]);
+
   // ---- test hooks ---------------------------------------------------------
 
   useEffect(() => {
@@ -1402,13 +1592,14 @@ export default function App() {
           written: capture.ring.written,
         }),
       },
-      // The window's state, the voice target's conversation laid over the
+      // The window's state, the active chat's conversation laid over the
       // top as the one conversation's fields were (the single-layout suites
-      // read those); `chats` has every pane's, `voiceTarget` says which.
+      // read those); `chats` has every pane's, `selectedChat` says which is
+      // selected (null with no chat on screen).
       state: () => flatState(live.current),
-      // A legacy `patch` of conversation fields lands in the voice target's pane.
+      // A legacy `patch` of conversation fields lands in the active chat's pane.
       dispatch: (a: any) => {
-        for (const x of compatActions(a, live.current.voiceTarget)) dispatch(x);
+        for (const x of compatActions(a, activePane(live.current))) dispatch(x);
       },
       // What a reconnect or the 15 s timer runs: every busy pane checked
       // against its thread record's live `running`.
@@ -1424,7 +1615,7 @@ export default function App() {
     const wasMuted = isMuted(live.current.dictation);
     saveMode(mode);
     dispatch({ type: "patch", patch: { dictation: mode } });
-    chatPatch(live.current.voiceTarget, { status: "" });
+    if (live.current.selectedChat !== null) chatPatch(live.current.selectedChat, { status: "" });
     if (wasMuted && !isMuted(mode)) capture.markUnmute();
     if (isMuted(mode)) capture.closeFollowUp();
     api.mute(isMuted(mode)).catch(() => {});
@@ -1482,8 +1673,8 @@ export default function App() {
   const renderChat = (n: PaneNo) => {
     const chat = state.chats[n];
     const thread = threadOf(chat.threadId);
-    const target = n === voicePane;
-    // The voice target's hint is the dictation strip's; another pane's says
+    const target = n === selected;
+    // The selected chat's hint is the dictation strip's; another pane's says
     // only what its own turn is doing.
     const hint = target
       ? chat.status || (state.approvals.length ? "ANSWER THE AUTHORIZATION" : HINTS[state.dictation])
@@ -1530,6 +1721,11 @@ export default function App() {
           onStop={() => stopTurn(n)}
           restore={chat.restore}
           onRestoreTaken={(nonce) => dispatch({ type: "given_back", pane: n, nonce })}
+          // The draft is the conversation's: it moves with it (review of PR #27).
+          text={chat.input}
+          files={chat.files}
+          onText={(text) => dispatch({ type: "input", pane: n, text })}
+          onFiles={(files) => dispatch({ type: "input", pane: n, files })}
         />
       </>
     );
@@ -1589,12 +1785,15 @@ export default function App() {
     const n = info.pane;
     const dirty = spec.view === "file" && !!dirtyPanes[n];
     const profileOf = profileProject(spec, n);
+    const refusal = refused[n];
     return (
       <>
-        {refused[n] && dirty ? (
+        {refusal && dirtyPanes[refusal.pane] ? (
           <span className="chip panepin warn" data-testid={`pane-${n}-refused`} role="status"
-                title="Switching this pane away would close the file and drop the edit">
-            unsaved edit · save or reload first
+                title="Switching that pane away would close its file and drop the edit">
+            {refusal.pane === n
+              ? "unsaved edit · save or reload first"
+              : `pane ${refusal.pane} has an unsaved edit · save or reload it first`}
           </span>
         ) : null}
         {dirty && pinGone(spec) ? (
@@ -1674,8 +1873,8 @@ export default function App() {
   };
 
   // The sidebar's view of the drawn chat panes: what each shows, which is active.
-  const sidebarOpen = openRows(ws, fit.panes, state.chats, voicePane);
-  const sidebarComposing = composeRows(ws, fit.panes, state.chats, voicePane);
+  const sidebarOpen = openRows(ws, fit.panes, state.chats, activeNow);
+  const sidebarComposing = composeRows(ws, fit.panes, state.chats, activeNow);
 
   return (
     <>
@@ -1782,7 +1981,7 @@ export default function App() {
             render={renderView}
             extras={paneExtras}
             context={paneContext}
-            voicePane={voicePane}
+            selectedPane={selected}
             onView={setPaneView}
           />
         </div>

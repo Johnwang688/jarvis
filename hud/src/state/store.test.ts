@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { compatActions, flatState, initialState, reduce, type State } from "./store";
-import { emptyChats, type ChatState } from "../lib/chats";
+import { emptyChats, runningHere, type ChatState } from "../lib/chats";
 import type { PaneNo } from "../lib/workspace";
 import type { Thread } from "../types";
 
@@ -90,7 +90,7 @@ describe("several chats: each pane its own conversation (WP-B)", () => {
   });
 
   it("lets only the voice target's turn move the orb", () => {
-    let s = withChats({ 1: { busy: true }, 2: { busy: true } }, { voiceTarget: 1, orb: "thinking" });
+    let s = withChats({ 1: { busy: true }, 2: { busy: true } }, { selectedChat: 1, orb: "thinking" });
     s = reduce(s, { type: "op_start", pane: 2, op: { call_id: "c", name: "t", started: 1 } });
     expect(s.orb).toBe("thinking");
     s = reduce(s, { type: "chat", pane: 2, patch: { orb: "error", status: "FAILED" } });
@@ -105,28 +105,28 @@ describe("several chats: each pane its own conversation (WP-B)", () => {
   });
 
   it("writes a pane patch's error to the window's error line, whichever pane", () => {
-    const s = reduce(withChats({}, { voiceTarget: 1 }), { type: "chat", pane: 3, patch: { error: "Could not send: x" } });
+    const s = reduce(withChats({}, { selectedChat: 1 }), { type: "chat", pane: 3, patch: { error: "Could not send: x" } });
     expect(s.error).toBe("Could not send: x");
     expect((s.chats[3] as any).error).toBeUndefined();
   });
 
   it("repaints the orb from the new voice target's turn, but not over the microphone", () => {
-    const s = withChats({ 1: { busy: true }, 2: { busy: false } }, { voiceTarget: 1, orb: "thinking" });
-    expect(reduce(s, { type: "voice_target", pane: 2 }).orb).toBe("idle");
-    const tooling = withChats({ 2: { busy: true, ops: [{ call_id: "c", name: "t", started: 1 }] } }, { voiceTarget: 1 });
-    expect(reduce(tooling, { type: "voice_target", pane: 2 }).orb).toBe("tool");
-    expect(reduce({ ...s, orb: "listening" }, { type: "voice_target", pane: 2 }).orb).toBe("listening");
-    expect(reduce({ ...s, orb: "transcribing" }, { type: "voice_target", pane: 2 }).orb).toBe("transcribing");
+    const s = withChats({ 1: { busy: true }, 2: { busy: false } }, { selectedChat: 1, orb: "thinking" });
+    expect(reduce(s, { type: "select", pane: 2 }).orb).toBe("idle");
+    const tooling = withChats({ 2: { busy: true, ops: [{ call_id: "c", name: "t", started: 1 }] } }, { selectedChat: 1 });
+    expect(reduce(tooling, { type: "select", pane: 2 }).orb).toBe("tool");
+    expect(reduce({ ...s, orb: "listening" }, { type: "select", pane: 2 }).orb).toBe("listening");
+    expect(reduce({ ...s, orb: "transcribing" }, { type: "select", pane: 2 }).orb).toBe("transcribing");
     const asking = { ...s, approvals: [{ req_id: "r" } as any], orb: "approval" as const };
-    expect(reduce(asking, { type: "voice_target", pane: 2 }).orb).toBe("approval");
-    expect(reduce(s, { type: "voice_target", pane: 1 })).toBe(s);
+    expect(reduce(asking, { type: "select", pane: 2 }).orb).toBe("approval");
+    expect(reduce(s, { type: "select", pane: 1 })).toBe(s);
   });
 
   it("drops an answered card back to the voice target's turn", () => {
     const s = withChats({ 1: { busy: false }, 2: { busy: true } },
-                        { voiceTarget: 2, orb: "approval", approvals: [{ req_id: "r" } as any] });
+                        { selectedChat: 2, orb: "approval", approvals: [{ req_id: "r" } as any] });
     expect(reduce(s, { type: "approval_drop", req_id: "r" }).orb).toBe("thinking");
-    expect(reduce({ ...s, voiceTarget: 1 }, { type: "approval_drop", req_id: "r" }).orb).toBe("idle");
+    expect(reduce({ ...s, selectedChat: 1 }, { type: "approval_drop", req_id: "r" }).orb).toBe("idle");
   });
 
   it("hands words back to one pane's box and takes them once", () => {
@@ -148,16 +148,21 @@ describe("several chats: each pane its own conversation (WP-B)", () => {
     expect(after.chats[1]).toMatchObject({ threadId: "b", busy: false, turnThreadId: null, status: "" });
   });
 
-  it("but never takes a turn from a pane still showing it, or into a pane waiting on its own", () => {
+  it("never takes a turn from a pane still showing it", () => {
     const showing = withChats({ 1: { threadId: "a", busy: true, turnThreadId: "a" } });
     expect(reduce(showing, { type: "open_thread", pane: 2, threadId: "a" }).chats[1].busy).toBe(true);
+  });
+
+  it("trades turns with a pane waiting on its own, so the running thread on screen has its Stop", () => {
+    // Review of PR #27: pane 2 kept its own turn (c) and t1's ran with no Stop anywhere.
     const own = withChats({
-      1: { threadId: "b", busy: true, turnThreadId: "a" },
-      2: { threadId: "c", busy: true, turnThreadId: "c" },
+      1: { threadId: "b", busy: true, turnThreadId: "a", status: "RUNNING · a" },
+      2: { threadId: "c", busy: true, turnThreadId: "c", status: "THINKING" },
     });
     const after = reduce(own, { type: "open_thread", pane: 2, threadId: "a" });
-    expect(after.chats[2]).toMatchObject({ threadId: "a", turnThreadId: "c", busy: true });
-    expect(after.chats[1]).toMatchObject({ busy: true, turnThreadId: "a" });
+    expect(after.chats[2]).toMatchObject({ threadId: "a", turnThreadId: "a", busy: true, status: "RUNNING · a" });
+    expect(after.chats[1]).toMatchObject({ threadId: "b", busy: true, turnThreadId: "c", status: "THINKING" });
+    expect(runningHere(after.chats[2])).toBe(true);
   });
 
   it("swaps two panes' conversations whole", () => {
@@ -170,9 +175,71 @@ describe("several chats: each pane its own conversation (WP-B)", () => {
   });
 });
 
+describe("a draft belongs to its conversation (review of PR #27)", () => {
+  it("is parked when a pane opens another thread, and comes back when it returns", () => {
+    let s = withChats({ 1: { threadId: "a", input: "half typed", files: [{ name: "f", mime: "text/plain", data_b64: "" }] } });
+    s = reduce(s, { type: "open_thread", pane: 1, threadId: "b" });
+    expect([s.chats[1].input, s.chats[1].files.length]).toEqual(["", 0]);
+    expect(s.drafts.a.text).toBe("half typed");
+    s = reduce(s, { type: "chat", pane: 1, patch: { threadId: "a" } });
+    expect([s.chats[1].input, s.chats[1].files.length]).toEqual(["half typed", 1]);
+    expect(s.drafts.a).toBeUndefined();
+  });
+
+  it("moves with the conversation when two panes trade", () => {
+    const s = reduce(withChats({ 1: { threadId: "a" }, 2: { threadId: "b", input: "for b" } }),
+                     { type: "chat_swap", a: 1, b: 2 });
+    expect([s.chats[1].threadId, s.chats[1].input, s.chats[2].input]).toEqual(["b", "for b", ""]);
+  });
+
+  it("stays in the box while a compose row becomes the thread it opened, or New thread replaces it", () => {
+    let s = withChats({ 1: { compose: { projectId: "p", openedId: "t9" }, input: "next words" } });
+    s = reduce(s, { type: "chat", pane: 1, patch: { threadId: "t9", compose: null } });
+    expect(s.chats[1].input).toBe("next words");
+    s = withChats({ 1: { compose: { projectId: "p" }, input: "kept" } });
+    s = reduce(s, { type: "chat", pane: 1, patch: { compose: { projectId: "q" } } });
+    expect(s.chats[1].input).toBe("kept");
+  });
+
+  it("parks words for a compose row no pane shows with its draft", () => {
+    let s = reduce(withChats({}), { type: "park", key: "compose:2", text: "spoken" });
+    s = reduce(s, { type: "park", key: "compose:2", text: "again" });
+    expect(s.drafts["compose:2"].text).toBe("spoken\nagain");
+  });
+});
+
+describe("a transcript belongs to its thread (review of PR #27)", () => {
+  it("is already loaded when a compose row that opened the thread becomes it", () => {
+    const s = reduce(withChats({ 1: { compose: { projectId: "p", openedId: "t9" }, messages: [{ role: "user", text: "first" }] } }),
+                     { type: "open_thread", pane: 1, threadId: "t9" });
+    expect(s.chats[1].loadedThread).toBe("t9");
+    expect(s.chats[1].messages.length).toBe(1);
+  });
+
+  it("is still to load for a pane that opens another thread", () => {
+    const s = reduce(withChats({ 1: { threadId: "a", loadedThread: "a" } }), { type: "open_thread", pane: 1, threadId: "b" });
+    expect(s.chats[1].loadedThread).toBe("a");
+  });
+});
+
+describe("what the microphone says follows the voice target (review of PR #27)", () => {
+  it("moves a capture status off the pane that stops being the target", () => {
+    const s = reduce(withChats({ 1: { status: "LISTENING · SPEAK NOW" } }, { selectedChat: 1 }), { type: "select", pane: 2 });
+    expect([s.chats[1].status, s.chats[2].status]).toEqual(["", "LISTENING · SPEAK NOW"]);
+  });
+
+  it("leaves a turn's status alone, and never overwrites the new target's own", () => {
+    const busy = reduce(withChats({ 1: { status: "RUNNING · grep" } }, { selectedChat: 1 }), { type: "select", pane: 2 });
+    expect([busy.chats[1].status, busy.chats[2].status]).toEqual(["RUNNING · grep", ""]);
+    const own = reduce(withChats({ 1: { status: "MIC MUTED" }, 2: { status: "THINKING" } }, { selectedChat: 1 }),
+                       { type: "select", pane: 2 });
+    expect([own.chats[1].status, own.chats[2].status]).toEqual(["", "THINKING"]);
+  });
+});
+
 describe("the test hook's view of the store", () => {
   it("lays the voice target's conversation over the window's fields", () => {
-    const s = withChats({ 1: { threadId: "a" }, 2: { threadId: "b", busy: true } }, { voiceTarget: 2 });
+    const s = withChats({ 1: { threadId: "a" }, 2: { threadId: "b", busy: true } }, { selectedChat: 2 });
     const flat = flatState(s);
     expect([flat.threadId, flat.busy]).toEqual(["b", true]);
     expect(flat.chats[1].threadId).toBe("a");
@@ -187,7 +254,7 @@ describe("the test hook's view of the store", () => {
     expect(compatActions({ type: "patch", patch: {} }, 1)).toEqual([{ type: "patch", patch: {} }]);
     const other = { type: "approval_drop", req_id: "r" };
     expect(compatActions(other, 1)).toEqual([other]);
-    let s = withChats({}, { voiceTarget: 3 });
+    let s = withChats({}, { selectedChat: 3 });
     for (const a of acts) s = reduce(s, a);
     expect(s.chats[3].threadId).toBe("kt9");
     expect(s.chats[1].threadId).toBeNull();

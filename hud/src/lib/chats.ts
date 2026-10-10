@@ -15,17 +15,27 @@
 // the pane it was opened in (the two panes' conversations change places, so
 // nothing either held — a running turn, a hand-back — is dropped).
 //
-// **Voice goes to the voice target: the chat pane used last** (`voiceTargetOf`).
-// Its turn is the one the orb follows and interrupts, the one whose end opens
-// the follow-up mic window, and the only one whose run keeps the mic
-// suppressed; its input bar is the only one drawing the dictation strip.
+// **Ambiguous input goes to the selected chat** (`selectedChatOf`; the
+// owner's rule, decisions W-6): the chat pane most recently clicked — a
+// pointer anywhere in it, keyboard focus moving into it, or a sidebar click
+// that opens or focuses a thread there. Clicking a Preview, File or other
+// pane does not change it. It is always a drawn chat pane: one the layout
+// drops falls back to the most recently selected chat pane still drawn, a
+// single chat pane is selected, and with no chat drawn there is none, so
+// ambiguous input has nowhere to go and is never sent. Ambiguous input is
+// input with no thread of its own — voice (AUTO and REVIEW, delivered to the
+// selected chat as it is when the transcript lands), push-to-talk and the
+// orb's interrupt, the follow-up listening window, files dropped outside a
+// chat pane, an SSE event with no `thread_id`. Input that belongs to a thread
+// — words typed in a pane's box, a steer or queued message, words handed back
+// or held for a thread, a first send's result, a transcript — stays with that
+// thread and is never redirected to the selected chat.
 //
 // **An event with a `thread_id` goes to the pane that shows that thread or
 // tracks its turn** (`routeEvent`); approvals, activity and lifecycle events
-// stay window-wide. An event with no thread goes to the voice target, as it
-// went to the one conversation before.
+// stay window-wide. An event with no thread goes to the selected chat.
 
-import type { ChatMessage, Thread, ToolOp } from "../types";
+import type { Attachment, ChatMessage, Thread, ToolOp } from "../types";
 import type { Compose } from "./compose";
 import type { GiveBack } from "./giveback";
 import { PANE_NOS, panesOf, type PaneNo, type Preset, type Workspace } from "./workspace";
@@ -52,6 +62,17 @@ export interface ChatState {
   restore: GiveBack[];
   /** Set by REVIEW dictation: text handed to this pane's box, never sent. */
   pendingTranscript: string;
+  /** The box's unsent words and staged files. They belong to the
+   * conversation, not to the pane (review of PR #27): they move with it when
+   * two panes trade conversations, and a pane that changes conversation
+   * parks them (`State.drafts`) and takes up the new one's. */
+  input: string;
+  files: Attachment[];
+  /** The thread whose transcript `messages` holds, once it has arrived (or the
+   * pane wrote it: a thread it just opened from its compose row). A pane whose
+   * `threadId` differs loads it; a late transcript for a thread no pane shows
+   * is dropped (review of PR #27). */
+  loadedThread: string | null;
 }
 
 export type Chats = Record<PaneNo, ChatState>;
@@ -59,13 +80,14 @@ export type Chats = Record<PaneNo, ChatState>;
 /** The fields a `ChatState` has — what the test hook's legacy `patch` routes to a pane. */
 export const CHAT_KEYS: readonly (keyof ChatState)[] = [
   "threadId", "compose", "turnThreadId", "busy", "status", "messages", "draft", "ops", "restore",
-  "pendingTranscript",
+  "pendingTranscript", "input", "files", "loadedThread",
 ];
 
 export function emptyChat(): ChatState {
   return {
     threadId: null, compose: null, turnThreadId: null, busy: false, status: "",
-    messages: [], draft: "", ops: [], restore: [], pendingTranscript: "",
+    messages: [], draft: "", ops: [], restore: [], pendingTranscript: "", input: "", files: [],
+    loadedThread: null,
   };
 }
 
@@ -87,6 +109,33 @@ export function shownThread(c: ChatState, pending: string | null = null): string
   return c.threadId ?? c.compose?.openedId ?? pending ?? null;
 }
 
+/**
+ * The key a pane's conversation parks its unsent draft under when the pane
+ * moves to another conversation: the thread (or the one its compose row
+ * opened), else the pane's own compose row.
+ */
+export function draftKey(c: ChatState, pane: PaneNo): string | null {
+  return c.threadId ?? c.compose?.openedId ?? (c.compose ? `compose:${pane}` : null);
+}
+
+/**
+ * Whether a pane moving from `a` to `b` stays in the same conversation, so
+ * its draft stays in the box: the same thread, or a compose row becoming the
+ * thread it opened, or one compose row replacing another (New thread while
+ * composing keeps the words, as it always did).
+ */
+export function sameConversation(a: ChatState, b: ChatState, pane: PaneNo): boolean {
+  // A compose row that opened its thread keys by that thread, so it is the
+  // same key as the thread it becomes.
+  if (draftKey(a, pane) === draftKey(b, pane)) return true;
+  return !a.threadId && !b.threadId && !!a.compose && !!b.compose;
+}
+
+/** Capture statuses: what the microphone is doing, said in the selected chat's input bar. */
+export const CAPTURE_STATUSES: ReadonlySet<string> = new Set([
+  "LISTENING · SPEAK NOW", "TRANSCRIBING", "STT FAILED", "DIDN'T CATCH THAT", "TOO SHORT", "MIC MUTED",
+]);
+
 /** The project a pane's conversation is in: its compose row's, else its thread's. */
 export function chatProjectId(c: ChatState, threads: readonly Thread[]): string | null {
   if (c.compose) return c.compose.projectId;
@@ -104,16 +153,16 @@ export function runningHere(c: ChatState): boolean {
  * the deltas, tool calls, settled replies and model lines draw there. `ours`:
  * the panes tracking its turn — the finish and an error reach them even when
  * they have moved on to another thread, or the pane waits on THINKING with
- * the mic suppressed for good. An event with no thread is the voice target's
+ * the mic suppressed for good. An event with no thread is the selected chat's
  * (it was the one conversation's before there were several).
  */
 export function routeEvent(
   tid: string | null | undefined,
   chats: Chats,
   pending: Readonly<Record<PaneNo, string | null>>,
-  target: PaneNo,
+  target: PaneNo | null,
 ): { mine: PaneNo[]; ours: PaneNo[] } {
-  if (!tid) return { mine: [target], ours: [] };
+  if (!tid) return { mine: target === null ? [] : [target], ours: [] };
   return {
     mine: PANE_NOS.filter((n) => shownThread(chats[n], pending[n]) === tid),
     ours: PANE_NOS.filter((n) => chats[n].turnThreadId === tid),
@@ -126,56 +175,60 @@ export function eitherPane(r: { mine: PaneNo[]; ours: PaneNo[] }): PaneNo[] {
 }
 
 /**
- * The pane whose box words handed back for `threadId` go into: the pane
- * showing that thread (`prefer` first, the pane they were typed in), else
- * null — they are held until the owner opens it, never written into another
- * thread's box. With no thread (a compose send that failed before its thread
- * existed) they go back where they were typed, else to the voice target.
+ * The pane whose box words handed back for `threadId` go into: a chat pane
+ * **on screen** showing that thread (`prefer` first, the pane they were typed
+ * in), else null — they are held until a drawn chat pane shows it, never
+ * written into a box the owner cannot see, which a trade of conversations
+ * could then carry to another thread (review of PR #27). With no thread (a
+ * compose send that failed before its thread existed) they go back to the
+ * pane holding that compose row, else to the selected chat.
  */
 export function giveBackPane(
   threadId: string | null,
   chats: Chats,
   pending: Readonly<Record<PaneNo, string | null>>,
-  target: PaneNo,
+  target: PaneNo | null,
   prefer: PaneNo | null = null,
+  onScreen: readonly PaneNo[] = PANE_NOS,
 ): PaneNo | null {
   if (!threadId) return prefer ?? target;
-  if (prefer && shownThread(chats[prefer], pending[prefer]) === threadId) return prefer;
-  return PANE_NOS.find((n) => shownThread(chats[n], pending[n]) === threadId) ?? null;
+  const shows = (n: PaneNo) => onScreen.includes(n) && shownThread(chats[n], pending[n]) === threadId;
+  if (prefer && shows(prefer)) return prefer;
+  return PANE_NOS.find(shows) ?? null;
 }
 
 const isChat = (ws: Workspace, n: PaneNo) => ws.panes[n - 1].view === "chat";
 
 /**
- * The voice target: the chat pane used last. The focused pane when it shows
- * chat (a click, a keystroke or Ctrl+Alt+N in a pane focuses it); else the
- * target so far while it is a drawn chat pane; else the first drawn chat
- * pane; else the target so far — with no chat on screen the conversation
- * lives on where it was, as the one conversation did when the single pane
- * showed something else.
+ * The selected chat (decisions W-6): the drawn chat pane most recently
+ * selected. `order` is the chat panes the owner selected, most recent first
+ * (a pointer or keyboard focus into a chat pane puts it at the front); the
+ * focused pane, when it is a drawn chat pane, is the newest selection. A
+ * selected pane the layout no longer draws gives way to the next most recent
+ * one that is drawn, else to any drawn chat pane (one chat pane open is
+ * selected); with no chat pane drawn there is no selected chat (null).
  */
-export function voiceTargetOf(ws: Workspace, drawn: readonly PaneNo[], current: PaneNo): PaneNo {
-  const f = ws.focused;
-  if (drawn.includes(f) && isChat(ws, f)) return f;
-  if (drawn.includes(current) && isChat(ws, current)) return current;
-  return drawn.find((n) => isChat(ws, n)) ?? current;
+export function selectedChatOf(ws: Workspace, drawn: readonly PaneNo[], order: readonly PaneNo[]): PaneNo | null {
+  const ok = (n: PaneNo) => drawn.includes(n) && isChat(ws, n);
+  if (ok(ws.focused)) return ws.focused;
+  return order.find(ok) ?? drawn.find(ok) ?? null;
 }
 
 /**
  * Where a chat lands when nothing already shows it (plan §2.2, the click
- * rule): the focused pane if it shows chat, else the voice target if it is a
- * drawn chat pane (else any drawn chat pane — the voice target is one
+ * rule): the focused pane if it shows chat, else the selected chat if it is
+ * a drawn chat pane (else any drawn chat pane — the selected chat is one
  * whenever one is drawn, but this holds before it is known), else the focused
  * pane, which switches to chat. `switches` says whether that pane's view
  * changes.
  */
 export function chatTarget(
-  ws: Workspace, drawn: readonly PaneNo[], voiceTarget: PaneNo,
+  ws: Workspace, drawn: readonly PaneNo[], selected: PaneNo | null,
 ): { pane: PaneNo; switches: boolean } {
   const visible = drawn.length ? drawn : [1 as PaneNo];
   const focused = visible.includes(ws.focused) ? ws.focused : visible[0];
   if (isChat(ws, focused)) return { pane: focused, switches: false };
-  if (visible.includes(voiceTarget) && isChat(ws, voiceTarget)) return { pane: voiceTarget, switches: false };
+  if (selected !== null && visible.includes(selected) && isChat(ws, selected)) return { pane: selected, switches: false };
   const any = visible.find((n) => isChat(ws, n));
   if (any !== undefined) return { pane: any, switches: false };
   return { pane: focused, switches: true };
@@ -228,7 +281,7 @@ export function besideTarget(
 
 /**
  * The panes whose conversations the sidebar marks: every drawn chat pane, and
- * the voice target's always — it is the conversation the window is about
+ * the last selected chat's always — it is the conversation the window is about
  * even while its pane shows a task or a file, as the one conversation was
  * marked whatever the single pane showed.
  */
@@ -253,7 +306,7 @@ export function composeRows(
     }));
 }
 
-/** The threads the sidebar marks as open: each marked pane's, the active one (the voice target) flagged. */
+/** The threads the sidebar marks as open: each marked pane's, the active one (the selected chat) flagged. */
 export function openRows(
   ws: Workspace, drawn: readonly PaneNo[], chats: Chats, active: PaneNo,
 ): { pane: PaneNo; threadId: string; active: boolean }[] {

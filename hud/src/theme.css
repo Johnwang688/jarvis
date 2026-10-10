@@ -885,9 +885,14 @@ body.resizing iframe { pointer-events: none; }
 }
 /* The focused pane of a split: a 2px accent line under its header. */
 .wpane.focused > .tabs { border-bottom-color: var(--accent-line); box-shadow: inset 0 -1px 0 var(--accent-line); }
-/* Several chats (WP-B): the voice target's mic mark in a split pane's header,
-   and in the sidebar a thread open in another drawn chat pane — a dimmer mark
-   than the active one's accent. */
+/* Several chats (WP-B): the selected chat — where ambiguous input goes
+   (decisions W-6) — carries an accent bar down its header's left edge and a
+   mic mark, in a split; in the sidebar a thread open in another drawn chat
+   pane gets a dimmer mark than the selected one's accent. */
+.wpane.selected > .tabs { box-shadow: inset 3px 0 0 var(--accent); }
+.wpane.selected.focused > .tabs {
+  box-shadow: inset 3px 0 0 var(--accent), inset 0 -1px 0 var(--accent-line);
+}
 .micmark { align-self: center; display: inline-flex; color: var(--accent); padding: 0 4px 0 6px; }
 .micmark svg { display: block; }
 .tree-row.panesel { color: var(--text); box-shadow: inset 2px 0 var(--border-strong); }

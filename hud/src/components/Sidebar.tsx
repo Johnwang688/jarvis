@@ -41,7 +41,7 @@
 // the row's end. Each dot has a fixed slot: no status moves a name.
 //
 // **Several chats at once (WP-B, 2026-10-09).** Every drawn chat pane's
-// conversation is marked: the active one (the voice target, the chat used
+// conversation is marked: the active one (the selected chat, the chat used
 // last) with the accent, the others with a dimmer mark, each row carrying the
 // pane it is open in (`data-pane`). Each composing chat pane has its own
 // compose row, numbered by pane when more than one chat pane is drawn. A
@@ -92,7 +92,7 @@ export function Sidebar(props: {
   activity?: ActivityView;
   /** The active conversation's project, derived, never stored. */
   activeProjectId: string | null;
-  /** The threads open in drawn chat panes, the active one (the voice target) marked. */
+  /** The threads open in drawn chat panes, the active one (the selected chat) marked. */
   open: { pane: PaneNo; threadId: string; active: boolean }[];
   /** The drawn chat panes composing a new thread, each with its row's label. */
   composing: { pane: PaneNo; compose: Compose; label: string; active: boolean }[];

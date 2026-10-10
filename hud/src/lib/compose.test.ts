@@ -96,8 +96,8 @@ describe("several chats: the project per pane (WP-B)", () => {
   const threads = [thread("t1", "p1", ""), thread("t2", "p2", "")];
   const tasks = [{ id: "k1", project_id: "inbox" } as Task];
   const pane = (over: Partial<ChatState>): ChatState => ({ ...emptyChat(), ...over });
-  const window = (chats: Partial<Record<1 | 2, ChatState>>, voiceTarget: 1 | 2, over: Partial<State> = {}): State => ({
-    ...initialState, threads, tasks, chats: { ...emptyChats(), ...chats }, voiceTarget, ...over,
+  const window = (chats: Partial<Record<1 | 2, ChatState>>, selectedChat: 1 | 2, over: Partial<State> = {}): State => ({
+    ...initialState, threads, tasks, chats: { ...emptyChats(), ...chats }, selectedChat, ...over,
   });
 
   it("each chat pane's chip is its own conversation's project", () => {
@@ -108,7 +108,7 @@ describe("several chats: the project per pane (WP-B)", () => {
   it("the project the window is about is the voice target's conversation's — the chat used last", () => {
     const s = window({ 1: pane({ threadId: "t1" }), 2: pane({ compose: { projectId: "p2" } }) }, 1);
     expect(currentProjectId(s)).toBe("p1");
-    expect(currentProjectId({ ...s, voiceTarget: 2 })).toBe("p2");
+    expect(currentProjectId({ ...s, selectedChat: 2 })).toBe("p2");
   });
 
   it("and a task picked more recently still wins, as it did", () => {
