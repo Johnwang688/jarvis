@@ -23,16 +23,27 @@
 //
 // **Output is hostile bytes.** A title a program sets is text in the pane
 // header, capped, and never `document.title`; a link opens only for http(s),
-// and only on Ctrl+click; there is no clipboard addon (no OSC 52).
+// and only on Ctrl+click; there is no clipboard addon (no OSC 52). xterm
+// answers some output — a cursor-position, device or colour query — through
+// the owner's own input channel, so **a reattach sends nothing until its
+// replay has been parsed** (the ring's old queries are answered into a
+// session that is not listening), and an older socket's queued output is
+// never parsed into a new one (OutputPipe).
+//
+// **A paste is inert as a control stream**: ESC and C1 are stripped before
+// xterm sees it, so a pasted `ESC[201~` cannot end bracketed paste early.
+//
+// **A terminal another window shows is never taken unasked**: it is drawn as
+// "in another window · Show it here" until the owner says so here.
 
 import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
 import type { IDisposable, Terminal as XTerm } from "@xterm/xterm";
 import type { FitAddon } from "@xterm/addon-fit";
 import { api } from "../api";
 import {
-  AttachLedger, InputGate, attachUrl, cleanTitle, clampSize, counterZoom, encodeInput, fontSizeFor,
-  integrationNote, isTerminalId, judgeLink, loadPrefs, parseControl, savePrefs, SPECS_KEPT,
-  type InSpec, type TerminalRow,
+  AttachLedger, InputGate, OutputPipe, attachUrl, cleanPaste, cleanTitle, clampSize, counterZoom, encodeInput,
+  fontSizeFor, integrationNote, isTerminalId, judgeLink, loadMine, loadPrefs, parseControl, saveMine, savePrefs,
+  SPECS_KEPT, type InSpec, type TerminalRow,
 } from "../lib/terminal";
 import { toCss } from "../lib/layout";
 import { loadXterm } from "../lib/xterm";
@@ -50,6 +61,8 @@ const RECONNECT_MS = [300, 700, 1500, 3000, 6000, 10000];
 /** How long a shell has to show its first prompt before "integration inactive" is said. */
 const SETTLE_MS = 4000;
 const RESUME_RETRY_MS = 1000;
+/** RIS, written in band: the replay that follows starts on a clean terminal (see "attached"). */
+const RIS = new Uint8Array([0x1b, 0x63]);
 
 /** Graphite, for the terminal: the pane colour, the HUD's text, the accent cursor. */
 const THEME = {
@@ -62,9 +75,15 @@ const THEME = {
 };
 
 export interface PasteNotice {
-  /** dropped: the program was not reading; lost: the socket closed mid-paste; stopped: a Ctrl-C ended it. */
-  kind: "dropped" | "lost" | "stopped";
+  /**
+   * dropped: the program was not reading; lost: the socket closed mid-paste;
+   * stopped: a Ctrl-C ended it; unsent: typed or pasted while the terminal
+   * was connecting (or not running here), so it went nowhere.
+   */
+  kind: "dropped" | "lost" | "stopped" | "unsent";
   bytes: number;
+  /** For "unsent": still connecting, or not running in this window. */
+  why?: "connecting" | "offline";
   /** An `input_resume` is out (or being retried). */
   resuming: boolean;
   /** The daemon's last word on a refused resume. */
@@ -127,6 +146,32 @@ export class TermSession {
   private loading: Promise<void> | null = null;
   private ws: WebSocket | null = null;
   private gate = new InputGate();
+  /**
+   * The output, in order, tagged with the socket it came from (lib/terminal.ts,
+   * OutputPipe): a reattach never parses an older socket's queued output.
+   */
+  private out = new OutputPipe((data, done) => {
+    const term = this.term;
+    if (!term) {
+      done();
+      return;
+    }
+    term.write(data, done);
+  });
+  /** The current socket's generation (OutputPipe). */
+  private gen = 0;
+  /**
+   * From a new socket until its replay has been *parsed*: xterm answers the
+   * queries in the replayed output (cursor position, device attributes, a
+   * colour, DECRQSS) through the owner's input channel, and none of those
+   * answers — nor anything else — may reach the program as if typed.
+   */
+  private replaying = false;
+  /** The owner is typing or pasting right now (set for the length of the event). */
+  private gesture = false;
+  private gestureTimer: ReturnType<typeof setTimeout> | null = null;
+  /** A first attach is waiting on a fresh listing (is it shown in another window?). */
+  private checking = false;
   private pumpTimer: ReturnType<typeof setTimeout> | null = null;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
   private resumeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -150,6 +195,36 @@ export class TermSession {
       if (!this.mgr.blocked) e.stopPropagation();
     };
     for (const kind of ["keydown", "keyup", "keypress"]) this.wrap.addEventListener(kind, stop);
+    // What the owner does, as opposed to what xterm answers on its own: a key
+    // or text dropped while connecting is said; a query's answer is not.
+    for (const kind of ["keydown", "keypress", "input", "compositionend"]) {
+      this.wrap.addEventListener(kind, this.markGesture, true);
+    }
+    // Every paste comes through here, before xterm's own handler (capture
+    // phase, on the host): made inert as a control stream, then pasted the
+    // way xterm would (bracketed when the program asked for it).
+    this.wrap.addEventListener("paste", (e) => this.onPaste(e as ClipboardEvent), true);
+  }
+
+  private markGesture = () => {
+    this.gesture = true;
+    if (this.gestureTimer) return;
+    this.gestureTimer = setTimeout(() => {
+      this.gestureTimer = null;
+      this.gesture = false;
+    }, 0);
+  };
+
+  private onPaste(e: ClipboardEvent) {
+    // xterm never sees the raw event: a paste carrying `ESC[201~` would end
+    // bracketed-paste mode early, and the rest would run as typed.
+    e.preventDefault();
+    e.stopPropagation();
+    if (this.mgr.blocked || this.disposed || !this.term) return;
+    const text = cleanPaste(e.clipboardData?.getData("text/plain") ?? "");
+    if (!text) return;
+    this.markGesture();
+    this.term.paste(text);
   }
 
   // -- the view -------------------------------------------------------------
@@ -162,7 +237,7 @@ export class TermSession {
       this.applyZoom();
       this.term?.refresh(0, Math.max(0, (this.term?.rows ?? 1) - 1));
       this.fitNow();
-      if (this.state === "idle") void this.attach();
+      if (this.state === "idle") void this.firstAttach();
     }).catch(() => {
       /* xterm did not load: the next mount tries again */
     });
@@ -311,16 +386,34 @@ export class TermSession {
     return this.gate.latched;
   }
 
-  /** The program the owner typed into, via the test hook (a paste, exactly as xterm would send it). */
-  paste_(text: string) {
-    this.term?.paste(text);
-  }
-
   // -- the socket -----------------------------------------------------------
 
   private set(state: SessionState) {
     this.state = state;
     this.mgr.changed();
+  }
+
+  /**
+   * The first attach from this window: straight away for a terminal this tab
+   * has shown, else only once a fresh listing says no other window shows it
+   * — one that does is drawn as "in another window · Show it here".
+   */
+  private async firstAttach() {
+    if (this.checking) return;
+    if (!this.mgr.claimed.has(this.id)) {
+      this.checking = true;
+      try {
+        await this.mgr.freshList();
+      } finally {
+        this.checking = false;
+      }
+      if (this.disposed || this.state !== "idle" || !this.slot) return;
+      if (this.mgr.elsewhere(this.id)) {
+        this.mgr.changed();
+        return;
+      }
+    }
+    void this.attach();
   }
 
   async attach() {
@@ -351,6 +444,11 @@ export class TermSession {
     }
     ws.binaryType = "arraybuffer";
     this.ws = ws;
+    // A new generation: whatever an older socket still has queued is never
+    // parsed here, and nothing is sent until this socket's replay is parsed.
+    const gen = this.out.next();
+    this.gen = gen;
+    this.replaying = true;
     // A queue of this socket's own, unlatched. Nothing of an older socket's
     // paste is ever offered to it.
     const stale = this.gate.open();
@@ -359,7 +457,7 @@ export class TermSession {
     this.sawAttached = false;
     this.lastSize = null;
     this.mgr.ledger.mine(this.id, Date.now());
-    ws.onmessage = (ev) => this.onMessage(ws, ev);
+    ws.onmessage = (ev) => this.onMessage(ws, gen, ev);
     ws.onclose = () => this.onClose(ws);
     ws.onerror = () => {};
   }
@@ -446,10 +544,10 @@ export class TermSession {
   /** "ended": Jarvis restarted (the socket said so). "gone": the terminal no longer exists. */
   endedWhy: "gone" | "ended" = "ended";
 
-  private onMessage(ws: WebSocket, ev: MessageEvent) {
+  private onMessage(ws: WebSocket, gen: number, ev: MessageEvent) {
     if (ws !== this.ws) return;
     if (typeof ev.data !== "string") {
-      this.term?.write(new Uint8Array(ev.data as ArrayBuffer));
+      this.out.data(gen, new Uint8Array(ev.data as ArrayBuffer));
       return;
     }
     const msg = parseControl(ev.data);
@@ -458,8 +556,13 @@ export class TermSession {
       case "attached":
         this.sawAttached = true;
         this.attempts = 0;
-        // The replay that follows is the terminal's whole recent output: start clean.
-        this.term?.reset();
+        this.mgr.claim(this.id);
+        // The replay that follows is the terminal's whole recent output: start
+        // clean. In band (RIS), so it lands after anything still being parsed
+        // and before the replay; a reset() here would let output xterm already
+        // holds be drawn again after it. Nothing is sent until "replayed".
+        this.replaying = true;
+        this.out.data(gen, RIS);
         if (msg.terminal) {
           this.mgr.updateRow(msg.terminal);
           this.lastRow = msg.terminal;
@@ -472,10 +575,16 @@ export class TermSession {
         this.set("attached");
         return;
       case "replayed":
-        // Then a resize, so a full-screen program redraws at this window's size.
-        this.replayed = true;
-        this.fitNow();
-        this.sendResize(true);
+        // Once the replay has been parsed — every query in it answered into a
+        // session that was not listening — input flows again. Then a resize,
+        // so a full-screen program redraws at this window's size.
+        this.out.then(gen, () => {
+          if (gen !== this.gen || ws !== this.ws) return;
+          this.replaying = false;
+          this.replayed = true;
+          this.fitNow();
+          this.sendResize(true);
+        });
         return;
       case "exit":
         this.exitCode = msg.code;
@@ -509,11 +618,14 @@ export class TermSession {
       case "taken":
         this.wanted = false;
         this.takeover = null;
+        // Another window has it now: a reload here asks before taking it back.
+        this.mgr.unclaim(this.id);
         this.set("taken");
         return;
       case "refused":
         this.wanted = false;
         this.refused = msg.reason;
+        this.mgr.unclaim(this.id);
         this.set("refused");
         return;
       case "input_dropped": {
@@ -580,7 +692,16 @@ export class TermSession {
   private input(bytes: Uint8Array) {
     // Held under a card: a `y⏎` typed at the wrong moment goes nowhere.
     if (this.mgr.blocked || this.disposed) return;
-    if (this.state !== "attached") return;
+    // Not connected, or the replay is still being parsed: nothing is sent —
+    // not a query's answer, and not a key. A key or a paste is said.
+    if (this.state !== "attached" || this.replaying) {
+      if (this.gesture) this.noteUnsent(bytes.length);
+      return;
+    }
+    if (this.gesture && this.paste?.kind === "unsent") {
+      this.paste = null;                      // typing reaches the shell again: the notice has done its job
+      this.mgr.changed();
+    }
     const r = this.gate.input(bytes);
     if (r.send && this.ws && this.ws.readyState === WebSocket.OPEN) this.ws.send(r.send);
     if (r.dropped) this.notePaste("stopped", r.dropped);
@@ -629,6 +750,15 @@ export class TermSession {
 
   private notePaste(kind: PasteNotice["kind"], bytes: number) {
     this.paste = { kind, bytes, resuming: false, refused: "" };
+    this.mgr.changed();
+  }
+
+  private noteUnsent(bytes: number) {
+    // Never over the notice that holds the only way to resume.
+    if (this.paste?.kind === "dropped" && this.gate.latched) return;
+    const why = ["connecting", "waiting", "attached"].includes(this.state) ? "connecting" : "offline";
+    const prev = this.paste?.kind === "unsent" ? this.paste : null;
+    this.paste = { kind: "unsent", bytes: (prev?.bytes ?? 0) + bytes, resuming: false, refused: "", why };
     this.mgr.changed();
   }
 
@@ -683,6 +813,9 @@ export class TermSession {
     this.stopPump();
     this.clearRetry();
     this.clearResume();
+    if (this.gestureTimer) clearTimeout(this.gestureTimer);
+    this.gestureTimer = null;
+    this.out.clear();
     const ws = this.ws;
     this.ws = null;
     this.gate.close();
@@ -727,8 +860,10 @@ export class TermManager {
   sessions = new Map<string, TermSession>();
   /** Attaches this window did not make (`terminal_attached`): quiet, dismissible. */
   notices: AttachNotice[] = [];
-  /** A busy terminal the owner asked to close: asked once more. */
-  confirm: { id: string; title: string } | null = null;
+  /** A busy terminal the owner asked to close: asked once more. `unsure`: the listing failed. */
+  confirm: { id: string; title: string; unsure: boolean } | null = null;
+  /** The terminals this tab has shown (sessionStorage; lib/terminal.ts, MINE_KEY). */
+  claimed: Set<string> = loadMine();
   blocked = false;
   zoom = 100;
   panelOpen = false;
@@ -808,13 +943,48 @@ export class TermManager {
     return out;
   }
 
-  /** The panel's tab: the stored one while it exists, else the first not shown in a pane. */
+  /**
+   * The panel's tab: the stored one while it exists, else the first not shown
+   * in a pane — one of this window's own before one another window shows.
+   */
   panelActive(): string | null {
     const tabs = this.tabs();
     const a = this.prefs.active;
     if (a && tabs.some((r) => r.id === a)) return a;
-    const free = tabs.find((r) => !this.place.has(r.id));
+    const free = tabs.find((r) => !this.place.has(r.id) && !this.elsewhere(r.id))
+      ?? tabs.find((r) => !this.place.has(r.id));
     return (free ?? tabs[0])?.id ?? null;
+  }
+
+  claim(id: string) {
+    if (this.claimed.has(id)) return;
+    this.claimed.add(id);
+    saveMine(this.claimed);
+    this.changed();
+  }
+
+  unclaim(id: string) {
+    if (!this.claimed.delete(id)) return;
+    saveMine(this.claimed);
+    this.changed();
+  }
+
+  /**
+   * Listed as shown, and not by this tab: another window has it. Never
+   * attached to unasked — taking it would put a takeover question in front
+   * of the owner there that nothing they did here caused.
+   */
+  elsewhere(id: string): boolean {
+    const r = this.row(id);
+    if (!r || !r.shown || this.claimed.has(id)) return false;
+    const s = this.sessions.get(id);
+    return !s || s.state === "idle";
+  }
+
+  /** "Show it here": the owner's choice. The window showing it is asked. */
+  showHere(id: string) {
+    if (this.blocked) return;
+    this.claim(id);
   }
 
   selectTab(id: string) {
@@ -889,6 +1059,18 @@ export class TermManager {
     return this.refreshing;
   }
 
+  /**
+   * A listing asked for now — never one already on its way, which may have
+   * left before the change the caller is about to act on. True if it came.
+   */
+  async freshList(): Promise<boolean> {
+    const before = this.refreshing;
+    if (before) await before;
+    if (this.refreshing && this.refreshing !== before) await this.refreshing;    // left after the ask
+    else await this.refresh();
+    return !this.listError;
+  }
+
   /** Where it was opened, so Restart and "New terminal here" reopen it there. */
   specOf(id: string): InSpec {
     const kept = this.prefs.specs[id];
@@ -918,6 +1100,8 @@ export class TermManager {
       return null;
     }
     this.updateRow(row);
+    this.claimed.add(row.id);
+    saveMine(this.claimed);
     this.remember(row.id, spec);
     if (where === "panel") {
       this.prefs = { ...this.prefs, active: row.id };
@@ -937,15 +1121,20 @@ export class TermManager {
     if (this.loaded && !this.listError && this.rows.length === 0) await this.create(this.defaultIn(), "panel");
   }
 
-  /** ×: closed at once, unless something is running in it — then asked first. */
+  /**
+   * ×: closed at once, unless something is running in it — then asked first.
+   * `busy` is read from a listing fetched now (a stale one could skip the
+   * question); if none comes, it asks anyway, saying it could not check.
+   */
   async requestClose(id: string) {
     if (this.blocked) return;
-    await this.refresh();
+    const listed = await this.freshList();
+    if (this.blocked) return;
     const row = this.row(id);
     const s = this.sessions.get(id);
     const gone = s && (s.state === "ended" || s.state === "closed");
-    if (row && row.busy && !row.exited && !gone) {
-      this.confirm = { id, title: row.title || id };
+    if (row && !row.exited && !gone && (row.busy || !listed)) {
+      this.confirm = { id, title: row.title || id, unsure: !listed };
       this.changed();
       return;
     }
@@ -984,6 +1173,7 @@ export class TermManager {
     s?.dispose();
     this.rows = this.rows.filter((r) => r.id !== id);
     this.unseenExits.delete(id);
+    if (this.claimed.delete(id)) saveMine(this.claimed);
     const specs = { ...this.prefs.specs };
     delete specs[id];
     this.prefs = { active: this.prefs.active === id ? null : this.prefs.active, specs };
@@ -1081,7 +1271,7 @@ if (typeof window !== "undefined") {
     text: (id: string) => terminals.sessions.get(id)?.bufferText() ?? "",
     selection: (id: string) => terminals.sessions.get(id)?.selection ?? "",
     size: (id: string) => terminals.sessions.get(id)?.size ?? null,
-    latched: (id: string) => terminals.sessions.get(id)?.latched ?? null,    paste: (id: string, text: string) => terminals.sessions.get(id)?.paste_(text),
+    latched: (id: string) => terminals.sessions.get(id)?.latched ?? null,
   };
 }
 
@@ -1118,6 +1308,8 @@ export function TerminalView(props: { id: string; where: string; pane?: PaneNo; 
   const mgr = useTerminals();
   const s = mgr.session(props.id);
   const slot = useRef<HTMLDivElement>(null);
+  // Another window shows it: drawn as a choice, never attached to unasked.
+  const away = mgr.elsewhere(props.id);
 
   useLayoutEffect(() => {
     const el = slot.current;
@@ -1134,7 +1326,7 @@ export function TerminalView(props: { id: string; where: string; pane?: PaneNo; 
       ro.disconnect();
       s.unmount(el);
     };
-  }, [s]);
+  }, [s, away]);
 
   const now = useNow(s.state === "waiting" || (s.attachedAt > 0 && Date.now() - s.attachedAt < SETTLE_MS + 1000));
   // The daemon's row while the terminal exists; its last one only for a name after.
@@ -1184,9 +1376,21 @@ export function TerminalView(props: { id: string; where: string; pane?: PaneNo; 
           ×
         </button>
       </div>
-      {s.paste ? <PasteStrip s={s} blocked={blocked} /> : null}
-      <div className="termslot" ref={slot} onMouseDown={() => setTimeout(() => s.focus(), 0)} />
-      <StateStrip s={s} now={now} blocked={blocked} onChoose={props.onChoose} />
+      {away ? (
+        <div className="termstrip" data-testid="term-elsewhere">
+          <span>This terminal is in another window.</span>
+          <button type="button" data-testid="term-show-here" disabled={blocked} onClick={() => mgr.showHere(props.id)}
+                  title="Show it here; the window showing it is asked first">
+            Show it here
+          </button>
+        </div>
+      ) : (
+        <>
+          {s.paste ? <PasteStrip s={s} blocked={blocked} /> : null}
+          <div className="termslot" ref={slot} onMouseDown={() => setTimeout(() => s.focus(), 0)} />
+          <StateStrip s={s} now={now} blocked={blocked} onChoose={props.onChoose} />
+        </>
+      )}
     </div>
   );
 }
@@ -1202,7 +1406,10 @@ function PasteStrip(props: { s: TermSession; blocked: boolean }) {
         : "The program in this terminal is not reading its input: typing is paused until you resume.")
       : p.kind === "lost"
         ? `The connection closed during a paste: the rest of it (${kib(p.bytes)}) was not sent, and will not be.`
-        : `Ctrl-C stopped the paste: the rest of it (${kib(p.bytes)}) was not sent.`;
+        : p.kind === "unsent"
+          ? `This terminal ${p.why === "offline" ? "is not running here" : "was still connecting"}, so what you `
+            + `typed or pasted (${kib(p.bytes)}) was not sent.`
+          : `Ctrl-C stopped the paste: the rest of it (${kib(p.bytes)}) was not sent.`;
   return (
     <div className="termnote" data-testid="term-paste-notice" data-kind={p.kind} data-held={s.heldAt ? "true" : undefined}
          role="status">
@@ -1333,7 +1540,7 @@ export function TerminalPane(props: { pane: PaneNo; terminalId: string | null; d
     const n = mgr.place.get(r.id);
     if (n) return `in pane ${n}`;
     if (r.exited) return "exited";
-    if (r.shown && !mgr.sessions.has(r.id)) return "in another window";
+    if (mgr.elsewhere(r.id)) return "in another window";
     return "in the panel";
   };
   return (
@@ -1412,6 +1619,7 @@ export function TerminalPanel(props: {
             const s = mgr.sessions.get(r.id);
             const exited = r.exited || s?.state === "exited";
             const ended = s?.state === "ended" || s?.state === "lost";
+            const away = mgr.elsewhere(r.id);
             return (
               <span key={r.id} className={"paneltab" + (r.id === active && !pane ? " on" : "")}>
                 <button
@@ -1427,7 +1635,8 @@ export function TerminalPanel(props: {
                   <span className="paneltab-name">{r.title || r.id}</span>
                   {pane ? <span className="paneltab-where">in pane {pane}</span> : null}
                   {ended ? <span className="paneltab-where">ended</span>
-                    : exited ? <span className="paneltab-where">exited</span> : null}
+                    : exited ? <span className="paneltab-where">exited</span>
+                      : away ? <span className="paneltab-where">in another window</span> : null}
                 </button>
                 <button
                   type="button"
@@ -1590,7 +1799,9 @@ export function TerminalToasts(props: { blocked: boolean }) {
       {mgr.confirm ? (
         <div className="termtoast" data-testid="term-close-confirm" role="alertdialog" aria-label="Close a busy terminal">
           <span>
-            Something is running in <b>{mgr.confirm.title}</b>. Close it anyway?
+            {mgr.confirm.unsure
+              ? <>Jarvis could not check whether something is running in <b>{mgr.confirm.title}</b>. Close it anyway?</>
+              : <>Something is running in <b>{mgr.confirm.title}</b>. Close it anyway?</>}
           </span>
           <button type="button" data-testid="term-close-yes" disabled={props.blocked}
                   onClick={() => void mgr.close(mgr.confirm!.id)}>

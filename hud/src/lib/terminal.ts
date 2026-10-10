@@ -254,6 +254,91 @@ export class InputGate {
   }
 }
 
+/**
+ * The terminal's output, written into xterm in order, **one write in flight
+ * at a time, each tagged with the socket it came from** (PR #28 review).
+ *
+ * xterm parses what it is given later, in its own time, and *answers* some of
+ * it — a cursor-position query, a device-attributes query, an OSC colour
+ * query — through the same channel the owner's keys use. Two things follow:
+ *
+ *   - a reattach must not parse an older socket's output into the new
+ *     session: `next()` starts a generation, and everything an older one
+ *     queued is dropped unparsed (at most the one write already handed to
+ *     xterm finishes, before anything of the new generation runs);
+ *   - `then(fn)` runs `fn` only once everything written before it has been
+ *     parsed — which is how the replay's end is known (its queries have all
+ *     been answered, into a session that was not listening).
+ */
+export class OutputPipe {
+  private q: { gen: number; data?: Uint8Array; run?: () => void }[] = [];
+  private inFlight = false;
+  private current = 0;
+
+  constructor(private write: (data: Uint8Array, done: () => void) => void) {}
+
+  get gen(): number {
+    return this.current;
+  }
+
+  /** A new socket: a new generation, and every older queued write dropped. */
+  next(): number {
+    this.current += 1;
+    this.q = [];
+    return this.current;
+  }
+
+  data(gen: number, bytes: Uint8Array) {
+    if (gen !== this.current || !bytes.length) return;
+    this.q.push({ gen, data: bytes });
+    this.pump();
+  }
+
+  /** `fn`, once everything written before it (this generation's and older) has been parsed. */
+  then(gen: number, fn: () => void) {
+    if (gen !== this.current) return;
+    this.q.push({ gen, run: fn });
+    this.pump();
+  }
+
+  /** Nothing more: the session is gone. */
+  clear() {
+    this.current += 1;
+    this.q = [];
+  }
+
+  private pump() {
+    while (!this.inFlight && this.q.length) {
+      const item = this.q.shift()!;
+      if (item.gen !== this.current) continue;      // an older socket's: never parsed here
+      if (item.run) {
+        item.run();
+        continue;
+      }
+      this.inFlight = true;
+      this.write(item.data!, () => {
+        this.inFlight = false;
+        this.pump();
+      });
+    }
+  }
+
+  get pending(): number {
+    return this.q.length;
+  }
+}
+
+/**
+ * Pasted text, made inert as a control stream: ESC and the C1 controls are
+ * removed, so a paste carrying `ESC[201~` cannot end bracketed-paste mode
+ * early and have the rest run as typed (PR #28 review), nor carry any other
+ * escape sequence into the program. Tabs and line ends stay.
+ */
+export function cleanPaste(text: string): string {
+  // eslint-disable-next-line no-control-regex
+  return (text || "").replace(/[\u001b\u0080-\u009f]/g, "");
+}
+
 /** The daemon's text frames (docs/hud-api.md). Anything else is ignored. */
 export type Control =
   | { type: "attached"; terminal: TerminalRow | null; replay: number }
@@ -580,5 +665,48 @@ export function savePrefs(prefs: TerminalPrefs, storage?: Pick<Storage, "setItem
     (storage ?? window.localStorage).setItem(TERMINALS_KEY, JSON.stringify(clean));
   } catch {
     /* storage blocked: the terminals still work, they just forget */
+  }
+}
+
+/**
+ * The terminals this tab has shown (sessionStorage: per tab, and it survives
+ * a reload). A terminal the daemon lists as `shown` that is **not** one of
+ * these is in another window, and this window never attaches to it on its own
+ * — the owner says "Show it here" first (PR #28 review: a takeover prompt the
+ * owner did not cause is one they learn to wave through). A reload finds its
+ * own terminals here, so it attaches straight back even while the daemon still
+ * counts the old page's socket.
+ */
+export const MINE_KEY = "jarvis.hud.terminals.mine";
+export const MINE_KEPT = 32;
+
+export function parseMine(raw: unknown): string[] {
+  let v: unknown = null;
+  if (typeof raw === "string") {
+    try {
+      v = JSON.parse(raw);
+    } catch {
+      v = null;
+    }
+  }
+  if (!Array.isArray(v)) return [];
+  const out: string[] = [];
+  for (const id of v) if (isTerminalId(id) && !out.includes(id)) out.push(id);
+  return out.slice(-MINE_KEPT);
+}
+
+export function loadMine(storage?: Pick<Storage, "getItem">): Set<string> {
+  try {
+    return new Set(parseMine((storage ?? window.sessionStorage).getItem(MINE_KEY)));
+  } catch {
+    return new Set();
+  }
+}
+
+export function saveMine(mine: Set<string>, storage?: Pick<Storage, "setItem">) {
+  try {
+    (storage ?? window.sessionStorage).setItem(MINE_KEY, JSON.stringify(Array.from(mine).slice(-MINE_KEPT)));
+  } catch {
+    /* storage blocked: a reload asks "Show it here" once more */
   }
 }

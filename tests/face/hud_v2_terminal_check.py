@@ -22,7 +22,14 @@ The checks worth keeping, each written to bite:
     paste never continues onto a new socket**;
   - every attach fetches a fresh ticket, builds its URL from `location`,
     and sends `resize` only after `replayed`; a reload reattaches and the
-    ring is replayed;
+    ring is replayed — **drawn once, and never answered**: a ring full of
+    terminal queries (cursor position, device attributes, a colour,
+    DECRQSS) makes a reload or a dropped socket send the program nothing;
+  - a pasted `ESC[201~` cannot end bracketed paste early;
+  - a card raised mid-paste holds every chunk until it goes, and nothing
+    typed or pasted under a card arrives after it;
+  - a terminal another window shows is never taken unasked ("in another
+    window · Show it here"), and keys typed while it connects are said;
   - another window's takeover asks here (Let it / Keep it), "taken" offers
     to take it back, and a refused newcomer says so;
   - exit offers Restart and Close; Jarvis's restart offers "New terminal
@@ -460,8 +467,8 @@ def terminal_checks(browser, mock, base, check, until, guard, init_script):
     try:
         _boot(page, mock, base, until)
         for section in (_open_checks, _typing_checks, _card_checks, _paste_checks, _reload_checks,
-                        _takeover_checks, _exit_checks, _busy_checks, _readable_checks, _integration_checks,
-                        _osc_link_checks, _pane_checks, _zoom_checks, _ended_checks):
+                        _takeover_checks, _elsewhere_checks, _exit_checks, _busy_checks, _readable_checks,
+                        _integration_checks, _osc_link_checks, _pane_checks, _zoom_checks, _ended_checks):
             if only and section.__name__.strip("_") not in only:
                 continue
             try:
@@ -566,6 +573,17 @@ def _typing_checks(page, mock, base, check, until, fake):
     page.keyboard.press("Escape")
     page.wait_for_timeout(100)
     check("Escape is the shell's in a terminal", fake.sent(tid)[before:] == b"\x1b", repr(fake.sent(tid)[before:]))
+    # The shell turns bracketed paste on; a paste carrying the end marker
+    # must stay one bracketed paste (ESC stripped), never end it early.
+    fake.output(tid, b"\x1b[?2004h$ ")
+    page.wait_for_timeout(150)
+    before = len(fake.sent(tid))
+    _paste(page, tid, "echo looks-harmless\x1b[201~echo INJECTED\n")
+    until(lambda: fake.sent(tid)[before:].endswith(b"\x1b[201~"), timeout=3)
+    got = fake.sent(tid)[before:]
+    check("a pasted ESC[201~ cannot end bracketed paste early: ESC is stripped, the paste stays one bracketed paste",
+          got == b"\x1b[200~echo looks-harmless[201~echo INJECTED\r\x1b[201~", repr(got))
+    fake.output(tid, b"\x1b[?2004l\r\n$ ")
 
 
 def _card_checks(page, mock, base, check, until, fake):
@@ -603,12 +621,42 @@ def _card_checks(page, mock, base, check, until, fake):
     check("and the Escape went to the card, not the shell", fake.sent(tid)[before:] == b"",
           repr(fake.sent(tid)[before:]))
     until(lambda: page.locator('[data-testid="approval-card"]').count() == 0, timeout=4)
-    page.wait_for_timeout(150)
+    # Held is not queued: nothing typed or pasted under the card arrives once it goes.
+    page.wait_for_timeout(1200)
+    check("once the card has gone (and a wait), nothing typed or pasted under it arrives late",
+          fake.sent(tid)[before:] == b"", repr(fake.sent(tid)[before:]))
     check("once it is answered, focus is back in the terminal", _in_term(page))
     page.keyboard.type("echo back")
     page.keyboard.press("Enter")
     until(lambda: "\nback" in _text(page, tid), timeout=3)
-    check("and typing works again", b"echo back\r" in fake.sent(tid)[before:])
+    check("and typing works again", fake.sent(tid)[before:] == b"echo back\r", repr(fake.sent(tid)[before:]))
+
+    # A card raised while a paste is going out: not one more chunk while it
+    # is up, and the rest — all of it, once, in order — when it goes.
+    big = "".join(f"{i:07d}\n" for i in range(256 * 1024))           # 2 MiB: 128 chunks
+    expect = big.replace("\n", "\r").encode()
+    sock = fake.holders[tid]
+    n0 = len(sock["frames"])
+    _focus_term(page, tid)
+    _paste(page, tid, big)
+    until(lambda: len(sock["frames"]) - n0 >= 4, timeout=4)
+    _approval(mock, "trm3")
+    until(lambda: page.locator('[data-testid="approval-card"]').count() > 0, timeout=4)
+    page.wait_for_timeout(150)
+    at_card = len(sock["frames"])
+    out_before = len(b"".join(sock["frames"][n0:at_card]))
+    if out_before >= len(expect):
+        raise AssertionError("setup: the paste finished before the card came up")
+    page.wait_for_timeout(1500)
+    check("a card raised mid-paste: not one more chunk leaves while it is up",
+          len(sock["frames"]) == at_card,
+          f"{at_card - n0} chunks before it, {len(sock['frames']) - at_card} while it was up")
+    page.keyboard.press("Escape")
+    until(lambda: page.locator('[data-testid="approval-card"]').count() == 0, timeout=4)
+    until(lambda: len(b"".join(sock["frames"][n0:])) >= len(expect), timeout=8)
+    got = b"".join(sock["frames"][n0:])
+    check("and once it is answered, the rest of the paste goes out: all of it, once, in order",
+          got == expect, f"{len(got)} of {len(expect)} bytes")
 
 
 def _resumes(fake, tid):
@@ -660,6 +708,18 @@ def _paste_checks(page, mock, base, check, until, fake):
     check("and says the way out is reattaching or closing",
           "reattach or close" in note.inner_text() and _visible(page, _sel(tid, '[data-testid="term-reattach"]')),
           note.inner_text()[:160])
+    # A frame already on its way when Resume was pressed is refused late: it
+    # adds its bytes, and never undoes the resume the owner asked for.
+    asked = len(_resumes(fake, tid))
+    fake.control(tid, {"type": "input_dropped", "bytes": 16384, "latched": True,
+                       "reason": "input is paused after a dropped paste"})
+    page.wait_for_timeout(150)
+    check("a late input_dropped after Resume: still resuming (still waiting, Resume still pressed)",
+          "Waiting for the program" in note.inner_text()
+          and page.locator(_sel(tid, '[data-testid="term-resume"]')).is_disabled(), note.inner_text()[:160])
+    until(lambda: len(_resumes(fake, tid)) >= asked + 2, timeout=5)
+    check("and still asking again while the daemon refuses", len(_resumes(fake, tid)) >= asked + 2,
+          f"{len(_resumes(fake, tid)) - asked} more after the late drop")
     fake.resume_refuse.discard(tid)
     until(lambda: not _visible(page, _sel(tid, '[data-testid="term-paste-notice"]')), timeout=4)
     check("once the daemon resumes, the notice goes",
@@ -707,8 +767,19 @@ def _paste_checks(page, mock, base, check, until, fake):
         page.locator(_sel(tid, '[data-testid="term-paste-dismiss"]')).click()
 
 
+# Terminal queries a program printed long ago — device attributes, cursor
+# position, an OSC 11 colour, DECRQSS — which xterm answers through the
+# owner's input channel. They sit in the ring and come back in every replay.
+QUERIES = b"\x1b[c\x1b[6n\x1b]11;?\x07\x1bP$qm\x1b\\"
+
+
 def _reload_checks(page, mock, base, check, until, fake):
     tid = _fresh(page, mock, base, until, fake)
+    fake.output(tid, QUERIES + b"ring-marker\r\n$ ")
+    until(lambda: "ring-marker" in _text(page, tid), timeout=3)
+    page.wait_for_timeout(300)
+    check("setup: live, xterm answers the queries (as a terminal does)", fake.sent(tid) != b"", "nothing answered")
+    fake.line[tid] = ""                         # the answers are not a command line
     _focus_term(page, tid)
     page.keyboard.type("echo before-reload")
     page.keyboard.press("Enter")
@@ -720,6 +791,9 @@ def _reload_checks(page, mock, base, check, until, fake):
     check("after a reload the terminal is back, its output replayed",
           _state(page, tid) == "attached" and "\nbefore-reload" in _text(page, tid), _text(page, tid)[-120:])
     new = fake.of(tid)[-1]
+    page.wait_for_timeout(800)
+    check("a reload's replay is never answered: the queries in the ring send the program nothing",
+          new["frames"] == [], repr(b"".join(new["frames"])[:80]))
     check("on a new socket with a new ticket",
           len(fake.of(tid)) == sockets + 1 and len(mock.sent("POST", f"/terminals/{tid}/ticket")) == tickets + 1)
     until(lambda: [r for r in fake.resizes(tid) if r[2] == new["n"]], timeout=3)
@@ -739,6 +813,33 @@ def _reload_checks(page, mock, base, check, until, fake):
     page.locator('[data-testid="term-attached-dismiss"]').click()
     until(lambda: page.locator('[data-testid="term-attached-notice"]').count() == 0, timeout=2)
     check("and is dismissed with ×", page.locator('[data-testid="term-attached-notice"]').count() == 0)
+    # A dropped socket (no reload): the replay is drawn once — not on top of
+    # what was there — and answered never.
+    sockets = len(fake.of(tid))
+    fake.drop(tid)
+    until(lambda: len(fake.of(tid)) > sockets and _state(page, tid) == "attached", timeout=8)
+    page.wait_for_timeout(800)
+    dropped = fake.of(tid)[-1]
+    check("after a dropped socket the replay is drawn once, not on top of what was there",
+          _text(page, tid).count("ring-marker") == 1, str(_text(page, tid).count("ring-marker")))
+    check("and its queries send the program nothing", dropped["frames"] == [],
+          repr(b"".join(dropped["frames"])[:80]))
+    # 50,000 cursor-position queries in the ring (`yes $'\e[6n'`): one reattach used to type 300 KB.
+    fake.ring[tid].extend(b"\x1b[6n" * 50000 + b"\r\nflood-marker\r\n$ ")
+    sockets = len(fake.of(tid))
+    fake.drop(tid)
+    until(lambda: len(fake.of(tid)) > sockets and _state(page, tid) == "attached"
+          and "flood-marker" in _text(page, tid), timeout=10)
+    page.wait_for_timeout(1500)
+    flood = fake.of(tid)[-1]
+    check("a ring of 50,000 queries, replayed, sends the program nothing",
+          flood["frames"] == [], f"{sum(len(f) for f in flood['frames'])} bytes in {len(flood['frames'])} frames")
+    _focus_term(page, tid)
+    page.keyboard.type("echo after-replay")
+    page.keyboard.press("Enter")
+    until(lambda: "\nafter-replay" in _text(page, tid), timeout=4)
+    check("and once the replay is parsed, typing flows: exactly the keys typed",
+          b"".join(flood["frames"]) == b"echo after-replay\r", repr(b"".join(flood["frames"])[:60]))
     mock.emit("terminal_attached", {"terminal_id": "../etc", "at": "x"})
     mock.emit("terminal_attached", {"terminal_id": tid, "output": "x", "at": "<b>x</b>"})
     until(lambda: page.locator('[data-testid="term-attached-notice"]').count() > 0, timeout=3)
@@ -794,6 +895,51 @@ def _takeover_checks(page, mock, base, check, until, fake):
     until(lambda: _state(page, tid) == "attached", timeout=3)
     check("asking again attaches, with the ring replayed", _state(page, tid) == "attached"
           and "marker-before-takeover" in _text(page, tid))
+
+
+def _elsewhere_checks(page, mock, base, check, until, fake):
+    _reset(page, mock, base, until, fake)
+    # The daemon lists it as shown, and this window has never shown it: another window has it.
+    away = "0b0c0d0e"
+    mock.world["terminals"].append(mock_terminals.row(away, "bash · elsewhere", shown=True))
+    fake.ring[away] = bytearray(b"other-window-output\r\n$ ")
+    sockets = len(fake.sockets)
+    page.locator('[data-testid="toggle-panel"]').click()
+    until(lambda: _visible(page, _sel(away, '[data-testid="term-elsewhere"]')), timeout=4)
+    page.wait_for_timeout(400)
+    check("opening the panel never takes a terminal another window shows: it says so, and attaches nothing",
+          _visible(page, _sel(away, '[data-testid="term-show-here"]')) and len(fake.sockets) == sockets
+          and not mock.sent("POST", f"/terminals/{away}/ticket"), f"{len(fake.sockets) - sockets} sockets")
+    check("its tab says where it is", "in another window" in page.locator(f'[data-testid="panel-tab-{away}"]').inner_text())
+    fake.hold.add(away)
+    page.locator(_sel(away, '[data-testid="term-show-here"]')).click()
+    until(lambda: _state(page, away) == "waiting", timeout=4)
+    check("'Show it here' asks for it (the other window is asked first)",
+          len(fake.sockets) == sockets + 1 and len(mock.sent("POST", f"/terminals/{away}/ticket")) == 1)
+    _focus_term(page, away)
+    page.keyboard.type("ls")
+    page.wait_for_timeout(200)
+    note = page.locator(_sel(away, '[data-testid="term-paste-notice"]'))
+    check("keys typed while it is still connecting are not sent, and that is said",
+          fake.sent(away) == b"" and note.count() == 1 and note.get_attribute("data-kind") == "unsent"
+          and "still connecting" in note.inner_text(), note.inner_text()[:160] if note.count() else "no notice")
+    fake.finish_waiting(away, allow=True)
+    until(lambda: _state(page, away) == "attached" and "other-window-output" in _text(page, away), timeout=4)
+    page.wait_for_timeout(200)
+    _focus_term(page, away)
+    page.keyboard.type("echo here")
+    page.keyboard.press("Enter")
+    until(lambda: "\nhere" in _text(page, away), timeout=3)
+    check("once it is here, typing reaches the shell, and the notice goes",
+          fake.sent(away) == b"echo here\r" and note.count() == 0, repr(fake.sent(away)))
+    # A reload: this tab showed it, so it attaches straight back — even though
+    # the daemon may still count the old page's socket as showing it.
+    sockets = len(fake.of(away))
+    _boot(page, mock, base, until, reload=True)
+    until(lambda: _state(page, away) == "attached" and len(fake.of(away)) > sockets, timeout=6)
+    check("after a reload this tab's own terminal attaches straight back, unasked",
+          _state(page, away) == "attached" and not _visible(page, _sel(away, '[data-testid="term-elsewhere"]')))
+    page.evaluate("sessionStorage.clear()")
 
 
 def _exit_checks(page, mock, base, check, until, fake):
@@ -862,6 +1008,27 @@ def _busy_checks(page, mock, base, check, until, fake):
     page.wait_for_timeout(150)
     check("an idle terminal closes at once, unasked",
           not _visible(page, '[data-testid="term-close-confirm"]') and len(deletes(tid)) == 1)
+    # A listing already on its way, from before something started running:
+    # × must not decide on it.
+    tid = _new_terminal(page, mock, until, fake)
+
+    def lists():
+        return len([1 for (m, p, _) in mock.calls if m == "GET" and p == "/terminals"])
+    n = lists()
+    mock.terminal_list_delay = 1.0
+    page.locator('[data-testid="toggle-panel"]').click()
+    until(lambda: not _visible(page, '[data-testid="panel"]'), timeout=2)
+    page.locator('[data-testid="toggle-panel"]').click()
+    until(lambda: lists() > n, timeout=3)                  # on its way, with busy: false
+    fake._row(tid)["busy"] = True
+    page.locator(f'[data-testid="panel-close-{tid}"]').click()
+    until(lambda: _visible(page, '[data-testid="term-close-confirm"]') or deletes(tid), timeout=5)
+    check("× reads a listing fetched after it was pressed: a stale `busy: false` never skips the question",
+          _visible(page, '[data-testid="term-close-confirm"]') and not deletes(tid), f"deleted={bool(deletes(tid))}")
+    mock.__dict__.pop("terminal_list_delay", None)
+    if _visible(page, '[data-testid="term-close-confirm"]'):
+        page.locator('[data-testid="term-close-yes"]').click()
+        until(lambda: deletes(tid), timeout=3)
 
 
 def _readable_checks(page, mock, base, check, until, fake):

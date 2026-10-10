@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
-  AttachLedger, CHUNK, InputGate, InputQueue, attachUrl, chunk, clampSize, cleanText, cleanTitle, counterZoom,
-  encodeInput, fontSizeFor, inTerminal, integrationNote, isCtrlC, judgeLink, parseControl, parsePrefs, parseRow,
-  parseRows, parseSpec, placeTerminals, terminalSpecFor, terminalTakesKey,
+  AttachLedger, CHUNK, InputGate, InputQueue, MINE_KEPT, OutputPipe, attachUrl, chunk, clampSize, cleanPaste,
+  cleanText, cleanTitle, counterZoom, encodeInput, fontSizeFor, inTerminal, integrationNote, isCtrlC, judgeLink,
+  loadMine, parseControl, parseMine, parsePrefs, parseRow, parseRows, parseSpec, placeTerminals, saveMine,
+  terminalSpecFor, terminalTakesKey,
 } from "./terminal";
 
 const row = (over: Record<string, unknown> = {}) => ({
@@ -309,5 +310,125 @@ describe("stored preferences", () => {
     expect(parseSpec({ thread: "t1" })).toEqual({ thread: "t1" });
     expect(parseSpec({ thread: "t1", project: "p1" })).toBeNull();
     expect(parseSpec({ folder: "/" })).toBeNull();
+  });
+});
+
+const enc = (t: string) => new TextEncoder().encode(t);
+
+/** A writer that parses later, as xterm does: a write is "parsed" when the test steps it. */
+function laterParser() {
+  const pending: { data: Uint8Array; done: () => void }[] = [];
+  const parsed: string[] = [];
+  const write = (data: Uint8Array, done: () => void) => {
+    pending.push({ data, done });
+  };
+  const step = () => {
+    const w = pending.shift();
+    if (!w) return false;
+    parsed.push(new TextDecoder().decode(w.data));
+    w.done();
+    return true;
+  };
+  const drain = () => {
+    while (step());
+  };
+  return { write, step, drain, parsed, pending };
+}
+
+describe("output", () => {
+  it("is written in order, one write in xterm's hands at a time", () => {
+    const x = laterParser();
+    const out = new OutputPipe(x.write);
+    const g = out.next();
+    out.data(g, enc("a"));
+    out.data(g, enc("b"));
+    out.data(g, enc("c"));
+    expect(x.pending.length).toBe(1);
+    x.drain();
+    expect(x.parsed).toEqual(["a", "b", "c"]);
+  });
+  it("never parses an older socket's queued output into a new one", () => {
+    const x = laterParser();
+    const out = new OutputPipe(x.write);
+    const g1 = out.next();
+    out.data(g1, enc("old-1"));
+    out.data(g1, enc("old-2 \x1b[6n"));
+    out.data(g1, enc("old-3"));
+    const g2 = out.next();                          // the socket dropped; a new one attached
+    out.data(g1, enc("late, from the old socket"));
+    out.data(g2, enc("RIS"));
+    out.data(g2, enc("replay"));
+    x.drain();
+    // old-1 was already in xterm's hands; it finishes before anything new.
+    expect(x.parsed).toEqual(["old-1", "RIS", "replay"]);
+  });
+  it("runs a step only once everything written before it has been parsed", () => {
+    const x = laterParser();
+    const out = new OutputPipe(x.write);
+    const g = out.next();
+    out.data(g, enc("replay-1"));
+    out.data(g, enc("replay-2"));
+    let done = false;
+    out.then(g, () => {
+      done = true;
+    });
+    expect(done).toBe(false);
+    x.step();
+    expect(done).toBe(false);
+    x.step();
+    expect(done).toBe(true);
+    const idle = new OutputPipe(x.write);
+    let now = false;
+    idle.then(idle.next(), () => {
+      now = true;
+    });
+    expect(now).toBe(true);                         // nothing pending: at once
+  });
+  it("drops an older socket's step, and everything after clear()", () => {
+    const x = laterParser();
+    const out = new OutputPipe(x.write);
+    const g1 = out.next();
+    out.data(g1, enc("in-flight"));
+    let ran = 0;
+    out.then(g1, () => ran++);
+    out.next();
+    out.then(g1, () => ran++);
+    x.drain();
+    expect(ran).toBe(0);
+    const g = out.gen;
+    out.clear();
+    out.data(g, enc("after"));
+    x.drain();
+    expect(x.parsed).toEqual(["in-flight"]);
+    expect(out.pending).toBe(0);
+  });
+});
+
+describe("a paste", () => {
+  it("is inert as a control stream: no ESC and no C1, so it cannot end bracketed paste early", () => {
+    expect(cleanPaste("echo looks-harmless\x1b[201~echo INJECTED\n")).toBe("echo looks-harmless[201~echo INJECTED\n");
+    expect(cleanPaste("\x1b[200~x\u009b201~y\u0090z")).toBe("[200~x201~yz");
+    expect(cleanPaste("tab\there\r\nnext\n")).toBe("tab\there\r\nnext\n");
+    expect(cleanPaste("Grüße · 日本 · 🚀")).toBe("Grüße · 日本 · 🚀");
+    expect(cleanPaste("")).toBe("");
+  });
+});
+
+describe("this tab's terminals", () => {
+  it("are ids only, once each, capped, and survive a round trip through storage", () => {
+    expect(parseMine("garbage")).toEqual([]);
+    expect(parseMine(JSON.stringify({ a: 1 }))).toEqual([]);
+    expect(parseMine(JSON.stringify(["0a1b2c3d", "../etc", "0a1b2c3d", 7, "0000000f"])))
+      .toEqual(["0a1b2c3d", "0000000f"]);
+    const ids = Array.from({ length: MINE_KEPT + 5 }, (_, i) => i.toString(16).padStart(8, "0"));
+    expect(parseMine(JSON.stringify(ids))).toEqual(ids.slice(-MINE_KEPT));
+    const kept = new Map<string, string>();
+    const storage = {
+      getItem: (k: string) => kept.get(k) ?? null,
+      setItem: (k: string, v: string) => void kept.set(k, v),
+    };
+    saveMine(new Set(["0a1b2c3d"]), storage);
+    expect(Array.from(loadMine(storage))).toEqual(["0a1b2c3d"]);
+    expect(Array.from(loadMine({ getItem: () => { throw new Error("blocked"); } }))).toEqual([]);
   });
 });

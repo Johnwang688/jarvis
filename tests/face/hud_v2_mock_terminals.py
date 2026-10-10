@@ -21,6 +21,7 @@ mock's own is 403 here too, so a HUD that ever sent one would be caught.
 from __future__ import annotations
 
 import secrets
+import time
 
 CAP = 6
 
@@ -73,7 +74,14 @@ def handle(h, mock, method: str, path: str, body) -> bool:
     tickets = mock.__dict__.setdefault("terminal_tickets", {})
     if parts == ["terminals"]:
         if method == "GET":
-            h._json(rows)
+            # `terminal_list_delay` (one-shot): the rows as they are now,
+            # answered that many seconds later — a listing already on its way
+            # while the world changes under it.
+            snapshot = [dict(r) for r in rows]
+            delay = mock.__dict__.pop("terminal_list_delay", 0)
+            if delay:
+                time.sleep(delay)
+            h._json(snapshot)
             return True
         if method == "POST":
             if not isinstance(body, dict) or set(body) - {"in", "cols", "rows"} or "in" not in body:
