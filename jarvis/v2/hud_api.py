@@ -988,6 +988,11 @@ def route(handler, daemon, parts, query):
         return binary(handler, data, mimetypes.guess_type(path.name)[0] or "application/octet-stream")
     if "/".join(parts) in ("avatar.svg", "avatars", "avatar", "voices", "voice", "models", "models/catalog", "model", "mute", "say", "stt"):
         return pickers(handler, daemon, parts, query)
+    if parts[0] == "terminals":
+        # The owner's terminals (WP-C): owner-only, the HUD listener only,
+        # and the attach socket also needs a single-use ticket.
+        from . import terminals as _terminals
+        return _terminals.route(handler, daemon, parts, query)
     # Archive, restore, permanent delete and the trash (decisions part B).
     from . import projects as _projects
     mounted = _projects.route(handler, daemon, parts, query)

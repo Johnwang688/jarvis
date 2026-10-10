@@ -300,45 +300,28 @@ def _strip_comment(segment: str) -> str:
 
 
 def _redirect_targets(segment: str) -> list[str]:
-    """Every word the segment redirects output into (`>`, `>>`, `>|`, `&>`,
-    `<>`, `{fd}>`, glued or spaced). File-descriptor duplication (`2>&1`) is
-    not one."""
-    syntax = set(rules.unquoted_indices(segment))
+    """Every word the segment opens for output — `rules.redirections()`, the
+    one reading of bash's redirect grammar. This module had its own copy
+    until 2026-10-09, and it had drifted: after a duplication it skipped one
+    character too many (`2>&1>FILE`, `>&2>FILE` never saw FILE), and it read
+    `>& FILE` with a space as a redirect to nothing."""
     targets: list[str] = []
-    i = 0
-    while i < len(segment):
-        if i not in syntax or segment[i] != ">":
-            i += 1
-            continue
-        j = i + 1
-        if segment[j:j + 1] in (">", "|"):
-            j += 1
-        while segment[j:j + 1] in (" ", "\t"):
-            j += 1
-        if segment[j:j + 1] == "&":
-            k = j + 1
-            while segment[k:k + 1].isdigit():
-                k += 1
-            if k > j + 1 or segment[k:k + 1] == "-":
-                i = k + 1
-                continue
-            j += 1  # bash's `>&word` is `&>word`
-        start, quote = j, ""
-        while j < len(segment):
-            ch = segment[j]
-            if quote:
-                if ch == quote:
-                    quote = ""
-            elif ch in "'\"":
-                quote = ch
-            elif ch in " \t;|&<>()":
-                break
-            j += 1
-        word = rules._tokens(segment[start:j])
-        if word:
-            targets.append(word[0])
-        i = max(j, i + 1)
+    for redirect in rules.redirections(segment):
+        if redirect.writes and redirect.word:
+            word = rules._tokens(redirect.word)
+            if word:
+                targets.append(word[0])
     return targets
+
+
+def _here_strings(segment: str) -> list[str]:
+    """The text of every here-string (`<<< text`) in the segment, unquoted:
+    what a shell or an interpreter reading standard input will run."""
+    out = []
+    for redirect in rules.redirections(segment):
+        if redirect.op == "<<<" and redirect.word:
+            out.append(" ".join(rules._tokens(redirect.word)))
+    return out
 
 
 def _operands(tokens: list[str]) -> list[str]:
@@ -446,45 +429,63 @@ class _Seen:
     read: set[Path] = field(default_factory=set)   # protected files only read
 
 
-_REDIRECT_TOKEN = re.compile(
-    r"^(\d*|&|\{\w+\})(>>|>\||>&|>|<<<|<<-|<<|<>|<&|<)(.*)$", re.S)
-
-
-def _without_redirects(tokens: list[str]) -> list[str]:
-    """The command's own arguments, with redirections and their targets taken
-    out — they are judged by `_redirect_targets`, on the raw text.
-
-    Leaving them in was a hole (found while pinning the 2026-10-08 review): in
-    `cp /tmp/x ~/.config/jarvis/allowlist.json 2>&1` the *last* token is
-    `2>&1`, so the copier's destination rule took the allowlist for a source,
-    a read, and the line ran. `> /dev/null` and `{fd}>/dev/null` did the same.
-    """
-    out: list[str] = []
-    skip = False
-    for token in tokens:
-        if skip:
-            skip = False
-            continue
-        match = _REDIRECT_TOKEN.match(token)
-        if match:
-            skip = not match.group(3)   # `>` alone: its target is the next token
-            continue
-        out.append(token)
-    return out
+def _env_split(rest: list[str], k: int) -> tuple[str, int] | None:
+    """If `rest[k]` is env's `-S`/`--split-string`, (its value, the index
+    after it); else None. Every spelling getopt and clap accept: `-S V`,
+    `-SV`, inside a cluster (`-iS V`), `--split-string=V`, and any prefix of
+    the long name (`--split V`)."""
+    token = rest[k]
+    if token.startswith("--"):
+        name, eq, value = token[2:].partition("=")
+        if not name or not "split-string".startswith(name):
+            return None
+        if eq:
+            return value, k + 1
+        return (rest[k + 1], k + 2) if k + 1 < len(rest) else ("", k + 1)
+    if not token.startswith("-"):
+        return None
+    letters = token[1:]
+    for idx, letter in enumerate(letters):
+        if letter == "S":
+            value = letters[idx + 1:]
+            if value:
+                return value, k + 1
+            return (rest[k + 1], k + 2) if k + 1 < len(rest) else ("", k + 1)
+        if letter in "Cuaf":        # the rest of the cluster is that option's value
+            return None
+    return None
 
 
 def _peel(tokens: list[str], state: _State) -> tuple[list[str], Path | None]:
     """Strip subshell punctuation and wrappers; return the real command and
-    any directory `env -C` would run it in."""
+    any directory `env -C` would run it in.
+
+    `env -S STRING` splits STRING into words and reads them as more of its own
+    arguments — a whole command line in one word (2026-10-09). It used to be
+    taken for the command's *name*, a word ending in whatever the path's last
+    component was, so the line behind it was never looked at. `builtin` is
+    bash's way of running a builtin by name (`builtin eval …`) and is peeled
+    the same way.
+    """
     tokens = list(tokens)
     while tokens and tokens[0] in ("(", "{", "!"):
         tokens = tokens[1:]
     if tokens and tokens[0].startswith("(") and len(tokens[0]) > 1:
         tokens[0] = tokens[0][1:]
     chdir = None
-    if tokens and rules._basename(tokens[0]) == "env":
+    for _ in range(8):
+        if tokens and tokens[0] == "builtin":
+            tokens = tokens[1:]
+            continue
+        if not tokens or rules._basename(tokens[0]) != "env":
+            break
         rest, k = tokens[1:], 0
+        split = None
         while k < len(rest) and (rest[k].startswith("-") or "=" in rest[k]):
+            found = _env_split(rest, k)
+            if found is not None:
+                split, k = found
+                break
             if rest[k] in ("-C", "--chdir") and k + 1 < len(rest):
                 target = _expand(rest[k + 1], state)
                 chdir = Path(target) if target else None
@@ -494,8 +495,67 @@ def _peel(tokens: list[str], state: _State) -> tuple[list[str], Path | None]:
                 target = _expand(rest[k].split("=", 1)[1], state)
                 chdir = Path(target) if target else None
             k += 1
-        tokens = rest[k:]
+        if split is None:
+            tokens = rest[k:]
+            break
+        try:
+            words = shlex.split(split)
+        except ValueError:
+            words = split.split()
+        tokens = ["env"] + words + rest[k:]
     return rules.unwrap(tokens), chdir
+
+
+_SHELL_VALUE_LONGS = frozenset({"rcfile", "init-file"})
+
+
+def _shell_strings(tokens: list[str]) -> tuple[list[str], bool]:
+    """(the command strings a shell runs, whether it reads them from stdin).
+
+    **The inline flag is found in a cluster too** (finding 1, 2026-10-09).
+    The check was `"-c" in tokens`, so `bash -lc`, `sh -ec`, `bash -xc`,
+    `bash -cx` and `zsh -fc` hid their string from this module entirely,
+    and `bash -c -- STRING` analysed the `--`. Read the way the shells read
+    it: option clusters starting `-` or `+`, a `c` in a `-` cluster making
+    the first operand a command string; `-o`/`-O`/`+o`/`+O` and `--rcfile`/
+    `--init-file` take the next word; `--` or a lone `-` ends the options.
+
+    With `-c`, **every** operand is analysed, not just the first — the rest
+    are `$0`, `$1`…, and checking text that will not run can only add a
+    refusal. Without it, an operand is a script file (not visible here); no
+    operand, or `-s`, means the commands come from standard input.
+    """
+    if not tokens:
+        return [], False
+    if rules._basename(tokens[0]) == "eval":
+        return ([" ".join(tokens[1:])] if len(tokens) > 1 else []), False
+    inline = stdin = False
+    operands: list[str] = []
+    i = 1
+    while i < len(tokens):
+        token = tokens[i]
+        i += 1
+        if token in ("--", "-"):
+            operands = tokens[i:]
+            break
+        if token.startswith("--"):
+            if token[2:] in _SHELL_VALUE_LONGS:
+                i += 1
+            continue
+        if len(token) > 1 and token[0] in "-+":
+            for letter in token[1:]:
+                if letter == "c" and token[0] == "-":
+                    inline = True
+                elif letter == "s" and token[0] == "-":
+                    stdin = True
+                elif letter in "oO":
+                    i += 1
+            continue
+        operands = tokens[i - 1:]
+        break
+    if inline:
+        return [o for o in operands if o.strip()], False
+    return [], stdin or not operands
 
 
 def _strip_closers(tokens: list[str]) -> list[str]:
@@ -512,14 +572,14 @@ def _strip_closers(tokens: list[str]) -> list[str]:
     return tokens
 
 
-def _kind(stem: str, tokens: list[str]) -> str:
+def _kind(stem: str, tokens: list[str], hazard: rules.Hazard | None) -> str:
     """writer / reader / unknown, for the paths this command is handed."""
     if stem in _WRITERS or stem in _INTERPRETERS or stem in _SHELLS:
         return "writer"
-    if rules.writes_anyway(tokens):  # `sed -i`, `find -delete`, `find -exec`
-        return "writer"
-    if stem == "sort" and any(t in ("-o", "--output") or t.startswith(("-o", "--output="))
-                              for t in tokens[1:]):
+    # A reader in a writing form — `sed -i` or a `w` in its script, `sort -o`,
+    # `find -delete`/`-exec`, `uniq IN OUT`, `xxd IN OUT`, `tree -o` …:
+    # rules.READER_HAZARDS, the one table of those forms.
+    if hazard is not None:
         return "writer"
     if stem in _READERS:
         return "reader"
@@ -531,15 +591,40 @@ def _kind(stem: str, tokens: list[str]) -> str:
     return "unknown"
 
 
+def _nested(strings: list[str], local: _State, state: _State, protected: set[Path],
+            ids: dict, depth: int, seen: _Seen) -> bool:
+    """Analyse each string as a command line of its own, one level down, into
+    `seen`. False when the bound was hit: the line is then recorded as too
+    complex to judge (an ASK, never an ALLOW) and the caller stops."""
+    for text in strings:
+        if depth >= _MAX_DEPTH or state.budget.spans >= _MAX_SPANS:
+            seen.touches.append(_opaque("shell strings nested too deeply to judge"))
+            seen.writes = True
+            return False
+        state.budget.spans += 1
+        inner = _analyse(text, _State(local.cwd, dict(state.variables), state.budget),
+                         protected, ids, depth + 1)
+        seen.touches += inner.touches
+        seen.writes = seen.writes or inner.writes
+        seen.read |= inner.read
+    return True
+
+
 def _segment(segment: str, state: _State, protected: set[Path], ids: dict,
              depth: int) -> _Seen:
     seen = _Seen()
     segment = _strip_comment(segment)
+    # The command's own words: every redirection — `2>&1`, `> /dev/null`,
+    # `{fd}>file`, a here-string — is cut out of the text first, so a copier's
+    # destination is never a redirect's target. (It was, once: in `cp x
+    # ALLOWLIST 2>&1` the last token was `2>&1`, and the allowlist read as a
+    # copy *source*.) Redirect targets are judged on the full text below.
+    words_only = rules.strip_redirections(segment)
     try:
-        raw = shlex.split(segment)
+        raw = shlex.split(words_only)
         parsed = True
     except ValueError:
-        raw, parsed = segment.split(), False
+        raw, parsed = words_only.split(), False
     raw = _strip_closers(raw)
     if not raw:
         return seen
@@ -557,7 +642,7 @@ def _segment(segment: str, state: _State, protected: set[Path], ids: dict,
                 state.variables.pop(name, None)
         return seen
 
-    tokens, chdir = _peel(_without_redirects(raw), state)
+    tokens, chdir = _peel(raw, state)
     if not tokens:
         return seen
     stem = rules._basename(tokens[0])
@@ -586,29 +671,37 @@ def _segment(segment: str, state: _State, protected: set[Path], ids: dict,
         if hit is not None:
             seen.touches.append(Touch(hit, True, f"a redirect onto {hit.name}"))
 
-    # A shell handed a string is a command line in its own right.
+    # A shell handed a string is a command line in its own right — from `-c`
+    # (in any cluster), `eval`, or a here-string on its standard input.
     if stem in _SHELLS:
-        inline = None
-        if stem == "eval":
-            inline = " ".join(tokens[1:])
-        elif "-c" in tokens[1:]:
-            idx = tokens.index("-c")
-            inline = tokens[idx + 1] if idx + 1 < len(tokens) else None
-        if inline:
-            if depth >= _MAX_DEPTH or state.budget.spans >= _MAX_SPANS:
-                seen.touches.append(_opaque("shell strings nested too deeply to judge"))
-                seen.writes = True
+        strings, stdin = _shell_strings(tokens)
+        inline = bool(strings)
+        if stdin:
+            strings += _here_strings(segment)
+        if strings:
+            if not _nested(strings, local, state, protected, ids, depth, seen):
                 return seen
-            state.budget.spans += 1
-            inner = _analyse(inline, _State(local.cwd, dict(state.variables), state.budget),
-                             protected, ids, depth + 1)
-            seen.touches += inner.touches
-            seen.writes = inner.writes
-            seen.read = inner.read
-            return seen
+            if inline:
+                return seen
 
-    kind = _kind(stem, tokens)
-    seen.writes = kind == "writer"
+    hazard = rules.reader_hazard(tokens)
+    kind = _kind(stem, tokens, hazard)
+    seen.writes = seen.writes or kind == "writer"
+    # A shell or an interpreter run *by* this command is a command line of its
+    # own: behind a wrapper this module does not know (`flock LOCK sh -c …`,
+    # `timeout -s KILL 5 python3 -c …`), or as `find`'s `-exec` program.
+    # Readers are left alone — `grep bash notes.txt` runs no bash.
+    behind = None
+    if stem not in _WRITERS | _INTERPRETERS | _SHELLS | _READERS:
+        behind = next((k for k, t in enumerate(tokens[1:], 1)
+                       if rules._basename(t) in _SHELLS | _INTERPRETERS), None)
+    elif stem == "find":
+        execs = [k for k, t in enumerate(tokens) if t in ("-exec", "-execdir", "-ok", "-okdir")]
+        behind = next((k + 1 for k in execs if k + 1 < len(tokens)
+                       and rules._basename(tokens[k + 1]) in _SHELLS | _INTERPRETERS), None)
+    if behind is not None and not _nested([shlex.join(tokens[behind:])], local, state,
+                                          protected, ids, depth, seen):
+        return seen
     if kind == "writer" and stem not in _WRITERS | _INTERPRETERS | _SHELLS | _READERS:
         # Name the writing word behind an unknown wrapper, not the wrapper.
         stem = next((rules._basename(t) for t in tokens[1:]
@@ -633,14 +726,20 @@ def _segment(segment: str, state: _State, protected: set[Path], ids: dict,
             written, read_only = written + read_only, []
     if kind == "reader":
         written, read_only = [], written + read_only
+    if hazard is not None:
+        # Files a sed script writes (`w FILE`, `s/…/…/w FILE`) live inside the
+        # script word, where no operand rule can see them.
+        written = written + list(hazard.writes)
 
     # Inline source names its files inside a string no tokenizer splits. A
     # full path, or a bare name while standing in the gate's own folder, is a
     # write; a bare name anywhere else may be a project's own models.json, so
-    # it asks rather than refuses.
-    if stem in _INTERPRETERS:
+    # it asks rather than refuses. A here-string is source too, and so is a
+    # sed script that runs commands (`e`).
+    if stem in _INTERPRETERS or (hazard is not None and hazard.runs):
         suffixes = tuple(p.name for p in protected)
-        source = " ".join(t for t in args if not (t in written and t.endswith(suffixes)))
+        source = " ".join([t for t in args if not (t in written and t.endswith(suffixes))]
+                          + _here_strings(segment))
         for path in protected:
             if path.name not in source:
                 continue
@@ -750,7 +849,9 @@ def _substitutions(text: str, limit: int) -> tuple[list[str], bool]:
 def _analyse(command: str, state: _State, protected: set[Path], ids: dict,
              depth: int = 0) -> _Seen:
     total = _Seen()
-    command = _ansi_c(command)
+    # As bash reads it: `\<newline>` removed first, so a continuation in the
+    # middle of a path or an operator hides nothing (2026-10-09).
+    command = _ansi_c(rules.join_continuations(command))
     budget = state.budget
     inner, overflow = _substitutions(command, max(_MAX_SPANS - budget.spans, 0))
     if inner and depth >= _MAX_DEPTH:

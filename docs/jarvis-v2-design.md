@@ -1928,6 +1928,55 @@ now.)
   run at once) keeps the window on the thread: no idle flash, no follow-up
   mic window.
 
+**The terminal backend (2026-10-09, WP-C of
+`docs/plans/2026-10-09-hud-workspace-plan.md`; decisions W-2, W-3, W-5).**
+The owner's terminals now exist on the daemon; the panel and view are WP-D.
+A terminal is the owner's login shell on a real PTY, started through
+util-linux `setsid --ctty` (never `pty.fork()` in a threaded daemon), in a
+clean environment (nothing from `.env`, no `OPENROUTER_API_KEY`,
+`HF_HUB_OFFLINE`, `VIRTUAL_ENV` or venv `PATH`), in the folder of a
+thread, task, project or home — resolved from ids, never a path. At most
+six; each keeps 1 MiB of output in memory, replayed when a window
+reattaches; closing one SIGHUPs its whole session, then SIGKILLs; they end
+with the daemon (no tmux). The transport is a WebSocket on the HUD listener,
+hand-rolled (`jarvis/v2/ws.py`, no new dependency). **The agent never gets a
+lever on a terminal**: no tool names the module or its routes (asserted in
+`tests/v2/terminal_check.py`), every route is owner-only, the socket also
+needs a single-use 30-second ticket bound to one terminal, and moving a
+terminal to another window asks the window that shows it (refused after
+20 s). That is stricter than `/approvals`, which accepts a local client that
+sends no Origin, and it is still not a boundary against a program running as
+the owner, which can forge an Origin, fetch a ticket and attach to a
+terminal no window shows. Three things limit such a program: the takeover
+question, `sudo -k`, and a `terminal_attached` bus record on every attach
+(the terminal's id and the time, nothing else), so the HUD can say when an
+attach was not its own. Output exists in the ring and the browser only:
+never on the bus (lifecycle ids only), in a log, a thread log, Discord or
+disk. Input goes through a bounded queue and a writer thread per terminal,
+so a program that never reads cannot stall the socket; once a paste frame is
+dropped for want of room the socket refuses all input but Ctrl-C until the
+queue drains and the window sends `input_resume`, so a program gets a
+prefix of the paste, never a spliced one. A closed session is matched on its
+leader's start time, so a reused pid is never signalled. The shell's
+realpath runs under the name it was given, so `rbash` stays restricted. The
+startup file (`terminal_rc.bash` for bash; the POSIX `terminal_rc.sh` as
+`$ENV` for an `sh`-family shell, which marks only the prompt; nothing for
+zsh, fish and the like, which the listing reports as `integration: "none"`)
+never touches disk — it reaches the shell through a pipe the shell drains
+before running anything — then reads the login files, sets `alias
+sudo='sudo -k'`, and emits OSC 133 marks signed with a per-terminal nonce
+that nothing the terminal runs has an ordinary way to find (a same-uid
+program outside it could race the shell for the pipe, at the price of
+leaving the shell unintegrated). The daemon turns them into
+per-command spans over the ring for WP-F's `terminal_read`. **The spans are
+advisory, not a boundary**: a program can print any bytes between real
+marks, a nested shell, `sudo -i`, `ssh` or `python` puts everything under
+the outer span, and a line kept out of history records only its first
+command — so WP-F's text-pattern refusals of `env`, `gh auth token` and the
+rest (W-2, item 3) must apply to **every** read, not only when no marks
+were seen. Each terminal carries the owner's `readable` switch, on by
+default. Contract: `docs/hud-api.md`.
+
 Remaining: WP13 (the long-bench comparison, the owner's call on cost), a
 native Windows worker, the R8 hook on Codex, and prompt tuning in
 `roles.py` (§17's over-planning note). The daemon started by hand for the
