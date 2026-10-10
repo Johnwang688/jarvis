@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import {
-  DEFAULT_MODE, HINTS, isMuted, loadMode, mayCapture, outcomeFor, saveMode,
+  DEFAULT_MODE, isMuted, loadMode, mayCapture, outcomeFor, saveMode,
   sendsOnItsOwn,
 } from "./dictation";
 
@@ -62,13 +62,5 @@ describe("dictation mode", () => {
     expect(isMuted("review")).toBe(false);
     expect(mayCapture("off")).toBe(false);
     expect(mayCapture("review")).toBe(true);
-  });
-
-  it("says the mic is muted rather than inviting speech", () => {
-    // Every other hint is an invitation to speak, and each would be a lie
-    // while nothing said can arrive.
-    expect(HINTS.off).toMatch(/MUTED/);
-    expect(HINTS.auto).not.toMatch(/MUTED/);
-    expect(HINTS.review).not.toMatch(/MUTED/);
   });
 });

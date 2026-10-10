@@ -476,6 +476,25 @@ ephemeral port (`MockDaemon(0)`; the mock records the port it bound), so its
 saves, `/seen` posts, approval decisions and preview hits never reach the
 world the main suite asserts on.
 
+**Input bar declutter (2026-10-10).** The bar is `📎 [box] ⬆` over one row,
+`in: project · provider ▾ · model · effort ▾`. **The mic is on the orb, not in
+the bar**: the dictation mode (AUTO/REVIEW/OFF, testids `dictation-*`) and the
+level meter sit in a strip above the orb (`#micstrip`, inside `#orbdock`; the
+sidebar's bottom padding grew to match), and the hint line is gone — its words
+now ride the orb's status line (`orb-status`: the turn's status, else `MIC
+MUTED`, else the orb state). A folded sidebar scales the dock to a 36px orb, so
+the strip cannot ride in it: `#modecycle` (`dictation-cycle`), a sibling button
+above the mini orb, cycles the mode and goes red at OFF. **Model and effort are
+one button** (`model-chip-btn`, carrying `data-model`/`data-effort`) that opens
+one popover (`ModelChip.tsx` `Popover`, in `#root`, `position: fixed` placed
+from the button's rect divided by the zoom, upward) with Model and Effort
+sections and "Set <provider> default…"; the provider stays a select. The box
+grows to 15 lines (`MAX_LINES`) then scrolls; Send and Attach are SVG icon
+buttons (testids unchanged), Stop a square icon. Tests drive the popover through
+helpers at the top of `hud_v2_check.py` (`pick_model`, `pick_effort`,
+`chip_model`…); a read made while a dialog's veil is up must use the button's
+text, because the popover cannot be opened under a veil.
+
 **Sidebar status dots (2026-10-08, design §18; contract in
 `docs/hud-api.md`).** The `·` left of each sidebar thread and task is what it
 is doing: idle `·`, working (pulsing ring, sweeping row), needs input

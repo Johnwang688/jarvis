@@ -1,5 +1,7 @@
-// provider ▾ · model ▾ · effort ▾, beside `in: <project> ▾` in the input bar
-// (decisions 2026-10-06, part A).
+// provider ▾ · model · effort ▾, beside `in: <project> ▾` in the input bar
+// (decisions 2026-10-06, part A). Since 2026-10-10 the model and effort are one
+// button that opens one popover with a Model section and an Effort section
+// (and the provider's "set default"); the provider stays a select.
 //
 // While composing every chip is free and nothing reaches the server: the
 // choice rides the first message's `POST /threads`. After it the provider is
@@ -7,11 +9,12 @@
 // `PATCH /threads/{id}` that applies from the next message. A refused change
 // leaves the chip on what the server holds and shows the server's reason.
 //
-// Native selects only, so every option label is text: model names come off
+// Every option label is text (a native select or a plain button): model names come off
 // the network and this window draws authorization cards. Space on a focused
 // chip must never start push-to-talk, so key events stop here.
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import type { ModelRow, ProviderName } from "../types";
 import {
   PROVIDERS, PROVIDER_LABELS, SEARCH, applyEffort, applyModel, applyProvider, canSetDefault,
@@ -47,6 +50,13 @@ export function ModelChip(props: {
       : "Applies from the next message"
     : "Set by routing for a task's thread; read-only here";
   const summary = `${modelLabel(props.models, c)}${eff.effort ? ` · ${eff.effort}` : ""}`;
+  const [open, setOpen] = useState(false);
+  const btn = useRef<HTMLButtonElement>(null);
+  // A popover must not outlive the control it belongs to: a card arriving
+  // disables the chip.
+  useEffect(() => {
+    if (props.disabled) setOpen(false);
+  }, [props.disabled]);
 
   return (
     <span className="chip projchip modelchip" data-testid="model-chip" title={title}>
@@ -73,53 +83,89 @@ export function ModelChip(props: {
       )}
       {props.modelEditable ? (
         <>
-          <select
-            data-testid="model-chip-select"
-            style={{ width: "auto", maxWidth: 220 }}
-            value={c.model ?? ""}
+          <button
+            type="button"
+            ref={btn}
+            className="modelbtn"
+            data-testid="model-chip-btn"
+            data-model={c.model ?? ""}
+            data-effort={c.effort ?? ""}
+            aria-haspopup="dialog"
+            aria-expanded={open}
             disabled={props.disabled}
+            title="Model and effort for this thread"
             onKeyDown={stop}
             onKeyUp={stop}
-            onChange={(e) => {
-              const v = e.target.value;
-              if (v === SEARCH) {
-                props.onSearch();
-                return;
-              }
-              props.onChange(applyModel(c, v || null));
-            }}
+            onClick={() => setOpen((o) => !o)}
           >
-            {modelOptions(props.models, c).map((o) => (
-              <option key={o.value} value={o.value}>{o.label}</option>
-            ))}
-          </select>
-          {efforts.length ? (
-            <select
-              data-testid="effort-chip-select"
-              style={{ width: "auto" }}
-              value={c.effort ?? ""}
-              disabled={props.disabled}
-              onKeyDown={stop}
-              onKeyUp={stop}
-              onChange={(e) => props.onChange(applyEffort(props.models, c, e.target.value || null))}
-            >
-              {efforts.map((o) => (
-                <option key={o.value} value={o.value}>{o.label}</option>
-              ))}
-            </select>
-          ) : null}
-          {props.onDefaults && canSetDefault(props.models, c.provider) ? (
-            <button
-              type="button"
-              data-testid="provider-defaults-open"
-              disabled={props.disabled}
-              title={`Choose the model every default ${PROVIDER_LABELS[c.provider]} thread runs on`}
-              onKeyDown={stop}
-              onKeyUp={stop}
-              onClick={() => props.onDefaults?.(c.provider)}
-            >
-              default ▾
-            </button>
+            <span className="mb-label">{summary}</span> <span aria-hidden="true">▾</span>
+          </button>
+          {open && btn.current && !props.disabled ? (
+            <Popover anchor={btn.current} label="Model and effort" onClose={() => setOpen(false)}>
+              <div className="msec">Model</div>
+              <div className="mlist" role="listbox" aria-label="Model" data-testid="model-list">
+                {modelOptions(props.models, c).map((o) => (
+                  <button
+                    type="button"
+                    key={o.value}
+                    role="option"
+                    aria-selected={o.value === (c.model ?? "")}
+                    className={"mopt" + (o.value === (c.model ?? "") ? " sel" : "") + (o.value === SEARCH ? " search" : "")}
+                    data-testid="model-opt"
+                    data-value={o.value}
+                    onClick={() => {
+                      if (o.value === SEARCH) {
+                        setOpen(false);
+                        props.onSearch();
+                        return;
+                      }
+                      props.onChange(applyModel(c, o.value || null));
+                    }}
+                  >
+                    {o.label}
+                  </button>
+                ))}
+              </div>
+              {efforts.length ? (
+                <>
+                  <div className="msec">Effort</div>
+                  <div className="mefforts" role="listbox" aria-label="Effort" data-testid="effort-list">
+                    {efforts.map((o) => (
+                      <button
+                        type="button"
+                        key={o.value}
+                        role="option"
+                        aria-selected={o.value === (c.effort ?? "")}
+                        className={"mopt pill" + (o.value === (c.effort ?? "") ? " sel" : "")}
+                        data-testid="effort-opt"
+                        data-value={o.value}
+                        onClick={() => {
+                          props.onChange(applyEffort(props.models, c, o.value || null));
+                          setOpen(false);
+                        }}
+                      >
+                        {o.label}
+                      </button>
+                    ))}
+                  </div>
+                </>
+              ) : null}
+              {props.onDefaults && canSetDefault(props.models, c.provider) ? (
+                <div className="mfoot">
+                  <button
+                    type="button"
+                    data-testid="provider-defaults-open"
+                    title={`Choose the model every default ${PROVIDER_LABELS[c.provider]} thread runs on`}
+                    onClick={() => {
+                      setOpen(false);
+                      props.onDefaults?.(c.provider);
+                    }}
+                  >
+                    Set {PROVIDER_LABELS[c.provider]} default…
+                  </button>
+                </div>
+              ) : null}
+            </Popover>
           ) : null}
         </>
       ) : (
@@ -133,6 +179,64 @@ export function ModelChip(props: {
         <span className="err" data-testid="provider-refused"> {refused}</span>
       ) : null}
     </span>
+  );
+}
+
+/**
+ * A small panel opened upward from `anchor`. Fixed-positioned in the zoomed
+ * space (a rect measured on screen is divided by the HUD zoom, as the sidebar's
+ * menus are), drawn inside #root so the zoom applies, closed by Escape, a click
+ * outside, or a resize. Keys never reach push-to-talk.
+ */
+function Popover(props: { anchor: HTMLElement; label: string; onClose: () => void; children: React.ReactNode }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const zoom = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--ui-zoom")) || 1;
+  const [at] = useState(() => {
+    const r = props.anchor.getBoundingClientRect();
+    const W = 300;
+    const vw = window.innerWidth / zoom;
+    const vh = window.innerHeight / zoom;
+    return {
+      left: Math.max(8, Math.min(r.left / zoom, vw - W - 8)),
+      bottom: vh - r.top / zoom + 6,
+      maxHeight: Math.max(160, Math.min(440, r.top / zoom - 14)),
+    };
+  });
+  const { onClose, anchor } = props;
+  useEffect(() => {
+    const down = (e: PointerEvent) => {
+      const t = e.target as Node;
+      if (!ref.current?.contains(t) && !anchor.contains(t)) onClose();
+    };
+    const key = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      e.stopPropagation();
+      onClose();
+      anchor.focus();
+    };
+    window.addEventListener("pointerdown", down, true);
+    window.addEventListener("keydown", key, true);
+    window.addEventListener("resize", onClose);
+    return () => {
+      window.removeEventListener("pointerdown", down, true);
+      window.removeEventListener("keydown", key, true);
+      window.removeEventListener("resize", onClose);
+    };
+  }, [onClose, anchor]);
+  return createPortal(
+    <div
+      ref={ref}
+      className="mpop"
+      role="dialog"
+      aria-label={props.label}
+      data-testid="model-pop"
+      style={{ left: at.left, bottom: at.bottom, maxHeight: at.maxHeight }}
+      onKeyDown={stop}
+      onKeyUp={stop}
+    >
+      {props.children}
+    </div>,
+    document.getElementById("root") || document.body,
   );
 }
 

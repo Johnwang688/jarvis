@@ -2,9 +2,15 @@
 // swap the outer one), the state palette, and push-to-talk. The avatar's face
 // is an <img> above the canvas, fixed size and pointer-events:none, so it can
 // neither cover the authorization card nor eat a click meant for it.
+//
+// The mic lives here too (2026-10-10): the dictation mode (AUTO / REVIEW /
+// OFF) and the level meter sit just above the orb, so everything about
+// listening is one place. A folded sidebar shrinks the dock to a 36px mini
+// orb and hides the strip; a muted mic then shows as a red dot on it.
 
 import { useEffect, useRef } from "react";
 import type { OrbState } from "../state/store";
+import { DICTATION_MODES, type DictationMode } from "../lib/dictation";
 
 interface Ring {
   r: number;
@@ -67,6 +73,9 @@ export function Orb(props: {
   accent?: string | null;
   avatarUrl?: string | null;
   status?: string;
+  /** The dictation mode, and its change. */
+  mode: DictationMode;
+  onModeChange: (m: DictationMode) => void;
   /** Folded into the left rail's foot while the sidebar is hidden. */
   compact?: boolean;
   /** The HUD zoom in percent: the canvas is drawn at that many more pixels. */
@@ -178,8 +187,29 @@ export function Orb(props: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.avatarUrl, props.zoom]);
 
+  const next = DICTATION_MODES[(DICTATION_MODES.indexOf(props.mode) + 1) % DICTATION_MODES.length];
   return (
-    <div id="orbdock" className={props.compact ? "mini" : undefined}>
+    <>
+    <div id="orbdock" className={props.compact ? "mini" : undefined} data-mode={props.mode}>
+      <div id="micstrip">
+        <div id="dictation" data-testid="dictation" title="What happens to what you say: AUTO sends it, REVIEW puts it in the box, OFF mutes the mic">
+          {DICTATION_MODES.map((m) => (
+            <button
+              type="button"
+              key={m}
+              data-testid={`dictation-${m}`}
+              className={(props.mode === m ? "on " : "") + (m === "off" ? "off" : "")}
+              aria-pressed={props.mode === m}
+              onClick={() => props.onModeChange(m)}
+            >
+              {m}
+            </button>
+          ))}
+        </div>
+        <div id="level" data-testid="level" data-level={props.level.toFixed(3)}>
+          <i style={{ width: `${Math.min(100, props.level * 100)}%` }} />
+        </div>
+      </div>
       <canvas
         ref={canvasRef}
         id="orb"
@@ -205,7 +235,24 @@ export function Orb(props: {
           }}
         />
       ) : null}
-      <div className="st" id="orbstatus">{props.status || ""}</div>
+      <div className="st" id="orbstatus" data-testid="orb-status" title={props.status || undefined}>
+        {props.status || ""}
+      </div>
     </div>
+    {props.compact ? (
+      // The dock is scaled down to a 36px mini orb, and so would a strip inside
+      // it be: folded, the mode is one small button above it that cycles.
+      <button
+        type="button"
+        id="modecycle"
+        data-testid="dictation-cycle"
+        data-mode={props.mode}
+        title={`Dictation: ${props.mode.toUpperCase()} — click for ${next.toUpperCase()}`}
+        onClick={() => props.onModeChange(next)}
+      >
+        {props.mode === "review" ? "rev" : props.mode}
+      </button>
+    ) : null}
+    </>
   );
 }

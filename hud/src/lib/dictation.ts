@@ -60,11 +60,3 @@ export function outcomeFor(mode: DictationMode): UtteranceOutcome {
   if (mode === "off") return "discard";
   return mode === "auto" ? "send" : "review";
 }
-
-export const HINTS: Record<DictationMode, string> = {
-  auto: "DICTATION AUTO · SPEAK AND IT SENDS",
-  review: "DICTATION REVIEW · SPEAK, THEN SEND",
-  // Every other hint is an invitation to speak, and each would be a lie while
-  // nothing said can arrive.
-  off: "MIC MUTED · TYPE · OR UNMUTE IN THE INPUT BAR",
-};

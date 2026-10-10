@@ -1,4 +1,5 @@
-// Typed text, attachments and the dictation mode control.
+// Typed text and attachments. (The dictation mode and the mic meter live on the
+// orb: components/Orb.tsx.)
 //
 // v1's staging contract holds: whatever is staged when a turn goes out — typed
 // *or spoken* — rides that turn. `@path` in the text attaches a server-side
@@ -7,9 +8,8 @@
 // Space typed in the box must never trigger push-to-talk, so the textarea
 // stops that key from reaching the document handler.
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { Attachment, Project } from "../types";
-import { DICTATION_MODES, HINTS, type DictationMode } from "../lib/dictation";
 import { folderName } from "../lib/compose";
 import { joined, pendingAfter, type GiveBack } from "../lib/giveback";
 
@@ -29,6 +29,9 @@ export interface ProjectChip {
   onNewProject: () => void;
 }
 
+/** The box grows with what is typed, up to this many lines, then scrolls. */
+const MAX_LINES = 15;
+
 const MAX_FILES = 8;
 const MAX_BYTES = 4 * 1024 * 1024;
 
@@ -41,10 +44,34 @@ async function toAttachment(file: File): Promise<Attachment | string> {
   return { name: file.name, mime: file.type || "application/octet-stream", data_b64: btoa(bin) };
 }
 
+function SendIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor"
+         strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M12 19V5" />
+      <path d="M5.5 11.5 12 5l6.5 6.5" />
+    </svg>
+  );
+}
+
+function StopIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" fill="currentColor">
+      <rect x="6" y="6" width="12" height="12" rx="2" />
+    </svg>
+  );
+}
+
+function ClipIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor"
+         strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="m21.4 11.1-8.5 8.5a5.5 5.5 0 0 1-7.8-7.8l8.5-8.5a3.7 3.7 0 0 1 5.2 5.2l-8.5 8.5a1.8 1.8 0 0 1-2.6-2.6l7.8-7.8" />
+    </svg>
+  );
+}
+
 export function InputBar(props: {
-  mode: DictationMode;
-  level: number;
-  hint: string;
   pendingTranscript: string;
   disabled?: boolean;
   placeholder?: string;
@@ -53,7 +80,6 @@ export function InputBar(props: {
   modelChip?: React.ReactNode;
   /** Shown while an image is staged, when the model cannot see one (A5). */
   imageNote?: string | null;
-  onModeChange: (m: DictationMode) => void;
   onSend: (text: string, attachments: Attachment[]) => void;
   onTranscriptTaken: () => void;
   /** A turn is running in the open thread (2026-10-08): Enter steers it, and
@@ -70,6 +96,35 @@ export function InputBar(props: {
   const [files, setFiles] = useState<Attachment[]>([]);
   const [notes, setNotes] = useState<string[]>([]);
   const box = useRef<HTMLTextAreaElement>(null);
+
+  // The box flexes up with what is typed, to MAX_LINES lines, and scrolls past
+  // that. Re-measured when the text changes and when the box's width does (a
+  // pane resize rewraps the same text), never on its own height change.
+  useLayoutEffect(() => {
+    const el = box.current;
+    if (!el) return;
+    const fit = () => {
+      el.style.height = "auto";
+      const cs = getComputedStyle(el);
+      const line = parseFloat(cs.lineHeight) || parseFloat(cs.fontSize) * 1.4;
+      const edge = parseFloat(cs.borderTopWidth) + parseFloat(cs.borderBottomWidth);
+      const pad = parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom);
+      const cap = line * MAX_LINES + pad + edge;
+      const want = el.scrollHeight + edge;
+      el.style.height = `${Math.min(want, cap)}px`;
+      el.style.overflowY = want > cap ? "auto" : "hidden";
+    };
+    fit();
+    if (typeof ResizeObserver === "undefined") return;
+    let width = el.clientWidth;
+    const ro = new ResizeObserver(() => {
+      if (el.clientWidth === width) return;
+      width = el.clientWidth;
+      fit();
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [text]);
 
   // REVIEW dictation puts the transcript in the box and focuses it. Nothing is
   // ever sent on its own in this mode — that is the whole point of the mode.
@@ -159,10 +214,21 @@ export function InputBar(props: {
         </div>
       ) : null}
       <div id="inputrow">
+        <label className="iconbtn attach" title="Attach files" aria-label="Attach files">
+          <ClipIcon />
+          <input
+            type="file"
+            multiple
+            data-testid="filepicker"
+            style={{ display: "none" }}
+            onChange={(e) => void stage(e.target.files)}
+          />
+        </label>
         <textarea
           ref={box}
           id="input"
           data-testid="input"
+          rows={1}
           value={text}
           placeholder={
             props.placeholder ||
@@ -187,54 +253,33 @@ export function InputBar(props: {
           }}
           onKeyUp={(e) => e.stopPropagation()}
         />
-        <button type="button" data-testid="send" onClick={send} disabled={props.disabled}>
-          {props.running ? "Steer" : "Send"}
-        </button>
         {props.running ? (
           <button
             type="button"
-            className="stop"
+            className="iconbtn stop"
             data-testid="stop"
+            aria-label="Stop"
             title="Stop the running turn. Anything queued behind it comes back to this box."
             onClick={() => props.onStop?.()}
           >
-            Stop
+            <StopIcon />
           </button>
         ) : null}
-        <label className="chip" style={{ cursor: "pointer" }}>
-          Attach
-          <input
-            type="file"
-            multiple
-            data-testid="filepicker"
-            style={{ display: "none" }}
-            onChange={(e) => void stage(e.target.files)}
-          />
-        </label>
+        <button
+          type="button"
+          className="iconbtn send"
+          data-testid="send"
+          aria-label={props.running ? "Steer" : "Send"}
+          title={props.running ? "Steer the running turn (Enter)" : "Send (Enter)"}
+          onClick={send}
+          disabled={props.disabled}
+        >
+          <SendIcon />
+        </button>
       </div>
       <div className="row">
         {props.projectChip ? <Chip chip={props.projectChip} /> : null}
         {props.modelChip ?? null}
-        <div id="dictation" data-testid="dictation">
-          {DICTATION_MODES.map((m) => (
-            <button
-              type="button"
-              key={m}
-              data-testid={`dictation-${m}`}
-              className={(props.mode === m ? "on " : "") + (m === "off" ? "off" : "")}
-              aria-pressed={props.mode === m}
-              onClick={() => props.onModeChange(m)}
-            >
-              {m}
-            </button>
-          ))}
-        </div>
-        <div id="level" data-testid="level" data-level={props.level.toFixed(3)}>
-          <i style={{ width: `${Math.min(100, props.level * 100)}%` }} />
-        </div>
-        <span className="hint" data-testid="hint">
-          {props.hint || HINTS[props.mode]}
-        </span>
       </div>
     </div>
   );

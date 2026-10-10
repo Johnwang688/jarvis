@@ -522,8 +522,8 @@ def dictation_checks(page, mock):
     time.sleep(0.4)
     check("OFF uploads nothing", len(mock.sent("POST", "/stt")) == stt_before)
     check("OFF says the mic is muted rather than inviting speech",
-          "MUTED" in page.locator('[data-testid="hint"]').inner_text(),
-          page.locator('[data-testid="hint"]').inner_text())
+          "MUTED" in page.locator('[data-testid="orb-status"]').inner_text(),
+          page.locator('[data-testid="orb-status"]').inner_text())
     check("OFF stops the wake recognizer outright",
           page.evaluate("!window.__hudRecog"))
     check("and the level meter reads zero",
@@ -1838,6 +1838,80 @@ PNG_1PX = bytes.fromhex(
     "1f15c4890000000d49444154789c6360000002000154a24f5d0000000049454e44ae426082")
 
 
+# ---- the model chip: one button, one popover (2026-10-10) -----------------------
+# provider select · [model · effort ▾] -> a popover with a Model and an Effort
+# section. These drive it like the owner does; each leaves the popover as it
+# found it, except pick_model, which (like the real thing) keeps it open so the
+# effort can follow.
+
+CHIP_BTN = '[data-testid="model-chip-btn"]'
+POP = '[data-testid="model-pop"]'
+
+
+def chip_model(page):
+    return page.locator(CHIP_BTN).get_attribute("data-model")
+
+
+def chip_effort(page):
+    return page.locator(CHIP_BTN).get_attribute("data-effort")
+
+
+def open_pop(page):
+    if page.locator(POP).count() == 0:
+        page.locator(CHIP_BTN).click()
+        page.wait_for_selector(POP)
+
+
+def close_pop(page):
+    if page.locator(POP).count():
+        page.locator(CHIP_BTN).click()
+        until(lambda: page.locator(POP).count() == 0)
+
+
+def _peek(page, fn):
+    """Run `fn` with the popover open, then leave it as it was."""
+    was = page.locator(POP).count() > 0
+    open_pop(page)
+    try:
+        return fn()
+    finally:
+        if not was:
+            close_pop(page)
+
+
+def model_labels(page):
+    return _peek(page, lambda: page.locator('[data-testid="model-opt"]').all_inner_texts())
+
+
+def effort_labels(page):
+    return _peek(page, lambda: page.locator('[data-testid="effort-opt"]').all_inner_texts())
+
+
+def has_effort(page):
+    return _peek(page, lambda: page.locator('[data-testid="effort-list"]').count() > 0)
+
+
+def has_defaults_button(page):
+    return _peek(page, lambda: page.locator('[data-testid="provider-defaults-open"]').count() > 0)
+
+
+def pick_model(page, value):
+    open_pop(page)
+    page.locator(f'[data-testid="model-opt"][data-value="{value}"]').click()
+
+
+def pick_effort(page, value):
+    open_pop(page)
+    page.locator(f'[data-testid="effort-opt"][data-value="{value}"]').click()
+    until(lambda: page.locator(POP).count() == 0)
+
+
+def open_defaults(page):
+    open_pop(page)
+    page.locator('[data-testid="provider-defaults-open"]').click()
+
+
+
 def writes(mock, since):
     return [c for c in mock.calls[since:] if c[0] in ("POST", "PATCH") and c[1] not in ("/stt", "/mute")]
 
@@ -1849,39 +1923,53 @@ def thread_model_checks(page, mock):
     mock.emit("model", {})
     page.locator('[data-testid="tab-chat"]').click()
     page.locator('[data-testid="new-thread"]').click()
-    until(lambda: page.locator('[data-testid="model-chip-select"]').count() > 0)
-    model = page.locator('[data-testid="model-chip-select"]')
-    until(lambda: "gpt-5.6-luna" in (model.locator("option").first.inner_text() or ""))
+    until(lambda: page.locator(CHIP_BTN).count() > 0)
+    until(lambda: "gpt-5.6-luna" in model_labels(page)[0])
     check("a new thread starts on the default, named",
-          model.input_value() == "" and model.locator("option").first.inner_text() == "default · gpt-5.6-luna",
-          model.locator("option").first.inner_text())
+          chip_model(page) == "" and model_labels(page)[0] == "default · gpt-5.6-luna",
+          model_labels(page)[0])
+    check("the chip button reads model and effort",
+          page.locator(CHIP_BTN).inner_text().strip().startswith("default · gpt-5.6-luna · high"),
+          page.locator(CHIP_BTN).inner_text())
+    open_pop(page)
+    check("the popover has a Model section and an Effort section",
+          [t.strip() for t in page.locator(POP + " .msec").all_inner_texts()] == ["MODEL", "EFFORT"]
+          or [t.strip().lower() for t in page.locator(POP + " .msec").all_inner_texts()] == ["model", "effort"],
+          str(page.locator(POP + " .msec").all_inner_texts()))
+    page.keyboard.press("Escape")
+    check("Escape closes it", until(lambda: page.locator(POP).count() == 0) is True)
+    open_pop(page)
+    page.mouse.click(5, 5)
+    check("and so does a click outside", until(lambda: page.locator(POP).count() == 0) is True)
     check("the provider chip offers OpenRouter, Claude and Codex",
           page.locator('[data-testid="provider-chip-select"] option').all_inner_texts()
           == ["OpenRouter", "Claude", "Codex"])
     check("the catalogue search is the last model entry",
-          model.locator("option").last.inner_text() == "search catalogue…")
+          model_labels(page)[-1] == "search catalogue…")
     check("the effort defaults to high",
-          page.locator('[data-testid="effort-chip-select"] option').first.inner_text() == "default · high")
+          effort_labels(page)[0] == "default · high")
 
     since = len(mock.calls)
     page.locator('[data-testid="provider-chip-select"]').select_option("claude")
-    until(lambda: "claude-opus-5-5" in model.locator("option").first.inner_text())
+    until(lambda: "claude-opus-5-5" in model_labels(page)[0])
     check("Claude lists its own models, defaulting to Opus 5.5",
-          model.locator("option").first.inner_text() == "default · claude-opus-5-5"
-          and "claude-haiku-4-5" in model.locator("option").all_inner_texts())
-    model.select_option("claude-haiku-4-5")
-    check("a model with no effort control gets no effort chip",
-          until(lambda: page.locator('[data-testid="effort-chip-select"]').count() == 0) is True)
+          model_labels(page)[0] == "default · claude-opus-5-5"
+          and "claude-haiku-4-5" in model_labels(page))
+    pick_model(page, "claude-haiku-4-5")
+    check("a model with no effort control gets no effort section",
+          until(lambda: not has_effort(page)) is True)
+    close_pop(page)
     page.locator('[data-testid="provider-chip-select"]').select_option("fast")
     check("changing provider starts from that provider's defaults",
-          until(lambda: model.input_value() == "") is True)
+          until(lambda: chip_model(page) == "") is True)
     page.evaluate("window.__pwned = false")
-    model.select_option("evil/model")
-    check("the chip draws no markup from a network-supplied model",
+    pick_model(page, "evil/model")
+    check("the chip and its popover draw no markup from a network-supplied model",
           page.locator('[data-testid="model-chip"] img').count() == 0
+          and page.locator(POP + " img").count() == 0
           and page.evaluate("window.__pwned") is False)
-    model.select_option("openai/gpt-5.6-luna")
-    page.locator('[data-testid="effort-chip-select"]').select_option("low")
+    pick_model(page, "openai/gpt-5.6-luna")
+    pick_effort(page, "low")
     check("choosing while composing sends nothing", not writes(mock, since), str(writes(mock, since)))
 
     # A provider the project's profile cannot run is greyed out, with why.
@@ -1900,13 +1988,14 @@ def thread_model_checks(page, mock):
     check("and enabled again in an auto project", until(lambda: not codex.is_disabled()) is True,
           f"started in {started_in}")
     project_select.select_option(started_in)
-    model.select_option("openai/gpt-5.6-luna")
-    page.locator('[data-testid="effort-chip-select"]').select_option("low")
+    pick_model(page, "openai/gpt-5.6-luna")
+    pick_effort(page, "low")
 
     # Space on a focused chip never starts push-to-talk.
-    model.focus()
+    page.locator(CHIP_BTN).focus()
     page.keyboard.press("Space")
     page.keyboard.press("Escape")
+    until(lambda: page.locator(POP).count() == 0)
     check("space on a chip does not start push-to-talk", page.evaluate("window.__hud.capture.ptt") is None)
 
     opened = len(mock.posted("/threads"))
@@ -1925,14 +2014,12 @@ def thread_model_checks(page, mock):
           bool(kept) and (kept.get("provider"), kept.get("model"), kept.get("effort"))
           == ("fast", "openai/gpt-5.6-luna", "low"), str(kept))
     # Bugbot 2026-10-08: the chips used to vanish here, until the retry.
-    chips = until(lambda: page.locator('[data-testid="model-chip-select"]').count() > 0
-                  and page.locator('[data-testid="effort-chip-select"]').count() > 0)
+    chips = until(lambda: page.locator(CHIP_BTN).count() > 0)
     check("and the chips stay on screen, on that choice, for the retry",
           bool(chips)
-          and page.locator('[data-testid="model-chip-select"]').input_value() == "openai/gpt-5.6-luna"
-          and page.locator('[data-testid="effort-chip-select"]').input_value() == "low",
-          page.locator('[data-testid="model-chip-select"]').input_value()
-          if page.locator('[data-testid="model-chip-select"]').count() else "no model chip")
+          and chip_model(page) == "openai/gpt-5.6-luna"
+          and chip_effort(page) == "low",
+          chip_model(page) if page.locator(CHIP_BTN).count() else "no model chip")
     box.fill("model test")
     box.press("Enter")
     tid = until(lambda: page.evaluate("window.__hud.state().threadId"))
@@ -1951,7 +2038,8 @@ def thread_model_checks(page, mock):
           "OpenRouter" in tip and "openai/gpt-5.6-luna" in tip and "pinned" in tip, tip)
 
     since = len(mock.calls)
-    page.locator('[data-testid="model-chip-select"]').select_option("")
+    pick_model(page, "")
+    close_pop(page)
     sent = until(lambda: mock.sent("PATCH", f"/threads/{tid}") or None)
     check("a change after the first message is a PATCH", bool(sent) and sent[-1] == {"model": None}, str(sent))
     check("and nothing else is written", [c[1] for c in writes(mock, since)] == [f"/threads/{tid}"],
@@ -1963,18 +2051,17 @@ def thread_model_checks(page, mock):
 
     # An effort alone keeps the thread on the default model (A4 amendment).
     n = len(mock.sent("PATCH", f"/threads/{tid}"))
-    page.locator('[data-testid="effort-chip-select"]').select_option("low")
+    pick_effort(page, "low")
     sent = until(lambda: mock.sent("PATCH", f"/threads/{tid}")[n:] or None)
     check("an effort on a default thread is a PATCH of the effort alone",
           bool(sent) and sent[-1] == {"effort": "low"}, str(sent))
     check("and the line names the default model it still follows",
           until(lambda: "effort → low (default model: openai/gpt-5.6-luna)"
                 in page.locator('[data-testid="log"]').inner_text()) is True)
-    model = page.locator('[data-testid="model-chip-select"]')
     check("the chip still shows the default",
-          until(lambda: page.locator('[data-testid="effort-chip-select"]').input_value() == "low") is True
-          and model.input_value() == "" and model.locator("option").first.inner_text() == "default · gpt-5.6-luna",
-          model.input_value())
+          until(lambda: chip_effort(page) == "low") is True
+          and chip_model(page) == "" and model_labels(page)[0] == "default · gpt-5.6-luna",
+          chip_model(page))
     check("and no pin badge appears", page.locator(f'[data-testid="pin-{tid}"]').count() == 0)
     tip = page.locator(f'[data-testid="thread-{tid}"]').get_attribute("title") or ""
     check("its tooltip says it follows the default, at that effort",
@@ -1983,16 +2070,17 @@ def thread_model_checks(page, mock):
 
     # A refused change leaves the chip on what the server holds, and says why.
     w["refuse_choice"] = "evil/model cannot call tools here"
-    page.locator('[data-testid="model-chip-select"]').select_option("evil/model")
+    pick_model(page, "evil/model")
+    close_pop(page)
     err = until(lambda: page.locator('[data-testid="model-error"]').count() and
                 page.locator('[data-testid="model-error"]').inner_text())
     check("a refused change is shown with the server's reason",
           bool(err) and "Could not change model" in err and "cannot call tools" in err, str(err))
-    check("and the chip reverts", page.locator('[data-testid="model-chip-select"]').input_value() == "")
+    check("and the chip reverts", chip_model(page) == "")
     w["refuse_choice"] = None
 
     # The catalogue: search, use (pins to the roster), and the text-only note.
-    page.locator('[data-testid="model-chip-select"]').select_option("__search__")
+    pick_model(page, "__search__")
     page.wait_for_selector('[data-testid="catalog"]')
     page.evaluate("window.__pwned = false")
     evil = page.locator('[data-testid="catalog-row-evil/model"]')
@@ -2012,7 +2100,7 @@ def thread_model_checks(page, mock):
           bool(added) and added[-1] == {"add": "deepseek/deepseek-v4-flash-0731"}, str(added))
     sent = until(lambda: [b for b in mock.sent("PATCH", f"/threads/{tid}") if (b.get("model") or "").startswith("deepseek")] or None)
     check("and puts this thread on it", bool(sent), str(mock.sent("PATCH", f"/threads/{tid}")))
-    until(lambda: page.locator('[data-testid="model-chip-select"]').input_value().startswith("deepseek"))
+    until(lambda: chip_model(page).startswith("deepseek"))
     page.locator('[data-testid="filepicker"]').set_input_files(
         files=[{"name": "shot.png", "mimeType": "image/png", "buffer": PNG_1PX}])
     note = until(lambda: page.locator('[data-testid="image-note"]').count() and
@@ -2021,7 +2109,7 @@ def thread_model_checks(page, mock):
           bool(note) and "text-only" in note, str(note))
 
     # The catalogue unpins what is pinned (2026-10-08): "on roster" was text.
-    page.locator('[data-testid="model-chip-select"]').select_option("__search__")
+    pick_model(page, "__search__")
     page.wait_for_selector('[data-testid="catalog"]')
     luna = "openai/gpt-5.6-luna"
     until(lambda: page.locator(f'[data-testid="catalog-unpin-{luna}"]').count() > 0)
@@ -2056,7 +2144,7 @@ def thread_model_checks(page, mock):
     ro = until(lambda: page.locator('[data-testid="model-chip-ro"]').count() and
                page.locator('[data-testid="model-chip-ro"]').inner_text())
     check("a task's thread shows its model read-only",
-          bool(ro) and "gpt-5.6-sol" in ro and page.locator('[data-testid="model-chip-select"]').count() == 0,
+          bool(ro) and "gpt-5.6-sol" in ro and page.locator(CHIP_BTN).count() == 0,
           str(ro))
 
 
@@ -2083,22 +2171,25 @@ def provider_default_checks(page, mock):
 
     def show(tid):
         page.evaluate(f"window.__hud.dispatch({{type: 'patch', patch: {{threadId: '{tid}', compose: null}}}})")
-        until(lambda: page.locator('[data-testid="model-chip-select"]').count() > 0)
+        until(lambda: page.locator(CHIP_BTN).count() > 0)
 
     def first_option():
-        return page.locator('[data-testid="model-chip-select"] option').first.inner_text()
+        # Read off the chip's own text: a dialog's veil is often up, and the
+        # popover cannot be opened under it.
+        t = page.locator(CHIP_BTN).inner_text().strip()
+        m = re.match(r"(default · \S+)", t)
+        return m.group(1) if m else t
 
     show("cd1")
     check("a default Claude thread is labelled with the built-in default",
           until(lambda: first_option() == "default · claude-opus-5-5") is True, first_option())
-    opener = page.locator('[data-testid="provider-defaults-open"]')
-    check("the Claude chip offers its default menu", opener.count() == 1)
+    check("the Claude chip offers its default menu", has_defaults_button(page))
     page.locator('[data-testid="tab-chat"]').click()
     page.locator('[data-testid="new-thread"]').click()
     until(lambda: page.locator('[data-testid="provider-chip-select"]').count() > 0)
     page.locator('[data-testid="provider-chip-select"]').select_option("fast")
     check("the OpenRouter chip does not (its default is the Model picker's)",
-          until(lambda: opener.count() == 0) is True)
+          until(lambda: not has_defaults_button(page)) is True)
 
     # The chip's dialogs are open pickers: no open mic under them (review).
     page.locator('[data-testid="dictation-review"]').click()
@@ -2113,13 +2204,13 @@ def provider_default_checks(page, mock):
         """)
         return until(lambda: len(mock.sent("POST", "/stt")) > before, timeout=1.0) is True
 
-    page.locator('[data-testid="model-chip-select"]').select_option("__search__")
+    pick_model(page, "__search__")
     page.wait_for_selector('[data-testid="catalog"]')
     check("speech under the catalogue is not taken", not mic_uploads())
     page.locator('[data-testid="catalog-close"]').click()
     until(lambda: page.locator('[data-testid="catalog"]').count() == 0)
     page.locator('[data-testid="provider-chip-select"]').select_option("claude")
-    opener.click()
+    open_defaults(page)
     page.wait_for_selector('[data-testid="provider-defaults"]')
     check("nor under the provider-default dialog", not mic_uploads())
     z = page.evaluate("getComputedStyle(document.querySelector('[data-testid=\"provider-defaults\"]')).zIndex")
@@ -2132,7 +2223,7 @@ def provider_default_checks(page, mock):
 
     show("cd1")
     page.evaluate("window.__pwned = false")
-    opener.click()
+    open_defaults(page)
     page.wait_for_selector('[data-testid="provider-defaults"]')
     badge = lambda mid: page.locator(f'[data-testid="pd-badge-{mid}"]').count() == 1  # noqa: E731
     check("the current default wears the badge", badge("claude-opus-5-5") and not badge("claude-haiku-4-5"))
@@ -2158,12 +2249,12 @@ def provider_default_checks(page, mock):
     page.locator('[data-testid="pd-close"]').click()
     show("cp1")
     check("a pinned thread keeps its own model",
-          until(lambda: page.locator('[data-testid="model-chip-select"]').input_value() == "claude-opus-5-5") is True
+          until(lambda: chip_model(page) == "claude-opus-5-5") is True
           and not mock.sent("PATCH", "/threads/cp1"))
 
     # The default's effort: the model's own ladder, stored with it.
     show("cd1")
-    opener.click()
+    open_defaults(page)
     page.locator('[data-testid="pd-set-claude-opus-5-5"]').click()
     until(lambda: badge("claude-opus-5-5"))
     page.locator('[data-testid="pd-effort"]').select_option("low")
@@ -2171,8 +2262,7 @@ def provider_default_checks(page, mock):
     check("an effort on the default posts {provider, model, effort}",
           bool(body) and body[-1] == {"provider": "claude", "model": "claude-opus-5-5", "effort": "low"}, str(body))
     check("and the default thread's effort chip follows it",
-          until(lambda: page.locator('[data-testid="effort-chip-select"] option').first.inner_text()
-                == "default · low") is True)
+          until(lambda: "· low" in page.locator(CHIP_BTN).inner_text()) is True)
 
     # A refusal is shown inline, in the server's words, and changes nothing.
     w["refuse_default"] = "claude-haiku-4-5 is not allowed here for a reason"
@@ -2212,7 +2302,7 @@ def provider_default_checks(page, mock):
     page.locator('[data-testid="project-chip-select"]').select_option("p1")     # an auto project
     page.locator('[data-testid="provider-chip-select"]').select_option("codex")
     until(lambda: first_option() == "default · gpt-6-astra")
-    opener.click()
+    open_defaults(page)
     page.wait_for_selector('[data-testid="provider-defaults"]')
     check("Codex's menu says routing is untouched",
           "Routing for tasks is unchanged" in page.locator('[data-testid="pd-now"]').inner_text()

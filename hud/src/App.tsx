@@ -18,7 +18,7 @@ import { AvatarPicker, ModelPicker, NewProject, NewTask, SettingsDialog, VoicePi
 import { ScheduleDialog } from "./components/ScheduleDialog";
 import { Orb } from "./components/Orb";
 import { Capture } from "./lib/capture";
-import { HINTS, isMuted, loadMode, outcomeFor, saveMode, type DictationMode } from "./lib/dictation";
+import { isMuted, loadMode, outcomeFor, saveMode, type DictationMode } from "./lib/dictation";
 import { WakeGate, compileWake, matchesWake, WAKE_PATTERNS } from "./lib/wake";
 import type { Attachment, AvatarDesc, Schedule, VoiceEntry } from "./types";
 import type { RosterView } from "./lib/roster";
@@ -1170,9 +1170,10 @@ export default function App() {
   const fit = view.fit;
   // The side panes leave the centre what the drawn shape needs (one pane: 480).
   const mainMin = SHAPES[fit.drawn].minW;
-  const hint =
-    state.status ||
-    (state.approvals.length ? "ANSWER THE AUTHORIZATION" : HINTS[state.dictation]);
+  // What the orb says under itself: what the turn is doing, else that the mic
+  // is muted (the line the input bar's hint used to carry), else the orb's state.
+  const orbStatus =
+    state.status || (isMuted(state.dictation) ? "MIC MUTED" : state.orb === "idle" ? "" : state.orb);
   const projectName = (id: string | null) => state.projects.find((p) => p.id === id)?.name || "…";
   const chatPane = fit.panes.find((n) => view.ws.panes[n - 1].view === "chat") ?? null;
   // The profile belongs to the conversation's project: it rides the chat
@@ -1207,9 +1208,6 @@ export default function App() {
               onCancelTask={(id) => api.cancelTask(id).then(refreshTasks).catch(() => {})}
             />
             <InputBar
-              mode={state.dictation}
-              level={state.level}
-              hint={hint}
               pendingTranscript={state.pendingTranscript}
               disabled={state.approvals.length > 0}
               placeholder={
@@ -1228,7 +1226,6 @@ export default function App() {
               }}
               modelChip={threadModel.chip}
               imageNote={threadModel.imageNote}
-              onModeChange={setMode}
               onSend={(text, files) => void send(text, files)}
               onTranscriptTaken={() => patch({ pendingTranscript: "" })}
               running={state.busy && !!state.threadId && state.turnThreadId === state.threadId}
@@ -1541,7 +1538,9 @@ export default function App() {
         // rather than sitting on top of the input bar.
         compact={drawn.leftFolded}
         zoom={view.zoom}
-        status={state.orb === "idle" ? "" : state.orb}
+        status={orbStatus}
+        mode={state.dictation}
+        onModeChange={setMode}
         onPress={press}
         onRelease={release}
       />
