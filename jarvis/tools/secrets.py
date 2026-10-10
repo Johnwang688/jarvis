@@ -105,7 +105,16 @@ _RAW_NAMES = [
 
 
 def protected_in_command(command: str) -> str | None:
-    """The protected filename a shell command references, if any."""
+    """The protected filename a shell command references, if any.
+
+    Read as bash reads it: a backslash-newline inside a name (`.e\\<newline>nv`)
+    is deleted before bash sees the word, so it is deleted here too — through
+    `rules.join_continuations`, the one implementation of that rule
+    (2026-10-09).
+    """
+    from .. import rules
+
+    command = rules.join_continuations(command)
     try:
         tokens = shlex.split(command)
     except ValueError:
