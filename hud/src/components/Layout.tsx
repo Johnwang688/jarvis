@@ -22,7 +22,7 @@ import {
 } from "../lib/layout";
 import {
   PANEL, PRESETS, SHAPES, TITLEBAR_H, equalSplit as equalSplitOf, fitWorkspace, focusPane, loadWorkspace,
-  pinPane, resetWorkspace, saveWorkspace, setPanel, setPreset as setPresetOf, setPreviewUrl as setPreviewUrlOf,
+  panesOf, pinPane, resetWorkspace, saveWorkspace, setPanel, setPreset as setPresetOf, setPreviewUrl as setPreviewUrlOf,
   setSplit as setSplitOf, setView as setViewOf, show as showOf, unpinProject as unpinProjectOf,
   type DrawnSet, type PaneNo, type Preset, type Split, type View, type Workspace, type WorkspaceFit,
 } from "../lib/workspace";
@@ -222,8 +222,10 @@ export function useLayout(blocked = false): LayoutControl {
       }
       if (what === "focus1" || what === "focus2" || what === "focus3" || what === "focus4") {
         const pane = Number(what.slice(-1)) as PaneNo;
-        // Only a pane the window draws; Ctrl+Alt+3 in two columns is left alone.
-        if (!now.current.fit.panes.includes(pane)) return;
+        // Only a pane the preset has: Ctrl+Alt+3 in two columns is left alone.
+        // One the window dropped for room is brought back into the drawn set
+        // (fitWorkspace keeps a dropped set only while it holds the focus).
+        if (!panesOf(now.current.ws.preset).includes(pane)) return;
         e.preventDefault();
         if (e.repeat) return;
         setWs((w) => focusPane(w, pane));

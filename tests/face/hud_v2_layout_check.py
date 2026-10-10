@@ -1,11 +1,14 @@
 """Headless checks for the HUD's zoom, folding panes and resizable edges
 (design §18, 2026-10-08).
 
-Called from `hud_v2_check.main()` **first**, in a browser context of its own:
-the mock hands SSE frames only to the newest `/events` connection, so a second
-page beside the main one would steal its frames, and a context of its own
-keeps this section's localStorage (zoom, widths, folded panes) away from the
-rest of the suite.
+Called from `hud_v2_check.main()` **first**, in a browser context of its own
+and against **a `MockDaemon` of its own** on an ephemeral port: the mock hands
+SSE frames only to the newest `/events` connection, so a second page beside
+the main one would steal its frames; a context of its own keeps this
+section's localStorage (zoom, widths, folded panes, the workspace) away from
+the rest of the suite; and a mock of its own keeps its saves, `/seen` posts,
+approval decisions and preview hits out of the world the main suite asserts
+on.
 
 The checks worth keeping, each written to bite:
   - at 160% and at 70%, on 1280x800 and 1024x700, an approval card is entirely
@@ -48,7 +51,6 @@ The workspace (2026-10-09, WP-A of docs/plans/2026-10-09-hud-workspace-plan.md):
 """
 from __future__ import annotations
 
-import copy
 import json
 import time
 
@@ -71,7 +73,8 @@ def layout_checks(browser, mock, base, check, until, guard, init_script):
         for section in (_zoom_checks, _fold_checks, _resize_checks, _approval_zoom_checks,
                         _blocked_checks, _small_window_checks, _picker_zoom_checks,
                         _monaco_zoom_checks, _menu_zoom_checks, _model_chip_checks,
-                        _titlebar_checks, _workspace_checks, _grid_card_checks):
+                        _titlebar_checks, _workspace_checks, _grid_card_checks, _sticky_checks,
+                        _card_focus_checks, _seen_checks):
             try:
                 section(page, mock, check, until)
             except Exception as e:  # a section that cannot run is a failure, and the rest still run
@@ -87,10 +90,6 @@ def layout_checks(browser, mock, base, check, until, guard, init_script):
         check("no page errors in the layout section", not errors, "; ".join(errors[:3]))
     finally:
         ctx.close()
-        # This section's own traffic must not reach the main suite's asserts,
-        # which share the mock: its preview check wants exactly one workshop
-        # hit, and its file check reads the first PUT it finds.
-        mock.workshop_hits.clear()
     _throwing_storage_checks(browser, mock, base, check, until, guard, init_script)
 
 
@@ -907,6 +906,21 @@ def _ptt_on_space(page) -> object:
     return ptt
 
 
+def _edit(page, until, pane: int, typed: str):
+    """Type at the end of the file open in pane N, in Monaco or its fallback."""
+    editor = page.locator(_pane(pane, '[data-testid="editor"] .view-lines'))
+    until(lambda: editor.count() > 0
+          or page.locator(_pane(pane, '[data-testid="editor-fallback"]')).count() > 0, timeout=10)
+    if editor.count():
+        editor.click()
+        page.keyboard.press("Control+End")
+        page.keyboard.type(typed)
+    else:
+        page.evaluate("([n, t]) => { const h = document.querySelector("
+                      "`[data-testid=\"pane-${n}\"] [data-testid=\"editor-fallback\"]`);"
+                      " h.value += t; h.dispatchEvent(new Event('input', {bubbles: true})); }", [pane, typed])
+
+
 def _approval(mock, req: str, command: str = "ls"):
     mock.emit("approval_requested", {
         "req_id": req, "code": req[-4:].upper(), "tool": "run_command", "args": {"command": command},
@@ -1250,51 +1264,79 @@ def _workspace_checks(page, mock, check, until):
           _attr(page, _pane(2), "data-view") == "task" and _attr(page, _pane(1), "data-view") == "chat")
 
     # The FileTab fix: a file pane is its project's, whatever the chat does.
-    files_before = copy.deepcopy(mock.world["files"])
     calls_before = len(mock.calls)
+    page.locator(_pane(2, '[data-testid="tab-file"]')).click()
+    page.locator('[data-testid="new-thread"]').click()
+    until(lambda: page.evaluate("window.__hud.state().compose") is not None)
+    page.locator('[data-testid="project-chip-select"]').select_option("p1")
+    until(lambda: page.locator(_pane(2, '[data-testid="file-calc.py"]')).count() > 0, timeout=4)
+    page.locator(_pane(2, '[data-testid="file-calc.py"]')).click()
+    until(lambda: page.locator(_pane(2, '[data-testid="file-path"]')).inner_text() == "calc.py", timeout=4)
+    check("opening a file pins its pane to that project", _ws(page)["ws"]["panes"][1]["projectId"] == "p1",
+          str(_ws(page)["ws"]["panes"][1]))
+    check("and says nothing while the chat is in the same project",
+          page.locator('[data-testid="pane-2-project"]').count() == 0)
+    page.locator('[data-testid="project-chip-select"]').select_option("p2")
+    until(lambda: page.locator('[data-testid="pane-2-project"]').count() > 0, timeout=3)
+    check("with the chat moved to another project the file stays open, and the pane says where it is",
+          page.locator(_pane(2, '[data-testid="file-path"]')).inner_text() == "calc.py"
+          and "jarvis" in page.locator('[data-testid="pane-2-project"]').inner_text())
+    _edit(page, until, 2, "\n# pinned")
+    save = page.locator(_pane(2, '[data-testid="file-save"]'))
+    until(lambda: not save.is_disabled(), timeout=3)
+    follow = page.locator('[data-testid="pane-2-follow"]')
+    until(lambda: follow.is_disabled(), timeout=3)
+    check("with an unsaved edit, follow chat waits and says why",
+          follow.is_disabled() and "Save" in (follow.get_attribute("title") or ""),
+          str(follow.get_attribute("title")))
+    save.click()
+    until(lambda: any(m == "PUT" for m, _p, _b in mock.calls[calls_before:]), timeout=4)
+    puts = [p for m, p, _b in mock.calls[calls_before:] if m == "PUT"]
+    check("and its save goes to the project it was read from, never the one the chat moved to",
+          puts == ["/projects/p1/file"], str(puts))
+    until(lambda: not follow.is_disabled(), timeout=3)
+    check("once saved, follow chat is offered again", not follow.is_disabled())
+    follow.click()
+    until(lambda: page.locator(_pane(2, '[data-testid="file-path"]')).inner_text() == "no file open", timeout=3)
+    check("follow chat unpins it: a fresh tree in the chat's project, nothing open",
+          _ws(page)["ws"]["panes"][1]["projectId"] is None
+          and page.locator('[data-testid="pane-2-project"]').count() == 0)
+
+    # A project that goes away under an unsaved edit: the edit is kept, and
+    # the pane asks before it lets go of it.
+    until(lambda: page.locator(_pane(2, '[data-testid="file-calc.py"]')).count() > 0, timeout=4)
+    page.locator(_pane(2, '[data-testid="file-calc.py"]')).click()
+    until(lambda: page.locator(_pane(2, '[data-testid="file-path"]')).inner_text() == "calc.py", timeout=4)
+    _edit(page, until, 2, "\n# kept")
+    until(lambda: not page.locator(_pane(2, '[data-testid="file-save"]')).is_disabled(), timeout=3)
+    mock.emit("project_archived", {"project_id": "p2"}, project_id="p2")
+    until(lambda: page.locator('[data-testid="pane-2-gone"]').count() > 0, timeout=4)
+    check("its project archived under an unsaved edit, the file stays open and the pane asks",
+          page.locator(_pane(2, '[data-testid="file-path"]')).inner_text() == "calc.py"
+          and page.locator('[data-testid="pane-2-gone"]').count() == 1
+          and _ws(page)["ws"]["panes"][1]["projectId"] == "p2")
+    dialogs: list[str] = []
+
+    def on_dialog(d):
+        dialogs.append(d.type)
+        d.dismiss()
+
+    page.on("dialog", on_dialog)
     try:
-        page.locator(_pane(2, '[data-testid="tab-file"]')).click()
-        page.locator('[data-testid="new-thread"]').click()
-        until(lambda: page.evaluate("window.__hud.state().compose") is not None)
-        page.locator('[data-testid="project-chip-select"]').select_option("p1")
-        until(lambda: page.locator(_pane(2, '[data-testid="file-calc.py"]')).count() > 0, timeout=4)
-        page.locator(_pane(2, '[data-testid="file-calc.py"]')).click()
-        until(lambda: page.locator(_pane(2, '[data-testid="file-path"]')).inner_text() == "calc.py", timeout=4)
-        check("opening a file pins its pane to that project", _ws(page)["ws"]["panes"][1]["projectId"] == "p1",
-              str(_ws(page)["ws"]["panes"][1]))
-        check("and says nothing while the chat is in the same project",
-              page.locator('[data-testid="pane-2-project"]').count() == 0)
-        page.locator('[data-testid="project-chip-select"]').select_option("p2")
-        until(lambda: page.locator('[data-testid="pane-2-project"]').count() > 0, timeout=3)
-        check("with the chat moved to another project the file stays open, and the pane says where it is",
-              page.locator(_pane(2, '[data-testid="file-path"]')).inner_text() == "calc.py"
-              and "jarvis" in page.locator('[data-testid="pane-2-project"]').inner_text())
-        editor = page.locator(_pane(2, '[data-testid="editor"] .view-lines'))
-        until(lambda: editor.count() > 0
-              or page.locator(_pane(2, '[data-testid="editor-fallback"]')).count() > 0, timeout=10)
-        if editor.count():
-            editor.click()
-            page.keyboard.press("Control+End")
-            page.keyboard.type("\n# pinned")
-        else:
-            page.evaluate("t => { const h = document.querySelector('[data-testid=\"pane-2\"] [data-testid=\"editor-fallback\"]');"
-                          " h.value += t; h.dispatchEvent(new Event('input', {bubbles: true})); }", "\n# pinned")
-        save = page.locator(_pane(2, '[data-testid="file-save"]'))
-        until(lambda: not save.is_disabled(), timeout=3)
-        save.click()
-        until(lambda: any(m == "PUT" for m, _p, _b in mock.calls[calls_before:]), timeout=4)
-        puts = [p for m, p, _b in mock.calls[calls_before:] if m == "PUT"]
-        check("and its save goes to the project it was read from, never the one the chat moved to",
-              puts == ["/projects/p1/file"], str(puts))
-        page.locator('[data-testid="pane-2-follow"]').click()
-        until(lambda: page.locator(_pane(2, '[data-testid="file-path"]')).inner_text() == "no file open", timeout=3)
-        check("follow chat unpins it: a fresh tree in the chat's project, nothing open",
-              _ws(page)["ws"]["panes"][1]["projectId"] is None
-              and page.locator('[data-testid="pane-2-project"]').count() == 0)
-    finally:
-        mock.world["files"].clear()
-        mock.world["files"].update(files_before)
-        mock.calls[:] = mock.calls[:calls_before] + [c for c in mock.calls[calls_before:] if c[0] != "PUT"]
+        page.evaluate("location.reload()")
+    except Exception:
+        pass  # a reload that went through destroys the context: the check below says so
+    time.sleep(0.6)
+    page.remove_listener("dialog", on_dialog)
+    check("closing the window with an unsaved edit asks first (beforeunload)", dialogs == ["beforeunload"],
+          str(dialogs))
+    check("and dismissing that keeps the edit",
+          page.locator(_pane(2, '[data-testid="file-path"]')).inner_text() == "calc.py")
+    page.locator('[data-testid="pane-2-discard"]').click()
+    until(lambda: page.locator(_pane(2, '[data-testid="file-path"]')).inner_text() == "no file open", timeout=3)
+    check("discard edit lets it go: the pane follows the chat again",
+          _ws(page)["ws"]["panes"][1]["projectId"] is None and page.locator('[data-testid="pane-2-gone"]').count() == 0)
+    _boot(page, mock, None, until, reload=True)
 
     # Ctrl+Alt+N focuses a drawn pane, from the input bar too.
     page.locator('[data-testid="input"]').click()
@@ -1431,4 +1473,177 @@ def _grid_card_checks(page, mock, check, until):
               ok, why)
         page.locator('[data-testid="approval-card"] button.deny').click()
         until(lambda: page.locator('[data-testid="approval-card"]').count() == 0, timeout=4)
+    _reset_all(page, mock, until)
+
+
+def _sticky_checks(page, mock, check, until):
+    """A dropped set stays put while focus moves inside it (review of PR #26):
+    the pair three-columns-drawn-as-two shows used to be re-chosen from the
+    focused pane on every click, so clicking the other pane redrew a
+    different pair and the pane under the pointer jumped."""
+    ws = '[data-testid="workspace"]'
+    three = json.dumps({"preset": "cols3", "focused": 3,
+                        "panes": [{"view": "chat"}, {"view": "preview"}, {"view": "file"}, {"view": "task"}]})
+    page.set_viewport_size({"width": 1280, "height": 800})
+    _set_storage(page, zoom="150", layout="{}")
+    _set_ws(page, three)
+    _boot(page, mock, None, until, reload=True)
+    check("setup: three columns at 150% draw as two, the focused pane 3 with pane 2",
+          _attr(page, ws, "data-drawn-preset") == "cols2" and _visible(page, _pane(2)) and _visible(page, _pane(3))
+          and not _visible(page, _pane(1)))
+    before = [page.locator(_pane(n)).bounding_box() for n in (2, 3)]
+    url = page.locator(_pane(2, '[data-testid="preview-url"]'))
+    url.click()
+    page.keyboard.type("http://localhost:5173/")
+    time.sleep(0.2)
+    after = [page.locator(_pane(n)).bounding_box() for n in (2, 3)]
+    check("clicking into the other drawn pane focuses it and leaves both panes where they are",
+          _attr(page, _pane(2), "data-focused") == "true" and before == after
+          and _visible(page, _pane(3)) and not _visible(page, _pane(1)), f"{before} -> {after}")
+    check("and what was typed there stayed there", url.input_value() == "http://localhost:5173/", url.input_value())
+    page.keyboard.press("Control+Alt+1")
+    until(lambda: _visible(page, _pane(1)), timeout=2)
+    check("focusing a pane the window was not drawing (Ctrl+Alt+1) brings it in",
+          _visible(page, _pane(1)) and _attr(page, _pane(1), "data-focused") == "true"
+          and _attr(page, ws, "data-drawn-preset") == "cols2")
+
+    # One large plus two stacked, too short for the stack: two columns.
+    main = json.dumps({"preset": "main2", "focused": 3,
+                       "panes": [{"view": "chat"}, {"view": "preview"}, {"view": "file"}, {"view": "task"}]})
+    page.set_viewport_size({"width": 1600, "height": 420})
+    _set_storage(page, zoom="100", layout="{}")
+    _set_ws(page, main)
+    _boot(page, mock, None, until, reload=True)
+    check("setup: one large plus two stacked on a short window draws the large pane and the focused one",
+          _attr(page, ws, "data-drawn-preset") == "cols2" and _visible(page, _pane(1)) and _visible(page, _pane(3))
+          and not _visible(page, _pane(2)))
+    before = [page.locator(_pane(n)).bounding_box() for n in (1, 3)]
+    page.locator('[data-testid="input"]').click()
+    time.sleep(0.2)
+    after = [page.locator(_pane(n)).bounding_box() for n in (1, 3)]
+    check("clicking into the large pane leaves the pair as it was",
+          _attr(page, _pane(1), "data-focused") == "true" and before == after
+          and _visible(page, _pane(3)) and not _visible(page, _pane(2)), f"{before} -> {after}")
+    _reset_all(page, mock, until)
+
+
+def _card_focus_checks(page, mock, check, until):
+    """Keys in a focused preview frame went to the framed page, card or no
+    card, and Monaco kept its focus under one (review of PR #26). A card now
+    takes focus off both, onto itself — never onto a button."""
+    two = json.dumps({"preset": "cols2", "focused": 2,
+                      "panes": [{"view": "chat"}, {"view": "preview"}, {"view": "file"}, {"view": "task"}]})
+    page.set_viewport_size({"width": 1600, "height": 900})
+    _set_storage(page, zoom="100", layout="{}")
+    _set_ws(page, two)
+    _boot(page, mock, None, until, reload=True)
+    page.locator(_pane(2, '[data-testid="preview-project"]')).click()
+    until(lambda: page.locator(_pane(2, "iframe")).count() > 0, timeout=4)
+    time.sleep(0.3)
+    page.locator(_pane(2, "iframe")).click()
+    until(lambda: page.evaluate("document.activeElement && document.activeElement.tagName") == "IFRAME", timeout=2)
+    check("setup: keys are going into the preview frame",
+          page.evaluate("document.activeElement.tagName") == "IFRAME")
+    _approval(mock, "frm1")
+    until(lambda: page.locator('[data-testid="approval-card"]').count() > 0, timeout=4)
+    time.sleep(0.2)
+    focus = page.evaluate("[document.activeElement.tagName, document.activeElement.getAttribute('data-testid')]")
+    check("a card takes focus out of the frame, onto the card and not a button", focus == ["DIV", "approval-card"],
+          str(focus))
+    page.keyboard.press("Escape")
+    body = until(lambda: mock.sent("POST", "/approvals/frm1") or None, timeout=4)
+    check("so Escape reaches it and denies", bool(body) and body[-1].get("decision") == "deny",
+          str(body[-1] if body else None))
+    until(lambda: page.locator('[data-testid="approval-card"]').count() == 0, timeout=4)
+    time.sleep(0.1)
+    check("and once it is answered, focus goes back to the frame",
+          page.evaluate("document.activeElement.tagName") == "IFRAME")
+
+    page.locator(_pane(2, '[data-testid="tab-file"]')).click()
+    until(lambda: page.locator(_pane(2, '[data-testid="file-calc.py"]')).count() > 0, timeout=4)
+    page.locator(_pane(2, '[data-testid="file-calc.py"]')).click()
+    editor = page.locator(_pane(2, '[data-testid="editor"] .view-lines'))
+    until(lambda: editor.count() > 0, timeout=10)
+    if not editor.count():
+        check("Monaco loads in a split pane (fell back to a textarea)", False)
+        _reset_all(page, mock, until)
+        return
+    editor.click()
+    page.keyboard.press("Control+End")
+    in_monaco = page.evaluate("!!document.activeElement.closest('.monaco-editor')")
+    _approval(mock, "mon1")
+    until(lambda: page.locator('[data-testid="approval-card"]').count() > 0, timeout=4)
+    time.sleep(0.2)
+    page.keyboard.type("zzqq")
+    time.sleep(0.2)
+    text = editor.inner_text()
+    check("with Monaco focused, a card takes the keys: nothing typed reaches the buffer behind it",
+          in_monaco and "zzqq" not in text
+          and page.locator(_pane(2, '[data-testid="file-save"]')).is_disabled(), text[-40:])
+    page.keyboard.press("Escape")
+    body = until(lambda: mock.sent("POST", "/approvals/mon1") or None, timeout=4)
+    check("and Escape denies", bool(body) and body[-1].get("decision") == "deny")
+    until(lambda: page.locator('[data-testid="approval-card"]').count() == 0, timeout=4)
+    time.sleep(0.1)
+    check("and focus goes back to the editor",
+          page.evaluate("!!document.activeElement.closest('.monaco-editor')"))
+    _reset_all(page, mock, until)
+
+
+def _seen_checks(page, mock, check, until):
+    """"Read" is a thread or task shown in **any** drawn pane, not only the
+    focused one (review of PR #26: a focused-pane-only mutation passed every
+    check before these)."""
+    seen = lambda path: len(mock.posted(path))  # noqa: E731
+    two = json.dumps({"preset": "cols2", "focused": 1,
+                      "panes": [{"view": "preview"}, {"view": "chat"}, {"view": "file"}, {"view": "task"}]})
+    page.set_viewport_size({"width": 1600, "height": 900})
+    _set_storage(page, zoom="100", layout="{}")
+    _set_ws(page, two)
+    _boot(page, mock, None, until, reload=True)
+    page.locator('[data-testid="thread-t1"]').click()
+    until(lambda: page.evaluate("window.__hud.state().threadId") == "t1")
+    page.locator(_pane(1, '[data-testid="tab-preview"]')).click()
+    until(lambda: _attr(page, _pane(1), "data-focused") == "true", timeout=2)
+    check("setup: t1's chat in pane 2, pane 1 focused",
+          _attr(page, _pane(2), "data-view") == "chat" and _attr(page, _pane(2), "data-focused") == "false")
+    before = seen("/threads/t1/seen")
+    mock.activity("thread", "t1", "unread")
+    until(lambda: seen("/threads/t1/seen") > before, timeout=4)
+    check("a thread finishing in a chat pane that is drawn but not focused is read",
+          seen("/threads/t1/seen") > before)
+
+    _choose(page, until, "single")
+    check("setup: one pane, showing Preview; the chat is hidden",
+          _attr(page, _pane(1), "data-view") == "preview" and not _visible(page, _pane(2)))
+    before = seen("/threads/t1/seen")
+    mock.activity("thread", "t1", "unread")
+    time.sleep(0.8)
+    check("a thread finishing while its chat is hidden is not read", seen("/threads/t1/seen") == before)
+    mock.activity("thread", "t1", "idle")
+
+    # The same for a task.
+    _choose(page, until, "cols2")
+    page.locator(_pane(1, '[data-testid="tab-preview"]')).click()
+    page.locator('[data-testid="task-k1"]').click()
+    until(lambda: _attr(page, _pane(1), "data-view") == "task", timeout=2)
+    page.locator(_pane(2, '[data-testid="tab-chat"]')).click()
+    until(lambda: _attr(page, _pane(2), "data-focused") == "true", timeout=2)
+    check("setup: the task in pane 1, pane 2 focused",
+          _attr(page, _pane(1), "data-view") == "task" and _attr(page, _pane(1), "data-focused") == "false")
+    before = seen("/tasks/k1/seen")
+    mock.activity("task", "k1", "unread")
+    until(lambda: seen("/tasks/k1/seen") > before, timeout=4)
+    check("a task finishing in a task pane that is drawn but not focused is read", seen("/tasks/k1/seen") > before)
+
+    _choose(page, until, "single")
+    page.locator(_pane(1, '[data-testid="tab-chat"]')).click()
+    until(lambda: _attr(page, _pane(1), "data-view") == "chat", timeout=2)
+    check("setup: one pane showing the chat; the task is hidden",
+          _attr(page, _pane(2), "data-view") == "task" and not _visible(page, _pane(2)))
+    before = seen("/tasks/k1/seen")
+    mock.activity("task", "k1", "unread")
+    time.sleep(0.8)
+    check("a task finishing while no pane shows it is not read", seen("/tasks/k1/seen") == before)
+    mock.activity("task", "k1", "idle")
     _reset_all(page, mock, until)
