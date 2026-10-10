@@ -595,6 +595,9 @@ class Lifecycle(Base):
         attached = client.message("attached")
         self.assertEqual(attached["terminal"]["id"], row["id"])
         self.assertTrue(attached["terminal"]["shown"])
+        self.assertFalse(attached["terminal"]["integrated"])                  # no command marked yet
+        client.type("echo hello")
+        client.wait_text("hello\n")
         listed = {r["id"]: r for r in self.owner("GET", "/terminals")}
         self.assertTrue(listed[row["id"]]["shown"])
         self.assertTrue(listed[row["id"]]["integrated"])
@@ -1064,13 +1067,15 @@ class RealBashStartupFile(Base):
         tid = self.open_terminal()["id"]
         terminal = self.term(tid)
         client = self.connect(tid)
-        eventually(lambda: terminal.history().integrated and b"133;B" in terminal.history().data,
-                   timeout=15, what="the first prompt")
+        eventually(lambda: b"133;B;jarvis=" in terminal.history().data, timeout=15,
+                   what="the first prompt")
+        self.assertFalse(terminal.history().integrated)
         self.run_lines(client, terminal, [
             "echo hi there", "false", "alias sudo", "printf '%s\\n' 'a;b'",
             "HISTCONTROL=ignorespace", " echo hidden from history",
             "env | cut -d= -f1 | sort | tr '\\n' ' '; echo", "stty size"])
         history = terminal.history()
+        self.assertTrue(history.integrated)
         spans = history.spans
 
         def out(span):
@@ -1094,6 +1099,27 @@ class RealBashStartupFile(Base):
         self.assertFalse(terminal.row()["busy"])
         client.type("sleep 3")
         eventually(lambda: terminal.row()["busy"], what="busy")
+
+
+class RealDashStartupFile(Base):
+    """The POSIX startup file, in real dash (temp HOME): it parses — a POSIX
+    shell reads every line of it — it keeps sudo from caching, and its
+    prompt marks carry the nonce, but it marks no command."""
+
+    def test_dash_reads_the_posix_file(self):
+        if not os.access("/usr/bin/dash", os.X_OK):
+            self.skipTest("no dash on this machine")
+        with patch.object(config, "TERMINAL_SHELL", "/usr/bin/dash"):
+            tid = self.open_terminal()["id"]
+        terminal = self.term(tid)
+        client = self.connect(tid)
+        eventually(lambda: b"133;B;jarvis=" in terminal.history().data, timeout=15, what="the prompt")
+        client.type("alias sudo")
+        client.wait_text("sudo -k", timeout=10)
+        self.assertNotIn("Syntax error", client.text())
+        history = terminal.history()
+        self.assertFalse(history.integrated)
+        self.assertEqual(history.spans, ())
 
 
 if __name__ == "__main__":

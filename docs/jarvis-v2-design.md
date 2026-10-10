@@ -1773,11 +1773,12 @@ sends no Origin, and it is still not a boundary against a program running as
 the owner, which can forge an Origin and fetch a ticket — the takeover
 question and `sudo -k` are what limit such a program. Output exists in the
 ring and the browser only: never on the bus, in a log, a thread log,
-Discord or disk. The startup file (`terminal_rc.sh`) reads the login files,
-sets `alias sudo='sudo -k'`, and emits OSC 133 marks signed with a
-per-terminal nonce, which the daemon turns into per-command spans over the
-ring — what WP-F's `terminal_read` needs to refuse the output of `env`,
-`gh auth token` and the rest (W-2, item 3). Each terminal carries the
+Discord or disk. The startup file (`terminal_rc.bash`; a POSIX
+`terminal_rc.sh` for any other shell, which marks only the prompt) reads the
+login files, sets `alias sudo='sudo -k'`, and emits OSC 133 marks signed
+with a per-terminal nonce, which the daemon turns into per-command spans
+over the ring — what WP-F's `terminal_read` needs to refuse the output of
+`env`, `gh auth token` and the rest (W-2, item 3). Each terminal carries the
 owner's `readable` switch, on by default. Contract: `docs/hud-api.md`.
 
 Remaining: WP13 (the long-bench comparison, the owner's call on cost), a

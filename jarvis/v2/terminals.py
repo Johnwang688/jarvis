@@ -61,11 +61,14 @@ owner's browser. It never goes to the bus, a log (the daemon log gets
 lifecycle lines only: opened, attached, exited, closed, with the folder as a
 project name or `~`), a session or thread log, Discord, or disk.
 
-**Shell integration (W-2, item 3).** The startup file (`terminal_rc.sh`)
-emits OSC 133 marks carrying a per-terminal nonce; `Marks` turns them into
+**Shell integration (W-2, item 3).** The startup file (`terminal_rc.bash`
+for bash, `terminal_rc.sh` as `$ENV` for any other shell) emits OSC 133
+marks carrying a per-terminal nonce; `Marks` turns them into
 `CommandSpan`s over the ring's byte offsets, so WP-F's `terminal_read` can
-refuse a read covering a secret-printing command's output. `readable` is the
-owner's "Jarvis can read" switch, on by default; nothing reads it yet.
+refuse a read covering a secret-printing command's output. Only bash marks
+commands (C and D); `integrated` says whether this terminal has. `readable`
+is the owner's "Jarvis can read" switch, on by default; nothing reads it
+yet.
 """
 from __future__ import annotations
 
@@ -108,7 +111,9 @@ REPLAY_CHUNK = 32 * 1024
 MARK_CAP = 16 * 1024           # an OSC 133 longer than this is not one of ours
 SPAN_CAP = 2000
 COMMAND_CAP = 4096
-RC_PATH = Path(__file__).with_name("terminal_rc.sh")
+# The startup files: bash's --rcfile, and $ENV for any other shell.
+RC_PATHS = {"bash": Path(__file__).with_name("terminal_rc.bash"),
+            "posix": Path(__file__).with_name("terminal_rc.sh")}
 _ID = re.compile(r"[0-9a-f]{8}")
 
 # The environment a terminal starts from: names that pass, and names that
@@ -230,11 +235,15 @@ def clean_environment(shell: str, *, source=None, env_file: Path | None = None) 
     return env
 
 
+def rc_kind(shell: str) -> str:
+    return "bash" if os.path.basename(shell) == "bash" else "posix"
+
+
 def shell_command(shell: str, rcfile: str) -> tuple[list[str], dict]:
-    """argv and extra environment. bash takes the startup file as its
+    """argv and extra environment. bash takes `terminal_rc.bash` as its
     --rcfile (the file then reads the login files itself); any other shell
-    starts as a login shell and reads it as $ENV (POSIX)."""
-    if os.path.basename(shell) == "bash":
+    starts as a login shell and reads `terminal_rc.sh` as $ENV (POSIX)."""
+    if rc_kind(shell) == "bash":
         return [shell, "--rcfile", rcfile, "-i"], {}
     return [shell, "-l"], {"ENV": rcfile}
 
@@ -413,7 +422,6 @@ class Marks:
         nonce = values.get(b"jarvis")
         if nonce is None or not hmac.compare_digest(nonce, self._nonce):
             return
-        self.integrated = True
         open_span = self._open()
         if kind == b"A":
             if open_span is not None:           # a prompt with no D: it ended there
@@ -424,6 +432,7 @@ class Marks:
                 open_span.end = start
             command = unquote_to_bytes(values.get(b"cmdline_url", b"")).decode("utf-8", "replace")
             self.spans.append(CommandSpan(command[:COMMAND_CAP], start=end, prompt=self._prompt))
+            self.integrated = True              # output is attributed to commands from here on
         elif kind == b"D" and open_span is not None:
             open_span.end = start
             if extras and re.fullmatch(rb"-?\d{1,6}", extras[0]):
@@ -804,21 +813,21 @@ class Terminals:
         self._terminals: dict[str, Terminal] = {}
         self._tickets: dict[str, tuple[str, float]] = {}
         self._clock = clock
-        self._rc_text: str | None = None
+        self._rc_text: dict[str, str] = {}
         self._rc_dir: Path | None = None
         self._stopped = False
 
-    def _rcfile(self, tid: str, nonce: str) -> Path:
-        """This terminal's private copy of the startup file, with its nonce.
-        The shipped file is read once per daemon, like the code beside it."""
-        if self._rc_text is None:
-            self._rc_text = RC_PATH.read_text(encoding="utf-8")
+    def _rcfile(self, tid: str, nonce: str, kind: str) -> Path:
+        """This terminal's private copy of its startup file, with its nonce.
+        Each shipped file is read once per daemon, like the code beside it."""
+        if kind not in self._rc_text:
+            self._rc_text[kind] = RC_PATHS[kind].read_text(encoding="utf-8")
         if self._rc_dir is None:
             self._rc_dir = Path(tempfile.mkdtemp(prefix="jarvis-terminals-"))   # mode 700
-        path = self._rc_dir / f"rc-{tid}.sh"
+        path = self._rc_dir / f"rc-{tid}.{'bash' if kind == 'bash' else 'sh'}"
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(f"__jarvis_nonce='{nonce}'\n{self._rc_text}")
+            handle.write(f"__jarvis_nonce='{nonce}'\n{self._rc_text[kind]}")
         return path
 
     def create(self, folder: str, *, project_id: str | None, label: str,
@@ -835,7 +844,7 @@ class Terminals:
             while tid in self._terminals:
                 tid = secrets.token_hex(4)
             nonce = secrets.token_hex(16)
-            rcfile = self._rcfile(tid, nonce)
+            rcfile = self._rcfile(tid, nonce, rc_kind(shell))
             terminal = Terminal(tid, shell=shell, folder=folder, project_id=project_id,
                                 label=label, cols=cols, rows=rows, nonce=nonce, rcfile=rcfile)
             argv, extra = shell_command(shell, str(rcfile))

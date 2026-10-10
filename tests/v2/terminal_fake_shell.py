@@ -5,7 +5,7 @@
 real login shell. Its name is not `bash`, so the daemon starts it the way it
 starts any non-bash shell: `-l`, with the terminal's startup file as `$ENV`.
 It reads the per-terminal nonce out of that file and emits the same OSC 133
-marks `terminal_rc.sh` makes bash emit, around a handful of commands:
+marks `terminal_rc.bash` makes bash emit, around a handful of commands:
 
   echo TEXT        print TEXT
   size             run `stty size` against its own terminal

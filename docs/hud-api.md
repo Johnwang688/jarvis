@@ -771,8 +771,9 @@ tool, MCP tool, fast-path tool or Discord verb names these routes.
   "Jarvis can read" switch (W-2), **on for every new terminal**; nothing
   reads it yet (WP-F's `terminal_read` will refuse a terminal with it off).
   `busy`: the PTY's foreground process is not the shell — the HUD asks
-  before closing then. `integrated`: the shell emits the startup file's
-  shell-integration marks.
+  before closing then. `integrated`: the shell has marked a command with
+  the startup file's shell-integration marks (bash does; other shells mark
+  only their prompt).
 - `POST /terminals` `{in, cols?, rows?}` → 201 `row`. `in` is `"home"`,
   `{"thread": id}` (that thread's own folder, `cwd`), `{"project": id}` (its
   root) or `{"task": id}` (its worktree if it exists, else the root it was
@@ -832,16 +833,17 @@ and display variables, `TERM=xterm-256color`, `COLORTERM=truecolor`,
 `PYTHONPATH`, `BASH_ENV`, `PROMPT_COMMAND`, or anything `JARVIS_*`,
 `ANTHROPIC_*`, `CLAUDE_*`, `CODEX_*`, `OPENAI_*`.
 
-**The startup file** (`jarvis/v2/terminal_rc.sh`, bash's `--rcfile`, any
-other shell's `$ENV`): bash first reads what a login shell reads
-(`/etc/profile`, then the first of `~/.bash_profile`, `~/.bash_login`,
-`~/.profile`); then `alias sudo='sudo -k'` (W-5: sudo never caches here);
-then OSC 133 marks, each carrying `jarvis=<per-terminal nonce>` — A (prompt
-start), B (prompt end), C with `cmdline_url=<percent-encoded command line>`
-(the command runs), D with its exit status. The daemon records them as
-per-command spans over the output ring (`Terminal.history()`, for WP-F);
-a mark without the nonce is ignored. xterm ignores OSC 133, so the HUD
-needs to do nothing with them.
+**The startup files** (`jarvis/v2/terminal_rc.bash`, bash's `--rcfile`;
+`jarvis/v2/terminal_rc.sh`, POSIX, any other shell's `$ENV` after `-l`):
+bash first reads what a login shell reads (`/etc/profile`, then the first
+of `~/.bash_profile`, `~/.bash_login`, `~/.profile`); both set `alias
+sudo='sudo -k'` (W-5: sudo never caches here); then OSC 133 marks, each
+carrying `jarvis=<per-terminal nonce>` — A (prompt start), B (prompt end),
+and in bash also C with `cmdline_url=<percent-encoded command line>` (the
+command runs) and D with its exit status. The daemon records them as
+per-command spans over the output ring (`Terminal.history()`, for WP-F); a
+mark without the nonce is ignored. xterm ignores OSC 133, so the HUD needs
+to do nothing with them.
 
 **Output never leaves memory**: it is not on the bus (terminals publish no
 event at all; the HUD lists them with `GET /terminals` and learns of an

@@ -345,8 +345,10 @@ ticket). **No tool, MCP tool, fast-path tool or Discord verb may reach
 never leaves memory**: no bus record (terminals publish nothing), no log line
 (lifecycle only, and `/terminals` paths are logged without their query — the
 ticket rides in it), no thread log, Discord or disk. The startup file
-`jarvis/v2/terminal_rc.sh` (bash `--rcfile` with login emulation, else
-`$ENV`) sets `alias sudo='sudo -k'` (W-5) and emits OSC 133 A/B/C(with the
+`jarvis/v2/terminal_rc.bash` (bash `--rcfile` with login emulation; any
+other shell gets the POSIX `terminal_rc.sh` as `$ENV`, kept apart because a
+dash parses every line, so bash syntax cannot hide behind an `if`) sets
+`alias sudo='sudo -k'` (W-5) and emits OSC 133 A/B/C(with the
 `cmdline_url`)/D marks **signed with a per-terminal nonce**, parsed into
 `CommandSpan`s over the ring (`Terminal.history()`, for WP-F's
 `terminal_read`, which does not exist yet — when it lands, `terminal_check`'s
