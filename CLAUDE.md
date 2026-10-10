@@ -495,6 +495,32 @@ helpers at the top of `hud_v2_check.py` (`pick_model`, `pick_effort`,
 `chip_model`…); a read made while a dialog's veil is up must use the button's
 text, because the popover cannot be opened under a veil.
 
+**The effort is a slider, not pills (2026-10-10, owner's ask: "like Claude's").**
+`components/EffortSlider.tsx`, rules in `lib/effortSlider.ts`: "Effort
+<level> · default (?)", Faster … Smarter, a dot per stop, a tick with
+**Default** under the default stop, a warm-white thumb. **The stops are exactly
+the levels the pills offered** (the effective model's ladder, or the provider's
+words when it is unknown — `ultra` is a stop on Codex only, and no ladder means
+no slider), sorted Faster → Smarter; `xhigh` reads "Extra". The pills' `default
+· high` is not a stop of its own: it is the stop it names, and **choosing it
+clears the effort to null** (A4/A6 unchanged: `applyEffort` + `patchBody`, a
+default thread stays unpinned); a default that names no level becomes a leading
+"Default" stop. **One change, one request**: a drag previews and commits on
+release, a click commits at once, arrows/Home/End commit once 350 ms after the
+last key (`SETTLE_MS`) or at once on blur or when the popover closes, and a
+commit that lands where the thread already is sends nothing. **Only the latest
+answer is drawn**: a sequence number in the slider, and one per thread in
+`ThreadModelControls.change` (its write after the PATCH) — the SSE
+`thread_updated` still carries every change in the daemon's order. Pointer math
+goes through `toCss` against the rail's own `offsetWidth`. Keys stop at the
+slider (Space is never push-to-talk) as well as at the popover. The popover now
+stays open while the slider moves. The Model picker's per-model `<select>` and
+the provider-default dialog's `pd-effort` are still selects. Free checks:
+`effortSlider.test.ts`, `EffortSlider.test.ts` (jsdom: keys, settle, unmount
+commit, the sequence guard) and `effort_slider_checks` in `hud_v2_check.py`
+(drives it like the owner, at 70% and 160%; the mock's `patch_delays` holds a
+PATCH's answer to make one arrive late).
+
 **Sidebar status dots (2026-10-08, design §18; contract in
 `docs/hud-api.md`).** The `·` left of each sidebar thread and task is what it
 is doing: idle `·`, working (pulsing ring, sweeping row), needs input

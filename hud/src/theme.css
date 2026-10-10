@@ -722,7 +722,6 @@ details.decisions[open] summary { color: var(--text); margin-bottom: 8px; }
   color: var(--text-muted); padding: 6px 6px 3px;
 }
 .mpop .mlist { display: flex; flex-direction: column; }
-.mpop .mefforts { display: flex; flex-wrap: wrap; gap: 4px; padding: 2px 4px 4px; }
 .mpop button.mopt {
   text-align: left; background: transparent; border: 1px solid transparent; border-radius: 4px;
   padding: 5px 8px; font: 12px var(--mono); color: var(--text-2);
@@ -730,7 +729,43 @@ details.decisions[open] summary { color: var(--text); margin-bottom: 8px; }
 .mpop button.mopt:hover:not(:disabled) { background: var(--hover); color: var(--text); }
 .mpop button.mopt.sel { background: var(--accent-soft); border-color: var(--accent-line); color: var(--text); }
 .mpop button.mopt.search { color: var(--accent); }
-.mpop button.mopt.pill { border-radius: 10px; border-color: var(--border-strong); padding: 3px 9px; font-size: 11px; }
+/* The effort slider (components/EffortSlider, 2026-10-10): Faster → Smarter,
+   the way Claude's app draws it. Neutral throughout — a raised track, muted
+   dots, a warm-white thumb; the accent is the focus ring only, and amber and
+   red never appear (they mean pending and error). Stops sit on a rail inset
+   by half the thumb, so the end stops' thumb stays inside the track. */
+.mpop .eslider { padding: 8px 8px 2px; display: flex; flex-direction: column; gap: 6px; }
+.eslider .es-head { display: flex; align-items: baseline; gap: 7px; font-size: 13px; }
+.eslider .es-title { color: var(--text-muted); }
+.eslider .es-level { color: var(--text); font-weight: 600; }
+.eslider .es-note { color: var(--text-muted); font-size: 12px; margin-left: -3px; }
+.eslider .es-help {
+  margin-left: auto; align-self: center; width: 15px; height: 15px; border-radius: 50%;
+  border: 1px solid var(--text-muted); color: var(--text-muted); cursor: help;
+  font: 600 10px/13px "Segoe UI", system-ui, sans-serif; text-align: center;
+}
+.eslider .es-ends { display: flex; justify-content: space-between; color: var(--text-muted); font-size: 12px; margin-top: 2px; }
+.eslider .es-track {
+  position: relative; height: 28px; border-radius: 8px; cursor: pointer; touch-action: none;
+  background: var(--bg-3); border: 1px solid var(--border); outline: none;
+}
+.eslider .es-track:focus-visible { box-shadow: var(--focus-ring); }
+.eslider .es-rail { position: absolute; top: 0; bottom: 0; left: 13px; right: 13px; }
+.eslider .es-dot, .eslider .es-tick, .eslider .es-thumb { position: absolute; pointer-events: none; }
+.eslider .es-dot {
+  top: 50%; width: 4px; height: 4px; margin: -2px 0 0 -2px; border-radius: 50%;
+  background: var(--text-muted); opacity: 0.6;
+}
+.eslider .es-tick { top: 50%; width: 2px; height: 12px; margin: -6px 0 0 -1px; border-radius: 1px; background: var(--text-2); }
+.eslider .es-thumb {
+  top: 3px; bottom: 3px; width: 24px; margin-left: -12px; border-radius: 6px;
+  background: var(--text); box-shadow: 0 1px 3px rgba(0, 0, 0, 0.55); transition: left 90ms ease-out;
+}
+.eslider .es-under { position: relative; height: 16px; margin: 0 14px; color: var(--text-muted); font-size: 12px; }
+.eslider .es-dlabel { position: absolute; top: 0; transform: translateX(-50%); white-space: nowrap; }
+/* At an end stop it lines up with the track's end instead, inside the popover. */
+.eslider .es-dlabel.first { transform: translateX(-13px); }
+.eslider .es-dlabel.last { transform: translateX(calc(-100% + 13px)); }
 .mpop .mfoot { border-top: 1px solid var(--border); margin-top: 4px; padding: 6px 4px 2px; display: flex; }
 .badge.pin { color: var(--text-2); text-transform: none; max-width: 110px; overflow: hidden;
              text-overflow: ellipsis; white-space: nowrap; }

@@ -6,7 +6,7 @@
 // and the chip shows only what the server holds: a refusal leaves it where it
 // was, with the server's own words beside it.
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import type { Action, State } from "../state/store";
 import type { ModelRow } from "../types";
@@ -56,8 +56,10 @@ export function useThreadModel(state: State, dispatch: React.Dispatch<Action>, o
   const project = composing ? state.projects.find((p) => p.id === state.compose?.projectId) : undefined;
   const refusals = Object.fromEntries(PROVIDERS.map((p) => [p, providerRefusal(models, p, project)]));
 
+  // Per thread: the sequence number of its latest model or effort change.
+  const latest = useRef<Record<string, number>>({});
   const change = useCallback(
-    (next: Choice) => {
+    (next: Choice): Promise<void> | undefined => {
       setError("");
       if (composing && state.compose) {
         // Composing: kept here, sent with the first message, nothing before.
@@ -71,16 +73,25 @@ export function useThreadModel(state: State, dispatch: React.Dispatch<Action>, o
       const body = patchBody(choice, next);
       if (!body) return;
       const opened = state.compose?.openedId === targetId ? state.compose : null;
-      api
+      // Only this thread's latest change may write what it answers: the
+      // effort slider can send two in quick succession, and an older answer
+      // arriving late must not move it back. The SSE `thread_updated` still
+      // carries every change, in the order the daemon made them.
+      const n = (latest.current[targetId] = (latest.current[targetId] || 0) + 1);
+      const isLatest = () => latest.current[targetId] === n;
+      return api
         .setThreadModel(targetId, body)
         .then((record) => {
+          if (!isLatest()) return;
           dispatch({ type: "thread_patch", id: record.id, patch: record });
           // An opened-but-unsent thread's chips read the compose row: keep it
           // on what the server now holds.
           if (opened)
             dispatch({ type: "patch", patch: { compose: { ...opened, model: record.model ?? null, effort: record.effort ?? null } } });
         })
-        .catch((e) => setError(`Could not change model: ${e.message}`));
+        .catch((e) => {
+          if (isLatest()) setError(`Could not change model: ${e.message}`);
+        });
     },
     [composing, state.compose, choice, targetId, dispatch],
   );

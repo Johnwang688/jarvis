@@ -1,7 +1,9 @@
 // provider ▾ · model · effort ▾, beside `in: <project> ▾` in the input bar
 // (decisions 2026-10-06, part A). Since 2026-10-10 the model and effort are one
 // button that opens one popover with a Model section and an Effort section
-// (and the provider's "set default"); the provider stays a select.
+// (and the provider's "set default"); the provider stays a select. The effort
+// is a slider (components/EffortSlider), and the popover stays open while it
+// moves; Escape or a click outside closes it.
 //
 // While composing every chip is free and nothing reaches the server: the
 // choice rides the first message's `POST /threads`. After it the provider is
@@ -19,8 +21,9 @@ import type { ModelRow, ProviderName } from "../types";
 import {
   PROVIDERS, PROVIDER_LABELS, SEARCH, applyEffort, applyModel, applyProvider, canSetDefault,
   defaultChosenHere, defaultEffortOptions, defaultModel, defaultRows, defaultSourceLabel, effective,
-  effortOptions, modelLabel, modelOptions, resetTitle, shortId, type Choice, type ThreadModels,
+  modelLabel, modelOptions, resetTitle, shortId, type Choice, type ThreadModels,
 } from "../lib/threadmodel";
+import { EffortSlider } from "./EffortSlider";
 
 const stop = (e: React.KeyboardEvent) => e.stopPropagation();
 
@@ -33,7 +36,9 @@ export function ModelChip(props: {
   modelEditable: boolean;
   disabled?: boolean;
   error?: string;
-  onChange: (next: Choice) => void;
+  /** May return the request's promise: the effort slider draws its change
+   * until that settles. */
+  onChange: (next: Choice) => void | Promise<unknown>;
   onSearch: () => void;
   /** Per provider, why the project cannot use it (greyed out), or null. */
   refusals?: Partial<Record<ProviderName, string | null>>;
@@ -43,7 +48,6 @@ export function ModelChip(props: {
   const c = props.choice;
   const refused = props.refusals?.[c.provider] || null;
   const eff = effective(props.models, c);
-  const efforts = effortOptions(props.models, c);
   const title = props.modelEditable
     ? props.providerEditable
       ? "Chosen for this new thread; sent with its first message"
@@ -126,30 +130,12 @@ export function ModelChip(props: {
                   </button>
                 ))}
               </div>
-              {efforts.length ? (
-                <>
-                  <div className="msec">Effort</div>
-                  <div className="mefforts" role="listbox" aria-label="Effort" data-testid="effort-list">
-                    {efforts.map((o) => (
-                      <button
-                        type="button"
-                        key={o.value}
-                        role="option"
-                        aria-selected={o.value === (c.effort ?? "")}
-                        className={"mopt pill" + (o.value === (c.effort ?? "") ? " sel" : "")}
-                        data-testid="effort-opt"
-                        data-value={o.value}
-                        onClick={() => {
-                          props.onChange(applyEffort(props.models, c, o.value || null));
-                          setOpen(false);
-                        }}
-                      >
-                        {o.label}
-                      </button>
-                    ))}
-                  </div>
-                </>
-              ) : null}
+              <EffortSlider
+                models={props.models}
+                choice={c}
+                disabled={props.disabled}
+                onCommit={(effort) => props.onChange(applyEffort(props.models, c, effort))}
+              />
               {props.onDefaults && canSetDefault(props.models, c.provider) ? (
                 <div className="mfoot">
                   <button

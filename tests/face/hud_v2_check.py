@@ -1883,12 +1883,36 @@ def model_labels(page):
     return _peek(page, lambda: page.locator('[data-testid="model-opt"]').all_inner_texts())
 
 
-def effort_labels(page):
-    return _peek(page, lambda: page.locator('[data-testid="effort-opt"]').all_inner_texts())
+# The effort is a slider since 2026-10-10 (components/EffortSlider): its stops
+# are `data-stops`, the thumb is `aria-valuenow`, the default stop is
+# `data-default`, and the words are `aria-valuetext` and the header.
+SLIDER = '[data-testid="effort-slider"]'
+
+
+def _slider_now(page):
+    s = page.locator(SLIDER)
+    if s.count() == 0:
+        return None
+    return {"stops": (s.get_attribute("data-stops") or "").split(","),
+            "now": int(s.get_attribute("aria-valuenow") or -1),
+            "default": int(s.get_attribute("data-default") or -1),
+            "min": s.get_attribute("aria-valuemin"), "max": s.get_attribute("aria-valuemax"),
+            "text": s.get_attribute("aria-valuetext"),
+            "head": " ".join(page.locator('[data-testid="effort-section"] .es-head').inner_text().split())}
+
+
+def effort_state(page):
+    return _peek(page, lambda: _slider_now(page))
 
 
 def has_effort(page):
-    return _peek(page, lambda: page.locator('[data-testid="effort-list"]').count() > 0)
+    return _peek(page, lambda: page.locator(SLIDER).count() > 0)
+
+
+def click_stop(page, i):
+    """Click stop `i`'s own spot on the track, as a pointer does."""
+    box = page.locator('[data-testid="effort-stop"]').nth(i).bounding_box()
+    page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
 
 
 def has_defaults_button(page):
@@ -1901,9 +1925,14 @@ def pick_model(page, value):
 
 
 def pick_effort(page, value):
+    """Click the level's stop ("" is the default stop), then close the
+    popover: it stays open while the slider moves."""
     open_pop(page)
-    page.locator(f'[data-testid="effort-opt"][data-value="{value}"]').click()
-    until(lambda: page.locator(POP).count() == 0)
+    st = _slider_now(page)
+    i = st["default"] if value == "" else st["stops"].index(value)
+    click_stop(page, i)
+    until(lambda: page.locator(SLIDER).get_attribute("aria-valuenow") == str(i))
+    close_pop(page)
 
 
 def open_defaults(page):
@@ -1932,9 +1961,11 @@ def thread_model_checks(page, mock):
           page.locator(CHIP_BTN).inner_text().strip().startswith("default · gpt-5.6-luna · high"),
           page.locator(CHIP_BTN).inner_text())
     open_pop(page)
-    check("the popover has a Model section and an Effort section",
-          [t.strip() for t in page.locator(POP + " .msec").all_inner_texts()] == ["MODEL", "EFFORT"]
-          or [t.strip().lower() for t in page.locator(POP + " .msec").all_inner_texts()] == ["model", "effort"],
+    check("the popover has a Model section and an Effort slider",
+          [t.strip().lower() for t in page.locator(POP + " .msec").all_inner_texts()] == ["model"]
+          and page.locator(POP + ' [data-testid="effort-section"]').count() == 1
+          and page.locator(POP + " " + SLIDER).count() == 1
+          and page.locator('[data-testid="effort-opt"]').count() == 0,
           str(page.locator(POP + " .msec").all_inner_texts()))
     page.keyboard.press("Escape")
     check("Escape closes it", until(lambda: page.locator(POP).count() == 0) is True)
@@ -1946,8 +1977,10 @@ def thread_model_checks(page, mock):
           == ["OpenRouter", "Claude", "Codex"])
     check("the catalogue search is the last model entry",
           model_labels(page)[-1] == "search catalogue…")
+    st = effort_state(page)
     check("the effort defaults to high",
-          effort_labels(page)[0] == "default · high")
+          st["stops"][st["default"]] == "high" and st["now"] == st["default"]
+          and st["text"] == "High, default" and st["head"].startswith("Effort High · default"), str(st))
 
     since = len(mock.calls)
     page.locator('[data-testid="provider-chip-select"]').select_option("claude")
@@ -2146,6 +2179,240 @@ def thread_model_checks(page, mock):
     check("a task's thread shows its model read-only",
           bool(ro) and "gpt-5.6-sol" in ro and page.locator(CHIP_BTN).count() == 0,
           str(ro))
+
+
+def effort_slider_checks(page, mock):
+    """The effort slider (2026-10-10), in place of the pills: one change is one
+    request (a drag on release, a click at once, keys once they settle), the
+    default stop clears the effort to null, a click lands on the stop under the
+    pointer at any zoom, Space on it is not push-to-talk, nothing is reachable
+    under a card, and a late older answer never moves the thumb back."""
+    print("\nthe effort slider")
+    from tests.face import hud_v2_mock
+    w = mock.world
+    tid = "es1"
+    w["threads"].append({
+        "id": tid, "project_id": "p1", "role": "chat", "provider": "claude",
+        "provider_session_id": None, "task_id": None, "title": "effort slider", "created": "",
+        "updated": "", "turns": 1, "cost_usd": 0, "tokens": 0, "model": None, "effort": None,
+        "cwd": None})
+    mock.emit("thread_opened", {}, thread_id=tid)
+    until(lambda: any(t["id"] == tid for t in page.evaluate("window.__hud.state().threads")))
+    page.evaluate(f"window.__hud.dispatch({{type: 'patch', patch: {{threadId: '{tid}', compose: null}}}})")
+    until(lambda: page.locator(CHIP_BTN).count() > 0 and chip_model(page) == "")
+
+    def patches():
+        return mock.sent("PATCH", f"/threads/{tid}")
+
+    def record():
+        return page.evaluate(f"window.__hud.state().threads.find(t => t.id === '{tid}')") or {}
+
+    def settled(n, quiet=0.6):
+        """The PATCHes sent since `n`, once the slider has had time to send more."""
+        until(lambda: len(patches()) > n)
+        time.sleep(quiet)
+        return patches()[n:]
+
+    def centre(box):
+        return box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
+
+    slider = page.locator(SLIDER)
+    open_pop(page)
+    st = _slider_now(page)
+    check("Claude's slider runs Faster → Smarter over the model's own ladder",
+          st["stops"] == ["low", "medium", "high", "xhigh", "max"] and st["min"] == "0" and st["max"] == "4"
+          and page.locator('[data-testid="effort-section"] .es-ends').inner_text().split() == ["Faster", "Smarter"],
+          str(st))
+    check("it is a focusable slider that names its level, and says default",
+          slider.get_attribute("role") == "slider" and slider.get_attribute("tabindex") == "0"
+          and st["text"] == "High, default" and st["head"] == "Effort High · default ?", str(st))
+    dflt = page.locator('[data-testid="effort-stop"]').nth(st["default"])
+    tick, label = dflt.bounding_box(), page.locator('[data-testid="effort-default-label"]').bounding_box()
+    check("the default stop carries the tick, with Default under it",
+          dflt.get_attribute("data-default") == "1" and dflt.get_attribute("class") == "es-tick"
+          and abs(centre(tick)[0] - centre(label)[0]) < 2 and label["y"] > tick["y"], f"{tick} {label}")
+    check("the (?) says what effort is",
+          "slower and smarter" in (page.locator('[data-testid="effort-help"]').get_attribute("title") or ""))
+
+    # Keys: the thumb moves at once, and one PATCH goes after they settle.
+    slider.focus()
+    n = len(patches())
+    page.keyboard.press("ArrowRight")
+    page.keyboard.press("ArrowRight")
+    moved = _slider_now(page)
+    time.sleep(0.15)
+    check("arrow keys move the thumb at once, and send nothing yet",
+          moved["now"] == 4 and moved["text"] == "Max" and len(patches()) == n, f"{moved} {patches()[n:]}")
+    check("once they settle, one PATCH of the effort alone", settled(n) == [{"effort": "max"}],
+          str(patches()[n:]))
+    check("the popover stays open while it moves", page.locator(POP).count() == 1)
+    check("and the thread stays on the default model",
+          until(lambda: record().get("effort") == "max") is True and record().get("model") is None
+          and chip_model(page) == "", str(record()))
+    for key, want in (("Home", "low"), ("End", "max")):
+        n = len(patches())
+        page.keyboard.press(key)
+        check(f"{key} commits once", settled(n) == [{"effort": want}], str(patches()[n:]))
+    n = len(patches())
+    page.keyboard.press("ArrowLeft")
+    page.keyboard.press("ArrowRight")
+    time.sleep(0.8)
+    check("keys that end where they began send nothing", len(patches()) == n, str(patches()[n:]))
+
+    # The default stop clears the effort to null: the thread follows the default.
+    n = len(patches())
+    page.keyboard.press("ArrowLeft")
+    page.keyboard.press("ArrowLeft")
+    check("keying back to the default stop clears the effort to null",
+          settled(n) == [{"effort": None}], str(patches()[n:]))
+    check("and the header says default again",
+          until(lambda: record().get("effort", "x") is None) is True
+          and until(lambda: _slider_now(page)["text"] == "High, default") is True, str(_slider_now(page)))
+
+    # A drag across every stop previews each and sends one PATCH, on release.
+    boxes = [page.locator('[data-testid="effort-stop"]').nth(i).bounding_box() for i in range(5)]
+    n = len(patches())
+    page.mouse.move(*centre(boxes[0]))
+    page.mouse.down()
+    seen = [_slider_now(page)["now"]]
+    for b in boxes[1:]:
+        page.mouse.move(*centre(b), steps=4)
+        seen.append(_slider_now(page)["now"])
+    during = len(patches()) - n
+    page.mouse.up()
+    check("a drag previews each stop it crosses", seen == [0, 1, 2, 3, 4], str(seen))
+    check("and sends nothing while it moves", during == 0, str(patches()[n:]))
+    check("then exactly one PATCH, on release, for where it ended", settled(n) == [{"effort": "max"}],
+          str(patches()[n:]))
+
+    n = len(patches())
+    click_stop(page, st["default"])
+    check("a click on the default stop clears the effort to null", settled(n) == [{"effort": None}],
+          str(patches()[n:]))
+    check("and leaves the thread unpinned",
+          until(lambda: record().get("effort", "x") is None) is True and record().get("model") is None
+          and chip_model(page) == "" and chip_effort(page) == "", str(record()))
+
+    # A key move still settling when the popover closes is committed, not lost.
+    slider.focus()
+    n = len(patches())
+    page.keyboard.press("ArrowLeft")
+    page.keyboard.press("Escape")
+    check("closing the popover commits a key move still settling, once",
+          until(lambda: page.locator(POP).count() == 0) is True and settled(n) == [{"effort": "medium"}],
+          str(patches()[n:]))
+
+    # The HUD is CSS-zoomed: a click lands on the stop under the pointer anyway.
+    def press_on_body(keys):
+        page.evaluate("document.activeElement && document.activeElement.blur()")
+        page.keyboard.press(keys)
+
+    for zoom, keys in ((70, ["Control+Minus"] * 3), (160, ["Control+Equal"] * 9)):
+        for k in keys:
+            press_on_body(k)
+        until(lambda: abs(float(page.evaluate(
+            "getComputedStyle(document.documentElement).getPropertyValue('--ui-zoom')") or 0) - zoom / 100) < 1e-6)
+        open_pop(page)
+        st = _slider_now(page)
+        bad = []
+        for i in (4, 0, 3, 1, 2):
+            n = len(patches())
+            click_stop(page, i)
+            want = None if i == st["default"] else st["stops"][i]
+            got = settled(n, quiet=0.3)
+            until(lambda: _slider_now(page)["now"] == i, timeout=2)
+            stop = centre(page.locator('[data-testid="effort-stop"]').nth(i).bounding_box())
+            thumb = centre(page.locator('[data-testid="effort-thumb"]').bounding_box())
+            if got != [{"effort": want}] or _slider_now(page)["now"] != i or abs(stop[0] - thumb[0]) > 2:
+                bad.append(f"stop {i}: sent {got}, thumb at {_slider_now(page)['now']} ({thumb[0]:.0f} vs {stop[0]:.0f})")
+        check(f"at {zoom}% a click lands on the stop under the pointer, and the thumb with it",
+              not bad, "; ".join(bad))
+        close_pop(page)
+    press_on_body("Control+0")
+    until(lambda: abs(float(page.evaluate(
+        "getComputedStyle(document.documentElement).getPropertyValue('--ui-zoom')") or 0) - 1) < 1e-6)
+
+    # Space on the slider is not push-to-talk, and moves nothing.
+    open_pop(page)
+    slider.focus()
+    n = len(patches())
+    muted = page.locator('[data-testid="dictation-off"]').get_attribute("aria-pressed") == "true"
+    page.keyboard.down("Space")
+    time.sleep(0.15)
+    ptt = page.evaluate("window.__hud.capture.ptt")
+    page.keyboard.up("Space")
+    time.sleep(0.5)
+    check("Space on the slider does not start push-to-talk",
+          not muted and ptt is None and len(patches()) == n, f"muted={muted} ptt={ptt} {patches()[n:]}")
+
+    # A late older answer: the first change's answer arrives after the second's.
+    w["patch_delays"] = [1.2]
+    n = len(patches())
+    start = _slider_now(page)
+    page.keyboard.press("ArrowRight")
+    until(lambda: len(patches()) > n)          # the first is in; its answer is held
+    page.keyboard.press("ArrowRight")
+    until(lambda: len(patches()) > n + 1)
+    time.sleep(1.6)                            # the held answer has landed now
+    end = _slider_now(page)
+    want = start["stops"][start["now"] + 2]
+    check("a late older answer does not move the thumb back",
+          [b.get("effort") for b in patches()[n:]] == [start["stops"][start["now"] + 1], want]
+          and end["stops"][end["now"]] == want and record().get("effort") == want,
+          f"{patches()[n:]} thumb={end['stops'][end['now']]} record={record().get('effort')}")
+    w.pop("patch_delays", None)
+
+    # Under a card nothing new is reachable: the popover closes, the chip is off.
+    slider.focus()
+    req = {"req_id": "es-card", "code": "ES01", "tool": "run_command", "args": {"command": "ls"},
+           "command": "ls", "reason": "", "layer": "human", "thread_id": tid, "task_id": None,
+           "provider": "claude", "origin": "", "asked_at": "2026-09-15T00:02:00+00:00",
+           "allowlistable": True, "timeout_s": 120}
+    mock.emit("approval_requested", req)
+    until(lambda: page.locator('[data-testid="approval-card"]').count() > 0)
+    n = len(patches())
+    check("a card closes the popover: the slider is gone",
+          until(lambda: page.locator(SLIDER).count() == 0) is True)
+    check("and the chip that opens it is disabled", page.locator(CHIP_BTN).is_disabled())
+    page.keyboard.press("ArrowRight")
+    page.keyboard.press("End")
+    time.sleep(0.6)
+    check("keys reach no slider under a card", len(patches()) == n and page.locator(POP).count() == 0,
+          str(patches()[n:]))
+    mock.emit("approval_resolved", {"req_id": "es-card", "decision": "deny"})
+    until(lambda: page.locator('[data-testid="approval-card"]').count() == 0)
+    until(lambda: not page.locator(CHIP_BTN).is_disabled())
+
+    # Ultra is a stop on Codex, at the Smarter end, and nowhere else.
+    sol = {"id": "gpt-6.1-sol", "name": "GPT-6.1 Sol", "vision": True,
+           "efforts": ["low", "medium", "high", "xhigh", "max", "ultra"]}
+    hud_v2_mock.CLI_MODELS["codex"].append(sol)
+    mock.emit("model", {})
+    page.locator('[data-testid="tab-chat"]').click()
+    page.locator('[data-testid="new-thread"]').click()
+    until(lambda: page.locator('[data-testid="provider-chip-select"]').count() > 0)
+    page.locator('[data-testid="project-chip-select"]').select_option("p1")     # an auto project
+    page.locator('[data-testid="provider-chip-select"]').select_option("codex")
+    open_pop(page)
+    until(lambda: page.locator('[data-testid="model-opt"][data-value="gpt-6.1-sol"]').count() > 0)
+    pick_model(page, "gpt-6.1-sol")
+    st = until(lambda: (lambda x: x if x and x["stops"][-1:] == ["ultra"] else None)(_slider_now(page)))
+    check("Codex's slider ends at Ultra", bool(st), str(_slider_now(page)))
+    slider.focus()
+    page.keyboard.press("End")
+    check("and names it", until(lambda: _slider_now(page)["head"].startswith("Effort Ultra")) is True,
+          str(_slider_now(page)))
+    for provider in ("claude", "fast"):
+        page.locator('[data-testid="provider-chip-select"]').select_option(provider)
+        st = until(lambda: (lambda x: x if x and "ultra" not in x["stops"] and x["stops"] != [] else None)(
+            effort_state(page)))
+        check(f"{PROVIDER_NAMES[provider]}'s slider has no Ultra stop", bool(st), str(effort_state(page)))
+    close_pop(page)
+    hud_v2_mock.CLI_MODELS["codex"].remove(sol)
+    mock.emit("model", {})
+
+
+PROVIDER_NAMES = {"fast": "OpenRouter", "claude": "Claude", "codex": "Codex"}
 
 
 def provider_default_checks(page, mock):
@@ -2398,6 +2665,7 @@ def main():
             newproject_checks(page, mock)
             move_checks(page, mock)
             thread_model_checks(page, mock)
+            effort_slider_checks(page, mock)
             provider_default_checks(page, mock)
             # B1: project channels, before part B archives what they link.
             from tests.face.hud_v2_discord_check import discord_link_checks
