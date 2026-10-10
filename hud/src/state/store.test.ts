@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { initialState, reduce, type State } from "./store";
+import { compatActions, flatState, initialState, reduce, type State } from "./store";
+import { emptyChats, type ChatState } from "../lib/chats";
+import type { PaneNo } from "../lib/workspace";
 import type { Thread } from "../types";
 
 const thread = (id: string, over: Partial<Thread> = {}): Thread => ({
@@ -30,29 +32,164 @@ describe("thread_patch", () => {
   });
 });
 
+/** A state with some panes' conversations set. */
+const withChats = (chats: Partial<Record<PaneNo, Partial<ChatState>>>, over: Partial<State> = {}): State => {
+  const all = emptyChats();
+  for (const [n, c] of Object.entries(chats)) all[Number(n) as PaneNo] = { ...all[Number(n) as PaneNo], ...c };
+  return { ...initialState, chats: all, ...over };
+};
+
 describe("steering marks (2026-10-08)", () => {
-  const sent: State = {
-    ...initialState,
-    messages: [
-      { role: "user", text: "first" },
-      { role: "assistant", text: "working on it" },
-      { role: "user", text: "do it in rust instead", local: "local-1", mark: "steering" },
-    ],
-  };
+  const sent = withChats({
+    1: {
+      messages: [
+        { role: "user", text: "first" },
+        { role: "assistant", text: "working on it" },
+        { role: "user", text: "do it in rust instead", local: "local-1", mark: "steering" },
+      ],
+    },
+  });
 
   it("marks this window's message by its local id, then by the daemon's id", () => {
     const queued = reduce(sent, { type: "mark", local: "local-1", patch: { mark: "queued", message_id: "m1" } });
-    expect(queued.messages[2]).toMatchObject({ mark: "queued", message_id: "m1", text: "do it in rust instead" });
+    expect(queued.chats[1].messages[2]).toMatchObject({ mark: "queued", message_id: "m1", text: "do it in rust instead" });
     const ran = reduce(queued, { type: "mark", message_id: "m1", patch: { mark: undefined } });
-    expect(ran.messages[2].mark).toBeUndefined();
+    expect(ran.chats[1].messages[2].mark).toBeUndefined();
     expect(reduce(queued, { type: "mark", message_id: "nope", patch: { mark: "not sent" } })).toBe(queued);
   });
 
   it("takes back only the failed message, never a reply that settled meanwhile", () => {
-    const settled = reduce(sent, { type: "settle", text: "a reply that landed during the send" });
+    const settled = reduce(sent, { type: "settle", pane: 1, text: "a reply that landed during the send" });
     const after = reduce(settled, { type: "unmessage", local: "local-1" });
-    expect(after.messages.map((m) => m.text)).toEqual([
+    expect(after.chats[1].messages.map((m) => m.text)).toEqual([
       "first", "working on it", "a reply that landed during the send",
     ]);
+  });
+
+  it("finds a message in whichever pane holds it", () => {
+    const two = withChats({ 2: { messages: [{ role: "user", text: "in pane two", local: "local-7" }] } });
+    const marked = reduce(two, { type: "mark", local: "local-7", patch: { mark: "queued" } });
+    expect(marked.chats[2].messages[0].mark).toBe("queued");
+    expect(marked.chats[1]).toBe(two.chats[1]);
+    expect(reduce(two, { type: "unmessage", local: "local-7" }).chats[2].messages).toEqual([]);
+  });
+});
+
+describe("several chats: each pane its own conversation (WP-B)", () => {
+  it("draws a delta, a settled reply and a tool only in the pane they name", () => {
+    let s = withChats({ 1: { busy: true, threadId: "a" }, 2: { busy: true, threadId: "b" } });
+    s = reduce(s, { type: "delta", pane: 2, text: "hel" });
+    s = reduce(s, { type: "delta", pane: 2, text: "lo" });
+    expect([s.chats[1].draft, s.chats[2].draft]).toEqual(["", "hello"]);
+    s = reduce(s, { type: "op_start", pane: 2, op: { call_id: "c1", name: "grep", started: 1 } });
+    expect([s.chats[1].ops.length, s.chats[2].ops.length]).toEqual([0, 1]);
+    s = reduce(s, { type: "settle", pane: 2, text: "hello" });
+    expect(s.chats[2].messages.map((m) => m.text)).toEqual(["hello"]);
+    expect(s.chats[1].messages).toEqual([]);
+    expect(s.chats[2].draft).toBe("");
+  });
+
+  it("lets only the voice target's turn move the orb", () => {
+    let s = withChats({ 1: { busy: true }, 2: { busy: true } }, { voiceTarget: 1, orb: "thinking" });
+    s = reduce(s, { type: "op_start", pane: 2, op: { call_id: "c", name: "t", started: 1 } });
+    expect(s.orb).toBe("thinking");
+    s = reduce(s, { type: "chat", pane: 2, patch: { orb: "error", status: "FAILED" } });
+    expect(s.orb).toBe("thinking");
+    expect(s.chats[2].status).toBe("FAILED");
+    s = reduce(s, { type: "op_start", pane: 1, op: { call_id: "d", name: "t", started: 1 } });
+    expect(s.orb).toBe("tool");
+    s = reduce(s, { type: "op_done", pane: 1, call_id: "d", ok: true, summary: "" });
+    expect(s.orb).toBe("thinking");
+    s = reduce(s, { type: "chat", pane: 1, patch: { orb: "idle", busy: false } });
+    expect(s.orb).toBe("idle");
+  });
+
+  it("writes a pane patch's error to the window's error line, whichever pane", () => {
+    const s = reduce(withChats({}, { voiceTarget: 1 }), { type: "chat", pane: 3, patch: { error: "Could not send: x" } });
+    expect(s.error).toBe("Could not send: x");
+    expect((s.chats[3] as any).error).toBeUndefined();
+  });
+
+  it("repaints the orb from the new voice target's turn, but not over the microphone", () => {
+    const s = withChats({ 1: { busy: true }, 2: { busy: false } }, { voiceTarget: 1, orb: "thinking" });
+    expect(reduce(s, { type: "voice_target", pane: 2 }).orb).toBe("idle");
+    const tooling = withChats({ 2: { busy: true, ops: [{ call_id: "c", name: "t", started: 1 }] } }, { voiceTarget: 1 });
+    expect(reduce(tooling, { type: "voice_target", pane: 2 }).orb).toBe("tool");
+    expect(reduce({ ...s, orb: "listening" }, { type: "voice_target", pane: 2 }).orb).toBe("listening");
+    expect(reduce({ ...s, orb: "transcribing" }, { type: "voice_target", pane: 2 }).orb).toBe("transcribing");
+    const asking = { ...s, approvals: [{ req_id: "r" } as any], orb: "approval" as const };
+    expect(reduce(asking, { type: "voice_target", pane: 2 }).orb).toBe("approval");
+    expect(reduce(s, { type: "voice_target", pane: 1 })).toBe(s);
+  });
+
+  it("drops an answered card back to the voice target's turn", () => {
+    const s = withChats({ 1: { busy: false }, 2: { busy: true } },
+                        { voiceTarget: 2, orb: "approval", approvals: [{ req_id: "r" } as any] });
+    expect(reduce(s, { type: "approval_drop", req_id: "r" }).orb).toBe("thinking");
+    expect(reduce({ ...s, voiceTarget: 1 }, { type: "approval_drop", req_id: "r" }).orb).toBe("idle");
+  });
+
+  it("hands words back to one pane's box and takes them once", () => {
+    let s = reduce(withChats({}), { type: "give_back", pane: 2, text: "again", files: [], nonce: 5 });
+    expect(s.chats[2].restore.map((g) => g.text)).toEqual(["again"]);
+    expect(s.chats[1].restore).toEqual([]);
+    s = reduce(s, { type: "given_back", pane: 2, nonce: 5 });
+    expect(s.chats[2].restore).toEqual([]);
+  });
+
+  it("opens a thread in a pane, bringing along a turn another pane started and then left", () => {
+    const s = withChats({
+      1: { threadId: "b", busy: true, turnThreadId: "a", status: "RUNNING · grep" },
+      2: { compose: { projectId: "p1" } },
+    });
+    const after = reduce(s, { type: "open_thread", pane: 2, threadId: "a" });
+    expect(after.chats[2]).toMatchObject({ threadId: "a", compose: null, busy: true, turnThreadId: "a",
+                                           status: "RUNNING · grep" });
+    expect(after.chats[1]).toMatchObject({ threadId: "b", busy: false, turnThreadId: null, status: "" });
+  });
+
+  it("but never takes a turn from a pane still showing it, or into a pane waiting on its own", () => {
+    const showing = withChats({ 1: { threadId: "a", busy: true, turnThreadId: "a" } });
+    expect(reduce(showing, { type: "open_thread", pane: 2, threadId: "a" }).chats[1].busy).toBe(true);
+    const own = withChats({
+      1: { threadId: "b", busy: true, turnThreadId: "a" },
+      2: { threadId: "c", busy: true, turnThreadId: "c" },
+    });
+    const after = reduce(own, { type: "open_thread", pane: 2, threadId: "a" });
+    expect(after.chats[2]).toMatchObject({ threadId: "a", turnThreadId: "c", busy: true });
+    expect(after.chats[1]).toMatchObject({ busy: true, turnThreadId: "a" });
+  });
+
+  it("swaps two panes' conversations whole", () => {
+    const s = withChats({ 1: { threadId: "a", draft: "x" }, 3: { threadId: "b", busy: true } });
+    const after = reduce(s, { type: "chat_swap", a: 1, b: 3 });
+    expect([after.chats[1].threadId, after.chats[3].threadId]).toEqual(["b", "a"]);
+    expect(after.chats[1].busy).toBe(true);
+    expect(after.chats[3].draft).toBe("x");
+    expect(reduce(s, { type: "chat_swap", a: 2, b: 2 })).toBe(s);
+  });
+});
+
+describe("the test hook's view of the store", () => {
+  it("lays the voice target's conversation over the window's fields", () => {
+    const s = withChats({ 1: { threadId: "a" }, 2: { threadId: "b", busy: true } }, { voiceTarget: 2 });
+    const flat = flatState(s);
+    expect([flat.threadId, flat.busy]).toEqual(["b", true]);
+    expect(flat.chats[1].threadId).toBe("a");
+  });
+
+  it("sends a legacy patch's conversation fields to the voice target's pane, the rest to the window", () => {
+    const acts = compatActions({ type: "patch", patch: { threadId: "kt9", compose: null, error: "" } }, 3);
+    expect(acts).toEqual([
+      { type: "chat", pane: 3, patch: { threadId: "kt9", compose: null } },
+      { type: "patch", patch: { error: "" } },
+    ]);
+    expect(compatActions({ type: "patch", patch: {} }, 1)).toEqual([{ type: "patch", patch: {} }]);
+    const other = { type: "approval_drop", req_id: "r" };
+    expect(compatActions(other, 1)).toEqual([other]);
+    let s = withChats({}, { voiceTarget: 3 });
+    for (const a of acts) s = reduce(s, a);
+    expect(s.chats[3].threadId).toBe("kt9");
+    expect(s.chats[1].threadId).toBeNull();
   });
 });

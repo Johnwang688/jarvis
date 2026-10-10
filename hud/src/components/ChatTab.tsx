@@ -75,7 +75,7 @@ export function ChatTab(props: {
           )}
         </div>
       ) : null}
-      <div className="scroll" id="log" ref={logRef} data-testid="log">
+      <div className="scroll chatlog" ref={logRef} data-testid="log">
         {props.messages.map((m, i) =>
           m.proposal ? (
             <Proposal key={i} msg={m} onCancel={props.onCancelTask} />
@@ -109,7 +109,7 @@ export function ChatTab(props: {
           </div>
         ) : null}
       </div>
-      <div id="ops" data-testid="ops">
+      <div className="chatops" data-testid="ops">
         {props.ops
           .slice(-30)
           .reverse()

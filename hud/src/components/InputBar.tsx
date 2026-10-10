@@ -65,6 +65,10 @@ export function InputBar(props: {
   restore?: GiveBack[];
   /** Every hand-back up to this nonce is in the box. */
   onRestoreTaken?: (nonce: number) => void;
+  /** This pane is the voice target (WP-B): it alone draws the dictation strip —
+   * AUTO / REVIEW / OFF, the level meter and the hint. False draws only this
+   * pane's own turn status in its place. */
+  strip?: boolean;
 }) {
   const [text, setText] = useState("");
   const [files, setFiles] = useState<Attachment[]>([]);
@@ -135,7 +139,7 @@ export function InputBar(props: {
 
   return (
     <div
-      id="inputbar"
+      className="inputbar"
       onDragOver={(e) => e.preventDefault()}
       onDrop={(e) => {
         e.preventDefault();
@@ -143,7 +147,7 @@ export function InputBar(props: {
       }}
     >
       {files.length || notes.length ? (
-        <div id="chips" data-testid="chips">
+        <div className="chips" data-testid="chips">
           {files.map((f, i) => (
             <span className="chip" key={f.name + i}>
               {f.name}
@@ -158,10 +162,10 @@ export function InputBar(props: {
           ) : null}
         </div>
       ) : null}
-      <div id="inputrow">
+      <div className="inputrow">
         <textarea
           ref={box}
-          id="input"
+          className="input"
           data-testid="input"
           value={text}
           placeholder={
@@ -215,7 +219,13 @@ export function InputBar(props: {
       <div className="row">
         {props.projectChip ? <Chip chip={props.projectChip} /> : null}
         {props.modelChip ?? null}
-        <div id="dictation" data-testid="dictation">
+        {props.strip === false ? (
+          // Not the voice target: no dictation strip, so the strip itself shows
+          // where speech lands. This pane's own turn still says what it is doing.
+          <span className="hint" data-testid="pane-status">{props.hint}</span>
+        ) : (
+        <>
+        <div className="dictation" data-testid="dictation">
           {DICTATION_MODES.map((m) => (
             <button
               type="button"
@@ -229,12 +239,14 @@ export function InputBar(props: {
             </button>
           ))}
         </div>
-        <div id="level" data-testid="level" data-level={props.level.toFixed(3)}>
+        <div className="level" data-testid="level" data-level={props.level.toFixed(3)}>
           <i style={{ width: `${Math.min(100, props.level * 100)}%` }} />
         </div>
         <span className="hint" data-testid="hint">
           {props.hint || HINTS[props.mode]}
         </span>
+        </>
+        )}
       </div>
     </div>
   );

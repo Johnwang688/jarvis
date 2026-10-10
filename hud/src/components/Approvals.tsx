@@ -123,16 +123,17 @@ export function ApprovalCard(props: {
 }
 
 /**
- * Where keys were going when a card came up, if that is somewhere the card's
- * rules cannot reach: a frame (a preview iframe gets its own key events, so
- * Escape never reached the card, and keys went on into the framed page), or
- * anything inside the workspace or the panel (Monaco kept typing into the
- * buffer behind the card).
+ * Where keys were going when a card came up, if that is anywhere but the card:
+ * a frame (a preview iframe gets its own key events, so Escape never reached
+ * the card, and keys went on into the framed page), Monaco (it kept typing
+ * into the buffer behind the card), or **any** focused control behind the
+ * veil — a sidebar button, a pane's tab, a chip — which the veil stops the
+ * pointer from reaching but Enter or Space still pressed (review of PR #26).
+ * Only the page itself (`body`, nothing focused) is not behind the card.
  */
-export function behindTheCard(el: Element | null): boolean {
-  if (!el || el === document.body) return false;
-  if (el.tagName === "IFRAME") return true;
-  return typeof (el as HTMLElement).closest === "function" && !!(el as HTMLElement).closest("#workspace, .panel");
+export function behindTheCard(el: Element | null, card: Element | null = null): boolean {
+  if (!el || el === document.body || el === document.documentElement) return false;
+  return !(card && card.contains(el));
 }
 
 /** The veil holds the newest card; the rest are listed in the right pane. */
@@ -142,16 +143,17 @@ export function ApprovalVeil(props: {
 }) {
   const top = props.requests[0];
   const up = !!top;
-  // A card coming up takes focus off a frame, Monaco or anything else in the
-  // workspace or panel, onto the card itself (never a button: nothing here is
+  // A card coming up takes focus off whatever had it — a frame, Monaco, a
+  // sidebar button — onto the card itself (never a button: nothing here is
   // keyboard-defaulted), and gives it back when the last card goes.
   const restore = useRef<HTMLElement | null>(null);
   useEffect(() => {
     if (!up) return;
     const was = document.activeElement as HTMLElement | null;
-    if (behindTheCard(was)) {
+    const card = document.querySelector<HTMLElement>('[data-testid="approval-card"]');
+    if (behindTheCard(was, card)) {
       restore.current = was;
-      document.querySelector<HTMLElement>('[data-testid="approval-card"]')?.focus({ preventScroll: true });
+      card?.focus({ preventScroll: true });
     }
     return () => {
       const back = restore.current;

@@ -2,15 +2,24 @@
 // subscription is the only thing that writes lifecycle state, which is the
 // §10.3 rule carried into the frontend: **the status record drives the task
 // view, never the model's prose.**
+//
+// Several chats at once (WP-B, 2026-10-09): the conversation and the turn it
+// waits on are per chat pane (`chats`, lib/chats.ts), and the actions that
+// write them name their pane. Approvals, activity, the projects and threads,
+// the orb, the level meter, the error line and the pickers stay window-wide.
+// The orb follows **the voice target's** turn: a turn event in another pane
+// never repaints it.
 
 import React, { createContext, useContext, useReducer } from "react";
 import type {
   ApprovalRequest, Attachment, AvatarDesc, ChatMessage, Project, Schedule, Task, TaskThread,
   Thread, ToolOp, Usage, RouteView, DiscordStatus } from "../types";
 import { DEFAULT_MODE, type DictationMode } from "../lib/dictation";
-import { activeProjectId, type Compose } from "../lib/compose";
+import { activeProjectId } from "../lib/compose";
 import { NO_ACTIVITY, applyActivity, type ActivityView } from "../lib/activity";
-import { pendingAfter, type GiveBack } from "../lib/giveback";
+import { pendingAfter } from "../lib/giveback";
+import { CHAT_KEYS, emptyChats, type ChatState, type Chats } from "../lib/chats";
+import { PANE_NOS, type PaneNo } from "../lib/workspace";
 
 // What the centre shows is the workspace's (lib/workspace.ts, 2026-10-09): a
 // view per pane, stored with the layout, not a single `tab` in this store.
@@ -26,22 +35,13 @@ export interface State {
   taskThreads: Record<string, TaskThread[]>;
   /** The sidebar dots: what each thread and task is doing (lib/activity.ts). */
   activity: ActivityView;
-  /** The conversation is exactly one of: an existing thread (`threadId`), or
-   * a new thread being composed (`compose`). There is no stored project;
-   * `currentProject` derives it, so the sidebar cannot drift from where a
-   * message goes (lib/compose.ts). */
-  threadId: string | null;
-  compose: Compose | null;
+  /** Each chat pane's conversation and the turn it waits on (lib/chats.ts). */
+  chats: Chats;
+  /** The chat pane voice goes to: the one used last (lib/chats `voiceTargetOf`). */
+  voiceTarget: PaneNo;
   taskId: string | null;
   /** A task was picked more recently than a thread: the File tab follows it. */
   taskFocus: boolean;
-  /** The thread whose turn this window started and is waiting on. Window-wide
-   * `busy` follows it, so switching threads mid-turn cannot wedge the window
-   * waiting for a finish it no longer listens for. */
-  turnThreadId: string | null;
-  messages: ChatMessage[];
-  draft: string;
-  ops: ToolOp[];
   approvals: ApprovalRequest[];
   usage: Usage | null;
   /** The Discord light (PR A): `GET /discord`, refetched on `discord_status`. */
@@ -53,16 +53,6 @@ export interface State {
   dictation: DictationMode;
   level: number;
   orb: OrbState;
-  status: string;
-  busy: boolean;
-  /** Set by REVIEW dictation: text handed to the input box, never sent. */
-  pendingTranscript: string;
-  /** Words (and files) handed back to the input box — a send that failed, or
-   * messages dropped when the owner stopped the turn — for the thread on
-   * screen, oldest first, until the box takes them (lib/giveback.ts). A
-   * fresh `nonce` each, so the same words handed back twice arrive twice and
-   * one hand-back is never taken twice. */
-  restore: GiveBack[];
   error: string;
   /** A refused thread move, shown beside the tree it was reverted in. */
   moveError: string;
@@ -75,83 +65,136 @@ export interface State {
 
 export const initialState: State = {
   projects: [], platforms: {}, threads: [], tasks: [], taskThreads: {}, activity: NO_ACTIVITY,
-  threadId: null, compose: null, taskId: null, taskFocus: false, turnThreadId: null,
-  messages: [], draft: "", ops: [], approvals: [], usage: null, discord: null, schedules: [],
+  chats: emptyChats(), voiceTarget: 1, taskId: null, taskFocus: false,
+  approvals: [], usage: null, discord: null, schedules: [],
   route: null, avatar: null, wakePatterns: [], dictation: DEFAULT_MODE,
-  level: 0, orb: "idle", status: "", busy: false, pendingTranscript: "", restore: [],
-  error: "", moveError: "", picker: null, archivedNames: [],
+  level: 0, orb: "idle", error: "", moveError: "", picker: null, archivedNames: [],
 };
+
+/** What a pane's patch may carry besides its own fields: the orb (applied only
+ * for the voice target's pane) and the window's error line. */
+export type ChatPatch = Partial<ChatState> & { orb?: OrbState; error?: string };
 
 export type Action =
   | { type: "patch"; patch: Partial<State> }
-  | { type: "message"; message: ChatMessage }
-  /** Patch the message this window drew as `local`, or the daemon's `message_id`. */
+  /** One pane's conversation fields; `orb` lands only when it is the voice target. */
+  | { type: "chat"; pane: PaneNo; patch: ChatPatch }
+  | { type: "message"; pane: PaneNo; message: ChatMessage }
+  /** Patch the message this window drew as `local`, or the daemon's `message_id`, in whichever pane holds it. */
   | { type: "mark"; local?: string; message_id?: string; patch: Partial<ChatMessage> }
   /** Take back a message this window drew optimistically (its send failed). */
   | { type: "unmessage"; local: string }
-  | { type: "delta"; text: string }
-  | { type: "settle"; text: string }
-  | { type: "op_start"; op: ToolOp }
-  | { type: "op_done"; call_id: string; ok: boolean; summary: string }
+  | { type: "delta"; pane: PaneNo; text: string }
+  | { type: "settle"; pane: PaneNo; text: string }
+  | { type: "op_start"; pane: PaneNo; op: ToolOp }
+  | { type: "op_done"; pane: PaneNo; call_id: string; ok: boolean; summary: string }
   | { type: "approval_add"; request: ApprovalRequest }
   | { type: "approval_drop"; req_id: string }
   | { type: "task_upsert"; task: Task }
   | { type: "thread_patch"; id: string; patch: Partial<Thread> }
   | { type: "activity"; record: any }
-  /** Hand words back to the box of the thread on screen. */
-  | { type: "give_back"; text: string; files: Attachment[]; nonce: number }
-  /** The box took every hand-back up to `nonce`. */
-  | { type: "given_back"; nonce: number };
+  /** Hand words back to a pane's box. */
+  | { type: "give_back"; pane: PaneNo; text: string; files: Attachment[]; nonce: number }
+  /** That pane's box took every hand-back up to `nonce`. */
+  | { type: "given_back"; pane: PaneNo; nonce: number }
+  /** Open `threadId` in `pane` (nothing else holds it). A turn in it another
+   * pane was tracking after moving on comes with it, so Stop and the finish
+   * reach the pane that shows it. */
+  | { type: "open_thread"; pane: PaneNo; threadId: string }
+  /** Two panes' conversations change places (a thread opened in one while the other held it off screen). */
+  | { type: "chat_swap"; a: PaneNo; b: PaneNo }
+  /** The voice target moved: the orb now follows that pane's turn. */
+  | { type: "voice_target"; pane: PaneNo };
+
+function withChat(s: State, pane: PaneNo, next: ChatState): State {
+  return { ...s, chats: { ...s.chats, [pane]: next } };
+}
+
+/** The orb for a pane's turn, as the reducers below leave it. */
+function turnOrb(s: State, c: ChatState): OrbState {
+  if (s.approvals.length) return "approval";
+  if (c.ops.some((o) => !o.finished)) return "tool";
+  return c.busy ? "thinking" : "idle";
+}
 
 export function reduce(s: State, a: Action): State {
   switch (a.type) {
     case "patch":
       return { ...s, ...a.patch };
 
+    case "chat": {
+      const { orb, error, ...fields } = a.patch;
+      let next = withChat(s, a.pane, { ...s.chats[a.pane], ...fields });
+      if (orb !== undefined && a.pane === s.voiceTarget) next = { ...next, orb };
+      if (error !== undefined) next = { ...next, error };
+      return next;
+    }
+
     case "message":
       // The owner's own line goes up verbatim; his is rendered. That decision
       // lives in the view, not here — the store keeps the role.
-      return { ...s, messages: [...s.messages, a.message] };
+      return withChat(s, a.pane, { ...s.chats[a.pane], messages: [...s.chats[a.pane].messages, a.message] });
 
     case "mark": {
       const hit = (m: ChatMessage) =>
         (!!a.local && m.local === a.local) || (!!a.message_id && m.message_id === a.message_id);
-      if (!s.messages.some(hit)) return s;
-      return { ...s, messages: s.messages.map((m) => (hit(m) ? { ...m, ...a.patch } : m)) };
+      if (!PANE_NOS.some((n) => s.chats[n].messages.some(hit))) return s;
+      const chats = { ...s.chats };
+      for (const n of PANE_NOS) {
+        if (!chats[n].messages.some(hit)) continue;
+        chats[n] = { ...chats[n], messages: chats[n].messages.map((m) => (hit(m) ? { ...m, ...a.patch } : m)) };
+      }
+      return { ...s, chats };
     }
 
-    case "unmessage":
+    case "unmessage": {
       // Only that bubble: a reply that settled while the send was failing
       // stays (restoring a snapshot taken before the send used to drop it).
-      return { ...s, messages: s.messages.filter((m) => m.local !== a.local) };
+      const chats = { ...s.chats };
+      for (const n of PANE_NOS) {
+        if (!chats[n].messages.some((m) => m.local === a.local)) continue;
+        chats[n] = { ...chats[n], messages: chats[n].messages.filter((m) => m.local !== a.local) };
+      }
+      return { ...s, chats };
+    }
 
-    case "delta":
+    case "delta": {
       // Plain text while drafting: half a markdown document is not markdown,
       // and rendering `**bold` mid-word flickers.
-      return { ...s, draft: s.draft + a.text };
+      const c = s.chats[a.pane];
+      return withChat(s, a.pane, { ...c, draft: c.draft + a.text });
+    }
 
     case "settle": {
       // The finished reply replaces the draft and is rendered once.
-      const text = a.text || s.draft;
-      if (!text) return { ...s, draft: "" };
-      return { ...s, draft: "", messages: [...s.messages, { role: "assistant", text }] };
+      const c = s.chats[a.pane];
+      const text = a.text || c.draft;
+      if (!text) return withChat(s, a.pane, { ...c, draft: "" });
+      return withChat(s, a.pane, { ...c, draft: "", messages: [...c.messages, { role: "assistant", text }] });
     }
 
-    case "op_start":
-      return { ...s, ops: [...s.ops.slice(-60), a.op], orb: s.orb === "approval" ? s.orb : "tool" };
+    case "op_start": {
+      const c = s.chats[a.pane];
+      const next = withChat(s, a.pane, { ...c, ops: [...c.ops.slice(-60), a.op] });
+      if (a.pane !== s.voiceTarget) return next;
+      return { ...next, orb: s.orb === "approval" ? s.orb : "tool" };
+    }
 
     case "op_done": {
-      const ops = s.ops.map((o) =>
+      const c = s.chats[a.pane];
+      const ops = c.ops.map((o) =>
         o.call_id === a.call_id && !o.finished
           ? { ...o, finished: Date.now(), ok: a.ok, summary: a.summary }
           : o,
       );
+      const next = withChat(s, a.pane, { ...c, ops });
+      if (a.pane !== s.voiceTarget) return next;
       const running = ops.some((o) => !o.finished);
       // The window falls back to THINKING when the running count hits zero —
       // v1's tool_done half, which is what stopped the slowest seconds of a
       // turn reading as "still running gmail_search".
-      const orb = s.orb === "approval" ? s.orb : running ? "tool" : s.busy ? "thinking" : "idle";
-      return { ...s, ops, orb };
+      const orb = s.orb === "approval" ? s.orb : running ? "tool" : c.busy ? "thinking" : "idle";
+      return { ...next, orb };
     }
 
     case "approval_add": {
@@ -161,8 +204,8 @@ export function reduce(s: State, a: Action): State {
 
     case "approval_drop": {
       const approvals = s.approvals.filter((r) => r.req_id !== a.req_id);
-      const orb =
-        approvals.length === 0 && s.orb === "approval" ? (s.busy ? "thinking" : "idle") : s.orb;
+      const busy = s.chats[s.voiceTarget].busy;
+      const orb = approvals.length === 0 && s.orb === "approval" ? (busy ? "thinking" : "idle") : s.orb;
       return { ...s, approvals, orb };
     }
 
@@ -185,13 +228,52 @@ export function reduce(s: State, a: Action): State {
       return activity === s.activity ? s : { ...s, activity };
     }
 
-    case "give_back":
+    case "give_back": {
       if (!a.text && !a.files.length) return s;
-      return { ...s, restore: [...s.restore, { text: a.text, files: a.files, nonce: a.nonce }] };
+      const c = s.chats[a.pane];
+      return withChat(s, a.pane, { ...c, restore: [...c.restore, { text: a.text, files: a.files, nonce: a.nonce }] });
+    }
 
     case "given_back": {
-      const left = pendingAfter(s.restore, a.nonce);
-      return left.length === s.restore.length ? s : { ...s, restore: left };
+      const c = s.chats[a.pane];
+      const left = pendingAfter(c.restore, a.nonce);
+      return left.length === c.restore.length ? s : withChat(s, a.pane, { ...c, restore: left });
+    }
+
+    case "open_thread": {
+      const chats = { ...s.chats };
+      const here = { ...chats[a.pane], threadId: a.threadId, compose: null };
+      for (const n of PANE_NOS) {
+        if (n === a.pane) continue;
+        const q = chats[n];
+        // Another pane started this thread's turn and then moved on to another
+        // thread: the turn comes with the thread — unless this pane is waiting
+        // on a turn of its own, which it keeps (the other pane then still
+        // hears this one finish, so neither wedges).
+        if (q.busy && q.turnThreadId === a.threadId && q.threadId !== a.threadId
+            && (!here.busy || here.turnThreadId === a.threadId)) {
+          here.busy = true;
+          here.turnThreadId = a.threadId;
+          here.status = q.status;
+          chats[n] = { ...q, busy: false, turnThreadId: null, status: "" };
+        }
+      }
+      chats[a.pane] = here;
+      return { ...s, chats };
+    }
+
+    case "chat_swap": {
+      if (a.a === a.b) return s;
+      return { ...s, chats: { ...s.chats, [a.a]: s.chats[a.b], [a.b]: s.chats[a.a] } };
+    }
+
+    case "voice_target": {
+      if (a.pane === s.voiceTarget) return s;
+      const next = { ...s, voiceTarget: a.pane };
+      // What the microphone is doing belongs to the window, whichever pane it
+      // will speak into; everything else is the new target's turn.
+      if (s.orb === "listening" || s.orb === "transcribing" || s.orb === "speaking") return next;
+      return { ...next, orb: turnOrb(next, next.chats[a.pane]) };
     }
   }
 }
@@ -208,9 +290,44 @@ export function StoreProvider({ children, initial }: { children: React.ReactNode
 
 export const useStore = () => useContext(Ctx);
 
+/** The voice target's conversation: the chat the window is about. */
+export const activeChat = (s: State) => s.chats[s.voiceTarget];
+
 export const currentTask = (s: State) => s.tasks.find((t) => t.id === s.taskId) || null;
-export const currentProjectId = (s: State) => activeProjectId(s);
-export const currentProject = (s: State) => s.projects.find((p) => p.id === activeProjectId(s)) || null;
+/** The project the window is about — the voice target's conversation's, or a
+ * task picked more recently — which the sidebar highlights and the File and
+ * Preview panes follow. A chat pane's own chip shows its own conversation's. */
+export const currentProjectId = (s: State) =>
+  activeProjectId({ ...activeChat(s), taskId: s.taskId, taskFocus: s.taskFocus, threads: s.threads, tasks: s.tasks });
+export const currentProject = (s: State) => s.projects.find((p) => p.id === currentProjectId(s)) || null;
+
+/**
+ * The state as the single-layout suites read it (`window.__hud.state()`): the
+ * window's fields with the voice target's conversation laid over the top, as
+ * the one conversation's fields used to be. `chats` still has every pane.
+ */
+export function flatState(s: State): State & ChatState {
+  return { ...s, ...activeChat(s) };
+}
+
+/**
+ * A test hook's action, translated: a legacy `patch` carrying conversation
+ * fields (`threadId`, `compose`, `busy`, …) writes them to the voice target's
+ * pane, and the rest to the window.
+ */
+export function compatActions(a: any, target: PaneNo): Action[] {
+  if (!a || a.type !== "patch" || !a.patch) return [a as Action];
+  const chat: Record<string, unknown> = {};
+  const rest: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(a.patch)) {
+    if ((CHAT_KEYS as readonly string[]).includes(k)) chat[k] = v;
+    else rest[k] = v;
+  }
+  const out: Action[] = [];
+  if (Object.keys(chat).length) out.push({ type: "chat", pane: target, patch: chat as ChatPatch });
+  if (Object.keys(rest).length || !out.length) out.push({ type: "patch", patch: rest as Partial<State> });
+  return out;
+}
 
 /**
  * The routing line every status embed and the HUD task view show

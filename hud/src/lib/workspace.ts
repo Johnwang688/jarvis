@@ -13,9 +13,10 @@
 // time a preset shows it and is then hidden, never unmounted (the side panes'
 // rule): an unsaved edit in pane 3 survives switching to one pane.
 //
-// **Chat is a singleton in this package (WP-A).** At most one pane shows the
-// conversation; choosing chat in another pane swaps the two panes' views.
-// WP-B lifts this.
+// **Several panes may show chat (WP-B, 2026-10-09)**, each its own
+// conversation (lib/chats.ts). WP-A kept the chat a singleton and swapped two
+// panes' views when chat was chosen in a second pane; that is gone, and a
+// stored workspace with several chat panes is kept as it is.
 //
 // **Fitting changes only the render, never what is stored** (`fitWorkspace`,
 // the generalisation of `fitLayout`). Across: the side panes give back their
@@ -174,19 +175,6 @@ function parseSplit(raw: unknown, preset: Preset): Split {
   return { cols, row: inside(v.row) ? v.row : def.row };
 }
 
-/** At most one pane shows the chat: the first keeps it, any later one goes back to its default view. */
-function oneChat(panes: Panes): Panes {
-  let seen = false;
-  return panes.map((p, i) => {
-    if (p.view !== "chat") return p;
-    if (!seen) {
-      seen = true;
-      return p;
-    }
-    return { ...p, view: DEFAULT_VIEWS[(i + 1) as PaneNo] };
-  }) as Panes;
-}
-
 /**
  * The stored JSON → a workspace. Each field stands on its own (a bad split
  * does not reset the panes), an unknown preset reads as `single`, and the
@@ -205,7 +193,7 @@ export function parseWorkspace(raw: unknown): Workspace {
   if (!isObj(v)) return ws;
   const preset = isPreset(v.preset) ? v.preset : "single";
   const rawPanes = Array.isArray(v.panes) ? v.panes : [];
-  const panes = oneChat(PANE_NOS.map((n) => parsePane(rawPanes[n - 1], n)) as Panes);
+  const panes = PANE_NOS.map((n) => parsePane(rawPanes[n - 1], n)) as Panes;
   const rawSplits = isObj(v.splits) ? v.splits : {};
   const splits = {} as Record<Preset, Split>;
   for (const p of PRESETS) splits[p] = parseSplit(rawSplits[p], p);
@@ -251,26 +239,13 @@ export function focusPane(ws: Workspace, pane: PaneNo): Workspace {
 }
 
 /**
- * Show `view` in `pane`, and focus it. Chat is a singleton: choosing it here
- * swaps with the pane that had it, whether or not that pane is drawn — the
- * **whole spec** (view, pin, preview URL, terminal), so the pane that takes
- * this one's view takes what it was showing too, never a stale URL or pin of
- * its own from before.
+ * Show `view` in `pane`, and focus it. Only that pane changes: several panes
+ * may show chat, each its own conversation (WP-B), so choosing chat in a
+ * second pane no longer swaps it with the first.
  */
 export function setView(ws: Workspace, pane: PaneNo, view: View): Workspace {
   if (!isView(view)) return ws;
-  const panes = ws.panes.map((p) => ({ ...p })) as Panes;
-  const here = pane - 1;
-  if (view === "chat" && panes[here].view !== "chat") {
-    const other = panes.findIndex((p) => p.view === "chat");
-    if (other >= 0) {
-      const mine = panes[here];
-      panes[here] = panes[other];
-      panes[other] = mine;
-      return { ...ws, panes, focused: pane };
-    }
-  }
-  panes[here].view = view;
+  const panes = ws.panes.map((p, i) => (i === pane - 1 ? { ...p, view } : p)) as Panes;
   return { ...ws, panes, focused: pane };
 }
 
@@ -278,8 +253,10 @@ export function setView(ws: Workspace, pane: PaneNo, view: View): Workspace {
  * Where a sidebar click lands (§2.2, "Where a sidebar click goes"): the pane
  * already showing that kind of thing, and only otherwise the focused pane.
  *
- *   - chat: the drawn pane that shows it gets focus; else the focused pane
- *     switches to chat (swapping with a hidden chat pane, the singleton rule);
+ *   - chat: a drawn chat pane gets focus (the focused one if it is one);
+ *     else the focused pane switches to chat. Which chat pane a *thread*
+ *     lands in — the one showing it, the focused chat pane, the voice target
+ *     — is lib/chats.ts `chatTarget`, which the window uses for threads;
  *   - task: a drawn task or diff pane follows the selected task by itself, so
  *     nothing moves; with none drawn the focused pane switches to task — in
  *     the single layout exactly today's behaviour;

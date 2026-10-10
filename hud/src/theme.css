@@ -13,7 +13,7 @@
 
    Class names the free suites assert on — droptarget, cur, done, ok, warn,
    high — and the avatar's pointer-events:none must survive any restyle. Do
-   not add text-transform to .op, .phase or #ops: the checks read their text. */
+   not add text-transform to .op, .phase or .chatops: the checks read their text. */
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -312,7 +312,10 @@ h2.bar {
 .tabbody { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
 
 /* ---- chat ---- */
-#log { display: flex; flex-direction: column; gap: 14px; padding: 16px 20px; }
+/* WP-B (2026-10-09): every chat pane has its own log, ticker and input bar,
+   so these are classes now. `:is(#x, .x)` keeps each rule's id weight — they
+   were id rules, and a class's lower weight would let generic rules win. */
+:is(#log, .chatlog) { display: flex; flex-direction: column; gap: 14px; padding: 16px 20px; }
 .msg { max-width: 100%; overflow-wrap: anywhere; }
 .msg .who {
   font: 600 9px var(--mono); letter-spacing: 0.08em; color: var(--text-muted);
@@ -349,31 +352,31 @@ h2.bar {
 .user-text { white-space: pre-wrap; }
 
 /* ---- operations ticker ---- */
-#ops { flex: 0 0 auto; max-height: 132px; overflow-y: auto; border-top: 1px solid var(--border); padding: 6px 20px; }
+:is(#ops, .chatops) { flex: 0 0 auto; max-height: 132px; overflow-y: auto; border-top: 1px solid var(--border); padding: 6px 20px; }
 .op { font: 10px var(--mono); color: var(--text-muted); display: flex; gap: 8px; }
 .op .nm { color: var(--amber); }
 .op.done .nm { color: var(--text-muted); }
 .op .ms { margin-left: auto; }
 
 /* ---- input bar ---- */
-#inputbar {
+:is(#inputbar, .inputbar) {
   flex: 0 0 auto; border-top: 1px solid var(--border); padding: 10px 20px;
   display: flex; flex-direction: column; gap: 6px;
 }
-#inputrow { display: flex; gap: 8px; align-items: flex-end; }
+:is(#inputrow, .inputrow) { display: flex; gap: 8px; align-items: flex-end; }
 /* The chip row wraps rather than crushing a chip to nothing; the hint takes
    only what is left, so it never forces a wrap of its own. */
-#inputbar > .row { flex-wrap: wrap; }
-#inputbar > .row > .hint { flex: 1 1 0; min-width: 120px; }
-#inputrow textarea { min-height: 36px; max-height: 140px; padding: 7px 9px; }
-#chips { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+:is(#inputbar, .inputbar) > .row { flex-wrap: wrap; }
+:is(#inputbar, .inputbar) > .row > .hint { flex: 1 1 0; min-width: 120px; }
+:is(#inputrow, .inputrow) textarea { min-height: 36px; max-height: 140px; padding: 7px 9px; }
+:is(#chips, .chips) { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
 .chip {
   font: 10px var(--mono); color: var(--text-2);
   background: var(--bg-2); border: 1px solid var(--border-strong); border-radius: 10px;
   padding: 2px 8px; display: flex; gap: 6px; align-items: center;
 }
-#inputrow > .chip { align-self: stretch; padding: 0 10px; border-radius: var(--radius); font-size: 11px; }
-#inputrow > .chip:hover { background: var(--bg-3); }
+:is(#inputrow, .inputrow) > .chip { align-self: stretch; padding: 0 10px; border-radius: var(--radius); font-size: 11px; }
+:is(#inputrow, .inputrow) > .chip:hover { background: var(--bg-3); }
 .chip b { cursor: pointer; color: var(--text-muted); font-weight: 400; }
 .chip b:hover { color: var(--red); }
 
@@ -388,21 +391,21 @@ h2.bar {
 .projchip select:hover { color: var(--accent-hi); }
 .projchip.ro { color: var(--text-2); cursor: default; }
 
-#dictation { display: flex; gap: 0; flex: 0 0 auto; }
-#dictation button {
+:is(#dictation, .dictation) { display: flex; gap: 0; flex: 0 0 auto; }
+:is(#dictation, .dictation) button {
   padding: 4px 8px; border-radius: 0; margin-left: -1px;
   font: 10px var(--mono); letter-spacing: 0.06em; text-transform: uppercase;
 }
-#dictation button:first-child { border-radius: var(--radius) 0 0 var(--radius); margin-left: 0; }
-#dictation button:last-child { border-radius: 0 var(--radius) var(--radius) 0; }
-#dictation button.on { position: relative; z-index: 1; }
-#dictation button.on.off { background: var(--red-soft); border-color: var(--red-line); color: var(--red); }
+:is(#dictation, .dictation) button:first-child { border-radius: var(--radius) 0 0 var(--radius); margin-left: 0; }
+:is(#dictation, .dictation) button:last-child { border-radius: 0 var(--radius) var(--radius) 0; }
+:is(#dictation, .dictation) button.on { position: relative; z-index: 1; }
+:is(#dictation, .dictation) button.on.off { background: var(--red-soft); border-color: var(--red-line); color: var(--red); }
 
-#level {
+:is(#level, .level) {
   flex: 0 0 60px; height: 5px; align-self: center; overflow: hidden;
   background: var(--bg-inset); border: 1px solid var(--border); border-radius: 3px;
 }
-#level > i { display: block; height: 100%; background: var(--accent); transition: width 0.08s linear; }
+:is(#level, .level) > i { display: block; height: 100%; background: var(--accent); transition: width 0.08s linear; }
 
 .hint {
   font: 10px var(--mono); color: var(--text-muted); letter-spacing: 0.06em; text-transform: uppercase;
@@ -743,7 +746,7 @@ button.danger:hover:not(:disabled) { background: var(--red-soft); }
 .msg .who .mark.queued { color: var(--amber); }
 .msg .who .mark.not-sent { color: var(--text-muted); }
 /* Stop is an action, not an error: no red (Graphite keeps red for errors). */
-#inputrow button.stop { border-color: var(--border-strong); }
+:is(#inputrow, .inputrow) button.stop { border-color: var(--border-strong); }
 
 /* ---- zoom, folding and resizing (design §18, 2026-10-08) ---- */
 /* The icon button that folds a pane: quiet until hovered, like the "+". */
@@ -882,6 +885,13 @@ body.resizing iframe { pointer-events: none; }
 }
 /* The focused pane of a split: a 2px accent line under its header. */
 .wpane.focused > .tabs { border-bottom-color: var(--accent-line); box-shadow: inset 0 -1px 0 var(--accent-line); }
+/* Several chats (WP-B): the voice target's mic mark in a split pane's header,
+   and in the sidebar a thread open in another drawn chat pane — a dimmer mark
+   than the active one's accent. */
+.micmark { align-self: center; display: inline-flex; color: var(--accent); padding: 0 4px 0 6px; }
+.micmark svg { display: block; }
+.tree-row.panesel { color: var(--text); box-shadow: inset 2px 0 var(--border-strong); }
+.tree-row.ghost.panesel { box-shadow: none; color: var(--text-2); }
 
 /* The edges between panes: laid over the 1px rule, taking no room. */
 .wsplit { position: absolute; z-index: 6; touch-action: none; background: transparent; }
