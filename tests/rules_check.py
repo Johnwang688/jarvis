@@ -255,6 +255,37 @@ REDIRECT_SHAPES = [
     # bash's `>&word`: with a *non*-numeric word this is `&>word`, both streams
     # into a file. Verified against bash, which created the file.
     ("echo hi >&out.txt", True),
+    # --- the full redirect grammar (2026-10-09) --------------------------------
+    # Every output-opening form, so the gate-state detector (which shares this
+    # scan now) sees a write onto a protected file however it is spelled.
+    ("echo x <> out.txt", True),            # read-write open, creates
+    ("echo x 3> out.txt", True),            # fd-numbered
+    ("echo x 3>> out.txt", True),
+    ("echo x 3>| out.txt", True),
+    ("echo x 3<> out.txt", True),
+    ("echo x {fd}> out.txt", True),         # named fd
+    ("echo x {fd}>> out.txt", True),
+    ("echo x {fd}<> out.txt", True),
+    ("echo x >&out.txt", True),             # non-numeric word, glued
+    ("echo x >& out.txt", True),            # ...and spaced (was read as nothing)
+    ("echo x>'out.txt'", True),             # quoted target
+    ('echo x>"out.txt"', True),
+    ("echo x 2>&1 >out.txt", True),         # a real redirect after a dup, spaced
+    ("echo x >&2>out.txt", True),           # ...straight after a dup-to-stderr
+    ("echo x 2>&->out.txt", True),          # ...after a close
+    # Not writes: a bare close, moves and dups, spaced or not.
+    ("echo x 2>&-", False),
+    ("echo x >&-", False),
+    ("echo x 2>& 1", False),                # a spaced dup is still a dup
+    ("echo x 1>&2", False),
+    # Input, here-docs and here-strings write nothing.
+    ("cat < in.txt", False),
+    ("python3 <<< 'code'", False),
+    ("cat <<EOF\nx\nEOF", False),
+    # A `>` behind a backslash is a literal character, not a redirect.
+    (r"echo a\>b", False),
+    # Process substitution is not a redirection (judged as substitution).
+    ("diff <(sort a) <(sort b)", False),
 ]
 
 
@@ -294,7 +325,245 @@ def redirect_shape_checks() -> None:
     # judge: a real second command after a duplication is still judged.
     assert rules.decide("make build 2>&1 && rm -rf /").decision == rules.DENY
     assert rules.decide("make build 2>&1 & rm -rf ~/work").decision == rules.ASK
+
+    # The noclobber redirect `>|` must not be split as a pipe (2026-10-09):
+    # `echo x >| FILE` is one segment, and `strip_redirections` leaves only
+    # the command so a copier's destination is never a redirect's target.
+    assert rules.segments("echo x >| out.log") == ["echo x >| out.log"]
+    assert rules.segments("echo x >|out.log") == ["echo x >|out.log"]
+    assert rules.strip_redirections("cp a b 2>&1").split() == ["cp", "a", "b"]
+    assert rules.strip_redirections("cp a b > /dev/null").split() == ["cp", "a", "b"]
+    assert rules.strip_redirections("uniq in out 2>&1").split() == ["uniq", "in", "out"]
+    # The span cut out starts at the fd number / {name}, so the operand before
+    # it survives and the target after it is gone.
+    assert rules.strip_redirections("tee a {fd}>/dev/null b").split() == ["tee", "a", "b"]
+    # An escaped `>` is a literal character, not redirect syntax, so the `&`
+    # after it is a real separator (bash backgrounds `echo \>` and runs `x`).
+    # The old "does buf end in `>`?" test treated the escaped `>` as syntax and
+    # glued the two into one segment; tracking an *unescaped* `>` splits it.
+    assert rules.segments(r"echo \>&x") == [r"echo \>", "x"]
+    # But a real `2>&1` is a duplication, not a split.
+    assert rules.segments("make 2>&1") == ["make 2>&1"]
     print(f"ok  rules: {len(REDIRECT_SHAPES)} redirect shapes — fd-duplication is not a write")
+
+
+# --- readers that write, read or run; one table, three callers (2026-10-09) ---
+#
+# Each is ALLOW on origin/main (verified by the mutation below) and ASK now.
+# `PLACEHOLDER_PROGRAM` stands in for any program a flag would run, and every
+# file named is a throwaway, never a real path.
+READER_HAZARDS_ASK = [
+    # sed scripts: write (w/W, the w flag of s), read (r/R), run (e, the e
+    # flag of s) — and -i in a cluster or abbreviated long option.
+    "sed 'w /tmp/out' f.txt",
+    "sed 'W /tmp/out' f.txt",
+    "sed 's/a/b/w /tmp/out' f.txt",
+    "sed -n '1,5w /tmp/out' f.txt",
+    "sed 'r /etc/hostname' f.txt",
+    "sed 'R /etc/hostname' f.txt",
+    "sed '1e PLACEHOLDER_PROGRAM' f.txt",
+    "sed 's/x/y/e' f.txt",
+    "sed -e 'p' -e 'w /tmp/out' f.txt",
+    "sed -ni 's/a/b/' f.txt",
+    "sed -Ei 's/a/b/' f.txt",
+    "sed --in-pl 's/a/b/' f.txt",
+    "sed 's/a/b/' f.txt -i",
+    "sed -f script.sed f.txt",          # a file we cannot read: not provably a read
+    "sed --unknownopt 's/a/b/' f.txt",  # an option the model does not know
+    # sort/tree/xxd/uniq/less/file/date/ss/hostname/env hazards.
+    "sort -o /tmp/out f.txt",
+    "sort -uo /tmp/out f.txt",
+    "sort --output=/tmp/out f.txt",
+    "sort --out=/tmp/out f.txt",        # getopt_long prefix of --output
+    "sort --compress-program=PLACEHOLDER_PROGRAM f.txt",
+    "tree -o /tmp/out .",
+    "tree -R .",
+    "xxd f.txt /tmp/out",               # second operand is written
+    "xxd -r f.hex /tmp/out",
+    "uniq in.txt /tmp/out",             # second operand is written
+    "less -o /tmp/log f.txt",
+    "less +!date f.txt",                # +cmd runs a less command at start-up
+    "file -C -m magic",
+    "date -s '2020-01-01'",
+    "date --set '2020-01-01'",
+    "hostname newname",
+    "ss -D /tmp/out",
+    "ss -K dst 1.2.3.4",
+    "env '-SPLACEHOLDER_PROGRAM arg'",  # -S splits and runs the whole word
+    "env --split-string='PLACEHOLDER_PROGRAM arg'",
+    "find . -fprint /tmp/out",
+    "find . -fprint0 /tmp/out",
+    "find . -fls /tmp/out",
+    "find . -okdir PLACEHOLDER_PROGRAM {} ;",
+]
+
+# The reading forms of the very same stems: every one must stay ALLOW, because
+# a read-only tool that refuses reads sends the owner to run_command and
+# teaches approve-without-reading.
+READER_HAZARDS_ALLOW = [
+    "sed -n '1,5p' f.txt",
+    "sed 's/a/b/g' f.txt",
+    "sed 's/a/b/gp' f.txt",
+    "sed 's/a/b/2' f.txt",
+    "sed -E 's/(a)/\\1/g' f.txt",
+    "sed -e 's/a/b/' -e 's/c/d/' f.txt",
+    "sed '/^#/d' f.txt",
+    "sed -n '/start/,/end/p' f.txt",
+    "sed '1,10!d' f.txt",
+    "sed 's|a|b|gI' f.txt",
+    "sed 's@a@b@' f.txt",               # arbitrary delimiter
+    "sed 's/a\\/b/c/' f.txt",           # escaped delimiter
+    "sed 'y/abc/xyz/' f.txt",
+    "sed ':a;N;$!ba;s/\\n/ /g' f.txt",  # labels, branches, braces
+    "sed '1i\\\\header' f.txt",         # a/i/c text that contains letters
+    "sed '1a write w here' f.txt",      # 'write' is text, not a w command
+    "sed '/w/d' f.txt",                 # a 'w' in a regex is not the w command
+    "sed -z 's/a/b/' f.txt",
+    "sort f.txt",
+    "sort -rn -k2 -t, f.txt",
+    "sort -u f.txt",
+    "tree -L 2 -d .",
+    "tree -P '*.py' .",
+    "xxd f.txt",                        # one operand: stdout
+    "xxd -l 64 -g 2 f.txt",
+    "uniq f.txt",
+    "uniq -c -w10 f.txt",
+    "less f.txt",
+    "less -N f.txt",
+    "file bin",
+    "file -i -L f",
+    "date",
+    "date +%s",
+    "date -u -d yesterday",
+    "date -Iseconds",
+    "ss -tlnp",
+    "ss -s",
+    "hostname",
+    "hostname -f",
+    "env",
+    "env -u PATH ls",                   # env still runs a program unwrap sees
+    "find . -name '*.py'",
+    "find . -type f -newer x -print",
+    "find . -executable",               # not -exec
+    "find . -path './x' -prune",
+]
+
+
+def reader_hazard_checks() -> None:
+    """One table (`rules.READER_HAZARDS`) of every reader's writing, reading
+    and running forms, read by `rules.decide`, `protected_state` and
+    `run_readonly` alike.
+
+    Finding 3 of the 2026-10-09 report: `sed` sat on the auto-ALLOW list with
+    only `-i` checked, so a script's `w`/`W`/`r`/`R`/`e` commands — writing
+    files, reading files, and on GNU sed running programs — were auto-approved.
+    The audit that built the table found the same shape on `sort -o`, `tree
+    -o`/`-R`, `xxd`'s output operand, `uniq`'s, `less -o`/`+cmd`, `file -C`,
+    `date -s`, `ss -D`/`-K`, `hostname NAME` and `env -S`.
+
+    The table is asserted directly (`reader_hazard`), because the three
+    callers that read it treat it differently — `decide` only turns it into a
+    verdict for a stem it would otherwise ALLOW (`rules._READONLY`), while
+    `run_readonly` and `protected_state` consult it for every reader. The
+    ALLOW/ASK subset that `decide` is responsible for is checked below.
+    """
+    for command in READER_HAZARDS_ASK:
+        assert rules.reader_hazard(rules._tokens(command)) is not None, \
+            f"reader hazard not caught: {command!r}"
+    for command in READER_HAZARDS_ALLOW:
+        assert rules.reader_hazard(rules._tokens(command)) is None, \
+            f"a read was flagged as a hazard: {command!r}"
+    # decide() is responsible for the stems it would otherwise auto-ALLOW.
+    for command in READER_HAZARDS_ASK:
+        if rules._stem(rules._tokens(command)) in rules._READONLY:
+            got = rules.decide(command).decision
+            assert got == rules.ASK, f"decide ALLOWed a hazard: {command!r} -> {got}"
+    for command in READER_HAZARDS_ALLOW:
+        if rules._stem(rules._tokens(command)) in rules._READONLY:
+            got = rules.decide(command).decision
+            assert got == rules.ALLOW, f"decide now asks an ordinary read: {command!r} -> {got}"
+
+    # Every stem in the three read-only sets is modelled (a hazard function)
+    # or audited clean (`_NO_HAZARD`). A new stem in neither is the gap the
+    # table exists to close, so fail loudly.
+    from jarvis.protected_state import _READERS
+    from jarvis.tools import shell
+    known = set(rules.READER_HAZARDS) | rules._NO_HAZARD
+    for name, source in (("rules._READONLY", rules._READONLY), ("_READERS", _READERS),
+                         ("shell.READ_ONLY", shell.READ_ONLY)):
+        missing = {s for s in source if s not in known and s not in ("git",)}
+        assert not missing, f"{name} has unaudited reader stems: {sorted(missing)}"
+    print(f"ok  rules: {len(READER_HAZARDS_ASK)} reader hazards caught, "
+          f"{len(READER_HAZARDS_ALLOW)} reads clean, every read-only stem audited")
+
+
+# (command, verdict) — the inline-source rule generalised (2026-10-09).
+INLINE_SOURCE = [
+    # The flag inside a short-option cluster.
+    ("python3 -Ic 'import os'", rules.ASK),
+    ("python3 -uc 'import os'", rules.ASK),
+    ("python -Bc 'print(1)'", rules.ASK),
+    ("node -pe 'process.pid'", rules.ASK),
+    # The flag with its value glued on by `=`.
+    ("node --eval='process.pid'", rules.ASK),
+    ("node --print='1'", rules.ASK),
+    # A subcommand that evaluates its argument.
+    ("deno eval 'Deno.pid'", rules.ASK),
+    ("deno repl", rules.ASK),
+    # Read from standard input: a pipe, a here-string. Segments are judged
+    # alone, so the interpreter segment must be ASK by itself.
+    ("echo 'import os' | python3", rules.ASK),
+    ("python3", rules.ASK),
+    ("python3 <<< 'import os'", rules.ASK),
+    ("node", rules.ASK),
+    ("deno", rules.ASK),
+    # ...but a named program, a module, or a script file read via `<` is ALLOW.
+    ("python3 script.py", rules.ALLOW),
+    ("python3 -m pytest", rules.ALLOW),
+    ("python3 --version", rules.ALLOW),
+    ("python3 -V", rules.ALLOW),
+    ("python3 < script.py", rules.ALLOW),   # reads a file, not inline source
+    ("node app.js", rules.ALLOW),
+    ("node --version", rules.ALLOW),
+    ("deno run app.ts", rules.ALLOW),
+    ("python train.py --epochs 3", rules.ALLOW),
+    ("python3 -W ignore script.py", rules.ALLOW),   # -W takes the next word
+]
+
+
+def inline_source_checks() -> None:
+    """The inline-source rule missed the same three shapes the shell-unwrap
+    missed (2026-10-09): the source flag in a cluster (`python3 -Ic …`), glued
+    by `=` (`node --eval=…`), and a subcommand (`deno eval …`) — plus source
+    fed on standard input, which a pipe into an auto-ALLOW interpreter is."""
+    for command, expected in INLINE_SOURCE:
+        got = rules.decide(command).decision
+        assert got == expected, f"inline source: {command!r} expected {expected}, got {got}"
+    print(f"ok  rules: {len(INLINE_SOURCE)} inline-source shapes judged "
+          "(cluster, glued, subcommand, stdin)")
+
+
+def continuation_checks() -> None:
+    """bash deletes `\\<newline>` before it splits anything, so a continuation
+    can sit inside any word or operator. Nothing knew that (2026-10-09): a
+    continuation between `$` and `(` hid a substitution, and one before an
+    operand turned a write onto the allowlist into a write onto a path that
+    starts with a newline."""
+    assert rules.join_continuations("echo a\\\nb") == "echo ab"
+    assert rules.join_continuations("ec\\\nho hi") == "echo hi"
+    # Inside single quotes bash keeps the pair; a comment keeps its newline.
+    assert rules.join_continuations("echo 'a\\\nb'") == "echo 'a\\\nb'"
+    assert rules.join_continuations("echo x # c\\\nls") == "echo x # c\\\nls"
+    # A continuation inside `$\n(` is a substitution once joined. (Callers join
+    # before judging, so `has_substitution` reads the joined line; `decide`
+    # does the joining itself.)
+    assert rules.has_substitution(rules.join_continuations("echo $\\\n(whoami)"))
+    assert rules.decide("echo $\\\n(whoami)").decision == rules.ASK
+    # Process substitution is substitution; quoted, it is text.
+    assert rules.has_substitution("cat <(sort f)")
+    assert not rules.has_substitution("grep '<(x)' f")
+    assert rules.decide("diff <(sort a) <(sort b)").decision == rules.ASK
+    print("ok  rules: continuations joined before judging; process substitution asks")
 
 
 READONLY_MUST_REFUSE = [
@@ -318,6 +587,32 @@ READONLY_MUST_REFUSE = [
     "rg --hostname-bin x pattern .",
     "rg -n --pre=x pattern .",
     "nohup sh -c 'touch PWNED'",
+    # The inline-command flag inside a short-option cluster (finding 1,
+    # 2026-10-09): run_readonly judged `env`/wrappers but never saw the string
+    # these hid. Placeholder programs only.
+    "bash -lc 'touch PWNED_CLUSTER'",
+    "sh -ec 'touch PWNED_SH'",
+    "bash -xc 'touch PWNED_X'",
+    "zsh -fc 'touch PWNED_ZSH'",
+    "bash -c -- 'touch PWNED_DD'",
+    "builtin eval 'touch PWNED_BUILTIN'",
+    # env -S splits one word into a whole command line and runs it (2026-10-09):
+    # run_readonly executed this.
+    "env '-Stouch PWNED_ENVS'",
+    "env --split-string='touch PWNED_SPLIT'",
+    # Readers *on run_readonly's own allowlist* in a writing or running form —
+    # the one hazard table catches these where it used to pass them (2026-10-09).
+    "date -s '2020-01-01'",
+    "hostname NEWNAME",
+    "ss -D PWNED_SS",
+    "tree -o PWNED_TREE .",
+    "file -C -m magic",
+    "find . -fprint PWNED_FIND",
+    "find . -execdir PLACEHOLDER_PROGRAM {} +",
+    # A backslash-newline continuation hiding a substitution (2026-10-09):
+    # run_readonly ran this, because the substitution scan saw `$(` only once
+    # the pair was joined.
+    "echo $\\\n(touch PWNED_CONT)",
     # Writing git subcommands the seven-name denylist never mentioned.
     "git rm -f f.txt",
     "git mv a b",
@@ -454,6 +749,20 @@ READONLY_MUST_ALLOW = [
     "grep -rn foo /tmp",
     "cat /tmp/notes.txt",
     "timeout 5 ls /tmp",
+    # The reading forms of the allowlisted stems whose writing forms are
+    # refused above: a read-only tool that refused these would send the owner
+    # to run_command and teach approve-without-reading. (sed/sort/uniq/xxd are
+    # not on run_readonly's allowlist at all; their reads are proven ALLOW in
+    # reader_hazard_checks, at the decide() level.)
+    "tree -L 2 -d .",
+    "tree -P '*.py' .",
+    "file -i bin",
+    "date +%s",
+    "date -u -Iseconds",
+    "ss -tlnp",
+    "ss -s",
+    "find . -name '*.py' -type f",
+    "find . -executable -print",            # -executable is not -exec
 ]
 
 
@@ -1131,6 +1440,54 @@ def gate_state_edge_checks() -> None:
         print(f"ok  gate state: {len(QUOTING_EXPLOITS)} quoting/separator exploits keep "
               "their verdicts, and aimed at the allowlist each is refused")
 
+        # The three findings, aimed at the allowlist: every one DENY now, and
+        # each certain-writes it (so run_command refuses it even with no
+        # approver, and mode "all" cannot answer it).
+        gap = [
+            # 1. the inline-command flag inside a cluster / behind env -S.
+            f"bash -lc 'cp /tmp/x {allow}'",
+            f"sh -ec 'cp /tmp/x {allow}'",
+            f"bash -xc 'cp /tmp/x {allow}'",
+            f"bash -c -- 'cp /tmp/x {allow}'",
+            f"builtin eval 'cp /tmp/x {allow}'",
+            f"env '-Scp /tmp/x {allow}'",
+            f"env --split-string='cp /tmp/x {allow}'",
+            # 2. redirect forms the detector's own scan had drifted on.
+            f"echo x >|{allow}",
+            f"echo x <>{allow}",
+            f"echo x 2>&1>{allow}",
+            f"echo x >&2>{allow}",
+            f"echo x 2>&->{allow}",
+            f"echo x >& {allow}",
+            f"echo x 3>{allow}",
+            f"echo x {{fd}}>{allow}",
+            # 3. sed script commands that write the allowlist.
+            f"sed 'w {allow}' f.txt",
+            f"sed 's/a/b/w {allow}' f.txt",
+            f"sed -ni 's/a/b/' {allow}",
+            # neighbours: a continuation before the target, find -exec sh.
+            f"cp /tmp/x \\\n{allow}",
+            f"find ~/.config/jarvis -name allowlist.json -execdir sh -c 'cp /tmp/x {{}}' \\;",
+        ]
+        before = config.ALLOWLIST_PATH.read_text()
+        for command in gap:
+            v = permissions.static_verdict(command)
+            assert v.decision == rules.DENY, (command, v.decision)
+            touch = protected_state.command_touch(command)
+            assert touch is not None and touch.certain and touch.path.name == "allowlist.json", (
+                command, touch)
+            with recorded() as ran:
+                out = tools.dispatch("run_command",
+                                     json.dumps({"command": command, "reason": "r"}))
+            assert not ran and "Refused" in out.text, (command, out.text)
+        assert config.ALLOWLIST_PATH.read_text() == before
+        print(f"ok  gate state: {len(gap)} new-grammar writes onto the allowlist all DENY")
+
+        # A sed *read* that happens to name the allowlist as its input stays an
+        # ordinary read — not refused for naming it.
+        assert protected_state.command_touch(f"sed -n '1,5p' {allow}") is None
+        assert protected_state.command_touch(f"sort {allow}") is None
+
         # Mutation pin: `_resolve` must follow symlinks. Through a link to the
         # gate's folder, a file that does not exist yet has no inode to match
         # and no lexical path in the set — only resolving the link finds it.
@@ -1206,6 +1563,44 @@ def gate_state_complexity_checks() -> None:
           "a second, as too complex to judge — never ALLOW")
 
 
+def fails_against_old_code_checks() -> None:
+    """Each new refusal must fail against the code before this change. Rather
+    than keep a copy of the old functions, reconstruct the old *decision* for
+    the three findings and assert the gap was real: the old rule would have
+    returned ALLOW where the new one returns ASK/DENY.
+
+    1. the old shell-string check was `"-c" in tokens`;
+    2. the old redirect scan treated `>|` as a pipe and a non-numeric `>& word`
+       (spaced) as a close, so `rules.redirects_to_file` is itself the oracle:
+       on origin/main it said False for `echo x >& out` and `echo x >|out`;
+    3. the old sed rule was `-i`/`--in-place` only, so a `w`/`e` script was not
+       a write at all.
+    """
+    # 1. The old inline-flag test, reproduced, says `bash -lc '…'` carries no
+    #    command string; the new `_shell_strings` finds it.
+    from jarvis import rules as R
+    old_has_c = lambda toks: "-c" in toks[1:]
+    for cluster in ("bash -lc x", "sh -ec x", "bash -xc x", "zsh -fc x"):
+        toks = cluster.split()
+        assert not old_has_c(toks), cluster          # old: missed
+        strings, _ = __import__("jarvis.protected_state", fromlist=["_shell_strings"]) \
+            ._shell_strings(toks)
+        assert strings == ["x"], (cluster, strings)   # new: found
+
+    # 2. sed: the old rule.
+    old_sed_writes = lambda toks: any(t in ("-i", "--in-place") or t.startswith("-i")
+                                      for t in toks[1:])
+    for command in ("sed 'w /tmp/o' f", "sed 's/a/b/e' f", "sed 'r /etc/hostname' f"):
+        assert not old_sed_writes(R._tokens(command)), command   # old: a read
+        assert R.reader_hazard(R._tokens(command)) is not None, command  # new: a hazard
+
+    # 3. redirect grammar: these spans are writes now; name the shapes the old
+    #    scan got wrong so a regression is legible.
+    for shape in ("echo x >& out", "echo x 2>&1>out", "echo x >&2>out"):
+        assert R.redirects_to_file(shape), shape
+    print("ok  rules: the three findings each fail against the pre-change rule")
+
+
 def main() -> int:
     # Never read (or write) the owner's real allowlist from a test: `gate()`
     # consults it, so a stray entry would silently change what this suite
@@ -1221,6 +1616,9 @@ def main() -> int:
     compound_checks()
     separator_checks()
     redirect_shape_checks()
+    reader_hazard_checks()
+    inline_source_checks()
+    continuation_checks()
     run_readonly_checks()
     run_readonly_narrowing_checks()
     write_in_disguise_checks()
@@ -1235,6 +1633,7 @@ def main() -> int:
     gate_state_checks()
     gate_state_edge_checks()
     gate_state_complexity_checks()
+    fails_against_old_code_checks()
     print("\nall rules checks passed")
     return 0
 

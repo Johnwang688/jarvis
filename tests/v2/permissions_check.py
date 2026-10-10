@@ -557,6 +557,52 @@ def file_deny_checks():
            Decision.ALLOW, "a credential-directory write is approvable")
         eq(len(asker.seen), before + 1, "but it is always asked")
 
+        # The three 2026-10-09 findings, aimed at the gate's own state: every
+        # one a certain write at layer 1, DENY, never asked. Each was ALLOW on
+        # origin/main's detector and so ran under AUTO with nobody consulted.
+        allow = "~/.config/jarvis/allowlist.json"
+        findings = [
+            # 1. the shell's inline flag inside a cluster, or behind env -S /
+            #    builtin, which the old `"-c" in tokens` test never saw.
+            f"bash -lc 'cp /tmp/x {allow}'",
+            f"sh -ec 'cp /tmp/x {allow}'",
+            f"bash -c -- 'cp /tmp/x {allow}'",
+            f"builtin eval 'cp /tmp/x {allow}'",
+            f"env '-Scp /tmp/x {allow}'",
+            f"env --split-string='cp /tmp/x {allow}'",
+            # 2. redirect forms the detector's drifted scan missed.
+            f"echo x >|{allow}",
+            f"echo x <>{allow}",
+            f"echo x 2>&1>{allow}",
+            f"echo x >&2>{allow}",
+            f"echo x >& {allow}",
+            f"echo x {{fd}}>{allow}",
+            # 3. a sed script command that writes.
+            f"sed 'w {allow}' f.txt",
+            f"sed 's/a/b/w {allow}' f.txt",
+            f"sed -ni 's/a/b/' {allow}",
+            # neighbours: a continuation before the target, a find -exec shell.
+            f"cp /tmp/x \\\n{allow}",
+            f"find ~/.config/jarvis -name allowlist.json -execdir sh -c 'cp /tmp/x {{}}' \\;",
+        ]
+        human_auto = build_permit(context(brief_for(P.AUTO)), Asker(Decision.ALLOW))
+        owner2 = Asker(Decision.ALLOW)
+        human_ask = build_permit(context(brief_for(P.ASK)), owner2)
+        for command in findings:
+            eq(_command_writes_protected_state(command), "allowlist.json",
+               f"layer 1 sees the write onto the allowlist: {command}")
+            seen = len(owner2.seen)
+            eq(human_auto(*bash(command), brief_for(P.AUTO)), Decision.DENY,
+               f"AUTO: refused at layer 1, nobody asked: {command}")
+            eq(human_ask(*bash(command), brief_for(P.ASK)), Decision.DENY,
+               f"ASK: refused at layer 1: {command}")
+            eq(len(owner2.seen), seen, f"and never asked: {command}")
+        # A sed *read* of the allowlist is an ordinary read, not a write.
+        eq(_command_writes_protected_state(f"sed -n '1,5p' {allow}"), None,
+           "a sed read of a gate file is not a write")
+        eq(_command_writes_protected_state(f"sort {allow}"), None,
+           "nor is sorting it to stdout")
+
 
 # --------------------------------------------------------------------------
 # 4. layer 4 is human-backed only

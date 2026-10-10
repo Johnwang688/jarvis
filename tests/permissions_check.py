@@ -285,6 +285,40 @@ def broker_always_checks() -> None:
     print("ok  broker: ALWAYS resolves approved and records the allowlist entry")
 
 
+def gate_state_coverage_checks() -> None:
+    """An allowlist entry never covers a line that writes the gate's own state,
+    however the write is spelled (2026-10-09). `allows()` asks
+    `protected_state.command_touch`, so even with a stem entry for the program
+    the owner allowlisted, a `cp`/`sed`/`bash -c`/`env -S` aimed at a gate file
+    is not covered. Checked here under a HOME whose gate paths are real temp
+    files — the same `gate_home` the rules suite uses."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import rules_check as rc
+
+    with rc.gate_home():
+        from jarvis import config as cfg
+        allow = str(cfg.ALLOWLIST_PATH)
+        # An entry for every program these lines name, so only the gate-state
+        # check can be what refuses coverage.
+        cfg.ALLOWLIST_PATH.write_text(json.dumps(
+            [{"tool": "run_command", "prefix": s}
+             for s in ("cp", "sed", "bash", "sh", "env", "echo", "builtin", "find")]))
+        for command in (
+            f"bash -lc 'cp /tmp/x {allow}'",
+            f"env '-Scp /tmp/x {allow}'",
+            f"echo x >|{allow}",
+            f"echo x 2>&1>{allow}",
+            f"sed 'w {allow}' f.txt",
+            f"sed -ni 's/a/b/' {allow}",
+            f"cp /tmp/x \\\n{allow}",
+        ):
+            assert not permissions.allows("run_command", {"command": command}), command
+        # A genuine read of a gate file, with the stem allowlisted, is covered.
+        assert permissions.allows("run_command", {"command": f"cp {allow} /tmp/backup.json"})
+        assert permissions.allows("run_command", {"command": f"sed -n '1,5p' {allow}"})
+    print("ok  allowlist: no entry covers a write onto the gate's state, any spelling")
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory() as tmp:
         config.ALLOWLIST_PATH = Path(tmp) / "allowlist.json"
@@ -293,6 +327,7 @@ def main() -> int:
         segment_checks()
         full_path_entry_checks()
         wildcard_entry_checks()
+        gate_state_coverage_checks()
         mode_all_checks()
         broker_always_checks()
     print("\nall permission checks passed")
