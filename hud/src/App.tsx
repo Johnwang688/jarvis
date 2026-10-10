@@ -4,7 +4,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, subscribe } from "./api";
-import { useStore, currentProject, currentProjectId, currentTask, type Tab } from "./state/store";
+import { useStore, currentProject, currentProjectId, currentTask } from "./state/store";
 import { Sidebar } from "./components/Sidebar";
 import { ChatTab } from "./components/ChatTab";
 import { InputBar } from "./components/InputBar";
@@ -31,11 +31,12 @@ import { ProjectDialog } from "./components/Pickers";
 import { ArchiveConfirm, ArchiveView } from "./components/Archive";
 import { afterProjectGone, afterThreadGone, forgetLastProject, projectNamesTaken } from "./lib/projects";
 import { guildConfigured, ownerLine } from "./lib/discord";
-import { CollapseButton, Rail, Splitter, ZoomControl, useLayout } from "./components/Layout";
-import { ZOOM_DEFAULT, maxWidth } from "./lib/layout";
+import { CollapseButton, Rail, Splitter, TitleBar, useLayout } from "./components/Layout";
+import { Workspace, type PaneInfo } from "./components/Workspace";
+import { maxWidth } from "./lib/layout";
+import { SHAPES, type PaneNo, type PaneSpec } from "./lib/workspace";
 import { ActivitySync, clearsOnRead } from "./lib/activity";
 
-const TABS: Tab[] = ["chat", "task", "file", "diff", "preview"];
 const PROPOSAL_WINDOW_MS = 60_000;
 /** How many of this window's steered or queued messages it remembers, to hand
  * their words back if a Stop drops them. */
@@ -49,9 +50,12 @@ const LIFECYCLE_KINDS = new Set([
 
 export default function App() {
   const { state, dispatch } = useStore();
-  // Zoom, pane widths and folded panes (§18, 2026-10-08): lib/layout.ts.
-  // Every layout key is inert while an authorization card is up (as PTT is).
-  const view = useLayout(state.approvals.length > 0);
+  // Zoom, pane widths and folded panes (§18, 2026-10-08): lib/layout.ts; the
+  // centre's panes, their views and the bottom panel (2026-10-09):
+  // lib/workspace.ts. Every layout key is inert while an authorization card
+  // is up (as PTT is), and every layout button is disabled.
+  const blocked = state.approvals.length > 0;
+  const view = useLayout(blocked);
   const [avatars, setAvatars] = useState<AvatarDesc[]>([]);
   // The fast path's roster and its default (`GET /models`), re-read on every
   // `model` broadcast so another window's change relabels this one.
@@ -666,7 +670,7 @@ export default function App() {
       const patchOut: Record<string, unknown> = { ...next, platforms };
       delete patchOut.displaced;
       if (next.displaced) {
-        Object.assign(patchOut, { messages: [], draft: "", ops: [], tab: "chat", taskFocus: false,
+        Object.assign(patchOut, { messages: [], draft: "", ops: [], taskFocus: false,
                                   status: `${name} was ${how}`.toUpperCase() });
       }
       if ((at.picker === "editProject" || at.picker === "archiveProject") && projectTargetRef.current === id) {
@@ -674,6 +678,9 @@ export default function App() {
         if (at.picker === "editProject") patchOut.error = `${name} was ${how} while you were editing it.`;
       }
       dispatch({ type: "patch", patch: patchOut as any });
+      // A File or Preview pane pinned to it follows the chat again.
+      view.unpinProject(id);
+      if (next.displaced) view.show("chat");
       void refreshThreads();
       void refreshTasks();
       void refreshSchedules();
@@ -739,7 +746,6 @@ export default function App() {
           threadId: null,
           compose: { projectId: projectId ?? lastProject(at.projects, at.threads, loadLastProject()) },
           taskFocus: false,
-          tab: "chat",
           messages: [],
           draft: "",
           ops: [],
@@ -747,7 +753,10 @@ export default function App() {
           status: at.turnThreadId ? at.status : "",
         },
       });
+      view.show("chat");
     },
+    // `view.show` is stable (a callback over refs).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [dispatch],
   );
 
@@ -839,6 +848,9 @@ export default function App() {
           compose: { projectId: lastProject(projects, threads, loadLastProject()) },
         },
       });
+      // The conversation is on screen: in a drawn pane that already shows it,
+      // else in the focused pane — in the single layout, today's chat tab.
+      view.show("chat");
       void refreshActivity();
       const [usage, schedules, route, approvals, discord] = await Promise.all([
         api.usage().catch(() => null),
@@ -878,12 +890,17 @@ export default function App() {
     if (held) dispatch({ type: "give_back", text: held.text, files: held.files, nonce: nextNonce() });
   }, [state.threadId, dispatch]);
 
-  // Reading clears blue and red (2026-10-08): a thread open in the chat tab,
-  // or a task open in the task tab, while the window is visible — on opening
-  // it, and when it finishes with the owner watching. The answer carries the
-  // status now, and is drawn at once — the daemon's `activity` record may not
-  // reach a window whose stream is reconnecting — unless something newer
-  // about that row has arrived meanwhile (ActivitySync).
+  // Reading clears blue and red (2026-10-08): a thread shown in a chat pane,
+  // or a task shown in a task pane, while the window is visible — on opening
+  // it, and when it finishes with the owner watching. Since 2026-10-09 that
+  // is **any drawn pane**, not only the focused one: a chat watched finishing
+  // in a side pane must not turn blue. The answer carries the status now, and
+  // is drawn at once — the daemon's `activity` record may not reach a window
+  // whose stream is reconnecting — unless something newer about that row has
+  // arrived meanwhile (ActivitySync).
+  const drawnViews = view.fit.panes.map((n) => view.ws.panes[n - 1].view);
+  const chatShown = drawnViews.includes("chat");
+  const taskShown = drawnViews.includes("task");
   const [visible, setVisible] = useState(() => document.visibilityState !== "hidden");
   useEffect(() => {
     const on = () => setVisible(document.visibilityState !== "hidden");
@@ -907,14 +924,14 @@ export default function App() {
         .finally(() => marking.current.delete(key));
     };
     const t = state.threadId;
-    if (t && state.tab === "chat" && clearsOnRead(state.activity.threads[t])) {
+    if (t && chatShown && clearsOnRead(state.activity.threads[t])) {
       mark("thread", t, api.seenThread);
     }
     const k = state.taskId;
-    if (k && state.tab === "task" && clearsOnRead(state.activity.tasks[k])) {
+    if (k && taskShown && clearsOnRead(state.activity.tasks[k])) {
       mark("task", k, api.seenTask);
     }
-  }, [visible, state.threadId, state.taskId, state.tab, state.activity, activitySync, dispatch]);
+  }, [visible, state.threadId, state.taskId, chatShown, taskShown, state.activity, activitySync, dispatch]);
 
   useEffect(() => {
     if (!state.taskId) return;
@@ -1096,8 +1113,12 @@ export default function App() {
       // What a reconnect or the 15 s timer runs: the busy state checked
       // against the thread record's live `running`.
       reconcile: () => reconcileBusy(),
+      // The centre's panes as stored and as drawn (lib/workspace.ts).
+      workspace: () => ({ ws: layoutNow.current.ws, fit: layoutNow.current.fit }),
     };
   }, [capture, dispatch, onWakeHit, reconcileBusy]);
+  const layoutNow = useRef(view);
+  layoutNow.current = view;
 
   // ---- actions ------------------------------------------------------------
 
@@ -1124,22 +1145,181 @@ export default function App() {
   const openThread = state.threadId ? state.threads.find((t) => t.id === state.threadId) || null : null;
   const task = currentTask(state);
   const drawn = view.fitted;
+  const fit = view.fit;
+  // The side panes leave the centre what the drawn shape needs (one pane: 480).
+  const mainMin = SHAPES[fit.drawn].minW;
   const hint =
     state.status ||
     (state.approvals.length ? "ANSWER THE AUTHORIZATION" : HINTS[state.dictation]);
+  const projectName = (id: string | null) => state.projects.find((p) => p.id === id)?.name || "…";
+  const chatPane = fit.panes.find((n) => view.ws.panes[n - 1].view === "chat") ?? null;
+  // The profile belongs to the conversation's project: it rides the chat
+  // pane's header, or the focused pane's when no drawn pane shows the chat —
+  // in the single layout, pane 1's, where it always was.
+  const profilePane: PaneNo = chatPane ?? (fit.panes.includes(view.ws.focused) ? view.ws.focused : fit.panes[0]);
+  /** A File or Preview pane's project: its pin, while that project exists, else the chat's. */
+  const paneProject = (spec: PaneSpec): string | null =>
+    spec.projectId && state.projects.some((p) => p.id === spec.projectId) ? spec.projectId : activeProjectId;
+  const pinnedElsewhere = (spec: PaneSpec) =>
+    (spec.view === "file" || spec.view === "preview") && paneProject(spec) !== activeProjectId;
+
+  const renderView = (spec: PaneSpec, info: PaneInfo) => {
+    const n = info.pane;
+    switch (spec.view) {
+      case "chat":
+        return (
+          <>
+            <ChatTab
+              thread={openThread}
+              messages={state.messages}
+              draft={state.draft}
+              ops={state.ops}
+              onCancelTask={(id) => api.cancelTask(id).then(refreshTasks).catch(() => {})}
+            />
+            <InputBar
+              mode={state.dictation}
+              level={state.level}
+              hint={hint}
+              pendingTranscript={state.pendingTranscript}
+              disabled={state.approvals.length > 0}
+              placeholder={
+                state.compose
+                  ? `New thread in ${project?.name || "…"} · message, or @path to attach`
+                  : undefined
+              }
+              projectChip={{
+                projects: state.projects,
+                value: activeProjectId,
+                editable: !!state.compose && !state.compose.openedId,
+                folder: openThread?.cwd ?? null,
+                onChange: (projectId) =>
+                  state.compose && patch({ compose: { ...state.compose, projectId } }),
+                onNewProject: () => patch({ picker: "newProject" }),
+              }}
+              modelChip={threadModel.chip}
+              imageNote={threadModel.imageNote}
+              onModeChange={setMode}
+              onSend={(text, files) => void send(text, files)}
+              onTranscriptTaken={() => patch({ pendingTranscript: "" })}
+              running={state.busy && !!state.threadId && state.turnThreadId === state.threadId}
+              onStop={stopTurn}
+              restore={state.restore}
+              onRestoreTaken={(nonce) => dispatch({ type: "given_back", nonce })}
+            />
+          </>
+        );
+      case "task":
+        return (
+          <div className="scroll">
+            <TaskView
+              task={task}
+              threads={state.taskId ? state.taskThreads[state.taskId] || [] : []}
+              onAnswer={(question, answer) =>
+                task && api.answerTask(task.id, { question, answer }).then(refreshTasks).catch(() => {})
+              }
+              onSteer={(text) => task && api.steerTask(task.id, text).catch(() => {})}
+              onCancel={() => task && api.cancelTask(task.id).then(refreshTasks).catch(() => {})}
+              onResume={() => task && api.resumeTask(task.id).then(refreshTasks).catch(() => {})}
+              onStart={() => task && api.startTask(task.id).then(refreshTasks).catch(() => {})}
+            />
+          </div>
+        );
+      case "file": {
+        // Keyed by its project: a save can only ever go where the file was read.
+        const pid = paneProject(spec);
+        return (
+          <FileTab key={pid ?? "none"} projectId={pid} narrow={info.narrow} onOpened={(id) => view.pin(n, id)} />
+        );
+      }
+      case "diff":
+        return <DiffTab taskId={state.taskId} narrow={info.narrow} />;
+      case "preview":
+        return (
+          <PreviewTab
+            projectId={paneProject(spec)}
+            url={spec.previewUrl}
+            onLoaded={(url) => view.setPreviewUrl(n, url)}
+            onProjectRoot={(id) => view.pin(n, id)}
+          />
+        );
+      default:
+        return null;
+    }
+  };
+
+  const paneExtras = (spec: PaneSpec, info: PaneInfo) => {
+    const n = info.pane;
+    return (
+      <>
+        {pinnedElsewhere(spec) ? (
+          <span className="chip panepin" data-testid={`pane-${n}-project`} title="This pane stays in its project">
+            in: {projectName(paneProject(spec))}
+            <button type="button" className="quiet" data-testid={`pane-${n}-follow`} onClick={() => view.pin(n, null)}>
+              follow chat
+            </button>
+          </span>
+        ) : null}
+        {n === profilePane && project ? (
+          <select
+            data-testid="profile"
+            style={{ width: 110 }}
+            value={project.profile}
+            title="Applies to threads and task workers opened from now on."
+            onChange={(e) =>
+              api
+                .patchProject(project.id, { profile: e.target.value })
+                .then(() => api.projects())
+                .then((projects) => patch({ projects }))
+                // Every refusal is shown (§18): a select that snaps back
+                // with no word is a profile the owner believes changed.
+                .catch((err) => patch({ error: `Could not change the profile: ${err.message}` }))
+            }
+          >
+            <option value="auto">auto</option>
+            <option value="ask">ask</option>
+            <option value="strict">strict</option>
+          </select>
+        ) : null}
+      </>
+    );
+  };
+
+  const paneContext = (spec: PaneSpec): string => {
+    switch (spec.view) {
+      case "chat":
+        return openThread?.title || (state.compose ? `New thread in ${project?.name || "…"}` : "");
+      case "task":
+      case "diff":
+        return task?.brief || "";
+      case "file":
+        return `in: ${projectName(paneProject(spec))}`;
+      case "preview":
+        return spec.previewUrl || "";
+      default:
+        return "";
+    }
+  };
 
   return (
     <>
+      <TitleBar view={view} blocked={blocked} onPicker={(which) => patch({ picker: which })} />
       <div
         id="shell"
         className={(drawn.leftFolded ? "left-collapsed " : "") + (drawn.rightFolded ? "right-collapsed" : "")}
         style={{ ["--left-w" as any]: `${drawn.left}px`, ["--right-w" as any]: `${drawn.right}px` }}
       >
         {drawn.leftFolded ? (
-          <Rail side="left" auto={drawn.autoLeft} onExpand={() => view.open("left")} onNewThread={() => newThread()} />
+          <Rail
+            side="left"
+            auto={drawn.autoLeft}
+            disabled={blocked}
+            onExpand={() => view.open("left")}
+            onNewThread={() => newThread()}
+          />
         ) : null}
         <Sidebar
           zoom={view.zoom}
+          layoutBlocked={blocked}
           onCollapse={() => view.fold("left")}
           projects={state.projects}
           archivedNames={state.archivedNames}
@@ -1154,9 +1334,13 @@ export default function App() {
           taskId={state.taskId}
           onPickThread={(id) => {
             pendingThread.current = null;
-            patch({ threadId: id, compose: null, taskFocus: false, tab: "chat" });
+            patch({ threadId: id, compose: null, taskFocus: false });
+            view.show("chat");
           }}
-          onPickTask={(id) => patch({ taskId: id, taskFocus: true, tab: "task" })}
+          onPickTask={(id) => {
+            patch({ taskId: id, taskFocus: true });
+            view.show("task");
+          }}
           onNewProject={() => patch({ picker: "newProject" })}
           onNewThread={() => newThread()}
           onNewTask={(projectId) => {
@@ -1209,130 +1393,25 @@ export default function App() {
           <Splitter
             side="left"
             width={drawn.left}
-            max={maxWidth("left", drawn.right, view.available)}
+            max={maxWidth("left", drawn.right, view.available, mainMin)}
             zoom={view.zoom}
+            blocked={blocked}
             onResize={(w) => view.setWidth("left", w)}
             onReset={() => view.resetWidth("left")}
           />
         )}
 
         <div className="pane" id="main">
-          <div id="tabs">
-            {TABS.map((t) => (
-              <button
-                type="button"
-                key={t}
-                data-testid={`tab-${t}`}
-                className={state.tab === t ? "on" : ""}
-                onClick={() => patch({ tab: t })}
-              >
-                {t}
-              </button>
-            ))}
-            <div style={{ marginLeft: "auto", display: "flex", gap: 6, alignItems: "center", paddingRight: 8 }}>
-              {project ? (
-                <select
-                  data-testid="profile"
-                  style={{ width: 110 }}
-                  value={project.profile}
-                  title="Applies to threads and task workers opened from now on."
-                  onChange={(e) =>
-                    api
-                      .patchProject(project.id, { profile: e.target.value })
-                      .then(() => api.projects())
-                      .then((projects) => patch({ projects }))
-                      // Every refusal is shown (§18): a select that snaps back
-                      // with no word is a profile the owner believes changed.
-                      .catch((err) => patch({ error: `Could not change the profile: ${err.message}` }))
-                  }
-                >
-                  <option value="auto">auto</option>
-                  <option value="ask">ask</option>
-                  <option value="strict">strict</option>
-                </select>
-              ) : null}
-              <button type="button" data-testid="open-model" onClick={() => patch({ picker: "model" })}>
-                Model
-              </button>
-              <button type="button" data-testid="open-voice" onClick={() => patch({ picker: "voice" })}>
-                Voice
-              </button>
-              <button type="button" data-testid="open-avatar" onClick={() => patch({ picker: "avatar" })}>
-                Avatar
-              </button>
-              <button type="button" data-testid="open-settings" onClick={() => patch({ picker: "settings" })}>
-                Settings
-              </button>
-            </div>
-          </div>
-
-          {state.tab === "chat" ? (
-            <>
-              <ChatTab
-                thread={openThread}
-                messages={state.messages}
-                draft={state.draft}
-                ops={state.ops}
-                onCancelTask={(id) => api.cancelTask(id).then(refreshTasks).catch(() => {})}
-              />
-              <InputBar
-                mode={state.dictation}
-                level={state.level}
-                hint={hint}
-                pendingTranscript={state.pendingTranscript}
-                disabled={state.approvals.length > 0}
-                placeholder={
-                  state.compose
-                    ? `New thread in ${project?.name || "…"} · message, or @path to attach`
-                    : undefined
-                }
-                projectChip={{
-                  projects: state.projects,
-                  value: activeProjectId,
-                  editable: !!state.compose && !state.compose.openedId,
-                  folder: openThread?.cwd ?? null,
-                  onChange: (projectId) =>
-                    state.compose && patch({ compose: { ...state.compose, projectId } }),
-                  onNewProject: () => patch({ picker: "newProject" }),
-                }}
-                modelChip={threadModel.chip}
-                imageNote={threadModel.imageNote}
-                onModeChange={setMode}
-                onSend={(text, files) => void send(text, files)}
-                onTranscriptTaken={() => patch({ pendingTranscript: "" })}
-                running={state.busy && !!state.threadId && state.turnThreadId === state.threadId}
-                onStop={stopTurn}
-                restore={state.restore}
-                onRestoreTaken={(nonce) => dispatch({ type: "given_back", nonce })}
-              />
-            </>
-          ) : null}
-          {state.tab === "task" ? (
-            <div className="scroll">
-              <TaskView
-                task={task}
-                threads={state.taskId ? state.taskThreads[state.taskId] || [] : []}
-                onAnswer={(question, answer) =>
-                  task && api.answerTask(task.id, { question, answer }).then(refreshTasks).catch(() => {})
-                }
-                onSteer={(text) => task && api.steerTask(task.id, text).catch(() => {})}
-                onCancel={() => task && api.cancelTask(task.id).then(refreshTasks).catch(() => {})}
-                onResume={() => task && api.resumeTask(task.id).then(refreshTasks).catch(() => {})}
-                onStart={() => task && api.startTask(task.id).then(refreshTasks).catch(() => {})}
-              />
-            </div>
-          ) : null}
-          {state.tab === "file" ? <FileTab projectId={activeProjectId} /> : null}
-          {state.tab === "diff" ? <DiffTab taskId={state.taskId} /> : null}
-          {state.tab === "preview" ? <PreviewTab projectId={activeProjectId} /> : null}
+          <Workspace view={view} blocked={blocked} render={renderView} extras={paneExtras} context={paneContext} />
         </div>
 
         {drawn.rightFolded ? null : (
           <Splitter
             side="right"
             width={drawn.right}
-            max={maxWidth("right", drawn.left, view.available)}
+            max={maxWidth("right", drawn.left, view.available, mainMin)}
             zoom={view.zoom}
+            blocked={blocked}
             onResize={(w) => view.setWidth("right", w)}
             onReset={() => view.resetWidth("right")}
           />
@@ -1340,8 +1419,9 @@ export default function App() {
         <div className="pane" id="right">
           <div className="barrow">
             <h2 className="bar">{task ? "Task" : "Status"}</h2>
-            <ZoomControl zoom={view.zoom} onStep={view.zoomBy} onReset={() => view.setZoom(ZOOM_DEFAULT)} />
-            <CollapseButton side="right" onCollapse={() => view.fold("right")} />
+            {/* The zoom control moved to the title bar (2026-10-09): here it
+                folded away with the pane it sat in. */}
+            <CollapseButton side="right" onCollapse={() => view.fold("right")} disabled={blocked} />
           </div>
           <div className="scroll">
             <ApprovalQueue requests={state.approvals} />
@@ -1382,6 +1462,7 @@ export default function App() {
           <Rail
             side="right"
             auto={drawn.autoRight}
+            disabled={blocked}
             onExpand={() => view.open("right")}
             approvals={state.approvals.length}
             error={!!state.error}
@@ -1551,7 +1632,8 @@ export default function App() {
             api
               .createTask({ project_id: projectId, brief })
               .then((t) => {
-                patch({ picker: null, taskId: t.id, taskFocus: true, tab: "task" });
+                patch({ picker: null, taskId: t.id, taskFocus: true });
+                view.show("task");
                 return refreshTasks();
               })
               .catch((e) => patch({ error: e.message }));
