@@ -2259,10 +2259,18 @@ def main():
                 FAILURES.append(f"the HUD under test reached a live daemon port: {route.request.url}")
                 route.abort()
 
-            # Zoom, folding panes and resizing (2026-10-08) first, in a context
-            # of its own: its localStorage and its reloads stay out of the rest.
+            # Zoom, folding panes, resizing and the workspace (2026-10-08/09)
+            # first, in a context of its own **and against a mock of its own**
+            # on an ephemeral port: its localStorage, its reloads, its saves,
+            # `/seen` posts, approval decisions and preview hits all stay out of
+            # the world the rest of the suite asserts on.
             from tests.face.hud_v2_layout_check import layout_checks
-            layout_checks(browser, mock, BASE, check, until, (live, refuse_live), FAKE_RECOGNIZER)
+            layout_mock = MockDaemon(0).start()
+            try:
+                layout_checks(browser, layout_mock, f"http://127.0.0.1:{layout_mock.port}", check, until,
+                              (live, refuse_live), FAKE_RECOGNIZER)
+            finally:
+                layout_mock.stop()
 
             ctx = browser.new_context(permissions=["microphone"])
             ctx.route(live, refuse_live)

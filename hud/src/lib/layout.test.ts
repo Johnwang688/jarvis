@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   DEFAULT_LAYOUT, LAYOUT_KEY, MAIN_MIN, PANE, RAIL, ZOOM_KEY, clampWidth, dragWidth, fitLayout, inMonaco,
-  isZoom, keyWidth, loadLayout, loadZoom, maxWidth, parseLayout, parseZoom, saveLayout, saveZoom, shortcutFor,
-  stepZoom, toCss,
+  isZoom, keyStep, keyWidth, loadLayout, loadZoom, maxWidth, parseLayout, parseZoom, saveLayout, saveZoom,
+  shortcutFor, stepZoom, toCss,
 } from "./layout";
 
 /** A Storage stand-in: a Map, or one that throws on every call. */
@@ -250,6 +250,33 @@ describe("dragging and keys", () => {
     expect(keyWidth("left", 236, "Enter", false, 480)).toBeNull();
     expect(keyWidth("left", 236, " ", false, 480)).toBeNull();
   });
+
+  it("moves a horizontal edge with Up and Down, and ignores Left and Right there", () => {
+    // A row edge: Down moves it down, growing the row above.
+    expect(keyStep("y", 300, "ArrowDown", false, 200, 600)).toBe(316);
+    expect(keyStep("y", 300, "ArrowUp", true, 200, 600)).toBe(236);
+    expect(keyStep("y", 300, "ArrowLeft", false, 200, 600)).toBeNull();
+    expect(keyStep("y", 300, "ArrowRight", false, 200, 600)).toBeNull();
+    // The panel's top edge: Up makes the panel taller.
+    expect(keyStep("y", 260, "ArrowUp", false, 120, 500, -1)).toBe(276);
+    expect(keyStep("y", 260, "ArrowDown", false, 120, 500, -1)).toBe(244);
+    expect(keyStep("y", 130, "ArrowDown", true, 120, 500, -1)).toBe(120);
+    expect(keyStep("y", 260, "End", false, 120, 500, -1)).toBe(500);
+    // A vertical edge ignores Up and Down.
+    expect(keyStep("x", 300, "ArrowUp", false, 0, 600)).toBeNull();
+  });
+
+  it("bounds the side panes by a split centre's minimum, not one pane's", () => {
+    expect(maxWidth("left", 316, 1280, 720)).toBe(1280 - 720 - 316);
+    expect(maxWidth("left", 316, 1280)).toBe(PANE.left.max);
+    // fitLayout with a wider centre folds sooner.
+    expect(fitLayout(DEFAULT_LAYOUT, 1280).rightFolded).toBe(false);
+    expect(fitLayout(DEFAULT_LAYOUT, 1280, null, 1080)).toMatchObject({ rightFolded: true, leftFolded: true });
+    // 236 + 316 + 720 = 1272: at 1200 both give back slack to leave 720.
+    const f = fitLayout(DEFAULT_LAYOUT, 1200, null, 720);
+    expect(f.left + f.right).toBe(1200 - 720);
+    expect(fitLayout(DEFAULT_LAYOUT, 1200).left + fitLayout(DEFAULT_LAYOUT, 1200).right).toBe(236 + 316);
+  });
 });
 
 describe("shortcuts", () => {
@@ -284,6 +311,42 @@ describe("shortcuts", () => {
     expect(k("ń", { altKey: true })).toBeNull();
     expect(k("=", { altKey: true })).toBeNull();
     expect(k("a")).toBeNull();
+  });
+
+  it("shows and hides the panel with Ctrl+` (VS Code's key)", () => {
+    expect(k("`")).toBe("togglePanel");
+    expect(k("`", { ctrlKey: false, metaKey: true })).toBe("togglePanel");
+    // Where the backtick is a dead key, the physical key stands in for it.
+    expect(shortcutFor({ key: "Dead", code: "Backquote", ctrlKey: true, altKey: false })).toBe("togglePanel");
+    // A dead key elsewhere (´ or ^ on another key) is not ours.
+    expect(shortcutFor({ key: "Dead", code: "Equal", ctrlKey: true, altKey: false })).toBeNull();
+    expect(shortcutFor({ key: "Dead", ctrlKey: true, altKey: false })).toBeNull();
+  });
+
+  it("takes no Alt for the panel: AltGr+7 types a backtick on French layouts", () => {
+    expect(k("`", { altKey: true })).toBeNull();
+    expect(k("`", { shiftKey: true })).toBeNull();
+    expect(k("~", { shiftKey: true })).toBeNull();
+    expect(shortcutFor({ key: "`", ctrlKey: false, altKey: false })).toBeNull();
+  });
+
+  it("focuses a pane with Ctrl+Alt+1 … 4", () => {
+    expect(k("1", { altKey: true })).toBe("focus1");
+    expect(k("2", { altKey: true })).toBe("focus2");
+    expect(k("3", { altKey: true })).toBe("focus3");
+    expect(k("4", { altKey: true })).toBe("focus4");
+    expect(k("5", { altKey: true })).toBeNull();
+    expect(k("0", { altKey: true })).toBeNull();
+    // Without Alt, Ctrl+digit is the browser's (Ctrl+0 is our zoom reset).
+    expect(k("1")).toBeNull();
+    expect(k("1", { altKey: true, shiftKey: true })).toBeNull();
+  });
+
+  it("never matches what AltGr+digit types on European layouts", () => {
+    // AltGr arrives as Ctrl+Alt and reports the symbol, not the digit.
+    for (const sym of ["{", "[", "]", "}", "@", "²", "³", "#", "~", "|", "\\", "€", "¹", "¼"]) {
+      expect(k(sym, { altKey: true })).toBeNull();
+    }
   });
 
   it("knows when keys are going into Monaco", () => {
