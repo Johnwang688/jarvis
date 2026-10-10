@@ -536,7 +536,14 @@ terminal suite proves the socket half against a port of its own. Two
 Playwright facts that cost a debugging round: sync route handlers run only
 during a Playwright call, so a wait on the fake's own state must pump
 (`pumping`); and a socket must not be closed from inside its own message
-handler.
+handler. **Verified to bite**, each mutation in a scratch copy: the key
+filter's card hold alone (Escape stops denying), every hold layer (a typed
+`y⏎` and a pasted `rm -rf` reach the shell), the paste abort (128 of 128
+chunks sent), a queue that outlives its socket (the rest of the paste goes
+out ahead of the next keystroke — the direct check only bit once it typed
+on the new socket), the guard's socket half, and the three backend fixes.
+While typing is paused the notice cannot be dismissed: it holds the only
+way to resume.
 
 **Sidebar status dots (2026-10-08, design §18; contract in
 `docs/hud-api.md`).** The `·` left of each sidebar thread and task is what it
