@@ -957,10 +957,22 @@ What the HUD does with the terminal contract above (code in
   terminal is closed, taken by another window, or ends with Jarvis. A
   hidden panel or a pane the layout does not draw attaches nothing, so a
   reload never asks another window for a terminal nobody here is looking at.
+- **A terminal another window shows is never taken unasked.** A row listed
+  `shown` that this tab has not shown (a sessionStorage set,
+  `jarvis.hud.terminals.mine`, which a reload keeps and `taken`/`refused`
+  clear) is drawn as "in another window · Show it here"; only that click
+  attaches (and so asks the other window). A first attach reads a fresh
+  `GET /terminals` before deciding.
 - **Every attach** fetches `POST /terminals/{id}/ticket` first, builds the
   socket URL from `location` (`ws:` or `wss:` + `location.host`, never a
-  port), starts from a clean xterm on `attached`, and sends `resize` only
-  after `replayed` (and again on every fit). An unexpected close reattaches
+  port), starts from a clean xterm on `attached` (an in-band RIS), and sends
+  `resize` only after `replayed` (and again on every fit). **Nothing is sent
+  from a new socket until its replay has been parsed**: xterm answers some
+  output (DA, a cursor-position report, an OSC 10/11 colour, DECRQSS)
+  through the input channel, and the ring's old queries must not be
+  answered into the program as if typed. Output is written one chunk at a
+  time and tagged with its socket, so an older socket's queued output is
+  never parsed into a newer session. An unexpected close reattaches
   with a fresh ticket (backoff 0.3–10 s, then "lost" with Reconnect); a
   ticket answered 404 reads "ended".
 - **Pastes** go out in 16 KiB chunks paced 8 ms apart from a queue that
@@ -973,7 +985,10 @@ What the HUD does with the terminal contract above (code in
   cannot be dismissed — it holds the only way to resume — and a held key
   brings it back. A Ctrl-C ends a paste still queued.
   **A socket that closes takes the rest of its paste with it**: nothing of
-  it is sent on the next socket, and the owner is told.
+  it is sent on the next socket, and the owner is told. **A paste is inert
+  as a control stream**: ESC and C1 are stripped before it is bracketed, so
+  a pasted `ESC[201~` cannot end bracketed paste early. Keys or a paste
+  dropped while the terminal connects (or is not running here) are said.
 - **Under an authorization card nothing reaches the shell** (keys, pastes,
   a paste still going out); every key bubbles past the terminal, so Escape
   denies; output keeps drawing; every terminal button is disabled.
@@ -990,8 +1005,10 @@ What the HUD does with the terminal contract above (code in
   reads "no integration" at once. Both say sudo may cache there.
 - **`readable`**: each terminal's bar carries the "Jarvis can read" switch,
   `PATCH /terminals/{id}` with exactly `{readable}`.
-- **`busy`**: × re-reads `GET /terminals` and, when the foreground process
-  is not the shell, asks before `DELETE`.
+- **`busy`**: × reads a `GET /terminals` sent after the click (never one
+  already on its way) and, when the foreground process is not the shell,
+  asks before `DELETE`; if the listing fails it asks anyway, saying it could
+  not check.
 - **Output is hostile bytes**: an OSC 0/2 title is text in the pane header
   and the terminal's bar, one line, capped at 80 — never `document.title`;
   links (plain or OSC 8) open only for `http`/`https`, only on Ctrl+click,

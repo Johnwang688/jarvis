@@ -416,7 +416,9 @@ opened with (`Thread.cwd`); a move re-labels, it never re-roots.
 `hud/src/lib/layout.ts`. Zoom is 70–160% in 10% steps: `− 100% +` in the
 title bar (since 2026-10-09; it used to fold away with the status pane), or
 Ctrl+= / Ctrl+- / Ctrl+0 — **the HUD's everywhere**, input
-bar and Monaco included, because a key let through is Chrome's page zoom,
+bar, Monaco and terminals included (inside a terminal only Ctrl+_ —
+Ctrl+Shift+-, readline's undo — goes to the shell instead of zooming out;
+WP-D), because a key let through is Chrome's page zoom,
 which the control cannot see and Chrome remembers per site. It is **CSS
 `zoom` on `#root`**, so **every `vh`/`vw` in `theme.css` must divide by
 `--ui-zoom`**, and a menu positioned from a screen rect must go through
@@ -493,7 +495,26 @@ reports off. `lib/terminal.ts` holds the rules (pure, `terminal.test.ts`),
 per window**: made the first time the window draws it, it attaches with a
 **fresh ticket** and a URL from `location` (never a port), resizes only after
 `replayed`, and **stays attached while hidden**; its xterm element is moved,
-not rebuilt, between the panel and a pane. **One terminal is drawn in one
+not rebuilt, between the panel and a pane. **A replay is never answered**
+(PR #28 review): xterm answers some output — DA, a cursor-position report,
+an OSC 11 colour, DECRQSS — through the owner's own input channel, so a ring
+holding old queries used to type their answers into the program on every
+reload or dropped socket (50,000 `ESC[6n` → 300 KB in 50k frames, past the
+daemon's 256 KiB latch). Output now goes through `OutputPipe`: one write in
+xterm's hands at a time, **tagged with its socket's generation**, so an older
+socket's queued output is never parsed into a new session; the reset is an
+in-band RIS (a JS `reset()` lets what xterm already holds be drawn again
+after it); and **nothing is sent from a new socket until its replay has been
+parsed** — the flag clears from the pipe's step after the replay, never on
+the `replayed` message itself. **A terminal another window shows is never
+taken unasked**: listed `shown` and not one this tab has shown (a
+sessionStorage set, `jarvis.hud.terminals.mine`, so a reload attaches straight
+back; `taken`/`refused` forget it), it is drawn as "in another window · Show
+it here" — a takeover question the owner did not cause is one they learn to
+wave through. A first attach reads a fresh listing first, and so does ×
+before deciding whether to ask (`freshList`: never a listing already on its
+way, which may predate `busy`; a failed listing asks, saying it could not
+check). **One terminal is drawn in one
 place** (`placeTerminals`): a drawn pane holding it wins and its panel tab
 reads "in pane N" and jumps there; a hidden panel or undrawn pane attaches
 nothing (a reload must not ask another window for a terminal nobody here
@@ -512,6 +533,12 @@ owner's **Resume typing** (`input_resume`, retried while refused, with
 Reattach/close as the way out — Ctrl-C is not); a late in-flight
 `input_dropped` adds to the notice and never undoes a resume; **a socket
 that closes takes its paste with it**, never continued on the next.
+**Every paste is inert as a control stream**: a capture-phase listener on the
+host takes it before xterm, strips ESC and C1 (`cleanPaste`), then
+`term.paste()`s it — a pasted `ESC[201~` used to end bracketed paste early
+and run the rest. Keys or a paste dropped while connecting (or not running
+here) are said, never swallowed (an `unsent` notice; only the owner's own
+gestures count, never xterm's answers).
 Takeover asks here (Let it / Keep it, disabled under a card — unanswered is
 kept); "taken", "refused", "exited (code N)" with Restart/Close, "ended"
 with New terminal here (the spec it was opened with, remembered under
@@ -542,6 +569,15 @@ filter's card hold alone (Escape stops denying), every hold layer (a typed
 chunks sent), a queue that outlives its socket (the rest of the paste goes
 out ahead of the next keystroke — the direct check only bit once it typed
 on the new socket), the guard's socket half, and the three backend fixes.
+The review round added, each also shown to bite in a scratch copy: the
+pump's card hold (chunks left while a card was up), a late `input_dropped`
+undoing a resume, input during the replay (a reload, a drop and a 50k-query
+ring each typed answers), clearing the replay flag on `replayed` rather than
+after the parse, the pipe keeping an older socket's queue (vitest), the paste
+listener and `cleanPaste`, "in another window", ×'s fresh listing, a card
+that queues rather than drops, the `unsent` notice, and the tab's own set.
+The test-only write hook `__hudTerminals.paste` is gone; the hooks left are
+read-only.
 While typing is paused the notice cannot be dismissed: it holds the only
 way to resume.
 

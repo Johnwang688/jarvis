@@ -1927,8 +1927,15 @@ input held, a paste in flight paused, every key left to bubble so Escape
 denies — and output keeps drawing. **A paste never splices**: it goes out in
 paced 16 KiB chunks from a queue that belongs to one socket, stops the
 moment the daemon drops a frame, waits for the owner's Resume before typing
-goes again, and dies with its socket rather than continuing on the next one.
-Another window's takeover is asked here (Let it / Keep it, unanswerable
+goes again, and dies with its socket rather than continuing on the next one;
+and it is inert as a control stream (ESC stripped), so a pasted end-of-paste
+marker cannot end bracketed paste early. **A replay is never answered**:
+xterm answers some output (a cursor-position or colour query) through the
+input channel, so nothing is sent from a new socket until its replay has been
+parsed, and an older socket's queued output is never parsed into a newer one.
+**A terminal another window shows is never taken unasked** — it reads "in
+another window · Show it here" until the owner says so. Another window's
+takeover is asked here (Let it / Keep it, unanswerable
 under a card, so kept); exit, Jarvis's restart, "taken" and "refused" each
 say so with the next step offered; a busy terminal is asked about before it
 closes; an attach this window did not make is a quiet notice. Output is
