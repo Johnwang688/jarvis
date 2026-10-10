@@ -298,9 +298,11 @@ h2.bar {
 }
 .tabs > .paneextras button { padding: 3px 9px; }
 .tabs > .paneextras select { padding: 3px 6px; }
-/* A split pane's context: the thread, the file's project, the URL. Quiet. */
+/* A split pane's context: the thread, the file's project, the URL. Quiet,
+   and it takes only the room left over (basis 0), so it ellipsizes away
+   before it ever pushes the header's right side onto a second row. */
 .tabs > .panectx {
-  align-self: center; min-width: 0; flex: 0 1 auto; max-width: 40%; padding: 0 8px;
+  align-self: center; min-width: 0; flex: 1 1 0; padding: 0 8px;
   font: 11px var(--mono); color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 /* "in: jarvis · follow chat": a File or Preview pane that stayed in its project. */
