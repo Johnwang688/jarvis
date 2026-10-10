@@ -49,7 +49,8 @@ cannot ride a `sudo` the owner just typed.
 
 **Lifecycle (W-3, plan decision 12).** The owner's login shell
 (`JARVIS_TERMINAL_SHELL`, an absolute path, overrides it; the realpath is
-what is checked and launched), started through util-linux `setsid --ctty`
+what is checked and launched, under the name it was given as argv[0], so
+`rbash` stays restricted), started through util-linux `setsid --ctty`
 so it leads its own session with the PTY as its controlling terminal —
 never `pty.fork()` in this threaded daemon — with HUP, INT, QUIT, TERM and
 TSTP back at their defaults (`env --default-signal`), whatever the daemon
@@ -58,7 +59,10 @@ inherited. A clean environment, not the daemon's: nothing from `.env`, no
 `ANTHROPIC_*`, `CLAUDE_*`, `CODEX_*` or `JARVIS_*`. At most six. Each keeps
 1 MiB of output in memory, replayed when a window reattaches. Input goes
 through a bounded queue and a writer thread of its own, so a program that
-does not read its input never stalls the window's socket. Closing one sends
+does not read its input never stalls the window's socket; once a frame is
+dropped for want of room, the socket refuses all input (a lone Ctrl-C
+excepted) until the queue drains and the window sends `input_resume`, so a
+paste reaches the program as a prefix, never spliced. Closing one sends
 SIGHUP to every process in its session (found in /proc, so background jobs
 are included), then SIGKILL; the session's leader is matched on its start
 time, so a session whose pid was reused is never signalled. **Terminals end
@@ -77,11 +81,16 @@ login shell with **no** startup file — no `sudo -k` and no marks — and the
 listing says so (`integration`). The startup file sets `sudo -k` and emits
 OSC 133 marks signed with a per-terminal nonce; `Marks` turns them into
 `CommandSpan`s over the ring's byte offsets for WP-F's `terminal_read`.
-The nonce lives only in the startup file's copy, which **deletes itself
-before anything else runs** (and `$ENV` is unset), and in an unexported
-shell variable that PS1 names rather than holds (an exported PS1 carries no
-nonce), so a program started in the terminal has no ordinary way to learn
-it. **Spans are advisory, never a
+The startup file **never touches disk**: it is written whole into a pipe
+whose write end is closed before the shell starts, and the shell reads it as
+/dev/fd/<n>, draining it before it runs anything (the POSIX file unsets
+`$ENV` too). After that the nonce is only in an unexported shell variable
+that PS1 names rather than holds (an exported PS1 carries no nonce), so a
+program started in the terminal has no ordinary way to learn it. A program
+running as the owner *outside* the terminal could still race the shell to
+read that pipe — it would get the nonce and leave the shell with no startup
+file at all — which is the same-uid limit stated above, not a new one.
+**Spans are advisory, never a
 boundary**: a program in the terminal still writes whatever bytes it likes
 between the marks; a nested shell, `sudo -i`, `ssh` or `python` puts
 everything under the outer command's span; a line kept out of history
@@ -108,7 +117,6 @@ import signal
 import struct
 import subprocess
 import sys
-import tempfile
 import termios
 import threading
 import time
@@ -168,11 +176,26 @@ def _fail(status, text):
 
 # -- the shell and its environment --------------------------------------------------
 
-def resolve_shell() -> str:
-    """The owner's login shell, or `JARVIS_TERMINAL_SHELL`, as the realpath
-    that is checked and launched (the Codex resolver's rule). An override
-    must be absolute (a relative one would be resolved in the terminal's
-    folder), and nothing under /mnt/ is a Linux shell."""
+@dataclass(frozen=True)
+class Shell:
+    """The shell a terminal runs: `path` is the realpath that is checked and
+    executed, `name` what the owner named it, which the shell gets as its
+    argv[0] — `/usr/bin/rbash` is a link to bash and must still run
+    restricted."""
+    path: str
+    name: str
+
+    @property
+    def kind(self) -> str:
+        return shell_kind(self.path, self.name)
+
+
+def resolve_shell() -> Shell:
+    """The owner's login shell, or `JARVIS_TERMINAL_SHELL`. Its realpath is
+    what is checked and launched (the Codex resolver's rule); the name it was
+    given stays its argv[0]. An override must be absolute (a relative one
+    would be resolved in the terminal's folder), and nothing under /mnt/ is
+    a Linux shell."""
     override = (config.TERMINAL_SHELL or "").strip()
     if override:
         if not os.path.isabs(override):
@@ -189,23 +212,25 @@ def resolve_shell() -> str:
         raise TerminalError("the terminal shell must be a Linux program, not one under /mnt/")
     if not (os.path.isfile(path) and os.access(path, os.X_OK)):
         raise TerminalError(f"the terminal shell {given} is not an executable file")
-    return path
+    return Shell(path, given)
 
 
-def shell_kind(shell: str) -> str:
+def shell_kind(path: str, name: str | None = None) -> str:
     """"bash", "posix" (reads $ENV when interactive) or "none" (zsh, fish,
-    anything else: no startup file, so no `sudo -k` and no marks)."""
-    name = os.path.basename(shell)
-    if name == "bash":
-        return "bash"
-    return "posix" if name in POSIX_SHELLS else "none"
+    anything else: no startup file, so no `sudo -k` and no marks). Judged on
+    the program and on the name it is called by: bash called `sh` is a POSIX
+    shell and ignores --rcfile."""
+    real, called = os.path.basename(path), os.path.basename(name or path)
+    if real == "bash":
+        return "posix" if called == "sh" else "bash"
+    return "posix" if real in POSIX_SHELLS or called in POSIX_SHELLS else "none"
 
 
 def shell_command(shell: str, kind: str, rcfile: str | None) -> tuple[list[str], dict]:
     """argv and extra environment. bash takes `terminal_rc.bash` as its
     --rcfile and a POSIX shell starts interactive with `terminal_rc.sh` as
-    $ENV; each file reads the login files itself, after deleting itself. Any
-    other shell starts as a plain login shell."""
+    $ENV; each file reads the login files itself. Any other shell starts as
+    a plain login shell."""
     if kind == "bash":
         return [shell, "--rcfile", rcfile, "-i"], {}
     if kind == "posix":
@@ -213,28 +238,48 @@ def shell_command(shell: str, kind: str, rcfile: str | None) -> tuple[list[str],
     return [shell, "-l"], {}
 
 
-_signal_reset: list[str] | None = None
+_env_support: tuple | None = None
 
 
-def signal_reset() -> list[str]:
-    """`env --default-signal=…` when this system's env has it (GNU coreutils
-    8.31+, uutils): a signal the daemon inherited as ignored would stay
-    ignored in the shell and every job, and a SIGHUP close would not land.
-    Probed once; without it the shell starts as it would have."""
-    global _signal_reset
-    if _signal_reset is None:
+def _env_probe() -> tuple[str | None, bool, bool]:
+    """(env, --default-signal works, --argv0 works) for this system's env
+    (GNU coreutils, uutils). Probed once."""
+    global _env_support
+    if _env_support is None:
         env = shutil.which("env", path="/usr/bin:/bin")
-        argv = [env, f"--default-signal={_RESET_SIGNALS}", "--"] if env else []
-        try:
-            ok = bool(argv) and subprocess.run([*argv, "true"], capture_output=True,
-                                               timeout=5).returncode == 0
-        except (OSError, subprocess.SubprocessError):
-            ok = False
-        if not ok:
+
+        def works(*options):
+            try:
+                return subprocess.run([env, *options, "--", "true"], capture_output=True,
+                                      timeout=5).returncode == 0
+            except (OSError, subprocess.SubprocessError):
+                return False
+        signals = bool(env) and works(f"--default-signal={_RESET_SIGNALS}")
+        argv0 = bool(env) and works("--argv0=jarvis-probe")
+        if not signals:
             LOG.warning("env --default-signal is unavailable; terminal shells inherit the "
                         "daemon's ignored signals")
-        _signal_reset = argv if ok else []
-    return _signal_reset
+        _env_support = (env, signals, argv0)
+    return _env_support
+
+
+def launcher(shell: Shell) -> tuple[list[str], str]:
+    """(prefix, program): `env` resetting HUP, INT, QUIT, TERM and TSTP to
+    their defaults — a signal the daemon inherited as ignored would stay
+    ignored in the shell and every job, and a SIGHUP close would not land —
+    and giving the shell its own name as argv[0] while the checked realpath
+    is what runs. An env without --argv0 runs the shell by its own name
+    instead, so argv[0] is still right."""
+    env, signals, argv0 = _env_probe()
+    prefix = []
+    if env and (signals or argv0):
+        prefix = [env]
+        if signals:
+            prefix.append(f"--default-signal={_RESET_SIGNALS}")
+        if argv0:
+            prefix.append(f"--argv0={shell.name}")
+        prefix.append("--")
+    return prefix, shell.path if argv0 else shell.name
 
 
 def _dotenv_names(path: Path) -> set[str]:
@@ -562,8 +607,7 @@ class _Takeover:
 
 class Terminal:
     def __init__(self, tid: str, *, shell: str, folder: str, project_id: str | None,
-                 label: str, cols: int, rows: int, nonce: str, rcfile: Path | None,
-                 integration: str = "none"):
+                 label: str, cols: int, rows: int, nonce: str, integration: str = "none"):
         self.id = tid
         self.shell = shell
         self.folder = folder
@@ -576,7 +620,6 @@ class Terminal:
         self.readable = True
         self.exited = False
         self.exit_code: int | None = None
-        self._rcfile = rcfile
         self._ring = Ring()
         self._marks = Marks(nonce)
         self._lock = threading.Lock()           # ring, marks, attachment, state
@@ -593,37 +636,47 @@ class Terminal:
         self._reader: threading.Thread | None = None
         # Input: queued by the window's socket, written by a thread of its own.
         self._inbox: collections.deque[bytes] = collections.deque()
-        self._in_bytes = 0
+        self._in_bytes = 0                      # queued plus in flight
         self._in_flight = 0
+        self._in_flight_ctrl_c = False
         self._in_gen = 0
         self._in_cond = threading.Condition()
         self._writer: threading.Thread | None = None
 
     # -- spawning ---------------------------------------------------------------------
 
-    def spawn(self, argv: list[str], env: dict) -> None:
-        setsid = shutil.which("setsid", path="/usr/bin:/bin")
-        if setsid is None:
-            raise TerminalError("util-linux setsid is missing, so no terminal can start")
-        master, slave = os.openpty()
+    def spawn(self, argv: list[str], env: dict, rc_fd: int | None = None) -> None:
+        """Start `argv` (a launcher prefix, the program, its arguments) on a
+        new PTY. `rc_fd` is the read end of the pipe holding the startup file:
+        the shell inherits it as /dev/fd/<rc_fd>, and this process closes its
+        copy at once, so the file exists nowhere but in that pipe."""
         try:
-            fcntl.ioctl(master, termios.TIOCSWINSZ, _winsize(self.cols, self.rows))
-            if hasattr(termios, "IUTF8"):
-                attrs = termios.tcgetattr(slave)
-                attrs[0] |= termios.IUTF8
-                termios.tcsetattr(slave, termios.TCSANOW, attrs)
-            # setsid --ctty: a new session led by the shell, with this PTY as
-            # its controlling terminal. The child is never a process-group
-            # leader here, so setsid does not fork, and `env` execs in place:
-            # the pid is the shell's.
-            self._proc = subprocess.Popen([setsid, "--ctty", "--", *signal_reset(), *argv],
-                                          stdin=slave, stdout=slave, stderr=slave,
-                                          cwd=self.folder, env=env, close_fds=True)
-        except BaseException:
-            os.close(master)
-            raise
+            setsid = shutil.which("setsid", path="/usr/bin:/bin")
+            if setsid is None:
+                raise TerminalError("util-linux setsid is missing, so no terminal can start")
+            master, slave = os.openpty()
+            try:
+                fcntl.ioctl(master, termios.TIOCSWINSZ, _winsize(self.cols, self.rows))
+                if hasattr(termios, "IUTF8"):
+                    attrs = termios.tcgetattr(slave)
+                    attrs[0] |= termios.IUTF8
+                    termios.tcsetattr(slave, termios.TCSANOW, attrs)
+                # setsid --ctty: a new session led by the shell, with this PTY
+                # as its controlling terminal. The child is never a
+                # process-group leader here, so setsid does not fork, and `env`
+                # execs in place: the pid is the shell's.
+                self._proc = subprocess.Popen([setsid, "--ctty", "--", *argv],
+                                              stdin=slave, stdout=slave, stderr=slave,
+                                              cwd=self.folder, env=env, close_fds=True,
+                                              pass_fds=(rc_fd,) if rc_fd is not None else ())
+            except BaseException:
+                os.close(master)
+                raise
+            finally:
+                os.close(slave)
         finally:
-            os.close(slave)
+            if rc_fd is not None:
+                os.close(rc_fd)
         stat = _proc_stat(self._proc.pid)       # unreaped, so still ours to read
         self._start_time = stat[2] if stat is not None else None
         os.set_blocking(master, False)
@@ -697,22 +750,34 @@ class Terminal:
 
     def queue_input(self, data: bytes) -> bool:
         """Owner keystrokes and pastes, for the writer thread. Never blocks:
-        False (the paste is dropped, and the window is told) when more than
-        INPUT_CAP is already waiting on a program that is not reading. A
-        lone Ctrl-C throws away what is still queued and goes next."""
+        False when more than INPUT_CAP is already waiting on a program that
+        is not reading (the socket then refuses all further input until the
+        window resumes it: `Terminals.serve`). A lone Ctrl-C always goes in,
+        whatever the cap: it throws away the input still queued — keeping one
+        Ctrl-C already waiting, so two quick ones never collapse into one —
+        and the paste chunk being written, unless that is a Ctrl-C too."""
         with self._in_cond:
             if self._closing:
                 return False
-            if data == CTRL_C and (self._inbox or self._in_flight):
+            if data == CTRL_C:
+                waiting = CTRL_C in self._inbox
                 self._inbox.clear()
-                self._in_gen += 1              # the writer abandons the chunk in hand
-                self._in_bytes = self._in_flight
-            if self._in_bytes + len(data) > INPUT_CAP:
+                if waiting:
+                    self._inbox.append(CTRL_C)
+                if self._in_flight and not self._in_flight_ctrl_c:
+                    self._in_gen += 1          # the writer abandons the paste chunk in hand
+                self._in_bytes = self._in_flight + len(self._inbox)
+            elif self._in_bytes + len(data) > INPUT_CAP:
                 return False
             self._inbox.append(data)
             self._in_bytes += len(data)
             self._in_cond.notify()
         return True
+
+    def input_drained(self) -> bool:
+        """Nothing queued and nothing being written."""
+        with self._in_cond:
+            return self._in_bytes == 0
 
     def _input_loop(self) -> None:
         while True:
@@ -724,6 +789,7 @@ class Terminal:
                 data = self._inbox.popleft()
                 generation = self._in_gen
                 self._in_flight = len(data)
+                self._in_flight_ctrl_c = data == CTRL_C
             try:
                 self._write(data, lambda: self._in_gen == generation and not self._closing)
             finally:
@@ -733,6 +799,7 @@ class Terminal:
                     else:
                         self._in_bytes = max(0, self._in_bytes - self._in_flight)
                     self._in_flight = 0
+                    self._in_flight_ctrl_c = False
 
     def _write(self, data: bytes, keep) -> None:
         view = memoryview(data)
@@ -954,11 +1021,6 @@ class Terminal:
                 os.close(fd)
             except OSError:
                 pass
-        if self._rcfile is not None:
-            try:
-                self._rcfile.unlink()           # already gone if the shell read it
-            except OSError:
-                pass
         if not self.exited and self._proc is not None and self._proc.returncode is not None:
             code = self._proc.returncode
             self.exited, self.exit_code = True, code if code >= 0 else 128 - code
@@ -966,6 +1028,23 @@ class Terminal:
 
 def _size_ok(cols, rows) -> bool:
     return (type(cols) is int and type(rows) is int and 2 <= cols <= 1000 and 1 <= rows <= 500)
+
+
+_NOT_READING = ("the program in this terminal is not reading its input; this input was "
+                "dropped, and so will all input be until the window sends input_resume")
+_LATCHED = "input is paused after a dropped paste; send input_resume to type again"
+
+
+def _send(sock, kind: str, **fields) -> None:
+    sock.send_text(json.dumps({"type": kind, **fields}))
+
+
+def _control_type(raw: bytes):
+    try:
+        message = json.loads(raw)
+    except ValueError:
+        return None
+    return message.get("type") if isinstance(message, dict) else None
 
 
 # -- every terminal ------------------------------------------------------------------
@@ -982,30 +1061,38 @@ class Terminals:
         self._tickets: dict[str, tuple[str, float]] = {}
         self._clock = clock
         self._publish = publish
-        self._rc_text: dict[str, str] = {}
-        self._rc_dir: Path | None = None
+        self._rc_text: dict[str, bytes] = {}
         self._stopped = False
 
-    def _rcfile(self, tid: str, nonce: str, kind: str) -> Path:
-        """This terminal's private copy of its startup file, with its nonce.
-        The shell deletes it as its first act. Each shipped file is read once
-        per daemon, like the code beside it."""
+    def _rc_pipe(self, nonce: str, kind: str) -> int:
+        """The read end of a pipe holding this terminal's startup file, with
+        its nonce: the shell reads it as /dev/fd/<n>, so it never touches
+        disk. It is written whole and the write end closed before the shell
+        starts, so the shell's first read drains it and anything that opens
+        it later reads nothing. Each shipped file is read once per daemon,
+        like the code beside it."""
         if kind not in self._rc_text:
-            self._rc_text[kind] = RC_PATHS[kind].read_text(encoding="utf-8")
-        if self._rc_dir is None:
-            self._rc_dir = Path(tempfile.mkdtemp(prefix="jarvis-terminals-"))   # mode 700
-        path = self._rc_dir / f"rc-{tid}.{'bash' if kind == 'bash' else 'sh'}"
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(f"__jarvis_nonce='{nonce}'\n{self._rc_text[kind]}")
-        return path
+            self._rc_text[kind] = RC_PATHS[kind].read_bytes()
+        content = f"__jarvis_nonce='{nonce}'\n".encode() + self._rc_text[kind]
+        if len(content) > 60 * 1024:           # under a pipe's 64 KiB: the write never blocks
+            raise TerminalError("the terminal startup file is too large")
+        read, write = os.pipe()
+        try:
+            os.write(write, content)
+        except BaseException:
+            os.close(read)
+            raise
+        finally:
+            os.close(write)
+        return read
 
     def create(self, folder: str, *, project_id: str | None, label: str,
                cols: int = 80, rows: int = 24) -> Terminal:
         if not _size_ok(cols, rows):
             raise ValueError("cols must be 2-1000 and rows 1-500")
         shell = resolve_shell()
-        kind = shell_kind(shell)
+        kind = shell.kind
+        prefix, program = launcher(shell)
         with self._lock:
             if self._stopped:
                 raise TerminalError("Jarvis is stopping")
@@ -1015,17 +1102,17 @@ class Terminals:
             while tid in self._terminals:
                 tid = secrets.token_hex(4)
             nonce = secrets.token_hex(16)
-            rcfile = self._rcfile(tid, nonce, kind) if kind != "none" else None
-            terminal = Terminal(tid, shell=shell, folder=folder, project_id=project_id,
-                                label=label, cols=cols, rows=rows, nonce=nonce, rcfile=rcfile,
-                                integration=kind)
-            argv, extra = shell_command(shell, kind, str(rcfile) if rcfile else None)
-            env = clean_environment(shell)
+            terminal = Terminal(tid, shell=shell.name, folder=folder, project_id=project_id,
+                                label=label, cols=cols, rows=rows, nonce=nonce, integration=kind)
+            rc_fd = self._rc_pipe(nonce, kind) if kind != "none" else None
+            argv, extra = shell_command(program, kind,
+                                        f"/dev/fd/{rc_fd}" if rc_fd is not None else None)
+            env = clean_environment(shell.name)
             env.update(extra)
             try:
-                terminal.spawn(argv, env)
+                terminal.spawn([*prefix, *argv], env, rc_fd)
             except BaseException:
-                terminal.finish()               # the wake pipe and the startup file
+                terminal.finish()               # the wake pipe
                 raise
             self._terminals[tid] = terminal
         LOG.info("terminal %s opened in %s", tid, label)
@@ -1092,6 +1179,12 @@ class Terminals:
                 sock.close(ws.POLICY, "refused")
                 return
             self._attached(terminal)
+            # Latched once any input frame is dropped: every later one is
+            # refused too (a lone Ctrl-C excepted), until the queue has
+            # drained *and* the window says `input_resume`. Accepting the next
+            # frame once room frees would splice a paste — the program would
+            # get a prefix, a hole, then a later chunk mid-line.
+            latched = False
             while True:
                 message = sock.receive()
                 if message is None:
@@ -1100,11 +1193,21 @@ class Terminals:
                 if not terminal.holds(sock):
                     break
                 if kind == ws.BINARY:
-                    if not terminal.queue_input(data):
-                        sock.send_text(json.dumps({
-                            "type": "input_dropped", "bytes": len(data),
-                            "reason": "the program in this terminal is not reading its input; "
-                                      "this input was dropped"}))
+                    if latched and data != CTRL_C:
+                        _send(sock, "input_dropped", bytes=len(data), latched=True,
+                              reason=_LATCHED)
+                    elif not terminal.queue_input(data):
+                        latched = True
+                        _send(sock, "input_dropped", bytes=len(data), latched=True,
+                              reason=_NOT_READING)
+                elif _control_type(data) == "input_resume":
+                    if latched and not terminal.input_drained():
+                        _send(sock, "input_resume_refused",
+                              reason="earlier input is still being written; "
+                                     "send input_resume again once it has drained")
+                    else:
+                        latched = False
+                        _send(sock, "input_resumed")
                 else:
                     terminal.control(sock, data)
         except Exception as exc:
@@ -1155,9 +1258,6 @@ class Terminals:
         for terminal in terminals:
             terminal.finish()
             LOG.info("terminal %s ended with Jarvis", terminal.id)
-        if self._rc_dir is not None:
-            shutil.rmtree(self._rc_dir, ignore_errors=True)
-            self._rc_dir = None
 
 
 # -- routes (owner-only, the HUD listener) -----------------------------------------------

@@ -4,13 +4,13 @@
 # hide behind a bash check in a file a dash reads.
 #
 # The daemon reads this file once, puts one line in front of it that sets
-# __jarvis_nonce, and writes the result for each terminal into a private
-# directory (mode 700); bash is started with that copy as its --rcfile. bash
-# reads the whole file before running it, and its first act is to delete
-# that copy — before the login files below, or anything they start, can run —
-# so the nonce is left only in an unexported shell variable (PS1 names it
-# rather than holding it, and is kept unexported too). It does three things
-# and nothing else.
+# __jarvis_nonce, and writes the result for each terminal into a pipe, never
+# to disk: bash gets `--rcfile /dev/fd/<n>` and reads the whole pipe before
+# running anything, and its first act is to close that descriptor, so
+# nothing it starts inherits it (it would read nothing anyway: the pipe is
+# drained and its write end closed). The nonce is then left only in an
+# unexported shell variable (PS1 names it rather than holding it, and is
+# kept unexported too). It does three things and nothing else.
 #
 # 1. What a login shell would have read. --rcfile makes bash an interactive
 #    *non-login* shell, so /etc/profile and the first of ~/.bash_profile,
@@ -41,7 +41,10 @@
 #    off), it is bash's $BASH_COMMAND instead: the first simple command of the
 #    line, not the whole line.
 
-command rm -f -- "${BASH_SOURCE[0]}"
+case ${BASH_SOURCE[0]} in
+    /dev/fd/[0-9]*) eval "exec ${BASH_SOURCE[0]#/dev/fd/}<&-" ;;   # the pipe it came in
+    *) [ -f "${BASH_SOURCE[0]}" ] && command rm -f -- "${BASH_SOURCE[0]}" ;;
+esac
 export -n __jarvis_nonce 2>/dev/null
 
 if [ -r /etc/profile ]; then . /etc/profile; fi

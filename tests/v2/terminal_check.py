@@ -154,6 +154,11 @@ class Client:
     def wait_text(self, needle: str, timeout=6.0):
         return self.until(lambda c: needle in c.text(), timeout, f"output {needle!r}")
 
+    def wait_line(self, line: str, timeout=6.0):
+        """`line` as a whole line of output. `echo x` echoes `echo x` first,
+        so waiting for "x\n" alone is satisfied before the command has run."""
+        return self.wait_text("\n" + line + "\n", timeout)
+
     def drain(self, seconds: float):
         """Keep reading (and so answering pings) for a while."""
         until = time.monotonic() + seconds
@@ -634,7 +639,7 @@ class Frames(Base):
             tid, client = self.session()
             client.drain(1.5)                                                   # pinged, answered, kept
             client.type("echo still here")
-            client.wait_text("still here\n")
+            client.wait_line("still here")
             self.assertTrue(self.term(tid).row()["shown"])
 
 
@@ -656,7 +661,8 @@ class Lifecycle(Base):
         self.assertTrue(attached["terminal"]["shown"])
         self.assertFalse(attached["terminal"]["integrated"])                  # no command marked yet
         client.type("echo hello")
-        client.wait_text("hello\n")
+        client.wait_line("hello")
+        eventually(lambda: self.term(row["id"]).history().integrated, what="the C mark")
         listed = {r["id"]: r for r in self.owner("GET", "/terminals")}
         self.assertTrue(listed[row["id"]]["shown"])
         self.assertTrue(listed[row["id"]]["integrated"])
@@ -711,7 +717,7 @@ class Lifecycle(Base):
         self.assertEqual(T.TAKEOVER_TIMEOUT_S, 20.0)
         tid, first = self.session()
         first.type("echo before takeover")
-        first.wait_text("before takeover\n")
+        first.wait_line("before takeover")
         second = self.connect(tid)
         first.until(lambda c: c.message("takeover_request"), what="the holder is asked")
         second.until(lambda c: c.message("waiting"), what="the newcomer waits")
@@ -737,7 +743,7 @@ class Lifecycle(Base):
             fourth.until(lambda c: c.message("refused") and c.closed is not None, what="timed out")
         self.assertIn("did not answer", fourth.message("refused")["reason"])
         second.type("echo still mine")
-        second.wait_text("still mine\n")
+        second.wait_line("still mine")
 
     def test_a_window_that_is_gone_is_not_asked(self):
         tid, first = self.session()
@@ -872,14 +878,23 @@ class Lifecycle(Base):
         self.assertEqual(sorted(results), [200, 404, 404, 404])
         self.open_terminal()                                                    # the daemon is fine
 
-    def test_the_shell_is_its_realpath(self):
+    def test_the_shell_is_its_realpath_under_its_own_name(self):
         bindir = self.root / "bin"
         bindir.mkdir()
         (bindir / "myshell").symlink_to(FAKE_SHELL)
         (bindir / "winshell").symlink_to("/mnt/c/Windows/System32/cmd.exe")
         with patch.object(config, "TERMINAL_SHELL", str(bindir / "myshell")):
             row = self.open_terminal()
-        self.assertEqual((row["title"], row["integration"]), ("sh · Calc", "posix"))
+        self.assertEqual((row["title"], row["integration"]), ("myshell · Calc", "posix"))
+        with patch.object(config, "TERMINAL_SHELL", str(bindir / "myshell")):
+            shell = T.resolve_shell()
+        self.assertEqual((shell.path, shell.name), (str(FAKE_SHELL), str(bindir / "myshell")))
+        prefix, program = T.launcher(shell)
+        if any(part.startswith("--argv0=") for part in prefix):               # the realpath runs,
+            self.assertEqual(program, str(FAKE_SHELL))                         # under its own name
+            self.assertIn(f"--argv0={bindir / 'myshell'}", prefix)
+        else:
+            self.assertEqual(program, str(bindir / "myshell"))
         with patch.object(config, "TERMINAL_SHELL", str(bindir / "winshell")):
             status, body = self.request("POST", "/terminals", {"in": "home"})
         self.assertEqual(status, 409)
@@ -895,23 +910,68 @@ class Lifecycle(Base):
             for _ in range(64):                                                 # 1 MiB it never reads
                 client.conn.send_binary(b"x" * 16384)
             client.until(lambda c: c.message("input_dropped"), what="the paste is refused")
-            self.assertIn("not reading", client.message("input_dropped")["reason"])
+            dropped = client.message("input_dropped")
+            self.assertTrue(dropped["latched"])
+            self.assertIn("not reading", dropped["reason"])
             client.control({"type": "resize", "cols": 101, "rows": 33})         # control still lands
             eventually(lambda: self.term(tid).cols == 101, what="resized while stuck")
             client.drain(2.5)                                                   # pings still answered
             self.assertIsNone(client.closed)
             self.assertTrue(self.term(tid).row()["shown"])
+            # Latched: a lone Ctrl-C still goes in; resuming waits for the
+            # queue to drain, which a program that never reads never lets it.
+            before = client.kinds().count("input_dropped")
+            client.conn.send_binary(b"\x03")
+            client.control({"type": "input_resume"})
+            client.until(lambda c: c.message("input_resume_refused"), what="resume refused")
+            self.assertEqual(client.kinds().count("input_dropped"), before)    # the ^C was taken
+            self.assertNotIn("input_resumed", client.kinds())
 
-    def test_ctrl_c_throws_away_queued_input(self):
+    def test_a_dropped_paste_is_never_spliced(self):
+        # The reviewer's shape: `sleep 1; cat > file` under a 768 KiB paste in
+        # 16 KiB frames 40 ms apart. Without the latch the frames after the
+        # first drop were taken again once room freed: a prefix, a hole, then
+        # a later chunk, cut mid-line.
+        out = self.root / "pasted.bin"
+        paste = b"".join(b"%07d\n" % i for i in range(768 * 1024 // 8))
+        with patch.object(T, "INPUT_CAP", 32 * 1024):
+            tid, client = self.session()
+            client.type(f"lateread {out}")
+            client.wait_text("LATE")
+            for i in range(0, len(paste), 16384):
+                client.conn.send_binary(paste[i:i + 16384])
+                time.sleep(0.04)
+            eventually(out.exists, timeout=20, what="the program saved what it read")
+            got = out.read_bytes()
+            client.until(lambda c: c.message("input_dropped"), what="a frame dropped (else no test)")
+            self.assertTrue(0 < len(got) < len(paste), len(got))
+            self.assertTrue(paste.startswith(got), "the program got a spliced paste")
+            # Typing waits for an explicit resume, after the queue drained.
+            client.wait_line(f"READ {len(got)}")
+            client.type("echo ignored")
+            client.control({"type": "input_resume"})
+            client.until(lambda c: "input_resumed" in c.kinds(), what="resumed")
+            client.output.clear()
+            client.type("echo typed again")
+            client.wait_line("typed again")
+            self.assertNotIn("ignored", client.text())
+
+    def test_ctrl_c_throws_away_queued_input_but_never_a_ctrl_c(self):
         terminal = T.Terminal("0000000c", shell="/bin/sh", folder="/", project_id=None, label="~",
-                              cols=80, rows=24, nonce="0" * 32, rcfile=None)
+                              cols=80, rows=24, nonce="0" * 32)
         self.addCleanup(terminal.finish)
         with patch.object(T, "INPUT_CAP", 100):
             self.assertTrue(terminal.queue_input(b"a" * 60))
             self.assertFalse(terminal.queue_input(b"b" * 60))                   # over the cap: refused
             self.assertTrue(terminal.queue_input(b"\x03"))
             self.assertEqual(list(terminal._inbox), [b"\x03"])
+            self.assertTrue(terminal.queue_input(b"\x03"))                      # two quick ones: both
+            self.assertEqual(list(terminal._inbox), [b"\x03", b"\x03"])
             self.assertTrue(terminal.queue_input(b"c" * 90))
+            self.assertTrue(terminal.queue_input(b"\x03"))                      # keeps one waiting
+            self.assertEqual(list(terminal._inbox), [b"\x03", b"\x03"])
+            self.assertEqual(terminal._in_bytes, 2)
+            self.assertFalse(terminal.input_drained())
 
     def test_daemon_stop_ends_every_terminal(self):
         pids, clients = [], []
@@ -921,9 +981,6 @@ class Lifecycle(Base):
             found = client.until(lambda c: re.findall(r"BGPID (\d+)", c.text()), what="a job")
             pids += [int(found[0]), self.term(tid)._proc.pid]
             clients.append(client)
-        rc_dir = self.daemon.terminals._rc_dir
-        self.assertTrue(rc_dir.is_dir())
-        self.assertEqual(rc_dir.stat().st_mode & 0o777, 0o700)
         started = time.monotonic()
         self.daemon.stop()
         self.assertLess(time.monotonic() - started, 4.0)
@@ -931,7 +988,6 @@ class Lifecycle(Base):
         for client in clients:
             client.until(lambda c: c.closed is not None, what="told")
             self.assertEqual(client.message("exit")["reason"], "ended")
-        self.assertFalse(rc_dir.exists())
         with self.assertRaises(T.TerminalError):
             self.daemon.terminals.create(str(self.work), project_id=None, label="~")
 
@@ -995,6 +1051,11 @@ class Environment(Base):
         self.assertEqual([T.shell_kind(s) for s in ("/usr/bin/bash", "/usr/bin/dash", "/bin/sh",
                                                     "/bin/busybox", "/usr/bin/zsh", "/usr/bin/fish")],
                          ["bash", "posix", "posix", "posix", "none", "none"])
+        # Judged on the name it is called by too: bash called sh reads $ENV.
+        self.assertEqual([T.shell_kind(path, name) for path, name in (
+            ("/usr/bin/bash", "/usr/bin/rbash"), ("/usr/bin/bash", "/bin/sh"),
+            ("/usr/bin/zsh", "/bin/sh"), ("/usr/bin/zsh", "/usr/bin/zsh"))],
+            ["bash", "posix", "posix", "none"])
 
 
 # -- what never leaves memory --------------------------------------------------------------
@@ -1031,7 +1092,7 @@ class Leaks(Base):
         with capture_logs() as records:
             tid, client = self.session()
             client.type(f"echo {marker}")
-            client.wait_text(marker + "\n")
+            client.wait_line(marker)
             client.control({"type": "resize", "cols": 100, "rows": 30})
             self.owner("PATCH", f"/terminals/{tid}", {"readable": False})
             client.close()
@@ -1204,7 +1265,7 @@ class SessionReuse(unittest.TestCase):
 
     def terminal(self, start=1000):
         terminal = T.Terminal("0000000d", shell="/bin/sh", folder="/", project_id=None, label="~",
-                              cols=80, rows=24, nonce="0" * 32, rcfile=None)
+                              cols=80, rows=24, nonce="0" * 32)
         terminal._proc = SimpleNamespace(pid=4242, poll=lambda: 0, wait=lambda timeout=None: 0,
                                          returncode=0)
         terminal._start_time = start
@@ -1245,7 +1306,8 @@ class FakeShellMarks(Base):
         tid, client = self.session()
         for line in ("echo one", "forge", "echo two"):
             client.type(line)
-        client.wait_text("two\n")
+        # Typed ahead, so no line of output starts after a newline the tty
+        # echoed: wait for the spans themselves.
         terminal = self.term(tid)
         eventually(lambda: len(terminal.history().spans) == 3
                    and terminal.history().spans[-1].exit_code == 0, what="the last D mark")
@@ -1279,40 +1341,58 @@ class OtherShells(Base):
         names = client.until(lambda c: re.search(r"NAMES (.*?) END", c.text()), what="names")
         self.assertNotIn("ENV", names.group(1).split())
         client.type("echo plain")
-        client.wait_text("plain\n")
+        client.wait_line("plain")
         history = self.term(tid).history()
         self.assertFalse(history.integrated)
         self.assertIsNone(history.prompt)
         self.assertEqual(history.spans, ())
-        rc_dir = self.daemon.terminals._rc_dir
-        self.assertTrue(rc_dir is None or not list(rc_dir.glob(f"rc-{tid}.*")))
+        self.assertFalse(list(self.root.rglob("rc-*")), "a startup file on disk")
 
 
-# A child process run in the terminal, hunting for the nonce everywhere a
-# program could ordinarily look: its environment, its parent shell's argv and
-# initial environment (/proc), every file either of those names, and every
-# file in the daemon's startup-file directory. It writes what it found to a
+# A child process hunting for the nonce everywhere a program could ordinarily
+# look: its environment, its parent shell's argv and initial environment
+# (/proc), every file either of those names, and every pipe or file the shell
+# holds open (/proc/<shell>/fd — where dash kept its deleted startup file
+# while ~/.profile ran). It is run twice: from ~/.profile, while the startup
+# file is being read, and later as a command. It writes what it found to a
 # file for the test to search; nothing is printed.
 HUNT = r'''
-import glob, os, sys
-dump, rc_dir = sys.argv[1], sys.argv[2]
+import os, sys
+dump = sys.argv[1]
+parent = os.getppid()
 seen = ["\n".join(f"{k}={v}" for k, v in os.environ.items())]
 for name in ("environ", "cmdline"):
     try:
-        with open(f"/proc/{os.getppid()}/{name}", "rb") as handle:
+        with open(f"/proc/{parent}/{name}", "rb") as handle:
             seen.append(handle.read().decode("latin-1"))
     except OSError:
         pass
-paths = set(glob.glob(os.path.join(rc_dir, "*")))
+paths = set()
 for text in list(seen):
     for token in text.replace("\0", "\n").replace("=", "\n").replace(":", "\n").split("\n"):
         if token.startswith("/"):
             paths.add(token)
+fd_dir = f"/proc/{parent}/fd"
+try:
+    for name in os.listdir(fd_dir):
+        try:
+            link = os.readlink(os.path.join(fd_dir, name))
+        except OSError:
+            continue
+        if link.startswith("pipe:") or (link.startswith("/") and not link.startswith("/dev/")):
+            paths.add(os.path.join(fd_dir, name))
+except OSError:
+    pass
 for path in sorted(paths):
     try:
-        if os.path.isfile(path):
-            with open(path, "rb") as handle:
-                seen.append(handle.read(1 << 16).decode("latin-1"))
+        if path.startswith(fd_dir) or os.path.isfile(path):
+            fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+            try:
+                seen.append(os.read(fd, 1 << 16).decode("latin-1"))
+            except BlockingIOError:
+                pass
+            finally:
+                os.close(fd)
     except OSError:
         pass
 with open(dump + ".part", "w") as handle:
@@ -1322,32 +1402,47 @@ os.replace(dump + ".part", dump)
 
 
 class NonceHunt:
-    """Mixed into the real-shell cases: the nonce must be out of a child's reach."""
+    """Mixed into the real-shell cases: the nonce must be out of a child's
+    reach — while the startup file is read and afterwards — and on no disk."""
+
+    def profile(self):
+        """A ~/.profile that exports PS1 and runs the hunt mid-startup."""
+        self.hunter = self.root / "hunt.py"
+        self.hunter.write_text(HUNT)
+        self.early = self.root / "hunt-profile.txt"
+        (self.home / ".profile").write_text(
+            f"export PS1='custom$ '\npython3 {self.hunter} {self.early}\n")
 
     def hunt(self, client, terminal):
-        script, dump = self.root / "hunt.py", self.root / "hunt.txt"
-        script.write_text(HUNT)
-        self.assertFalse(terminal._rcfile.exists(), "the startup file outlived its reading")
-        client.type(f"python3 {script} {dump} {self.daemon.terminals._rc_dir}")
-        eventually(dump.exists, timeout=15, what="the hunt")
-        found = dump.read_text(encoding="latin-1")
-        # Booleans only: a failure must not print what the child read.
-        self.assertTrue("HOME=" in found, "the hunt read nothing")              # it really looked
-        self.assertFalse(terminal._marks._nonce.decode() in found, "a child found the nonce")
+        nonce = terminal._marks._nonce
+        late = self.root / "hunt.txt"
+        client.type(f"python3 {self.hunter} {late}")
+        eventually(late.exists, timeout=15, what="the hunt")
+        eventually(self.early.exists, timeout=15, what="the hunt from ~/.profile")
+        for dump in (self.early, late):
+            found = dump.read_text(encoding="latin-1")
+            # Booleans only: a failure must not print what the child read.
+            self.assertTrue("HOME=" in found, f"{dump.name} read nothing")     # it really looked
+            self.assertFalse(nonce.decode() in found, f"a child found the nonce ({dump.name})")
+        for path in self.root.rglob("*"):                                       # TMPDIR is in here
+            if path.is_file():
+                self.assertFalse(nonce in path.read_bytes(), f"the nonce is on disk ({path.name})")
 
 
 class RealBashStartupFile(NonceHunt, Base):
     """The shipped startup file, in real bash, with a temp HOME and no
-    profile files of the owner's but one that exports PS1: the marks WP-F
-    depends on, `sudo -k`, a clean environment by name, and a nonce no
-    program in the terminal can find."""
+    profile files of the owner's but one that exports PS1 and hunts: the
+    marks WP-F depends on, `sudo -k`, a clean environment by name, and a
+    nonce no program in the terminal can find."""
 
     def setUp(self):
         super().setUp()
         bindir = self.root / "bin"
         bindir.mkdir()
         (bindir / "bash").symlink_to("/bin/bash")              # named bash: --rcfile mode
-        (self.home / ".profile").write_text("export PS1='custom$ '\n")
+        (bindir / "rbash").symlink_to("/bin/bash")             # named rbash: restricted
+        self.bindir = bindir
+        self.profile()
         guard = patch.object(config, "TERMINAL_SHELL", str(bindir / "bash"))
         guard.start()
         self.addCleanup(guard.stop)
@@ -1403,17 +1498,33 @@ class RealBashStartupFile(NonceHunt, Base):
         client.type("sleep 3")
         eventually(lambda: terminal.row()["busy"], what="busy")
 
+    def test_a_shell_keeps_the_name_it_was_given(self):
+        # rbash is a link to bash; launched as its realpath under its own
+        # name, it must still be restricted.
+        with patch.object(config, "TERMINAL_SHELL", str(self.bindir / "rbash")):
+            row = self.open_terminal()
+        self.assertEqual((row["title"], row["integration"]), ("rbash · Calc", "bash"))
+        terminal = self.term(row["id"])
+        client = self.connect(row["id"])
+        eventually(lambda: b"133;B;jarvis=" in terminal.history().data, timeout=15,
+                   what="the first prompt")
+        client.type("cd /")
+        client.wait_text("restricted", timeout=10)
+        client.type('echo "zero=$0"')
+        client.wait_line(f"zero={self.bindir / 'rbash'}")
+
 
 class RealDashStartupFile(NonceHunt, Base):
     """The POSIX startup file, in real dash (temp HOME, a ~/.profile that
-    exports PS1): it parses — a POSIX shell reads every line of it — it keeps
-    sudo from caching, its prompt marks are well formed and carry the nonce,
-    it marks no command, and the nonce is out of a child's reach."""
+    exports PS1 and hunts while the startup file is still open): it parses —
+    a POSIX shell reads every line of it — it keeps sudo from caching, its
+    prompt marks are well formed and carry the nonce, it marks no command,
+    and the nonce is out of a child's reach and on no disk."""
 
     def test_dash_reads_the_posix_file(self):
         if not os.access("/usr/bin/dash", os.X_OK):
             self.skipTest("no dash on this machine")
-        (self.home / ".profile").write_text("export PS1='custom$ '\n")
+        self.profile()
         with patch.object(config, "TERMINAL_SHELL", "/usr/bin/dash"):
             tid = self.open_terminal()["id"]
         terminal = self.term(tid)

@@ -790,7 +790,9 @@ that is why every attach is announced (`terminal_attached`, below).
   that no longer exists 409. At most **6** terminals (exited ones count
   until closed): the seventh is 409 with a sentence. A bad
   `JARVIS_TERMINAL_SHELL` (relative, resolving under `/mnt/`, not
-  executable) is 409; the shell's realpath is what runs.
+  executable) is 409. The shell's realpath is what runs, under the name it
+  was given as its argv[0] (`env --argv0`), so `/usr/bin/rbash`, a link to
+  bash, still runs restricted; `title` uses that name.
 - `PATCH /terminals/{id}` `{readable: bool}` → `row`. Exactly that key.
 - `POST /terminals/{id}/ticket` `{}` → `{ticket, expires_in: 30}`. **Single
   use, 30 seconds, valid for this terminal only**; it is spent the moment it
@@ -814,10 +816,22 @@ that is why every attach is announced (`terminal_attached`, below).
     output out. Input goes through a queue (256 KiB) that a writer thread
     of the terminal's own drains, so a program that does not read its input
     never stalls the socket: resize, takeover answers and pongs still land.
-    When the queue is full the frame is dropped and the window gets
-    `{"type": "input_dropped", "bytes": n, "reason"}` — say so. A frame that
-    is exactly Ctrl-C (`\x03`) throws away whatever input is still queued
-    and goes next.
+  - **A dropped frame latches the socket's input.** When the queue is full
+    the frame is dropped and the window gets `{"type": "input_dropped",
+    "bytes": n, "latched": true, "reason"}`. From then on **every** input
+    frame on that socket is refused the same way — a frame that is exactly
+    Ctrl-C (`\x03`) excepted — so a paste reaches the program as a prefix,
+    never a prefix with a later chunk spliced on (accepting the next frame
+    once room freed is what cut a `cat > file` paste mid-line). WP-D, on the
+    first `input_dropped`: **stop sending the rest of the paste**, say what
+    happened, and when the owner types again send `{"type":
+    "input_resume"}`. The answer is `{"type": "input_resumed"}` once the
+    queue has drained, else `{"type": "input_resume_refused", "reason"}`
+    (send it again shortly; a program that never reads never drains, and
+    Ctrl-C is the way out). A Ctrl-C frame throws away whatever input is
+    still queued and the paste chunk being written, keeping one Ctrl-C that
+    was already waiting, so two quick ones are never collapsed into one. The
+    latch is per socket: a reattached window starts unlatched.
   - **Text frames are JSON control.** Server → window, in order on attach:
     `{"type": "attached", "terminal": row, "replay": n}`, then `n` bytes of
     replay as binary frames (the last 1 MiB of output, starting just after
@@ -828,10 +842,11 @@ that is why every attach is announced (`terminal_attached`, below).
     offer Restart and Close); `{"type": "exit", "code", "reason": "closed"}`
     then a close when the terminal is closed; `{"type": "exit", "code",
     "reason": "ended"}` then close 1001 when Jarvis stops (terminals do not
-    survive a restart, W-3); `input_dropped` (above).
+    survive a restart, W-3); `input_dropped`, `input_resumed` and
+    `input_resume_refused` (above).
   - Window → server: `{"type": "resize", "cols", "rows"}` (same ranges;
-    anything else is ignored) and the takeover answer below. Unknown
-    messages are ignored.
+    anything else is ignored), `{"type": "input_resume"}` (above) and the
+    takeover answer below. Unknown messages are ignored.
   - **One window at a time.** Attaching to a terminal another window shows
     sends that window `{"type": "takeover_request", "id", "timeout_s": 20}`
     and the newcomer `{"type": "waiting", "timeout_s": 20}`. The holder
@@ -865,13 +880,21 @@ SIGTERM and SIGTSTP start at their defaults (`env --default-signal`), even
 if the daemon inherited them ignored.
 
 **The startup files.** bash gets `jarvis/v2/terminal_rc.bash` as its
-`--rcfile`; an `sh`-family shell (sh, dash, ash, ksh, mksh, …) starts
-interactive with `jarvis/v2/terminal_rc.sh` as `$ENV`; any other shell runs
-as a plain login shell with neither. Each file's first act is to **delete
-itself** (the POSIX one also unsets `ENV`), before it reads the login files
-(`/etc/profile`, then `~/.bash_profile` / `~/.bash_login` / `~/.profile`
-for bash, `~/.profile` for sh) — so nothing the terminal later runs can read
-it. Both then set `alias sudo='sudo -k'` (W-5: sudo never caches here) and
+`--rcfile`; an `sh`-family shell (sh, dash, ash, ksh, mksh, …, and bash
+called `sh`) starts interactive with `jarvis/v2/terminal_rc.sh` as `$ENV`;
+any other shell runs as a plain login shell with neither. **The file never
+touches disk**: the daemon writes it, nonce and all, into a pipe, closes the
+write end, and hands the shell the read end as `/dev/fd/<n>`. The shell's
+first read drains it, before it runs anything, so whatever opens that pipe
+later — a program started from `~/.profile` reading the shell's own
+descriptor through `/proc`, say — reads nothing; bash also closes the
+descriptor at once, and the POSIX file unsets `ENV`. Each file then reads the
+login files (`/etc/profile`, then `~/.bash_profile` / `~/.bash_login` /
+`~/.profile` for bash, `~/.profile` for sh). What is left is a race only a
+program running as the owner *outside* the terminal could run: read the
+pipe before the shell does. It would get the nonce and leave the shell with
+no startup file at all — the same-uid limit stated at the top, not a new
+one. Both files then set `alias sudo='sudo -k'` (W-5: sudo never caches here) and
 emit OSC 133 marks carrying `jarvis=<per-terminal nonce>`: A (prompt start)
 and B (prompt end), and in bash also C with `cmdline_url=<percent-encoded
 command line>` (the command runs) and D with its exit status. The nonce is

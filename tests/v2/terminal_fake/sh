@@ -17,13 +17,16 @@ nonce, deletes the file and unsets ENV — and then emits the OSC 133 marks
   flood N          print N numbered lines
   forge            print marks that carry no nonce, or the wrong one
   deaf             raw mode, then sleep without ever reading its input
+  lateread PATH    raw mode, read nothing for 1 s, then save what arrives
   exit N           exit with status N
 """
 import os
 import re
+import select
 import signal
 import subprocess
 import sys
+import termios
 import time
 import tty
 from urllib.parse import quote
@@ -34,9 +37,10 @@ def _nonce():
     if not path:
         return None
     try:
-        with open(path, encoding="utf-8") as handle:
+        with open(path, encoding="utf-8") as handle:       # /dev/fd/<n>: a pipe
             found = re.search(r"__jarvis_nonce='([0-9a-f]+)'", handle.read())
-        os.unlink(path)
+        if os.path.isfile(path):
+            os.unlink(path)
     except OSError:
         return None
     return found.group(1) if found else None
@@ -91,6 +95,24 @@ def run(line):
         tty.setraw(0)
         write("DEAF\r\n")
         time.sleep(300)
+        return 0
+    if word == "lateread":
+        # `sleep 1; cat > PATH`, in raw mode: read nothing for a second, then
+        # everything until a second passes with no input, and save it.
+        saved = termios.tcgetattr(0)
+        tty.setraw(0)
+        write("LATE\r\n")
+        time.sleep(1)
+        got = bytearray()
+        while select.select([0], [], [], 1.0)[0]:
+            chunk = os.read(0, 65536)
+            if not chunk:
+                break
+            got += chunk
+        termios.tcsetattr(0, termios.TCSANOW, saved)
+        with open(rest, "wb") as handle:
+            handle.write(got)
+        write(f"READ {len(got)}\n")
         return 0
     if word == "exit":
         sys.exit(int(rest or "0"))

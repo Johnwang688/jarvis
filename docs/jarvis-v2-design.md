@@ -1881,14 +1881,21 @@ question, `sudo -k`, and a `terminal_attached` bus record on every attach
 attach was not its own. Output exists in the ring and the browser only:
 never on the bus (lifecycle ids only), in a log, a thread log, Discord or
 disk. Input goes through a bounded queue and a writer thread per terminal,
-so a program that never reads cannot stall the socket. A closed session is
-matched on its leader's start time, so a reused pid is never signalled. The
+so a program that never reads cannot stall the socket; once a paste frame is
+dropped for want of room the socket refuses all input but Ctrl-C until the
+queue drains and the window sends `input_resume`, so a program gets a
+prefix of the paste, never a spliced one. A closed session is matched on its
+leader's start time, so a reused pid is never signalled. The shell's
+realpath runs under the name it was given, so `rbash` stays restricted. The
 startup file (`terminal_rc.bash` for bash; the POSIX `terminal_rc.sh` as
 `$ENV` for an `sh`-family shell, which marks only the prompt; nothing for
 zsh, fish and the like, which the listing reports as `integration: "none"`)
-deletes itself before anything else runs, reads the login files, sets
-`alias sudo='sudo -k'`, and emits OSC 133 marks signed with a per-terminal
-nonce that no child process can find. The daemon turns them into
+never touches disk — it reaches the shell through a pipe the shell drains
+before running anything — then reads the login files, sets `alias
+sudo='sudo -k'`, and emits OSC 133 marks signed with a per-terminal nonce
+that nothing the terminal runs has an ordinary way to find (a same-uid
+program outside it could race the shell for the pipe, at the price of
+leaving the shell unintegrated). The daemon turns them into
 per-command spans over the ring for WP-F's `terminal_read`. **The spans are
 advisory, not a boundary**: a program can print any bytes between real
 marks, a nested shell, `sudo -i`, `ssh` or `python` puts everything under

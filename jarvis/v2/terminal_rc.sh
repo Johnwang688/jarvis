@@ -4,12 +4,14 @@
 # gets no startup file at all. POSIX shell only: a dash parses every line.
 #
 # The daemon reads this file once, puts one line in front of it that sets
-# __jarvis_nonce, and writes the result for each terminal into a private
-# directory (mode 700). The shell starts interactive (not as a login shell)
-# with $ENV naming that copy. Its first act is to delete the copy and unset
-# ENV — before the login files below, or anything they start, can run — so
-# the nonce is left only in an unexported shell variable, which PS1 names
-# rather than holds (below). Then:
+# __jarvis_nonce, and writes the result for each terminal into a pipe, never
+# to disk. The shell starts interactive (not as a login shell) with $ENV
+# naming /dev/fd/<n>; its first read drains the pipe, whose write end is
+# already closed, so anything that opens it later — even through the
+# shell's own descriptor while the login files below run — reads nothing.
+# Its first act is to unset ENV. The nonce is then left only in an
+# unexported shell variable, which PS1 names rather than holds (below).
+# Then:
 #
 # 1. What a login shell would have read: /etc/profile, then ~/.profile.
 #
@@ -23,7 +25,7 @@
 #    spans here: a reader of such a terminal has text patterns only (W-2,
 #    item 3).
 
-rm -f -- "$ENV" 2>/dev/null
+if [ -f "$ENV" ]; then rm -f -- "$ENV"; fi     # a file, if ever one is used: gone
 unset ENV
 
 if [ -r /etc/profile ]; then . /etc/profile; fi

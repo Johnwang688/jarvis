@@ -323,7 +323,8 @@ lacks (it still runs — there is nothing to fall back to). Tests point
 `docs/plans/2026-10-09-hud-workspace-plan.md` §2.4, decisions W-2/W-3/W-5;
 design §18; contract in `docs/hud-api.md`).** `jarvis/v2/terminals.py` runs
 the owner's login shell (`JARVIS_TERMINAL_SHELL`, absolute only, overrides;
-the **realpath** is checked and launched) on a real PTY through util-linux
+the **realpath** is checked and launched, under the given name as argv[0]
+via `env --argv0`, so `rbash` stays restricted) on a real PTY through util-linux
 `setsid --ctty` — **never `pty.fork()`** in this threaded daemon — with
 HUP/INT/QUIT/TERM/TSTP reset to default (`env --default-signal`), in a
 **clean environment** built from an allowlist (never a `.env` name,
@@ -331,7 +332,10 @@ HUP/INT/QUIT/TERM/TSTP reset to default (`env --default-signal`), in a
 `JARVIS_*`/`ANTHROPIC_*`/`CLAUDE_*`/`CODEX_*`), in a folder resolved **from
 ids, never a path**. Six at most, a 1 MiB ring each, replayed on reattach;
 input goes through a 256 KiB queue and a writer thread per terminal (a full
-queue drops the paste with `input_dropped`, never blocks the socket); close
+queue drops the frame with `input_dropped`, never blocks the socket, and
+**latches** the socket: every later frame but a lone Ctrl-C is refused until
+the queue drains and the window sends `input_resume`, so a paste arrives as
+a prefix, never spliced; a Ctrl-C flush keeps one waiting Ctrl-C); close
 = SIGHUP to the whole session (found in /proc), then SIGKILL — the leader is
 matched on its **start time** and a session once seen empty is never
 signalled again, so a reused pid is never hit; two DELETEs pop it once;
@@ -360,12 +364,16 @@ no thread log, Discord or disk. Startup files: `terminal_rc.bash` (bash
 `sh`-family shell started `-i`; kept apart because a dash parses every line,
 so bash syntax cannot hide behind an `if`); **zsh, fish and other shells get
 none — no `sudo -k`, no marks — and the listing says `integration:
-"none"`**. Each file **deletes itself first** (POSIX also unsets `ENV`),
-then reads the login files, sets `alias sudo='sudo -k'` (W-5) and emits OSC
-133 A/B (+ C with the `cmdline_url`, D in bash) marks **signed with a
-per-terminal nonce** held only in an unexported variable that PS1 *names*
-(`${__jarvis_nonce}`), never holds — a child process cannot find it (the
-suite hunts for it in real bash and dash). POSIX marks end in BEL (dash's
+"none"`**. Each file **never touches disk**: it reaches the shell through a
+pipe (`--rcfile /dev/fd/N`, `ENV=/dev/fd/N`) whose write end is closed
+first, so the shell's first read drains it (bash closes the fd; POSIX
+unsets `ENV`). It then reads the login files, sets `alias sudo='sudo -k'`
+(W-5) and emits OSC 133 A/B (+ C with the `cmdline_url`, D in bash) marks
+**signed with a per-terminal nonce** held only in an unexported variable
+that PS1 *names* (`${__jarvis_nonce}`), never holds — nothing the terminal
+runs can find it (the suite hunts from `~/.profile` mid-startup and later,
+in real bash and dash, and scans the disk); a same-uid program outside the
+terminal could only race the shell for the pipe. POSIX marks end in BEL (dash's
 PS1 expansion eats the backslash of `ESC \`). They become `CommandSpan`s
 (`Terminal.history()`: spans, `spans_from` — bytes before it lost their spans
 to the 2000 cap — `integrated`, `readable`, `prompt`) for WP-F's
