@@ -64,6 +64,11 @@ SELF_PROTECTED = frozenset(
         # Decides which shell commands may write the gate's own state files
         # (2026-10-08). Editing it is editing what never runs.
         "jarvis/protected_state.py",
+        # Decides what git an unattended workflow may run, and where
+        # (2026-10-09), and the tools that expose it. Same reasoning as the
+        # rules: an agent that could edit the judge could widen it.
+        "jarvis/gitops.py",
+        "jarvis/tools/gitctl.py",
     }
 )
 
@@ -135,9 +140,41 @@ def _protected_state() -> set[Path]:
     return {p.resolve() for p in paths}
 
 
+# A repository's own `.git` (hooks, config, the refs and the worktree
+# registrations) and the owner's global git configuration are files that git
+# *executes or obeys*: a hook is run by the owner's next commit, an ssh command
+# setting by their next push, a filter or textconv driver by their next diff.
+# The write tools could write any of them (found 2026-10-09 while designing the
+# workflow git tool: none is a credential name and none is in SELF_PROTECTED),
+# which made "write a file" a way to have the owner's own git run a program of
+# the agent's choosing. Git's internals are git's to write; the agent reaches
+# them through the `git` tool, which judges every invocation (jarvis/gitops.py).
+#
+# Keyed on a `.git` path *component* of the resolved path, so a symlink into a
+# repository does not launder it, and `.github` / `.gitignore` / `.gitattributes`
+# stay ordinary files. The global files are keyed on identity, the way the
+# gate's state is, and read per call so a test that repoints HOME protects its
+# own.
+def _git_internal(resolved: Path) -> bool:
+    if ".git" in resolved.parts:
+        return True
+    try:
+        home = Path.home()
+        xdg = os.environ.get("XDG_CONFIG_HOME")
+        config_home = Path(xdg).expanduser() if xdg else home / ".config"
+        exact = {(home / name).resolve()
+                 for name in (".gitconfig", ".git-credentials", ".gitattributes", ".gitignore")}
+        git_dir = (config_home / "git").resolve()
+        return resolved in exact or resolved == git_dir or git_dir in resolved.parents
+    except (OSError, RuntimeError):
+        return True  # cannot tell: refuse
+
+
 def _self_protected(target: Path) -> bool:
     resolved = target.resolve()
     if resolved in _protected_state():
+        return True
+    if _git_internal(resolved):
         return True
     try:
         rel = resolved.relative_to(config.REPO_ROOT)
@@ -147,6 +184,12 @@ def _self_protected(target: Path) -> bool:
 
 
 def _protect_refusal(target: Path) -> str:
+    if _git_internal(target.resolve()):
+        return (
+            f"Error: {target.name} is git's own configuration or internals, which git executes "
+            "or obeys, so it can only be changed by the owner by hand. Use the git tool for "
+            "git operations."
+        )
     return (
         f"Error: {target.name} is part of Jarvis's safety layer and can "
         "only be changed by the owner by hand. Explain what you wanted "

@@ -60,6 +60,14 @@ MATRIX = [
     ("git stash pop", rules.ALLOW),
     # Excluded from auto-approval at the owner's instruction.
     ("git push origin main", rules.ASK),
+    ("rg --pre=x pattern .", rules.ASK),         # the flag runs a program
+    ("rg --pre x pattern .", rules.ASK),
+    ("rg --hostname-bin=x pattern .", rules.ASK),
+    ("rg -n pattern .", rules.ALLOW),
+    ("rg --pretty pattern .", rules.ALLOW),       # a prefix of --pre is not --pre
+    ("rg -p pattern .", rules.ALLOW),
+    ("rg --pre-glob '*.gz' pattern .", rules.ALLOW),
+    ("sed -i.bak s/a/b/ f.txt", rules.ASK),        # sed keeps prefix matching: the value glues on
     ("git clean -fd", rules.ASK),
     ("git reset --hard HEAD~1", rules.ASK),
     ("git reset HEAD~1", rules.ALLOW),          # a mixed reset loses nothing committed
@@ -302,6 +310,13 @@ READONLY_MUST_REFUSE = [
     # token that nothing parsed.
     "env -C /tmp sh -c 'cat .env'",
     "env sh -c 'rm -rf /tmp/x'",
+    # ripgrep's flags that run a program (2026-10-09): the binary is a search,
+    # the flag is not. Placeholder program names only.
+    "rg --pre=x pattern f.txt",
+    "rg --pre x pattern f.txt",
+    "rg --hostname-bin=x --hyperlink-format=default pattern .",
+    "rg --hostname-bin x pattern .",
+    "rg -n --pre=x pattern .",
     "nohup sh -c 'touch PWNED'",
     # Writing git subcommands the seven-name denylist never mentioned.
     "git rm -f f.txt",
@@ -319,7 +334,7 @@ READONLY_MUST_REFUSE = [
     # Input redirection glues a filename to a binary, which is how `cat<.env`
     # slipped past the secrets check.
     "cat<.env",
-    # The git reads were widened on 2026-08-17 (see READONLY_STILL_A_READ).
+    # The git reads were widened on 2026-08-17 (now READONLY_GIT_MOVED; the git grammar is asserted in gitops_check.py).
     # These are the writing forms that must not have come with them. Two are
     # there because the widening could plausibly have swept them up: `git
     # stash` with no sub-subcommand *is* `git stash push`, the one member of
@@ -366,10 +381,17 @@ READONLY_MUST_REFUSE = [
     'grep "won\'t $(cat /etc/passwd)" f',
 ]
 
-# Ten pure reads that the first cut of the git allowlist refused (measured
-# 2026-08-17). Every one of them only looks at the repository, and every one
-# was being pushed to `run_command` — which asks the owner to approve a read.
-READONLY_STILL_A_READ = [
+# **`git` left `run_readonly` on 2026-10-09.** This tool is ungated, and judging
+# a git invocation by its subcommand let the *flags* through: options that name
+# a program for git to run, or a file for it to write, were all "reads". Git is
+# the typed `git` tool's job now (jarvis/gitops.py), which judges the whole
+# invocation and confines writes to worktrees of its own — and the grammar the
+# lists below were written to protect (ten pure reads that the 2026-08-17
+# allowlist wrongly refused, and the writing form of each) is asserted there,
+# in tests/gitops_check.py. Here they are kept for what is left to prove: that
+# every one of them, read or write, is refused by this tool with a pointer to
+# the one that replaced it.
+READONLY_GIT_MOVED = [
     "git branch --contains HEAD",
     "git branch --list 'feat*'",
     "git tag -l 'v*'",
@@ -392,27 +414,6 @@ READONLY_STILL_A_READ = [
     "git config --global --list",
     "git worktree",
     "git notes",
-]
-
-# Arguments that merely *contain* a metacharacter. The shell will never treat
-# these as operators, and `run_readonly` was refusing all of them because its
-# operator check was a raw substring scan — a second, hand-written copy of the
-# idea `rules.segments()` had just been made quote-aware about.
-READONLY_QUOTED_METACHARACTERS = [
-    "grep 'a&b' f.txt",
-    "git log --grep='fix & bug'",
-    "echo 'a;b'",
-    "grep 'a|b' f.txt",
-    'grep "a > b" f.txt',
-    "grep 'a<b' f.txt",
-    "git log --grep='a && b'",
-    # ...and `find` in its reading forms is still a read.
-    "find . -name '*.py'",
-    "find /tmp -type f -newer /tmp/x",
-]
-
-READONLY_MUST_ALLOW = [
-    "ls -la /tmp",
     "git status",
     "git log --oneline -5",
     "git diff HEAD~1",
@@ -422,6 +423,33 @@ READONLY_MUST_ALLOW = [
     "git remote -v",
     "git config --list",
     "git",
+    "env git status",
+    "timeout 5 git log",
+]
+
+# Arguments that merely *contain* a metacharacter. The shell will never treat
+# these as operators, and `run_readonly` was refusing all of them because its
+# operator check was a raw substring scan — a second, hand-written copy of the
+# idea `rules.segments()` had just been made quote-aware about.
+READONLY_QUOTED_METACHARACTERS = [
+    "grep 'a&b' f.txt",
+    "rg 'fix & bug' f.txt",
+    "echo 'a;b'",
+    "grep 'a|b' f.txt",
+    'grep "a > b" f.txt',
+    "grep 'a<b' f.txt",
+    "rg 'a && b' f.txt",
+    # ...and `find` in its reading forms is still a read.
+    "find . -name '*.py'",
+    "find /tmp -type f -newer /tmp/x",
+]
+
+READONLY_MUST_ALLOW = [
+    "ls -la /tmp",
+    "rg -n pattern f.txt",
+    "rg --files-with-matches --glob '*.py' pattern .",
+    "rg --pretty pattern f.txt",
+    "rg --pre-glob '*.gz' pattern f.txt",
     "env",
     "grep -rn foo /tmp",
     "cat /tmp/notes.txt",
@@ -448,9 +476,16 @@ def run_readonly_checks() -> None:
             out = shell.run_readonly(command)
             assert ran == [command], f"run_readonly refused ordinary work {command!r}: {out}"
             ran.clear()
+        # git is the typed tool's, in every costume — a read as much as a write.
+        for command in READONLY_GIT_MOVED:
+            out = shell.run_readonly(command)
+            assert out.startswith("Error") and "git tool" in out, f"{command!r}: {out}"
+            assert not ran, f"run_readonly executed {command!r}"
+        assert "git" not in shell.READ_ONLY
     print(
         f"ok  run_readonly: {len(READONLY_MUST_REFUSE)} escapes refused, "
-        f"{len(READONLY_MUST_ALLOW)} reads still unattended"
+        f"{len(READONLY_MUST_ALLOW)} reads still unattended, "
+        f"{len(READONLY_GIT_MOVED)} git forms pointed at the git tool"
     )
 
 
@@ -472,7 +507,7 @@ def run_readonly_narrowing_checks() -> None:
     from jarvis.tools import shell
 
     with recorded() as ran:
-        for command in READONLY_STILL_A_READ + READONLY_QUOTED_METACHARACTERS:
+        for command in READONLY_QUOTED_METACHARACTERS:
             out = shell.run_readonly(command)
             assert ran == [command], f"run_readonly refused a read: {command!r}: {out}"
             ran.clear()
@@ -501,8 +536,7 @@ def run_readonly_narrowing_checks() -> None:
     # split on it — the narrowing must survive the hole being closed.
     assert rules.first_unquoted('grep "it\'s ; ok" f', (";", "&", "|")) == ""
     print(
-        f"ok  run_readonly: {len(READONLY_STILL_A_READ)} git reads and "
-        f"{len(READONLY_QUOTED_METACHARACTERS)} quoted metacharacters still run unattended"
+        f"ok  run_readonly: {len(READONLY_QUOTED_METACHARACTERS)} quoted metacharacters still run unattended"
     )
 
 
