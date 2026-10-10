@@ -571,6 +571,9 @@ def _steer_pane2_checks(page, mock, check, until):
           and stop.count() == 1)
     check("pane 1 is untouched by it", page.locator(_pane(1, '[data-testid="msg-user"]')).count() == box1_msgs
           and _chat(page, 1)["busy"] is False)
+    mock.emit("steer_queued", {"message_id": f"msg-{w['sends']}"}, thread_id="t2")
+    check("pane 2: steer_queued re-marks that steer queued, in pane 2",
+          bool(until(lambda: "queued" in steered.inner_text(), timeout=3)), steered.inner_text())
 
     w["send_status"] = "queued"
     box.fill("then the docs")
