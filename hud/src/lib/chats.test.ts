@@ -96,29 +96,32 @@ describe("handing words back", () => {
   const c = chats({ 1: { threadId: "a" }, 2: { threadId: "b" } });
 
   it("goes to the box of the pane showing the thread", () => {
-    expect(giveBackPane("b", c, none, 1)).toBe(2);
-    expect(giveBackPane("a", c, none, 2)).toBe(1);
+    expect(giveBackPane("b", c, none)).toBe(2);
+    expect(giveBackPane("a", c, none)).toBe(1);
   });
 
   it("holds words for a thread no pane shows, rather than writing them into another thread's box", () => {
-    expect(giveBackPane("zz", c, none, 1)).toBeNull();
+    expect(giveBackPane("zz", c, none)).toBeNull();
   });
 
-  it("with no thread yet, goes back where they were typed, else to the selected chat", () => {
-    expect(giveBackPane(null, c, none, 1, 2)).toBe(2);
-    expect(giveBackPane(null, c, none, 3)).toBe(3);
+  it("with no thread yet, goes back to the pane holding its compose row, else to no box at all", () => {
+    expect(giveBackPane(null, c, none, 2)).toBe(2);
+    // Never the selected chat, which may show another thread (W-6; re-review
+    // of PR #27): the caller parks them under the compose row instead.
+    expect(giveBackPane(null, c, none)).toBeNull();
+    expect(giveBackPane(null, c, none, null)).toBeNull();
   });
 
   it("holds words for a thread only a pane off screen shows (review of PR #27)", () => {
     // A hidden box could be carried to another thread when two panes trade.
-    expect(giveBackPane("b", c, none, 1, null, [1])).toBeNull();
-    expect(giveBackPane("b", c, none, 1, 2, [1])).toBeNull();
-    expect(giveBackPane("b", c, none, 1, null, [1, 2])).toBe(2);
+    expect(giveBackPane("b", c, none, null, [1])).toBeNull();
+    expect(giveBackPane("b", c, none, 2, [1])).toBeNull();
+    expect(giveBackPane("b", c, none, null, [1, 2])).toBe(2);
   });
 
   it("prefers the pane they were typed in when it shows the thread", () => {
     const both = chats({ 1: { threadId: "a" }, 2: { compose: { projectId: "p", openedId: "a" } } });
-    expect(giveBackPane("a", both, none, 1, 2)).toBe(2);
+    expect(giveBackPane("a", both, none, 2)).toBe(2);
   });
 });
 

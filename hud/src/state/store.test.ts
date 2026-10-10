@@ -206,6 +206,31 @@ describe("a draft belongs to its conversation (review of PR #27)", () => {
     s = reduce(s, { type: "park", key: "compose:2", text: "again" });
     expect(s.drafts["compose:2"].text).toBe("spoken\nagain");
   });
+
+  it("stages files read in for a conversation where that conversation is when they are ready (re-review of PR #27)", () => {
+    const f = (name: string) => ({ name, mime: "text/plain", data_b64: "" });
+    // Dropped on pane 1 while it showed t1; pane 1 opened t2 and pane 2 took t1 meanwhile.
+    let s = withChats({ 1: { threadId: "t2", files: [f("t2.txt")] }, 2: { threadId: "t1" } });
+    s = reduce(s, { type: "stage", key: "t1", files: [f("a.txt")] });
+    expect(s.chats[1].files.map((x) => x.name)).toEqual(["t2.txt"]);
+    expect(s.chats[2].files.map((x) => x.name)).toEqual(["a.txt"]);
+    // No pane holds it: kept with its parked draft, and added to, never replaced.
+    s = reduce(s, { type: "stage", key: "t9", files: [f("b.txt")] });
+    s = reduce(s, { type: "stage", key: "t9", files: [f("c.txt")] });
+    expect(s.drafts["t9"].files.map((x) => x.name)).toEqual(["b.txt", "c.txt"]);
+    // Never past the per-turn cap.
+    s = reduce(s, { type: "stage", key: "t1", files: Array.from({ length: 12 }, (_, i) => f(`${i}`)) });
+    expect(s.chats[2].files.length).toBe(8);
+  });
+
+  it("parks a failed new-thread send's files with its words, and the next compose row there gets both (re-review of PR #27)", () => {
+    const f = { name: "f.txt", mime: "text/plain", data_b64: "" };
+    let s = reduce(withChats({ 1: { threadId: "t2" } }), { type: "park", key: "compose:1", text: "lost words", files: [f] });
+    expect(s.chats[1].input).toBe("");
+    s = reduce(s, { type: "chat", pane: 1, patch: { threadId: null, compose: { projectId: "p" } } });
+    expect([s.chats[1].input, s.chats[1].files.length]).toEqual(["lost words", 1]);
+    expect(s.drafts["compose:1"]).toBeUndefined();
+  });
 });
 
 describe("a transcript belongs to its thread (review of PR #27)", () => {

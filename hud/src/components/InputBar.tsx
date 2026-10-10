@@ -12,6 +12,9 @@ import type { Attachment, Project } from "../types";
 import { DICTATION_MODES, HINTS, type DictationMode } from "../lib/dictation";
 import { folderName } from "../lib/compose";
 import { joined, pendingAfter, type GiveBack } from "../lib/giveback";
+import { MAX_FILES } from "../lib/chats";
+
+export { MAX_FILES };
 
 /**
  * `in: <project>`, where this conversation lives. Editable only while a new
@@ -29,7 +32,6 @@ export interface ProjectChip {
   onNewProject: () => void;
 }
 
-export const MAX_FILES = 8;
 const MAX_BYTES = 4 * 1024 * 1024;
 
 export async function toAttachment(file: File): Promise<Attachment | string> {
@@ -77,6 +79,11 @@ export function InputBar(props: {
   files?: Attachment[];
   onText?: (text: string) => void;
   onFiles?: (files: Attachment[]) => void;
+  /** The conversation this box shows (lib/chats `draftKey`), and where files
+   * read in for it go once they are ready (the store's `stage`): to that
+   * conversation wherever it is by then, not to this box's next one. */
+  stageKey?: string | null;
+  onStage?: (key: string, files: Attachment[]) => void;
 }) {
   const [ownText, setOwnText] = useState("");
   const [ownFiles, setOwnFiles] = useState<Attachment[]>([]);
@@ -140,18 +147,24 @@ export function InputBar(props: {
     if (!list) return;
     const incoming = Array.from(list);
     const msgs: string[] = [];
-    const next = [...filesNow.current];
+    // The conversation they are for, as it is now: reading them in takes a
+    // while, and the box may show another conversation by then (re-review of
+    // PR #27). They are added to what is staged then, never over it.
+    const key = props.stageKey ?? null;
+    const read: Attachment[] = [];
+    const room = MAX_FILES - filesNow.current.length;
     for (const f of incoming) {
-      if (next.length >= MAX_FILES) {
+      if (read.length >= room) {
         msgs.push(`[${f.name} skipped: 8 files per turn]`);
         continue;
       }
       const a = await toAttachment(f);
       // Every refusal becomes a visible note, never a silent drop.
       if (typeof a === "string") msgs.push(a);
-      else next.push(a);
+      else read.push(a);
     }
-    setFiles(next);
+    if (key !== null && props.onStage) props.onStage(key, read);
+    else setFiles((cur) => [...cur, ...read].slice(0, MAX_FILES));
     setNotes(msgs);
   };
 

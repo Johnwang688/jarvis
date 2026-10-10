@@ -649,12 +649,21 @@ def approval_checks(page, mock):
           len(mock.sent("POST", "/approvals/r1")) == resolved_before
           and page.locator('[data-testid="approval-card"]').count() == 1)
 
-    # Push-to-talk and typing are inert while a card is up.
-    check("the input is disabled while a card is up",
-          page.locator('[data-testid="input"]').is_disabled())
+    # Push-to-talk and typing are inert while a card is up. The box is inert,
+    # not disabled (PR #27 re-review: a disabled box dropped focus to the page
+    # before the card recorded it, so focus never came back to it).
+    box_before = page.locator('[data-testid="input"]').input_value()
+    check("the input cannot be reached while a card is up (inert)",
+          page.evaluate("!!document.querySelector('[data-testid=\"input\"]').closest('[inert]')"))
+    page.evaluate("document.querySelector('[data-testid=\"input\"]').focus()")
     page.keyboard.press("Space")
     check("space does not start recording while a card is up",
           page.evaluate("window.__hud.capture.ptt") is None)
+    page.keyboard.type("x")
+    check("and neither Space nor typing reaches the box",
+          page.locator('[data-testid="input"]').input_value() == box_before
+          and page.evaluate("document.activeElement?.getAttribute('data-testid')") != "input",
+          repr(page.locator('[data-testid="input"]').input_value()))
 
     # Escape denies — the cheap action.
     page.keyboard.press("Escape")

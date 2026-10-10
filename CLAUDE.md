@@ -484,18 +484,34 @@ chips, Send/Steer and Stop. What was one set of window-wide fields is
 status, messages, draft, ops, restore, pendingTranscript, input, files,
 loadedThread), and the turn machinery — send, steer, Stop, give-back,
 held-back words, the 15 s reconcile — is the old code keyed by pane, so the
-single layout (pane 1) behaves as before. **What a conversation owns moves
+single layout (pane 1) behaves as before, **with one deliberate change: an
+unsent draft belongs to its conversation.** Opening another thread, or New
+thread from a thread, parks the words typed (main left them in the box), and
+they come back when that conversation is reopened; New thread while composing
+still keeps them. There is no sidebar marker for a parked draft yet.
+**What a conversation owns moves
 with the conversation, never with the pane** (PR #27 review): a pane that
 trades conversations takes its box text, files and REVIEW transcript along
-(`chat_swap`); a pane that changes thread parks its unsent text under that
-conversation (`drafts`, `draftKey`) and gets back what the new one had;
+(`chat_swap`); a pane that changes thread parks its unsent text and files
+under that conversation (`drafts`, `draftKey`) and gets back what the new one
+had; files read in for a box (a drop, the picker, a paste) are added, when
+ready, to whichever pane holds the conversation they were dropped for, else
+to its parked draft (`stage`) — never to whatever the pane shows by then;
 `send()` re-finds its pane by conversation after every await and patches
 nothing if none still shows it (which also fixed New thread pressed while a
 compose send was in flight, in one pane or two); the transcript loader patches
 whichever pane shows that thread when it arrives, drops it if none, and a pane
 counts as loaded (`loadedThread`) only once it has; a hand-back goes to a
 drawn pane showing its thread, else is held (`HeldBack`) and comes back when
-one does — never into another conversation. **An SSE event with a
+one does — never into another conversation. A failed first send whose
+compose row no pane holds any more (another thread was opened there
+meanwhile) parks its words under that row, for the next new thread in that
+pane, and says so; a hand-back never falls back to the selected chat. Until
+its thread exists a first send's turn is tracked under a placeholder
+(`local-N`) that **never reaches the daemon**: a Stop or orb press then is
+held and interrupts the thread once the message is in. A model change whose
+answer lands late updates the compose row holding that thread *then*, so New
+thread meanwhile stays a new thread. **An SSE event with a
 `thread_id` goes to the pane showing that thread or tracking its turn**
 (`routeEvent`); approvals, activity and lifecycle stay window-wide.
 **Ambiguous input goes to the selected chat** (the owner's rule, W-6): the
@@ -508,7 +524,8 @@ none. Ambiguous means: a dictated transcript (AUTO sends, REVIEW fills the
 box — **to the selected chat as it is when the transcript lands**, so
 clicking another chat during STT sends it there), the orb's press and
 interrupt, push-to-talk, the follow-up window, files dropped on the window
-outside any pane, and an SSE event with no thread. Input that belongs to a
+outside any pane (on the sidebar, a project row included, or a Preview or File
+pane), and an SSE event with no thread. Input that belongs to a
 thread (typed text, queued and steered messages, hand-backs, a send's own
 result, a transcript load) stays with its thread, and a hand-back whose thread
 is off screen is held, never put in the selected chat. With no chat drawn,
@@ -545,9 +562,16 @@ refused, and the refusal shows where the owner clicked (`pane-N-refused` on
 the refusing pane, or on the focused pane naming it when it is not drawn).
 **While a card is up, everything outside it is `inert`** (`Approvals.tsx` sets
 it on every sibling of `#authveil` and takes it off before focus goes back),
-and Tab/Shift+Tab cycle the card's own buttons: the card takes focus off
-anything outside it (`behindTheCard`), but Tab used to walk focus back behind
-the veil, where Enter pressed things. Two latent single-layout quirks were
+and Tab/Shift+Tab stay on the card: the card takes focus off anything outside
+it (`behindTheCard`), but Tab used to walk focus back behind the veil, where
+Enter pressed things. **AUTHORIZE and ALWAYS are `tabIndex=-1`**, so no Tab
+or Shift+Tab ever puts one under an Enter — DENY is the only stop (they stay
+clickable; the coordinator's default, told to the owner). The chat box is not
+`disabled` under a card (inert covers it): a disabled box dropped focus to
+the page before the card could record it, so focus never came back. **Each
+card is keyed by its request**: a queued card used to inherit the answered
+one's busy state and countdown, its buttons dead (main too), and a new top
+card takes the focus. Two latent single-layout quirks were
 fixed in passing: a pane's project chip and profile select now show *its*
 conversation's project even after a task was picked, and an archived
 project's *task* no longer clears an unrelated chat's transcript.
@@ -559,7 +583,11 @@ cases in `store.test.ts` and `compose.test.ts`, and
 `tests/face/hud_v2_multichat_check.py` (run by `hud_v2_check` after the
 layout section, on a `MockDaemon(0)` of its own, or alone) — including one
 `review:` check per PR #27 finding and one `W-6:` check per case of the rule,
-each shown to fail on the commit before the fixes (dbd2096).
+each shown to fail on the commit before the fixes (dbd2096), and `review 2:`
+checks for the re-review (failing on feb61ff), each naming the mutation it
+kills. **Typing re-renders the window** (the box's words are the store's), so
+`ChatTab` is memoized with stable props: a long transcript redrawn per
+keystroke cost milliseconds per character per chat pane.
 
 **Sidebar status dots (2026-10-08, design §18; contract in
 `docs/hud-api.md`).** The `·` left of each sidebar thread and task is what it

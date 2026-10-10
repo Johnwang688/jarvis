@@ -49,7 +49,7 @@
 // in one pane at most; Alt+click, or "Open beside" in the row's ⋯ menu, opens
 // it in the next pane to the right (from one pane, two columns).
 
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import type { Project, Task, TaskThread, Thread } from "../types";
 import { canMoveThread, wouldMove } from "../lib/threads";
 import { composeMovable, folderName, movedAway, type Compose } from "../lib/compose";
@@ -80,7 +80,13 @@ interface MenuAt {
   y: number;
 }
 
-export function Sidebar(props: {
+/**
+ * The sidebar. Memoized: typing in a chat box re-renders the window (the
+ * box's words are the store's, WP-B), and every thread row redrawn per
+ * keystroke grows with the owner's thread count (re-review of PR #27). The
+ * window hands it stable callbacks and row lists.
+ */
+export const Sidebar = memo(function Sidebar(props: {
   projects: Project[];
   /** Archived projects' names: a rename preview counts them, as the backend does. */
   archivedNames?: string[];
@@ -329,6 +335,13 @@ export function Sidebar(props: {
                 }}
                 onDragLeave={() => setOver((o) => (o === p.id ? null : o))}
                 onDrop={(e) => {
+                  // Files from outside are not a move: left alone, so the
+                  // window stages them in the selected chat (decisions W-6;
+                  // re-review of PR #27 — this row used to swallow them).
+                  if (!dragging && e.dataTransfer.types.includes("Files")) {
+                    setOver(null);
+                    return;
+                  }
                   e.preventDefault();
                   const id = e.dataTransfer.getData("text/plain") || dragging;
                   setOver(null);
@@ -723,7 +736,7 @@ export function Sidebar(props: {
       ) : null}
     </div>
   );
-}
+});
 
 /** One row's status. Idle is the plain `·` it always was; the rest carry a
  * label for the tooltip and for a screen reader. */

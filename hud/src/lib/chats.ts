@@ -131,6 +131,9 @@ export function sameConversation(a: ChatState, b: ChatState, pane: PaneNo): bool
   return !a.threadId && !b.threadId && !!a.compose && !!b.compose;
 }
 
+/** Files a box stages for one message, at most (the backend's per-turn cap). */
+export const MAX_FILES = 8;
+
 /** Capture statuses: what the microphone is doing, said in the selected chat's input bar. */
 export const CAPTURE_STATUSES: ReadonlySet<string> = new Set([
   "LISTENING · SPEAK NOW", "TRANSCRIBING", "STT FAILED", "DIDN'T CATCH THAT", "TOO SHORT", "MIC MUTED",
@@ -181,17 +184,19 @@ export function eitherPane(r: { mine: PaneNo[]; ours: PaneNo[] }): PaneNo[] {
  * written into a box the owner cannot see, which a trade of conversations
  * could then carry to another thread (review of PR #27). With no thread (a
  * compose send that failed before its thread existed) they go back to the
- * pane holding that compose row, else to the selected chat.
+ * pane holding that compose row (`prefer`), else nowhere: the caller parks
+ * them under that compose row. **Never the selected chat** — a hand-back
+ * belongs to its conversation, and the selected chat may show another
+ * thread (decisions W-6; re-review of PR #27).
  */
 export function giveBackPane(
   threadId: string | null,
   chats: Chats,
   pending: Readonly<Record<PaneNo, string | null>>,
-  target: PaneNo | null,
   prefer: PaneNo | null = null,
   onScreen: readonly PaneNo[] = PANE_NOS,
 ): PaneNo | null {
-  if (!threadId) return prefer ?? target;
+  if (!threadId) return prefer;
   const shows = (n: PaneNo) => onScreen.includes(n) && shownThread(chats[n], pending[n]) === threadId;
   if (prefer && shows(prefer)) return prefer;
   return PANE_NOS.find(shows) ?? null;

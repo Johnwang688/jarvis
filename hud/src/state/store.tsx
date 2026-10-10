@@ -19,7 +19,7 @@ import { activeProjectId } from "../lib/compose";
 import { NO_ACTIVITY, applyActivity, type ActivityView } from "../lib/activity";
 import { pendingAfter } from "../lib/giveback";
 import {
-  CAPTURE_STATUSES, CHAT_KEYS, draftKey, emptyChats, sameConversation, type ChatState, type Chats,
+  CAPTURE_STATUSES, CHAT_KEYS, MAX_FILES, draftKey, emptyChats, sameConversation, type ChatState, type Chats,
 } from "../lib/chats";
 import { PANE_NOS, type PaneNo } from "../lib/workspace";
 
@@ -116,8 +116,13 @@ export type Action =
   | { type: "open_thread"; pane: PaneNo; threadId: string }
   /** The box's unsent words or staged files changed. */
   | { type: "input"; pane: PaneNo; text?: string; files?: Attachment[] }
+  /** Files read in for conversation `key` (a drop, the picker, a paste): added
+   * to the box of the pane holding that conversation when they are ready,
+   * else to its parked draft — never to whatever the pane they were dropped
+   * on shows by then (re-review of PR #27). */
+  | { type: "stage"; key: string; files: Attachment[] }
   /** Words for a conversation no pane shows: kept with its parked draft. */
-  | { type: "park"; key: string; text: string }
+  | { type: "park"; key: string; text: string; files?: Attachment[] }
   /** Two panes' conversations change places (a thread opened in one while the other held it off screen). */
   | { type: "chat_swap"; a: PaneNo; b: PaneNo }
   /** The selected chat changed (`front`: the owner selected it, so it heads
@@ -169,15 +174,28 @@ export function reduce(s: State, a: Action): State {
     }
 
     case "park": {
-      if (!a.text) return s;
+      const add = a.files ?? [];
+      if (!a.text && !add.length) return s;
       const had = s.drafts[a.key];
-      const text = had?.text ? `${had.text}\n${a.text}` : a.text;
-      return { ...s, drafts: { ...s.drafts, [a.key]: { text, files: had?.files ?? [] } } };
+      const text = had?.text && a.text ? `${had.text}\n${a.text}` : a.text || had?.text || "";
+      return { ...s, drafts: { ...s.drafts, [a.key]: { text, files: [...(had?.files ?? []), ...add] } } };
     }
 
     case "input": {
       const c = s.chats[a.pane];
       return withChat(s, a.pane, { ...c, input: a.text ?? c.input, files: a.files ?? c.files });
+    }
+
+    case "stage": {
+      if (!a.files.length) return s;
+      const n = PANE_NOS.find((p) => draftKey(s.chats[p], p) === a.key);
+      if (n !== undefined) {
+        const c = s.chats[n];
+        return withChat(s, n, { ...c, files: [...c.files, ...a.files].slice(0, MAX_FILES) });
+      }
+      const had = s.drafts[a.key];
+      const files = [...(had?.files ?? []), ...a.files].slice(0, MAX_FILES);
+      return { ...s, drafts: { ...s.drafts, [a.key]: { text: had?.text ?? "", files } } };
     }
 
     case "message":

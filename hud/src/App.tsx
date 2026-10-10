@@ -56,9 +56,10 @@ import { maxWidth } from "./lib/layout";
 import { PANE_NOS, SHAPES, show as showOf, type PaneNo, type PaneSpec, type View } from "./lib/workspace";
 import { ActivitySync, clearsOnRead } from "./lib/activity";
 import {
-  besideTarget, chatProjectId, chatTarget, composeRows, drawnShowing, eitherPane, giveBackPane, heldElsewhere,
+  besideTarget, chatProjectId, chatTarget, composeRows, draftKey, drawnShowing, eitherPane, giveBackPane, heldElsewhere,
   isEmptyChat, openRows, routeEvent, runningHere, selectedChatOf, shownThread,
 } from "./lib/chats";
+import { useStableHandlers, useStableValue } from "./lib/stable";
 
 const PROPOSAL_WINDOW_MS = 60_000;
 /** How many of this window's steered or queued messages it remembers, to hand
@@ -157,6 +158,12 @@ export default function App() {
   // ones waiting behind a turn (daemon id -> words and files), so a Stop that
   // drops them can put them back in the box (2026-10-08).
   const localSeq = useRef(0);
+  // A first send's turn is tracked under its own `local-N` id until its
+  // thread exists. That id is never sent to the daemon (re-review of PR #27):
+  // a Stop or an orb press on it is remembered here and becomes a real
+  // interrupt once the thread exists and the message is in.
+  const placeholders = useRef(new Set<string>());
+  const stopWhenOpen = useRef(new Set<string>());
   const waitingHere = useRef(new Map<string, { text: string; files: Attachment[] }>());
   // Words handed back for a thread that is not on screen wait here until the
   // owner opens it: never in another thread's box (Bugbot on PR #22).
@@ -182,15 +189,35 @@ export default function App() {
    * until a drawn chat pane shows the thread — never another thread's box,
    * and never a hidden box a trade of conversations could carry to another
    * thread (review of PR #27). With no thread yet (a compose send that failed
-   * before it opened one), back to the pane holding that compose row.
+   * before it opened one), back to the pane holding that compose row; if no
+   * pane holds it any more, parked under that row's key (`park`), so the next
+   * compose row there gets them — **never the selected chat**, which may
+   * show another thread (decisions W-6; re-review of PR #27).
    */
   const giveBack = useCallback(
-    (threadId: string | null, text: string, files: Attachment[], from: PaneNo | null = null) => {
+    (threadId: string | null, text: string, files: Attachment[], from: PaneNo | null = null,
+     parkKey: string | null = null): "box" | "held" | "parked" | "lost" => {
       const at = live.current;
-      const pane = giveBackPane(threadId, at.chats, pendingThread.current, at.selectedChat, from, chatsOnScreen());
-      if (pane === null && threadId) heldBack.current.hold(threadId, text, files);
-      else if (pane === null) dispatch({ type: "patch", patch: { error: "Words that were not sent had no chat to go back to: open a chat." } });
-      else dispatch({ type: "give_back", pane, text, files, nonce: nextNonce() });
+      const onScreen = chatsOnScreen();
+      // A compose row under that key already on screen (New thread pressed
+      // in that pane meanwhile) is where they belong: its box, at once.
+      const holder = parkKey === null ? null
+        : onScreen.find((n) => draftKey(at.chats[n], n) === parkKey) ?? null;
+      const pane = giveBackPane(threadId, at.chats, pendingThread.current, from ?? holder, onScreen);
+      if (pane !== null) {
+        dispatch({ type: "give_back", pane, text, files, nonce: nextNonce() });
+        return "box";
+      }
+      if (threadId) {
+        heldBack.current.hold(threadId, text, files);
+        return "held";
+      }
+      if (parkKey) {
+        dispatch({ type: "park", key: parkKey, text, files });
+        return "parked";
+      }
+      dispatch({ type: "patch", patch: { error: "Words that were not sent had no chat to go back to: open a chat." } });
+      return "lost";
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [dispatch],
@@ -351,6 +378,7 @@ export default function App() {
       // the turn would stay tracked under it — its `turn_finished` would never
       // free the pane, and the mic would stay suppressed.
       let tracked = threadId ?? compose?.openedId ?? local;
+      if (tracked === local) placeholders.current.add(local);
       dispatch({
         type: "message", pane,
         message: { role: "user", text, local, ...(steering ? { mark: "steering" as const } : {}) },
@@ -428,6 +456,9 @@ export default function App() {
           ...(spoken ? { spoken: true } : {}),
         });
         const status = result?.status ?? "started";
+        // A Stop pressed while the thread was opening: the turn exists now,
+        // so the stop it asked for goes to it.
+        if (stopWhenOpen.current.delete(local) && status === "started") api.interrupt(threadId).catch(() => {});
         if (status === "dropped") {
           // The owner pressed Stop while this steer was on its way and the
           // turn would not take it: stop means stop, so it is not sent, and
@@ -490,8 +521,14 @@ export default function App() {
         // meanwhile stays — and its words and files go back in the box, so
         // a failed send costs nothing. Said inline, never as a dead end.
         dispatch({ type: "unmessage", local });
-        giveBack(threadId, text, attachments, conversation());
-        const error = `Could not send: ${e.message}`;
+        // A first send whose compose row no pane holds any more (the owner
+        // opened another thread there meanwhile): its words are parked under
+        // that row, never put in a box showing another thread.
+        const back = conversation();
+        const parkKey = !threadId && back === null ? `compose:${pane}` : null;
+        const went = giveBack(threadId, text, attachments, back, parkKey);
+        const error = `Could not send: ${e.message}`
+          + (went === "parked" ? " — what you wrote is kept for the next new thread in this pane." : "");
         if (steering) {
           // A refused steer leaves the running turn as it was: still tracked,
           // still stoppable.
@@ -508,18 +545,36 @@ export default function App() {
           else dispatch({ type: "patch", patch: { error } });
         }
         return false;
+      } finally {
+        // Nothing is tracked under the placeholder once the send is over:
+        // the turn is its thread's, or the pane went back to what it had.
+        placeholders.current.delete(local);
+        stopWhenOpen.current.delete(local);
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [dispatch],
   );
 
+  /**
+   * Interrupt a tracked turn — never a placeholder: a first send's `local-N`
+   * id is no thread the daemon knows (re-review of PR #27). A stop asked of
+   * one is kept until its thread exists (`send` delivers it).
+   */
+  const interruptTurn = useCallback((turn: string, onError?: (e: any) => void) => {
+    if (placeholders.current.has(turn)) {
+      stopWhenOpen.current.add(turn);
+      return;
+    }
+    api.interrupt(turn).catch((e: any) => onError?.(e));
+  }, []);
+
   /** Stop the turn running in a pane's thread (the orb does the same for the selected chat's). */
   const stopTurn = useCallback((pane: PaneNo) => {
     const chat = live.current.chats[pane];
     const turn = chat.turnThreadId ?? chat.threadId;
     if (!turn) return;
-    api.interrupt(turn).catch((e: any) => {
+    interruptTurn(turn, (e: any) => {
       // Nothing running there any more: the window was behind. Catch up.
       if (e?.status === 409) void reconcileBusy();
     });
@@ -839,6 +894,11 @@ export default function App() {
       /* the window keeps what it had rather than blanking */
     }
   }, [dispatch]);
+  // Stable, so a memoized ChatTab is not redrawn by a keystroke.
+  const cancelTask = useCallback(
+    (id: string) => void api.cancelTask(id).then(refreshTasks).catch(() => {}),
+    [refreshTasks],
+  );
 
   const refreshActivity = useCallback(async () => {
     // Records heard while this is in flight are newer than the snapshot may
@@ -1458,13 +1518,13 @@ export default function App() {
     // orb as the way to shut him up. It interrupts the selected chat's turn —
     // a turn running in another pane keeps running, and keeps its Stop.
     const chat = live.current.chats[pane];
-    if (chat.busy && chat.turnThreadId) api.interrupt(chat.turnThreadId).catch(() => {});
+    if (chat.busy && chat.turnThreadId) interruptTurn(chat.turnThreadId);
     if (isMuted(live.current.dictation)) {
       chatPatch(pane, { status: "MIC MUTED" });
       return;
     }
     capture.press();
-  }, [capture, chatPatch, dispatch]);
+  }, [capture, chatPatch, dispatch, interruptTurn]);
 
   const release = useCallback(() => capture.release(), [capture]);
 
@@ -1558,19 +1618,29 @@ export default function App() {
         dispatch({ type: "patch", patch: { error: "No chat is open to attach files to: open a chat first." } });
         return;
       }
+      // The conversation they were dropped for, not the pane: reading them in
+      // takes a while, and by then that pane may show another thread. The
+      // store adds them to whichever pane holds that conversation when they
+      // are ready, else to its parked draft (`stage`; re-review of PR #27).
+      const key = draftKey(live.current.chats[pane], pane);
+      if (key === null) {
+        dispatch({ type: "patch", patch: { error: "No chat is open to attach files to: open a chat first." } });
+        return;
+      }
       void (async () => {
         const notes: string[] = [];
-        const staged = [...live.current.chats[pane].files];
+        const read: Attachment[] = [];
+        const room = MAX_FILES - live.current.chats[pane].files.length;
         for (const f of dropped) {
-          if (staged.length >= MAX_FILES) {
+          if (read.length >= room) {
             notes.push(`[${f.name} skipped: 8 files per turn]`);
             continue;
           }
           const a = await toAttachment(f);
           if (typeof a === "string") notes.push(a);
-          else staged.push(a);
+          else read.push(a);
         }
-        dispatch({ type: "input", pane, files: staged });
+        dispatch({ type: "stage", key, files: read });
         if (notes.length) dispatch({ type: "patch", patch: { error: notes.join(" ") } });
       })();
     };
@@ -1692,7 +1762,7 @@ export default function App() {
           messages={chat.messages}
           draft={chat.draft}
           ops={chat.ops}
-          onCancelTask={(id) => api.cancelTask(id).then(refreshTasks).catch(() => {})}
+          onCancelTask={cancelTask}
         />
         <InputBar
           mode={state.dictation}
@@ -1700,7 +1770,10 @@ export default function App() {
           hint={hint}
           strip={target}
           pendingTranscript={chat.pendingTranscript}
-          disabled={state.approvals.length > 0}
+          // Not `disabled` under a card: everything outside the card is inert,
+          // which keeps the box unreachable, and a disabled box dropped focus
+          // to the page before the card could record it — so focus never came
+          // back to the box after the card (re-review of PR #27).
           placeholder={
             compose
               ? `New thread in ${projectName(compose.projectId)} · message, or @path to attach`
@@ -1731,6 +1804,8 @@ export default function App() {
           files={chat.files}
           onText={(text) => dispatch({ type: "input", pane: n, text })}
           onFiles={(files) => dispatch({ type: "input", pane: n, files })}
+          stageKey={draftKey(chat, n)}
+          onStage={(key, files) => dispatch({ type: "stage", key, files })}
         />
       </>
     );
@@ -1878,8 +1953,64 @@ export default function App() {
   };
 
   // The sidebar's view of the drawn chat panes: what each shows, which is active.
-  const sidebarOpen = openRows(ws, fit.panes, state.chats, activeNow);
-  const sidebarComposing = composeRows(ws, fit.panes, state.chats, activeNow);
+  // Kept as the same lists while their content is unchanged, and its callbacks
+  // stable (lib/stable.ts): the Sidebar is memoized, and a keystroke in a chat
+  // box must not redraw every thread row (re-review of PR #27).
+  const sidebarOpen = useStableValue(openRows(ws, fit.panes, state.chats, activeNow));
+  const sidebarComposing = useStableValue(composeRows(ws, fit.panes, state.chats, activeNow));
+  const sidebarCalls = useStableHandlers({
+    onCollapse: () => view.fold("left"),
+    onPickThread: pickThread,
+    onPickTask: (id: string) => {
+      patch({ taskId: id, taskFocus: true });
+      showView("task");
+    },
+    onNewProject: () => patch({ picker: "newProject" }),
+    onNewThread: () => newThread(),
+    onNewTask: (projectId: string) => {
+      setNewTaskProject(projectId);
+      patch({ picker: "newTask" });
+    },
+    onMoveThread: moveThread,
+    onMoveCompose: (projectId: string, pane: PaneNo) => {
+      const c = live.current.chats[pane].compose;
+      if (c) chatPatch(pane, { compose: { ...c, projectId } });
+    },
+    onEditProject: (id: string) => {
+      setProjectTarget(id);
+      patch({ picker: "editProject" });
+    },
+    onArchiveProject: (id: string) => {
+      setProjectTarget(id);
+      patch({ picker: "archiveProject" });
+    },
+    onRenameProject: (id: string, name: string) =>
+      api.patchProject(id, { name }).then(async (saved) => {
+        await refreshProjects(id);
+        return saved;
+      }),
+    onRenameThread: (id: string, title: string) =>
+      api.renameThread(id, title).then(async (saved) => {
+        await refreshThreads();
+        return saved;
+      }),
+    onArchiveThread: (id: string) => api.archiveThread(id).then(() => threadGone(id)),
+    onOpenArchive: () => patch({ picker: "archive" }),
+    onOpen: (what: "schedules" | "route" | "usage") => {
+      if (what === "schedules") {
+        setEditingSchedule(null);
+        patch({ picker: "schedule" });
+        return;
+      }
+      if (what === "route") {
+        patch({ picker: "settings" });
+        return;
+      }
+      // The usage meters live in the status pane: a folded one opens first.
+      view.open("right");
+      setTimeout(() => document.querySelector('[data-testid="usage"]')?.scrollIntoView({ block: "nearest" }), 0);
+    },
+  });
 
   return (
     <>
@@ -1901,7 +2032,7 @@ export default function App() {
         <Sidebar
           zoom={view.zoom}
           layoutBlocked={blocked}
-          onCollapse={() => view.fold("left")}
+          onCollapse={sidebarCalls.onCollapse}
           projects={state.projects}
           archivedNames={state.archivedNames}
           platforms={state.platforms}
@@ -1913,59 +2044,21 @@ export default function App() {
           open={sidebarOpen}
           composing={sidebarComposing}
           taskId={state.taskId}
-          onPickThread={pickThread}
-          onPickTask={(id) => {
-            patch({ taskId: id, taskFocus: true });
-            showView("task");
-          }}
-          onNewProject={() => patch({ picker: "newProject" })}
-          onNewThread={() => newThread()}
-          onNewTask={(projectId) => {
-            setNewTaskProject(projectId);
-            patch({ picker: "newTask" });
-          }}
+          onPickThread={sidebarCalls.onPickThread}
+          onPickTask={sidebarCalls.onPickTask}
+          onNewProject={sidebarCalls.onNewProject}
+          onNewThread={sidebarCalls.onNewThread}
+          onNewTask={sidebarCalls.onNewTask}
           moveError={state.moveError}
-          onMoveThread={moveThread}
-          onMoveCompose={(projectId, pane) => {
-            const c = live.current.chats[pane].compose;
-            if (c) chatPatch(pane, { compose: { ...c, projectId } });
-          }}
-          onEditProject={(id) => {
-            setProjectTarget(id);
-            patch({ picker: "editProject" });
-          }}
-          onArchiveProject={(id) => {
-            setProjectTarget(id);
-            patch({ picker: "archiveProject" });
-          }}
-          onRenameProject={(id, name) =>
-            api.patchProject(id, { name }).then(async (saved) => {
-              await refreshProjects(id);
-              return saved;
-            })
-          }
-          onRenameThread={(id, title) =>
-            api.renameThread(id, title).then(async (saved) => {
-              await refreshThreads();
-              return saved;
-            })
-          }
-          onArchiveThread={(id) => api.archiveThread(id).then(() => threadGone(id))}
-          onOpenArchive={() => patch({ picker: "archive" })}
-          onOpen={(what) => {
-            if (what === "schedules") {
-              setEditingSchedule(null);
-              patch({ picker: "schedule" });
-              return;
-            }
-            if (what === "route") {
-              patch({ picker: "settings" });
-              return;
-            }
-            // The usage meters live in the status pane: a folded one opens first.
-            view.open("right");
-            setTimeout(() => document.querySelector('[data-testid="usage"]')?.scrollIntoView({ block: "nearest" }), 0);
-          }}
+          onMoveThread={sidebarCalls.onMoveThread}
+          onMoveCompose={sidebarCalls.onMoveCompose}
+          onEditProject={sidebarCalls.onEditProject}
+          onArchiveProject={sidebarCalls.onArchiveProject}
+          onRenameProject={sidebarCalls.onRenameProject}
+          onRenameThread={sidebarCalls.onRenameThread}
+          onArchiveThread={sidebarCalls.onArchiveThread}
+          onOpenArchive={sidebarCalls.onOpenArchive}
+          onOpen={sidebarCalls.onOpen}
         />
         {drawn.leftFolded ? null : (
           <Splitter

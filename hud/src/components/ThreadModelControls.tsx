@@ -95,21 +95,32 @@ export function useThreadModel(state: State, dispatch: React.Dispatch<Action>, o
       if (!targetId || !choice) return;
       const body = patchBody(choice, next);
       if (!body) return;
-      const opened = compose?.openedId === targetId ? compose : null;
       const key = keyOf(cs);
       api
         .setThreadModel(targetId, body)
         .then((record) => {
           dispatch({ type: "thread_patch", id: record.id, patch: record });
           // An opened-but-unsent thread's chips read the compose row: keep it
-          // on what the server now holds.
-          if (opened)
+          // on what the server now holds — the row that holds that thread
+          // **when the answer lands**, wherever it is by then, and nothing
+          // else. Writing back the row captured before the request put a
+          // fresh compose row (New thread pressed meanwhile) back on the old
+          // thread (re-review of PR #27).
+          const s2 = now.current;
+          const holder = PANE_NOS.find((n) => s2.chats[n].compose?.openedId === targetId);
+          const row = holder !== undefined ? s2.chats[holder].compose : null;
+          if (holder !== undefined && row)
             dispatch({
-              type: "chat", pane,
-              patch: { compose: { ...opened, model: record.model ?? null, effort: record.effort ?? null } },
+              type: "chat", pane: holder,
+              patch: { compose: { ...row, model: record.model ?? null, effort: record.effort ?? null } },
             });
         })
-        .catch((e) => setErrors((all) => ({ ...all, [pane]: { key, text: `Could not change model: ${e.message}` } })));
+        .catch((e) => {
+          // Said in the pane still on that conversation, if any.
+          const s2 = now.current;
+          const at = PANE_NOS.find((n) => keyOf(paneChips(s2, n)) === key);
+          if (at !== undefined) setErrors((all) => ({ ...all, [at]: { key, text: `Could not change model: ${e.message}` } }));
+        });
     },
     [dispatch],
   );

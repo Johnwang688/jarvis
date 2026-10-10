@@ -1832,7 +1832,26 @@ and `selectedOrder`.
   arrives and drops it if none does; a pane counts as loaded only once its
   transcript has arrived. A hand-back goes to a drawn pane showing its
   thread; if none does, it is held and comes back when one does — never into
-  another conversation.
+  another conversation, and never into the selected chat as a fallback. A
+  first send that fails after another thread was opened in its pane parks its
+  words under its compose row; the next new thread in that pane gets them
+  back, and the error says so (re-review of PR #27). Files read in for a box
+  (a drop, the picker, a paste) are added, once ready, to the pane holding
+  the conversation they were dropped for, else to its parked draft. A first
+  send's turn is tracked under a placeholder until its thread exists; that
+  id never reaches the daemon — a Stop or orb press meanwhile is held and
+  interrupts the thread once the message is in. A model change whose answer
+  arrives late updates the compose row holding that thread at that moment,
+  not the pane it was asked from.
+- **The single layout changes in one way, deliberately: a draft belongs to
+  its conversation.** Typing in a thread and then opening another thread, or
+  pressing New thread, parks the words (main left them in the box); they
+  come back when that conversation is reopened. New thread while composing
+  still keeps them. There is no sidebar marker for a parked draft yet.
+- **Typing re-renders the window**, because the box's words are the store's
+  (they must move with the conversation), so the transcript (`ChatTab`) is
+  memoized with stable props: redrawing a long transcript per keystroke cost
+  milliseconds per character, per chat pane.
 - **Routing.** An SSE event with a `thread_id` reaches the panes *showing*
   that thread (deltas, tools, replies, Discord messages, model lines,
   proposals) and those *tracking its turn* (the finish, an error), so a pane
@@ -1901,10 +1920,18 @@ and `selectedOrder`.
   focus off anything outside it, not only a frame, the workspace or the
   panel (a sidebar button that kept focus still answered Enter behind the
   veil), and everything outside the card is made `inert` until the last card
-  goes, while Tab and Shift+Tab cycle the card's own buttons — Tab used to
-  walk focus back out behind the veil. Focus goes to the card container,
+  goes, while Tab and Shift+Tab stay on the card — Tab used to walk focus
+  back out behind the veil. AUTHORIZE and ALWAYS are out of the Tab order
+  (`tabIndex=-1`), so no Tab or Shift+Tab puts one under an Enter: they take
+  a click, and DENY is the only stop. Focus goes to the card container,
   never a button, and comes back (after `inert` is lifted) when the last
-  card goes.
+  card goes — to the chat box too, which is no longer `disabled` under a
+  card (inert covers it; a disabled box lost focus before the card could
+  record it). Each card is keyed by its request, so a queued card is a card
+  of its own, with live buttons and its own countdown, and takes the focus
+  (the answered card's busy state used to carry over; main had this too).
+- **A file dropped on a sidebar project row** is staged in the selected
+  chat like any other drop outside a box; the row used to swallow it.
 - **Two single-layout quirks fixed on the way**: a chat pane's project chip
   and profile select read its own conversation's project (after a task was
   picked they showed the task's while the message went elsewhere), and a
@@ -1920,7 +1947,10 @@ and `selectedOrder`.
   `review:` check per PR #27 finding and one `W-6:` check per case of the
   rule (four chats in a 2×2 grid, a click during STT, a selected chat
   dropped by a narrow window, one chat and none, an off-screen hand-back),
-  each shown to fail on the commit before the fixes. It runs after the
+  each shown to fail on the commit before the fixes; and `review 2:` checks
+  for the re-review (placeholder Stop, two queued cards, the Tab round,
+  late chip answers, a failed send after its pane moved, file drops), each
+  failing on feb61ff and naming the mutation it kills. It runs after the
   layout section on a `MockDaemon` of its own, or alone. WP-A's three checks
   of the single-chat swap were rewritten for the new rule.
 

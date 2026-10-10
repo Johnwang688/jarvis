@@ -7,7 +7,7 @@
 // And the owner's own message goes up **verbatim** — typing `*foo*` means
 // `*foo*` — while only his is rendered.
 
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import type { ChatMessage, Thread, ToolOp } from "../types";
 import { chatPlace } from "../lib/discord";
 import { Markdown } from "./Markdown";
@@ -49,7 +49,13 @@ function Proposal({ msg, onCancel }: { msg: ChatMessage; onCancel: (id: string) 
   );
 }
 
-export function ChatTab(props: {
+/**
+ * One chat pane's transcript and tool ticker. Memoized: typing in any box
+ * re-renders the window (the box's words are the store's, WP-B), and a long
+ * transcript redrawn per keystroke cost milliseconds per character, per
+ * chat pane (re-review of PR #27). Every prop is stable between keystrokes.
+ */
+export const ChatTab = memo(function ChatTab(props: {
   /** The open chat, for its "On Discord" header (PR C); null while composing. */
   thread?: Thread | null;
   messages: ChatMessage[];
@@ -125,4 +131,4 @@ export function ChatTab(props: {
       </div>
     </div>
   );
-}
+});

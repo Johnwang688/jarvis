@@ -104,7 +104,10 @@ def multichat_checks(browser, mock, base, check, until, guard, init_script):
                         _rv_handoff_trade_checks, _rv_stt_lands_selected_checks, _rv_stale_status_checks,
                         _rv_beside_refusal_checks,
                         # the owner's rule: ambiguous input goes to the selected chat (decisions W-6)
-                        _w6_grid_checks, _w6_fallback_checks, _w6_one_and_none_checks, _w6_handback_held_checks):
+                        _w6_grid_checks, _w6_fallback_checks, _w6_one_and_none_checks, _w6_handback_held_checks,
+                        # re-review of PR #27 (feb61ff)
+                        _rr_compose_fail_moved_checks, _rr_two_cards_checks, _rr_tab_never_authorizes_checks,
+                        _rr_placeholder_stop_checks, _rr_chip_writeback_checks, _rr_drop_checks):
             try:
                 section(page, mock, check, until)
             except Exception as e:  # a section that cannot run is a failure, and the rest still run
@@ -1317,6 +1320,265 @@ def _w6_handback_held_checks(page, mock, check, until):
     _box(page, 2).fill("")
     mock.emit("turn_finished", {"stop": "interrupted"}, thread_id="t2")
 
+
+# ---------------------------------------------------------------------------
+# Re-review of PR #27 (feb61ff). Each failed there and passes now; the
+# docstring names the mutation each one kills.
+
+def _drop_on(page, selector: str, name: str = "note.txt"):
+    """Drop a file on `selector` the way a browser does: dragover, then drop."""
+    page.evaluate("""([sel, name]) => {
+      const dt = new DataTransfer();
+      dt.items.add(new File(["hello"], name, {type: "text/plain"}));
+      const el = document.querySelector(sel);
+      el.dispatchEvent(new DragEvent("dragover", {dataTransfer: dt, bubbles: true, cancelable: true}));
+      el.dispatchEvent(new DragEvent("drop", {dataTransfer: dt, bubbles: true, cancelable: true}));
+      return true; }""", [selector, name])
+
+
+def _unstage(page, n: int):
+    """Take every staged file out of pane N's box (each chip's x)."""
+    for _ in range(10):
+        x = page.locator(_pane(n, '[data-testid="chips"] .chip b'))
+        if not x.count():
+            return
+        x.first.click()
+
+
+def _rr_compose_fail_moved_checks(page, mock, check, until):
+    """A first send that fails after the owner opened another thread in its
+    pane: its words never go into a box showing another thread (W-6), and the
+    next new thread in that pane gets them back. Kills: a hand-back with no
+    thread falling back to the selected chat (giveBackPane's old
+    `prefer ?? target`)."""
+    _fresh(page, mock, until, TWO)
+    _open(page, until, 2, "t3", "p2")
+    _focus(page, until, 1)
+    held = []
+    page.route(OPEN_URL, lambda r: held.append(r) if r.request.method == "POST" else r.continue_())
+    try:
+        _box(page, 1).fill("words for a brand new thread")
+        _box(page, 1).press("Enter")
+        until(lambda: _pumped(page) and len(held) > 0, timeout=3)
+        check("setup: pane 1's first send is opening its thread", len(held) == 1)
+        _expand(page, until, "p1", "thread-t2")
+        page.locator('[data-testid="thread-t2"]').click()
+        until(lambda: _chat(page, 1)["threadId"] == "t2", timeout=3)
+        held[0].abort()
+    finally:
+        page.unroute(OPEN_URL)
+    time.sleep(0.8)
+    b1, b2 = _box(page, 1).input_value(), _box(page, 2).input_value()
+    check("review 2: a failed new-thread send's words never land in a box showing another thread",
+          "brand new" not in b1 and "brand new" not in b2, f"pane 1 (t2) {b1!r}, pane 2 (t3) {b2!r}")
+    err = page.evaluate("window.__hud.state().error") or ""
+    check("review 2: and the window says where they are kept", "kept for the next new thread" in err, err)
+    _focus(page, until, 1)
+    page.locator('[data-testid="new-thread"]').click()
+    until(lambda: _chat(page, 1)["threadId"] is None and _chat(page, 1)["compose"] is not None, timeout=3)
+    check("review 2: the next new thread in that pane gets them back",
+          bool(until(lambda: "brand new" in _box(page, 1).input_value(), timeout=2)),
+          repr(_box(page, 1).input_value()))
+    _box(page, 1).fill("")
+
+
+def _rr_two_cards_checks(page, mock, check, until):
+    """Two queued cards: the second is a card of its own — live buttons and
+    the focus — and after the last one focus is back in the box it was taken
+    from. Kills: the card not keyed by its request (card 2 inherited card 1's
+    busy state, so its buttons stayed disabled; main had this too); no
+    re-focus when a new card comes to the top; the box `disabled` under a
+    card (focus fell to the page before the card recorded it)."""
+    _fresh(page, mock, until, TWO)
+    _open(page, until, 1, "t1")
+    _box(page, 1).fill("typing here")
+    _box(page, 1).focus()
+    _approval(mock, "twocard01")
+    _approval(mock, "twocard02")
+    until(lambda: page.evaluate("window.__hud.state().approvals.length") == 2, timeout=4)
+    until(lambda: page.locator('[data-testid="approval-card"]').count() == 1, timeout=4)
+    time.sleep(0.3)
+    first = page.locator('[data-testid="approval-card"]').get_attribute("data-req")
+    page.locator('[data-testid="approval-deny"]').click()
+    second = until(lambda: (lambda r: r if r and r != first else None)(
+        page.locator('[data-testid="approval-card"]').get_attribute("data-req")), timeout=4)
+    check("setup: the second card comes up when the first is denied", bool(second), str(second))
+    time.sleep(0.3)
+    dis = page.evaluate("""() => Array.from(document.querySelectorAll('[data-testid="approval-card"] button'))
+                             .map(b => b.disabled)""")
+    check("review 2: after the first card is denied by a click, the second card's buttons are live",
+          bool(dis) and not any(dis), str(dis))
+    focused = page.evaluate("""() => document.activeElement?.closest('[data-testid="approval-card"]')
+                                 ?.getAttribute('data-req') || null""")
+    check("review 2: and the second card has the focus", focused == second, str(focused))
+    page.locator('[data-testid="approval-allow"]').click()
+    body = until(lambda: mock.sent("POST", f"/approvals/{second}") or None, timeout=3)
+    check("review 2: and its AUTHORIZE is clickable: it authorizes that request",
+          bool(body) and body[-1].get("decision") == "allow", str(body[-1] if body else None))
+    until(lambda: page.locator('[data-testid="approval-card"]').count() == 0, timeout=4)
+    act = until(lambda: page.evaluate("""() => { const a = document.activeElement;
+        return a && a.getAttribute('data-testid') === 'input' && a.closest('[data-testid="pane-1"]') ? 'pane-1 input'
+             : (a && (a.getAttribute('data-testid') || a.tagName)); }""") == "pane-1 input", timeout=2)
+    check("review 2: with the last card answered, focus is back in the box it was taken from", bool(act),
+          str(page.evaluate("document.activeElement && (document.activeElement.getAttribute('data-testid') || document.activeElement.tagName)")))
+    page.keyboard.type(" more")
+    check("review 2: and typing goes on where it left off", _box(page, 1).input_value() == "typing here more",
+          repr(_box(page, 1).input_value()))
+    _box(page, 1).fill("")
+
+
+def _rr_tab_never_authorizes_checks(page, mock, check, until):
+    """No Tab or Shift+Tab sequence from the card's first focus puts AUTHORIZE
+    or ALWAYS under an Enter: authorizing takes a click (CLAUDE.md, the
+    approval card). Kills: AUTHORIZE or ALWAYS back in the card's Tab round
+    (no tabIndex -1, or the round not skipping it)."""
+    import itertools
+    _fresh(page, mock, until, SINGLE)
+    _approval(mock, "tabauth01")
+    until(lambda: page.locator('[data-testid="approval-card"]').count() == 1, timeout=4)
+    time.sleep(0.3)
+    first_focus = page.evaluate("document.activeElement?.getAttribute('data-testid')")
+    check("setup: the card has the focus when it comes up", first_focus == "approval-card", str(first_focus))
+    bad = []
+    for seq in itertools.product(["Tab", "Shift+Tab"], repeat=4):
+        page.evaluate("document.querySelector('[data-testid=\"approval-card\"]').focus()")
+        for i, key in enumerate(seq):
+            page.keyboard.press(key)
+            t = page.evaluate("document.activeElement?.getAttribute('data-testid')")
+            if t in ("approval-allow", "approval-always"):
+                bad.append((seq[: i + 1], t))
+    check("review 2: no Tab or Shift+Tab sequence from the card's first focus reaches AUTHORIZE or ALWAYS",
+          not bad, str(bad[:3]))
+    for key in ("Shift+Tab", "Tab"):
+        page.evaluate("document.querySelector('[data-testid=\"approval-card\"]')?.focus()")
+        page.keyboard.press(key)
+        page.keyboard.press("Enter")
+        time.sleep(0.3)
+    decisions = [b.get("decision") for b in mock.sent("POST", "/approvals/tabauth01") if b]
+    check("review 2: and Enter after either key never authorizes", "allow" not in decisions, str(decisions))
+    if page.locator('[data-testid="approval-card"]').count():
+        page.keyboard.press("Escape")
+    until(lambda: page.locator('[data-testid="approval-card"]').count() == 0, timeout=4)
+
+
+def _rr_placeholder_stop_checks(page, mock, check, until):
+    """The orb or Stop pressed while a first send opens its thread: no
+    interrupt names the send's placeholder id (`local-N`, no thread the
+    daemon knows), and the stop reaches the thread once it exists. Kills: the
+    orb and Stop interrupting whatever id the pane tracks."""
+    _fresh(page, mock, until, SINGLE)
+    held = []
+    page.route(OPEN_URL, lambda r: held.append(r) if r.request.method == "POST" else r.continue_())
+    try:
+        _box(page, 1).fill("stop me before I start")
+        _box(page, 1).press("Enter")
+        until(lambda: _pumped(page) and len(held) > 0, timeout=3)
+        tracked = _chat(page, 1)["turnThreadId"]
+        n0 = len(mock.calls)
+        page.evaluate("document.activeElement && document.activeElement.blur()")
+        page.keyboard.down("Space")
+        time.sleep(0.1)
+        page.keyboard.up("Space")
+        stop = page.locator(_pane(1, '[data-testid="stop"]'))
+        if stop.count():
+            stop.click()
+        time.sleep(0.3)
+        odd = [c[1] for c in mock.calls[n0:] if "interrupt" in c[1]]
+        check("review 2: the orb and Stop send no interrupt for a first send's placeholder id",
+              str(tracked).startswith("local-") and not odd, f"tracked {tracked}, sent {odd}")
+        held[0].continue_()
+    finally:
+        page.unroute(OPEN_URL)
+    new = until(lambda: _chat(page, 1)["threadId"], timeout=3)
+    check("review 2: and the stop asked for meanwhile reaches the thread once it exists",
+          bool(new) and bool(until(lambda: mock.saw("POST", f"/threads/{new}/interrupt"), timeout=3)), str(new))
+    if new:
+        mock.emit("turn_finished", {"stop": "interrupted"}, thread_id=new)
+
+
+def _rr_chip_writeback_checks(page, mock, check, until):
+    """A model change on an opened-but-unsent thread whose answer lands after
+    New thread: the fresh compose row stays fresh, and the next message opens
+    a new thread. Kills: the answer written back into the pane captured
+    before the request (ThreadModelControls' `change`)."""
+    _fresh(page, mock, until, SINGLE)
+    mock.world["fail_send"] = 1
+    _box(page, 1).fill("first try")
+    _box(page, 1).press("Enter")
+    opened = until(lambda: (_chat(page, 1)["compose"] or {}).get("openedId")
+                   if not _chat(page, 1)["busy"] else None, timeout=4)
+    check("setup: a failed first send left its thread opened", bool(opened), str(opened))
+    url = re.compile(rf".*/threads/{re.escape(str(opened))}$")
+    held = []
+    page.route(url, lambda r: held.append(r) if r.request.method == "PATCH" else r.continue_())
+    try:
+        until(lambda: page.locator('[data-testid="effort-chip-select"]').count() > 0, timeout=3)
+        sel = page.locator('[data-testid="effort-chip-select"]')
+        opts = sel.evaluate("s => Array.from(s.options).map(o => o.value)")
+        cur = sel.input_value()
+        sel.select_option(next(o for o in opts if o != cur))
+        until(lambda: _pumped(page) and len(held) > 0, timeout=3)
+        check("setup: the model change is on its way", len(held) == 1)
+        _box(page, 1).fill("")
+        page.locator('[data-testid="new-thread"]').click()
+        until(lambda: (_chat(page, 1)["compose"] or {}).get("openedId") is None, timeout=3)
+        held[0].continue_()
+    finally:
+        page.unroute(url)
+    time.sleep(0.6)
+    c = _chat(page, 1)["compose"] or {}
+    check("review 2: a late model answer does not put the old thread back on a fresh compose row",
+          c.get("openedId") is None, str(c))
+    n_open = len(mock.posted("/threads"))
+    _box(page, 1).fill("meant for a new thread")
+    _box(page, 1).press("Enter")
+    until(lambda: len(mock.posted("/threads")) > n_open, timeout=3)
+    went_old = any((b or {}).get("text") == "meant for a new thread" for b in _sent(mock, str(opened)))
+    check("review 2: and the next message opens a new thread rather than going to the old one",
+          not went_old and len(mock.posted("/threads")) > n_open, f"to the old thread: {went_old}")
+    tid = until(lambda: _chat(page, 1)["threadId"], timeout=3)
+    if tid:
+        mock.emit("turn_finished", {"stop": "end"}, thread_id=tid)
+
+
+def _rr_drop_checks(page, mock, check, until):
+    """Files dropped outside a box go to the selected chat (W-6) — a sidebar
+    project row included — and stay with the conversation they were dropped
+    for when its pane moves on while they are read in. Kills: the project
+    row's drop handler swallowing a file drop (preventDefault); the window's
+    drop handler writing the files it read before the await into whatever the
+    pane shows after it."""
+    _fresh(page, mock, until, CHAT_FILE)
+    _open(page, until, 1, "t1")
+    _drop_on(page, '[data-testid="project-p1"]')
+    check("review 2: a file dropped on a sidebar project row is staged in the selected chat",
+          bool(until(lambda: len(_chat(page, 1)["files"]) == 1, timeout=3)),
+          str([f["name"] for f in _chat(page, 1)["files"]]))
+    _unstage(page, 1)
+    until(lambda: not _chat(page, 1)["files"], timeout=2)
+    # Hold the read, move the pane on, then let the read finish.
+    page.evaluate("""() => { window.__origRead = File.prototype.arrayBuffer; window.__reads = [];
+      File.prototype.arrayBuffer = function () {
+        const f = this; return new Promise((res) => window.__reads.push(() => res(window.__origRead.call(f))));
+      }; return true; }""")
+    try:
+        _drop_on(page, _pane(2), "for-t1.txt")
+        until(lambda: page.evaluate("window.__reads.length") > 0, timeout=2)
+        _expand(page, until, "p1", "thread-t2")
+        page.locator('[data-testid="thread-t2"]').click()
+        until(lambda: _chat(page, 1)["threadId"] == "t2", timeout=3)
+        page.evaluate("() => { window.__reads.forEach((go) => go()); window.__reads = []; return true; }")
+    finally:
+        page.evaluate("() => { if (window.__origRead) File.prototype.arrayBuffer = window.__origRead; return true; }")
+    time.sleep(0.5)
+    check("review 2: a file read in while its pane moved on is not staged in the thread it moved to",
+          not _chat(page, 1)["files"], str([f["name"] for f in _chat(page, 1)["files"]]))
+    page.locator('[data-testid="thread-t1"]').click()
+    until(lambda: _chat(page, 1)["threadId"] == "t1", timeout=3)
+    check("review 2: it is with the conversation it was dropped for",
+          bool(until(lambda: [f["name"] for f in _chat(page, 1)["files"]] == ["for-t1.txt"], timeout=2)),
+          str([f["name"] for f in _chat(page, 1)["files"]]))
+    _unstage(page, 1)
 
 # ---------------------------------------------------------------------------
 
