@@ -338,7 +338,8 @@ opened with (`Thread.cwd`); a move re-labels, it never re-roots.
 
 **HUD zoom and panes (2026-10-08, design §18).** The rules are in
 `hud/src/lib/layout.ts`. Zoom is 70–160% in 10% steps: `− 100% +` in the
-status header, or Ctrl+= / Ctrl+- / Ctrl+0 — **the HUD's everywhere**, input
+title bar (since 2026-10-09; it used to fold away with the status pane), or
+Ctrl+= / Ctrl+- / Ctrl+0 — **the HUD's everywhere**, input
 bar and Monaco included, because a key let through is Chrome's page zoom,
 which the control cannot see and Chrome remembers per site. It is **CSS
 `zoom` on `#root`**, so **every `vh`/`vw` in `theme.css` must divide by
@@ -366,6 +367,35 @@ both panes folded (under ~552 zoomed px) leaves the centre narrower. Zoom
 and layout persist in localStorage behind try/catch. The free checks are
 `tests/face/hud_v2_layout_check.py`, run first by `hud_v2_check.py` in a
 context of its own, plus `hud/src/lib/layout.test.ts`.
+
+**HUD title bar and split workspace, WP-A (2026-10-09, design §18; plan
+`docs/plans/2026-10-09-hud-workspace-plan.md`, decisions file beside it
+wins).** A 28px window-wide **title bar** holds Model · Voice · Avatar ·
+Settings │ zoom │ ⊞ ◧ ⬓ ◨ (`components/Layout.tsx`, `TitleBar`). The
+toggles are `aria-pressed` and follow what is **drawn**: a window-folded pane
+reads closed with `data-auto`, and opening it folds the other. ⊞'s menu is
+the only way to pick one of six presets (single, cols2, rows2, cols3, main2,
+grid4). `lib/workspace.ts` is the pure pane model: four pane specs always
+stored under `jarvis.hud.workspace` (apart from `jarvis.hud.layout`), a pane
+mounted on first draw and then **hidden, never unmounted**, edges as
+fractions per preset clamped to 360×200, and `fitWorkspace` (side panes fold
+first against the shape's own centre minimum, then columns drop, then — down
+— the panel shrinks, folds, and only then rows drop; **the focused pane is
+never dropped**, nothing is stored). **Chat is a singleton until WP-B**:
+choosing it in another pane swaps views; sidebar clicks go to the pane
+already showing that kind of thing, else the focused one; "read" is any drawn
+pane. **A File pane pins its project** when it opens a file and `FileTab` is
+keyed by it — it used to save to whatever project was current at save time.
+Preview keeps its URL per pane, re-judged on load. The bottom panel (⬓,
+Ctrl+`) is an **empty dock until WP-D** fills it with terminals. **Under a
+card every title-bar, fold and rail button is disabled** and the layout menu
+closes — Enter on a focused toggle used to fold a pane behind the card.
+Ctrl+Alt+1–4 focus a drawn pane. In the single layout — the default —
+every existing suite passes unchanged; `_titlebar_checks`,
+`_workspace_checks` and `_grid_card_checks` in `hud_v2_layout_check.py`
+plus `workspace.test.ts` cover the rest. Tests that run the layout section
+leave the shared mock as they found it (`mock.workshop_hits`, PUT records,
+`world["files"]`): the main suite asserts on all three.
 
 **Sidebar status dots (2026-10-08, design §18; contract in
 `docs/hud-api.md`).** The `·` left of each sidebar thread and task is what it
