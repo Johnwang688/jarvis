@@ -1739,10 +1739,9 @@ title bar.
   focus a pane of the preset, bringing back one the window dropped
   (AltGr+digit types a symbol, so it never fires mid-word); the focused pane
   of a split has an accent line under its header.
-- **Chat stays a singleton in WP-A**: choosing chat in another pane swaps
-  the two panes' **whole specs** (view, pin, preview URL, terminal), so the
-  pane that takes the other view never brings back a stale URL or pin of its
-  own. A sidebar click goes to the pane already showing
+- **Chat stayed a singleton in WP-A** (lifted by WP-B, below): choosing
+  chat in another pane swapped the two panes' **whole specs**. A sidebar
+  click goes to the pane already showing
   that kind of thing, else to the focused pane — a task click leaves a drawn
   task or diff pane following the selection. "Read" means shown in any
   drawn pane. The profile select rides the chat pane's header (the focused
@@ -1804,6 +1803,79 @@ title bar.
   `MockDaemon` of its own on an ephemeral port, so its saves, `/seen` posts,
   approval decisions and preview hits never reach the world the main suite
   asserts on. Every existing suite passes unchanged in the single layout.
+
+**Several chats at once (2026-10-09, WP-B of the same plan, §2.2).** WP-A
+kept one conversation; the owner asked for two chats side by side as two
+separate conversations. The pure rules are `hud/src/lib/chats.ts` (tested in
+`chats.test.ts`); the store holds `chats[pane]` and `voiceTarget`.
+
+- **Each chat pane is its own conversation**, with its own input box,
+  project chip, model chips, Send/Steer and Stop. Where you type is where it
+  goes — a shared box would need a "which pane?" indicator and would be one
+  keystroke from the wrong thread. The per-pane state is exactly what was
+  window-wide: thread or compose row, the turn tracked, busy, status,
+  transcript, draft, tool ticker, hand-backs and a REVIEW transcript. Send,
+  steer, Stop, give-back, held-back words and the 15-second reconcile are the
+  same code keyed by pane, so the single layout is unchanged.
+- **Routing.** An SSE event with a `thread_id` reaches the panes *showing*
+  that thread (deltas, tools, replies, Discord messages, model lines,
+  proposals) and those *tracking its turn* (the finish, an error), so a pane
+  that moved on mid-turn still hears it end. An event with no thread goes to
+  the voice target. Approvals, activity, task and project lifecycle stay
+  window-wide.
+- **The voice target is the chat pane used last**: the focused pane when it
+  shows chat; else the previous target while it is a drawn chat pane; else
+  the first drawn chat pane; with no chat drawn, the conversation it had.
+  Only its input bar draws the dictation strip (AUTO / REVIEW / OFF, the
+  meter, the hint), so the strip shows where speech lands; another chat pane
+  shows only its own turn's status. In a split its header carries a mic mark
+  (`pane-N-mic`, `data-voice`). REVIEW puts the transcript in its box, AUTO
+  sends to its thread, the orb follows and interrupts its turn, the
+  follow-up window opens only when its own turn finishes, and capture is
+  suppressed only while *its* turn runs — a long turn in another pane no
+  longer silences the mic.
+- **A thread is open in one pane at most.** A click on a thread a drawn pane
+  shows focuses that pane. A thread held off screen — by a pane the preset
+  hides, or a pane now showing another view — trades conversations with the
+  pane it is opened in, so nothing either held (a running turn, hand-backs)
+  is dropped. A pane that switched threads mid-turn hands that turn, Stop
+  included, to the pane that opens the thread, unless that pane is waiting
+  on a turn of its own. A thread click lands in the pane showing it, else
+  the focused chat pane, else the voice target, else the focused pane
+  switches to chat. **Alt+click, or "Open beside" in the row's ⋯ menu**,
+  opens the next pane to the right: from one pane two columns, from the
+  right of two a third column, and round to the first in other shapes.
+- **The sidebar** marks every drawn chat pane's thread — the active one (the
+  voice target) with the accent, the others with a dimmer mark, each row
+  carrying `data-pane` — and the voice target's conversation even when its
+  pane shows something else, as the one conversation always was. Each
+  composing pane has its own compose row, numbered by pane ("New thread ·
+  2") when more than one is marked. A pane that shows chat for the first
+  time opens a new thread in the last project worked in.
+- **"Read"** covers every drawn chat pane's thread, focused or not.
+- **An unsaved edit is never switched away.** A File pane holding a dirty
+  buffer refuses every view switch — its own tabs, Open beside, a sidebar
+  thread or task landing there, New thread — and its header says "unsaved
+  edit · save or reload first" (`pane-N-refused`). The WP-A guard covered
+  follow-chat and a gone project; a tab switch still closed the buffer.
+- **The card takes focus off anything outside it**, not only a frame, the
+  workspace or the panel: a sidebar button that kept focus still answered
+  Enter behind the veil. Focus goes to the card container, never a button,
+  and comes back when the last card goes.
+- **Two single-layout quirks fixed on the way**: a chat pane's project chip
+  and profile select read its own conversation's project (after a task was
+  picked they showed the task's while the message went elsewhere), and a
+  project archived with only its *task* open no longer clears an unrelated
+  chat's transcript (its messages were emptied and never reloaded).
+- **Free checks**: `chats.test.ts`, per-pane cases in `store.test.ts` and
+  `compose.test.ts`, and `tests/face/hud_v2_multichat_check.py` — two
+  threads side by side, a turn in one pane while the owner sends in the
+  other, every event kind to its pane, one pane's Stop never reaching the
+  other, voice to the target, never twice, `/seen` for both, the steer and
+  give-back cases re-run in pane 2, the card taking focus from a sidebar
+  button, and a dirty File pane refusing every switch. It runs after the
+  layout section on a `MockDaemon` of its own, or alone. WP-A's three checks
+  of the single-chat swap were rewritten for the new rule.
 
 **Steering a running turn (2026-10-08).** The owner: "I can't steer claude or codex sessions while they are working
 if I want them to do something differently or whatnot and it just throws an
