@@ -289,6 +289,14 @@ CLAUDE_CLI = os.environ.get("JARVIS_CLAUDE_CLI", "")
 # last verified version, so a 2.2 release reads as unhealthy until checked.
 CLAUDE_STRICT = os.environ.get("JARVIS_CLAUDE_STRICT", "") == "1"
 
+# The shell a HUD terminal runs (v2 WP-C, `jarvis/v2/terminals.py`). Empty
+# means the owner's login shell from /etc/passwd. An override must be an
+# absolute path (a relative one would resolve in the terminal's folder) and
+# nothing under /mnt/ is accepted. A shell named `bash` reads the terminal
+# startup file as its --rcfile; any other shell starts with -l and reads it
+# as $ENV. The test suite points this at a scripted fake shell.
+TERMINAL_SHELL = os.environ.get("JARVIS_TERMINAL_SHELL", "")
+
 # The v2 always-ask list (design §6, layer 2; jarvis/v2/permissions.py).
 #
 # The path holds **additions only**. §6 says a project may add to this layer and
