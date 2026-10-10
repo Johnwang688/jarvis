@@ -769,7 +769,7 @@ that is why every attach is announced (`terminal_attached`, below).
 
 - `GET /terminals` → `[row]`, where `row` is `{id, title, folder,
   project_id, created, cols, rows, shown, exited, exit_code, readable,
-  busy, integration, integrated}`. `id` is eight hex characters. `title` is
+  busy, integration, integrated, marked}`. `id` is eight hex characters. `title` is
   `<shell> · <project name | ~>`. `shown`: a window is attached.
   `exited`/`exit_code`: the shell ended (killed by signal n reads 128+n).
   `readable`: the owner's "Jarvis can read" switch (W-2), **on for every new
@@ -779,7 +779,11 @@ that is why every attach is announced (`terminal_attached`, below).
   (startup file, `sudo -k`, prompt and command marks), `"posix"` (an
   `sh`-family shell: startup file, `sudo -k`, prompt marks only) or
   `"none"` (zsh, fish, any shell that reads no `$ENV`: **no startup file —
-  no `sudo -k` and no marks**; the HUD should say so). `integrated`: the
+  no `sudo -k` and no marks**; the HUD should say so). `integration` is
+  what was **configured**; `marked` (2026-10-09, WP-D) is what **took**: true
+  once the first signed prompt mark (A) arrived, so the startup file ran —
+  a profile that `exec`s another shell configures `"bash"` and never marks,
+  so it has no `sudo -k` either, and the HUD says so. `integrated`: the
   shell has marked a command (bash only).
 - `POST /terminals` `{in, cols?, rows?}` → 201 `row`. `in` is `"home"`,
   `{"thread": id}` (that thread's own folder, `cwd`), `{"project": id}` (its
@@ -792,7 +796,14 @@ that is why every attach is announced (`terminal_attached`, below).
   `JARVIS_TERMINAL_SHELL` (relative, resolving under `/mnt/`, not
   executable) is 409. The shell's realpath is what runs, under the name it
   was given as its argv[0] (`env --argv0`), so `/usr/bin/rbash`, a link to
-  bash, still runs restricted; `title` uses that name.
+  bash, still runs restricted; `title` uses that name. **The checked
+  realpath is always what runs** (2026-10-09): where `env` has no
+  `--argv0`, it runs under its own name, and a name whose basename differs
+  from the program's (`rbash`, `sh` for bash, a busybox applet) is 409 —
+  running it under its own name would run something the owner did not
+  name. The startup file must fit 8 KiB (a pipe's capacity even under
+  `pipe-user-pages-soft`), is written without blocking, and a short write
+  is a 409, never a cut file or a wedged route.
 - `PATCH /terminals/{id}` `{readable: bool}` → `row`. Exactly that key.
 - `POST /terminals/{id}/ticket` `{}` → `{ticket, expires_in: 30}`. **Single
   use, 30 seconds, valid for this terminal only**; it is spent the moment it
@@ -827,8 +838,14 @@ that is why every attach is announced (`terminal_attached`, below).
     happened, and when the owner types again send `{"type":
     "input_resume"}`. The answer is `{"type": "input_resumed"}` once the
     queue has drained, else `{"type": "input_resume_refused", "reason"}`
-    (send it again shortly; a program that never reads never drains, and
-    Ctrl-C is the way out). A Ctrl-C frame throws away whatever input is
+    (send it again shortly). A program that never reads never drains, and
+    **Ctrl-C is not a way out of that**: the `^C` byte waits behind the same
+    full tty buffer as everything else, so the program never sees it. The
+    ways out are a reattach (a new socket starts unlatched) or closing the
+    terminal. **A paste must never continue onto a new socket**: whatever
+    of it was not sent when its socket closed is dropped, and the owner is
+    told, so a reconnect can never splice the tail of a paste onto a prefix
+    the program already took. A Ctrl-C frame throws away whatever input is
     still queued and the paste chunk being written, keeping one Ctrl-C that
     was already waiting, so two quick ones are never collapsed into one. The
     latch is per socket: a reattached window starts unlatched.
@@ -838,6 +855,9 @@ that is why every attach is announced (`terminal_attached`, below).
     a newline once anything has been dropped), then `{"type": "replayed"}` —
     send a `resize` then, so full-screen programs redraw — and
     `{"type": "exit", "code"}` if the shell has already ended. Later:
+    `{"type": "marked"}` once, when the startup file's first signed prompt
+    mark arrives (the row's `marked` turns true; `attached` carries it once
+    it is);
     `{"type": "exit", "code"}` when the shell exits (the socket stays open;
     offer Restart and Close); `{"type": "exit", "code", "reason": "closed"}`
     then a close when the terminal is closed; `{"type": "exit", "code",
