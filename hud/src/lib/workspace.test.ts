@@ -84,11 +84,11 @@ describe("parsing what was stored", () => {
     expect(parseWorkspace(JSON.stringify({ panes: [{ view: "terminal" }] })).panes[0].view).toBe("chat");
   });
 
-  it("keeps the chat a singleton: a second chat goes back to its pane's default", () => {
+  it("keeps several chat panes as stored: each is its own conversation (WP-B)", () => {
     const w = parseWorkspace(JSON.stringify({
       panes: [{ view: "file" }, { view: "chat" }, { view: "chat" }, { view: "chat" }],
     }));
-    expect(w.panes.map((p) => p.view)).toEqual(["file", "chat", "file", "task"]);
+    expect(w.panes.map((p) => p.view)).toEqual(["file", "chat", "chat", "chat"]);
   });
 
   it("refuses ids and URLs that are not strings, or are too long", () => {
@@ -152,14 +152,14 @@ describe("parsing what was stored", () => {
 });
 
 describe("what each pane shows", () => {
-  it("keeps the chat a singleton: choosing it elsewhere swaps the two views", () => {
+  it("choosing chat in a second pane changes only that pane: two chats, no swap (WP-B)", () => {
     const w = setView(defaultWorkspace(), 2, "chat");
-    expect(w.panes.map((p) => p.view)).toEqual(["preview", "chat", "file", "task"]);
+    expect(w.panes.map((p) => p.view)).toEqual(["chat", "chat", "file", "task"]);
     expect(w.focused).toBe(2);
-    // Even with the chat in a pane the preset does not draw.
-    const hidden = setView(setPreset(defaultWorkspace(), "grid4"), 4, "chat");
+    // A hidden chat pane stays a chat pane when another pane chooses chat.
+    const hidden = setView(setView(setPreset(defaultWorkspace(), "grid4"), 4, "chat"), 1, "file");
     expect(setView(setPreset(hidden, "single"), 1, "chat").panes.map((p) => p.view))
-      .toEqual(["chat", "preview", "file", "task"]);
+      .toEqual(["chat", "preview", "file", "chat"]);
   });
 
   it("does not touch what was there before", () => {
@@ -198,11 +198,10 @@ describe("what each pane shows", () => {
     const w = setView(defaultWorkspace(), 1, "file");
     expect(show(w, "chat", [1]).panes[0].view).toBe("chat");
     expect(show(w, "task", [1]).panes[0].view).toBe("task");
-    // The chat, wherever it was hidden, swaps into the pane that is drawn.
-    const hidden = setView(setPreset(defaultWorkspace(), "cols2"), 2, "chat");
+    // A chat hidden in another pane is not pulled in: the drawn pane switches.
+    const hidden = setView(setView(setPreset(defaultWorkspace(), "cols2"), 2, "chat"), 1, "file");
     const back = show(setPreset(hidden, "single"), "chat", [1]);
-    expect(back.panes[0].view).toBe("chat");
-    expect(back.panes.filter((p) => p.view === "chat")).toHaveLength(1);
+    expect(back.panes.map((p) => p.view).slice(0, 2)).toEqual(["chat", "chat"]);
   });
 
   it("lets a visible task or diff pane follow the selected task without moving anything", () => {
@@ -212,19 +211,16 @@ describe("what each pane shows", () => {
     expect(show(t, "task", [1, 2])).toBe(t);
   });
 
-  it("swaps the whole spec with the chat, never leaving a stale URL or pin behind", () => {
-    let w = setPreviewUrl(defaultWorkspace(), 1, "http://localhost:9999/stale"); // pane 1's own, from before
-    w = pinPane(w, 1, "p-stale");
-    w = setView(w, 1, "chat");
-    w = setPreviewUrl(w, 2, "http://localhost:5173/");
+  it("switches one pane's view and keeps its own pin, URL and terminal for when it comes back", () => {
+    let w = setPreviewUrl(defaultWorkspace(), 2, "http://localhost:5173/");
     w = pinPane(w, 2, "p2");
     w = { ...w, panes: w.panes.map((p, i) => (i === 1 ? { ...p, terminalId: "term-b" } : p)) as Workspace["panes"] };
     const after = setView(w, 2, "chat");
-    expect(after.panes[0]).toEqual(
-      { view: "preview", projectId: "p2", terminalId: "term-b", previewUrl: "http://localhost:5173/" });
-    expect(after.panes[1]).toEqual(w.panes[0]);
-    expect(after.panes[1].view).toBe("chat");
+    expect(after.panes[1]).toEqual(
+      { view: "chat", projectId: "p2", terminalId: "term-b", previewUrl: "http://localhost:5173/" });
+    expect(after.panes[0]).toBe(w.panes[0]);
     expect(after.focused).toBe(2);
+    expect(setView(after, 2, "preview").panes[1].previewUrl).toBe("http://localhost:5173/");
   });
 
   it("pins and unpins a pane's project", () => {

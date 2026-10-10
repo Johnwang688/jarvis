@@ -249,6 +249,9 @@ where a message goes; the sidebar only shows it".
   the wrong thread.
 - **A thread is open in at most one pane.** Clicking a thread already on
   screen focuses that pane rather than giving one thread two boxes.
+- *(Superseded by decisions W-6: every ambiguous input — voice included —
+  goes to the **selected chat**, the chat pane most recently clicked; the
+  code and docs say "selected chat", not "voice target".)*
 - **Voice goes to the voice target: the chat pane you used last.** Its header
   carries a small mic mark. The dictation strip (AUTO / REVIEW / OFF, the
   level meter and the hint) is drawn only in that pane's input bar, so the

@@ -5,8 +5,13 @@
 // first message carries it (`threadBody`). After that a change is a PATCH,
 // and the chip shows only what the server holds: a refusal leaves it where it
 // was, with the server's own words beside it.
+//
+// Several chats at once (WP-B): every chat pane has its own chips, for its own
+// conversation (`chipFor(pane)`); the catalogue and the provider-default
+// dialogs are the window's, and the catalogue's "use" puts the model on the
+// pane it was opened from.
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import type { Action, State } from "../state/store";
 import type { ModelRow } from "../types";
@@ -15,21 +20,35 @@ import {
   type Choice, type ThreadModels,
 } from "../lib/threadmodel";
 import type { ProviderName } from "../types";
+import { PANE_NOS, type PaneNo } from "../lib/workspace";
 import { CatalogPicker, ModelChip, ProviderDefaults } from "./ModelChip";
 import { refusal, rosterIds } from "../lib/roster";
 
+/** The chips' view of one pane's conversation (lib/threadmodel `chipState`). */
+function paneChips(state: State, pane: PaneNo) {
+  const c = state.chats[pane];
+  return chipState({ threadId: c.threadId, compose: c.compose, threads: state.threads });
+}
+
 export function useThreadModel(state: State, dispatch: React.Dispatch<Action>, onRosterChange?: () => void) {
   const [models, setModels] = useState<ThreadModels | null>(null);
-  const [error, setError] = useState("");
+  // A refusal belongs to the pane and the conversation it was said about: a
+  // pane that moves on to another conversation no longer shows it.
+  const [errors, setErrors] = useState<Partial<Record<PaneNo, { key: string; text: string }>>>({});
   const [catalog, setCatalog] = useState<ModelRow[] | null>(null);
   const [roster, setRoster] = useState<string[]>([]);
   const [catalogOpen, setCatalogOpen] = useState(false);
   // "roster" when opened from the Model picker (pin/unpin only).
   const [catalogMode, setCatalogMode] = useState<"thread" | "roster">("thread");
+  // The pane whose chip opened the catalogue: "use" puts that pane's thread on the model.
+  const [catalogPane, setCatalogPane] = useState<PaneNo>(1);
   const [catalogError, setCatalogError] = useState("");
   // Claude's or Codex's default menu (2026-10-08), and its refusal.
   const [defaultsFor, setDefaultsFor] = useState<ProviderName | null>(null);
   const [defaultsError, setDefaultsError] = useState("");
+  // Clicks read the state as it is when they land, never a render's closure.
+  const now = useRef(state);
+  now.current = state;
 
   const reload = useCallback(async () => {
     try {
@@ -43,50 +62,72 @@ export function useThreadModel(state: State, dispatch: React.Dispatch<Action>, o
     void reload();
   }, [reload]);
 
-  // The open thread, or the one a compose row opened whose first send failed
-  // (lib/threadmodel `chipState`): the chips stay on screen for the retry
-  // instead of vanishing between "composing" and "a thread".
-  const { choice, targetId, composing, editable } = chipState(state);
-  // Clear a stale refusal when the conversation changes.
-  useEffect(() => setError(""), [targetId, composing]);
-
-  // While composing, grey out a provider the chosen project's permission
-  // profile cannot run, with the reason as its tooltip (POST /threads would
-  // refuse it with the same reason).
-  const project = composing ? state.projects.find((p) => p.id === state.compose?.projectId) : undefined;
-  const refusals = Object.fromEntries(PROVIDERS.map((p) => [p, providerRefusal(models, p, project)]));
+  const keyOf = (cs: ReturnType<typeof paneChips>) => `${cs.targetId ?? ""}|${cs.composing}`;
+  // Clear a stale refusal when its pane's conversation changes.
+  const keys = PANE_NOS.map((n) => keyOf(paneChips(state, n)));
+  const keysNow = keys.join(",");
+  useEffect(() => {
+    setErrors((e) => {
+      const stale = PANE_NOS.filter((n, i) => e[n] && e[n]!.key !== keys[i]);
+      if (!stale.length) return e;
+      const next = { ...e };
+      for (const n of stale) delete next[n];
+      return next;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [keysNow]);
 
   const change = useCallback(
-    (next: Choice) => {
-      setError("");
-      if (composing && state.compose) {
+    (pane: PaneNo, next: Choice) => {
+      const s = now.current;
+      const cs = paneChips(s, pane);
+      const { choice, targetId, composing } = cs;
+      const compose = s.chats[pane].compose;
+      setErrors((e) => (e[pane] ? { ...e, [pane]: undefined } : e));
+      if (composing && compose) {
         // Composing: kept here, sent with the first message, nothing before.
         dispatch({
-          type: "patch",
-          patch: { compose: { ...state.compose, provider: next.provider, model: next.model, effort: next.effort } },
+          type: "chat", pane,
+          patch: { compose: { ...compose, provider: next.provider, model: next.model, effort: next.effort } },
         });
         return;
       }
       if (!targetId || !choice) return;
       const body = patchBody(choice, next);
       if (!body) return;
-      const opened = state.compose?.openedId === targetId ? state.compose : null;
+      const key = keyOf(cs);
       api
         .setThreadModel(targetId, body)
         .then((record) => {
           dispatch({ type: "thread_patch", id: record.id, patch: record });
           // An opened-but-unsent thread's chips read the compose row: keep it
-          // on what the server now holds.
-          if (opened)
-            dispatch({ type: "patch", patch: { compose: { ...opened, model: record.model ?? null, effort: record.effort ?? null } } });
+          // on what the server now holds — the row that holds that thread
+          // **when the answer lands**, wherever it is by then, and nothing
+          // else. Writing back the row captured before the request put a
+          // fresh compose row (New thread pressed meanwhile) back on the old
+          // thread (re-review of PR #27).
+          const s2 = now.current;
+          const holder = PANE_NOS.find((n) => s2.chats[n].compose?.openedId === targetId);
+          const row = holder !== undefined ? s2.chats[holder].compose : null;
+          if (holder !== undefined && row)
+            dispatch({
+              type: "chat", pane: holder,
+              patch: { compose: { ...row, model: record.model ?? null, effort: record.effort ?? null } },
+            });
         })
-        .catch((e) => setError(`Could not change model: ${e.message}`));
+        .catch((e) => {
+          // Said in the pane still on that conversation, if any.
+          const s2 = now.current;
+          const at = PANE_NOS.find((n) => keyOf(paneChips(s2, n)) === key);
+          if (at !== undefined) setErrors((all) => ({ ...all, [at]: { key, text: `Could not change model: ${e.message}` } }));
+        });
     },
-    [composing, state.compose, choice, targetId, dispatch],
+    [dispatch],
   );
 
-  const openCatalog = useCallback((mode: "thread" | "roster" = "thread") => {
+  const openCatalog = useCallback((mode: "thread" | "roster" = "thread", pane: PaneNo = 1) => {
     setCatalogMode(mode);
+    setCatalogPane(pane);
     setCatalogOpen(true);
     setCatalogError("");
     api
@@ -134,24 +175,41 @@ export function useThreadModel(state: State, dispatch: React.Dispatch<Action>, o
       .catch((e) => setDefaultsError(refusal(what, e)));
   }, []);
 
-  const chip =
-    choice !== null ? (
+  /** The chips for one chat pane's conversation, or null when it has none to show. */
+  const chipFor = (pane: PaneNo) => {
+    const cs = paneChips(state, pane);
+    if (cs.choice === null) return null;
+    // While composing, grey out a provider the chosen project's permission
+    // profile cannot run, with the reason as its tooltip (POST /threads would
+    // refuse it with the same reason).
+    const compose = state.chats[pane].compose;
+    const project = cs.composing ? state.projects.find((p) => p.id === compose?.projectId) : undefined;
+    const refusals = Object.fromEntries(PROVIDERS.map((p) => [p, providerRefusal(models, p, project)]));
+    const err = errors[pane];
+    return (
       <ModelChip
         models={models}
-        choice={choice}
-        providerEditable={editable.provider}
-        modelEditable={editable.model}
+        choice={cs.choice}
+        providerEditable={cs.editable.provider}
+        modelEditable={cs.editable.model}
         disabled={state.approvals.length > 0}
-        error={error}
-        onChange={change}
-        onSearch={() => openCatalog("thread")}
+        error={err && err.key === keyOf(cs) ? err.text : ""}
+        onChange={(next) => change(pane, next)}
+        onSearch={() => openCatalog("thread", pane)}
         refusals={refusals}
         onDefaults={(provider) => {
           setDefaultsError("");
           setDefaultsFor(provider);
         }}
       />
-    ) : null;
+    );
+  };
+
+  /** Shown while an image is staged in a pane whose model cannot see one (A5). */
+  const imageNoteFor = (pane: PaneNo) => {
+    const { choice } = paneChips(state, pane);
+    return choice ? visionNote(models, choice) : null;
+  };
 
   const defaults = defaultsFor ? (
     <ProviderDefaults
@@ -179,7 +237,8 @@ export function useThreadModel(state: State, dispatch: React.Dispatch<Action>, o
         pin(id)
           .then(() => {
             setCatalogOpen(false);
-            if (choice) change({ ...choice, model: id, effort: null });
+            const { choice } = paneChips(now.current, catalogPane);
+            if (choice) change(catalogPane, { ...choice, model: id, effort: null });
           })
           .catch((e) => setCatalogError(e.message))
       }
@@ -192,13 +251,13 @@ export function useThreadModel(state: State, dispatch: React.Dispatch<Action>, o
   return {
     models,
     reload,
-    chip,
+    chipFor,
     picker,
     /** The catalogue or a provider-default dialog is open: an open picker,
      * for the mic's suppression and push-to-talk. */
     overlayOpen: catalogOpen || defaultsFor !== null,
     /** The catalogue for the Model picker's "Pin a model…". */
     openRosterCatalog: () => openCatalog("roster"),
-    imageNote: choice ? visionNote(models, choice) : null,
+    imageNoteFor,
   };
 }

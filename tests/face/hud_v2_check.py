@@ -649,12 +649,21 @@ def approval_checks(page, mock):
           len(mock.sent("POST", "/approvals/r1")) == resolved_before
           and page.locator('[data-testid="approval-card"]').count() == 1)
 
-    # Push-to-talk and typing are inert while a card is up.
-    check("the input is disabled while a card is up",
-          page.locator('[data-testid="input"]').is_disabled())
+    # Push-to-talk and typing are inert while a card is up. The box is inert,
+    # not disabled (PR #27 re-review: a disabled box dropped focus to the page
+    # before the card recorded it, so focus never came back to it).
+    box_before = page.locator('[data-testid="input"]').input_value()
+    check("the input cannot be reached while a card is up (inert)",
+          page.evaluate("!!document.querySelector('[data-testid=\"input\"]').closest('[inert]')"))
+    page.evaluate("document.querySelector('[data-testid=\"input\"]').focus()")
     page.keyboard.press("Space")
     check("space does not start recording while a card is up",
           page.evaluate("window.__hud.capture.ptt") is None)
+    page.keyboard.type("x")
+    check("and neither Space nor typing reaches the box",
+          page.locator('[data-testid="input"]').input_value() == box_before
+          and page.evaluate("document.activeElement?.getAttribute('data-testid')") != "input",
+          repr(page.locator('[data-testid="input"]').input_value()))
 
     # Escape denies — the cheap action.
     page.keyboard.press("Escape")
@@ -1937,6 +1946,11 @@ def thread_model_checks(page, mock):
     box.press("Enter")
     tid = until(lambda: page.evaluate("window.__hud.state().threadId"))
     mock.emit("turn_finished", {"stop": "end"}, thread_id=tid)
+    # PR #27: the retry's turn was tracked under the send's own placeholder
+    # id, so this finish never freed the pane and the mic stayed suppressed.
+    check("the retried first send's turn ends with its thread's turn_finished",
+          until(lambda: page.evaluate("!window.__hud.state().busy")) is True,
+          str(page.evaluate("[window.__hud.state().busy, window.__hud.state().chats[1].turnThreadId]")))
     until(lambda: page.locator('[data-testid="provider-chip"]').count() > 0)
     check("after it the provider is fixed",
           page.locator('[data-testid="provider-chip-select"]').count() == 0
@@ -2271,6 +2285,17 @@ def main():
                               (live, refuse_live), FAKE_RECOGNIZER)
             finally:
                 layout_mock.stop()
+
+            # Several chat panes at once (WP-B, 2026-10-09): the same reasons
+            # for a context and a mock of its own — its sends, interrupts and
+            # `/seen` posts stay out of the main world.
+            from tests.face.hud_v2_multichat_check import multichat_checks
+            multichat_mock = MockDaemon(0).start()
+            try:
+                multichat_checks(browser, multichat_mock, f"http://127.0.0.1:{multichat_mock.port}", check, until,
+                                 (live, refuse_live), FAKE_RECOGNIZER)
+            finally:
+                multichat_mock.stop()
 
             ctx = browser.new_context(permissions=["microphone"])
             ctx.route(live, refuse_live)

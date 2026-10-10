@@ -39,7 +39,8 @@ The workspace (2026-10-09, WP-A of docs/plans/2026-10-09-hud-workspace-plan.md):
     status pane no longer takes the zoom control with it;
   - with a card up every title-bar, fold and rail button is disabled and an
     open layout menu closes — Enter on a toggle that kept focus does nothing;
-  - presets draw, resize, swap the single chat, hide a pane without
+  - presets draw, resize, make a second chat with its own box (WP-B lifted
+    WP-A's single-chat swap), hide a pane without
     unmounting it (a loaded preview is the same frame afterwards), keep a
     pane's preview URL across a reload, drop the unfocused pane first on a
     small window, and send sidebar clicks where the plan says;
@@ -1221,15 +1222,16 @@ def _workspace_checks(page, mock, check, until):
     until(lambda: abs(_width(page, _pane(1)) - _width(page, _pane(2))) <= 2, timeout=2)
     check("a double-click makes the panes equal", abs(_width(page, _pane(1)) - _width(page, _pane(2))) <= 2)
 
-    # One chat: choosing it elsewhere swaps.
+    # Several chats (WP-B): choosing chat in pane 2 makes a second chat; it
+    # used to swap the two panes' views (WP-A's single chat).
     page.locator(_pane(2, '[data-testid="tab-chat"]')).click()
     until(lambda: _attr(page, _pane(2), "data-view") == "chat", timeout=2)
-    check("choosing chat in pane 2 swaps the two panes' views",
-          _attr(page, _pane(2), "data-view") == "chat" and _attr(page, _pane(1), "data-view") == "preview"
-          and page.locator('[data-testid="input"]').count() == 1
+    check("choosing chat in pane 2 makes a second chat beside the first, each with its own box",
+          _attr(page, _pane(2), "data-view") == "chat" and _attr(page, _pane(1), "data-view") == "chat"
+          and page.locator(_pane(1, '[data-testid="input"]')).count() == 1
           and page.locator(_pane(2, '[data-testid="input"]')).count() == 1)
-    page.locator(_pane(1, '[data-testid="tab-chat"]')).click()
-    until(lambda: _attr(page, _pane(1), "data-view") == "chat", timeout=2)
+    page.locator(_pane(2, '[data-testid="tab-preview"]')).click()
+    until(lambda: _attr(page, _pane(2), "data-view") == "preview", timeout=2)
 
     # Hidden, never unmounted: the same frame after one pane and back.
     page.locator(_pane(2, '[data-testid="preview-project"]')).click()
@@ -1636,9 +1638,13 @@ def _seen_checks(page, mock, check, until):
     until(lambda: seen("/tasks/k1/seen") > before, timeout=4)
     check("a task finishing in a task pane that is drawn but not focused is read", seen("/tasks/k1/seen") > before)
 
-    _choose(page, until, "single")
+    # The task to pane 2 and the chat back to pane 1 by hand: choosing chat no
+    # longer swaps two panes' views (WP-B).
+    page.locator(_pane(2, '[data-testid="tab-task"]')).click()
+    until(lambda: _attr(page, _pane(2), "data-view") == "task", timeout=2)
     page.locator(_pane(1, '[data-testid="tab-chat"]')).click()
     until(lambda: _attr(page, _pane(1), "data-view") == "chat", timeout=2)
+    _choose(page, until, "single")
     check("setup: one pane showing the chat; the task is hidden",
           _attr(page, _pane(2), "data-view") == "task" and not _visible(page, _pane(2)))
     before = seen("/tasks/k1/seen")

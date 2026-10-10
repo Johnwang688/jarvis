@@ -12,6 +12,9 @@ import type { Attachment, Project } from "../types";
 import { DICTATION_MODES, HINTS, type DictationMode } from "../lib/dictation";
 import { folderName } from "../lib/compose";
 import { joined, pendingAfter, type GiveBack } from "../lib/giveback";
+import { MAX_FILES } from "../lib/chats";
+
+export { MAX_FILES };
 
 /**
  * `in: <project>`, where this conversation lives. Editable only while a new
@@ -29,10 +32,9 @@ export interface ProjectChip {
   onNewProject: () => void;
 }
 
-const MAX_FILES = 8;
 const MAX_BYTES = 4 * 1024 * 1024;
 
-async function toAttachment(file: File): Promise<Attachment | string> {
+export async function toAttachment(file: File): Promise<Attachment | string> {
   if (file.size > MAX_BYTES) return `[${file.name} skipped: over 4MB]`;
   const buf = await file.arrayBuffer();
   let bin = "";
@@ -65,9 +67,48 @@ export function InputBar(props: {
   restore?: GiveBack[];
   /** Every hand-back up to this nonce is in the box. */
   onRestoreTaken?: (nonce: number) => void;
+  /** This pane is the selected chat (WP-B, decisions W-6): it alone draws the dictation strip —
+   * AUTO / REVIEW / OFF, the level meter and the hint. False draws only this
+   * pane's own turn status in its place. */
+  strip?: boolean;
+  /** The unsent words and staged files, when the caller keeps them (WP-B):
+   * they belong to the conversation, so a pane that trades conversations, or
+   * opens another thread, shows that conversation's draft (review of PR #27).
+   * Absent, the box keeps its own. */
+  text?: string;
+  files?: Attachment[];
+  onText?: (text: string) => void;
+  onFiles?: (files: Attachment[]) => void;
+  /** The conversation this box shows (lib/chats `draftKey`), and where files
+   * read in for it go once they are ready (the store's `stage`): to that
+   * conversation wherever it is by then, not to this box's next one. */
+  stageKey?: string | null;
+  onStage?: (key: string, files: Attachment[]) => void;
 }) {
-  const [text, setText] = useState("");
-  const [files, setFiles] = useState<Attachment[]>([]);
+  const [ownText, setOwnText] = useState("");
+  const [ownFiles, setOwnFiles] = useState<Attachment[]>([]);
+  const textControlled = props.text !== undefined;
+  const filesControlled = props.files !== undefined;
+  const text = textControlled ? props.text! : ownText;
+  const files = filesControlled ? props.files! : ownFiles;
+  // Several changes can land before a render (a hand-back and a transcript at
+  // once): each reads what the one before it wrote, not the last render's.
+  const textNow = useRef(text);
+  textNow.current = text;
+  const filesNow = useRef(files);
+  filesNow.current = files;
+  const setText = (next: string | ((t: string) => string)) => {
+    const value = typeof next === "function" ? next(textNow.current) : next;
+    textNow.current = value;
+    if (textControlled) props.onText?.(value);
+    else setOwnText(value);
+  };
+  const setFiles = (next: Attachment[] | ((f: Attachment[]) => Attachment[])) => {
+    const value = typeof next === "function" ? next(filesNow.current) : next;
+    filesNow.current = value;
+    if (filesControlled) props.onFiles?.(value);
+    else setOwnFiles(value);
+  };
   const [notes, setNotes] = useState<string[]>([]);
   const box = useRef<HTMLTextAreaElement>(null);
 
@@ -106,18 +147,24 @@ export function InputBar(props: {
     if (!list) return;
     const incoming = Array.from(list);
     const msgs: string[] = [];
-    const next = [...files];
+    // The conversation they are for, as it is now: reading them in takes a
+    // while, and the box may show another conversation by then (re-review of
+    // PR #27). They are added to what is staged then, never over it.
+    const key = props.stageKey ?? null;
+    const read: Attachment[] = [];
+    const room = MAX_FILES - filesNow.current.length;
     for (const f of incoming) {
-      if (next.length >= MAX_FILES) {
+      if (read.length >= room) {
         msgs.push(`[${f.name} skipped: 8 files per turn]`);
         continue;
       }
       const a = await toAttachment(f);
       // Every refusal becomes a visible note, never a silent drop.
       if (typeof a === "string") msgs.push(a);
-      else next.push(a);
+      else read.push(a);
     }
-    setFiles(next);
+    if (key !== null && props.onStage) props.onStage(key, read);
+    else setFiles((cur) => [...cur, ...read].slice(0, MAX_FILES));
     setNotes(msgs);
   };
 
@@ -135,7 +182,7 @@ export function InputBar(props: {
 
   return (
     <div
-      id="inputbar"
+      className="inputbar"
       onDragOver={(e) => e.preventDefault()}
       onDrop={(e) => {
         e.preventDefault();
@@ -143,7 +190,7 @@ export function InputBar(props: {
       }}
     >
       {files.length || notes.length ? (
-        <div id="chips" data-testid="chips">
+        <div className="chips" data-testid="chips">
           {files.map((f, i) => (
             <span className="chip" key={f.name + i}>
               {f.name}
@@ -158,10 +205,10 @@ export function InputBar(props: {
           ) : null}
         </div>
       ) : null}
-      <div id="inputrow">
+      <div className="inputrow">
         <textarea
           ref={box}
-          id="input"
+          className="input"
           data-testid="input"
           value={text}
           placeholder={
@@ -215,7 +262,13 @@ export function InputBar(props: {
       <div className="row">
         {props.projectChip ? <Chip chip={props.projectChip} /> : null}
         {props.modelChip ?? null}
-        <div id="dictation" data-testid="dictation">
+        {props.strip === false ? (
+          // Not the selected chat: no dictation strip, so the strip itself shows
+          // where speech lands. This pane's own turn still says what it is doing.
+          <span className="hint" data-testid="pane-status">{props.hint}</span>
+        ) : (
+        <>
+        <div className="dictation" data-testid="dictation">
           {DICTATION_MODES.map((m) => (
             <button
               type="button"
@@ -229,12 +282,14 @@ export function InputBar(props: {
             </button>
           ))}
         </div>
-        <div id="level" data-testid="level" data-level={props.level.toFixed(3)}>
+        <div className="level" data-testid="level" data-level={props.level.toFixed(3)}>
           <i style={{ width: `${Math.min(100, props.level * 100)}%` }} />
         </div>
         <span className="hint" data-testid="hint">
           {props.hint || HINTS[props.mode]}
         </span>
+        </>
+        )}
       </div>
     </div>
   );

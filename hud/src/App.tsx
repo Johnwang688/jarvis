@@ -1,13 +1,32 @@
 // The window. One SSE subscription writes lifecycle state; every panel reads
 // the store. The orb, the capture pipeline and the wake word live here because
 // they are properties of the *window*, not of whichever tab is showing.
+//
+// Several chats at once (WP-B, 2026-10-09; plan §2.2): every chat pane holds
+// its own conversation, input box, project and model chips, Send/Steer and
+// Stop (`state.chats[pane]`, lib/chats.ts). The turn machinery — send, steer,
+// Stop, give-back, held-back words, the 15-second busy reconcile — is the one
+// that drove the single conversation, keyed by pane: in the single layout
+// pane 1 is that conversation, unchanged. An SSE event with a `thread_id`
+// reaches the pane showing that thread or tracking its turn; approvals,
+// activity and lifecycle events stay window-wide. **Ambiguous input goes to
+// the selected chat** (decisions W-6): the chat pane most recently clicked,
+// always one on screen, none with no chat drawn. Voice lands there when its
+// transcript does, the orb follows and interrupts its turn, the follow-up mic
+// window opens only when its turn ends, only its turn keeps the mic
+// suppressed, and files dropped outside a chat pane are staged in its box.
+// Input that belongs to a thread — typed words, a steer, a hand-back, a first
+// send, a transcript — stays with that thread.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { api, subscribe } from "./api";
-import { useStore, currentProject, currentProjectId, currentTask } from "./state/store";
+import {
+  useStore, activePane, compatActions, currentProjectId, currentTask, flatState,
+  type ChatPatch,
+} from "./state/store";
 import { Sidebar } from "./components/Sidebar";
 import { ChatTab } from "./components/ChatTab";
-import { InputBar } from "./components/InputBar";
+import { InputBar, MAX_FILES, toAttachment } from "./components/InputBar";
 import { TaskView } from "./components/TaskView";
 import { FileTab } from "./components/FileTab";
 import { DiffTab } from "./components/DiffTab";
@@ -20,7 +39,7 @@ import { Orb } from "./components/Orb";
 import { Capture } from "./lib/capture";
 import { HINTS, isMuted, loadMode, outcomeFor, saveMode, type DictationMode } from "./lib/dictation";
 import { WakeGate, compileWake, matchesWake, WAKE_PATTERNS } from "./lib/wake";
-import type { Attachment, AvatarDesc, Schedule, VoiceEntry } from "./types";
+import type { Attachment, AvatarDesc, ChatMessage, Schedule, VoiceEntry } from "./types";
 import type { RosterView } from "./lib/roster";
 import { moveThreadTo } from "./lib/threads";
 import { lastProject, loadLastProject, saveLastProject } from "./lib/compose";
@@ -34,8 +53,13 @@ import { guildConfigured, ownerLine } from "./lib/discord";
 import { CollapseButton, Rail, Splitter, TitleBar, useLayout } from "./components/Layout";
 import { Workspace, type PaneInfo } from "./components/Workspace";
 import { maxWidth } from "./lib/layout";
-import { SHAPES, type PaneNo, type PaneSpec } from "./lib/workspace";
+import { PANE_NOS, SHAPES, show as showOf, type PaneNo, type PaneSpec, type View } from "./lib/workspace";
 import { ActivitySync, clearsOnRead } from "./lib/activity";
+import {
+  besideTarget, chatProjectId, chatTarget, composeRows, draftKey, drawnShowing, eitherPane, giveBackPane, heldElsewhere,
+  isEmptyChat, openRows, routeEvent, runningHere, selectedChatOf, shownThread,
+} from "./lib/chats";
+import { useStableHandlers, useStableValue } from "./lib/stable";
 
 const PROPOSAL_WINDOW_MS = 60_000;
 /** How many of this window's steered or queued messages it remembers, to hand
@@ -47,6 +71,11 @@ const LIFECYCLE_KINDS = new Set([
   "project_restored", "project_deleted", "thread_archived", "thread_restored", "thread_deleted",
   "thread_updated", "turn_started", "turn_finished",
 ]);
+/** How long a pane says why it refused to switch away from an unsaved edit. */
+const REFUSED_MS = 6000;
+
+/** One value per pane, all null: the window's per-pane refs start here. */
+const perPane = (): Record<PaneNo, string | null> => ({ 1: null, 2: null, 3: null, 4: null });
 
 export default function App() {
   const { state, dispatch } = useStore();
@@ -59,7 +88,9 @@ export default function App() {
   // File panes holding an unsaved edit (FileTab's `onDirty`): such a buffer
   // is never closed behind the owner's back — "follow chat" waits, a project
   // that goes away keeps the pane pinned until the owner discards the edit,
-  // and closing the window asks (2026-10-09, the minimal guard).
+  // closing the window asks (2026-10-09, the minimal guard), and since WP-B
+  // nothing switches the pane to another view — a tab, a sidebar click, a
+  // chat landing there — until the edit is saved or discarded.
   const [dirtyPanes, setDirtyPanes] = useState<Record<number, boolean>>({});
   const dirtyNow = useRef(dirtyPanes);
   dirtyNow.current = dirtyPanes;
@@ -77,6 +108,17 @@ export default function App() {
     window.addEventListener("beforeunload", ask);
     return () => window.removeEventListener("beforeunload", ask);
   }, [anyDirty]);
+  // A refused switch away from an unsaved edit says why, briefly, in a pane
+  // the owner can see (by where it is shown): the File pane itself when it
+  // is drawn, else the focused pane, naming the File pane — Open beside can
+  // aim at a pane the layout hides (review of PR #27).
+  const [refused, setRefused] = useState<Partial<Record<PaneNo, { at: number; pane: PaneNo }>>>({});
+  useEffect(() => {
+    const live = Object.values(refused).filter(Boolean).map((r) => r!.at);
+    if (!live.length) return;
+    const t = setTimeout(() => setRefused({}), Math.max(0, Math.min(...live) + REFUSED_MS - Date.now()));
+    return () => clearTimeout(t);
+  }, [refused]);
   const [avatars, setAvatars] = useState<AvatarDesc[]>([]);
   // The fast path's roster and its default (`GET /models`), re-read on every
   // `model` broadcast so another window's change relabels this one.
@@ -94,36 +136,93 @@ export default function App() {
   const projectTargetRef = useRef<string | null>(null);
   projectTargetRef.current = projectTarget;
   const [lifecycle, setLifecycle] = useState(0);
+  // Set once the first load has landed: a chat pane that has never had a
+  // conversation gets a compose row from then on (below).
+  const [booted, setBooted] = useState(false);
 
   // `live` gives the capture callbacks — which run on the audio thread's
   // cadence, not React's — the current state without stale closures.
   const live = useRef(state);
   live.current = state;
-  // A thread opened for a compose send, before it becomes `threadId`: its
-  // events are this window's from the moment it exists.
-  const pendingThread = useRef<string | null>(null);
-  // The thread whose transcript must not be reloaded when it becomes the open
-  // one, because the window already holds it: the first message, drawn
-  // optimistically, and a reply that may already be streaming.
-  const skipReload = useRef<string | null>(null);
+  // The layout as last drawn, for callbacks that place a chat.
+  const layoutNow = useRef(view);
+  layoutNow.current = view;
+  // Per pane: a thread opened for a compose send, before it becomes the
+  // pane's `threadId` — its events are that pane's from the moment it exists.
+  const pendingThread = useRef(perPane());
+  // Transcripts on their way, by thread: one load per thread at a time, and
+  // it lands in whichever pane shows that thread when it arrives
+  // (`ChatState.loadedThread`; review of PR #27).
+  const loading = useRef(new Set<string>());
   // This window's own messages, named until the daemon names them; and the
   // ones waiting behind a turn (daemon id -> words and files), so a Stop that
   // drops them can put them back in the box (2026-10-08).
   const localSeq = useRef(0);
+  // A first send's turn is tracked under its own `local-N` id until its
+  // thread exists. That id is never sent to the daemon (re-review of PR #27):
+  // a Stop or an orb press on it is remembered here and becomes a real
+  // interrupt once the thread exists and the message is in.
+  const placeholders = useRef(new Set<string>());
+  const stopWhenOpen = useRef(new Set<string>());
   const waitingHere = useRef(new Map<string, { text: string; files: Attachment[] }>());
   // Words handed back for a thread that is not on screen wait here until the
   // owner opens it: never in another thread's box (Bugbot on PR #22).
   const heldBack = useRef(new HeldBack());
+
+  const patch = useCallback((p: Parameters<typeof dispatch>[0] extends any ? any : never) => {
+    dispatch({ type: "patch", patch: p });
+  }, [dispatch]);
+  /** One pane's conversation fields; an `orb` in it lands only for the selected chat. */
+  const chatPatch = useCallback((pane: PaneNo, p: ChatPatch) => {
+    dispatch({ type: "chat", pane, patch: p });
+  }, [dispatch]);
+
+  /** The chat panes the owner can see: drawn, and showing chat. */
+  const chatsOnScreen = (): PaneNo[] => {
+    const lay = layoutNow.current;
+    return lay.fit.panes.filter((n) => lay.ws.panes[n - 1].view === "chat");
+  };
+
+  /**
+   * Words and files back to a box: the box of a chat pane **on screen**
+   * showing that thread (`from`, where they were typed, first), else held
+   * until a drawn chat pane shows the thread — never another thread's box,
+   * and never a hidden box a trade of conversations could carry to another
+   * thread (review of PR #27). With no thread yet (a compose send that failed
+   * before it opened one), back to the pane holding that compose row; if no
+   * pane holds it any more, parked under that row's key (`park`), so the next
+   * compose row there gets them — **never the selected chat**, which may
+   * show another thread (decisions W-6; re-review of PR #27).
+   */
   const giveBack = useCallback(
-    (threadId: string | null, text: string, files: Attachment[]) => {
+    (threadId: string | null, text: string, files: Attachment[], from: PaneNo | null = null,
+     parkKey: string | null = null): "box" | "held" | "parked" | "lost" => {
       const at = live.current;
-      const shown = at.threadId ?? at.compose?.openedId ?? pendingThread.current;
-      if (threadId && threadId !== shown) heldBack.current.hold(threadId, text, files);
-      else dispatch({ type: "give_back", text, files, nonce: nextNonce() });
+      const onScreen = chatsOnScreen();
+      // A compose row under that key already on screen (New thread pressed
+      // in that pane meanwhile) is where they belong: its box, at once.
+      const holder = parkKey === null ? null
+        : onScreen.find((n) => draftKey(at.chats[n], n) === parkKey) ?? null;
+      const pane = giveBackPane(threadId, at.chats, pendingThread.current, from ?? holder, onScreen);
+      if (pane !== null) {
+        dispatch({ type: "give_back", pane, text, files, nonce: nextNonce() });
+        return "box";
+      }
+      if (threadId) {
+        heldBack.current.hold(threadId, text, files);
+        return "held";
+      }
+      if (parkKey) {
+        dispatch({ type: "park", key: parkKey, text, files });
+        return "parked";
+      }
+      dispatch({ type: "patch", patch: { error: "Words that were not sent had no chat to go back to: open a chat." } });
+      return "lost";
     },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [dispatch],
   );
-  // provider ▾ · model ▾ · effort ▾ in the input bar (decisions 2026-10-06, A).
+  // provider ▾ · model ▾ · effort ▾ in each chat pane's input bar (decisions 2026-10-06, A).
   const threadModel = useThreadModel(state, dispatch, () => void loadModels());
   const reloadThreadModels = useRef(threadModel.reload);
   reloadThreadModels.current = threadModel.reload;
@@ -136,9 +235,26 @@ export default function App() {
   // already heard must not undo it (lib/activity.ts, review 2026-10-09).
   const [activitySync] = useState(() => new ActivitySync());
 
-  const patch = useCallback((p: Parameters<typeof dispatch>[0] extends any ? any : never) => {
-    dispatch({ type: "patch", patch: p });
-  }, [dispatch]);
+  // ---- the selected chat ---------------------------------------------------
+
+  // Where ambiguous input goes (decisions W-6, lib/chats `selectedChatOf`):
+  // the chat pane most recently clicked — a pointer or keyboard focus into a
+  // chat pane focuses it, and that heads the order — always one the layout
+  // draws (a dropped one gives way to the next most recently selected), and
+  // none at all with no chat pane drawn. Synced into the store before paint,
+  // so the callbacks below (capture, the orb, the SSE routing) read it from
+  // `live`. `activeNow` is the chat the window is about: the selected one,
+  // else the one selected last.
+  const focusedChat: PaneNo | null =
+    view.fit.panes.includes(view.ws.focused) && view.ws.panes[view.ws.focused - 1].view === "chat"
+      ? view.ws.focused : null;
+  const selected = selectedChatOf(view.ws, view.fit.panes, state.selectedOrder);
+  const activeNow: PaneNo = selected ?? state.selectedOrder[0] ?? 1;
+  useLayoutEffect(() => {
+    const at = live.current;
+    const front = focusedChat !== null && focusedChat === selected && at.selectedOrder[0] !== focusedChat;
+    if (selected !== at.selectedChat || front) dispatch({ type: "select", pane: selected, front });
+  }, [selected, focusedChat, state.selectedChat, state.selectedOrder, dispatch]);
 
   // ---- capture ------------------------------------------------------------
 
@@ -146,76 +262,160 @@ export default function App() {
     () =>
       new Capture({
         // He does not answer himself, and never talks over a pending
-        // authorization or an open picker.
+        // authorization or an open picker. Only the selected chat's turn
+        // suppresses the mic — a long turn in another pane must not silence
+        // it — and with no chat on screen there is nobody to talk to.
         suppressed: () =>
           live.current.orb === "speaking" ||
-          live.current.busy ||
+          live.current.selectedChat === null ||
+          live.current.chats[live.current.selectedChat].busy ||
           live.current.approvals.length > 0 ||
           live.current.picker !== null ||
           chipOverlay.current,
         muted: () => isMuted(live.current.dictation),
         onLevel: (level) => dispatch({ type: "patch", patch: { level } }),
-        onListening: () =>
-          dispatch({ type: "patch", patch: { orb: "listening", status: "LISTENING · SPEAK NOW" } }),
-        onIdle: (note) => dispatch({ type: "patch", patch: { orb: "idle", status: note || "" } }),
+        onListening: () => {
+          const n = live.current.selectedChat;
+          if (n !== null) dispatch({ type: "chat", pane: n, patch: { orb: "listening", status: "LISTENING · SPEAK NOW" } });
+        },
+        onIdle: (note) => {
+          const n = live.current.selectedChat;
+          if (n !== null) dispatch({ type: "chat", pane: n, patch: { orb: "idle", status: note || "" } });
+          else dispatch({ type: "patch", patch: { orb: "idle" } });
+        },
         onUtterance: (wav) => void onUtterance(wav),
       }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [dispatch],
   );
 
+  // Words spoken while no chat pane was on screen: they wait, unsent, for the
+  // next chat selected (decisions W-6: ambiguous input goes to the selected
+  // chat as it is when it is delivered, and there was none).
+  const unplaced = useRef<string[]>([]);
+
   const onUtterance = useCallback(
     async (wav: Blob) => {
+      // Ambiguous input (decisions W-6): what was said goes to **the selected
+      // chat as it is when the transcript lands** — the chat pane most
+      // recently clicked, whatever thread it shows by then. Clicking another
+      // chat during STT sends the words there: the owner's call. What the
+      // microphone is doing is said in the selected chat's input bar.
+      const say = (p: ChatPatch) => {
+        const n = live.current.selectedChat;
+        if (n !== null) chatPatch(n, p);
+        else if (p.error !== undefined) dispatch({ type: "patch", patch: { error: p.error } });
+      };
       const mode = live.current.dictation;
       const what = outcomeFor(mode);
       // OFF never reaches here (Capture refuses to claim while muted), but the
       // mode is checked again rather than assumed: the fail-closed direction
       // costs a discarded utterance and the other costs an upload.
       if (what === "discard") return;
-      dispatch({ type: "patch", patch: { orb: "transcribing", status: "TRANSCRIBING" } });
+      say({ orb: "transcribing", status: "TRANSCRIBING" });
       let text = "";
       try {
         text = await api.stt(wav);
       } catch (e: any) {
-        dispatch({ type: "patch", patch: { orb: "error", status: "STT FAILED", error: e.message } });
+        say({ orb: "error", status: "STT FAILED", error: e.message });
         return;
       }
       if (!text.trim()) {
-        dispatch({ type: "patch", patch: { orb: "idle", status: "DIDN'T CATCH THAT" } });
+        say({ orb: "idle", status: "DIDN'T CATCH THAT" });
         return;
       }
+      const n = live.current.selectedChat;
+      if (n === null) {
+        // No chat on screen: never sent anywhere. It waits for the next chat
+        // selected, in its box, unsent — and the window says so.
+        unplaced.current.push(text);
+        dispatch({
+          type: "patch",
+          patch: { orb: "idle", error: "No chat is open, so what you said was not sent. It will be in the box of the next chat you select." },
+        });
+        return;
+      }
+      // REVIEW never sends on its own: the transcript lands in the box.
       if (what === "review") {
-        // REVIEW never sends on its own: the transcript lands in the box.
-        dispatch({ type: "patch", patch: { orb: "idle", status: "", pendingTranscript: text } });
+        chatPatch(n, { orb: "idle", status: "", pendingTranscript: text });
         return;
       }
       // Dictated: the Discord mirror labels it "You (HUD, voice)" (PR C).
-      await send(text, [], true);
+      await send(n, text, [], true);
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [dispatch],
   );
 
+  // Words that had no chat to go to come back, unsent, in the next one selected.
+  useEffect(() => {
+    if (state.selectedChat === null || !unplaced.current.length) return;
+    const text = unplaced.current.join("\n");
+    unplaced.current = [];
+    dispatch({ type: "give_back", pane: state.selectedChat, text, files: [], nonce: nextNonce() });
+  }, [state.selectedChat, dispatch]);
+
   // ---- sending ------------------------------------------------------------
 
   const send = useCallback(
-    async (text: string, attachments: Attachment[], spoken = false) => {
+    async (pane: PaneNo, text: string, attachments: Attachment[], spoken = false) => {
       const at = live.current;
-      let threadId = at.threadId;
-      const compose = at.compose;
+      const chat = at.chats[pane];
+      let threadId = chat.threadId;
+      const compose = chat.compose;
       const local = `local-${++localSeq.current}`;
       // A turn already running in this thread: the message steers it
-      // (2026-10-08) — drawn at once, marked, and the box clears. The
-      // window's turn state is left alone: that turn is still the one
-      // running, and Stop and the orb must still reach it.
-      const steering = !!threadId && at.busy && at.turnThreadId === threadId;
-      const prior = { busy: at.busy, turnThreadId: at.turnThreadId, orb: at.orb, status: at.status };
+      // (2026-10-08) — drawn at once, marked, and the box clears. The pane's
+      // turn state is left alone: that turn is still the one running, and
+      // Stop and the orb must still reach it.
+      const steering = !!threadId && chat.busy && chat.turnThreadId === threadId;
+      const prior = { busy: chat.busy, turnThreadId: chat.turnThreadId, orb: at.orb, status: chat.status };
+      // What this send tracks until it knows its thread: a compose row's turn
+      // is tracked under this send's own id, then under the thread it opens.
+      // A retry whose thread was opened by a failed first send knows it now:
+      // tracked under it from the start, because nothing is awaited before
+      // the retarget below, so `live` would not yet hold the placeholder and
+      // the turn would stay tracked under it — its `turn_finished` would never
+      // free the pane, and the mic would stay suppressed.
+      let tracked = threadId ?? compose?.openedId ?? local;
+      if (tracked === local) placeholders.current.add(local);
       dispatch({
-        type: "message",
+        type: "message", pane,
         message: { role: "user", text, local, ...(steering ? { mark: "steering" as const } : {}) },
       });
-      if (steering) dispatch({ type: "patch", patch: { error: "" } });
-      else dispatch({ type: "patch", patch: { busy: true, orb: "thinking", status: "SENDING", draft: "", error: "" } });
+      if (steering) chatPatch(pane, { error: "" });
+      else {
+        chatPatch(pane, {
+          busy: true, orb: "thinking", status: "SENDING", draft: "", error: "", turnThreadId: tracked,
+          // The compose row carries this send's id, so the send finds it again.
+          ...(compose && !threadId ? { compose: { ...compose, sending: local } } : {}),
+        });
+      }
+      /**
+       * After every await, the pane is found again by what it holds (review of
+       * PR #27): the owner may have traded this conversation into another
+       * pane, or opened another thread in this one. `conversation`: the pane
+       * holding this compose row or showing this thread — for what is drawn.
+       * `turn`: the pane tracking this send's turn — for busy and Stop. Null:
+       * nothing on screen is this send's any more, and no pane is touched.
+       */
+      const conversation = (): PaneNo | null => {
+        const now = live.current.chats;
+        const pend = pendingThread.current;
+        return PANE_NOS.find((n) =>
+          (!!compose && now[n].compose?.sending === local)
+          || (!!threadId && (now[n].threadId === threadId || now[n].compose?.openedId === threadId
+                             || pend[n] === threadId)),
+        ) ?? null;
+      };
+      const turn = (): PaneNo | null => {
+        const now = live.current.chats;
+        return PANE_NOS.find((n) => now[n].busy && now[n].turnThreadId === tracked) ?? conversation();
+      };
+      const onPane = (which: () => PaneNo | null, p: ChatPatch) => {
+        const n = which();
+        if (n !== null) chatPatch(n, p);
+      };
       try {
         let projectId = threadId ? at.threads.find((t) => t.id === threadId)?.project_id ?? null : null;
         if (!threadId) {
@@ -225,26 +425,40 @@ export default function App() {
           if (!projectId) throw new Error("Create a project first.");
           threadId = compose?.openedId || null;
           if (!threadId) {
-            dispatch({ type: "patch", patch: { status: "OPENING THREAD" } });
+            chatPatch(pane, { status: "OPENING THREAD" });
             // The provider, model and effort chosen while composing ride the
             // first message; a default sends no model (decisions A1, A5).
             const t = await api.openThread({
               project_id: projectId, role: "chat", ...threadBody(composeChoice(compose)),
             });
+            const n = conversation();
             threadId = t.id;
             // Remembered, so a retry after a failed send reuses this thread.
             // The whole compose row is kept, provider, model and effort with
             // it, so a failed first send retries on the same choice.
-            dispatch({ type: "patch", patch: { compose: { ...compose, projectId, openedId: t.id } } });
+            if (n !== null) {
+              const row = live.current.chats[n].compose;
+              chatPatch(n, { compose: { ...(row ?? compose), projectId, openedId: t.id } });
+            }
           }
-          pendingThread.current = threadId;
+          const n = conversation();
+          if (n !== null) pendingThread.current[n] = threadId;
+          // The turn is now this thread's, wherever the pane tracking it is.
+          const tracking = turn();
+          const was = tracked;
+          tracked = threadId;
+          if (!steering && tracking !== null && live.current.chats[tracking].turnThreadId === was) {
+            chatPatch(tracking, { turnThreadId: threadId });
+          }
         }
-        if (!steering) dispatch({ type: "patch", patch: { turnThreadId: threadId } });
         const result = await api.send(threadId, {
           text, attachments: attachments.length ? attachments : undefined,
           ...(spoken ? { spoken: true } : {}),
         });
         const status = result?.status ?? "started";
+        // A Stop pressed while the thread was opening: the turn exists now,
+        // so the stop it asked for goes to it.
+        if (stopWhenOpen.current.delete(local) && status === "started") api.interrupt(threadId).catch(() => {});
         if (status === "dropped") {
           // The owner pressed Stop while this steer was on its way and the
           // turn would not take it: stop means stop, so it is not sent, and
@@ -253,12 +467,9 @@ export default function App() {
             type: "mark", local,
             patch: { mark: "not sent", ...(result.message_id ? { message_id: result.message_id } : {}) },
           });
-          giveBack(threadId, text, attachments);
+          giveBack(threadId, text, attachments, conversation());
           if (!steering) {
-            dispatch({
-              type: "patch",
-              patch: { busy: prior.busy, turnThreadId: prior.turnThreadId, orb: prior.orb, status: prior.status },
-            });
+            onPane(turn, { busy: prior.busy, turnThreadId: prior.turnThreadId, orb: prior.orb, status: prior.status });
           }
           return true;
         }
@@ -276,25 +487,33 @@ export default function App() {
             mine.set(result.message_id, { text, files: attachments });
             while (mine.size > WAITING_KEPT) mine.delete(mine.keys().next().value as string);
           }
-          // A turn this window had not heard of (one started from Discord) is
-          // running here: track it, so Stop and its finish reach this window.
-          dispatch({ type: "patch", patch: { busy: true, turnThreadId: threadId } });
+          // A turn this pane had not heard of (one started from Discord) is
+          // running here: track it, so Stop and its finish reach this pane.
+          onPane(conversation, { busy: true, turnThreadId: threadId });
         } else if (steering) {
           // The turn ended while this was on its way: it started its own.
           dispatch({ type: "mark", local, patch: { mark: undefined } });
-          dispatch({ type: "patch", patch: { busy: true, turnThreadId: threadId, orb: "thinking", status: "THINKING" } });
+          onPane(conversation, { busy: true, turnThreadId: threadId, orb: "thinking", status: "THINKING" });
         }
         if (projectId) saveLastProject(projectId);
-        if (!at.threadId) {
-          // The compose row becomes the thread. Its transcript is already on
-          // screen; reloading it here is what used to wipe the first message.
-          skipReload.current = threadId;
+        if (!chat.threadId) {
+          // The compose row becomes the thread — in the pane that still holds
+          // it, and only there: one the owner moved on is left where it is. Its
+          // transcript is already on screen; reloading it here is what used to
+          // wipe the first message.
           await refreshThreads();
-          dispatch({ type: "patch", patch: { threadId, compose: null } });
-          pendingThread.current = null;
+          const n = conversation();
+          if (n !== null) {
+            if (live.current.chats[n].threadId !== threadId) {
+              chatPatch(n, { threadId, compose: null, loadedThread: threadId });
+            }
+            pendingThread.current[n] = null;
+          }
         }
-        if (live.current.busy && live.current.turnThreadId === threadId && live.current.status === "SENDING") {
-          dispatch({ type: "patch", patch: { status: "THINKING" } });
+        const n = turn();
+        const now = n !== null ? live.current.chats[n] : null;
+        if (n !== null && now && now.busy && now.turnThreadId === threadId && now.status === "SENDING") {
+          chatPatch(n, { status: "THINKING" });
         }
         return true;
       } catch (e: any) {
@@ -302,37 +521,60 @@ export default function App() {
         // meanwhile stays — and its words and files go back in the box, so
         // a failed send costs nothing. Said inline, never as a dead end.
         dispatch({ type: "unmessage", local });
-        giveBack(threadId, text, attachments);
-        const error = `Could not send: ${e.message}`;
+        // A first send whose compose row no pane holds any more (the owner
+        // opened another thread there meanwhile): its words are parked under
+        // that row, never put in a box showing another thread.
+        const back = conversation();
+        const parkKey = !threadId && back === null ? `compose:${pane}` : null;
+        const went = giveBack(threadId, text, attachments, back, parkKey);
+        const error = `Could not send: ${e.message}`
+          + (went === "parked" ? " — what you wrote is kept for the next new thread in this pane." : "");
         if (steering) {
           // A refused steer leaves the running turn as it was: still tracked,
           // still stoppable.
-          dispatch({ type: "patch", patch: { error } });
+          chatPatch(pane, { error });
         } else {
-          // Back to whatever the window was tracking before this send (a turn
+          // Back to whatever the pane was tracking before this send (a turn
           // in another thread keeps running and keeps its Stop).
-          dispatch({
-            type: "patch",
-            patch: {
-              busy: prior.busy, turnThreadId: prior.turnThreadId,
-              orb: prior.busy ? prior.orb : "error", status: prior.busy ? prior.status : "FAILED",
-              error,
-            },
-          });
+          const p: ChatPatch = {
+            busy: prior.busy, turnThreadId: prior.turnThreadId,
+            orb: prior.busy ? prior.orb : "error", status: prior.busy ? prior.status : "FAILED",
+          };
+          const n = turn();
+          if (n !== null) chatPatch(n, { ...p, error });
+          else dispatch({ type: "patch", patch: { error } });
         }
         return false;
+      } finally {
+        // Nothing is tracked under the placeholder once the send is over:
+        // the turn is its thread's, or the pane went back to what it had.
+        placeholders.current.delete(local);
+        stopWhenOpen.current.delete(local);
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [dispatch],
   );
 
-  /** Stop the turn running in the open thread (the orb does the same). */
-  const stopTurn = useCallback(() => {
-    const at = live.current;
-    const turn = at.turnThreadId ?? at.threadId;
+  /**
+   * Interrupt a tracked turn — never a placeholder: a first send's `local-N`
+   * id is no thread the daemon knows (re-review of PR #27). A stop asked of
+   * one is kept until its thread exists (`send` delivers it).
+   */
+  const interruptTurn = useCallback((turn: string, onError?: (e: any) => void) => {
+    if (placeholders.current.has(turn)) {
+      stopWhenOpen.current.add(turn);
+      return;
+    }
+    api.interrupt(turn).catch((e: any) => onError?.(e));
+  }, []);
+
+  /** Stop the turn running in a pane's thread (the orb does the same for the selected chat's). */
+  const stopTurn = useCallback((pane: PaneNo) => {
+    const chat = live.current.chats[pane];
+    const turn = chat.turnThreadId ?? chat.threadId;
     if (!turn) return;
-    api.interrupt(turn).catch((e: any) => {
+    interruptTurn(turn, (e: any) => {
       // Nothing running there any more: the window was behind. Catch up.
       if (e?.status === 409) void reconcileBusy();
     });
@@ -343,12 +585,16 @@ export default function App() {
    * The busy state never wedges (2026-10-08): it follows `turn_finished`, and
    * when that was missed (an SSE reconnect, a dropped frame) the thread
    * record's live `running` says the turn is over. Run on every reconnect
-   * and every 15 s while busy. An older daemon sends no `running`: then
-   * nothing is reset, as before.
+   * and every 15 s while any pane is busy, for every busy pane. An older
+   * daemon sends no `running`: then nothing is reset, as before.
    */
   const reconcileBusy = useCallback(async () => {
-    const turn = live.current.turnThreadId;
-    if (!live.current.busy || !turn) return;
+    const turns = perPane();
+    for (const n of PANE_NOS) {
+      const chat = live.current.chats[n];
+      if (chat.busy && chat.turnThreadId) turns[n] = chat.turnThreadId;
+    }
+    if (!PANE_NOS.some((n) => turns[n])) return;
     let threads: any[];
     try {
       threads = await api.threads();
@@ -356,18 +602,23 @@ export default function App() {
       return;
     }
     dispatch({ type: "patch", patch: { threads } });
-    const record = threads.find((t) => t.id === turn);
-    const at = live.current;
-    if (record && record.running === false && at.busy && at.turnThreadId === turn) {
-      dispatch({ type: "patch", patch: { busy: false, turnThreadId: null, orb: "idle", status: "" } });
+    for (const n of PANE_NOS) {
+      const turn = turns[n];
+      if (!turn) continue;
+      const record = threads.find((t) => t.id === turn);
+      const chat = live.current.chats[n];
+      if (record && record.running === false && chat.busy && chat.turnThreadId === turn) {
+        chatPatch(n, { busy: false, turnThreadId: null, orb: "idle", status: "" });
+      }
     }
-  }, [dispatch]);
+  }, [dispatch, chatPatch]);
 
+  const anyBusy = PANE_NOS.some((n) => state.chats[n].busy);
   useEffect(() => {
-    if (!state.busy) return;
+    if (!anyBusy) return;
     const timer = setInterval(() => void reconcileBusy(), 15_000);
     return () => clearInterval(timer);
-  }, [state.busy, reconcileBusy]);
+  }, [anyBusy, reconcileBusy]);
 
   // ---- events -------------------------------------------------------------
 
@@ -376,30 +627,33 @@ export default function App() {
       const kind = e.kind;
       const data = e.data || e;
       const at = live.current;
-      // On screen: the thread the chat pane shows (or is about to). Ours: the
-      // thread whose turn this window started. They differ when the owner
-      // switches threads mid-turn, and the window must still hear that turn
-      // finish, or it waits on THINKING with the mic suppressed for good.
-      const shown = at.threadId ?? at.compose?.openedId ?? pendingThread.current;
+      // Per pane (lib/chats `routeEvent`). Mine: the panes showing the thread
+      // (or about to). Ours: the panes whose turn this is. They differ when
+      // the owner switches a pane's thread mid-turn, and that pane must still
+      // hear the turn finish, or it waits on THINKING — and, as the selected
+      // chat, keeps the mic suppressed — for good. No thread: the selected
+      // chat's (ambiguous input, decisions W-6), or no pane's with none.
       const tid: string | undefined = e.thread_id;
-      const mine = !tid || tid === shown;
-      const ours = !!tid && tid === at.turnThreadId;
+      const route = routeEvent(tid, at.chats, pendingThread.current, at.selectedChat);
+      const { mine, ours } = route;
       if (LIFECYCLE_KINDS.has(kind)) setLifecycle((n) => n + 1);
       switch (kind) {
         case "user_message":
           // PR C: a message the owner typed in Discord (a chat's thread or the
           // DM) appears in the open chat as theirs, labelled. A HUD message is
           // already on screen from send(), so it is never added twice.
-          if (mine && tid && (data.via === "discord" || data.via === "dm")) {
+          if (tid && (data.via === "discord" || data.via === "dm")) {
             const mark = data.steer ? "steering" : data.queued ? "queued" : undefined;
-            dispatch({
-              type: "message",
-              message: {
-                role: "user", text: ownerLine(data), via: data.via,
-                ...(data.message_id ? { message_id: data.message_id } : {}),
-                ...(mark ? { mark } : {}),
-              },
-            });
+            for (const n of mine) {
+              dispatch({
+                type: "message", pane: n,
+                message: {
+                  role: "user", text: ownerLine(data), via: data.via,
+                  ...(data.message_id ? { message_id: data.message_id } : {}),
+                  ...(mark ? { mark } : {}),
+                },
+              });
+            }
           }
           break;
         case "steer_queued":
@@ -429,61 +683,68 @@ export default function App() {
               files.push(...mineHere.files);
             }
           }
-          // Into the box only when that thread is on screen; else held for it.
+          // Into the box of the pane showing that thread; else held for it.
           if (back.length || files.length) giveBack(tid ?? null, back.join("\n"), files);
           break;
         }
         case "turn_started":
-          if (mine) {
-            dispatch({
-              type: "patch",
-              patch: { busy: true, orb: "thinking", draft: "", turnThreadId: at.turnThreadId ?? tid ?? null },
+          for (const n of mine) {
+            chatPatch(n, {
+              busy: true, orb: "thinking", draft: "", turnThreadId: at.chats[n].turnThreadId ?? tid ?? null,
             });
           }
           break;
         case "text_delta":
-          if (mine) dispatch({ type: "patch", patch: { status: "RESPONDING" } });
-          if (mine) dispatch({ type: "delta", text: data.text || "" });
+          for (const n of mine) {
+            chatPatch(n, { status: "RESPONDING" });
+            dispatch({ type: "delta", pane: n, text: data.text || "" });
+          }
           break;
         case "text":
-          if (mine) dispatch({ type: "settle", text: data.text || "" });
+          for (const n of mine) dispatch({ type: "settle", pane: n, text: data.text || "" });
           break;
         case "tool_started":
-          if (mine) dispatch({ type: "patch", patch: { status: `RUNNING · ${data.name || "tool"}`, orb: "tool" } });
-          if (mine)
+          for (const n of mine) {
+            chatPatch(n, { status: `RUNNING · ${data.name || "tool"}`, orb: "tool" });
             dispatch({
-              type: "op_start",
+              type: "op_start", pane: n,
               op: { call_id: data.call_id || String(Date.now()), name: data.name || "tool", started: Date.now() },
             });
+          }
           break;
         case "tool_finished":
-          if (mine) dispatch({ type: "patch", patch: { status: "THINKING", orb: "thinking" } });
-          if (mine)
+          for (const n of mine) {
+            chatPatch(n, { status: "THINKING", orb: "thinking" });
             dispatch({
-              type: "op_done",
+              type: "op_done", pane: n,
               call_id: data.call_id || "",
               ok: data.ok !== false,
               summary: data.summary || "",
             });
-          break;
-        case "turn_finished":
-          // A message waits behind this turn (`next`) and runs as the thread's
-          // next turn at once: the window stays on it — no flash of idle, no
-          // follow-up mic window over a turn about to start. Its own
-          // `turn_finished` (or the 15 s reconcile) frees the window.
-          if (ours && data.next) break;
-          if (ours) {
-            dispatch({ type: "patch", patch: { busy: false, turnThreadId: null, orb: "idle", status: "" } });
-            // Only this window's own turn opens the follow-up window. A Discord
-            // turn finishing must not start the HUD listening.
-            capture.openFollowUp();
           }
           break;
+        case "turn_finished": {
+          // A message waits behind this turn (`next`) and runs as the thread's
+          // next turn at once: the pane stays on it — no flash of idle, no
+          // follow-up mic window over a turn about to start. Its own
+          // `turn_finished` (or the 15 s reconcile) frees the pane.
+          if (data.next) break;
+          let followUp = false;
+          for (const n of ours) {
+            chatPatch(n, { busy: false, turnThreadId: null, orb: "idle", status: "" });
+            if (n === at.selectedChat) followUp = true;
+          }
+          // Only the selected chat's own turn opens the follow-up window. A
+          // Discord turn, or a turn in another pane, finishing must not start
+          // the HUD listening.
+          if (followUp) capture.openFollowUp();
+          break;
+        }
         case "error":
           // Shown, but the turn is not over until `turn_finished` (which the
           // daemon always sends): resetting `busy` here took the Stop and the
           // orb's interrupt away from a turn that was still running.
-          if (ours || mine) dispatch({ type: "patch", patch: { orb: "error", error: data.message || "error" } });
+          for (const n of eitherPane(route)) chatPatch(n, { orb: "error", error: data.message || "error" });
           break;
         case "approval_requested":
           // Only the broker asks the owner, and every broker question carries
@@ -499,19 +760,22 @@ export default function App() {
         case "proposal_reply":
           // A proposal is a system line with a 60-second cancel: the fast path
           // has already answered and a task is about to run. Only in the
-          // thread that proposed it, never whichever thread happens to be open.
+          // pane showing the thread that proposed it (or waiting on its turn),
+          // never whichever thread happens to be open.
           void refreshTasks();
-          if (!(tid && (tid === shown || ours))) break;
-          dispatch({
-            type: "message",
-            message: {
-              role: "system",
-              text: data.reply || "",
-              proposal: data.task_id
-                ? { task_id: data.task_id, until: Date.now() + PROPOSAL_WINDOW_MS }
-                : undefined,
-            },
-          });
+          if (!tid) break;
+          for (const n of eitherPane(route)) {
+            dispatch({
+              type: "message", pane: n,
+              message: {
+                role: "system",
+                text: data.reply || "",
+                proposal: data.task_id
+                  ? { task_id: data.task_id, until: Date.now() + PROPOSAL_WINDOW_MS }
+                  : undefined,
+              },
+            });
+          }
           break;
         case "task_created":
         case "task_status_changed":
@@ -540,7 +804,7 @@ export default function App() {
         }
         case "model_set":
           // Every model and effort change is a line in the chat (A7).
-          if (tid && tid === shown) dispatch({ type: "message", message: { role: "system", text: data.text || "" } });
+          if (tid) for (const n of mine) dispatch({ type: "message", pane: n, message: { role: "system", text: data.text || "" } });
           break;
         case "discord_status":
           // The event says something changed; the route says what, filtered.
@@ -630,6 +894,11 @@ export default function App() {
       /* the window keeps what it had rather than blanking */
     }
   }, [dispatch]);
+  // Stable, so a memoized ChatTab is not redrawn by a keystroke.
+  const cancelTask = useCallback(
+    (id: string) => void api.cancelTask(id).then(refreshTasks).catch(() => {}),
+    [refreshTasks],
+  );
 
   const refreshActivity = useCallback(async () => {
     // Records heard while this is in flight are newer than the snapshot may
@@ -673,11 +942,128 @@ export default function App() {
     [dispatch],
   );
 
+  // ---- placing a view in a pane ----------------------------------------------
+
+  /**
+   * A File pane holding an unsaved edit is never switched to another view
+   * behind the owner's back — by its own tabs, a sidebar click, or a chat
+   * landing in it (WP-B, review of PR #26): the switch is refused and the
+   * pane says why. True when `pane` may show `next`.
+   */
+  const mayShow = useCallback((pane: PaneNo, next: View): boolean => {
+    const { ws, fit } = layoutNow.current;
+    const spec = ws.panes[pane - 1];
+    if (spec.view !== "file" || next === "file" || !dirtyNow.current[pane]) return true;
+    const shownIn: PaneNo = fit.panes.includes(pane) ? pane : fit.panes.includes(ws.focused) ? ws.focused : fit.panes[0];
+    setRefused((r) => ({ ...r, [shownIn]: { at: Date.now(), pane } }));
+    return false;
+  }, []);
+
+  /** The view strip's buttons and menu: switch a pane, unless that drops an unsaved edit. */
+  const setPaneView = useCallback((pane: PaneNo, next: View) => {
+    if (mayShow(pane, next)) view.setView(pane, next);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mayShow]);
+
+  /**
+   * A sidebar click for a task (or anything but a chat): the pane already
+   * showing that kind of thing, else the focused pane (lib/workspace `show`)
+   * — unless that pane holds an unsaved edit.
+   */
+  const showView = useCallback((next: View): boolean => {
+    const lay = layoutNow.current;
+    const after = showOf(lay.ws, next, lay.fit.panes);
+    const changed = PANE_NOS.find((n) => after.panes[n - 1].view !== lay.ws.panes[n - 1].view);
+    if (changed && !mayShow(changed, next)) return false;
+    view.show(next);
+    return true;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mayShow]);
+
+  /** Put a chat on screen in `pane`: focus it, switching its view to chat when it shows something else. */
+  const placeChat = useCallback((pane: PaneNo): boolean => {
+    const spec = layoutNow.current.ws.panes[pane - 1];
+    if (spec.view === "chat") {
+      view.focus(pane);
+      return true;
+    }
+    if (!mayShow(pane, "chat")) return false;
+    view.setView(pane, "chat");
+    return true;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mayShow]);
+
+  /** The pane a chat with no thread yet lands in (lib/chats `chatTarget`). */
+  const chatPaneNow = (): PaneNo => {
+    const lay = layoutNow.current;
+    return chatTarget(lay.ws, lay.fit.panes, live.current.selectedChat).pane;
+  };
+
+  /**
+   * Open thread `id` in `pane`, keeping it in one pane only: a pane that
+   * holds it off screen (hidden, or showing another view) trades
+   * conversations with this one, so the thread — its turn, its hand-backs —
+   * moves here and nothing the two panes held is dropped.
+   */
+  const openIn = useCallback((pane: PaneNo, id: string) => {
+    const at = live.current;
+    const pend = pendingThread.current;
+    dispatch({ type: "patch", patch: { taskFocus: false } });
+    const holder = heldElsewhere(at.chats, pane, id, pend);
+    if (holder === null) {
+      pend[pane] = null;
+      dispatch({ type: "open_thread", pane, threadId: id });
+      return;
+    }
+    const there = at.chats[holder];
+    // Everything a conversation holds moves with it — its transcript and
+    // whether that has arrived yet (`loadedThread`), its draft, its turn, a
+    // first send in flight — so neither pane reloads what it already has, and
+    // one still loading keeps loading for the pane it is in now.
+    [pend[pane], pend[holder]] = [pend[holder], pend[pane]];
+    dispatch({ type: "chat_swap", a: pane, b: holder });
+    // Held through a compose row that opened it: it is now the open thread.
+    if (there.threadId !== id) dispatch({ type: "open_thread", pane, threadId: id });
+  }, [dispatch]);
+
+  /**
+   * A thread picked in the sidebar (plan §2.2, "Where a sidebar click goes").
+   * Already on screen in a chat pane: that pane is focused — a thread is open
+   * in one pane at most. Otherwise the focused chat pane, else the selected
+   * chat, else the focused pane switches to chat. `beside` (Alt+click, or
+   * "Open beside"): the next pane to the right, from one pane two columns.
+   */
+  const pickThread = useCallback((id: string, beside = false) => {
+    const at = live.current;
+    const lay = layoutNow.current;
+    const showing = drawnShowing(lay.ws, lay.fit.panes, at.chats, id, pendingThread.current);
+    if (showing !== null) {
+      view.focus(showing);
+      // On screen through a compose row whose first send failed: it is the thread now.
+      if (at.chats[showing].threadId !== id) openIn(showing, id);
+      else dispatch({ type: "patch", patch: { taskFocus: false } });
+      return;
+    }
+    if (beside) {
+      const to = besideTarget(lay.ws, lay.fit.panes);
+      if (!mayShow(to.pane, "chat")) return;
+      if (to.preset !== lay.ws.preset) view.setPreset(to.preset);
+      view.setView(to.pane, "chat");
+      openIn(to.pane, id);
+      return;
+    }
+    const pane = chatPaneNow();
+    if (!placeChat(pane)) return;
+    openIn(pane, id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dispatch, mayShow, placeChat, openIn]);
+
   /**
    * A project went away — archived or deleted, here or in another window. Its
    * rows go, a conversation inside it closes into a new thread in the last
-   * project worked in, the remembered project forgets it, and a dialog open
-   * on it closes and says why (lib/projects.ts decides all of it).
+   * project worked in — in every pane that had one — the remembered project
+   * forgets it, and a dialog open on it closes and says why
+   * (lib/projects.ts decides all of it, per pane).
    */
   const projectGone = useCallback(
     (id: string, how: "archived" | "deleted") => {
@@ -685,24 +1071,46 @@ export default function App() {
       const at = live.current;
       const name = at.projects.find((p) => p.id === id)?.name || "the project";
       forgetLastProject(id);
-      const next = afterProjectGone(at, id, loadLastProject());
+      const stored = loadLastProject();
+      const where = (n: PaneNo) => ({
+        projects: at.projects, threads: at.threads, tasks: at.tasks, taskId: at.taskId,
+        threadId: at.chats[n].threadId, compose: at.chats[n].compose,
+      });
+      const next = PANE_NOS.map((n) => afterProjectGone(where(n), id, stored));
+      const first = next[0];
+      const taskGone = first.taskId !== at.taskId;
       const platforms = { ...at.platforms };
       delete platforms[id];
-      const patchOut: Record<string, unknown> = { ...next, platforms };
-      delete patchOut.displaced;
-      if (next.displaced) {
-        Object.assign(patchOut, { messages: [], draft: "", ops: [], taskFocus: false,
-                                  status: `${name} was ${how}`.toUpperCase() });
-      }
+      const patchOut: Record<string, unknown> = {
+        projects: first.projects, threads: first.threads, tasks: first.tasks, taskId: first.taskId, platforms,
+      };
+      if (taskGone) patchOut.taskFocus = false;
       if ((at.picker === "editProject" || at.picker === "archiveProject") && projectTargetRef.current === id) {
         patchOut.picker = null;
         if (at.picker === "editProject") patchOut.error = `${name} was ${how} while you were editing it.`;
       }
       dispatch({ type: "patch", patch: patchOut as any });
+      const status = `${name} was ${how}`.toUpperCase();
+      let displaced = false;
+      for (const n of PANE_NOS) {
+        const was = at.chats[n];
+        const after = next[n - 1];
+        // This pane's own conversation was in the project (a task there going
+        // away is not a reason to clear a chat in another project).
+        const gone = after.threadId !== was.threadId || after.compose !== was.compose;
+        if (!gone) continue;
+        displaced = true;
+        if (pendingThread.current[n] && after.threadId === null) pendingThread.current[n] = null;
+        chatPatch(n, {
+          threadId: after.threadId, compose: after.compose, messages: [], loadedThread: null, draft: "", ops: [], status,
+        });
+      }
+      // The task view it showed is empty now: the status line says why.
+      if (taskGone && !displaced) chatPatch(activePane(at), { status });
       // A File or Preview pane pinned to it follows the chat again — except
       // one holding an unsaved edit, which waits for the owner to discard it.
-      view.unpinProject(id, ([1, 2, 3, 4] as PaneNo[]).filter((n) => dirtyNow.current[n]));
-      if (next.displaced) view.show("chat");
+      view.unpinProject(id, PANE_NOS.filter((n) => dirtyNow.current[n]));
+      if (displaced || taskGone) placeChat(chatPaneNow());
       void refreshThreads();
       void refreshTasks();
       void refreshSchedules();
@@ -711,15 +1119,25 @@ export default function App() {
     [dispatch],
   );
 
-  /** One chat thread went away (archived or deleted). */
+  /** One chat thread went away (archived or deleted): every pane that had it opens a new thread. */
   const threadGone = useCallback(
     (id: string) => {
       if (!id) return;
-      const next = afterThreadGone(live.current, id);
-      const patchOut: Record<string, unknown> = { threads: next.threads, threadId: next.threadId,
-                                                  compose: next.compose };
-      if (next.displaced) Object.assign(patchOut, { messages: [], draft: "", ops: [] });
-      dispatch({ type: "patch", patch: patchOut as any });
+      const at = live.current;
+      const where = (n: PaneNo) => ({
+        projects: at.projects, threads: at.threads, tasks: at.tasks, taskId: at.taskId,
+        threadId: at.chats[n].threadId, compose: at.chats[n].compose,
+      });
+      const next = PANE_NOS.map((n) => afterThreadGone(where(n), id));
+      dispatch({ type: "patch", patch: { threads: next[0].threads } });
+      for (const n of PANE_NOS) {
+        const after = next[n - 1];
+        if (!after.displaced) continue;
+        pendingThread.current[n] = null;
+        chatPatch(n, {
+          threadId: after.threadId, compose: after.compose, messages: [], loadedThread: null, draft: "", ops: [],
+        });
+      }
       void refreshThreads();
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -757,27 +1175,26 @@ export default function App() {
     return () => clearTimeout(t);
   }, [state.moveError, dispatch]);
 
-  /** Start a new thread: a compose row in the last project worked in. */
+  /** Start a new thread: a compose row in the last project worked in, in the chat pane a click lands in. */
   const newThread = useCallback(
     (projectId?: string | null) => {
       const at = live.current;
-      pendingThread.current = null;
-      dispatch({
-        type: "patch",
-        patch: {
-          threadId: null,
-          compose: { projectId: projectId ?? lastProject(at.projects, at.threads, loadLastProject()) },
-          taskFocus: false,
-          messages: [],
-          draft: "",
-          ops: [],
-          error: "",
-          status: at.turnThreadId ? at.status : "",
-        },
+      const pane = chatPaneNow();
+      if (!placeChat(pane)) return;
+      pendingThread.current[pane] = null;
+      const chat = at.chats[pane];
+      dispatch({ type: "patch", patch: { taskFocus: false, error: "" } });
+      chatPatch(pane, {
+        threadId: null,
+        compose: { projectId: projectId ?? lastProject(at.projects, at.threads, loadLastProject()) },
+        messages: [],
+        loadedThread: null,
+        draft: "",
+        ops: [],
+        status: chat.turnThreadId ? chat.status : "",
       });
-      view.show("chat");
     },
-    // `view.show` is stable (a callback over refs).
+    // `placeChat` is stable (a callback over refs).
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [dispatch],
   );
@@ -859,20 +1276,23 @@ export default function App() {
           platforms[p.id] = await api.platform(p.id).catch(() => ({ platform: "wsl", note: null }));
         }),
       );
-      dispatch({
-        type: "patch",
-        patch: {
-          projects, threads, tasks, platforms,
-          // The window opens on a new thread in the last project worked in,
-          // as Claude Code opens on a new session. Nothing is sent until
-          // the owner speaks.
-          threadId: null,
-          compose: { projectId: lastProject(projects, threads, loadLastProject()) },
-        },
-      });
-      // The conversation is on screen: in a drawn pane that already shows it,
-      // else in the focused pane — in the single layout, today's chat tab.
-      view.show("chat");
+      dispatch({ type: "patch", patch: { projects, threads, tasks, platforms } });
+      // The window opens on a new thread in the last project worked in, as
+      // Claude Code opens on a new session — in every pane that shows chat,
+      // and in the pane the conversation is put on screen in. Nothing is sent
+      // until the owner speaks.
+      const lay = layoutNow.current;
+      const pane = chatTarget(lay.ws, lay.fit.panes, live.current.selectedChat).pane;
+      const projectId = lastProject(projects, threads, loadLastProject());
+      for (const n of PANE_NOS) {
+        if (n === pane || lay.ws.panes[n - 1].view === "chat") {
+          dispatch({ type: "chat", pane: n, patch: { threadId: null, compose: { projectId } } });
+        }
+      }
+      setBooted(true);
+      // The conversation is on screen: in a drawn pane that already shows
+      // chat, else in the focused pane — in the single layout, today's chat tab.
+      placeChat(pane);
       void refreshActivity();
       const [usage, schedules, route, approvals, discord] = await Promise.all([
         api.usage().catch(() => null),
@@ -887,42 +1307,92 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // A thread's transcript is loaded when it becomes the live one, so switching
-  // redraws from the saved conversation rather than from whatever is on screen.
+  // A pane that shows chat for the first time — a second chat pane, chosen
+  // from its tabs or a preset — opens on a new thread in the last project
+  // worked in, as the window does.
+  const emptyChatPanes = PANE_NOS.filter(
+    (n) => view.ws.panes[n - 1].view === "chat" && isEmptyChat(state.chats[n]),
+  ).join(",");
   useEffect(() => {
-    if (!state.threadId) return;
-    if (skipReload.current === state.threadId) {
-      skipReload.current = null;
-      return;
+    if (!booted || !emptyChatPanes) return;
+    const at = live.current;
+    const projectId = lastProject(at.projects, at.threads, loadLastProject());
+    for (const n of PANE_NOS) {
+      if (layoutNow.current.ws.panes[n - 1].view === "chat" && isEmptyChat(at.chats[n])) {
+        chatPatch(n, { compose: { projectId } });
+      }
     }
-    // A turn running in another thread keeps the window busy, but its status
-    // line is about that thread, not this one.
-    const status = live.current.turnThreadId === state.threadId ? live.current.status : "";
-    api
-      .transcript(state.threadId)
-      .then((r) => dispatch({ type: "patch", patch: { messages: r.messages || [], draft: "", ops: [], status } }))
-      .catch(() => dispatch({ type: "patch", patch: { messages: [], draft: "", ops: [], status } }));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state.threadId]);
+  }, [booted, emptyChatPanes, chatPatch]);
 
-  // Words handed back while this thread was not on screen come back now.
+  // A thread's transcript is loaded when a pane opens it, so switching redraws
+  // from the saved conversation rather than from whatever is on screen. A
+  // load lands in **whichever pane shows that thread when it arrives**, and
+  // is dropped if none does: the pane it was asked for may have moved on, or
+  // traded conversations with another, meanwhile (review of PR #27 — a late
+  // transcript used to land in the pane number it was asked for, drawing one
+  // thread's messages under another). `loadedThread` says whose transcript a
+  // pane's messages are; a conversation that moves between panes takes it
+  // along, so one that has arrived is never loaded twice and one still on its
+  // way is still loaded.
+  const toLoad = PANE_NOS.map((n) => `${state.chats[n].threadId ?? ""}:${state.chats[n].loadedThread ?? ""}`).join("|");
   useEffect(() => {
-    if (!state.threadId) return;
-    const held = heldBack.current.take(state.threadId);
-    if (held) dispatch({ type: "give_back", text: held.text, files: held.files, nonce: nextNonce() });
-  }, [state.threadId, dispatch]);
+    const land = (id: string, messages: ChatMessage[]) => {
+      const at = live.current;
+      const n = PANE_NOS.find((p) => at.chats[p].threadId === id);
+      if (n === undefined) return;
+      // A turn running in another thread keeps the pane busy, but its status
+      // line is about that thread, not this one.
+      const chat = at.chats[n];
+      const status = chat.turnThreadId === id ? chat.status : "";
+      chatPatch(n, { messages, draft: "", ops: [], status, loadedThread: id });
+    };
+    for (const n of PANE_NOS) {
+      const chat = live.current.chats[n];
+      const id = chat.threadId;
+      if (!id || chat.loadedThread === id || loading.current.has(id)) continue;
+      loading.current.add(id);
+      api
+        .transcript(id)
+        .then((r) => land(id, r.messages || []))
+        .catch(() => land(id, []))
+        .finally(() => loading.current.delete(id));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [toLoad]);
+
+  // Words handed back while a thread was not on screen come back when a
+  // **drawn** chat pane shows it — on opening it, and when a pane already
+  // holding it comes on screen again (review of PR #27).
+  const onScreenThreads = view.fit.panes
+    .filter((n) => view.ws.panes[n - 1].view === "chat")
+    .map((n) => `${n}:${shownThread(state.chats[n]) ?? ""}`)
+    .join("|");
+  useEffect(() => {
+    for (const n of chatsOnScreen()) {
+      const id = shownThread(live.current.chats[n]);
+      if (!id) continue;
+      const held = heldBack.current.take(id);
+      if (held) dispatch({ type: "give_back", pane: n, text: held.text, files: held.files, nonce: nextNonce() });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [onScreenThreads, dispatch]);
 
   // Reading clears blue and red (2026-10-08): a thread shown in a chat pane,
   // or a task shown in a task pane, while the window is visible — on opening
   // it, and when it finishes with the owner watching. Since 2026-10-09 that
   // is **any drawn pane**, not only the focused one: a chat watched finishing
-  // in a side pane must not turn blue. The answer carries the status now, and
-  // is drawn at once — the daemon's `activity` record may not reach a window
-  // whose stream is reconnecting — unless something newer about that row has
-  // arrived meanwhile (ActivitySync).
+  // in a side pane must not turn blue — and with several chats, every drawn
+  // chat pane's thread. The answer carries the status now, and is drawn at
+  // once — the daemon's `activity` record may not reach a window whose stream
+  // is reconnecting — unless something newer about that row has arrived
+  // meanwhile (ActivitySync).
   const drawnViews = view.fit.panes.map((n) => view.ws.panes[n - 1].view);
-  const chatShown = drawnViews.includes("chat");
   const taskShown = drawnViews.includes("task");
+  const readThreads = view.fit.panes
+    .filter((n) => view.ws.panes[n - 1].view === "chat")
+    .map((n) => state.chats[n].threadId)
+    .filter((t): t is string => !!t);
+  const readKey = readThreads.join(",");
   const [visible, setVisible] = useState(() => document.visibilityState !== "hidden");
   useEffect(() => {
     const on = () => setVisible(document.visibilityState !== "hidden");
@@ -945,15 +1415,15 @@ export default function App() {
         .catch(() => {})
         .finally(() => marking.current.delete(key));
     };
-    const t = state.threadId;
-    if (t && chatShown && clearsOnRead(state.activity.threads[t])) {
-      mark("thread", t, api.seenThread);
+    for (const t of readThreads) {
+      if (clearsOnRead(state.activity.threads[t])) mark("thread", t, api.seenThread);
     }
     const k = state.taskId;
     if (k && taskShown && clearsOnRead(state.activity.tasks[k])) {
       mark("task", k, api.seenTask);
     }
-  }, [visible, state.threadId, state.taskId, chatShown, taskShown, state.activity, activitySync, dispatch]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visible, readKey, state.taskId, taskShown, state.activity, activitySync, dispatch]);
 
   useEffect(() => {
     if (!state.taskId) return;
@@ -1036,16 +1506,25 @@ export default function App() {
   const press = useCallback(() => {
     if (live.current.approvals.length) return; // answer the authorization first
     if (live.current.picker || chipOverlay.current) return;
+    // Push-to-talk and the orb act on the selected chat (decisions W-6): with
+    // no chat pane on screen there is no turn to interrupt and nobody to
+    // talk to, and the window says so rather than recording for nobody.
+    const pane = live.current.selectedChat;
+    if (pane === null) {
+      dispatch({ type: "patch", patch: { error: "No chat is open to talk to: open a chat first." } });
+      return;
+    }
     // The interrupt half comes first: muting yourself must not take away the
-    // orb as the way to shut him up.
-    const turn = live.current.turnThreadId;
-    if (live.current.busy && turn) api.interrupt(turn).catch(() => {});
+    // orb as the way to shut him up. It interrupts the selected chat's turn —
+    // a turn running in another pane keeps running, and keeps its Stop.
+    const chat = live.current.chats[pane];
+    if (chat.busy && chat.turnThreadId) interruptTurn(chat.turnThreadId);
     if (isMuted(live.current.dictation)) {
-      dispatch({ type: "patch", patch: { status: "MIC MUTED" } });
+      chatPatch(pane, { status: "MIC MUTED" });
       return;
     }
     capture.press();
-  }, [capture, dispatch]);
+  }, [capture, chatPatch, dispatch, interruptTurn]);
 
   const release = useCallback(() => capture.release(), [capture]);
 
@@ -1115,6 +1594,64 @@ export default function App() {
     };
   }, [capture]);
 
+  // ---- files dropped on the window -----------------------------------------
+
+  // Files dropped anywhere but a box (which stages its own): on a chat pane,
+  // into that pane's box; anywhere else — the sidebar, the status pane, a File
+  // or Preview pane — they are ambiguous input and go to the selected chat's
+  // box (decisions W-6), staged, never sent. With no chat on screen the window
+  // says so. Without this, the browser opened the dropped file in place of
+  // the HUD.
+  useEffect(() => {
+    const over = (e: DragEvent) => {
+      if (e.dataTransfer?.types?.includes("Files")) e.preventDefault();
+    };
+    const drop = (e: DragEvent) => {
+      const dropped = Array.from(e.dataTransfer?.files || []);
+      if (!dropped.length || e.defaultPrevented) return;
+      e.preventDefault();
+      const el = e.target instanceof Element ? e.target : null;
+      const own = el?.closest('[data-testid^="pane-"][data-view="chat"]');
+      const ownNo = own ? (Number(own.getAttribute("data-testid")!.slice(5)) as PaneNo) : null;
+      const pane = ownNo ?? live.current.selectedChat;
+      if (pane === null) {
+        dispatch({ type: "patch", patch: { error: "No chat is open to attach files to: open a chat first." } });
+        return;
+      }
+      // The conversation they were dropped for, not the pane: reading them in
+      // takes a while, and by then that pane may show another thread. The
+      // store adds them to whichever pane holds that conversation when they
+      // are ready, else to its parked draft (`stage`; re-review of PR #27).
+      const key = draftKey(live.current.chats[pane], pane);
+      if (key === null) {
+        dispatch({ type: "patch", patch: { error: "No chat is open to attach files to: open a chat first." } });
+        return;
+      }
+      void (async () => {
+        const notes: string[] = [];
+        const read: Attachment[] = [];
+        const room = MAX_FILES - live.current.chats[pane].files.length;
+        for (const f of dropped) {
+          if (read.length >= room) {
+            notes.push(`[${f.name} skipped: 8 files per turn]`);
+            continue;
+          }
+          const a = await toAttachment(f);
+          if (typeof a === "string") notes.push(a);
+          else read.push(a);
+        }
+        dispatch({ type: "stage", key, files: read });
+        if (notes.length) dispatch({ type: "patch", patch: { error: notes.join(" ") } });
+      })();
+    };
+    document.addEventListener("dragover", over);
+    document.addEventListener("drop", drop);
+    return () => {
+      document.removeEventListener("dragover", over);
+      document.removeEventListener("drop", drop);
+    };
+  }, [dispatch]);
+
   // ---- test hooks ---------------------------------------------------------
 
   useEffect(() => {
@@ -1130,24 +1667,30 @@ export default function App() {
           written: capture.ring.written,
         }),
       },
-      state: () => live.current,
-      dispatch,
-      // What a reconnect or the 15 s timer runs: the busy state checked
-      // against the thread record's live `running`.
+      // The window's state, the active chat's conversation laid over the
+      // top as the one conversation's fields were (the single-layout suites
+      // read those); `chats` has every pane's, `selectedChat` says which is
+      // selected (null with no chat on screen).
+      state: () => flatState(live.current),
+      // A legacy `patch` of conversation fields lands in the active chat's pane.
+      dispatch: (a: any) => {
+        for (const x of compatActions(a, activePane(live.current))) dispatch(x);
+      },
+      // What a reconnect or the 15 s timer runs: every busy pane checked
+      // against its thread record's live `running`.
       reconcile: () => reconcileBusy(),
       // The centre's panes as stored and as drawn (lib/workspace.ts).
       workspace: () => ({ ws: layoutNow.current.ws, fit: layoutNow.current.fit }),
     };
   }, [capture, dispatch, onWakeHit, reconcileBusy]);
-  const layoutNow = useRef(view);
-  layoutNow.current = view;
 
   // ---- actions ------------------------------------------------------------
 
   const setMode = (mode: DictationMode) => {
     const wasMuted = isMuted(live.current.dictation);
     saveMode(mode);
-    dispatch({ type: "patch", patch: { dictation: mode, status: "" } });
+    dispatch({ type: "patch", patch: { dictation: mode } });
+    if (live.current.selectedChat !== null) chatPatch(live.current.selectedChat, { status: "" });
     if (wasMuted && !isMuted(mode)) capture.markUnmute();
     if (isMuted(mode)) capture.closeFollowUp();
     api.mute(isMuted(mode)).catch(() => {});
@@ -1162,23 +1705,31 @@ export default function App() {
     dispatch({ type: "approval_drop", req_id: reqId });
   };
 
-  const project = currentProject(state);
   const activeProjectId = currentProjectId(state);
-  const openThread = state.threadId ? state.threads.find((t) => t.id === state.threadId) || null : null;
   const task = currentTask(state);
   const drawn = view.fitted;
   const fit = view.fit;
+  const ws = view.ws;
   // The side panes leave the centre what the drawn shape needs (one pane: 480).
   const mainMin = SHAPES[fit.drawn].minW;
-  const hint =
-    state.status ||
-    (state.approvals.length ? "ANSWER THE AUTHORIZATION" : HINTS[state.dictation]);
   const projectName = (id: string | null) => state.projects.find((p) => p.id === id)?.name || "…";
-  const chatPane = fit.panes.find((n) => view.ws.panes[n - 1].view === "chat") ?? null;
-  // The profile belongs to the conversation's project: it rides the chat
-  // pane's header, or the focused pane's when no drawn pane shows the chat —
-  // in the single layout, pane 1's, where it always was.
-  const profilePane: PaneNo = chatPane ?? (fit.panes.includes(view.ws.focused) ? view.ws.focused : fit.panes[0]);
+  const threadOf = (id: string | null) => (id ? state.threads.find((t) => t.id === id) || null : null);
+  const drawnChats = fit.panes.filter((n) => ws.panes[n - 1].view === "chat");
+  /** The pane that carries the profile select when no drawn pane shows a chat: the focused one. */
+  const focusedDrawn: PaneNo = fit.panes.includes(ws.focused) ? ws.focused : fit.panes[0];
+  /**
+   * The profile belongs to a conversation's project: every drawn chat pane's
+   * header carries one for its own conversation, and with no chat drawn the
+   * focused pane's carries the project the window is about — in the single
+   * layout, pane 1's, where it always was.
+   */
+  const profileProject = (spec: PaneSpec, n: PaneNo) => {
+    if (!fit.panes.includes(n)) return null;
+    const id = spec.view === "chat"
+      ? chatProjectId(state.chats[n], state.threads)
+      : !drawnChats.length && n === focusedDrawn ? activeProjectId : null;
+    return id ? state.projects.find((p) => p.id === id) || null : null;
+  };
   /** The pane's pinned project went away (archived, deleted). */
   const pinGone = (spec: PaneSpec) => !!spec.projectId && !state.projects.some((p) => p.id === spec.projectId);
   /**
@@ -1193,51 +1744,78 @@ export default function App() {
   const pinnedElsewhere = (spec: PaneSpec, pane: PaneNo) =>
     (spec.view === "file" || spec.view === "preview") && paneProject(spec, pane) !== activeProjectId;
 
+  /** One chat pane: its conversation, its box, its chips, its Send/Steer and Stop. */
+  const renderChat = (n: PaneNo) => {
+    const chat = state.chats[n];
+    const thread = threadOf(chat.threadId);
+    const target = n === selected;
+    // The selected chat's hint is the dictation strip's; another pane's says
+    // only what its own turn is doing.
+    const hint = target
+      ? chat.status || (state.approvals.length ? "ANSWER THE AUTHORIZATION" : HINTS[state.dictation])
+      : chat.status;
+    const compose = chat.compose;
+    return (
+      <>
+        <ChatTab
+          thread={thread}
+          messages={chat.messages}
+          draft={chat.draft}
+          ops={chat.ops}
+          onCancelTask={cancelTask}
+        />
+        <InputBar
+          mode={state.dictation}
+          level={target ? state.level : 0}
+          hint={hint}
+          strip={target}
+          pendingTranscript={chat.pendingTranscript}
+          // Not `disabled` under a card: everything outside the card is inert,
+          // which keeps the box unreachable, and a disabled box dropped focus
+          // to the page before the card could record it — so focus never came
+          // back to the box after the card (re-review of PR #27).
+          placeholder={
+            compose
+              ? `New thread in ${projectName(compose.projectId)} · message, or @path to attach`
+              : undefined
+          }
+          projectChip={{
+            projects: state.projects,
+            value: chatProjectId(chat, state.threads),
+            editable: !!compose && !compose.openedId,
+            folder: thread?.cwd ?? null,
+            onChange: (projectId) => {
+              const c = live.current.chats[n].compose;
+              if (c) chatPatch(n, { compose: { ...c, projectId } });
+            },
+            onNewProject: () => patch({ picker: "newProject" }),
+          }}
+          modelChip={threadModel.chipFor(n)}
+          imageNote={threadModel.imageNoteFor(n)}
+          onModeChange={setMode}
+          onSend={(text, files) => void send(n, text, files)}
+          onTranscriptTaken={() => chatPatch(n, { pendingTranscript: "" })}
+          running={runningHere(chat)}
+          onStop={() => stopTurn(n)}
+          restore={chat.restore}
+          onRestoreTaken={(nonce) => dispatch({ type: "given_back", pane: n, nonce })}
+          // The draft is the conversation's: it moves with it (review of PR #27).
+          text={chat.input}
+          files={chat.files}
+          onText={(text) => dispatch({ type: "input", pane: n, text })}
+          onFiles={(files) => dispatch({ type: "input", pane: n, files })}
+          stageKey={draftKey(chat, n)}
+          onStage={(key, files) => dispatch({ type: "stage", key, files })}
+        />
+      </>
+    );
+  };
+
   const renderView = (spec: PaneSpec, info: PaneInfo) => {
     const n = info.pane;
     switch (spec.view) {
       case "chat":
-        return (
-          <>
-            <ChatTab
-              thread={openThread}
-              messages={state.messages}
-              draft={state.draft}
-              ops={state.ops}
-              onCancelTask={(id) => api.cancelTask(id).then(refreshTasks).catch(() => {})}
-            />
-            <InputBar
-              mode={state.dictation}
-              level={state.level}
-              hint={hint}
-              pendingTranscript={state.pendingTranscript}
-              disabled={state.approvals.length > 0}
-              placeholder={
-                state.compose
-                  ? `New thread in ${project?.name || "…"} · message, or @path to attach`
-                  : undefined
-              }
-              projectChip={{
-                projects: state.projects,
-                value: activeProjectId,
-                editable: !!state.compose && !state.compose.openedId,
-                folder: openThread?.cwd ?? null,
-                onChange: (projectId) =>
-                  state.compose && patch({ compose: { ...state.compose, projectId } }),
-                onNewProject: () => patch({ picker: "newProject" }),
-              }}
-              modelChip={threadModel.chip}
-              imageNote={threadModel.imageNote}
-              onModeChange={setMode}
-              onSend={(text, files) => void send(text, files)}
-              onTranscriptTaken={() => patch({ pendingTranscript: "" })}
-              running={state.busy && !!state.threadId && state.turnThreadId === state.threadId}
-              onStop={stopTurn}
-              restore={state.restore}
-              onRestoreTaken={(nonce) => dispatch({ type: "given_back", nonce })}
-            />
-          </>
-        );
+        return renderChat(n);
       case "task":
         return (
           <div className="scroll">
@@ -1286,8 +1864,18 @@ export default function App() {
   const paneExtras = (spec: PaneSpec, info: PaneInfo) => {
     const n = info.pane;
     const dirty = spec.view === "file" && !!dirtyPanes[n];
+    const profileOf = profileProject(spec, n);
+    const refusal = refused[n];
     return (
       <>
+        {refusal && dirtyPanes[refusal.pane] ? (
+          <span className="chip panepin warn" data-testid={`pane-${n}-refused`} role="status"
+                title="Switching that pane away would close its file and drop the edit">
+            {refusal.pane === n
+              ? "unsaved edit · save or reload first"
+              : `pane ${refusal.pane} has an unsaved edit · save or reload it first`}
+          </span>
+        ) : null}
         {dirty && pinGone(spec) ? (
           // The one remount nothing can avoid: ask before it drops the edit.
           <span className="chip panepin warn" data-testid={`pane-${n}-gone`}
@@ -1320,15 +1908,15 @@ export default function App() {
             </button>
           </span>
         ) : null}
-        {n === profilePane && project ? (
+        {profileOf ? (
           <select
             data-testid="profile"
             style={{ width: 110 }}
-            value={project.profile}
+            value={profileOf.profile}
             title="Applies to threads and task workers opened from now on."
             onChange={(e) =>
               api
-                .patchProject(project.id, { profile: e.target.value })
+                .patchProject(profileOf.id, { profile: e.target.value })
                 .then(() => api.projects())
                 .then((projects) => patch({ projects }))
                 // Every refusal is shown (§18): a select that snaps back
@@ -1347,8 +1935,11 @@ export default function App() {
 
   const paneContext = (spec: PaneSpec, info: PaneInfo): string => {
     switch (spec.view) {
-      case "chat":
-        return openThread?.title || (state.compose ? `New thread in ${project?.name || "…"}` : "");
+      case "chat": {
+        const chat = state.chats[info.pane];
+        return threadOf(chat.threadId)?.title
+          || (chat.compose ? `New thread in ${projectName(chat.compose.projectId)}` : "");
+      }
       case "task":
       case "diff":
         return task?.brief || "";
@@ -1360,6 +1951,66 @@ export default function App() {
         return "";
     }
   };
+
+  // The sidebar's view of the drawn chat panes: what each shows, which is active.
+  // Kept as the same lists while their content is unchanged, and its callbacks
+  // stable (lib/stable.ts): the Sidebar is memoized, and a keystroke in a chat
+  // box must not redraw every thread row (re-review of PR #27).
+  const sidebarOpen = useStableValue(openRows(ws, fit.panes, state.chats, activeNow));
+  const sidebarComposing = useStableValue(composeRows(ws, fit.panes, state.chats, activeNow));
+  const sidebarCalls = useStableHandlers({
+    onCollapse: () => view.fold("left"),
+    onPickThread: pickThread,
+    onPickTask: (id: string) => {
+      patch({ taskId: id, taskFocus: true });
+      showView("task");
+    },
+    onNewProject: () => patch({ picker: "newProject" }),
+    onNewThread: () => newThread(),
+    onNewTask: (projectId: string) => {
+      setNewTaskProject(projectId);
+      patch({ picker: "newTask" });
+    },
+    onMoveThread: moveThread,
+    onMoveCompose: (projectId: string, pane: PaneNo) => {
+      const c = live.current.chats[pane].compose;
+      if (c) chatPatch(pane, { compose: { ...c, projectId } });
+    },
+    onEditProject: (id: string) => {
+      setProjectTarget(id);
+      patch({ picker: "editProject" });
+    },
+    onArchiveProject: (id: string) => {
+      setProjectTarget(id);
+      patch({ picker: "archiveProject" });
+    },
+    onRenameProject: (id: string, name: string) =>
+      api.patchProject(id, { name }).then(async (saved) => {
+        await refreshProjects(id);
+        return saved;
+      }),
+    onRenameThread: (id: string, title: string) =>
+      api.renameThread(id, title).then(async (saved) => {
+        await refreshThreads();
+        return saved;
+      }),
+    onArchiveThread: (id: string) => api.archiveThread(id).then(() => threadGone(id)),
+    onOpenArchive: () => patch({ picker: "archive" }),
+    onOpen: (what: "schedules" | "route" | "usage") => {
+      if (what === "schedules") {
+        setEditingSchedule(null);
+        patch({ picker: "schedule" });
+        return;
+      }
+      if (what === "route") {
+        patch({ picker: "settings" });
+        return;
+      }
+      // The usage meters live in the status pane: a folded one opens first.
+      view.open("right");
+      setTimeout(() => document.querySelector('[data-testid="usage"]')?.scrollIntoView({ block: "nearest" }), 0);
+    },
+  });
 
   return (
     <>
@@ -1381,7 +2032,7 @@ export default function App() {
         <Sidebar
           zoom={view.zoom}
           layoutBlocked={blocked}
-          onCollapse={() => view.fold("left")}
+          onCollapse={sidebarCalls.onCollapse}
           projects={state.projects}
           archivedNames={state.archivedNames}
           platforms={state.platforms}
@@ -1390,65 +2041,24 @@ export default function App() {
           taskThreads={state.taskThreads}
           activity={state.activity}
           activeProjectId={activeProjectId}
-          compose={state.compose}
-          threadId={state.threadId}
+          open={sidebarOpen}
+          composing={sidebarComposing}
           taskId={state.taskId}
-          onPickThread={(id) => {
-            pendingThread.current = null;
-            patch({ threadId: id, compose: null, taskFocus: false });
-            view.show("chat");
-          }}
-          onPickTask={(id) => {
-            patch({ taskId: id, taskFocus: true });
-            view.show("task");
-          }}
-          onNewProject={() => patch({ picker: "newProject" })}
-          onNewThread={() => newThread()}
-          onNewTask={(projectId) => {
-            setNewTaskProject(projectId);
-            patch({ picker: "newTask" });
-          }}
+          onPickThread={sidebarCalls.onPickThread}
+          onPickTask={sidebarCalls.onPickTask}
+          onNewProject={sidebarCalls.onNewProject}
+          onNewThread={sidebarCalls.onNewThread}
+          onNewTask={sidebarCalls.onNewTask}
           moveError={state.moveError}
-          onMoveThread={moveThread}
-          onMoveCompose={(projectId) =>
-            state.compose && patch({ compose: { ...state.compose, projectId } })
-          }
-          onEditProject={(id) => {
-            setProjectTarget(id);
-            patch({ picker: "editProject" });
-          }}
-          onArchiveProject={(id) => {
-            setProjectTarget(id);
-            patch({ picker: "archiveProject" });
-          }}
-          onRenameProject={(id, name) =>
-            api.patchProject(id, { name }).then(async (saved) => {
-              await refreshProjects(id);
-              return saved;
-            })
-          }
-          onRenameThread={(id, title) =>
-            api.renameThread(id, title).then(async (saved) => {
-              await refreshThreads();
-              return saved;
-            })
-          }
-          onArchiveThread={(id) => api.archiveThread(id).then(() => threadGone(id))}
-          onOpenArchive={() => patch({ picker: "archive" })}
-          onOpen={(what) => {
-            if (what === "schedules") {
-              setEditingSchedule(null);
-              patch({ picker: "schedule" });
-              return;
-            }
-            if (what === "route") {
-              patch({ picker: "settings" });
-              return;
-            }
-            // The usage meters live in the status pane: a folded one opens first.
-            view.open("right");
-            setTimeout(() => document.querySelector('[data-testid="usage"]')?.scrollIntoView({ block: "nearest" }), 0);
-          }}
+          onMoveThread={sidebarCalls.onMoveThread}
+          onMoveCompose={sidebarCalls.onMoveCompose}
+          onEditProject={sidebarCalls.onEditProject}
+          onArchiveProject={sidebarCalls.onArchiveProject}
+          onRenameProject={sidebarCalls.onRenameProject}
+          onRenameThread={sidebarCalls.onRenameThread}
+          onArchiveThread={sidebarCalls.onArchiveThread}
+          onOpenArchive={sidebarCalls.onOpenArchive}
+          onOpen={sidebarCalls.onOpen}
         />
         {drawn.leftFolded ? null : (
           <Splitter
@@ -1463,9 +2073,16 @@ export default function App() {
         )}
 
         <div className="pane" id="main">
-          <Workspace view={view} blocked={blocked} render={renderView} extras={paneExtras} context={paneContext} />
+          <Workspace
+            view={view}
+            blocked={blocked}
+            render={renderView}
+            extras={paneExtras}
+            context={paneContext}
+            selectedPane={selected}
+            onView={setPaneView}
+          />
         </div>
-
         {drawn.rightFolded ? null : (
           <Splitter
             side="right"
@@ -1694,7 +2311,7 @@ export default function App() {
               .createTask({ project_id: projectId, brief })
               .then((t) => {
                 patch({ picker: null, taskId: t.id, taskFocus: true });
-                view.show("task");
+                showView("task");
                 return refreshTasks();
               })
               .catch((e) => patch({ error: e.message }));
