@@ -1399,7 +1399,7 @@ def _rr_two_cards_checks(page, mock, check, until):
     until(lambda: page.locator('[data-testid="approval-card"]').count() == 1, timeout=4)
     time.sleep(0.3)
     first = page.locator('[data-testid="approval-card"]').get_attribute("data-req")
-    page.locator('[data-testid="approval-deny"]').click()
+    page.locator('[data-testid="approval-card"] button.deny').click()
     second = until(lambda: (lambda r: r if r and r != first else None)(
         page.locator('[data-testid="approval-card"]').get_attribute("data-req")), timeout=4)
     check("setup: the second card comes up when the first is denied", bool(second), str(second))
