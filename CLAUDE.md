@@ -1297,8 +1297,16 @@ jarvis/
     where the script is compiled; a `-f` file (unreadable here) or any script
     the scanner is unsure of falls to ASK. The scanner models addresses, `!`,
     `{}`, `;`/newline separators, labels and branches, `s`/`y` with any
-    delimiter and escapes, and the `a`/`i`/`c` text commands (whose text is not
-    misread as commands).
+    delimiter and escapes, **POSIX bracket expressions** in `s`'s pattern and in
+    addresses (a delimiter inside `[…]` is text; leading `^`/`]`, `[:class:]`,
+    `[=x=]`, `[.x.]`; a backslash is literal inside one), and the `a`/`i`/`c`
+    text commands (whose text is not misread as commands). The bracket rule was
+    first written from memory as "brackets are not special", which made
+    `s/[/]/X/` ask; the review caught it and GNU sed 4.9 itself settled it
+    (argv only, `--sandbox -n`, stdin input — the sandbox reports e/r/w rather
+    than doing them): bracket-aware in the pattern and addresses, not in the
+    replacement or `y`. A 42-script differential against GNU sed then found no
+    write/read/run the scanner missed and no read it asked about.
 
   The unifying fix is **one table** of readers that are not always reads —
   `rules.READER_HAZARDS`, keyed per stem because the grammars differ (a prefix
@@ -1312,6 +1320,30 @@ jarvis/
   five all on `run_readonly`'s own (ungated) allowlist, where nothing had
   looked at their flags. Every stem is either in the table or in the
   audited-clean `_NO_HAZARD` set, and a test fails if one is in neither.
+
+  **The audit is of the installed binaries, and it is a union** (PR #24
+  review). The first pass read GNU documentation and put `grep` in
+  `_NO_HAZARD` — but one name is two programs here. Ubuntu 26.04's PATH has
+  GNU grep 3.12, GNU findutils 4.10, GNU sed 4.9, ripgrep 15.1 and **uutils
+  coreutils 0.8.0** (GNU 9.7 for `df`/`true`); and in **Claude Code's shell**,
+  which v2 Claude workers run their commands through, `grep` is a function
+  running **ugrep 7.8.4** and `find` one running **bfs 4.1.1**. ugrep runs a
+  filter command on every file searched (`--filter`, not terminal-gated — rg's
+  `--pre` again), runs a pager or a viewer (`--pager`, `--view`, `-Q`), writes
+  a configuration file (`--save-config[=FILE]`, so a gate-state path is a
+  certain write) and loads options from one (`--config`, `---FILE`; `ug` loads
+  `.ugrep` unasked); bfs adds `-rm`, a delete. A filter-running grep had been
+  ALLOW, and `run_readonly` would have run it. Every entry is now the **union**
+  of the GNU program's dangerous forms and each installed implementation's, read
+  from each binary's own `--help`/`man` by argv (never through a shell, where a
+  function can stand in for the binary), so a verdict never depends on which
+  one answers — "two backends, two answers" again, the `grep_files` lesson.
+  `rules.AUDITED_IMPLEMENTATIONS` names what was read, and `rules_check`
+  prints `AUDIT NOT VERIFIED FOR <stem>` (informational, like files_check's
+  PARITY NOT VERIFIED) when a binary reports something else. `jq`, `tree` and
+  `bat` are not installed and come from their documentation. Recorded, not
+  listed: `diff -l` runs the fixed `pr`, `sort -T` writes temporary files it
+  deletes, `file -p` restores an atime.
   A neighbour fixed in the same pass: **backslash-newline continuations are
   joined before any judge reads a line** (`rules.join_continuations`), because
   bash deletes `\<newline>` before it splits anything — one such pair between
@@ -1319,11 +1351,18 @@ jarvis/
   **process substitution `<(…)`/`>(…)` now counts as substitution** in
   `decide` and `has_substitution`, where `cat <(PROGRAM)` had been an ALLOW.
 
-  Evidence: a differential sweep of 588 ordinary dev commands plus the
-  command-like strings in the repo's tests, skills and docs moved **two**
-  verdicts — bare `python`/`python3` ALLOW→ASK, which is the stdin-inline-source
-  fix (a segment is judged alone, so `echo code | python3` must have its
-  `python3` segment ASK). Every other ordinary command, readers included, kept
+  Evidence: a differential sweep of 808 commands (ordinary dev work plus every
+  command-like string in the repo's tests, skills and docs) against
+  origin/main. **Looser, four, all intended:** `find . -executable` with and
+  without `-type f`/`-print` ASK→ALLOW (find's predicates are whole words, so
+  `-executable` is not `-exec`) and `echo x 2>& 1` ASK→ALLOW (a spaced
+  descriptor duplication writes nothing). **Stricter:** bare `python`,
+  `python3`, `node` and `deno` ALLOW→ASK — the stdin-inline-source fix: a
+  segment is judged alone, so `echo code | python3` must have its `python3`
+  segment ask (bare `bun` is unchanged: with no arguments it prints its help),
+  while `python3 < script.py` and `node < app.js` stay ALLOW — plus every
+  writing, reading or running reader form and inline-source shape above.
+  Every other ordinary command, readers in their reading forms included, kept
   its verdict. The lesson is the one this section already carries, a third
   time: **two implementations of one idea drift, and the more permissive copy
   decides** — so the redirect grammar, the reader-hazard table and the
@@ -1922,14 +1961,21 @@ jarvis/
   `run_readonly_narrowing_checks` pins 9 quoted
   metacharacters still running unattended (it pinned 21 git reads too, until
   they moved to the `git` tool). **Since 2026-10-09** (this PR)
-  `reader_hazard_checks` pins the one `rules.READER_HAZARDS` table — 39 writing,
+  `reader_hazard_checks` pins the one `rules.READER_HAZARDS` table — 58 writing,
   reading or running forms of readers caught (sed `w`/`W`/`r`/`R`/`e` scripts,
   `sort -o`, `tree -o`/`-R`, `xxd`/`uniq` output operands, `less -o`/`+cmd`,
-  `file -C`, `date -s`, `ss -D`/`-K`, `hostname NAME`, `env -S`, and the find
-  predicates), 45 reads of the same stems still clean, and **every** stem in
+  `file -C`, `date -s`, `ss -D`/`-K`, `hostname NAME`, `env -S`, the find
+  predicates and bfs's `-rm`, and ugrep's `--filter`/`--pager`/`--view`/`-Q`/
+  `--save-config`/`--config`/`---`), 65 reads of the same stems still clean
+  (grep reads, sed patterns with a bracket holding the delimiter), and
+  **every** stem in
   `rules._READONLY`, `protected_state._READERS` and `shell.READ_ONLY` asserted
   to be in the table or in the audited-clean `_NO_HAZARD` set (a new reader
-  stem in neither fails loudly). `inline_source_checks` pins the inline-source
+  stem in neither fails loudly). That test cannot catch a *mis-audited*
+  `_NO_HAZARD` entry, so `audit_implementation_checks` runs each probe
+  binary's `--version` by argv and prints `AUDIT NOT VERIFIED FOR <stem>`
+  (informational) when it is not an implementation the audit read
+  (`rules.AUDITED_IMPLEMENTATIONS`). `inline_source_checks` pins the inline-source
   rule generalised — the flag in a cluster (`python3 -Ic`), glued by `=`
   (`node --eval=`), a subcommand (`deno eval`), and source fed on stdin (a
   pipe or here-string into a bare interpreter, which bare `python3`/`node`/
@@ -1972,7 +2018,8 @@ jarvis/
   Since 2026-10-09 `gate_state_coverage_checks` pins that **no allowlist entry
   covers a write onto the gate's own state** in any of the new spellings (a
   `bash -lc`/`env -S` wrapping a `cp`, a drifted redirect, a sed `w`/`-i`
-  script, a continuation before the target), even with the stem allowlisted,
+  script, a continuation before the target, a ugrep `--save-config`), even
+  with the stem allowlisted,
   while a genuine read of a gate file stays covered.
   Run after touching `permissions.py`, `rules.command_targets`, or
   `approvals.py`.
