@@ -2272,6 +2272,17 @@ def main():
             finally:
                 layout_mock.stop()
 
+            # Several chat panes at once (WP-B, 2026-10-09): the same reasons
+            # for a context and a mock of its own — its sends, interrupts and
+            # `/seen` posts stay out of the main world.
+            from tests.face.hud_v2_multichat_check import multichat_checks
+            multichat_mock = MockDaemon(0).start()
+            try:
+                multichat_checks(browser, multichat_mock, f"http://127.0.0.1:{multichat_mock.port}", check, until,
+                                 (live, refuse_live), FAKE_RECOGNIZER)
+            finally:
+                multichat_mock.stop()
+
             ctx = browser.new_context(permissions=["microphone"])
             ctx.route(live, refuse_live)
             ctx.add_init_script(FAKE_RECOGNIZER)

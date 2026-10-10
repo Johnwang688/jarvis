@@ -4,6 +4,8 @@ import {
   saveLastProject, LAST_PROJECT_KEY,
 } from "./compose";
 import type { Project, Task, Thread } from "../types";
+import { chatProjectId, emptyChat, emptyChats, type ChatState } from "./chats";
+import { currentProjectId, initialState, type State } from "../state/store";
 
 const project = (id: string, over: Partial<Project> = {}): Project => ({
   id, name: id, root: `/home/johnw/${id}`, created: "", profile: "auto",
@@ -87,6 +89,36 @@ describe("the project the window is about", () => {
 
   it("is null with nothing open", () => {
     expect(activeProjectId(base)).toBeNull();
+  });
+});
+
+describe("several chats: the project per pane (WP-B)", () => {
+  const threads = [thread("t1", "p1", ""), thread("t2", "p2", "")];
+  const tasks = [{ id: "k1", project_id: "inbox" } as Task];
+  const pane = (over: Partial<ChatState>): ChatState => ({ ...emptyChat(), ...over });
+  const window = (chats: Partial<Record<1 | 2, ChatState>>, voiceTarget: 1 | 2, over: Partial<State> = {}): State => ({
+    ...initialState, threads, tasks, chats: { ...emptyChats(), ...chats }, voiceTarget, ...over,
+  });
+
+  it("each chat pane's chip is its own conversation's project", () => {
+    expect(chatProjectId(pane({ threadId: "t1" }), threads)).toBe("p1");
+    expect(chatProjectId(pane({ compose: { projectId: "p2" } }), threads)).toBe("p2");
+  });
+
+  it("the project the window is about is the voice target's conversation's — the chat used last", () => {
+    const s = window({ 1: pane({ threadId: "t1" }), 2: pane({ compose: { projectId: "p2" } }) }, 1);
+    expect(currentProjectId(s)).toBe("p1");
+    expect(currentProjectId({ ...s, voiceTarget: 2 })).toBe("p2");
+  });
+
+  it("and a task picked more recently still wins, as it did", () => {
+    const s = window({ 1: pane({ threadId: "t1" }) }, 1, { taskId: "k1", taskFocus: true });
+    expect(currentProjectId(s)).toBe("inbox");
+  });
+
+  it("a pane's thread is what its chips read, never another pane's", () => {
+    expect(conversationThreadId(pane({ threadId: "t2" }))).toBe("t2");
+    expect(conversationThreadId(pane({ compose: { projectId: "p1", openedId: "t9" } }))).toBe("t9");
   });
 });
 
