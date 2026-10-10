@@ -1013,6 +1013,8 @@ class MockDaemon:
                 return self._err(404, "no such route")
 
         self.httpd = ThreadingHTTPServer(("127.0.0.1", self.port), Handler)
+        # Port 0 asks for an ephemeral one; the bound port is the one to use.
+        self.port = self.httpd.server_address[1]
         self.httpd.daemon_threads = True
         self._thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
         self._thread.start()

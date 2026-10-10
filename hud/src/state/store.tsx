@@ -12,7 +12,8 @@ import { activeProjectId, type Compose } from "../lib/compose";
 import { NO_ACTIVITY, applyActivity, type ActivityView } from "../lib/activity";
 import { pendingAfter, type GiveBack } from "../lib/giveback";
 
-export type Tab = "chat" | "task" | "file" | "diff" | "preview";
+// What the centre shows is the workspace's (lib/workspace.ts, 2026-10-09): a
+// view per pane, stored with the layout, not a single `tab` in this store.
 export type OrbState =
   | "idle" | "listening" | "transcribing" | "thinking"
   | "composing" | "tool" | "approval" | "speaking" | "error";
@@ -38,7 +39,6 @@ export interface State {
    * `busy` follows it, so switching threads mid-turn cannot wedge the window
    * waiting for a finish it no longer listens for. */
   turnThreadId: string | null;
-  tab: Tab;
   messages: ChatMessage[];
   draft: string;
   ops: ToolOp[];
@@ -75,7 +75,7 @@ export interface State {
 
 export const initialState: State = {
   projects: [], platforms: {}, threads: [], tasks: [], taskThreads: {}, activity: NO_ACTIVITY,
-  threadId: null, compose: null, taskId: null, taskFocus: false, turnThreadId: null, tab: "chat",
+  threadId: null, compose: null, taskId: null, taskFocus: false, turnThreadId: null,
   messages: [], draft: "", ops: [], approvals: [], usage: null, discord: null, schedules: [],
   route: null, avatar: null, wakePatterns: [], dictation: DEFAULT_MODE,
   level: 0, orb: "idle", status: "", busy: false, pendingTranscript: "", restore: [],

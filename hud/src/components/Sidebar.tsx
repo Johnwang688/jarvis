@@ -107,6 +107,8 @@ export function Sidebar(props: {
   zoom?: number;
   /** Folds the sidebar to its rail (2026-10-08). */
   onCollapse?: () => void;
+  /** An authorization card is up: the fold button is disabled (it would still answer Enter). */
+  layoutBlocked?: boolean;
 }) {
   const z = props.zoom ?? 100;
   const activity = props.activity ?? NO_ACTIVITY;
@@ -236,7 +238,9 @@ export function Sidebar(props: {
         <button type="button" id="newthread" data-testid="new-thread" onClick={props.onNewThread}>
           <span className="plus">+</span> New thread
         </button>
-        {props.onCollapse ? <CollapseButton side="left" onCollapse={props.onCollapse} /> : null}
+        {props.onCollapse ? (
+          <CollapseButton side="left" onCollapse={props.onCollapse} disabled={props.layoutBlocked} />
+        ) : null}
       </div>
       <div className="barrow">
         <h2 className="bar">Projects</h2>
