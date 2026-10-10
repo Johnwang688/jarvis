@@ -383,6 +383,14 @@ program can print bytes between real marks, nested shells/`sudo -i`/`ssh`/
 command only — so WP-F's text-pattern refusals apply to every read. When
 `terminal_read` lands, `terminal_check`'s no-tool test must allow exactly
 it. Each terminal has the owner's `readable` switch, **on by default**.
+Follow-ups from the re-review (with WP-D): `integration` is what was
+*configured*, **`marked`** (listing, attach row, one `{"type": "marked"}`) is
+what *took* — a profile that `exec`s another shell reads "bash" but never
+marked; the startup file must fit **8 KiB** (a pipe under
+`pipe-user-pages-soft`) and is written **without blocking** under
+`Terminals._lock` — a short write is a 409, never a wedged route; and **the
+checked realpath always runs** — without `env --argv0` a name whose basename
+differs (rbash, `sh` for bash) is refused rather than exec'd by its link.
 Tests point `config.TERMINAL_SHELL` at `tests/v2/terminal_fake/sh` (named
 `sh` so it is started as a POSIX shell) with a temp HOME, and never use
 8402/8403/8405.
@@ -461,7 +469,7 @@ keyed by it — it used to save to whatever project was current at save time.
 An unsaved edit is never dropped silently: "follow chat" waits, a gone
 project keeps the pane pinned until "discard edit", and closing the window
 asks. Preview keeps its URL per pane, re-judged on load. The bottom panel
-(⬓, Ctrl+`) is an **empty dock until WP-D** fills it with terminals. **Under
+(⬓, Ctrl+`) holds the terminals (WP-D, below). **Under
 a card every title-bar, fold and rail button is disabled**, the layout menu
 closes, and **the card takes focus** off a preview frame, Monaco or anything
 in the workspace or panel (a framed page got its own key events, so Escape
@@ -475,6 +483,60 @@ rest. **The layout section runs against a `MockDaemon` of its own** on an
 ephemeral port (`MockDaemon(0)`; the mock records the port it bound), so its
 saves, `/seen` posts, approval decisions and preview hits never reach the
 world the main suite asserts on.
+
+**HUD terminals, panel and view, WP-D (2026-10-09; plan §2.3–§2.4,
+decisions W-1/W-2/W-5; contract in `docs/hud-api.md`).** xterm.js pinned
+exactly (`@xterm/xterm` 6.0.0, `addon-fit` 0.11.0, `addon-web-links` 0.12.0)
+and lazy-loaded (`lib/xterm.ts`); **no clipboard addon** (no OSC 52), window
+reports off. `lib/terminal.ts` holds the rules (pure, `terminal.test.ts`),
+`components/Terminal.tsx` the sockets and views. **One session per terminal
+per window**: made the first time the window draws it, it attaches with a
+**fresh ticket** and a URL from `location` (never a port), resizes only after
+`replayed`, and **stays attached while hidden**; its xterm element is moved,
+not rebuilt, between the panel and a pane. **One terminal is drawn in one
+place** (`placeTerminals`): a drawn pane holding it wins and its panel tab
+reads "in pane N" and jumps there; a hidden panel or undrawn pane attaches
+nothing (a reload must not ask another window for a terminal nobody here
+sees). Panel: a tab per terminal, `+` (the focused pane's folder **as an
+id**, `terminalSpecFor`), `▾` (Home or a project), × per tab; **Ctrl+` opens
+a terminal when there is none, ⬓ never does**; a dot on ⬓ means one in the
+hidden panel exited. In a terminal **Ctrl+B, Ctrl+Alt+B and Ctrl+_ are the
+shell's** (`terminalTakesKey`), the zoom keys, Ctrl+` and Ctrl+Alt+N stay the
+HUD's, and every key stops at the terminal (Space is never push-to-talk).
+**Under a card nothing reaches the shell**: `disableStdin`, a key filter
+that lets every key bubble (Escape denies), a guard on the bytes, a paste in
+flight waits, and the card takes focus (WP-A). **Pastes**: 16 KiB chunks
+paced 8 ms from a queue that belongs to **one socket** (`InputGate`);
+`input_dropped` throws the rest away at once and typing waits for the
+owner's **Resume typing** (`input_resume`, retried while refused, with
+Reattach/close as the way out — Ctrl-C is not); a late in-flight
+`input_dropped` adds to the notice and never undoes a resume; **a socket
+that closes takes its paste with it**, never continued on the next.
+Takeover asks here (Let it / Keep it, disabled under a card — unanswered is
+kept); "taken", "refused", "exited (code N)" with Restart/Close, "ended"
+with New terminal here (the spec it was opened with, remembered under
+`jarvis.hud.terminals`); a `busy` terminal is asked about before it closes.
+A `terminal_attached` not matched to one of the window's own sockets
+(`AttachLedger`) is a quiet, dismissible notice. Each terminal's bar has the
+"Jarvis can read" switch (owner-only PATCH) and an integration note (`none`,
+or `inactive` when a configured shell has not `marked` 4 s after attaching).
+**An OSC title is text** in the pane header and the bar, capped at 80 —
+**never `document.title`**; links open only for http(s), only on Ctrl+click
+(`judgeLink`); "Open in Preview" for loopback links is WP-E's. **xterm under
+CSS zoom**: the host is counter-zoomed (`zoom: 1/level`) and the font scaled
+by the zoom, so cells and the pointer are measured unzoomed. Free checks:
+`terminal.test.ts`, `workspace.test.ts`, and
+`tests/face/hud_v2_terminal_check.py` — the PTY is **played in the browser
+by `route_web_socket`** (`FakePty`; no shell, no HOME) against a
+`MockDaemon(0)` of its own, the `/terminals` routes in
+`hud_v2_mock_terminals.py`; `hud_v2_layout_check`'s 2×2 grid now holds a
+terminal under the card. **`hud_v2_check.guard_live` refuses HTTP and
+WebSockets to 8402/8403/8405** (`ctx.route` never sees a socket), and the
+terminal suite proves the socket half against a port of its own. Two
+Playwright facts that cost a debugging round: sync route handlers run only
+during a Playwright call, so a wait on the fake's own state must pump
+(`pumping`); and a socket must not be closed from inside its own message
+handler.
 
 **Sidebar status dots (2026-10-08, design §18; contract in
 `docs/hud-api.md`).** The `·` left of each sidebar thread and task is what it

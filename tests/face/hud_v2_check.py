@@ -2257,9 +2257,11 @@ def guard_live(ctx, record, ports=LIVE_PORTS):
         route.abort()
 
     def refuse_socket(ws):
-        # Not connected to the server: the socket never leaves the browser.
+        # Never `connect_to_server()`: the socket never leaves the browser. It
+        # is not closed here either — a close from inside the route handler
+        # deadlocks the sync API — so the page holds a socket to nowhere and
+        # the record is the failure.
         record(f"the HUD under test opened a socket to a live daemon port: {ws.url}")
-        ws.close(code=1008, reason="a live daemon port")
 
     ctx.route(http, refuse_http)
     ctx.route_web_socket(sock, refuse_socket)

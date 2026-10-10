@@ -833,10 +833,11 @@ that is why every attach is announced (`terminal_attached`, below).
     frame on that socket is refused the same way — a frame that is exactly
     Ctrl-C (`\x03`) excepted — so a paste reaches the program as a prefix,
     never a prefix with a later chunk spliced on (accepting the next frame
-    once room freed is what cut a `cat > file` paste mid-line). WP-D, on the
-    first `input_dropped`: **stop sending the rest of the paste**, say what
-    happened, and when the owner types again send `{"type":
-    "input_resume"}`. The answer is `{"type": "input_resumed"}` once the
+    once room freed is what cut a `cat > file` paste mid-line). The window,
+    on the first `input_dropped`: **stop sending the rest of the paste**, say
+    what happened, and send `{"type": "input_resume"}` only once the owner
+    has acknowledged it (the HUD's "Resume typing"; WP-D below). The answer
+    is `{"type": "input_resumed"}` once the
     queue has drained, else `{"type": "input_resume_refused", "reason"}`
     (send it again shortly). A program that never reads never drains, and
     **Ctrl-C is not a way out of that**: the `^C` byte waits behind the same
@@ -944,3 +945,54 @@ remove one.
 (the daemon logs opened / attached / exited / closed with the folder as a
 project name or `~`, and logs `/terminals` paths without their query, so
 never a ticket), not in a thread log, not on Discord, not on disk.
+
+## Additions 2026-10-09 (terminal panel and view — WP-D)
+
+What the HUD does with the terminal contract above (code in
+`hud/src/components/Terminal.tsx`, rules in `hud/src/lib/terminal.ts`):
+
+- **One session per terminal per window.** It is made the first time the
+  window draws the terminal (the open panel's tab, or a drawn pane), and
+  then stays attached while hidden — its output keeps landing — until the
+  terminal is closed, taken by another window, or ends with Jarvis. A
+  hidden panel or a pane the layout does not draw attaches nothing, so a
+  reload never asks another window for a terminal nobody here is looking at.
+- **Every attach** fetches `POST /terminals/{id}/ticket` first, builds the
+  socket URL from `location` (`ws:` or `wss:` + `location.host`, never a
+  port), starts from a clean xterm on `attached`, and sends `resize` only
+  after `replayed` (and again on every fit). An unexpected close reattaches
+  with a fresh ticket (backoff 0.3–10 s, then "lost" with Reconnect); a
+  ticket answered 404 reads "ended".
+- **Pastes** go out in 16 KiB chunks paced 8 ms apart from a queue that
+  belongs to **one socket**. `input_dropped` stops the rest at once (the
+  frames already on their way are refused too and counted into the same
+  notice — never undoing a resume); typing then waits, shown, until the
+  owner presses **Resume typing** (`input_resume`, retried every second
+  while `input_resume_refused`, with **Reattach** and closing offered as the
+  way out); a lone Ctrl-C still goes. A Ctrl-C ends a paste still queued.
+  **A socket that closes takes the rest of its paste with it**: nothing of
+  it is sent on the next socket, and the owner is told.
+- **Under an authorization card nothing reaches the shell** (keys, pastes,
+  a paste still going out); every key bubbles past the terminal, so Escape
+  denies; output keeps drawing; every terminal button is disabled.
+- **Takeover**: a `takeover_request` is a window-wide prompt (Let it /
+  Keep it, the countdown; disabled under a card, so unanswered is kept).
+  The newcomer shows "Asking the window that shows this terminal… Ns",
+  then `refused` (Ask again) or the replay; `taken` offers Take it back.
+- **`terminal_attached`**: the window notes each socket it opens and
+  matches the events against them (40 s); one it cannot match is a quiet,
+  dismissible notice naming the terminal and the time. Only
+  `{terminal_id, at}` is read; a malformed id is ignored.
+- **`marked`** (above): a configured shell (`bash`, `posix`) that has not
+  marked a prompt 4 s after attaching reads "integration inactive"; `none`
+  reads "no integration" at once. Both say sudo may cache there.
+- **`readable`**: each terminal's bar carries the "Jarvis can read" switch,
+  `PATCH /terminals/{id}` with exactly `{readable}`.
+- **`busy`**: × re-reads `GET /terminals` and, when the foreground process
+  is not the shell, asks before `DELETE`.
+- **Output is hostile bytes**: an OSC 0/2 title is text in the pane header
+  and the terminal's bar, one line, capped at 80 — never `document.title`;
+  links (plain or OSC 8) open only for `http`/`https`, only on Ctrl+click,
+  in a new window with `noopener`; there is no clipboard addon (no OSC 52)
+  and window reports stay off. "Open in Preview" for loopback links is
+  WP-E's.

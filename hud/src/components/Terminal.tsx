@@ -73,10 +73,27 @@ export interface PasteNotice {
 
 let unloading = false;
 if (typeof window !== "undefined") {
+  // Leaving (a reload, the window closing): say goodbye with a normal close,
+  // so the daemon detaches at once rather than when TCP notices — and never
+  // reattach on the way out.
   window.addEventListener("pagehide", () => {
     unloading = true;
+    for (const s of terminals.sessions.values()) s.leave();
+  });
+  // Back from the back/forward cache: the sessions it closed attach again.
+  window.addEventListener("pageshow", (e) => {
+    if (!e.persisted) return;
+    unloading = false;
+    for (const s of terminals.sessions.values()) s.revive();
   });
 }
+
+/** A tab's row for a terminal that no longer exists. */
+const GONE_ROW: TerminalRow = {
+  id: "", title: "", folder: "", project_id: null, created: "", cols: 80, rows: 24, shown: false,
+  exited: false, exit_code: null, readable: true, busy: false, integration: "none", integrated: false,
+  marked: false,
+};
 
 function kib(bytes: number): string {
   return bytes >= 1024 ? `${Math.round(bytes / 1024)} KiB` : `${bytes} bytes`;
@@ -100,6 +117,8 @@ export class TermSession {
   heldAt = 0;
   marked = false;
   attachedAt = 0;
+  /** The row as last seen, kept for a tab after the terminal itself is gone. */
+  lastRow: TerminalRow | null = null;
   /** The element xterm lives in; moved, not rebuilt, between the panel and a pane. */
   readonly wrap: HTMLDivElement;
   private slot: HTMLElement | null = null;
@@ -443,6 +462,7 @@ export class TermSession {
         this.term?.reset();
         if (msg.terminal) {
           this.mgr.updateRow(msg.terminal);
+          this.lastRow = msg.terminal;
           this.marked = this.marked || msg.terminal.marked;
         }
         this.exitCode = null;
@@ -630,6 +650,22 @@ export class TermSession {
     this.resumeTimer = null;
   }
 
+  /** The window came back from the back/forward cache: attach again if it was. */
+  revive() {
+    if (this.wanted && !this.ws && !this.disposed) this.retry();
+  }
+
+  /** The window is going: a normal close, nothing more. */
+  leave() {
+    const ws = this.ws;
+    if (!ws) return;
+    try {
+      ws.close(1000, "window closed");
+    } catch {
+      /* already closing */
+    }
+  }
+
   dismissPaste() {
     this.clearResume();
     if (this.paste) this.paste = null;
@@ -752,12 +788,28 @@ export class TermManager {
     return this.place.has(id) || (this.panelOpen && this.panelActive() === id);
   }
 
+  /**
+   * The panel's tabs: every terminal the daemon lists, and — until the owner
+   * acts on it — one this window was showing that ended with Jarvis or was
+   * lost, so its "ended" strip and "New terminal here" stay where they were.
+   */
+  tabs(): TerminalRow[] {
+    const out = this.rows.slice();
+    for (const s of this.sessions.values()) {
+      if ((s.state === "ended" || s.state === "lost") && !out.some((r) => r.id === s.id)) {
+        out.push(s.lastRow ?? { ...GONE_ROW, id: s.id, title: `terminal ${s.id}` });
+      }
+    }
+    return out;
+  }
+
   /** The panel's tab: the stored one while it exists, else the first not shown in a pane. */
   panelActive(): string | null {
+    const tabs = this.tabs();
     const a = this.prefs.active;
-    if (a && this.rows.some((r) => r.id === a)) return a;
-    const free = this.rows.find((r) => !this.place.has(r.id));
-    return (free ?? this.rows[0])?.id ?? null;
+    if (a && tabs.some((r) => r.id === a)) return a;
+    const free = tabs.find((r) => !this.place.has(r.id));
+    return (free ?? tabs[0])?.id ?? null;
   }
 
   selectTab(id: string) {
@@ -943,6 +995,9 @@ export class TermManager {
 
   ended(id: string) {
     this.unseenExits.delete(id);
+    const row = this.row(id);
+    const s = this.sessions.get(id);
+    if (s && row) s.lastRow = row;
     this.rows = this.rows.filter((r) => r.id !== id);
     this.changed();
   }
@@ -1077,9 +1132,12 @@ export function TerminalView(props: { id: string; where: string; pane?: PaneNo; 
   }, [s]);
 
   const now = useNow(s.state === "waiting" || (s.attachedAt > 0 && Date.now() - s.attachedAt < SETTLE_MS + 1000));
-  const row = mgr.row(props.id);
+  // The daemon's row while the terminal exists; its last one only for a name after.
+  const live = mgr.row(props.id);
+  const row = live ?? s.lastRow;
   const settled = s.attachedAt > 0 && now - s.attachedAt >= SETTLE_MS;
-  const note = integrationNote(row ? { integration: row.integration, marked: s.marked || row.marked } : null, settled);
+  const note = integrationNote(live ? { integration: live.integration, marked: s.marked || live.marked } : null,
+                               settled);
   const readable = row ? row.readable : true;
   const name = s.title || row?.title || `terminal ${props.id}`;
   const blocked = mgr.blocked;
@@ -1101,7 +1159,7 @@ export function TerminalView(props: { id: string; where: string; pane?: PaneNo; 
           className={"termread" + (readable ? " on" : "")}
           data-testid="term-readable"
           aria-pressed={readable}
-          disabled={blocked || !row}
+          disabled={blocked || !live}
           title={readable
             ? "Jarvis can read this terminal's recent output (a read never includes a recognisable secret). Click to stop."
             : "Jarvis cannot read this terminal. Click to allow."}
@@ -1308,6 +1366,7 @@ export function TerminalPanel(props: {
   const [menu, setMenu] = useState<{ right: number; bottom: number } | null>(null);
   const menuBtn = useRef<HTMLButtonElement>(null);
   const active = mgr.panelActive();
+  const tabs = mgr.tabs();
   useEffect(() => {
     if (props.blocked) setMenu(null);
   }, [props.blocked]);
@@ -1338,10 +1397,11 @@ export function TerminalPanel(props: {
       <div className="panelhead">
         <span className="paneltitle">Terminal</span>
         <div className="paneltabs" role="tablist" aria-label="Terminals" data-testid="panel-tabs">
-          {mgr.rows.map((r) => {
+          {tabs.map((r) => {
             const pane = mgr.place.get(r.id);
             const s = mgr.sessions.get(r.id);
             const exited = r.exited || s?.state === "exited";
+            const ended = s?.state === "ended" || s?.state === "lost";
             return (
               <span key={r.id} className={"paneltab" + (r.id === active && !pane ? " on" : "")}>
                 <button
@@ -1356,7 +1416,8 @@ export function TerminalPanel(props: {
                 >
                   <span className="paneltab-name">{r.title || r.id}</span>
                   {pane ? <span className="paneltab-where">in pane {pane}</span> : null}
-                  {exited ? <span className="paneltab-where">exited</span> : null}
+                  {ended ? <span className="paneltab-where">ended</span>
+                    : exited ? <span className="paneltab-where">exited</span> : null}
                 </button>
                 <button
                   type="button"
@@ -1459,9 +1520,9 @@ export function TerminalPanel(props: {
       <div className="panelbody termpanel">
         {!mgr.loaded && !mgr.listError ? (
           <div className="pad muted">…</div>
-        ) : mgr.listError && !mgr.rows.length ? (
+        ) : mgr.listError && !tabs.length ? (
           <div className="pad err" data-testid="panel-list-error">{mgr.listError}</div>
-        ) : !mgr.rows.length || !active ? (
+        ) : !tabs.length || !active ? (
           <div className="pad muted" data-testid="panel-empty">
             No terminals are open.{" "}
             <button type="button" className="quiet" data-testid="panel-empty-new" disabled={props.blocked}

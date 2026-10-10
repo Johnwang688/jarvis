@@ -1777,11 +1777,10 @@ title bar.
   pointer. The last render's set (a render-only ref, never stored) is kept
   while the preset and the drawn shape are the same and it still holds the
   focused pane; focusing a pane it does not draw draws one that does.
-- **The bottom panel is an empty dock until WP-D**: ⬓ and Ctrl+` (no Alt —
-  AltGr+7 is a backtick on French layouts; a dead backtick matches on `code`)
-  show and hide it under the panes, between the side panes; its top edge is
-  a horizontal separator (Up/Down, double-click resets to 260px). WP-D only
-  fills it with terminals.
+- **The bottom panel holds the terminals (WP-D, below)**: ⬓ and Ctrl+` (no
+  Alt — AltGr+7 is a backtick on French layouts; a dead backtick matches on
+  `code`) show and hide it under the panes, between the side panes; its top
+  edge is a horizontal separator (Up/Down, double-click resets to 260px).
 - **Under a card nothing moves**: every title-bar button, fold button and
   rail button is disabled (the veil stops the pointer, but a button that kept
   focus still answered Enter — on main it folded a pane behind the card), an
@@ -1903,7 +1902,43 @@ the outer span, and a line kept out of history records only its first
 command — so WP-F's text-pattern refusals of `env`, `gh auth token` and the
 rest (W-2, item 3) must apply to **every** read, not only when no marks
 were seen. Each terminal carries the owner's `readable` switch, on by
-default. Contract: `docs/hud-api.md`.
+default. Contract: `docs/hud-api.md`. Since WP-D the listing also says
+whether the startup file *took* (`marked`, on the first signed prompt mark):
+`integration` is only what was configured, and a profile that `exec`s
+another shell configures "bash" and marks nothing. The startup file must fit
+8 KiB and is written without blocking (a blocking write past a small pipe
+would have wedged every terminal route), and the launcher always runs the
+checked realpath, refusing a renamed shell where `env` cannot set argv[0].
+
+**The terminal panel and view (2026-10-09, WP-D).** The owner's terminals
+are drawn with xterm.js (pinned exactly, lazy-loaded, no clipboard addon, no
+window reports) in the bottom panel — a tab each, `+` in the focused pane's
+folder, `▾` for Home or a project — and in any pane's terminal view; **one
+terminal is drawn in one place at a time** (W-1), and its panel tab says
+which pane has it. A window keeps one session per terminal: it attaches on
+first draw with a fresh ticket and a URL from its own location, resizes only
+after the replay, and stays attached while hidden, so moving a terminal
+between the panel and a pane, or hiding the panel, never reattaches. Ctrl+`
+opens a terminal when there is none (⬓ only shows the panel), and a dot on
+⬓ says one in the hidden panel exited. In a terminal Ctrl+B, Ctrl+Alt+B and
+Ctrl+_ are the shell's; the zoom keys, Ctrl+` and Ctrl+Alt+N stay the HUD's;
+Space is never push-to-talk. **Under a card nothing reaches the shell** —
+input held, a paste in flight paused, every key left to bubble so Escape
+denies — and output keeps drawing. **A paste never splices**: it goes out in
+paced 16 KiB chunks from a queue that belongs to one socket, stops the
+moment the daemon drops a frame, waits for the owner's Resume before typing
+goes again, and dies with its socket rather than continuing on the next one.
+Another window's takeover is asked here (Let it / Keep it, unanswerable
+under a card, so kept); exit, Jarvis's restart, "taken" and "refused" each
+say so with the next step offered; a busy terminal is asked about before it
+closes; an attach this window did not make is a quiet notice. Output is
+hostile bytes: a title it sets is text in the pane header, never the
+window's title (the desktop bridge matches on `J.A.R.V.I.S.`), and a link
+opens only for http(s) on Ctrl+click. xterm under the HUD's CSS zoom is
+counter-zoomed with its font scaled instead; the 160% and 70% checks guard
+fit and selection. The headless suite plays the PTY inside the browser
+(`route_web_socket`), so no shell ever runs, and the live-port guard now
+refuses WebSockets too. "Open in Preview" for a dev server's link is WP-E.
 
 Remaining: WP13 (the long-bench comparison, the owner's call on cost), a
 native Windows worker, the R8 hook on Codex, and prompt tuning in

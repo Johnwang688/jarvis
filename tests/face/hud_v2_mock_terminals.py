@@ -92,7 +92,10 @@ def handle(h, mock, method: str, path: str, body) -> bool:
             label, pid = resolved
             seq = mock.__dict__.get("terminal_seq", 0) + 1
             mock.terminal_seq = seq
-            rec = row(f"{0xa0000000 + seq:08x}", f"bash · {label}", project_id=pid)
+            # `terminal_defaults`: what the next terminals are like (a shell
+            # with no integration, one whose startup file never ran).
+            rec = row(f"{0xa0000000 + seq:08x}", f"bash · {label}", project_id=pid,
+                      **mock.__dict__.get("terminal_defaults", {}))
             rows.append(rec)
             mock.__dict__.setdefault("terminal_created", []).append((rec["id"], body["in"]))
             h._json(rec, 201)

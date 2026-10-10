@@ -93,7 +93,20 @@ class FakePty:
         self.waiting: dict[str, dict] = {}
         self.takeover_answers: list[dict] = []
         self.refused_tickets = 0
+        self.closing: list[tuple[dict, int, str]] = []
         ctx.route_web_socket(re.compile(rf"^ws://127\.0\.0\.1:{mock.port}/terminals/"), self._attach)
+
+    def _close(self, sock, code: int, reason: str):
+        """Close a socket — later, from the test's own flow (`flush`): a close
+        from inside a route or message handler deadlocks the sync API."""
+        if sock["open"]:
+            sock["open"] = False
+            self.closing.append((sock, code, reason))
+
+    def flush(self):
+        pending, self.closing = self.closing, []
+        for sock, code, reason in pending:
+            sock["ws"].close(code=code, reason=reason)
 
     # -- the socket -------------------------------------------------------------
 
@@ -111,11 +124,12 @@ class FakePty:
         self.sockets.append(sock)
         if not ticket or tickets.pop(ticket, None) != tid or self._row(tid) is None:
             self.refused_tickets += 1
-            sock["open"] = False
-            ws.close(code=1008, reason="a fresh ticket for this terminal is required")
+            self._close(sock, 1008, "a fresh ticket for this terminal is required")
             return
         ws.on_message(lambda m, s=sock: self._message(s, m))
-        ws.on_close(lambda code, reason, s=sock: self._closed(s))
+        # No on_close: Playwright's own handler for it raises KeyError('code')
+        # on a page-side close without a code (every reload), and the fake
+        # never needs to know — a send to a closed page socket is dropped.
         if tid in self.hold:
             self.hold.discard(tid)
             self.waiting[tid] = sock
@@ -144,9 +158,6 @@ class FakePty:
     def _send(self, sock, payload: dict):
         if sock["open"]:
             sock["ws"].send(json.dumps(payload))
-
-    def _closed(self, sock):
-        sock["open"] = False
 
     def _message(self, sock, m):
         tid = sock["tid"]
@@ -182,8 +193,7 @@ class FakePty:
             self.takeover_answers.append(msg)
             if msg.get("allow") is True and self.holders.get(tid) is sock:
                 self._send(sock, {"type": "taken"})
-                sock["ws"].close(code=1000, reason="taken by another window")
-                sock["open"] = False
+                self._close(sock, 1000, "taken by another window")
                 self.holders.pop(tid, None)
 
     def _tty(self, tid, data: bytes):
@@ -231,15 +241,15 @@ class FakePty:
         sock = self.holders.pop(tid, None)
         if sock and sock["open"]:
             self._send(sock, {"type": "exit", "code": None, "reason": "ended"})
-            sock["ws"].close(code=1001, reason="ended")
-            sock["open"] = False
+            self._close(sock, 1001, "ended")
+            self.flush()
 
     def drop(self, tid: str):
         """The daemon drops the socket (too far behind): the window reattaches."""
         sock = self.holders.pop(tid, None)
         if sock and sock["open"]:
-            sock["ws"].close(code=1011, reason="dropped")
-            sock["open"] = False
+            self._close(sock, 1011, "dropped")
+            self.flush()
 
     def drop_after_frames(self, tid: str, n: int):
         """Arm a drop once `n` more frames have arrived (`drop_if_due`). Not
@@ -265,8 +275,8 @@ class FakePty:
             self._install(sock)
         else:
             self._send(sock, {"type": "refused", "reason": "the window showing this terminal kept it"})
-            sock["ws"].close(code=1008, reason="refused")
-            sock["open"] = False
+            self._close(sock, 1008, "refused")
+            self.flush()
 
     # -- reading --------------------------------------------------------------
 
@@ -419,14 +429,16 @@ def _fresh(page, mock, base, until, fake, size=(1280, 800)) -> str:
 # the suite
 
 
-def pumping(page, until):
+def pumping(page, until, fake=None):
     """`until`, but every poll lets Playwright dispatch: the fake PTY's
     handlers run only while a Playwright call is in progress, so a predicate
     that reads only the fake's state would otherwise wait on events nobody
-    delivers."""
+    delivers. Each poll also carries out the closes the fake deferred."""
     def wait(fn, timeout=6.0, step=0.0):
         def poll():
             page.wait_for_timeout(20)
+            if fake is not None:
+                fake.flush()
             return fn()
         return until(poll, timeout=timeout, step=step)
     return wait
@@ -440,7 +452,7 @@ def terminal_checks(browser, mock, base, check, until, guard, init_script):
     ctx.add_init_script(OPEN_STUB)
     fake = FakePty(ctx, mock)
     page = ctx.new_page()
-    until = pumping(page, until)
+    until = pumping(page, until, fake)
     errors: list[str] = []
     page.on("pageerror", lambda e: errors.append(f"{e} @ {(getattr(e, 'stack', '') or '').splitlines()[1:3]}"))
     page.set_default_timeout(5000)
@@ -864,18 +876,19 @@ def _integration_checks(page, mock, base, check, until, fake):
     page.wait_for_timeout(300)
     check("a terminal whose startup file ran says nothing about it",
           page.locator(_sel(tid, '[data-testid="term-integration"]')).count() == 0)
-    # A shell that reads no startup file (zsh, fish): said at once.
-    fake._row(tid).update(integration="none", marked=False, integrated=False)
-    fake.drop(tid)                                   # reattach: the row now says "none"
-    until(lambda: page.locator(_sel(tid, '[data-testid="term-integration"]')).count() > 0, timeout=6)
-    badge = page.locator(_sel(tid, '[data-testid="term-integration"]'))
-    check("a shell with no integration says so (no sudo -k, no marks)",
-          badge.get_attribute("data-kind") == "none" and "sudo" in (badge.get_attribute("title") or ""))
-    # Configured, but the startup file never ran (a profile exec'd another shell).
-    t2 = _new_terminal(page, mock, until, fake)
-    fake._row(t2).update(integration="bash", marked=False)
-    fake.drop(t2)
-    until(lambda: _state(page, t2) == "attached", timeout=6)
+    try:
+        # A shell that reads no startup file (zsh, fish): said at once.
+        mock.terminal_defaults = {"integration": "none", "marked": False, "integrated": False}
+        t1 = _new_terminal(page, mock, until, fake)
+        until(lambda: page.locator(_sel(t1, '[data-testid="term-integration"]')).count() > 0, timeout=3)
+        badge = page.locator(_sel(t1, '[data-testid="term-integration"]'))
+        check("a shell with no integration says so (no sudo -k, no marks)",
+              badge.get_attribute("data-kind") == "none" and "sudo" in (badge.get_attribute("title") or ""))
+        # Configured, but the startup file never ran (a profile exec'd another shell).
+        mock.terminal_defaults = {"integration": "bash", "marked": False, "integrated": False}
+        t2 = _new_terminal(page, mock, until, fake)
+    finally:
+        mock.terminal_defaults = {}
     page.wait_for_timeout(300)
     check("configured: nothing is said while the shell may still be starting",
           page.locator(_sel(t2, '[data-testid="term-integration"]')).count() == 0)
@@ -1105,15 +1118,15 @@ def _guard_selftest(browser, mock, base, check, until, init_script):
         page = ctx.new_page()
         page.goto(base + "/")
         page.wait_for_selector('[data-testid="sidebar"]', state="attached")
-        closed = page.evaluate("""(port) => new Promise((done) => {
-          const ws = new WebSocket(`ws://127.0.0.1:${port}/terminals/0a1b2c3d/attach?ticket=x`);
-          ws.onclose = (e) => done({ code: e.code, opened: !!ws.__opened });
-          ws.onopen = () => { ws.__opened = true; };
-          setTimeout(() => done({ code: -1 }), 3000);
-        })""", dummy)
-        page.wait_for_timeout(300)
-        check("the live-port guard refuses a WebSocket to a guarded port before it leaves the browser",
-              refused and not hits and closed.get("code") != -1, f"refused={refused} hits={len(hits)} {closed}")
+        page.evaluate("""(port) => { window.__guarded = new WebSocket(
+          `ws://127.0.0.1:${port}/terminals/0a1b2c3d/attach?ticket=x`); }""", dummy)
+        for _ in range(40):                               # let the route handler run
+            page.wait_for_timeout(50)
+            if refused:
+                break
+        page.wait_for_timeout(500)                        # time for a real connect to land
+        check("the live-port guard catches a WebSocket to a guarded port before it leaves the browser",
+              len(refused) == 1 and "socket" in refused[0] and not hits, f"refused={refused} hits={len(hits)}")
     finally:
         ctx.close()
         stop.set()
