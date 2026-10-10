@@ -1257,6 +1257,77 @@ jarvis/
   Generalises: **protecting a file means protecting every verb that reaches
   it** — a refusal on the write tool and silence on the shell is a door
   with a lock and no wall.
+
+  **Three more ways past it, all the two-copies failure again (2026-10-09,
+  this PR).** An external reviewer found three gaps; each was confirmed by
+  in-process classification against temp paths (no spelling was ever run), and
+  each was ALLOW on the old detector, so it rode through the mandatory
+  gate-state refusal under a standing allowlist entry or under `--dangerously-
+  skip-permissions`. By shape:
+
+  - **The shell's inline-command flag inside a bundled short-flag group.** The
+    unwrap looked for `-c` as a whole token, so a login or trace flag bundled
+    with it (the cluster `-lc`/`-ec`/`-xc`/`-cx`/`-fc`), a `--` after it, or
+    the command behind `env -S`/`--split-string` (one word env splits into an
+    argv) and `builtin` left the inner command-string unseen. The shells'
+    options are parsed as a cluster now (`_shell_strings`), `env -S` is peeled
+    like `env -C` (`_peel`), and `rules.unwrap`/the inline-source rule got the
+    same cluster treatment — so `python3 -Ic …`, `node --eval=…`, a `deno
+    eval` subcommand and source fed on stdin (a pipe or here-string into a
+    bare interpreter) are inline source too.
+  - **Redirect forms the detector's own scan missed.** `protected_state` kept
+    a second copy of "where does a redirect write", and it had drifted from
+    `rules.redirects_to_file`: after a duplication it skipped one character too
+    many, so `2>&1>FILE` and `>&2>FILE` never saw FILE; `>& FILE` (a space
+    after the `&`) read as a close; and `segments()` split the noclobber `>|`
+    as a pipe, cutting the target into its own "command". There is **one**
+    reading of bash's redirect grammar now — `rules.redirections()`, returning
+    each redirection's operator, target and span — and both the write check and
+    the operand-stripping share it. It covers plain/append/clobber, read-write
+    `<>`, both-streams `&>`/`&>>`, `>&word` with a non-numeric word, every
+    fd-numbered and `{name}` form, glued and quoted targets; it excludes
+    descriptor dups/moves/closes, input, here-docs and here-strings.
+  - **sed's script is a program.** `sed` was auto-ALLOW with only `-i` checked,
+    so a script's `w`/`W` (write a file), `r`/`R` (read one) and — on GNU sed —
+    `e` command and `s///e` flag (run a shell command) were all "reads", and
+    `-i` in a cluster (`-ni`/`-Ei`) or as an abbreviated long option
+    (`--in-pl`) was not seen. A conservative sed-script scanner decides now
+    (`rules._sed_hazard`): sed is a read only when every script it will compile
+    parses as commands that do none of those things, or `--sandbox` is in force
+    where the script is compiled; a `-f` file (unreadable here) or any script
+    the scanner is unsure of falls to ASK. The scanner models addresses, `!`,
+    `{}`, `;`/newline separators, labels and branches, `s`/`y` with any
+    delimiter and escapes, and the `a`/`i`/`c` text commands (whose text is not
+    misread as commands).
+
+  The unifying fix is **one table** of readers that are not always reads —
+  `rules.READER_HAZARDS`, keyed per stem because the grammars differ (a prefix
+  match is right for `sed -i.bak`, wrong for rg's `--pre`; getopt_long takes
+  any unique prefix, ripgrep none; find's predicates are whole words). It
+  folds in the sed-script rule and positional-output writers, and `rules.decide`,
+  `protected_state` and `run_readonly` all consult it. An audit of every stem
+  in those three read-only sets filled it: besides sed, it caught `sort -o`,
+  `tree -o`/`-R`, `xxd`'s and `uniq`'s output operands, `less -o`/`+cmd`,
+  `file -C`, `date -s`, `ss -D`/`-K`, `hostname NAME` and `env -S` — the last
+  five all on `run_readonly`'s own (ungated) allowlist, where nothing had
+  looked at their flags. Every stem is either in the table or in the
+  audited-clean `_NO_HAZARD` set, and a test fails if one is in neither.
+  A neighbour fixed in the same pass: **backslash-newline continuations are
+  joined before any judge reads a line** (`rules.join_continuations`), because
+  bash deletes `\<newline>` before it splits anything — one such pair between
+  `$` and `(` hid a substitution from `run_readonly`, which ran it — and
+  **process substitution `<(…)`/`>(…)` now counts as substitution** in
+  `decide` and `has_substitution`, where `cat <(PROGRAM)` had been an ALLOW.
+
+  Evidence: a differential sweep of 588 ordinary dev commands plus the
+  command-like strings in the repo's tests, skills and docs moved **two**
+  verdicts — bare `python`/`python3` ALLOW→ASK, which is the stdin-inline-source
+  fix (a segment is judged alone, so `echo code | python3` must have its
+  `python3` segment ASK). Every other ordinary command, readers included, kept
+  its verdict. The lesson is the one this section already carries, a third
+  time: **two implementations of one idea drift, and the more permissive copy
+  decides** — so the redirect grammar, the reader-hazard table and the
+  continuation rule each have exactly one home now.
 - **Desktop control is confined to an app allowlist** (2026-07-31).
   `config.DESKTOP_APPS` is the whole door: no desktop tool accepts a window
   title, handle, or executable path, only a registered app name, so the model
@@ -1843,12 +1914,30 @@ jarvis/
 
   Since the same day it also owns **both narrowing suites**, because a
   boundary is only correct together with the ordinary work it lets through.
-  `redirect_shape_checks` grades 21 redirect shapes on whether they write to a
-  path — fd-duplication and quoted `>` do not, `&>file`, `>&word`,
-  `2>/dev/null` and `2>&1>out.log` do — and pins `2>&1` surviving
-  segmentation intact. `run_readonly_narrowing_checks` pins 9 quoted
+  `redirect_shape_checks` grades 44 redirect shapes on whether they write to a
+  path — fd-duplication (spaced or not), a close, a quoted `>`, input, a
+  here-doc, a here-string and a backslash-escaped `>` do not; `&>file`,
+  `>&word`, `>|`, `<>`, fd-numbered and `{name}` forms, `2>/dev/null` and
+  `2>&1>out.log` do — and pins `2>&1` and `>|` surviving segmentation intact.
+  `run_readonly_narrowing_checks` pins 9 quoted
   metacharacters still running unattended (it pinned 21 git reads too, until
-  they moved to the `git` tool). Since 2026-10-08 `gate_state_checks` owns
+  they moved to the `git` tool). **Since 2026-10-09** (this PR)
+  `reader_hazard_checks` pins the one `rules.READER_HAZARDS` table — 39 writing,
+  reading or running forms of readers caught (sed `w`/`W`/`r`/`R`/`e` scripts,
+  `sort -o`, `tree -o`/`-R`, `xxd`/`uniq` output operands, `less -o`/`+cmd`,
+  `file -C`, `date -s`, `ss -D`/`-K`, `hostname NAME`, `env -S`, and the find
+  predicates), 45 reads of the same stems still clean, and **every** stem in
+  `rules._READONLY`, `protected_state._READERS` and `shell.READ_ONLY` asserted
+  to be in the table or in the audited-clean `_NO_HAZARD` set (a new reader
+  stem in neither fails loudly). `inline_source_checks` pins the inline-source
+  rule generalised — the flag in a cluster (`python3 -Ic`), glued by `=`
+  (`node --eval=`), a subcommand (`deno eval`), and source fed on stdin (a
+  pipe or here-string into a bare interpreter, which bare `python3`/`node`/
+  `deno` therefore ASK while a named script, `-m`, or `< file` stays ALLOW).
+  `continuation_checks` pins backslash-newline joining and process
+  substitution asking. `fails_against_old_code_checks` reconstructs each
+  finding's pre-change verdict so the gap is proven real. Since 2026-10-08
+  `gate_state_checks` owns
   **shell writes to the gate's own state**, under a throwaway HOME with an
   allowlist entry for every stem in sight: 85 spellings of a write onto the
   allowlist refused (allowlisted stem, mode "all", and no approver at all),
@@ -1858,8 +1947,12 @@ jarvis/
   200-deep nesting and 2,500 spans each judged in well under a second as too
   complex to judge, never ALLOW.
   `gate_state_edge_checks` re-runs the old quoting/separator exploits as
-  verdicts (none may move but toward stricter) and pins the symlinked-folder,
-  `ROUTING_PATH`-elsewhere and explicit-`cwd` cases.
+  verdicts (none may move but toward stricter), pins the symlinked-folder,
+  `ROUTING_PATH`-elsewhere and explicit-`cwd` cases, and (2026-10-09) pins
+  the three new-grammar families — a cluster/`env -S`/`builtin` shell string,
+  the drifted redirect forms, a sed `w`/`-i` script — each a certain write
+  onto the allowlist, DENY, never asked, never run, with the allowlist file
+  byte-identical afterwards.
   Run after touching `rules.py`, `tools/shell.py`, `command_review.py`,
   `protected_state.py`, `permissions.gate`, or `dispatch()`.
 - `tests/permissions_check.py` — free checks for modes and the allowlist:
@@ -1876,6 +1969,11 @@ jarvis/
   mytool run`, wrapped, and beside a `git` entry on one line) while covering
   only itself — not the bare basename, not the same name under another path,
   not a string prefix of it, and not a second command riding behind it.
+  Since 2026-10-09 `gate_state_coverage_checks` pins that **no allowlist entry
+  covers a write onto the gate's own state** in any of the new spellings (a
+  `bash -lc`/`env -S` wrapping a `cp`, a drifted redirect, a sed `w`/`-i`
+  script, a continuation before the target), even with the stem allowlisted,
+  while a genuine read of a gate file stays covered.
   Run after touching `permissions.py`, `rules.command_targets`, or
   `approvals.py`.
 - `tests/skills_check.py` — free checks for skill tools (round-trip, bad
