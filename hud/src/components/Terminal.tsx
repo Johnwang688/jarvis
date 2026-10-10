@@ -96,7 +96,7 @@ const GONE_ROW: TerminalRow = {
 };
 
 function kib(bytes: number): string {
-  return bytes >= 1024 ? `${Math.round(bytes / 1024)} KiB` : `${bytes} bytes`;
+  return bytes >= 1024 ? `${Math.round(bytes / 1024)} KiB` : `${bytes} byte${bytes === 1 ? "" : "s"}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -586,7 +586,12 @@ export class TermSession {
     if (r.dropped) this.notePaste("stopped", r.dropped);
     if (r.held) {
       if (this.gate.latched) {
+        // Typing is paused: the notice (and its Resume) is on screen whenever
+        // a key is held, never a key swallowed without a word.
         this.heldAt = Date.now();
+        if (!this.paste || this.paste.kind !== "dropped") {
+          this.paste = { kind: "dropped", bytes: 0, resuming: false, refused: "" };
+        }
         this.mgr.changed();
       }
       return;
@@ -1191,8 +1196,10 @@ function PasteStrip(props: { s: TermSession; blocked: boolean }) {
   const p = s.paste!;
   const what =
     p.kind === "dropped"
-      ? `Paste stopped: the program in this terminal is not reading its input, so the rest of it (${kib(p.bytes)}) `
-        + "was not sent. Typing is paused until you resume."
+      ? (p.bytes > 0
+        ? `Paste stopped: the program in this terminal is not reading its input, so the rest of it (${kib(p.bytes)}) `
+          + "was not sent. Typing is paused until you resume."
+        : "The program in this terminal is not reading its input: typing is paused until you resume.")
       : p.kind === "lost"
         ? `The connection closed during a paste: the rest of it (${kib(p.bytes)}) was not sent, and will not be.`
         : `Ctrl-C stopped the paste: the rest of it (${kib(p.bytes)}) was not sent.`;
@@ -1216,10 +1223,13 @@ function PasteStrip(props: { s: TermSession; blocked: boolean }) {
           </button>
         </>
       ) : null}
-      <button type="button" className="quiet" data-testid="term-paste-dismiss" aria-label="Dismiss"
-              onClick={() => s.dismissPaste()}>
-        ×
-      </button>
+      {/* While typing is paused the notice stays: it holds the only way to resume. */}
+      {p.kind === "dropped" && s.latched ? null : (
+        <button type="button" className="quiet" data-testid="term-paste-dismiss" aria-label="Dismiss"
+                onClick={() => s.dismissPaste()}>
+          ×
+        </button>
+      )}
     </div>
   );
 }

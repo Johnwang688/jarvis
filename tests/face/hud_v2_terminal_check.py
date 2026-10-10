@@ -639,6 +639,9 @@ def _paste_checks(page, mock, base, check, until, fake):
     check("the owner is told, in words, and typing is paused",
           note.get_attribute("data-kind") == "dropped" and "not reading" in note.inner_text()
           and page.evaluate("id => window.__hudTerminals.latched(id)", tid) is True, note.inner_text()[:120])
+    check("and the notice cannot be dismissed while it holds the only way to resume",
+          page.locator(_sel(tid, '[data-testid="term-paste-dismiss"]')).count() == 0
+          and _visible(page, _sel(tid, '[data-testid="term-resume"]')))
     before = len(fake.frames(tid, sock_n))
     page.keyboard.type("abc")
     page.wait_for_timeout(200)
@@ -690,12 +693,18 @@ def _paste_checks(page, mock, base, check, until, fake):
     lost = page.locator(_sel(tid, '[data-testid="term-paste-notice"]'))
     check("and says the rest of the paste was not sent, and will not be",
           lost.count() > 0 and lost.get_attribute("data-kind") == "lost" and "will not be" in lost.inner_text())
-    page.locator(_sel(tid, '[data-testid="term-paste-dismiss"]')).click()
+    # Not even behind the owner's next keystroke: what goes out on the new
+    # socket is exactly what was typed there (a queue that outlived its
+    # socket would send the rest of the paste ahead of these keys).
     _focus_term(page, tid)
     page.keyboard.type("echo fresh")
     page.keyboard.press("Enter")
     until(lambda: "\nfresh" in _text(page, tid), timeout=3)
-    check("typing on the new socket works", b"echo fresh\r" in b"".join(new["frames"]))
+    page.wait_for_timeout(300)
+    check("typing on the new socket sends exactly the keys typed, nothing of the old paste",
+          b"".join(new["frames"]) == b"echo fresh\r", repr(b"".join(new["frames"])[:60]))
+    if lost.count():
+        page.locator(_sel(tid, '[data-testid="term-paste-dismiss"]')).click()
 
 
 def _reload_checks(page, mock, base, check, until, fake):

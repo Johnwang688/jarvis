@@ -969,7 +969,9 @@ What the HUD does with the terminal contract above (code in
   notice — never undoing a resume); typing then waits, shown, until the
   owner presses **Resume typing** (`input_resume`, retried every second
   while `input_resume_refused`, with **Reattach** and closing offered as the
-  way out); a lone Ctrl-C still goes. A Ctrl-C ends a paste still queued.
+  way out); a lone Ctrl-C still goes. While typing is paused the notice
+  cannot be dismissed — it holds the only way to resume — and a held key
+  brings it back. A Ctrl-C ends a paste still queued.
   **A socket that closes takes the rest of its paste with it**: nothing of
   it is sent on the next socket, and the owner is told.
 - **Under an authorization card nothing reaches the shell** (keys, pastes,
