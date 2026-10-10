@@ -48,7 +48,9 @@ export const PANE: Record<Side, { min: number; max: number; def: number }> = {
 /**
  * The centre pane (chat, file, diff, Monaco) is kept at least this wide —
  * by shrinking the panes, then by folding them for the render — unless the
- * window is too small even with both panes folded.
+ * window is too small even with both panes folded. A split centre needs more
+ * (lib/workspace.ts, `SHAPES`): every fitting function takes the centre's
+ * minimum as a parameter, defaulting to this one, the single layout's.
  */
 export const MAIN_MIN = 480;
 /** A folded pane's rail. */
@@ -182,11 +184,13 @@ export interface Fitted {
  * the open panes give back their slack above their minimums in proportion to
  * it, so neither is the only one to lose; past that, the minimums are drawn.
  */
-function widths(layout: PaneLayout, leftFolded: boolean, rightFolded: boolean, available: number) {
+function widths(
+  layout: PaneLayout, leftFolded: boolean, rightFolded: boolean, available: number, mainMin: number,
+) {
   const left = leftFolded ? RAIL : clampWidth("left", layout.left);
   const right = rightFolded ? RAIL : clampWidth("right", layout.right);
   if (!Number.isFinite(available) || available <= 0) return { left, right };
-  const over = left + right + MAIN_MIN - available;
+  const over = left + right + mainMin - available;
   if (over <= 0) return { left, right };
   const slackL = leftFolded ? 0 : left - PANE.left.min;
   const slackR = rightFolded ? 0 : right - PANE.right.min;
@@ -209,15 +213,19 @@ function widths(layout: PaneLayout, leftFolded: boolean, rightFolded: boolean, a
  *
  * `prefer` is a pane the owner opened by hand while the window had folded it:
  * it is never folded by the window, and the other pane folds first instead.
+ * `mainMin` is the centre's minimum: MAIN_MIN for one pane, more for a split
+ * (lib/workspace.ts decides which, and drops panes when even this fails).
  */
-export function fitLayout(layout: PaneLayout, available: number, prefer: Side | null = null): Fitted {
+export function fitLayout(
+  layout: PaneLayout, available: number, prefer: Side | null = null, mainMin: number = MAIN_MIN,
+): Fitted {
   let leftFolded = layout.leftCollapsed;
   let rightFolded = layout.rightCollapsed;
   let autoLeft = false;
   let autoRight = false;
   if (Number.isFinite(available) && available > 0) {
     const fits = () =>
-      (leftFolded ? RAIL : PANE.left.min) + (rightFolded ? RAIL : PANE.right.min) + MAIN_MIN <= available;
+      (leftFolded ? RAIL : PANE.left.min) + (rightFolded ? RAIL : PANE.right.min) + mainMin <= available;
     const order: Side[] = prefer === "left" ? ["right"] : prefer === "right" ? ["left"] : ["right", "left"];
     for (const side of order) {
       if (fits()) break;
@@ -225,7 +233,9 @@ export function fitLayout(layout: PaneLayout, available: number, prefer: Side | 
       if (side === "left" && !leftFolded) leftFolded = autoLeft = true;
     }
   }
-  return { ...widths(layout, leftFolded, rightFolded, available), leftFolded, rightFolded, autoLeft, autoRight };
+  return {
+    ...widths(layout, leftFolded, rightFolded, available, mainMin), leftFolded, rightFolded, autoLeft, autoRight,
+  };
 }
 
 /**
@@ -233,10 +243,10 @@ export function fitLayout(layout: PaneLayout, available: number, prefer: Side | 
  * leaves the centre its minimum beside the other pane as drawn — never below
  * its own minimum.
  */
-export function maxWidth(side: Side, otherDrawn: number, available: number): number {
+export function maxWidth(side: Side, otherDrawn: number, available: number, mainMin: number = MAIN_MIN): number {
   const p = PANE[side];
   if (!Number.isFinite(available) || available <= 0) return p.max;
-  return Math.max(p.min, Math.min(p.max, Math.floor(available - MAIN_MIN - otherDrawn)));
+  return Math.max(p.min, Math.min(p.max, Math.floor(available - mainMin - otherDrawn)));
 }
 
 /** A width from a drag: `dx` is the pointer's travel in the zoomed space. */
@@ -256,23 +266,39 @@ export const KEY_STEP_BIG = 64;
 export function keyWidth(
   side: Side, current: number, key: string, shift: boolean, max: number,
 ): number | null {
-  const p = PANE[side];
+  return keyStep("x", current, key, shift, PANE[side].min, max, side === "left" ? 1 : -1);
+}
+
+/**
+ * A value from a key on any separator: the side panes', a split's, the
+ * panel's. `axis` is the way the edge moves: "x" for a vertical separator
+ * (Left/Right), "y" for a horizontal one (Up/Down). `edge` is +1 when moving
+ * the edge right or down grows the value and -1 when it shrinks it (the
+ * status pane's edge, the panel's top edge). Home and End go to the ends,
+ * Shift takes the bigger step, and any other key is null.
+ */
+export function keyStep(
+  axis: "x" | "y", current: number, key: string, shift: boolean, min: number, max: number, edge: 1 | -1 = 1,
+): number | null {
   const step = shift ? KEY_STEP_BIG : KEY_STEP;
-  const edge = side === "left" ? 1 : -1;
-  let w: number;
+  const fwd = axis === "x" ? "ArrowRight" : "ArrowDown";
+  const back = axis === "x" ? "ArrowLeft" : "ArrowUp";
+  let v: number;
   switch (key) {
-    case "ArrowRight": w = current + step * edge; break;
-    case "ArrowLeft": w = current - step * edge; break;
-    case "Home": w = p.min; break;
-    case "End": w = max; break;
+    case fwd: v = current + step * edge; break;
+    case back: v = current - step * edge; break;
+    case "Home": v = min; break;
+    case "End": v = max; break;
     default: return null;
   }
-  return Math.min(max, Math.max(p.min, Math.round(w)));
+  return Math.min(max, Math.max(min, Math.round(v)));
 }
 
 // ---- shortcuts --------------------------------------------------------------
 
-export type Shortcut = "zoomIn" | "zoomOut" | "zoomReset" | "toggleLeft" | "toggleRight";
+export type Shortcut =
+  | "zoomIn" | "zoomOut" | "zoomReset" | "toggleLeft" | "toggleRight" | "togglePanel"
+  | "focus1" | "focus2" | "focus3" | "focus4";
 
 /**
  * Ctrl+= / Ctrl+- / Ctrl+0 zoom (with the numpad and shifted spellings), Ctrl+B
@@ -280,9 +306,17 @@ export type Shortcut = "zoomIn" | "zoomOut" | "zoomReset" | "toggleLeft" | "togg
  * it is the browser's bookmarks bar. Matched on `key`, not `code`: AltGr
  * arrives as Ctrl+Alt, and AltGr+B on a layout that types a letter there
  * reports that letter, so it can never fold a pane mid-word.
+ *
+ * The workspace's keys (2026-10-09). Ctrl+` shows or hides the bottom panel
+ * (VS Code's key). It takes no Alt, because AltGr+7 *is* a backtick on French
+ * layouts; where the backtick is a dead key `key` reads "Dead", so there, and
+ * only there, the physical key (`code` Backquote) is accepted. Ctrl+Alt+1 … 4
+ * focus a pane: AltGr+digit types `{[]}` on European layouts, which reports
+ * the symbol and not the digit, so it never fires mid-word. There is no cycle
+ * key, because every bracket is a character on some AltGr layout.
  */
 export function shortcutFor(e: {
-  key: string; ctrlKey: boolean; metaKey?: boolean; altKey: boolean; shiftKey?: boolean;
+  key: string; code?: string; ctrlKey: boolean; metaKey?: boolean; altKey: boolean; shiftKey?: boolean;
 }): Shortcut | null {
   if (!(e.ctrlKey || e.metaKey)) return null;
   const k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
@@ -290,7 +324,11 @@ export function shortcutFor(e: {
     if (e.shiftKey) return null;
     return e.altKey ? "toggleRight" : "toggleLeft";
   }
-  if (e.altKey) return null;
+  if (e.altKey) {
+    if (!e.shiftKey && (k === "1" || k === "2" || k === "3" || k === "4")) return `focus${k}` as Shortcut;
+    return null;
+  }
+  if (k === "`" || (k === "Dead" && e.code === "Backquote")) return e.shiftKey ? null : "togglePanel";
   if (k === "=" || k === "+") return "zoomIn";
   if (k === "-" || k === "_") return "zoomOut";
   if (k === "0") return "zoomReset";

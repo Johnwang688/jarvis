@@ -7,15 +7,28 @@
 // `allow-scripts allow-forms` **without** `allow-same-origin`: the two
 // together are no sandbox at all, because a framed page could then reach out
 // of it and script the window that gates approvals.
+//
+// **The URL is the pane's** (2026-10-09): what was last loaded is stored with
+// the workspace (`url`, `onLoaded`), so a reload or a preset change brings it
+// back — and it is **judged again** before it is loaded again, never trusted
+// because it was once allowed. Loading the project root pins the pane to that
+// project (`onProjectRoot`), as opening a file pins a File pane.
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import { judgePreviewUrl, workshopPortFrom, workshopUrl } from "../lib/preview";
 
-export function PreviewTab(props: { projectId: string | null }) {
-  const [typed, setTyped] = useState("");
+export function PreviewTab(props: {
+  projectId: string | null;
+  /** The URL this pane last loaded (stored), loaded again at mount if it still passes. */
+  url?: string;
+  onLoaded?: (url: string) => void;
+  onProjectRoot?: (projectId: string) => void;
+}) {
+  const [typed, setTyped] = useState(props.url || "");
   const [src, setSrc] = useState("");
   const [reason, setReason] = useState("");
+  const restored = useRef(false);
   // The workshop origin of *the daemon serving this window*, from /status.
   // It used to be a constant 8403, so a HUD under test (served by a mock on
   // another port) loaded the owner's live daemon's preview for the fixture
@@ -47,11 +60,21 @@ export function PreviewTab(props: { projectId: string | null }) {
     if (!v.ok) {
       setSrc("");
       setReason(v.reason);
-      return;
+      return false;
     }
     setReason("");
     setSrc(v.url);
+    props.onLoaded?.(v.url);
+    return true;
   };
+
+  // The pane's last URL, through the same judge as a typed one.
+  useEffect(() => {
+    if (restored.current) return;
+    restored.current = true;
+    if (props.url) go(props.url);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   return (
     <div className="tabbody">
@@ -77,7 +100,7 @@ export function PreviewTab(props: { projectId: string | null }) {
             if (!props.projectId || workshopPort === null) return;
             const u = workshopUrl(props.projectId, "index.html", workshopPort);
             setTyped(u);
-            go(u);
+            if (go(u)) props.onProjectRoot?.(props.projectId);
           }}
         >
           Project root
@@ -90,7 +113,7 @@ export function PreviewTab(props: { projectId: string | null }) {
       ) : null}
       {src ? (
         <iframe
-          id="previewframe"
+          className="previewframe"
           data-testid="preview-frame"
           title="preview"
           src={src}

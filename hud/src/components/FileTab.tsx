@@ -10,8 +10,16 @@
 // The mtime guard is the read-before-write rule with a second writer in mind:
 // a 409 means someone else wrote the file since it was read, and the only safe
 // answer is to reload rather than to clobber.
+//
+// **A File pane is one project's, for as long as it is mounted** (2026-10-09).
+// The tab used to save to `pid + file.path` with whatever project was current
+// *at save time*, so a file pane left open while the chat moved to another
+// project would have written its buffer into the wrong project. Now the pane
+// pins its project when it opens a file (`onOpened`), and App keys this
+// component by that project: a different project is a fresh mount with
+// nothing open, so a save can never land anywhere but where it was read.
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api, ApiError } from "../api";
 import type { Tree, TreeEntry } from "../types";
 import { CodeEditor } from "./Editor";
@@ -91,12 +99,24 @@ function Node(props: {
   );
 }
 
-export function FileTab(props: { projectId: string | null }) {
+export function FileTab(props: {
+  projectId: string | null;
+  /** A file opened here: the pane pins itself to this project. */
+  onOpened?: (projectId: string) => void;
+  /** A narrow split pane: the tree folds behind a toggle. */
+  narrow?: boolean;
+  /** The buffer holds an unsaved edit (or no longer does). Told false on unmount. */
+  onDirty?: (dirty: boolean) => void;
+}) {
   const [file, setFile] = useState<Open | null>(null);
   const [text, setText] = useState("");
   const [note, setNote] = useState("");
   const [renderedOnly, setRenderedOnly] = useState(false);
-  const pid = props.projectId;
+  const [treeOpen, setTreeOpen] = useState(false);
+  // Read once, at mount: the key App gives this component is the project, so
+  // a prop that changed under an open buffer would be a bug, not a feature.
+  const [pid] = useState(props.projectId);
+  const onOpened = props.onOpened;
 
   const open = useCallback(
     async (path: string) => {
@@ -107,11 +127,13 @@ export function FileTab(props: { projectId: string | null }) {
         setFile({ path: r.path, content: r.content || "", mtime: r.mtime, protected: !!r.protected });
         setText(r.content || "");
         setRenderedOnly(isMarkdown(path));
+        setTreeOpen(false);
+        onOpened?.(pid);
       } catch (e: any) {
         setNote(e.message);
       }
     },
-    [pid],
+    [pid, onOpened],
   );
 
   const save = async () => {
@@ -134,15 +156,36 @@ export function FileTab(props: { projectId: string | null }) {
     }
   };
 
+  // An unsaved edit is said out loud, so App can refuse to close this
+  // buffer behind the owner's back (a "follow chat", a project that went
+  // away, a window closing). The minimal guard; the editor plan does more.
+  const dirty = !!file && !file.protected && text !== file.content;
+  const tell = useRef(props.onDirty);
+  tell.current = props.onDirty;
+  useEffect(() => tell.current?.(dirty), [dirty]);
+  useEffect(() => () => tell.current?.(false), []);
+
   if (!pid) return <div className="pad muted">Pick a project.</div>;
 
+  const showTree = !props.narrow || treeOpen || !file;
   return (
     <div className="split">
-      <div className="filetree" data-testid="filetree">
+      <div className="filetree" data-testid="filetree" style={showTree ? undefined : { display: "none" }}>
         <Node projectId={pid} dir="" depth={0} onOpen={open} selected={file?.path || ""} />
       </div>
       <div className="editorwrap">
         <div className="toolbar">
+          {props.narrow && file ? (
+            <button
+              type="button"
+              data-testid="tree-toggle"
+              aria-pressed={showTree}
+              title={showTree ? "Hide the files" : "Show the files"}
+              onClick={() => setTreeOpen((o) => !o)}
+            >
+              Files
+            </button>
+          ) : null}
           <span className="path" data-testid="file-path">{file?.path || "no file open"}</span>
           {file && isMarkdown(file.path) ? (
             <button type="button" data-testid="toggle-rendered" onClick={() => setRenderedOnly((v) => !v)}>
