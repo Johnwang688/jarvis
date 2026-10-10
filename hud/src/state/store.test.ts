@@ -89,7 +89,7 @@ describe("several chats: each pane its own conversation (WP-B)", () => {
     expect(s.chats[2].draft).toBe("");
   });
 
-  it("lets only the voice target's turn move the orb", () => {
+  it("lets only the selected chat's turn move the orb", () => {
     let s = withChats({ 1: { busy: true }, 2: { busy: true } }, { selectedChat: 1, orb: "thinking" });
     s = reduce(s, { type: "op_start", pane: 2, op: { call_id: "c", name: "t", started: 1 } });
     expect(s.orb).toBe("thinking");
@@ -110,7 +110,7 @@ describe("several chats: each pane its own conversation (WP-B)", () => {
     expect((s.chats[3] as any).error).toBeUndefined();
   });
 
-  it("repaints the orb from the new voice target's turn, but not over the microphone", () => {
+  it("repaints the orb from the newly selected chat's turn, but not over the microphone", () => {
     const s = withChats({ 1: { busy: true }, 2: { busy: false } }, { selectedChat: 1, orb: "thinking" });
     expect(reduce(s, { type: "select", pane: 2 }).orb).toBe("idle");
     const tooling = withChats({ 2: { busy: true, ops: [{ call_id: "c", name: "t", started: 1 }] } }, { selectedChat: 1 });
@@ -122,7 +122,7 @@ describe("several chats: each pane its own conversation (WP-B)", () => {
     expect(reduce(s, { type: "select", pane: 1 })).toBe(s);
   });
 
-  it("drops an answered card back to the voice target's turn", () => {
+  it("drops an answered card back to the selected chat's turn", () => {
     const s = withChats({ 1: { busy: false }, 2: { busy: true } },
                         { selectedChat: 2, orb: "approval", approvals: [{ req_id: "r" } as any] });
     expect(reduce(s, { type: "approval_drop", req_id: "r" }).orb).toBe("thinking");
@@ -222,7 +222,7 @@ describe("a transcript belongs to its thread (review of PR #27)", () => {
   });
 });
 
-describe("what the microphone says follows the voice target (review of PR #27)", () => {
+describe("what the microphone says follows the selected chat (review of PR #27)", () => {
   it("moves a capture status off the pane that stops being the target", () => {
     const s = reduce(withChats({ 1: { status: "LISTENING · SPEAK NOW" } }, { selectedChat: 1 }), { type: "select", pane: 2 });
     expect([s.chats[1].status, s.chats[2].status]).toEqual(["", "LISTENING · SPEAK NOW"]);
@@ -238,14 +238,14 @@ describe("what the microphone says follows the voice target (review of PR #27)",
 });
 
 describe("the test hook's view of the store", () => {
-  it("lays the voice target's conversation over the window's fields", () => {
+  it("lays the selected chat's conversation over the window's fields", () => {
     const s = withChats({ 1: { threadId: "a" }, 2: { threadId: "b", busy: true } }, { selectedChat: 2 });
     const flat = flatState(s);
     expect([flat.threadId, flat.busy]).toEqual(["b", true]);
     expect(flat.chats[1].threadId).toBe("a");
   });
 
-  it("sends a legacy patch's conversation fields to the voice target's pane, the rest to the window", () => {
+  it("sends a legacy patch's conversation fields to the selected chat's pane, the rest to the window", () => {
     const acts = compatActions({ type: "patch", patch: { threadId: "kt9", compose: null, error: "" } }, 3);
     expect(acts).toEqual([
       { type: "chat", pane: 3, patch: { threadId: "kt9", compose: null } },

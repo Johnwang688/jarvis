@@ -345,7 +345,12 @@ export default function App() {
       const prior = { busy: chat.busy, turnThreadId: chat.turnThreadId, orb: at.orb, status: chat.status };
       // What this send tracks until it knows its thread: a compose row's turn
       // is tracked under this send's own id, then under the thread it opens.
-      let tracked = threadId ?? local;
+      // A retry whose thread was opened by a failed first send knows it now:
+      // tracked under it from the start, because nothing is awaited before
+      // the retarget below, so `live` would not yet hold the placeholder and
+      // the turn would stay tracked under it — its `turn_finished` would never
+      // free the pane, and the mic would stay suppressed.
+      let tracked = threadId ?? compose?.openedId ?? local;
       dispatch({
         type: "message", pane,
         message: { role: "user", text, local, ...(steering ? { mark: "steering" as const } : {}) },

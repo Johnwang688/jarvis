@@ -78,7 +78,7 @@ describe("routing an event to its pane", () => {
     expect(routeEvent("e", c, { ...none, 4: "e" }, 1).mine).toEqual([4]);
   });
 
-  it("sends an event with no thread to the voice target, as it went to the one conversation", () => {
+  it("sends an event with no thread to the selected chat, as it went to the one conversation", () => {
     expect(routeEvent(undefined, c, none, 3)).toEqual({ mine: [3], ours: [] });
     expect(routeEvent(null, c, none, 1)).toEqual({ mine: [1], ours: [] });
   });
@@ -104,7 +104,7 @@ describe("handing words back", () => {
     expect(giveBackPane("zz", c, none, 1)).toBeNull();
   });
 
-  it("with no thread yet, goes back where they were typed, else to the voice target", () => {
+  it("with no thread yet, goes back where they were typed, else to the selected chat", () => {
     expect(giveBackPane(null, c, none, 1, 2)).toBe(2);
     expect(giveBackPane(null, c, none, 3)).toBe(3);
   });
@@ -157,11 +157,11 @@ describe("where a thread click lands", () => {
     expect(chatTarget(shaped(["chat", "chat"], "cols2", 2), [1, 2], 1)).toEqual({ pane: 2, switches: false });
   });
 
-  it("else in the voice target", () => {
+  it("else in the selected chat", () => {
     expect(chatTarget(shaped(["chat", "chat", "file"], "cols3", 3), [1, 2, 3], 2)).toEqual({ pane: 2, switches: false });
   });
 
-  it("else in a drawn chat pane, before the voice target is known", () => {
+  it("else in a drawn chat pane, before the selected chat is known", () => {
     expect(chatTarget(shaped(["preview", "chat"], "cols2", 1), [1, 2], 1)).toEqual({ pane: 2, switches: false });
   });
 
@@ -213,7 +213,7 @@ describe("open beside", () => {
 describe("what the sidebar marks", () => {
   const w = shaped(["chat", "chat", "file", "chat"], "cols3", 2);
 
-  it("every drawn chat pane, and the voice target's conversation even off screen", () => {
+  it("every drawn chat pane, and the selected chat's conversation even off screen", () => {
     expect(sidebarPanes(w, [1, 2, 3], 2)).toEqual([1, 2]);
     expect(sidebarPanes(shaped(["file"], "single", 1), [1], 1)).toEqual([1]);
     expect(sidebarPanes(w, [1, 2, 3], 4)).toEqual([1, 2, 4]);

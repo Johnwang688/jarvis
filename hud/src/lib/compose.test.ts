@@ -105,7 +105,7 @@ describe("several chats: the project per pane (WP-B)", () => {
     expect(chatProjectId(pane({ compose: { projectId: "p2" } }), threads)).toBe("p2");
   });
 
-  it("the project the window is about is the voice target's conversation's — the chat used last", () => {
+  it("the project the window is about is the selected chat's conversation's — the chat clicked last", () => {
     const s = window({ 1: pane({ threadId: "t1" }), 2: pane({ compose: { projectId: "p2" } }) }, 1);
     expect(currentProjectId(s)).toBe("p1");
     expect(currentProjectId({ ...s, selectedChat: 2 })).toBe("p2");

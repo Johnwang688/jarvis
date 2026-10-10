@@ -1937,6 +1937,11 @@ def thread_model_checks(page, mock):
     box.press("Enter")
     tid = until(lambda: page.evaluate("window.__hud.state().threadId"))
     mock.emit("turn_finished", {"stop": "end"}, thread_id=tid)
+    # PR #27: the retry's turn was tracked under the send's own placeholder
+    # id, so this finish never freed the pane and the mic stayed suppressed.
+    check("the retried first send's turn ends with its thread's turn_finished",
+          until(lambda: page.evaluate("!window.__hud.state().busy")) is True,
+          str(page.evaluate("[window.__hud.state().busy, window.__hud.state().chats[1].turnThreadId]")))
     until(lambda: page.locator('[data-testid="provider-chip"]').count() > 0)
     check("after it the provider is fixed",
           page.locator('[data-testid="provider-chip-select"]').count() == 0
