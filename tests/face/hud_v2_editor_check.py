@@ -57,6 +57,9 @@ from tests.face.hud_v2_layout_check import (  # noqa: E402
 from tests.face.hud_v2_mock import etag_of  # noqa: E402
 
 ENV_SECRET = "sk-mock-ed2-fake-0000"
+# Wide enough that panes 2 and 3 of three columns are not narrow (a narrow
+# pane folds its tree and opens every file pinned).
+WIDE = (2400, 1000)
 TWO = json.dumps({"preset": "cols3", "focused": 2,
                   "panes": [{"view": "chat"}, {"view": "file"}, {"view": "file"}, {"view": "task"}]})
 
@@ -96,7 +99,7 @@ def _fresh(page, mock, until, ws: str | None = TWO, keep_files=None):
             pass
     page.on("dialog", accept)
     try:
-        page.set_viewport_size({"width": 1600, "height": 900})
+        page.set_viewport_size({"width": WIDE[0], "height": WIDE[1]})
         _set_storage(page, zoom="100", layout="{}")
         _set_ws(page, ws)
         _boot(page, mock, None, until, reload=True)
@@ -110,9 +113,7 @@ def _open(page, until, n: int, name: str, double: bool = False) -> bool:
     row = page.locator(_pane(n, f'[data-testid="file-{name}"]'))
     until(lambda: row.count() > 0, timeout=4)
     toggle = page.locator(_pane(n, '[data-testid="tree-toggle"]'))
-    # A narrow pane folds its tree a moment after a file opens: let any such
-    # moment pass, then unfold it with "Files" if it is folded.
-    time.sleep(0.45)
+    # A narrow pane folds its tree once a file opens: unfold it with "Files".
     for _ in range(3):
         if not row.first.is_visible() and toggle.count():
             toggle.click()
@@ -156,7 +157,7 @@ def _type(page, until, n: int, text: str) -> bool:
 
 def editor_checks(browser, mock, base, check, until, guard, init_script):
     print("\neditor: buffers, tabs, the guarded save, env files (ED-2)")
-    ctx = browser.new_context(viewport={"width": 1600, "height": 900}, permissions=["microphone"])
+    ctx = browser.new_context(viewport={"width": WIDE[0], "height": WIDE[1]}, permissions=["microphone"])
     guard(ctx)
     ctx.add_init_script(init_script)
     page = ctx.new_page()
@@ -166,7 +167,7 @@ def editor_checks(browser, mock, base, check, until, guard, init_script):
     keep = {k: dict(v) for k, v in mock.world["files"].items()}
     try:
         _boot(page, mock, base, until)
-        for section in (_tab_checks, _shared_checks, _reload_in_place_checks, _conflict_checks,
+        for section in (_tab_checks, _narrow_checks, _shared_checks, _reload_in_place_checks, _conflict_checks,
                         _gone_checks, _persist_checks, _env_checks, _kinds_checks, _add_to_chat_checks,
                         _unmount_checks, _card_checks):
             _fresh(page, mock, until, keep_files=keep)
@@ -237,6 +238,22 @@ def _tab_checks(page, mock, check, until):
     check("Save saves it first, then closes the tab",
           calc.count() == 0 and len(sent) == 1 and sent[0]["path"] == "calc.py"
           and mock.world["files"]["calc.py"]["content"].endswith("#pinned_by_an_edit"), str(sent))
+
+
+def _narrow_checks(page, mock, check, until):
+    """A narrow pane folds its tree behind "Files" the moment a file opens, so
+    there is nothing to browse by clicking: every open there is a pinned tab."""
+    page.set_viewport_size({"width": 1500, "height": 900})
+    _boot(page, mock, None, until, reload=True)
+    row = page.locator(_pane(2, '[data-testid="file-calc.py"]'))
+    until(lambda: row.count() > 0, timeout=4)
+    row.click()
+    tab = page.locator(_tab(2, "calc.py"))
+    until(lambda: tab.count() == 1, timeout=4)
+    tree = page.locator(_pane(2, '[data-testid="filetree"]'))
+    check("in a narrow pane a click opens a pinned tab and folds the tree at once",
+          tab.get_attribute("data-preview") == "false" and not tree.is_visible()
+          and page.locator(_pane(2, '[data-testid="tree-toggle"]')).count() == 1)
 
 
 def _shared_checks(page, mock, check, until):

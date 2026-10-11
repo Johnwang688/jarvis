@@ -113,9 +113,6 @@ function Node(props: {
   );
 }
 
-/** How long a narrow pane's tree waits after a single click before it folds. */
-const DOUBLE_CLICK_MS = 400;
-
 const READONLY_LABEL: Record<string, string> = {
   gate: "read-only: permission state",
   safety: "read-only: safety layer",
@@ -162,13 +159,6 @@ export function FileTab(props: {
   const alive = useRef(true);
   const [note, setNote] = useState("");
   const [treeOpen, setTreeOpen] = useState(false);
-  // A narrow pane folds its tree once a file opens — a moment after a single
-  // click, so the second click of a double click (pin) still lands on the row.
-  const [treeHold, setTreeHold] = useState(false);
-  const holdTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  useEffect(() => () => {
-    if (holdTimer.current) clearTimeout(holdTimer.current);
-  }, []);
   const [mdRead, setMdRead] = useState<Record<string, boolean>>({});
   // Reload over an unsaved edit, or closing the last tab on one: what was asked.
   const [ask, setAsk] = useState<{ kind: "reload" | "close"; path: string } | null>(null);
@@ -274,10 +264,10 @@ export function FileTab(props: {
   const open = (path: string, pin: boolean) => {
     setAsk(null);
     setTreeOpen(false);
-    if (holdTimer.current) clearTimeout(holdTimer.current);
-    setTreeHold(!pin);
-    if (!pin) holdTimer.current = setTimeout(() => setTreeHold(false), DOUBLE_CLICK_MS);
-    setTabs(openTab(tabsNow.current, path, { pin, keepPreview: (p) => !!bufOf(p)?.dirty }));
+    // A narrow pane folds its tree behind "Files" the moment a file opens, so
+    // there is no browsing click to click: every open there is a pinned tab.
+    const pinned = pin || !!props.narrow;
+    setTabs(openTab(tabsNow.current, path, { pin: pinned, keepPreview: (p) => !!bufOf(p)?.dirty }));
   };
 
   const close = (path: string, discard = false) => {
@@ -370,7 +360,7 @@ export function FileTab(props: {
 
   if (!pid) return <div className="pad muted">Pick a project.</div>;
 
-  const showTree = !props.narrow || treeOpen || treeHold || !active;
+  const showTree = !props.narrow || treeOpen || !active;
   const env = view?.kind === "env";
   return (
     <div className="split">
@@ -515,8 +505,8 @@ export function FileTab(props: {
           </div>
         ) : null}
         {everEditor ? (
-          <div className={"edbody" + (md && !read && !comparing ? " mdsplit" : "")}
-               data-testid={md && !read && !comparing ? "md-split" : undefined}
+          <div className={"edbody" + (md && model && !read && !comparing ? " mdsplit" : "")}
+               data-testid={md && model && !read && !comparing ? "md-split" : undefined}
                style={!active || view?.kind === "withheld" ? { display: "none" } : undefined}>
             <PaneEditor
               model={model}
@@ -529,12 +519,12 @@ export function FileTab(props: {
                 editorRef.current = ed;
               }}
             />
-            {md && !read && !comparing ? (
+            {md && model && !read && !comparing ? (
               <div className="mdrender" data-testid="md-preview">
                 <Markdown text={mdText} className="" />
               </div>
             ) : null}
-            {md && read && !comparing ? (
+            {md && model && read && !comparing ? (
               <div className="mdrender" data-testid="md-rendered">
                 <Markdown text={mdText} className="" />
               </div>
