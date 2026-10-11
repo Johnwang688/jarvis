@@ -11,11 +11,18 @@
 // panes (WP-G1): a pane is known by its id (`pane-<id>`, its React key) and
 // carries its slot, the number the owner reads, as `data-slot`.
 //
-// In the single layout — the default — pane 1 is the only pane mounted and
-// its header is the old tab row exactly: the five view buttons and, on the
-// right, the profile select. The split-only chrome (the focus line, the
-// context, the compact view menu) is drawn only when there is more than one
-// pane, so the default window renders as it did.
+// In the single layout — the default — one pane is mounted and its header is
+// the old tab row: the view buttons, the split button (WP-G2: that is how one
+// pane becomes two) and, on the right, the profile select. The split-only
+// chrome (the focus line, the context, the compact view menu, the ×) is drawn
+// only when there is more than one pane.
+//
+// Split and × (WP-G2): the split button adds a copy of the pane after it (App
+// decides what the copy shows and whether one fits); × closes exactly that
+// pane, asking first in an inline strip when App says it holds something that
+// cannot wait (an unsaved edit, a compose row's unsent words). A × clicked
+// within CLOSE_GUARD_MS of a close, or as a double-click's second click,
+// closes nothing. A pane neither drawn nor hidden by ⊞ is unmounted.
 //
 // Several chats (WP-B): any pane may show chat, each its own conversation.
 // The selected chat's pane (decisions W-6: the chat pane most recently
