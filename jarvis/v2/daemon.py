@@ -336,6 +336,11 @@ class Daemon:
             cli = _cli_status(provider)
             if cli is not None:
                 providers[name.value]["cli"] = cli
+        from .hud_api import hud_build_id
+        try:
+            hud_build = hud_build_id()
+        except Exception:
+            hud_build = None
         with self._lock:
             return {"jarvis-daemon": True, "version": 2,
                     "uptime": time.monotonic() - self.started_at, "providers": providers,
@@ -357,7 +362,11 @@ class Daemon:
                     # never does.
                     "frame_hardened": bool(
                         self._server is not None
-                        and getattr(self._server.RequestHandlerClass, "frame_hardened", False))}
+                        and getattr(self._server.RequestHandlerClass, "frame_hardened", False)),
+                    # Which HUD `GET /` serves (decision C-1, ED-4): the
+                    # installed build's id, "dev" under JARVIS_HUD_DEV=1, or
+                    # null when nothing is installed (`jarvis hud install`).
+                    "hud_build": hud_build}
 
     def require(self, store, object_id):
         if not isinstance(object_id, str) or not re.fullmatch(r"[0-9a-f]{8}", object_id):

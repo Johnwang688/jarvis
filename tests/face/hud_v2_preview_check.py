@@ -326,7 +326,7 @@ def main():
                 headless=True,
                 args=["--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream"])
             preview_checks(browser, mock, f"http://127.0.0.1:{mock.port}", v2.check, v2.until,
-                           lambda ctx: v2.guard_live(ctx, v2.FAILURES.append), v2.FAKE_RECOGNIZER)
+                           v2.guard, v2.FAKE_RECOGNIZER)
             browser.close()
     finally:
         mock.stop()

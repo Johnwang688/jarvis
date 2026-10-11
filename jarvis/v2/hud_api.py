@@ -34,8 +34,9 @@ FILE_CAP = 2 * 1024 * 1024
 PATCH_CAP = 1024 * 1024
 ATTACH_CAP = 4 * 1024 * 1024
 LOG = logging.getLogger(__name__)
-# What the HUD listener serves; the write tools refuse it (config.HUD_DIST, BR-0).
-HUD_DIST = config.HUD_DIST
+# What the HUD listener serves is `config.HUD_DIST`, read per request (the
+# write tools refuse the same folder, BR-0): the newest installed build
+# (`hud_install`, decision C-1), or `hud/dist` itself under JARVIS_HUD_DEV=1.
 
 # Claude Code's own `/usage` command. Undocumented, so a failure is "not
 # reported", never a number invented from the ledger. The User-Agent has to
@@ -726,6 +727,60 @@ WORKSHOP_SANDBOX = "sandbox allow-scripts allow-forms"
 # violations somewhere of its own choosing).
 _RESERVED = ("frame-ancestors", "sandbox", "report-uri", "report-to")
 
+# -- the HUD's Content-Security-Policy (editor plan §2.7, ED-4) ------------------------
+#
+# Sent on **every** response from the HUD and API listeners — the page, every
+# `/assets/*` file (a worker takes its policy from its own script's response,
+# not the page's), JSON, SSE, errors and the terminal socket's `101` — in the
+# one header WP-E's frame rule already rides in. Only code bundled at build
+# time runs in the window that gates approvals: no inline script, no script
+# from another origin, no `eval`, no plugin, no `<base>`, no form posting
+# anywhere. Why each line:
+#   - `script-src 'self'`: the bundle only. **No `'unsafe-eval'`, and no
+#     `'wasm-unsafe-eval'` yet**: nothing in the HUD compiles WebAssembly
+#     today (Monaco 0.57, xterm 6 and the HUD's own code have none), so it is
+#     left out until ED-5's tree-sitter brings the first `.wasm` and the test
+#     that loads every grammar under this policy (decided: ED-5, not here).
+#   - `worker-src 'self'`: Monaco's one `editor.worker`, a module worker
+#     Vite emits under `/assets/` (no `blob:` worker).
+#   - `connect-src 'self'`: `fetch`, the `/events` stream, the `/stt` upload
+#     and — CSP3, as Chromium implements it — same-origin `ws://` for the
+#     terminal socket (proved headless by tests/face/hud_v2_csp_check.py).
+#   - `style-src 'self' 'unsafe-inline'`: Monaco and xterm inject `<style>`
+#     elements and React writes `style=` attributes. Styles cannot run code.
+#   - `img-src 'self' data:`: the avatar `<img>` (`/avatar.svg`) and Monaco's
+#     `data:` SVG squiggles. `font-src 'self' data:`: the codicon font.
+#   - `media-src 'self'`: same-origin audio only (`/say`), should playback
+#     ever come back; the microphone and the approval chime are Web Audio,
+#     which no CSP directive governs.
+#   - `frame-src`: the Preview pane's loopback frames, by the host names a
+#     CSP can express (an IPv6 literal or another 127/8 address cannot be
+#     named, so the Preview judge refuses those with a sentence). An
+#     `http:` source also matches `https:` (CSP3). The judge already refuses
+#     the daemon's own ports; `frame-ancestors 'none'` stops the frame from
+#     becoming the HUD.
+#   - `base-uri`, `form-action`, `object-src 'none'`: nothing to allow.
+HUD_POLICY: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("default-src", ("'none'",)),
+    ("script-src", ("'self'",)),
+    ("worker-src", ("'self'",)),
+    ("connect-src", ("'self'",)),
+    ("style-src", ("'self'", "'unsafe-inline'")),
+    ("img-src", ("'self'", "data:")),
+    ("font-src", ("'self'", "data:")),
+    ("media-src", ("'self'",)),
+    ("frame-src", ("http://localhost:*", "http://*.localhost:*", "http://127.0.0.1:*",
+                   "http://0.0.0.0:*")),
+    ("base-uri", ("'none'",)),
+    ("form-action", ("'none'",)),
+    ("object-src", ("'none'",)),
+)
+# The avatar SVG's own lockdown (`GET /avatar.svg`): nothing but its own
+# inline styles, should the file ever be opened as a document.
+AVATAR_CSP = "default-src 'none'; style-src 'unsafe-inline'"
+_FETCH = frozenset({"default-src", "script-src", "worker-src", "connect-src", "style-src", "img-src",
+                    "font-src", "media-src", "frame-src", "object-src"})
+
 
 def _own_directives(extra) -> list[str]:
     """A response's own CSP directives, checked.
@@ -759,16 +814,57 @@ def _own_directives(extra) -> list[str]:
     return directives
 
 
+def _source(token: str) -> str:
+    # Keywords and schemes are case-insensitive; compare them folded.
+    return token.lower() if token.startswith("'") or token.endswith(":") else token
+
+
+def _narrowed(own: list[str]) -> list[tuple[str, tuple[str, ...]]]:
+    """`HUD_POLICY` with a response's own directives folded in — narrowing only.
+
+    A response may restate a directive the policy sets, with a subset of its
+    sources (`'none'` is the empty set, so it always narrows); anything else
+    raises ValueError: a source the policy does not allow, a directive it
+    does not set, the same directive twice. A response that states its own
+    `default-src` (necessarily `'none'`) also drops every fetch directive of
+    the policy it does not restate, so they fall back to its `'none'` — the
+    avatar's `default-src 'none'; style-src 'unsafe-inline'` keeps exactly the
+    lockdown it had before the policy existed."""
+    base = dict(HUD_POLICY)
+    stated: dict[str, tuple[str, ...]] = {}
+    for directive in own:
+        name, *sources = directive.split()
+        name = name.lower()
+        if name in stated:
+            raise ValueError(f"a response states the CSP directive {name!r} twice")
+        if name not in base:
+            raise ValueError(f"a response may only narrow a directive the HUD policy sets, not {name!r}")
+        wanted = tuple(_source(t) for t in sources)
+        allowed = {_source(t) for t in base[name]} - {"'none'"}
+        if not wanted or not (set(wanted) - {"'none'"} <= allowed) or ("'none'" in wanted and len(wanted) > 1):
+            raise ValueError(f"a response's own {name!r} may only narrow the HUD policy's")
+        stated[name] = wanted
+    merged = []
+    for name, sources in HUD_POLICY:
+        if name in stated:
+            merged.append((name, stated[name]))
+        elif "default-src" in stated and name in _FETCH:
+            continue
+        else:
+            merged.append((name, sources))
+    return merged
+
+
 def content_security_policy(*extra: str | None) -> str:
     """The one `Content-Security-Policy` the HUD and API listeners send.
 
-    Always `frame-ancestors 'none'`; a response may add directives of its own
-    (an avatar's SVG locks itself down further), checked by `_own_directives`
-    so none of them can change the frame rule. This is the function to extend
-    when the HUD gains a full policy (editor plan ED-4, which adds
-    `'wasm-unsafe-eval'`): one builder, so no response sends a second,
-    conflicting policy that drops the frame rule."""
-    return "; ".join([*_own_directives(extra), FRAME_ANCESTORS])
+    `HUD_POLICY` (ED-4) and `frame-ancestors 'none'` (WP-E), in one header; a
+    response may add directives of its own (an avatar's SVG locks itself
+    down further), checked by `_own_directives` (no comma, printable ASCII,
+    nothing reserved) and by `_narrowed` (they may only narrow the policy).
+    One builder, so no response ever sends a second, conflicting policy."""
+    merged = _narrowed(_own_directives(extra))
+    return "; ".join([*(f"{name} {' '.join(sources)}" for name, sources in merged), FRAME_ANCESTORS])
 
 
 def workshop_security_policy(*extra: str | None) -> str:
@@ -790,11 +886,11 @@ def frame_headers(handler, csp: str | None = None) -> list[tuple[str, str]]:
     return [("Content-Security-Policy", content_security_policy(csp)), ("X-Frame-Options", "DENY")]
 
 
-def binary(handler, data, mime, *, csp=None):
+def binary(handler, data, mime, *, csp=None, status=200):
     # Checked before a byte is written: a bad policy is one 400 (the
     # dispatcher's answer to a ValueError), never half a response.
-    _own_directives((csp,))
-    handler.send_response(200)
+    frame_headers(handler, csp)
+    handler.send_response(status)
     handler.send_header("Content-Type", mime)
     handler.send_header("Content-Length", str(len(data)))
     handler.send_header("Cache-Control", "no-store")
@@ -804,7 +900,60 @@ def binary(handler, data, mime, *, csp=None):
     handler.end_headers()
     handler._streaming = True
     handler.wfile.write(data)
-    return 200, None
+    return status, None
+
+
+# -- the HUD's own files (decision C-1, ED-4) -------------------------------------------
+
+_NOT_INSTALLED = (b"<!doctype html><meta charset=\"utf-8\"><title>J.A.R.V.I.S.</title>"
+                  b"<p>The HUD is not installed. Run <code>jarvis hud install</code> "
+                  b"in a terminal, then reload this window.</p>\n")
+_HUD_CAP = 64 * 1024 * 1024
+
+
+def hud_build_id() -> str | None:
+    """Which HUD this daemon serves: a build id, "dev" (hud/dist under
+    JARVIS_HUD_DEV=1), or None when nothing is installed."""
+    from . import hud_install
+    if config.HUD_DEV:
+        return "dev"
+    built = hud_install.newest(config.HUD_DIST)
+    return built.id if built else None
+
+
+def hud_files(handler, parts):
+    """`GET /` and `GET /assets/*`: the HUD, from the newest installed build.
+
+    Under JARVIS_HUD_DEV=1 (the headless suites) it is `hud/dist` as it is,
+    no link followed; otherwise only a file the build's manifest lists, still
+    matching its SHA-256 (`hud_install.read`)."""
+    from . import hud_install
+    name = "index.html" if parts == [""] else unquote("/".join(parts))
+    if ".." in Path(name).parts or name.startswith("/") or "\\" in name or "\0" in name:
+        fail(403, "asset outside HUD")
+    if config.HUD_DEV:
+        root = Path(config.HUD_DIST)
+        path = (root / name).resolve()
+        if not path.is_relative_to(root.resolve()) or (root / name).is_symlink():
+            fail(403, "asset outside HUD")
+        if not path.is_file():
+            if parts == [""]:
+                return binary(handler, b"<!doctype html><title>J.A.R.V.I.S.</title>hud/dist is absent; "
+                              b"build the HUD first.\n", "text/html; charset=utf-8", status=503)
+            fail(404, "file not found")
+        data, _ = read_file(path, _HUD_CAP)
+    else:
+        root = config.HUD_DIST
+        if parts == [""]:
+            built = hud_install.newest(root)
+            data = hud_install.read(built, "index.html") if built else None
+            if data is None:
+                return binary(handler, _NOT_INSTALLED, "text/html; charset=utf-8", status=503)
+        else:
+            data = hud_install.find(root, name)
+            if data is None:
+                fail(404, "file not found")
+    return binary(handler, data, mimetypes.guess_type(name)[0] or "application/octet-stream")
 
 
 def check_origin(handler, *, preview=False):
@@ -854,7 +1003,7 @@ def pickers(handler, daemon, parts, query):
             art = avatars.svg(av) if av else None
             if not art:
                 fail(404, "no avatar art")
-            return binary(handler, art.encode(), "image/svg+xml", csp="default-src 'none'; style-src 'unsafe-inline'")
+            return binary(handler, art.encode(), "image/svg+xml", csp=AVATAR_CSP)
         if name == "voices":
             return 200, {"current": voice.selected_voice(), "override": voice._voice_override, "voices": voice.catalog()}
         if name == "models":
@@ -1080,17 +1229,7 @@ def route(handler, daemon, parts, query):
     from .daemon import _object, safe_list
     method, stores = handler.command, daemon.stores
     if method == "GET" and (parts == [""] or parts[0] == "assets"):
-        if parts == [""]:
-            path = HUD_DIST / "index.html"
-            if not path.is_file():
-                return binary(handler, b"<!doctype html><title>J.A.R.V.I.S.</title>hud/dist is absent; build the HUD first.\n", "text/html; charset=utf-8")
-        else:
-            name = unquote("/".join(parts))
-            path = (HUD_DIST / name).resolve()
-            if ".." in Path(name).parts or not path.is_relative_to(HUD_DIST.resolve()) or path.is_symlink():
-                fail(403, "asset outside HUD")
-        data, _ = read_file(path, 32 * 1024 * 1024)
-        return binary(handler, data, mimetypes.guess_type(path.name)[0] or "application/octet-stream")
+        return hud_files(handler, parts)
     if "/".join(parts) in ("avatar.svg", "avatars", "avatar", "voices", "voice", "models", "models/catalog", "model", "mute", "say", "stt"):
         return pickers(handler, daemon, parts, query)
     if parts[0] == "terminals":

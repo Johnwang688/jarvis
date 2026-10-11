@@ -250,7 +250,7 @@ def denied_file(target: str) -> str | None:
         if v1_files._hud_build(resolved):
             return (f"{path.name} is in the built HUD the daemon serves, whose script "
                     "can approve what the owner is asked (BR-0). Change the HUD's "
-                    "source instead; the owner rebuilds it.")
+                    "source instead; the owner installs it with `jarvis hud install`.")
         if v1_files._self_protected(path):
             return (f"{path.name} is part of Jarvis's safety layer and can only "
                     "be changed by the owner by hand. Say what you wanted "

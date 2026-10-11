@@ -168,7 +168,10 @@ class Backend(unittest.TestCase):
                                 # Never the owner's real Discord files: the guild
                                 # file decides `GET /discord`'s answer (B1).
                                 DISCORD_GUILD_PATH=self.root / "discord_guild.json",
-                                DISCORD_TOKEN_PATH=self.root / "discord_token.json").items():
+                                DISCORD_TOKEN_PATH=self.root / "discord_token.json",
+                                # Never the owner's installed HUD (C-1, ED-4).
+                                HUD_DIR=self.root / "hud-installed", HUD_DIST=self.root / "hud-installed",
+                                HUD_DEV=False).items():
             guard = patch.object(config, name, value)
             guard.start()
             self.addCleanup(guard.stop)
@@ -300,16 +303,25 @@ class Backend(unittest.TestCase):
             self.assertIs(status["frame_hardened"], True)
             self.assertEqual(self.headers["X-Frame-Options"], "DENY")
             self.assertIn("frame-ancestors 'none'", self.headers["Content-Security-Policy"])
-            # Either the built HUD (title pinned for FORBIDDEN_TITLES) or, with no
-        # build present, the placeholder naming hud/dist.
-        page = self.request("GET", "/", port=port)
-        self.assertTrue(b"<title>J.A.R.V.I.S.</title>" in page or b"hud/dist" in page)
+            # Nothing installed (C-1): a 503 that names the command, with the
+            # title pinned for FORBIDDEN_TITLES.
+            conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+            try:
+                conn.request("GET", "/")
+                response = conn.getresponse()
+                page = response.read()
+            finally:
+                conn.close()
+            self.assertEqual(response.status, 503, page)
+            self.assertTrue(response.getheader("Content-Type", "").startswith("text/html"))
+            self.assertIn(b"<title>J.A.R.V.I.S.</title>", page)
+            self.assertIn(b"jarvis hud install", page)
         # Simulate a separately built HUD without writing hud/dist.
         dist = self.root / "dist"
         (dist / "assets").mkdir(parents=True)
         (dist / "index.html").write_text("built HUD")
         (dist / "assets" / "app.js").write_text("console.log('HUD')")
-        with patch.object(H, "HUD_DIST", dist):
+        with patch.object(config, "HUD_DIST", dist), patch.object(config, "HUD_DEV", True):
             self.assertEqual(self.request("GET", "/"), b"built HUD")
             self.assertIn(b"console", self.request("GET", "/assets/app.js"))
             self.request("GET", "/assets/no.js", status=404)

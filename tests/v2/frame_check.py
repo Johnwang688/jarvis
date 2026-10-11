@@ -158,7 +158,10 @@ class Base(unittest.TestCase):
                                 AVATAR_ENV="",
                                 DISCORD_GUILD_PATH=self.root / "guild.json",
                                 DISCORD_TOKEN_PATH=self.root / "discord_token.json",
-                                TERMINAL_SHELL=str(FAKE_SHELL)).items():
+                                TERMINAL_SHELL=str(FAKE_SHELL),
+                                # Never the owner's installed HUD (C-1, ED-4).
+                                HUD_DIR=self.root / "hud-installed", HUD_DIST=self.root / "hud-installed",
+                                HUD_DEV=False).items():
             guard = patch.object(config, name, value)
             guard.start()
             self.addCleanup(guard.stop)
@@ -393,7 +396,7 @@ class FrameHeaders(Base):
         (dist / "assets").mkdir(parents=True)
         (dist / "index.html").write_text("<!doctype html><title>J.A.R.V.I.S.</title>")
         (dist / "assets" / "app.js").write_text("console.log('HUD')")
-        with patch.object(H, "HUD_DIST", dist):
+        with patch.object(config, "HUD_DIST", dist), patch.object(config, "HUD_DEV", True):
             for listener in ("hud", "api"):
                 for path in ("/", "/assets/app.js"):
                     with self.subTest(listener=listener, path=path):
