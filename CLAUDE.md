@@ -753,12 +753,16 @@ press another button"; WP-D had it on Ctrl+` only, ⬓ never). One path,
 `togglePanel` stays the plain flip a stored layout, a reload and
 `showPanel` use, and opens nothing. Only on that gesture — never a load, a
 restored open panel, a reload or a reattach; never under a card (every
-opener is disabled, and a card that arrives while the listing is on its way
-drops it); only on a listing asked for then that came back (never on
-`listError`); never when any terminal is listed, another window's or an
-exited one included; never if a terminal was opened meanwhile or the pane
-was switched away; one at a time (a double-click opens one); a refusal is
-said in the panel, as `+` says it. While it is on its way the panel and the
+opener is disabled, and any card raised since the gesture drops it, answered
+or not — a card count, review of #41); only on a listing asked for then that
+came back (never on `listError`); never when any terminal is listed, another
+window's or an exited one included; never if a terminal was opened meanwhile,
+the panel was closed again or the pane switched away (`still`) — asked again
+once the daemon has made it, and if it changed meanwhile the terminal stays
+in the list and nothing opens, reopens or moves; one at a time, and on ⬓ and
+the menu row only a click's first counts (a double-click is one gesture and
+opens one, as Ctrl+` ignores auto-repeat); a refusal is said in the panel, as
+`+` says it. While it is on its way the panel and the
 pane say "Opening a terminal…" instead of offering a second button. With
 terminals open, a pane switched to the terminal view keeps its picker, "+ New
 terminal here" first. It needed the owner-only read fix above to work on the

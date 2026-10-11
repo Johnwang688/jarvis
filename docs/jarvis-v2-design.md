@@ -2078,8 +2078,10 @@ the panel — Ctrl+`, ⬓ or the layout menu's Panel row — opens a terminal wh
 there is none, and so does switching a pane to the terminal view (the
 owner's request, 2026-10-11: one click, not two; WP-D had ⬓ only show the
 panel). Only on that owner gesture: never on a load, a restored layout, a
-reload or a reattach, never under a card, never on a failed listing or when
-any terminal is listed, and one per gesture. A dot on ⬓ says one in the
+reload or a reattach, never under a card (nor once one has come and gone
+since), never on a failed listing or when any terminal is listed, never once
+the panel was closed again or the pane switched away (the terminal then stays
+in the list, shown nowhere), and one per gesture — a double-click is one. A dot on ⬓ says one in the
 hidden panel exited. In a terminal Ctrl+B, Ctrl+Alt+B and
 Ctrl+_ are the shell's; the zoom keys, Ctrl+` and Ctrl+Alt+N stay the HUD's;
 Space is never push-to-talk. **Under a card nothing reaches the shell** —
