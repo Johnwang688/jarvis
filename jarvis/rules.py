@@ -46,6 +46,7 @@ the same reasoning that freezes permissions.py and the approval broker.
 
 from __future__ import annotations
 
+import functools
 import re
 import shlex
 from dataclasses import dataclass, field
@@ -96,50 +97,88 @@ _DENY_PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(r">\s*/dev/(sd|nvme|hd|vd)[a-z0-9]*"), "a raw write to a block device"),
 ]
 
-# --- deny: anything that names VEX's device tool (VX-1, decision V-2) --------
+# --- deny: anything that names or runs VEX's device tool (VX-1, decision V-2) --
 #
 # `vexcom` downloads programs to a VEX V5 robot and talks to its brain. Sending
 # code to a robot is a **physical** action, so it is meant to be only the
 # owner's click in the HUD (`jarvis/v2/vex.py`): no tool, MCP tool, CLI or
-# Discord verb reaches it, and an agent command line that *names* it is DENY —
-# never put to the owner as a yes/no, because a card that offers "download to
-# the robot" can be approved by a tired owner as easily as any other.
+# Discord verb reaches it, and an agent command line that *names* it, or
+# *runs* something that could be it, is DENY — never put to the owner as a
+# yes/no, because a card that offers "download to the robot" can be approved
+# by a tired owner as easily as any other.
 #
-# "Names" is deliberately wide: the word anywhere on the line, in any case
-# (Windows is case-insensitive), in a path (`/mnt/c/…/vexcom.exe`, the Linux
-# `…/linux-x64/vexcom`, `C:\…\vexcom.exe`), behind a wrapper, inside a `sh -c`
-# / `cmd.exe /c` / `powershell -c` string, after the quote, escape and
-# expansion tricks that split a word without changing it (bash `'"\`, `$'…'`,
-# `${X}`, `${X:-vex}`, `$()`, cmd's `^` and `%X%`, PowerShell's backtick, brace
-# and bracket expansion), a glob that keeps at least four of its letters
-# (`vexc*`, `ve?com`, `*xcom.exe` — never `*vex*`, `v*` or `*.exe`, which are
-# ordinary), or a PowerShell `-EncodedCommand` (any unique prefix, `-`, `/` or
-# a dash character, `:value` or a separate word) that decodes to it. A grep or
-# a commit message that merely mentions the word is refused too — the `.env`
+# Two readings of a line, both pure text work (nothing runs):
+#
+# **What the line names** (`vexcom_reading`). Deliberately wide: the word
+# anywhere on the line, in any case (Windows is case-insensitive), in a path
+# (`/mnt/c/…/vexcom.exe`, the Linux `…/linux-x64/vexcom`, `C:\…\vexcom.exe`),
+# behind a wrapper, inside a `sh -c` / `cmd.exe /c` / `powershell -c` string,
+# after the quote, escape and expansion tricks that split a word without
+# changing it (bash `'"\`, `$'…'`, `${X}`, `${X:-vex}`, `$()`, cmd's `^` and
+# `%X%`, PowerShell's backtick, brace and bracket expansion), a glob that keeps
+# at least four of its letters (`vexc*`, `ve?com`, `*xcom.exe` — never `*vex*`,
+# `v*` or `*.exe`, which are ordinary arguments in a VEX project), or a
+# PowerShell `-EncodedCommand` (any unique prefix, `-`, `/` or a dash
+# character, `:value` or a separate word) that decodes to it. A grep or a
+# commit message that merely mentions the word is refused too — the `.env`
 # rule's trade: a refusal the model can rephrase past costs less than a
 # download nobody chose.
+#
+# **What the line runs** (`_vex_line`, below `_has_inline_source`). The
+# four-letter threshold is for *arguments* only. A word in **program
+# position** — command position, past a wrapper (`env`, `nohup`, `timeout`,
+# `xargs`, …), the program a runner starts (`uv run`, `poetry run`, `pipx
+# run`, `npx`, `npm exec`, …, options parsed), a `sh -c` string, a `$(…)` —
+# that is a glob or holds an expansion and could be `vexcom`/`vexcom.exe` by
+# its file name is a vexcom run, DENY, with no threshold: `uv run
+# /mnt/c/…/tools/v*/*/*/v*.exe --user` and `…/*/*/win32/*.exe` are downloads.
+# A program that cannot be told at all — nothing but an expansion (`$X`,
+# `"$@"`, `$(…)`), a program read from input (`xargs env`, `find -exec {}`),
+# an option the runner's table does not know that leaves two candidates — and
+# that could be vexcom is **asked whatever else stands**: ASK in v1, never
+# covered by an allowlist entry, always-ask in v2 (`vex_uncoverable`).
+#
+# **A guard that can be made slow is a guard that can be made absent**: past
+# the caps below a glob is *too complex to judge* — ASK, never ALLOW, never
+# allowlist-covered, always-ask in v2 — and the make file guard refuses.
 #
 # **An accident guard, not a boundary**, exactly as the DENY note above says —
 # and the owner's button is not a boundary either. An agent can still reach a
 # plugged-in brain: through a script it writes and runs (which can assemble the
-# name or call the device itself), through `make -f` on a makefile of its own,
-# or by POSTing to the HUD's own download route with a forged Origin (it runs
-# as the owner). What this buys is that the obvious spellings never run and
-# never become an approval card; what makes a forged download *visible* is the
-# id-only `vex_device` bus record every device action publishes. That residual
-# gap is stated, not closed: closing it needs the device to belong to a user
-# the agent's processes are not.
+# name or call the device itself), a shell fed its commands through a pipe,
+# cmd.exe's or PowerShell's own wildcard forms, a program launcher this file
+# does not model (`systemd-run` and `flock` are; `parallel`, `strace` are not),
+# `make -f` on a makefile of its own, or by POSTing to the HUD's own download
+# route with a forged Origin (it runs as the owner). What this buys is that the
+# obvious spellings never run and never become an approval card; what makes a
+# forged download *visible* is the id-only `vex_device` bus record every device
+# action publishes. That residual gap is stated, not closed: closing it needs
+# the device to belong to a user the agent's processes are not.
 _VEXCOM = "vexcom"
-_VEXCOM_TARGETS = ("vexcom", "vexcom.exe")
+_VEX_TARGETS = ("vexcom", "vexcom.exe")
 _SPLITTERS = re.compile(r"[\"'\\^`]")
 _DEFAULT_EXPANSIONS = re.compile(r"\$\{[#!]?[A-Za-z_][A-Za-z0-9_]*:?[-=+?]([^{}]*)\}")
+# `[^}$]`, not `[^}]`: a flood of `${` with no `}` made each one scan to the
+# end of the line (quadratic); stopping at the next `$` keeps it linear.
 _EMPTY_EXPANSIONS = re.compile(
-    r"\$\{[^}]*\}|\$\([^()]*\)|\$[@*#?$!0-9-]|\$[A-Za-z_][A-Za-z0-9_]*|%[^%\s]*%|`[^`]*`")
+    r"\$\{[^}$]*\}|\$\([^()]*\)|\$[@*#?$!0-9-]|\$[A-Za-z_][A-Za-z0-9_]*|%[^%\s]*%|`[^`]*`")
 _BRACES = re.compile(r"[{},\[\]]")
 _ANSI_C_QUOTE = re.compile(r"\$'((?:[^'\\]|\\.)*)'")
 _POWERSHELL = re.compile(r"(^|[\\/\s'\"])(powershell|pwsh)(\.exe)?($|[\s'\"])", re.I)
 # PowerShell takes `-`, `/` and the dash characters as a parameter's prefix.
 _PS_PREFIX = "-/\u2010\u2011\u2012\u2013\u2014\u2015\u2212"
+_WORD_SPLIT = re.compile(r"[\s;&|<>()=]+")
+
+# What one line may hold before it is too complex to judge (review round 2,
+# MED 2: `ls [[[[…` took seconds on a quadratic scan, 20,000 of them 3.4 s, and
+# the make file guard read one 40,000-`[` word for 14 s). Each glob word costs
+# a bounded scan, and there is a bounded number of them.
+GLOB_WORD_CAP = 256        # characters in a glob word's file-name part
+GLOB_META_CAP = 64         # `*`, `?` and `[` in it
+GLOB_WORDS_CAP = 512       # distinct glob words judged in one line or make file
+NAMES, COMPLEX = "names", "complex"
+TOO_COMPLEX = ("it is too complex to judge whether it names or runs vexcom, VEX's tool for "
+               "the robot, so it is asked whatever else stands")
 
 
 def _ansi_c_decoded(text: str) -> str:
@@ -151,20 +190,117 @@ def _ansi_c_decoded(text: str) -> str:
     return _ANSI_C_QUOTE.sub(decode, text)
 
 
-def _glob_could_be_vexcom(word: str) -> bool:
-    """A glob that matches vexcom's name **and keeps at least four of its
-    letters** (`vexc*`, `ve?com`, `*xcom.exe`). A glob with fewer
-    literal letters (`*vex*`, `v*`, `*.exe`, `*`) is ordinary work in a VEX
-    project and is never refused for this."""
-    from fnmatch import fnmatchcase
-    base = re.split(r"[\\/]", word)[-1].lower()
+# A glob, read the way bash reads it, as atoms: `_STAR`, `_ANY` (a `?`, or a
+# whole bracket expression — read as any one character, which can only widen
+# what it is said to match), or one literal character.
+_STAR, _ANY = object(), object()
+
+
+def _bracket_end(pat: str, i: int, posix: bool = True) -> int | None:
+    """Index just past the bracket expression bash opens at `pat[i] == "["`,
+    or None if it never closes (then the `[` is a literal). A leading `!`
+    or `^` negates and a `]` straight after that is a member. With `posix`,
+    `[:class:]`, `[=x=]` and `[.x.]` run to their own closers; without it the
+    first `]` closes (fnmatch's reading). Callers read both and take either
+    match, so a spelling the two disagree on can only widen what a glob is
+    said to match. Callers bound `pat` first."""
+    n, j = len(pat), i + 1
+    if j < n and pat[j] in "!^":
+        j += 1
+    if j < n and pat[j] == "]":
+        j += 1
+    while j < n:
+        close = pat.find("]", j)
+        if close == -1:
+            return None
+        if not posix:
+            return close + 1
+        opener = -1
+        for kind in ":=.":
+            k = pat.find("[" + kind, j, close)
+            if k != -1 and (opener == -1 or k < opener):
+                opener = k
+        if opener == -1:
+            return close + 1
+        closer = pat.find(pat[opener + 1] + "]", opener + 2)
+        j = closer + 2 if closer != -1 else opener + 1
+    return None
+
+
+def _glob_atoms(pat: str, posix: bool = True) -> list:
+    """`pat` (already cut to its file-name part) as atoms; a `[` that never
+    closes is a literal, a backslash makes the next character one."""
+    atoms: list = []
+    i, n = 0, len(pat)
+    while i < n:
+        ch = pat[i]
+        if ch == "*":
+            if not atoms or atoms[-1] is not _STAR:
+                atoms.append(_STAR)
+        elif ch == "?":
+            atoms.append(_ANY)
+        elif ch == "[":
+            end = _bracket_end(pat, i, posix)
+            if end is not None:
+                atoms.append(_ANY)
+                i = end
+                continue
+            atoms.append("[")
+        elif ch == "\\" and i + 1 < n:
+            atoms.append(_fold(pat[i + 1]))
+            i += 2
+            continue
+        else:
+            atoms.append(_fold(ch))
+        i += 1
+    return atoms
+
+
+def _fold(ch: str) -> str:
+    low = ch.lower()
+    return low if len(low) == 1 else ch
+
+
+def _atoms_match(atoms: list, target: str) -> bool:
+    """Could the atoms match `target`? Linear in the atoms: the target is a
+    short, fixed name."""
+    reach = {0}
+    end = len(target)
+    for atom in atoms:
+        if atom is _STAR:
+            reach = set(range(min(reach), end + 1))
+        else:
+            reach = {p + 1 for p in reach
+                     if p < end and (atom is _ANY or atom == target[p])}
+        if not reach:
+            return False
+    return end in reach
+
+
+def _literal_letters(atoms: list) -> int:
+    """How many characters of the glob are literal, a trailing `.exe` not
+    counted (`*xcom.exe` keeps four: x, c, o, m)."""
+    tail = atoms[-4:]
+    if len(atoms) >= 4 and all(isinstance(a, str) for a in tail) and "".join(tail) == ".exe":
+        atoms = atoms[:-4]
+    return sum(isinstance(a, str) for a in atoms)
+
+
+def _glob_reading(word: str) -> str | None:
+    """NAMES for an argument glob that could be vexcom's name **and keeps at
+    least four of its letters** (`vexc*`, `ve?com`, `*xcom.exe`); COMPLEX past
+    the caps; else None. `*vex*`, `v*`, `*.exe` and `*` are ordinary work in a
+    VEX project and are never refused for this."""
+    base = re.split(r"[\\/]", word)[-1]
     if not base or not any(c in base for c in "*?["):
-        return False
-    if not any(fnmatchcase(t, base) for t in _VEXCOM_TARGETS):
-        return False
-    # fnmatch already holds the literal pieces to vexcom's order; count them.
-    pieces = re.split(r"\[[^\]]*\]|[*?]", base.removesuffix(".exe"))
-    return sum(len(piece) for piece in pieces) >= 4
+        return None
+    if len(base) > GLOB_WORD_CAP or sum(base.count(c) for c in "*?[") > GLOB_META_CAP:
+        return COMPLEX
+    for posix in (True, False):
+        atoms = _glob_atoms(base, posix)
+        if any(_atoms_match(atoms, t) for t in _VEX_TARGETS) and _literal_letters(atoms) >= 4:
+            return NAMES
+    return None
 
 
 def _encoded_powershell(text: str) -> list[str]:
@@ -196,13 +332,15 @@ def _encoded_powershell(text: str) -> list[str]:
     return found
 
 
-def names_vexcom(command: str, _depth: int = 0) -> bool:
-    """True if this command line names VEX's device tool in any spelling the
-    note above lists. Pure text work; nothing runs."""
+def vexcom_reading(command: str, _depth: int = 0) -> str | None:
+    """NAMES if this text names VEX's device tool in any spelling the note
+    above lists, COMPLEX if a glob in it is past the caps (or there are too
+    many to judge), else None. Pure text work; nothing runs. The make file
+    guard (`vex.makefile_refusal`) reads make files with it too."""
     import unicodedata
     text = join_continuations(command or "")
     if not text.strip():
-        return False
+        return None
     variants = {text, unicodedata.normalize("NFKC", text)}
     variants |= {_ansi_c_decoded(v) for v in list(variants)}
     variants |= {_DEFAULT_EXPANSIONS.sub(r"\1", v) for v in list(variants)}
@@ -212,22 +350,37 @@ def names_vexcom(command: str, _depth: int = 0) -> bool:
     variants |= {_BRACES.sub("", v) for v in list(variants)}
     for v in variants:
         if _VEXCOM in v.casefold():
-            return True
+            return NAMES
+    complex_ = False
+    judged: set[str] = set()
     for v in variants:
-        for word in re.split(r"[\s;&|<>()=]+", v):
-            if _glob_could_be_vexcom(word):
-                return True
+        for word in _WORD_SPLIT.split(v):
+            if word in judged or not any(c in word for c in "*?["):
+                continue
+            judged.add(word)
+            if len(judged) > GLOB_WORDS_CAP:
+                return COMPLEX
+            reading = _glob_reading(word)
+            if reading == NAMES:
+                return NAMES
+            complex_ = complex_ or reading == COMPLEX
     if _depth < 2:
-        return any(names_vexcom(decoded, _depth + 1) for decoded in _encoded_powershell(text))
-    return False
+        for decoded in _encoded_powershell(text):
+            reading = vexcom_reading(decoded, _depth + 1)
+            if reading == NAMES:
+                return NAMES
+            complex_ = complex_ or reading == COMPLEX
+    return COMPLEX if complex_ else None
 
 
-def _vexcom_verdict(command: str) -> Verdict | None:
-    if names_vexcom(command):
-        return Verdict(DENY, "it names vexcom, VEX's tool for downloading to and talking to "
-                             "the robot; that is only ever the owner's click in the HUD, "
-                             "never an agent's command (build with vexbuild instead)")
-    return None
+def names_vexcom(command: str) -> bool:
+    """True if this command line names VEX's device tool (`vexcom_reading`)."""
+    return vexcom_reading(command) == NAMES
+
+
+VEXCOM_DENIED = ("it names vexcom, VEX's tool for downloading to and talking to the robot; "
+                 "that is only ever the owner's click in the HUD, never an agent's command "
+                 "(build with vexbuild instead)")
 
 
 # --- allow: runs without asking ---------------------------------------------
@@ -1650,38 +1803,6 @@ def _program_named(stem: str, args: list[str]) -> bool:
     return False
 
 
-_VEX_MODULE = re.compile(r"jarvis\.v2\.vex(\.[\w.]*)?")
-# A word after which the next word is the program a runner starts.
-_RUNNER_WORDS = frozenset({"run", "exec", "x", "--"})
-_RUNNERS = frozenset({"npx", "bunx", "uvx", "pnpx"})
-# Whose `run`/`exec`/`x` starts a program (npm's `run` starts a package.json
-# script by that name, which is not the program).
-_PROGRAM_RUNNERS = frozenset({"uv", "pipx", "poetry", "pdm", "hatch", "pixi", "conda", "bun"})
-
-
-def _runs_vex_build(tokens: list[str]) -> bool:
-    """The segment runs `vexbuild` or its module (`jarvis.v2.vex`), however it
-    is wrapped: `vexbuild`, `uv run vexbuild`, `python -m jarvis.v2.vex`,
-    `python -Im…`, `uv run python -m …`. A reader that only names the file
-    (`cat ~/.local/bin/vexbuild`) is not running it and is judged as before."""
-    if _stem(tokens) in _READONLY:
-        return False
-    for i, token in enumerate(tokens):
-        # In command position, or handed to a runner — never as an argument
-        # (`cp ~/.local/bin/vexbuild x` copies it; it does not run it).
-        if _basename(token) == "vexbuild" and (
-                i == 0 or _basename(tokens[i - 1]) in _RUNNERS
-                or (tokens[i - 1] in _RUNNER_WORDS and _stem(tokens) in _PROGRAM_RUNNERS)):
-            return True
-        if _VEX_MODULE.fullmatch(token) and i and tokens[i - 1].startswith("-") \
-                and tokens[i - 1].endswith("m") and not tokens[i - 1].startswith("--"):
-            return True
-        glued = re.fullmatch(r"-[A-Za-z]*m(.+)", token)
-        if glued and _VEX_MODULE.fullmatch(glued.group(1)):
-            return True
-    return False
-
-
 def _has_inline_source(tokens: list[str], redirects: list[Redirect] = ()) -> bool:
     """True if an interpreter was handed source on the command line."""
     for token in tokens[1:]:
@@ -1720,6 +1841,930 @@ def _has_inline_source(tokens: list[str], redirects: list[Redirect] = ()) -> boo
         from_file = any(r.op == "<" for r in redirects)
         return heredoc or not from_file
     return False
+
+
+# --- vex: what a line runs (VX-1, review round 2) ------------------------------
+#
+# **Program position is judged strictly; the four-letter threshold is for
+# arguments only** (MED 1). Round 1 let a glob through when it kept fewer than
+# four of vexcom's letters, which is right for `ls v*` and wrong for the word a
+# line *runs*: `uv run /mnt/c/…/tools/v*/*/*/v*.exe --name x --slot 1 --write
+# build/x.bin` was ALLOW (an ALLOW stem handing a glob to its program), so v1's
+# human-backed gate ran it with nobody asked and v2 allowed it under AUTO and
+# ASK alike. So every word the line will start as a program is found —
+# command position, past each wrapper, the program a runner starts (options
+# parsed), a `sh -c` string, `eval`, `watch`, `find -exec`, `xargs`, a `$(…)`,
+# backticks, process substitution and a here-string fed to a shell — and:
+#
+# * a glob, or a word holding an expansion (`${X}com.exe`, `$X.exe`), that
+#   could be `vexcom`/`vexcom.exe` by its file name is a vexcom run: DENY;
+# * a program that cannot be told — nothing but an expansion (`$X`, `"$@"`,
+#   `$(…)`), a program read from input (`xargs env`, `find -exec {}`), a
+#   candidate an option the runner's table does not know may have moved — that
+#   could be vexcom is asked whatever else stands (`vex_uncoverable`);
+# * `vexbuild`, or `jarvis.v2.vex` run as a module (`python -m`, `uv run -m`,
+#   `python -m runpy`), asks like any command (V-2).
+#
+# Runner and wrapper options are read from tables (`_Opts`). **An option the
+# table does not know may or may not take the next word, and both readings are
+# followed** (`_option_walk`), so a short table can only make a program
+# uncertain, never hide it: `uv run --no-project vexbuild` asks, as does `uv
+# run --some-future-flag x vexbuild`. Nothing here is general runner
+# unwrapping — `uv run rm -rf ~` is judged as it always was; only what could be
+# vexcom or vexbuild moves.
+_VEX_MODULE = re.compile(r"jarvis\.v2\.vex(\.[\w.]*)?")
+_PYTHON = re.compile(r"(python|pypy)[0-9.]*")
+VEXBUILD_ASKS = "this runs vexbuild, which asks unless you allowlist exactly it"
+PROGRAM_WORD_CAP = 1024    # characters in one program word
+PROGRAM_CAP = 4096         # segments and programs examined in one line
+PROGRAM_DEPTH = 4          # `sh -c`, `$(…)`, wrappers and runners followed inside each other
+SUBSTITUTION_CAP = 64      # `$(…)`, backticks and `<(…)` read in one text
+RUNS, UNKNOWN, VEXBUILD = "runs", "unknown", "vexbuild"
+
+
+class _TooComplex(Exception):
+    """Past a cap: the line is too complex to judge."""
+
+
+@dataclass(frozen=True)
+class _Opts:
+    """A wrapper's or runner's options, as far as finding its program goes."""
+    flags: str = ""                     # short letters that take no value
+    values: str = ""                    # short letters that take one
+    optional: str = ""                  # short letters whose value, if any, is glued on
+    long_flags: frozenset = frozenset()
+    long_values: frozenset = frozenset()
+    strings: frozenset = frozenset()    # options whose value is a command line (npx -c)
+    module: frozenset = frozenset()     # options that make the program a Python module
+    shell: frozenset = frozenset()      # options that make the rest one command line
+    positionals: int = 0                # words between the options and the program
+    assignments: bool = False           # NAME=VALUE words before the program (env)
+    dash: bool = False                  # a lone `-` is an option (env)
+    program: bool = True                # False: no operand is a program (script)
+
+
+def _opts(flags="", values="", optional="", lflags="", lvalues="", strings="", module="",
+          shell="", positionals=0, assignments=False, dash=False, program=True) -> _Opts:
+    return _Opts(flags, values, optional, frozenset(lflags.split()), frozenset(lvalues.split()),
+                 frozenset(strings.split()), frozenset(module.split()), frozenset(shell.split()),
+                 positionals, assignments, dash, program)
+
+
+# Wrappers: run their operand as a program (`_WRAPPERS` above unwraps the same
+# idea for every other verdict, without reading options; this table is for
+# the vex reading alone).
+_WRAPPER_OPTS = {
+    "env": _opts("i0v", "uCS", lflags="ignore-environment null debug list-signal-handling help "
+                 "version block-signal default-signal ignore-signal",
+                 lvalues="unset chdir split-string", assignments=True, dash=True),
+    "nohup": _opts(lflags="help version"),
+    "timeout": _opts("v", "sk", lflags="preserve-status foreground verbose help version",
+                     lvalues="signal kill-after", positionals=1),
+    "setsid": _opts("cfw", lflags="ctty fork wait help version"),
+    "stdbuf": _opts(values="ioe", lvalues="input output error"),
+    "nice": _opts("0123456789", "n", lvalues="adjustment"),
+    "ionice": _opts("t", "cnpPu", lflags="ignore help version",
+                    lvalues="class classdata pid pgid uid"),
+    "command": _opts("p"),
+    "exec": _opts("cl", "a"),
+    "time": _opts("pavq", "fo", lflags="portability verbose quiet append help version",
+                  lvalues="format output"),
+    "xargs": _opts("0prtxo", "adEILnPs", optional="eil",
+                   lflags="null interactive no-run-if-empty verbose exit open-tty show-limits "
+                   "help version eof replace max-lines",
+                   lvalues="arg-file delimiter max-args max-procs max-chars process-slot-var"),
+    "watch": _opts("bcCdeftgprwx", "nq", lflags="beep color no-color differences errexit chgexit "
+                   "exec no-title no-wrap no-linewrap precise help version",
+                   lvalues="interval equexit"),
+    "busybox": _opts(),
+    "systemd-run": _opts("rdtPSqG", "puEHM",
+                         lflags="user system scope remain-after-exit send-sighup same-dir pty pipe "
+                         "shell quiet collect wait no-block no-ask-password slice-inherit help "
+                         "version",
+                         lvalues="unit property description slice service-type uid gid nice "
+                         "working-directory setenv host machine on-active on-boot on-startup "
+                         "on-unit-active on-unit-inactive on-calendar timer-property "
+                         "path-property socket-property json expand-environment"),
+    "flock": _opts("sxeunoFhV", "wEc", lflags="shared exclusive unlock nonblock nb close no-fork "
+                   "verbose help version", lvalues="timeout wait conflict-exit-code command",
+                   strings="c command", positionals=1),
+    "script": _opts("aefqhV", "cEIOBTmo", optional="t", lflags="append return flush quiet help "
+                    "version", lvalues="command echo log-in log-out log-io log-timing "
+                    "logging-format output-limit", strings="c command", program=False),
+}
+
+_UV_FLAGS = ("quiet verbose native-tls offline no-cache no-progress no-config preview no-preview "
+             "managed-python no-managed-python no-python-downloads show-settings help version")
+_UV_VALUES = ("cache-dir color directory project config-file python-preference "
+              "allow-insecure-host preview-features")
+_UV_RUN = _opts(
+    "qvnhmsU", "pwifPC",
+    lflags=_UV_FLAGS + " module script gui-script all-extras no-dev dev no-default-groups "
+    "all-groups only-dev no-editable editable exact inexact no-env-file isolated active no-active "
+    "no-sync locked frozen all-packages no-project no-index upgrade reinstall pre "
+    "no-build-isolation compile-bytecode no-sources no-build no-binary refresh no-install-project "
+    "no-install-workspace no-install-local",
+    lvalues=_UV_VALUES + " extra no-extra group no-group only-group env-file with with-editable "
+    "with-requirements package python max-recursion-depth index default-index index-url "
+    "extra-index-url find-links upgrade-package reinstall-package index-strategy "
+    "keyring-provider resolution prerelease fork-strategy config-setting "
+    "no-build-isolation-package exclude-newer exclude-newer-package link-mode no-build-package "
+    "no-binary-package refresh-package python-platform torch-backend no-install-package from "
+    "constraints overrides build-constraints with-executables-from",
+    module="m module")
+_UV = _opts("qvnhV", lflags=_UV_FLAGS, lvalues=_UV_VALUES)
+_NPX = _opts("yqh", "pcw", lflags="yes no ignore-existing quiet no-install workspaces "
+             "include-workspace-root help", lvalues="package call node-options prefix userconfig "
+             "cache registry workspace shell loglevel", strings="c call")
+_NPM = _opts("ysqdgh", "pcwC", lflags="yes no silent quiet json global workspaces "
+             "include-workspace-root help", lvalues="package call workspace prefix loglevel "
+             "registry userconfig cache", strings="c call")
+_BUNX = _opts("h", "p", lflags="bun silent verbose help", lvalues="package")
+_PNPM = _opts("rh", "FC", lflags="recursive silent help", lvalues="filter dir workspace-concurrency "
+              "reporter loglevel")
+_PNPM_EXEC = _opts("rch", "FC", lflags="recursive parallel shell-mode report-summary help",
+                   lvalues="filter dir resume-from workspace-concurrency reporter",
+                   shell="c shell-mode")
+_PNPM_DLX = _opts("csh", lflags="shell-mode silent help", lvalues="package allow-build",
+                  shell="c shell-mode")
+_POETRY = _opts("qvVnh", "CP", lflags="quiet verbose version no-interaction ansi no-ansi "
+                "no-plugins no-cache help", lvalues="directory project")
+_PIPX = _opts("qvh", lflags="quiet verbose version help")
+_PIPX_RUN = _opts("eqvh", "i", lflags="no-cache path pypackages editable system-site-packages "
+                  "fetch-missing-python quiet verbose help",
+                  lvalues="spec python pip-args index-url backend")
+_PDM = _opts("vqVhI", lflags="verbose quiet version help ignore-python")
+_PDM_RUN = _opts("ljsgvqh", "p", lflags="list json site-packages global verbose quiet recreate "
+                 "help", lvalues="project venv")
+_HATCH = _opts("vqh", "ep", lflags="verbose quiet interactive no-interactive version help",
+               lvalues="env project color data-dir cache-dir config")
+_PLAIN = _opts("vqh", lflags="verbose quiet help version")
+_PIXI_RUN = _opts("vqnh", "e", lflags="frozen locked clean-env force-activate no-install "
+                  "revalidate skip-deps dry-run verbose quiet help",
+                  lvalues="manifest-path environment executable pypi-keyring-provider "
+                  "concurrent-solves concurrent-downloads color")
+_PIXI_EXEC = _opts("h", "scp", lflags="force-reinstall help", lvalues="spec channel platform with")
+_CONDA_RUN = _opts("vh", "np", lflags="no-capture-output live-stream dev debug-wrapper-scripts "
+                   "verbose help", lvalues="name prefix cwd")
+_BUN_RUN = _opts("bh", "Fcrdl", lflags="silent bun watch hot no-clear-screen smol if-present help",
+                 lvalues="cwd env-file filter config preload main-fields tsconfig-override define "
+                 "loader port conditions elide-lines")
+_STRING = "string"          # the subcommand's next word is a command line (`bun exec`)
+
+# Runners: a stem's own program table, or (its options before a subcommand,
+# {subcommand: what follows}). A subcommand not listed starts no program —
+# `uv pip`, `npm run` (a package.json script by that name, not a program).
+_RUNNER_SPECS = {
+    "npx": _NPX, "bunx": _BUNX, "uvx": _UV_RUN, "pnpx": _PNPM_DLX,
+    "uv": (_UV, {"run": _UV_RUN, "tool": (_UV, {"run": _UV_RUN})}),
+    "poetry": (_POETRY, {"run": _POETRY}),
+    "pipx": (_PIPX, {"run": _PIPX_RUN}),
+    "pdm": (_PDM, {"run": _PDM_RUN}),
+    "hatch": (_HATCH, {"run": _PLAIN}),
+    "pixi": (_PLAIN, {"run": _PIXI_RUN, "exec": _PIXI_EXEC}),
+    "conda": (_PLAIN, {"run": _CONDA_RUN}),
+    "mamba": (_PLAIN, {"run": _CONDA_RUN}),
+    "micromamba": (_PLAIN, {"run": _CONDA_RUN}),
+    "bun": (_PLAIN, {"run": _BUN_RUN, "x": _BUNX, "exec": _STRING}),
+    "npm": (_NPM, {"exec": _NPM, "x": _NPM}),
+    "pnpm": (_PNPM, {"exec": _PNPM_EXEC, "dlx": _PNPM_DLX}),
+    "yarn": (_opts("h", lvalues="cwd", lflags="help"),
+             {"exec": _opts(), "dlx": _opts("q", "p", lflags="quiet", lvalues="package")}),
+}
+_SHELL_STEMS = frozenset({"sh", "bash", "dash", "zsh", "ksh", "mksh", "ash", "yash", "posh",
+                          "fish"})
+_FIND_EXEC = frozenset({"-exec", "-execdir", "-ok", "-okdir"})
+# Words that open or close a compound command rather than name a program.
+_LEAD_WORDS = frozenset({"if", "then", "else", "elif", "do", "while", "until", "!", "{", "(",
+                         "((", "coproc", "fi", "done", "esac", "}", ")", "))", ";;"})
+_ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(\[[^\]]*\])?\+?=.*", re.S)
+
+
+def _option_walk(tokens: list[str], start: int, opts: _Opts):
+    """(indices where the program may stand, command-line strings, whether
+    the program is a module, whether the rest is one command line). An
+    index of `len(tokens)` means no program. An unknown option is followed
+    both ways — taking the next word, and not — so the set is every place
+    the program could be."""
+    n = len(tokens)
+    found: set[int] = set()
+    strings: list[str] = []
+    module = shell = False
+    todo, seen = [(start, opts.positionals)], set()
+    while todo:
+        state = todo.pop()
+        if state in seen:
+            continue
+        seen.add(state)
+        i, left = state
+        if i >= n:
+            found.add(n)
+            continue
+        token = tokens[i]
+        if token == "--":
+            found.add(min(i + 1 + left, n))
+            continue
+        if (opts.dash and token == "-") or (opts.assignments and _ASSIGNMENT.fullmatch(token)):
+            todo.append((i + 1, left))
+            continue
+        if token.startswith("--") and len(token) > 2:
+            name, eq, value = token[2:].partition("=")
+            module = module or name in opts.module
+            shell = shell or name in opts.shell
+            if name in opts.long_values:
+                if name in opts.strings:
+                    strings.append(value if eq else (tokens[i + 1] if i + 1 < n else ""))
+                todo.append((i + (1 if eq else 2), left))
+            elif name in opts.long_flags or eq:
+                if name in opts.strings and eq:
+                    strings.append(value)
+                todo.append((i + 1, left))
+            else:
+                todo += [(i + 1, left), (i + 2, left)]
+            continue
+        if token.startswith("-") and len(token) > 1:
+            letters = token[1:]
+            for k, letter in enumerate(letters):
+                module = module or letter in opts.module
+                shell = shell or letter in opts.shell
+                if letter in opts.values:
+                    glued = letters[k + 1:]
+                    if letter in opts.strings:
+                        strings.append(glued or (tokens[i + 1] if i + 1 < n else ""))
+                    todo.append((i + (1 if glued else 2), left))
+                    break
+                if letter in opts.optional:
+                    todo.append((i + 1, left))
+                    break
+                if letter in opts.flags:
+                    if k == len(letters) - 1:
+                        todo.append((i + 1, left))
+                    continue
+                todo += [(i + 1, left), (i + 2, left)]
+                break
+            continue
+        if left:
+            todo.append((i + 1, left - 1))
+            continue
+        found.add(i)
+    return found, strings, module, shell
+
+
+def _runner_walk(tokens: list[str], spec):
+    """`_option_walk` for a runner, through its subcommands."""
+    if isinstance(spec, _Opts):
+        return _option_walk(tokens, 1, spec)
+    before, subcommands = spec
+    found: set[int] = set()
+    strings: list[str] = []
+    module = shell = False
+    places, *_ = _option_walk(tokens, 1, before)
+    for p in places:
+        follow = subcommands.get(tokens[p]) if p < len(tokens) else None
+        if follow is None:
+            continue
+        if follow == _STRING:
+            strings += tokens[p + 1:p + 2]
+            continue
+        inner = tokens[p:]
+        more, texts, mod, sh = _runner_walk(inner, follow)
+        found |= {p + q for q in more}
+        strings += texts
+        module, shell = module or mod, shell or sh
+    return found, strings, module, shell
+
+
+def _env_splice(tokens: list[str]) -> list[str]:
+    """`env -S STRING` / `--split-string=STRING` splits STRING into words
+    that stand where it stood; read the line as env will."""
+    out, i, splices = tokens[:1], 1, 0
+    while i < len(tokens):
+        token = tokens[i]
+        value = None
+        if token == "--split-string" and i + 1 < len(tokens):
+            value, i = tokens[i + 1], i + 2
+        elif token.startswith("--split-string="):
+            value, i = token.split("=", 1)[1], i + 1
+        elif token.startswith("-") and not token.startswith("--") and "S" in token[1:]:
+            k = token.index("S", 1)
+            if token[1:k].strip("i0v") == "":
+                if len(token) > 1 and k > 1:
+                    out.append(token[:k])
+                value = token[k + 1:] or (tokens[i + 1] if i + 1 < len(tokens) else "")
+                i += 1 if token[k + 1:] else 2
+        if value is not None:
+            splices += 1
+            if splices > 8:
+                raise _TooComplex
+            out += _tokens(value)
+            continue
+        if token in ("-u", "-C", "--unset", "--chdir"):
+            out += tokens[i:i + 2]
+            i += 2
+            continue
+        if token == "--" or not token.startswith("-"):
+            if not _ASSIGNMENT.fullmatch(token):
+                out += tokens[i:]
+                break
+        out.append(token)
+        i += 1
+    return out
+
+
+def _shell_command(tokens: list[str]) -> tuple[list[str], bool]:
+    """(the command string a shell runs, whether it reads its commands from
+    standard input). The `c` is found in a cluster (`bash -lc`); `-o`/`-O`
+    and `--rcfile`/`--init-file` take the next word; `--` or `-` end the
+    options; fish's `--command`. Only the first operand is the command:
+    the rest are `$0`, `$1`, and a program named by one of those is an
+    expansion in the command, which is read as one."""
+    inline = stdin = False
+    operands: list[str] = []
+    i = 1
+    while i < len(tokens):
+        token = tokens[i]
+        i += 1
+        if token in ("--", "-"):
+            operands = tokens[i:]
+            break
+        if token.startswith("--"):
+            name, eq, value = token[2:].partition("=")
+            if name == "command":
+                return ([value] if eq else tokens[i:i + 1]), False
+            if name in ("rcfile", "init-file", "init-command") and not eq:
+                i += 1
+            continue
+        if len(token) > 1 and token[0] in "-+":
+            for letter in token[1:]:
+                if letter == "c" and token[0] == "-":
+                    inline = True
+                elif letter == "s" and token[0] == "-":
+                    stdin = True
+                elif letter in "oO":
+                    i += 1
+            continue
+        operands = tokens[i - 1:]
+        break
+    if inline:
+        return operands[:1], False
+    return [], stdin or not operands
+
+
+def _xargs_replace(tokens: list[str]) -> str | None:
+    """The string `xargs -I`/`-i`/`--replace` substitutes, if any."""
+    for i, token in enumerate(tokens[1:], 1):
+        if token == "-I" and i + 1 < len(tokens):
+            return tokens[i + 1]
+        if token.startswith("-I") and len(token) > 2:
+            return token[2:]
+        if token in ("-i", "--replace"):
+            return "{}"
+        if token.startswith("-i") and len(token) > 2:
+            return token[2:]
+        if token.startswith("--replace="):
+            return token.split("=", 1)[1] or "{}"
+        if not token.startswith("-"):
+            break
+    return None
+
+
+def _substitution_texts(text: str) -> list[str]:
+    """The commands inside `$(…)` and backticks (outside single quotes; bash
+    expands both inside double ones) and `<(…)`/`>(…)` (outside any quotes),
+    at the top level of `text` — each is read again for its own. Linear; at
+    most `SUBSTITUTION_CAP`."""
+    out: list[str] = []
+    quote = ""
+    i, n = 0, len(text)
+    while i < n:
+        ch = text[i]
+        if quote == "'":
+            quote = "" if ch == "'" else quote
+            i += 1
+            continue
+        if ch == "\\":
+            i += 2
+            continue
+        if not quote and text.startswith("$'", i):
+            j = i + 2
+            while j < n and text[j] != "'":
+                j += 2 if text[j] == "\\" else 1
+            i = j + 1
+            continue
+        if ch == "'" and not quote:
+            quote = "'"
+            i += 1
+            continue
+        if ch == '"':
+            quote = "" if quote == '"' else '"'
+            i += 1
+            continue
+        if text.startswith("$((", i):
+            i += 3
+            continue
+        if text.startswith("$(", i) or (not quote and text.startswith(("<(", ">("), i)):
+            j, depth = i + 2, 1
+            while j < n and depth:
+                if text[j] == "(":
+                    depth += 1
+                elif text[j] == ")":
+                    depth -= 1
+                j += 1
+            out.append(text[i + 2:j - 1 if depth == 0 else n])
+            i = j
+        elif ch == "`":
+            end = text.find("`", i + 1)
+            end = n if end == -1 else end
+            out.append(text[i + 1:end])
+            i = end + 1
+        else:
+            i += 1
+        if len(out) > SUBSTITUTION_CAP:
+            raise _TooComplex
+    return out
+
+
+class _Word(str):
+    """A word as bash reads it: its text with quotes removed, and for each
+    character whether it is *active* — a glob or expansion character bash
+    will act on (unquoted, or `$` and backticks inside double quotes)."""
+    active: tuple
+
+    def __new__(cls, text: str, active):
+        word = super().__new__(cls, text)
+        word.active = tuple(active)
+        return word
+
+
+def _cut(word: str, start: int, end: int | None = None) -> str:
+    """`word[start:end]`, keeping a `_Word`'s mask."""
+    if isinstance(word, _Word):
+        return _Word(str.__getitem__(word, slice(start, end)), word.active[start:end])
+    return word[start:end]
+
+
+def _span_end(text: str, i: int) -> int:
+    """Index just past the `$(…)` (nesting counted) or `` `…` `` at `i`."""
+    n = len(text)
+    if text[i] == "`":
+        end = text.find("`", i + 1)
+        return n if end == -1 else end + 1
+    j, depth = i + 2, 1
+    while j < n and depth:
+        if text[j] == "(":
+            depth += 1
+        elif text[j] == ")":
+            depth -= 1
+        j += 1
+    return j
+
+
+def _shell_words(segment: str) -> list[str]:
+    """One segment's words as bash splits them, as `_Word`s. Quotes are
+    removed and what they held is inactive; `$'…'` is decoded; a `$(…)` or
+    backtick span stays inside its word, active. Linear."""
+    words: list[str] = []
+    text: list[str] = []
+    active: list[bool] = []
+    started = False
+    i, n = 0, len(segment)
+
+    def put(chars: str, on: bool) -> None:
+        text.extend(chars)
+        active.extend([on] * len(chars))
+
+    while i < n:
+        ch = segment[i]
+        if ch in " \t\n":
+            if started:
+                words.append(_Word("".join(text), active))
+                text.clear()
+                active.clear()
+                started = False
+            i += 1
+            continue
+        started = True
+        if ch == "\\":
+            put(segment[i + 1:i + 2], False)
+            i += 2
+        elif segment.startswith("$'", i):
+            j = i + 2
+            while j < n and segment[j] != "'":
+                j += 2 if segment[j] == "\\" else 1
+            put(_ansi_c_decoded(segment[i:j + 1]) if j < n else segment[i + 2:], False)
+            i = j + 1
+        elif ch == "'":
+            end = segment.find("'", i + 1)
+            end = n if end == -1 else end
+            put(segment[i + 1:end], False)
+            i = end + 1
+        elif ch == '"':
+            j = i + 1
+            while j < n and segment[j] != '"':
+                c = segment[j]
+                if c == "\\" and segment[j + 1:j + 2] in ("$", "`", '"', "\\"):
+                    put(segment[j + 1], False)
+                    j += 2
+                elif segment.startswith("$(", j) or c == "`":
+                    end = _span_end(segment, j)
+                    put(segment[j:end], True)
+                    j = end
+                else:
+                    put(c, c == "$")
+                    j += 1
+            i = j + 1
+        elif segment.startswith("$(", i) or ch == "`":
+            end = _span_end(segment, i)
+            put(segment[i:end], True)
+            i = end
+        else:
+            put(ch, True)
+            i += 1
+    if started:
+        words.append(_Word("".join(text), active))
+    return words
+
+
+def _command_words(tokens: list[str]) -> list[str]:
+    """A segment's words from the program on: compound-command keywords,
+    `(`, a function's name, a `case` pattern and assignments cut off the
+    front, and the `)`/`}` that close a group cut off the end."""
+    tokens = list(tokens)
+    while tokens:
+        word = tokens[0]
+        if word in _LEAD_WORDS or word.endswith("()") or _ASSIGNMENT.fullmatch(word):
+            tokens.pop(0)
+        elif word in ("for", "select"):
+            return []                       # the words of `for x in …` are not run
+        elif word == "case":
+            tokens = tokens[tokens.index("in") + 1:] if "in" in tokens else []
+        elif word == "function":
+            tokens = tokens[2:]
+        elif word.startswith("(") and len(word) > 1:
+            tokens[0] = _cut(word, len(word) - len(word.lstrip("(")))
+        elif len(tokens) > 1 and word.endswith(")") and word.count(")") > word.count("("):
+            tokens.pop(0)                   # a `case` pattern
+        else:
+            break
+    tokens = [t for t in tokens if t not in (")", "}", "))", ";;")]
+    if tokens:
+        last = tokens[-1]
+        while last.endswith(")") and last.count(")") > last.count("("):
+            last = _cut(last, 0, -1)
+        while last.endswith("}") and last.count("}") > last.count("{"):
+            last = _cut(last, 0, -1)
+        tokens[-1] = last
+        if not tokens[-1]:
+            tokens.pop()
+    return tokens
+
+
+@dataclass(frozen=True)
+class _Prog:
+    word: str               # as the line spells it ("" when it comes from input)
+    certain: bool           # the only word that can stand here
+    args: tuple
+    via_input: bool = False
+    replace: str | None = None
+
+
+class _Walk:
+    """Every program a line runs, found as described above, within caps."""
+
+    def __init__(self):
+        self.progs: list[_Prog] = []
+        self.modules = False
+        self.spent = 0
+
+    def _spend(self, depth: int) -> None:
+        self.spent += 1
+        if self.spent > PROGRAM_CAP or depth > PROGRAM_DEPTH:
+            raise _TooComplex
+
+    def line(self, text: str, certain: bool, depth: int) -> None:
+        self._spend(depth)
+        text = join_continuations(text)
+        for inner in _substitution_texts(text):
+            self.line(inner, certain, depth + 1)
+        for segment in segments(text):
+            here = [r.word for r in redirections(segment) if r.op == "<<<"]
+            self.segment(_shell_words(strip_redirections(segment)), certain, depth, here=here)
+
+    def segment(self, tokens, certain, depth, via_input=False, here=(), replace=None) -> None:
+        self._spend(depth)
+        tokens = _command_words(tokens)
+        if not tokens:
+            if via_input:
+                self.progs.append(_Prog("", certain, (), True, replace))
+            return
+        word, args = tokens[0], tokens[1:]
+        self.progs.append(_Prog(word, certain, tuple(args), via_input, replace))
+        stem = _basename(word)
+        if _PYTHON.fullmatch(stem) and _module_run(args):
+            self.modules = True
+        if stem in _WRAPPER_OPTS:
+            self._wrapper(stem, tokens, certain, depth, via_input, replace)
+        elif stem in _SHELL_STEMS:
+            strings, stdin = _shell_command(tokens)
+            for text in strings + ([_unquoted(w) for w in here] if stdin else []):
+                self.line(text, certain, depth + 1)
+        elif stem == "eval":
+            self.line(" ".join(args), certain, depth + 1)
+        elif stem in ("find", "bfs"):
+            i = 1
+            while i < len(tokens):
+                if tokens[i] in _FIND_EXEC:
+                    j = i + 1
+                    while j < len(tokens) and tokens[j] not in (";", "+"):
+                        j += 1
+                    self.segment(tokens[i + 1:j], certain, depth, via_input=True,
+                                 replace="{}")
+                    i = j
+                i += 1
+        elif stem in _RUNNER_SPECS:
+            places, strings, module, shell = _runner_walk(tokens, _RUNNER_SPECS[stem])
+            for text in strings:
+                self.line(text, certain, depth + 1)
+            programs = sorted(p for p in places if p < len(tokens))
+            sure = certain and len(programs) == 1
+            for p in programs:
+                if module and _VEX_MODULE.fullmatch(tokens[p]):
+                    self.modules = True
+                if shell:
+                    self.line(" ".join(tokens[p:]), sure, depth + 1)
+                self.segment(tokens[p:], sure, depth, via_input=via_input)
+
+    def _wrapper(self, stem, tokens, certain, depth, via_input, replace) -> None:
+        opts = _WRAPPER_OPTS[stem]
+        if stem == "command" and any(t.startswith("-") and set(t[1:]) & {"v", "V"}
+                                     for t in tokens[1:2]):
+            return                              # `command -v x` looks x up
+        if stem == "env":
+            tokens = _env_splice(tokens)
+        places, strings, _module, _shell = _option_walk(tokens, 1, opts)
+        for text in strings:
+            self.line(text, certain, depth + 1)
+        if not opts.program:
+            return
+        if stem == "xargs":
+            replace = _xargs_replace(tokens) or replace
+        sure = certain and len(places) == 1
+        exec_mode = stem == "watch" and any(t in ("-x", "--exec") for t in tokens[1:])
+        for p in sorted(places):
+            rest = tokens[p:]
+            if stem == "xargs" and not rest:
+                continue                        # bare xargs runs echo
+            if stem == "watch" and not exec_mode:
+                if rest:
+                    self.line(" ".join(rest), sure, depth + 1)
+                continue
+            self.segment(rest, sure, depth, via_input=via_input or stem == "xargs",
+                         replace=replace)
+
+
+def _unquoted(word: str) -> str:
+    try:
+        return " ".join(shlex.split(word))
+    except ValueError:
+        return word
+
+
+def _module_run(args) -> bool:
+    """`-m jarvis.v2.vex` in any spelling a Python takes (`-m X`, `-Im X`,
+    `-mX`), or `-m runpy jarvis.v2.vex`."""
+    for i, token in enumerate(args):
+        before = args[i - 1] if i else ""
+        if _VEX_MODULE.fullmatch(token) and (
+                before == "runpy" or before == "--module"
+                or (before.startswith("-") and not before.startswith("--") and before.endswith("m"))):
+            return True
+        if token.startswith("--module=") and _VEX_MODULE.fullmatch(token.split("=", 1)[1]):
+            return True
+        glued = re.fullmatch(r"-[A-Za-z]*m(.+)", token)
+        if glued and _VEX_MODULE.fullmatch(glued.group(1)):
+            return True
+    return False
+
+
+def _matching(word: str, i: int) -> int:
+    """Index just past the closer of the `{` or `(` at `word[i]`, or the
+    word's end when it never closes."""
+    opener, closer = word[i], "}" if word[i] == "{" else ")"
+    depth = 0
+    for j in range(i, len(word)):
+        if word[j] == opener:
+            depth += 1
+        elif word[j] == closer:
+            depth -= 1
+            if depth == 0:
+                return j + 1
+    return len(word)
+
+
+def _first_alternative(inner: str) -> str | None:
+    """The first word a brace expansion `{inner}` makes, or None when it is
+    not one (no top-level comma and no `x..y` range: bash keeps it as text)."""
+    depth, parts, start = 0, [], 0
+    for k, ch in enumerate(inner):
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            parts.append(inner[start:k])
+            start = k + 1
+    if parts:
+        return parts[0]
+    bounds = re.fullmatch(r"(-?\d+|[A-Za-z])\.\.(-?\d+|[A-Za-z])(\.\.-?\d+)?", inner)
+    return bounds.group(1) if bounds else None
+
+
+def _word_atoms(word: str, posix: bool) -> tuple[list, list[str]]:
+    """A program word as glob atoms, each with its kind: "lit", "glob",
+    "exp" (an expansion, read as `*`: `$X`, `${…}`, `$(…)`, backticks,
+    find's `{}`) or "sep" (a literal `/`). Only an *active* character (a
+    `_Word`'s mask; a plain string is all active) is a glob or an expansion:
+    `'*'` is a file called `*`. A brace expansion is read as the first word
+    it makes, which is the one that runs."""
+    text = str(word)
+    mask = list(getattr(word, "active", None) or [True] * len(text))
+    atoms: list = []
+    kinds: list[str] = []
+    i = 0
+    while i < len(text):
+        ch, on = text[i], mask[i]
+        nxt = text[i + 1] if i + 1 < len(text) else ""
+        if on and ch == "$" and nxt in ("{", "("):
+            atoms.append(_STAR)
+            kinds.append("exp")
+            i = _matching(text, i + 1)
+            continue
+        if on and ch == "$" and nxt and (nxt == "_" or (nxt.isascii() and nxt.isalpha())):
+            j = i + 2
+            while j < len(text) and (text[j] == "_" or (text[j].isascii() and text[j].isalnum())):
+                j += 1
+            atoms.append(_STAR)
+            kinds.append("exp")
+            i = j
+            continue
+        if on and ch == "$" and nxt and nxt in "@*#?$!-0123456789":
+            atoms.append(_STAR)
+            kinds.append("exp")
+            i += 2
+            continue
+        if on and ch == "`":
+            end = text.find("`", i + 1)
+            atoms.append(_STAR)
+            kinds.append("exp")
+            i = len(text) if end == -1 else end + 1
+            continue
+        if on and ch == "{":
+            end = _matching(text, i)
+            first = _first_alternative(text[i + 1:end - 1]) if text[end - 1:end] == "}" else None
+            if first is not None:
+                # Brace expansion: the program is the first word it makes,
+                # the rest are its arguments (`{v,x}excom` runs vexcom).
+                text = text[:i] + first + text[end:]
+                mask = mask[:i] + [True] * len(first) + mask[end:]
+                continue
+            if end == i + 2:                # `{}`: find's and xargs' placeholder
+                atoms.append(_STAR)
+                kinds.append("exp")
+                i = end
+                continue
+        if on and ch == "*":
+            atoms.append(_STAR)
+            kinds.append("glob")
+        elif on and ch == "?":
+            atoms.append(_ANY)
+            kinds.append("glob")
+        elif on and ch == "[" and (end := _bracket_end(text, i, posix)) is not None:
+            atoms.append(_ANY)
+            kinds.append("glob")
+            i = end
+            continue
+        else:
+            atoms.append("/" if ch == "/" else _fold(ch))
+            kinds.append("sep" if ch == "/" else "lit")
+        i += 1
+    return atoms, kinds
+
+
+def _program_kind(prog: _Prog) -> str | None:
+    """RUNS, UNKNOWN, VEXBUILD, COMPLEX or None for one program word."""
+    if prog.via_input and (not prog.word or (prog.replace and prog.replace in prog.word)):
+        return UNKNOWN
+    word = prog.word
+    if not word:
+        return None
+    if len(word) > PROGRAM_WORD_CAP or sum(word.count(c) for c in "*?[{$`") > GLOB_META_CAP:
+        return COMPLEX
+    could = vexbuild = only_expansions = False
+    for posix in (True, False):
+        atoms, kinds = _word_atoms(word, posix)
+        cut = max((k for k, kind in enumerate(kinds) if kind == "sep"), default=-1)
+        atoms, kinds = atoms[cut + 1:], kinds[cut + 1:]
+        if not atoms:
+            continue
+        if "exp" not in kinds and "glob" not in kinds:
+            name = "".join(atoms)
+            if name in _VEX_TARGETS:
+                return RUNS
+            vexbuild = vexbuild or name == "vexbuild"
+            continue
+        if "exp" in kinds:
+            # An expansion may hold a `/`, so the file name may begin inside
+            # it: what follows the last one, after anything at all. With
+            # nothing after it, the name is the expansion's alone: it
+            # cannot be told (`$X`, `${A}.${B}`, `$DIR/$PROG`).
+            last = max(k for k, kind in enumerate(kinds) if kind == "exp")
+            only_expansions = only_expansions or last == len(kinds) - 1
+            atoms = [_STAR] + atoms[last + 1:]
+        could = could or any(_atoms_match(atoms, t) for t in _VEX_TARGETS)
+        vexbuild = vexbuild or _atoms_match(atoms, "vexbuild")
+    if could:
+        return UNKNOWN if only_expansions or not prog.certain else RUNS
+    return VEXBUILD if vexbuild else None
+
+
+def _program_variants(command: str) -> list[str]:
+    import unicodedata
+    out = [command]
+    nfkc = unicodedata.normalize("NFKC", command)
+    for variant in (nfkc, _ansi_c_decoded(command), _ansi_c_decoded(nfkc)):
+        if variant not in out:
+            out.append(variant)
+    return out
+
+
+@dataclass(frozen=True)
+class VexLine:
+    """What a line does with VEX's tools: `deny` (it names or runs vexcom),
+    `unsure` (it may, and cannot be told: asked whatever stands), `vexbuild`
+    (it runs the agents' build door, which asks like any command)."""
+    deny: str | None = None
+    unsure: str | None = None
+    vexbuild: bool = False
+
+
+def _vex_line_uncached(command: str) -> VexLine:
+    if not command.strip():
+        return VexLine()
+    named = vexcom_reading(command)
+    if named == NAMES:
+        return VexLine(deny=VEXCOM_DENIED)
+    unsure = TOO_COMPLEX if named == COMPLEX else None
+    vexbuild = False
+    for text in _program_variants(command):
+        walk = _Walk()
+        try:
+            walk.line(text, True, 0)
+        except _TooComplex:
+            unsure = unsure or TOO_COMPLEX
+        vexbuild = vexbuild or walk.modules
+        for prog in walk.progs:
+            kind = _program_kind(prog)
+            if kind == RUNS:
+                return VexLine(deny=(
+                    f"it runs {_quoted_word(prog.word)} as a program, which could be vexcom, "
+                    "VEX's tool for downloading to and talking to the robot; that is only ever "
+                    "the owner's click in the HUD, never an agent's command (build with "
+                    "vexbuild instead)"))
+            if kind == UNKNOWN and unsure is None:
+                unsure = (f"the program it runs ({_quoted_word(prog.word) or 'read from input'}) "
+                          "cannot be told from here and could be vexcom, VEX's tool for the "
+                          "robot, so it is asked whatever else stands")
+            elif kind == COMPLEX:
+                unsure = unsure or TOO_COMPLEX
+            vexbuild = vexbuild or kind == VEXBUILD
+    return VexLine(unsure=unsure, vexbuild=vexbuild)
+
+
+def _quoted_word(word: str) -> str:
+    """A program word as a reason quotes it: one capped, printable line."""
+    text = " ".join("".join(c for c in str(word) if c.isprintable() or c.isspace()).split())
+    return f"`{text[:60]}{'…' if len(text) > 60 else ''}`" if text else ""
+
+
+@functools.lru_cache(maxsize=256)
+def _vex_line_cached(command: str) -> VexLine:
+    return _vex_line_uncached(command)
+
+
+def _vex_line(command: str) -> VexLine:
+    """The vex reading of a line (`decide`, the allowlist and v2's layer 2
+    each ask; short lines are cached, the reading is pure)."""
+    command = join_continuations(command or "")
+    return _vex_line_cached(command) if len(command) <= 16384 else _vex_line_uncached(command)
+
+
+def vex_uncoverable(command: str) -> str | None:
+    """Why no allowlist entry, and no v2 profile, may answer for this line
+    without asking: it names or runs vexcom (DENY before this is reached),
+    or it may run vexcom and cannot be told, or it is too complex to judge.
+    `permissions.allows` and v2's layer 2 read it."""
+    line = _vex_line(command)
+    return line.deny or line.unsure
 
 
 def _judge_segment(segment: str) -> Verdict:
@@ -1781,12 +2826,6 @@ def _judge_segment(segment: str) -> Verdict:
     if stem in _INTERPRETERS and _has_inline_source(bare, redirects):
         return Verdict(ASK, f"{stem} with inline source is arbitrary code, not a build step")
 
-    # `vexbuild` asks unless the owner allowlists exactly it (V-2); the module
-    # it runs is the same door, and neither may ride an ALLOW stem (`python
-    # -m`, `uv run`) past the ask.
-    if _runs_vex_build(bare):
-        return Verdict(ASK, "this runs vexbuild, which asks unless you allowlist exactly it")
-
     if stem == "systemctl" and "--user" not in tokens:
         return Verdict(ASK, "system-wide systemctl affects the whole machine")
 
@@ -1810,12 +2849,13 @@ def decide(command: str) -> Verdict:
     if not command.strip():
         return Verdict(ASK, "empty command")
 
-    # Naming VEX's device tool anywhere on the line is DENY (V-2): judged on
-    # the whole line, before segmentation, so a `sh -c '…'` string, a
-    # substitution or a quoted path cannot carry it past.
-    vexcom = _vexcom_verdict(command)
-    if vexcom is not None:
-        return vexcom
+    # Naming VEX's device tool anywhere on the line, or running something
+    # that could be it, is DENY (V-2): judged on the whole line, before
+    # segmentation, so a `sh -c '…'` string, a substitution, a quoted path or
+    # an ALLOW-stem runner cannot carry it past (`_vex_line`).
+    vex = _vex_line(command)
+    if vex.deny:
+        return Verdict(DENY, vex.deny)
 
     # Command substitution runs a command this function never sees. There is no
     # honest verdict except "a human should look".
@@ -1831,4 +2871,12 @@ def decide(command: str) -> Verdict:
             worst = verdict
         if worst.decision == DENY:
             break
+    # A line that may run vexcom and cannot be told, or is too complex to
+    # judge, asks whatever else stands (and no allowlist entry covers it:
+    # `vex_uncoverable`); `vexbuild` asks like any command unless allowlisted.
+    if worst.decision != DENY:
+        if vex.unsure:
+            worst = Verdict(ASK, vex.unsure)
+        elif vex.vexbuild:
+            worst = Verdict(ASK, VEXBUILD_ASKS)
     return worst

@@ -172,6 +172,12 @@ def allows(tool_name: str, args: dict[str, Any], cwd: str | None = None) -> bool
     # neighbours. See `protected_state_verdict`.
     if protected_state.command_touch(command, cwd) is not None:
         return False
+    # A line that may run VEX's device tool and cannot be told, or is too
+    # complex to judge, is never covered: an entry for `uv` was a yes to
+    # running Python, not to whatever `uv run $X` turns out to start (VX-1,
+    # `rules.vex_uncoverable`).
+    if rules.vex_uncoverable(command):
+        return False
     targets = rules.command_targets(command)
     if not targets:
         return False

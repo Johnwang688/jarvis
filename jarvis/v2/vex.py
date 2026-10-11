@@ -67,6 +67,7 @@ import datetime
 import fcntl
 import hashlib
 import io
+import itertools
 import json
 import logging
 import os
@@ -378,7 +379,8 @@ def to_windows(path, *, spaces: bool = True) -> str:
     """`/mnt/c/Users/x` → `C:\\Users\\x` — the one function every argument a
     Windows program receives goes through. A path not on a Windows drive, or
     holding a character a Windows command line (or make's cmd.exe recipes)
-    could misread, is refused rather than quoted around."""
+    could misread — anything outside printable ASCII included — is refused
+    rather than quoted around."""
     text = str(path)
     if not os.path.isabs(text) or os.path.normpath(text) != text:
         raise VexError(f"{text} is not an absolute, plain path")
@@ -387,7 +389,10 @@ def to_windows(path, *, spaces: bool = True) -> str:
                        "Windows toolchain works only there")
     rel = Path(text).relative_to(_mount()).parts
     for part in rel[1:]:
-        if _unseen(part) or set(part) & _CMD_UNSAFE or ":" in part:
+        # ASCII only: a program that takes its command line in the ANSI code
+        # page gets Windows' "best fit" for anything else, and that maps
+        # U+FF02 to `"`, U+FF3C to `\\` and U+2215 to `/` — syntax again.
+        if not part.isascii() or _unseen(part) or set(part) & _CMD_UNSAFE or ":" in part:
             raise VexError(f"{text} holds a character a Windows command line could misread")
         if part.endswith((".", " ")) or _WINDOWS_RESERVED.match(part) \
                 or _WINDOWS_RESERVED.match(part.split(".")[0]):
@@ -503,6 +508,7 @@ def detect(root) -> dict:
 # -- make files ------------------------------------------------------------------------------
 
 _INCLUDE = re.compile(r"^\s*-?s?include\s+(.+)$", re.MULTILINE)
+INCLUDE_WORD_CAP = 256
 
 
 def _regular(path: Path) -> bool:
@@ -538,13 +544,19 @@ def makefile_refusal(root) -> str | None:
     A makefile is project content that `make` runs; one that called vexcom
     would make a build a download. So a build refuses a project whose make
     files — the makefile, every `*.mk` at the top or in `vex/`, and what they
-    `include` — name it (`rules.names_vexcom`, the same accident guard as the
-    DENY), and it **fails closed** wherever it cannot read all of them: more
-    than `MAKEFILE_LIMIT` files, one past `MAKEFILE_CAP`, a symlink or a
-    non-regular file among them, a `vex/` folder that is a symlink, or an
-    `include` it cannot resolve here (a `$(…)` in the name, an absolute path,
-    a path outside the project). Not a boundary: a makefile can still
-    assemble the name at run time (`$(shell …)`)."""
+    `include` — name it (`rules.vexcom_reading`, the same accident guard as
+    the DENY), and it **fails closed** wherever it cannot read all of them:
+    more than `MAKEFILE_LIMIT` files, one past `MAKEFILE_CAP`, a symlink or a
+    non-regular file among them, a `vex/` folder that is a symlink, a glob in
+    one past the guard's limits (too complex to check), or an `include` it
+    cannot resolve here — a `$(…)` in the name, a backslash, an absolute path,
+    a path outside the project, or a file that is not in the project (make
+    would go on to search other folders for it, `-include` and `sinclude`
+    alike). Lines are read as make reads them: a backslash-newline joins the
+    next line on with a space, so an `include` continued onto a second line
+    includes what that line names. Not a boundary: a makefile can still
+    assemble the name at run time (`$(shell …)`, `$(wildcard …)`, `$(eval
+    include …)`)."""
     root = Path(root)
     queue: list[Path] = []
     for name in ("makefile", "Makefile", "GNUmakefile"):
@@ -569,26 +581,49 @@ def makefile_refusal(root) -> str | None:
             text = _read_make_file(path, rel)
         except VexError as exc:
             return str(exc)
-        if rules.names_vexcom(text):
+        reading = rules.vexcom_reading(text)
+        if reading == rules.NAMES:
             return (f"{rel} names vexcom, so Jarvis will not build this project: a build must "
                     "never reach the robot. Remove it, or build in VS Code")
-        for match in _INCLUDE.finditer(text):
+        if reading == rules.COMPLEX:
+            return (f"{rel} holds a glob too complex to check for vexcom, so this project is "
+                    "not built")
+        joined = text.replace("\r\n", "\n").replace("\\\n", " ")
+        for match in _INCLUDE.finditer(joined):
             for word in match.group(1).split("#", 1)[0].split():
+                shown = word[:60]
                 if "$" in word:
-                    return (f"{rel} includes a file named by a variable ({word[:60]}), which "
+                    return (f"{rel} includes a file named by a variable ({shown}), which "
                             "cannot be checked here, so this project is not built")
+                if "\\" in word or len(word) > INCLUDE_WORD_CAP:
+                    return (f"{rel} includes a file this check cannot read as make does "
+                            f"({shown}), so this project is not built")
                 if word.startswith("/"):
-                    return (f"{rel} includes a file outside the project ({word[:60]}), so this "
+                    return (f"{rel} includes a file outside the project ({shown}), so this "
                             "project is not built")
-                candidates = sorted(root.glob(word)) if any(c in word for c in "*?[") \
-                    else [root / word]
+                candidates = [root / word]
+                if any(c in word for c in "*?["):
+                    try:
+                        candidates = sorted(itertools.islice(root.glob(word), MAKEFILE_LIMIT + 1))
+                    except (ValueError, OSError):
+                        return (f"{rel} includes a file this check cannot read as make does "
+                                f"({shown}), so this project is not built")
+                    if len(candidates) > MAKEFILE_LIMIT:
+                        return (f"{rel} includes more than {MAKEFILE_LIMIT} files ({shown}), too "
+                                "many to check, so this project is not built")
+                if not candidates:
+                    return (f"{rel} includes {shown}, which is not in the project (make would "
+                            "search other folders for it), so this project is not built")
                 for candidate in candidates:
                     resolved = Path(os.path.normpath(candidate))
                     if not resolved.is_relative_to(root):
-                        return (f"{rel} includes a file outside the project ({word[:60]}), so "
+                        return (f"{rel} includes a file outside the project ({shown}), so "
                                 "this project is not built")
-                    if os.path.lexists(resolved):
-                        queue.append(resolved)
+                    if not os.path.lexists(resolved):
+                        return (f"{rel} includes {shown}, which is not in the project (make "
+                                "would search other folders for it), so this project is not "
+                                "built")
+                    queue.append(resolved)
     return None
 
 
@@ -793,13 +828,27 @@ def _label(stem: str, index: dict[str, str]) -> str:
 
 def _index_names(folder: Path) -> dict[str, str]:
     """Display names for template files, from the folder's `index.json`
-    (`examples[].samples[] = {name, files: [{name}]}`), where it names them."""
-    path = folder / "index.json"
-    if not _regular(path) or os.lstat(path).st_size > 2 * 1024 * 1024:
+    (`examples[].samples[] = {name, files: [{name}]}`), where it names them.
+    Opened as the templates are: never through a symlink, never a FIFO or a
+    device, never read past 2 MB."""
+    cap = 2 * 1024 * 1024
+    try:
+        fd = os.open(folder / "index.json", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except OSError:
         return {}
     try:
-        doc = json.loads(path.read_bytes().decode("utf-8"))
-    except (OSError, UnicodeDecodeError, ValueError):
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return {}                   # never a FIFO (it would block) or a device
+        data = os.read(fd, cap + 1)
+    except OSError:
+        return {}
+    finally:
+        os.close(fd)
+    if len(data) > cap:
+        return {}
+    try:
+        doc = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
         return {}
     names = {}
     for category in doc.get("examples", []) if isinstance(doc, dict) else []:
@@ -1638,6 +1687,11 @@ def cli(argv=None, *, cwd=None, out=None) -> int:
     mode = build.add_mutually_exclusive_group()
     mode.add_argument("--rebuild", action="store_true", help="rebuild everything (make -B)")
     mode.add_argument("--clean", action="store_true", help="remove the build folder")
+    argv = list(sys.argv[1:] if argv is None else argv)
+    # The wrapper already says `build` (`vexbuild` is `… -m jarvis.v2.vex
+    # build "$@"`), so `vexbuild build` arrives as `build build`.
+    if argv[:2] == ["build", "build"]:
+        argv = argv[1:]
     args = parser.parse_args(argv)
     action = "clean" if args.clean else "rebuild" if args.rebuild else "build"
 
@@ -1704,9 +1758,11 @@ def cli(argv=None, *, cwd=None, out=None) -> int:
                 except subprocess.TimeoutExpired:
                     continue
             reader.join(KILL_GRACE_S)
+            proc.stdout.close()
             say(f"timed out after {int(BUILD_TIMEOUT_S)} s")
             return 124
         reader.join(KILL_GRACE_S)
+        proc.stdout.close()
     finally:
         lock.release()
     errors = parse_errors(plain(bytes(captured)), root_windows)

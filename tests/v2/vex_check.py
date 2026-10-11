@@ -19,7 +19,15 @@ What matters most, each written to fail with its guard removed:
 * **An agent command that names `vexcom` is DENY**, in every spelling the
   rule lists — never run, never asked, under an allowlist entry and under
   mode "all" (v1), and never a card (v2 layer 1).
-* **`vexbuild` asks like any command** (and its module through `python -m`).
+* **What a line runs is judged strictly** (review round 2): a glob, or a
+  word holding an expansion, in program position — past a wrapper, as the
+  program a runner starts (its options parsed), inside `sh -c` or `$(…)` —
+  that could be vexcom is DENY; a program that cannot be told and could be
+  vexcom is asked, never allowlist-covered, and always asked in v2.
+* **A glob past the caps is too complex to judge** — asked, and judged in
+  well under a second however it is built; the make file guard refuses one.
+* **`vexbuild` asks like any command** (and its module through `python -m`,
+  `uv run -m`, `python -m runpy`, and through every runner, options parsed).
 * **Paths are fixed by `vex.json`**, re-checked at every use; a request never
   names an executable or a path to run; a project comes from its id.
 * The exact argv of build, rebuild, clean, download and the brain terminal,
@@ -1604,6 +1612,311 @@ class Reach(unittest.TestCase):
                      "subprocess.run(['VEXCOM.exe'])", "terminals.create_program(argv)"):
             self.assertIsNotNone(self.NEEDLES.search(text), text)
         self.assertIsNone(self.NEEDLES.search("from .model import TERMINAL_STATES"))
+
+
+# -- review round 2: what a line runs, the caps, includes, names, the CLI ---------------------------
+
+TOOLS_DIR = "/mnt/c/Users/placeholder/AppData/Roaming/Code/User/globalStorage/vexrobotics.vexcode/tools"
+GLOBBED = f"{TOOLS_DIR}/v*/*/win32/v*.exe --user"
+# A glob, or a word holding an expansion, in program position that could be
+# vexcom by its file name: DENY, with no four-letter threshold (MED 1).
+RUNS = {
+    "uv run, one letter": f"uv run {TOOLS_DIR}/v*/*/*/v*.exe --name x --slot 1 --write build/x.bin",
+    "uv run, stars only": f"uv run {TOOLS_DIR}/*/*/win32/*.exe --user",
+    "uv run, a variable": f"X=vex; uv run {TOOLS_DIR}/${{X}}com/*/win32/${{X}}com.exe --user",
+    "uv run, few letters": f"uv run {TOOLS_DIR}/*/*/win32/v*m.exe --user",
+    "command position": GLOBBED,
+    "uv run --no-project": f"uv run --no-project {GLOBBED}",
+    "uv --directory": f"uv --directory /tmp run {GLOBBED}",
+    "uv tool run": f"uv tool run {GLOBBED}",
+    "uvx": f"uvx {GLOBBED}",
+    "poetry run": f"poetry run {GLOBBED}",
+    "poetry -q run": f"poetry -q run {GLOBBED}",
+    "pipx run --spec": f"pipx run --spec x {GLOBBED}",
+    "npm exec --": f"npm exec -- {GLOBBED}",
+    "npx --yes": f"npx --yes {GLOBBED}",
+    "npx -c": f"npx -c '{GLOBBED}'",
+    "pnpm exec": f"pnpm exec {GLOBBED}",
+    "pnpm dlx -c": f"pnpm dlx -c '{GLOBBED}'",
+    "bun x": f"bun x {GLOBBED}",
+    "bun exec": f"bun exec '{GLOBBED}'",
+    "nohup": f"nohup {GLOBBED}",
+    "timeout -s KILL 5": f"timeout -s KILL 5 {GLOBBED}",
+    "env -C dir": f"env -C /tmp FOO=1 {GLOBBED}",
+    "env -S": f"env -S '{GLOBBED}'",
+    "env -u X -S": f"env -u X -S '{GLOBBED}'",
+    "nice, then uv run": f"nice -n 5 uv run {GLOBBED}",
+    "systemd-run": f"systemd-run --user --scope -q {GLOBBED}",
+    "flock -c": f"flock /tmp/x -c '{GLOBBED}'",
+    "sh -c": f"sh -c '{GLOBBED}'",
+    "bash -lc": f"bash -lc '{GLOBBED}'",
+    "uv run sh -c": f"uv run sh -c '{GLOBBED}'",
+    "here-string": f"bash <<< '{GLOBBED}'",
+    "eval": f"eval {GLOBBED}",
+    "watch": f"watch -n 5 {GLOBBED}",
+    "$(…)": f"echo $({GLOBBED})",
+    "backticks": f"echo `{GLOBBED}`",
+    "<(…)": f"cat <({GLOBBED})",
+    "find -exec": f"find {TOOLS_DIR} -name x -exec {GLOBBED} \\;",
+    "xargs": f"xargs {GLOBBED} < args.txt",
+    "if/then": f"if true; then {GLOBBED}; fi",
+    "subshell": f"(cd /tmp; {GLOBBED})",
+    "a bare star": "*.exe --user",
+    "an expansion then a name": "${X}com.exe --user",
+    "an expansion then .exe": "$X.exe --user",
+    "a substitution then a name": "$(printf vex)com --user",
+    "brace expansion": "{v,x}excom.exe --user",
+    "ANSI-C then a glob": "$'\\x2e/v'*.exe --user",
+    "posix class": "./ve[[:alpha:]]com --user",
+    "negated with ^": "./ve[^a]com --user",
+    "only fnmatch's bracket reading matches": "./ve[x[:]co[m:] --user",
+    "fullwidth glob": "ｖ*.exe --user",
+}
+# A program that cannot be told and could be vexcom: ASK in v1, never covered
+# by an allowlist entry, always asked in v2 (MED 1).
+UNSURE = {
+    "uv run $X": "uv run $X --user",
+    "a variable": "$X --user",
+    "all arguments": '"$@"',
+    "a substitution": "$(cat name.txt) --user",
+    "two expansions": "${A}.${B} --user",
+    "an option the table does not know": f"uv run --frobnicate x {GLOBBED}",
+    "xargs env": "ls /mnt/c/x/*.exe | xargs env",
+    "find -exec {}": f"find {TOOLS_DIR} -name 'v*.exe' -exec {{}} --user \\;",
+    "xargs -I": "ls | xargs -I{} {} --user",
+    "sh -c with $0": "sh -c '\"$0\" --user' x",
+}
+# Each ALLOW on 33dcb99 (or ASK for another reason); each runs vexbuild or its module (LOW 1).
+VEXBUILD_RUNS = ("uv run --no-project vexbuild build", "uv run --python 3.14 vexbuild",
+                 "uv run --no-sync vexbuild", "poetry run -q vexbuild", "npx --yes vexbuild",
+                 "pipx run --spec foo vexbuild", "uv run --module jarvis.v2.vex build",
+                 "python3 -m runpy jarvis.v2.vex build", "npx vexbuild", "bunx vexbuild",
+                 "uvx vexbuild", "pnpx vexbuild", "uv run sh -c vexbuild",
+                 "npm exec -c 'vexbuild build'", "uv run --some-future-flag x vexbuild",
+                 "npm exec -- vexbuild", "bun x vexbuild", "uv tool run --from x vexbuild")
+ORDINARY_RUNNERS = {
+    "uv run pytest -q": rules.ALLOW, "uv run --no-project python script.py": rules.ALLOW,
+    "uv run --with rich python x.py": rules.ALLOW, "npx --yes prettier --check .": rules.ALLOW,
+    "poetry run pytest": rules.ALLOW, "timeout 60 ls v*": rules.ALLOW,
+    "env FOO=1 ls *.exe": rules.ALLOW, "xargs ls v*": rules.ALLOW, "nohup make": rules.ALLOW,
+    "uv run --frobnicate pytest -q": rules.ALLOW, "npm exec -- prettier --check .": rules.ALLOW,
+    "ls '*'": rules.ALLOW, "ls v*m.exe": rules.ALLOW, "uv pip install -e .": rules.ALLOW,
+    "git commit -m 'fix the v* glob'": rules.ALLOW, "make -j4 2>&1 | tail -20": rules.ALLOW,
+    "ls " + "[a-z]" * 10: rules.ALLOW, "npm run vexbuild": rules.ALLOW,
+    # Asked as on main, never refused: a quoted star is a file called `*`,
+    # and a brace expansion runs its first word.
+    "'*' --user": rules.ASK, "arm-none-eabi-{ar,ld}.exe x": rules.ASK,
+}
+
+
+class ProgramPosition(Base):
+    """MED 1: program position is judged strictly; the threshold is for arguments only."""
+
+    def setUp(self):
+        super().setUp()
+        self.ran = []
+        real = shell._run
+        shell._run = lambda command, *a, **k: self.ran.append(command) or "[exit 0]"
+        self.addCleanup(setattr, shell, "_run", real)
+        self.addCleanup(v1_permissions.set_mode, "ask")
+
+    def test_a_glob_or_expansion_the_line_runs_is_deny(self):
+        for label, command in RUNS.items():
+            with self.subTest(label):
+                verdict = rules.decide(command)
+                self.assertEqual(verdict.decision, rules.DENY, command)
+                self.assertIn("vexcom", verdict.reason)
+                self.assertEqual(v1_permissions.static_verdict(command).decision, rules.DENY)
+                self.assertIsNotNone(v2_permissions.denied_command(command))
+
+    def test_runs_never_run_or_raise_a_card(self):
+        Path(config.ALLOWLIST_PATH).write_text(json.dumps([
+            {"tool": "run_command", "prefix": p}
+            for p in ("uv", "uvx", "npx", "npm", "pnpm", "poetry", "pipx", "bun", "nohup",
+                      "timeout", "env", "nice", "sh", "bash", "echo", "cat", "find", "xargs",
+                      "eval", "watch", "systemd-run", "flock", "*.exe")]))
+        asked = []
+        gate = v1_permissions.gate(lambda tool, args: asked.append(args) or True)
+        for mode in ("ask", "all"):
+            v1_permissions.set_mode(mode)
+            for label, command in RUNS.items():
+                with self.subTest(mode=mode, shape=label):
+                    result = tools.dispatch("run_command", json.dumps({"command": command,
+                                                                       "reason": "probe"}), gate)
+                    self.assertIn("vexcom", str(result.text))
+        self.assertEqual((self.ran, asked), ([], []))
+        asker = Asker()
+        for profile in (PP.AUTO, PP.ASK):
+            permit = v2_permissions.build_permit(context(self.root, profile), asker)
+            for label, command in RUNS.items():
+                with self.subTest(profile=profile.value, shape=label):
+                    self.assertEqual(permit("Bash", {"command": command}), Decision.DENY)
+        self.assertEqual(asker.seen, [])
+
+    def test_a_program_that_cannot_be_told_is_asked_whatever_stands(self):
+        stems = {"uv", "$x", "$@", "$(cat", "${a}.${b}", "ls", "xargs", "find", "sh"}
+        Path(config.ALLOWLIST_PATH).write_text(json.dumps(
+            [{"tool": "run_command", "prefix": p} for p in stems]))
+        asked = []
+        gate = v1_permissions.gate(lambda tool, args: asked.append(args["command"]) or False)
+        for label, command in UNSURE.items():
+            with self.subTest(label):
+                verdict = rules.decide(command)
+                self.assertEqual(verdict.decision, rules.ASK, command)
+                self.assertIn("vexcom", verdict.reason)
+                self.assertIsNotNone(rules.vex_uncoverable(command))
+                self.assertFalse(v1_permissions.allows("run_command", {"command": command}),
+                                 "an allowlist entry covered it")
+                tools.dispatch("run_command", json.dumps({"command": command, "reason": "probe"}),
+                               gate)
+        self.assertEqual(sorted(asked), sorted(UNSURE.values()), "v1 asked about each")
+        self.assertEqual(self.ran, [], "a no ran nothing")
+        # v2: asked under AUTO too — never the provider's reviewer's call.
+        for profile in (PP.AUTO, PP.ASK):
+            asker = Asker(Decision.DENY)
+            permit = v2_permissions.build_permit(context(self.root, profile), asker)
+            for label, command in UNSURE.items():
+                with self.subTest(profile=profile.value, shape=label):
+                    self.assertEqual(permit("Bash", {"command": command}), Decision.DENY)
+            self.assertEqual(len(asker.seen), len(UNSURE), profile)
+
+    def test_runner_options_are_parsed_and_vexbuild_asks(self):
+        for command in VEXBUILD_RUNS:
+            with self.subTest(command):
+                verdict = rules.decide(command)
+                self.assertEqual(verdict.decision, rules.ASK, command)
+                self.assertIn("vexbuild", verdict.reason)
+                self.assertEqual(v1_permissions.static_verdict(command).decision, rules.ASK)
+
+    def test_ordinary_runner_lines_keep_their_verdicts(self):
+        for command, expected in ORDINARY_RUNNERS.items():
+            with self.subTest(command):
+                self.assertEqual(rules.decide(command).decision, expected, command)
+                self.assertIsNone(rules.vex_uncoverable(command))
+
+
+class TooComplex(Base):
+    """MED 2: a glob past the caps is too complex to judge — asked, never slow."""
+
+    FLOODS = {"[": "ls " + "[" * 20000, "[a": "ls " + "[a" * 20000, "[[:": "ls " + "[[:" * 8000,
+              "*?": "ls " + "*?" * 20000, "v[": "./v" + "[" * 20000, "${": "echo " + "${" * 80000,
+              "many words": "ls " + " ".join(f"v{i}*" for i in range(4000))}
+
+    def test_a_flood_is_judged_fast_asked_and_never_covered(self):
+        Path(config.ALLOWLIST_PATH).write_text(json.dumps([
+            {"tool": "run_command", "prefix": p} for p in ("ls", "echo", "./v" + "[" * 20000)]))
+        for label, line in self.FLOODS.items():
+            with self.subTest(label):
+                started = time.perf_counter()
+                verdict = rules.decide(line)
+                took = time.perf_counter() - started
+                self.assertLess(took, 1.0, f"{label}: {took:.2f} s")
+                if label == "${":
+                    continue                    # no glob in it: as on main
+                self.assertEqual(verdict.decision, rules.ASK, label)
+                self.assertFalse(v1_permissions.allows("run_command", {"command": line}))
+                self.assertIsNotNone(rules.vex_uncoverable(line))
+        asker = Asker(Decision.DENY)
+        permit = v2_permissions.build_permit(context(self.root), asker)
+        self.assertEqual(permit("Bash", {"command": self.FLOODS["["]}), Decision.DENY)
+        self.assertEqual(len(asker.seen), 1, "v2 asks under AUTO")
+
+    def test_a_make_file_flood_is_refused_fast(self):
+        folder = self.world.project()
+        for label, text in (("one word", "x = " + "[" * 40000 + "\n"),
+                            ("a file of them", "".join(f"{'[a' * 30}{i}\n" for i in range(2000))),
+                            ("brackets that close", "x = " + "[ab]" * 20000 + "\n")):
+            with self.subTest(label):
+                (folder / "vex" / "big.mk").write_text(text)
+                started = time.perf_counter()
+                reason = vex.makefile_refusal(folder)
+                self.assertLess(time.perf_counter() - started, 1.0, label)
+                self.assertIsNotNone(reason, label)
+                self.assertIn("too complex", reason)
+        self.assertEqual(vex.cli(["build"], cwd=str(folder), out=io.StringIO()), 2)
+        self.assertEqual(self.world.calls("make"), [])
+
+
+class MakeIncludes(Base):
+    """LOW 2: includes are read as make reads them, and one that does not
+    resolve in the project is refused rather than skipped."""
+
+    def setUp(self):
+        super().setUp()
+        self.folder = self.world.project()
+        (self.folder / "src" / "notes.txt").write_text("x:\n\tvexcom --user\n")
+
+    def refused(self, makefile, pattern):
+        (self.folder / "makefile").write_bytes(makefile.encode())
+        reason = vex.makefile_refusal(self.folder)
+        self.assertIsNotNone(reason, makefile)
+        self.assertRegex(reason, pattern)
+
+    def test_a_continued_include_is_followed(self):
+        self.refused("include vex/mkenv.mk \\\n  src/notes.txt\n", "names vexcom")
+        self.refused("include vex/mkenv.mk \\\r\n  src/notes.txt\r\n", "names vexcom")
+
+    def test_a_backslash_in_an_include_is_refused(self):
+        self.refused("include vex\\mkenv.mk\n", "cannot read as make does")
+
+    def test_an_include_that_does_not_resolve_is_refused(self):
+        for line in ("include missing.mk", "-include missing.mk", "sinclude missing.mk",
+                     "include extra/*.mk"):
+            with self.subTest(line):
+                self.refused(line + "\n", "not in the project")
+
+    def test_ordinary_includes_still_pass(self):
+        (self.folder / "makefile").write_text("include vex/mkenv.mk\n-include vex/*.mk\n")
+        self.assertIsNone(vex.makefile_refusal(self.folder))
+
+
+class BestFitNames(Base):
+    """LOW 3: Windows' best fit maps these to syntax; a path part is ASCII."""
+
+    def test_a_path_part_outside_ascii_is_refused(self):
+        for part in ("a\uff02b", "a\uff3cb", "a\u2215b", "caf\u00e9", "a\uff1bb"):
+            with self.subTest(part=part):
+                self.assertRaises(vex.VexError, vex.to_windows, str(self.world.user / part))
+
+
+class Polish(Base):
+    """LOW 5: the template index is opened as the templates are; the
+    natural `vexbuild build` works; the CLI closes what it opened."""
+
+    def test_an_index_swapped_for_a_fifo_never_hangs(self):
+        import threading
+        index = self.world.templates / "index.json"
+        index.unlink()
+        os.mkfifo(index)
+        result = []
+        # As if it had been a regular file when looked at, and swapped since.
+        with patch.object(vex, "_regular", lambda path: True):
+            reader = threading.Thread(
+                target=lambda: result.append(vex._index_names(self.world.templates)), daemon=True)
+            reader.start()
+            reader.join(3)
+        self.assertFalse(reader.is_alive(), "the listing hung on a FIFO")
+        self.assertEqual(result, [{}])
+        index.unlink()
+        index.symlink_to(self.root / "elsewhere.json")
+        (self.root / "elsewhere.json").write_text(json.dumps({"examples": [{"samples": [
+            {"name": "Planted", "files": [{"name": "cpp_v5_vsc_empty.zip"}]}]}]}))
+        with patch.object(vex, "_regular", lambda path: True):
+            self.assertEqual(vex._index_names(self.world.templates), {})
+
+    def test_vexbuild_build_and_no_unclosed_pipe(self):
+        import gc
+        import warnings
+        folder = self.world.project()
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", ResourceWarning)
+            self.assertEqual(vex.cli(["build", "build"], cwd=str(folder), out=io.StringIO()), 0)
+            self.assertEqual(vex.cli(["build", "build", "--clean"], cwd=str(folder),
+                                     out=io.StringIO()), 0)
+            gc.collect()
+        self.assertEqual(self.world.calls("make")[-1]["argv"][-1], "clean")
+        leaks = [str(w.message) for w in caught if issubclass(w.category, ResourceWarning)]
+        self.assertEqual(leaks, [])
 
 
 # -- setup ------------------------------------------------------------------------------------------------
