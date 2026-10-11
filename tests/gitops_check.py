@@ -31,6 +31,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from jarvis import runtime
 from jarvis import config, gitops, llm, tools, workflows
 from jarvis.gitops import OWN, READ, REFUSE, REVIEW, WRITE, RepoContext
 
@@ -911,4 +912,9 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # dispatch() refuses when no toolset is bound (PR #34's follow-up), so
+    # this suite says what it calls directly — and is held to it.
+    with runtime.tools_bound({
+        "edit_file", "git", "git_worktree", "read_file", "write_file"
+    }):
+        sys.exit(main())

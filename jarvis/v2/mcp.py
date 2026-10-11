@@ -76,10 +76,9 @@ def call_tool(name: str, arguments: dict) -> dict:
                 return
             # Bind the exposed list as this caller's toolset, so dispatch()
             # enforces the same set the check above does (tools._toolset_
-            # refusal). This thread starts with an empty context, and an
-            # unbound toolset is the one case dispatch does not enforce — so
-            # without it, the check above would be the only thing between a
-            # client and the whole registry.
+            # refusal). This thread starts with an empty context, and dispatch
+            # refuses every call when no toolset is bound — so without it, a
+            # bare worker would refuse every call, the exposed tools included.
             runtime.bind(tool_names=exposed)
             declined = False
 

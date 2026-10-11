@@ -224,6 +224,17 @@ class Agent:
         # compaction threshold is judged against, so the threshold means what
         # it says. Per-agent, because it describes one transcript.
         self.meter = context.TokenMeter()
+        # The shared base prompt names tools, and this agent is told only about
+        # the ones it holds — invariant 7's "never describe a tool the model
+        # cannot call", which since dispatch enforces the toolset is also a
+        # refused step saved. The whole of any prompt built on SYSTEM_PROMPT
+        # (a surface's own paragraphs after it included) is narrowed here, so
+        # no surface needs code of its own; see config.PROMPT_TOOL_PARAGRAPHS.
+        # Judged on the toolset the agent starts with: a group loaded later
+        # only adds tools.
+        if system.startswith(config.SYSTEM_PROMPT):
+            held = {spec["function"]["name"] for spec in self.tool_specs}
+            system = config.narrow_prompt(system, held)
         self._base_system = system
         # How many sub-agents deep this one is; bound into runtime so a child
         # can refuse to spawn past MAX_DEPTH.
@@ -397,7 +408,7 @@ class Agent:
             # anything that writes into `loaded_groups` some other way. The
             # set re-bound below is what `dispatch()` enforces, so folding in
             # a group the agent was not offered would widen its toolset.
-            if group is None or not set(group.core) <= base:
+            if group is None or not group.core or not set(group.core) <= base:
                 continue
             for name in group.extra:
                 if name in tools.REGISTRY and name not in seen:
@@ -502,13 +513,13 @@ class Agent:
             else:
                 # One fresh Context copy per worker. ContextVars are per-thread,
                 # so a bare pool thread starts with nothing bound — and
-                # runtime.py fails closed, meaning an unbound approver *denies*.
-                # Without this, a gated tool would start refusing itself purely
-                # because it ran beside another one — and, the other way round,
-                # an unbound toolset is one dispatch() does not enforce, so a
-                # bare worker would run a tool this agent was never given
-                # (tools._toolset_refusal). Copies share the plan dict by
-                # reference, so a write through one is seen by its owner.
+                # runtime.py fails closed, meaning an unbound approver *denies*,
+                # and dispatch() refuses every call when no toolset is bound
+                # (tools._toolset_refusal). Without this, a bare worker would
+                # refuse every call it was handed, this agent's own tools
+                # included, purely because it ran beside another one. Copies
+                # share the plan dict by reference, so a write through one is
+                # seen by its owner.
                 #
                 # copy_context() is called per worker rather than reused: a
                 # single Context cannot be entered by two threads at once.

@@ -1012,9 +1012,22 @@ export default function App() {
     return false;
   }, []);
 
-  /** The view strip's buttons and menu: switch a pane, unless that drops an unsaved edit. */
+  /**
+   * The view strip's buttons and menu: switch a pane, unless that drops an
+   * unsaved edit. Switched to the terminal view with no terminal of its own,
+   * the pane opens one, as its `+` would, when none is open anywhere (the
+   * owner's call, 2026-10-11; with some open it offers them, `+` first).
+   */
   const setPaneView = useCallback((pane: PaneNo, next: View) => {
-    if (mayShow(pane, next)) view.setView(pane, next);
+    if (!mayShow(pane, next)) return;
+    const was = layoutNow.current.ws.panes[pane - 1];
+    view.setView(pane, next);
+    if (next === "terminal" && was.view !== "terminal" && !was.terminalId) {
+      void terminals.ownerOpened(pane, () => {
+        const now = layoutNow.current.ws.panes[pane - 1];
+        return now.view === "terminal" && !now.terminalId;
+      });
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mayShow]);
 
