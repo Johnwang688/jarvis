@@ -38,6 +38,8 @@ The answers below were given 2026-10-09: heuristic hits **withhold lines**, and 
 - **Not** background work: workflows, sub-agents, goals and task workers do not hold it. The owner's terminal is a
   desk feature, like the desktop tools.
 - Lead's default; say if otherwise.
+- **2026-10-10, owner confirmed:** fast path desk turns only for now. Claude and Codex chats via jarvis-mcp are a
+  follow-up (per-session tokens). Discord, DM and scheduled turns never.
 
 **Refusals: the whole read is refused, saying only "possible credential in this output". The refusal never says what
 or where.**
