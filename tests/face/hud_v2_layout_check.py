@@ -927,18 +927,43 @@ def _ptt_on_space(page) -> object:
 
 
 def _edit(page, until, pane: int, typed: str):
-    """Type at the end of the file open in pane N, in Monaco or its fallback."""
+    """Type at the end of the file open in pane N, in Monaco or its fallback,
+    until the pane's Save says the edit landed.
+
+    Under load this was the layout section's flake: it typed as soon as *a*
+    `.view-lines` existed in the pane — the editor going away, or the new one
+    before the file's text had replaced its buffer — and the edit was lost,
+    so four "unsaved edit" checks failed. Now it waits for the editor to show
+    the file, types, and types again (at most four times) until Save is
+    enabled: an edit that did not land is retried, never assumed."""
     editor = page.locator(_pane(pane, '[data-testid="editor"] .view-lines'))
-    until(lambda: editor.count() > 0
-          or page.locator(_pane(pane, '[data-testid="editor-fallback"]')).count() > 0, timeout=10)
-    if editor.count():
-        editor.click()
-        page.keyboard.press("Control+End")
-        page.keyboard.type(typed)
-    else:
-        page.evaluate("([n, t]) => { const h = document.querySelector("
-                      "`[data-testid=\"pane-${n}\"] [data-testid=\"editor-fallback\"]`);"
-                      " h.value += t; h.dispatchEvent(new Event('input', {bubbles: true})); }", [pane, typed])
+    fallback = page.locator(_pane(pane, '[data-testid="editor-fallback"]'))
+    save = page.locator(_pane(pane, '[data-testid="file-save"]'))
+    def shows_file() -> bool:
+        # One editor (not the old one beside the new), holding the file's text
+        # (not an empty buffer it is about to replace).
+        try:
+            return editor.count() == 1 and editor.inner_text(timeout=1000).strip() != ""
+        except Exception:
+            return False
+
+    for attempt in range(4):
+        until(lambda: editor.count() > 0 or fallback.count() > 0, timeout=10)
+        if editor.count():
+            until(shows_file, timeout=5)
+            try:
+                editor.click(timeout=3000)
+            except Exception:
+                continue  # replaced under the click: find the new one
+            page.keyboard.press("Control+End")
+            page.keyboard.type(typed)
+        else:
+            page.evaluate("([n, t]) => { const h = document.querySelector("
+                          "`[data-testid=\"pane-${n}\"] [data-testid=\"editor-fallback\"]`);"
+                          " h.value += t; h.dispatchEvent(new Event('input', {bubbles: true})); }", [pane, typed])
+        if until(lambda: save.count() > 0 and not save.is_disabled(), timeout=2.0 + attempt):
+            return True
+    return False
 
 
 def _approval(mock, req: str, command: str = "ls"):

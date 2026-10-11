@@ -371,8 +371,11 @@ h2.bar {
    only what is left, so it never forces a wrap of its own. */
 :is(#inputbar, .inputbar) > .row { flex-wrap: wrap; }
 :is(#inputbar, .inputbar) > .row > .hint { flex: 1 1 0; min-width: 120px; }
+/* A status line with nothing to say takes no line of its own (it would wrap
+   onto one in a narrow pane and steal the conversation's height). */
+:is(#inputbar, .inputbar) > .row > .hint:empty { display: none; }
 /* Grows with the text (InputBar sets the height: up to 15 lines, and never
-   past 40% of its pane) and scrolls past that; a drag handle would fight it. */
+   past 35% of its pane) and scrolls past that; a drag handle would fight it. */
 :is(#inputrow, .inputrow) textarea { min-height: 36px; padding: 7px 9px; line-height: 1.45; resize: none; overflow-y: hidden; }
 :is(#chips, .chips) { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
 .chip {

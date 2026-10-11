@@ -531,14 +531,15 @@ result, a transcript load) stays with its thread, and a hand-back whose thread
 is off screen is held, never put in the selected chat. With no chat drawn,
 speech waits unsent in the box of the next chat selected, and a press or a
 dropped file is refused with a sentence: nothing is ever sent. The selected
-chat alone draws the dictation strip (AUTO/REVIEW/OFF, meter, hint — another
-pane shows only its own turn's status, `pane-status`), carries
+chat's status is the line under the orb (since PR #29 the dictation strip —
+AUTO/REVIEW/OFF and the meter — is on the orb, acting for the selected chat;
+every other chat pane shows only its own turn's status, `pane-status`), it carries
 `data-selected` and, in a split, an accent bar down its header's edge and a mic
 mark (`pane-N-mic`); **the orb follows and interrupts only its turn**, the
 follow-up window opens only when its turn ends, **only its turn suppresses
 the mic** — a long turn in another pane no longer silences it — and a capture
 status ("LISTENING", "TRANSCRIBING", "STT FAILED" …) moves with the selection
-instead of going stale in a pane that no longer draws the strip. The store's
+instead of going stale in a pane that is no longer selected. The store's
 `orb` is window-wide, but a pane's turn event moves it only for the selected
 chat (`select` repaints it from the new one's turn). **A thread is open in one
 pane at most**: a click on a thread a drawn pane shows focuses that pane; one
@@ -589,24 +590,55 @@ kills. **Typing re-renders the window** (the box's words are the store's), so
 `ChatTab` is memoized with stable props: a long transcript redrawn per
 keystroke cost milliseconds per character per chat pane.
 
-**Input bar declutter (2026-10-10).** The bar is `📎 [box] ⬆` over one row,
-`in: project · provider ▾ · model · effort ▾`. **The mic is on the orb, not in
-the bar**: the dictation mode (AUTO/REVIEW/OFF, testids `dictation-*`) and the
-level meter sit in a strip above the orb (`#micstrip`, inside `#orbdock`; the
-sidebar's bottom padding grew to match), and the hint line is gone — its words
-now ride the orb's status line (`orb-status`: the turn's status, else `MIC
-MUTED`, else the orb state). A folded sidebar scales the dock to a 36px orb, so
-the strip cannot ride in it: `#modecycle` (`dictation-cycle`), a sibling button
-above the mini orb, cycles the mode and goes red at OFF. **Model and effort are
-one button** (`model-chip-btn`, carrying `data-model`/`data-effort`) that opens
-one popover (`ModelChip.tsx` `Popover`, in `#root`, `position: fixed` placed
-from the button's rect divided by the zoom, upward) with Model and Effort
-sections and "Set <provider> default…"; the provider stays a select. The box
-grows to 15 lines (`MAX_LINES`) then scrolls; Send and Attach are SVG icon
-buttons (testids unchanged), Stop a square icon. Tests drive the popover through
-helpers at the top of `hud_v2_check.py` (`pick_model`, `pick_effort`,
-`chip_model`…); a read made while a dialog's veil is up must use the button's
-text, because the popover cannot be opened under a veil.
+**Input bar declutter (2026-10-10, PR #29; ported onto WP-B and reviewed the
+same day).** The bar is `📎 [box] ⬆` over one row, `in: project · provider ▾ ·
+model · effort ▾`. **The mic is on the orb, not in any bar**: the dictation
+mode (AUTO/REVIEW/OFF, testids `dictation-*`) and the level meter sit in a
+strip above the orb (`#micstrip`, inside `#orbdock`), acting for the selected
+chat (W-6), and **the line under the orb is the selected chat's status**
+(`orb-status`, lib/dictation `orbLine`: the turn's status, else ANSWER THE
+AUTHORIZATION under a card, else MIC MUTED, else the orb state — only OFF ever
+says MUTED; up to three lines, a little wider than the orb, so nothing is cut
+off). Every other chat pane keeps its own `pane-status` line (an empty one
+takes no room); the selected chat's bar draws one only while the sidebar is
+folded, when the orb is a 36px dot with no line under it. The strip folds into
+one button, `#modecycle` (`dictation-cycle`), that cycles **OFF → REVIEW →
+AUTO → OFF** (`nextMode`: one click from muted never lands on a mic that
+sends on its own) and goes red at OFF — above the mini orb when the sidebar is
+folded, and beside the full orb in a short window (under `MIC_TIGHT_H` = 560
+zoomed px, `#shell.mic-tight`, which gives the sidebar the strip's 44px back
+for its rows). **Under a card the mode buttons are disabled as well as
+inert**, and the card takes focus off them: focus left on the cycle button
+used to let Enter switch OFF to AUTO behind the card. **Model and effort are
+one button per chat pane** (`model-chip-btn`, carrying `data-model` and
+`data-effort`) opening one popover (`ModelChip.tsx` `Popover`, portaled to
+`#root`; `data-pane` says whose) with Model and Effort sections and "Set
+<provider> default…"; the provider stays a select. It is placed by
+`placePopover` through `toCss` — upward, downward only when there is too little
+room above and more below, never taller than the room it opens into — and
+closes on Escape (focus back on the button; **under a card it never swallows
+Escape**, which denies), a click outside, focus leaving it, a resize, a zoom
+change, or its button moving (a rAF watch: a fold, a split, a re-layout). It
+opens on the chosen option, the arrows move within a list, Tab goes round its
+stops and never leaves it, none of its keys reach push-to-talk, and its
+listeners are set once (the close is read through a ref). The box grows to 15
+lines (`MAX_LINES`) or 35% of its pane (`MAX_PANE_SHARE`), whichever is less —
+re-measured when the pane's height changes, not only its width — then scrolls:
+fifteen lines in a 2×2 grid, two rows or a small window at 160% pushed Send and
+the chips out of the pane and left the conversation 32px. Send and Attach are
+SVG icon buttons (testids unchanged), Stop a square, and Steer an outlined bent
+arrow (`.steer`, `data-steer`) — it must not look like Send. Tests drive the
+popover through helpers at the top of `hud_v2_check.py` (`pick_model`,
+`pick_effort`, `chip_model`… — each takes `pane=1`; unscoped, Playwright's
+strict mode fails on several chips at once); a read made while a dialog's veil
+is up must close the dialog first, because the popover cannot be opened under
+a veil. Free checks: `tests/face/hud_v2_declutter_check.py` — one `review #29
+Fn` check per finding of the review, run by `hud_v2_check` after the multichat
+section on a `MockDaemon(0)` of its own, or alone — plus `ModelChip.test.ts`
+(`placePopover`) and `dictation.test.ts` (`orbLine`, `nextMode`). The layout
+section's `_edit` now types until the pane's Save is enabled: it used to type
+into an editor not yet showing the file, and four "unsaved edit" checks failed
+under load.
 
 **Sidebar status dots (2026-10-08, design §18; contract in
 `docs/hud-api.md`).** The `·` left of each sidebar thread and task is what it

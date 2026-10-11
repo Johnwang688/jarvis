@@ -531,6 +531,11 @@ def dictation_checks(page, mock):
 
     # REVIEW puts the transcript in the box and never sends on its own.
     page.locator('[data-testid="dictation-review"]').click()
+    # The orb's line took over from the input bar's hint (PR #29): only OFF may
+    # say MUTED, and REVIEW and AUTO never do (review of #29, M2b).
+    check("REVIEW never says the mic is muted",
+          bool(until(lambda: "MUTED" not in page.locator('[data-testid="orb-status"]').inner_text(), timeout=2)),
+          page.locator('[data-testid="orb-status"]').inner_text())
     sends_before = len(mock.sent("POST", "/threads/t1/send"))
     stt_before = len(mock.sent("POST", "/stt"))
     page.evaluate("""
@@ -552,6 +557,9 @@ def dictation_checks(page, mock):
 
     # AUTO sends a finished utterance: /stt then /send.
     page.locator('[data-testid="dictation-auto"]').click()
+    check("nor does AUTO",
+          bool(until(lambda: "MUTED" not in page.locator('[data-testid="orb-status"]').inner_text(), timeout=2)),
+          page.locator('[data-testid="orb-status"]').inner_text())
     sends_before = len(mock.sent("POST", "/threads/t1/send"))
     page.evaluate("""
       const m = window.__hud.mic;
@@ -2292,8 +2300,16 @@ def provider_default_checks(page, mock):
     body = until(lambda: [b for b in mock.sent("POST", "/thread-models") if b.get("effort")] or None)
     check("an effort on the default posts {provider, model, effort}",
           bool(body) and body[-1] == {"provider": "claude", "model": "claude-opus-5-5", "effort": "low"}, str(body))
+    # Read in the chip's own effort list: its first entry names the default's
+    # effort (review of #29 — reading "· low" off the button passed a list
+    # still saying "default · high"). The list cannot open under the dialog's
+    # veil, so the dialog closes for the read and opens again after it.
+    page.locator('[data-testid="pd-close"]').click()
+    until(lambda: page.locator('[data-testid="provider-defaults"]').count() == 0)
     check("and the default thread's effort chip follows it",
-          until(lambda: "· low" in page.locator(CHIP_BTN).inner_text()) is True)
+          until(lambda: (effort_labels(page) or [""])[0] == "default · low") is True, str(effort_labels(page)[:1]))
+    open_defaults(page)
+    page.wait_for_selector('[data-testid="provider-defaults"]')
 
     # A refusal is shown inline, in the server's words, and changes nothing.
     w["refuse_default"] = "claude-haiku-4-5 is not allowed here for a reason"
@@ -2403,6 +2419,15 @@ def main():
                                  (live, refuse_live), FAKE_RECOGNIZER)
             finally:
                 multichat_mock.stop()
+            # The input bar declutter (PR #29) and its review: a context and a
+            # mock of their own, for the same reasons.
+            from tests.face.hud_v2_declutter_check import declutter_checks
+            declutter_mock = MockDaemon(0).start()
+            try:
+                declutter_checks(browser, declutter_mock, f"http://127.0.0.1:{declutter_mock.port}", check, until,
+                                 (live, refuse_live), FAKE_RECOGNIZER)
+            finally:
+                declutter_mock.stop()
 
             ctx = browser.new_context(permissions=["microphone"])
             ctx.route(live, refuse_live)

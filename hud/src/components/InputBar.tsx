@@ -38,7 +38,7 @@ export const MAX_LINES = 15;
  * of rows, a small window at a high zoom) fifteen lines pushed Send and the
  * chips out of the pane and squeezed the conversation to nothing (review of
  * PR #29). */
-export const MAX_PANE_SHARE = 0.4;
+export const MAX_PANE_SHARE = 0.35;
 
 const MAX_BYTES = 4 * 1024 * 1024;
 
