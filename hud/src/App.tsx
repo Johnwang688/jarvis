@@ -29,6 +29,7 @@ import { ChatTab } from "./components/ChatTab";
 import { InputBar, MAX_FILES, toAttachment } from "./components/InputBar";
 import { TaskView } from "./components/TaskView";
 import { FileTab } from "./components/FileTab";
+import { monacoEditors, monacoLanguage, monacoModels, setEditorsBlocked } from "./lib/monaco";
 import { DiffTab } from "./components/DiffTab";
 import { PreviewTab, type PreviewRequest } from "./components/PreviewTab";
 import { judgePreviewUrl } from "./lib/preview";
@@ -101,6 +102,10 @@ export default function App() {
   // there froze with it (review of PR #32). A layout effect, so the hold is on
   // before a paste's next chunk can leave.
   useLayoutEffect(() => terminals.setBlocked(blocked), [blocked]);
+  // And nothing reaches an editor: every Monaco goes read-only while a card
+  // is up (ED-1; the card takes focus itself), said from here for the same
+  // reason.
+  useLayoutEffect(() => setEditorsBlocked(blocked), [blocked]);
   // A render error stopped the title bar, the shell and the orb drawing
   // (components/Boundary.tsx): the owner sees a Reload prompt and nothing
   // else, so nothing is heard or sent on their behalf from then on — no
@@ -115,13 +120,19 @@ export default function App() {
   // closing the window asks (2026-10-09, the minimal guard), and since WP-B
   // nothing switches the pane to another view — a tab, a sidebar click, a
   // chat landing there — until the edit is saved or discarded.
+  //
+  // The ref is the truth the guards read (`mayShow`, the project picker, the
+  // archive path), written at once by `markDirty` — FileTab calls it from the
+  // editor's own change event — and the state follows for drawing. A ref
+  // copied from the state at render time lagged a frame behind the edit, and
+  // a project picked in that frame dropped it (review of PR #43).
   const [dirtyPanes, setDirtyPanes] = useState<Record<number, boolean>>({});
-  const dirtyNow = useRef(dirtyPanes);
-  dirtyNow.current = dirtyPanes;
-  const markDirty = useCallback(
-    (pane: PaneNo, dirty: boolean) => setDirtyPanes((m) => (!!m[pane] === dirty ? m : { ...m, [pane]: dirty })),
-    [],
-  );
+  const dirtyNow = useRef<Record<number, boolean>>({});
+  const markDirty = useCallback((pane: PaneNo, dirty: boolean) => {
+    if (!!dirtyNow.current[pane] === dirty) return;
+    dirtyNow.current = { ...dirtyNow.current, [pane]: dirty };
+    setDirtyPanes((m) => (!!m[pane] === dirty ? m : { ...m, [pane]: dirty }));
+  }, []);
   const anyDirty = Object.values(dirtyPanes).some(Boolean);
   useEffect(() => {
     if (!anyDirty) return;
@@ -1779,6 +1790,11 @@ export default function App() {
       reconcile: () => reconcileBusy(),
       // The centre's panes as stored and as drawn (lib/workspace.ts).
       workspace: () => ({ ws: layoutNow.current.ws, fit: layoutNow.current.fit }),
+      // Monaco, read-only (lib/monaco.ts): live model URIs, live editors, and
+      // the language the registry gives a path.
+      monacoModels,
+      monacoEditors,
+      monacoLanguage,
     };
   }, [capture, dispatch, onWakeHit, reconcileBusy]);
 
@@ -2002,6 +2018,33 @@ export default function App() {
               discard edit
             </button>
           </span>
+        ) : spec.view === "file" ? (
+          // A File pane picks its own project (decisions E-13): every project,
+          // or Follow chat. Only project roots are offered — a folder becomes
+          // reachable by becoming a project, so folders.py stays the one gate.
+          // A pane holding an unsaved edit refuses, with the refusal chip, and
+          // the select snaps back; under a card it is disabled (and inert).
+          <select
+            className="panepick"
+            data-testid={`pane-${n}-folder`}
+            value={spec.projectId && !pinGone(spec) ? spec.projectId : ""}
+            disabled={blocked}
+            title={dirty
+              ? "Save or reload the file first: another project closes it"
+              : "The project this pane's files come from"}
+            onChange={(e) => {
+              if (dirtyNow.current[n]) {
+                setRefused((r) => ({ ...r, [n]: { at: Date.now(), pane: n } }));
+                return;
+              }
+              view.pin(n, e.target.value || null);
+            }}
+          >
+            <option value="">Follow chat{activeProjectId ? ` · ${projectName(activeProjectId)}` : ""}</option>
+            {state.projects.map((p) => (
+              <option key={p.id} value={p.id}>{p.name}</option>
+            ))}
+          </select>
         ) : pinnedElsewhere(spec, n) ? (
           <span className="chip panepin" data-testid={`pane-${n}-project`} title="This pane stays in its project">
             in: {projectName(paneProject(spec, n))}
