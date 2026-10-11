@@ -1336,7 +1336,9 @@ quotes or a quoted here-document). A line that only mentions the command —
 `echo …`, a `grep` for it, a commit message — is untouched: a DENY cannot be
 approved, so a false one would block the owner too. Not seen: a link made
 earlier under another name, words built at run time (`jarvis $(echo hud)
-install`), a Makefile, alias or script. A shell write **into** the install root (`cp`, `rsync`, a
+install`), a Makefile, alias or script. The same detector refuses `jarvis hud rebuild`,
+`jarvis restart` and `jarvis daemon2 restart` (2026-10-11, `v2/owner_ops.py`),
+and a `systemctl` verb that changes `jarvis-daemon2`. A shell write **into** the install root (`cp`, `rsync`, a
 redirect) is asked, never auto-approved or covered by an allowlist entry. A
 shell can still write there in a form nobody sees — the accepted shell gap.
 

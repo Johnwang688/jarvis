@@ -2340,6 +2340,14 @@ from the older build). Every headless HUD suite runs under the policy with a
 violation watch; `tests/face/hud_v2_csp_check.py` proves the HUD's needs work
 and an attacker's are refused.
 
+**Restart and rebuild from the CLI (2026-10-11).** `jarvis restart` (alias
+`jarvis daemon2 restart`) restarts systemd's `jarvis-daemon2` — refused while a
+turn runs unless `--force`, then it waits for a new daemon to answer `/status`
+and reports it — and `jarvis hud rebuild [--pull] [--restart]` runs `npm ci`
+when the lock file moved, installs through `jarvis hud install`'s own path and
+checks `/status` serves the new build; both are the owner's and DENY for every
+agent (`jarvis/v2/owner_ops.py`).
+
 **Push-to-talk is Ctrl+D (2026-10-10).** The owner: "can we change the push
 to talk button? change it to Ctrl + D just like it is in claude." It was
 Space, which is a character in every box the owner types in: each typing

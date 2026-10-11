@@ -59,7 +59,7 @@ task runner with the intake gate (WP11 — `TaskControl` in
 backend ran one real task end to end on 2026-09-16** (design §17): Claude
 orchestrated, Codex implemented in a worktree, a fresh Claude reviewer
 failed it once and passed it second time, DONE in 198 s. **The HUD v2 landed the same
-day** (WP12a backend + WP12b frontend under `hud/`, `jarvis hud` opens it, and since ED-4 the daemon serves only what `jarvis hud install` installed;
+day** (WP12a backend + WP12b frontend under `hud/`, `jarvis hud` opens it, and since ED-4 the daemon serves only what `jarvis hud install` installed — `jarvis hud rebuild` and `jarvis restart` are the owner's two operation commands, DENY for agents;
 design §12 and §18). **Projects are archived, never deleted in place**
 (2026-10-06, decisions part B): an archived project or thread keeps every
 record and is hidden from lists, placement and schedules; permanent delete
@@ -1208,7 +1208,8 @@ v2 grant. **Jarvis never runs the installer**: `protected_state.owner_op`
 (**the table `OWNER_OPS` is the extension point** for any other owner-only
 `jarvis` command; `OWNER_OP_MODULES` for its module), asked by `rules.decide`
 (so v1's gate and v2's layer 1) and by `run_command`, makes `jarvis hud
-install` DENY — judged on the **command word** after wrappers and runners
+install` — and since 2026-10-11 `jarvis hud rebuild`, `jarvis restart` and
+`jarvis daemon2 restart` (below) — DENY, judged on the **command word** after wrappers and runners
 (`_RUNNERS`: `env -S`, `nohup`, `timeout`, `flock`, `systemd-run`, `uv run`,
 `ssh`, `xargs` with input that may complete it), `python -m jarvis`, a line's
 own `$VAR` or `ln -s` alias, the installer module, Python source that
@@ -1221,14 +1222,16 @@ to the full parse by `hud_install_check`. An agent can edit `hud/src`, so
 running the installer would undo C-1. A shell write *into* the install root
 asks (`protected_state.hud_trees`). A shell can still
 write it in a form nobody sees (the accepted gap). **After a merge, the lead
-runs, from a synced, clean main checkout: `jarvis hud install` (it builds
-`hud/`; run `npm ci` in `hud/` first if `package-lock.json` changed; it
-refuses uncommitted `hud/` changes — commit or stash them, `--allow-dirty`
-only on purpose), then `systemctl --user restart jarvis-daemon2` only if
-Python changed — a HUD-only change needs just a reload of the window** — and
-checks `curl -s localhost:8405/status` shows the new `hud_build`,
+runs, from a synced, clean main checkout, `jarvis hud rebuild` — adding
+`--restart` only if Python changed; a HUD-only change needs just a reload of
+the window (Ctrl+R)** — and `jarvis restart` alone when only Python changed.
+`rebuild` runs `npm ci` first when `package-lock.json` moved, refuses
+uncommitted `hud/` changes (commit or stash them; `--allow-dirty` only on
+purpose), installs, and checks `/status` shows the new `hud_build`,
 `hud_git_head` equal to the checkout's HEAD and `hud_state: "installed"` (not
-`"fallback"`).
+`"fallback"`), exiting 4 if not; `--pull` fast-forwards main first. (`jarvis
+hud install` and `systemctl --user restart jarvis-daemon2` still work; the
+new commands do the checks those leave to the reader.)
 Never `jarvis hud` to restart. **Tests point
 `config.HUD_DIR`/`HUD_DIST` at temp dirs** (or set `HUD_DEV` with a temp
 dist); never install into the owner's real root. **Every context of every
@@ -1240,6 +1243,46 @@ work under it — SSE, the terminal socket, Monaco and its worker, the avatar,
 the mic and `/stt`, a loopback frame — and that an inline or remote script,
 `eval`, a `blob:` worker, WebAssembly, a cross-origin fetch, socket, image,
 object, `<base>`, form or non-loopback frame is refused with a violation.
+
+**The owner's restart and rebuild commands (2026-10-11; `jarvis/v2/owner_ops.py`,
+free suite `tests/v2/owner_ops_check.py`).** The owner: "a way for me to
+restart the daemon and a command to force the hud to rebuild with latest
+changes in the jarvis cli". **`jarvis restart [--force] [--wait S]`** (alias
+`jarvis daemon2 restart [--force]`) reads `/status` and **refuses while a turn
+runs** (exit 3; it would be cut off mid-step and anything it waits on denied)
+unless `--force`; refuses when the systemd user unit is not installed, or is
+not what runs the daemon (one started by `jarvis hud` or a shell would be
+doubled — the second cannot bind); warns that open HUD terminals end; runs
+`systemctl --user restart jarvis-daemon2` as argv; waits up to 30 s for a
+daemon **younger than the restart** to answer `/status` (the old one's last
+answer never passes; exit 4 with systemd's state and the `journalctl` line
+otherwise); and prints uptime, each provider's ok/reason and the HUD served,
+then asks for Ctrl+R. **`jarvis hud rebuild [--pull] [--restart] [--force]
+[--clean] [--allow-dirty]`**: `--pull` fast-forwards `main` from `origin/main`
+through `gitops._git` (refused off `main`, on a detached HEAD, with dirty
+tracked files, or when the checkout's own config names a program — it never
+stashes, merges, resets or forces — and it names Python the pull changed);
+`npm ci` runs when `node_modules` is missing, unmarked or older than
+`package-lock.json` (or `--clean`); then **`jarvis hud install`'s own path**
+(`hud_install.install_checkout`, split out of `main`); `--restart` goes
+through `restart`'s code (its busy refusal checked before anything is built
+and again before restarting); and `/status` must then serve the new build
+from HEAD as `installed`, else exit 4. Exit codes: 0 done, 1 refused or
+failed, 3 a turn runs, 4 not verified. **Both are DENY for every agent**
+through the one detector (`OWNER_OPS` gains `("hud", "rebuild")`,
+`("restart",)`, `("daemon2", "restart")`; `OWNER_OP_MODULES` gains
+`jarvis.v2.owner_ops`, and `hud_install`'s writers gain `install_checkout`),
+plus a sibling rule for a `systemctl` verb that changes `jarvis-daemon2`
+(named or globbed; reads like `status`/`show` untouched) and `systemctl
+--user exit|isolate` — `systemctl --user restart jarvis-daemon2` was ALLOW,
+and v2's AUTO permit let every spelling through unasked. **`hud` and
+`daemon2` take no option with a value** (the detector reads their words,
+options skipped; `jarvis restart --wait` is fine, its op being the first
+word) — `owner_ops_check` pins it through `__main__.build_parser()`. Not
+decided here: `pkill -f jarvis` matches the daemon and stays ALLOW, as the
+owner's 2026-08-09 matrix pins. **Never run either command from a session**:
+the tests fake `systemctl` and `npm` behind `subprocess.run`, play `/status`
+on a fake clock and refuse any connection to 8402/8403/8405.
 
 **Input bar declutter (2026-10-10, PR #29; ported onto WP-B and reviewed the
 same day).** The bar is `📎 [box] ⬆` over one row, `in: project · provider ▾ ·
