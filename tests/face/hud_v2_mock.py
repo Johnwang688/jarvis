@@ -795,7 +795,7 @@ class MockDaemon:
                         rel = q.get("path", [""])[0]
                         abs_ = mock.abs_of(project, rel)
                         if rel in w["protected"]:
-                            return self._json({"path": rel, "abs": abs_, "kind": "withheld",
+                            return self._json({"path": rel, "abs": abs_, "kind": "withheld", "editable": False,
                                                "readonly": "a credential file: its contents are never sent to this window.",
                                                "protected": True})
                         rec = w["files"].get(rel)
@@ -803,11 +803,17 @@ class MockDaemon:
                             return self._err(404, "no such file")
                         kind = w["kinds"].get(rel, "text")
                         content = rec["content"]
+                        # The daemon's `editable` (ED-2's review, MED1): an
+                        # editable kind the editor still may not write — an
+                        # env file that is not UTF-8 — is in `uneditable`.
+                        editable = kind in ("text", "env") and rel not in w.get("uneditable", ())
                         return self._json({
                             "path": rel, "abs": abs_, "content": content, "etag": etag_of(content),
                             "mtime": rec["mtime"], "size": len(content.encode()), "protected": False,
-                            "encoding": "utf-8", "eol": eol_of(content), "kind": kind,
-                            "readonly": READONLY.get(kind)})
+                            "encoding": "utf-8" if editable or kind != "env" else None,
+                            "eol": eol_of(content), "kind": kind, "editable": editable,
+                            "readonly": (READONLY.get(kind) if editable or kind != "env"
+                                         else READONLY["env"] + " And read-only here: it holds NUL bytes.")})
 
                 # /threads/{id}/transcript|log
                 if len(parts) == 3 and parts[0] == "threads" and parts[2] == "transcript":
@@ -851,7 +857,11 @@ class MockDaemon:
                         if rel in w["protected"]:
                             files[rel] = {"kind": "withheld"}
                         elif rel in w["files"]:
-                            files[rel] = {"etag": etag_of(w["files"][rel]["content"]),
+                            # `stat_etags` (on cue): what the poll says while a
+                            # read already sees a newer write — a disk that moved
+                            # again between the stat and the read.
+                            files[rel] = {"etag": w.get("stat_etags", {}).get(rel)
+                                          or etag_of(w["files"][rel]["content"]),
                                           "kind": w["kinds"].get(rel, "text")}
                         else:
                             files[rel] = {"gone": True}
@@ -1153,7 +1163,7 @@ class MockDaemon:
                 if len(parts) == 3 and parts[0] == "projects" and parts[2] == "file":
                     rel = body.get("path", "")
                     kind = w["kinds"].get(rel, "text")
-                    if rel in w["protected"] or kind not in ("text", "env"):
+                    if rel in w["protected"] or kind not in ("text", "env") or rel in w.get("uneditable", ()):
                         return self._err(403, "read-only here")
                     rec = w["files"].get(rel)
                     if "expected_etag" in body:

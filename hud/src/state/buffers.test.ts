@@ -90,6 +90,16 @@ const tagOf = (text: string) => `e${[...text].reduce((h, c) => (h * 31 + c.charC
 class World {
   files = new Map<string, string>();
   kinds = new Map<string, string>();
+  /** Files the daemon says the editor may not save (an env file that is not UTF-8). */
+  uneditable = new Set<string>();
+  uriRegistry = false;
+  byUri = new Map<string, FakeModel>();
+  /** While set, each write waits until `release()` lets it go. */
+  hold = false;
+  held: (() => void)[] = [];
+  release() {
+    for (const r of this.held.splice(0)) r();
+  }
   writes: (WriteBody & { projectId: string })[] = [];
   reads: string[] = [];
   statCalls = 0;
@@ -106,10 +116,12 @@ class World {
       return {
         path, abs, content, etag: tagOf(content), kind, protected: false, encoding: "utf-8",
         eol: content.includes("\r\n") ? "CRLF" : "LF", readonly: kind === "text" ? null : `a ${kind} file`,
+        editable: (kind === "text" || kind === "env") && !this.uneditable.has(abs),
       };
     },
     write: async (projectId, body) => {
       this.writes.push({ ...body, projectId });
+      if (this.hold) await new Promise<void>((resolve) => this.held.push(resolve));
       const abs = this.abs(projectId, body.path);
       const now = this.files.get(abs);
       const etag = now === undefined ? null : tagOf(now);
@@ -128,8 +140,12 @@ class World {
       }
       return { files };
     },
-    makeModel: async (text) => {
+    makeModel: async (text, abs) => {
+      // Like Monaco's model registry, when asked (`uriRegistry`): one live
+      // model per URI, an older one at the same URI disposed.
+      if (this.uriRegistry) this.byUri.get(abs)?.dispose();
       const m = new FakeModel(text);
+      this.byUri.set(abs, m);
       this.models.push(m);
       return m;
     },
@@ -351,7 +367,8 @@ describe("the change poll", () => {
     await b.open("p1", "a.py", "1|a.py");
     const notes: string[] = [];
     b.onNotice((_abs, t) => notes.push(t));
-    b.noteTouch("a.py", "Codex · task 41");
+    b.noteTouch("/w/a.py", "Codex · task 41");
+    b.noteTouch("a.py", "a relative path: ignored");
     w.files.set("/w/a.py", "one\ntwo\n");
     await b.poll();
     const m = model("/w/a.py");
@@ -477,5 +494,153 @@ describe("the fallback's shim model", () => {
     m.setValue("b");
     m.setValue("b");
     expect([m.getValue(), m.getAlternativeVersionId(), n]).toEqual(["b", 2, 1]);
+  });
+});
+
+describe("the review of PR #49 (each failing on f869543)", () => {
+  it("H1: releasePane lets go of this pane's buffers only — another pane's orphaned edit survives", async () => {
+    await b.open("p1", "a.py", "2|a.py");
+    model("/w/a.py").type("orphan");
+    b.release("/w/a.py", "2|a.py");            // pane 2 unmounted: the edit is kept, held by no tab
+    await b.open("p1", "b.py", "3|b.py");
+    b.releasePane(5, { discard: true });        // × on a chat pane
+    b.releasePane(3, { discard: true });        // × on another File pane
+    expect(b.get("/w/a.py")?.dirty).toBe(true);
+    expect(b.text("/w/a.py")).toBe("one\norphan");
+    expect(b.get("/w/b.py")).toBeNull();        // its own clean buffer still goes
+    // Pane 3 with its own edit, discarded: that one goes.
+    await b.open("p1", "b.py", "3|b.py");
+    model("/w/b.py").type("mine");
+    b.releasePane(3, { discard: true });
+    expect(b.get("/w/b.py")).toBeNull();
+    expect(b.get("/w/a.py")?.dirty).toBe(true);
+  });
+
+  it("H2: panesLose asks the panes together — two panes sharing an edit hold it as a set", async () => {
+    await b.open("p1", "a.py", "2|a.py");
+    await b.open("p1", "a.py", "3|a.py");
+    await b.open("p1", "b.py", "4|b.py");
+    model("/w/a.py").type("x");
+    // Pane by pane, neither holds the last view.
+    expect([b.paneLoses(2), b.paneLoses(3)]).toEqual([false, false]);
+    // Together they do.
+    expect(b.panesLose([2, 3]).map((v) => v.path)).toEqual(["a.py"]);
+    expect(b.panesHolding([2, 3, 4])).toEqual(["2", "3"]);
+    expect(b.panesLose([2])).toEqual([]);
+    expect(b.panesHolding([2, 4])).toEqual([]);   // pane 3, outside the set, still holds it
+  });
+
+  it("L1: one file read through two projects at once is one model, never a disposed one", async () => {
+    w.uriRegistry = true;
+    w.files.set("/w/src/main.py", "print('hi')\n");
+    const [v1, v2] = await Promise.all([
+      b.open("p1", "src/main.py", "2|src/main.py"),
+      b.open("inbox", "w/src/main.py", "3|w/src/main.py"),
+    ]);
+    expect(v1.abs).toBe(v2.abs);
+    expect(w.models.filter((m) => !m.isDisposed())).toHaveLength(1);
+    const m = b.model("/w/src/main.py") as FakeModel;
+    expect(m.isDisposed()).toBe(false);
+    expect(b.get("/w/src/main.py")!.refs.sort()).toEqual(["2|src/main.py", "3|w/src/main.py"]);
+  });
+
+  it("L4: a reload in place never reads dirty, not even for a moment", async () => {
+    await b.open("p1", "a.py", "1|a.py");
+    const seen: boolean[] = [];
+    b.subscribe(() => seen.push(b.isDirty("/w/a.py")));
+    w.files.set("/w/a.py", "one\nchanged\n");
+    await b.poll();
+    expect(b.text("/w/a.py")).toBe("one\nchanged\n");
+    expect(seen.length).toBeGreaterThan(0);
+    expect(seen).not.toContain(true);
+  });
+
+  it("MED1: a buffer the read calls not editable is never dirty and never saved, whatever its kind", async () => {
+    w.files.set("/w/.env.utf16", "A=1\n");
+    w.kinds.set("/w/.env.utf16", "env");
+    w.uneditable.add("/w/.env.utf16");
+    const v = await b.open("p1", ".env.utf16", "1|.env.utf16");
+    expect([v.kind, v.editable]).toEqual(["env", false]);
+    model("/w/.env.utf16").type("B=2");
+    expect(b.isDirty("/w/.env.utf16")).toBe(false);
+    expect(await b.save("/w/.env.utf16")).toBe("skipped");
+    expect(w.writes).toHaveLength(0);
+  });
+
+  it("L2: a kind this window does not know opens read-only", async () => {
+    w.kinds.set("/w/a.py", "brand-new-kind");
+    const v = await b.open("p1", "a.py", "1|a.py");
+    expect([v.kind, v.editable]).toEqual(["unknown", false]);
+    model("/w/a.py").type("x");
+    expect(b.isDirty("/w/a.py")).toBe(false);
+  });
+
+  it("double Ctrl+S: the second save waits for the first — no second PUT on a stale etag, no false conflict", async () => {
+    await b.open("p1", "a.py", "1|a.py");
+    model("/w/a.py").type("x");
+    w.hold = true;
+    const first = b.save("/w/a.py");
+    expect(await b.save("/w/a.py")).toBe("skipped");
+    w.hold = false;
+    w.release();
+    expect(await first).toBe("saved");
+    expect(w.writes).toHaveLength(1);
+    expect(b.get("/w/a.py")!.conflict).toBeNull();
+    expect(b.isDirty("/w/a.py")).toBe(false);
+  });
+
+  it("a late save answer never lands on a newer buffer for the same file", async () => {
+    await b.open("p1", "a.py", "1|a.py");
+    model("/w/a.py").type("x");
+    const notes: string[] = [];
+    b.onNotice((_abs, t) => notes.push(t));
+    w.hold = true;
+    const late = b.save("/w/a.py");
+    b.release("/w/a.py", "1|a.py", { discard: true });   // thrown away while the save was out
+    w.hold = false;
+    const again = b.open("p1", "a.py", "2|a.py");          // and read again: a new buffer
+    await again;
+    const fresh = b.get("/w/a.py")!;
+    w.release();
+    await late;
+    expect(notes).not.toContain("saved");
+    expect(b.get("/w/a.py")!.etag).toBe(fresh.etag);
+  });
+
+  it("a 409 whose etag is not an etag, and no stat to ask, tells the owner", async () => {
+    await b.open("p1", "a.py", "1|a.py");
+    model("/w/a.py").type("x");
+    const notes: string[] = [];
+    b.onNotice((_abs, t) => notes.push(t));
+    w.deps.write = async () => {
+      throw new ApiError(409, "changed", { error: "changed", etag: 12345 });
+    };
+    w.deps.stat = async () => {
+      throw new ApiError(500, "down");
+    };
+    expect(await b.save("/w/a.py")).toBe("conflict");
+    expect(notes).toContain("changed on disk since it was read");
+  });
+
+  it("L3: saveAll saves every unsaved edit, one no tab holds included", async () => {
+    await b.open("p1", "a.py", "2|a.py");
+    await b.open("p1", "b.py", "3|b.py");
+    model("/w/a.py").type("x");
+    model("/w/b.py").type("y");
+    b.release("/w/a.py", "2|a.py");                        // the workspace crashed: no tab holds it
+    expect(b.dirtyCount()).toBe(2);
+    expect(await b.saveAll()).toBe(true);
+    expect([w.files.get("/w/a.py"), w.files.get("/w/b.py")]).toEqual(["one\nx", "two\ny"]);
+    expect(b.dirtyCount()).toBe(0);
+  });
+
+  it("the writer's toast: an absolute path only", async () => {
+    await b.open("p1", "a.py", "1|a.py");
+    const notes: string[] = [];
+    b.onNotice((_abs, t) => notes.push(t));
+    b.noteTouch("a.py", "a relative path");
+    w.files.set("/w/a.py", "moved\n");
+    await b.poll();
+    expect(notes).toEqual(["changed on disk — reloaded"]);
   });
 });
