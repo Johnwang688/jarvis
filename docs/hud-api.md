@@ -170,6 +170,14 @@ every one of these routes asks (`kind`):
   "state": "open"|"closed", "turns", "cost_usd"}]` — the orchestration
   view.
 - `GET /tasks/{id}/journal?after=N` → the journal records.
+- The WP11 verbs' bodies (`daemon.task_verb_body`, 400 for any other
+  shape): `start` and `cancel` `{}`; `steer` `{"text", "spoken"?}`;
+  `resume` `{"provider"?}`; `answer` exactly `{"index", "text"}`, where
+  `index` is the question's place in `spec.questions` — every question,
+  answered and assumable ones included — and only a `clarifying` task takes
+  one (`control.answer_refusal`, 409 with its sentence otherwise). This
+  file named the verbs without their bodies, and the HUD sent `{question,
+  answer}` to `answer` until 2026-10-11.
 
 ## Usage
 

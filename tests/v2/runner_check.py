@@ -19,7 +19,7 @@ from unittest.mock import patch
 
 from jarvis import config, models
 from jarvis.v2 import roles, runner as R, worktrees
-from jarvis.v2.control import ControlError
+from jarvis.v2.control import ControlError, answer_refusal
 from jarvis.v2.daemon import Daemon
 from jarvis.v2.ledger import UsageLedger
 from jarvis.v2.model import (PermissionProfile, ProviderName as P, Role, TaskState as S,
@@ -773,6 +773,24 @@ class ControlSurface(Fixture):
             self.runner.resume(task.id, provider=P.FAST)
 
 
+class AnswerRule(unittest.TestCase):
+    """`control.answer_refusal` is the runner's rule for an answer and the HUD
+    mock's (2026-10-11), so the sentence the owner reads in the HUD is the one
+    the runner raises."""
+
+    def test_one_rule_and_its_sentences(self):
+        qs = ["first", "second"]
+        self.assertIsNone(answer_refusal("k1", S.CLARIFYING, qs, 1, " x "))
+        self.assertIsNone(answer_refusal("k1", "clarifying", qs, 0, "x"))    # the mock's plain value
+        self.assertEqual(answer_refusal("k1", "running", qs, 0, "x"),
+                         "Task k1 is running; it is not waiting on a question.")
+        for index in (-1, 2, True, "0", None):
+            self.assertEqual(answer_refusal("k1", S.CLARIFYING, qs, index, "x"),
+                             f"Task k1 has no question {index}.")
+        for text in ("", "   ", None):
+            self.assertEqual(answer_refusal("k1", S.CLARIFYING, qs, 0, text), "An answer needs some text.")
+
+
 class RoleBriefs(unittest.TestCase):
     def test_every_role_has_a_brief_and_the_prohibitions_are_stated(self):
         for role in (Role.ORCHESTRATOR, Role.IMPLEMENTER, Role.REVIEWER, Role.RESEARCHER):
@@ -884,6 +902,12 @@ class DaemonRoutes(Fixture):
     def test_the_routes_refuse_bad_input_and_a_missing_runner(self):
         task = self.new_task()
         self.assertEqual(self.request("POST", f"/tasks/{task.id}/answer", {"index": 0})[0], 400)
+        # The body the HUD sent for weeks (2026-10-11): the route refuses it,
+        # and keeps refusing it — the HUD was fixed, not the route.
+        self.assertEqual(self.request("POST", f"/tasks/{task.id}/answer",
+                                      {"question": "Which port?", "answer": "8080"})[0], 400)
+        self.assertEqual(self.request("POST", f"/tasks/{task.id}/answer",
+                                      {"index": True, "text": "8080"})[0], 400)
         self.assertEqual(self.request("POST", f"/tasks/{task.id}/steer",
                                       {"text": "x", "spoken": "yes"})[0], 400)
         self.assertEqual(self.request("POST", f"/tasks/{task.id}/resume",

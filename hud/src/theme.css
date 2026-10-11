@@ -53,6 +53,18 @@
   --badge-codex: #cfcbc3;
   --badge-win: #a9b4bf;  /* steel, not amber: amber means "pending" */
 
+  /* The code editor's four syntax hues (ED-3, editor plan §2.5). Each is a
+     quieter sibling of a HUD hue rather than the hue itself, so the chrome's
+     meanings stay single: --accent is focus, selection, links and "running",
+     --green is "done". None is amber or red (decisions E-4). The editor's
+     Monaco theme is built from these and the tokens above
+     (lib/editorTheme.ts reads them off :root), and editorTheme.test.ts
+     recomputes every contrast and hue from this file. */
+  --syn-fn: #8ec5d6;      /* glacier, --accent's family: functions, tags, headings */
+  --syn-string: #a6c79b;  /* sage, --green's family: strings, code spans */
+  --syn-const: #b9aade;   /* lavender, --badge-claude's family: numbers, constants, escapes */
+  --syn-type: #a8b5c2;    /* steel, --badge-win's family: types, modules, directives, keys */
+
   --veil: rgba(0, 0, 0, 0.62);
   --shadow-pop: 0 8px 28px rgba(0, 0, 0, 0.55);
   --radius: 6px;
@@ -567,6 +579,17 @@ label.iconbtn.attach:hover { background: var(--bg-3); border-color: var(--border
    container; this makes that container a stacking context, so they stack
    inside the editor and never above #authveil (z 100). ED-1. */
 .editorhost { flex: 1 1 auto; min-height: 0; isolation: isolate; }
+/* A control character (ESC and BEL from an ANSI build log, a GNU C page
+   break) is drawn on a box of Monaco's own: `.mtkcontrol`, white on dark red,
+   both `!important` (viewLines.css). It is no colour in Monaco's registry, so
+   the theme cannot reach it; this does, and wins on specificity whichever
+   stylesheet loads last. Never red: red is the HUD's error (ED-3, review of
+   PR #45). */
+.monaco-editor .mtkcontrol {
+  color: var(--text-2) !important;
+  background: var(--bg-3) !important;
+}
+
 /* The File pane's tabs, conflict bar, locks and status line (ED-2). */
 .edtabs {
   display: flex; flex: 0 0 auto; overflow-x: auto; overflow-y: hidden; border-bottom: 1px solid var(--border);

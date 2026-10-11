@@ -1526,6 +1526,38 @@ def _text(value, name):
     return value
 
 
+def task_verb_body(verb: str, body) -> dict:
+    """The body of `POST /tasks/{id}/<verb>` (§11.2), checked and parsed —
+    400 for any other shape. `start` and `cancel` take `{}`; `steer`
+    `{text, spoken?}`; `resume` `{provider?}`; `answer` exactly `{index,
+    text}`, `index` being the question's place in `spec.questions`
+    (`control.answer_refusal`). The route and the HUD's test mock both call
+    this, so the mock cannot take a body the daemon refuses: it took anything,
+    and the HUD sent `{question, answer}` to `/answer` for weeks (2026-10-11).
+    A provider that is not a `ProviderName` raises ValueError, which the
+    dispatcher answers 400."""
+    if verb in ("start", "cancel"):
+        _object(body, ())
+        return {}
+    if verb == "steer":
+        _object(body, ("text", "spoken"), ("text",))
+        spoken = body.get("spoken", False)
+        if not isinstance(spoken, bool):
+            raise APIError(400, "spoken must be a boolean")
+        return {"text": _text(body["text"], "text"), "spoken": spoken}
+    if verb == "resume":
+        _object(body, ("provider",))
+        provider = body.get("provider")
+        return {"provider": ProviderName(provider) if provider else None}
+    if verb == "answer":
+        _object(body, ("index", "text"), ("index", "text"))
+        index = body["index"]
+        if not isinstance(index, int) or isinstance(index, bool):
+            raise APIError(400, "index must be an integer")
+        return {"index": index, "text": _text(body["text"], "text")}
+    raise APIError(404, "route not found")
+
+
 def _log_path(path: str) -> str:
     """A request path for the daemon log. A terminal attach carries its
     ticket in the query string, so `/terminals` paths are logged without one;
@@ -1870,32 +1902,18 @@ def _handler(daemon):
             runner = daemon.runner
             if runner is None:
                 raise DaemonError("no task runner is attached to this daemon")
-            body = self._body()
+            args = task_verb_body(verb, self._body())
             try:
                 if verb == "start":
-                    _object(body, ())
                     return 200, to_json(runner.start(task_id))
                 if verb == "steer":
-                    _object(body, ("text", "spoken"), ("text",))
-                    spoken = body.get("spoken", False)
-                    if not isinstance(spoken, bool):
-                        raise APIError(400, "spoken must be a boolean")
-                    runner.steer(task_id, _text(body["text"], "text"), spoken=spoken)
+                    runner.steer(task_id, args["text"], spoken=args["spoken"])
                     return 200, {"ok": True}
                 if verb == "cancel":
-                    _object(body, ())
                     return 200, to_json(runner.cancel(task_id))
                 if verb == "resume":
-                    _object(body, ("provider",))
-                    provider = body.get("provider")
-                    return 200, to_json(runner.resume(
-                        task_id, provider=ProviderName(provider) if provider else None))
-                _object(body, ("index", "text"), ("index", "text"))
-                index = body["index"]
-                if not isinstance(index, int) or isinstance(index, bool):
-                    raise APIError(400, "index must be an integer")
-                return 200, to_json(runner.answer_question(task_id, index,
-                                                           _text(body["text"], "text")))
+                    return 200, to_json(runner.resume(task_id, provider=args["provider"]))
+                return 200, to_json(runner.answer_question(task_id, args["index"], args["text"]))
             except ControlError as exc:
                 raise APIError(409, str(exc)) from exc
 

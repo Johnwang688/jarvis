@@ -2282,7 +2282,7 @@ tokenizer fetched only when a file of its language opens) — a whole editor
 HTML worker built or loaded ("Claude Code is my intellisense"). The language
 comes from Monaco's registry by the model's URI; `.h` is C++ for VEX, `.json`
 and `.toml` get small definitions of ours, a shebang names its language.
-Links open only http(s), with `noopener`. Until ED-3's Graphite scheme,
+Links open only http(s), with `noopener`. Until ED-3's Graphite scheme (below),
 vs-dark's salmon strings, its red tokens and the orange and gold chrome of
 find matches, bracket pairs and the unicode box are moved off amber and red.
 Under an approval card every editor is read-only and unfocused, and the
@@ -2374,6 +2374,30 @@ and preview sections, on a `MockDaemon(0)` of its own, or alone), plus the
 ported checks in the terminal (`\x04` to the PTY, nothing under a card, no
 EOF from a hold that moved into a terminal, the readable switch), multichat
 (W-6), layout (a separator) and preview (Keep its origin) suites.
+
+**The editor's colours (2026-10-11, ED-3 of the editor plan, §2.5;
+decisions E-4).** One Graphite scheme, in the spirit of Neovim 0.10's
+default: most code is the HUD's own text colour, told apart by weight and
+slant — keywords bold, comments italic and muted, punctuation dimmer — and
+colour is kept for four kinds of thing, in four new tokens beside the HUD's on
+`:root`: functions, tags and headings in glacier (`--syn-fn`), strings in
+sage (`--syn-string`), numbers, constants and escapes in lavender
+(`--syn-const`), types, modules, directives and keys in steel
+(`--syn-type`). Each is a quieter sibling of a HUD hue rather than the hue,
+so the accent still means only focus, selection, links and "running", and
+green only "done". No syntax colour is amber or red, and in the chrome red
+appears only for an error squiggle (nothing raises one) and a diff's
+low-alpha "removed"; every colour Monaco would otherwise draw orange, gold
+or amber — find matches, the first bracket pair, the unicode box, warnings,
+and the rest of its registry — is pinned off it. Every pair passes WCAG AA on
+the pane and on the current line. The scheme is one table keyed by
+nvim-treesitter's capture names, ready for ED-5's tree-sitter colour, and
+the same rows style Monaco's own Monarch tokens, which stay as the fallback;
+Monarch's C, C++ and Python are refined so a call, a builtin, a type and a
+constant show there too. The colours are written once, in theme.css: the
+editor's theme is built from the tokens when Monaco loads, and the tests
+recompute every contrast and hue from that file and read the rendered
+tokens back against it.
 
 **Buffers, tabs and the guarded save (2026-10-11, ED-2 of the editor plan,
 §2.3–§2.4; decisions E-7, E-8, E-13; the owner's `.env*` rule,
