@@ -23,9 +23,20 @@ fail on e859140 (the PR as reviewed) or on this tree with its fix reverted:
       (no "Set default…" footer) Tab from the slider must stay in the popover;
   R3b a model change under a move still settling must send nothing: the stop
       is not one the new model offers.
+
+The re-review (cafdf19) found two more, pinned here the same way:
+
+  RR1 every compose row had one conversation key ("|true"): a project archived
+      from another window re-aimed a composing pane at a fresh row and the
+      move rode it (from an OpenRouter row and a Claude one alike), and so did
+      a fresh row in the same project. Each row now has its own id;
+  RR2 when a pane's conversation changes and a card arrives in one render,
+      the slider unmounts without seeing the change, and the `change()` guard
+      is the only thing between the move and the other thread.
 """
 from __future__ import annotations
 
+import json
 import re
 import sys
 import time
@@ -42,6 +53,8 @@ POP = '[data-testid="model-pop"][data-pane="1"]'
 SLIDER = POP + ' [data-testid="effort-slider"]'
 KIMI = "moonshotai/kimi-k3"
 LUNA = "openai/gpt-5.6-luna"
+COLS_CHATS = json.dumps({"preset": "cols2", "focused": 1,
+                         "panes": [{"view": "chat"}, {"view": "chat"}, {"view": "file"}, {"view": "task"}]})
 
 
 def effort_checks(browser, mock, base, check, until, guard, init_script):
@@ -60,7 +73,8 @@ def effort_checks(browser, mock, base, check, until, guard, init_script):
         page.wait_for_selector('[data-testid="sidebar"]', state="attached")
         mock.await_reconnect(before)
         for section in (_tab_round_checks, _pane_switch_checks, _model_change_checks,
-                        _opened_row_checks, _archived_checks):
+                        _opened_row_checks, _swap_card_checks, _same_project_checks, _project_gone_checks,
+                        _archived_checks):
             try:
                 section(page, mock, check, until)
             except Exception as e:  # a section that cannot run is a failure, and the rest still run
@@ -90,6 +104,11 @@ def _seed(mock):
             w["threads"].append({**base, "id": tid, "provider": provider, "model": model, "effort": effort,
                                  "title": f"effort {tid}", "updated": f"2026-09-2{i}T00:00:00+00:00"})
             w["transcripts"][tid] = [{"role": "user", "text": f"hello {tid}", "at": "2026-09-14T00:00:00+00:00"}]
+    p1 = next(p for p in w["projects"] if p["id"] == "p1")
+    for pid, name in (("p9", "doomed fast"), ("p8", "doomed claude")):
+        if not any(p["id"] == pid for p in w["projects"]):
+            w["projects"].append({**p1, "id": pid, "name": name, "root": f"/home/johnw/jarvis-work/{pid}",
+                                  "inbox": False})
     if not any(r["id"] == KIMI for r in w["models"]["models"]):
         w["models"]["models"].append({"id": KIMI, "name": "Kimi K3", "efforts": ["low", "medium", "high"],
                                       "effort": None})
@@ -274,6 +293,85 @@ def _opened_row_checks(page, mock, check, until):
         mock.world["refuse_choice"] = None
         page.unroute(url)
     _close_pop(page, until)
+
+
+# ---- RR2: a pane switch and a card in one render -----------------------------
+
+SWAP_AND_CARD = """(req) => { const d = window.__hud.dispatch;
+  d({type: 'chat', pane: 1, patch: {threadId: 'ec1', compose: null}});
+  d({type: 'chat', pane: 2, patch: {threadId: 'eb1', compose: null}});
+  d({type: 'patch', patch: {approvals: [req]}}); }"""
+
+
+def _swap_card_checks(page, mock, check, until):
+    _fresh(page, mock, until, COLS_CHATS, size=(1600, 900))
+    _show(page, until, "eb1")
+    page.evaluate("window.__hud.dispatch({type: 'chat', pane: 2, patch: {threadId: 'ec1', compose: null}})")
+    until(lambda: _chat(page, 2)["threadId"] == "ec1", timeout=3)
+    _open_pop(page, until)
+    page.locator(SLIDER).focus()
+    n = len(mock.calls)
+    page.keyboard.press("ArrowLeft")
+    req = {"req_id": "rr2-card", "code": "RR02", "tool": "run_command", "args": {"command": "ls"},
+           "command": "ls", "reason": "", "layer": "human", "thread_id": "ec1", "task_id": None,
+           "provider": "claude", "origin": "", "asked_at": "2026-09-15T00:02:00+00:00",
+           "allowlistable": True, "timeout_s": 120}
+    # The two panes trade conversations and a card comes up, all in one
+    # render: the slider unmounts before it ever renders pane 1's new thread.
+    page.evaluate(SWAP_AND_CARD, req)
+    until(lambda: page.locator(POP).count() == 0, timeout=2)
+    time.sleep(0.9)
+    late = [(p, b) for m, p, b in mock.calls[n:] if m == "PATCH" and p.startswith("/threads/")]
+    check("review #30 RR2: a swap and a card in one render: pane 1's move never lands on the thread it shows now",
+          not [c for c in late if c[0] == "/threads/ec1"] and _thread(mock, "ec1").get("effort") is None, str(late))
+    page.evaluate("window.__hud.dispatch({type: 'patch', patch: {approvals: []}})")
+    until(lambda: not page.locator(BTN).is_disabled(), timeout=3)
+
+
+# ---- RR1: one compose row's move never lands on the next ----------------------
+
+def _compose_in(page, until, project, provider):
+    """A fresh compose row in pane 1, as New thread makes one."""
+    page.evaluate(f"""window.__hud.dispatch({{type: 'chat', pane: 1, patch: {{threadId: null,
+        compose: {{projectId: '{project}', provider: '{provider}', model: null, effort: null}}}}}})""")
+    until(lambda: (_chat(page)["compose"] or {}).get("projectId") == project and page.locator(BTN).count() > 0,
+          timeout=3)
+    time.sleep(0.2)
+
+
+def _same_project_checks(page, mock, check, until):
+    _fresh(page, mock, until, SINGLE)
+    _compose_in(page, until, "p1", "fast")
+    _open_pop(page, until)
+    page.locator(SLIDER).focus()
+    first = (_chat(page)["compose"] or {}).get("id")
+    page.keyboard.press("ArrowLeft")
+    _compose_in(page, until, "p1", "fast")          # another fresh row, the same project
+    time.sleep(0.9)
+    row = _chat(page)["compose"] or {}
+    check("review #30 RR1: a fresh compose row in the same project is another conversation: the move stays off it",
+          row.get("effort") is None and (first is None or row.get("id") != first), str(row))
+    _close_pop(page, until)
+
+
+def _project_gone_checks(page, mock, check, until):
+    for provider, proj in (("fast", "p9"), ("claude", "p8")):
+        _fresh(page, mock, until, SINGLE)
+        _compose_in(page, until, proj, provider)
+        _open_pop(page, until)
+        page.locator(SLIDER).focus()
+        n = len(mock.calls)
+        page.keyboard.press("ArrowLeft")
+        project = next(p for p in mock.world["projects"] if p["id"] == proj)
+        project["archived"] = True
+        mock.emit("project_archived", {"project_id": proj}, project_id=proj)
+        moved = until(lambda: (_chat(page)["compose"] or {}).get("projectId") not in (proj, None), timeout=3)
+        time.sleep(0.9)
+        row = _chat(page)["compose"] or {}
+        late = [(p, b) for m, p, b in mock.calls[n:] if m in ("PATCH", "POST") and p.startswith("/threads")]
+        check(f"review #30 RR1: a {provider} compose row's move does not ride the row its archived project re-aims to",
+              bool(moved) and row.get("effort") is None and not late, f"{row} {late}")
+        _close_pop(page, until)
 
 
 # ---- R1: the thread archived from another window ----------------------------

@@ -285,3 +285,30 @@ describe("the test hook's view of the store", () => {
     expect(s.chats[1].threadId).toBeNull();
   });
 });
+
+describe("a compose row's identity (review of PR #30)", () => {
+  it("is minted for every new row, in the same project too, and kept by a row spread from it", () => {
+    let s = reduce(initialState, { type: "chat", pane: 1, patch: { compose: { projectId: "p1" } } });
+    const first = s.chats[1].compose!.id;
+    expect(first).toBeTruthy();
+    // A change to the same row (the chips, a send) spreads it: the same row.
+    s = reduce(s, { type: "chat", pane: 1, patch: { compose: { ...s.chats[1].compose!, effort: "low" } } });
+    expect(s.chats[1].compose!.id).toBe(first);
+    // New thread, or a re-aim when a project goes: a fresh row, even in the same project.
+    s = reduce(s, { type: "chat", pane: 1, patch: { compose: { projectId: "p1" } } });
+    const second = s.chats[1].compose!.id;
+    expect(second).toBeTruthy();
+    expect(second).not.toBe(first);
+    // Another pane's row is another row.
+    s = reduce(s, { type: "chat", pane: 2, patch: { compose: { projectId: "p1" } } });
+    expect(new Set([first, second, s.chats[2].compose!.id]).size).toBe(3);
+  });
+
+  it("travels with its conversation when two panes trade them", () => {
+    let s = reduce(initialState, { type: "chat", pane: 1, patch: { compose: { projectId: "p1" } } });
+    const id = s.chats[1].compose!.id;
+    s = reduce(s, { type: "chat", pane: 2, patch: { threadId: "t1" } });
+    s = reduce(s, { type: "chat_swap", a: 1, b: 2 });
+    expect(s.chats[2].compose?.id).toBe(id);
+  });
+});

@@ -815,12 +815,19 @@ button), and a key move still settling then is committed like any other close
 — the owner made it before the card — while every key pressed under the card
 reaches the card (inert behind it, the slider gone), so Escape denies.
 **A move belongs to the conversation it was made on** (review of PR #30): the
-chip passes its key (`keyOf(paneChips(…))`, thread or compose row) as the
-slider's `conversation`; when the pane moves on with a move in hand — another
-thread opened there, or the thread archived from another window and the pane
-re-aimed at a new compose row — the slider drops the move and stops drawing
-what it sent, and `change(pane, next, from)` drops a commit whose pane shows
-another conversation by then (the unmount that comes before a re-render).
+chip passes its key (`keyOf(paneChips(…))`: the thread, or **that compose
+row** — every compose row has its own `Compose.id`, minted by the store's
+`chat` reducer for a row that arrives without one, `composeSeq` keeping the
+reducer pure; a row spread from another keeps it, so New thread or a re-aim
+makes a new conversation even in the same project, where every row used to
+key as `"|true"`) as the slider's `conversation`; when the pane moves on with
+a move in hand — another thread opened there, the thread or its project
+archived from another window and the pane re-aimed at a new compose row — the
+slider drops the move and stops drawing what it sent, and `change(pane, next,
+from)` drops a commit whose pane shows another conversation by then. That
+second guard is the only one when the conversation changes and a card comes
+up in the same render (the slider unmounts without ever seeing the change),
+and a check pins it.
 Keying the slider on the thread instead would pair the old render's choice
 with the new pane in its unmount commit, and `patchBody` could add a `model`
 key. A move whose stop the model no longer offers (its model changed under it,
@@ -851,9 +858,13 @@ when the conversation or the model changes), `effort_slider_checks` in
 a card; the mock's `patch_delays` holds a PATCH's answer to make one arrive
 late), and `tests/face/hud_v2_effort_check.py` (the review's findings, a
 `MockDaemon(0)` of its own, run by `hud_v2_check` after the declutter section
-or alone: Tab on an OpenRouter popover with no footer, a pane switch and an
-archive with a move settling, a model change under one, an opened row's late
-success). **Breaking the close-under-a-card alone bit no check at first**
+or alone: Tab on an OpenRouter popover with no footer, a pane switch, a thread
+archive, a project archive (OpenRouter and Claude rows), a fresh row in the
+same project, and a swap with a card in one render, each with a move settling;
+a model change under one; an opened row's late success) and `store.test.ts`
+(a compose row's id). A late HTTP success can still overwrite a newer state
+another window's SSE brought (main does too): comparing `updated` would need a
+model change to bump it, which nothing shows it does. **Breaking the close-under-a-card alone bit no check at first**
 (shown in a scratch copy at the merge): the card taking focus closes the
 popover anyway, by #29's focus-leaving rule. So a card also arrives with focus
 on the chip's own button and the popover open — the one place only the disable

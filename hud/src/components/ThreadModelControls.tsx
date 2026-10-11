@@ -24,10 +24,12 @@ import { PANE_NOS, type PaneNo } from "../lib/workspace";
 import { CatalogPicker, ModelChip, ProviderDefaults } from "./ModelChip";
 import { refusal, rosterIds } from "../lib/roster";
 
-/** The chips' view of one pane's conversation (lib/threadmodel `chipState`). */
+/** The chips' view of one pane's conversation (lib/threadmodel `chipState`),
+ * with the compose row's own identity when it is one being composed. */
 function paneChips(state: State, pane: PaneNo) {
   const c = state.chats[pane];
-  return chipState({ threadId: c.threadId, compose: c.compose, threads: state.threads });
+  return { ...chipState({ threadId: c.threadId, compose: c.compose, threads: state.threads }),
+           composeId: c.compose?.id ?? "" };
 }
 
 export function useThreadModel(state: State, dispatch: React.Dispatch<Action>, onRosterChange?: () => void) {
@@ -62,7 +64,12 @@ export function useThreadModel(state: State, dispatch: React.Dispatch<Action>, o
     void reload();
   }, [reload]);
 
-  const keyOf = (cs: ReturnType<typeof paneChips>) => `${cs.targetId ?? ""}|${cs.composing}`;
+  // The conversation a pane's chips show: its thread (or the one its compose
+  // row opened), else **that** compose row — each row has its own id, so two
+  // rows one after another, in the same project or not, are two
+  // conversations (review of PR #30: every row used to be "|true").
+  const keyOf = (cs: ReturnType<typeof paneChips>) =>
+    cs.composing ? `compose:${cs.composeId}` : `${cs.targetId ?? ""}|thread`;
   // Clear a stale refusal when its pane's conversation changes.
   const keys = PANE_NOS.map((n) => keyOf(paneChips(state, n)));
   const keysNow = keys.join(",");
