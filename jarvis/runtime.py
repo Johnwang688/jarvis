@@ -80,6 +80,17 @@ _PROPOSAL: ContextVar[dict | None] = ContextVar("jarvis_proposal", default=None)
 # never sets it, so a slot the provider bound survives the loop's own bind.
 _DESK: ContextVar[dict | None] = ContextVar("jarvis_desk", default=None)
 
+# Which v2 conversation a tool call belongs to (the peers plan's Phase 0,
+# 2026-10-10): `{thread_id, project_id, provider, turn_id}`. The v2 fast path
+# binds it for its own turn; the daemon's jarvis-mcp bridge binds it for each
+# call a Claude or Codex chat makes through its session token. A tool that
+# must know who is asking (a peer message, a project proposal) reads it here,
+# never from an argument the model wrote. Unbound — every v1 surface, a
+# script, a test — is None, and such a tool refuses. `Agent.run_turn` never
+# sets it, so a caller the provider bound survives the loop's own bind.
+_CALLER: ContextVar[dict | None] = ContextVar("jarvis_caller", default=None)
+CALLER_KEYS = ("thread_id", "project_id", "provider", "turn_id")
+
 MAX_DEPTH = 2
 
 
@@ -93,6 +104,7 @@ def bind(
     loaded_groups: set[str] | None = None,
     proposal: dict | None = None,
     desk: dict | None = None,
+    caller: dict | None = None,
 ) -> None:
     """Bind the current agent's per-run state. Called by `Agent.run_turn`."""
     if plan is not None:
@@ -113,6 +125,15 @@ def bind(
         _PROPOSAL.set(proposal)
     if desk is not None:
         _DESK.set(desk)
+    if caller is not None:
+        _CALLER.set({key: caller.get(key) for key in CALLER_KEYS})
+
+
+def bind_caller(thread_id: str, project_id: str | None, provider: str,
+                turn_id: str | None) -> None:
+    """Bind who is calling, from the four facts that name a v2 turn."""
+    bind(caller={"thread_id": thread_id, "project_id": project_id,
+                 "provider": provider, "turn_id": turn_id})
 
 
 def plan_slot() -> dict[str, str] | None:
@@ -193,6 +214,15 @@ def at_desk() -> bool:
     in the HUD, and never steered from elsewhere since. Fails closed."""
     slot = _DESK.get()
     return bool(slot is not None and slot.get("present") is True)
+
+
+def caller() -> dict | None:
+    """The v2 conversation this call belongs to, or None if nothing bound one.
+
+    A copy: what a tool does with it cannot change what the next call sees.
+    """
+    found = _CALLER.get()
+    return dict(found) if found is not None else None
 
 
 def describe() -> dict[str, Any]:

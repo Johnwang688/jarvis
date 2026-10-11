@@ -11,7 +11,7 @@ packages are built.
 | B-1 | Engine | **Yes**: daemon-owned Chrome streamed into the pane; the iframe stays as Direct mode. |
 | B-2 | Local dev URLs | **Direct**, as recommended. **Plus:** when a dev server starts in a HUD terminal, **automatically open it in a new Browser pane**. |
 | B-3 | Which Chrome | **Google Chrome stable via apt.** The owner installs it; the lead gives the command. |
-| B-4 | Logins and accounts | **Named profiles plus Private.** Each Browser pane picks a profile; panes on the same profile share logins; different profiles hold different accounts at once; a Private pane forgets everything on close. The owner may sign in to Google *websites* in any profile. Lead's recommendation, pending the owner's word: **no Chrome-level sign-in or sync**, which would copy saved passwords and history into a browser agents can drive. Google may refuse sign-in from an automated Chrome; measurement M4 covers it. |
+| B-4 | Logins and accounts | **Named profiles plus Private.** Each Browser pane picks a profile; panes on the same profile share logins; different profiles hold different accounts at once; a Private pane forgets everything on close. **Chrome-level sign-in, sync and autofill are on** (owner, 2026-10-11: "chrome sync should be on. keep the sign ins. it's ok for the agents to click and type in stuff with autofill since I'm watching them do it in the HUD"). An agent still never types a password, code or card number itself, and submitting a login or payment still asks (amendment 1 §C). Google may refuse sign-in from an automated Chrome (M4, M4b). |
 | B-5 | LAN addresses | **Off by default, with a Settings switch.** |
 | B-6 | Downloads | **Private folder plus "Save a copy"**, as recommended. |
 | B-7 | What Jarvis can see | **Every HUD Browser pane, by default.** The owner can point him at a specific one ("look at pane 3"). The owner's own Windows Chrome stays private. The per-pane switch remains as a way to turn a pane off, but it defaults **on** for every site. |
@@ -45,3 +45,7 @@ This governs the plan amendment.
 4. **Driving** (B-9): new driving tools behind the classifier, plus the approval-card path, the banner and takeover. This replaces the plan's "no driving" (§6 iii).
 5. **Sound** (B-12): a switch, off by default.
 6. **Rename** (B-14): BR-3a moves up to "right after G1".
+
+## Amendment 1 (2026-10-11)
+
+The plan changes above are worked out in `2026-10-11-hud-browser-plan-amendment-1.md` (driving, profiles, auto-open, seeing, sound, and the re-cut work packages). Its §J decisions BD-1 to BD-4, BD-6, BD-7, BD-9 and BD-11 are adopted as recommended. BD-5 (Chrome sign-in and sync) is answered: on. BD-8 waits for M3, and BD-10 for BR-1a's review.

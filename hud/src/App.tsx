@@ -247,7 +247,9 @@ export default function App() {
     [dispatch],
   );
   // provider ▾ · model ▾ · effort ▾ in each chat pane's input bar (decisions 2026-10-06, A).
-  const threadModel = useThreadModel(state, dispatch, () => void loadModels());
+  // A crashed window sends nothing (PR #32): not even an effort move the
+  // slider was settling when the workspace fell over (review of PR #30).
+  const threadModel = useThreadModel(state, dispatch, () => void loadModels(), () => crashedRef.current);
   const reloadThreadModels = useRef(threadModel.reload);
   reloadThreadModels.current = threadModel.reload;
   // The chip's own dialogs (catalogue, provider default) are hook state, not

@@ -223,7 +223,9 @@ def _toolset_refusal(name: str) -> str | None:
     directly — so there is no toolset to enforce. It is safe only because no
     real path dispatches unbound: the only callers of `dispatch` under
     `jarvis/` are `Agent._dispatch_one` (reached only from `_run_turn`, after
-    its bind) and `v2/mcp.call_tool` (which binds its exposed list first), and
+    its bind), `v2/mcp.call_tool` (which binds its exposed list first) and the
+    daemon's jarvis-mcp bridge, `v2/bridge.call` (which binds the chat
+    session's offered list first), and
     `tests/dispatch_toolset_check.py` asserts both halves — that set of call
     sites, and a binding at every dispatch on every surface it drives. A new
     caller of `dispatch` must bind a toolset first, or it runs unconfined.

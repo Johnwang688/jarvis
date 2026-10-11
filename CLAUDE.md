@@ -403,6 +403,59 @@ Tests point `config.TERMINAL_SHELL` at `tests/v2/terminal_fake/sh` (named
 `sh` so it is started as a POSIX shell) with a temp HOME, and never use
 8402/8403/8405.
 
+**jarvis-mcp for chat sessions, WP-1 (2026-10-10; plan
+`docs/plans/2026-10-10-terminal-read-mcp-plan.md` §1–§2, §4, decisions file
+beside it — the peers plan's Phase 0, built once).** Plumbing only, **no
+behaviour change**: `jarvis/v2/session_tools.py` (the per-session tool list,
+flags `read_only`/`foreground_only`/`desk_only`, `for_provider`) **ships
+empty**, and with nothing in it no token is minted and no session gets a
+jarvis server. When it holds something (WP-2: `terminal_read` plus the D-3
+tools), `Daemon._run_brief` mints a caller token (`jarvis/v2/callers.py`:
+`jmcp_` + `token_urlsafe(32)`, **held only as a sha256 digest**) for an
+owner's chat thread on Claude or Codex, and puts `mcp_servers["jarvis"] =
+bridge.server_entry(...)` (`python -m jarvis.v2.mcp_session`, env
+`JARVIS_MCP_TOKEN`/`JARVIS_DAEMON_PORT`/`PYTHONPATH`) in **the run copy
+only** — never brief.json; `_open` refuses a non-chat brief naming `jarvis`.
+**Never on a command line**: the SDK puts a dict `mcp_servers` on `claude`'s
+argv as JSON (world-readable through `ps`), so Claude gets a private 0600
+`V2_DATA_DIR/claude/<thread>/mcp-<nonce>.json` in 0700 dirs and
+`--mcp-config <path>` (checked with the SDK's own command builder), reused by
+`set_model`, deleted by `close()` — **one file per session, never per
+thread** (PR #35 review): a lost session is closed outside the daemon lock
+while the next send opens its successor, and a shared `mcp.json` was deleted
+from under the new session; Codex carries it in its private `config.toml`'s `env`
+table, with `approval_mode = "approve"` per read-only tool, stripped on close
+and on a failed open.
+`Daemon.start` sweeps leftover carriers **after it holds its ports** (the bind
+is the single-instance lock, so a second daemon on the live folder fails
+before touching the live one's) and **only under the data folder it owns**
+(`stores.root == V2_DATA_DIR`), so a test daemon never touches the live
+one's; `/mcp` paths are logged without a query. The relay is **stdlib only and never runs a tool**: it pops the token
+from its environment, writes nothing to stderr, lists `[]` and answers
+`Error:` when it cannot reach the daemon. The bridge (`jarvis/v2/bridge.py`)
+serves `GET /mcp/tools` and `POST /mcp/call` **on the API listener only**
+(404 on the HUD and preview listeners), `Authorization: Bearer` only, 403
+`not a Jarvis chat session` for any `Origin` or bad/revoked token or a
+session that is not the thread's live one (`_sessions.get(id) is session` —
+a missed revoke cannot reach a newer session) or not an owner's Claude/Codex
+chat; 404 not offered, 400, 413 over 16 KiB. A call runs through the bridge's
+**one** registry dispatch in a fresh `contextvars.Context()` with
+`runtime.caller()` (`{thread_id, project_id, provider, turn_id}`, new) bound,
+depth 0 and the offered names as the toolset; a **dangerous** tool goes to
+the session's permit with `dangerous_tool=True` — the owner every time, no
+Always, never the allowlist or the reviewer. Tokens are revoked by
+`_cleanup` (close, archive, delete, a lost session), `_open`'s failure and
+`stop()` (`revoke_all` first); a model switch keeps the token (D-7). Claude's
+hook explicitly allows a read-only session tool under both profiles (after
+`permit`'s new **`jarvis-tool`** layer, which follows layer 2 so an
+always-ask rule still asks) and refuses a `foreground_only` one for a
+sub-agent (`agent_id`) without asking `permit`; Codex declines an MCP
+elicitation (before the turn-identity check, which used to kill the turn
+over it) or an MCP-approval `requestUserInput` with a non-fatal ERROR, never
+a QUESTION. The fast path binds `runtime.caller()` in its turn (the daemon
+binds it on the turn thread, so the turn id is the daemon's). All four new
+modules are SELF_PROTECTED. Free suite: `tests/v2/mcp_session_check.py`.
+
 Briefs for every package, including the ones in flight, are in
 `docs/codex-briefs/`; each merged package left a `*-notes.md` beside its
 brief with what its implementer verified and what it proposes.
@@ -967,7 +1020,8 @@ inert**, and the card takes focus off them: focus left on the cycle button
 used to let Enter switch OFF to AUTO behind the card. **Model and effort are
 one button per chat pane** (`model-chip-btn`, carrying `data-model` and
 `data-effort`) opening one popover (`ModelChip.tsx` `Popover`, portaled to
-`#root`; `data-pane` says whose) with Model and Effort sections and "Set
+`#root`; `data-pane` says whose) with a Model section, the effort slider
+(below) and "Set
 <provider> default…"; the provider stays a select. It is placed by
 `placePopover` through `toCss` — upward, downward only when there is too little
 room above and more below, never taller than the room it opens into — and
@@ -1001,6 +1055,93 @@ section on a `MockDaemon(0)` of its own, or alone — plus `ModelChip.test.ts`
 section's `_edit` now types until the pane's Save is enabled: it used to type
 into an editor not yet showing the file, and four "unsaved edit" checks failed
 under load.
+
+**The effort is a slider, not pills (2026-10-10, owner's ask: "like Claude's").**
+`components/EffortSlider.tsx`, rules in `lib/effortSlider.ts`: "Effort
+<level> · default (?)", Faster … Smarter, a dot per stop, a tick with
+**Default** under the default stop, a warm-white thumb. **The stops are exactly
+the levels the pills offered** (the effective model's ladder, or the provider's
+words when it is unknown — `ultra` is a stop on Codex only, and no ladder means
+no slider), sorted Faster → Smarter; `xhigh` reads "Extra". **The default stop
+means "follow the default", as in Claude's app**: the pills' `default · high`
+is not a stop of its own but the stop it names, and **choosing it clears the
+effort to null** — so a thread on that stop follows whatever the default
+becomes, never a pinned copy of today's level (A4/A6 unchanged: `applyEffort`
++ `patchBody`, a default thread stays unpinned); a default that names no level
+becomes a leading "Default" stop. **One change, one request**: a drag previews
+and commits on release, a click commits at once, arrows/Home/End commit once
+350 ms after the last key (`SETTLE_MS`) or at once on blur or when the popover
+closes, and a commit that lands where the thread already is sends nothing.
+**A move made before a card is committed as the popover closes; keys under
+the card change nothing**: a card closes the popover (and disables its
+button), and a key move still settling then is committed like any other close
+— the owner made it before the card — while every key pressed under the card
+reaches the card (inert behind it, the slider gone), so Escape denies. **A
+move made before a crash is dropped**, though — the one exception: once the
+workspace's boundary has caught a crash (PR #32's `onCrash`, `crashedRef`),
+nothing is sent on the owner's behalf, so `change()` drops whatever the
+slider's unmount commits as the crash tears it down.
+**A move belongs to the conversation it was made on** (review of PR #30): the
+chip passes its key (`keyOf(paneChips(…))`: the thread, or **that compose
+row** — every compose row has its own `Compose.id`, minted by the store's
+`chat` reducer for a row that arrives without one, `composeSeq` keeping the
+reducer pure; a row spread from another keeps it, so New thread or a re-aim
+makes a new conversation even in the same project, where every row used to
+key as `"|true"`) as the slider's `conversation`; when the pane moves on with
+a move in hand — another thread opened there, the thread or its project
+archived from another window and the pane re-aimed at a new compose row — the
+slider drops the move and stops drawing what it sent, and `change(pane, next,
+from)` drops a commit whose pane shows another conversation by then. That
+second guard is the only one when the conversation changes and a card comes
+up in the same render (the slider unmounts without ever seeing the change),
+and a check pins it.
+Keying the slider on the thread instead would pair the old render's choice
+with the new pane in its unmount commit, and `patchBody` could add a `model`
+key. A move whose stop the model no longer offers (its model changed under it,
+from another window) is dropped too — without that, it cleared the effort to null.
+**An older answer never undoes a newer one**: a sequence number in the slider
+(what it draws), and per thread in `ThreadModelControls.change` a success is
+written (the record and the opened compose row holding the thread) unless a
+later change's success already was — so a late success whose newer change was
+refused still lands, which an opened row (a failed first send, no record, no
+`thread_updated`) needs; only the latest change's refusal is shown. The SSE
+`thread_updated` still carries every change in the daemon's order. Pointer
+math goes through `toCss` against the rail's own `offsetWidth`. Keys stop at
+the slider (Space is never push-to-talk) as well as at the popover — **except
+Tab**, which goes on to the popover's round (#29's review): the model list's
+chosen option → the slider → "Set default…" (when there is one) → round. The
+popover now stays open while the slider moves. **It lives in #29's reworked
+popover** (merged 2026-10-10): one per chat pane (`data-pane`), and a pick
+PATCHes only that pane's thread; under a card the popover closes and its
+button is disabled, and the slider's own `disabled` (out of the Tab order,
+`aria-disabled`, no key or pointer moves it) holds wherever it is mounted. The
+Model picker's per-model `<select>` and the provider-default dialog's
+`pd-effort` are still selects. Free checks: `effortSlider.test.ts`,
+`EffortSlider.test.ts` (jsdom: keys, Tab — heard by a React handler around the
+slider, since a listener on the root container hears keys React already
+stopped — disabled, settle, unmount commit, the sequence guard, a move dropped
+when the conversation or the model changes), `effort_slider_checks` in
+`hud_v2_check.py` (drives it like the owner, at 70% and 160%, and Escape under
+a card; the mock's `patch_delays` holds a PATCH's answer to make one arrive
+late), and `tests/face/hud_v2_effort_check.py` (the review's findings, a
+`MockDaemon(0)` of its own, run by `hud_v2_check` after the declutter section
+or alone: Tab on an OpenRouter popover with no footer, a pane switch, a thread
+archive, a project archive (OpenRouter and Claude rows), a fresh row in the
+same project, and a swap with a card in one render, each with a move settling;
+a model change under one; an opened row's late success; a workspace crash
+with a move settling) and `store.test.ts`
+(a compose row's id). A late HTTP success can still overwrite a newer state
+another window's SSE brought (main does too). The backend's
+`set_thread_model` does set `thread.updated`, so comparing it would work
+against the daemon; it is left open because the mock never bumps it, so no
+check could show the comparison doing anything. **Breaking the close-under-a-card alone bit no check at first**
+(shown in a scratch copy at the merge): the card taking focus closes the
+popover anyway, by #29's focus-leaving rule. So a card also arrives with focus
+on the chip's own button and the popover open — the one place only the disable
+closes it — and that check fails without it; inert still keeps every key off
+the slider. #29's own checks are ported to it: `hud_v2_declutter_check`'s F4
+(Tab round, arrows) and F6 (a card with focus on the slider), and
+`hud_v2_multichat_check`'s late-answer writeback, which clicks a stop.
 
 **Sidebar status dots (2026-10-08, design §18; contract in
 `docs/hud-api.md`).** The `·` left of each sidebar thread and task is what it
@@ -1412,13 +1553,16 @@ jarvis/
   turn", never "an agent once ran on this thread"), `_sync_tools`
   on a `load_tools` expansion, `_dispatch_calls`' per-worker `copy_context()`
   (now load-bearing twice: without it a pool worker would hold an unbound
-  approver, which denies, *and* an unbound toolset, which is not enforced), and
-  jarvis-mcp's worker, which binds the list it exposes. A tool an agent was
+  approver, which denies, *and* an unbound toolset, which is not enforced),
+  jarvis-mcp's worker, which binds the list it exposes, and the daemon's
+  jarvis-mcp bridge, which binds the chat session's offered list (WP-1). A
+  tool an agent was
   handed explicitly (PR #33's `EXPLICIT_ONLY` shape) is in that set like any
   other. **Unbound fails open** — deliberately: nothing bound means no agent is
   calling, and the only callers of `dispatch` under `jarvis/` are
-  `Agent._dispatch_one` (reached only from `_run_turn`, after its bind) and
-  `v2/mcp.call_tool`. `tests/dispatch_toolset_check.py` pins that set of call
+  `Agent._dispatch_one` (reached only from `_run_turn`, after its bind),
+  `v2/mcp.call_tool` and `v2/bridge.call` (each binding its list first).
+  `tests/dispatch_toolset_check.py` pins that set of call
   sites by AST and checks a binding at every dispatch across sixteen surfaces;
   **a new caller of `dispatch` must bind a toolset first**, or it runs
   unconfined. Not covered: `jarvis/runtime.py` and `jarvis/agent.py` are not
@@ -2382,8 +2526,10 @@ jarvis/
   turn's toolset being restored when the turn ends. **The surface walk** is
   what makes "unbound fails open" safe: an AST pin that the only `dispatch`
   callers (in `jarvis/`, `longbench/`, `swecompare/`) are
-  `Agent._dispatch_one` (from `_run_turn`, after its bind) and jarvis-mcp's
-  worker, and a probe on every dispatch across sixteen surfaces (CLI,
+  `Agent._dispatch_one` (from `_run_turn`, after its bind), jarvis-mcp's
+  worker and the daemon's jarvis-mcp bridge (each after its own bind; the
+  bridge's ordering is pinned by AST too), and a probe on every dispatch
+  across sixteen surfaces (CLI,
   Discord, the face and its designer included) asserting a toolset was
   bound. Sixteen of its twenty checks fail on 34b6ab2 (the four that pass
   there are the static pin, the deferred pointer, the conversation-surface
