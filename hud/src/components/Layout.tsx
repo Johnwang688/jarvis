@@ -21,12 +21,15 @@ import {
   type Fitted, type PaneLayout, type Side,
 } from "../lib/layout";
 import {
-  MENU_PRESETS, PANEL, SHAPES, TITLEBAR_H, cellsOf, defaultWorkspace, equalSplit as equalSplitOf, fitWorkspace, focusPane,
+  MENU_PRESETS, PANEL, SHAPES, TITLEBAR_H, cellsOf, closePane as closePaneOf, defaultWorkspace,
+  equalSplit as equalSplitOf, fitWorkspace, focusPane,
   forgetTerminal as forgetTerminalOf, loadWorkspace, paneAt, pinPane, resetWorkspace, saveWorkspace, setPaneTerminal,
   setPanel, setPreset as setPresetOf, setKeepOrigin as setKeepOriginOf,
   setPreviewUrl as setPreviewUrlOf, setSplit as setSplitOf, setView as setViewOf, show as showOf,
+  setFilePath as setFilePathOf, splitPane as splitPaneOf, splitVerdict as splitVerdictOf,
   unpinProject as unpinProjectOf,
-  type DrawnSet, type PaneNo, type Preset, type Split, type View, type Workspace, type WorkspaceFit,
+  type DrawnSet, type PaneNo, type PaneSpec, type Preset, type Split, type SplitWhy, type View, type Workspace,
+  type WorkspaceFit,
 } from "../lib/workspace";
 import { inTerminal, terminalTakesKey } from "../lib/terminal";
 import { terminals, usePanelDot } from "./Terminal";
@@ -59,6 +62,8 @@ export interface LayoutControl {
   /** A project went away; panes in `keep` (holding an unsaved edit) stay pinned. */
   unpinProject: (projectId: string, keep?: readonly PaneNo[]) => void;
   setPreviewUrl: (pane: PaneNo, url: string) => void;
+  /** The file a File or Diff pane has open (null: none), read again when it mounts (WP-G2). */
+  setFilePath: (pane: PaneNo, path: string | null) => void;
   /** A Preview pane's "keep its own origin" grant (an origin), or none (WP-E, W-4). */
   setKeepOrigin: (pane: PaneNo, origin: string | null) => void;
   /** The terminal a terminal pane shows (null: choose again); no other pane keeps it (W-1). */
@@ -73,18 +78,26 @@ export interface LayoutControl {
   /** Reset layout: one pane, default widths, the panel closed. */
   resetAll: () => void;
   /**
-   * Render-only, by pane id: how many times that id has been closed. The
-   * workspace keys a pane by id and incarnation, so an id a close frees and a
-   * split reuses (WP-G2) mounts fresh — never the old FileTab, frame or
-   * terminal slot. Nothing closes a pane yet (WP-G1), so every id is 0.
+   * Split (WP-G2, lib/workspace `splitPane`): pane `id` shows `spec` right
+   * after `source`, on the ladder's shape for one pane more. `focus: false`
+   * leaves focus where it is. An id ⊞ had hidden mounts fresh.
+   */
+  split: (source: PaneNo, id: PaneNo, spec: PaneSpec, opts?: { focus?: boolean }) => void;
+  /** × (lib/workspace `closePane`): that pane goes, and mounts fresh if a split reuses its id. */
+  close: (pane: PaneNo) => void;
+  /** Whether one more pane can be drawn in this window now (`dirty`: ids holding an unsaved edit). */
+  splitVerdict: (dirty?: readonly PaneNo[]) => { ok: boolean; why: SplitWhy };
+  /**
+   * Render-only, by pane id: how many times that id has been closed (or
+   * taken back from ⊞'s hidden panes by a split). The workspace keys a pane
+   * by id and incarnation, so an id a close frees and a split reuses mounts
+   * fresh — never the old FileTab, frame or terminal slot.
    */
   incarnation: Readonly<Partial<Record<PaneNo, number>>>;
 }
 
-const NO_INCARNATIONS: Readonly<Partial<Record<PaneNo, number>>> = Object.freeze({});
-
 /** Focus pane `pane` (an id) for the keyboard: its message box when it has one, else the pane itself. */
-function focusPaneElement(pane: PaneNo) {
+export function focusPaneElement(pane: PaneNo) {
   requestAnimationFrame(() => {
     const el = document.querySelector<HTMLElement>(`[data-testid="pane-${pane}"]`);
     if (!el) return;
@@ -140,8 +153,8 @@ export function useLayout(blocked = false): LayoutControl {
   const fit = fitWorkspace(layout, ws, available, availableH, prefer, preferPanel, drawnBefore.current);
   drawnBefore.current = { preset: ws.preset, drawn: fit.drawn, panes: fit.panes };
   const fitted = fit.sides;
-  const now = useRef({ fit, ws, layout, available, availableH, prefer });
-  now.current = { fit, ws, layout, available, availableH, prefer };
+  const now = useRef({ fit, ws, layout, available, availableH, prefer, preferPanel });
+  now.current = { fit, ws, layout, available, availableH, prefer, preferPanel };
   const blockedRef = useRef(blocked);
   blockedRef.current = blocked;
 
@@ -182,6 +195,9 @@ export function useLayout(blocked = false): LayoutControl {
     (projectId: string, keep: readonly PaneNo[] = []) => setWs((w) => unpinProjectOf(w, projectId, keep)), [],
   );
   const setPreviewUrl = useCallback((pane: PaneNo, url: string) => setWs((w) => setPreviewUrlOf(w, pane, url)), []);
+  const setFilePath = useCallback(
+    (pane: PaneNo, path: string | null) => setWs((w) => setFilePathOf(w, pane, path)), [],
+  );
   const setKeepOrigin = useCallback(
     (pane: PaneNo, origin: string | null) => setWs((w) => setKeepOriginOf(w, pane, origin)), [],
   );
@@ -206,6 +222,27 @@ export function useLayout(blocked = false): LayoutControl {
     const trial = fitWorkspace(at.layout, opened, at.available, at.availableH, at.prefer, false);
     setPreferPanel(at.fit.panel.auto || trial.panel.auto);
     setWs((w) => setPanel(w, { open: true }));
+  }, []);
+  // A pane closed, or a hidden one a split takes back, mounts fresh next time.
+  const [incarnation, setIncarnation] = useState<Partial<Record<PaneNo, number>>>({});
+  const bump = useCallback(
+    (pane: PaneNo) => setIncarnation((m) => ({ ...m, [pane]: (m[pane] ?? 0) + 1 })), [],
+  );
+  const split = useCallback((source: PaneNo, id: PaneNo, spec: PaneSpec, opts: { focus?: boolean } = {}) => {
+    if (blockedRef.current) return;
+    if (now.current.ws.kept.includes(id)) bump(id);
+    setWs((w) => splitPaneOf(w, source, id, spec, opts));
+  }, [bump]);
+  const close = useCallback((pane: PaneNo) => {
+    if (blockedRef.current) return;
+    const at = now.current.ws;
+    if (closePaneOf(at, pane) === at) return;
+    bump(pane);
+    setWs((w) => closePaneOf(w, pane));
+  }, [bump]);
+  const splitVerdict = useCallback((dirty: readonly PaneNo[] = []) => {
+    const at = now.current;
+    return splitVerdictOf(at.layout, at.ws, at.available, at.availableH, at.prefer, at.preferPanel, dirty);
   }, []);
   const resetAll = useCallback(() => {
     setWs((w) => resetWorkspace(w));
@@ -277,8 +314,8 @@ export function useLayout(blocked = false): LayoutControl {
   return {
     zoom, layout, fitted, available, availableH, ws, fit,
     setZoom, zoomBy, setWidth, resetWidth, open, fold, toggle,
-    setPreset, setView, focus, show, pin, unpinProject, setPreviewUrl, setKeepOrigin, setTerminal, forgetTerminal, setSplit,
-    equalSplit, togglePanel, setPanelHeight, resetPanelHeight, resetAll, incarnation: NO_INCARNATIONS,
+    setPreset, setView, focus, show, pin, unpinProject, setPreviewUrl, setFilePath, setKeepOrigin, setTerminal, forgetTerminal, setSplit,
+    equalSplit, togglePanel, setPanelHeight, resetPanelHeight, resetAll, split, close, splitVerdict, incarnation,
   };
 }
 
@@ -568,13 +605,13 @@ export function ZoomControl(props: {
 /** Below this many zoomed px the four text buttons fold into a ⋯ menu; zoom and the toggles never hide. */
 export const TITLE_FOLD_W = 560;
 
-type Area = "left" | "panel" | "right" | "grid";
+type Area = "left" | "panel" | "right" | "grid" | "split";
 
 /**
  * A window outline, 16×16, with the area the button controls filled with
  * `currentColor` when open and drawn as an outline when closed.
  */
-function AreaIcon(props: { area: Area; open: boolean }) {
+export function AreaIcon(props: { area: Area; open: boolean }) {
   const { area, open } = props;
   const band =
     area === "left" ? { x: 1.5, y: 1.5, w: 4.5, h: 13 }
@@ -584,7 +621,10 @@ function AreaIcon(props: { area: Area; open: boolean }) {
   return (
     <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
       <rect x="1.5" y="1.5" width="13" height="13" rx="1.5" fill="none" stroke="currentColor" strokeWidth="1.2" />
-      {band ? (
+      {area === "split" ? (
+        // A pane's split button (WP-G2): the outline and one divider, VS Code's split.
+        <line x1="8" y1="1.5" x2="8" y2="14.5" stroke="currentColor" strokeWidth="1.2" />
+      ) : band ? (
         <rect
           x={band.x} y={band.y} width={band.w} height={band.h}
           fill={open ? "currentColor" : "none"} stroke="currentColor" strokeWidth="1.2"

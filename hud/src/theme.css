@@ -949,16 +949,18 @@ body.resizing iframe { pointer-events: none; }
 .tb-toggles { gap: 2px; }
 .tb-sep { flex: 0 0 1px; width: 1px; height: 14px; background: var(--border-strong); }
 #titlebar button.tb-text { height: 22px; padding: 0 9px; font-size: 12px; }
-#titlebar button.tb-icon {
+/* The icon buttons: the title bar's toggles and, since WP-G2, each pane's
+   split and × (shared, so a pane's split button looks like ◧ ⬓ ◨). */
+button.tb-icon {
   position: relative; width: 26px; height: 22px; padding: 0;
   display: inline-flex; align-items: center; justify-content: center;
   color: var(--text-muted); background: transparent; border-color: transparent; border-radius: 4px;
 }
-#titlebar button.tb-icon:hover:not(:disabled) { color: var(--text); background: var(--bg-3); }
-#titlebar button.tb-icon[aria-expanded="true"] { color: var(--text); background: var(--bg-3); }
-#titlebar button.tb-icon svg { display: block; }
+button.tb-icon:hover:not(:disabled) { color: var(--text); background: var(--bg-3); }
+button.tb-icon[aria-expanded="true"] { color: var(--text); background: var(--bg-3); }
+button.tb-icon svg { display: block; }
 /* Folded by the window, not the owner: drawn closed, outlined dashed. */
-#titlebar button.tb-icon[data-auto="true"] svg rect { stroke-dasharray: 2 1.4; }
+button.tb-icon[data-auto="true"] svg rect { stroke-dasharray: 2 1.4; }
 /* ⊞ when the window is drawing fewer panes than the preset has. Not amber:
    amber means pending, and nothing here waits on the owner. */
 .tb-badge {
@@ -1022,6 +1024,16 @@ body.resizing iframe { pointer-events: none; }
   box-shadow: inset 3px 0 0 var(--accent), inset 0 -1px 0 var(--accent-line);
 }
 .micmark { align-self: center; display: inline-flex; color: var(--accent); padding: 0 4px 0 6px; }
+/* Split and × in a pane's strip (WP-G2): the title bar's icon buttons, centred
+   in the strip; × at the far right. */
+.tabs > button.tb-icon.panesplit, .tabs > button.tb-icon.paneclose { align-self: center; margin: 0 2px; }
+.tabs > button.tb-icon.paneclose { font: 15px/1 var(--mono); margin-right: 6px; }
+/* "Discard and close?" — inline, in the pane, never a modal or a card look-alike. */
+.closeask {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 6px 10px;
+  border-bottom: 1px solid var(--border); background: var(--bg-2); font-size: 12px; color: var(--text-2);
+}
+.closeask button { padding: 2px 9px; }
 .micmark svg { display: block; }
 .tree-row.panesel { color: var(--text); box-shadow: inset 2px 0 var(--border-strong); }
 .tree-row.ghost.panesel { box-shadow: none; color: var(--text-2); }

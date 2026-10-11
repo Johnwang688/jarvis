@@ -25,6 +25,7 @@ import type { Tree, TreeEntry } from "../types";
 import { CodeEditor } from "./Editor";
 import { Markdown } from "./Markdown";
 import { isMarkdown } from "../lib/monaco";
+import { afterSave, fileSaved, onFileSaved } from "../lib/filesync";
 
 interface Open {
   path: string;
@@ -101,8 +102,10 @@ function Node(props: {
 
 export function FileTab(props: {
   projectId: string | null;
-  /** A file opened here: the pane pins itself to this project. */
-  onOpened?: (projectId: string) => void;
+  /** A file opened here: the pane pins itself to this project and remembers the file (WP-G2). */
+  onOpened?: (projectId: string, path: string) => void;
+  /** The file to open when this mounts (a reload, a split's copy), relative to the project. */
+  filePath?: string;
   /** A narrow split pane: the tree folds behind a toggle. */
   narrow?: boolean;
   /** The buffer holds an unsaved edit (or no longer does). Told false on unmount. */
@@ -117,6 +120,8 @@ export function FileTab(props: {
   // a prop that changed under an open buffer would be a bug, not a feature.
   const [pid] = useState(props.projectId);
   const onOpened = props.onOpened;
+  // This pane, to the other File panes it tells about its saves (lib/filesync.ts).
+  const [me] = useState(() => ({}));
 
   const open = useCallback(
     async (path: string) => {
@@ -128,7 +133,7 @@ export function FileTab(props: {
         setText(r.content || "");
         setRenderedOnly(isMarkdown(path));
         setTreeOpen(false);
-        onOpened?.(pid);
+        onOpened?.(pid, r.path);
       } catch (e: any) {
         setNote(e.message);
       }
@@ -146,6 +151,7 @@ export function FileTab(props: {
       });
       setFile({ ...file, mtime: r.mtime, content: text });
       setNote("saved");
+      fileSaved({ projectId: pid, path: file.path, mtime: r.mtime }, me);
     } catch (e: any) {
       if (e instanceof ApiError && e.status === 409) {
         // Someone else wrote it. Never clobber: offer the reload.
@@ -164,6 +170,25 @@ export function FileTab(props: {
   tell.current = props.onDirty;
   useEffect(() => tell.current?.(dirty), [dirty]);
   useEffect(() => () => tell.current?.(false), []);
+
+  // The file this pane had open (a reload) or was split from: read at mount.
+  const first = useRef(props.filePath);
+  useEffect(() => {
+    if (first.current) void open(first.current);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // A save in another pane on this file (lib/filesync.ts): read it again when
+  // clean; with an unsaved edit, keep it and say the file changed on disk.
+  const mine = useRef({ projectId: pid, path: null as string | null, mtime: null as number | null, dirty: false });
+  mine.current = { projectId: pid, path: file?.path ?? null, mtime: file?.mtime ?? null, dirty };
+  const reread = useRef(open);
+  reread.current = open;
+  useEffect(() => onFileSaved((saved, from) => {
+    const act = afterSave(saved, mine.current, from === me);
+    if (act === "reload") void reread.current(saved.path);
+    else if (act === "note") setNote("changed on disk since it was read — reload to see it, then re-apply your edit");
+  }), [me]);
 
   if (!pid) return <div className="pad muted">Pick a project.</div>;
 

@@ -38,7 +38,9 @@
 import type { Attachment, ChatMessage, Thread, ToolOp } from "../types";
 import type { Compose } from "./compose";
 import type { GiveBack } from "./giveback";
-import { PANE_NOS, orderOf, setPreset, slotOf, type PaneNo, type Preset, type Workspace } from "./workspace";
+import {
+  LADDER, PANE_NOS, allocate, orderOf, setPreset, slotOf, type PaneNo, type Preset, type Workspace,
+} from "./workspace";
 
 /** One pane's conversation, and the turn it is waiting on. */
 export interface ChatState {
@@ -269,15 +271,25 @@ export function heldElsewhere(
  * right of the focused one. From the single layout it is two columns, the
  * pane in slot 2 (VS Code's "open to the side"); from the last column of two
  * it is a third column; from the last pane of any other shape it wraps to the
- * first drawn pane that is not the focused one. A grow takes the pane ⊞ would
- * bring back there (`setPreset`), so the pane is named by id.
+ * first drawn pane that is not the focused one.
+ *
+ * The two that grow are a split (WP-G2, plan §3.5): `source` names the pane
+ * the new one goes after, and `pane` the id it takes (lib/workspace
+ * `allocate`: a free id first, so a pane ⊞ hid keeps what it showed; never
+ * one hidden with an unsaved edit, `dirty`). With every id taken, the grow
+ * takes back the pane ⊞ would bring back there (`setPreset`), as before.
  */
 export function besideTarget(
-  ws: Workspace, drawn: readonly PaneNo[],
-): { preset: Preset; pane: PaneNo } {
+  ws: Workspace, drawn: readonly PaneNo[], dirty: readonly PaneNo[] = [],
+): { preset: Preset; pane: PaneNo; source?: PaneNo } {
   const own = orderOf(ws);
   const visible = drawn.length ? drawn : [own[0]];
-  const grown = (preset: Preset, slot: number) => ({ preset, pane: setPreset({ ...ws, order: own }, preset).order[slot - 1] });
+  const grown = (preset: Preset, slot: number) => {
+    const source = own[slot - 2];
+    const id = allocate({ order: own, kept: ws.kept }, dirty);
+    if (id !== null) return { preset: LADDER[own.length + 1], pane: id, source };
+    return { preset, pane: setPreset({ ...ws, order: own }, preset).order[slot - 1] };
+  };
   if (visible.length === 1) {
     if (ws.preset === "single") return grown("cols2", 2);
     // A preset drawn as one pane for room: the next of its own panes.

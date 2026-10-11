@@ -19,9 +19,10 @@ import { activeProjectId } from "../lib/compose";
 import { NO_ACTIVITY, applyActivity, type ActivityView } from "../lib/activity";
 import { pendingAfter } from "../lib/giveback";
 import {
-  CAPTURE_STATUSES, CHAT_KEYS, MAX_FILES, draftKey, emptyChats, sameConversation, type ChatState, type Chats,
+  CAPTURE_STATUSES, CHAT_KEYS, MAX_FILES, draftKey, emptyChat, emptyChats, sameConversation, shownThread,
+  type ChatState, type Chats,
 } from "../lib/chats";
-import { PANE_NOS, type PaneNo } from "../lib/workspace";
+import { PANE_NOS, defaultWorkspace, type PaneNo } from "../lib/workspace";
 
 // What the centre shows is the workspace's (lib/workspace.ts, 2026-10-09): a
 // view per pane, stored with the layout, not a single `tab` in this store.
@@ -46,6 +47,14 @@ export interface State {
   selectedChat: PaneNo | null;
   /** The chat panes the owner selected, most recent first. */
   selectedOrder: PaneNo[];
+  /** The pane in slot 1 (App's to say, from the workspace): the chat the
+   * window is about when no chat was ever selected — never an id assumed to
+   * exist (pane 1 may have been closed, WP-G2). */
+  home: PaneNo;
+  /** Turns still running in a thread no pane shows, because the pane that
+   * tracked them was closed (WP-G2): thread id → its status line. The pane
+   * that opens that thread next takes the turn up, Stop and all. */
+  loose: Record<string, string>;
   /** Unsent words and staged files a conversation left behind when its pane
    * moved to another one, by `draftKey` (a thread id, or a pane's compose
    * row): they come back when a pane takes that conversation up again, and
@@ -80,7 +89,8 @@ export interface State {
 
 export const initialState: State = {
   projects: [], platforms: {}, threads: [], tasks: [], taskThreads: {}, activity: NO_ACTIVITY,
-  chats: emptyChats(), selectedChat: 1, selectedOrder: [], drafts: {}, composeSeq: 0, taskId: null, taskFocus: false,
+  chats: emptyChats(), selectedChat: null, selectedOrder: [], home: defaultWorkspace().order[0], loose: {},
+  drafts: {}, composeSeq: 0, taskId: null, taskFocus: false,
   approvals: [], usage: null, discord: null, schedules: [],
   route: null, avatar: null, wakePatterns: [], dictation: DEFAULT_MODE,
   level: 0, orb: "idle", error: "", moveError: "", picker: null, archivedNames: [],
@@ -131,7 +141,20 @@ export type Action =
   /** The selected chat changed (`front`: the owner selected it, so it heads
    * the order; else a fallback while the layout hides the one selected). The
    * orb now follows that pane's turn. */
-  | { type: "select"; pane: PaneNo | null; front?: boolean };
+  | { type: "select"; pane: PaneNo | null; front?: boolean }
+  /** The pane in slot 1 changed (a close, a split, ⊞). */
+  | { type: "home"; pane: PaneNo }
+  /**
+   * × on a pane (WP-G2, plan §3.6): its conversation leaves it. Unsent words
+   * and files in a thread's box are parked under that thread and come back
+   * when it opens again; words in a compose row's box were asked about and
+   * are dropped. A turn it tracked is left `loose` for the next pane that
+   * opens the thread. The pane leaves the selection order; a capture status
+   * stays until the selection moves on (`select` carries it to the next chat).
+   */
+  | { type: "release_chat"; pane: PaneNo }
+  /** A turn finished in a thread no pane tracks: nothing is loose there any more. */
+  | { type: "turn_over"; threadId: string };
 
 function withChat(s: State, pane: PaneNo, next: ChatState): State {
   return { ...s, chats: { ...s.chats, [pane]: next } };
@@ -319,6 +342,7 @@ export function reduce(s: State, a: Action): State {
 
     case "open_thread": {
       const chats = { ...s.chats };
+      let loose = s.loose;
       const was = chats[a.pane];
       // A compose row that already opened this thread is the same
       // conversation: what it shows is that thread's, so nothing reloads.
@@ -346,9 +370,58 @@ export function reduce(s: State, a: Action): State {
           chats[n] = { ...q, ...mine };
         }
       }
+      // A turn left running by a pane that was closed (WP-G2): this pane
+      // takes it up, so its Stop is here. A turn of this pane's own on another
+      // thread is left loose in its place, for whichever pane opens that one.
+      if (a.threadId in loose) {
+        loose = { ...loose };
+        const status = loose[a.threadId];
+        delete loose[a.threadId];
+        const tracked = PANE_NOS.some((n) => chats[n].busy && chats[n].turnThreadId === a.threadId)
+          || (here.busy && here.turnThreadId === a.threadId);
+        if (!tracked) {
+          if (here.busy && here.turnThreadId) loose[here.turnThreadId] = here.status;
+          here.busy = true;
+          here.turnThreadId = a.threadId;
+          here.status = status;
+        }
+      }
       chats[a.pane] = here;
-      return { ...s, chats, drafts: moved.drafts };
+      return { ...s, chats, drafts: moved.drafts, loose };
     }
+
+    case "release_chat": {
+      const c = s.chats[a.pane];
+      const drafts = { ...s.drafts };
+      const thread = shownThread(c);
+      if (thread && (c.input || c.files.length)) {
+        const had = drafts[thread];
+        drafts[thread] = {
+          text: had?.text && c.input ? `${had.text}\n${c.input}` : c.input || had?.text || "",
+          files: [...(had?.files ?? []), ...c.files].slice(0, MAX_FILES),
+        };
+      }
+      const loose = { ...s.loose };
+      // A placeholder (`local-N`, a first send whose thread does not exist
+      // yet) is no thread: nothing can open it.
+      if (c.busy && c.turnThreadId && !c.turnThreadId.startsWith("local-")) loose[c.turnThreadId] = c.status;
+      const keep = a.pane === s.selectedChat && CAPTURE_STATUSES.has(c.status) ? c.status : "";
+      return {
+        ...s, drafts, loose,
+        chats: { ...s.chats, [a.pane]: { ...emptyChat(), status: keep } },
+        selectedOrder: s.selectedOrder.filter((n) => n !== a.pane),
+      };
+    }
+
+    case "turn_over": {
+      if (!(a.threadId in s.loose)) return s;
+      const loose = { ...s.loose };
+      delete loose[a.threadId];
+      return { ...s, loose };
+    }
+
+    case "home":
+      return s.home === a.pane ? s : { ...s, home: a.pane };
 
     case "chat_swap": {
       if (a.a === a.b) return s;
@@ -396,10 +469,11 @@ export const useStore = () => useContext(Ctx);
  * The chat the window is about: the selected chat, else (no chat pane drawn)
  * the one selected last — the sidebar marks its conversation and File and
  * Preview panes follow its project, as they followed the one conversation
- * whatever the single pane showed. Never where ambiguous input goes: that is
- * `selectedChat`, or nowhere.
+ * whatever the single pane showed; with none ever selected, the pane in slot
+ * 1 (`home`). Never where ambiguous input goes: that is `selectedChat`, or
+ * nowhere.
  */
-export const activePane = (s: State): PaneNo => s.selectedChat ?? s.selectedOrder[0] ?? 1;
+export const activePane = (s: State): PaneNo => s.selectedChat ?? s.selectedOrder[0] ?? s.home;
 export const activeChat = (s: State) => s.chats[activePane(s)];
 
 export const currentTask = (s: State) => s.tasks.find((t) => t.id === s.taskId) || null;
