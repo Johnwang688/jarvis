@@ -55,7 +55,7 @@ import { afterProjectGone, afterThreadGone, forgetLastProject, projectNamesTaken
 import { guildConfigured, ownerLine } from "./lib/discord";
 import { CollapseButton, Rail, Splitter, TitleBar, focusPaneElement, useLayout } from "./components/Layout";
 import { Workspace, type PaneInfo } from "./components/Workspace";
-import { terminalAttached, terminals } from "./components/Terminal";
+import { terminalAttached, terminalRead, terminals } from "./components/Terminal";
 import { terminalSpecFor } from "./lib/terminal";
 import { maxWidth } from "./lib/layout";
 import {
@@ -919,6 +919,11 @@ export default function App() {
           // `{terminal_id, at}` only: the terminals say so when it was not
           // this window's own attach (components/Terminal.tsx).
           terminalAttached(data);
+          break;
+        case "terminal_read":
+          // `{terminal_id, lines, at, refused}` only: the terminal's bar says
+          // "Jarvis read 200 lines · 15:42" (components/Terminal.tsx).
+          terminalRead(data);
           break;
         default:
           break;

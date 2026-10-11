@@ -46,9 +46,8 @@ import { api } from "../api";
 import {
   AttachLedger, InputGate, OutputPipe, attachUrl, cleanPaste, cleanTitle, clampSize, counterZoom, encodeInput,
   fontSizeFor, integrationNote, isTerminalId, judgeLink, loadMine, loadPrefs, menuWidth, pageNonce, parseControl,
-  placeMenu, saveMine,
-  savePrefs,
-  SPECS_KEPT, type InSpec, type TerminalRow,
+  parseRead, placeMenu, readNoteText, saveMine, savePrefs,
+  SPECS_KEPT, type InSpec, type ReadNote, type TerminalRow,
 } from "../lib/terminal";
 import { toCss } from "../lib/layout";
 import { judgePreviewUrl } from "../lib/preview";
@@ -906,6 +905,8 @@ export class TermManager {
   sessions = new Map<string, TermSession>();
   /** Attaches this window did not make (`terminal_attached`): quiet, dismissible. */
   notices: AttachNotice[] = [];
+  /** The last `terminal_read` per terminal (WP-F): "Jarvis read 200 lines · 15:42" in its bar. */
+  reads = new Map<string, ReadNote>();
   /** A busy terminal the owner asked to close: asked once more. `unsure`: the listing failed. */
   confirm: { id: string; title: string; unsure: boolean } | null = null;
   /** A Ctrl+clicked link to a server on this machine: where to open it (WP-E). Screen px. */
@@ -1367,6 +1368,17 @@ export class TermManager {
     this.changed();
   }
 
+  /**
+   * `terminal_read` on the bus: Jarvis read this terminal (or was refused).
+   * HUD chrome only — the note never touches the terminal's stream.
+   */
+  heardRead(data: unknown) {
+    const note = parseRead(data);
+    if (!note) return;
+    this.reads = new Map(this.reads).set(note.terminalId, note);
+    this.changed();
+  }
+
   dismissNotice(key: number) {
     this.notices = this.notices.filter((n) => n.key !== key);
     this.changed();
@@ -1416,6 +1428,11 @@ export const terminals = new TermManager();
 /** The SSE `terminal_attached` record (App's one event stream). */
 export function terminalAttached(data: unknown) {
   terminals.heardAttached(data);
+}
+
+/** The SSE `terminal_read` record (App's one event stream). */
+export function terminalRead(data: unknown) {
+  terminals.heardRead(data);
 }
 
 if (typeof window !== "undefined") {
@@ -1494,6 +1511,7 @@ export function TerminalView(props: { id: string; where: string; pane?: PaneNo; 
   const note = integrationNote(live ? { integration: live.integration, marked: s.marked || live.marked } : null,
                                settled);
   const readable = row ? row.readable : true;
+  const read = mgr.reads.get(props.id);
   const name = s.title || row?.title || `terminal ${props.id}`;
   const blocked = mgr.blocked;
 
@@ -1507,6 +1525,15 @@ export function TerminalView(props: { id: string; where: string; pane?: PaneNo; 
           <span className={"termbadge " + note.kind} data-testid="term-integration" data-kind={note.kind}
                 title={note.title}>
             {note.badge}
+          </span>
+        ) : null}
+        {read ? (
+          <span className={"termreadnote" + (read.refused ? " refused" : "")} data-testid="term-read-note"
+                data-refused={read.refused ? "true" : "false"} role="status"
+                title={read.refused
+                  ? "Jarvis asked to read this terminal and was refused: reading is off, or the output may hold a credential"
+                  : "Jarvis read this terminal's recent output (text only; it never types here)"}>
+            {readNoteText(read, clock(read.at))}
           </span>
         ) : null}
         <button
