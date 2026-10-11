@@ -13,11 +13,9 @@ function render(root: Root, restore: GiveBack[], level: number, taken: number[])
   act(() => {
     root.render(
       createElement(InputBar, {
-        mode: "review",
-        level,
-        hint: "",
+        // Any prop that moves is a parent render (the mic level used to).
+        placeholder: `render ${level}`,
         pendingTranscript: "",
-        onModeChange: () => {},
         onSend: () => {},
         onTranscriptTaken: () => {},
         restore,

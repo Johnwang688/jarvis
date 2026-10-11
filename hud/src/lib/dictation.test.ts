@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import {
-  DEFAULT_MODE, HINTS, isMuted, loadMode, mayCapture, outcomeFor, saveMode,
+  DEFAULT_MODE, DICTATION_MODES, isMuted, loadMode, mayCapture, nextMode, orbLine, outcomeFor, saveMode,
   sendsOnItsOwn,
 } from "./dictation";
 
@@ -64,11 +64,36 @@ describe("dictation mode", () => {
     expect(mayCapture("review")).toBe(true);
   });
 
-  it("says the mic is muted rather than inviting speech", () => {
-    // Every other hint is an invitation to speak, and each would be a lie
-    // while nothing said can arrive.
-    expect(HINTS.off).toMatch(/MUTED/);
-    expect(HINTS.auto).not.toMatch(/MUTED/);
-    expect(HINTS.review).not.toMatch(/MUTED/);
+  it("says the mic is muted rather than inviting speech, and only when it is", () => {
+    // The orb's line took over from the input bar's hint (PR #29): a muted
+    // mic must say so, and a live one must never read as muted.
+    for (const orb of ["idle", "listening", "thinking", "speaking"]) {
+      expect(orbLine({ mode: "off", approvals: 0, orb })).toMatch(/MUTED/);
+      expect(orbLine({ mode: "auto", approvals: 0, orb })).not.toMatch(/MUTED/);
+      expect(orbLine({ mode: "review", approvals: 0, orb })).not.toMatch(/MUTED/);
+    }
+    expect(orbLine({ mode: "review", approvals: 0, orb: "idle" })).toBe("");
+    expect(orbLine({ mode: "auto", approvals: 0, orb: "listening" })).toBe("listening");
+  });
+
+  it("puts the turn's own status first, and a card's question before the mic", () => {
+    expect(orbLine({ status: "STT FAILED", mode: "off", approvals: 1, orb: "error" })).toBe("STT FAILED");
+    // Under a card it asks for the answer in words, not the orb's state name.
+    expect(orbLine({ mode: "review", approvals: 1, orb: "approval" })).toBe("ANSWER THE AUTHORIZATION");
+    expect(orbLine({ mode: "off", approvals: 2, orb: "approval" })).toBe("ANSWER THE AUTHORIZATION");
+  });
+
+  it("cycles OFF → REVIEW → AUTO → OFF, so unmuting never lands on AUTO", () => {
+    expect(nextMode("off")).toBe("review");
+    expect(nextMode("review")).toBe("auto");
+    expect(nextMode("auto")).toBe("off");
+    // A full round visits every mode once.
+    const seen = new Set<string>();
+    let m = nextMode("off");
+    for (let i = 0; i < DICTATION_MODES.length; i++) {
+      seen.add(m);
+      m = nextMode(m);
+    }
+    expect([...seen].sort()).toEqual([...DICTATION_MODES].sort());
   });
 });
