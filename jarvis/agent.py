@@ -397,7 +397,7 @@ class Agent:
             # anything that writes into `loaded_groups` some other way. The
             # set re-bound below is what `dispatch()` enforces, so folding in
             # a group the agent was not offered would widen its toolset.
-            if group is None or not set(group.core) <= base:
+            if group is None or not group.core or not set(group.core) <= base:
                 continue
             for name in group.extra:
                 if name in tools.REGISTRY and name not in seen:

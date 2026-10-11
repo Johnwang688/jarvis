@@ -19,8 +19,9 @@ be a way to run dangerous tools unguarded (the same rule that makes
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import Any, Callable
+from typing import Any, Callable, Iterable, Iterator
 
 # The working plan, as a one-key mutable dict so a tool can rewrite it in place
 # and the agent that owns it sees the change on its next step.
@@ -46,6 +47,12 @@ _DEPTH: ContextVar[int] = ContextVar("jarvis_depth", default=0)
 # because they would interleave on the one shared Playwright page) from getting
 # to the browser by spawning a child that has them, or by naming one.
 _TOOLS: ContextVar[frozenset[str] | None] = ContextVar("jarvis_tools", default=None)
+
+# Set only by `unconfined()`: dispatch with nothing bound runs instead of
+# refusing. Unbound refuses by default — every real caller binds a toolset
+# first, so an unbound dispatch is a bug, and a bug should fail loudly rather
+# than quietly open the whole registry.
+_UNCONFINED: ContextVar[bool] = ContextVar("jarvis_unconfined", default=False)
 
 # Who is asking, shown on the approval surfaces (HUD card, Discord DM). Bound
 # once by the surface that owns the thread — a background task's runner binds
@@ -154,11 +161,54 @@ def parent_tools() -> frozenset[str] | None:
 def current_tools() -> frozenset[str] | None:
     """The tools the agent running now may call, or None if no agent is bound.
 
-    `dispatch()` refuses anything outside this set. None — a script or a test
-    calling `dispatch` directly — is the one case it does not enforce, and it
-    is reached by no real path (see tools._toolset_refusal).
+    `dispatch()` refuses anything outside this set, and with None — nothing
+    bound — it refuses everything, unless the code calling it opted out with
+    `unconfined()` (see tools._toolset_refusal). Every real caller binds first.
     """
     return _TOOLS.get()
+
+
+@contextmanager
+def tools_bound(names: Iterable[str]) -> Iterator[frozenset[str]]:
+    """Bind `names` as the toolset for the duration, then put back what was.
+
+    For a script or a test that calls `tools.dispatch` itself, with no agent
+    turn to bind one: name the tools it calls, and dispatch holds it to them
+    exactly as it would an agent. Scoped, so the thread is not left holding a
+    toolset no agent owns once the block ends.
+    """
+    held = frozenset(names)
+    token = _TOOLS.set(held)
+    try:
+        yield held
+    finally:
+        _TOOLS.reset(token)
+
+
+@contextmanager
+def unconfined() -> Iterator[None]:
+    """Let `dispatch` run any registered tool on this thread while nothing is
+    bound — for a script or a test that really means "every tool".
+
+    The explicit opt-in that makes "unbound refuses" livable (2026-10-11, the
+    owner's call on PR #34's follow-up). It is code, not configuration: a
+    ContextVar set by this context manager and nothing else, so no environment
+    variable, file or argument a model could write reaches it, and nothing under
+    `jarvis/` calls it (tests/dispatch_toolset_check.py pins that). It changes
+    only the unbound case — a toolset bound inside the block, an agent's turn
+    included, is enforced as ever — and it does not follow a new thread, which
+    starts with an empty context and so refuses again.
+    """
+    token = _UNCONFINED.set(True)
+    try:
+        yield
+    finally:
+        _UNCONFINED.reset(token)
+
+
+def is_unconfined() -> bool:
+    """True inside `unconfined()`. Read by dispatch only when nothing is bound."""
+    return _UNCONFINED.get()
 
 
 def restore_tools(previous: frozenset[str] | None) -> None:
