@@ -792,6 +792,62 @@ on ephemeral ports (`api_port`, `dev_port`) and asserts the API one is never
 hit; the mock HUD, API and workshop send the real `hud_api.frame_headers()`,
 so the HUD under test is always rendered under them. Not yet: §2.5 item 5, a "dev servers in your terminals" list.
 
+**VEX backend, VX-1 (2026-10-11; editor plan
+`docs/plans/2026-10-09-hud-editor-plan.md` §2.9/§3, decisions file beside it
+wins: V-1..V-5; design §18; contract in `docs/hud-api.md`).**
+`jarvis/v2/vex.py` builds, downloads, opens the brain's user port and makes
+new projects with the Windows `vexcom.exe` and toolchain the owner's VS Code
+VEX extension downloaded, **run in place through WSL interop — nothing
+copied, bundled or committed**, and **never decompiled**: the only `vexcom`
+flags are DishPy's (`--name --slot --write --progress`, `--user`). **Tests
+never run a real VEX tool or touch a device** — `tests/v2/vex_fake/` holds
+a fake `make.exe` and `vexcom.exe`. Which executables run is
+**`config.VEX_PATH` (`~/.config/jarvis/vex.json`)**, written only by the
+human-run `jarvis vex setup` (`vex_setup.py`: looks only in
+`config.VEX_STORAGE_ROOTS`/`VEX_EXTENSION_ROOTS`, checks by the daemon's own
+rule, y/N, mode 600, needs a TTY; it also offers `~/.local/bin/vexbuild`),
+and it is **gate state** (`files._protected_state`, by path and by name beside
+the allowlist). **Every path is re-checked at each use** (`load_config`:
+absolute, `realpath == path` so no symlink anywhere, a regular executable or a
+folder, inside the extension's folders; the file itself `O_NOFOLLOW |
+O_NONBLOCK`, capped). **No request names an executable, a path or an
+argument**: argv tables in `vex.py`, the project from its id, `{action}` /
+`{slot, name}` validated first (slot an int 1–8; name
+`^[A-Za-z0-9_][A-Za-z0-9_-]{0,19}$`), Windows paths through one `to_windows`
+that refuses `"<>|?*%^&!:` and invisible characters. Programs run as
+**program terminals** — `terminals.create_program`, called from `vex.py`
+alone (grep-tested; `terminal_check`'s allowed set now includes `vex.py`):
+same ring and routes as a shell, `WSLENV` emptied, typed input refused but
+Ctrl-C except the brain's, an `on_exit` hook after EOF, six apart from the
+shells' six. One build per project (a `flock` under `V2_DATA_DIR/vex/`,
+shared with `vexbuild`), one device action at a time (download, info, brain;
+the device is reserved before the build lock), 5-minute build timeout (SIGTERM
+then SIGKILL, output kept), and **a build refuses a project whose make files
+name `vexcom`** (a makefile is project content; one that downloaded would make
+a build a download — an accident guard). **Download is only the owner's
+click** (V-2/V-3): no tool, MCP tool, CLI or Discord verb, no "run after
+download", and **any agent command naming `vexcom` is DENY in
+`rules.decide`** (see *Command rules*). Agents build through **`vexbuild`**
+(`python -m jarvis.v2.vex build [--rebuild|--clean]`, nothing else), which
+asks like any command unless allowlisted — and `python -m jarvis.v2.vex` asks
+too. **Every route is owner-only with one deliberate difference**: Chromium
+sends **no Origin on a same-origin GET** (measured), so a VEX `GET` without
+one is accepted only with the browser's `Sec-Fetch-Site: same-origin`; every
+other method needs the HUD's Origin. (`projects.owner_only` requires an
+Origin, so **WP-C's `GET /terminals` is 403 from the real HUD** — a defect
+found here, not fixed in this package.) New projects reuse the
+`project_folder` card: **`projects.confirm_folder` is now the one
+confirmation handler** (moved out of `discord/project_commands.py`; still the
+single caller of `make_project_folder`), templates are checked whole before
+anyone is asked and written `O_EXCL | O_NOFOLLOW`. No VEX action puts a
+record on the bus; the log gets lifecycle lines only. Not yet, said by the
+routes: device info (flag from the owner's `vexcom --help`) and Python
+download (spike). Agents' task worktrees are on the Linux filesystem, so
+`vexbuild` builds only in a chat's own project folder. Tests point every
+`config.VEX_*` path, `VEX_MOUNT_ROOT` and `VEXBUILD_PATH` at a temp tree.
+`tests/v2/vex_check.py` (59 checks); 27 guards each shown to fail their check
+when removed in a scratch copy.
+
 **Input bar declutter (2026-10-10, PR #29; ported onto WP-B and reviewed the
 same day).** The bar is `📎 [box] ⬆` over one row, `in: project · provider ▾ ·
 model · effort ▾`. **The mic is on the orb, not in any bar**: the dictation
@@ -1507,6 +1563,24 @@ jarvis/
   git writes **except push** (it reaches production directly) and **except
   reset --hard / clean** (they destroy uncommitted work); **never `rm`**
   (asked, not denied); auth commands deliberately **not** denied.
+
+  **A line that names `vexcom` is DENY** (2026-10-11, VX-1, decision V-2:
+  sending code to a robot is a physical act, only ever the owner's click in
+  the HUD). `rules.names_vexcom` reads the whole line before segmentation,
+  case-folded, in every variant a shell or Windows would collapse to the
+  word: quotes and backslashes removed (bash), `^` (cmd) and backticks
+  (PowerShell), `$'…'` decoded, empty expansions (`${X}`, `$X`, `$()`,
+  `%X%`, a backtick substitution) dropped, braces and brackets dropped, NFKC;
+  a glob only it could match (`v*m.exe`, judged against a control name so
+  `*.exe` stays ordinary); and a PowerShell `-EncodedCommand`/`-enc`/`-e`
+  payload decoded from base64 UTF-16LE. It runs in `decide`, so v1's
+  `command_verdict` (before any approver, so neither an allowlist entry nor
+  mode "all" reaches it) and v2's layer 1 (no card) refuse alike. **The
+  accepted cost**: a grep or a commit message that only mentions the word is
+  refused too — the `.env` trade. An accident guard, not a boundary (a
+  renamed copy is not caught). `vexbuild` itself is ordinary (ASK), and so is
+  `python -m jarvis.v2.vex` — its module would otherwise ride the `python`
+  stem's ALLOW past the ask.
 
   **`2>&1` is not a redirect to a file** (narrowed 2026-08-17, one round after
   the fixes above). The redirect check had become a raw scan for any unquoted
