@@ -1157,6 +1157,165 @@ def answer_checks() -> None:
             check(True, "a spent request id is dead")
         provider.close(handle)
 
+    # BR-0: an out-of-band answer may only withdraw. The broker's card is the
+    # one place a yes comes from; `POST /threads/<id>/answer` on the API
+    # listener reaches this method, and on a49423c its ALLOW beat the card the
+    # owner had not answered yet (the Codex provider already refused it).
+    released = threading.Event()
+    asked = threading.Event()
+    with fake([Hook("Bash", {"command": "git push origin main"}), result_message()]):
+        handle = provider.start(thread("t-oob"), brief(), lambda *a: (asked.set(), released.wait(10),
+                                                                       Decision.DENY)[-1])
+        stream = provider.send(handle, UserMessage(text="go"))
+        next(stream)  # turn_started
+        request = next(stream)  # approval_requested
+        check(asked.wait(5), "the broker is asking the owner")
+        refused = []
+        for decision in (Decision.ALLOW, "allow"):
+            try:
+                provider.answer(handle, request.data["req_id"], decision)
+            except ValueError:
+                refused.append(decision)
+        eq(len(refused), 2, "an out-of-band ALLOW is refused, as the Codex provider refuses it")
+        released.set()  # the owner (the broker) says no
+        rest = list(stream)
+        resolved = [e for e in rest if e.kind is EventKind.APPROVAL_RESOLVED][0]
+        eq(resolved.data["decision"], "deny", "the broker's answer stands")
+        # (On a49423c the hook got `{}`: under AUTO an ALLOW hands the call to
+        # Claude Code's own classifier, with the owner's card still open.)
+        out = FakeClient.instances[-1].hook_results[0].get("hookSpecificOutput", {})
+        eq(out.get("permissionDecision"), "deny", "...and is what reaches the hook")
+        provider.close(handle)
+
+
+@contextlib.contextmanager
+def _temp_config():
+    """Every config path a daemon writes, pointed at a temp dir and restored."""
+    from jarvis import config
+
+    names = ("ALLOWLIST_PATH", "MODELS_PATH", "PROVIDER_DEFAULTS_PATH", "V2_DATA_DIR",
+             "V2_ALWAYS_ASK", "DISCORD_GUILD_PATH", "ROUTING_PATH", "CODEX_CATALOG_PATH")
+    saved = {name: getattr(config, name) for name in names}
+    with tempfile.TemporaryDirectory(prefix="br0-") as tmp:
+        root = Path(tmp)
+        home = root / "home" / ".config" / "jarvis"
+        home.mkdir(parents=True)
+        config.ALLOWLIST_PATH = home / "allowlist.json"
+        config.MODELS_PATH = home / "models.json"
+        config.PROVIDER_DEFAULTS_PATH = home / "provider_defaults.json"
+        config.V2_DATA_DIR = root / "v2data"
+        config.V2_ALWAYS_ASK = home / "always-ask.json"
+        config.DISCORD_GUILD_PATH = home / "discord_guild.json"
+        config.ROUTING_PATH = home / "routing.json"
+        config.CODEX_CATALOG_PATH = root / "codex-models.json"
+        try:
+            yield root
+        finally:
+            for name, value in saved.items():
+                setattr(config, name, value)
+
+
+def _http(port, method, path, body=None, origin=None):
+    import http.client
+
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    try:
+        payload = None if body is None else json.dumps(body).encode()
+        headers = {"Content-Type": "application/json"} if payload else {}
+        if origin:
+            headers["Origin"] = origin
+        conn.request(method, path, payload, headers)
+        response = conn.getresponse()
+        return response.status, json.loads(response.read() or b"null")
+    finally:
+        conn.close()
+
+
+def daemon_answer_route_checks() -> None:
+    """BR-0, end to end on a real daemon: on a Claude thread, the API route that
+    answers a provider (`POST /threads/<id>/answer`) cannot approve a tool use;
+    only the owner's card can. Fails on a49423c, where the route's ALLOW was
+    200 and the tool ran with the card still open.
+
+    How the route tells questions from approvals: its body carries exactly one
+    of `text` (a question's answer, passed on as a str) or `decision` (an
+    approval's, a `Decision`), and the provider then checks what the pending
+    slot is. Codex marks question slots (`pending.question`) and takes only
+    text there, and only a DENY for an approval. Claude raises no questions at
+    all — every pending slot is a tool permission from `_decide` — so on a
+    Claude thread every answer is a withdrawal or nothing. The source guard at
+    the end fails first if that ever changes, so whoever gives Claude
+    questions also gives `answer()` a text path for them.
+    """
+    print("\n-- the API's answer route cannot approve a Claude tool use (BR-0)")
+    from jarvis.v2 import daemon as daemon_mod
+    from jarvis.v2.stores import Stores
+
+    with _temp_config() as root, fake([Hook("Bash", {"command": "git push origin main"}),
+                                       result_message()]):
+        from jarvis import config
+
+        project_root = root / "project"
+        project_root.mkdir()
+        daemon = daemon_mod.Daemon(Stores(config.V2_DATA_DIR),
+                                   {ProviderName.CLAUDE: claude.ClaudeProvider()}, None, 0)
+        daemon.start()
+        worker = None
+        try:
+            hud = f"http://127.0.0.1:{daemon.face_port}"
+            status, project = _http(daemon.port, "POST", "/projects",
+                                    {"name": "p", "root": str(project_root)})
+            eq(status, 201, "project created")
+            thread_ = daemon.open_thread(project["id"], Role.IMPLEMENTER, ProviderName.CLAUDE,
+                                         Brief(Role.IMPLEMENTER, str(project_root),
+                                               profile=PermissionProfile.ASK))
+            worker = threading.Thread(
+                target=lambda: daemon.send(thread_.id, UserMessage(text="push it")), daemon=True)
+            worker.start()
+            card = []
+            deadline = time.monotonic() + 10
+            while not card and time.monotonic() < deadline:
+                card = _http(daemon.port, "GET", "/approvals")[1] or []
+                time.sleep(0.02)
+            eq(len(card), 1, "the always-ask push is a card for the owner")
+            gate = [r for r in _http(daemon.port, "GET", f"/threads/{thread_.id}/log")[1]
+                    if r.get("kind") == "gate_requested"]
+            check(bool(gate), "the provider's request id is in the thread log (readable by any client)")
+            req_id = (gate[-1].get("data") or {}).get("req_id", "") if gate else ""
+            # `text` first: on a49423c a text of "allow" was coerced to an ALLOW too.
+            for body in ({"req_id": req_id, "text": "allow"}, {"req_id": req_id, "decision": "allow"}):
+                status, _ = _http(daemon.port, "POST", f"/threads/{thread_.id}/answer", body)
+                key = "decision" if "decision" in body else "text"
+                eq(status, 400, f"the answer route refuses {key}=allow for a tool use")
+            eq([r["req_id"] for r in _http(daemon.port, "GET", "/approvals")[1]],
+               [card[0]["req_id"]], "and the owner's card is still open")
+            decided = []
+            deadline = time.monotonic() + 0.5     # time for a winning answer to land
+            while not decided and time.monotonic() < deadline:
+                decided = [r for c in FakeClient.instances for r in c.hook_results]
+                time.sleep(0.02)
+            eq(decided, [], "and the tool use has not been decided while the card is open")
+            status, _ = _http(daemon.face_port, "POST", f"/approvals/{card[0]['req_id']}",
+                              {"decision": "allow"}, origin=hud)
+            eq(status, 200, "the owner approves from the HUD window")
+            results = []
+            deadline = time.monotonic() + 10
+            while not results and time.monotonic() < deadline:
+                results = [r for c in FakeClient.instances for r in c.hook_results]
+                time.sleep(0.02)
+            out = (results[0] if results else {}).get("hookSpecificOutput", {})
+            eq(out.get("permissionDecision"), "allow", "and the owner's yes is what reaches the hook")
+        finally:
+            daemon.stop()
+            if worker is not None:
+                worker.join(5)
+
+    source = Path(claude.__file__).read_text()
+    check("EventKind.QUESTION" not in source,
+          "the Claude provider raises no questions (if it starts to, answer() needs a text path)")
+    check(source.count("session.pending[") == 1 and "session.pending[req_id] = pending" in source,
+          "its one pending slot is the tool permission `_decide` opens")
+
 
 # --- the escape hatch -------------------------------------------------------
 
@@ -2032,6 +2191,7 @@ def main() -> int:
     sequence_checks()
     hook_checks()
     answer_checks()
+    daemon_answer_route_checks()
     reviewer_declined_checks()
     interrupt_checks()
     steering_checks()
