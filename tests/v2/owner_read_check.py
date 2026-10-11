@@ -68,6 +68,10 @@ try:
 except ImportError:  # pragma: no cover - the venv has it
     sync_playwright = None
 
+# Base points HOME at a temp folder, and Playwright looks for its browsers
+# under HOME unless told where they are: pin the real cache before that.
+os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", str(Path.home() / ".cache" / "ms-playwright"))
+
 
 class Fake:
     def __init__(self, name):
