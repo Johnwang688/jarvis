@@ -812,7 +812,17 @@ the desk, skip the `readable` check, the tool skipping its desk check, any
 HUD-route message counting as the desk, a Discord steer leaving the desk on,
 `EXPLICIT_ONLY` not honoured, rules before `strip_invisible`, no base64
 forms, no folder `.env` values, and `ink` forgetting cleared lines.
-REVIEW_MUTATIONS_PLACEHOLDER
+The review round's own, each also shown to bite (39 of 39 with round 1's,
+re-anchored): no private-key footer, no key-block state, a closed block read
+as open, shell keywords not stripped, input redirections not read,
+substitutions not judged, `find -exec` readers not printers, `.env.*` not
+protected (and templates protected), no `.env.*` folder values, no width, no
+row cap, an unbounded command cache, the ticker showing the result, a split
+switch not handed over, the tracker blind to C0 inside a switch, C0 aborting a
+CSI, the desk slot carried over between turns, no re-check of the switch
+after the render, a blocking env reader (the FIFO hangs), and URL passwords
+not withheld. At bd95320 the `Speed` rings took over 30 s, 12.6 s or ran out
+of a 3 GiB cap where they now take under 1 s.
 
 **Input bar declutter (2026-10-10, PR #29; ported onto WP-B and reviewed the
 same day).** The bar is `📎 [box] ⬆` over one row, `in: project · provider ▾ ·
