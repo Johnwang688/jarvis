@@ -494,7 +494,7 @@ HUD's `Origin`; anything else is 403. No tool reaches them (fast path, MCP,
 Claude or Codex threads, Discord) — `tests/v2/archive_check.py` asserts
 it. The gate keeps every tool's HTTP client off these routes; it is not a
 boundary against a shell command the permission gate approved, the same
-footing as `/approvals`.
+footing as `/approvals` (owner-only too since BR-0, below).
 
 ## Additions 2026-10-07 (Discord slash core — S1)
 
@@ -1107,9 +1107,10 @@ own server and is unaffected.
   when the framed page is the parent's origin. The port check refuses the
   HUD's origin up front, and `frame-ancestors 'none'` on every HUD and API
   response stops a frame from navigating itself into the HUD later. A page
-  on another origin cannot reach the parent's DOM, and `/approvals` still
-  needs the HUD's own Origin and a JSON body. And a page that sends its
-  frame to the workshop lands opaque there (the workshop's own sandbox).
+  on another origin cannot reach the parent's DOM, and `/approvals` needs
+  the HUD's listener, its own Origin and a JSON body (owner-only, BR-0).
+  And a page that sends its frame to the workshop lands opaque there (the
+  workshop's own sandbox).
 - **A URL carrying a user name or password** is refused, as a terminal
   link is.
 
@@ -1130,3 +1131,29 @@ at 100% and 160%).
 
 Not in this package: §2.5 item 5, a "dev servers in your terminals" list
 built from the listening sockets terminal sessions own.
+
+## Additions 2026-10-11 (BR-0 — only the HUD window approves)
+
+- **`POST /approvals/{id}` `{decision, always?}` is owner-only**
+  (`projects.owner_only`): it answers only on the HUD's listener
+  (`FACE_PORT`, 8402) and only to a request whose `Origin` is the HUD's;
+  anything else is **403**, and the request stays pending. The API listener
+  (8405) serves the same HUD page, so a page loaded from it sent an Origin
+  equal to its Host and used to pass `check_origin`. The HUD already calls
+  it from its own listener (`api.resolveApproval`); Discord's buttons and
+  `/yes`/`/no`/`/always`, and the escape hatch, resolve in-process and
+  never call the route. **`GET /approvals` is unchanged** — open on both
+  listeners; reading what waits is not a lever.
+- **`POST /threads/{id}/answer` cannot approve.** Its body is exactly one
+  of `{req_id, text}` (a provider question's answer, passed on as text) or
+  `{req_id, decision}` (a provider's pending approval). For an approval,
+  anything but a deny — as `decision` or as `text` — is **400** on every
+  provider: a yes comes only from the card above (the broker), and this
+  route only withdraws. (The Claude provider used to accept an
+  `allow` here, even as `text`, and it beat a card the owner had not
+  answered.) Provider questions are Codex's alone; the Claude provider and
+  the fast path raise none.
+- **v1's browser and `fetch_page` refuse every Jarvis port**
+  (`config.control_ports()`: 8402, 8404, 8405, 8406, configured and
+  default; never 8403) in every loopback spelling — they used to refuse
+  only 8402, so a v1 agent could open the HUD on 8405.

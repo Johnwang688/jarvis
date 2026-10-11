@@ -49,7 +49,8 @@ or contains protected state or touches a credential dir is DENY unasked
 (`denied_grant`); the headline is Codex-supplied text, so it is one cleaned,
 capped line everywhere; unknown methods get an error, malformed approvals
 and unknown `kind`s a decline; null fields never overwrite the item's
-command; `answer()` can only deny an approval — keep all of it), a worktree per
+command; `answer()` can only deny an approval — the Claude provider's too since
+BR-0, below — keep all of it), a worktree per
 task (WP6), the daemon and local API (WP7, `jarvis daemon2`), one skills
 folder for three consumers plus `jarvis-mcp` (WP8), and Discord rendering
 (WP10a), Discord routing with thread-scoped approvals (WP10b), and the
@@ -228,6 +229,47 @@ Together; `HTTP 404: Provider returned 404` when it is down) to
 reads the preview port from `/status` → `workshop_port`, and `hud_v2_check`
 aborts and fails any request to 8402/8403/8405 — it used to load the live
 daemon's preview.
+
+**Only the HUD window says yes, and none of Jarvis's ports is a web page to
+Jarvis (BR-0, 2026-10-11; plan `docs/plans/2026-10-10-hud-browser-plan.md`
+§1 item 4, decisions B-15).** Three approve paths closed together:
+- **`config.control_ports()`** is the one Python list of Jarvis's own
+  listeners — 8402 (face, v2 HUD), 8404 (desktop bridge), 8405 (daemon; v2's
+  API serves the same HUD page), 8406 (Spotify callback) — at their defaults
+  *and* wherever this process's config moved them. **8403, the workshop, is
+  not in it on purpose** (v1's designer screenshots its own work there; v2's
+  Browser gate admits it only as the daemon's reported workshop). v1's
+  browser (typed, and where a page lands) and `fetch_page` refuse every one
+  through `is_face_origin`, in every loopback spelling (`*.localhost`,
+  `localhost.`, `127.1`, hex/octal/integer IPv4, IPv4-mapped and expanded
+  IPv6, `0.0.0.0`, `::`) with no DNS. It used to refuse only 8402, so v1's
+  browser could open the HUD on 8405. BR-1a's gate reuses the list.
+- **`POST /approvals/{id}` is `projects.owner_only`**: the HUD's listener and
+  the HUD's Origin, or 403. A page served by the API listener sends an Origin
+  equal to its Host, which `check_origin` alone accepted. Discord and the
+  escape hatch resolve in-process; `GET /approvals` stays open (reading is
+  not a lever).
+- **An out-of-band `answer()` can only deny, on both providers.**
+  `POST /threads/{id}/answer` reaches `provider.answer` from any API client,
+  and the provider's request id is in the thread log (`gate_requested`). The
+  Codex provider always refused an ALLOW there; the Claude one accepted it —
+  and coerced `{text: "allow"}` to one — and it beat the broker's card while
+  the owner had not answered. The route tells the two kinds apart by body
+  (`text` for a question, `decision` for an approval) and the provider by the
+  pending slot (Codex marks question slots; Claude raises no questions, so
+  every Claude slot is a tool permission — a source guard in
+  `claude_provider_check` fails if that changes). Provider questions are
+  Codex's, answered from Discord; task questions go through `TaskControl`
+  and never reach `answer()`.
+Free checks: `tests/face/approval_check.py` (`control_port_checks`),
+`tests/browser/policy_check.py` (`control_port_*`, a real headless session
+refused a stand-in API listener), `tests/v2/permissions_check.py`
+(`approve_route_owner_only_checks`) and `tests/v2/claude_provider_check.py`
+(`daemon_answer_route_checks`, end to end on a daemon) — each fails on
+a49423c. **Not a boundary against a program running as the owner** (it can
+send the HUD's Origin to the HUD's port), the footing `/terminals` states;
+it closes the routes a v1 agent's browser and any Origin-less API client
+had.
 
 **A message sent while a turn runs is never a dead end (2026-10-08, design
 §5.1/§11.8/§18; free suite `tests/v2/steer_check.py`).** It used to 409, and
@@ -2089,10 +2131,20 @@ jarvis/
   `workflows.start`'s `max_steps` if that bites.
 - **Jarvis may not touch his own control plane.** `config.is_face_origin()` —
   the browser and `fetch_page` refuse it, ahead of `allowed_hosts='*'`.
-  Otherwise he could drive his own HUD and approve himself. In v2 the HUD
+  Otherwise he could drive his own HUD and approve himself. Since BR-0
+  (2026-10-11) it covers every port in `config.control_ports()` — 8402,
+  8404, 8405 and 8406, configured and default; v2's API listener on 8405
+  serves the same HUD page, and only 8402 used to be refused — in every
+  loopback spelling, and **not 8403**, the workshop, which v1's designer
+  browses on purpose. The v2 approve route is owner-only too (the HUD's
+  listener and Origin), and a provider's out-of-band `answer()` can only
+  deny (see *Only the HUD window says yes* at the top). In v2 the HUD
   and API listeners also refuse to be framed on every response (WP-E,
   `frame-ancestors 'none'`), so no page in a Preview frame can become the
-  HUD by navigating itself there.
+  HUD by navigating itself there. Known limit: `fetch_page` checks a
+  redirect's landing after httpx has followed it, so a hop onto a control
+  port is a GET that happens before the refusal (no control-plane GET
+  approves anything).
 - **External accounts follow use-but-never-see** (Gmail, 2026-07-31, the
   template for every future integration): a *scoped OAuth refresh token* —
   never a password — lives in `~/.config/jarvis/google_token.json` (mode
