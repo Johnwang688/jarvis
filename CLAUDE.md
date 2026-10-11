@@ -931,7 +931,14 @@ above the error boundary, beside the terminals' hold) and unfocused (the
 card's own focus grab, WP-A), and `.editorhost` is `isolation: isolate`, so
 Monaco's thousand-z overlays (its context menu is 2575) stack inside it,
 under `#authveil` — they also close when the card takes focus, so the check
-for the isolation lays a layer at the veil's z-index over an open menu. **Keys: the one interception place is still
+for the isolation lays a layer at the veil's z-index over an open menu.
+**Monaco's context view under the HUD's zoom**: it lays the right-click menu
+(and its buttons' tooltips) out in viewport pixels and writes them as CSS
+lengths, which `#root`'s zoom scales again — at 160% the menu opened off the
+window. `monacoBundle.ts` patches `ContextView.prototype.doLayout` (Monaco
+patches its own find widget the same way) to divide by the zoom it sits
+under, across the shadow root, and keep the box on screen
+(`lib/zoomfix.ts`). **Keys: the one interception place is still
 `useLayout`'s capture handler.** It feeds every keydown to
 `lib/editorkeys.ts`'s `chordStep`, so **the second key of a Ctrl+K chord
 typed in Monaco is Monaco's, whatever HUD key it is** (Ctrl+K Ctrl+B sets the
@@ -957,7 +964,7 @@ not ED-1's (the owner's decision, 2026-10-10). Test hooks (read-only):
 `__hud.monacoModels()`, `monacoEditors()`, `monacoLanguage(path, text)`; the
 editor host carries `data-language` (set once Monaco holds the file — what
 `_edit` waits on now) and `data-readonly`. Free checks: `editorkeys.test.ts`,
-`monaco.test.ts`, `hud_v2_check`'s file and diff sections (tokens, find,
+`monaco.test.ts`, `zoomfix.test.ts`, `hud_v2_check`'s file and diff sections (tokens, find,
 suggest, Ctrl+S in and out of an editor, links, Ctrl+B and the chords, the
 discard ask, the diff leak, no request off loopback by a catch-all route, no
 language worker requested or built) and `hud_v2_layout_check`'s
