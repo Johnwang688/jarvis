@@ -21,6 +21,7 @@ import json
 import socket
 import sys
 import threading
+import time
 import types
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -249,7 +250,7 @@ def control_port_landing_checks() -> None:
             raise AssertionError("a redirect onto the API listener was not caught")
         except BrowserError as exc:
             assert "backed out" in str(exc), exc
-        assert session.eval_js("location.href") == "about:blank"
+        assert _pumped_url(session) == "about:blank"
     finally:
         config.DAEMON_PORT = real_daemon_port
         session.stop(trace_name="policy-check-control")
@@ -257,6 +258,212 @@ def control_port_landing_checks() -> None:
             server.shutdown()
             server.server_close()
     print("ok  browser: the API listener's HUD is refused typed, and backed out of on a redirect")
+
+
+# A stand-in for the HUD's card, served by a real v2 daemon from its HUD
+# listener: one button that approves whatever is pending, through the real
+# owner-only route, with whatever Origin the browser sends.
+STAND_IN_HUD = b"""<!doctype html><html><head><title>J.A.R.V.I.S.</title></head><body>
+<div role="dialog"><p>git push origin main</p>
+<button id="auth" onclick="approve()">AUTHORIZE</button><button>DENY</button></div>
+<script>
+async function approve() {
+  const pending = await (await fetch('/approvals')).json();
+  for (const r of pending)
+    await fetch('/approvals/' + r.req_id, {method: 'POST',
+      headers: {'Content-Type': 'application/json'}, body: JSON.stringify({decision: 'allow'})});
+}
+</script></body></html>"""
+
+
+def _pumped_url(session: Session) -> str:
+    """Where the page is, after letting Playwright process its events — on the
+    browser thread, and without evaluating anything in a page that may be
+    navigating (test-only, like `eval_js`)."""
+    return session._submit(lambda: (session.page.wait_for_timeout(300), session.page.url)[-1])
+
+
+_SAVED_CONFIG: dict = {}
+
+
+def _restore_config() -> None:
+    for name, value in _SAVED_CONFIG.items():
+        setattr(config, name, value)
+    _SAVED_CONFIG.clear()
+
+
+def _daemon_with_a_card(tmp: Path):
+    """A port-0 v2 daemon, its config in `tmp`, with one approval pending."""
+    from jarvis.v2 import daemon as daemon_mod
+    from jarvis.v2.approvals import ApprovalRequest
+    from jarvis.v2.stores import Stores
+
+    home = tmp / "home" / ".config" / "jarvis"
+    home.mkdir(parents=True)
+    for name, path in (("ALLOWLIST_PATH", home / "allowlist.json"),
+                       ("MODELS_PATH", home / "models.json"),
+                       ("PROVIDER_DEFAULTS_PATH", home / "provider_defaults.json"),
+                       ("V2_DATA_DIR", tmp / "v2data"), ("V2_ALWAYS_ASK", home / "always-ask.json"),
+                       ("DISCORD_GUILD_PATH", home / "discord_guild.json"),
+                       ("ROUTING_PATH", home / "routing.json"),
+                       ("CODEX_CATALOG_PATH", tmp / "codex-models.json")):
+        _SAVED_CONFIG.setdefault(name, getattr(config, name))
+        setattr(config, name, path)
+    daemon = daemon_mod.Daemon(Stores(config.V2_DATA_DIR), {}, None, 0)
+    daemon.start()
+    answer: list = []
+    asker = threading.Thread(target=lambda: answer.append(daemon.approvals.ask(ApprovalRequest(
+        tool="Bash", args={"command": "git push origin main"}, command="git push origin main"))),
+        daemon=True)
+    asker.start()
+    deadline = time.monotonic() + 5
+    while not daemon.approvals.pending() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert daemon.approvals.pending(), "the card never queued"
+    return daemon, answer
+
+
+def _attacker(hud: str) -> ThreadingHTTPServer:
+    """Pages that pass goto's check, then move themselves (or only pretend to)."""
+    pages = {
+        "/late": f"<p>hello</p><script>setTimeout(() => location = '{hud}', 300)</script>",
+        "/replace": f"<p>hello</p><script>setTimeout(() => location.replace('{hud}'), 300)</script>",
+        "/refresh": f"<head><meta http-equiv='refresh' content='0.3;url={hud}'></head><p>hello</p>",
+        "/push": "<p>hello</p><button>stay</button>"
+                 "<script>setTimeout(() => history.pushState({}, '', '/pushed'), 300)</script>",
+    }
+
+    class Attacker(SimpleHTTPRequestHandler):
+        def do_GET(self):
+            body = ("<!doctype html><html><body>" + pages.get(self.path, "<p>hello</p>")
+                    + "</body></html>").encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Attacker)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+def late_landing_checks() -> None:
+    """BR-0, the high one: a page that moves itself onto the HUD listener
+    *after* goto's check is never read, never clicked, and backed out of.
+
+    On dfb1d7e (and a49423c) the next snapshot read the HUD and offered the
+    card's AUTHORIZE as a ref, and clicking it approved the card: the POST
+    left the HUD listener with the HUD's own Origin, so `owner_only` passed.
+    Played against a port-0 daemon and a stand-in attacker on ephemeral
+    ports, with `config.FACE_PORT`/`DAEMON_PORT` pointed at the daemon.
+    """
+    import tempfile
+
+    from jarvis.v2 import hud_api
+
+    huds = [("stand-in card", None)]
+    if (hud_api.HUD_DIST / "index.html").is_file():
+        huds.append(("the built HUD", hud_api.HUD_DIST))
+    real_ports = (config.FACE_PORT, config.DAEMON_PORT)
+    real_dist = hud_api.HUD_DIST
+    for label, dist in huds:
+        with tempfile.TemporaryDirectory(prefix="br0-late-") as tmp:
+            tmp = Path(tmp)
+            if dist is None:
+                (tmp / "dist").mkdir()
+                (tmp / "dist" / "index.html").write_bytes(STAND_IN_HUD)
+                hud_api.HUD_DIST = tmp / "dist"
+            try:
+                daemon, answer = _daemon_with_a_card(tmp)
+            except BaseException:
+                _restore_config()
+                hud_api.HUD_DIST = real_dist
+                raise
+            config.FACE_PORT, config.DAEMON_PORT = daemon.face_port, daemon.port
+            hud = f"http://localhost:{daemon.face_port}/"
+            attacker = _attacker(hud)
+            # Same-site with the HUD (localhost, another port): a cross-site
+            # navigation is already refused by the daemon (Sec-Fetch-Site).
+            base = f"http://localhost:{attacker.server_address[1]}"
+            session = Session(BrowserPolicy(headless=True))
+            try:
+                # The approve attempt, made the way an agent would make it.
+                session.goto(f"{base}/late")
+                time.sleep(1.5)            # Python idle; the page moves on its own
+                refused = None
+                try:
+                    snap = session.snapshot()
+                except BrowserError as exc:
+                    refused = exc
+                else:
+                    refs = [line.split("]")[0].strip(" [") for line in snap.splitlines()
+                            if "AUTHORIZE" in line and line.strip().startswith("[")]
+                    for ref in refs:
+                        try:
+                            session.click(ref)
+                        except BrowserError:
+                            pass
+                    time.sleep(0.5)
+                assert refused is not None and "control plane" in str(refused), (
+                    f"{label}: the snapshot read the HUD after a late landing")
+                assert answer == [] and len(daemon.approvals.pending()) == 1, (
+                    f"{label}: the card was approved from v1's browser: {answer}")
+                assert _pumped_url(session) == "about:blank"
+
+                # Each shape of moving later, through each read and act.
+                for path, act in (("/late", "screenshot"), ("/replace", "snapshot"),
+                                  ("/refresh", "click"), ("/replace", "type")):
+                    session.goto(f"{base}{path}")
+                    time.sleep(1.5)
+                    try:
+                        if act == "snapshot":
+                            session.snapshot()
+                        elif act == "screenshot":
+                            session.screenshot_b64(marked=True)
+                        elif act == "click":
+                            session.click("e1")
+                        else:
+                            session.type_text("e1", "hello")
+                        raise AssertionError(f"{label}: {path} then {act} was not refused")
+                    except BrowserError as exc:
+                        assert "control plane" in str(exc), (label, path, act, exc)
+                    assert _pumped_url(session) == "about:blank", (path, act)
+
+                # The event handler backs out on its own, before any check runs:
+                # eval_js (tests only) is no guarded path, yet it lands on blank.
+                session.goto(f"{base}/late")
+                time.sleep(1.5)
+                assert _pumped_url(session) == "about:blank", "no back-out at once"
+                try:
+                    session.snapshot()
+                    raise AssertionError("the back-out was not reported")
+                except BrowserError as exc:
+                    assert "control plane" in str(exc), exc
+
+                # A same-origin pushState is not a landing anywhere new.
+                session.goto(f"{base}/push")
+                time.sleep(1.0)
+                snap = session.snapshot()
+                assert "/pushed" in snap and "stay" in snap, snap[:300]
+                stay = [line.split("]")[0].strip(" [") for line in snap.splitlines()
+                        if "stay" in line and line.strip().startswith("[")]
+                assert stay, snap[:300]
+                session.click(stay[0])
+                assert answer == [] and len(daemon.approvals.pending()) == 1, answer
+            finally:
+                config.FACE_PORT, config.DAEMON_PORT = real_ports
+                hud_api.HUD_DIST = real_dist
+                session.stop(trace_name="policy-check-late")
+                attacker.shutdown()
+                attacker.server_close()
+                daemon.stop()
+                _restore_config()
+        print(f"ok  browser ({label}): a late landing on the HUD listener is never read or "
+              "clicked, in four shapes; a same-origin pushState is fine")
 
 
 def landing_guard_checks() -> None:
@@ -293,7 +500,7 @@ def landing_guard_checks() -> None:
             raise AssertionError("redirect off the allowlist was not caught")
         except BrowserError as exc:
             assert "backed out" in str(exc), exc
-        assert session.eval_js("location.href") == "about:blank"
+        assert _pumped_url(session) == "about:blank"
     finally:
         session.stop(trace_name="policy-check")
         server.shutdown()
@@ -308,6 +515,7 @@ def main() -> int:
     control_port_policy_checks()
     landing_guard_checks()
     control_port_landing_checks()
+    late_landing_checks()
     print("\nall policy checks passed")
     return 0
 

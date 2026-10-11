@@ -258,7 +258,15 @@ _JUDGE_JS = r"""
     };
 """
 
-_SNAPSHOT_JS = "(args) => {" + _JUDGE_JS + r"""
+# The scan reads and stamps only the document whose origin Python has just
+# judged (BR-0): a page that moved itself in between — onto Jarvis's own HUD,
+# say — is reported as moved, never scanned, and never gets a ref.
+_ORIGIN_GATE_JS = r"""
+    if (args.origin != null && location.origin !== args.origin)
+        return {moved: location.href, elements: [], text: '', withheld: ''};
+"""
+
+_SNAPSHOT_JS = "(args) => {" + _ORIGIN_GATE_JS + _JUDGE_JS + r"""
     const {limit, max, cap, nodeCap, text: wantText} = args;
     // Reads only: no attribute is written here (see stamp()).
     const scan = (labels) => {
@@ -442,6 +450,9 @@ class Session:
         self.actions = 0
         self._work: queue.Queue = queue.Queue()
         self._thread: threading.Thread | None = None
+        # Where `_on_navigated` last backed out of Jarvis's control plane, until
+        # the next read or act reports it (BR-0).
+        self._control_landing: str | None = None
 
     # -- the browser thread ------------------------------------------------
     # Playwright's sync API is thread-affine, and starting it parks a
@@ -513,6 +524,7 @@ class Session:
         self.policy.trace_dir.mkdir(parents=True, exist_ok=True)
         self._context.tracing.start(screenshots=True, snapshots=True)
         self._page = self._context.new_page()
+        self._page.on("framenavigated", self._on_navigated)
 
     def stop(self, trace_name: str = "session") -> Path | None:
         """Close everything and write the trace. Returns the trace path.
@@ -541,6 +553,7 @@ class Session:
                 self._pw.stop()
             self._pw = self._browser = self._context = self._page = None
             self.actions = 0
+            self._control_landing = None
         return trace_path
 
     # -- guards ------------------------------------------------------------
@@ -610,35 +623,136 @@ class Session:
                 f"Allowed hosts: {', '.join(self.policy.allowed_hosts)}"
             )
         self._spend()
-        self.page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+        self._control_landing = None
+        try:
+            self.page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+        except Exception:
+            self._settle()  # a redirect onto the control plane, backed out mid-goto
+            raise
         self._guard_landing()
         # The title is the page's own words, so it is fenced like the snapshot.
         title = untrusted.fence(f"Title: {untrusted.one_line(self.page.title())}", self.page.url)
         return f"Loaded {self.page.url}\n{title}"
 
-    def _guard_landing(self) -> None:
-        """Re-check policy on wherever the page actually ended up.
+    # -- where the page really is (BR-0) -------------------------------------
+    # goto() vets the URL the agent asked for, but a page decides where it
+    # lands: a redirect, a clicked link, or its own script at any later moment
+    # (a timer, `location.replace`, a meta refresh). A page that moved itself
+    # onto the HUD's listener after goto's check used to be snapshotted — the
+    # card's AUTHORIZE offered as a ref — and clicked, and the click's POST
+    # carried the HUD's own Origin. So the page is judged where it is: when it
+    # navigates (`_on_navigated`, the control plane at once), before every act
+    # and read (`_check_here`), and inside the scan itself (`_ORIGIN_GATE_JS`).
 
-        goto() vets the URL the agent asked for, but redirects and clicked
-        links decide where the browser lands — without this, a public page
-        could bounce the session onto the LAN or the face.
+    def _on_navigated(self, frame) -> None:
+        """Back out the moment the main frame lands on Jarvis's control plane.
+
+        Playwright runs this on the browser thread, from inside whichever call
+        is pumping its events — so it is never later than the next read or act,
+        and during a long one (a click's wait, a goto) it is at once. Only
+        `is_face_origin` here (no DNS in an event handler); `_check_here`
+        applies the whole policy.
         """
-        url = self.page.url
-        if not url.startswith(("http://", "https://")):
-            return  # about:blank, chrome-error://, etc.
-        if not self.policy.allows(url):
-            host = urlparse(url).hostname
-            self.page.goto("about:blank")
+        try:
+            if frame.parent_frame is not None or not config.is_face_origin(frame.url):
+                return
+        except Exception:
+            return
+        self._control_landing = frame.url
+        try:
+            frame.page.goto("about:blank", wait_until="commit")
+        except Exception:
+            pass  # `_settle` still refuses, and backs out again
+
+    def _where(self) -> tuple[str, str | None]:
+        """(href, origin) of the main frame's document, asked of the page.
+
+        `page.url` is only as fresh as the last event Python processed, and a
+        page moves on its own while Python is idle; `location` is the
+        document's own, and page script cannot redefine it. Asking also pumps
+        Playwright's events, so `_on_navigated` has run by the time this
+        returns. A page mid-navigation has no document to ask: then the
+        freshly pumped `page.url`, and no origin.
+        """
+        try:
+            href, origin = self.page.evaluate("() => [location.href, location.origin]")
+            return str(href), str(origin)
+        except Exception:
+            return self.page.url, None
+
+    def _settle(self) -> None:
+        """Report a back-out `_on_navigated` made since the last check."""
+        landed, self._control_landing = self._control_landing, None
+        if landed is not None:
+            self._back_out(landed)
+
+    def _back_out(self, url: str) -> None:
+        try:
+            self.page.goto("about:blank", wait_until="commit")
+        except Exception:
+            pass
+        if config.is_face_origin(url):
             raise BrowserError(
-                f"the page navigated to blocked host {host!r}; "
-                "backed out to about:blank."
+                "the page moved itself onto Jarvis's own control plane; backed out "
+                "to about:blank. Nothing there was read or clicked."
             )
+        raise BrowserError(
+            f"the page navigated to blocked host {urlparse(url).hostname!r}; "
+            "backed out to about:blank."
+        )
+
+    def _refuse_unless_allowed(self, url: str) -> None:
+        if url.startswith(("http://", "https://")) and not self.policy.allows(url):
+            self._back_out(url)
+
+    def _check_here(self, *, reading: bool = False) -> str | None:
+        """Judge where the page is now, before acting on it or reading it.
+
+        Returns the document's origin, which a read hands to the scan
+        (`_ORIGIN_GATE_JS`) so it reads only the document judged here. A read
+        will not go ahead without one: a page still navigating gets one more
+        moment, then a refusal.
+        """
+        href, origin = self._where()
+        if reading and origin is None:
+            self.page.wait_for_timeout(250)
+            href, origin = self._where()
+        self._settle()
+        self._refuse_unless_allowed(href)
+        if reading and origin is None:
+            raise BrowserError("the page is still loading; take the snapshot again in a moment.")
+        return origin
+
+    def _guard_landing(self) -> None:
+        """Re-check policy on wherever the page actually ended up."""
+        self._check_here()
 
     @staticmethod
     def _scan_args(max_elements: int, text: bool) -> dict:
         """The one set of scan arguments both channels use (see _SNAPSHOT_JS)."""
         return {"limit": 4000, "max": max_elements, "cap": WRAP_CAP,
                 "nodeCap": WRAP_NODE_CAP, "text": text}
+
+    def _scan(self, max_elements: int, *, text: bool, origin: str | None) -> dict:
+        """Run the scan on the document `_check_here` judged, and only that one.
+
+        A page that moved in between is judged where it went (backed out if it
+        is refused) and the read is refused either way: nothing it scanned is
+        returned, and it stamped no ref. A back-out `_on_navigated` made while
+        the scan ran is reported too.
+        """
+        try:
+            result = self.page.evaluate(
+                _SNAPSHOT_JS, {**self._scan_args(max_elements, text), "origin": origin})
+        except Exception:
+            self._settle()
+            raise
+        self._settle()
+        moved = result.get("moved")
+        if moved is not None:
+            self._refuse_unless_allowed(str(moved))
+            raise BrowserError("the page moved while it was being read; take the snapshot again.")
+        return result
 
     def _snapshot(self, max_elements: int = 120) -> str:
         """Text view of the page: interactive elements with stable refs.
@@ -652,7 +766,8 @@ class Session:
         (`_SNAPSHOT_JS`). The format inside the fence is unchanged.
         """
         self.page.wait_for_timeout(150)
-        result = self.page.evaluate(_SNAPSHOT_JS, self._scan_args(max_elements, text=True))
+        origin = self._check_here(reading=True)
+        result = self._scan(max_elements, text=True, origin=origin)
         elements = result.get("elements") or []
         notes = []
         withheld = result.get("withheld")
@@ -704,6 +819,7 @@ class Session:
 
     def _click(self, ref: str) -> str:
         self._spend()
+        self._check_here()  # before the press, never only after it (BR-0)
         self._locator(ref).click(timeout=10_000)
         self.page.wait_for_timeout(300)
         self._guard_landing()
@@ -711,6 +827,7 @@ class Session:
 
     def _type_text(self, ref: str, text: str, submit: bool = False) -> str:
         self._spend()
+        self._check_here()  # before typing, never only after it (BR-0)
         locator = self._locator(ref)
         locator.fill(text, timeout=10_000)
         if submit:
@@ -731,11 +848,12 @@ class Session:
         """
         self._spend()
         marks = 0
+        self.page.wait_for_timeout(150 if marked else 0)
+        origin = self._check_here(reading=marked)
         if marked:
-            self.page.wait_for_timeout(150)
             # The snapshot's own scan (text not read), so the badges name
             # exactly the refs a snapshot of this page would offer.
-            elements = self.page.evaluate(_SNAPSHOT_JS, self._scan_args(120, text=False))
+            elements = self._scan(120, text=False, origin=origin)
             elements = elements.get("elements") or []
             marks = len(elements)
             self.page.evaluate(_MARK_JS, elements)
@@ -743,9 +861,15 @@ class Session:
             raw = self.page.screenshot(full_page=full_page, type="png")
         finally:
             if marked:
-                self.page.evaluate(
-                    "() => document.getElementById('__jarvis-marks')?.remove()"
-                )
+                try:
+                    self.page.evaluate(
+                        "() => document.getElementById('__jarvis-marks')?.remove()"
+                    )
+                except Exception:
+                    pass  # the page moved on; the check below says where
+        # Judged again after the capture: a picture of a page the policy
+        # refuses (the HUD's card, say) is never handed to the model.
+        self._check_here()
         return base64.b64encode(raw).decode(), len(raw), marks
 
 
