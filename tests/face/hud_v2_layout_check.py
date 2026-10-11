@@ -53,7 +53,13 @@ The workspace (2026-10-09, WP-A of docs/plans/2026-10-09-hud-workspace-plan.md):
   - (ED-1) with Monaco's context menu or suggest list open, at 100% and 160%,
     a card that arrives is topmost at every button, the editor behind it is
     unfocused and read-only, a typed `y` and Ctrl+S do nothing, and Escape
-    denies.
+    denies;
+  - (ED-1, review of PR #43) Ctrl+S saves the editor it is pressed in and
+    nothing else — not after that editor went away, not another pane's — an
+    editor created under a card is read-only, a save answered after another
+    file opened leaves that file alone, a key outside the editor does not end
+    Monaco's Ctrl+K chord, and the context menu opens at the pointer flipped
+    up or left at 70% and 160% and stays on screen in a short window.
 
 A render error (review of PR #29):
   - three clicks in one task on ⊞, and on ⋯ when the title bar is folded,
