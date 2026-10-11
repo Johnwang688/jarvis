@@ -12,6 +12,9 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { Attachment, Project } from "../types";
 import { folderName } from "../lib/compose";
 import { joined, pendingAfter, type GiveBack } from "../lib/giveback";
+import { MAX_FILES } from "../lib/chats";
+
+export { MAX_FILES };
 
 /**
  * `in: <project>`, where this conversation lives. Editable only while a new
@@ -30,12 +33,16 @@ export interface ProjectChip {
 }
 
 /** The box grows with what is typed, up to this many lines, then scrolls. */
-const MAX_LINES = 15;
+export const MAX_LINES = 15;
+/** …and never past this share of its pane's height: in a short pane (a split
+ * of rows, a small window at a high zoom) fifteen lines pushed Send and the
+ * chips out of the pane and squeezed the conversation to nothing (review of
+ * PR #29). */
+export const MAX_PANE_SHARE = 0.4;
 
-const MAX_FILES = 8;
 const MAX_BYTES = 4 * 1024 * 1024;
 
-async function toAttachment(file: File): Promise<Attachment | string> {
+export async function toAttachment(file: File): Promise<Attachment | string> {
   if (file.size > MAX_BYTES) return `[${file.name} skipped: over 4MB]`;
   const buf = await file.arrayBuffer();
   let bin = "";
@@ -50,6 +57,18 @@ function SendIcon() {
          strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
       <path d="M12 19V5" />
       <path d="M5.5 11.5 12 5l6.5 6.5" />
+    </svg>
+  );
+}
+
+/** Steer: the arrow bends into the turn already running (Send's look is "start
+ * one"; a steer must not look like it). */
+function SteerIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor"
+         strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M5 19v-5a6 6 0 0 1 6-6h8" />
+      <path d="m15 4 4 4-4 4" />
     </svg>
   );
 }
@@ -91,40 +110,96 @@ export function InputBar(props: {
   restore?: GiveBack[];
   /** Every hand-back up to this nonce is in the box. */
   onRestoreTaken?: (nonce: number) => void;
+  /** A status line under the box (`pane-status`), or null for none. The mic
+   * and its words live on the orb (PR #29): the selected chat's status rides
+   * the orb's line, so its bar draws none — unless the sidebar is folded and
+   * the orb with it, when this is the only place left to say it. Every other
+   * chat pane says here what its own turn is doing (WP-B). */
+  status?: string | null;
+  /** The unsent words and staged files, when the caller keeps them (WP-B):
+   * they belong to the conversation, so a pane that trades conversations, or
+   * opens another thread, shows that conversation's draft (review of PR #27).
+   * Absent, the box keeps its own. */
+  text?: string;
+  files?: Attachment[];
+  onText?: (text: string) => void;
+  onFiles?: (files: Attachment[]) => void;
+  /** The conversation this box shows (lib/chats `draftKey`), and where files
+   * read in for it go once they are ready (the store's `stage`): to that
+   * conversation wherever it is by then, not to this box's next one. */
+  stageKey?: string | null;
+  onStage?: (key: string, files: Attachment[]) => void;
 }) {
-  const [text, setText] = useState("");
-  const [files, setFiles] = useState<Attachment[]>([]);
+  const [ownText, setOwnText] = useState("");
+  const [ownFiles, setOwnFiles] = useState<Attachment[]>([]);
+  const textControlled = props.text !== undefined;
+  const filesControlled = props.files !== undefined;
+  const text = textControlled ? props.text! : ownText;
+  const files = filesControlled ? props.files! : ownFiles;
+  // Several changes can land before a render (a hand-back and a transcript at
+  // once): each reads what the one before it wrote, not the last render's.
+  const textNow = useRef(text);
+  textNow.current = text;
+  const filesNow = useRef(files);
+  filesNow.current = files;
+  const setText = (next: string | ((t: string) => string)) => {
+    const value = typeof next === "function" ? next(textNow.current) : next;
+    textNow.current = value;
+    if (textControlled) props.onText?.(value);
+    else setOwnText(value);
+  };
+  const setFiles = (next: Attachment[] | ((f: Attachment[]) => Attachment[])) => {
+    const value = typeof next === "function" ? next(filesNow.current) : next;
+    filesNow.current = value;
+    if (filesControlled) props.onFiles?.(value);
+    else setOwnFiles(value);
+  };
   const [notes, setNotes] = useState<string[]>([]);
   const box = useRef<HTMLTextAreaElement>(null);
 
-  // The box flexes up with what is typed, to MAX_LINES lines, and scrolls past
-  // that. Re-measured when the text changes and when the box's width does (a
-  // pane resize rewraps the same text), never on its own height change.
+  // The box flexes up with what is typed, to MAX_LINES lines or MAX_PANE_SHARE
+  // of its pane's height, whichever is less, and scrolls past that.
+  // Re-measured when the text changes, when the box's width does (a pane
+  // resize rewraps the same text) and when its pane's height does (a split,
+  // a fold, the zoom) — never on the box's own height change, which it set.
+  const fit = useRef<() => void>(() => {});
   useLayoutEffect(() => {
     const el = box.current;
     if (!el) return;
-    const fit = () => {
+    const pane = el.closest<HTMLElement>(".wpane");
+    fit.current = () => {
       el.style.height = "auto";
       const cs = getComputedStyle(el);
-      const line = parseFloat(cs.lineHeight) || parseFloat(cs.fontSize) * 1.4;
+      const line = parseFloat(cs.lineHeight) || parseFloat(cs.fontSize) * 1.45;
       const edge = parseFloat(cs.borderTopWidth) + parseFloat(cs.borderBottomWidth);
       const pad = parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom);
-      const cap = line * MAX_LINES + pad + edge;
+      const one = line + pad + edge;
+      const lines = line * MAX_LINES + pad + edge;
+      // A hidden pane measures 0: its box is refitted when the pane is drawn.
+      const room = pane && pane.clientHeight > 0 ? pane.clientHeight * MAX_PANE_SHARE : Infinity;
+      const cap = Math.max(one, Math.min(lines, room));
       const want = el.scrollHeight + edge;
       el.style.height = `${Math.min(want, cap)}px`;
       el.style.overflowY = want > cap ? "auto" : "hidden";
+      el.dataset.cap = String(Math.round(cap));
     };
-    fit();
+    fit.current();
     if (typeof ResizeObserver === "undefined") return;
     let width = el.clientWidth;
+    let height = pane?.clientHeight ?? 0;
     const ro = new ResizeObserver(() => {
-      if (el.clientWidth === width) return;
-      width = el.clientWidth;
-      fit();
+      const w = el.clientWidth;
+      const h = pane?.clientHeight ?? 0;
+      if (w === width && h === height) return;
+      width = w;
+      height = h;
+      fit.current();
     });
     ro.observe(el);
+    if (pane) ro.observe(pane);
     return () => ro.disconnect();
-  }, [text]);
+  }, []);
+  useLayoutEffect(() => fit.current(), [text]);
 
   // REVIEW dictation puts the transcript in the box and focuses it. Nothing is
   // ever sent on its own in this mode — that is the whole point of the mode.
@@ -161,18 +236,24 @@ export function InputBar(props: {
     if (!list) return;
     const incoming = Array.from(list);
     const msgs: string[] = [];
-    const next = [...files];
+    // The conversation they are for, as it is now: reading them in takes a
+    // while, and the box may show another conversation by then (re-review of
+    // PR #27). They are added to what is staged then, never over it.
+    const key = props.stageKey ?? null;
+    const read: Attachment[] = [];
+    const room = MAX_FILES - filesNow.current.length;
     for (const f of incoming) {
-      if (next.length >= MAX_FILES) {
+      if (read.length >= room) {
         msgs.push(`[${f.name} skipped: 8 files per turn]`);
         continue;
       }
       const a = await toAttachment(f);
       // Every refusal becomes a visible note, never a silent drop.
       if (typeof a === "string") msgs.push(a);
-      else next.push(a);
+      else read.push(a);
     }
-    setFiles(next);
+    if (key !== null && props.onStage) props.onStage(key, read);
+    else setFiles((cur) => [...cur, ...read].slice(0, MAX_FILES));
     setNotes(msgs);
   };
 
@@ -190,7 +271,7 @@ export function InputBar(props: {
 
   return (
     <div
-      id="inputbar"
+      className="inputbar"
       onDragOver={(e) => e.preventDefault()}
       onDrop={(e) => {
         e.preventDefault();
@@ -198,7 +279,7 @@ export function InputBar(props: {
       }}
     >
       {files.length || notes.length ? (
-        <div id="chips" data-testid="chips">
+        <div className="chips" data-testid="chips">
           {files.map((f, i) => (
             <span className="chip" key={f.name + i}>
               {f.name}
@@ -213,7 +294,7 @@ export function InputBar(props: {
           ) : null}
         </div>
       ) : null}
-      <div id="inputrow">
+      <div className="inputrow">
         <label className="iconbtn attach" title="Attach files" aria-label="Attach files">
           <ClipIcon />
           <input
@@ -226,7 +307,7 @@ export function InputBar(props: {
         </label>
         <textarea
           ref={box}
-          id="input"
+          className="input"
           data-testid="input"
           rows={1}
           value={text}
@@ -267,19 +348,29 @@ export function InputBar(props: {
         ) : null}
         <button
           type="button"
-          className="iconbtn send"
+          // Steering looks like steering (main's button said "Steer"): an
+          // outlined, bent arrow, not the filled "start a turn" one.
+          className={"iconbtn send" + (props.running ? " steer" : "")}
           data-testid="send"
+          data-steer={props.running ? "true" : undefined}
           aria-label={props.running ? "Steer" : "Send"}
           title={props.running ? "Steer the running turn (Enter)" : "Send (Enter)"}
           onClick={send}
           disabled={props.disabled}
         >
-          <SendIcon />
+          {props.running ? <SteerIcon /> : <SendIcon />}
         </button>
       </div>
       <div className="row">
         {props.projectChip ? <Chip chip={props.projectChip} /> : null}
         {props.modelChip ?? null}
+        {props.status != null ? (
+          // This pane's own turn says what it is doing (WP-B); the selected
+          // chat's says it on the orb, and here only while the orb is folded.
+          <span className="hint" data-testid="pane-status" title={props.status || undefined}>
+            {props.status}
+          </span>
+        ) : null}
       </div>
     </div>
   );

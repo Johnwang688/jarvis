@@ -649,12 +649,21 @@ def approval_checks(page, mock):
           len(mock.sent("POST", "/approvals/r1")) == resolved_before
           and page.locator('[data-testid="approval-card"]').count() == 1)
 
-    # Push-to-talk and typing are inert while a card is up.
-    check("the input is disabled while a card is up",
-          page.locator('[data-testid="input"]').is_disabled())
+    # Push-to-talk and typing are inert while a card is up. The box is inert,
+    # not disabled (PR #27 re-review: a disabled box dropped focus to the page
+    # before the card recorded it, so focus never came back to it).
+    box_before = page.locator('[data-testid="input"]').input_value()
+    check("the input cannot be reached while a card is up (inert)",
+          page.evaluate("!!document.querySelector('[data-testid=\"input\"]').closest('[inert]')"))
+    page.evaluate("document.querySelector('[data-testid=\"input\"]').focus()")
     page.keyboard.press("Space")
     check("space does not start recording while a card is up",
           page.evaluate("window.__hud.capture.ptt") is None)
+    page.keyboard.type("x")
+    check("and neither Space nor typing reaches the box",
+          page.locator('[data-testid="input"]').input_value() == box_before
+          and page.evaluate("document.activeElement?.getAttribute('data-testid')") != "input",
+          repr(page.locator('[data-testid="input"]').input_value()))
 
     # Escape denies — the cheap action.
     page.keyboard.press("Escape")
@@ -1842,74 +1851,91 @@ PNG_1PX = bytes.fromhex(
 # provider select · [model · effort ▾] -> a popover with a Model and an Effort
 # section. These drive it like the owner does; each leaves the popover as it
 # found it, except pick_model, which (like the real thing) keeps it open so the
-# effort can follow.
-
-CHIP_BTN = '[data-testid="model-chip-btn"]'
-POP = '[data-testid="model-pop"]'
-
-
-def chip_model(page):
-    return page.locator(CHIP_BTN).get_attribute("data-model")
+# effort can follow. Every chat pane has a chip of its own (WP-B), so each
+# helper takes the pane (`pane=1`, the single layout's chat): the button is
+# found inside that pane, and the popover — drawn in #root — by its
+# `data-pane`. Unscoped, Playwright's strict mode fails on the duplicates.
 
 
-def chip_effort(page):
-    return page.locator(CHIP_BTN).get_attribute("data-effort")
+def chip_btn(pane=1):
+    return f'[data-testid="pane-{pane}"] [data-testid="model-chip-btn"]'
 
 
-def open_pop(page):
-    if page.locator(POP).count() == 0:
-        page.locator(CHIP_BTN).click()
-        page.wait_for_selector(POP)
+def pop_of(pane=1):
+    return f'[data-testid="model-pop"][data-pane="{pane}"]'
 
 
-def close_pop(page):
-    if page.locator(POP).count():
-        page.locator(CHIP_BTN).click()
-        until(lambda: page.locator(POP).count() == 0)
+CHIP_BTN = chip_btn(1)
+POP = pop_of(1)
 
 
-def _peek(page, fn):
+def chip_model(page, pane=1):
+    return page.locator(chip_btn(pane)).get_attribute("data-model")
+
+
+def chip_effort(page, pane=1):
+    return page.locator(chip_btn(pane)).get_attribute("data-effort")
+
+
+def open_pop(page, pane=1):
+    if page.locator(pop_of(pane)).count() == 0:
+        page.locator(chip_btn(pane)).click()
+        page.wait_for_selector(pop_of(pane))
+
+
+def close_pop(page, pane=1):
+    if page.locator(pop_of(pane)).count():
+        page.locator(chip_btn(pane)).click()
+        until(lambda: page.locator(pop_of(pane)).count() == 0)
+
+
+def _peek(page, fn, pane=1):
     """Run `fn` with the popover open, then leave it as it was."""
-    was = page.locator(POP).count() > 0
-    open_pop(page)
+    was = page.locator(pop_of(pane)).count() > 0
+    open_pop(page, pane)
     try:
         return fn()
     finally:
         if not was:
-            close_pop(page)
+            close_pop(page, pane)
 
 
-def model_labels(page):
-    return _peek(page, lambda: page.locator('[data-testid="model-opt"]').all_inner_texts())
+def model_labels(page, pane=1):
+    return _peek(page, lambda: page.locator(pop_of(pane) + ' [data-testid="model-opt"]').all_inner_texts(), pane)
 
 
-def effort_labels(page):
-    return _peek(page, lambda: page.locator('[data-testid="effort-opt"]').all_inner_texts())
+def effort_labels(page, pane=1):
+    return _peek(page, lambda: page.locator(pop_of(pane) + ' [data-testid="effort-opt"]').all_inner_texts(), pane)
 
 
-def has_effort(page):
-    return _peek(page, lambda: page.locator('[data-testid="effort-list"]').count() > 0)
+def effort_values(page, pane=1):
+    return _peek(page, lambda: page.locator(pop_of(pane) + ' [data-testid="effort-opt"]').evaluate_all(
+        "els => els.map(e => e.getAttribute('data-value'))"), pane)
 
 
-def has_defaults_button(page):
-    return _peek(page, lambda: page.locator('[data-testid="provider-defaults-open"]').count() > 0)
+def has_effort(page, pane=1):
+    return _peek(page, lambda: page.locator(pop_of(pane) + ' [data-testid="effort-list"]').count() > 0, pane)
 
 
-def pick_model(page, value):
-    open_pop(page)
-    page.locator(f'[data-testid="model-opt"][data-value="{value}"]').click()
+def has_defaults_button(page, pane=1):
+    return _peek(page, lambda: page.locator(pop_of(pane) + ' [data-testid="provider-defaults-open"]').count() > 0,
+                 pane)
 
 
-def pick_effort(page, value):
-    open_pop(page)
-    page.locator(f'[data-testid="effort-opt"][data-value="{value}"]').click()
-    until(lambda: page.locator(POP).count() == 0)
+def pick_model(page, value, pane=1):
+    open_pop(page, pane)
+    page.locator(pop_of(pane) + f' [data-testid="model-opt"][data-value="{value}"]').click()
 
 
-def open_defaults(page):
-    open_pop(page)
-    page.locator('[data-testid="provider-defaults-open"]').click()
+def pick_effort(page, value, pane=1):
+    open_pop(page, pane)
+    page.locator(pop_of(pane) + f' [data-testid="effort-opt"][data-value="{value}"]').click()
+    until(lambda: page.locator(pop_of(pane)).count() == 0)
 
+
+def open_defaults(page, pane=1):
+    open_pop(page, pane)
+    page.locator(pop_of(pane) + ' [data-testid="provider-defaults-open"]').click()
 
 
 def writes(mock, since):
@@ -2024,6 +2050,11 @@ def thread_model_checks(page, mock):
     box.press("Enter")
     tid = until(lambda: page.evaluate("window.__hud.state().threadId"))
     mock.emit("turn_finished", {"stop": "end"}, thread_id=tid)
+    # PR #27: the retry's turn was tracked under the send's own placeholder
+    # id, so this finish never freed the pane and the mic stayed suppressed.
+    check("the retried first send's turn ends with its thread's turn_finished",
+          until(lambda: page.evaluate("!window.__hud.state().busy")) is True,
+          str(page.evaluate("[window.__hud.state().busy, window.__hud.state().chats[1].turnThreadId]")))
     until(lambda: page.locator('[data-testid="provider-chip"]').count() > 0)
     check("after it the provider is fixed",
           page.locator('[data-testid="provider-chip-select"]').count() == 0
@@ -2361,6 +2392,17 @@ def main():
                               (live, refuse_live), FAKE_RECOGNIZER)
             finally:
                 layout_mock.stop()
+
+            # Several chat panes at once (WP-B, 2026-10-09): the same reasons
+            # for a context and a mock of its own — its sends, interrupts and
+            # `/seen` posts stay out of the main world.
+            from tests.face.hud_v2_multichat_check import multichat_checks
+            multichat_mock = MockDaemon(0).start()
+            try:
+                multichat_checks(browser, multichat_mock, f"http://127.0.0.1:{multichat_mock.port}", check, until,
+                                 (live, refuse_live), FAKE_RECOGNIZER)
+            finally:
+                multichat_mock.stop()
 
             ctx = browser.new_context(permissions=["microphone"])
             ctx.route(live, refuse_live)

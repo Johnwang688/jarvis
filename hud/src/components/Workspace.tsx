@@ -13,6 +13,12 @@
 // right, the profile select. The split-only chrome (the focus line, the
 // context, the compact view menu) is drawn only when there is more than one
 // pane, so the default window renders as it did.
+//
+// Several chats (WP-B): any pane may show chat, each its own conversation.
+// The selected chat's pane (decisions W-6: the chat pane most recently
+// clicked, where ambiguous input goes) carries `data-selected` and, in a
+// split, an accent down its header's edge and a mic mark. A view switch goes through the caller (`onView`), which refuses
+// to switch a File pane holding an unsaved edit away.
 
 import { useRef, type ReactNode } from "react";
 import { keyStep } from "../lib/layout";
@@ -61,6 +67,10 @@ export function Workspace(props: {
   extras: (spec: PaneSpec, info: PaneInfo) => ReactNode;
   /** The pane's context in a split: the thread title, the file path, the URL. */
   context: (spec: PaneSpec, info: PaneInfo) => string;
+  /** The selected chat (lib/chats `selectedChatOf`); null with no chat drawn. */
+  selectedPane: PaneNo | null;
+  /** Show `view` in `pane` — the strip's buttons and its menu. */
+  onView: (pane: PaneNo, view: View) => void;
 }) {
   const v = props.view;
   const { fit, ws } = v;
@@ -117,11 +127,14 @@ export function Workspace(props: {
           return (
             <section
               key={n}
-              className={"wpane" + (at.split && at.focused ? " focused" : "")}
+              className={
+                "wpane" + (at.split && at.focused ? " focused" : "")
+                + (at.split && spec.view === "chat" && n === props.selectedPane ? " selected" : "")
+              }
               data-testid={`pane-${n}`}
               data-view={spec.view}
               data-focused={at.focused ? "true" : "false"}
-              data-voice={spec.view === "chat" ? "true" : undefined}
+              data-selected={spec.view === "chat" && n === props.selectedPane ? "true" : undefined}
               aria-label={`Pane ${n}: ${spec.view}`}
               tabIndex={-1}
               style={at.drawn ? { gridArea: `p${n}` } : { display: "none" }}
@@ -135,7 +148,7 @@ export function Workspace(props: {
                       data-testid={`pane-${n}-view-select`}
                       aria-label={`What pane ${n} shows`}
                       value={spec.view}
-                      onChange={(e) => v.setView(n, e.target.value as View)}
+                      onChange={(e) => props.onView(n, e.target.value as View)}
                       onKeyDown={(e) => e.stopPropagation()}
                       onKeyUp={(e) => e.stopPropagation()}
                     >
@@ -150,13 +163,23 @@ export function Workspace(props: {
                         key={view}
                         data-testid={`tab-${view}`}
                         className={spec.view === view ? "on" : ""}
-                        onClick={() => v.setView(n, view)}
+                        onClick={() => props.onView(n, view)}
                       >
                         {view}
                       </button>
                     ))
                   )}
                 </div>
+                {at.split && spec.view === "chat" && n === props.selectedPane ? (
+                  <span className="micmark" data-testid={`pane-${n}-mic`} role="img" aria-label="Selected chat"
+                        title="The selected chat: what you say, the orb, and files dropped outside a chat go here">
+                    <svg width="10" height="13" viewBox="0 0 10 13" aria-hidden="true" focusable="false">
+                      <rect x="3" y="0.75" width="4" height="7" rx="2" fill="currentColor" />
+                      <path d="M1 6.25a4 4 0 0 0 8 0M5 10.25v2" fill="none" stroke="currentColor" strokeWidth="1.2"
+                            strokeLinecap="round" />
+                    </svg>
+                  </span>
+                ) : null}
                 {ctx ? <span className="panectx" title={ctx}>{ctx}</span> : null}
                 <div className="paneextras">{props.extras(spec, at)}</div>
               </div>

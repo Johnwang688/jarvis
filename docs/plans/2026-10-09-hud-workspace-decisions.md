@@ -12,6 +12,7 @@ this file wins.**
 | W-3 | Terminals survive a daemon restart (tmux) | **No.** Terminals and their dev servers end with the daemon. |
 | W-4 | Dev apps in Preview keep their own origin | **Yes, opt-in per pane**, and only once `frame-ancestors` / `X-Frame-Options` have landed (WP-E orders it). |
 | W-5 | `sudo` never caches in HUD terminals | **Yes** (the recommendation; the owner did not object). |
+| W-6 | Where ambiguous input goes | **The currently selected chat** (the chat pane most recently clicked); input that belongs to a thread stays with it. |
 
 Plan items 6–14 ("defaulted; say if you want otherwise") stand as written. The owner raised no objection to any of them.
 
