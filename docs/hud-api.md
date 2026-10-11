@@ -1292,21 +1292,45 @@ and copies `hud/dist` into `config.HUD_DIR/<build-id>/` (default
 `~/.local/share/jarvis/hud/`, `JARVIS_HUD_DIR` overrides; ids are
 `YYYYMMDDTHHMMSSffffffZ-<12 hex>`, so they sort by time), files 0444 and
 folders 0555, with `manifest.json` (`format`, `build`, `installed_at`,
-`source`, `git_head`, `files: {path: {sha256, size}}`), through a temp folder
-renamed into place; the newest three builds are kept. It refuses an install
-root that is, or sits under, a symbolic link, one inside the repository, not
-a folder or writable by others, and a build output holding a link, a special
-file, an odd name or no `index.html`. The daemon serves the **newest** build
-whose manifest reads, and only a file that manifest lists, read without
-following a link, whose size and SHA-256 still match (else 404, logged); an
-asset the newest build lacks is served from an older kept build that has it
-(Vite names are content hashes), so a window loaded before an install keeps
-its lazy chunks — **an install needs a reload, not a daemon restart**.
-`config.HUD_DIST` is the install root (or `hud/dist` under
-`JARVIS_HUD_DEV=1`), so BR-0's one write check refuses every agent write tool
-and v2 grant there. A shell command can still write it — the accepted shell
-gap.
+`source`, `git_head`, `dirty`, `files: {path: {sha256, size}}`), through a
+temp folder renamed into place; the newest three builds are kept. It refuses
+**uncommitted changes under `hud/`** (`git status --porcelain -- hud`, which
+counts untracked files) unless `--allow-dirty` is given, and records the
+commit and whether it was dirty. It refuses an install root that is, or sits
+under, a symbolic link, one inside the repository, not a folder or writable
+by others, and a build output holding a link, a special file, an odd name or
+no `index.html`.
 
-**`GET /status` gains `hud_build`**: the served build's id, `"dev"` under
-`JARVIS_HUD_DEV=1`, or `null` when nothing is installed.
+The daemon serves the **newest intact** build — its manifest reads (a
+malformed, oversized or hostile manifest is ignored, never an error) and its
+`index.html` still matches it; a newer build whose page fails is passed over
+for the one before. Only a file the manifest lists is served, read without
+following a link, its size and SHA-256 checked **on every read** (no cache);
+anything else is a 404, logged. An asset the newest intact build lacks is
+served from an older kept build that has it (Vite names are content hashes),
+so a window loaded before an install keeps its lazy chunks — **an install
+needs a reload, not a daemon restart**. With no intact build, `GET /` is a
+503 page that says which: "not installed", or "failed verification" when
+builds are there but none passes. `config.HUD_DIST` is the install root (or
+`hud/dist` under `JARVIS_HUD_DEV=1`), and BR-0's one write check refuses the
+install root always, plus `hud/dist` in dev mode, to every agent write tool
+and v2 grant.
+
+**Jarvis never runs the installer.** `jarvis hud install` is DENY for agents
+in every spelling the one detector (`protected_state.installs_hud`, asked by
+`rules.decide`, so v1's gate and v2's layer 1) sees — `python -m jarvis hud
+install`, a venv's `bin/jarvis`, `uv run`, `env`/`nohup`/`systemd-run`,
+`bash -lc`, `eval`, `env -S`, `python -m jarvis.v2.hud_install`, inline or
+here-document source naming the installer — and `run_command` refuses it
+with no approver. A shell write **into** the install root (`cp`, `rsync`, a
+redirect) is asked, never auto-approved or covered by an allowlist entry. A
+shell can still write there in a form nobody sees — the accepted shell gap.
+
+**`GET /status` gains `hud_build`, `hud_git_head` and `hud_state`**: what
+`GET /` actually serves — the build's id (`"dev"` under `JARVIS_HUD_DEV=1`,
+`null` when nothing intact), the commit it was installed from, and
+`"installed"`, `"dev"`, `"not installed"`, `"failed verification"` or
+`"refused: …"`. daemon2 logs the same at start-up, and **warns** in dev mode,
+when nothing is served, when the build was installed with uncommitted
+changes, and when its commit is not the checkout's HEAD.
 
