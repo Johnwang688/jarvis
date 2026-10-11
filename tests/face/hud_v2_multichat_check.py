@@ -1612,16 +1612,17 @@ def _rr_drop_checks(page, mock, check, until):
 # eight panes (WP-G1)
 
 EIGHT = json.dumps({"preset": "grid8", "focused": 1, "panes": [{"view": "chat"} for _ in range(8)]})
-EIGHT_THREADS = {1: ("t1", "p1"), 2: ("t2", "p1"), 3: ("t3", "p2"), 4: ("t4", "p1"), 5: ("t5", "p1"),
-                 6: ("t6", "p1"), 7: ("t7", "p1"), 8: ("t8", "p1")}
+# Ids of their own: the mock names threads made by earlier sections t4, t5, …
+EIGHT_THREADS = {1: ("t1", "p1"), 2: ("t2", "p1"), 3: ("t3", "p2"), 4: ("e4", "p1"), 5: ("e5", "p1"),
+                 6: ("e6", "p1"), 7: ("e7", "p1"), 8: ("e8", "p1")}
 
 
 def _seed_eight(mock):
-    """Five more chat threads in jarvis, t4 … t8, each with a transcript of its own."""
+    """Five more chat threads in jarvis, e4 … e8, each with a transcript of its own."""
     w = mock.world
     base = next(t for t in w["threads"] if t["id"] == "t1")
     for n in range(4, 9):
-        tid = f"t{n}"
+        tid = f"e{n}"
         if any(t["id"] == tid for t in w["threads"]):
             continue
         w["threads"].append({**base, "id": tid, "title": f"chat number {n}", "model": None,
@@ -1656,31 +1657,31 @@ def _eight_chats_checks(page, mock, check, until):
           marked == [str(n) for n in range(1, 9)], str(marked))
 
     stop = {n: page.locator(_pane(n, '[data-testid="stop"]')) for n in range(1, 9)}
-    mock.emit("turn_started", {}, thread_id="t7")
+    mock.emit("turn_started", {}, thread_id="e7")
     until(lambda: _chat(page, 7)["busy"], timeout=3)
-    mock.emit("text_delta", {"text": "seven is working"}, thread_id="t7")
+    mock.emit("text_delta", {"text": "seven is working"}, thread_id="e7")
     until(lambda: page.locator(_pane(7, '[data-testid="draft"]')).count() > 0, timeout=3)
     check("a turn in pane 7's thread draws only in pane 7: its draft and its Stop",
           "seven is working" in page.locator(_pane(7, '[data-testid="draft"]')).inner_text()
           and all(page.locator(_pane(n, '[data-testid="draft"]')).count() == 0 for n in range(1, 9) if n != 7)
           and stop[7].count() == 1 and all(stop[n].count() == 0 for n in range(1, 9) if n != 7)
           and all(not _chat(page, n)["busy"] for n in range(1, 9) if n != 7))
-    mock.emit("tool_started", {"call_id": "c7", "name": "pytest"}, thread_id="t7")
+    mock.emit("tool_started", {"call_id": "c7", "name": "pytest"}, thread_id="e7")
     until(lambda: page.locator(_pane(7, '[data-testid="op"]')).count() > 0, timeout=3)
     check("and its tool call ticks in pane 7 only",
           all(page.locator(_pane(n, '[data-testid="op"]')).count() == 0 for n in range(1, 9) if n != 7))
 
-    mock.emit("turn_started", {}, thread_id="t8")
+    mock.emit("turn_started", {}, thread_id="e8")
     until(lambda: _chat(page, 8)["busy"], timeout=3)
     until(lambda: stop[8].count() == 1, timeout=2)
-    i7, i8 = len(mock.sent("POST", "/threads/t7/interrupt")), len(mock.sent("POST", "/threads/t8/interrupt"))
+    i7, i8 = len(mock.sent("POST", "/threads/e7/interrupt")), len(mock.sent("POST", "/threads/e8/interrupt"))
     stop[8].click()
-    until(lambda: len(mock.sent("POST", "/threads/t8/interrupt")) > i8, timeout=3)
+    until(lambda: len(mock.sent("POST", "/threads/e8/interrupt")) > i8, timeout=3)
     time.sleep(0.2)
-    check("Stop in pane 8 interrupts pane 8's thread", len(mock.sent("POST", "/threads/t8/interrupt")) == i8 + 1)
+    check("Stop in pane 8 interrupts pane 8's thread", len(mock.sent("POST", "/threads/e8/interrupt")) == i8 + 1)
     check("and leaves pane 7's running, its Stop still there",
-          len(mock.sent("POST", "/threads/t7/interrupt")) == i7 and _chat(page, 7)["busy"] and stop[7].count() == 1)
-    mock.emit("turn_finished", {"stop": "interrupted"}, thread_id="t8")
+          len(mock.sent("POST", "/threads/e7/interrupt")) == i7 and _chat(page, 7)["busy"] and stop[7].count() == 1)
+    mock.emit("turn_finished", {"stop": "interrupted"}, thread_id="e8")
     until(lambda: not _chat(page, 8)["busy"], timeout=3)
     check("pane 8's finish frees pane 8 and only pane 8", _chat(page, 7)["busy"] and stop[7].count() == 1)
 
@@ -1696,7 +1697,7 @@ def _eight_chats_checks(page, mock, check, until):
           and all(_box(page, n).input_value() == "" for n in range(1, 9) if n != 6),
           _box(page, 6).input_value())
     _box(page, 6).fill("")
-    mock.emit("turn_finished", {"stop": "end"}, thread_id="t7")
+    mock.emit("turn_finished", {"stop": "end"}, thread_id="e7")
     until(lambda: not _chat(page, 7)["busy"], timeout=3)
     page.evaluate("window.__hud.capture.closeFollowUp()")
 

@@ -1859,12 +1859,17 @@ def _eight_checks(page, mock, check, until):
           page.locator(_pane(1, '[data-testid="input"]')).count() == 1
           and page.locator(_pane(6, '[data-testid="input"]')).count() == 1
           and page.locator('[data-testid="compose-row"]').count() == 2)
+    page.evaluate("document.querySelector('[data-testid=\"pane-8\"] iframe').__kept = 88")
     _choose(page, until, "single")
+    check("⊞ to one pane: panes 2–8 are hidden, not unmounted",
+          all(page.locator(_pane(n)).count() == 1 and not _visible(page, _pane(n)) for n in range(2, 9))
+          and page.evaluate("document.querySelector('[data-testid=\"pane-8\"] iframe').__kept") == 88)
     _choose(page, until, "grid8")
-    check("⊞ to one pane and back to eight: the very panes, still showing what they showed",
+    check("and back to eight: the very panes, still showing what they showed (pane 8's frame not reloaded)",
           all(_attr(page, _pane(n), "data-view") == v for n, v in views.items())
           and page.locator(_pane(7, '[data-testid="file-path"]')).inner_text() == "calc.py"
-          and _visible(page, _pane(8, "iframe")) and _visible(page, _pane(5, f"{term} .xterm-screen")))
+          and _visible(page, _pane(8, "iframe")) and _visible(page, _pane(5, f"{term} .xterm-screen"))
+          and page.evaluate("document.querySelector('[data-testid=\"pane-8\"] iframe').__kept") == 88)
 
     # Smaller windows draw what fits, and say so.
     page.set_viewport_size({"width": 1280, "height": 800})
