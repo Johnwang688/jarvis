@@ -19,7 +19,7 @@ import { activeProjectId } from "../lib/compose";
 import { NO_ACTIVITY, applyActivity, type ActivityView } from "../lib/activity";
 import { pendingAfter } from "../lib/giveback";
 import {
-  CAPTURE_STATUSES, CHAT_KEYS, MAX_FILES, draftKey, emptyChat, emptyChats, sameConversation, shownThread,
+  CAPTURE_STATUSES, CHAT_KEYS, MAX_FILES, ORPHAN_DRAFT, draftKey, emptyChat, emptyChats, sameConversation, shownThread,
   type ChatState, type Chats,
 } from "../lib/chats";
 import { PANE_NOS, defaultWorkspace, type PaneNo } from "../lib/workspace";
@@ -145,14 +145,19 @@ export type Action =
   /** The pane in slot 1 changed (a close, a split, ⊞). */
   | { type: "home"; pane: PaneNo }
   /**
-   * × on a pane (WP-G2, plan §3.6): its conversation leaves it. Unsent words
-   * and files in a thread's box are parked under that thread and come back
-   * when it opens again; words in a compose row's box were asked about and
-   * are dropped. A turn it tracked is left `loose` for the next pane that
-   * opens the thread. The pane leaves the selection order; a capture status
-   * stays until the selection moves on (`select` carries it to the next chat).
+   * × on a pane (WP-G2, plan §3.6), or a split taking back a pane ⊞ hid: its
+   * conversation leaves it. Unsent words and files in a thread's box are
+   * parked under that thread and come back when it opens again. Words in a
+   * compose row's box were asked about on a × and are dropped; a hidden pane
+   * could not ask, so with `keep` they — and words handed back to it — are
+   * parked for the next new thread (`ORPHAN_DRAFT`; review of PR #47). A
+   * turn it tracked is left `loose` for the next pane that opens the thread.
+   * The pane leaves the selection order; a capture status stays until the
+   * selection moves on (`select` carries it to the next chat).
    */
-  | { type: "release_chat"; pane: PaneNo }
+  | { type: "release_chat"; pane: PaneNo; keep?: boolean }
+  /** A turn running in a thread no pane shows (a first send whose pane was closed meanwhile). */
+  | { type: "loose"; threadId: string; status: string }
   /** A turn finished in a thread no pane tracks: nothing is loose there any more. */
   | { type: "turn_over"; threadId: string };
 
@@ -171,7 +176,12 @@ function reconverse(s: State, pane: PaneNo, was: ChatState, next: ChatState): { 
   const drafts = { ...s.drafts };
   const out = draftKey(was, pane);
   if (out && (was.input || was.files.length)) drafts[out] = { text: was.input, files: was.files };
-  const into = draftKey(next, pane);
+  let into = draftKey(next, pane);
+  // A new compose row with nothing of its own parked takes up words no pane's
+  // row holds any more (review of PR #47): the next new thread, wherever.
+  if (into && !drafts[into] && !next.threadId && next.compose && !next.compose.openedId && drafts[ORPHAN_DRAFT]) {
+    into = ORPHAN_DRAFT;
+  }
   const parked = into ? drafts[into] : undefined;
   if (into && parked) delete drafts[into];
   return { next: { ...next, input: parked?.text ?? "", files: parked?.files ?? [] }, drafts };
@@ -394,12 +404,18 @@ export function reduce(s: State, a: Action): State {
       const c = s.chats[a.pane];
       const drafts = { ...s.drafts };
       const thread = shownThread(c);
-      if (thread && (c.input || c.files.length)) {
-        const had = drafts[thread];
-        drafts[thread] = {
-          text: had?.text && c.input ? `${had.text}\n${c.input}` : c.input || had?.text || "",
-          files: [...(had?.files ?? []), ...c.files].slice(0, MAX_FILES),
+      const park = (key: string, text: string, files: Attachment[]) => {
+        if (!text && !files.length) return;
+        const had = drafts[key];
+        drafts[key] = {
+          text: had?.text && text ? `${had.text}\n${text}` : text || had?.text || "",
+          files: [...(had?.files ?? []), ...files].slice(0, MAX_FILES),
         };
+      };
+      if (thread) park(thread, c.input, c.files);
+      else if (a.keep && c.compose) {
+        park(ORPHAN_DRAFT, c.input, c.files);
+        for (const r of c.restore) park(ORPHAN_DRAFT, r.text, r.files);
       }
       const loose = { ...s.loose };
       // A placeholder (`local-N`, a first send whose thread does not exist
@@ -412,6 +428,10 @@ export function reduce(s: State, a: Action): State {
         selectedOrder: s.selectedOrder.filter((n) => n !== a.pane),
       };
     }
+
+    case "loose":
+      if (s.loose[a.threadId] === a.status) return s;
+      return { ...s, loose: { ...s.loose, [a.threadId]: a.status } };
 
     case "turn_over": {
       if (!(a.threadId in s.loose)) return s;

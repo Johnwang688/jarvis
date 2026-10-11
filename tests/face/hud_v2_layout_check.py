@@ -3067,15 +3067,19 @@ def _split_file_checks(page, mock, check, until):
     _approval(mock, "close-ask-card")
     until(lambda: page.locator('[data-testid="approval-card"]').count() > 0, timeout=4)
     time.sleep(0.2)
-    check("under a card the question's buttons are disabled, and the card has the focus",
+    # Discard is disabled; Keep is only inert behind the veil (disabling it
+    # would drop focus to the page before the card could record it).
+    check("under a card Discard is disabled, Keep cannot be reached, and the card has the focus",
           page.locator('[data-testid="pane-3-close-discard"]').is_disabled()
-          and page.locator('[data-testid="pane-3-close-keep"]').is_disabled()
+          and page.evaluate("!!document.querySelector('[data-testid=\"pane-3-close-keep\"]').closest('[inert]')")
           and _active_testid(page) == "approval-card", str(_active_testid(page)))
     page.keyboard.press("Enter")
     time.sleep(0.3)
     check("and Enter there discards nothing", _order(page) == [1, 2, 3])
     page.locator('[data-testid="approval-card"] button.deny').click()
     until(lambda: page.locator('[data-testid="approval-card"]').count() == 0, timeout=4)
+    check("once the card is answered, focus is back on Keep",
+          bool(until(lambda: _active_testid(page) == "pane-3-close-keep", timeout=2)), str(_active_testid(page)))
     page.locator('[data-testid="pane-3-close-keep"]').click()
     until(lambda: ask.count() == 0, timeout=2)
     check("Keep keeps the pane and its edit", _order(page) == [1, 2, 3] and "dirtyinthree" in _file_text(page, 3))
@@ -3086,9 +3090,11 @@ def _split_file_checks(page, mock, check, until):
     until(lambda: 3 not in _order(page), timeout=2)
     check("Discard and close closes it", _order(page) == [1, 2] and page.locator(_pane(3)).count() == 0
           and page.evaluate("window.__hud.workspace().ws.preset") == "cols2")
-    until(lambda: _active_testid(page) == "pane-2", timeout=2)
-    check("and focus goes to the slot before it (pane 2), never the page", _active_testid(page) == "pane-2",
-          str(_active_testid(page)))
+    # Where the mic is (review of PR #47, M1): the selected chat, pane 1 —
+    # not the File pane in the slot before, and never the page.
+    until(lambda: _active_testid(page) == "pane-1", timeout=2)
+    check("and focus goes to the selected chat (pane 1), never the page", _active_testid(page) == "pane-1"
+          and page.evaluate("window.__hud.state().selectedChat") == 1, str(_active_testid(page)))
 
     # Close a File pane on calc.py, then split one on README.md into the same id.
     page.locator('[data-testid="pane-2-split"]').click()

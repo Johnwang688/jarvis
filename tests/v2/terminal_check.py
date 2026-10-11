@@ -705,6 +705,19 @@ class Lifecycle(Base):
         self.owner("PATCH", f"/terminals/{tid}", {"readable": False})
         self.assertTrue(self.open_terminal()["readable"])
 
+    def test_a_terminal_can_be_made_unreadable_from_its_first_byte(self):
+        # WP-G2: a split's copy of a terminal Jarvis may not read is created
+        # with the switch off, never readable for the round trip a PATCH takes.
+        row = self.open_terminal(readable=False)
+        self.assertFalse(row["readable"])
+        self.assertFalse(self.term(row["id"]).readable)
+        self.assertFalse(self.term(row["id"]).history().readable)
+        self.assertTrue(self.open_terminal(readable=True)["readable"])
+        for bad in ("no", 0, None, [False]):
+            self.owner("POST", "/terminals", {"in": "home", "readable": bad}, status=400)
+        # Still the owner's alone, like every terminal route.
+        self.request("POST", "/terminals", {"in": "home", "readable": False}, port=self.daemon.port, status=403)
+
     def test_at_most_six(self):
         self.assertEqual(T.TERMINAL_CAP, 6)
         made = [self.open_terminal()["id"] for _ in range(6)]

@@ -1592,7 +1592,10 @@ source, id, spec, {focus})` inserts the id **right after its source** and
 lands on `LADDER`'s shape for the new count (rows2 and main2 are ⊞'s alone);
 `closePane(ws, id, then)` drops it, resets only its spec, leaves `kept` and
 every edge alone, and never closes the last pane; `allocate` takes the
-lowest free id, else the oldest hidden pane with no unsaved edit; `copySpec`
+lowest free id, else the oldest hidden pane holding nothing, else the oldest
+whose compose row holds unsent words (`holding` — **its words are parked for
+the next new thread, `ORPHAN_DRAFT`**, never dropped: a hidden pane cannot
+ask; review of PR #47, H1), never one with an unsaved edit; `copySpec`
 copies a file or diff (project and `filePath`), a preview's URL — **never
 its keep-origin grant** — turns a task into its diff, and leaves a chat or a
 terminal for App to fill; `splitVerdict` refuses past eight (`max`), when
@@ -1607,21 +1610,31 @@ the thread (they come back when it opens anywhere), words handed back are
 held for it, a turn the pane tracked is left in `State.loose` and **the next
 pane that opens that thread takes it up, Stop and all** (`open_thread`,
 trading a turn of its own into `loose`; `turn_finished` and the 15 s
-reconcile clear it); a compose row's unsent words are asked about (G-9) and
-Discard drops them for good; a terminal goes back to the panel as its
+reconcile clear it, the reconcile also when the thread is no longer listed —
+archived or deleted). **A first send whose pane closed while its thread
+opened** leaves the new turn `loose` too (`send()`: nothing tracks or shows
+it), and one that fails after the close parks its words for the next new
+thread anywhere and says so (review of PR #47, M2). A compose row's unsent
+words are asked about (G-9) and Discard drops them for good; a terminal goes back to the panel as its
 selected tab (`releaseToPanel`) — **no DELETE, no new ticket, the shell lives
 on**. × asks first, in an inline strip (`pane-<id>-close-ask`, focus on
-Keep, never a modal), for an unsaved edit or a compose row's unsent words.
-Focus after a close goes to the pane now in that slot (else the slot before)
-— the pane itself, never its box, so a held Enter cannot send — and when the
-selected chat closes, to the chat selected before it (W-6: the owner's last
-choice keeps the mic). **One click closes one pane**: a × click within 400 ms
+Keep, never a modal), for an unsaved edit or a compose row's unsent words;
+the strip is dropped when the question no longer holds (the pane switched,
+the words were sent) and Discard re-asks at the click, so it never answers a
+question nobody asked; Keep is not `disabled` under a card (inert covers it),
+so focus comes back to it. **Focus after a close goes where the mic is**
+(W-6): the selected chat while it is another drawn pane — closing a File pane
+never hands the mic, or dropped files, to the chat that slides into its slot
+(review of PR #47, M1) — else, the selected chat closing, the chat selected
+before it, else the pane now in that slot (else the slot before); always the
+pane itself, never its box, so a held Enter cannot send. **One click closes one pane**: a × click within 400 ms
 of a close, or the second of a double-click, does nothing (3 over 2's top-
 right × sits exactly where 2×2's lands). A split's chat copy is a compose row
 in the source's project, written before the layout changes; a terminal's is
-`terminals.create(specOf(source), id, {readable: false} if the source is
-off)` — the switch goes off **before** the terminal is shown, and if it
-cannot, the copy is closed: a copy never widens what Jarvis can read. A
+`terminals.create(specOf(source), id, …, {readable})` — **`POST /terminals`
+takes `readable` now, so a copy of a terminal Jarvis may not read is made
+with the switch off from its first byte** (never PATCHed after), and a source
+whose row is unknown fails closed: a copy never widens what Jarvis can read. A
 reused id mounts fresh: Workspace unmounts a pane neither drawn nor `kept`,
 and `useLayout` bumps the incarnation on a close and when a split takes back
 a hidden pane (else its old FileTab stayed). File panes store their open
@@ -1629,7 +1642,12 @@ file (`filePath`, dropped when the pin moves project) and reopen it on mount;
 a save tells the other File panes (`lib/filesync.ts`): a clean one on that
 file re-reads, a dirty one says "changed on disk"; Diff panes seed their file.
 Open beside's two grow cases are splits now (a free id, so a pane ⊞ hid keeps
-what it showed). **Nothing assumes pane 1**: the store starts with no
+what it showed). **A stored WP-A/WP-B value's panes 2–4 are `kept`** when its
+preset does not draw them (it has no `order` or `kept`), so a split takes a
+free id rather than writing over what pane 3 showed, and a grow brings them
+back in the order it always did. `focusPaneElement` looks for a pane a split
+just made for a few frames, since a split from a socket or a timer is drawn
+after the next frame. **Nothing assumes pane 1**: the store starts with no
 selected chat, `activePane` falls back to `home` (the pane in slot 1, which
 App syncs), `#tabs` is slot 1's, and Workspace no longer seeds pane 1;
 WP-G1's surviving unit mutants (U4 bottom edges unclamped, U34 a preferred
@@ -1639,10 +1657,11 @@ disabled and inert, and the eight-pane card check asserts it at 160% and
 70%. Free checks: `workspace.test.ts`, `chats.test.ts`, `store.test.ts`,
 `filesync.test.ts`, the layout suite's `_split_checks`,
 `_split_close_one_checks` and `_split_file_checks`, the multichat suite's
-`_split_close_chat_checks` and `_split_close_selected_checks`, the terminal
-suite's `_split_close_terminal_checks` and the preview suite's
-`_split_checks`; the PR's mutation table shows each failing with its
-mutation. Not done: WP-G3's shared buffer (S-8 says save first) and WP-H's
+`_split_close_chat_checks`, `_split_close_selected_checks` and the
+`_rv47_*` review checks (each failing on bf09633), the terminal suite's
+`_split_close_terminal_checks`, the preview suite's `_split_checks` and
+`tests/v2/terminal_check.py`'s unreadable-from-the-first-byte case; the PR's
+mutation tables show each failing with its mutation. Not done: WP-G3's shared buffer (S-8 says save first) and WP-H's
 thinking line.
 
 **Sidebar status dots (2026-10-08, design §18; contract in
