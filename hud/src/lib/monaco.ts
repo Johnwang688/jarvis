@@ -16,6 +16,9 @@ import type * as MonacoNS from "monaco-editor/editor";
 
 export type Monaco = typeof MonacoNS;
 
+/** The syntax worker's label (ED-5): the one label besides Monaco's own that `getWorker` answers. */
+export const SYNTAX_WORKER = "jarvisSyntax";
+
 let loading: Promise<Monaco> | null = null;
 let loaded: Monaco | null = null;
 
@@ -100,14 +103,17 @@ const JSON_MONARCH = {
 export function loadMonaco(): Promise<Monaco> {
   if (!loading) {
     loading = (async () => {
-      const [{ monaco, applyGraphite }, EditorWorker] = await Promise.all([
+      const [{ monaco, applyGraphite, applySyntax }, EditorWorker, SyntaxWorker] = await Promise.all([
         import("./monacoBundle"),
         import("monaco-editor/editor/editor.worker?worker"),
+        import("./syntax/worker?worker"),
       ]);
-      // The one worker. Asked for any other label (a language service's),
-      // there is none to give: E-1 ships no language workers at all.
+      // Two workers, each by its label: Monaco's own, and tree-sitter's
+      // (ED-5). Asked for any other label (a language service's), there is
+      // none to give: E-1 ships no language workers at all.
       (self as any).MonacoEnvironment = {
         getWorker: (_id: string, label: string) => {
+          if (label === SYNTAX_WORKER) return new (SyntaxWorker.default as any)();
           if (label && label !== "editorWorkerService") throw new Error(`no ${label} worker in the HUD`);
           return new (EditorWorker.default as any)();
         },
@@ -117,6 +123,8 @@ export function loadMonaco(): Promise<Monaco> {
       // its rows show under Monarch (lib/editorTheme.ts, lib/monarchRefine.ts).
       applyGraphite();
       registerExtras(monaco as unknown as Monaco);
+      // Tree-sitter colour (ED-5): semantic tokens from the syntax worker.
+      applySyntax(monaco, () => (self as any).MonacoEnvironment.getWorker("syntax", SYNTAX_WORKER));
       // Push-to-talk owns Ctrl+D (PR #40); Monaco's next-match moves.
       monaco.editor.addKeybindingRules(editorKeyRules(monaco as unknown as MonacoKeys));
       loaded = monaco as unknown as Monaco;
