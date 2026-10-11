@@ -30,6 +30,8 @@
 import * as monaco from "monaco-editor/editor";
 import { ContextView } from "monaco-editor/base/browser/ui/contextview/contextview";
 import { effectiveZoom, placePopup, type Rect } from "./zoomfix";
+import { cssPalette, themeData } from "./editorTheme";
+import { C_WORDS, PY_WORDS, refine, type WordClasses } from "./monarchRefine";
 
 import "monaco-editor/features/codeEditor/register";
 import "monaco-editor/features/codicon/register";
@@ -115,5 +117,30 @@ ContextView.prototype.doLayout = function patchedDoLayout(this: any) {
   view.style.left = `${(at.left - origin.left) / z}px`;
   view.style.top = `${(at.top - origin.top) / z}px`;
 };
+
+// The Graphite editor scheme (ED-3, editor plan §2.5). Here, in the lazy
+// chunk, rather than in lib/monaco.ts: the scheme's tables stay out of the
+// first-paint chunk, and the refined tokenizers' imports of C++ and Python —
+// whose definition modules import Monaco's API — are reached only from this
+// chunk, so Monaco is not split into a second one to serve them.
+export function applyGraphite() {
+  // One theme, from the tokens on :root: theme.css is the one place a colour
+  // is written (lib/editorTheme.ts).
+  monaco.editor.defineTheme("jarvis", themeData(cssPalette()));
+  // C, C++ and Python tell functions, builtins, types and constants apart
+  // (lib/monarchRefine.ts). Each replaces the tokenizer `register.all`
+  // registered (the last registration wins) with the same module, refined —
+  // or as it was, if its shape has moved.
+  const refined = (id: string, load: () => Promise<{ language: unknown }>, words: WordClasses) =>
+    monaco.languages.registerTokensProviderFactory(id, {
+      create: async () => {
+        const { language } = await load();
+        return (refine(language, words) ?? language) as any;
+      },
+    });
+  refined("c", () => import("monaco-editor/languages/definitions/cpp/cpp"), C_WORDS);
+  refined("cpp", () => import("monaco-editor/languages/definitions/cpp/cpp"), C_WORDS);
+  refined("python", () => import("monaco-editor/languages/definitions/python/python"), PY_WORDS);
+}
 
 export { monaco };

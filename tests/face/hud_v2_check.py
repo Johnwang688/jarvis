@@ -22,7 +22,11 @@ The safety checks are the ones to keep, and each is written to bite:
   - (ED-1) the editor makes no request off loopback (a catch-all route
     refuses and records any), no language-service worker is built or loaded,
     a link in a file opens only http(s) with noopener, and an unsaved edit is
-    never dropped by opening another file or Reload without asking.
+    never dropped by opening another file or Reload without asking;
+  - (ED-3) no token the editor draws, and no colour Monaco publishes, is
+    amber or red except `--red` where it means an error or "removed", and a
+    C++ and a Python file show each class of token in its row's HUD token
+    (tests/face/hud_v2_editor_theme_check.py).
 
 Build first:  cd hud && npm ci && npm run build
 Run:          PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. .venv/bin/python \\
@@ -3037,6 +3041,17 @@ def main():
                                       guard, FAKE_RECOGNIZER)
             finally:
                 preview_mock.stop()
+
+            # The Graphite editor scheme (ED-3): a context and a mock of their
+            # own — its world gains a C++ and a Python file, and its card
+            # snapshot needs a window where Monaco has not loaded yet.
+            from tests.face.hud_v2_editor_theme_check import editor_theme_checks
+            theme_mock = MockDaemon(0).start()
+            try:
+                editor_theme_checks(browser, theme_mock, f"http://127.0.0.1:{theme_mock.port}", check, until,
+                                    guard, FAKE_RECOGNIZER)
+            finally:
+                theme_mock.stop()
 
             ctx = browser.new_context(permissions=["microphone"])
             guard(ctx)

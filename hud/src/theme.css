@@ -53,6 +53,18 @@
   --badge-codex: #cfcbc3;
   --badge-win: #a9b4bf;  /* steel, not amber: amber means "pending" */
 
+  /* The code editor's four syntax hues (ED-3, editor plan §2.5). Each is a
+     quieter sibling of a HUD hue rather than the hue itself, so the chrome's
+     meanings stay single: --accent is focus, selection, links and "running",
+     --green is "done". None is amber or red (decisions E-4). The editor's
+     Monaco theme is built from these and the tokens above
+     (lib/editorTheme.ts reads them off :root), and editorTheme.test.ts
+     recomputes every contrast and hue from this file. */
+  --syn-fn: #8ec5d6;      /* glacier, --accent's family: functions, tags, headings */
+  --syn-string: #a6c79b;  /* sage, --green's family: strings, code spans */
+  --syn-const: #b9aade;   /* lavender, --badge-claude's family: numbers, constants, escapes */
+  --syn-type: #a8b5c2;    /* steel, --badge-win's family: types, modules, directives, keys */
+
   --veil: rgba(0, 0, 0, 0.62);
   --shadow-pop: 0 8px 28px rgba(0, 0, 0, 0.55);
   --radius: 6px;
