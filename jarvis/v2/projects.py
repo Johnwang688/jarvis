@@ -255,6 +255,64 @@ def create_project(daemon, name, root, **values) -> Project:
     return created
 
 
+MAX_FOLDER_ASKS = 3
+
+
+def confirm_folder(asker, check, name, *, origin, say, taken_roots, channel_id=None):
+    """Ask when needed, make the folder, and ask again if it changed after the
+    yes. -> the path, or None once `say` has been told why not.
+
+    **The one caller of `folders.make_project_folder`** (`folders_check` greps
+    for it), shared by Discord's `/project new` (B2) and the HUD's new VEX
+    project (VX-1), so both raise the same `project_folder` request — the
+    exact path, Approve/Deny, never Always, a timeout denies — and both
+    re-check after the yes. An existing empty folder is used without asking
+    (O5). `asker` is the daemon's broker (`.ask(request) -> Decision`); one
+    that raises never grants. `taken_roots()` is every project's root, re-read
+    when the folder changed (what appeared may be another project's)."""
+    from . import folders
+    from .approvals import ApprovalRequest
+    from .provider import Decision
+    approval, forced = None, False
+    for _ in range(MAX_FOLDER_ASKS):
+        if check.needs_confirmation or forced:
+            verb = "Create" if check.action == "create" else "Use"
+            say(f"{verb} `{check.path}` ({check.describe()}) for project "
+                f"**{name}**? Approve or Deny on the request below.")
+            request = ApprovalRequest(
+                tool=folders.TOOL, args=check.approval_args(name),
+                reason=f"{verb} {check.path} as the folder of project {name}",
+                origin=origin, allowlistable=False, discord_channel_id=channel_id)
+            try:
+                decision = Decision(asker.ask(request))
+            except Exception as exc:             # a broker that breaks never grants
+                import logging
+                logging.getLogger(__name__).warning(
+                    "project folder approval failed (%s)", type(exc).__name__)
+                decision = Decision.DENY
+            if decision is not Decision.ALLOW:
+                say(f"Not approved, so nothing was made (`{check.path}`).")
+                return None
+            approval = folders.approved(request, decision)
+        try:
+            return folders.make_project_folder(check, approval)
+        except folders.FolderChanged as exc:
+            try:
+                check = folders.check_project_folder(exc.check.raw, taken_roots=taken_roots())
+            except folders.FolderRefused as refused:
+                say(f"`{exc.check.path}` changed while you were deciding, and "
+                    f"now {refused}. Nothing was made.")
+                return None
+            approval, forced = None, True
+            say(f"`{check.path}` changed while you were deciding: it is now "
+                f"{check.describe()}. Asking again.")
+        except folders.FolderRefused as exc:
+            say(f"I can't use that folder any more: {exc}. Nothing was made.")
+            return None
+    say(f"`{check.path}` kept changing, so nothing was made.")
+    return None
+
+
 def _expect(expect, current):
     from .daemon import APIError, DaemonError
     if not isinstance(expect, str) or not expect:

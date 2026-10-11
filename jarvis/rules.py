@@ -96,6 +96,116 @@ _DENY_PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(r">\s*/dev/(sd|nvme|hd|vd)[a-z0-9]*"), "a raw write to a block device"),
 ]
 
+# --- deny: anything that names VEX's device tool (VX-1, decision V-2) --------
+#
+# `vexcom` downloads programs to a VEX V5 robot and talks to its brain. Sending
+# code to a robot is a **physical** action, so it is only ever the owner's
+# click in the HUD (`jarvis/v2/vex.py`): no tool, MCP tool, CLI or Discord verb
+# reaches it, and an agent command line that *names* it is DENY — never put to
+# the owner as a yes/no, because a card that offers "download to the robot"
+# can be approved by a tired owner as easily as any other.
+#
+# "Names" is deliberately wide: the word anywhere on the line, in any case
+# (Windows is case-insensitive), in a path (`/mnt/c/…/vexcom.exe`, the Linux
+# `…/linux-x64/vexcom`, `C:\…\vexcom.exe`), behind a wrapper, inside a `sh -c`
+# / `cmd.exe /c` / `powershell -c` string, after the quote, escape and
+# empty-expansion tricks that split a word without changing it (bash `'"\`,
+# `$'…'`, `${X}`, `$()`, cmd's `^` and `%X%`, PowerShell's backtick, brace
+# expansion), a glob only it could match (`v*m.exe`), or a PowerShell
+# `-EncodedCommand` that decodes to it. A grep or a commit message that merely
+# mentions the word is refused too — the `.env` rule's trade: a refusal the
+# model can rephrase past costs less than a download nobody chose.
+#
+# **An accident guard, not a boundary**, exactly as the DENY note above says:
+# a renamed copy, a name assembled at run time, or a program that runs vexcom
+# itself is not caught. The boundary is that download exists only as the
+# owner's button, and that `vex.json` (which executables that button runs) is
+# gate state no agent tool can write.
+_VEXCOM = "vexcom"
+_VEXCOM_TARGETS = ("vexcom", "vexcom.exe")
+_SPLITTERS = re.compile(r"[\"'\\^`]")
+_EMPTY_EXPANSIONS = re.compile(
+    r"\$\{[^}]*\}|\$\([^()]*\)|\$[@*#?$!0-9-]|\$[A-Za-z_][A-Za-z0-9_]*|%[^%\s]*%|`[^`]*`")
+_BRACES = re.compile(r"[{},\[\]]")
+_ANSI_C_QUOTE = re.compile(r"\$'((?:[^'\\]|\\.)*)'")
+_GLOB_CHARS = re.compile(r"[*?\[]")
+_POWERSHELL = re.compile(r"(^|[\\/\s'\"])(powershell|pwsh)(\.exe)?($|[\s'\"])", re.I)
+
+
+def _ansi_c_decoded(text: str) -> str:
+    def decode(match: re.Match) -> str:
+        try:
+            return match.group(1).encode("latin-1", "backslashreplace").decode("unicode_escape")
+        except (UnicodeError, ValueError):
+            return match.group(0)
+    return _ANSI_C_QUOTE.sub(decode, text)
+
+
+def _glob_could_be_vexcom(word: str) -> bool:
+    """A glob that matches vexcom's name and would not match an arbitrary one:
+    `v*m.exe` yes, `*.exe` and `*` no (they are ordinary)."""
+    from fnmatch import fnmatchcase
+    base = re.split(r"[\\/]", word)[-1].lower()
+    if not base or not _GLOB_CHARS.search(base):
+        return False
+    if not any(fnmatchcase(t, base) for t in _VEXCOM_TARGETS):
+        return False
+    return not any(fnmatchcase(t, base) for t in ("qqqqqqqqqqqq", "qqqqqq.exe"))
+
+
+def _encoded_powershell(text: str) -> list[str]:
+    """What a PowerShell `-EncodedCommand` (base64 of UTF-16LE) on this line
+    says, decoded, so a hidden `vexcom` is still a named one."""
+    import base64
+    import binascii
+    if not _POWERSHELL.search(text):
+        return []
+    words = text.split()
+    found = []
+    for i, word in enumerate(words[:-1]):
+        flag = word.strip("'\"").lstrip("-/").lower()
+        if flag and (flag in ("e", "ec") or (flag.startswith("en") and "encodedcommand".startswith(flag))):
+            payload = words[i + 1].strip("'\"")
+            try:
+                found.append(base64.b64decode(payload + "=" * (-len(payload) % 4),
+                                              validate=True).decode("utf-16-le", "ignore"))
+            except (binascii.Error, ValueError):
+                continue
+    return found
+
+
+def names_vexcom(command: str, _depth: int = 0) -> bool:
+    """True if this command line names VEX's device tool in any spelling the
+    note above lists. Pure text work; nothing runs."""
+    import unicodedata
+    text = join_continuations(command or "")
+    if not text.strip():
+        return False
+    variants = {text, unicodedata.normalize("NFKC", text)}
+    variants |= {_ansi_c_decoded(v) for v in list(variants)}
+    for v in list(variants):
+        cut = _EMPTY_EXPANSIONS.sub("", v)
+        variants |= {cut, _SPLITTERS.sub("", v), _SPLITTERS.sub("", cut)}
+    variants |= {_BRACES.sub("", v) for v in list(variants)}
+    for v in variants:
+        if _VEXCOM in v.casefold():
+            return True
+    for v in variants:
+        for word in re.split(r"[\s;&|<>()=]+", v):
+            if _glob_could_be_vexcom(word):
+                return True
+    if _depth < 2:
+        return any(names_vexcom(decoded, _depth + 1) for decoded in _encoded_powershell(text))
+    return False
+
+
+def _vexcom_verdict(command: str) -> Verdict | None:
+    if names_vexcom(command):
+        return Verdict(DENY, "it names vexcom, VEX's tool for downloading to and talking to "
+                             "the robot; that is only ever the owner's click in the HUD, "
+                             "never an agent's command (build with vexbuild instead)")
+    return None
+
 
 # --- allow: runs without asking ---------------------------------------------
 
@@ -1517,6 +1627,29 @@ def _program_named(stem: str, args: list[str]) -> bool:
     return False
 
 
+def _python_module(tokens: list[str]) -> str:
+    """The module a `python -m MODULE` runs (`-mMODULE` and a cluster like
+    `-Im MODULE` included), or ""."""
+    args = tokens[1:]
+    i = 0
+    while i < len(args):
+        token = args[i]
+        i += 1
+        if token == "--" or not token.startswith("-") or token.startswith("--"):
+            if token.startswith("--") and token != "--":
+                continue
+            return ""
+        for k, letter in enumerate(token[1:]):
+            if letter == "m":
+                rest = token[k + 2:]
+                return rest if rest else (args[i] if i < len(args) else "")
+            if letter in "WXQ":
+                if k == len(token) - 2:
+                    i += 1
+                break
+    return ""
+
+
 def _has_inline_source(tokens: list[str], redirects: list[Redirect] = ()) -> bool:
     """True if an interpreter was handed source on the command line."""
     for token in tokens[1:]:
@@ -1616,6 +1749,12 @@ def _judge_segment(segment: str) -> Verdict:
     if stem in _INTERPRETERS and _has_inline_source(bare, redirects):
         return Verdict(ASK, f"{stem} with inline source is arbitrary code, not a build step")
 
+    # `vexbuild` asks unless the owner allowlists exactly it (V-2); the module
+    # it runs is the same door and must not be an ALLOW through `python -m`.
+    module = _python_module(bare) if stem in ("python", "python3") else ""
+    if module == "jarvis.v2.vex" or module.startswith("jarvis.v2.vex."):
+        return Verdict(ASK, "this is vexbuild's own module, which asks as vexbuild does")
+
     if stem == "systemctl" and "--user" not in tokens:
         return Verdict(ASK, "system-wide systemctl affects the whole machine")
 
@@ -1638,6 +1777,13 @@ def decide(command: str) -> Verdict:
     command = join_continuations(command or "")
     if not command.strip():
         return Verdict(ASK, "empty command")
+
+    # Naming VEX's device tool anywhere on the line is DENY (V-2): judged on
+    # the whole line, before segmentation, so a `sh -c '…'` string, a
+    # substitution or a quoted path cannot carry it past.
+    vexcom = _vexcom_verdict(command)
+    if vexcom is not None:
+        return vexcom
 
     # Command substitution runs a command this function never sees. There is no
     # honest verdict except "a human should look".

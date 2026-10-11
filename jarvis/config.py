@@ -464,6 +464,45 @@ PROJECT_FOLDER_ROOTS: tuple[str, ...] = tuple(
 # and is never a project folder on its own.
 PROJECT_WORK_DIR = os.environ.get("JARVIS_PROJECT_WORK_DIR", "~/jarvis-work")
 
+# VEX V5 in the HUD (VX-1, `jarvis/v2/vex.py`; editor decisions V-1, V-2, V-5).
+# The HUD builds with, and downloads through, the Windows tools the owner's
+# VS Code VEX extension already downloaded, run **in place** through WSL
+# interop: nothing is copied, bundled or committed (VEX's licence forbids
+# redistribution). Which executables those are is `VEX_PATH` (`vex.json`),
+# written only by the human-run `jarvis vex setup` — gate state, in
+# `tools/files._protected_state`, so no agent write tool can repoint it — and
+# every path in it is re-checked at each use: absolute, no symlink anywhere
+# in it, a regular file (or folder), and inside one of the roots below. A
+# request never names an executable or a path to run (the `DESKTOP_APPS`
+# pattern); a project folder comes from a project id, never from a path.
+VEX_PATH = Path(
+    os.environ.get("JARVIS_VEX", Path.home() / ".config" / "jarvis" / "vex.json")
+)
+# Where the extension keeps its downloads (vexcom, the toolchain, the SDKs)
+# and where it is installed (its project templates), for VS Code and Cursor.
+# Colon-separated overrides exist for the test suite, which points them at a
+# temp tree of fakes; nothing here is ever searched beyond these roots.
+_WINDOWS_HOME = "/mnt/c/Users/johnw"
+VEX_STORAGE_ROOTS: tuple[str, ...] = tuple(
+    p for p in os.environ.get("JARVIS_VEX_STORAGE_ROOTS", "").split(":") if p
+) or (f"{_WINDOWS_HOME}/AppData/Roaming/Code/User/globalStorage/vexrobotics.vexcode",
+      f"{_WINDOWS_HOME}/AppData/Roaming/Cursor/User/globalStorage/vexrobotics.vexcode")
+VEX_EXTENSION_ROOTS: tuple[str, ...] = tuple(
+    p for p in os.environ.get("JARVIS_VEX_EXTENSION_ROOTS", "").split(":") if p
+) or (f"{_WINDOWS_HOME}/.vscode/extensions", f"{_WINDOWS_HOME}/.cursor/extensions")
+# Where WSL mounts Windows drives (`/mnt/c` is `C:\`). VEX's toolchain is
+# Windows-only and `cmd.exe` cannot work in a `\\wsl.localhost` folder, so a
+# project builds only below this; the tests point it at a temp tree.
+VEX_MOUNT_ROOT = os.environ.get("JARVIS_VEX_MOUNT_ROOT", "/mnt")
+# V-4: where a new VEX project goes unless `vex.json` names another folder.
+VEX_PROJECT_FOLDER = f"{_WINDOWS_HOME}/Documents/Robotics"
+# The agent's build door (V-2): a three-line wrapper `jarvis vex setup` offers
+# to write. Its stem is `vexbuild`, so the gate asks unless the owner
+# allowlists exactly it.
+VEXBUILD_PATH = Path(
+    os.environ.get("JARVIS_VEXBUILD", Path.home() / ".local" / "bin" / "vexbuild")
+)
+
 # Spotify OAuth token bundle (client id + refresh token), written once by
 # `jarvis auth spotify` and read only by spotify_auth.py. Same use-but-never-see
 # contract as the Google token: outside the repo, mode 600, invisible to the
