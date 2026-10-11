@@ -949,6 +949,15 @@ export default function App() {
       /* the window keeps what it had rather than blanking */
     }
   }, [dispatch]);
+  // A task's question, answered from the task view: exactly `{index, text}`
+  // (lib/taskQuestions). A refusal rejects with the daemon's sentence, which
+  // the view shows under the box it was typed in, keeping the words — this
+  // used to send `{question, answer}` and swallow the 400 (2026-10-11).
+  const answerQuestion = useCallback(
+    (taskId: string, index: number, text: string) =>
+      api.answerTask(taskId, index, text).then(() => { void refreshTasks(); }),
+    [refreshTasks],
+  );
   // Stable, so a memoized ChatTab is not redrawn by a keystroke.
   const cancelTask = useCallback(
     (id: string) => void api.cancelTask(id).then(refreshTasks).catch(() => {}),
@@ -2009,9 +2018,7 @@ export default function App() {
             <TaskView
               task={task}
               threads={state.taskId ? state.taskThreads[state.taskId] || [] : []}
-              onAnswer={(question, answer) =>
-                task && api.answerTask(task.id, { question, answer }).then(refreshTasks).catch(() => {})
-              }
+              onAnswer={answerQuestion}
               onSteer={(text) => task && api.steerTask(task.id, text).catch(() => {})}
               onCancel={() => task && api.cancelTask(task.id).then(refreshTasks).catch(() => {})}
               onResume={() => task && api.resumeTask(task.id).then(refreshTasks).catch(() => {})}
@@ -2348,9 +2355,7 @@ export default function App() {
             <TaskView
               task={task}
               threads={state.taskId ? state.taskThreads[state.taskId] || [] : []}
-              onAnswer={(question, answer) =>
-                task && api.answerTask(task.id, { question, answer }).then(refreshTasks).catch(() => {})
-              }
+              onAnswer={answerQuestion}
               onSteer={(text) => task && api.steerTask(task.id, text).catch(() => {})}
               onCancel={() => task && api.cancelTask(task.id).then(refreshTasks).catch(() => {})}
               onResume={() => task && api.resumeTask(task.id).then(refreshTasks).catch(() => {})}

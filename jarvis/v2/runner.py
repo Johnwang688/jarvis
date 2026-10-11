@@ -41,7 +41,7 @@ import threading
 import time
 from typing import Any, Callable
 
-from .control import ControlError, TaskControl
+from .control import ControlError, TaskControl, answer_refusal
 from .daemon import DaemonError
 from .model import (OpenQuestion, ProviderName, Report, Role, RoutingDecision, Spec,
                     Task, TaskState, TERMINAL_STATES, to_json, utcnow)
@@ -223,12 +223,9 @@ class TaskRunner(TaskControl):
 
     def answer_question(self, task_id: str, index: int, text: str) -> Task:
         task = self._require(task_id)
-        if task.state != TaskState.CLARIFYING:
-            raise ControlError(f"Task {task_id} is {task.state.value}; it is not waiting on a question.")
-        if not isinstance(index, int) or isinstance(index, bool) or not 0 <= index < len(task.spec.questions):
-            raise ControlError(f"Task {task_id} has no question {index}.")
-        if not isinstance(text, str) or not text.strip():
-            raise ControlError("An answer needs some text.")
+        refusal = answer_refusal(task_id, task.state, task.spec.questions, index, text)
+        if refusal:
+            raise ControlError(refusal)
         task.spec.questions[index].answer = text.strip()
         remaining = task.spec.blocked_on()
         task.status.open_question = remaining[0].text if remaining else None

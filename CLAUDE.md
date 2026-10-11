@@ -577,6 +577,18 @@ thread** is pinned at the top of the sidebar and starts in the last project
 worked in. A moved thread keeps the folder and permission rules it was
 opened with (`Thread.cwd`); a move re-labels, it never re-roots.
 
+**A task's question is answered by index (2026-10-11).** `POST
+/tasks/{id}/answer` takes exactly `{index, text}`, `index` the place in
+`spec.questions`, and only a CLARIFYING task asks (`hud/src/lib/
+taskQuestions.ts`, the daemon's `open_questions` rule). The HUD sent
+`{question, answer}` and swallowed the 400, so answering from the window
+never worked — and the mock took any body. A refusal now shows its sentence
+under the box and keeps the words, and the mock calls the daemon's
+`task_verb_body` and `control.answer_refusal` instead of answering `ok`.
+Free checks: `tests/face/hud_v2_task_check.py` (own mock), `TaskView.test.ts`,
+`taskQuestions.test.ts`, `api.test.ts`. The other task verbs (steer, cancel,
+resume, start) still swallow a refusal in `App.tsx`.
+
 **HUD zoom and panes (2026-10-08, design §18).** The rules are in
 `hud/src/lib/layout.ts`. Zoom is 70–160% in 10% steps: `− 100% +` in the
 title bar (since 2026-10-09; it used to fold away with the status pane), or

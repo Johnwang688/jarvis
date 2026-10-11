@@ -133,8 +133,11 @@ export const api = {
   steerTask: (id: string, text: string) => req<any>(`/tasks/${id}/steer`, json({ text })),
   cancelTask: (id: string) => req<any>(`/tasks/${id}/cancel`, json({})),
   resumeTask: (id: string) => req<any>(`/tasks/${id}/resume`, json({})),
-  answerTask: (id: string, body: { question: string; answer: string }) =>
-    req<any>(`/tasks/${id}/answer`, json(body)),
+  /** Exactly `{index, text}`: `index` is the question's place in
+   * `spec.questions` (lib/taskQuestions). A refusal rejects with the daemon's
+   * sentence; the caller shows it. Answers the task as it now is. */
+  answerTask: (id: string, index: number, text: string) =>
+    req<Task>(`/tasks/${id}/answer`, json({ index, text })),
   taskThreads: (id: string) => req<TaskThread[]>(`/tasks/${id}/threads`),
   journal: (id: string, after = 0) => req<any[]>(`/tasks/${id}/journal?after=${after}`),
 
