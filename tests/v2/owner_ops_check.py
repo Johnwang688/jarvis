@@ -191,9 +191,22 @@ class Programs:
                 for argv, _ in self.calls if os.path.basename(argv[0]) == program]
 
 
+def _remove(path: Path) -> None:
+    """An installed build is read-only (0555 folders): make it writable, then go."""
+    for here, dirs, _files in os.walk(path):
+        os.chmod(here, 0o755)
+        for name in dirs:
+            child = Path(here) / name
+            if not child.is_symlink():
+                os.chmod(child, 0o755)
+    import shutil
+    shutil.rmtree(path, ignore_errors=True)
+
+
 class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="owner-ops-"))
+        self.addCleanup(_remove, self.tmp)
         self.clock = Clock()
         self.out: list[str] = []
         self.addCleanup(patch.stopall)
