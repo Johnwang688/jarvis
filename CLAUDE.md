@@ -383,6 +383,14 @@ program can print bytes between real marks, nested shells/`sudo -i`/`ssh`/
 command only — so WP-F's text-pattern refusals apply to every read. When
 `terminal_read` lands, `terminal_check`'s no-tool test must allow exactly
 it. Each terminal has the owner's `readable` switch, **on by default**.
+Follow-ups from the re-review (with WP-D): `integration` is what was
+*configured*, **`marked`** (listing, attach row, one `{"type": "marked"}`) is
+what *took* — a profile that `exec`s another shell reads "bash" but never
+marked; the startup file must fit **8 KiB** (a pipe under
+`pipe-user-pages-soft`) and is written **without blocking** under
+`Terminals._lock` — a short write is a 409, never a wedged route; and **the
+checked realpath always runs** — without `env --argv0` a name whose basename
+differs (rbash, `sh` for bash) is refused rather than exec'd by its link.
 Tests point `config.TERMINAL_SHELL` at `tests/v2/terminal_fake/sh` (named
 `sh` so it is started as a POSIX shell) with a temp HOME, and never use
 8402/8403/8405.
@@ -408,7 +416,9 @@ opened with (`Thread.cwd`); a move re-labels, it never re-roots.
 `hud/src/lib/layout.ts`. Zoom is 70–160% in 10% steps: `− 100% +` in the
 title bar (since 2026-10-09; it used to fold away with the status pane), or
 Ctrl+= / Ctrl+- / Ctrl+0 — **the HUD's everywhere**, input
-bar and Monaco included, because a key let through is Chrome's page zoom,
+bar, Monaco and terminals included (inside a terminal only Ctrl+_ —
+Ctrl+Shift+-, readline's undo — goes to the shell instead of zooming out;
+WP-D), because a key let through is Chrome's page zoom,
 which the control cannot see and Chrome remembers per site. It is **CSS
 `zoom` on `#root`**, so **every `vh`/`vw` in `theme.css` must divide by
 `--ui-zoom`**, and a menu positioned from a screen rect must go through
@@ -461,7 +471,7 @@ keyed by it — it used to save to whatever project was current at save time.
 An unsaved edit is never dropped silently: "follow chat" waits, a gone
 project keeps the pane pinned until "discard edit", and closing the window
 asks. Preview keeps its URL per pane, re-judged on load. The bottom panel
-(⬓, Ctrl+`) is an **empty dock until WP-D** fills it with terminals. **Under
+(⬓, Ctrl+`) holds the terminals (WP-D, below). **Under
 a card every title-bar, fold and rail button is disabled**, the layout menu
 closes, and **the card takes focus** off a preview frame, Monaco or anything
 in the workspace or panel (a framed page got its own key events, so Escape
@@ -589,6 +599,122 @@ checks for the re-review (failing on feb61ff), each naming the mutation it
 kills. **Typing re-renders the window** (the box's words are the store's), so
 `ChatTab` is memoized with stable props: a long transcript redrawn per
 keystroke cost milliseconds per character per chat pane.
+
+**HUD terminals, panel and view, WP-D (2026-10-09; plan §2.3–§2.4,
+decisions W-1/W-2/W-5; contract in `docs/hud-api.md`).** xterm.js pinned
+exactly (`@xterm/xterm` 6.0.0, `addon-fit` 0.11.0, `addon-web-links` 0.12.0)
+and lazy-loaded (`lib/xterm.ts`); **no clipboard addon** (no OSC 52), window
+reports off. `lib/terminal.ts` holds the rules (pure, `terminal.test.ts`),
+`components/Terminal.tsx` the sockets and views. **One session per terminal
+per window**: made the first time the window draws it, it attaches with a
+**fresh ticket** and a URL from `location` (never a port), resizes only after
+`replayed`, and **stays attached while hidden**; its xterm element is moved,
+not rebuilt, between the panel and a pane. **A replay is never answered**
+(PR #28 review): xterm answers some output — DA, a cursor-position report,
+an OSC 11 colour, DECRQSS — through the owner's own input channel, so a ring
+holding old queries used to type their answers into the program on every
+reload or dropped socket (50,000 `ESC[6n` → 300 KB in 50k frames, past the
+daemon's 256 KiB latch). Output now goes through `OutputPipe`: one write in
+xterm's hands at a time, **tagged with its socket's generation**, so an older
+socket's queued output is never parsed into a new session; the reset is an
+in-band RIS (a JS `reset()` lets what xterm already holds be drawn again
+after it); and **nothing is sent from a new socket until its replay has been
+parsed** — the flag clears from the pipe's step after the replay, never on
+the `replayed` message itself. **The pipe's backlog is bounded** (re-review):
+output faster than xterm parses (~14 MB/s) used to queue without limit (a
+reviewer reached ~1.5 GB, the display ~40 s behind, once xterm's own 50 MB
+refusal no longer applied); past `OUTPUT_HIGH_WATER` (8 MiB) the backlog is
+dropped, that socket's output ends and the session reattaches, so the replay
+shows the latest 1 MiB, with a notice that it skipped ahead. A `term.write`
+that throws clears the in-flight flag in a `finally`, so it cannot stall the
+pipe. **A terminal another window shows is never
+taken unasked**: listed `shown` and not one this tab has shown (a
+sessionStorage list, `jarvis.hud.terminals.mine`; `taken`/`refused` forget
+an id), it is drawn as "in another window · Show it here" — a takeover
+question the owner did not cause is one they learn to wave through. **A
+copy of the list is not the list** (re-review): Chrome copies sessionStorage
+into a duplicated tab and a reopened closed one, so the list carries its
+`holder`, the live page's per-load nonce (memory only), which that page's
+`pagehide` sets to null; a new page inherits the list only if the holder is
+null **and** its navigation type is `reload` — a duplicate's copy is held by
+its live original, a reopened tab's is released but a restore. A reload
+still attaches straight back even while the daemon counts the old page's
+socket. A first attach reads a fresh listing first, and so does ×
+before deciding whether to ask (`freshList`: never a listing already on its
+way, which may predate `busy`; a failed listing asks, saying it could not
+check). **One terminal is drawn in one
+place** (`placeTerminals`): a drawn pane holding it wins and its panel tab
+reads "in pane N" and jumps there; a hidden panel or undrawn pane attaches
+nothing (a reload must not ask another window for a terminal nobody here
+sees). Panel: a tab per terminal, `+` (the focused pane's folder **as an
+id**, `terminalSpecFor`; since WP-B a focused chat pane gives its *own*
+conversation, and any other pane defers to `activeChat` — the selected chat,
+else the one selected last — the chat File and Preview panes already follow,
+not W-6's input rule, which is about where words go), `▾` (Home or a project), × per tab; **Ctrl+` opens
+a terminal when there is none, ⬓ never does**; a dot on ⬓ means one in the
+hidden panel exited. In a terminal **Ctrl+B, Ctrl+Alt+B and Ctrl+_ are the
+shell's** (`terminalTakesKey`), the zoom keys, Ctrl+` and Ctrl+Alt+N stay the
+HUD's, and every key stops at the terminal (Space is never push-to-talk).
+**Under a card nothing reaches the shell**: `disableStdin`, a key filter
+that lets every key bubble (Escape denies), a guard on the bytes, a paste in
+flight waits, and the card takes focus (WP-A). **Pastes**: 16 KiB chunks
+paced 8 ms from a queue that belongs to **one socket** (`InputGate`);
+`input_dropped` throws the rest away at once and typing waits for the
+owner's **Resume typing** (`input_resume`, retried while refused, with
+Reattach/close as the way out — Ctrl-C is not); a late in-flight
+`input_dropped` adds to the notice and never undoes a resume; **a socket
+that closes takes its paste with it**, never continued on the next.
+**Every paste is inert as a control stream**: a capture-phase listener on the
+host takes it before xterm, strips ESC and C1 (`cleanPaste`), then
+`term.paste()`s it — a pasted `ESC[201~` used to end bracketed paste early
+and run the rest. Keys or a paste dropped while connecting (or not running
+here) are said, never swallowed (an `unsent` notice; only the owner's own
+gestures count, never xterm's answers).
+Takeover asks here (Let it / Keep it, disabled under a card — unanswered is
+kept); "taken", "refused", "exited (code N)" with Restart/Close, "ended"
+with New terminal here (the spec it was opened with, remembered under
+`jarvis.hud.terminals`); a `busy` terminal is asked about before it closes.
+A `terminal_attached` not matched to one of the window's own sockets
+(`AttachLedger`) is a quiet, dismissible notice. Each terminal's bar has the
+"Jarvis can read" switch (owner-only PATCH) and an integration note (`none`,
+or `inactive` when a configured shell has not `marked` 4 s after attaching).
+**An OSC title is text** in the pane header and the bar, capped at 80 —
+**never `document.title`**; links open only for http(s), only on Ctrl+click
+(`judgeLink`); "Open in Preview" for loopback links is WP-E's. **xterm under
+CSS zoom**: the host is counter-zoomed (`zoom: 1/level`) and the font scaled
+by the zoom, so cells and the pointer are measured unzoomed. Free checks:
+`terminal.test.ts`, `workspace.test.ts`, and
+`tests/face/hud_v2_terminal_check.py` — the PTY is **played in the browser
+by `route_web_socket`** (`FakePty`; no shell, no HOME) against a
+`MockDaemon(0)` of its own, the `/terminals` routes in
+`hud_v2_mock_terminals.py`; `hud_v2_layout_check`'s 2×2 grid now holds a
+terminal under the card. **`hud_v2_check.guard_live` refuses HTTP and
+WebSockets to 8402/8403/8405** (`ctx.route` never sees a socket), and the
+terminal suite proves the socket half against a port of its own. Two
+Playwright facts that cost a debugging round: sync route handlers run only
+during a Playwright call, so a wait on the fake's own state must pump
+(`pumping`); and a socket must not be closed from inside its own message
+handler. **Verified to bite**, each mutation in a scratch copy: the key
+filter's card hold alone (Escape stops denying), every hold layer (a typed
+`y⏎` and a pasted `rm -rf` reach the shell), the paste abort (128 of 128
+chunks sent), a queue that outlives its socket (the rest of the paste goes
+out ahead of the next keystroke — the direct check only bit once it typed
+on the new socket), the guard's socket half, and the three backend fixes.
+The review round added, each also shown to bite in a scratch copy: the
+pump's card hold (chunks left while a card was up), a late `input_dropped`
+undoing a resume, input during the replay (a reload, a drop and a 50k-query
+ring each typed answers), clearing the replay flag on `replayed` rather than
+after the parse, the pipe keeping an older socket's queue (vitest), the paste
+listener and `cleanPaste`, "in another window", ×'s fresh listing, a card
+that queues rather than drops, the `unsent` notice, and the tab's own set.
+The re-review's three, likewise: no backlog cap (a 40 MiB flood never
+reattached, the backlog unbounded), no reattach on overflow, a copied list
+trusted (a duplicated tab opened a socket), the navigation test or the
+`pagehide` release dropped, and the `finally` (vitest: the pipe stalls).
+The test-only write hook `__hudTerminals.paste` is gone; the hooks left are
+read-only (`backlog` among them).
+While typing is paused the notice cannot be dismissed: it holds the only
+way to resume.
 
 **Input bar declutter (2026-10-10, PR #29; ported onto WP-B and reviewed the
 same day).** The bar is `📎 [box] ⬆` over one row, `in: project · provider ▾ ·

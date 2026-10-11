@@ -14,6 +14,7 @@ import type { ThreadModels } from "./lib/threadmodel";
 import type { RosterView } from "./lib/roster";
 import type { ArchiveView, DeleteResult, ProjectImpact } from "./types";
 import { parseActivity, type ActivityView } from "./lib/activity";
+import { parseRow, parseRows, type InSpec } from "./lib/terminal";
 
 export class ApiError extends Error {
   status: number;
@@ -205,6 +206,27 @@ export const api = {
   /** Unpin a model from the roster (the config default included). Refused
    * with a sentence when it would leave the default unlisted. Never selects. */
   removeModel: (id: string) => req<RosterView>("/models", json({ remove: id })),
+
+  // --- terminals (WP-C's routes; owner-only: this window's Origin) ----------
+  // Never an id the window did not get from the daemon, and the folder is
+  // always an id (`in`), never a path. The socket itself is in
+  // components/Terminal.tsx, built from `location` with a fresh ticket.
+  terminals: () => req<unknown>("/terminals").then(parseRows),
+  createTerminal: (body: { in: InSpec; cols?: number; rows?: number }) =>
+    req<unknown>("/terminals", json(body)).then((r) => {
+      const row = parseRow(r);
+      if (!row) throw new ApiError(500, "the daemon answered without a terminal");
+      return row;
+    }),
+  /** Single use, 30 seconds, this terminal only: fetched right before each attach. */
+  terminalTicket: (id: string) => req<{ ticket: string; expires_in: number }>(
+    `/terminals/${encodeURIComponent(id)}/ticket`, json({})),
+  /** The owner's "Jarvis can read" switch (W-2): exactly `{readable}`. */
+  setTerminalReadable: (id: string, readable: boolean) =>
+    req<unknown>(`/terminals/${encodeURIComponent(id)}`, patch({ readable })).then(parseRow),
+  closeTerminal: (id: string) =>
+    req<{ ok: boolean; id: string; exit_code: number | null }>(`/terminals/${encodeURIComponent(id)}`,
+      { method: "DELETE" }),
 
   // --- speech -------------------------------------------------------------
   async stt(blob: Blob): Promise<string> {

@@ -21,7 +21,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { api, subscribe } from "./api";
 import {
-  useStore, activePane, compatActions, currentProjectId, currentTask, flatState,
+  useStore, activeChat, activePane, compatActions, currentProjectId, currentTask, flatState,
   type ChatPatch,
 } from "./state/store";
 import { Sidebar } from "./components/Sidebar";
@@ -52,6 +52,8 @@ import { afterProjectGone, afterThreadGone, forgetLastProject, projectNamesTaken
 import { guildConfigured, ownerLine } from "./lib/discord";
 import { CollapseButton, Rail, Splitter, TitleBar, useLayout } from "./components/Layout";
 import { Workspace, type PaneInfo } from "./components/Workspace";
+import { terminalAttached } from "./components/Terminal";
+import { terminalSpecFor } from "./lib/terminal";
 import { maxWidth } from "./lib/layout";
 import { PANE_NOS, SHAPES, show as showOf, type PaneNo, type PaneSpec, type View } from "./lib/workspace";
 import { ActivitySync, clearsOnRead } from "./lib/activity";
@@ -871,6 +873,11 @@ export default function App() {
           break;
         case "_connected":
           void refreshActivity();
+          break;
+        case "terminal_attached":
+          // `{terminal_id, at}` only: the terminals say so when it was not
+          // this window's own attach (components/Terminal.tsx).
+          terminalAttached(data);
           break;
         default:
           break;
@@ -2093,6 +2100,22 @@ export default function App() {
             context={paneContext}
             selectedPane={selected}
             onView={setPaneView}
+            projects={state.projects}
+            // Where `+` opens a terminal: the folder of what the focused pane
+            // shows, as an id. A chat pane is its own conversation; any other
+            // pane defers to the chat the window is about (`activeChat`: the
+            // selected chat, else the one selected last) — the same chat
+            // File and Preview panes follow, so a terminal opened from an
+            // unpinned File pane lands where that pane points.
+            terminalIn={() => {
+              const n = view.ws.focused;
+              const spec = view.ws.panes[n - 1];
+              const chat = spec.view === "chat" ? state.chats[n] : activeChat(state);
+              return terminalSpecFor(spec.view, {
+                thread: chat.threadId, compose: chat.compose?.projectId ?? null,
+                project: paneProject(spec, n), task: state.taskId,
+              });
+            }}
           />
         </div>
         {drawn.rightFolded ? null : (

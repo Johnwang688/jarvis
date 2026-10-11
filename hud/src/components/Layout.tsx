@@ -21,11 +21,14 @@ import {
   type Fitted, type PaneLayout, type Side,
 } from "../lib/layout";
 import {
-  PANEL, PRESETS, SHAPES, TITLEBAR_H, equalSplit as equalSplitOf, fitWorkspace, focusPane, loadWorkspace,
-  panesOf, pinPane, resetWorkspace, saveWorkspace, setPanel, setPreset as setPresetOf, setPreviewUrl as setPreviewUrlOf,
-  setSplit as setSplitOf, setView as setViewOf, show as showOf, unpinProject as unpinProjectOf,
+  PANEL, PRESETS, SHAPES, TITLEBAR_H, equalSplit as equalSplitOf, fitWorkspace, focusPane, forgetTerminal as forgetTerminalOf,
+  loadWorkspace, panesOf, pinPane, resetWorkspace, saveWorkspace, setPaneTerminal, setPanel, setPreset as setPresetOf,
+  setPreviewUrl as setPreviewUrlOf, setSplit as setSplitOf, setView as setViewOf, show as showOf,
+  unpinProject as unpinProjectOf,
   type DrawnSet, type PaneNo, type Preset, type Split, type View, type Workspace, type WorkspaceFit,
 } from "../lib/workspace";
+import { inTerminal, terminalTakesKey } from "../lib/terminal";
+import { terminals, usePanelDot } from "./Terminal";
 
 export interface LayoutControl {
   zoom: number;
@@ -55,6 +58,10 @@ export interface LayoutControl {
   /** A project went away; panes in `keep` (holding an unsaved edit) stay pinned. */
   unpinProject: (projectId: string, keep?: readonly PaneNo[]) => void;
   setPreviewUrl: (pane: PaneNo, url: string) => void;
+  /** The terminal a terminal pane shows (null: choose again); no other pane keeps it (W-1). */
+  setTerminal: (pane: PaneNo, id: string | null) => void;
+  /** A terminal was closed or ended: no pane holds it any more. */
+  forgetTerminal: (id: string) => void;
   setSplit: (preset: Preset, split: Partial<Split>) => void;
   equalSplit: (preset: Preset) => void;
   togglePanel: () => void;
@@ -163,6 +170,8 @@ export function useLayout(blocked = false): LayoutControl {
     (projectId: string, keep: readonly PaneNo[] = []) => setWs((w) => unpinProjectOf(w, projectId, keep)), [],
   );
   const setPreviewUrl = useCallback((pane: PaneNo, url: string) => setWs((w) => setPreviewUrlOf(w, pane, url)), []);
+  const setTerminal = useCallback((pane: PaneNo, id: string | null) => setWs((w) => setPaneTerminal(w, pane, id)), []);
+  const forgetTerminal = useCallback((id: string) => setWs((w) => forgetTerminalOf(w, id)), []);
   const setSplit = useCallback(
     (preset: Preset, split: Partial<Split>) => setWs((w) => setSplitOf(w, preset, split)), [],
   );
@@ -208,6 +217,10 @@ export function useLayout(blocked = false): LayoutControl {
         e.preventDefault();
         return;
       }
+      // In a terminal the shell gets Ctrl+B and Ctrl+Alt+B (readline back-
+      // char; page up in less and vim) and Ctrl+_ (readline undo). The zoom
+      // keys, Ctrl+` and Ctrl+Alt+N stay the HUD's there too.
+      if (inTerminal(e.target) && terminalTakesKey(what, e.key)) return;
       if (what === "toggleLeft" || what === "toggleRight") {
         if (inMonaco(e.target)) return;
         e.preventDefault();
@@ -217,7 +230,11 @@ export function useLayout(blocked = false): LayoutControl {
       }
       if (what === "togglePanel") {
         e.preventDefault();
-        if (!e.repeat) togglePanel();
+        if (e.repeat) return;
+        const opening = !now.current.fit.panel.open;
+        togglePanel();
+        // VS Code's key: opening the panel opens a terminal when there is none.
+        if (opening) void terminals.keyOpened();
         return;
       }
       if (what === "focus1" || what === "focus2" || what === "focus3" || what === "focus4") {
@@ -243,8 +260,8 @@ export function useLayout(blocked = false): LayoutControl {
   return {
     zoom, layout, fitted, available, availableH, ws, fit,
     setZoom, zoomBy, setWidth, resetWidth, open, fold, toggle,
-    setPreset, setView, focus, show, pin, unpinProject, setPreviewUrl, setSplit, equalSplit,
-    togglePanel, setPanelHeight, resetPanelHeight, resetAll,
+    setPreset, setView, focus, show, pin, unpinProject, setPreviewUrl, setTerminal, forgetTerminal, setSplit,
+    equalSplit, togglePanel, setPanelHeight, resetPanelHeight, resetAll,
   };
 }
 
@@ -752,6 +769,8 @@ export function TitleBar(props: {
   const sides = v.fit.sides;
   const folded = v.available < TITLE_FOLD_W;
   const dropped = v.fit.dropped;
+  // A terminal in the hidden panel has exited (plan §2.3): a dot on ⬓.
+  const panelDot = usePanelDot() && !v.fit.panel.open;
   const toggles: { area: "left" | "panel" | "right"; open: boolean; auto: boolean; act: () => void }[] = [
     { area: "left", open: !sides.leftFolded, auto: sides.autoLeft, act: () => v.toggle("left") },
     { area: "panel", open: v.fit.panel.open, auto: v.fit.panel.auto, act: v.togglePanel },
@@ -833,6 +852,9 @@ export function TitleBar(props: {
             onClick={t.act}
           >
             <AreaIcon area={t.area} open={t.open} />
+            {t.area === "panel" && panelDot ? (
+              <span className="tb-dot" data-testid="toggle-panel-dot" title="A terminal in the panel has exited" />
+            ) : null}
           </button>
         ))}
       </div>
