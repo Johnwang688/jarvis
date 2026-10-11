@@ -664,11 +664,41 @@ def _dynamic(arg: str) -> bool:
     return "$" in arg or "`" in arg or "{}" in arg or "\x01" in arg
 
 
-def reads_environment(source: str, loaded: bool = False) -> bool:
+_GETENV_CALL = re.compile(r"\s*\(")
+_GETENV_EMPTY = re.compile(r"\s*\(\s*\)")
+_GETENV_EMPTY_IN_CODE = re.compile(r"\s*\(\s*\)\s*[);,.\]]")
+
+
+def _explicit(ref: str, source: str, end: int) -> bool:
+    """Is this environment reference unmistakably code? `ENV[`/`ENV.`,
+    `$ENV{`, a getenv *call* (an empty one followed by code punctuation:
+    `print_r(getenv());`), and the dotted forms — never the bare words
+    `ENV`, `env:`, `environ` or `getenv`, which prose and YAML hold."""
+    if ref == "ENV":
+        return re.match(r"\s*[\[.]", source[end:end + 8]) is not None
+    if ref in ("env:", "environ"):
+        return False
+    if ref == "$ENV":
+        return source[end:end + 8].lstrip().startswith("{")
+    if ref.endswith("getenv") or ref.startswith("GetEnvironment"):
+        if _GETENV_CALL.match(source, end) is None:
+            return False
+        if _GETENV_EMPTY.match(source, end) is not None:
+            return _GETENV_EMPTY_IN_CODE.match(source, end) is not None
+    return True
+
+
+def reads_environment(source: str, loaded: bool = False, explicit: bool = False) -> bool:
     """Does an interpreter's inline source print the environment: the whole of
     it, a variable whose name looks secret, or — after an `--env-file` loaded
-    one — any variable at all?"""
+    one — any variable at all? With `explicit` (a REPL or here-document line
+    read off the screen, whose consumer is unknown), only references that are
+    unmistakably code count (`_explicit`; 2026-10-11 third review: a YAML
+    `env:` or a Dockerfile `ENV` line in a here-document is not an
+    environment read)."""
     for ref in _ENV_REF.finditer(source):
+        if explicit and not _explicit(ref.group(), source, ref.end()):
+            continue
         if loaded:
             return True
         if ref.group().endswith(":"):
@@ -715,6 +745,11 @@ def _interpreter_parts(prog: str, args: list[str]):
     inline_s, valued_s, glued_s, inline_l, valued_l = _INTERPRETER_OPTIONS.get(
         prog, ("", "", "", frozenset(), frozenset()))
     sources: list[str] = []
+    # An inline-source option whose next argument looked like an option
+    # (`node --print -e x`, `node -pe -- x`): the source is still to come.
+    # Where that is ambiguous the parse fails toward refusing: the first
+    # operand left over is judged as a source too (2026-10-11 third review).
+    wants_source = False
     i = 0
     while i < len(args):
         arg = args[i]
@@ -726,8 +761,16 @@ def _interpreter_parts(prog: str, args: list[str]):
         if arg.startswith("--"):
             name, eq, value = arg.partition("=")
             if name in inline_l:
-                sources.append(value if eq else (args[i + 1] if i + 1 < len(args) else ""))
-                i += 1 if eq else 2
+                following = args[i + 1] if i + 1 < len(args) else ""
+                if eq:
+                    sources.append(value)
+                    i += 1
+                elif following.startswith("-") and prog in _NEXT_ARGUMENT_SOURCES:
+                    wants_source = True                    # `--print -e x`, `--eval -- x`
+                    i += 1
+                else:
+                    sources.append(following)
+                    i += 2
             else:
                 i += 2 if (name in valued_l and not eq) else 1
             continue
@@ -741,7 +784,9 @@ def _interpreter_parts(prog: str, args: list[str]):
                 if step == 1 and not following.startswith("-"):
                     sources.append(following)              # `-pe`: one source, the next argument
                     step = 2
-                continue                                   # `-p -e x`: the source is -e's
+                elif step == 1:
+                    wants_source = True                    # `-p -e x`, `-pe -- x`: still to come
+                continue
             if letter in glued_s:
                 if letter in "l0":                         # perl -l[octal], -0[digits]: the cluster goes on
                     while j < len(arg) and (arg[j].isdigit() or (letter == "0" and arg[j] in "xX")):
@@ -760,10 +805,17 @@ def _interpreter_parts(prog: str, args: list[str]):
                 break
         i += step
     rest = args[i:]
+    if wants_source and rest:
+        sources.append(rest[0])
     if prog in ("deno", "bun") and rest and rest[0] in ("run", "eval", "serve", "test", "bench", "x"):
-        verb, rest = rest[0], _skip_options(rest[1:], valued_l)
+        verb = rest[0]
         if verb == "eval":
+            rest = _skip_options(rest[1:], valued_l)
             return sources + rest[:1], None, None, rest[1:]
+        # `bun run -e '…'`, `deno run -A main.ts`: the verb's own options are
+        # the interpreter's, so they are parsed again, not skipped.
+        more, script, module, after = _interpreter_parts(prog, rest[1:])
+        return (None if more is None else sources + more), script, module, after
     return sources, (rest[0] if rest else None), None, rest[1:]
 
 
@@ -1228,7 +1280,7 @@ _PROMPT_WORD = re.compile(r"\s*[^\s" + _PROMPT_MARKS + r"]*[" + _PROMPT_MARKS + 
 # Input to a REPL or a here-document at a line's start (`>>> `, `... `, `> `):
 # what follows is source the interpreter runs, so an environment read there
 # prints the environment (2026-10-11 delta review).
-_REPL_INPUT = re.compile(r"\s*(?:>>>|\.\.\.|>)\s+")
+_REPL_INPUT = re.compile(r"\s*(?:php\s*>|>>>|\.\.\.|>)\s+")
 
 
 def shows_printer(line: str, budget: Budget | None = None) -> bool:
@@ -1265,9 +1317,8 @@ def shows_printer(line: str, budget: Budget | None = None) -> bool:
     if len(line) > SCAN_LINE_CAP and unseen(SCAN_LINE_CAP):
         return True                                        # past the scan: not seen, not read
     repl = _REPL_INPUT.match(scan)
-    if repl is not None and (reads_environment(scan[repl.end():repl.end() + CANDIDATE_CAP])
-                             or unseen(repl.end() + CANDIDATE_CAP)):
-        return True
+    if repl is not None and reads_environment(scan[repl.end():], explicit=True):
+        return True                                        # the whole line: a regex pass, no cap
     if not (_has_trigger(flat) or protected_in(flat)):
         return False
     lead = len(scan) - len(scan.lstrip())

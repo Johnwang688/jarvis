@@ -1018,6 +1018,75 @@ class DeltaReview(unittest.TestCase):
                 self.assertTrue(G.prints_secrets(command), command)
 
 
+class ThirdReview(unittest.TestCase):
+    """2026-10-11 third review of 38cb5e6. MEDIUM: the REPL/here-document
+    text rule read every `> `/`>>> `/`... ` line as interpreter input and
+    counted the bare words `ENV`, `env:` and `getenv` as environment reads,
+    so a here-doc of a manifest or a Dockerfile, a README blockquote, an
+    email-style quote or a REPL assignment refused the read (and one such
+    line refused everything after it). LOW: long options and `--` let a
+    node/bun source slip past the parser, and `bun run -e` was skipped."""
+
+    MUST_PASS = {
+        "a manifest here-doc into kubectl": (
+            b"$ cat <<EOF | kubectl apply -f -\r\n> apiVersion: v1\r\n> kind: Pod\r\n> spec:\r\n"
+            b">   containers:\r\n>   - name: app\r\n>     image: app:1\r\n>     env:\r\n>     - name: MODE\r\n"
+            b">       value: prod\r\n> EOF\r\npod/app created\r\n$ "),
+        "a Dockerfile here-doc": (
+            b"$ cat > Dockerfile <<'EOF'\r\n> FROM node:20\r\n> ENV NODE_ENV=production\r\n"
+            b"> CMD [\"node\", \"server.js\"]\r\n> EOF\r\n$ "),
+        "a README with blockquotes": (
+            b"$ cat README.md\r\n# App\r\n> Set the ENV variable before starting.\r\n"
+            b"> The getenv helper reads one variable.\r\nDone.\r\n$ "),
+        "an email-style quote in a commit message": (
+            b"$ git log -1\r\ncommit abc1234\r\n\r\n    Read config once\r\n\r\n"
+            b"    > we should read ENV in getenv()\r\n    Agreed.\r\n$ "),
+        "a Python REPL assigning ENV": b">>> ENV = 'prod'\r\n>>> print(ENV)\r\nprod\r\n>>> ",
+        "a continuation line holding env:": b">>> cfg = {\r\n...     env: {}\r\n... }\r\n>>> ",
+    }
+    MUST_REFUSE = {
+        "a Node REPL": b"> process.env\r\n{ HOME: '/home/x' }\r\n> ",
+        "a Python REPL": b">>> os.environ['API_KEY']\r\n'x'\r\n>>> ",
+        "a here-doc into python": b"$ python3 <<EOF\r\n> import os\r\n> print(os.environ)\r\n> EOF\r\n{}\r\n$ ",
+        "a PHP shell": b"php > print_r(getenv());\r\nArray ()\r\nphp > ",
+    }
+
+    def test_only_explicit_environment_reads_count_on_input_lines(self):
+        for name, data in self.MUST_PASS.items():
+            with self.subTest(must="pass", case=name):
+                verdict = G.judge(data + b"\r\nafter it\r\n", 0)
+                self.assertFalse(verdict.refused, name)
+                self.assertIn("after it", verdict.text)
+        for name, data in self.MUST_REFUSE.items():
+            with self.subTest(must="refuse", case=name):
+                self.assertTrue(G.judge(data, 0).refused, name)
+
+    def test_explicit_references(self):
+        for source in ("print(os.environ)", "process.env", "print_r(getenv());", "p ENV.to_h",
+                       "print $ENV{GITHUB_TOKEN}", "puts ENV['API_KEY']", "Bun.env", "Deno.env.toObject()"):
+            with self.subTest(source=source):
+                self.assertTrue(G.reads_environment(source, explicit=True), source)
+        for source in ("env:", "ENV NODE_ENV=production", "Set the ENV variable", "The getenv helper",
+                       "we should read ENV in getenv()", "ENV = 'prod'", "print(ENV)", "environ", "env: {}"):
+            with self.subTest(source=source):
+                self.assertFalse(G.reads_environment(source, explicit=True), source)
+        # Inline source on a command line keeps the broad reading.
+        self.assertTrue(G.prints_secrets("ruby -e 'p ENV'"))
+
+    def test_long_options_and_double_dashes(self):
+        for command in ("node --print -e process.env", "node --print --eval process.env", "node --eval -p process.env",
+                        "node -pe -- process.env", "node --print -- process.env",
+                        "bun run -e 'console.log(Bun.env)'", "bun --print -e Bun.env"):
+            with self.subTest(command=command):
+                self.assertTrue(G.prints_secrets(command), command)
+                self.assertTrue(G.shows_printer("john@host:~/app$ " + command), command)
+        for command in ("node --print 1", "node -pe -- 1", "bun run -e 1", "bun run dev",
+                        "bun run --env-file=.env.production dev", "deno run -A --env-file=.env main.ts",
+                        "node --eval 'console.log(1)'"):
+            with self.subTest(command=command):
+                self.assertFalse(G.prints_secrets(command), command)
+
+
 class FolderValues(unittest.TestCase):
     def test_env_variants_are_credential_files_here_but_templates_are_not(self):
         for name in (".env.production", ".env.staging.local", ".env.test", "dir/.env.prod"):
