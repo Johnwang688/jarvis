@@ -763,6 +763,16 @@ export function TitleBar(props: {
   const more = useRef<HTMLButtonElement>(null);
   const closeLayout = useCallback(() => setLayoutMenu(null), []);
   const closeTools = useCallback(() => setToolsMenu(null), []);
+  // Where a menu opens is read **in the click**, never inside the updater:
+  // React runs an updater during the click only when nothing is pending, and
+  // otherwise at render time, when the event's `currentTarget` is already
+  // null — `getBoundingClientRect` then threw inside render and, with nothing
+  // to catch it, unmounted the whole window, an approval card included (three
+  // quick clicks on ⊞ did it). An updater reads only its own argument.
+  const toggleMenu = (set: typeof setLayoutMenu, e: React.MouseEvent<HTMLButtonElement>) => {
+    const at = menuAt(e.currentTarget, v.zoom);
+    set((m) => (m ? null : at));
+  };
 
   // An authorization card closes any open menu: nothing behind it may move.
   useEffect(() => {
@@ -797,7 +807,7 @@ export function TitleBar(props: {
             aria-expanded={!!toolsMenu}
             disabled={blocked}
             onMouseDown={(e) => e.stopPropagation()}
-            onClick={(e) => setToolsMenu((m) => (m ? null : menuAt(e.currentTarget, v.zoom)))}
+            onClick={(e) => toggleMenu(setToolsMenu, e)}
           >
             ⋯
           </button>
@@ -838,7 +848,7 @@ export function TitleBar(props: {
           data-dropped={dropped || undefined}
           disabled={blocked}
           onMouseDown={(e) => e.stopPropagation()}
-          onClick={(e) => setLayoutMenu((m) => (m ? null : menuAt(e.currentTarget, v.zoom)))}
+          onClick={(e) => toggleMenu(setLayoutMenu, e)}
         >
           <AreaIcon area="grid" open={false} />
           {dropped ? <span className="tb-badge" data-testid="layout-badge">{dropped}</span> : null}

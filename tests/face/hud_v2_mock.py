@@ -533,6 +533,10 @@ class MockDaemon:
         # `/status` says every HUD and API response refuses to be framed
         # (WP-E); a test turns it off to play a daemon too old to say so.
         self.frame_hardened = True
+        # While `stt_gate` is an Event, `POST /stt` is recorded on arrival and
+        # answers only once the Event is set: a transcript still in flight
+        # (the crash checks land one after the window stopped drawing).
+        self.stt_gate: threading.Event | None = None
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -755,6 +759,9 @@ class MockDaemon:
                     raw = self.rfile.read(n) if n else b""
                     self._record("POST", "/stt", {"bytes": len(raw),
                                                   "type": self.headers.get("Content-Type", "")})
+                    gate = mock.stt_gate
+                    if gate is not None:
+                        gate.wait(10)
                     return self._json({"text": w["stt_text"]})
                 body = self._body()
                 self._record("POST", path, body)

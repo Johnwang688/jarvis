@@ -788,6 +788,12 @@ export class TermSession {
     this.pumpTimer = null;
   }
 
+  /** The window stopped drawing: a paste going out stops here (`InputGate.abort`). */
+  abortPaste() {
+    this.gate.abort();
+    this.stopPump();
+  }
+
   private notePaste(kind: PasteNotice["kind"], bytes: number) {
     this.paste = { kind, bytes, resuming: false, refused: "" };
     this.mgr.changed();
@@ -1061,6 +1067,20 @@ export class TermManager {
   }
 
   // -- the workspace's settings, from an effect (never during a render) ----
+
+  /**
+   * A render error stopped the window drawing (components/Boundary.tsx). The
+   * sockets and their paste pumps live on here, outside React, so every paste
+   * going out is thrown away: nothing on screen could show its notice, its
+   * Resume or the card it should wait for. (The hold under a card is driven
+   * from App, above the boundary, so it still holds after a crash.) A link
+   * menu waiting for a choice goes too (WP-E): it was opened for a window
+   * that is gone, and Reload must not bring it back.
+   */
+  abortPastes() {
+    for (const s of this.sessions.values()) s.abortPaste();
+    this.closeLinkMenu();
+  }
 
   setBlocked(blocked: boolean) {
     if (this.blocked === blocked) return;
@@ -1368,6 +1388,8 @@ if (typeof window !== "undefined") {
     size: (id: string) => terminals.sessions.get(id)?.size ?? null,
     latched: (id: string) => terminals.sessions.get(id)?.latched ?? null,
     backlog: (id: string) => terminals.sessions.get(id)?.backlog ?? null,
+    // Whether input is held for a card (App drives it, above the boundary).
+    blocked: () => terminals.blocked,
   };
 }
 
