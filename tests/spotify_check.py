@@ -32,7 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import httpx
 
-from jarvis import config, spotify_auth, tools, workflows
+from jarvis import config, runtime, spotify_auth, tools, workflows
 from jarvis.tools import secrets, spotify
 
 REFRESH_TOKEN = "AQC-refresh-token-value-not-for-the-model-abc123"
@@ -466,6 +466,10 @@ def secrets_checks(token_path: Path) -> None:
     print("ok  secrets: the bundle is refused by name/glob/read_file, values scrubbed")
 
 
+def spotify_group_names() -> tuple[str, ...]:
+    return tools.GROUPS["spotify"].all_names()
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory() as tmp:
         token_path = Path(tmp) / "spotify_token.json"
@@ -484,4 +488,10 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # dispatch() refuses when no toolset is bound (PR #34's follow-up), so
+    # this suite says what it calls directly — and is held to it. The group
+    # checks bind an agent's own set inside, as a turn would.
+    with runtime.tools_bound(
+        ["load_tools", "read_file", *spotify_group_names()]
+    ):
+        sys.exit(main())

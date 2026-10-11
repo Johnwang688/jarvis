@@ -26,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import httpx
 
+from jarvis import runtime
 from jarvis import config, google_auth, tools
 from jarvis.tools import secrets
 
@@ -254,4 +255,7 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # dispatch() refuses when no toolset is bound (PR #34's follow-up), so
+    # this suite says what it calls directly — and is held to it.
+    with runtime.tools_bound({"gmail_read", "gmail_search", "gmail_send", "read_file"}):
+        sys.exit(main())
