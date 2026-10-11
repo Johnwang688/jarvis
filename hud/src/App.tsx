@@ -39,7 +39,7 @@ import { AvatarPicker, ModelPicker, NewProject, NewTask, SettingsDialog, VoicePi
 import { ScheduleDialog } from "./components/ScheduleDialog";
 import { Orb } from "./components/Orb";
 import { Capture } from "./lib/capture";
-import { HINTS, isMuted, loadMode, outcomeFor, saveMode, type DictationMode } from "./lib/dictation";
+import { isMuted, loadMode, orbLine, outcomeFor, saveMode, type DictationMode } from "./lib/dictation";
 import { WakeGate, compileWake, matchesWake, WAKE_PATTERNS } from "./lib/wake";
 import type { Attachment, AvatarDesc, ChatMessage, Schedule, VoiceEntry } from "./types";
 import type { RosterView } from "./lib/roster";
@@ -77,6 +77,11 @@ const LIFECYCLE_KINDS = new Set([
 ]);
 /** How long a pane says why it refused to switch away from an unsaved edit. */
 const REFUSED_MS = 6000;
+/** Below this height (zoomed px, under the title bar) the mic strip folds into
+ * one button beside the orb: the sidebar needs those 44px for its rows more
+ * than the strip needs them (review of PR #29: 1920x700 at 160% showed under
+ * two thread rows). */
+const MIC_TIGHT_H = 560;
 
 /** One value per pane, all null: the window's per-pane refs start here. */
 const perPane = (): Record<PaneNo, string | null> => ({ 1: null, 2: null, 3: null, 4: null });
@@ -1751,6 +1756,18 @@ export default function App() {
   const ws = view.ws;
   // The side panes leave the centre what the drawn shape needs (one pane: 480).
   const mainMin = SHAPES[fit.drawn].minW;
+  // A short window folds the orb's mic strip into one button beside it.
+  const micTight = !drawn.leftFolded && view.availableH < MIC_TIGHT_H;
+  // What the orb says under itself (PR #29; the input bar's hint used to say
+  // it): the selected chat's turn status, else a card's question, else MIC
+  // MUTED, else the orb's state (lib/dictation `orbLine`). Folded, the orb is
+  // a 36px dot with no line under it, so the selected chat's bar says it.
+  const orbStatus = orbLine({
+    status: selected !== null ? state.chats[selected].status : "",
+    mode: state.dictation,
+    approvals: state.approvals.length,
+    orb: state.orb,
+  });
   const projectName = (id: string | null) => state.projects.find((p) => p.id === id)?.name || "…";
   const threadOf = (id: string | null) => (id ? state.threads.find((t) => t.id === id) || null : null);
   const drawnChats = fit.panes.filter((n) => ws.panes[n - 1].view === "chat");
@@ -1788,11 +1805,9 @@ export default function App() {
     const chat = state.chats[n];
     const thread = threadOf(chat.threadId);
     const target = n === selected;
-    // The selected chat's hint is the dictation strip's; another pane's says
-    // only what its own turn is doing.
-    const hint = target
-      ? chat.status || (state.approvals.length ? "ANSWER THE AUTHORIZATION" : HINTS[state.dictation])
-      : chat.status;
+    // Another chat pane's status line says only what its own turn is doing;
+    // the selected chat's is on the orb — here only while the orb is folded.
+    const status = !target ? chat.status : drawn.leftFolded ? orbStatus : null;
     const compose = chat.compose;
     return (
       <>
@@ -1804,10 +1819,7 @@ export default function App() {
           onCancelTask={cancelTask}
         />
         <InputBar
-          mode={state.dictation}
-          level={target ? state.level : 0}
-          hint={hint}
-          strip={target}
+          status={status}
           pendingTranscript={chat.pendingTranscript}
           // Not `disabled` under a card: everything outside the card is inert,
           // which keeps the box unreachable, and a disabled box dropped focus
@@ -1829,9 +1841,8 @@ export default function App() {
             },
             onNewProject: () => patch({ picker: "newProject" }),
           }}
-          modelChip={threadModel.chipFor(n)}
+          modelChip={threadModel.chipFor(n, view.zoom)}
           imageNote={threadModel.imageNoteFor(n)}
-          onModeChange={setMode}
           onSend={(text, files) => void send(n, text, files)}
           onTranscriptTaken={() => chatPatch(n, { pendingTranscript: "" })}
           running={runningHere(chat)}
@@ -2061,7 +2072,8 @@ export default function App() {
       <TitleBar view={view} blocked={blocked} onPicker={(which) => patch({ picker: which })} />
       <div
         id="shell"
-        className={(drawn.leftFolded ? "left-collapsed " : "") + (drawn.rightFolded ? "right-collapsed" : "")}
+        className={(drawn.leftFolded ? "left-collapsed " : "") + (drawn.rightFolded ? "right-collapsed " : "")
+          + (micTight ? "mic-tight" : "")}
         style={{ ["--left-w" as any]: `${drawn.left}px`, ["--right-w" as any]: `${drawn.right}px` }}
       >
         {drawn.leftFolded ? (
@@ -2218,8 +2230,12 @@ export default function App() {
         // A folded sidebar leaves a 36px rail: the orb shrinks into its foot
         // rather than sitting on top of the input bar.
         compact={drawn.leftFolded}
+        tight={micTight}
+        blocked={blocked}
         zoom={view.zoom}
-        status={state.orb === "idle" ? "" : state.orb}
+        status={orbStatus}
+        mode={state.dictation}
+        onModeChange={setMode}
         onPress={press}
         onRelease={release}
       />

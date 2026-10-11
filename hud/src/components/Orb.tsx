@@ -2,9 +2,24 @@
 // swap the outer one), the state palette, and push-to-talk. The avatar's face
 // is an <img> above the canvas, fixed size and pointer-events:none, so it can
 // neither cover the authorization card nor eat a click meant for it.
+//
+// The mic lives here too (2026-10-10): the dictation mode (AUTO / REVIEW /
+// OFF) and the level meter sit just above the orb, so everything about
+// listening is one place, and the selected chat's status is the line under
+// it. Where the strip cannot ride — a folded sidebar shrinks the dock to a
+// 36px mini orb, and a short window needs the sidebar's rows more than a
+// 44px strip — it folds into one button (`#modecycle`) that cycles the mode
+// (OFF → REVIEW → AUTO, lib/dictation `nextMode`) and goes red at OFF: above
+// the mini orb, or beside the full one.
+//
+// Under an authorization card none of it is a lever: everything outside the
+// card is inert (Approvals.tsx), and the mode buttons are disabled as well,
+// so a button that had focus when the card came up cannot be pressed by an
+// Enter or a Space behind it (review of PR #29).
 
 import { useEffect, useRef } from "react";
 import type { OrbState } from "../state/store";
+import { DICTATION_MODES, nextMode, type DictationMode } from "../lib/dictation";
 
 interface Ring {
   r: number;
@@ -67,8 +82,16 @@ export function Orb(props: {
   accent?: string | null;
   avatarUrl?: string | null;
   status?: string;
+  /** The dictation mode, and its change. */
+  mode: DictationMode;
+  onModeChange: (m: DictationMode) => void;
   /** Folded into the left rail's foot while the sidebar is hidden. */
   compact?: boolean;
+  /** A short window: the strip folds into the one cycling button, beside the
+   * orb, so the sidebar keeps its rows. */
+  tight?: boolean;
+  /** An authorization card is up: the mode buttons are disabled. */
+  blocked?: boolean;
   /** The HUD zoom in percent: the canvas is drawn at that many more pixels. */
   zoom?: number;
   onPress: () => void;
@@ -178,8 +201,35 @@ export function Orb(props: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.avatarUrl, props.zoom]);
 
+  const next = nextMode(props.mode);
+  const folded = !!props.compact || !!props.tight;
   return (
-    <div id="orbdock" className={props.compact ? "mini" : undefined}>
+    <>
+    <div
+      id="orbdock"
+      className={props.compact ? "mini" : props.tight ? "tight" : undefined}
+      data-mode={props.mode}
+    >
+      <div id="micstrip">
+        <div id="dictation" data-testid="dictation" title="What happens to what you say: AUTO sends it, REVIEW puts it in the box, OFF mutes the mic">
+          {DICTATION_MODES.map((m) => (
+            <button
+              type="button"
+              key={m}
+              data-testid={`dictation-${m}`}
+              className={(props.mode === m ? "on " : "") + (m === "off" ? "off" : "")}
+              aria-pressed={props.mode === m}
+              disabled={props.blocked}
+              onClick={() => props.onModeChange(m)}
+            >
+              {m}
+            </button>
+          ))}
+        </div>
+        <div id="level" data-testid="level" data-level={props.level.toFixed(3)}>
+          <i style={{ width: `${Math.min(100, props.level * 100)}%` }} />
+        </div>
+      </div>
       <canvas
         ref={canvasRef}
         id="orb"
@@ -205,7 +255,28 @@ export function Orb(props: {
           }}
         />
       ) : null}
-      <div className="st" id="orbstatus">{props.status || ""}</div>
+      <div className="st" id="orbstatus" data-testid="orb-status" title={props.status || undefined}>
+        {props.status || ""}
+      </div>
     </div>
+    {folded ? (
+      // The dock is scaled down to a 36px mini orb, and so would a strip inside
+      // it be; a short window has no room above the orb for it. Either way the
+      // mode is one small button that cycles: above the mini orb, or beside the
+      // full one.
+      <button
+        type="button"
+        id="modecycle"
+        className={props.compact ? undefined : "beside"}
+        data-testid="dictation-cycle"
+        data-mode={props.mode}
+        disabled={props.blocked}
+        title={`Dictation: ${props.mode.toUpperCase()} — click for ${next.toUpperCase()}`}
+        onClick={() => props.onModeChange(next)}
+      >
+        {props.mode === "review" ? "rev" : props.mode}
+      </button>
+    ) : null}
+    </>
   );
 }

@@ -61,10 +61,24 @@ export function outcomeFor(mode: DictationMode): UtteranceOutcome {
   return mode === "auto" ? "send" : "review";
 }
 
-export const HINTS: Record<DictationMode, string> = {
-  auto: "DICTATION AUTO · SPEAK AND IT SENDS",
-  review: "DICTATION REVIEW · SPEAK, THEN SEND",
-  // Every other hint is an invitation to speak, and each would be a lie while
-  // nothing said can arrive.
-  off: "MIC MUTED · TYPE · OR UNMUTE IN THE INPUT BAR",
-};
+/**
+ * The line under the orb (PR #29, where the input bar's hint used to be): what
+ * the selected chat's turn is doing, else that a card is waiting for an
+ * answer, else that the mic is muted, else what the orb is doing — nothing
+ * while it idles. Only OFF ever says MUTED: every other line is an invitation
+ * to speak, or silence, and a muted mic must never look like it is listening
+ * (nor a live one look muted).
+ */
+export function orbLine(p: { status?: string; mode: DictationMode; approvals: number; orb: string }): string {
+  if (p.status) return p.status;
+  if (p.approvals > 0) return "ANSWER THE AUTHORIZATION";
+  if (isMuted(p.mode)) return "MIC MUTED";
+  return p.orb === "idle" ? "" : p.orb;
+}
+
+/** The folded sidebar's one mode button cycles OFF → REVIEW → AUTO → OFF: one
+ * click from muted never lands on a mic that sends on its own (the reasoning
+ * that boots a fresh window into REVIEW). */
+export function nextMode(mode: DictationMode): DictationMode {
+  return mode === "off" ? "review" : mode === "review" ? "auto" : "off";
+}
