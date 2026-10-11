@@ -564,6 +564,71 @@ def late_landing_checks() -> None:
               "clicked, in four shapes; a same-origin pushState is fine")
 
 
+def read_gate_checks() -> None:
+    """BR-0, the two guards no timing reaches on its own.
+
+    The scan reads and stamps only the document whose origin was judged: given
+    another origin it reports `moved` and stamps no ref. And a screenshot is
+    judged after the capture too: a page that moves onto a control port while
+    it is taken is backed out of and the picture withheld.
+    """
+    from jarvis import browser as browser_mod
+
+    class Page(SimpleHTTPRequestHandler):
+        def do_GET(self):
+            body = b"<!doctype html><html><body><button>press</button><p>text</p></body></html>"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    site = ThreadingHTTPServer(("127.0.0.1", 0), Page)
+    control = ThreadingHTTPServer(("127.0.0.1", 0), Page)
+    for server in (site, control):
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+    real = config.FACE_PORT
+    config.FACE_PORT = control.server_address[1]          # the stand-in is the face now
+    session = Session(BrowserPolicy(headless=True))
+    try:
+        session.goto(f"http://localhost:{site.server_address[1]}/")
+        args = {**Session._scan_args(120, text=True), "origin": "http://elsewhere.example"}
+        result = session._submit(lambda: session.page.evaluate(browser_mod._SNAPSHOT_JS, args))
+        assert result.get("moved", "").startswith("http://localhost:"), result
+        assert result["elements"] == [] and result["text"] == "", result
+        stamped = session.eval_js("document.querySelectorAll('[data-jarvis-ref]').length")
+        assert stamped == 0, f"a document nobody judged got {stamped} refs"
+        assert "press" in session.snapshot(), "the judged document is still read"
+
+        hud = f"http://localhost:{config.FACE_PORT}/"
+
+        def moving_capture(page, original):
+            def capture(**kwargs):
+                page.evaluate(f"location.href = '{hud}'")
+                page.wait_for_timeout(500)
+                return original(**kwargs)
+            return capture
+
+        session._submit(lambda: setattr(session.page, "screenshot",
+                                        moving_capture(session.page, session.page.screenshot)))
+        try:
+            session.screenshot_b64()
+            raise AssertionError("a picture taken across a move onto a control port was returned")
+        except BrowserError as exc:
+            assert "control plane" in str(exc), exc
+    finally:
+        config.FACE_PORT = real
+        session.stop(trace_name="policy-check-gate")
+        for server in (site, control):
+            server.shutdown()
+            server.server_close()
+    print("ok  browser: the scan reads only the judged document; a screenshot across a move "
+          "onto a control port is withheld")
+
+
 def landing_guard_checks() -> None:
     """A pinned session that gets redirected off-list backs out to about:blank."""
 
@@ -615,6 +680,7 @@ def main() -> int:
     landing_guard_checks()
     control_port_landing_checks()
     late_landing_checks()
+    read_gate_checks()
     print("\nall policy checks passed")
     return 0
 
