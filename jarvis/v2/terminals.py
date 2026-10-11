@@ -96,7 +96,20 @@ between the marks; a nested shell, `sudo -i`, `ssh` or `python` puts
 everything under the outer command's span; a line kept out of history
 records only its first command. WP-F's text-pattern refusals must always
 apply, marks or no marks. `readable` is the owner's "Jarvis can read"
-switch, on by default; nothing reads it yet.
+switch, on by default.
+
+**What Jarvis can read (WP-F, decisions W-2).** `read_for_tool` is the one
+way in for an agent, and it only reads: it resolves a terminal from what the
+HUD shows (its id, title or number), refuses one whose switch is off by
+name, renders the ring's normal buffer as plain text (`terminal_text`: no
+escape sequences, never the alternate screen — the state at the start of a
+ring that has dropped bytes comes from an `AltTracker` fed every dropped
+byte), and hands it to `terminal_guard`, which refuses the whole read when
+it may hold a credential and withholds lines that look like one. Every read
+that reaches a terminal, refused or not, publishes `terminal_read` with
+exactly `{terminal_id, lines, at, refused}`: never output, a command or a
+reason. The `terminal_read` tool (jarvis/v2/tools/terminal_read.py) imports
+this one function and nothing else from here.
 """
 from __future__ import annotations
 
@@ -122,9 +135,9 @@ import threading
 import time
 from urllib.parse import unquote_to_bytes
 
-from jarvis import config
+from jarvis import config, untrusted
 from .model import utcnow
-from . import ws
+from . import terminal_guard, terminal_text, ws
 
 LOG = logging.getLogger(__name__)
 
@@ -415,12 +428,18 @@ class Ring:
     """The last `cap` bytes of a terminal's output, in order, with the
     absolute stream offset of the first byte still held (`start`)."""
 
-    def __init__(self, cap: int = RING_BYTES):
+    def __init__(self, cap: int = RING_BYTES, on_drop=None):
         self.cap = cap
         self._chunks: collections.deque[bytes] = collections.deque()
         self._size = 0
         self.start = 0
         self._before = b""                     # the last byte dropped, if any
+        # Every byte the ring lets go, in order (the terminal's AltTracker).
+        self.on_drop = on_drop
+
+    def _dropped(self, data: bytes) -> None:
+        if data and self.on_drop is not None:
+            self.on_drop(data)
 
     @property
     def end(self) -> int:
@@ -436,6 +455,9 @@ class Ring:
             elif self._chunks:
                 self._before = self._chunks[-1][-1:]
             self.start = self.end + len(data) - self.cap
+            for chunk in self._chunks:
+                self._dropped(chunk)
+            self._dropped(data[:-self.cap])
             self._chunks.clear()
             self._chunks.append(data[-self.cap:])
             self._size = self.cap
@@ -450,10 +472,12 @@ class Ring:
             excess = self._size - self.cap
             if len(first) <= excess:
                 self._chunks.popleft()
+                self._dropped(first)
                 self._size -= len(first)
                 self.start += len(first)
                 self._before = first[-1:]
             else:
+                self._dropped(first[:excess])
                 self._chunks[0] = first[excess:]
                 self._size -= excess
                 self.start += excess
@@ -465,14 +489,19 @@ class Ring:
         the first newline in its first 64 KiB, so it does not begin
         mid-line; with no newline there it starts at the cut. An escape
         sequence that spans the cut, or that newline, can still be split."""
+        start, data, skip = self.view()
+        return start + skip, data[skip:]
+
+    def view(self) -> tuple[int, bytes, int]:
+        """(offset of the first byte held, every byte held, how many of them
+        `snapshot` leaves out at the front)."""
         data = b"".join(self._chunks)
-        start = self.start
-        if start > 0 and self._before != b"\n":
+        skip = 0
+        if self.start > 0 and self._before != b"\n":
             cut = data.find(b"\n", 0, 64 * 1024)
             if cut >= 0:
-                data = data[cut + 1:]
-                start += cut + 1
-        return start, data
+                skip = cut + 1
+        return self.start, data, skip
 
 
 @dataclass
@@ -598,13 +627,15 @@ class Marks:
 
 @dataclass(frozen=True)
 class History:
-    """What WP-F's `terminal_read` will read: the ring's bytes from `start`
+    """What WP-F's `terminal_read` reads: the ring's bytes from `start`
     and the command spans overlapping them. Bytes before `spans_from` lost
     their spans to the span cap and are unattributed. `integrated`: this
     terminal has marked a command; without it a reader has text patterns
     only. Spans are advisory either way (module note): the text-pattern
     refusals apply to every read. `prompt` is where the last signed prompt
-    mark began, None if there was none."""
+    mark began, None if there was none. `alt`: the alternate screen is in
+    force at `start` (from every byte the ring has dropped, and the ones the
+    replay cut leaves out), so a read never starts inside vim's screen."""
     start: int
     data: bytes
     spans: tuple
@@ -612,6 +643,7 @@ class History:
     integrated: bool
     readable: bool
     prompt: int | None = None
+    alt: bool = False
 
 
 # -- one terminal --------------------------------------------------------------------
@@ -639,7 +671,8 @@ class Terminal:
         self.readable = True
         self.exited = False
         self.exit_code: int | None = None
-        self._ring = Ring()
+        self._alt = terminal_text.AltTracker()  # the alternate screen, at the ring's start
+        self._ring = Ring(on_drop=self._alt.feed)
         self._marks = Marks(nonce)
         self._lock = threading.Lock()           # ring, marks, attachment, state
         self._io_lock = threading.RLock()       # the master fd's life
@@ -873,13 +906,16 @@ class Terminal:
                 "integrated": self._marks.integrated, "marked": self._marks.marked}
 
     def history(self) -> History:
-        """The ring and its command spans, for WP-F. No route reaches this."""
+        """The ring and its command spans, for WP-F (`read_for_tool`). No
+        route reaches this."""
         with self._lock:
-            start, data = self._ring.snapshot()
+            ring_start, held, skip = self._ring.view()
+            start, data = ring_start + skip, held[skip:]
+            alt = self._alt.at(held[:skip])
             spans = tuple(replace(s) for s in self._marks.spans
                           if s.end is None or s.end > start)
             return History(start, data, spans, self._marks.spans_from, self._marks.integrated,
-                           self.readable, self._marks.prompt)
+                           self.readable, self._marks.prompt, alt)
 
     # -- windows ---------------------------------------------------------------------
 
@@ -1182,6 +1218,84 @@ class Terminals:
             terminals = list(self._terminals.values())
         return [t.row() for t in terminals]
 
+    # -- what Jarvis can read (WP-F) -----------------------------------------------------
+
+    def install(self) -> None:
+        """Make these the terminals `read_for_tool` reads (the daemon, at start)."""
+        global _installed
+        with _installed_lock:
+            _installed = self
+
+    def uninstall(self) -> None:
+        global _installed
+        with _installed_lock:
+            if _installed is self:
+                _installed = None
+
+    def _resolve(self, spec) -> Terminal:
+        """A terminal from what the HUD shows: its id, its title (or the
+        folder part of it), or its number in the panel's order. Never a path."""
+        with self._lock:
+            terminals = list(self._terminals.values())
+        if not terminals:
+            raise TerminalReadError("no HUD terminal is open")
+        text = " ".join(str(spec if spec is not None else "").split())
+        if not text and len(terminals) == 1:
+            return terminals[0]
+        if _ID.fullmatch(text):
+            found = [t for t in terminals if t.id == text]
+        elif text.isdigit():
+            n = int(text)
+            found = [terminals[n - 1]] if 1 <= n <= len(terminals) else []
+        else:
+            want = text.casefold()
+            found = [t for t in terminals if " ".join(t.title.split()).casefold() == want]
+            if not found:
+                found = [t for t in terminals if " ".join(t.label.split()).casefold() == want]
+        if len(found) == 1:
+            return found[0]
+        listed = "; ".join(f"{i}. {t.title} (id {t.id})" for i, t in enumerate(terminals, 1))
+        named = untrusted.one_line(text, 60) or "nothing"
+        if found:
+            raise TerminalReadError(f"{named} names more than one terminal; use an id. Open: {listed}")
+        raise TerminalReadError(f"no terminal is called {named}. Open: {listed}")
+
+    def _read_published(self, terminal: Terminal, lines: int, refused: bool) -> None:
+        """`terminal_read`, so the HUD can say "Jarvis read 200 lines · 15:42"
+        on that terminal. The id, a count, the time and whether it was
+        refused: never output, a command, or why."""
+        LOG.info("terminal %s read by Jarvis (%d lines%s)", terminal.id, lines,
+                 ", refused" if refused else "")
+        if self._publish is None:
+            return
+        try:
+            self._publish({"kind": "terminal_read",
+                           "data": {"terminal_id": terminal.id, "lines": int(lines),
+                                    "at": utcnow(), "refused": bool(refused)}})
+        except Exception as exc:  # noqa: BLE001 — a bus problem never fails a read
+            LOG.warning("terminal %s: read not published (%s)", terminal.id, type(exc).__name__)
+
+    def read(self, spec, lines: int = terminal_guard.DEFAULT_LINES) -> "ToolRead":
+        terminal = self._resolve(spec)
+        if not terminal.readable:
+            self._read_published(terminal, 0, True)
+            return ToolRead(terminal.id, terminal.title, refused=READ_OFF)
+        history = terminal.history()
+        if not history.readable:
+            self._read_published(terminal, 0, True)
+            return ToolRead(terminal.id, terminal.title, refused=READ_OFF)
+        values = _secret_values(terminal.folder)
+        verdict = terminal_guard.judge(history.data, history.start, lines=lines, alt=history.alt,
+                                       rows=terminal.rows, spans=history.spans,
+                                       spans_from=history.spans_from,
+                                       integrated=history.integrated, values=values)
+        self._read_published(terminal, verdict.covered, verdict.refused)
+        if verdict.refused:
+            return ToolRead(terminal.id, terminal.title, refused=terminal_guard.REFUSAL,
+                            lines=verdict.covered)
+        return ToolRead(terminal.id, terminal.title, text=verdict.text, lines=verdict.covered,
+                        withheld=verdict.withheld, cut=verdict.cut, shortened=verdict.shortened)
+
     # -- tickets ---------------------------------------------------------------------
 
     def _expire(self, now: float) -> None:
@@ -1308,6 +1422,68 @@ class Terminals:
         for terminal in terminals:
             terminal.finish()
             LOG.info("terminal %s ended with Jarvis", terminal.id)
+
+
+# -- read_for_tool (WP-F) -----------------------------------------------------------------
+
+READ_OFF = "the owner has turned off reading for this terminal"
+
+
+class TerminalReadError(Exception):
+    """A read that names no terminal this daemon has, in a sentence."""
+
+
+@dataclass(frozen=True)
+class ToolRead:
+    """One read, for the tool: the lines (plain text, not yet fenced), a
+    refusal sentence, or — when no such terminal is open — an error sentence
+    (and no event). `lines` is how many lines the read covered."""
+    terminal_id: str
+    title: str
+    refused: str | None = None
+    error: str | None = None
+    text: str = ""
+    lines: int = 0
+    withheld: int = 0
+    cut: int = 0
+    shortened: int = 0
+
+
+_installed: Terminals | None = None
+_installed_lock = threading.Lock()
+
+
+def _secret_values(folder: str) -> list[str]:
+    """Rule 1's values: everything `secrets.secret_values()` reaches, plus
+    the `.env` files in the terminal's folder and its parents up to home."""
+    from jarvis.tools import secrets as v1_secrets
+    dirs = []
+    try:
+        here, home = Path(folder).resolve(), Path.home().resolve()
+        for directory in [here, *here.parents][:12]:
+            dirs.append(directory)
+            if directory == home:
+                break
+    except (OSError, RuntimeError, ValueError):
+        pass
+    return v1_secrets.secret_values(extra_dirs=dirs)
+
+
+def read_for_tool(terminal: str, lines: int = terminal_guard.DEFAULT_LINES) -> ToolRead:
+    """The `terminal_read` tool's one way in, and it only reads.
+
+    `terminal` is what the HUD shows (an id, a title, a number); `lines` is
+    clamped to 1–1000. When no such terminal is open the answer carries an
+    `error` sentence. Never writes to, resizes, focuses, attaches to, opens
+    or closes a terminal."""
+    with _installed_lock:
+        terminals = _installed
+    if terminals is None:
+        return ToolRead("", "", error="no HUD terminals are running here")
+    try:
+        return terminals.read(terminal, lines)
+    except TerminalReadError as exc:
+        return ToolRead("", "", error=str(exc))
 
 
 # -- routes (owner-only, the HUD listener) -----------------------------------------------

@@ -72,6 +72,13 @@ class Tool:
 
 REGISTRY: dict[str, Tool] = {}
 
+# Registered tools only an agent that names them gets: never in
+# `default_names()`, so no surface that takes "the whole registry" (v1's chat,
+# face and daemon, goals, attended tasks) picks one up by importing the module
+# that registers it. `terminal_read` (jarvis/v2/tools/terminal_read.py) is the
+# first: a desk feature the fast path names, and nothing else may hold.
+EXPLICIT_ONLY: set[str] = set()
+
 
 @dataclass(frozen=True)
 class ToolGroup:
@@ -160,6 +167,7 @@ def default_names() -> list[str]:
     # the exact cost this whole mechanism exists to avoid.
     if not available:
         hidden.add("load_tools")
+    hidden.update(EXPLICIT_ONLY)
     return [name for name in REGISTRY if name not in hidden]
 
 

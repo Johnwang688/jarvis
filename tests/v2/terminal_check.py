@@ -1194,12 +1194,25 @@ class capture_logs:
 
 class Leaks(Base):
     def test_output_reaches_no_bus_no_log_and_no_file(self):
+        import contextvars
+        from jarvis import runtime, tools
+        from jarvis.v2.tools import terminal_read  # noqa: F401  (registers the tool)
         marker = "zq-terminal-marker-" + secrets.token_hex(6)
         events = self.daemon.bus.subscribe()
+
+        def read():
+            ctx = contextvars.copy_context()
+            ctx.run(runtime.bind, desk={"present": True}, depth=0)
+            return ctx.run(tools.dispatch, "terminal_read",
+                           json.dumps({"terminal": tid, "lines": 20})).text
+
         with capture_logs() as records:
             tid, client = self.session()
             client.type(f"echo {marker}")
             client.wait_line(marker)
+            # Jarvis reads it (WP-F): the tool's answer holds the output,
+            # the bus and the log never do.
+            self.assertIn(marker, read())
             client.control({"type": "resize", "cols": 100, "rows": 30})
             self.owner("PATCH", f"/terminals/{tid}", {"readable": False})
             client.close()
@@ -1213,11 +1226,15 @@ class Leaks(Base):
             except Exception:
                 break
         # Lifecycle ids only, never output: one `terminal_attached` per attach
-        # (two here), each exactly {terminal_id, at}.
-        self.assertEqual([r["kind"] for r in drained], ["terminal_attached"] * 2, drained)
+        # (two here), each exactly {terminal_id, at} — and one `terminal_read`
+        # for the read, exactly {terminal_id, lines, at, refused}.
+        self.assertEqual(sorted(r["kind"] for r in drained),
+                         ["terminal_attached"] * 2 + ["terminal_read"], drained)
         for record in drained:
             self.assertEqual(set(record), {"kind", "data"})
-            self.assertEqual(set(record["data"]), {"terminal_id", "at"})
+            keys = ({"terminal_id", "at"} if record["kind"] == "terminal_attached"
+                    else {"terminal_id", "lines", "at", "refused"})
+            self.assertEqual(set(record["data"]), keys)
             self.assertEqual(record["data"]["terminal_id"], tid)
             self.assertRegex(record["data"]["at"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d")
         self.assertNotIn(marker, json.dumps(drained))
@@ -1231,11 +1248,23 @@ class Leaks(Base):
 
 
 class NoTool(Base):
-    """No tool, MCP tool, fast-path tool or Discord verb reaches a terminal."""
+    """No tool, MCP tool, fast-path tool or Discord verb reaches a terminal —
+    but one: `terminal_read` (WP-F), which imports exactly `read_for_tool`."""
 
     NEEDLES = re.compile(r"""['"]/terminals|\.terminals\b|import\s+terminals\b|\bterminals\s+import|"""
                          r"""jarvis\.v2\.terminals|\bTerminals\(|\bterminals\.(route|serve|create)""")
     ALLOWED = {"jarvis/v2/daemon.py", "jarvis/v2/hud_api.py", "jarvis/v2/terminals.py"}
+    # The one reader, and the one line it may hold.
+    READER = "jarvis/v2/tools/terminal_read.py"
+    READER_IMPORT = "from ..terminals import read_for_tool\n"
+    # What `read_for_tool` and everything it calls must never do.
+    WRITES = ("queue_input", "_write(", "resize(", ".control(", "attach(", "ticket(", "create(",
+              "close(", "hangup", "spawn(", "send_text", "send_binary", "readable =", "redeem(",
+              "os.write", "_terminals.pop", "serve(")
+
+    def _without_reader_import(self, text: str) -> str:
+        self.assertEqual(text.count(self.READER_IMPORT), 1, "the reader imports read_for_tool once")
+        return text.replace(self.READER_IMPORT, "")
 
     def test_no_tool_is_named_for_a_terminal(self):
         from jarvis import tools
@@ -1243,7 +1272,10 @@ class NoTool(Base):
         from jarvis.v2.providers import fastpath
         reachable = set(fastpath.FAST_TOOLS) | set(mcp.MCP_TOOLS) | set(tools.REGISTRY)
         self.assertTrue({"task_propose", "schedule_delete"} <= reachable)
-        self.assertEqual(sorted(n for n in reachable if "terminal" in n.lower()), [])
+        self.assertEqual(sorted(n for n in reachable if "terminal" in n.lower()), ["terminal_read"])
+        # jarvis-mcp cannot tell a chat from a task worker: it does not offer it.
+        self.assertNotIn("terminal_read", mcp.MCP_TOOLS)
+        self.assertFalse(tools.REGISTRY["terminal_read"].dangerous)
 
     def test_nothing_but_the_daemon_and_its_routes_reaches_the_module(self):
         repo = Path(__file__).resolve().parents[2]
@@ -1252,7 +1284,10 @@ class NoTool(Base):
             rel = path.relative_to(repo).as_posix()
             if rel in self.ALLOWED:
                 continue
-            if self.NEEDLES.search(path.read_text(encoding="utf-8")):
+            text = path.read_text(encoding="utf-8")
+            if rel == self.READER:
+                text = self._without_reader_import(text)
+            if self.NEEDLES.search(text):
                 offenders.append(rel)
         self.assertEqual(offenders, [])
         # And the tool modules the agent actually runs, by import.
@@ -1265,7 +1300,20 @@ class NoTool(Base):
             if func is not None:
                 modules.add(inspect.getmodule(func))
         for module in modules:
-            self.assertIsNone(self.NEEDLES.search(inspect.getsource(module)), module.__name__)
+            text = inspect.getsource(module)
+            if module.__name__ == "jarvis.v2.tools.terminal_read":
+                text = self._without_reader_import(text)
+                # It reaches the terminals through one call of that one function.
+                self.assertEqual(len(re.findall(r"\bread_for_tool\(", text)), 1)
+            self.assertIsNone(self.NEEDLES.search(text), module.__name__)
+
+    def test_the_reader_only_reads(self):
+        reader = [T.read_for_tool, T.Terminals.read, T.Terminals._resolve,
+                  T.Terminals._read_published, T.Terminal.history, T._secret_values]
+        for func in reader:
+            source = inspect.getsource(func)
+            for verb in self.WRITES:
+                self.assertNotIn(verb, source, f"{func.__qualname__} calls {verb}")
 
     def test_the_needles_would_catch_a_tool_that_reached_in(self):
         for text in ('client.post("/terminals", ...)', "daemon.terminals.create(x)",
