@@ -1434,17 +1434,22 @@ pane still shows may switch away, re-pin or close without asking. **Tabs** (`Pan
 pinned project, per-field fallback, only with a pin; `pinPane`/`unpinProject`
 drop them; `setEditors` pins and sets in one step; a WP-G2 `filePath` with no
 tabs reads as one): a single click opens an italic preview tab the next one
-replaces, a double click or an edit pins it (a narrow pane's tree waits 400 ms
-before folding so a double click lands), middle-click or × closes, the last
-tab on an unsaved edit asks Save / Don't save / Cancel. Reload over an edit
+replaces, a double click or an edit pins it (a narrow pane opens every file
+pinned and folds its tree at once), middle-click or × closes, the last
+tab on an unsaved edit asks Save / Don't save / Cancel. Past 40 tabs the
+oldest **clean** one closes; with every other tab dirty nothing opens and the
+pane says why (a dirty tab is never closed unasked). Reload over an edit
 still asks; opening another file just opens a tab. **One editor per pane**
 (`PaneEditor`), its model swapped, created at the first buffer and kept.
 **Saving is by content**: `expected_etag` (null: must not exist), 409 with the
 disk's etag, never a force; `expected_mtime` is accepted one more release.
 **The poll** (`buffers.poll`, App, every 2 s while visible and on focus):
 clean + moved → reload in place (`minimalEdit`, one undo stop each side, EOL
-followed), toast naming the writer (`tool_started` args through `touchedPath`
-→ `noteTouch`); dirty + moved or a 409 → the amber `ConflictBar` (Compare —
+followed), toast naming the writer (a `tool_started` of a **write** tool only
+— Write/Edit/MultiEdit/NotebookEdit, `apply_patch`, `write_file`/`edit_file`
+— through `writtenPaths` → `noteTouch`, **absolute paths only**, a relative
+one resolved from the thread's `cwd`, never matched by its tail); dirty +
+moved or a 409 → the amber `ConflictBar` (Compare —
 `CompareEditor`, the disk read-only left via a `jarvis-disk:` model, the
 buffer itself right, `useInlineViewWhenSpaceIsLimited: false`; Keep mine
 against the shown etag; Take theirs asks once, undoable); gone → Save to
@@ -1470,7 +1475,58 @@ Free checks: `lib/buffers.test.ts`, `state/buffers.test.ts`,
 the kinds, etag/409/stat, owner-only, env content kept off the bus, logs,
 API listener, diffs, preview and attachments; real Chromium for the owner's
 own page) and `tests/face/hud_v2_editor_check.py` (run by `hud_v2_check` on a
-`MockDaemon(0)` of its own, or alone).
+`MockDaemon(0)` of its own, or alone, under `hud_v2_check.guard` — no CSP
+violation).
+
+**ED-2's review round (2026-10-11, PR #49; each check failing on f869543).**
+The rules the two reviews left, in one place:
+- **An env file is never demoted** (MED1): `editor_policy.classify_bytes`
+  keeps a non-UTF-8 env file `env` (UTF-16LE from PowerShell 5.1, Latin-1)
+  with `Verdict.writable=False`; every read carries **`editable`**, and the
+  HUD's editability is `editableOf(kind, editable)` — the read's word and an
+  editable kind, both, never the kind alone — so the lock, closed Add to chat
+  and `dotenv` stay while the file is read-only (`editor-readonly-reason` too).
+- **The gate's readable exemption is the editor's own, and only for a gate
+  path that resolves to itself** (LOW2, `Policy._readable_gate`): not a
+  symlink anywhere on its way, not a protected/env name or login file, not in
+  a credential folder other than `~/.config/jarvis`. `hud_api.protected` (an
+  `@path`, the preview origin, a diff) asks `withheld_anywhere`, which has no
+  exemption — the allowlist is no longer attachable by `@path`.
+  `files._protected_state_paths()` is the unresolved list it reads.
+- **Withheld widened** (LOW3): `~/.docker/config.json` (and
+  `$DOCKER_CONFIG`), `~/.kube/config` (and `$KUBECONFIG`), `~/.npmrc` (and
+  `$NPM_CONFIG_USERCONFIG`), `~/.pypirc` as login files; v2's session
+  carriers (`V2_DATA_DIR/claude`, `V2_DATA_DIR/codex`) as credential folders;
+  a dropped file named like a store (`editor_policy.credential_name`) is never
+  attached. **The preview origin refuses any path with a hidden component
+  inside the project except `.well-known`, and anything under Jarvis's config
+  and data folders** (`hud_api._not_a_page`, `editor_policy.jarvis_dirs`): it
+  answers any loopback client, `fetch_page` included.
+- The atomic write's temp is `<name>.<x>.tmp` (an env file's temp is an env
+  file by name, LOW4); a save's unexpected `OSError` is 500 and a
+  `PermissionError` 403, never the dispatcher's 409 (the conflict bar); a tree
+  row is `env` only for a file; `jarvis/v2/editor_policy.py` is SELF_PROTECTED.
+- **`Buffers.releasePane` touches only buffers this pane held** (H1): × on any
+  pane used to discard every edit no tab held. **A project going away asks
+  the panes on it together** (H2, `panesLose`/`panesHolding`): two panes
+  sharing an edit each read "another pane holds it", both unpinned and the
+  edit lost every tab; now each one holding it stays pinned with
+  `pane-N-gone`, and FileTab stays keyed by the gone project (`goneHeld`).
+- Compare re-reads once per new conflict etag (M2, `rereadFor`; it looped at
+  ~340 GET/s while the disk disagreed with the poll, unbounded when hidden).
+  Loads dedupe by `abs` after the read (L1, `making`), and `makeModel` never
+  disposes a model at its URI — a second goes beside it under a query. An
+  unknown kind is `unknown`: read-only, closed to Jarvis (L2). The crash
+  prompt has **Save N unsaved files** (`hud-crashed-save`, `saveAll`; disabled
+  and inert under a card, L3). A reload in place says nothing while it runs
+  (`applying`, L4 — it used to read dirty for a moment and pin a preview
+  tab). A save's late answer lands only on its own buffer; a 409 whose etag
+  is not one asks the poll route and, still unknown, tells the owner; one
+  save at a time per buffer (a double Ctrl+S sends one PUT).
+Checks: `editor_files_check`'s `Review*` classes, the `review of PR #49`
+blocks in `state/buffers.test.ts` and `lib/buffers.test.ts`, and the
+`_rv49_*` sections of `hud_v2_editor_check` (the mock serves `editable`,
+`uneditable` and on-cue `stat_etags`).
 
 **The Graphite editor scheme, ED-3 (2026-10-11; plan §2.5, decisions E-4).**
 One scheme, no picker, **no syntax colour amber or red**. `lib/editorTheme.ts`

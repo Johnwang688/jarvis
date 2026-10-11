@@ -2477,6 +2477,26 @@ shell, the scrub, Claude's hook, Codex's grants) are ENV-1's, on this rule.
 `path:Lx-y` and a fence, into the selected chat's box, unsent) so the env
 rule has something to disable; ED-7 extends it.
 
+**ED-2's review round (2026-10-11, PR #49).** An env file is never demoted
+to `binary`: one that is not UTF-8 (UTF-16 from PowerShell 5.1 on `/mnt/c`,
+Latin-1) stays `env`, read-only, and every read now says `editable`, which
+the HUD follows rather than the kind. The gate's readable exemption holds
+only for a gate path that resolves to itself and is no credential by another
+rule, and only in the editor's own routes — an `@path`, a diff and the preview
+origin have none (a `models.json` symlinked to a key had made the key
+readable through all three). Withheld now also covers docker's, kube's,
+npm's and PyPI's credential stores and v2's session carriers, and **the
+preview origin refuses any dotfile path but `.well-known` and anything in
+Jarvis's own folders** — it answers every loopback client. In the window: a
+pane's × lets go of that pane's buffers only; a project going away keeps
+every pane on it that holds an edit no pane outside them holds (two panes
+sharing one edit used to let go together and orphan it); past 40 tabs only a
+clean one closes; Compare re-reads once per new conflict, never in a loop;
+one file reached through two projects at once is one model; a kind the window
+does not know is read-only and closed to Jarvis; the crash prompt can save
+every unsaved edit; a reload in place never reads as an edit; and the "changed
+on disk by …" toast names only a write tool, by absolute path.
+
 **Split and close (2026-10-11, WP-G2 of
 `docs/plans/2026-10-10-hud-split-panes-plan.md`; decisions S-2, S-6–S-8).**
 The owner asked for a × on every pane, more than once, and a VS Code split
