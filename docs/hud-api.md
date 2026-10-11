@@ -1153,7 +1153,22 @@ built from the listening sockets terminal sessions own.
   `allow` here, even as `text`, and it beat a card the owner had not
   answered.) Provider questions are Codex's alone; the Claude provider and
   the fast path raise none.
+- **`PATCH /projects/{id}`: a change to `profile`, `always_ask`,
+  `extra_dirs` or `root` is owner-only** (the HUD's listener and Origin,
+  else **403**, nothing changed). A field sent back with its current value
+  needs no owner, and `name`, `routing` and the rest are as before. The HUD
+  already PATCHes from its own listener; nothing else changes these fields
+  over HTTP.
 - **v1's browser and `fetch_page` refuse every Jarvis port**
   (`config.control_ports()`: 8402, 8404, 8405, 8406, configured and
   default; never 8403) in every loopback spelling — they used to refuse
-  only 8402, so a v1 agent could open the HUD on 8405.
+  only 8402, so a v1 agent could open the HUD on 8405. v1's browser judges
+  the page wherever it is, before every act and read (a page that moved
+  itself onto the HUD listener after goto's check was read and its card
+  clicked), and `fetch_page` judges each redirect hop before requesting it.
+  A *cross-site* navigation onto the HUD or API listener was already a 403
+  (`Sec-Fetch-Site`); a same-site page (another `localhost` port) was not.
+- **The built HUD (`config.HUD_DIST`, what `GET /` and `/assets/*` serve) is
+  not writable by any agent write tool**, v1's or a v2 provider's, nor by a
+  Codex write grant: its script runs with the HUD's Origin. Rebuilding it is
+  the owner's (`npm run build`).

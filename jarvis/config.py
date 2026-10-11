@@ -144,8 +144,9 @@ def ambiguous_authority(url: str) -> bool:
 def is_face_origin(url: str) -> bool:
     """True if `url` points at one of Jarvis's own control-plane listeners.
 
-    Tools refuse these (v1's browser, including where a page lands after a
-    redirect, and `fetch_page`, before the request and after redirects). The
+    Tools refuse these (v1's browser: a typed URL, and the page wherever it
+    is before every act and read, and at once when it moves onto one;
+    `fetch_page`: the URL and every redirect hop, before each request). The
     face and v2's HUD carry the approval gate for dangerous tools, and v2's
     API listener serves the very same HUD page — an agent that can drive its
     own HUD can click its own approval button, so the windows Jarvis must not
@@ -156,9 +157,8 @@ def is_face_origin(url: str) -> bool:
     knows (`*.localhost` included), on a control port — the URL's own port,
     or 80/443 by scheme when it has none. What it does not: a public name
     that resolves to loopback (`is_lan_host` refuses those, on every port),
-    a v2 daemon started on ports this process's configuration does not know
-    of, and a redirect hop `fetch_page` follows before checking where it
-    landed (a GET, which on no control-plane route approves anything).
+    and a v2 daemon started on ports this process's configuration does not
+    know of. A host two parsers read differently is `ambiguous_authority`'s.
     """
     from urllib.parse import urlparse
 
