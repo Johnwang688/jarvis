@@ -594,6 +594,35 @@ export function placeTerminals(
 }
 
 /**
+ * `terminal_read` on the bus (WP-F, decisions W-2): Jarvis read this terminal,
+ * or asked and was refused. The record is exactly `{terminal_id, lines, at,
+ * refused}` — never output, a command or a reason — and a record that does not
+ * have that shape is dropped whole; any other key is ignored, never drawn.
+ */
+export interface ReadNote {
+  terminalId: string;
+  lines: number;
+  at: string;
+  refused: boolean;
+}
+
+export function parseRead(data: unknown): ReadNote | null {
+  const d = (data ?? {}) as Record<string, unknown>;
+  if (!isTerminalId(d.terminal_id)) return null;
+  const lines = d.lines;
+  if (typeof lines !== "number" || !Number.isInteger(lines) || lines < 0 || lines > 100_000) return null;
+  if (typeof d.refused !== "boolean") return null;
+  return { terminalId: d.terminal_id, lines, at: typeof d.at === "string" ? d.at.slice(0, 64) : "",
+           refused: d.refused };
+}
+
+/** The terminal bar's note: "Jarvis read 200 lines · 15:42", or "refused a read · 15:42". */
+export function readNoteText(note: ReadNote, time: string): string {
+  if (note.refused) return `refused a read · ${time}`;
+  return `Jarvis read ${note.lines} line${note.lines === 1 ? "" : "s"} · ${time}`;
+}
+
+/**
  * Whose attach was it? Every attach publishes `terminal_attached` with only
  * `{terminal_id, at}` — a same-uid program can mint a ticket and attach to a
  * terminal no window shows, and over HTTP that looks like the HUD. The window

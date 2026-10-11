@@ -445,7 +445,9 @@ match wins.
 Rule 4 is where judgement enters, and it is bounded structurally: **the fast
 path has no tool that can change anything.** Its toolset is read-only files,
 `grep_files`, a single-page `fetch_page`, memory, threads/sessions read,
-`task_status`, and one new tool, `task_propose`. It cannot edit, run a
+`task_status`, and one new tool, `task_propose` — plus, since WP-F and only
+for the owner's own chat turn typed in the HUD, the read-only
+`terminal_read` (§18). It cannot edit, run a
 command, browse interactively, or spawn anything. So a fast-path turn that
 misjudges a request as chat can only *answer badly*; it cannot half-do work.
 
@@ -2095,6 +2097,59 @@ counter-zoomed with its font scaled instead; the 160% and 70% checks guard
 fit and selection. The headless suite plays the PTY inside the browser
 (`route_web_socket`), so no shell ever runs, and the live-port guard now
 refuses WebSockets too. "Open in Preview" for a dev server's link is WP-E.
+
+**Jarvis can read a terminal (2026-10-10, WP-F; decisions W-2).**
+`terminal_read(terminal, lines=200)` returns the last lines (at most 1000) of
+one terminal's **normal buffer** as plain text — escape sequences stripped,
+CR/backspace/cursor redraws collapsed to what the terminal shows, the
+alternate screen (vim, less, top) never read, even when the switch into it has
+left the ring (`terminal_text.AltTracker` is fed every byte the ring drops) —
+fenced as untrusted like a fetched page, and through `dispatch()`'s scrub. It
+is read-only structurally: the tool imports exactly `terminals.read_for_tool`.
+**Three rules refuse the whole read** with one sentence, "possible credential
+in this output", that never says what, where or which rule: an exact known
+value (every `.env` and token-bundle value Jarvis reaches plus the terminal
+folder's `.env` files, and their base64 at any alignment and URL-encodings),
+a known credential format (`jarvis/credential_patterns.py`), or a
+secret-printing command (`env`, `printenv`, `cat .env`, `gh auth token`, …,
+one list in `terminal_guard`). The last has two halves and the second always
+runs: a signed span overlapping the read (or one that backgrounds a printer),
+and the text — any line drawn in the read, or in the 32 KiB before it, that
+shows such a command after a prompt, judged on every state a line was in (a
+cleared command line still counts) — narrowed only at a boundary the signed
+marks prove, never at a span record below `spans_from`. A heuristic withholds
+lines (a keyword with a long high-entropy token after it; a bare hash or UUID
+stays) and says how many. The owner's per-terminal switch refuses by name,
+and every read that reaches a terminal publishes `terminal_read`
+`{terminal_id, lines, at, refused}` so its bar says "Jarvis read 200 lines ·
+15:42". **Who holds it**: the fast path, for an owner's chat turn the HUD's
+own window sent (`UserMessage.desk`, set only through the HUD listener with
+its Origin) — not a task's thread, a Discord or DM turn (the owner is not at
+the desk), the escape hatch, a schedule, a sub-agent, a workflow, a goal or
+any v1 surface (`tools.EXPLICIT_ONLY` keeps it out of "the whole registry"),
+and not jarvis-mcp, which cannot tell a chat from a task worker until the
+peers plan's per-session tokens land, so it fails closed. A steer from
+anywhere but the desk takes the running turn off it. The owner confirmed both
+limits on 2026-10-10: fast-path desk turns only for now (Claude and Codex
+chats via jarvis-mcp are a follow-up), and never Discord, DM or scheduled
+turns. **Where read text goes**: like any tool result, into the fast-path
+transcript (and so OpenRouter), that conversation's v1 session
+`messages.json`, `SPILL_DIR` if truncation cuts it later, and whatever the
+model's reply repeats (mirrored to Discord, spoken); the ticker summary is
+fixed ("read N lines"), so none of it reaches the bus or the thread log.
+**The review round (2026-10-10)** gave the renderer the terminal's width
+(xterm's autowrap, clamped cursor numbers, capped rows), refused a read that
+starts inside a private key's block or shows its END footer, taught rule 3
+the shell's compound shapes (`then`/`do`/`!`/`case … )`, redirections,
+substitutions, `find -exec`/`xargs` readers, `.env.*`), made every scan
+linear (a 1 MiB adversarial ring is judged in well under 2 s), handed a
+switch the ring's cut split in two over whole, executed C0 controls inside a
+sequence as xterm does, re-checked the switch after the render, and read
+folder env files so a FIFO cannot hang a read. **The limit**: a secret
+with no recognisable shape and no keyword beside it, or one printed in pieces
+or encoded otherwise, is not caught, and rule 3 cannot see through an alias,
+a shell function, a script or a symlink; the switch and the note are the
+backstops.
 
 Remaining: WP13 (the long-bench comparison, the owner's call on cost), a
 native Windows worker, the R8 hook on Codex, and prompt tuning in

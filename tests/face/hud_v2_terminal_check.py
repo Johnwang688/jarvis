@@ -477,8 +477,8 @@ def terminal_checks(browser, mock, base, check, until, guard, init_script):
         _boot(page, mock, base, until)
         for section in (_open_checks, _typing_checks, _card_checks, _paste_checks, _reload_checks,
                         _takeover_checks, _elsewhere_checks, _exit_checks, _busy_checks, _readable_checks,
-                        _integration_checks, _osc_link_checks, _pane_checks, _zoom_checks, _ended_checks,
-                        _flood_checks, _chat_panes_checks, _crash_checks):
+                        _read_note_checks, _integration_checks, _osc_link_checks, _pane_checks, _zoom_checks,
+                        _ended_checks, _flood_checks, _chat_panes_checks, _crash_checks):
             if only and section.__name__.strip("_") not in only:
                 continue
             try:
@@ -1079,6 +1079,54 @@ def _readable_checks(page, mock, base, check, until, fake):
     sw.click()
     until(lambda: sw.get_attribute("aria-pressed") == "true", timeout=3)
     check("and back on", mock.sent("PATCH", f"/terminals/{tid}")[-1] == {"readable": True})
+
+
+def _read_note_checks(page, mock, base, check, until, fake):
+    """WP-F: `terminal_read` on the bus is said in that terminal's bar —
+    "Jarvis read 200 lines · 15:42" — as HUD chrome, never in the terminal."""
+    tid = _fresh(page, mock, base, until, fake)
+    other = _new_terminal(page, mock, until, fake)
+    page.locator(f'[data-testid="panel-tab-{tid}"]').click()
+    _attached(page, until, tid)
+    fake.output(tid, b"read-note-marker\r\n$ ")
+    until(lambda: "read-note-marker" in _text(page, tid), timeout=3)
+    note = page.locator(_sel(tid, '[data-testid="term-read-note"]'))
+    check("no read note until Jarvis reads", note.count() == 0)
+    screen, typed = _text(page, tid), fake.sent(tid)
+    mock.emit("terminal_read", {"terminal_id": tid, "lines": 200, "at": "2026-10-10T15:42:00+00:00",
+                                "refused": False})
+    until(lambda: note.count() > 0, timeout=3)
+    shown = note.inner_text() if note.count() else ""
+    check("a read is said in the terminal's bar: 'Jarvis read 200 lines · HH:MM'",
+          re.fullmatch(r"Jarvis read 200 lines · \d\d:\d\d(\s?[AP]M)?", shown) is not None
+          and note.get_attribute("data-refused") == "false" and note.get_attribute("role") == "status", shown)
+    page.wait_for_timeout(250)
+    check("as HUD chrome only: nothing is drawn in the terminal and nothing reaches its shell",
+          _text(page, tid) == screen and fake.sent(tid) == typed)
+    mock.emit("terminal_read", {"terminal_id": tid, "lines": 0, "at": "2026-10-10T15:43:00+00:00",
+                                "refused": True})
+    until(lambda: note.get_attribute("data-refused") == "true", timeout=3)
+    check("a refused read says so, and nothing else",
+          re.fullmatch(r"refused a read · \d\d:\d\d(\s?[AP]M)?", note.inner_text()) is not None,
+          note.inner_text())
+    for bad in ({"terminal_id": "../etc", "lines": 5, "at": "x", "refused": False},
+                {"terminal_id": tid, "lines": "5", "at": "x", "refused": False},
+                {"terminal_id": tid, "lines": 5, "at": "x"}):
+        mock.emit("terminal_read", bad)
+    page.wait_for_timeout(300)
+    check("a record of the wrong shape changes nothing",
+          note.get_attribute("data-refused") == "true" and "refused a read" in note.inner_text())
+    mock.emit("terminal_read", {"terminal_id": tid, "lines": 7, "at": "<b>12:00</b>", "refused": False,
+                                "output": "<b>LEAKED-OUTPUT</b>", "command": "printenv", "reason": "rule 1"})
+    until(lambda: "read 7 lines" in note.inner_text(), timeout=3)
+    bar = page.locator(_sel(tid, ".termbar"))
+    check("anything else in the record is never drawn, and a strange time is text, not markup",
+          "LEAKED-OUTPUT" not in bar.inner_text() and "printenv" not in bar.inner_text()
+          and bar.locator("b").count() == 0, bar.inner_text())
+    page.locator(f'[data-testid="panel-tab-{other}"]').click()
+    _attached(page, until, other)
+    check("a note belongs to its own terminal",
+          page.locator(_sel(other, '[data-testid="term-read-note"]')).count() == 0)
 
 
 def _integration_checks(page, mock, base, check, until, fake):

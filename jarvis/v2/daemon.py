@@ -290,6 +290,8 @@ class Daemon:
             self._server_thread = self._listeners[0][1]
             from .hud_api import connect_controls
             connect_controls(self)
+            # `terminal_read` (WP-F) reads these terminals and no others.
+            self.terminals.install()
             self.schedules.start()
 
     def status(self) -> dict:
@@ -1321,6 +1323,7 @@ class Daemon:
             # Terminals end with the daemon (decision W-3): every window is
             # told and every session gets SIGHUP now; what outlives it is
             # SIGKILLed below, before the listeners close.
+            self.terminals.uninstall()
             self.terminals.hangup_all()
             sessions = list(self._sessions.values())
             # The queue is in memory; what waits on a turn at shutdown says so

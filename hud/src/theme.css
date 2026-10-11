@@ -1061,6 +1061,12 @@ body.resizing iframe { pointer-events: none; }
   border: 1px solid var(--border-strong); border-radius: 10px; padding: 1px 7px;
 }
 button.termread { flex: 0 0 auto; padding: 1px 8px; font-size: 11px; white-space: nowrap; }
+/* What Jarvis last read here (WP-F): quiet chrome, never in the terminal itself. */
+.termreadnote {
+  flex: 0 1 auto; min-width: 0; font: 10px var(--mono); color: var(--text-2);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.termreadnote.refused { font-style: italic; }
 .termslot {
   flex: 1 1 auto; min-height: 0; min-width: 0; position: relative; overflow: hidden;
   padding: 4px 0 0 8px; background: var(--bg-1);

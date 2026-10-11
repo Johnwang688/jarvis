@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import copy
+import dataclasses
 import difflib
 import json
 import logging
@@ -1156,6 +1157,11 @@ def route(handler, daemon, parts, query):
         if parts[2] == "send" and method == "POST":
             project = daemon.require(stores.projects, thread.project_id)
             message = assemble_turn(project, handler._body())
+            # The owner is at the desk only when the window itself sent this
+            # (the HUD's listener and Origin), never a script on the API one.
+            from .projects import is_owner
+            if is_owner(handler, daemon):
+                message = dataclasses.replace(message, desk=True)
             # Never a dead end while a turn runs (2026-10-08): the message
             # starts a turn, is steered into the running one, or waits behind
             # it — `{"status": "started"|"steered"|"queued", "turn_id", ...}`.

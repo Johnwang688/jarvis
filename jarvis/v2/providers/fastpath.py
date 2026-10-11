@@ -29,6 +29,7 @@ from __future__ import annotations
 import json
 import os
 import queue
+import re
 import threading
 from collections import deque
 from dataclasses import dataclass, field
@@ -36,7 +37,7 @@ from typing import Any, Iterator
 
 from ... import config, models, permissions, sessions, tools
 from ...agent import Agent
-from ..model import PermissionProfile, ProviderName, Thread
+from ..model import PermissionProfile, ProviderName, Role, Thread
 from ..provider import (
     Brief,
     BriefRefused,
@@ -51,6 +52,7 @@ from ..provider import (
 )
 from ..tools import propose as _propose  # noqa: F401  (registers task_propose)
 from ..tools import schedules as _schedules  # noqa: F401  (registers schedule_*)
+from ..tools import terminal_read as _terminal_read  # noqa: F401  (registers terminal_read)
 
 # Eight steps, per §8.1. Not a work limit — a *definition*: anything that needs
 # more than eight rounds of read-and-think is work, and work goes to a task.
@@ -135,8 +137,19 @@ FAST_TOOLS: frozenset[str] = frozenset(
         "schedule_create",
         "schedule_list",
         "schedule_delete",
+        # the owner's HUD terminals, read-only (WP-F, decisions W-2) — and
+        # only in an owner's chat turn typed in the HUD: `DESK_TOOLS`.
+        "terminal_read",
     }
 )
+
+# Tools a fast-path handle holds only for a turn where the owner is present:
+# an owner's chat thread (not a task's), the message typed in the HUD's own
+# window (`UserMessage.desk`). Any other turn — Discord, the DM, the escape
+# hatch, a schedule — runs without them in the request, and the tool itself
+# refuses unless `runtime.at_desk()` (fail closed). A steer from anywhere but
+# the desk takes the turn off the desk for the rest of it.
+DESK_TOOLS: frozenset[str] = frozenset({"terminal_read"})
 
 # Names that must never be in FAST_TOOLS, asserted below and again in the
 # suite. Kept as data rather than left to a reader's eye because the failure
@@ -224,6 +237,38 @@ def _available_tools(names: frozenset[str]) -> list[str]:
     return sorted(name for name in names if name not in hidden)
 
 
+def _owners_chat(brief: Brief) -> bool:
+    """An owner's chat thread's brief: the chat role and no task."""
+    return brief.role == Role.CHAT and brief.task_id is None
+
+
+def _at_desk(brief: Brief, message: UserMessage) -> bool:
+    """The owner is present for this message (WP-F): their chat thread, and
+    a message the HUD's own window sent (`UserMessage.desk`), as the owner."""
+    return (_owners_chat(brief) and message.desk is True and message.origin == "owner"
+            and (message.via or "hud") == "hud")
+
+
+_READ_COUNT = re.compile(r"its last (\d+) line")
+
+
+def _summary(name: str, text: str) -> str:
+    """TOOL_FINISHED's summary: the result's start — except a desk tool's,
+    which is fixed (2026-10-10 review). The summary rides the bus and the
+    thread's `log.jsonl`, and a terminal's text must reach neither: the read's
+    first line used to, inside the first 200 characters."""
+    if name not in DESK_TOOLS:
+        return text[:SUMMARY_CHARS]
+    # The tool's own refusals, and dispatch's for a tool this turn does not
+    # hold (PR #34: "… is not available to this agent").
+    if text.startswith("Refused") or " is not available to this agent" in text[:200]:
+        return "refused"
+    if text.startswith(_NOT_OK):
+        return "error"
+    count = _READ_COUNT.search(text[:400])
+    return f"read {count.group(1)} lines" if count else "read"
+
+
 # --- the handle -------------------------------------------------------------
 
 
@@ -257,6 +302,10 @@ class _Native:
     inbox_lock: threading.Lock = field(default_factory=threading.Lock)
     accepting: bool = False
     leftover: list = field(default_factory=list)
+    # The tools this brief allows (DESK_TOOLS included when it may hold them),
+    # and the turn's desk slot (`runtime._DESK`): {"present": bool}.
+    tool_names: list = field(default_factory=list)
+    desk: dict = field(default_factory=lambda: {"present": False})
 
 
 # --- the provider -----------------------------------------------------------
@@ -319,7 +368,8 @@ class FastPathProvider:
             agent=Agent(
                 model=brief.model or models.tier("orchestrator"),
                 system=config.SYSTEM_PROMPT + FAST_PROMPT + (brief.system_append or ""),
-                tool_names=tool_names,
+                # Off the desk until a turn says otherwise (`_turn_tools`).
+                tool_names=[name for name in tool_names if name not in DESK_TOOLS],
                 max_steps=FAST_MAX_STEPS,
                 approve=self._approver(brief, permit),
                 on_event=lambda kind, data: None,  # replaced per turn by send()
@@ -330,6 +380,7 @@ class FastPathProvider:
             brief=brief,
             model=brief.model,
             effort=brief.effort,
+            tool_names=list(tool_names),
         )
         native.agent.should_stop = native.stop.is_set
         native.agent.take_steering = lambda: self._take_steering(native)
@@ -359,6 +410,12 @@ class FastPathProvider:
         if brief.mcp_servers:
             raise BriefRefused("the fast path cannot load MCP servers; use a CLI provider")
         allowed = _available_tools(FAST_TOOLS)
+        if not _owners_chat(brief):
+            # A task's thread (or any role but chat) never holds a desk tool.
+            if brief.allowed_tools is not None and DESK_TOOLS & set(brief.allowed_tools):
+                raise BriefRefused(
+                    "terminal_read is for the owner's own chat at the HUD, never a task's thread")
+            allowed = [name for name in allowed if name not in DESK_TOOLS]
         if brief.allowed_tools is None:
             return allowed
         asked = set(brief.allowed_tools)
@@ -371,6 +428,17 @@ class FastPathProvider:
                 "Open a task instead."
             )
         return sorted(asked & set(allowed))
+
+    @staticmethod
+    def _turn_tools(native: _Native, at_desk: bool) -> None:
+        """This turn's toolset: the brief's, without `DESK_TOOLS` unless the
+        owner is at the desk. Rebuilt only when it changes (the tools are part
+        of the cached prefix)."""
+        names = [n for n in native.tool_names if at_desk or n not in DESK_TOOLS]
+        agent = native.agent
+        if names != list(agent._base_tool_names):
+            agent._base_tool_names = names
+            agent.tool_specs = tools.specs(names)
 
     @staticmethod
     def _approver(brief: Brief, permit: PermissionCallback):
@@ -449,6 +517,8 @@ class FastPathProvider:
         with native.inbox_lock:
             if not native.accepting:
                 raise SteerRefused("no turn is running")
+            if not _at_desk(native.brief, message):
+                native.desk["present"] = False          # the rest of this turn is off the desk
             native.inbox.append((message, text, list(message.images)))
 
     def undelivered(self, h: SessionHandle) -> list[UserMessage]:
@@ -560,6 +630,11 @@ class FastPathProvider:
         native.agent.effort = effort
         state = _TurnState(thread_id, events, native.agent.model, effort)
         native.agent.on_event = state.on_event
+        # Is the owner at the desk for this turn? A fresh slot per turn, so a
+        # steer that took the last turn off the desk does not linger.
+        desk = {"present": _at_desk(native.brief, message)}
+        native.desk = desk
+        self._turn_tools(native, desk["present"])
 
         result: dict[str, Any] = {}
 
@@ -567,7 +642,7 @@ class FastPathProvider:
             try:
                 from ... import runtime
 
-                runtime.bind(proposal=proposal)
+                runtime.bind(proposal=proposal, desk=desk)
                 result["turn"] = native.agent.run_turn(
                     text, images=list(message.images) or None
                 )
@@ -740,7 +815,7 @@ class _TurnState:
                 # returns — which is a call that did not happen and must not
                 # render as one that did.
                 "ok": not text.startswith(_NOT_OK),
-                "summary": text[:SUMMARY_CHARS],
+                "summary": _summary(name, text),
             },
         )
 
