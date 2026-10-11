@@ -708,7 +708,8 @@ def _small_window_checks(page, mock, check, until):
           stored)
     check("the centre keeps its minimum there", _width(page, "#main") >= 480, str(_width(page, "#main")))
     bad = []
-    for sel in TOOLS:
+    # Folded, the mic's mode is one button on the mini orb (it cycles).
+    for sel in [('[data-testid="dictation-cycle"]' if t == '[data-testid="dictation"]' else t) for t in TOOLS]:
         ok, why = _reachable(page, sel)
         if not ok:
             bad.append(f"{sel}: {why}")
@@ -730,14 +731,18 @@ def _small_window_checks(page, mock, check, until):
     _boot(page, mock, None, until, reload=True)
 
 
-CHIP_CONTROLS = ['[data-testid="provider-chip-select"]', '[data-testid="model-chip-select"]',
-                 '[data-testid="effort-chip-select"]', '[data-testid="provider-defaults-open"]']
+CHIP_CONTROLS = ['[data-testid="provider-chip-select"]', '[data-testid="model-chip-btn"]']
+POP_CONTROLS = ['[data-testid="model-opt"][data-value=""]', '[data-testid="effort-opt"][data-value=""]',
+                '[data-testid="provider-defaults-open"]']
 
 
 def _model_chip_checks(page, mock, check, until):
     """The chip's own controls, not just the chip: the chip's centre was
-    reachable while its right half was clipped away behind dictation. On
-    Claude, so `default ▾` is drawn too: the widest the chip gets."""
+    reachable while its right half was clipped away. The model and effort are
+    one button now, so its popover is checked too: it opens upward inside the
+    window at every zoom and size, and its first rows, effort and the provider
+    default are on screen and clickable. On Claude, so `Set … default` is drawn
+    too: the fullest the popover gets."""
     for (w, h), zoom, layout in (((1280, 800), "100", '{"left":480,"right":560}'),
                                  ((1280, 800), "160", "{}"),
                                  ((1024, 700), "160", "{}"),
@@ -749,8 +754,22 @@ def _model_chip_checks(page, mock, check, until):
         page.locator(CHIP_CONTROLS[0]).select_option("claude")
         until(lambda: all(page.locator(sel).count() > 0 for sel in CHIP_CONTROLS), timeout=3)
         bad = [f"{sel}: {why}" for sel in CHIP_CONTROLS for ok, why in [_reachable(page, sel)] if not ok]
-        check(f"at {w}x{h} and {zoom}% provider, model, effort and default ▾ are all on screen and clickable",
+        check(f"at {w}x{h} and {zoom}% the provider and the model button are on screen and clickable",
               not bad, "; ".join(bad))
+        page.locator(CHIP_CONTROLS[1]).click()
+        until(lambda: page.locator('[data-testid="model-pop"]').count() > 0, timeout=3)
+        until(lambda: all(page.locator(sel).count() > 0 for sel in POP_CONTROLS), timeout=3)
+        box = page.evaluate("""() => {
+          const r = document.querySelector('[data-testid="model-pop"]').getBoundingClientRect();
+          return {l: r.left, t: r.top, r: r.right, b: r.bottom, w: innerWidth, h: innerHeight};
+        }""")
+        check(f"at {w}x{h} and {zoom}% the popover stays inside the window",
+              box["l"] >= 0 and box["t"] >= 0 and box["r"] <= box["w"] + 0.5 and box["b"] <= box["h"] + 0.5,
+              str(box))
+        bad = [f"{sel}: {why}" for sel in POP_CONTROLS for ok, why in [_reachable(page, sel)] if not ok]
+        check(f"at {w}x{h} and {zoom}% the model, effort and default controls in it are clickable",
+              not bad, "; ".join(bad))
+        page.keyboard.press("Escape")
     page.set_viewport_size({"width": 1280, "height": 800})
     _set_storage(page, zoom="100", layout="{}")
     _boot(page, mock, None, until, reload=True)
@@ -912,18 +931,43 @@ def _ptt_on_space(page) -> object:
 
 
 def _edit(page, until, pane: int, typed: str):
-    """Type at the end of the file open in pane N, in Monaco or its fallback."""
+    """Type at the end of the file open in pane N, in Monaco or its fallback,
+    until the pane's Save says the edit landed.
+
+    Under load this was the layout section's flake: it typed as soon as *a*
+    `.view-lines` existed in the pane — the editor going away, or the new one
+    before the file's text had replaced its buffer — and the edit was lost,
+    so four "unsaved edit" checks failed. Now it waits for the editor to show
+    the file, types, and types again (at most four times) until Save is
+    enabled: an edit that did not land is retried, never assumed."""
     editor = page.locator(_pane(pane, '[data-testid="editor"] .view-lines'))
-    until(lambda: editor.count() > 0
-          or page.locator(_pane(pane, '[data-testid="editor-fallback"]')).count() > 0, timeout=10)
-    if editor.count():
-        editor.click()
-        page.keyboard.press("Control+End")
-        page.keyboard.type(typed)
-    else:
-        page.evaluate("([n, t]) => { const h = document.querySelector("
-                      "`[data-testid=\"pane-${n}\"] [data-testid=\"editor-fallback\"]`);"
-                      " h.value += t; h.dispatchEvent(new Event('input', {bubbles: true})); }", [pane, typed])
+    fallback = page.locator(_pane(pane, '[data-testid="editor-fallback"]'))
+    save = page.locator(_pane(pane, '[data-testid="file-save"]'))
+    def shows_file() -> bool:
+        # One editor (not the old one beside the new), holding the file's text
+        # (not an empty buffer it is about to replace).
+        try:
+            return editor.count() == 1 and editor.inner_text(timeout=1000).strip() != ""
+        except Exception:
+            return False
+
+    for attempt in range(4):
+        until(lambda: editor.count() > 0 or fallback.count() > 0, timeout=10)
+        if editor.count():
+            until(shows_file, timeout=5)
+            try:
+                editor.click(timeout=3000)
+            except Exception:
+                continue  # replaced under the click: find the new one
+            page.keyboard.press("Control+End")
+            page.keyboard.type(typed)
+        else:
+            page.evaluate("([n, t]) => { const h = document.querySelector("
+                          "`[data-testid=\"pane-${n}\"] [data-testid=\"editor-fallback\"]`);"
+                          " h.value += t; h.dispatchEvent(new Event('input', {bubbles: true})); }", [pane, typed])
+        if until(lambda: save.count() > 0 and not save.is_disabled(), timeout=2.0 + attempt):
+            return True
+    return False
 
 
 def _approval(mock, req: str, command: str = "ls"):

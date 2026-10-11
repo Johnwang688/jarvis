@@ -175,8 +175,9 @@ export function useThreadModel(state: State, dispatch: React.Dispatch<Action>, o
       .catch((e) => setDefaultsError(refusal(what, e)));
   }, []);
 
-  /** The chips for one chat pane's conversation, or null when it has none to show. */
-  const chipFor = (pane: PaneNo) => {
+  /** The chips for one chat pane's conversation, or null when it has none to
+   * show. `zoom` (percent) places the model popover. */
+  const chipFor = (pane: PaneNo, zoom?: number) => {
     const cs = paneChips(state, pane);
     if (cs.choice === null) return null;
     // While composing, grey out a provider the chosen project's permission
@@ -201,6 +202,8 @@ export function useThreadModel(state: State, dispatch: React.Dispatch<Action>, o
           setDefaultsError("");
           setDefaultsFor(provider);
         }}
+        pane={pane}
+        zoom={zoom}
       />
     );
   };

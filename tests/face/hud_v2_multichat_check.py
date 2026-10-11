@@ -18,7 +18,8 @@ The checks worth keeping, each written to bite:
     its turn), and an event with no thread in the selected chat's;
   - A's Stop interrupts A's thread and never B's;
   - voice goes to the selected chat, the chat pane most recently clicked: its header
-    carries the mic mark, only its input bar draws the dictation strip, REVIEW
+    carries the mic mark, its status rides the orb (the dictation strip is on
+    the orb, PR #29) while every other chat pane shows its own, REVIEW
     puts the transcript in its box, AUTO sends to its thread, the orb follows
     and interrupts its turn, the follow-up window opens only when its turn
     ends, and only its turn keeps the mic suppressed (a long turn in another
@@ -200,6 +201,17 @@ def _open(page, until, n: int, tid: str, project: str = "p1"):
     until(lambda: _log(page, n) != "", timeout=3)
 
 
+def _dictation(page, mode: str):
+    """Set the dictation mode on the orb's strip (PR #29): it acts on the
+    selected chat, and clicking it selects no pane."""
+    page.locator(f'#orbdock [data-testid="dictation-{mode}"]').click()
+
+
+def _status_lines(page) -> list:
+    """Which chat panes draw a status line of their own (`pane-status`)."""
+    return [page.locator(_pane(n, '[data-testid="pane-status"]')).count() for n in (1, 2, 3, 4)]
+
+
 def _sent(mock, tid: str) -> list:
     return mock.sent("POST", f"/threads/{tid}/send")
 
@@ -371,9 +383,10 @@ def _two_turns_checks(page, mock, check, until):
     check("tool_started: pane 2's ticker, not pane 1's",
           "grep_files" in page.locator(_pane(2, '[data-testid="ops"]')).inner_text()
           and page.locator(_pane(1, '[data-testid="op"]')).count() == 0)
-    check("and pane 2's own status line says what it runs",
+    check("and pane 2's own status says what it runs — on the orb, pane 2 being the selected chat",
           "RUNNING · grep_files" in _chat(page, 2)["status"]
-          and "grep_files" in page.locator(_pane(2, '[data-testid="hint"]')).inner_text().lower(),
+          and "grep_files" in page.locator('[data-testid="orb-status"]').inner_text().lower()
+          and page.locator(_pane(2, '[data-testid="pane-status"]')).count() == 0,
           _chat(page, 2)["status"])
     check("while pane 1's input bar still says what its own turn is doing",
           "responding" in page.locator(_pane(1, '[data-testid="pane-status"]')).inner_text().lower(),
@@ -463,12 +476,12 @@ def _voice_checks(page, mock, check, until):
           page.evaluate("window.__hud.state().selectedChat") == 2 and _attr(page, _pane(2), "data-selected") == "true"
           and page.locator('[data-testid="pane-2-mic"]').count() == 1
           and _attr(page, _pane(1), "data-selected") is None and page.locator('[data-testid="pane-1-mic"]').count() == 0)
-    check("only its input bar draws the dictation strip; the other shows its own status",
-          page.locator(_pane(2, '[data-testid="dictation"]')).count() == 1
-          and page.locator(_pane(2, '[data-testid="level"]')).count() == 1
-          and page.locator(_pane(1, '[data-testid="dictation"]')).count() == 0
-          and page.locator(_pane(1, '[data-testid="level"]')).count() == 0
-          and page.locator(_pane(1, '[data-testid="pane-status"]')).count() == 1)
+    check("no input bar draws the dictation strip (it is on the orb); the other pane shows its own status",
+          all(page.locator(_pane(n, '[data-testid="dictation"]')).count() == 0 for n in (1, 2))
+          and all(page.locator(_pane(n, '[data-testid="level"]')).count() == 0 for n in (1, 2))
+          and page.locator('#orbdock [data-testid="dictation"]').count() == 1
+          and page.locator(_pane(1, '[data-testid="pane-status"]')).count() == 1
+          and page.locator(_pane(2, '[data-testid="pane-status"]')).count() == 0)
 
     # A long turn in pane 1: the orb does not follow it, and the mic stays open.
     mock.emit("turn_started", {}, thread_id="t1")
@@ -489,14 +502,15 @@ def _voice_checks(page, mock, check, until):
     _box(page, 2).fill("")
 
     # AUTO sends to the selected chat's thread.
-    page.locator(_pane(2, '[data-testid="dictation-auto"]')).click()
+    _dictation(page, "auto")
+    check("the orb's strip acts for the selected chat and selects no pane", _sel(page) == 2)
     s1, s2 = len(_sent(mock, "t1")), len(_sent(mock, "t2"))
     page.evaluate(UTTERANCE)
     sent = until(lambda: _sent(mock, "t2")[s2:] or None, timeout=5)
     check("AUTO sends the utterance to the selected chat's thread",
           bool(sent) and sent[-1].get("text") == "what is the weather" and sent[-1].get("spoken") is True, str(sent))
     check("and nothing to the other pane's", len(_sent(mock, "t1")) == s1)
-    page.locator(_pane(2, '[data-testid="dictation-review"]')).click()
+    _dictation(page, "review")
     until(lambda: _chat(page, 2)["busy"], timeout=3)
     check("the orb now shows the selected chat's own turn", bool(until(lambda: orb() == "thinking", timeout=2)),
           str(orb()))
@@ -533,10 +547,9 @@ def _voice_checks(page, mock, check, until):
     # Using the other pane moves the selected chat, the mark and the strip with it.
     _focus(page, until, 1)
     until(lambda: page.evaluate("window.__hud.state().selectedChat") == 1, timeout=2)
-    check("using pane 1 makes it the selected chat: the mark and the strip move with it",
+    check("using pane 1 makes it the selected chat: the mark and the orb's status line move with it",
           page.locator('[data-testid="pane-1-mic"]').count() == 1 and page.locator('[data-testid="pane-2-mic"]').count() == 0
-          and page.locator(_pane(1, '[data-testid="dictation"]')).count() == 1
-          and page.locator(_pane(2, '[data-testid="dictation"]')).count() == 0)
+          and _status_lines(page)[:2] == [0, 1], str(_status_lines(page)))
     stt = len(mock.sent("POST", "/stt"))
     page.evaluate(UTTERANCE)
     until(lambda: _box(page, 1).input_value() != "", timeout=4)
@@ -1113,7 +1126,7 @@ def _rv_stt_lands_selected_checks(page, mock, check, until):
     _open(page, until, 1, "t1")
     _open(page, until, 2, "t2")
     _focus(page, until, 1)
-    page.locator(_pane(1, '[data-testid="dictation-auto"]')).click()
+    _dictation(page, "auto")
     held = []
     page.route("**/stt", lambda r: held.append(r))
     try:
@@ -1130,7 +1143,7 @@ def _rv_stt_lands_selected_checks(page, mock, check, until):
     check("W-6: clicking pane 2 during STT sends the words to pane 2's chat",
           bool(sent) and sent[-1].get("text") == "what is the weather", str(sent))
     check("W-6: and none to the pane they were spoken in", len(_sent(mock, "t1")) == s1)
-    page.locator(_pane(2, '[data-testid="dictation-review"]')).click()
+    _dictation(page, "review")
     mock.emit("turn_finished", {"stop": "end"}, thread_id="t2")
 
 
@@ -1209,8 +1222,10 @@ def _w6_grid_checks(page, mock, check, until):
           _sel(page) == 3 and _attr(page, _pane(3), "data-selected") == "true"
           and page.locator('[data-testid="pane-3-mic"]').count() == 1
           and "selected" in (_attr(page, _pane(3), "class") or ""))
-    check("W-6: only the selected chat draws the dictation strip",
-          [page.locator(_pane(n, '[data-testid="dictation"]')).count() for n in (1, 2, 3, 4)] == [0, 0, 1, 0])
+    check("W-6: only the selected chat's status rides the orb; every other chat pane draws its own line",
+          _status_lines(page) == [1, 1, 0, 1]
+          and [page.locator(_pane(n, '[data-testid="dictation"]')).count() for n in (1, 2, 3, 4)] == [0, 0, 0, 0],
+          str(_status_lines(page)))
     page.locator(_pane(4, '[data-testid="tab-preview"]')).click()
     until(lambda: _attr(page, _pane(4), "data-view") == "preview", timeout=2)
     page.locator(_pane(4, '[data-testid="tab-file"]')).click()
@@ -1224,13 +1239,13 @@ def _w6_grid_checks(page, mock, check, until):
           bool(until(lambda: "what is the weather" in _box(page, 3).input_value(), timeout=5))
           and all(_box(page, n).input_value() == "" for n in (1, 2)))
     _box(page, 3).fill("")
-    page.locator(_pane(3, '[data-testid="dictation-auto"]')).click()
+    _dictation(page, "auto")
     s3 = len(_sent(mock, "t3"))
     page.evaluate(UTTERANCE)
     sent = until(lambda: _sent(mock, "t3")[s3:] or None, timeout=5)
     check("W-6: AUTO sends it to the selected chat's thread (pane 3)",
           bool(sent) and sent[-1].get("spoken") is True, str(sent))
-    page.locator(_pane(3, '[data-testid="dictation-review"]')).click()
+    _dictation(page, "review")
     mock.emit("turn_finished", {"stop": "end"}, thread_id="t3")
     until(lambda: _chat(page, 3)["busy"] is False, timeout=3)
     mock.emit("text_delta", {"text": "no thread of its own"})
@@ -1252,7 +1267,7 @@ def _w6_fallback_checks(page, mock, check, until):
     until(lambda: not _visible(page, _pane(1)), timeout=3)
     check("W-6: the selected pane dropped by a narrow window falls back to the one selected before it, still drawn",
           bool(until(lambda: _sel(page) == 2, timeout=2))
-          and page.locator(_pane(2, '[data-testid="dictation"]')).count() == 1, str(_sel(page)))
+          and _attr(page, _pane(2), "data-selected") == "true", str(_sel(page)))
     page.set_viewport_size({"width": 1600, "height": 900})
     check("W-6: and the selection is pane 1 again once it is drawn again",
           bool(until(lambda: _sel(page) == 1 and _visible(page, _pane(1)), timeout=3)), str(_sel(page)))
@@ -1261,7 +1276,7 @@ def _w6_fallback_checks(page, mock, check, until):
 def _w6_one_and_none_checks(page, mock, check, until):
     _fresh(page, mock, until, SINGLE)
     check("W-6: with one chat open, that chat is selected",
-          _sel(page) == 1 and page.locator(_pane(1, '[data-testid="dictation"]')).count() == 1)
+          _sel(page) == 1 and _attr(page, _pane(1), "data-selected") == "true")
     two = json.dumps({"preset": "cols2", "focused": 1,
                       "panes": [{"view": "preview"}, {"view": "chat"}, {"view": "file"}, {"view": "task"}]})
     _fresh(page, mock, until, two)
@@ -1512,11 +1527,15 @@ def _rr_chip_writeback_checks(page, mock, check, until):
     held = []
     page.route(url, lambda r: held.append(r) if r.request.method == "PATCH" else r.continue_())
     try:
-        until(lambda: page.locator('[data-testid="effort-chip-select"]').count() > 0, timeout=3)
-        sel = page.locator('[data-testid="effort-chip-select"]')
-        opts = sel.evaluate("s => Array.from(s.options).map(o => o.value)")
-        cur = sel.input_value()
-        sel.select_option(next(o for o in opts if o != cur))
+        btn = page.locator(_pane(1, '[data-testid="model-chip-btn"]'))
+        until(lambda: btn.count() > 0, timeout=3)
+        cur = btn.get_attribute("data-effort") or ""
+        btn.click()
+        pop = '[data-testid="model-pop"][data-pane="1"]'
+        page.wait_for_selector(pop)
+        opts = page.locator(pop + ' [data-testid="effort-opt"]').evaluate_all(
+            "els => els.map(e => e.getAttribute('data-value'))")
+        page.locator(pop + f' [data-testid="effort-opt"][data-value="{next(o for o in opts if o != cur)}"]').click()
         until(lambda: _pumped(page) and len(held) > 0, timeout=3)
         check("setup: the model change is on its way", len(held) == 1)
         _box(page, 1).fill("")

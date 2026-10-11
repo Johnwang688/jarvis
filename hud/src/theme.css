@@ -243,9 +243,12 @@ h2.bar {
 }
 
 /* The fixed orb dock sits over the sidebar's bottom-left corner (132px plus
-   its 10px inset), so the sidebar keeps that band empty and its last rows —
+   its 10px inset, and the mic strip's ~44px above it), so the sidebar keeps that band empty and its last rows —
    schedules, usage, route — sit above the orb instead of under it. */
-#sidebar { padding-bottom: 146px; }
+#sidebar { padding-bottom: 190px; }
+/* A short window folds the strip into one button beside the orb (Orb.tsx),
+   and the sidebar gets the strip's 44px back for its rows. */
+#shell.mic-tight #sidebar { padding-bottom: 146px; }
 .sidebar-foot { border-top: 1px solid var(--border); flex: 0 0 auto; padding: 4px 0; }
 
 .badge {
@@ -368,15 +371,18 @@ h2.bar {
    only what is left, so it never forces a wrap of its own. */
 :is(#inputbar, .inputbar) > .row { flex-wrap: wrap; }
 :is(#inputbar, .inputbar) > .row > .hint { flex: 1 1 0; min-width: 120px; }
-:is(#inputrow, .inputrow) textarea { min-height: 36px; max-height: 140px; padding: 7px 9px; }
+/* A status line with nothing to say takes no line of its own (it would wrap
+   onto one in a narrow pane and steal the conversation's height). */
+:is(#inputbar, .inputbar) > .row > .hint:empty { display: none; }
+/* Grows with the text (InputBar sets the height: up to 15 lines, and never
+   past 35% of its pane) and scrolls past that; a drag handle would fight it. */
+:is(#inputrow, .inputrow) textarea { min-height: 36px; padding: 7px 9px; line-height: 1.45; resize: none; overflow-y: hidden; }
 :is(#chips, .chips) { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
 .chip {
   font: 10px var(--mono); color: var(--text-2);
   background: var(--bg-2); border: 1px solid var(--border-strong); border-radius: 10px;
   padding: 2px 8px; display: flex; gap: 6px; align-items: center;
 }
-:is(#inputrow, .inputrow) > .chip { align-self: stretch; padding: 0 10px; border-radius: var(--radius); font-size: 11px; }
-:is(#inputrow, .inputrow) > .chip:hover { background: var(--bg-3); }
 .chip b { cursor: pointer; color: var(--text-muted); font-weight: 400; }
 .chip b:hover { color: var(--red); }
 
@@ -391,9 +397,31 @@ h2.bar {
 .projchip select:hover { color: var(--accent-hi); }
 .projchip.ro { color: var(--text-2); cursor: default; }
 
-:is(#dictation, .dictation) { display: flex; gap: 0; flex: 0 0 auto; }
+/* Attach (a paperclip) and Send (an arrow in a circle): round icon buttons the
+   height of one line of the box, pinned to its bottom edge as it grows. */
+.iconbtn {
+  flex: 0 0 auto; width: 36px; height: 36px; padding: 0; border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center; cursor: pointer;
+  color: var(--text-2); background: var(--bg-2); border: 1px solid var(--border-strong);
+}
+.iconbtn:hover:not(:disabled) { background: var(--bg-3); color: var(--text); }
+label.iconbtn.attach { background: transparent; border-color: transparent; }
+label.iconbtn.attach:hover { background: var(--bg-3); border-color: var(--border-strong); }
+.iconbtn.send { background: var(--accent); border-color: var(--accent); color: #0f0f0e; }
+.iconbtn.send:hover:not(:disabled) { background: var(--accent-hi); border-color: var(--accent-hi); color: #0f0f0e; }
+/* Steering a running turn is not starting one: outlined, not filled. */
+.iconbtn.send.steer { background: transparent; border-color: var(--accent); color: var(--accent); }
+.iconbtn.send.steer:hover:not(:disabled) { background: var(--accent-soft); border-color: var(--accent-hi); color: var(--accent-hi); }
+
+/* The mic: dictation mode and level meter, a strip above the orb. */
+#micstrip {
+  position: absolute; left: 0; right: 0; bottom: 100%; margin-bottom: 6px;
+  display: flex; flex-direction: column; gap: 5px; align-items: stretch;
+}
+#micstrip #level { flex: 0 0 5px; align-self: stretch; }
+:is(#dictation, .dictation) { display: flex; gap: 0; flex: 0 0 auto; justify-content: center; }
 :is(#dictation, .dictation) button {
-  padding: 4px 8px; border-radius: 0; margin-left: -1px;
+  padding: 4px 6px; border-radius: 0; margin-left: -1px;
   font: 10px var(--mono); letter-spacing: 0.06em; text-transform: uppercase;
 }
 :is(#dictation, .dictation) button:first-child { border-radius: var(--radius) 0 0 var(--radius); margin-left: 0; }
@@ -407,6 +435,9 @@ h2.bar {
 }
 :is(#level, .level) > i { display: block; height: 100%; background: var(--accent); transition: width 0.08s linear; }
 
+/* A chat pane's status line under its box (`pane-status`): every chat pane
+   but the selected one, whose status rides the orb — and the selected one's
+   too while the sidebar, and the orb with it, is folded. */
 .hint {
   font: 10px var(--mono); color: var(--text-muted); letter-spacing: 0.06em; text-transform: uppercase;
   min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
@@ -426,10 +457,26 @@ h2.bar {
 /* Folded into the left rail's foot (36px) while the sidebar is hidden: the
    same orb, scaled, still the push-to-talk control. */
 #orbdock.mini { left: 2px; bottom: 8px; transform: scale(0.2424); transform-origin: left bottom; }
-#orbdock.mini .st { display: none; }
+#orbdock.mini .st, #orbdock.mini #micstrip, #orbdock.tight #micstrip { display: none; }
+
+/* Folded: the mode as one small button above the mini orb (a red OFF when muted). */
+#modecycle {
+  position: fixed; left: 2px; bottom: 48px; width: 32px; height: 20px; z-index: 40; padding: 0;
+  font: 9px var(--mono); letter-spacing: 0.04em; text-transform: uppercase;
+}
+/* A short window: the same button, beside the full orb's lower right. */
+#modecycle.beside { left: 146px; bottom: 66px; }
+#modecycle[data-mode="off"] { background: var(--red-soft); border-color: var(--red-line); color: var(--red); }
+/* The selected chat's status under the orb (orbLine). A little wider than the
+   orb, so "LISTENING · SPEAK NOW" fits on one line, and up to three lines
+   growing upward, so a notice ("<PROJECT> WAS ARCHIVED") is read whole rather
+   than cut off. It never takes a press meant for the orb under it. */
 #orbdock .st {
-  position: absolute; left: 0; right: 0; bottom: -2px; text-align: center;
-  font: 9px var(--mono); letter-spacing: 0.1em; color: var(--text-muted); text-transform: uppercase;
+  position: absolute; left: -6px; right: -6px; bottom: -2px; text-align: center;
+  white-space: normal; overflow-wrap: anywhere; line-height: 11px;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; overflow: hidden;
+  pointer-events: none;
+  font: 9px var(--mono); letter-spacing: 0.08em; color: var(--text-muted); text-transform: uppercase;
 }
 
 /* ---- right pane blocks ---- */
@@ -687,6 +734,33 @@ details.decisions[open] summary { color: var(--text); margin-bottom: 8px; }
 .modelchip { gap: 4px; flex-wrap: wrap; min-width: 0; max-width: 100%; }
 .modelchip select { min-width: 0; max-width: 100%; text-overflow: ellipsis; }
 .modelchip .err { color: var(--red); white-space: normal; }
+/* One button for model and effort; its panel opens upward (ModelChip's Popover). */
+.modelchip button.modelbtn {
+  font: inherit; color: inherit; background: transparent; border: none; padding: 0 2px;
+  max-width: 100%; min-width: 0; display: inline-flex; gap: 4px; align-items: baseline;
+}
+.modelchip button.modelbtn:hover:not(:disabled) { background: transparent; color: var(--accent-hi); }
+.modelbtn .mb-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.mpop {
+  position: fixed; z-index: 60; width: 300px; overflow-y: auto;
+  background: var(--bg-2); border: 1px solid var(--border-strong); border-radius: var(--radius);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.5); padding: 6px; display: flex; flex-direction: column; gap: 2px;
+}
+.mpop .msec {
+  font: 600 10px var(--mono); letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--text-muted); padding: 6px 6px 3px;
+}
+.mpop .mlist { display: flex; flex-direction: column; }
+.mpop .mefforts { display: flex; flex-wrap: wrap; gap: 4px; padding: 2px 4px 4px; }
+.mpop button.mopt {
+  text-align: left; background: transparent; border: 1px solid transparent; border-radius: 4px;
+  padding: 5px 8px; font: 12px var(--mono); color: var(--text-2);
+}
+.mpop button.mopt:hover:not(:disabled) { background: var(--hover); color: var(--text); }
+.mpop button.mopt.sel { background: var(--accent-soft); border-color: var(--accent-line); color: var(--text); }
+.mpop button.mopt.search { color: var(--accent); }
+.mpop button.mopt.pill { border-radius: 10px; border-color: var(--border-strong); padding: 3px 9px; font-size: 11px; }
+.mpop .mfoot { border-top: 1px solid var(--border); margin-top: 4px; padding: 6px 4px 2px; display: flex; }
 .badge.pin { color: var(--text-2); text-transform: none; max-width: 110px; overflow: hidden;
              text-overflow: ellipsis; white-space: nowrap; }
 /* Red, not amber: amber means "pending"; an image the model cannot see is a
@@ -746,7 +820,7 @@ button.danger:hover:not(:disabled) { background: var(--red-soft); }
 .msg .who .mark.queued { color: var(--amber); }
 .msg .who .mark.not-sent { color: var(--text-muted); }
 /* Stop is an action, not an error: no red (Graphite keeps red for errors). */
-:is(#inputrow, .inputrow) button.stop { border-color: var(--border-strong); }
+:is(#inputrow, .inputrow) .iconbtn.stop { color: var(--text); }
 
 /* ---- zoom, folding and resizing (design §18, 2026-10-08) ---- */
 /* The icon button that folds a pane: quiet until hovered, like the "+". */
