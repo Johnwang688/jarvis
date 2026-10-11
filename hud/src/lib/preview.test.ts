@@ -57,6 +57,15 @@ describe("preview URL policy", () => {
       expect(judgePreviewUrl(bad).ok).toBe(false);
   });
 
+  it("refuses a URL carrying a user name or password, as a terminal link is", () => {
+    for (const bad of ["http://u:p@localhost:5173/", "http://u@localhost:5173/", "http://:p@127.0.0.1:3000/"]) {
+      const v = judgePreviewUrl(bad, PORTS);
+      expect(v.ok, bad).toBe(false);
+      expect(v.reason).toMatch(/user name or password/);
+      expect(judgeKeepOrigin(bad, PORTS).ok, bad).toBe(false);
+    }
+  });
+
   it("refuses schemes that are not pages", () => {
     for (const bad of ["javascript:alert(1)", "data:text/html,<b>x</b>", "file:///etc/passwd"])
       expect(judgePreviewUrl(bad).ok).toBe(false);

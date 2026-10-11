@@ -24,7 +24,16 @@ import threading
 import time
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.parse import parse_qs, urlparse
+
+# The daemon's own frame headers (WP-E), never a copy: the HUD under test is
+# always rendered under exactly what 8402 sends — `frame-ancestors 'none'` and
+# `X-Frame-Options: DENY` — and the mock workshop under the workshop's sandbox.
+from jarvis.v2.hud_api import frame_headers  # noqa: E402
+
+_HUD_LISTENER = SimpleNamespace(server=SimpleNamespace())
+_PREVIEW_LISTENER = SimpleNamespace(server=SimpleNamespace(preview_only=True))
 
 REPO = Path(__file__).resolve().parents[2]
 DIST = REPO / "hud" / "dist"
@@ -536,6 +545,11 @@ class MockDaemon:
 
             def log_message(self, *args):
                 pass
+
+            def end_headers(self):
+                for name, value in frame_headers(_HUD_LISTENER):
+                    self.send_header(name, value)
+                super().end_headers()
 
             # -- helpers
             def _json(self, obj, status=200):
@@ -1061,9 +1075,17 @@ class MockDaemon:
             def log_message(self, *a):
                 pass
 
+            def end_headers(self):
+                for name, value in frame_headers(_PREVIEW_LISTENER):
+                    self.send_header(name, value)
+                super().end_headers()
+
             def do_GET(self):
                 mock.workshop_hits.append(self.path)
-                body = b"<!doctype html><title>mock preview</title><h1>preview</h1>"
+                # `probe.html` says what origin it runs under and whether its
+                # storage works (the keep-origin hijack check, WP-E).
+                body = (DEV_PAGE.encode() if self.path.endswith("/probe.html")
+                        else b"<!doctype html><title>mock preview</title><h1>preview</h1>")
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html")
                 self.send_header("Content-Length", str(len(body)))
@@ -1082,6 +1104,11 @@ class MockDaemon:
         class Api(SimpleHTTPRequestHandler):
             def log_message(self, *a):
                 pass
+
+            def end_headers(self):
+                for name, value in frame_headers(_HUD_LISTENER):
+                    self.send_header(name, value)
+                super().end_headers()
 
             def do_GET(self):
                 mock.api_hits.append(self.path)
@@ -1108,6 +1135,13 @@ class MockDaemon:
             def do_GET(self):
                 mock.dev_hits.append(self.path)
                 body = DEV_PAGE.encode()
+                if self.path.startswith("/to-workshop"):
+                    # A dev page that sends its own frame to the workshop: the
+                    # frame keeps the sandbox flags it was given, so with
+                    # "keep its origin" on it would run with the workshop's
+                    # real origin unless the workshop sandboxes itself.
+                    target = f"http://127.0.0.1:{mock.workshop_port}/p/p1/probe.html"
+                    body = f"<!doctype html><script>location.replace({json.dumps(target)})</script>".encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(body)))

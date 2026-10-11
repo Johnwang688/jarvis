@@ -494,6 +494,29 @@ export function judgeLink(uri: string): LinkVerdict {
   return { ok: true, url: url.href, loopback: isLoopbackHost(url.hostname) };
 }
 
+/**
+ * Where a menu opened at a click goes (the link menu, WP-E), every length in
+ * the HUD's own CSS px (a screen length through `toCss`). Below the click and
+ * starting at it; **above** the click when it does not fit below (a dev
+ * server's `Local:` line is usually the last row of the panel's terminal, so
+ * that is the common case); and in any case clamped so the whole menu is
+ * inside the window, `gap` from every edge. A menu taller than the window
+ * starts at the top.
+ */
+export function placeMenu(
+  click: { x: number; y: number },
+  size: { w: number; h: number },
+  view: { w: number; h: number },
+  gap = 4,
+): { left: number; top: number } {
+  const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(v, Math.max(lo, hi)));
+  const left = clamp(click.x, gap, view.w - size.w - gap);
+  const below = click.y + gap;
+  const above = click.y - gap - size.h;
+  const top = below + size.h + gap <= view.h ? below : above >= gap ? above : below;
+  return { left: Math.round(left), top: Math.round(clamp(top, gap, view.h - size.h - gap)) };
+}
+
 /** A size the daemon accepts (cols 2–1000, rows 1–500), or null. */
 export function clampSize(cols: number, rows: number): { cols: number; rows: number } | null {
   if (!Number.isFinite(cols) || !Number.isFinite(rows) || cols < 1 || rows < 1) return null;

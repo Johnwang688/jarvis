@@ -44,6 +44,9 @@ The checks worth keeping, each written to bite:
     "Open in Preview" lands in a drawn Preview pane, else the focused pane,
     and is refused, with the reason, for the HUD's and the API's ports;
     "Open in a browser tab" still opens it; Escape and a card close it;
+    and a link on the panel terminal's **last row** opens a menu that flips
+    above the click and sits wholly on screen, both buttons clickable, at
+    100% and 160% (PR #31 review: it opened below the window);
   - at 160% and 70% the terminal fits its pane, its text scales with the
     HUD, and a drag selects exactly the cells under the pointer;
   - one terminal is drawn in one place: in a pane, its panel tab says so;
@@ -477,7 +480,8 @@ def terminal_checks(browser, mock, base, check, until, guard, init_script):
         _boot(page, mock, base, until)
         for section in (_open_checks, _typing_checks, _card_checks, _paste_checks, _reload_checks,
                         _takeover_checks, _elsewhere_checks, _exit_checks, _busy_checks, _readable_checks,
-                        _integration_checks, _osc_link_checks, _preview_link_checks, _pane_checks, _zoom_checks,
+                        _integration_checks, _osc_link_checks, _preview_link_checks, _menu_edge_checks,
+                        _pane_checks, _zoom_checks,
                         _ended_checks,
                         _flood_checks, _chat_panes_checks):
             if only and section.__name__.strip("_") not in only:
@@ -1246,6 +1250,59 @@ def _preview_link_checks(page, mock, base, check, until, fake):
     check("and Escape still denies the card", bool(body) and body[-1].get("decision") == "deny")
     until(lambda: page.locator('[data-testid="approval-card"]').count() == 0, timeout=4)
     check("nothing reached the API listener", mock.api_hits == [], str(mock.api_hits))
+
+
+def _menu_edge_checks(page, mock, base, check, until, fake):
+    """A dev server's `Local:` line is usually the last row of the panel's
+    terminal, and the link menu opened below the click there — off the bottom
+    of the window, both buttons unreachable, at 100% and at 160% (PR #31
+    review; this is the reviewer's probe, kept). It must flip above the click
+    and sit wholly inside the window, both buttons clickable."""
+    menu = '[data-testid="term-link-menu"]'
+    dev = f"http://127.0.0.1:{mock.dev_port}/"
+    for zoom in (100, 160):
+        tid = _fresh(page, mock, base, until, fake)
+        if zoom != 100:
+            _store(page, zoom=str(zoom), layout="{}")
+            _boot(page, mock, base, until, reload=True)
+            until(lambda: _state(page, tid) == "attached", timeout=6)
+            page.wait_for_timeout(300)
+        size = page.evaluate("id => window.__hudTerminals.size(id)", tid)
+        last = size["rows"] - 1
+        fake.output(tid, f"\x1b[2J\x1b[{last + 1};1H".encode() + dev.encode())
+        until(lambda: dev.rstrip("/") in _text(page, tid), timeout=3)
+        page.wait_for_timeout(200)
+        page.evaluate("window.__opened = []")
+        x2, y2, _, _ = _cell(page, tid, 8, last)
+        page.mouse.move(x2, y2)
+        page.wait_for_timeout(80)
+        x, y, _, _ = _cell(page, tid, 4, last)
+        page.mouse.move(x, y)
+        page.wait_for_timeout(120)
+        page.keyboard.down("Control")
+        page.mouse.click(x, y)
+        page.keyboard.up("Control")
+        until(lambda: _visible(page, menu), timeout=3)
+        page.wait_for_timeout(150)
+        vp = page.viewport_size
+        box = page.locator(menu).bounding_box() if _visible(page, menu) else None
+
+        def on_screen(b):
+            return bool(b) and b["x"] >= 0 and b["y"] >= 0 and b["x"] + b["width"] <= vp["width"] + 0.5 \
+                and b["y"] + b["height"] <= vp["height"] + 0.5
+        buttons = [page.locator(f'[data-testid="{t}"]').bounding_box()
+                   for t in ("term-link-preview", "term-link-browser")] if box else [None, None]
+        check(f"at {zoom}%, a link on the panel terminal's last row opens its menu wholly on screen",
+              on_screen(box), f"menu {box} viewport {vp} click {x:.0f},{y:.0f}")
+        check(f"at {zoom}%, both of its buttons are on screen", all(on_screen(b) for b in buttons), str(buttons))
+        check(f"at {zoom}%, it flips above the click (no room below) and starts at it",
+              bool(box) and box["y"] + box["height"] <= y + 1 and abs(box["x"] - x) < 40,
+              f"menu {box} click {x:.0f},{y:.0f}")
+        page.locator('[data-testid="term-link-browser"]').click(timeout=2000)
+        check(f"at {zoom}%, its buttons are clickable (Open in a browser tab opened it)",
+              page.evaluate("window.__opened") == [dev] and not _visible(page, menu),
+              str(page.evaluate("window.__opened")))
+    _store(page, zoom="100", layout="{}")
 
 
 def _layout(page, until, preset):

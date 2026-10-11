@@ -318,9 +318,10 @@ class Backend(unittest.TestCase):
         prefix = f"/p/{self.project.id}/"
         self.assertEqual(self.request("GET", prefix + "hello.txt", port=preview), b"hello\n")
         self.assertEqual(self.headers["Cache-Control"], "no-store")
-        # The preview origin is framed by the HUD on purpose: no frame rule here.
+        # The preview origin is framed by the HUD on purpose: no frame rule
+        # here, but every document it serves is sandboxed (PR #31 review).
         self.assertNotIn("X-Frame-Options", self.headers)
-        self.assertNotIn("Content-Security-Policy", self.headers)
+        self.assertEqual(self.headers["Content-Security-Policy"], "sandbox allow-scripts allow-forms")
         self.assertIn("text/plain", self.headers["Content-Type"])
         self.assertIn(b"preview", self.request("GET", prefix, port=preview))
         for path, code in [("/status", 404), ("/", 404), ("/assets/app.js", 404),

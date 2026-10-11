@@ -23,7 +23,12 @@ The checks worth keeping, each written to bite:
     turns it off, and so does nothing else;
   - a stored grant that is no longer allowed (the daemon now reports that
     port as its own, or no longer says it is frame-hardened) is dropped;
-  - under an authorization card the switch is disabled and inert.
+  - under an authorization card the switch is disabled and inert;
+  - a keep-origin page that sends its own frame to the workshop lands
+    opaque — the workshop sandboxes every document it serves (PR #31
+    review: it used to run with the real workshop origin);
+  - the HUD under test is served under the daemon's own frame headers (the
+    mock sends `hud_api.frame_headers()`, never a copy).
 """
 from __future__ import annotations
 
@@ -58,7 +63,8 @@ def preview_checks(browser, mock, base, check, until, guard, init_script):
     page.set_default_timeout(5000)
     try:
         _boot(page, mock, base, until)
-        for section in (_port_checks, _keep_checks, _stored_checks, _hardened_checks, _card_checks):
+        for section in (_port_checks, _keep_checks, _stored_checks, _hardened_checks, _card_checks,
+                        _workshop_hijack_checks, _served_under_checks):
             try:
                 section(page, mock, check, until)
             except Exception as e:  # a section that cannot run is a failure; the rest still run
@@ -255,6 +261,37 @@ def _hardened_checks(page, mock, check, until):
     _setup(page, mock, until, {"previewUrl": dev})
     until(lambda: _count(page, KEEP) > 0, timeout=4)
     check("the same daemon saying it again offers the switch again", _visible(page, KEEP) and not _keep_checked(page))
+
+
+def _workshop_hijack_checks(page, mock, check, until):
+    """A page let keep its origin navigates its own frame to the workshop. The
+    frame keeps the flags it was given (allow-same-origin among them), so
+    without the workshop's own sandbox the agent-written page there ran with
+    the real workshop origin: its storage, and same-origin reads of any
+    project's served files (PR #31 review, shown in Chromium)."""
+    dev = f"http://127.0.0.1:{mock.dev_port}"
+    hits = len(mock.workshop_hits)
+    _setup(page, mock, until, {"previewUrl": dev + "/to-workshop", "keepOrigin": dev})
+    until(lambda: _sandbox(page) == ON, timeout=4)
+    check("setup: the dev page's frame was let keep its origin", _sandbox(page) == ON, str(_sandbox(page)))
+    until(lambda: "/p/p1/probe.html" in mock.workshop_hits[hits:], timeout=4)
+    check("setup: the dev page sent its frame to the workshop", "/p/p1/probe.html" in mock.workshop_hits[hits:],
+          str(mock.workshop_hits[hits:]))
+    until(lambda: _inside(page, "#origin") not in ("", "?"), timeout=4)
+    origin, storage = _inside(page, "#origin"), _inside(page, "#storage")
+    check("the workshop page there runs with an opaque origin, not the workshop's",
+          origin == "null", f"origin {origin}")
+    check("so its storage throws", storage == "blocked", f"storage {storage}")
+
+
+def _served_under_checks(page, mock, check, until):
+    """The HUD under test is rendered under the daemon's own frame headers."""
+    got = page.evaluate("""async () => {
+      const r = await fetch('/status');
+      return [r.headers.get('x-frame-options'), r.headers.get('content-security-policy')];
+    }""")
+    check("the mock HUD sends the daemon's frame headers (hud_api.frame_headers)",
+          got == ["DENY", "frame-ancestors 'none'"], str(got))
 
 
 def _card_checks(page, mock, check, until):

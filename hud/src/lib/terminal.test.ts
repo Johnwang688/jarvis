@@ -3,7 +3,7 @@ import {
   AttachLedger, CHUNK, InputGate, InputQueue, MINE_KEPT, MINE_KEY, OUTPUT_HIGH_WATER, OutputPipe, attachUrl, chunk,
   clampSize, cleanPaste, cleanText, cleanTitle, counterZoom, encodeInput, fontSizeFor, inTerminal, inheritMine,
   integrationNote, isCtrlC, judgeLink, loadMine, pageNonce, parseControl, parseMine, parsePrefs, parseRow, parseRows,
-  parseSpec, placeTerminals, saveMine, terminalSpecFor, terminalTakesKey,
+  parseSpec, placeMenu, placeTerminals, saveMine, terminalSpecFor, terminalTakesKey,
 } from "./terminal";
 
 const row = (over: Record<string, unknown> = {}) => ({
@@ -181,6 +181,39 @@ describe("links", () => {
                        "not a url", "http://user:pass@example.com/"]) {
       expect(judgeLink(bad).ok).toBe(false);
     }
+  });
+});
+
+describe("the link menu's place (PR #31 review)", () => {
+  const size = { w: 280, h: 102 };
+  const view = { w: 1280, h: 800 };
+  const inside = (p: { left: number; top: number }, s = size, v = view) =>
+    p.left >= 4 && p.top >= 4 && p.left + s.w <= v.w - 4 && p.top + s.h <= v.h - 4;
+
+  it("opens below the click, at it, when there is room", () => {
+    expect(placeMenu({ x: 300, y: 200 }, size, view)).toEqual({ left: 300, top: 204 });
+  });
+
+  it("flips above a click near the bottom (a dev server's last row), fully on screen", () => {
+    const p = placeMenu({ x: 300, y: 788 }, size, view);
+    expect(p).toEqual({ left: 300, top: 788 - 4 - 102 });
+    expect(inside(p)).toBe(true);
+    // At 160% the same window is 800x500 CSS px and the menu taller.
+    const z = { w: 800, h: 500 };
+    const tall = { w: 280, h: 164 };
+    const q = placeMenu({ x: 200, y: 492 }, tall, z);
+    expect(q.top + tall.h).toBeLessThanOrEqual(492);
+    expect(inside(q, tall, z)).toBe(true);
+  });
+
+  it("is clamped inside the window on both axes", () => {
+    expect(inside(placeMenu({ x: 1275, y: 795 }, size, view))).toBe(true);
+    expect(placeMenu({ x: -50, y: -50 }, size, view)).toEqual({ left: 4, top: 4 });
+    // Room neither below nor above: inside the window anyway.
+    const short = { w: 1280, h: 150 };
+    expect(inside(placeMenu({ x: 10, y: 60 }, size, short), size, short)).toBe(true);
+    // Taller than the window: from the top.
+    expect(placeMenu({ x: 10, y: 60 }, { w: 280, h: 900 }, view).top).toBe(4);
   });
 });
 

@@ -4,8 +4,13 @@ Every response on the daemon's HUD listener and API listener must carry
 `Content-Security-Policy: frame-ancestors 'none'` and `X-Frame-Options: DENY`
 — the HUD page, its assets, JSON, SSE, every error and refusal, a request so
 malformed the route never ran, and the terminal socket's hand-written `101`.
-The preview (workshop) listener must carry neither: the HUD frames it on
-purpose. `GET /status` reports `hud_port`, `api_port` and `frame_hardened`,
+The preview (workshop) listener must carry neither — the HUD frames it on
+purpose — but every response there carries exactly one CSP, `sandbox
+allow-scripts allow-forms`, so a workshop page always runs with an opaque
+origin, even in a frame its page was let keep (PR #31 review). A response's
+own directives can never touch either rule: a comma, CR/LF, or a reserved
+directive (`frame-ancestors`, `sandbox`, `report-*`) is refused.
+`GET /status` reports `hud_port`, `api_port` and `frame_hardened`,
 which is what lets the HUD offer a Preview pane's "keep its own origin"
 switch at all.
 
@@ -221,9 +226,10 @@ class Base(unittest.TestCase):
         self.assertIn("frame-ancestors 'none'", csp[0], what)
         self.assertEqual(xfo, ["DENY"], f"{what}: X-Frame-Options")
 
-    def assert_bare(self, got, what):
-        csp = " ".join(v for n, v in got if n.lower() == CSP.lower())
-        self.assertNotIn("frame-ancestors", csp, what)
+    def assert_workshop(self, got, what):
+        """The preview listener: no frame rule, and exactly one CSP — the sandbox."""
+        csp = [v for n, v in got if n.lower() == CSP.lower()]
+        self.assertEqual(csp, ["sandbox allow-scripts allow-forms"], f"{what}: the workshop's one CSP")
         self.assertFalse([v for n, v in got if n.lower() == XFO.lower()], f"{what}: X-Frame-Options")
 
     # -- a terminal (owner-only: the HUD listener and its Origin) -------------------
@@ -394,10 +400,39 @@ class FrameHeaders(Base):
         csp = next(v for n, v in got if n == CSP)
         self.assertIn("default-src 'none'", csp)
         self.assertIn("style-src 'unsafe-inline'", csp)
-        self.assertEqual(H.content_security_policy("default-src 'none'; frame-ancestors *"),
-                         "default-src 'none'; frame-ancestors 'none'",
-                         "a response cannot loosen the frame rule through its own directives")
         self.assertEqual(H.content_security_policy(), "frame-ancestors 'none'")
+        self.assertEqual(H.content_security_policy("img-src 'self'"), "img-src 'self'; frame-ancestors 'none'")
+
+    def test_a_response_cannot_change_the_frame_rule_through_its_own_directives(self):
+        # PR #31 review, shown in Chromium: a comma starts a second policy, so
+        # `img-src 'self', frame-ancestors *` became `img-src 'self'` and
+        # `frame-ancestors *; frame-ancestors 'none'` (the first wins), and a
+        # browser that sees frame-ancestors ignores X-Frame-Options: a
+        # keep-origin frame landed same-origin on the HUD and read the parent.
+        for bad in ("img-src 'self', frame-ancestors *",          # a second policy
+                    "img-src 'self',frame-ancestors *",
+                    "default-src 'none'; frame-ancestors *",       # an override
+                    "FRAME-ANCESTORS http://localhost:5173",
+                    "sandbox allow-same-origin allow-scripts",     # reserved
+                    "report-uri http://localhost:5173/r",
+                    "img-src 'self'; report-to x",
+                    "img-src 'self'\r\nX-Injected: 1",            # a header split
+                    "img-src 'self'\nX-Injected: 1",
+                    "img-src 'self'\0"):
+            for builder in (H.content_security_policy, H.workshop_security_policy):
+                with self.subTest(bad=bad, builder=builder.__name__), self.assertRaises(ValueError):
+                    builder(bad)
+            with self.subTest(bad=bad, where="frame_headers"), self.assertRaises(ValueError):
+                H.frame_headers(SimpleNamespace(server=SimpleNamespace()), bad)
+
+        class Recorder:
+            server = SimpleNamespace()
+
+            def __getattr__(self, name):
+                raise AssertionError(f"binary wrote something ({name}) before refusing its policy")
+
+        with self.assertRaises(ValueError):
+            H.binary(Recorder(), b"x", "text/plain", csp="img-src 'self', frame-ancestors *")
 
     def test_the_terminal_socket_and_its_refusals_refuse_to_be_framed(self):
         status, _, content = self.ask("hud", "POST", "/terminals", {"in": {"project": self.project.id}})
@@ -437,7 +472,7 @@ class FrameHeaders(Base):
 
 
 class PreviewOrigin(Base):
-    def test_the_workshop_never_refuses_to_be_framed(self):
+    def test_the_workshop_is_framed_but_always_sandboxed(self):
         prefix = f"/p/{self.project.id}/"
         for method, path, want in (("GET", prefix + "hello.txt", 200), ("GET", prefix, 200),
                                    ("GET", prefix + ".env", 403), ("GET", "/status", 404),
@@ -446,14 +481,19 @@ class PreviewOrigin(Base):
             with self.subTest(path=path):
                 status, got, _ = self.ask("preview", method, path, {} if method == "PUT" else None)
                 self.assertEqual(status, want)
-                self.assert_bare(got, f"preview {method} {path}")
+                self.assert_workshop(got, f"preview {method} {path}")
         status, got, _ = self.ask("preview", "GET", prefix + "hello.txt", headers={"Host": "attacker.example"})
         self.assertEqual(status, 403)
-        self.assert_bare(got, "preview bad Host")
+        self.assert_workshop(got, "preview bad Host")
         status, got = headers_of(raw_exchange(self.ports["preview"], b"GARBAGE\r\n\r\n"))
         self.assertEqual(status, 400)
-        self.assert_bare(got, "preview garbage")
-        self.assertEqual(H.frame_headers(SimpleNamespace(server=SimpleNamespace(preview_only=True))), [])
+        self.assert_workshop(got, "preview garbage")
+        preview = SimpleNamespace(server=SimpleNamespace(preview_only=True))
+        self.assertEqual(H.frame_headers(preview),
+                         [("Content-Security-Policy", "sandbox allow-scripts allow-forms")])
+        self.assertEqual(H.frame_headers(preview, "img-src 'self'"),
+                         [("Content-Security-Policy", "img-src 'self'; sandbox allow-scripts allow-forms")],
+                         "a response's own directives merge into the one header")
 
 
 class Status(Base):

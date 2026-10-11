@@ -45,7 +45,8 @@ import type { FitAddon } from "@xterm/addon-fit";
 import { api } from "../api";
 import {
   AttachLedger, InputGate, OutputPipe, attachUrl, cleanPaste, cleanTitle, clampSize, counterZoom, encodeInput,
-  fontSizeFor, integrationNote, isTerminalId, judgeLink, loadMine, loadPrefs, pageNonce, parseControl, saveMine,
+  fontSizeFor, integrationNote, isTerminalId, judgeLink, loadMine, loadPrefs, pageNonce, parseControl, placeMenu,
+  saveMine,
   savePrefs,
   SPECS_KEPT, type InSpec, type TerminalRow,
 } from "../lib/terminal";
@@ -1946,11 +1947,22 @@ export function TerminalLinkMenu(props: { blocked: boolean; zoom: number }) {
   const { status, ports } = useDaemonPorts();
   const menu = props.blocked ? null : mgr.linkMenu;
   const first = useRef<HTMLButtonElement>(null);
-  useEffect(() => {
+  const box = useRef<HTMLDivElement>(null);
+  // Read by the Escape listener: true from the render a card arrives in, so
+  // the listener never takes the card's Escape in the moment before it goes.
+  const blocked = useRef(props.blocked);
+  blocked.current = props.blocked;
+  // Where it is drawn: measured, then placed (below the click, else above it,
+  // always inside the window). Null until measured, so it is never painted
+  // where it would not fit.
+  const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
+  // A layout effect: added and removed in the same commit as the menu, so a
+  // card that closes the menu takes the listener with it at once.
+  useLayoutEffect(() => {
     if (!menu) return;
     const close = () => mgr.closeLinkMenu();
     const esc = (e: KeyboardEvent) => {
-      if (e.key !== "Escape") return;
+      if (e.key !== "Escape" || blocked.current || mgr.blocked) return;
       e.stopPropagation();
       e.preventDefault();
       mgr.closeLinkMenu();
@@ -1963,19 +1975,31 @@ export function TerminalLinkMenu(props: { blocked: boolean; zoom: number }) {
       document.removeEventListener("keydown", esc, true);
     };
   }, [menu, mgr]);
-  if (!menu) return null;
-  const verdict = status === "pending" ? null : judgePreviewUrl(menu.url, ports);
+  const verdict = !menu || status === "pending" ? null : judgePreviewUrl(menu.url, ports);
   const width = 280;
-  const left = Math.max(4, Math.min(Math.round(toCss(menu.x, props.zoom)),
-    Math.round(toCss(window.innerWidth, props.zoom)) - width - 4));
-  const top = Math.max(4, Math.round(toCss(menu.y, props.zoom)) + 4);
+  useLayoutEffect(() => {
+    const el = box.current;
+    if (!menu || !el) {
+      setPos(null);
+      return;
+    }
+    const z = props.zoom;
+    setPos(placeMenu(
+      { x: toCss(menu.x, z), y: toCss(menu.y, z) },
+      { w: el.offsetWidth || width, h: el.offsetHeight },
+      { w: toCss(window.innerWidth, z), h: toCss(window.innerHeight, z) },
+    ));
+    // The refusal line changes the height once /status has answered.
+  }, [menu, props.zoom, verdict?.ok, verdict?.reason]);
+  if (!menu) return null;
   return (
     <div
+      ref={box}
       className="laymenu linkmenu"
       role="menu"
       aria-label="Open this link"
       data-testid="term-link-menu"
-      style={{ left, top, width }}
+      style={pos ? { left: pos.left, top: pos.top, width } : { left: 0, top: 0, width, visibility: "hidden" }}
       onMouseDown={(e) => e.stopPropagation()}
       onKeyDown={(e) => {
         if (e.code === "Space" || e.key === " ") e.stopPropagation();

@@ -115,6 +115,11 @@ export function judgePreviewUrl(raw: string, ports: Partial<DaemonPorts> = {}): 
   if (url.protocol !== "http:" && url.protocol !== "https:") {
     return { ok: false, url: "", reason: `Refused: ${url.protocol} is not a page.` };
   }
+  // As a terminal link is (lib/terminal.ts judgeLink): a URL carrying a user
+  // name or password is never loaded.
+  if (url.username || url.password) {
+    return { ok: false, url: "", reason: "Refused: a URL with a user name or password in it." };
+  }
   if (!isLoopbackHost(url.hostname)) {
     return { ok: false, url: "", reason: "Refused: the preview pane only loads local servers." };
   }
