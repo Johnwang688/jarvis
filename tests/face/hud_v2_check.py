@@ -22,7 +22,11 @@ The safety checks are the ones to keep, and each is written to bite:
   - (ED-1) the editor makes no request off loopback (a catch-all route
     refuses and records any), no language-service worker is built or loaded,
     a link in a file opens only http(s) with noopener, and an unsaved edit is
-    never dropped by opening another file or Reload without asking.
+    never dropped by opening another file or Reload without asking;
+  - (ED-3) no token the editor draws, and no colour Monaco publishes, is
+    amber or red except `--red` where it means an error or "removed", and a
+    C++ and a Python file show each class of token in its row's HUD token
+    (tests/face/hud_v2_editor_theme_check.py).
 
 Build first:  cd hud && npm ci && npm run build
 Run:          PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. .venv/bin/python \\
@@ -813,17 +817,13 @@ def task_checks(page, mock):
     check("the acceptance criteria are shown",
           view.locator('[data-testid="acceptance"]').count() == 2)
 
-    # A blocking question gets an answer box; an assumable one does not park
-    # the task and is not asked.
-    qs = view.locator('[data-testid="blocking-questions"]')
-    check("a blocking question is asked", qs.count() == 1)
-    check("only the blocking one", view.locator('[data-testid="answer-1"]').count() == 0)
-    view.locator('[data-testid="answer-0"]').fill("branch")
-    view.locator('[data-testid="answer-send-0"]').click()
-    body = until(lambda: mock.sent("POST", "/tasks/k1/answer") or None)
-    check("answering calls /answer with the question and the answer",
-          bool(body) and body[-1].get("answer") == "branch"
-          and "commit" in (body[-1].get("question") or ""), str(body[-1] if body else None))
+    # A running task is waiting on no question, whatever its spec still
+    # holds: the runner takes an answer only while it is CLARIFYING, so none
+    # is asked. Answering one, and a refusal, are `hud_v2_task_check.py`'s, on
+    # a mock of their own (this check used to assert the very body the daemon
+    # refuses, `{question, answer}`, 2026-10-11).
+    check("a running task offers no answer box (the runner would refuse it)",
+          view.locator('[data-testid="blocking-questions"]').count() == 0)
 
     view.locator('[data-testid="steer-box"]').fill("skip the docstring nit")
     view.locator('[data-testid="steer-send"]').click()
@@ -3046,6 +3046,17 @@ def main():
             finally:
                 preview_mock.stop()
 
+            # The Graphite editor scheme (ED-3): a context and a mock of their
+            # own — its world gains a C++ and a Python file, and its card
+            # snapshot needs a window where Monaco has not loaded yet.
+            from tests.face.hud_v2_editor_theme_check import editor_theme_checks
+            theme_mock = MockDaemon(0).start()
+            try:
+                editor_theme_checks(browser, theme_mock, f"http://127.0.0.1:{theme_mock.port}", check, until,
+                                    guard, FAKE_RECOGNIZER)
+            finally:
+                theme_mock.stop()
+
             # Push-to-talk's key, Ctrl+D (2026-10-10): a context and a mock of
             # their own, for the same reasons.
             from tests.face.hud_v2_ptt_check import ptt_checks
@@ -3055,6 +3066,16 @@ def main():
                            FAKE_RECOGNIZER)
             finally:
                 ptt_mock.stop()
+
+            # Answering a task's question (2026-10-11): a context and a mock
+            # of their own — it rewrites task k1's state and questions.
+            from tests.face.hud_v2_task_check import task_answer_checks
+            task_mock = MockDaemon(0).start()
+            try:
+                task_answer_checks(browser, task_mock, f"http://127.0.0.1:{task_mock.port}", check, until,
+                                   guard, FAKE_RECOGNIZER)
+            finally:
+                task_mock.stop()
 
             ctx = browser.new_context(permissions=["microphone"])
             guard(ctx)

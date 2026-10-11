@@ -9,13 +9,33 @@ model. Failures raise `ControlError` with a sentence the surface can show.
 """
 from __future__ import annotations
 
-from typing import Protocol
+from typing import Any, Protocol, Sequence
 
-from .model import ProviderName, Task
+from .model import ProviderName, Task, TaskState
 
 
 class ControlError(Exception):
     """A verb that cannot be applied: unknown task, wrong state, bad provider."""
+
+
+def answer_refusal(task_id: str, state: TaskState | str, questions: Sequence[Any],
+                   index: Any, text: Any) -> str | None:
+    """Why `answer_question` refuses this answer, or None if it takes it.
+
+    The runner's rule, kept in one place because the HUD's test mock calls it
+    too (a mock that took any body is how the HUD sent `{question, answer}`
+    for weeks, 2026-10-11): only a CLARIFYING task takes an answer; `index` is
+    the question's place in `spec.questions` — every question, answered and
+    assumable ones included, never its place among the open ones; and the
+    answer is not blank."""
+    state = TaskState(state)
+    if state != TaskState.CLARIFYING:
+        return f"Task {task_id} is {state.value}; it is not waiting on a question."
+    if not isinstance(index, int) or isinstance(index, bool) or not 0 <= index < len(questions):
+        return f"Task {task_id} has no question {index}."
+    if not isinstance(text, str) or not text.strip():
+        return "An answer needs some text."
+    return None
 
 
 class TaskControl(Protocol):
