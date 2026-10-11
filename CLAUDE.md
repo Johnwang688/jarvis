@@ -1315,11 +1315,8 @@ language comes from the registry by the model's URI** (`file:///<project>/<path>
 a per-editor query until ED-2's buffers share one model per absolute path);
 `languageFor` is gone. Links open only http/https, `noopener`
 (`registerLinkOpener` answers every other scheme "handled" — Monaco's own
-fallback navigates the window). vs-dark's amber and red token colours and
-the orange/gold chrome of find, bracket pairs and the unicode box are moved
-off those hues until ED-3's scheme (`INTERIM_RULES`, `CHROME`, tested in
-`monaco.test.ts` on one warm band 340°–65° — the plan's two bands leave
-orange, Monaco's own find colour, between them). Diff models live under
+fallback navigates the window). ED-1's interim moves of vs-dark's amber and
+red off those hues are gone: ED-3's scheme (below) replaced them. Diff models live under
 `jarvis-diff:` and are disposed with their view (two leaked per file).
 **Under a card every editor is read-only** (`setEditorsBlocked` from App,
 above the error boundary, beside the terminals' hold) and unfocused (the
@@ -1395,6 +1392,67 @@ picked in the same breath as a keystroke). Every one that guards a behaviour
 fails on origin/main, on the reviewed head (18381b9) or with its fix reverted
 (PR body). Monaco's `getValue()` per keystroke (the change event hands the
 whole text to React) is left for ED-2's buffers.
+
+**The Graphite editor scheme, ED-3 (2026-10-11; plan §2.5, decisions E-4).**
+One scheme, no picker, **no syntax colour amber or red**. `lib/editorTheme.ts`
+is the table: rows keyed by **nvim-treesitter capture names** (`LEGEND` —
+ED-5's semantic token types), Monarch's tokens styled through the same rows,
+each naming a HUD token and a style. Most code is `--text`; keywords bold,
+comments italic `--text-muted`, punctuation `--text-2`, and four new `:root`
+tokens: `--syn-fn` #8ec5d6 (functions, tags, headings), `--syn-string`
+#a6c79b, `--syn-const` #b9aade (numbers, constants, escapes), `--syn-type`
+#a8b5c2 (types, modules, directives, keys) — quieter siblings of HUD hues, so
+`--accent` and `--green` keep single meanings. **theme.css is the one place a
+colour is written**: `cssPalette()` reads the tokens off `:root` when Monaco
+loads and `themeData()` derives the hex, with `inherit: false` (nothing of
+vs-dark's survives; a token no rule names is `--text`); a vitest fails on any
+hex literal in editorTheme.ts's code. The chrome is pinned in the same file —
+the plan's list (current line `--bg-2`, line numbers `--text-muted`, cursor
+`--accent-hi`, selection and find in the accent, word highlight `--selected`,
+bracket pairs in the three syntax hues, unicode box `--syn-const`, error
+squiggles `--red`, warnings `--text-2`, diff tints, whitespace, sticky
+scroll) **plus every colour Monaco 0.57 resolves warm anywhere in its
+registry**; red only on a row marked `red: "error" | "removed"`. **A control
+character is not a registry colour**: Monaco draws ESC, BEL or ^L on its own
+`.mtkcontrol` box, white on dark red, `!important` — theme.css pins
+`.monaco-editor .mtkcontrol` to `--text-2` on `--bg-3` (review of PR #45).
+**A theme failure fails soft**: `themeOrFallback` logs the unreadable token by
+name and Monaco loads in plain vs-dark (a rejected `loadMonaco` used to drop
+every editor to its textarea, silently, until reload), and each refined
+tokenizer is compiled in its factory first (`refinedOrOwn`, with Monaco's own
+Monarch compiler) — a throw or a compile error leaves that language Monaco's
+own tokenizer, logged. A
+per-language rule is `<capture>.<lang>` (Monarch's postfix; ED-5 passes the
+language as the token's last modifier — Monaco matches a semantic token's
+type and modifiers joined by dots). **Monarch's C, C++ and Python are
+refined** (`lib/monarchRefine.ts`): a word before `(` is `function`, a C++
+word before `::` a `module`, and the builtins split into
+`constant`/`type`/`function`/`variable.builtin` (Python's keyword list *was*
+its builtins); the one identifier rule is found by its exact shape, and a
+definition that has moved keeps Monaco's own tokenizer. **Both live in the
+lazy chunk** (`monacoBundle.ts`'s `applyGraphite`, called by `loadMonaco`):
+imported from `monaco.ts` they cost 11 KB of first paint and, because
+Python's definition imports Monaco's API, split Monaco into a second chunk.
+For ED-5: the plan's "bold on `void`" test contradicts its own table (`void`
+is `@type.builtin`, `--syn-type`); the table wins. Left for ED-5's tree-sitter
+(fidelity, not safety): Markdown bullets and link URLs, untyped `=`/`*`/`::`/
+`->`, `#define SQ(x)` drawn as a function, Python's `class Foo(Base)` drawn
+as a function, `match` drawn as a keyword, and escapes inside Python strings. Vitest reads theme.css
+raw only because `test.css.include` names it (Vitest empties CSS, `?raw`
+included). Free checks: `editorTheme.test.ts` (≥ 4.5:1 on `--bg-1` and
+`--bg-2`, the warm band 340°–65° at s ≥ 0.35, strict hex, the CSS and the
+table agree, every capture and Monarch token resolved through Monaco's own
+`TokenTheme`, every warm Monaco default pinned), `monarchRefine.test.ts`
+(Monaco's own Monarch compiler and lexer on the installed definitions), and
+`tests/face/hud_v2_editor_theme_check.py` (a `MockDaemon(0)` of its own, run
+by `hud_v2_check` after the preview section, or alone: a C++ and a Python
+file's rendered tokens against the page's `:root` tokens, Monaco's `.mtkN`
+colour map, every `--vscode-*` colour it publishes, bracket pairs, find in
+the accent, control characters off Monaco's red box, and the approval card's
+computed colours unchanged once Monaco has loaded). 30 of its first 44 checks
+fail on b04d6e8, and the control-character pair without the theme.css rule;
+the rest are setup or guards (find was already pinned by ED-1), each shown to
+bite in a scratch copy.
 
 **The effort is a slider, not pills (2026-10-10, owner's ask: "like Claude's").**
 `components/EffortSlider.tsx`, rules in `lib/effortSlider.ts`: "Effort
