@@ -320,7 +320,8 @@ def _card_checks(page, mock, check, until):
         page.keyboard.press("Enter")
         time.sleep(0.3)
         sent = mock.sent("POST", "/approvals/pttcard1")
-        check(f"review #40: an aborted click on {testid.split('-')[1].upper()} leaves no focus on it, so a "
+        label = {"approval-allow": "AUTHORIZE", "approval-always": "ALWAYS"}[testid]
+        check(f"review #40: an aborted click on {label} leaves no focus on it, so a "
               "Space or Enter after it authorizes nothing",
               focused != testid and not sent and page.locator('[data-testid="approval-card"]').count() == 1,
               f"focus={focused} sent={sent}")
