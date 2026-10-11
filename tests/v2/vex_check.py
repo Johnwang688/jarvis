@@ -1698,7 +1698,8 @@ VEXBUILD_RUNS = ("uv run --no-project vexbuild build", "uv run --python 3.14 vex
                  "python3 -m runpy jarvis.v2.vex build", "npx vexbuild", "bunx vexbuild",
                  "uvx vexbuild", "pnpx vexbuild", "uv run sh -c vexbuild",
                  "npm exec -c 'vexbuild build'", "uv run --some-future-flag x vexbuild",
-                 "npm exec -- vexbuild", "bun x vexbuild", "uv tool run --from x vexbuild")
+                 "npm exec -- vexbuild", "bun x vexbuild", "uv tool run --from x vexbuild",
+                 "uv run -Z x vexbuild")
 ORDINARY_RUNNERS = {
     "uv run pytest -q": rules.ALLOW, "uv run --no-project python script.py": rules.ALLOW,
     "uv run --with rich python x.py": rules.ALLOW, "npx --yes prettier --check .": rules.ALLOW,
@@ -1810,7 +1811,10 @@ class TooComplex(Base):
 
     FLOODS = {"[": "ls " + "[" * 20000, "[a": "ls " + "[a" * 20000, "[[:": "ls " + "[[:" * 8000,
               "*?": "ls " + "*?" * 20000, "v[": "./v" + "[" * 20000, "${": "echo " + "${" * 80000,
-              "many words": "ls " + " ".join(f"v{i}*" for i in range(4000))}
+              "many words": "ls " + " ".join(f"v{i}*" for i in range(4000)),
+              "{": "{" * 20000 + " --user", "$((": "./v$((" * 8000,
+              "nested $(…)": "echo " + "$(echo " * 3000 + "x" + ")" * 3000,
+              "nested eval": "eval " * 3000 + "x"}
 
     def test_a_flood_is_judged_fast_asked_and_never_covered(self):
         Path(config.ALLOWLIST_PATH).write_text(json.dumps([
@@ -1821,7 +1825,7 @@ class TooComplex(Base):
                 verdict = rules.decide(line)
                 took = time.perf_counter() - started
                 self.assertLess(took, 1.0, f"{label}: {took:.2f} s")
-                if label == "${":
+                if label in ("${",):
                     continue                    # no glob in it: as on main
                 self.assertEqual(verdict.decision, rules.ASK, label)
                 self.assertFalse(v1_permissions.allows("run_command", {"command": line}))
@@ -1867,7 +1871,12 @@ class MakeIncludes(Base):
         self.refused("include vex/mkenv.mk \\\r\n  src/notes.txt\r\n", "names vexcom")
 
     def test_a_backslash_in_an_include_is_refused(self):
-        self.refused("include vex\\mkenv.mk\n", "cannot read as make does")
+        # make.exe reads `extra\rules.inc` as `extra/rules.inc`, which names
+        # vexcom; on Linux the same word names a clean decoy beside it.
+        (self.folder / "extra").mkdir()
+        (self.folder / "extra" / "rules.inc").write_text("x:\n\tvexcom --user\n")
+        (self.folder / "extra\\rules.inc").write_text("x = 1\n")
+        self.refused("include vex/mkenv.mk\ninclude extra\\rules.inc\n", "cannot read as make does")
 
     def test_an_include_that_does_not_resolve_is_refused(self):
         for line in ("include missing.mk", "-include missing.mk", "sinclude missing.mk",
@@ -1911,6 +1920,16 @@ class Polish(Base):
         index.symlink_to(self.root / "elsewhere.json")
         (self.root / "elsewhere.json").write_text(json.dumps({"examples": [{"samples": [
             {"name": "Planted", "files": [{"name": "cpp_v5_vsc_empty.zip"}]}]}]}))
+        with patch.object(vex, "_regular", lambda path: True):
+            self.assertEqual(vex._index_names(self.world.templates), {})
+        # A FIFO with a writer and a document waiting in it: still not read.
+        index.unlink()
+        os.mkfifo(index)
+        keep = os.open(index, os.O_RDONLY | os.O_NONBLOCK)
+        writer = os.open(index, os.O_WRONLY | os.O_NONBLOCK)
+        self.addCleanup(os.close, keep)
+        self.addCleanup(os.close, writer)
+        os.write(writer, (self.root / "elsewhere.json").read_bytes())
         with patch.object(vex, "_regular", lambda path: True):
             self.assertEqual(vex._index_names(self.world.templates), {})
 
