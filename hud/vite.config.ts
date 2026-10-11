@@ -18,5 +18,9 @@ export default defineConfig({
     globals: true,
     environment: "jsdom",
     include: ["src/**/*.test.ts"],
+    // Vitest replaces CSS with an empty string unless told otherwise, `?raw`
+    // included. editorTheme.test.ts reads theme.css's own text, to recompute
+    // the editor scheme's contrast and hue from the tokens there (ED-3).
+    css: { include: [/theme\.css/] },
   },
 });
