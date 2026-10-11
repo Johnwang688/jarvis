@@ -21,7 +21,12 @@ own headers, never hand-written ones:
   - a page from another ephemeral port (cross-origin) cannot read the
     listing, and gets no CORS read either;
 
-and by hand, the shapes no browser page can send but a refusal must cover:
+`is_owner` itself, one clause at a time (`IsOwnerClauses`): over HTTP the
+listener, Host and Origin checks that run first (`check_origin`,
+`_strict_host`) refuse most of these before `is_owner` is asked, so a 403
+alone cannot say which clause held; called directly, each one has to.
+
+And by hand, the shapes no browser page can send but a refusal must cover:
 a GET with no Origin and `Sec-Fetch-Site` same-site / cross-site / none /
 "none"; a non-loopback Host; a POST, PATCH or DELETE with no Origin (even
 marked same-origin); `Origin: null`; a WebSocket upgrade with no Origin; and
@@ -31,6 +36,7 @@ Run: PYTHONPATH=. .venv/bin/python tests/v2/owner_read_check.py
 """
 from __future__ import annotations
 
+from email.message import Message
 import http.client
 import http.server
 import json
@@ -47,6 +53,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from jarvis import config  # noqa: E402
+from jarvis.v2 import projects  # noqa: E402
 from jarvis.v2.daemon import Daemon  # noqa: E402
 from jarvis.v2.model import ProviderName as PN  # noqa: E402
 from jarvis.v2.provider import Decision, Event, EventKind as K, SessionHandle, Usage  # noqa: E402
@@ -132,6 +139,75 @@ class Base(unittest.TestCase):
             return response.status, response.read()
         finally:
             conn.close()
+
+
+FACE = 41000
+
+
+def handler(method="GET", *, port=FACE, host=f"127.0.0.1:{FACE}", origin=None, site="same-origin",
+            upgrade=None):
+    """A stand-in for the request handler `is_owner` reads: its listener's
+    port, its method and its headers (case-insensitive, as http.server's)."""
+    headers = Message()
+    if host is not None:
+        headers["Host"] = host
+    if origin is not None:
+        headers["Origin"] = origin
+    if site is not None:
+        headers["Sec-Fetch-Site"] = site
+    if upgrade is not None:
+        headers["Upgrade"] = upgrade
+    return SimpleNamespace(command=method, headers=headers,
+                           server=SimpleNamespace(server_address=("127.0.0.1", port)))
+
+
+class IsOwnerClauses(unittest.TestCase):
+    """Each clause of `is_owner` held on its own: from a request it accepts,
+    change one thing and it must refuse."""
+
+    daemon = SimpleNamespace(face_port=FACE)
+
+    def owner(self, **kw) -> bool:
+        return projects.is_owner(handler(**kw), self.daemon)
+
+    def test_a_same_origin_read_on_the_hud_listener_is_the_owners(self):
+        self.assertTrue(self.owner())
+        self.assertTrue(self.owner(method="HEAD"))
+        self.assertTrue(self.owner(host=f"localhost:{FACE}"))
+
+    def test_the_hud_listener_is_required(self):
+        self.assertFalse(self.owner(port=FACE + 1, host=f"127.0.0.1:{FACE + 1}"))
+        self.assertFalse(self.owner(port=FACE + 1, host=f"127.0.0.1:{FACE + 1}", origin=f"http://127.0.0.1:{FACE + 1}"))
+        self.assertFalse(self.owner(port=FACE + 1))
+
+    def test_a_read_with_no_origin_needs_a_loopback_host(self):
+        for host in (f"evil.example:{FACE}", f"127.0.0.1.nip.io:{FACE}", "127.0.0.1", f"127.0.0.1:{FACE + 1}",
+                     f"[::1]:{FACE}", "", None):
+            with self.subTest(host=host):
+                self.assertFalse(self.owner(host=host))
+
+    def test_a_read_with_no_origin_needs_same_origin_fetch_metadata(self):
+        for site in ("same-site", "cross-site", "none", "", "Same-Origin", None):
+            with self.subTest(site=site):
+                self.assertFalse(self.owner(site=site))
+
+    def test_only_a_plain_read_may_come_without_an_origin(self):
+        for method in ("POST", "PATCH", "PUT", "DELETE", "OPTIONS"):
+            with self.subTest(method=method):
+                self.assertFalse(self.owner(method=method))
+        self.assertFalse(self.owner(upgrade="websocket"))
+        self.assertFalse(self.owner(upgrade=""))
+
+    def test_an_origin_present_must_be_the_huds_own(self):
+        hud = f"http://127.0.0.1:{FACE}"
+        for method in ("GET", "POST", "PATCH", "DELETE"):
+            with self.subTest(method=method):
+                self.assertTrue(self.owner(method=method, origin=hud, site=None))
+                self.assertTrue(self.owner(method=method, origin=hud, upgrade="websocket"))
+        for origin in ("null", "", f"http://localhost:{FACE}", f"http://127.0.0.1:{FACE + 1}", "http://evil.example"):
+            with self.subTest(origin=origin):
+                # A wrong Origin is refused even with same-origin fetch metadata beside it.
+                self.assertFalse(self.owner(origin=origin))
 
 
 class ByHand(Base):

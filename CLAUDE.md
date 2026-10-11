@@ -461,9 +461,11 @@ http://<Host>`, as before, or (b) is a plain GET/HEAD — not a WebSocket
 upgrade — with **no** Origin header at all, a loopback Host and
 `Sec-Fetch-Site: same-origin` (a forbidden header no page can set; any other
 origin is `same-site`/`cross-site`). Never a missing Origin on a write or a
-socket, never `Origin: null`. `hud_api.check_origin`'s strict Host test
-(and `terminals._strict_host`) stays what stops DNS rebinding, since a
-rebound page's own GETs are `same-origin` too. `tests/v2/owner_read_check.py`
+socket, never `Origin: null`. DNS rebinding is refused twice over (measured
+in Chromium 149): a rebound name is not a potentially trustworthy URL, so it
+gets no fetch metadata and (b) never matches, and its Host is not loopback,
+which `hud_api.check_origin`'s strict Host test (and
+`terminals._strict_host`) refuses first — keep it. `tests/v2/owner_read_check.py`
 runs a real port-0 daemon and real headless Chromium and reads the headers
 where the daemon receives them; its same-origin read fails on main.
 

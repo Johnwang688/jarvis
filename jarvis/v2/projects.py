@@ -139,12 +139,15 @@ def is_owner(handler, daemon) -> bool:
     `same-origin`, and its cross-origin fetch carries its own `Origin`
     besides, which (a) refuses. A write with no Origin is never the owner's,
     whatever else it says, and neither is `Origin: null` (an opaque,
-    sandboxed frame). DNS rebinding is not stopped here: a rebound page's own
-    GETs are `same-origin` too. What stops it is `hud_api.check_origin`'s
-    strict Host test, run on every request before any route (and
-    `terminals._strict_host` again for the terminals) — keep both. A
-    program running as the owner can send any of these headers; this was
-    never a boundary against one (module note).
+    sandboxed frame). DNS rebinding is refused on two grounds, measured in
+    Chromium 149: a rebound name (`http://evil.example:<port>`) is not a
+    potentially trustworthy URL, so the browser sends it no fetch metadata
+    at all and (b) never matches; and its `Host` is not loopback, which
+    `hud_api.check_origin`'s strict Host test refuses on every request before
+    any route runs ("untrusted Host"; `terminals._strict_host` again for the
+    terminals, and (b)'s own loopback test here) — keep all three. A program
+    running as the owner can send any of these headers; this was never a
+    boundary against one (module note).
 
     `PATCH /projects` uses it to tag `project_updated` with `by: "owner" |
     "api"` (B1, decisions D4): an owner rename moves the Discord channel at
