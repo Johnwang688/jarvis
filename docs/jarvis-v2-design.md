@@ -1301,7 +1301,10 @@ providers, and dictation with an adjustable send mode.
   `localhost` dev server the owner names; never onto the HUD's own origin,
   nor (WP-E, §18) the API listener's. The HUD and API refuse to be framed at
   all (`frame-ancestors 'none'`), which is what lets a dev server's page keep
-  its own origin when the owner switches that on for its pane.
+  its own origin when the owner switches that on for its pane; and the
+  workshop sandboxes every document it serves (`sandbox allow-scripts
+  allow-forms`), so an agent-written page there always runs with an opaque
+  origin, wherever it is opened.
 - **Dictation send mode is a three-position control in the input bar:**
   AUTO (send when speech ends), REVIEW (transcript lands in the box, the
   owner clicks send), OFF (v1's mic mute). Persisted; a fresh window boots
@@ -2107,7 +2110,12 @@ socket's hand-written `101` — carries `Content-Security-Policy:
 frame-ancestors 'none'` and `X-Frame-Options: DENY`, added in the daemon
 handler's `end_headers`, the one place every status line passes; one
 function builds the policy (`hud_api.content_security_policy`, which the
-editor's full CSP will extend). The preview origin (8403) carries neither.
+editor's full CSP will extend, and which refuses a response's own
+directives holding a comma — a second policy — CR/LF, or a reserved
+`frame-ancestors`/`sandbox`/`report-*`). The preview origin (8403) carries
+neither, but sandboxes every document it serves with its own CSP (`sandbox
+allow-scripts allow-forms`), so a keep-origin frame that navigates itself
+to the workshop lands opaque (PR #31 review).
 `/status` reports `hud_port`, `api_port` and `frame_hardened`, and the
 Preview pane refuses the HUD's port, the API's port (both as reported and
 the live defaults) and the window's own. **A dev app may keep its own
@@ -2124,7 +2132,9 @@ The frame never gets top navigation, popups or downloads. A Ctrl+clicked
 link to a server on this machine opens a small menu — **Open in Preview**
 (a drawn Preview pane, else the focused pane, by the click rule; refused,
 with the reason, for the daemon's ports) or **Open in a browser tab**; any
-other link opens in a new tab as before. Free suites: `tests/v2/
+other link opens in a new tab as before; the menu flips above a click on
+the panel terminal's last row and stays inside the window at any zoom.
+Free suites: `tests/v2/
 frame_check.py` (every route family on both listeners, checked against the
 route modules' source), `preview.test.ts`, `hud_v2_preview_check.py` and
 the terminal suite's link section. Not yet: a "dev servers in your

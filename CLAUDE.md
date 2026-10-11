@@ -726,9 +726,17 @@ body) — added in the daemon handler's `end_headers`, the one place every
 status line passes; the terminal's hand-written `101` passes
 `hud_api.frame_headers` to `ws.upgrade` explicitly. **One** CSP header,
 built by `hud_api.content_security_policy(*extra)` — a response's own
-directives (the avatar SVG's) fold in and cannot touch `frame-ancestors`;
-the editor's full CSP (ED-4) extends that function, never a second header.
-The preview listener (8403) carries **neither**: the HUD frames it.
+directives (the avatar SVG's) fold in, and **a comma** (it starts a second
+policy: `img-src 'self', frame-ancestors *` let a frame land on the HUD),
+CR/LF/NUL or a reserved `frame-ancestors`/`sandbox`/`report-*` **raises**
+(`_own_directives`; `binary()` checks before writing a byte); the editor's
+full CSP (ED-4) extends that function, never a second header. The preview
+listener (8403) carries **neither** frame header — the HUD frames it — but
+**sandboxes every document it serves** with one CSP, `sandbox allow-scripts
+allow-forms` (`workshop_security_policy`): a keep-origin frame that navigated
+itself to the workshop used to get its real origin (PR #31 review), and a
+workshop page in a top-level tab is now opaque too. v1's whiteboard workshop
+is its own server, untouched.
 `tests/v2/frame_check.py` walks every route family on both listeners and
 **fails if a route module gains a first path segment it does not walk**,
 and fails if any status line but `ws.py`'s is written by hand. `/status`
@@ -751,11 +759,17 @@ only for a page on the parent's origin, which the port check refuses and
 link in a terminal opens a menu** (`term-link-menu`): Open in Preview — a
 drawn Preview pane, else the focused pane, by the sidebar's click rule;
 refused with the reason for the daemon's ports — or Open in a browser tab;
-other links still open a tab directly. xterm finds a link only when the
+other links still open a tab directly. It is measured and placed by
+`placeMenu` (`lib/terminal.ts`): below the click, else **above** it — a dev
+server's `Local:` line is usually the panel terminal's last row, where it
+used to open below the window — and clamped on both axes, zoom-aware; its
+Escape listener is a layout effect that ignores Escape once a card is up.
+`judgePreviewUrl` refuses userinfo, as `judgeLink` does. xterm finds a link only when the
 pointer enters a new cell, so a test that clicks the same cell twice must
 move through another first. The mock serves an API listener and a dev server
 on ephemeral ports (`api_port`, `dev_port`) and asserts the API one is never
-hit. Not yet: §2.5 item 5, a "dev servers in your terminals" list.
+hit; the mock HUD, API and workshop send the real `hud_api.frame_headers()`,
+so the HUD under test is always rendered under them. Not yet: §2.5 item 5, a "dev servers in your terminals" list.
 
 **Input bar declutter (2026-10-10, PR #29; ported onto WP-B and reviewed the
 same day).** The bar is `📎 [box] ⬆` over one row, `in: project · provider ▾ ·
