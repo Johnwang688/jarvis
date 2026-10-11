@@ -73,8 +73,12 @@ def ptt_checks(browser, mock, base, check, until, guard, init_script):
         page.goto(base + "/")
         page.wait_for_selector('[data-testid="sidebar"]', state="attached")
         mock.await_reconnect(before)
+        # Run alone, `python tests/face/hud_v2_ptt_check.py box_checks,monaco_checks` runs those only.
+        only = set(filter(None, (sys.argv[1] if len(sys.argv) > 1 and __name__ == "__main__" else "").split(",")))
         for section in (_box_checks, _places_checks, _modifier_checks, _repeat_checks, _card_checks,
                         _muted_checks, _blur_checks, _space_checks, _monaco_checks, _crash_checks):
+            if only and section.__name__.strip("_") not in only:
+                continue
             try:
                 section(page, mock, check, until)
             except Exception as e:  # a section that cannot run is a failure, and the rest still run
