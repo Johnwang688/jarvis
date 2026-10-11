@@ -490,7 +490,10 @@ worktree and no branch is touched; the ledger and decision log are kept.
 
 **Owner only.** Archive, restore, both deletes and the trash empty answer
 only on the HUD's listener (`FACE_PORT`) and only to a request carrying the
-HUD's `Origin`; anything else is 403. No tool reaches them (fast path, MCP,
+HUD's `Origin` — or, for a plain GET/HEAD only, one carrying no `Origin` at
+all that the browser marked `Sec-Fetch-Site: same-origin` (Chromium sends no
+Origin on a same-origin GET; `projects.is_owner`, 2026-10-11); anything else
+is 403. No tool reaches them (fast path, MCP,
 Claude or Codex threads, Discord) — `tests/v2/archive_check.py` asserts
 it. The gate keeps every tool's HTTP client off these routes; it is not a
 boundary against a shell command the permission gate approved, the same
@@ -766,9 +769,13 @@ The owner's terminals (HUD plan §2.4, decisions W-2, W-3, W-5; code in
 shell on a real PTY. **Every route is owner-only**: it answers only on the
 HUD's listener (`FACE_PORT`) and only to a request whose `Origin` is present
 and equals `http://<Host>`, with `Host` exactly `127.0.0.1:<port>` or
-`localhost:<port>`. Anything else is 403: the API listener (8405, every
-tool's client), a missing Origin, `null`, the workshop origin, any other
-site. The preview listener (8403) serves only `/p/...` and answers 404. No
+`localhost:<port>` — except a plain GET (the listing), which Chromium sends
+with no Origin when the HUD's own page asks, and which is accepted with no
+Origin only when the browser marked it `Sec-Fetch-Site: same-origin`
+(a forbidden header no page can set; since 2026-10-11 — before it, the
+HUD's own listing was refused). Anything else is 403: the API listener (8405,
+every tool's client), a missing Origin on a write or the socket, `null`, the
+workshop origin, any other site. The preview listener (8403) serves only `/p/...` and answers 404. No
 tool, MCP tool, fast-path tool or Discord verb names these routes. A
 program running as the owner can still forge an Origin and fetch a ticket:
 that is why every attach is announced (`terminal_attached`, below).

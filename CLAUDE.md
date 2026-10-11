@@ -430,7 +430,8 @@ out-of-range are protocol errors), **nothing sent after our close** (one
 lock for the check and the put), the `101` written as `HTTP/1.1` by hand,
 and the handler's 2 s timeout lifted. **The agent never gets a lever on a
 terminal**: every route is `projects.owner_only` (HUD listener + an Origin
-that must be present), the attach also needs a **single-use 30 s ticket
+that must be present — on a plain GET, `Sec-Fetch-Site: same-origin` with no
+Origin at all instead, since 2026-10-11, below), the attach also needs a **single-use 30 s ticket
 bound to one terminal**, and a terminal another window shows is only taken
 after that window says yes (refused after 20 s) — stricter than
 `/approvals`, and still not a boundary against a program running as the
@@ -538,6 +539,26 @@ over it) or an MCP-approval `requestUserInput` with a non-fatal ERROR, never
 a QUESTION. The fast path binds `runtime.caller()` in its turn (the daemon
 binds it on the turn thread, so the turn id is the daemon's). All four new
 modules are SELF_PROTECTED. Free suite: `tests/v2/mcp_session_check.py`.
+
+**Owner-only reads (2026-10-11, `projects.is_owner`).** Chromium sends no
+`Origin` on a same-origin GET, and `is_owner` demanded one, so on the
+owner's live daemon **every `GET /terminals` from the HUD was 403**: the
+panel only worked through its "could not check" fallback, and opening it
+could never open a terminal. The HUD suites missed it because `MockDaemon`
+does not enforce `owner_only` — **a gate checked only against a mock is a
+gate checked against the mock's idea of the browser.** Now a request is the
+owner's when it arrives on the HUD listener and either (a) carries `Origin:
+http://<Host>`, as before, or (b) is a plain GET/HEAD — not a WebSocket
+upgrade — with **no** Origin header at all, a loopback Host and
+`Sec-Fetch-Site: same-origin` (a forbidden header no page can set; any other
+origin is `same-site`/`cross-site`). Never a missing Origin on a write or a
+socket, never `Origin: null`. DNS rebinding is refused twice over (measured
+in Chromium 149): a rebound name is not a potentially trustworthy URL, so it
+gets no fetch metadata and (b) never matches, and its Host is not loopback,
+which `hud_api.check_origin`'s strict Host test (and
+`terminals._strict_host`) refuses first — keep it. `tests/v2/owner_read_check.py`
+runs a real port-0 daemon and real headless Chromium and reads the headers
+where the daemon receives them; its same-origin read fails on main.
 
 Briefs for every package, including the ones in flight, are in
 `docs/codex-briefs/`; each merged package left a `*-notes.md` beside its
@@ -816,9 +837,30 @@ sees). Panel: a tab per terminal, `+` (the focused pane's folder **as an
 id**, `terminalSpecFor`; since WP-B a focused chat pane gives its *own*
 conversation, and any other pane defers to `activeChat` — the selected chat,
 else the one selected last — the chat File and Preview panes already follow,
-not W-6's input rule, which is about where words go), `▾` (Home or a project), × per tab; **Ctrl+` opens
-a terminal when there is none, ⬓ never does**; a dot on ⬓ means one in the
-hidden panel exited. In a terminal **Ctrl+B, Ctrl+Alt+B and Ctrl+_ are the
+not W-6's input rule, which is about where words go), `▾` (Home or a project), × per tab; **every
+way the owner opens the panel — Ctrl+`, ⬓, the layout menu's Panel row —
+opens a terminal when there is none, and a pane the owner switches to the
+terminal view opens one there** (the owner's request, 2026-10-11: "when I
+open the terminal pane it needs to auto open a terminal instead of having me
+press another button"; WP-D had it on Ctrl+` only, ⬓ never). One path,
+`LayoutControl.ownerTogglePanel` → `TermManager.ownerOpened(where, still)`;
+`togglePanel` stays the plain flip a stored layout, a reload and
+`showPanel` use, and opens nothing. Only on that gesture — never a load, a
+restored open panel, a reload or a reattach; never under a card (every
+opener is disabled, and any card raised since the gesture drops it, answered
+or not — a card count, review of #41); only on a listing asked for then that
+came back (never on `listError`); never when any terminal is listed, another
+window's or an exited one included; never if a terminal was opened meanwhile,
+the panel was closed again or the pane switched away (`still`) — asked again
+once the daemon has made it, and if it changed meanwhile the terminal stays
+in the list and nothing opens, reopens or moves; one at a time, and on ⬓ and
+the menu row only a click's first counts (a double-click is one gesture and
+opens one, as Ctrl+` ignores auto-repeat); a refusal is said in the panel, as
+`+` says it. While it is on its way the panel and the
+pane say "Opening a terminal…" instead of offering a second button. With
+terminals open, a pane switched to the terminal view keeps its picker, "+ New
+terminal here" first. It needed the owner-only read fix above to work on the
+real daemon at all. A dot on ⬓ means one in the hidden panel exited. In a terminal **Ctrl+B, Ctrl+Alt+B and Ctrl+_ are the
 shell's** (`terminalTakesKey`), the zoom keys, Ctrl+` and Ctrl+Alt+N stay the
 HUD's, and every key stops at the terminal (Space is never push-to-talk).
 **Under a card nothing reaches the shell**: `disableStdin`, a key filter
