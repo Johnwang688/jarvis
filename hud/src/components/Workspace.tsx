@@ -33,7 +33,7 @@ import { placeTerminals, type InSpec } from "../lib/terminal";
 import type { Project } from "../types";
 import { Separator, type LayoutControl } from "./Layout";
 import { Panel } from "./Panel";
-import { TerminalPane, TerminalToasts, terminals, useTerminals } from "./Terminal";
+import { TerminalLinkMenu, TerminalPane, TerminalToasts, terminals, useTerminals } from "./Terminal";
 
 /**
  * The terminals' view of the workspace (WP-D), handed over after each render:
@@ -44,10 +44,12 @@ import { TerminalPane, TerminalToasts, terminals, useTerminals } from "./Termina
  * freeze with it (review of PR #32).
  */
 function useTerminalBridge(v: LayoutControl, place: Map<string, number>, terminalIn?: () => InSpec,
-                           slots?: Map<number, number>) {
-  const latest = useRef({ v, terminalIn });
-  latest.current = { v, terminalIn };
+                           openPreview?: (url: string) => boolean, slots?: Map<number, number>) {
+  const latest = useRef({ v, terminalIn, openPreview });
+  latest.current = { v, terminalIn, openPreview };
   useEffect(() => {
+    // A terminal link's "Open in Preview" (WP-E): App's click rule decides the pane.
+    terminals.openPreview = (url) => latest.current.openPreview?.(url) ?? false;
     terminals.defaultIn = () => latest.current.terminalIn?.() ?? "home";
     terminals.setPaneTerminal = (pane, id) => latest.current.v.setTerminal(pane, id);
     terminals.forgetTerminal = (id) => latest.current.v.forgetTerminal(id);
@@ -109,6 +111,8 @@ export function Workspace(props: {
   onView: (pane: PaneNo, view: View) => void;
   /** Where `+` opens a terminal: the focused pane's folder, as an id (lib/terminal.ts, terminalSpecFor). */
   terminalIn?: () => InSpec;
+  /** A terminal link's "Open in Preview": load it in a Preview pane (WP-E); false when it did not. */
+  openPreview?: (url: string) => boolean;
   /** `+ ▾`'s choices besides Home. */
   projects?: Project[];
 }) {
@@ -119,7 +123,7 @@ export function Workspace(props: {
   // holding it, else the panel.
   const place = placeTerminals(ws.panes, fit.panes);
   const slots = new Map<number, number>(PANE_NOS.map((n) => [n, slotOf(ws, n)]));
-  useTerminalBridge(v, place, props.terminalIn, slots);
+  useTerminalBridge(v, place, props.terminalIn, props.openPreview, slots);
   const mgr = useTerminals();
   /** A terminal pane's header: the title its program set (text, capped), else its own. */
   const terminalContext = (spec: PaneSpec) => {
@@ -357,6 +361,7 @@ export function Workspace(props: {
       <Panel open={fit.panel.open} height={fit.panel.height} blocked={props.blocked} zoom={v.zoom}
              projects={props.projects ?? []} onHide={v.togglePanel} />
       <TerminalToasts blocked={props.blocked} />
+      <TerminalLinkMenu blocked={props.blocked} zoom={v.zoom} />
     </>
   );
 }

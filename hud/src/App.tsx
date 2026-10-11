@@ -30,7 +30,9 @@ import { InputBar, MAX_FILES, toAttachment } from "./components/InputBar";
 import { TaskView } from "./components/TaskView";
 import { FileTab } from "./components/FileTab";
 import { DiffTab } from "./components/DiffTab";
-import { PreviewTab } from "./components/PreviewTab";
+import { PreviewTab, type PreviewRequest } from "./components/PreviewTab";
+import { judgePreviewUrl } from "./lib/preview";
+import { daemonPortsNow } from "./state/daemonPorts";
 import { ApprovalQueue, ApprovalVeil } from "./components/Approvals";
 import { CrashProbe, DialogBoundary, WorkspaceBoundary } from "./components/Boundary";
 import { DecisionsLog, DiscordPanel, SchedulesButton, UsagePanel } from "./components/Panels";
@@ -1013,6 +1015,36 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mayShow]);
 
+  /**
+   * "Open in Preview" from a terminal link (WP-E): the URL, judged with the
+   * daemon's ports, goes to a drawn Preview pane — the focused one if it is
+   * one — else the focused pane switches to Preview (the sidebar's click
+   * rule, lib/workspace `show`), unless that pane holds an unsaved edit. The
+   * pane loads it as a request, judged again there, and stores it.
+   */
+  const [previewAsk, setPreviewAsk] = useState<Partial<Record<PaneNo, PreviewRequest>>>({});
+  const previewSeq = useRef(0);
+  const openPreview = useCallback((url: string): boolean => {
+    const { status, ports } = daemonPortsNow();
+    if (status === "pending") return false;
+    const v = judgePreviewUrl(url, ports);
+    if (!v.ok) return false;
+    const lay = layoutNow.current;
+    const pane = showOf(lay.ws, "preview", lay.fit.panes).focused;
+    if (!showView("preview")) return false;
+    const n = ++previewSeq.current;
+    setPreviewAsk((asks) => ({ ...asks, [pane]: { url: v.url, n } }));
+    return true;
+  }, [showView]);
+  const previewHandled = useCallback((pane: PaneNo, n: number) => {
+    setPreviewAsk((asks) => {
+      if (asks[pane]?.n !== n) return asks;
+      const next = { ...asks };
+      delete next[pane];
+      return next;
+    });
+  }, []);
+
   /** Put a chat on screen in `pane`: focus it, switching its view to chat when it shows something else. */
   const placeChat = useCallback((pane: PaneNo): boolean => {
     const spec = layoutNow.current.ws.panes[pane - 1];
@@ -1904,7 +1936,12 @@ export default function App() {
           <PreviewTab
             projectId={paneProject(spec, n)}
             url={spec.previewUrl}
+            keepOrigin={spec.keepOrigin}
+            request={previewAsk[n] ?? null}
+            blocked={blocked}
             onLoaded={(url) => view.setPreviewUrl(n, url)}
+            onKeepOrigin={(origin) => view.setKeepOrigin(n, origin)}
+            onRequestHandled={(k) => previewHandled(n, k)}
             onProjectRoot={(id) => view.pin(n, id)}
           />
         );
@@ -2140,6 +2177,7 @@ export default function App() {
             selectedPane={selected}
             onView={setPaneView}
             projects={state.projects}
+            openPreview={openPreview}
             // Where `+` opens a terminal: the folder of what the focused pane
             // shows, as an id. A chat pane is its own conversation; any other
             // pane defers to the chat the window is about (`activeChat`: the

@@ -97,6 +97,11 @@ since the v1 face and the v2 daemon are separate processes.
   owner's **live** daemon's preview for fixture project `p1`
   (`GET /p/p1/index.html -> 400` in the live log). Only a daemon too old to
   report one falls back to 8403.
+- The preview origin carries **no** frame headers (it is framed by the HUD
+  on purpose), but every response there carries one CSP, `sandbox
+  allow-scripts allow-forms`, so every document it serves runs with an
+  opaque origin; the HUD and API listeners refuse to be framed (WP-E,
+  below).
 
 ## Threads (additions)
 
@@ -1021,4 +1026,107 @@ What the HUD does with the terminal contract above (code in
   links (plain or OSC 8) open only for `http`/`https`, only on Ctrl+click,
   in a new window with `noopener`; there is no clipboard addon (no OSC 52)
   and window reports stay off. "Open in Preview" for loopback links is
-  WP-E's.
+  WP-E's (below).
+
+## Additions 2026-10-10 (Preview and dev servers — WP-E)
+
+Plan `docs/plans/2026-10-09-hud-workspace-plan.md` §2.5 items 1–4; decisions
+W-4 (that file wins).
+
+**No HUD or API response may be framed.** Every response on the HUD
+listener (`FACE_PORT`, 8402) and the API listener (`DAEMON_PORT`, 8405)
+carries
+
+    Content-Security-Policy: frame-ancestors 'none'
+    X-Frame-Options: DENY
+
+— the HUD page and its assets, JSON, the SSE stream, every error and
+refusal (403 Host/Origin, 400, 404, 409, 413), http.server's own refusals of
+a malformed request (400, 414, 431, 501, 505 — answered as HTTP/1.0, never
+as a header-less HTTP/0.9 body), and the terminal socket's hand-written
+`101` and its 400/403 refusals. They are added in one place, the daemon
+handler's `end_headers`; the `101` asks `hud_api.frame_headers` for them.
+There is exactly **one** `Content-Security-Policy` header per response,
+built by `hud_api.content_security_policy(*extra)`: a response's own
+directives (`/avatar.svg`'s `default-src 'none'; style-src 'unsafe-inline'`)
+ride in the same header. **None of them can change the frame rule**: a
+response's own directives holding a comma (which starts a second policy in
+the same header — `img-src 'self', frame-ancestors *` let a frame land on
+the HUD, PR #31 review), anything but printable ASCII (CR or LF would split
+the header; U+2028 used to fail after the status line was written), or
+naming `frame-ancestors`, `sandbox`, `report-uri` or `report-to`, raise
+`ValueError` (a programming error; `binary()` checks before writing a byte,
+so the answer is **one 400** — the dispatcher's status for a
+`ValueError` — never half a response or a second status line). The editor's full policy (ED-4, `'wasm-unsafe-eval'`) extends
+that function. The **preview listener (8403) carries neither frame
+header**; instead it sends one CSP, `sandbox allow-scripts allow-forms`
+(`hud_api.workshop_security_policy`, a response's own directives merged and
+checked the same way), so a workshop page runs with an opaque origin
+everywhere: inside the HUD (unchanged — the Preview frame was already
+opaque), in a top-level tab (newly), and in a Preview frame whose page was
+let keep its origin and then navigated itself to the workshop (it used to
+get the real workshop origin there — its storage and same-origin reads of
+any project's served files; PR #31 review). v1's whiteboard workshop is its
+own server and is unaffected.
+
+**`GET /status` gains three fields:**
+- `hud_port` — the HUD listener's bound port;
+- `api_port` — the API listener's bound port;
+- `frame_hardened: true` — set by the handler class that adds the headers
+  (`false` before the daemon has started). A HUD whose `/status` lacks it
+  (an older daemon) never offers "keep its own origin".
+
+**The Preview pane (`lib/preview.ts`, `PreviewTab.tsx`):**
+- **Refused ports**: the HUD's (`hud_port`, 8402), the API's (`api_port`,
+  8405) — the defaults are refused whatever `/status` says, since they are
+  the owner's live daemon — and the window's own port; anything not loopback
+  `http(s)`. The workshop (`workshop_port`) stays allowed. Nothing is
+  restored or requested until `/status` has answered (the API port is only
+  known then); five failed `/status` reads judge with the defaults and never
+  keep an origin.
+- **The sandbox** is exactly `allow-scripts allow-forms`; with the pane's
+  "Keep its origin" switch on, exactly `allow-scripts allow-forms
+  allow-same-origin`. Never `allow-top-navigation`, `allow-popups`,
+  `allow-popups-to-escape-sandbox`, `allow-downloads` or `allow-modals`.
+  The frame is keyed by its sandbox, so a change reloads the page under the
+  new flags.
+- **"Keep its origin"** (`preview-keep-origin`, a checkbox; `data-origin`
+  names what it covers): off by default, per pane, offered only when the
+  loaded URL is loopback `http(s)` on a port that is none of `hud_port`,
+  `workshop_port`, `api_port`, 8402, 8403, 8405 nor the window's own, and
+  only while `/status` says `frame_hardened: true`. Stored with the pane
+  spec (`jarvis.hud.workspace`) as `keepOrigin: "<scheme://host:port>"` —
+  the origin it was given for — so loading a URL on another port, host or
+  scheme turns it off (`setPreviewUrl` drops it, and the frame applies it
+  only while the origins match). Judged again on every load
+  (`keptOrigin`) and **dropped from storage** when it no longer passes; the
+  parser keeps only a grant that is exactly the stored URL's origin on a
+  non-default loopback port. Disabled under an approval card (and inert
+  behind its veil).
+- **Why it is safe**: scripts plus same-origin amount to no sandbox only
+  when the framed page is the parent's origin. The port check refuses the
+  HUD's origin up front, and `frame-ancestors 'none'` on every HUD and API
+  response stops a frame from navigating itself into the HUD later. A page
+  on another origin cannot reach the parent's DOM, and `/approvals` still
+  needs the HUD's own Origin and a JSON body. And a page that sends its
+  frame to the workshop lands opaque there (the workshop's own sandbox).
+- **A URL carrying a user name or password** is refused, as a terminal
+  link is.
+
+**"Open in Preview" from a terminal.** A Ctrl+clicked link whose host is
+loopback opens a small menu (`term-link-menu`: `term-link-url`,
+`term-link-preview`, `term-link-browser`) instead of a new tab; any other
+link still opens in a new window directly. "Open in Preview" is judged with
+the ports above (refused, disabled, with `term-link-refused` saying why, for
+the HUD's and the API's ports) and lands in a drawn Preview pane — the
+focused one if it is one — else the focused pane switches to Preview (the
+sidebar's click rule, refused for a File pane holding an unsaved edit).
+The pane loads it as a request, judged again there, and stores it. Escape,
+a click elsewhere or an approval card closes the menu. **The menu is placed
+inside the window** (`placeMenu`): below the click, else **above** it — a
+dev server's `Local:` line is usually the panel terminal's last row — and
+clamped on both axes, zoom-aware (PR #31 review: it opened below the window
+at 100% and 160%).
+
+Not in this package: §2.5 item 5, a "dev servers in your terminals" list
+built from the listening sockets terminal sessions own.
