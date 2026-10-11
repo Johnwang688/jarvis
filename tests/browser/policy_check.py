@@ -26,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import httpx
 
-from jarvis import config, tools
+from jarvis import config, runtime, tools
 from jarvis.browser import BrowserError, BrowserPolicy, Session
 
 PORT = 8431
@@ -184,4 +184,7 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # dispatch() refuses when no toolset is bound (PR #34's follow-up), so
+    # this suite says what it calls directly — and is held to it.
+    with runtime.tools_bound({"fetch_page"}):
+        sys.exit(main())
