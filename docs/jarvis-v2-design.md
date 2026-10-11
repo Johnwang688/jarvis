@@ -2316,6 +2316,60 @@ typed in Monaco still starts push-to-talk and is lost (confirmed headless);
 the owner moved push-to-talk to Ctrl+D (2026-10-10), which its own PR
 delivers. The `monaco-vim` spike is ED-8's (E-11), not this package's.
 
+**Buffers, tabs and the guarded save (2026-10-11, ED-2 of the editor plan,
+§2.3–§2.4; decisions E-7, E-8, E-13; the owner's `.env*` rule,
+`docs/plans/2026-10-11-env-files.md`).** A file's text lives in a buffer
+registry outside React (`hud/src/state/buffers.ts`): one Monaco model per
+file on disk, keyed by the absolute path the read route now returns, so one
+file reached from two projects (the Inbox is rooted at `~`) is one buffer, and
+the same file in two panes shares the text, the dirty dot and the undo stack
+while each pane keeps its own cursor and scroll. A view that unmounts never
+takes an edit with it, and the text is read once, at save — never per
+keystroke (#43's L3). Dirty is "not the version last read or saved" (the
+model's alternative version id), so undoing back to the saved text reads
+clean. Each File pane has tabs (`PaneSpec.editors {paths, active, preview}`,
+stored with per-field fallback, re-read from disk after a reload; unsaved
+text is never stored, and `beforeunload` asks while anything is dirty): a
+single click opens an italic preview tab the next single click replaces, a
+double click or an edit pins it, middle-click or × closes, and the last tab
+on an unsaved edit asks Save / Don't save / Cancel. One editor per pane, its
+model swapped. **Saving is guarded by content, not by mtime**: a read returns
+an `etag` (the first 128 bits of SHA-256), a save sends `expected_etag`
+(`null`: must not exist), and the daemon hashes the disk again under its lock
+and answers 409 with the current etag — an mtime missed a same-size rewrite
+on the 9p `/mnt/c` mount (or one `utime`d back) and called a bare `touch` a
+conflict. **The HUD polls** (`POST …/files/stat`, every 2 s while visible and
+on focus, hashing again only when the stat moved, because inotify cannot see
+a write made from Windows): a clean buffer whose file moved reloads in place
+as one undo step, with a toast naming the writer when the activity feed saw a
+running turn's tool call name the file; an edited one gets an amber conflict
+bar — Compare (the disk read-only on the left, the buffer on the right, side
+by side even in a narrow pane), Keep mine (saved against the disk etag the
+bar was shown, so a write meanwhile brings the bar back), Take theirs (asks
+once; Ctrl+Z brings the edit back); a gone file offers Save to recreate or
+Close. There is no force-save anywhere. **One classifier,
+`jarvis/v2/editor_policy.py`**, decides what the editor may do: withheld (a
+credential bundle, anything in a credential folder, Claude's and Codex's
+login files, git's credential store, `.netrc` — no content, ever; a withheld
+folder is never listed, except the gate's own files inside
+`~/.config/jarvis`), read-only (the gate's state, the safety layer and the
+served HUD build, bytes that are not UTF-8 — which a save never overwrites),
+the owner's env files, and text. **Every editor file route is owner-only,
+reads included** (E-7: the HUD's listener and its own page). **The owner
+edits `.env*` files here, and Jarvis never reads them**: `secrets.is_env_credential`
+is the one name rule (`.env` or `.env.<anything>` at any depth, not ending
+`.example`, case-insensitive, symlinks resolved both ways); such a buffer
+carries a lock — "Jarvis can't read this file" — Add to chat is disabled for
+it, its model has a language of its own so its words are never suggested in
+another file, and its text goes nowhere but its own save: not the bus, a log,
+localStorage, an `@path` attachment, a diff or the preview origin (which
+also refuse withheld files now — the preview origin had served a key out of
+the Inbox's `.ssh`). The Jarvis-side refusals of env files (v1 tools, the
+shell, the scrub, Claude's hook, Codex's grants) are ENV-1's, on this rule.
+"Add to chat" is here in its smallest form (the selection or the line, as
+`path:Lx-y` and a fence, into the selected chat's box, unsent) so the env
+rule has something to disable; ED-7 extends it.
+
 Remaining: WP13 (the long-bench comparison, the owner's call on cost), a
 native Windows worker, the R8 hook on Codex, and prompt tuning in
 `roles.py` (§17's over-planning note). The daemon started by hand for the

@@ -113,6 +113,9 @@ function Node(props: {
   );
 }
 
+/** How long a narrow pane's tree waits after a single click before it folds. */
+const DOUBLE_CLICK_MS = 400;
+
 const READONLY_LABEL: Record<string, string> = {
   gate: "read-only: permission state",
   safety: "read-only: safety layer",
@@ -159,6 +162,13 @@ export function FileTab(props: {
   const alive = useRef(true);
   const [note, setNote] = useState("");
   const [treeOpen, setTreeOpen] = useState(false);
+  // A narrow pane folds its tree once a file opens — a moment after a single
+  // click, so the second click of a double click (pin) still lands on the row.
+  const [treeHold, setTreeHold] = useState(false);
+  const holdTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (holdTimer.current) clearTimeout(holdTimer.current);
+  }, []);
   const [mdRead, setMdRead] = useState<Record<string, boolean>>({});
   // Reload over an unsaved edit, or closing the last tab on one: what was asked.
   const [ask, setAsk] = useState<{ kind: "reload" | "close"; path: string } | null>(null);
@@ -249,6 +259,9 @@ export function FileTab(props: {
   const open = (path: string, pin: boolean) => {
     setAsk(null);
     setTreeOpen(false);
+    if (holdTimer.current) clearTimeout(holdTimer.current);
+    setTreeHold(!pin);
+    if (!pin) holdTimer.current = setTimeout(() => setTreeHold(false), DOUBLE_CLICK_MS);
     setTabs(openTab(tabsNow.current, path, { pin, keepPreview: (p) => !!bufOf(p)?.dirty }));
   };
 
@@ -342,7 +355,7 @@ export function FileTab(props: {
 
   if (!pid) return <div className="pad muted">Pick a project.</div>;
 
-  const showTree = !props.narrow || treeOpen || !active;
+  const showTree = !props.narrow || treeOpen || treeHold || !active;
   const env = view?.kind === "env";
   return (
     <div className="split">

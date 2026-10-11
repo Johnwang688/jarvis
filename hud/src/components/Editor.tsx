@@ -214,6 +214,9 @@ export function CompareEditor(props: { model: TextModel; disk: string; path: str
           readOnly: readOnly.current || editorsBlocked(),
           originalEditable: false,
           renderSideBySide: true,
+          // Side by side even in a narrow pane: the disk's text on the left,
+          // the buffer on the right, never folded into one inline view.
+          useInlineViewWhenSpaceIsLimited: false,
           fontSize: 12,
           minimap: { enabled: false },
         });

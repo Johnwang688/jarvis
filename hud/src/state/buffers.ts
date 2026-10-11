@@ -47,6 +47,8 @@ export interface TextModel {
   pushEditOperations?(before: any, ops: any[], cursor: () => any): any;
   getPositionAt?(offset: number): { lineNumber: number; column: number };
   pushEOL?(eol: number): void;
+  /** Monaco: close the undo element, so a reload is one step of its own. */
+  pushStackElement?(): void;
   setValue?(text: string): void;
 }
 
@@ -482,10 +484,14 @@ export class Buffers {
         if (edit) {
           const a = m.getPositionAt(edit.start);
           const z = m.getPositionAt(edit.end);
+          // An undo step of its own, on both sides: Ctrl+Z steps back over
+          // the reload alone, never the reload and the typing before it.
+          m.pushStackElement?.();
           m.pushEditOperations([], [{
             range: { startLineNumber: a.lineNumber, startColumn: a.column, endLineNumber: z.lineNumber, endColumn: z.column },
             text: edit.text, forceMoveMarkers: true,
           }], () => null);
+          m.pushStackElement?.();
         }
       } else {
         m.setValue?.(next);

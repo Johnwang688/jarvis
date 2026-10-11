@@ -3066,6 +3066,16 @@ def main():
             finally:
                 preview_mock.stop()
 
+            # The editor's buffers, tabs and guarded save (ED-2): a context and
+            # a mock of their own — the mock writes files behind the editor.
+            from tests.face.hud_v2_editor_check import editor_checks
+            editor_mock = MockDaemon(0).start()
+            try:
+                editor_checks(browser, editor_mock, f"http://127.0.0.1:{editor_mock.port}", check, until,
+                              guard, FAKE_RECOGNIZER)
+            finally:
+                editor_mock.stop()
+
             ctx = browser.new_context(permissions=["microphone"])
             guard(ctx)
             guard_loopback(ctx)

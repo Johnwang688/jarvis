@@ -1310,7 +1310,66 @@ short for either side) and the E-13 checks in `_workspace_checks` (a project
 picked in the same breath as a keystroke). Every one that guards a behaviour
 fails on origin/main, on the reviewed head (18381b9) or with its fix reverted
 (PR body). Monaco's `getValue()` per keystroke (the change event hands the
-whole text to React) is left for ED-2's buffers.
+whole text to React) was left for ED-2's buffers, which removed it (below).
+
+**Buffers, tabs and the guarded save, ED-2 (2026-10-11; plan
+`docs/plans/2026-10-09-hud-editor-plan.md` §2.3–§2.4, decisions E-7/E-8/E-13;
+the owner's `.env*` rule; contract in `docs/hud-api.md`).** **A file's text
+lives in the buffer registry, outside React** (`hud/src/state/buffers.ts`,
+rules in `lib/buffers.ts`): **one Monaco model per file on disk, keyed by
+`abs`** (where the read route says it resolves), so one file reached from two
+projects is one buffer and the same file in two panes shares the text, the
+dirty dot and the undo stack (each pane keeps its view state, in memory). A
+buffer saves through the project it was read through. **Unmounting a view
+never loses an edit**: a pane holds a reference per tab (`<pane>|<path>`); a
+model goes when no tab holds it **and it is clean** — a dirty one nobody holds
+stays (and `beforeunload` asks) until it is reopened or the owner discards it
+(`releasePane(n, {discard})`, the project-gone "discard edit"). **The text is
+read once, at save** (`getValue()` never per keystroke). **Dirty is
+`getAlternativeVersionId() !== saved`**, said from the edit's own change event
+and only when it moves, so App's guards (`dirtyNow(pane)` =
+`buffers.paneDirty`, `mayShow`, the E-13 picker, `unpinProject`'s keep) read
+it in the keystroke's breath (#43's M1), and undo back to the saved text reads
+clean. **Tabs** (`PaneSpec.editors {paths, active, preview}`, relative to the
+pinned project, per-field fallback, only with a pin; `pinPane`/`unpinProject`
+drop them; `setEditors` pins and sets in one step; a WP-G2 `filePath` with no
+tabs reads as one): a single click opens an italic preview tab the next one
+replaces, a double click or an edit pins it (a narrow pane's tree waits 400 ms
+before folding so a double click lands), middle-click or × closes, the last
+tab on an unsaved edit asks Save / Don't save / Cancel. Reload over an edit
+still asks; opening another file just opens a tab. **One editor per pane**
+(`PaneEditor`), its model swapped, created at the first buffer and kept.
+**Saving is by content**: `expected_etag` (null: must not exist), 409 with the
+disk's etag, never a force; `expected_mtime` is accepted one more release.
+**The poll** (`buffers.poll`, App, every 2 s while visible and on focus):
+clean + moved → reload in place (`minimalEdit`, one undo stop each side, EOL
+followed), toast naming the writer (`tool_started` args through `touchedPath`
+→ `noteTouch`); dirty + moved or a 409 → the amber `ConflictBar` (Compare —
+`CompareEditor`, the disk read-only left via a `jarvis-disk:` model, the
+buffer itself right, `useInlineViewWhenSpaceIsLimited: false`; Keep mine
+against the shown etag; Take theirs asks once, undoable); gone → Save to
+recreate / Close. **`jarvis/v2/editor_policy.py` is the one classifier**
+(gate → withheld → safety → env → binary → text; see `docs/hud-api.md`), and
+**every editor file route is owner-only, reads included** (E-7) — so tests
+that read a file go through the HUD listener with the HUD's Origin
+(`hud_backend_check.owner`). **Env files**: kind `env`, a lock "Jarvis can't
+read this file", Add to chat disabled (`jarvisMayRead`), model language
+`dotenv` (word suggestions draw only on same-language models, so a secret is
+never offered in a file Jarvis can read), and the text in no request but its
+own save, never localStorage or `__hud.buffers()`. **Add to chat** exists in
+its smallest form (selection or line → `path:Lx-y` + fence into the selected
+chat's box, unsent; W-6) so the env rule has something to disable; ED-7
+extends it, and anything new that carries a buffer's text toward Jarvis must
+ask `jarvisMayRead` first. Polling mock: `mock.disk_write`/`disk_delete`
+write behind the editor; the mock's `files/stat` and etag 409s follow the
+daemon's. Space typed in Monaco is still push-to-talk (#40's), so the
+headless checks type no spaces. Test hook: `__hud.buffers()` (no text).
+Free checks: `lib/buffers.test.ts`, `state/buffers.test.ts`,
+`workspace.test.ts` (tabs), `tests/v2/editor_files_check.py` (the name rule,
+the kinds, etag/409/stat, owner-only, env content kept off the bus, logs,
+API listener, diffs, preview and attachments; real Chromium for the owner's
+own page) and `tests/face/hud_v2_editor_check.py` (run by `hud_v2_check` on a
+`MockDaemon(0)` of its own, or alone).
 
 **The effort is a slider, not pills (2026-10-10, owner's ask: "like Claude's").**
 `components/EffortSlider.tsx`, rules in `lib/effortSlider.ts`: "Effort
@@ -2842,6 +2901,25 @@ jarvis/
   names: `.env`, `.env.local`, `google_token.json`, and `onshape_keys.json`
   (JSON values pulled by sensitive key names) — `.env.example` stays
   readable on purpose.
+
+  **The owner's `.env*` rule (2026-10-11, `docs/plans/2026-10-11-env-files.md`):
+  the owner edits every `.env*` file in the HUD, Jarvis reads none of them
+  and writes only `*.example`.** A **credential env file** is `.env` or
+  `.env.<anything>`, at any depth, except a name ending `.example`;
+  case-insensitive (Windows drives are); a name Windows would trim (trailing
+  dots or spaces) judged both ways; symlinks resolved both ways (a symlink
+  *named* `.env.example` that reaches `.env` is credential, and one *named*
+  `.env` is credential whatever it points at), a symlink it cannot follow is
+  credential. **One function, `secrets.is_env_credential(path)`** (and
+  `is_env_credential_name` for a bare name), and every caller asks it —
+  nothing keeps a copy. **ED-2 built the owner's half**: the editor's routes
+  serve and save such a file only to the owner (`editor_policy` kind `env`,
+  owner-only routes, the API listener 403), and `hud_api.protected` — what a
+  diff, the preview origin and an `@path` or dropped attachment refuse — asks
+  it too. **ENV-1 owes Jarvis's half on the same function**: v1's
+  `read_file`/`grep_files`/write tools, the shells (DENY for a write), the
+  scrub's search for values, Claude's hook and Codex's grants — until it
+  lands, `PROTECTED_NAMES` still covers only `.env` and `.env.local` for v1.
 
 ## Testing
 
