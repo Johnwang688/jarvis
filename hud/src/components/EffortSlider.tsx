@@ -11,6 +11,16 @@
 // in ThreadModelControls), so an older answer arriving late never moves the
 // thumb back.
 //
+// A move belongs to the conversation it was made on (`conversation`, the
+// chip's key for what its pane shows; review of PR #30). If the pane moves on
+// while a move is still in hand — another thread opened there, the thread
+// archived from another window and the pane re-aimed at a new compose row —
+// the move is dropped, never committed onto what the pane shows now; the key
+// also rides `onCommit`, and ThreadModelControls drops a commit whose pane has
+// moved on, for the one path that cannot see the change here (an unmount
+// before the slider re-renders). A move whose stop the model no longer offers
+// (its model changed under it) is dropped too.
+//
 // The HUD is CSS-zoomed on #root: a pointer's screen offset goes through
 // `toCss` before it is measured against the rail's own (unzoomed) width.
 // Keys stop here (Tab goes on to the popover's round), so Space on the
@@ -35,23 +45,31 @@ export function EffortSlider(props: {
   models: ThreadModels | null;
   choice: Choice;
   disabled?: boolean;
-  /** Store this effort (null: the default). May return the request's promise. */
-  onCommit: (effort: string | null) => void | Promise<unknown>;
+  /** The conversation the slider shows (the chip's key): a move is made on
+   * it, and a move whose conversation is no longer shown is dropped. */
+  conversation?: string;
+  /** Store this effort (null: the default) on `conversation`, the one the
+   * move was made on. May return the request's promise. */
+  onCommit: (effort: string | null, conversation: string) => void | Promise<unknown>;
 }) {
   const m = sliderModel(props.models, props.choice);
-  // A stop being dragged to or keyed to, not yet committed.
-  const [preview, setPreview] = useState<string | null>(null);
-  // The latest commit, drawn until its own answer settles.
-  const [sent, setSent] = useState<{ word: string; effort: string | null; seq: number } | null>(null);
+  const conv = props.conversation ?? "";
+  // A stop being dragged to or keyed to, not yet committed — on `on`.
+  const [preview, setPreviewState] = useState<{ word: string; on: string } | null>(null);
+  // The latest commit, drawn until its own answer settles — on `on`.
+  const [sent, setSent] = useState<{ word: string; effort: string | null; seq: number; on: string } | null>(null);
   const sentRef = useRef(sent);
   sentRef.current = sent;
   const seq = useRef(0);
   const pending = useRef<string | null>(null);
   const timer = useRef<number | null>(null);
   const drag = useRef<string | null>(null);
+  // The conversation the move in hand (keys or a drag) was started on.
+  const moveFrom = useRef(conv);
   const rail = useRef<HTMLDivElement>(null);
-  const live = useRef({ m, choice: props.choice, onCommit: props.onCommit });
-  live.current = { m, choice: props.choice, onCommit: props.onCommit };
+  const live = useRef({ m, choice: props.choice, onCommit: props.onCommit, conv });
+  live.current = { m, choice: props.choice, onCommit: props.onCommit, conv };
+  const setPreview = (word: string | null) => setPreviewState(word === null ? null : { word, on: moveFrom.current });
 
   const clearTimer = () => {
     if (timer.current !== null) window.clearTimeout(timer.current);
@@ -63,19 +81,23 @@ export function EffortSlider(props: {
     pending.current = null;
     drag.current = null;
     setPreview(null);
-    const { m: now, choice, onCommit } = live.current;
+    const { m: now, choice, onCommit, conv: shown } = live.current;
+    const from = moveFrom.current;
     if (word === null || !now) return;
+    // The pane moved on under the move: it was made on another conversation.
+    if (from !== shown) return;
+    // The model changed under the move and does not offer that stop.
     const i = now.stops.indexOf(word);
     if (i < 0) return;
     const effort = effortAt(now, i);
     // Against what is drawn as committed: a change still on its way counts.
-    const current = sentRef.current !== null ? sentRef.current.effort : choice.effort;
+    const current = sentRef.current !== null && sentRef.current.on === from ? sentRef.current.effort : choice.effort;
     if (effort === current) return;
     const n = ++seq.current;
-    const next = { word, effort, seq: n };
+    const next = { word, effort, seq: n, on: from };
     sentRef.current = next;
     setSent(next);
-    Promise.resolve(onCommit(effort))
+    Promise.resolve(onCommit(effort, from))
       .catch(() => undefined)
       .finally(() => {
         if (seq.current !== n) return; // a later commit decides what is drawn
@@ -87,7 +109,8 @@ export function EffortSlider(props: {
   commitRef.current = commit;
 
   // The popover closing (Escape, a click outside, a card arriving) unmounts
-  // the slider: a key move still settling is committed then, not dropped.
+  // the slider: a key move still settling is committed then, not dropped —
+  // on the conversation it was made on, or not at all.
   useEffect(
     () => () => {
       if (pending.current !== null) commitRef.current(pending.current);
@@ -96,9 +119,28 @@ export function EffortSlider(props: {
     [],
   );
 
+  // The pane moved on to another conversation: whatever was in hand for the
+  // last one is dropped, and what was on its way is no longer drawn here.
+  const lastConv = useRef(conv);
+  useEffect(() => {
+    if (lastConv.current === conv) return;
+    lastConv.current = conv;
+    clearTimer();
+    pending.current = null;
+    drag.current = null;
+    moveFrom.current = conv;
+    seq.current++;
+    sentRef.current = null;
+    setPreviewState(null);
+    setSent(null);
+  }, [conv]);
+
   if (!m) return null;
   const n = m.stops.length;
-  const shown = preview ?? sent?.word ?? null;
+  // Only what was moved on the conversation shown is drawn (until the effect
+  // above clears what belonged to the last one).
+  const shown = (preview && preview.on === conv ? preview.word : null)
+    ?? (sent && sent.on === conv ? sent.word : null);
   const at = shown !== null && m.stops.includes(shown) ? m.stops.indexOf(shown) : null;
   const index = at ?? m.index;
   const words = describe(m, at);
@@ -153,6 +195,7 @@ export function EffortSlider(props: {
           if (next === null) return;
           e.preventDefault();
           const word = m.stops[next];
+          moveFrom.current = conv;
           pending.current = word;
           setPreview(word);
           clearTimer();
@@ -168,6 +211,7 @@ export function EffortSlider(props: {
           // The pointer supersedes a key move still settling.
           clearTimer();
           pending.current = null;
+          moveFrom.current = conv;
           e.currentTarget.setPointerCapture?.(e.pointerId);
           const word = stopAt(e.clientX);
           drag.current = word;

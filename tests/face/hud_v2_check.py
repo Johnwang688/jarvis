@@ -2761,6 +2761,16 @@ def main():
             finally:
                 declutter_mock.stop()
 
+            # The effort slider's review (PR #30): a context and a mock of
+            # their own too — it archives a thread and opens new ones.
+            from tests.face.hud_v2_effort_check import effort_checks
+            effort_mock = MockDaemon(0).start()
+            try:
+                effort_checks(browser, effort_mock, f"http://127.0.0.1:{effort_mock.port}", check, until,
+                              guard, FAKE_RECOGNIZER)
+            finally:
+                effort_mock.stop()
+
             # The terminals (WP-D): a context and a mock of their own too, the
             # PTY played in the browser (no shell, no HOME).
             from tests.face.hud_v2_terminal_check import terminal_checks

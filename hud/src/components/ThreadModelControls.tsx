@@ -77,12 +77,18 @@ export function useThreadModel(state: State, dispatch: React.Dispatch<Action>, o
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [keysNow]);
 
-  // Per thread: the sequence number of its latest model or effort change.
+  // Per thread: the sequence number of its latest model or effort change, and
+  // of the latest one whose success has been drawn.
   const latest = useRef<Record<string, number>>({});
+  const landed = useRef<Record<string, number>>({});
+  /** `from`: the conversation an effort move was made on (the chip's key when
+   * it started). The pane showing another by now drops it — never onto a
+   * thread or compose row it was not made on (review of PR #30). */
   const change = useCallback(
-    (pane: PaneNo, next: Choice): Promise<void> | undefined => {
+    (pane: PaneNo, next: Choice, from?: string): Promise<void> | undefined => {
       const s = now.current;
       const cs = paneChips(s, pane);
+      if (from !== undefined && keyOf(cs) !== from) return;
       const { choice, targetId, composing } = cs;
       const compose = s.chats[pane].compose;
       setErrors((e) => (e[pane] ? { ...e, [pane]: undefined } : e));
@@ -98,16 +104,21 @@ export function useThreadModel(state: State, dispatch: React.Dispatch<Action>, o
       const body = patchBody(choice, next);
       if (!body) return;
       const key = keyOf(cs);
-      // Only this thread's latest change may write what it answers: the
-      // effort slider can send two in quick succession, and an older answer
-      // arriving late must not move it back. The SSE `thread_updated` still
-      // carries every change, in the order the daemon made them.
+      // An older answer must not undo a newer one: the effort slider can send
+      // two in quick succession, and the first answer can arrive last. So a
+      // success is drawn unless a later change's success already was — but it
+      // is drawn when the later one was refused or is still on its way, since
+      // it is then what the server holds (an opened compose row has no
+      // `thread_updated` to put it right; review of PR #30). Only the latest
+      // change's refusal is said. The SSE `thread_updated` still carries every
+      // change, in the order the daemon made them.
       const n = (latest.current[targetId] = (latest.current[targetId] || 0) + 1);
       const isLatest = () => latest.current[targetId] === n;
       return api
         .setThreadModel(targetId, body)
         .then((record) => {
-          if (!isLatest()) return;
+          if ((landed.current[targetId] || 0) > n) return;
+          landed.current[targetId] = n;
           dispatch({ type: "thread_patch", id: record.id, patch: record });
           // An opened-but-unsent thread's chips read the compose row: keep it
           // on what the server now holds — the row that holds that thread
@@ -205,7 +216,8 @@ export function useThreadModel(state: State, dispatch: React.Dispatch<Action>, o
         modelEditable={cs.editable.model}
         disabled={state.approvals.length > 0}
         error={err && err.key === keyOf(cs) ? err.text : ""}
-        onChange={(next) => change(pane, next)}
+        onChange={(next, from) => change(pane, next, from)}
+        conversation={keyOf(cs)}
         onSearch={() => openCatalog("thread", pane)}
         refusals={refusals}
         onDefaults={(provider) => {

@@ -47,8 +47,10 @@ export function ModelChip(props: {
   disabled?: boolean;
   error?: string;
   /** May return the request's promise: the effort slider draws its change
-   * until that settles. */
-  onChange: (next: Choice) => void | Promise<unknown>;
+   * until that settles. `from` is the conversation an effort move was made
+   * on (`conversation` when it started); the change is dropped if the chip
+   * shows another by then. */
+  onChange: (next: Choice, from?: string) => void | Promise<unknown>;
   onSearch: () => void;
   /** Per provider, why the project cannot use it (greyed out), or null. */
   refusals?: Partial<Record<ProviderName, string | null>>;
@@ -58,6 +60,9 @@ export function ModelChip(props: {
   pane?: number;
   /** The HUD zoom in percent, for placing the popover (lib/layout `toCss`). */
   zoom?: number;
+  /** The conversation the chip shows (its pane's thread or compose row): an
+   * effort move is tied to it (review of PR #30). */
+  conversation?: string;
 }) {
   const c = props.choice;
   const refused = props.refusals?.[c.provider] || null;
@@ -154,7 +159,8 @@ export function ModelChip(props: {
                 models={props.models}
                 choice={c}
                 disabled={props.disabled}
-                onCommit={(effort) => props.onChange(applyEffort(props.models, c, effort))}
+                conversation={props.conversation}
+                onCommit={(effort, from) => props.onChange(applyEffort(props.models, c, effort), from)}
               />
               {props.onDefaults && canSetDefault(props.models, c.provider) ? (
                 <div className="mfoot">

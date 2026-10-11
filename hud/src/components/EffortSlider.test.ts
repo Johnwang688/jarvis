@@ -15,7 +15,10 @@ const TM: ThreadModels = {
   providers: {
     claude: {
       label: "Claude", default: "claude-opus-5-5", default_effort: "high",
-      models: [{ id: "claude-opus-5-5", efforts: ["low", "medium", "high", "xhigh", "max"] }],
+      models: [
+        { id: "claude-opus-5-5", efforts: ["low", "medium", "high", "xhigh", "max"] },
+        { id: "claude-small", efforts: ["low", "medium", "high"] },
+      ],
     },
   },
 };
@@ -32,21 +35,29 @@ describe("EffortSlider", () => {
   let host: HTMLDivElement;
   let root: Root;
   let sent: (string | null)[];
+  let on: string[];
   let answers: Deferred[];
+  // What a React handler around the slider hears — the popover's own
+  // onKeyDown, where its Tab round lives. A listener on the root container
+  // would hear keys React already stopped, so it cannot tell.
+  let around: string[];
 
-  const render = (choice: Choice, disabled = false) =>
+  const render = (choice: Choice, disabled = false, conversation = "t1|false") =>
     act(() => {
-      root.render(createElement(EffortSlider, {
-        models: TM,
-        choice,
-        disabled,
-        onCommit: (effort: string | null) => {
-          sent.push(effort);
-          const d = deferred();
-          answers.push(d);
-          return d.promise;
-        },
-      }));
+      root.render(createElement("div", { onKeyDown: (e: { key: string }) => around.push(e.key) },
+        createElement(EffortSlider, {
+          models: TM,
+          choice,
+          disabled,
+          conversation,
+          onCommit: (effort: string | null, from: string) => {
+            sent.push(effort);
+            on.push(from);
+            const d = deferred();
+            answers.push(d);
+            return d.promise;
+          },
+        })));
     });
   const slider = () => host.querySelector('[data-testid="effort-slider"]') as HTMLElement;
   const key = (k: string, type = "keydown") =>
@@ -61,7 +72,9 @@ describe("EffortSlider", () => {
     document.body.appendChild(host);
     root = createRoot(host);
     sent = [];
+    on = [];
     answers = [];
+    around = [];
   });
 
   afterEach(() => {
@@ -99,18 +112,21 @@ describe("EffortSlider", () => {
 
   it("lets Tab go on to the popover's round (ModelChip), and never moves on it", () => {
     render(onDefault);
-    const heard: string[] = [];
-    const listen = (e: KeyboardEvent) => heard.push(`${e.type}:${e.key}:${e.defaultPrevented}`);
+    let prevented: boolean | null = null;
+    const listen = (e: KeyboardEvent) => { prevented = e.defaultPrevented; };
     host.addEventListener("keydown", listen);
     try {
       key("Tab");
+      key("ArrowRight");
+      key(" ");
     } finally {
       host.removeEventListener("keydown", listen);
     }
-    expect(heard).toEqual(["keydown:Tab:false"]);
-    expect(slider().getAttribute("aria-valuenow")).toBe("2");
+    // The popover's handler hears Tab, and only Tab: the slider's own keys stop there.
+    expect(around).toEqual(["Tab"]);
+    expect(prevented).toBe(false);
     settle();
-    expect(sent).toEqual([]);
+    expect(sent).toEqual(["xhigh"]);
   });
 
   it("disabled (an authorization card is up): out of the Tab order, and no key or pointer moves it", () => {
@@ -138,6 +154,46 @@ describe("EffortSlider", () => {
       document.removeEventListener("keydown", listen);
     }
     expect(heard).toEqual([]);
+  });
+
+  it("commits on the conversation the move was made on", () => {
+    render(onDefault);
+    key("ArrowRight");
+    settle();
+    expect(sent).toEqual(["xhigh"]);
+    expect(on).toEqual(["t1|false"]);
+  });
+
+  it("drops a key move still settling when the pane moves on to another conversation", () => {
+    render(onDefault, false, "t1|false");
+    key("ArrowLeft");
+    // Another thread opened in the pane, same provider and model: the timer
+    // must not carry t1's move onto it.
+    render(onDefault, false, "t2|false");
+    expect(slider().getAttribute("aria-valuenow")).toBe("2");
+    settle();
+    expect(sent).toEqual([]);
+    // Nor the popover closing afterwards.
+    act(() => root.unmount());
+    expect(sent).toEqual([]);
+    root = createRoot(host); // for afterEach
+  });
+
+  it("drops it when the thread is archived and the pane re-aimed at a new compose row", () => {
+    render({ ...onDefault, effort: "high" }, false, "t1|false");
+    key("ArrowLeft");
+    render({ provider: "claude", model: null, effort: null }, false, "|true");
+    act(() => root.unmount());
+    expect(sent).toEqual([]);
+    root = createRoot(host);
+  });
+
+  it("drops a move whose stop the model no longer offers (its model changed under it)", () => {
+    render({ provider: "claude", model: "claude-opus-5-5", effort: "low" });
+    key("End"); // max, settling
+    render({ provider: "claude", model: "claude-small", effort: "low" });
+    settle();
+    expect(sent).toEqual([]);
   });
 
   it("commits a key move once, after the keys settle", () => {

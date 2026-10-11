@@ -780,41 +780,68 @@ under load.
 **Default** under the default stop, a warm-white thumb. **The stops are exactly
 the levels the pills offered** (the effective model's ladder, or the provider's
 words when it is unknown — `ultra` is a stop on Codex only, and no ladder means
-no slider), sorted Faster → Smarter; `xhigh` reads "Extra". The pills' `default
-· high` is not a stop of its own: it is the stop it names, and **choosing it
-clears the effort to null** (A4/A6 unchanged: `applyEffort` + `patchBody`, a
-default thread stays unpinned); a default that names no level becomes a leading
-"Default" stop. **One change, one request**: a drag previews and commits on
-release, a click commits at once, arrows/Home/End commit once 350 ms after the
-last key (`SETTLE_MS`) or at once on blur or when the popover closes, and a
-commit that lands where the thread already is sends nothing. **Only the latest
-answer is drawn**: a sequence number in the slider, and one per thread in
-`ThreadModelControls.change` (its write after the PATCH) — the SSE
-`thread_updated` still carries every change in the daemon's order. Pointer math
-goes through `toCss` against the rail's own `offsetWidth`. Keys stop at the
-slider (Space is never push-to-talk) as well as at the popover — **except Tab**,
-which goes on to the popover's round (#29's review): the model list's chosen
-option → the slider → "Set default…" → round. The popover now stays open while
-the slider moves. **It lives in #29's reworked popover** (merged 2026-10-10):
-one per chat pane (`data-pane`), and a pick PATCHes only that pane's thread
-(`change(pane, …)`, the per-thread sequence number inside it); under a card
-the popover closes and its button is disabled, so the slider is gone and
-Escape denies the card — and the slider's own `disabled` (out of the Tab
-order, `aria-disabled`, no key or pointer moves it) holds wherever it is
-mounted. The Model picker's per-model `<select>` and the provider-default
-dialog's `pd-effort` are still selects. Free checks: `effortSlider.test.ts`,
-`EffortSlider.test.ts` (jsdom: keys, Tab, disabled, settle, unmount commit, the
-sequence guard), `effort_slider_checks` in `hud_v2_check.py` (drives it like
-the owner, at 70% and 160%, and Escape under a card; the mock's `patch_delays`
-holds a PATCH's answer to make one arrive late). **Breaking the close-under-a-
-card alone bit no check at first** (shown in a scratch copy at the merge): the
-card taking focus closes the popover anyway, by #29's focus-leaving rule. So a
-card also arrives with focus on the chip's own button and the popover open —
-the one place only the disable closes it — and that check fails without it;
-inert still keeps every key off the slider. #29's own checks are ported
-to it: `hud_v2_declutter_check`'s F4 (Tab round, arrows) and F6 (a card with
-focus on the slider), and `hud_v2_multichat_check`'s late-answer writeback,
-which clicks a stop.
+no slider), sorted Faster → Smarter; `xhigh` reads "Extra". **The default stop
+means "follow the default", as in Claude's app**: the pills' `default · high`
+is not a stop of its own but the stop it names, and **choosing it clears the
+effort to null** — so a thread on that stop follows whatever the default
+becomes, never a pinned copy of today's level (A4/A6 unchanged: `applyEffort`
++ `patchBody`, a default thread stays unpinned); a default that names no level
+becomes a leading "Default" stop. **One change, one request**: a drag previews
+and commits on release, a click commits at once, arrows/Home/End commit once
+350 ms after the last key (`SETTLE_MS`) or at once on blur or when the popover
+closes, and a commit that lands where the thread already is sends nothing.
+**A move made before a card is committed as the popover closes; keys under
+the card change nothing**: a card closes the popover (and disables its
+button), and a key move still settling then is committed like any other close
+— the owner made it before the card — while every key pressed under the card
+reaches the card (inert behind it, the slider gone), so Escape denies.
+**A move belongs to the conversation it was made on** (review of PR #30): the
+chip passes its key (`keyOf(paneChips(…))`, thread or compose row) as the
+slider's `conversation`; when the pane moves on with a move in hand — another
+thread opened there, or the thread archived from another window and the pane
+re-aimed at a new compose row — the slider drops the move and stops drawing
+what it sent, and `change(pane, next, from)` drops a commit whose pane shows
+another conversation by then (the unmount that comes before a re-render).
+Keying the slider on the thread instead would pair the old render's choice
+with the new pane in its unmount commit, and `patchBody` could add a `model`
+key. A move whose stop the model no longer offers (its model changed under it,
+from another window) is dropped too — without that, it cleared the effort to null.
+**An older answer never undoes a newer one**: a sequence number in the slider
+(what it draws), and per thread in `ThreadModelControls.change` a success is
+written (the record and the opened compose row holding the thread) unless a
+later change's success already was — so a late success whose newer change was
+refused still lands, which an opened row (a failed first send, no record, no
+`thread_updated`) needs; only the latest change's refusal is shown. The SSE
+`thread_updated` still carries every change in the daemon's order. Pointer
+math goes through `toCss` against the rail's own `offsetWidth`. Keys stop at
+the slider (Space is never push-to-talk) as well as at the popover — **except
+Tab**, which goes on to the popover's round (#29's review): the model list's
+chosen option → the slider → "Set default…" (when there is one) → round. The
+popover now stays open while the slider moves. **It lives in #29's reworked
+popover** (merged 2026-10-10): one per chat pane (`data-pane`), and a pick
+PATCHes only that pane's thread; under a card the popover closes and its
+button is disabled, and the slider's own `disabled` (out of the Tab order,
+`aria-disabled`, no key or pointer moves it) holds wherever it is mounted. The
+Model picker's per-model `<select>` and the provider-default dialog's
+`pd-effort` are still selects. Free checks: `effortSlider.test.ts`,
+`EffortSlider.test.ts` (jsdom: keys, Tab — heard by a React handler around the
+slider, since a listener on the root container hears keys React already
+stopped — disabled, settle, unmount commit, the sequence guard, a move dropped
+when the conversation or the model changes), `effort_slider_checks` in
+`hud_v2_check.py` (drives it like the owner, at 70% and 160%, and Escape under
+a card; the mock's `patch_delays` holds a PATCH's answer to make one arrive
+late), and `tests/face/hud_v2_effort_check.py` (the review's findings, a
+`MockDaemon(0)` of its own, run by `hud_v2_check` after the declutter section
+or alone: Tab on an OpenRouter popover with no footer, a pane switch and an
+archive with a move settling, a model change under one, an opened row's late
+success). **Breaking the close-under-a-card alone bit no check at first**
+(shown in a scratch copy at the merge): the card taking focus closes the
+popover anyway, by #29's focus-leaving rule. So a card also arrives with focus
+on the chip's own button and the popover open — the one place only the disable
+closes it — and that check fails without it; inert still keeps every key off
+the slider. #29's own checks are ported to it: `hud_v2_declutter_check`'s F4
+(Tab round, arrows) and F6 (a card with focus on the slider), and
+`hud_v2_multichat_check`'s late-answer writeback, which clicks a stop.
 
 **Sidebar status dots (2026-10-08, design §18; contract in
 `docs/hud-api.md`).** The `·` left of each sidebar thread and task is what it
