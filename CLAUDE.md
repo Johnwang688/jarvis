@@ -410,13 +410,19 @@ bridge.server_entry(...)` (`python -m jarvis.v2.mcp_session`, env
 only** — never brief.json; `_open` refuses a non-chat brief naming `jarvis`.
 **Never on a command line**: the SDK puts a dict `mcp_servers` on `claude`'s
 argv as JSON (world-readable through `ps`), so Claude gets a private 0600
-`V2_DATA_DIR/claude/<thread>/mcp.json` in 0700 dirs and `--mcp-config
-<path>` (checked with the SDK's own command builder), reused by `set_model`,
-deleted by `close()`; Codex carries it in its private `config.toml`'s `env`
-table, with `approval_mode = "approve"` per read-only tool, stripped on close.
-`Daemon.start` sweeps leftover carriers — **only under the data folder it
-owns** (`stores.root == V2_DATA_DIR`), so a test daemon never touches the live
-one's. The relay is **stdlib only and never runs a tool**: it pops the token
+`V2_DATA_DIR/claude/<thread>/mcp-<nonce>.json` in 0700 dirs and
+`--mcp-config <path>` (checked with the SDK's own command builder), reused by
+`set_model`, deleted by `close()` — **one file per session, never per
+thread** (PR #35 review): a lost session is closed outside the daemon lock
+while the next send opens its successor, and a shared `mcp.json` was deleted
+from under the new session; Codex carries it in its private `config.toml`'s `env`
+table, with `approval_mode = "approve"` per read-only tool, stripped on close
+and on a failed open.
+`Daemon.start` sweeps leftover carriers **after it holds its ports** (the bind
+is the single-instance lock, so a second daemon on the live folder fails
+before touching the live one's) and **only under the data folder it owns**
+(`stores.root == V2_DATA_DIR`), so a test daemon never touches the live
+one's; `/mcp` paths are logged without a query. The relay is **stdlib only and never runs a tool**: it pops the token
 from its environment, writes nothing to stderr, lists `[]` and answers
 `Error:` when it cannot reach the daemon. The bridge (`jarvis/v2/bridge.py`)
 serves `GET /mcp/tools` and `POST /mcp/call` **on the API listener only**

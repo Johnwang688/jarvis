@@ -213,8 +213,9 @@ first written here:*
   peer-specific. The token is never written to `brief.json`.
 - **The carrier is a file, never the command line.** The SDK puts a dict
   `mcp_servers` on `claude`'s command line as JSON, which `ps` shows to anyone;
-  so Claude gets a private 0600 `V2_DATA_DIR/claude/<thread>/mcp.json`
-  (`--mcp-config <path>`), and Codex the `env` table in its private
+  so Claude gets a private 0600 file of the session's own,
+  `V2_DATA_DIR/claude/<thread>/mcp-<nonce>.json` (`--mcp-config <path>`),
+  and Codex the `env` table in its private
   `config.toml`. Both are removed when the session closes.
 - **The routes are the bridge's** (`jarvis/v2/bridge.py`): the relay
   (`python -m jarvis.v2.mcp_session`, stdlib only) calls `GET /mcp/tools` and

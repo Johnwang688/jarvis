@@ -160,24 +160,33 @@ def authenticate(handler, daemon):
 
 # -- the start-up sweep (§1.3) -------------------------------------------------
 
+# A Claude session's carrier is `mcp-<32 hex>.json` (one per session, so a
+# closing session never removes its successor's); `mcp.json` is the WP-1
+# first round's per-thread name, and `.mcp-*` a write a crash interrupted.
+_CLAUDE_CARRIER = re.compile(r"(?:mcp(?:-[0-9a-f]{32})?\.json|\.mcp-.+)")
+
+
 def sweep_carriers(root: Path) -> int:
     """Remove token carriers a crash left under `root` (the daemon's data
-    folder): every `claude/<thread>/mcp.json`, and `mcp_servers` from every
-    `codex/<thread>/config.toml`. Their tokens died with the process that
-    minted them; the files would only keep a dead secret on disk. Returns how
-    many files changed. Never raises: a sweep that fails is a log line."""
+    folder): every Claude session carrier under `claude/<thread>/`, and
+    `mcp_servers` from every `codex/<thread>/config.toml`. Their tokens died
+    with the process that minted them; the files would only keep a dead
+    secret on disk. Called once this daemon holds its port — the bind is the
+    single-instance lock — so it never touches a live daemon's carriers.
+    Returns how many files changed. Never raises: a failure is a log line."""
     changed = 0
     root = Path(root)
     claude = root / "claude"
     if claude.is_dir() and not claude.is_symlink():
         for home in claude.iterdir():
-            carrier = home / "mcp.json"
             try:
                 if home.is_symlink() or not home.is_dir():
                     continue
-                if carrier.is_symlink() or carrier.exists():
-                    carrier.unlink()
-                    changed += 1
+                for carrier in home.iterdir():
+                    if _CLAUDE_CARRIER.fullmatch(carrier.name) and (
+                            carrier.is_symlink() or carrier.is_file()):
+                        carrier.unlink()
+                        changed += 1
             except OSError as exc:
                 LOG.warning("Cannot remove a leftover Claude MCP carrier (%s)", type(exc).__name__)
     codex = root / "codex"

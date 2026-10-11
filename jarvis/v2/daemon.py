@@ -270,7 +270,6 @@ class Daemon:
         with self._lock:
             if self._stopping or self._server is not None:
                 raise DaemonError("daemon already started or stopped")
-            self._sweep_carriers()
             try:
                 server = ThreadingHTTPServer(("127.0.0.1", self.port), _handler(self))
             except OSError as exc:
@@ -293,6 +292,12 @@ class Daemon:
                 raise DaemonError("HUD or preview port is already in use") from exc
             self._server = server
             self.port, self.face_port, self.workshop_port = [s.server_address[1] for s in servers]
+            # Only now, holding all three ports (the bind is the
+            # single-instance lock) and before anything is served: a second
+            # daemon started by hand on the live data folder fails the bind
+            # above and never reaches this, so it cannot delete the live
+            # daemon's carriers (PR #35 review).
+            self._sweep_carriers()
             self.started_at = time.monotonic()
             for listener in servers:
                 listener.daemon_threads = True
@@ -1518,9 +1523,11 @@ def _text(value, name):
 
 def _log_path(path: str) -> str:
     """A request path for the daemon log. A terminal attach carries its
-    ticket in the query string, so `/terminals` paths are logged without one."""
+    ticket in the query string, so `/terminals` paths are logged without one;
+    so are `/mcp` paths, whose credential is a header the relay never moves
+    into a query — but a confused client could (PR #35 review)."""
     url = urlsplit(path)
-    return url.path if url.path.startswith("/terminals") else path
+    return url.path if url.path.startswith(("/terminals", "/mcp")) else path
 
 
 def _handler(daemon):

@@ -25,6 +25,7 @@ Run: PYTHONPATH=. .venv/bin/python tests/v2/mcp_session_check.py
 from __future__ import annotations
 
 import ast
+import asyncio
 import json
 import http.client as httpclient
 import logging
@@ -137,12 +138,19 @@ class FakeCli:
         self.script: dict = {}
         self.fail_start = False
         self.closed = 0
+        # (entered, release) events: hold `start` (a session still opening)
+        # or `close` (a session still closing) until the test releases it.
+        self.start_gate = None
+        self.close_gate = None
 
     def health(self):
         return True, "fake"
 
     def start(self, thread, brief, permit):
         self.opened.append(Opened(thread.id, brief, permit))
+        if self.start_gate is not None:
+            self.start_gate[0].set()
+            self.start_gate[1].wait(10)
         if self.fail_start:
             raise BriefRefused("fake start failure")
         return SessionHandle(thread.id, self.name, f"fake:{thread.id}:{len(self.opened)}",
@@ -164,6 +172,9 @@ class FakeCli:
         pass
 
     def close(self, h):
+        if self.close_gate is not None:
+            self.close_gate[0].set()
+            self.close_gate[1].wait(5)
         self.closed += 1
 
     def usage(self, h):
@@ -606,6 +617,51 @@ class BridgeChecks(DaemonHarness):
         self.assertEqual(self.d.callers.live(), 1)
         self.assertEqual(self.call(token)[0], 200)
 
+    def test_stop_revokes_a_session_still_opening(self):
+        """A session whose provider is still starting has no handle, so
+        `stop()` closes nothing for it: only `revoke_all` takes its token."""
+        self.claude.start_gate = (threading.Event(), threading.Event())
+        failure = {}
+
+        def opener():
+            try:
+                self.chat(CLAUDE)
+            except Exception as exc:  # noqa: BLE001 — stopping refuses it
+                failure["exc"] = exc
+
+        worker = threading.Thread(target=opener, daemon=True)
+        worker.start()
+        try:
+            self.assertTrue(self.claude.start_gate[0].wait(5))
+            token = token_of(self.claude.opened[-1].brief)
+            self.assertIsNotNone(self.d.callers.resolve(token), "minted while opening")
+            self.d.stop()
+            self.assertIsNone(self.d.callers.resolve(token),
+                              "stop revokes a session still opening")
+            self.assertEqual(self.d.callers.live(), 0)
+        finally:
+            self.claude.start_gate[1].set()
+            worker.join(10)
+        self.assertIsInstance(failure.get("exc"), daemon_mod.DaemonError)
+        self.assertEqual(self.d.callers.live(), 0)
+
+    def test_a_closing_session_is_refused_even_if_its_revoke_was_missed(self):
+        thread = self.chat(CLAUDE)
+        token = token_of(self.run_brief(thread))
+        self.claude.close_gate = (threading.Event(), threading.Event())
+        with patch.object(self.d.callers, "revoke", lambda session: None):
+            closer = threading.Thread(target=self.d.close_thread, args=(thread.id,), daemon=True)
+            closer.start()
+            try:
+                self.assertTrue(self.claude.close_gate[0].wait(5), "the close is under way")
+                self.assertIs(self.d._sessions.get(thread.id).closing, True)
+                status, _ = self.call(token)
+            finally:
+                self.claude.close_gate[1].set()
+                closer.join(10)
+        self.assertEqual(status, 403, "a closing session answers no call")
+        self.assertEqual(CALLS, [])
+
     def test_the_identity_check_holds_when_a_revoke_is_missed(self):
         thread = self.chat(CLAUDE)
         old = token_of(self.run_brief(thread))
@@ -939,7 +995,9 @@ class ClaudeProviderChecks(unittest.TestCase):
         self.assertNotIn(PLACEHOLDER, "\0".join(command), "no token on the command line")
         index = command.index("--mcp-config")
         carrier = Path(command[index + 1])
-        self.assertEqual(carrier, self.claude.mcp_config_path("mcpcl001"))
+        self.assertEqual(carrier.parent, self.claude.mcp_config_dir("mcpcl001"))
+        self.assertRegex(carrier.name, self.claude.MCP_CONFIG_NAME.pattern,
+                         "a file of this session's own")
         self.assertEqual(json.loads(carrier.read_text())["mcpServers"]["jarvis"]["env"]
                          [bridge.TOKEN_VARIABLE], PLACEHOLDER)
         self.assertEqual(carrier.stat().st_mode & 0o777, 0o600)
@@ -953,6 +1011,62 @@ class ClaudeProviderChecks(unittest.TestCase):
         self.assertTrue(carrier.exists())
         self.provider.close(handle)
         self.assertFalse(carrier.exists())
+
+    def test_a_closing_session_never_removes_its_successors_carrier(self):
+        """PR #35 review: the daemon drops a lost session under its lock and
+        closes it outside; a send meanwhile opens the next session on the same
+        thread. The old session's close must remove its own carrier only."""
+        entered, release = threading.Event(), threading.Event()
+        clients = []
+        base = self.cl.FakeClient
+
+        class SlowClose(base):
+            async def disconnect(self):
+                if self is clients[0]:
+                    entered.set()
+                    while not release.is_set():
+                        await asyncio.sleep(0.01)
+                await super().disconnect()
+
+        def factory(options):
+            client = SlowClose(options)
+            clients.append(client)
+            return client
+
+        with patch.object(self.claude, "_client_factory", factory):
+            old, _ = self.start(thread_id="mcpcl010")
+            old_file = Path(clients[0].options.mcp_servers)
+            closer = threading.Thread(target=self.provider.close, args=(old,), daemon=True)
+            closer.start()
+            try:
+                self.assertTrue(entered.wait(5), "the old session's close is under way")
+                new, _ = self.start(thread_id="mcpcl010")
+                new_file = Path(clients[-1].options.mcp_servers)
+                self.assertTrue(new_file.exists())
+            finally:
+                release.set()
+                closer.join(10)
+            self.assertFalse(closer.is_alive())
+            self.assertTrue(new_file.exists(),
+                            "the old session's close removed the new session's carrier")
+            self.assertEqual(json.loads(new_file.read_text())["mcpServers"]["jarvis"]["env"]
+                             [bridge.TOKEN_VARIABLE], PLACEHOLDER)
+            self.assertNotEqual(old_file, new_file, "one carrier per session")
+            self.assertFalse(old_file.exists(), "the old session removed its own")
+            self.provider.close(new)
+            self.assertFalse(new_file.exists())
+
+    def test_a_failed_open_removes_its_carrier(self):
+        class Unreachable(self.cl.FakeClient):
+            async def connect(self):
+                raise RuntimeError("the CLI did not start")
+
+        with patch.object(self.claude, "_client_factory", lambda options: Unreachable(options)):
+            with self.assertRaises(BriefRefused):
+                self.start(thread_id="mcpcl011")
+        folder = config.V2_DATA_DIR / "claude" / "mcpcl011"
+        left = list(folder.iterdir()) if folder.exists() else []
+        self.assertEqual(left, [], "a session that never opened keeps no carrier")
 
     def test_a_symlinked_carrier_directory_is_refused(self):
         target = self.root / "elsewhere"
@@ -998,6 +1112,27 @@ class ClaudeProviderChecks(unittest.TestCase):
                                  "a read-only Jarvis tool")
                 self.assertEqual(len(calls), 1, "permit decided it (its jarvis-tool layer)")
                 self.assertEqual(asker.seen, [], "nobody was asked")
+
+    def test_the_explicit_allow_is_exactly_the_read_only_tools(self):
+        """Only a read-only session tool gets the hook's explicit allow: a
+        tool that writes, ALLOWed by `permit`, keeps today's behaviour — `{}`
+        under AUTO (the classifier still decides), "approved by Jarvis" under
+        ASK."""
+        offered = session_tools.for_provider(CLAUDE)
+        self.assertEqual({t.name for t in offered}, {READ, SEND})
+        for profile in (PermissionProfile.AUTO, PermissionProfile.ASK):
+            handle, _ = self.start(profile, lambda *a, **k: Decision.ALLOW,
+                                   thread_id=f"mcpro{profile.value[:3]}")
+            for tool in offered:
+                with self.subTest(profile=profile.value, tool=tool.name):
+                    out = self.hook(handle, session_tools.CLAUDE_PREFIX + tool.name)
+                    reason = (out.get("hookSpecificOutput") or {}).get("permissionDecisionReason")
+                    if tool.read_only:
+                        self.assertEqual(reason, "a read-only Jarvis tool")
+                    elif profile is PermissionProfile.AUTO:
+                        self.assertEqual(out, {}, "the classifier still decides a writing tool")
+                    else:
+                        self.assertEqual(reason, "approved by Jarvis")
 
     def test_the_hook_refuses_a_foreground_tool_for_a_sub_agent_without_permit(self):
         asker = Asker(Decision.ALLOW)
@@ -1050,6 +1185,19 @@ class CodexProviderChecks(unittest.TestCase):
                                 lambda *a, **k: Decision.ALLOW)
         self.handles.append(h)
         return h
+
+    def test_a_failed_open_strips_its_config(self):
+        """`prepare` writes the config (token and all) before the app-server
+        is asked anything; an open that then fails keeps no token on disk."""
+        self.brain.script["account"] = "apiKey"     # refused after the config is written
+        with self.assertRaises(BriefRefused):
+            self.start(thread_id="mcpcx009")
+        path = config.V2_DATA_DIR / "codex" / "mcpcx009" / "config.toml"
+        self.assertTrue(self.brain.calls("account/read"), "it got as far as the app-server")
+        if path.exists():
+            text = path.read_text()
+            self.assertNotIn(PLACEHOLDER, text)
+            self.assertNotIn("mcp_servers", tomllib.loads(text))
 
     def test_the_token_is_in_the_private_config_only_and_leaves_on_close(self):
         h = self.start()
@@ -1141,34 +1289,66 @@ class SweepChecks(unittest.TestCase):
         patch_config(self.stack, self.root)
 
     def leave_carriers(self, data: Path):
-        claude_file = data / "claude" / "deadbeef" / "mcp.json"
-        claude_file.parent.mkdir(parents=True)
-        claude_file.write_text(json.dumps({"mcpServers": {"jarvis": {"env": {"T": PLACEHOLDER}}}}))
+        """What a crash leaves: a session carrier (`mcp-<nonce>.json`), the
+        first round's per-thread `mcp.json`, a write cut short (`.mcp-*`), and
+        a Codex config with the jarvis server. Plus one file that is not a
+        carrier, which must survive. -> (carriers, codex config, bystander)."""
+        folder = data / "claude" / "deadbeef"
+        folder.mkdir(parents=True)
+        body = json.dumps({"mcpServers": {"jarvis": {"env": {"T": PLACEHOLDER}}}})
+        carriers = [folder / f"mcp-{'ab' * 16}.json", folder / "mcp.json", folder / ".mcp-x1y2"]
+        for carrier in carriers:
+            carrier.write_text(body)
+        bystander = folder / "notes.txt"
+        bystander.write_text("not a carrier")
         home = data / "codex" / "cafebabe"
         home.mkdir(parents=True)
         brief = Brief(Role.CHAT, str(self.root), model="m",
                       mcp_servers={"jarvis": bridge.server_entry(CODEX, 4242, PLACEHOLDER)})
         (home / "config.toml").write_text(codex_config.config_text(brief))
-        return claude_file, home / "config.toml"
+        return carriers, home / "config.toml", bystander
 
-    def daemon(self, stores):
-        d = daemon_mod.Daemon(stores, {FAST: FakeCli(FAST)}, None, 0)
+    def daemon(self, stores, port=0, face_port=None, workshop_port=None):
+        d = daemon_mod.Daemon(stores, {FAST: FakeCli(FAST)}, None, port,
+                              face_port=face_port, workshop_port=workshop_port)
         d.start()
         self.addCleanup(d.stop)
         return d
 
     def test_a_daemon_sweeps_its_own_data_folder(self):
-        claude_file, toml = self.leave_carriers(config.V2_DATA_DIR)
+        carriers, toml, bystander = self.leave_carriers(config.V2_DATA_DIR)
         self.daemon(Stores())
-        self.assertFalse(claude_file.exists())
+        for carrier in carriers:
+            self.assertFalse(carrier.exists(), carrier.name)
+        self.assertTrue(bystander.exists(), "only carriers are removed")
         self.assertNotIn(PLACEHOLDER, toml.read_text())
         self.assertEqual(tomllib.loads(toml.read_text())["model"], "m")
 
     def test_a_daemon_on_another_folder_touches_nothing(self):
-        claude_file, toml = self.leave_carriers(config.V2_DATA_DIR)
+        carriers, toml, _ = self.leave_carriers(config.V2_DATA_DIR)
         self.daemon(Stores(self.root / "elsewhere"))
-        self.assertTrue(claude_file.exists())
+        self.assertTrue(all(carrier.exists() for carrier in carriers))
         self.assertIn(PLACEHOLDER, toml.read_text())
+
+    def test_a_second_daemon_that_cannot_bind_sweeps_nothing(self):
+        """PR #35 review: the sweep used to run before the bind, so a second
+        daemon started by hand on the live data folder deleted the live one's
+        carriers and only then failed with "port is already in use". The bind
+        is the single-instance lock; the sweep comes after it."""
+        live = self.daemon(Stores())
+        carriers, toml, _ = self.leave_carriers(config.V2_DATA_DIR)
+        second = daemon_mod.Daemon(Stores(), {FAST: FakeCli(FAST)}, None, live.port,
+                                   face_port=0, workshop_port=0)
+        with self.assertRaises(daemon_mod.DaemonError):
+            second.start()
+        self.assertTrue(all(carrier.exists() for carrier in carriers),
+                        "the live daemon's carriers are untouched")
+        self.assertIn(PLACEHOLDER, toml.read_text())
+
+    def test_log_paths_keep_no_query_on_mcp_routes(self):
+        self.assertEqual(daemon_mod._log_path("/mcp/call?token=abc"), "/mcp/call")
+        self.assertEqual(daemon_mod._log_path("/threads?project=ab12cd34"),
+                         "/threads?project=ab12cd34")
 
 
 # --- the relay on its own ---------------------------------------------------------

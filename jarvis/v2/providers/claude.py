@@ -200,21 +200,33 @@ def _safe(text: Any) -> str:
 # file instead and the SDK is handed its path, which it passes as
 # `--mcp-config <path>`. Written once per session, reused by `set_model`'s
 # reconnect, deleted by `close()`; `Daemon.start` sweeps any a crash left.
+#
+# **One file per session, never per thread** (PR #35 review): a thread's old
+# session can still be closing — the daemon drops a lost session under its
+# lock and closes it outside — while the next send opens a new session on the
+# same thread. With one `mcp.json` per thread, the old session's close deleted
+# the new session's carrier. Each session writes `mcp-<nonce>.json` and only
+# ever removes its own.
 
 _THREAD_DIR = re.compile(r"[A-Za-z0-9_-]{1,64}")
+# A session's carrier, and the pattern the start-up sweep removes (with the
+# temporary `.mcp-*` a crash may leave mid-write).
+MCP_CONFIG_NAME = re.compile(r"mcp-[0-9a-f]{32}\.json")
 
 
-def mcp_config_path(thread_id: str) -> Path:
-    """`V2_DATA_DIR/claude/<thread_id>/mcp.json`."""
+def mcp_config_dir(thread_id: str) -> Path:
+    """`V2_DATA_DIR/claude/<thread_id>/`, where a thread's sessions keep
+    their carriers."""
     if not isinstance(thread_id, str) or not _THREAD_DIR.fullmatch(thread_id):
         raise BriefRefused("invalid Claude thread id for an MCP config")
-    return Path(config.V2_DATA_DIR) / "claude" / thread_id / "mcp.json"
+    return Path(config.V2_DATA_DIR) / "claude" / thread_id
 
 
 def write_mcp_config(thread_id: str, servers: dict) -> Path:
-    """The servers as `{"mcpServers": …}`, 0600 in 0700 directories, written
-    aside and renamed into place; never through a symlink."""
-    path = mcp_config_path(thread_id)
+    """The servers as `{"mcpServers": …}` in a file of this session's own
+    (`mcp-<nonce>.json`), 0600 in 0700 directories, written aside and renamed
+    into place; never through a symlink."""
+    path = mcp_config_dir(thread_id) / f"mcp-{uuid.uuid4().hex}.json"
     for directory in (path.parent.parent, path.parent):
         if directory.is_symlink():
             raise BriefRefused("the Claude MCP config directory must not be a symlink")
