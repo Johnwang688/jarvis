@@ -735,6 +735,63 @@ read-only (`backlog` among them).
 While typing is paused the notice cannot be dismissed: it holds the only
 way to resume.
 
+**Preview and dev servers, WP-E (2026-10-10; plan
+`docs/plans/2026-10-09-hud-workspace-plan.md` §2.5, decisions W-4; design
+§18; contract in `docs/hud-api.md`).** **No HUD (8402) or API (8405)
+response may be framed**: `Content-Security-Policy: frame-ancestors 'none'`
+and `X-Frame-Options: DENY` on every one — page, JSON, SSE, every error, a
+malformed request's refusal (answered HTTP/1.0, never a header-less 0.9
+body) — added in the daemon handler's `end_headers`, the one place every
+status line passes; the terminal's hand-written `101` passes
+`hud_api.frame_headers` to `ws.upgrade` explicitly. **One** CSP header,
+built by `hud_api.content_security_policy(*extra)` — a response's own
+directives (the avatar SVG's) fold in, and **a comma** (it starts a second
+policy: `img-src 'self', frame-ancestors *` let a frame land on the HUD),
+anything outside printable ASCII (CR/LF split the header; U+2028 failed
+after the status line) or a reserved `frame-ancestors`/`sandbox`/`report-*`
+**raises** (`_own_directives`; `binary()` checks before writing a byte, so
+it is one 400, never two status lines); the editor's
+full CSP (ED-4) extends that function, never a second header. The preview
+listener (8403) carries **neither** frame header — the HUD frames it — but
+**sandboxes every document it serves** with one CSP, `sandbox allow-scripts
+allow-forms` (`workshop_security_policy`): a keep-origin frame that navigated
+itself to the workshop used to get its real origin (PR #31 review), and a
+workshop page in a top-level tab is now opaque too. v1's whiteboard workshop
+is its own server, untouched.
+`tests/v2/frame_check.py` walks every route family on both listeners and
+**fails if a route module gains a first path segment it does not walk**,
+and fails if any status line but `ws.py`'s is written by hand. `/status`
+gains `hud_port`, `api_port` and `frame_hardened` (the handler class's own
+flag, beside `end_headers`). **The Preview pane** (`lib/preview.ts`) refuses
+the HUD's and API's ports — as reported **and** 8402/8405, the live
+daemon — and the window's own, and restores nothing until `/status`
+answers (`state/daemonPorts.ts`, read once per page). **"Keep its origin"**
+(`preview-keep-origin`) adds `allow-same-origin`, the only flag ever added
+to `allow-scripts allow-forms` (never top navigation, popups or downloads):
+off by default, per pane, offered only for a loopback port that is none of
+the daemon's three nor the window's own, and only while `/status` says
+`frame_hardened: true` — a HUD on an older daemon never offers it. **It is
+stored as the origin it was given for** (`PaneSpec.keepOrigin`), so another
+port, host or scheme turns it off by construction; it is judged again on
+every load and **dropped from storage** when it no longer passes; disabled
+and inert under a card. Safe because scripts plus same-origin are no sandbox
+only for a page on the parent's origin, which the port check refuses and
+`frame-ancestors` keeps a frame from becoming. **A Ctrl+clicked loopback
+link in a terminal opens a menu** (`term-link-menu`): Open in Preview — a
+drawn Preview pane, else the focused pane, by the sidebar's click rule;
+refused with the reason for the daemon's ports — or Open in a browser tab;
+other links still open a tab directly. It is measured and placed by
+`placeMenu` (`lib/terminal.ts`): below the click, else **above** it — a dev
+server's `Local:` line is usually the panel terminal's last row, where it
+used to open below the window — and clamped on both axes, zoom-aware; its
+Escape listener is a layout effect that ignores Escape once a card is up.
+`judgePreviewUrl` refuses userinfo, as `judgeLink` does. xterm finds a link only when the
+pointer enters a new cell, so a test that clicks the same cell twice must
+move through another first. The mock serves an API listener and a dev server
+on ephemeral ports (`api_port`, `dev_port`) and asserts the API one is never
+hit; the mock HUD, API and workshop send the real `hud_api.frame_headers()`,
+so the HUD under test is always rendered under them. Not yet: §2.5 item 5, a "dev servers in your terminals" list.
+
 **Input bar declutter (2026-10-10, PR #29; ported onto WP-B and reviewed the
 same day).** The bar is `📎 [box] ⬆` over one row, `in: project · provider ▾ ·
 model · effort ▾`. **The mic is on the orb, not in any bar**: the dictation
@@ -1990,7 +2047,10 @@ jarvis/
   `workflows.start`'s `max_steps` if that bites.
 - **Jarvis may not touch his own control plane.** `config.is_face_origin()` —
   the browser and `fetch_page` refuse it, ahead of `allowed_hosts='*'`.
-  Otherwise he could drive his own HUD and approve himself.
+  Otherwise he could drive his own HUD and approve himself. In v2 the HUD
+  and API listeners also refuse to be framed on every response (WP-E,
+  `frame-ancestors 'none'`), so no page in a Preview frame can become the
+  HUD by navigating itself there.
 - **External accounts follow use-but-never-see** (Gmail, 2026-07-31, the
   template for every future integration): a *scoped OAuth refresh token* —
   never a password — lives in `~/.config/jarvis/google_token.json` (mode

@@ -1,4 +1,8 @@
-"""HUD routes mounted on the daemon, plus an isolated read-only preview origin."""
+"""HUD routes mounted on the daemon, plus an isolated read-only preview origin.
+
+Every response on the HUD and API listeners refuses to be framed
+(`frame_headers`, WP-E); the preview origin is framed on purpose, and every
+document it serves is sandboxed by its own CSP instead."""
 from __future__ import annotations
 
 import base64
@@ -688,14 +692,113 @@ def diff(daemon, task, name=None):
     return result
 
 
+# -- framing (WP-E, HUD workspace plan §2.5 item 3) --------------------------------
+#
+# Nothing on the HUD listener (8402) or the API listener (8405) may be drawn
+# inside a frame: not the HUD, not a JSON answer, not an error page. A Preview
+# pane frames local pages on purpose, and a page in one could otherwise
+# navigate its own frame to 8402 and become a working copy of the window that
+# gates approvals, drawn inside that window. With these two headers the
+# browser shows a blocked frame instead. Both, because `X-Frame-Options` is
+# what an older engine reads and `frame-ancestors` is the standard one.
+#
+# The preview listener (8403) is framed by the HUD on purpose, so it gets
+# neither — but every document it serves is **sandboxed by its own header**
+# (`sandbox allow-scripts allow-forms`, the Preview frame's own flags), so a
+# workshop page always runs with an opaque origin: inside the HUD (as it
+# already did), in a top-level tab, and in a Preview frame whose page was let
+# keep its origin and then navigated itself to the workshop (PR #31 review:
+# that frame used to run with the real workshop origin, its storage and
+# same-origin reads of other projects' served files).
+#
+# They are added in **one place**, the daemon handler's `end_headers`, so a
+# route cannot forget them; the one response written by hand (the WebSocket
+# `101`, `ws.upgrade`) asks `frame_headers` for them too. `GET /status`
+# reports `frame_hardened: true` from the handler that adds them, and the HUD
+# offers a Preview pane's "keep its own origin" switch only then (decisions
+# W-4: that switch ships only once these headers are in force).
+FRAME_ANCESTORS = "frame-ancestors 'none'"
+WORKSHOP_SANDBOX = "sandbox allow-scripts allow-forms"
+# Directives a response may never set for itself: they are this module's to
+# decide, on every response (`report-*` would let a response send the policy's
+# violations somewhere of its own choosing).
+_RESERVED = ("frame-ancestors", "sandbox", "report-uri", "report-to")
+
+
+def _own_directives(extra) -> list[str]:
+    """A response's own CSP directives, checked.
+
+    Refused with ValueError — a programming error, never input:
+      - a comma: it ends one policy and starts another in the same header.
+        `img-src 'self', frame-ancestors *` became the policies `img-src
+        'self'` and `frame-ancestors *; frame-ancestors 'none'`, where the
+        first `frame-ancestors` wins — and a browser that sees one ignores
+        `X-Frame-Options`, so both frame headers fell at once (PR #31 review,
+        shown in Chromium);
+      - anything but printable ASCII (space to `~`): CR or LF splits the
+        header, and a character `latin-1` cannot encode (U+2028) failed only
+        inside `end_headers` — after `send_response`, so the error's own
+        answer went out as a second status line (PR #31 re-review);
+      - any directive this module reserves (`_RESERVED`)."""
+    directives: list[str] = []
+    for chunk in extra:
+        if not chunk:
+            continue
+        if not isinstance(chunk, str) or any(c == "," or not " " <= c <= "~" for c in chunk):
+            raise ValueError("a response's own CSP directives must be printable ASCII with no comma")
+        for directive in chunk.split(";"):
+            directive = directive.strip()
+            if not directive:
+                continue
+            name = directive.split()[0].lower()
+            if name in _RESERVED:
+                raise ValueError(f"a response may not set the CSP directive {name!r}")
+            directives.append(directive)
+    return directives
+
+
+def content_security_policy(*extra: str | None) -> str:
+    """The one `Content-Security-Policy` the HUD and API listeners send.
+
+    Always `frame-ancestors 'none'`; a response may add directives of its own
+    (an avatar's SVG locks itself down further), checked by `_own_directives`
+    so none of them can change the frame rule. This is the function to extend
+    when the HUD gains a full policy (editor plan ED-4, which adds
+    `'wasm-unsafe-eval'`): one builder, so no response sends a second,
+    conflicting policy that drops the frame rule."""
+    return "; ".join([*_own_directives(extra), FRAME_ANCESTORS])
+
+
+def workshop_security_policy(*extra: str | None) -> str:
+    """The one `Content-Security-Policy` the preview listener sends: the
+    sandbox (an opaque origin for every document it serves) and a response's
+    own directives, checked the same way."""
+    return "; ".join([*_own_directives(extra), WORKSHOP_SANDBOX])
+
+
+def frame_headers(handler, csp: str | None = None) -> list[tuple[str, str]]:
+    """The headers every response on `handler`'s listener carries.
+
+    The HUD and API listeners: the CSP (with `csp`'s directives, if any) and
+    `X-Frame-Options: DENY`. The preview listener: no frame rule (the HUD
+    frames it), but one CSP that sandboxes every document it serves, with
+    `csp`'s directives merged in."""
+    if getattr(getattr(handler, "server", None), "preview_only", False):
+        return [("Content-Security-Policy", workshop_security_policy(csp))]
+    return [("Content-Security-Policy", content_security_policy(csp)), ("X-Frame-Options", "DENY")]
+
+
 def binary(handler, data, mime, *, csp=None):
+    # Checked before a byte is written: a bad policy is one 400 (the
+    # dispatcher's answer to a ValueError), never half a response.
+    _own_directives((csp,))
     handler.send_response(200)
     handler.send_header("Content-Type", mime)
     handler.send_header("Content-Length", str(len(data)))
     handler.send_header("Cache-Control", "no-store")
     handler.send_header("X-Content-Type-Options", "nosniff")
-    if csp:
-        handler.send_header("Content-Security-Policy", csp)
+    # Folded into the one policy by the handler's `end_headers` (`frame_headers`).
+    handler._csp = csp
     handler.end_headers()
     handler._streaming = True
     handler.wfile.write(data)

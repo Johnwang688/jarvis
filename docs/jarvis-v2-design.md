@@ -1298,7 +1298,13 @@ providers, and dictation with an adjustable send mode.
   (`WORKSHOP_PORT` 8403, v1's rule): the HUD is the approval surface, and
   an iframe that could reach `/approvals` would let an agent approve
   itself. The preview pane is an iframe onto that origin or onto a
-  `localhost` dev server the owner names; never onto the HUD's own origin.
+  `localhost` dev server the owner names; never onto the HUD's own origin,
+  nor (WP-E, §18) the API listener's. The HUD and API refuse to be framed at
+  all (`frame-ancestors 'none'`), which is what lets a dev server's page keep
+  its own origin when the owner switches that on for its pane; and the
+  workshop sandboxes every document it serves (`sandbox allow-scripts
+  allow-forms`), so an agent-written page there always runs with an opaque
+  origin, wherever it is opened.
 - **Dictation send mode is a three-position control in the input bar:**
   AUTO (send when speech ends), REVIEW (transcript lands in the box, the
   owner clicks send), OFF (v1's mic mute). Persisted; a fresh window boots
@@ -2095,6 +2101,45 @@ counter-zoomed with its font scaled instead; the 160% and 70% checks guard
 fit and selection. The headless suite plays the PTY inside the browser
 (`route_web_socket`), so no shell ever runs, and the live-port guard now
 refuses WebSockets too. "Open in Preview" for a dev server's link is WP-E.
+
+**Preview and dev servers (2026-10-10, WP-E; decisions W-4).** **No HUD or
+API response may be framed**: every response on 8402 and 8405 — the page,
+JSON, SSE, every error, http.server's own refusals of a malformed request
+(answered as HTTP/1.0, never a header-less 0.9 body) and the terminal
+socket's hand-written `101` — carries `Content-Security-Policy:
+frame-ancestors 'none'` and `X-Frame-Options: DENY`, added in the daemon
+handler's `end_headers`, the one place every status line passes; one
+function builds the policy (`hud_api.content_security_policy`, which the
+editor's full CSP will extend, and which refuses a response's own
+directives holding a comma — a second policy — anything outside printable
+ASCII, or a reserved
+`frame-ancestors`/`sandbox`/`report-*`). The preview origin (8403) carries
+neither, but sandboxes every document it serves with its own CSP (`sandbox
+allow-scripts allow-forms`), so a keep-origin frame that navigates itself
+to the workshop lands opaque (PR #31 review).
+`/status` reports `hud_port`, `api_port` and `frame_hardened`, and the
+Preview pane refuses the HUD's port, the API's port (both as reported and
+the live defaults) and the window's own. **A dev app may keep its own
+origin**, per pane, off by default: the "Keep its origin" switch adds
+`allow-same-origin`, offered only for a loopback port that is none of the
+daemon's three, and only while `/status` says `frame_hardened` — so a HUD
+served by an older daemon never offers it. It is stored as the origin it
+was given for, so another port, host or scheme turns it off, and a stored
+one is judged again on every load and dropped when it no longer passes. It
+is safe because scripts plus same-origin are no sandbox only for a page on
+the parent's origin: the port check refuses that up front, and
+`frame-ancestors` stops a frame from navigating itself into the HUD later.
+The frame never gets top navigation, popups or downloads. A Ctrl+clicked
+link to a server on this machine opens a small menu — **Open in Preview**
+(a drawn Preview pane, else the focused pane, by the click rule; refused,
+with the reason, for the daemon's ports) or **Open in a browser tab**; any
+other link opens in a new tab as before; the menu flips above a click on
+the panel terminal's last row and stays inside the window at any zoom.
+Free suites: `tests/v2/
+frame_check.py` (every route family on both listeners, checked against the
+route modules' source), `preview.test.ts`, `hud_v2_preview_check.py` and
+the terminal suite's link section. Not yet: a "dev servers in your
+terminals" list (§2.5 item 5).
 
 Remaining: WP13 (the long-bench comparison, the owner's call on cost), a
 native Windows worker, the R8 hook on Codex, and prompt tuning in

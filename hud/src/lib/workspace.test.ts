@@ -4,8 +4,8 @@ import {
   PANEL, PANE_MIN_H, PANE_MIN_W, PANE_VIEWS, PRESETS, SHAPES, TITLEBAR_H, WORKSPACE_KEY, clampCols,
   clampPanelHeight, clampRow, columnWidths, defaultWorkspace, dropColumn, dropRow, equalSplit, fitWorkspace,
   focusPane, forgetTerminal, loadWorkspace, maxPanelHeight, moveColEdge, panesOf, parseWorkspace, pinPane,
-  resetWorkspace, saveWorkspace, setPaneTerminal, setPanel, setPreset, setPreviewUrl, setSplit, setView, show,
-  unpinProject,
+  resetWorkspace, saveWorkspace, setKeepOrigin, setPaneTerminal, setPanel, setPreset, setPreviewUrl, setSplit,
+  setView, show, unpinProject,
   type DrawnSet, type PaneNo, type Preset, type Workspace,
 } from "./workspace";
 
@@ -260,6 +260,46 @@ describe("what each pane shows", () => {
     expect(w.panes.map((p) => p.previewUrl)).toEqual(
       [undefined, "http://localhost:5173/", "http://127.0.0.1:8403/p/p1/index.html", undefined]);
     expect(setPreviewUrl(w, 2, "").panes[1].previewUrl).toBeUndefined();
+  });
+
+  it("keeps a pane's keep-origin grant only for the origin it was given for (WP-E)", () => {
+    let w = setPreviewUrl(defaultWorkspace(), 2, "http://localhost:5173/");
+    w = setKeepOrigin(w, 2, "http://localhost:5173");
+    expect(w.panes[1].keepOrigin).toBe("http://localhost:5173");
+    // Another page on the same origin keeps it.
+    expect(setPreviewUrl(w, 2, "http://localhost:5173/settings").panes[1].keepOrigin).toBe("http://localhost:5173");
+    // Another port, host or scheme turns it off.
+    for (const url of ["http://localhost:5174/", "http://127.0.0.1:5173/", "https://localhost:5173/", ""]) {
+      expect(setPreviewUrl(w, 2, url).panes[1].keepOrigin, url).toBeUndefined();
+    }
+    // Survives a reload, judged again by the parser.
+    expect(parseWorkspace(JSON.stringify(w)).panes[1].keepOrigin).toBe("http://localhost:5173");
+    // Off.
+    expect(setKeepOrigin(w, 2, null).panes[1].keepOrigin).toBeUndefined();
+    expect(setKeepOrigin(setKeepOrigin(w, 2, null), 2, null)).toEqual(setKeepOrigin(w, 2, null));
+  });
+
+  it("never grants keep-origin to another origin than the pane's URL, nor to a daemon port", () => {
+    const w = setPreviewUrl(defaultWorkspace(), 2, "http://localhost:5173/");
+    expect(setKeepOrigin(w, 2, "http://localhost:5174")).toBe(w);
+    expect(setKeepOrigin(w, 3, "http://localhost:5173")).toBe(w);           // pane 3 holds no URL
+    const hud = setPreviewUrl(defaultWorkspace(), 2, "http://localhost:8402/");
+    expect(setKeepOrigin(hud, 2, "http://localhost:8402")).toBe(hud);
+    const shop = setPreviewUrl(defaultWorkspace(), 2, "http://127.0.0.1:8403/p/p1/index.html");
+    expect(setKeepOrigin(shop, 2, "http://127.0.0.1:8403")).toBe(shop);
+  });
+
+  it("drops a stored keep-origin that is not allowed when it is read back", () => {
+    const stored = (pane: Record<string, unknown>) =>
+      parseWorkspace(JSON.stringify({ panes: [{}, { view: "preview", ...pane }] })).panes[1].keepOrigin;
+    expect(stored({ previewUrl: "http://localhost:5173/", keepOrigin: "http://localhost:5173" }))
+      .toBe("http://localhost:5173");
+    expect(stored({ previewUrl: "http://localhost:5174/", keepOrigin: "http://localhost:5173" })).toBeUndefined();
+    expect(stored({ previewUrl: "http://localhost:8402/", keepOrigin: "http://localhost:8402" })).toBeUndefined();
+    expect(stored({ previewUrl: "http://localhost:8405/", keepOrigin: "http://localhost:8405" })).toBeUndefined();
+    expect(stored({ previewUrl: "https://example.com/", keepOrigin: "https://example.com" })).toBeUndefined();
+    expect(stored({ keepOrigin: "http://localhost:5173" })).toBeUndefined();
+    expect(stored({ previewUrl: "http://localhost:5173/", keepOrigin: true })).toBeUndefined();
   });
 
   it("resets the layout without forgetting what each pane showed", () => {

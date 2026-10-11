@@ -312,7 +312,19 @@ class Daemon:
                     # hard-coded 8403: a HUD served by any other daemon (a
                     # test's, on an ephemeral port) must never reach the
                     # owner's live workshop origin.
-                    "workshop_port": self.workshop_port}
+                    "workshop_port": self.workshop_port,
+                    # The daemon's other two listeners (WP-E): the Preview
+                    # pane refuses both, so neither the HUD nor the API is
+                    # ever loaded into a frame inside the HUD.
+                    "hud_port": self.face_port, "api_port": self.port,
+                    # True once every HUD and API response refuses to be
+                    # framed (the handler's `end_headers`). The HUD offers a
+                    # Preview pane's "keep its own origin" switch only then
+                    # (decisions W-4), so a HUD served by an older daemon
+                    # never does.
+                    "frame_hardened": bool(
+                        self._server is not None
+                        and getattr(self._server.RequestHandlerClass, "frame_hardened", False))}
 
     def require(self, store, object_id):
         if not isinstance(object_id, str) or not re.fullmatch(r"[0-9a-f]{8}", object_id):
@@ -1433,6 +1445,13 @@ def _log_path(path: str) -> str:
 def _handler(daemon):
     class Handler(BaseHTTPRequestHandler):
         # No CORS: the preview origin must never invoke this approval surface.
+        # And no framing (WP-E): every response on the HUD and API listeners
+        # carries `frame-ancestors 'none'` and `X-Frame-Options: DENY`, added
+        # here in `end_headers` — the one place every status line we send
+        # passes through (JSON, files, SSE, errors, a malformed request's
+        # 400), so no route can forget them. `/status` says so (`frame_hardened`).
+        frame_hardened = True
+
         def log_message(self, *args):
             pass
 
@@ -1440,6 +1459,24 @@ def _handler(daemon):
             super().setup()
             self.connection.settimeout(2)
             self._streaming = False
+            self._csp = None
+
+        def send_response(self, code, message=None):
+            self._csp = None        # a response's own CSP directives (hud_api.binary)
+            # A request too malformed for http.server to learn its version
+            # (a garbage line, HTTP/9.9) — or a real HTTP/0.9 one, which the
+            # Host check refuses — is answered HTTP/0.9-style: a body with no
+            # status line and so no headers at all. Answer it as 1.0, so even
+            # that refusal carries the frame headers.
+            if self.request_version == "HTTP/0.9":
+                self.request_version = "HTTP/1.0"
+            super().send_response(code, message)
+
+        def end_headers(self):
+            from .hud_api import frame_headers
+            for name, value in frame_headers(self, self._csp):
+                self.send_header(name, value)
+            super().end_headers()
 
         def send_error(self, code, message=None, explain=None):
             self._json(code, {"error": message or self.responses.get(code, ("HTTP error",))[0]})

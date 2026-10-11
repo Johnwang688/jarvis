@@ -24,7 +24,16 @@ import threading
 import time
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.parse import parse_qs, urlparse
+
+# The daemon's own frame headers (WP-E), never a copy: the HUD under test is
+# always rendered under exactly what 8402 sends — `frame-ancestors 'none'` and
+# `X-Frame-Options: DENY` — and the mock workshop under the workshop's sandbox.
+from jarvis.v2.hud_api import frame_headers  # noqa: E402
+
+_HUD_LISTENER = SimpleNamespace(server=SimpleNamespace())
+_PREVIEW_LISTENER = SimpleNamespace(server=SimpleNamespace(preview_only=True))
 
 REPO = Path(__file__).resolve().parents[2]
 DIST = REPO / "hud" / "dist"
@@ -478,6 +487,20 @@ def _preview(cron, every_s) -> dict:
             "next": [f"2026-09-{d}T{at}:00-05:00" for d in ("16", "17", "18")]}
 
 
+# The mock dev server's page (WP-E): whether its storage works, and the origin
+# it runs under — "null" in a sandboxed frame without allow-same-origin.
+DEV_PAGE = """<!doctype html><meta charset="utf-8"><title>mock dev server</title>
+<h1>dev server</h1><p id="storage">?</p><p id="origin">?</p>
+<script>
+let r;
+try { localStorage.setItem("k", "v"); r = localStorage.getItem("k") === "v" ? "ok" : "blocked"; }
+catch (e) { r = "blocked"; }
+document.getElementById("storage").textContent = r;
+document.getElementById("origin").textContent = String(self.origin);
+</script>
+"""
+
+
 class MockDaemon:
     """The mock server plus the calls it recorded, for the test to assert on."""
 
@@ -507,6 +530,9 @@ class MockDaemon:
         # window's stream is reconnecting.
         self.activity_gate: threading.Event | None = None
         self.activity_seen_quiet = False
+        # `/status` says every HUD and API response refuses to be framed
+        # (WP-E); a test turns it off to play a daemon too old to say so.
+        self.frame_hardened = True
         # While `stt_gate` is an Event, `POST /stt` is recorded on arrival and
         # answers only once the Event is set: a transcript still in flight
         # (the crash checks land one after the window stopped drawing).
@@ -523,6 +549,11 @@ class MockDaemon:
 
             def log_message(self, *args):
                 pass
+
+            def end_headers(self):
+                for name, value in frame_headers(_HUD_LISTENER):
+                    self.send_header(name, value)
+                super().end_headers()
 
             # -- helpers
             def _json(self, obj, status=200):
@@ -591,8 +622,14 @@ class MockDaemon:
                             return
 
                 if path == "/status":
-                    return self._json({"version": "2.0-mock", "uptime_s": 1,
-                                       "workshop_port": mock.workshop_port})
+                    # Every port the window must judge (WP-E): this mock is
+                    # the HUD listener, and its API listener and workshop
+                    # are listeners of their own on ephemeral ports.
+                    status = {"version": "2.0-mock", "uptime_s": 1, "workshop_port": mock.workshop_port,
+                              "hud_port": mock.port, "api_port": mock.api_port}
+                    if mock.frame_hardened:
+                        status["frame_hardened"] = True
+                    return self._json(status)
                 if path == "/projects":
                     return self._json(w["projects"])
                 if path == "/threads":
@@ -1045,9 +1082,17 @@ class MockDaemon:
             def log_message(self, *a):
                 pass
 
+            def end_headers(self):
+                for name, value in frame_headers(_PREVIEW_LISTENER):
+                    self.send_header(name, value)
+                super().end_headers()
+
             def do_GET(self):
                 mock.workshop_hits.append(self.path)
-                body = b"<!doctype html><title>mock preview</title><h1>preview</h1>"
+                # `probe.html` says what origin it runs under and whether its
+                # storage works (the keep-origin hijack check, WP-E).
+                body = (DEV_PAGE.encode() if self.path.endswith("/probe.html")
+                        else b"<!doctype html><title>mock preview</title><h1>preview</h1>")
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html")
                 self.send_header("Content-Length", str(len(body)))
@@ -1059,6 +1104,63 @@ class MockDaemon:
         self.workshop.daemon_threads = True
         self.workshop_port = self.workshop.server_address[1]
         threading.Thread(target=self.workshop.serve_forever, daemon=True).start()
+
+        # The daemon's API listener, apart from the HUD's (WP-E): a port of
+        # its own, reported on /status, that the window must never load into
+        # a frame. Every hit is recorded, and the suites assert there is none.
+        class Api(SimpleHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def end_headers(self):
+                for name, value in frame_headers(_HUD_LISTENER):
+                    self.send_header(name, value)
+                super().end_headers()
+
+            def do_GET(self):
+                mock.api_hits.append(self.path)
+                body = b'{"error": "the API listener is never framed"}'
+                self.send_response(404)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        self.api_hits: list[str] = []
+        self.api = ThreadingHTTPServer(("127.0.0.1", 0), Api)
+        self.api.daemon_threads = True
+        self.api_port = self.api.server_address[1]
+        threading.Thread(target=self.api.serve_forever, daemon=True).start()
+
+        # A local dev server on a port of its own (WP-E): what a Preview
+        # pane's "keep its own origin" is for. Its page says whether its
+        # storage works and what origin it runs under.
+        class Dev(SimpleHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                mock.dev_hits.append(self.path)
+                body = DEV_PAGE.encode()
+                if self.path.startswith("/to-workshop"):
+                    # A dev page that sends its own frame to the workshop: the
+                    # frame keeps the sandbox flags it was given, so with
+                    # "keep its origin" on it would run with the workshop's
+                    # real origin unless the workshop sandboxes itself.
+                    target = f"http://127.0.0.1:{mock.workshop_port}/p/p1/probe.html"
+                    body = f"<!doctype html><script>location.replace({json.dumps(target)})</script>".encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(body)
+
+        self.dev_hits: list[str] = []
+        self.dev = ThreadingHTTPServer(("127.0.0.1", 0), Dev)
+        self.dev.daemon_threads = True
+        self.dev_port = self.dev.server_address[1]
+        threading.Thread(target=self.dev.serve_forever, daemon=True).start()
         return self
 
     def stop(self):
@@ -1068,9 +1170,11 @@ class MockDaemon:
         if self.httpd:
             self.httpd.shutdown()
             self.httpd.server_close()
-        if getattr(self, "workshop", None):
-            self.workshop.shutdown()
-            self.workshop.server_close()
+        for name in ("workshop", "api", "dev"):
+            server = getattr(self, name, None)
+            if server is not None:
+                server.shutdown()
+                server.server_close()
 
     # -- driving -----------------------------------------------------------
 
