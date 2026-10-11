@@ -162,6 +162,8 @@ export interface TreeEntry {
   kind: "file" | "dir";
   size: number;
   mtime: number;
+  /** ED-2: a withheld credential (never opened; a folder never walked) or an env file. */
+  policy?: "withheld" | "env";
 }
 
 export interface Tree {
@@ -172,9 +174,19 @@ export interface Tree {
 export interface FileRead {
   path: string;
   content?: string;
-  mtime: number;
-  size: number;
+  mtime?: number;
+  size?: number;
   protected: boolean;
+  /** ED-2: where the file resolves — one buffer per file on disk. */
+  abs?: string;
+  /** ED-2: the first 128 bits of the bytes' SHA-256: what a save is made against. */
+  etag?: string;
+  encoding?: string | null;
+  eol?: string | null;
+  /** ED-2 (`jarvis/v2/editor_policy.py`): text, env, gate, safety, binary or withheld. */
+  kind?: string;
+  /** The sentence beside the editor's lock (null: editable, and Jarvis may read it). */
+  readonly?: string | null;
 }
 
 export interface DiffFile {

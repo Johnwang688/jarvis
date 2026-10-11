@@ -5,7 +5,7 @@ import {
   WORKSPACE_KEY, cellsOf, clampCols, clampPanelHeight, clampRow, columnWidths, defaultWorkspace, dropColumn, dropRow,
   equalSplit, fitWorkspace, focusPane, forgetTerminal, gridTemplate, loadWorkspace, maxPanelHeight, moveColEdge,
   orderOf, paneAt, paneSequence, parseWorkspace, pinPane, resetWorkspace, saveWorkspace, setKeepOrigin, setPaneTerminal,
-  setPanel, setPreset, setPreviewUrl, setSplit, setView, show, slotOf, slotWidths, unpinProject,
+  setEditors, setPanel, setPreset, setPreviewUrl, setSplit, setView, show, slotOf, slotWidths, unpinProject,
   type DrawnSet, type PaneNo, type Preset, type Workspace,
 } from "./workspace";
 import LEGACY_FITS from "./workspace.legacy-fits.json";
@@ -735,6 +735,56 @@ describe("parsing order, kept, bottom and filePath (§3.2)", () => {
   it("reads a preset this HUD does not know as single (a newer HUD's, rolled back)", () => {
     const w = parseWorkspace(JSON.stringify({ preset: "grid9", order: [1, 2, 3, 4, 5, 6, 7, 8, 9] }));
     expect([w.preset, w.order, w.focused]).toEqual(["single", [1], 1]);
+  });
+});
+
+describe("a File pane's tabs (ED-2, PaneSpec.editors)", () => {
+  const stored = (panes: unknown[]) => parseWorkspace(JSON.stringify({ preset: "cols2", panes }));
+
+  it("are read field by field, and only with a pinned project", () => {
+    const w = stored([{ view: "chat" }, { view: "file", projectId: "p1",
+      editors: { paths: ["a.py", "src/b.ts"], active: "src/b.ts", preview: "src/b.ts" } }]);
+    expect(w.panes[1].editors).toEqual({ paths: ["a.py", "src/b.ts"], active: "src/b.ts", preview: "src/b.ts" });
+    const bad = stored([{ view: "chat" }, { view: "file", projectId: "p1", editors: { paths: ["a.py"], active: 9, preview: "x" } }]);
+    expect(bad.panes[1].editors).toEqual({ paths: ["a.py"], active: "a.py", preview: null });
+    expect(bad.panes[1].projectId).toBe("p1");
+    // No project: the paths would mean nothing.
+    expect(stored([{ view: "chat" }, { view: "file", editors: { paths: ["a.py"] } }]).panes[1].editors).toBeUndefined();
+    expect(stored([{ view: "chat" }, { view: "file", projectId: "p1", editors: "a.py" }]).panes[1].editors).toBeUndefined();
+  });
+
+  it("take a WP-G2 filePath as one tab", () => {
+    const w = stored([{ view: "chat" }, { view: "file", projectId: "p1", filePath: "calc.py" }]);
+    expect(w.panes[1].editors).toEqual({ paths: ["calc.py"], active: "calc.py", preview: null });
+  });
+
+  it("round-trip through storage, and never hold text", () => {
+    const s = memory();
+    const w = setEditors(defaultWorkspace(), 3, "p1", { paths: ["a.py"], active: "a.py", preview: null });
+    saveWorkspace(w, s);
+    expect(loadWorkspace(s).panes[2].editors).toEqual({ paths: ["a.py"], active: "a.py", preview: null });
+    expect(JSON.stringify(loadWorkspace(s))).not.toContain("content");
+  });
+
+  it("setEditors pins the pane to their project in the same step; null clears them, the pin kept", () => {
+    let w = setEditors(defaultWorkspace(), 3, "p1", { paths: ["a.py"], active: "a.py", preview: "a.py" });
+    expect(w.panes[2]).toMatchObject({ projectId: "p1", editors: { paths: ["a.py"] } });
+    expect(setEditors(w, 3, "p1", { paths: ["a.py"], active: "a.py", preview: "a.py" })).toBe(w);
+    w = setEditors(w, 3, "p1", null);
+    expect(w.panes[2].projectId).toBe("p1");
+    expect(w.panes[2].editors).toBeUndefined();
+  });
+
+  it("a pin to another project, Follow chat or a project gone drops them — except a pane kept for an unsaved edit", () => {
+    const w = setEditors(defaultWorkspace(), 3, "p1", { paths: ["a.py"], active: "a.py", preview: null });
+    expect(pinPane(w, 3, "p2").panes[2].editors).toBeUndefined();
+    expect(pinPane(w, 3, null).panes[2].editors).toBeUndefined();
+    expect(pinPane(w, 3, "p1")).toBe(w);
+    expect(unpinProject(w, "p1").panes[2].editors).toBeUndefined();
+    expect(unpinProject(w, "p1", [3]).panes[2].editors).toEqual({ paths: ["a.py"], active: "a.py", preview: null });
+    // And another project's tabs were never this one's.
+    expect(setEditors(w, 3, "p2", { paths: ["z.py"], active: "z.py", preview: null }).panes[2])
+      .toMatchObject({ projectId: "p2", editors: { paths: ["z.py"] } });
   });
 });
 

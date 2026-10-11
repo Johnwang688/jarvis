@@ -25,12 +25,13 @@ import {
   forgetTerminal as forgetTerminalOf, loadWorkspace, paneAt, pinPane, resetWorkspace, saveWorkspace, setPaneTerminal,
   setPanel, setPreset as setPresetOf, setKeepOrigin as setKeepOriginOf,
   setPreviewUrl as setPreviewUrlOf, setSplit as setSplitOf, setView as setViewOf, show as showOf,
-  unpinProject as unpinProjectOf,
+  unpinProject as unpinProjectOf, setEditors as setEditorsOf,
   type DrawnSet, type PaneNo, type Preset, type Split, type View, type Workspace, type WorkspaceFit,
 } from "../lib/workspace";
 import { inTerminal, terminalTakesKey } from "../lib/terminal";
 import { chordStep, isSaveKey, type ChordState } from "../lib/editorkeys";
 import { terminals, usePanelDot } from "./Terminal";
+import type { Tabs } from "../lib/buffers";
 
 export interface LayoutControl {
   zoom: number;
@@ -57,6 +58,8 @@ export interface LayoutControl {
   /** A sidebar click: the pane already showing that kind of thing, else the focused pane. */
   show: (view: View) => void;
   pin: (pane: PaneNo, projectId: string | null) => void;
+  /** A File pane's tabs (ED-2), pinning it to their project in the same step. */
+  setEditors: (pane: PaneNo, projectId: string, tabs: Tabs | null) => void;
   /** A project went away; panes in `keep` (holding an unsaved edit) stay pinned. */
   unpinProject: (projectId: string, keep?: readonly PaneNo[]) => void;
   setPreviewUrl: (pane: PaneNo, url: string) => void;
@@ -188,6 +191,9 @@ export function useLayout(blocked = false): LayoutControl {
   const focus = useCallback((pane: PaneNo) => setWs((w) => focusPane(w, pane)), []);
   const show = useCallback((view: View) => setWs((w) => showOf(w, view, now.current.fit.panes)), []);
   const pin = useCallback((pane: PaneNo, projectId: string | null) => setWs((w) => pinPane(w, pane, projectId)), []);
+  const setEditors = useCallback(
+    (pane: PaneNo, projectId: string, tabs: Tabs | null) => setWs((w) => setEditorsOf(w, pane, projectId, tabs)), [],
+  );
   const unpinProject = useCallback(
     (projectId: string, keep: readonly PaneNo[] = []) => setWs((w) => unpinProjectOf(w, projectId, keep)), [],
   );
@@ -322,7 +328,8 @@ export function useLayout(blocked = false): LayoutControl {
     ownerTogglePanel,
     zoom, layout, fitted, available, availableH, ws, fit,
     setZoom, zoomBy, setWidth, resetWidth, open, fold, toggle,
-    setPreset, setView, focus, show, pin, unpinProject, setPreviewUrl, setKeepOrigin, setTerminal, forgetTerminal, setSplit,
+    setPreset, setView, focus, show, pin, setEditors, unpinProject, setPreviewUrl, setKeepOrigin, setTerminal,
+    forgetTerminal, setSplit,
     equalSplit, togglePanel, setPanelHeight, resetPanelHeight, resetAll, incarnation: NO_INCARNATIONS,
   };
 }

@@ -18,7 +18,7 @@
 // Input that belongs to a thread — typed words, a steer, a hand-back, a first
 // send, a transcript — stays with that thread.
 
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { api, subscribe } from "./api";
 import {
   useStore, activeChat, activePane, compatActions, currentProjectId, currentTask, flatState,
@@ -29,7 +29,9 @@ import { ChatTab } from "./components/ChatTab";
 import { InputBar, MAX_FILES, toAttachment } from "./components/InputBar";
 import { TaskView } from "./components/TaskView";
 import { FileTab } from "./components/FileTab";
-import { monacoEditors, monacoLanguage, monacoModels, setEditorsBlocked } from "./lib/monaco";
+import { makeModel, monacoEditors, monacoLanguage, monacoModels, setEditorsBlocked } from "./lib/monaco";
+import { buffers, PlainModel } from "./state/buffers";
+import { touchedPath } from "./lib/buffers";
 import { DiffTab } from "./components/DiffTab";
 import { PreviewTab, type PreviewRequest } from "./components/PreviewTab";
 import { judgePreviewUrl } from "./lib/preview";
@@ -88,6 +90,32 @@ const MIC_TIGHT_H = 560;
 /** One value per pane, all null: the window's per-pane refs start here. */
 const perPane = nonePerPane;
 
+/** The editor's change poll (ED-2, plan §2.4): every 2 s while the window is visible. */
+const BUFFER_POLL_MS = 2000;
+
+// The window's one buffer registry talks to the daemon through the API and
+// makes Monaco models — or, when Monaco cannot load, the fallback's shim, so
+// the save path stays reachable.
+buffers.configure({
+  read: (projectId, path) => api.readFile(projectId, path),
+  write: (projectId, body) => api.writeFile(projectId, body),
+  stat: (projectId, paths) => api.statFiles(projectId, paths),
+  makeModel: (text, abs, kind) => makeModel(text, abs, kind).catch(() => new PlainModel(text)),
+  now: () => Date.now(),
+});
+
+const PROVIDER_LABEL: Record<string, string> = { fast: "Jarvis", claude: "Claude", codex: "Codex" };
+
+/** Who a thread is, for the editor's "changed on disk by …" toast. */
+function writerOf(threadId: string | undefined, at: { threads: { id: string; provider: string; task_id: string | null; title: string }[]; tasks: { id: string; thread_ids: string[] }[] }): string {
+  const thread = threadId ? at.threads.find((t) => t.id === threadId) : undefined;
+  const task = threadId
+    ? at.tasks.find((k) => k.id === thread?.task_id || k.thread_ids.includes(threadId)) : undefined;
+  const who = thread ? PROVIDER_LABEL[thread.provider] || thread.provider : "an agent";
+  if (task) return `${who} · task ${task.id.slice(0, 6)}`;
+  return thread?.title ? `${who} · ${thread.title}` : who;
+}
+
 export default function App() {
   const { state, dispatch } = useStore();
   // Zoom, pane widths and folded panes (§18, 2026-10-08): lib/layout.ts; the
@@ -114,26 +142,23 @@ export default function App() {
   // wake recognizer's effect, which stops it.
   const [crashed, setCrashed] = useState(false);
   const crashedRef = useRef(false);
-  // File panes holding an unsaved edit (FileTab's `onDirty`): such a buffer
-  // is never closed behind the owner's back — "follow chat" waits, a project
-  // that goes away keeps the pane pinned until the owner discards the edit,
-  // closing the window asks (2026-10-09, the minimal guard), and since WP-B
-  // nothing switches the pane to another view — a tab, a sidebar click, a
-  // chat landing there — until the edit is saved or discarded.
+  // File panes holding an unsaved edit: such a buffer is never closed behind
+  // the owner's back — "follow chat" waits, a project that goes away keeps
+  // the pane pinned until the owner discards the edit, closing the window
+  // asks (2026-10-09, the minimal guard), and since WP-B nothing switches the
+  // pane to another view — a tab, a sidebar click, a chat landing there —
+  // until the edit is saved or discarded.
   //
-  // The ref is the truth the guards read (`mayShow`, the project picker, the
-  // archive path), written at once by `markDirty` — FileTab calls it from the
-  // editor's own change event — and the state follows for drawing. A ref
-  // copied from the state at render time lagged a frame behind the edit, and
-  // a project picked in that frame dropped it (review of PR #43).
-  const [dirtyPanes, setDirtyPanes] = useState<Record<number, boolean>>({});
-  const dirtyNow = useRef<Record<number, boolean>>({});
-  const markDirty = useCallback((pane: PaneNo, dirty: boolean) => {
-    if (!!dirtyNow.current[pane] === dirty) return;
-    dirtyNow.current = { ...dirtyNow.current, [pane]: dirty };
-    setDirtyPanes((m) => (!!m[pane] === dirty ? m : { ...m, [pane]: dirty }));
-  }, []);
-  const anyDirty = Object.values(dirtyPanes).some(Boolean);
+  // Since ED-2 the truth is the buffer registry (`state/buffers.ts`): a pane
+  // is dirty when a buffer one of its tabs holds is. It is read where it is
+  // needed (`dirtyNow`), never copied a frame behind: the registry says so in
+  // the keystroke's own change event (#43's M1), and this render follows.
+  useSyncExternalStore(buffers.subscribe, buffers.version);
+  const dirtyNow = useCallback((pane: PaneNo) => buffers.paneDirty(pane), []);
+  const dirtyPanes: Partial<Record<PaneNo, boolean>> = {};
+  for (const n of PANE_NOS) if (buffers.paneDirty(n)) dirtyPanes[n] = true;
+  // Any unsaved edit at all — a buffer no tab holds any more included.
+  const anyDirty = buffers.anyDirty();
   useEffect(() => {
     if (!anyDirty) return;
     const ask = (e: BeforeUnloadEvent) => {
@@ -143,6 +168,22 @@ export default function App() {
     window.addEventListener("beforeunload", ask);
     return () => window.removeEventListener("beforeunload", ask);
   }, [anyDirty]);
+  // The change poll (ED-2, plan §2.4): every 2 s while the window is visible,
+  // and the moment it is shown or focused again. inotify cannot see a write
+  // made from Windows on the 9p `/mnt/c` mount, where VEX projects live.
+  useEffect(() => {
+    const tick = () => {
+      if (document.visibilityState === "visible") void buffers.poll();
+    };
+    const t = setInterval(tick, BUFFER_POLL_MS);
+    window.addEventListener("focus", tick);
+    document.addEventListener("visibilitychange", tick);
+    return () => {
+      clearInterval(t);
+      window.removeEventListener("focus", tick);
+      document.removeEventListener("visibilitychange", tick);
+    };
+  }, []);
   // A refused switch away from an unsaved edit says why, briefly, in a pane
   // the owner can see (by where it is shown): the File pane itself when it
   // is drawn, else the focused pane, naming the File pane — Open beside can
@@ -746,7 +787,11 @@ export default function App() {
         case "text":
           for (const n of mine) dispatch({ type: "settle", pane: n, text: data.text || "" });
           break;
-        case "tool_started":
+        case "tool_started": {
+          // A running turn named a file (any thread, a task's included): if
+          // that file is open and reloads in place, the toast says who wrote it.
+          const touched = touchedPath(data.args);
+          if (touched) buffers.noteTouch(touched, writerOf(tid, at));
           for (const n of mine) {
             chatPatch(n, { status: `RUNNING · ${data.name || "tool"}`, orb: "tool" });
             dispatch({
@@ -755,6 +800,7 @@ export default function App() {
             });
           }
           break;
+        }
         case "tool_finished":
           for (const n of mine) {
             chatPatch(n, { status: "THINKING", orb: "thinking" });
@@ -995,6 +1041,24 @@ export default function App() {
     [dispatch],
   );
 
+  // ---- the editor --------------------------------------------------------------
+
+  /**
+   * "Add to chat" from a File pane (ED-2, the minimal half of ED-7's "Add
+   * selection to chat"): the excerpt goes into the selected chat's box,
+   * unsent (decisions W-6). With no chat on screen it is refused with a
+   * sentence — never sent, never anywhere else. An env file never gets here
+   * (FileTab asks `jarvisMayRead` first).
+   */
+  const addToChat = useCallback((text: string): string | null => {
+    const at = live.current;
+    const n = at.selectedChat;
+    if (n === null) return "No chat is open to add it to.";
+    const had = at.chats[n].input;
+    dispatch({ type: "input", pane: n, text: had && !had.endsWith("\n") ? `${had}\n${text}` : had + text });
+    return null;
+  }, [dispatch]);
+
   // ---- placing a view in a pane ----------------------------------------------
 
   /**
@@ -1006,7 +1070,7 @@ export default function App() {
   const mayShow = useCallback((pane: PaneNo, next: View): boolean => {
     const { ws, fit } = layoutNow.current;
     const spec = ws.panes[pane - 1];
-    if (spec.view !== "file" || next === "file" || !dirtyNow.current[pane]) return true;
+    if (spec.view !== "file" || next === "file" || !dirtyNow(pane)) return true;
     const shownIn: PaneNo = fit.panes.includes(pane) ? pane : fit.panes.includes(ws.focused) ? ws.focused : fit.panes[0];
     setRefused((r) => ({ ...r, [shownIn]: { at: Date.now(), pane } }));
     return false;
@@ -1205,7 +1269,7 @@ export default function App() {
       if (taskGone && !displaced) chatPatch(activePane(at), { status });
       // A File or Preview pane pinned to it follows the chat again — except
       // one holding an unsaved edit, which waits for the owner to discard it.
-      view.unpinProject(id, PANE_NOS.filter((n) => dirtyNow.current[n]));
+      view.unpinProject(id, PANE_NOS.filter((n) => dirtyNow(n)));
       if (displaced || taskGone) placeChat(chatPaneNow());
       void refreshThreads();
       void refreshTasks();
@@ -1795,6 +1859,8 @@ export default function App() {
       monacoModels,
       monacoEditors,
       monacoLanguage,
+      // The editor's buffers (ED-2), read-only: never any text.
+      buffers: () => buffers.snapshot(),
     };
   }, [capture, dispatch, onWakeHit, reconcileBusy]);
 
@@ -1953,15 +2019,19 @@ export default function App() {
           </div>
         );
       case "file": {
-        // Keyed by its project: a save can only ever go where the file was read.
+        // Keyed by its project: its tabs are paths there, and a buffer saves
+        // through the project it was read through (state/buffers.ts).
         const pid = paneProject(spec, n);
         return (
           <FileTab
             key={pid ?? "none"}
+            pane={n}
             projectId={pid}
+            tabs={spec.projectId && spec.projectId === pid ? spec.editors ?? null : null}
+            onTabs={(id, tabs) => view.setEditors(n, id, tabs)}
             narrow={info.narrow}
-            onOpened={(id) => view.pin(n, id)}
-            onDirty={(dirty) => markDirty(n, dirty)}
+            blocked={blocked}
+            onAddToChat={addToChat}
           />
         );
       }
@@ -2011,7 +2081,9 @@ export default function App() {
               className="quiet"
               data-testid={`pane-${n}-discard`}
               onClick={() => {
-                markDirty(n, false);
+                // The owner threw the edit away: the pane's holds go, and with
+                // them every buffer no other pane holds.
+                buffers.releasePane(n, { discard: true });
                 view.pin(n, null);
               }}
             >
@@ -2033,7 +2105,7 @@ export default function App() {
               ? "Save or reload the file first: another project closes it"
               : "The project this pane's files come from"}
             onChange={(e) => {
-              if (dirtyNow.current[n]) {
+              if (dirtyNow(n)) {
                 setRefused((r) => ({ ...r, [n]: { at: Date.now(), pane: n } }));
                 return;
               }

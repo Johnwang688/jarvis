@@ -1887,6 +1887,12 @@ def _open_file(page, until, pane: int, name: str) -> bool:
     if not until(lambda: row.count() > 0, timeout=2) and picker.count():
         picker.select_option("p1")  # no chat to follow: the pane picks its project (E-13)
     until(lambda: row.count() > 0, timeout=4)
+    # A narrow pane with a file open (ED-2: its tabs come back) folds its tree
+    # behind "Files".
+    toggle = page.locator(_pane(pane, '[data-testid="tree-toggle"]'))
+    if row.count() and not row.first.is_visible() and toggle.count():
+        toggle.click()
+        until(lambda: row.first.is_visible(), timeout=2)
     row.click()
     until(lambda: page.locator(_pane(pane, '[data-testid="file-path"]')).inner_text() == name, timeout=4)
     if name.endswith(".md"):
@@ -2048,7 +2054,7 @@ def _late_save_checks(page, mock, check, until):
         until(lambda: len(_puts(mock)) > before, timeout=3)
         time.sleep(0.3)
         sent = _puts(mock)[before:]
-        check("and the next save is that file's own, sent with its own mtime (no conflict)",
+        check("and the next save is that file's own, sent against its own etag (no conflict)",
               len(sent) == 1 and sent[0].get("path") == "README.md" and files["README.md"]["content"].endswith("#mine")
               and save.is_disabled(), str(sent))
     finally:

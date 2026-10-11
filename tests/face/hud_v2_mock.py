@@ -19,6 +19,7 @@ Run it standalone to poke at the HUD by hand:
 from __future__ import annotations
 
 import collections
+import hashlib
 import json
 import threading
 import time
@@ -58,6 +59,27 @@ HOSTILE_SVG = (
     '<circle cx="50" cy="50" r="40" fill="#38bdf8"/>'
     "</svg>"
 )
+
+
+def etag_of(content: str) -> str:
+    """The daemon's etag (ED-2): the first 128 bits of the bytes' SHA-256."""
+    return hashlib.sha256(content.encode()).hexdigest()[:32]
+
+
+def eol_of(content: str):
+    crlf = content.count("\r\n")
+    lf = content.count("\n") - crlf
+    cr = content.count("\r") - crlf
+    kinds = [n for n, c in (("LF", lf), ("CRLF", crlf), ("CR", cr)) if c]
+    return None if not kinds else kinds[0] if len(kinds) == 1 else "mixed"
+
+
+READONLY = {
+    "env": "Jarvis can't read this file. Only you can, here.",
+    "gate": "Jarvis's own permission state: read-only here. Edit it by hand.",
+    "safety": "part of Jarvis's safety layer: read-only here. Edit it by hand.",
+    "binary": "read-only here: it is not UTF-8.",
+}
 
 
 def _world() -> dict:
@@ -146,7 +168,11 @@ def _world() -> dict:
                 {"name": "src", "kind": "dir", "size": 0, "mtime": 1757900000},
                 {"name": "README.md", "kind": "file", "size": 42, "mtime": 1757900001},
                 {"name": "calc.py", "kind": "file", "size": 61, "mtime": 1757900002},
-                {"name": ".env", "kind": "file", "size": 61, "mtime": 1757900003},
+                {"name": ".env", "kind": "file", "size": 61, "mtime": 1757900003, "policy": "env"},
+                {"name": ".env.production", "kind": "file", "size": 40, "mtime": 1757900005, "policy": "env"},
+                {"name": "google_token.json", "kind": "file", "size": 61, "mtime": 1757900006, "policy": "withheld"},
+                {"name": "allowlist.json", "kind": "file", "size": 3, "mtime": 1757900007},
+                {"name": "notes.txt", "kind": "file", "size": 9, "mtime": 1757900008},
             ],
             "src": [
                 {"name": "main.py", "kind": "file", "size": 12, "mtime": 1757900004},
@@ -156,9 +182,18 @@ def _world() -> dict:
             "calc.py": {"content": "def add(a, b):\n    return a + b\n", "mtime": 1757900002},
             "README.md": {"content": "# Title\n\nSome **docs** here.\n", "mtime": 1757900001},
             "src/main.py": {"content": "print('hi')\n", "mtime": 1757900004},
+            # The owner's env files (ED-2): the owner edits them, Jarvis never
+            # reads them. Fake values, made up for the mock.
+            ".env": {"content": "MOCK_KEY=fake-value-not-a-secret\n", "mtime": 1757900003},
+            ".env.production": {"content": "API_KEY=sk-mock-ed2-fake-0000\n", "mtime": 1757900005},
+            "allowlist.json": {"content": "[]\n", "mtime": 1757900007},
+            "notes.txt": {"content": "a\r\nb\nc\n", "mtime": 1757900008},
         },
-        # A protected credential name comes back 200 with no content, ever.
-        "protected": {".env"},
+        # What the daemon's editor_policy says of each file (ED-2); a file not
+        # here is text.
+        "kinds": {".env": "env", ".env.production": "env", "allowlist.json": "gate"},
+        # A withheld credential comes back 200 with no content, ever.
+        "protected": {"google_token.json"},
         "diff": {
             "base": "main", "head": "jarvis/add-multiply",
             "files": [
@@ -716,15 +751,21 @@ class MockDaemon:
                         return self._json({"path": rel, "entries": entries})
                     if verb == "file":
                         rel = q.get("path", [""])[0]
+                        abs_ = mock.abs_of(project, rel)
                         if rel in w["protected"]:
-                            return self._json({"path": rel, "mtime": 0, "size": 0,
+                            return self._json({"path": rel, "abs": abs_, "kind": "withheld",
+                                               "readonly": "a credential file: its contents are never sent to this window.",
                                                "protected": True})
                         rec = w["files"].get(rel)
                         if rec is None:
                             return self._err(404, "no such file")
-                        return self._json({"path": rel, "content": rec["content"],
-                                           "mtime": rec["mtime"],
-                                           "size": len(rec["content"]), "protected": False})
+                        kind = w["kinds"].get(rel, "text")
+                        content = rec["content"]
+                        return self._json({
+                            "path": rel, "abs": abs_, "content": content, "etag": etag_of(content),
+                            "mtime": rec["mtime"], "size": len(content.encode()), "protected": False,
+                            "encoding": "utf-8", "eol": eol_of(content), "kind": kind,
+                            "readonly": READONLY.get(kind)})
 
                 # /threads/{id}/transcript|log
                 if len(parts) == 3 and parts[0] == "threads" and parts[2] == "transcript":
@@ -754,6 +795,25 @@ class MockDaemon:
                 url = urlparse(self.path)
                 path = url.path
                 w = mock.world
+                parts = [p for p in path.split("/") if p]
+                if len(parts) == 4 and parts[0] == "projects" and parts[2:] == ["files", "stat"]:
+                    body = self._body()
+                    self._record("POST", path, body)
+                    paths = body.get("paths")
+                    if not isinstance(paths, list):
+                        return self._err(400, "paths must be a list of strings")
+                    if len(paths) > 100:
+                        return self._err(413, "at most 100 paths at once")
+                    files = {}
+                    for rel in paths:
+                        if rel in w["protected"]:
+                            files[rel] = {"kind": "withheld"}
+                        elif rel in w["files"]:
+                            files[rel] = {"etag": etag_of(w["files"][rel]["content"]),
+                                          "kind": w["kinds"].get(rel, "text")}
+                        else:
+                            files[rel] = {"gone": True}
+                    return self._json({"files": files})
                 if path == "/stt":
                     n = int(self.headers.get("Content-Length") or 0)
                     raw = self.rfile.read(n) if n else b""
@@ -1049,17 +1109,24 @@ class MockDaemon:
                 w = mock.world
                 if len(parts) == 3 and parts[0] == "projects" and parts[2] == "file":
                     rel = body.get("path", "")
-                    if rel in w["protected"]:
-                        return self._err(403, "protected file")
+                    kind = w["kinds"].get(rel, "text")
+                    if rel in w["protected"] or kind not in ("text", "env"):
+                        return self._err(403, "read-only here")
                     rec = w["files"].get(rel)
-                    if rec is None:
-                        return self._err(404, "no such file")
-                    if body.get("expected_mtime") != rec["mtime"]:
-                        # Someone else wrote it since it was read.
+                    if "expected_etag" in body:
+                        now = etag_of(rec["content"]) if rec else None
+                        if now != body["expected_etag"]:
+                            # Someone else wrote it since it was read: the
+                            # disk's etag (null: gone), the file untouched.
+                            return self._json({"error": "file changed on disk since it was read", "etag": now}, 409)
+                    elif rec is None or body.get("expected_mtime") != rec["mtime"]:
                         return self._err(409, "changed on disk")
+                    if rec is None:
+                        rec = w["files"][rel] = {"content": "", "mtime": 1757900100}
                     rec["content"] = body.get("content", "")
                     rec["mtime"] = rec["mtime"] + 1
-                    answer = {"mtime": rec["mtime"]}
+                    answer = {"etag": etag_of(rec["content"]), "mtime": rec["mtime"],
+                              "abs": mock.abs_of(next(p for p in w["projects"] if p["id"] == parts[1]), rel)}
                     # A slow answer, on cue (`put_delays`, seconds, one per
                     # write): the file is written at once, the answer late.
                     delays = w.get("put_delays")
@@ -1222,6 +1289,20 @@ class MockDaemon:
 
     def posted(self, path: str) -> list[dict]:
         return [b for m, p, b in self.calls if m == "POST" and p == path]
+
+    # -- the disk behind the editor (ED-2) -------------------------------------
+
+    def abs_of(self, project: dict, rel: str) -> str:
+        return project["root"].rstrip("/") + "/" + rel
+
+    def disk_write(self, rel: str, content: str):
+        """Something other than the editor writes a file (an agent, a shell)."""
+        rec = self.world["files"].setdefault(rel, {"content": "", "mtime": 1757900200})
+        rec["content"] = content
+        rec["mtime"] += 1
+
+    def disk_delete(self, rel: str):
+        self.world["files"].pop(rel, None)
 
     def sent(self, method: str, path: str) -> list[dict]:
         return [b for m, p, b in self.calls if m == method and p == path]
