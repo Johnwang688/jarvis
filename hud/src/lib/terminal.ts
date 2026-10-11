@@ -269,13 +269,30 @@ export class InputGate {
  *   - `then(fn)` runs `fn` only once everything written before it has been
  *     parsed — which is how the replay's end is known (its queries have all
  *     been answered, into a session that was not listening).
+ *
+ * **The backlog is bounded** (PR #28 re-review). xterm parses some 14 MB/s;
+ * output that arrives faster used to pile up here without limit (a reviewer
+ * drove the renderer to ~1.5 GB, the display ~40 s behind). Past
+ * `OUTPUT_HIGH_WATER` queued bytes everything queued is dropped, the
+ * generation ends (the rest of this socket's output is never drawn) and
+ * `onOverflow` says so — the session reattaches, so the replay shows the
+ * terminal's latest 1 MiB instead of a backlog seconds or minutes old.
+ *
+ * **A write that throws never stalls it**: its callback will never come, so
+ * the in-flight flag is cleared in a `finally` and the rest goes on.
  */
+export const OUTPUT_HIGH_WATER = 8 * 1024 * 1024;
+
 export class OutputPipe {
   private q: { gen: number; data?: Uint8Array; run?: () => void }[] = [];
   private inFlight = false;
   private current = 0;
+  private queued = 0;
 
-  constructor(private write: (data: Uint8Array, done: () => void) => void) {}
+  constructor(
+    private write: (data: Uint8Array, done: () => void) => void,
+    private opts: { cap?: number; onOverflow?: (dropped: number) => void } = {},
+  ) {}
 
   get gen(): number {
     return this.current;
@@ -285,12 +302,22 @@ export class OutputPipe {
   next(): number {
     this.current += 1;
     this.q = [];
+    this.queued = 0;
     return this.current;
   }
 
   data(gen: number, bytes: Uint8Array) {
     if (gen !== this.current || !bytes.length) return;
     this.q.push({ gen, data: bytes });
+    this.queued += bytes.length;
+    if (this.queued > (this.opts.cap ?? OUTPUT_HIGH_WATER)) {
+      const dropped = this.queued;
+      this.current += 1;                             // this socket's output is not drawn any more
+      this.q = [];
+      this.queued = 0;
+      this.opts.onOverflow?.(dropped);
+      return;
+    }
     this.pump();
   }
 
@@ -305,26 +332,44 @@ export class OutputPipe {
   clear() {
     this.current += 1;
     this.q = [];
+    this.queued = 0;
   }
 
   private pump() {
     while (!this.inFlight && this.q.length) {
       const item = this.q.shift()!;
+      if (item.data) this.queued -= item.data.length;
       if (item.gen !== this.current) continue;      // an older socket's: never parsed here
       if (item.run) {
         item.run();
         continue;
       }
       this.inFlight = true;
-      this.write(item.data!, () => {
-        this.inFlight = false;
-        this.pump();
-      });
+      let handed = false;
+      try {
+        this.write(item.data!, () => {
+          this.inFlight = false;
+          this.pump();
+        });
+        handed = true;
+      } finally {
+        if (!handed) {
+          // It threw: its callback will never come. Never wait on it — the
+          // chunk is lost, the rest goes on once the throw has been reported.
+          this.inFlight = false;
+          queueMicrotask(() => this.pump());
+        }
+      }
     }
   }
 
   get pending(): number {
     return this.q.length;
+  }
+
+  /** Bytes queued and not yet handed to xterm. */
+  get backlog(): number {
+    return this.queued;
   }
 }
 
@@ -676,12 +721,31 @@ export function savePrefs(prefs: TerminalPrefs, storage?: Pick<Storage, "setItem
  * owner did not cause is one they learn to wave through). A reload finds its
  * own terminals here, so it attaches straight back even while the daemon still
  * counts the old page's socket.
+ *
+ * **A copy of the list is not the list** (PR #28 re-review). Chrome copies
+ * sessionStorage into a duplicated tab and into a reopened closed one, and a
+ * copy must not skip "Show it here". So the list carries its `holder`: the
+ * per-page-load nonce of the live page that wrote it (minted in memory, never
+ * stored anywhere else), set to null by that page's `pagehide` as it goes. A
+ * new page inherits the list only when **both** say it is a reload of the page
+ * that released it: the holder is null, and this load's navigation type is
+ * `reload`. A duplicate copies a list whose holder is its still-live original
+ * (never null), whatever Chrome calls the navigation; a reopened closed tab
+ * has a released list but is a restore, not a reload. Anything else — a
+ * legacy array, garbage, storage that throws — inherits nothing (the safe
+ * direction: "Show it here" once more).
  */
 export const MINE_KEY = "jarvis.hud.terminals.mine";
 export const MINE_KEPT = 32;
 
-export function parseMine(raw: unknown): string[] {
-  let v: unknown = null;
+export interface MineRecord {
+  ids: string[];
+  /** The live page that wrote it; null once that page has gone (pagehide). */
+  holder: string | null;
+}
+
+export function parseMine(raw: unknown): MineRecord {
+  let v: any = null;
   if (typeof raw === "string") {
     try {
       v = JSON.parse(raw);
@@ -689,24 +753,54 @@ export function parseMine(raw: unknown): string[] {
       v = null;
     }
   }
-  if (!Array.isArray(v)) return [];
-  const out: string[] = [];
-  for (const id of v) if (isTerminalId(id) && !out.includes(id)) out.push(id);
-  return out.slice(-MINE_KEPT);
+  if (!v || typeof v !== "object" || Array.isArray(v) || !Array.isArray(v.ids)) return { ids: [], holder: "" };
+  const ids: string[] = [];
+  for (const id of v.ids) if (isTerminalId(id) && !ids.includes(id)) ids.push(id);
+  const holder = v.holder === null ? null : typeof v.holder === "string" ? v.holder.slice(0, 64) : "";
+  return { ids: ids.slice(-MINE_KEPT), holder };
 }
 
-export function loadMine(storage?: Pick<Storage, "getItem">): Set<string> {
+/** What a page load inherits: the list only on a reload of the page that released it. */
+export function inheritMine(raw: unknown, navigation: string): Set<string> {
+  const rec = parseMine(raw);
+  return navigation === "reload" && rec.holder === null ? new Set(rec.ids) : new Set();
+}
+
+/** This load's navigation type ("navigate", "reload", "back_forward", …), or "" if unknown. */
+export function navigationType(): string {
   try {
-    return new Set(parseMine((storage ?? window.sessionStorage).getItem(MINE_KEY)));
+    const nav = performance.getEntriesByType("navigation")[0] as PerformanceNavigationTiming | undefined;
+    return nav?.type ?? "";
+  } catch {
+    return "";
+  }
+}
+
+export function loadMine(storage?: Pick<Storage, "getItem">, navigation?: string): Set<string> {
+  try {
+    return inheritMine((storage ?? window.sessionStorage).getItem(MINE_KEY), navigation ?? navigationType());
   } catch {
     return new Set();
   }
 }
 
-export function saveMine(mine: Set<string>, storage?: Pick<Storage, "setItem">) {
+/** `holder`: this page's nonce while it lives; null as it goes (pagehide). */
+export function saveMine(mine: Set<string>, holder: string | null, storage?: Pick<Storage, "setItem">) {
   try {
-    (storage ?? window.sessionStorage).setItem(MINE_KEY, JSON.stringify(Array.from(mine).slice(-MINE_KEPT)));
+    (storage ?? window.sessionStorage).setItem(
+      MINE_KEY, JSON.stringify({ ids: Array.from(mine).slice(-MINE_KEPT), holder }));
   } catch {
     /* storage blocked: a reload asks "Show it here" once more */
+  }
+}
+
+/** A per-page-load nonce, in memory only. */
+export function pageNonce(): string {
+  try {
+    const b = new Uint8Array(8);
+    crypto.getRandomValues(b);
+    return Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
+  } catch {
+    return `${Date.now().toString(16)}${Math.random().toString(16).slice(2, 10)}`;
   }
 }

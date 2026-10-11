@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
-  AttachLedger, CHUNK, InputGate, InputQueue, MINE_KEPT, OutputPipe, attachUrl, chunk, clampSize, cleanPaste,
-  cleanText, cleanTitle, counterZoom, encodeInput, fontSizeFor, inTerminal, integrationNote, isCtrlC, judgeLink,
-  loadMine, parseControl, parseMine, parsePrefs, parseRow, parseRows, parseSpec, placeTerminals, saveMine,
-  terminalSpecFor, terminalTakesKey,
+  AttachLedger, CHUNK, InputGate, InputQueue, MINE_KEPT, MINE_KEY, OUTPUT_HIGH_WATER, OutputPipe, attachUrl, chunk,
+  clampSize, cleanPaste, cleanText, cleanTitle, counterZoom, encodeInput, fontSizeFor, inTerminal, inheritMine,
+  integrationNote, isCtrlC, judgeLink, loadMine, pageNonce, parseControl, parseMine, parsePrefs, parseRow, parseRows,
+  parseSpec, placeTerminals, saveMine, terminalSpecFor, terminalTakesKey,
 } from "./terminal";
 
 const row = (over: Record<string, unknown> = {}) => ({
@@ -415,20 +415,105 @@ describe("a paste", () => {
 });
 
 describe("this tab's terminals", () => {
-  it("are ids only, once each, capped, and survive a round trip through storage", () => {
-    expect(parseMine("garbage")).toEqual([]);
-    expect(parseMine(JSON.stringify({ a: 1 }))).toEqual([]);
-    expect(parseMine(JSON.stringify(["0a1b2c3d", "../etc", "0a1b2c3d", 7, "0000000f"])))
-      .toEqual(["0a1b2c3d", "0000000f"]);
+  const rec = (ids: unknown, holder: unknown) => JSON.stringify({ ids, holder });
+  it("are ids only, once each, capped, with the page that holds them", () => {
+    expect(parseMine("garbage")).toEqual({ ids: [], holder: "" });
+    expect(parseMine(JSON.stringify({ a: 1 }))).toEqual({ ids: [], holder: "" });
+    expect(parseMine(JSON.stringify(["0a1b2c3d"]))).toEqual({ ids: [], holder: "" });   // the old array: nobody's
+    expect(parseMine(rec(["0a1b2c3d", "../etc", "0a1b2c3d", 7, "0000000f"], null)))
+      .toEqual({ ids: ["0a1b2c3d", "0000000f"], holder: null });
     const ids = Array.from({ length: MINE_KEPT + 5 }, (_, i) => i.toString(16).padStart(8, "0"));
-    expect(parseMine(JSON.stringify(ids))).toEqual(ids.slice(-MINE_KEPT));
+    expect(parseMine(rec(ids, "n1")).ids).toEqual(ids.slice(-MINE_KEPT));
+  });
+  it("are inherited only by a reload of the page that released them", () => {
+    const released = rec(["0a1b2c3d"], null);
+    expect(Array.from(inheritMine(released, "reload"))).toEqual(["0a1b2c3d"]);
+    // A duplicate copies a list its still-live original holds: never inherited,
+    // whatever the navigation is called.
+    for (const nav of ["reload", "navigate", "back_forward", ""]) {
+      expect(inheritMine(rec(["0a1b2c3d"], "a1b2c3d4e5f60718"), nav).size).toBe(0);
+    }
+    // A reopened closed tab has a released list, but is a restore, not a reload.
+    for (const nav of ["navigate", "back_forward", "prerender", ""]) expect(inheritMine(released, nav).size).toBe(0);
+    expect(inheritMine(JSON.stringify(["0a1b2c3d"]), "reload").size).toBe(0);
+    expect(inheritMine("garbage", "reload").size).toBe(0);
+  });
+  it("round-trip through storage under this page's nonce, and are released as it goes", () => {
     const kept = new Map<string, string>();
     const storage = {
       getItem: (k: string) => kept.get(k) ?? null,
       setItem: (k: string, v: string) => void kept.set(k, v),
     };
-    saveMine(new Set(["0a1b2c3d"]), storage);
-    expect(Array.from(loadMine(storage))).toEqual(["0a1b2c3d"]);
-    expect(Array.from(loadMine({ getItem: () => { throw new Error("blocked"); } }))).toEqual([]);
+    const me = pageNonce();
+    expect(me).toMatch(/^[0-9a-f]{16}$/);
+    expect(pageNonce()).not.toBe(me);
+    saveMine(new Set(["0a1b2c3d"]), me, storage);
+    expect(parseMine(kept.get(MINE_KEY))).toEqual({ ids: ["0a1b2c3d"], holder: me });
+    expect(loadMine(storage, "reload").size).toBe(0);           // a copy taken while this page lives
+    saveMine(new Set(["0a1b2c3d"]), null, storage);             // pagehide
+    expect(Array.from(loadMine(storage, "reload"))).toEqual(["0a1b2c3d"]);
+    expect(loadMine(storage, "navigate").size).toBe(0);
+    expect(Array.from(loadMine({ getItem: () => { throw new Error("blocked"); } }, "reload"))).toEqual([]);
+  });
+});
+
+describe("output that comes faster than it is drawn", () => {
+  it("is bounded: past the high-water mark the backlog is dropped and the socket's output ends", () => {
+    const x = laterParser();
+    const overflows: number[] = [];
+    const out = new OutputPipe(x.write, { cap: 100, onOverflow: (n) => overflows.push(n) });
+    const g = out.next();
+    out.data(g, new Uint8Array(30));                // in xterm's hands
+    for (let i = 0; i < 3; i++) out.data(g, new Uint8Array(30));
+    expect(out.backlog).toBe(90);
+    expect(overflows).toEqual([]);
+    out.data(g, new Uint8Array(30));                // 120 > 100
+    expect(overflows).toEqual([120]);
+    expect(out.backlog).toBe(0);
+    expect(out.pending).toBe(0);
+    out.data(g, new Uint8Array(30));                // the rest of that socket: never drawn
+    expect(out.backlog).toBe(0);
+    x.drain();
+    expect(x.parsed.length).toBe(1);                // only the write already handed over
+    const g2 = out.next();                          // the reattach
+    out.data(g2, enc("replay"));
+    x.drain();
+    expect(x.parsed[1]).toBe("replay");
+  });
+  it("counts only what is queued: what xterm has parsed is no longer backlog", () => {
+    const x = laterParser();
+    const out = new OutputPipe(x.write, { cap: 100 });
+    const g = out.next();
+    for (let i = 0; i < 4; i++) out.data(g, new Uint8Array(30));
+    x.drain();
+    for (let i = 0; i < 3; i++) out.data(g, new Uint8Array(30));
+    expect(out.backlog).toBe(60);
+  });
+  it("has a default high-water mark of 8 MiB", () => {
+    expect(OUTPUT_HIGH_WATER).toBe(8 * 1024 * 1024);
+  });
+});
+
+describe("a write that throws", () => {
+  it("never leaves the pipe waiting for a callback that will not come", async () => {
+    const parsed: string[] = [];
+    const pending: (() => void)[] = [];
+    const out = new OutputPipe((data, done) => {
+      const t = new TextDecoder().decode(data);
+      if (t === "boom") throw new Error("xterm refused it");
+      parsed.push(t);
+      pending.push(done);
+    });
+    const g = out.next();
+    expect(() => out.data(g, enc("boom"))).toThrow("xterm refused it");
+    out.data(g, enc("after"));
+    expect(parsed).toEqual(["after"]);
+    pending.shift()!();
+    out.data(g, enc("a"));
+    out.data(g, enc("boom"));
+    out.data(g, enc("c"));
+    expect(() => pending.shift()!()).toThrow("xterm refused it");   // a's callback hands over boom
+    await Promise.resolve();
+    expect(parsed).toEqual(["after", "a", "c"]);
   });
 });

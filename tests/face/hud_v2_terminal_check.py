@@ -29,7 +29,10 @@ The checks worth keeping, each written to bite:
   - a card raised mid-paste holds every chunk until it goes, and nothing
     typed or pasted under a card arrives after it;
   - a terminal another window shows is never taken unasked ("in another
-    window · Show it here"), and keys typed while it connects are said;
+    window · Show it here") — not by a duplicated or reopened tab carrying a
+    copy of the list either — and keys typed while it connects are said;
+  - output faster than xterm can draw keeps a bounded backlog: past 8 MiB
+    the window reattaches (and says so), and a card still denies;
   - another window's takeover asks here (Let it / Keep it), "taken" offers
     to take it back, and a refused newcomer says so;
   - exit offers Restart and Close; Jarvis's restart offers "New terminal
@@ -471,7 +474,7 @@ def terminal_checks(browser, mock, base, check, until, guard, init_script):
         for section in (_open_checks, _typing_checks, _card_checks, _paste_checks, _reload_checks,
                         _takeover_checks, _elsewhere_checks, _exit_checks, _busy_checks, _readable_checks,
                         _integration_checks, _osc_link_checks, _pane_checks, _zoom_checks, _ended_checks,
-                        _chat_panes_checks):
+                        _flood_checks, _chat_panes_checks):
             if only and section.__name__.strip("_") not in only:
                 continue
             try:
@@ -942,6 +945,30 @@ def _elsewhere_checks(page, mock, base, check, until, fake):
     until(lambda: _state(page, away) == "attached" and len(fake.of(away)) > sockets, timeout=6)
     check("after a reload this tab's own terminal attaches straight back, unasked",
           _state(page, away) == "attached" and not _visible(page, _sel(away, '[data-testid="term-elsewhere"]')))
+    # A copy of the list is not the list (re-review): Chrome copies
+    # sessionStorage into a duplicated tab (the list still held by its live
+    # original) and into a reopened closed one (released, but a restore, not
+    # a reload). Neither may skip "Show it here".
+    for what, holder in (("a duplicated tab's copy (held by its live original)", "a1b2c3d4e5f60718"),
+                         ("a reopened tab's copy (released, but not a reload)", None)):
+        seeded = json.dumps({"ids": [away], "holder": holder})
+        other = page.context.new_page()
+        errs: list[str] = []
+        other.on("pageerror", lambda e, errs=errs: errs.append(str(e)))
+        other.add_init_script(f"sessionStorage.setItem('jarvis.hud.terminals.mine', {json.dumps(seeded)});")
+        sockets, tickets = len(fake.of(away)), len(mock.sent("POST", f"/terminals/{away}/ticket"))
+        other.goto(base + "/")
+        other.wait_for_selector('[data-testid="sidebar"]', state="attached")
+        if not _visible(other, '[data-testid="panel"]'):
+            other.locator('[data-testid="toggle-panel"]').click()
+        until(lambda: _visible(other, _sel(away, '[data-testid="term-elsewhere"]')), timeout=5)
+        other.wait_for_timeout(800)
+        check(f"{what} opens no socket and shows 'in another window'",
+              _visible(other, _sel(away, '[data-testid="term-show-here"]')) and len(fake.of(away)) == sockets
+              and len(mock.sent("POST", f"/terminals/{away}/ticket")) == tickets and not errs,
+              f"{len(fake.of(away)) - sockets} sockets, errors {errs[:1]}")
+        other.close()
+    check("and the tab that holds it still has it", _state(page, away) == "attached")
     page.evaluate("sessionStorage.clear()")
 
 
@@ -1265,6 +1292,57 @@ def _ended_checks(page, mock, base, check, until, fake):
     check("and 'Choose another' lets it choose", _visible(page, '[data-testid="pane-2-terminal-pick"]'))
     page.set_viewport_size({"width": 1280, "height": 800})
     _store(page, ws=None)
+
+
+def _flood_checks(page, mock, base, check, until, fake):
+    """Output faster than xterm can parse it (~14 MB/s): the window's backlog
+    is bounded (OUTPUT_HIGH_WATER, 8 MiB), it reattaches so the replay is the
+    latest output, it says so, and a card still comes up and Escape denies."""
+    tid = _fresh(page, mock, base, until, fake)
+    fake.output(tid, b"before-the-flood\r\n$ ")
+    until(lambda: "before-the-flood" in _text(page, tid), timeout=3)
+    cap = 8 * 1024 * 1024
+    heap0 = page.evaluate("(performance.memory && performance.memory.usedJSHeapSize) || 0")
+    page.evaluate("""(id) => { window.__maxBacklog = 0; window.__backlogTimer = setInterval(() => {
+      window.__maxBacklog = Math.max(window.__maxBacklog, window.__hudTerminals.backlog(id) || 0); }, 2); }""", tid)
+    sock = fake.holders[tid]
+    sockets = len(fake.of(tid))
+    line = b"x" * 150 + b"\r\n"
+    blob = line * (256 * 1024 // len(line))
+    t0 = time.monotonic()
+    for _ in range(160):                                  # ~40 MiB, page-side, as fast as it goes
+        sock["ws"].send(blob)
+    _approval(mock, "fl01")
+    until(lambda: page.locator('[data-testid="approval-card"]').count() > 0, timeout=30, step=0.02)
+    t_card = time.monotonic() - t0
+    page.keyboard.press("Escape")
+    t1 = time.monotonic()
+    body = until(lambda: mock.sent("POST", "/approvals/fl01") or None, timeout=30, step=0.02)
+    t_deny = time.monotonic() - t1
+    check("under a 40 MiB flood a card still comes up and Escape denies",
+          bool(body) and body[-1].get("decision") == "deny", f"card after {t_card:.2f}s, deny after {t_deny:.2f}s")
+    until(lambda: len(fake.of(tid)) > sockets and _state(page, tid) == "attached", timeout=20)
+    page.wait_for_timeout(1500)
+    most = page.evaluate("() => { clearInterval(window.__backlogTimer); return window.__maxBacklog; }")
+    now = page.evaluate("id => window.__hudTerminals.backlog(id)", tid)
+    heap1 = page.evaluate("(performance.memory && performance.memory.usedJSHeapSize) || 0")
+    check("the window's backlog stays bounded (8 MiB plus the frame that crossed it)",
+          most <= cap + len(blob) and (now or 0) <= cap,
+          f"most {most / 2**20:.1f} MiB, now {(now or 0) / 2**20:.1f} MiB, heap {heap0 / 2**20:.0f} -> {heap1 / 2**20:.0f} MiB")
+    check("and past it the window reattached: a new socket, the replay drawn",
+          len(fake.of(tid)) > sockets and _state(page, tid) == "attached" and "before-the-flood" in _text(page, tid),
+          f"{len(fake.of(tid)) - sockets} new sockets")
+    note = page.locator(_sel(tid, '[data-testid="term-output-skipped"]'))
+    check("and it says the output skipped ahead", note.count() == 1 and "skipped ahead" in note.inner_text())
+    fake.line[tid] = ""
+    _focus_term(page, tid)
+    page.keyboard.type("echo after-flood")
+    page.keyboard.press("Enter")
+    until(lambda: "\nafter-flood" in _text(page, tid), timeout=6)
+    newest = fake.of(tid)[-1]
+    check("and typing works on the new socket", b"echo after-flood\r" in b"".join(newest["frames"]),
+          repr(b"".join(newest["frames"])[:40]))
+    page.locator(_sel(tid, '[data-testid="term-output-skipped-dismiss"]')).click()
 
 
 def _chat_panes_checks(page, mock, base, check, until, fake):

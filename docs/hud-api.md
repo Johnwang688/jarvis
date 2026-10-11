@@ -959,11 +959,14 @@ What the HUD does with the terminal contract above (code in
   hidden panel or a pane the layout does not draw attaches nothing, so a
   reload never asks another window for a terminal nobody here is looking at.
 - **A terminal another window shows is never taken unasked.** A row listed
-  `shown` that this tab has not shown (a sessionStorage set,
-  `jarvis.hud.terminals.mine`, which a reload keeps and `taken`/`refused`
-  clear) is drawn as "in another window · Show it here"; only that click
-  attaches (and so asks the other window). A first attach reads a fresh
-  `GET /terminals` before deciding.
+  `shown` that this tab has not shown (a sessionStorage list,
+  `jarvis.hud.terminals.mine`; `taken`/`refused` clear an id) is drawn as
+  "in another window · Show it here"; only that click attaches (and so asks
+  the other window). A first attach reads a fresh `GET /terminals` before
+  deciding. The list names its holder — the live page's per-load nonce, set
+  to null by its `pagehide` — and a new page inherits it only when the holder
+  is null and the page was loaded by a `reload`, so a duplicated or reopened
+  tab's copy of it never skips "Show it here".
 - **Every attach** fetches `POST /terminals/{id}/ticket` first, builds the
   socket URL from `location` (`ws:` or `wss:` + `location.host`, never a
   port), starts from a clean xterm on `attached` (an in-band RIS), and sends
@@ -973,7 +976,10 @@ What the HUD does with the terminal contract above (code in
   through the input channel, and the ring's old queries must not be
   answered into the program as if typed. Output is written one chunk at a
   time and tagged with its socket, so an older socket's queued output is
-  never parsed into a newer session. An unexpected close reattaches
+  never parsed into a newer session; past 8 MiB queued (output faster than
+  xterm draws) the backlog is dropped and the window reattaches, so the
+  replay shows the latest output, and says it skipped ahead. An unexpected
+  close reattaches
   with a fresh ticket (backoff 0.3–10 s, then "lost" with Reconnect); a
   ticket answered 404 reads "ended".
 - **Pastes** go out in 16 KiB chunks paced 8 ms apart from a queue that

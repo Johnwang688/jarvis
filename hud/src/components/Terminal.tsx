@@ -42,7 +42,8 @@ import type { FitAddon } from "@xterm/addon-fit";
 import { api } from "../api";
 import {
   AttachLedger, InputGate, OutputPipe, attachUrl, cleanPaste, cleanTitle, clampSize, counterZoom, encodeInput,
-  fontSizeFor, integrationNote, isTerminalId, judgeLink, loadMine, loadPrefs, parseControl, saveMine, savePrefs,
+  fontSizeFor, integrationNote, isTerminalId, judgeLink, loadMine, loadPrefs, pageNonce, parseControl, saveMine,
+  savePrefs,
   SPECS_KEPT, type InSpec, type TerminalRow,
 } from "../lib/terminal";
 import { toCss } from "../lib/layout";
@@ -91,18 +92,27 @@ export interface PasteNotice {
 }
 
 let unloading = false;
+/**
+ * This page load's nonce, in memory only: it marks this tab's list of its own
+ * terminals as held by a live page (lib/terminal.ts, MINE_KEY), so a copy of
+ * the list in a duplicated or reopened tab is never taken for its own.
+ */
+const PAGE = pageNonce();
 if (typeof window !== "undefined") {
   // Leaving (a reload, the window closing): say goodbye with a normal close,
   // so the daemon detaches at once rather than when TCP notices — and never
-  // reattach on the way out.
+  // reattach on the way out. The tab's list is released as it goes: only a
+  // reload of this page may take it up again.
   window.addEventListener("pagehide", () => {
     unloading = true;
     for (const s of terminals.sessions.values()) s.leave();
+    terminals.release();
   });
   // Back from the back/forward cache: the sessions it closed attach again.
   window.addEventListener("pageshow", (e) => {
     if (!e.persisted) return;
     unloading = false;
+    terminals.hold();
     for (const s of terminals.sessions.values()) s.revive();
   });
 }
@@ -157,7 +167,9 @@ export class TermSession {
       return;
     }
     term.write(data, done);
-  });
+  }, { onOverflow: (dropped) => this.overflowed(dropped) });
+  /** Output skipped because it came faster than xterm could draw it (bytes; the notice). */
+  skipped = 0;
   /** The current socket's generation (OutputPipe). */
   private gen = 0;
   /**
@@ -172,6 +184,28 @@ export class TermSession {
   private gestureTimer: ReturnType<typeof setTimeout> | null = null;
   /** A first attach is waiting on a fresh listing (is it shown in another window?). */
   private checking = false;
+
+  /**
+   * The terminal printed faster than this window can draw (OutputPipe's
+   * high-water mark): the backlog is already gone, and the socket starts
+   * again, so the replay shows the latest 1 MiB rather than output seconds or
+   * minutes old. Said, never silent: the scrollback just jumped.
+   */
+  private overflowed(dropped: number) {
+    this.skipped += dropped;
+    this.mgr.changed();
+    if (!this.disposed && this.ws) this.reattach();
+  }
+
+  dismissSkipped() {
+    this.skipped = 0;
+    this.mgr.changed();
+  }
+
+  /** Output queued and not yet drawn (bytes; the test hook). */
+  get backlog(): number {
+    return this.out.backlog;
+  }
   private pumpTimer: ReturnType<typeof setTimeout> | null = null;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
   private resumeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -862,8 +896,27 @@ export class TermManager {
   notices: AttachNotice[] = [];
   /** A busy terminal the owner asked to close: asked once more. `unsure`: the listing failed. */
   confirm: { id: string; title: string; unsure: boolean } | null = null;
-  /** The terminals this tab has shown (sessionStorage; lib/terminal.ts, MINE_KEY). */
+  /**
+   * The terminals this tab has shown (sessionStorage; lib/terminal.ts,
+   * MINE_KEY): inherited only by a reload of the page that released them,
+   * then held under this load's nonce at once, so a copy made from now on is
+   * a copy.
+   */
   claimed: Set<string> = loadMine();
+
+  constructor() {
+    if (typeof window !== "undefined") saveMine(this.claimed, PAGE);
+  }
+
+  /** The page is going: the list is released, for a reload of this page to take up. */
+  release() {
+    saveMine(this.claimed, null);
+  }
+
+  /** The page came back (back/forward cache): the list is held again. */
+  hold() {
+    saveMine(this.claimed, PAGE);
+  }
   blocked = false;
   zoom = 100;
   panelOpen = false;
@@ -959,13 +1012,13 @@ export class TermManager {
   claim(id: string) {
     if (this.claimed.has(id)) return;
     this.claimed.add(id);
-    saveMine(this.claimed);
+    saveMine(this.claimed, PAGE);
     this.changed();
   }
 
   unclaim(id: string) {
     if (!this.claimed.delete(id)) return;
-    saveMine(this.claimed);
+    saveMine(this.claimed, PAGE);
     this.changed();
   }
 
@@ -1101,7 +1154,7 @@ export class TermManager {
     }
     this.updateRow(row);
     this.claimed.add(row.id);
-    saveMine(this.claimed);
+    saveMine(this.claimed, PAGE);
     this.remember(row.id, spec);
     if (where === "panel") {
       this.prefs = { ...this.prefs, active: row.id };
@@ -1173,7 +1226,7 @@ export class TermManager {
     s?.dispose();
     this.rows = this.rows.filter((r) => r.id !== id);
     this.unseenExits.delete(id);
-    if (this.claimed.delete(id)) saveMine(this.claimed);
+    if (this.claimed.delete(id)) saveMine(this.claimed, PAGE);
     const specs = { ...this.prefs.specs };
     delete specs[id];
     this.prefs = { active: this.prefs.active === id ? null : this.prefs.active, specs };
@@ -1272,6 +1325,7 @@ if (typeof window !== "undefined") {
     selection: (id: string) => terminals.sessions.get(id)?.selection ?? "",
     size: (id: string) => terminals.sessions.get(id)?.size ?? null,
     latched: (id: string) => terminals.sessions.get(id)?.latched ?? null,
+    backlog: (id: string) => terminals.sessions.get(id)?.backlog ?? null,
   };
 }
 
@@ -1387,6 +1441,18 @@ export function TerminalView(props: { id: string; where: string; pane?: PaneNo; 
       ) : (
         <>
           {s.paste ? <PasteStrip s={s} blocked={blocked} /> : null}
+          {s.skipped ? (
+            <div className="termnote" data-testid="term-output-skipped" role="status">
+              <span className="termnote-text">
+                Output came faster than this window could draw it, so it skipped ahead ({kib(s.skipped)} not
+                drawn): what is shown is the terminal's latest output.
+              </span>
+              <button type="button" className="quiet" data-testid="term-output-skipped-dismiss" aria-label="Dismiss"
+                      onClick={() => s.dismissSkipped()}>
+                ×
+              </button>
+            </div>
+          ) : null}
           <div className="termslot" ref={slot} onMouseDown={() => setTimeout(() => s.focus(), 0)} />
           <StateStrip s={s} now={now} blocked={blocked} onChoose={props.onChoose} />
         </>

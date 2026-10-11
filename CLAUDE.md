@@ -619,12 +619,26 @@ socket's queued output is never parsed into a new session; the reset is an
 in-band RIS (a JS `reset()` lets what xterm already holds be drawn again
 after it); and **nothing is sent from a new socket until its replay has been
 parsed** — the flag clears from the pipe's step after the replay, never on
-the `replayed` message itself. **A terminal another window shows is never
+the `replayed` message itself. **The pipe's backlog is bounded** (re-review):
+output faster than xterm parses (~14 MB/s) used to queue without limit (a
+reviewer reached ~1.5 GB, the display ~40 s behind, once xterm's own 50 MB
+refusal no longer applied); past `OUTPUT_HIGH_WATER` (8 MiB) the backlog is
+dropped, that socket's output ends and the session reattaches, so the replay
+shows the latest 1 MiB, with a notice that it skipped ahead. A `term.write`
+that throws clears the in-flight flag in a `finally`, so it cannot stall the
+pipe. **A terminal another window shows is never
 taken unasked**: listed `shown` and not one this tab has shown (a
-sessionStorage set, `jarvis.hud.terminals.mine`, so a reload attaches straight
-back; `taken`/`refused` forget it), it is drawn as "in another window · Show
-it here" — a takeover question the owner did not cause is one they learn to
-wave through. A first attach reads a fresh listing first, and so does ×
+sessionStorage list, `jarvis.hud.terminals.mine`; `taken`/`refused` forget
+an id), it is drawn as "in another window · Show it here" — a takeover
+question the owner did not cause is one they learn to wave through. **A
+copy of the list is not the list** (re-review): Chrome copies sessionStorage
+into a duplicated tab and a reopened closed one, so the list carries its
+`holder`, the live page's per-load nonce (memory only), which that page's
+`pagehide` sets to null; a new page inherits the list only if the holder is
+null **and** its navigation type is `reload` — a duplicate's copy is held by
+its live original, a reopened tab's is released but a restore. A reload
+still attaches straight back even while the daemon counts the old page's
+socket. A first attach reads a fresh listing first, and so does ×
 before deciding whether to ask (`freshList`: never a listing already on its
 way, which may predate `busy`; a failed listing asks, saying it could not
 check). **One terminal is drawn in one
@@ -692,8 +706,12 @@ ring each typed answers), clearing the replay flag on `replayed` rather than
 after the parse, the pipe keeping an older socket's queue (vitest), the paste
 listener and `cleanPaste`, "in another window", ×'s fresh listing, a card
 that queues rather than drops, the `unsent` notice, and the tab's own set.
+The re-review's three, likewise: no backlog cap (a 40 MiB flood never
+reattached, the backlog unbounded), no reattach on overflow, a copied list
+trusted (a duplicated tab opened a socket), the navigation test or the
+`pagehide` release dropped, and the `finally` (vitest: the pipe stalls).
 The test-only write hook `__hudTerminals.paste` is gone; the hooks left are
-read-only.
+read-only (`backlog` among them).
 While typing is paused the notice cannot be dismissed: it holds the only
 way to resume.
 
