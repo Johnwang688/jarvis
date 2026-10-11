@@ -2390,7 +2390,17 @@ jarvis/
   here-document lexer recognises an operator only where bash does — never in
   quotes, a comment, `${…}` or arithmetic (`$((1<<2))`, `((x<<=1))`,
   `$[…]`), and a backtick's own here-document ends at its backtick —
-  because one recognised where bash would not hides the lines after it. It runs in `decide`, so v1's
+  because one recognised where bash would not hides the lines after it.
+  Round 3b: the delimiter is formed as bash forms it (`"E\"F"` is `E"F`,
+  `$"EOF"` and `$'EOF'` are `EOF`, `<<''` ends at an empty line; each checked
+  with `bash -n` on bash 5.3, which names the delimiter it wanted), and where
+  bash's reading is unsure the line is **too complex to judge**: `$(`/`${`/a
+  backtick or an unbalanced quote in the word, an unquoted backslash-newline,
+  an extglob, an ANSI-C escape it does not decode exactly, more than 64 open on
+  a line, and two `$(…)` shapes that differ between bash versions — a
+  here-document whose `$(…)` closes before its body, and a body line inside
+  `$(…)` that starts with the delimiter and holds a `)` (bash 5.3 ends the body
+  there and runs the rest of the line, `EOF)` included). It runs in `decide`, so v1's
   `command_verdict` (before any approver, so neither an allowlist entry nor
   mode "all" reaches it) and v2's layer 1 (no card) refuse alike. **The
   accepted cost**: a grep or a commit message that only mentions the word is

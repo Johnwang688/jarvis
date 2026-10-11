@@ -358,7 +358,12 @@ def vexcom_reading(command: str, _depth: int = 0, *, shell: bool = True) -> str 
     complex_ = False
     judged: set[str] = set()
     if shell and "<<" in text:
-        globbed = _inline_heredocs(command or "", keep=False)
+        try:
+            globbed = _inline_heredocs(command or "", keep=False)
+        except _TooComplex:
+            # Where a body ends cannot be told: no glob word can be said to
+            # be data or a command, so none is judged; the line is asked.
+            complex_, globbed = True, ""
         variants = {globbed, unicodedata.normalize("NFKC", globbed)}
         variants |= {_ansi_c_decoded(v) for v in list(variants)}
         variants |= {_DEFAULT_EXPANSIONS.sub(r"\1", v) for v in list(variants)}
@@ -2373,10 +2378,28 @@ def _close_paren(text: str, j: int) -> int:
 # arithmetic (`$((1<<2))`, `((x<<=1))`, `$[…]`) — because one recognised where
 # bash would not hides the lines after it.
 _HEREDOC_STOP = " \t\n;|&<>()`"
+HEREDOC_CAP = 64           # here-documents open on one line before it is too complex (round 3b)
+# The `$'…'` escapes whose decoding by `_ansi_c_decoded` is exactly bash's;
+# any other (`\x`, octal, `\u`, `\c`, `\e`, `\?`) makes the delimiter unsure.
+_ANSI_C_PLAIN = re.compile(r"(?:[^\\]|\\[\\'\"abfnrtv])*", re.S)
 
 
-def _heredoc_word(text: str, j: int) -> tuple[str, bool, int]:
-    """(delimiter, quoted, index past it) for the word after `<<`/`<<-`."""
+def _heredoc_word(text: str, j: int, in_tick: bool = False) -> tuple[str, bool, int]:
+    """(delimiter, quoted, index past it) for the word after `<<`/`<<-`, as
+    bash forms it: never expanded, quotes removed (round 3b, each checked
+    with `bash -n` on bash 5.3, which names the delimiter it wanted). In
+    `"…"` (and `$"…"`) a backslash escapes only `"`, `\\`, `$`, `` ` `` and a
+    newline (removed); elsewhere it stays. `$'…'` is decoded. An unquoted
+    backslash quotes the next character. `$NAME` stays literal.
+
+    **What it cannot read with certainty raises `_TooComplex`** (asked,
+    never allowlist-covered): an unbalanced quote; `$(`, `${`, `$[` or a
+    backtick in the word, whose extent bash finds by parsing them; an
+    unquoted backslash-newline or a trailing backslash; a `$'…'` escape
+    outside `_ANSI_C_PLAIN`; and an extglob `@(`, `*(`, … which bash keeps
+    in the word when `extglob` is on. A backtick straight after the word
+    ends it only where it closes the backticks the operator is in
+    (`in_tick`)."""
     n = len(text)
     while j < n and text[j] in " \t":
         j += 1
@@ -2384,17 +2407,51 @@ def _heredoc_word(text: str, j: int) -> tuple[str, bool, int]:
     quoted = False
     while j < n and text[j] not in _HEREDOC_STOP:
         ch = text[j]
-        if ch in "'\"":
-            end = text.find(ch, j + 1)
-            end = n if end == -1 else end
+        if ch == "'":
+            end = text.find("'", j + 1)
+            if end == -1:
+                raise _TooComplex
             out.append(text[j + 1:end])
             quoted, j = True, end + 1
-        elif ch == "\\" and j + 1 < n:
+        elif text.startswith("$'", j):
+            k = j + 2
+            while k < n and text[k] != "'":
+                k += 2 if text[k] == "\\" else 1
+            if k >= n or not _ANSI_C_PLAIN.fullmatch(text, j + 2, k):
+                raise _TooComplex
+            out.append(_ansi_c_decoded(text[j:k + 1]))
+            quoted, j = True, k + 1
+        elif ch == '"' or text.startswith('$"', j):
+            k = j + (2 if ch == "$" else 1)
+            while True:
+                if k >= n:
+                    raise _TooComplex
+                c = text[k]
+                if c == '"':
+                    break
+                if c == "\\" and k + 1 < n and text[k + 1] in '"\\$`\n':
+                    if text[k + 1] != "\n":
+                        out.append(text[k + 1])
+                    k += 2
+                    continue
+                if c == "`" or (c == "$" and text[k + 1:k + 2] in ("(", "{", "[")):
+                    raise _TooComplex
+                out.append(c)
+                k += 1
+            quoted, j = True, k + 1
+        elif ch == "\\":
+            if j + 1 >= n or text[j + 1] == "\n":
+                raise _TooComplex
             out.append(text[j + 1])
             quoted, j = True, j + 2
+        elif ch == "$" and text[j + 1:j + 2] in ("(", "{", "["):
+            raise _TooComplex
         else:
             out.append(ch)
             j += 1
+    if j < n and ((text[j] == "`" and not in_tick)
+                  or (text[j] == "(" and text[j - 1] in "@*+?!")):
+        raise _TooComplex
     return "".join(out), quoted, j
 
 
@@ -2419,13 +2476,25 @@ def _inline_heredocs(text: str, keep: bool = True) -> str:
     """The text with each here-document's body moved into its operator as a
     here-string (see above). Several on one line are read in order, `<<-`
     strips leading tabs, a body with no terminator runs to the end (as in
-    bash), and an operator with no line after it is left as it was."""
+    bash), and an operator with no line after it is left as it was.
+
+    Raises `_TooComplex` where bash's reading is unsure (round 3b): a
+    delimiter `_heredoc_word` cannot read with a line after it (with none,
+    there is no body and the word does not matter); a here-document opened
+    inside `$(…)` with a body line that starts with its delimiter and holds
+    a `)` after it (bash 5.3 ends the body at such a line — `EOF)`, and
+    `Exposes a)` under `<<'E'` — and reads the rest as code; bash 5.1 and
+    older end it only at `EOF)`; reading on would hide what follows); one
+    opened inside a `$(…)` that closes before its body; and more than
+    `HEREDOC_CAP` open on one line."""
     if "<<" not in text:
         return text
     out: list[str] = []
     stack: list = []            # '"', "$(", "`", "(", or [kind, depth] for ${…} and arithmetic
-    pending: list[tuple] = []   # (delimiter, strip tabs, quoted, slot in out, as written, depth)
+    # (delimiter, strip tabs, quoted, slot in out, as written, depth, inside `$(…)`)
+    pending: list[tuple] = []
     i, n = 0, len(text)
+    last_newline = text.rfind("\n")
     while i < n:
         ch = text[i]
         top = stack[-1] if stack else ""
@@ -2533,15 +2602,30 @@ def _inline_heredocs(text: str, keep: bool = True) -> str:
             stack.append("(")
         elif ch == ")" and top in ("$(", "("):
             stack.pop()
+            # A here-document opened in a `$(…)` that closes before its body
+            # begins: bash 5.3 reads the body from the lines after it, older
+            # bash reads them as commands (round 3b, checked with `bash -n`).
+            if top == "$(" and last_newline > i and any(e[5] > len(stack) for e in pending):
+                raise _TooComplex
         elif text.startswith("<<<", i):             # a here-string: one operator, not two
             out.append("<<<")
             i += 3
             continue
         elif text.startswith("<<", i):
             strip = text.startswith("<<-", i)
-            delimiter, quoted, j = _heredoc_word(text, i + (3 if strip else 2))
-            if delimiter:
-                pending.append((delimiter, strip, quoted, len(out), text[i:j], len(stack)))
+            try:
+                delimiter, quoted, j = _heredoc_word(text, i + (3 if strip else 2), top == "`")
+            except _TooComplex:
+                if last_newline > i:
+                    raise
+                out.append("<<")                    # no line after it: no body to place
+                i += 2
+                continue
+            if delimiter or quoted:                 # `<<''` ends at the first empty line
+                if len(pending) >= HEREDOC_CAP:
+                    raise _TooComplex
+                pending.append((delimiter, strip, quoted, len(out), text[i:j], len(stack),
+                                "$(" in stack))
                 out.append("")
                 i = j
                 continue
@@ -2549,7 +2633,7 @@ def _inline_heredocs(text: str, keep: bool = True) -> str:
             out.append(ch)
             i += 1
             in_tick = "`" in stack
-            for delimiter, strip, quoted, slot, _written, _depth in pending:
+            for delimiter, strip, quoted, slot, _written, _depth, in_sub in pending:
                 lines: list[str] = []
                 while i < n:
                     end = text.find("\n", i)
@@ -2563,6 +2647,8 @@ def _inline_heredocs(text: str, keep: bool = True) -> str:
                         line = line.lstrip("\t")
                     if line == delimiter:
                         break
+                    if in_sub and line.startswith(delimiter) and ")" in line[len(delimiter):]:
+                        raise _TooComplex
                     if tick != -1:
                         if line:
                             lines.append(line)
@@ -2573,7 +2659,7 @@ def _inline_heredocs(text: str, keep: bool = True) -> str:
             continue
         out.append(ch)
         i += 1
-    for _delimiter, _strip, _quoted, slot, written, _depth in pending:
+    for _delimiter, _strip, _quoted, slot, written, _depth, _in_sub in pending:
         out[slot] = written                         # no line after it: no body
     return "".join(out)
 

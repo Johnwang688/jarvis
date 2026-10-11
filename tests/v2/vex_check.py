@@ -27,7 +27,9 @@ What matters most, each written to fail with its guard removed:
 * **A here-document's body is data** (review round 3): a `* item` in a commit
   message, a C doc comment, a crontab line is never read as a command; a
   body fed to a shell still is, and the lexer never sees an operator where
-  bash would not (quotes, comments, `${…}`, arithmetic, backticks).
+  bash would not (quotes, comments, `${…}`, arithmetic, backticks). Its
+  delimiter is formed as bash forms it, and where bash's reading is unsure
+  (round 3b) the line is too complex to judge, never a hidden marker.
 * **A glob past the caps is too complex to judge** — asked, and judged in
   well under a second however it is built; the make file guard refuses one.
 * **`vexbuild` asks like any command** (and its module through `python -m`,
@@ -1822,7 +1824,8 @@ class TooComplex(Base):
               "many words": "ls " + " ".join(f"v{i}*" for i in range(4000)),
               "{": "{" * 20000 + " --user", "$((": "./v$((" * 8000,
               "nested $(…)": "echo " + "$(echo " * 3000 + "x" + ")" * 3000,
-              "nested eval": "eval " * 3000 + "x"}
+              "nested eval": "eval " * 3000 + "x",
+              "here-documents": "cat <<E " * 15000 + "`x` " * 15000}
 
     def test_a_flood_is_judged_fast_asked_and_never_covered(self):
         Path(config.ALLOWLIST_PATH).write_text(json.dumps([
@@ -2005,9 +2008,61 @@ HEREDOC_RUNS = {
     "a body that ends with its backtick": f"echo `cat <<X\nbody\nX`\n{R3}",
 }
 
+# Round 3b: a delimiter is read as bash reads it (each checked with `bash -n` on bash 5.3, which
+# names the delimiter it wanted), or the line is too complex to judge. `M` runs only if the body
+# ends where bash ends it; read as body, it would be hidden.
+M = "bin/*"
+# bash's terminator is found, so the marker after it is a command: DENY.
+HEREDOC_DELIMITERS = {
+    '"E\\"F"': f'cat <<"E\\"F"\nx\nE"F\n{M}',
+    '"E\\\\F"': f'cat <<"E\\\\F"\nx\nE\\F\n{M}',
+    '"E\\$F"': f'cat <<"E\\$F"\nx\nE$F\n{M}',
+    '"E\\`F"': f'cat <<"E\\`F"\nx\nE`F\n{M}',
+    'a backslash-newline in "…"': f'cat <<"E\\\nF"\nx\nEF\n{M}',
+    '$"EOF"': f'cat <<$"EOF"\nx\nEOF\n{M}',
+    "$'EOF'": f"cat <<$'EOF'\nx\nEOF\n{M}",
+    "$'E\\tF'": f"cat <<$'E\\tF'\nx\nE\tF\n{M}",
+    "$'E\\'F'": f"cat <<$'E\\'F'\nx\nE'F\n{M}",
+    "$NAME stays literal": f"cat <<$EOF\nx\n$EOF\n{M}",
+    "an empty delimiter": f"cat <<''\nx\n\n{M}",
+}
+# Where bash's reading is unsure: too complex — ASK, never allowlist-covered, always asked in v2.
+HEREDOC_UNSURE = {
+    "EOF) inside $(…)": f"x=$(cat <<EOF\nhi\nEOF)\n{M}",
+    "a body line starting with the delimiter, then a )": f"x=$(cat <<'E'\nE{M} x)\nE\n)",
+    "a $(…) that closes before its body": f"x=$(cat <<E)\nbody\n{M}\nE",
+    "$(…) in the delimiter": f'cat <<"E$(echo q)F"\nx\nE$(echo q)F\n{M}',
+    "${…} in the delimiter": f"cat <<${{X}}\nx\n${{X}}\n{M}",
+    "a backtick in the delimiter": f"cat <<E`echo q`F\nx\nE`echo q`F\n{M}",
+    "a backtick in a quoted delimiter": f'cat <<"E`echo q`F"\nx\nE`echo q`F\n{M}',
+    "an unbalanced quote": f'cat <<"EOF\nx\nEOF\n{M}',
+    "an unbalanced single quote": f"cat <<'EOF\nx\nEOF\n{M}",
+    "an unquoted backslash-newline": f"cat <<E\\\nF\nx\nEF\n{M}",
+    "an ANSI-C escape not decoded exactly": f"cat <<$'E\\x4'\nx\nE\x04\n{M}",
+    "an extglob": f"cat <<E@(x)\nx\nE@(x)\n{M}",
+}
+# A body bash does not end there: its lines stay data.
+HEREDOC_DATA = {
+    "a terminator with trailing whitespace": f"cat <<'EOF'\nx\nEOF \n{M}",
+    "an empty delimiter's body": f"cat <<''\n{M}\n\nls",
+    'a "E\\"F" body': f'cat <<"E\\"F"\n{M}\nE"F',
+    "an unsure delimiter with no line after it": 'cat <<"E$(echo q)F"; cat <<E`echo q`F',
+}
+
 
 class HereDocuments(Base):
     """Round 3: a here-document's body is read only where a shell is fed it."""
+
+    def setUp(self):
+        super().setUp()
+        self.ran = []
+        real = shell._run
+        shell._run = lambda command, *a, **k: self.ran.append(command) or "[exit 0]"
+        self.addCleanup(setattr, shell, "_run", real)
+        self.addCleanup(v1_permissions.set_mode, "ask")
+        bound = runtime.tools_bound({"run_command"})     # where an agent's turn would stand
+        bound.__enter__()
+        self.addCleanup(bound.__exit__, None, None, None)
 
     def test_ordinary_here_documents_are_never_refused(self):
         for label, command in HEREDOC_ORDINARY.items():
@@ -2038,6 +2093,52 @@ class HereDocuments(Base):
         permit = v2_permissions.build_permit(context(self.root, PP.AUTO), auto)
         permit("Bash", {"command": HEREDOC_ORDINARY["a commit message"]})
         self.assertEqual(auto.seen, [])
+
+    def test_a_delimiter_is_read_as_bash_reads_it(self):
+        for label, command in HEREDOC_DELIMITERS.items():
+            with self.subTest(label):
+                verdict = rules.decide(command)
+                self.assertEqual(verdict.decision, rules.DENY, command)
+                self.assertIn("`bin/*`", verdict.reason)
+                self.assertEqual(v1_permissions.static_verdict(command).decision, rules.DENY)
+                self.assertIsNotNone(v2_permissions.denied_command(command))
+
+    def test_an_unsure_delimiter_is_too_complex(self):
+        asked = []
+        gate = v1_permissions.gate(lambda tool, args: asked.append(args["command"]) or False)
+        for label, command in HEREDOC_UNSURE.items():
+            with self.subTest(label):
+                verdict = rules.decide(command)
+                self.assertEqual(verdict.decision, rules.ASK, command)
+                self.assertEqual(verdict.reason, rules.TOO_COMPLEX)
+                self.assertEqual(v1_permissions.static_verdict(command).decision, rules.ASK)
+                self.assertEqual(rules.vex_uncoverable(command), rules.TOO_COMPLEX)
+                self.assertIsNone(v2_permissions.denied_command(command))
+                stems = {w for pair in rules.command_targets(command) for w in pair}
+                stems |= {"cat", "x"}       # an entry for every program the line names
+                Path(config.ALLOWLIST_PATH).write_text(json.dumps(
+                    [{"tool": "run_command", "prefix": p} for p in stems]))
+                self.assertFalse(v1_permissions.allows("run_command", {"command": command}),
+                                 "an allowlist entry covered it")
+                tools.dispatch("run_command", json.dumps({"command": command, "reason": "probe"}),
+                               gate)
+        self.assertEqual(sorted(asked), sorted(HEREDOC_UNSURE.values()), "v1 asked about each")
+        self.assertEqual(self.ran, [], "a no ran nothing")
+        for profile in (PP.AUTO, PP.ASK):
+            asker = Asker(Decision.DENY)
+            permit = v2_permissions.build_permit(context(self.root, profile), asker)
+            for label, command in HEREDOC_UNSURE.items():
+                with self.subTest(profile=profile.value, shape=label):
+                    self.assertEqual(permit("Bash", {"command": command}), Decision.DENY)
+            self.assertEqual(len(asker.seen), len(HEREDOC_UNSURE), profile)
+
+    def test_a_body_bash_does_not_end_stays_data(self):
+        for label, command in HEREDOC_DATA.items():
+            with self.subTest(label):
+                self.assertNotEqual(rules.decide(command).decision, rules.DENY, command)
+                self.assertNotEqual(v1_permissions.static_verdict(command).decision, rules.DENY)
+                self.assertIsNone(v2_permissions.denied_command(command))
+                self.assertIsNone(rules.vex_uncoverable(command), command)
 
     def test_a_large_here_document_is_not_too_complex(self):
         body = "\n".join(f"int *p{i} = a{i} * b[{i}] /* [{i}] */;" for i in range(3000))
