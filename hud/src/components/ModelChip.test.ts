@@ -28,10 +28,11 @@ describe("placePopover", () => {
   });
 
   it("stays upward when above is short but below is shorter, and never runs off the top", () => {
-    const p = placePopover(at(180, 300, 18), 100, { w: 1280, h: 360 });
+    const p = placePopover(at(150, 300, 18), 100, { w: 1280, h: 300 });
     expect(p.up).toBe(true);
-    // The old floor (160px) would have put its top at 360 - (360-180+6) - 160 < 8.
-    const top = 360 - p.bottom! - p.maxHeight;
+    expect(p.maxHeight).toBe(150 - 6 - 8);
+    // The old 160px floor put its top at 300 - (300 - 150 + 6) - 160 = -16: off the window.
+    const top = 300 - p.bottom! - p.maxHeight;
     expect(top).toBeGreaterThanOrEqual(8);
   });
 

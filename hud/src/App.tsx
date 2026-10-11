@@ -1717,11 +1717,12 @@ export default function App() {
   const ws = view.ws;
   // The side panes leave the centre what the drawn shape needs (one pane: 480).
   const mainMin = SHAPES[fit.drawn].minW;
+  // A short window folds the orb's mic strip into one button beside it.
+  const micTight = !drawn.leftFolded && view.availableH < MIC_TIGHT_H;
   // What the orb says under itself (PR #29; the input bar's hint used to say
   // it): the selected chat's turn status, else a card's question, else MIC
   // MUTED, else the orb's state (lib/dictation `orbLine`). Folded, the orb is
   // a 36px dot with no line under it, so the selected chat's bar says it.
-  const micTight = !drawn.leftFolded && view.availableH < MIC_TIGHT_H;
   const orbStatus = orbLine({
     status: selected !== null ? state.chats[selected].status : "",
     mode: state.dictation,

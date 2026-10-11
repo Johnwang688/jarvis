@@ -181,7 +181,6 @@ export function InputBar(props: {
       const want = el.scrollHeight + edge;
       el.style.height = `${Math.min(want, cap)}px`;
       el.style.overflowY = want > cap ? "auto" : "hidden";
-      el.dataset.cap = String(Math.round(cap));
     };
     fit.current();
     if (typeof ResizeObserver === "undefined") return;

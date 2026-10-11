@@ -149,7 +149,8 @@ def _open(page, until, tid: str, project: str = "p1", pane: int = 1):
     page.locator(_pane(pane, '[data-testid="input"]')).click()
     _expand(page, until, project, f"thread-{tid}")
     page.locator(f'[data-testid="thread-{tid}"]').click()
-    until(lambda: page.evaluate(f"window.__hud.state().chats['{pane}'].threadId") == tid, timeout=3)
+    # The selected chat's conversation is flattened into state() (WP-B).
+    until(lambda: page.evaluate("window.__hud.state().threadId") == tid, timeout=3)
 
 
 def _mode(page) -> str:
@@ -546,6 +547,10 @@ def _popover_place_checks(page, mock, check, until):
 
 def _escape_under_card_checks(page, mock, check, until):
     _fresh(page, mock, until, SINGLE)
+    # An existing thread: its provider is plain text, so nothing beside the
+    # model button changes shape under the card (a compose row's provider
+    # select turns to text, the button moves, and that alone closes it).
+    _open(page, until, "t2")
     _reopen(page)
     _approval(mock, "req-pop-1")
     page.wait_for_selector('[data-testid="approval-card"]')
