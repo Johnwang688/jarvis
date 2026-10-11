@@ -165,7 +165,9 @@ class Serving(Base):
         os.chmod(self.built.path / "assets", 0o755)
         (self.built.path / "assets" / "planted.js").write_text("approve()")
         self.assertIsNone(I.find(self.root, "assets/planted.js"))
+        self.assertIsNone(I.read(self.built, "assets/planted.js"), "read itself vouches only for listed files")
         self.assertIsNone(I.find(self.root, "manifest.json"))
+        self.assertIsNone(I.read(self.built, "manifest.json"))
 
     def test_a_link_inside_a_build_is_refused(self):
         outside = self.tmp / "outside.js"

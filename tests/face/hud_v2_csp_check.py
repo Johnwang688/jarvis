@@ -101,6 +101,8 @@ def csp_checks(browser, mock, base, check, until, guard_live, init_script):
     page.on("pageerror", lambda e: errors.append(str(e)))
     console: list[str] = []
     page.on("console", lambda m: console.append(m.text))
+    workers: list = []
+    page.on("worker", lambda w: workers.append(w))
     page.set_default_timeout(6000)
     until = pumping(page, until, fake)
     mock.world["avatars"]["active"] = "hoot"
@@ -141,7 +143,7 @@ def csp_checks(browser, mock, base, check, until, guard_live, init_script):
         svg_csp = [h["value"] for h in svg[-1].headers_array()
                    if h["name"].lower() == "content-security-policy"] if svg else []
         check("the avatar's own response is narrowed to its own lockdown, in one header",
-              svg_csp == [H.content_security_policy(H.AVATAR_CSP)], str(svg_csp))
+              svg_csp == [H.content_security_policy(getattr(H, "AVATAR_CSP", None))], str(svg_csp))
 
         # -- the terminal socket ------------------------------------------------------
         tid = _open_terminal(page, mock, until, fake)
@@ -179,20 +181,31 @@ def csp_checks(browser, mock, base, check, until, guard_live, init_script):
         check("Monaco itself mounts (not its textarea fallback)",
               page.locator('[data-testid="editor"] .monaco-editor').count() == 1
               and page.locator('[data-testid="editor-fallback"]').count() == 0)
-        page.locator('[data-testid="editor"] .view-lines').first.click()
-        page.keyboard.press("Control+End")
-        page.keyboard.type("\nimport os\nos.")                # word suggestions use the worker
-        until(lambda: page.evaluate(
-            "performance.getEntriesByType('resource').some(e => /editor\\.worker/.test(e.name))"), timeout=10)
-        check("Monaco's editor.worker is loaded from /assets under worker-src 'self'",
-              page.evaluate("performance.getEntriesByType('resource').some(e => /editor\\.worker/.test(e.name))"))
+        # The worker: a diff is computed in Monaco's editor.worker. Playwright
+        # reports every dedicated worker the page starts; a blocked one never
+        # starts (and Monaco would say it fell back to the main thread).
+        from tests.face.hud_v2_check import expand
+        expand(page, "p1", "task-k1")
+        page.locator('[data-testid="task-k1"]').click()
+        page.locator('[data-testid="tab-diff"]').first.click()
+        until(lambda: page.locator('[data-testid="diff-calc.py"]').count() > 0)
+        page.locator('[data-testid="diff-calc.py"]').first.click()
+        until(lambda: page.locator('[data-testid="diff-editor"] .monaco-diff-editor').count() > 0
+              or page.locator('[data-testid="diff-fallback"]').count() > 0, timeout=15)
+        check("the diff opens in Monaco's diff editor (not its fallback)",
+              page.locator('[data-testid="diff-editor"] .monaco-diff-editor').count() == 1)
+        until(lambda: any("editor.worker" in w.url for w in workers), timeout=10)
+        check("Monaco's editor.worker starts from /assets under worker-src 'self'",
+              any("editor.worker" in w.url and w.url.startswith(base + "/assets/") for w in workers),
+              str([w.url for w in workers]))
+        until(lambda: page.locator('[data-testid="diff-editor"] .line-insert, '
+                                   '[data-testid="diff-editor"] .char-insert').count() > 0, timeout=10)
+        check("the worker computed the diff (changed lines are marked)",
+              page.locator('[data-testid="diff-editor"] .line-insert, '
+                           '[data-testid="diff-editor"] .char-insert').count() > 0)
         check("Monaco never fell back to running its worker on the main thread",
               not [c for c in console if "Could not create web worker" in c],
               "; ".join(c for c in console if "worker" in c.lower())[:300])
-        page.keyboard.press("Escape")
-        page.keyboard.press("Control+z")
-        page.keyboard.press("Control+z")
-        page.keyboard.press("Control+z")
 
         # -- a loopback Preview frame (frame-src) ------------------------------------
         loaded = page.evaluate("""port => new Promise(done => {
