@@ -437,6 +437,59 @@ Tests point `config.TERMINAL_SHELL` at `tests/v2/terminal_fake/sh` (named
 `sh` so it is started as a POSIX shell) with a temp HOME, and never use
 8402/8403/8405.
 
+**jarvis-mcp for chat sessions, WP-1 (2026-10-10; plan
+`docs/plans/2026-10-10-terminal-read-mcp-plan.md` §1–§2, §4, decisions file
+beside it — the peers plan's Phase 0, built once).** Plumbing only, **no
+behaviour change**: `jarvis/v2/session_tools.py` (the per-session tool list,
+flags `read_only`/`foreground_only`/`desk_only`, `for_provider`) **ships
+empty**, and with nothing in it no token is minted and no session gets a
+jarvis server. When it holds something (WP-2: `terminal_read` plus the D-3
+tools), `Daemon._run_brief` mints a caller token (`jarvis/v2/callers.py`:
+`jmcp_` + `token_urlsafe(32)`, **held only as a sha256 digest**) for an
+owner's chat thread on Claude or Codex, and puts `mcp_servers["jarvis"] =
+bridge.server_entry(...)` (`python -m jarvis.v2.mcp_session`, env
+`JARVIS_MCP_TOKEN`/`JARVIS_DAEMON_PORT`/`PYTHONPATH`) in **the run copy
+only** — never brief.json; `_open` refuses a non-chat brief naming `jarvis`.
+**Never on a command line**: the SDK puts a dict `mcp_servers` on `claude`'s
+argv as JSON (world-readable through `ps`), so Claude gets a private 0600
+`V2_DATA_DIR/claude/<thread>/mcp-<nonce>.json` in 0700 dirs and
+`--mcp-config <path>` (checked with the SDK's own command builder), reused by
+`set_model`, deleted by `close()` — **one file per session, never per
+thread** (PR #35 review): a lost session is closed outside the daemon lock
+while the next send opens its successor, and a shared `mcp.json` was deleted
+from under the new session; Codex carries it in its private `config.toml`'s `env`
+table, with `approval_mode = "approve"` per read-only tool, stripped on close
+and on a failed open.
+`Daemon.start` sweeps leftover carriers **after it holds its ports** (the bind
+is the single-instance lock, so a second daemon on the live folder fails
+before touching the live one's) and **only under the data folder it owns**
+(`stores.root == V2_DATA_DIR`), so a test daemon never touches the live
+one's; `/mcp` paths are logged without a query. The relay is **stdlib only and never runs a tool**: it pops the token
+from its environment, writes nothing to stderr, lists `[]` and answers
+`Error:` when it cannot reach the daemon. The bridge (`jarvis/v2/bridge.py`)
+serves `GET /mcp/tools` and `POST /mcp/call` **on the API listener only**
+(404 on the HUD and preview listeners), `Authorization: Bearer` only, 403
+`not a Jarvis chat session` for any `Origin` or bad/revoked token or a
+session that is not the thread's live one (`_sessions.get(id) is session` —
+a missed revoke cannot reach a newer session) or not an owner's Claude/Codex
+chat; 404 not offered, 400, 413 over 16 KiB. A call runs through the bridge's
+**one** registry dispatch in a fresh `contextvars.Context()` with
+`runtime.caller()` (`{thread_id, project_id, provider, turn_id}`, new) bound,
+depth 0 and the offered names as the toolset; a **dangerous** tool goes to
+the session's permit with `dangerous_tool=True` — the owner every time, no
+Always, never the allowlist or the reviewer. Tokens are revoked by
+`_cleanup` (close, archive, delete, a lost session), `_open`'s failure and
+`stop()` (`revoke_all` first); a model switch keeps the token (D-7). Claude's
+hook explicitly allows a read-only session tool under both profiles (after
+`permit`'s new **`jarvis-tool`** layer, which follows layer 2 so an
+always-ask rule still asks) and refuses a `foreground_only` one for a
+sub-agent (`agent_id`) without asking `permit`; Codex declines an MCP
+elicitation (before the turn-identity check, which used to kill the turn
+over it) or an MCP-approval `requestUserInput` with a non-fatal ERROR, never
+a QUESTION. The fast path binds `runtime.caller()` in its turn (the daemon
+binds it on the turn thread, so the turn id is the daemon's). All four new
+modules are SELF_PROTECTED. Free suite: `tests/v2/mcp_session_check.py`.
+
 Briefs for every package, including the ones in flight, are in
 `docs/codex-briefs/`; each merged package left a `*-notes.md` beside its
 brief with what its implementer verified and what it proposes.
@@ -1389,13 +1442,16 @@ jarvis/
   turn", never "an agent once ran on this thread"), `_sync_tools`
   on a `load_tools` expansion, `_dispatch_calls`' per-worker `copy_context()`
   (now load-bearing twice: without it a pool worker would hold an unbound
-  approver, which denies, *and* an unbound toolset, which is not enforced), and
-  jarvis-mcp's worker, which binds the list it exposes. A tool an agent was
+  approver, which denies, *and* an unbound toolset, which is not enforced),
+  jarvis-mcp's worker, which binds the list it exposes, and the daemon's
+  jarvis-mcp bridge, which binds the chat session's offered list (WP-1). A
+  tool an agent was
   handed explicitly (PR #33's `EXPLICIT_ONLY` shape) is in that set like any
   other. **Unbound fails open** — deliberately: nothing bound means no agent is
   calling, and the only callers of `dispatch` under `jarvis/` are
-  `Agent._dispatch_one` (reached only from `_run_turn`, after its bind) and
-  `v2/mcp.call_tool`. `tests/dispatch_toolset_check.py` pins that set of call
+  `Agent._dispatch_one` (reached only from `_run_turn`, after its bind),
+  `v2/mcp.call_tool` and `v2/bridge.call` (each binding its list first).
+  `tests/dispatch_toolset_check.py` pins that set of call
   sites by AST and checks a binding at every dispatch across sixteen surfaces;
   **a new caller of `dispatch` must bind a toolset first**, or it runs
   unconfined. Not covered: `jarvis/runtime.py` and `jarvis/agent.py` are not
@@ -2369,8 +2425,10 @@ jarvis/
   turn's toolset being restored when the turn ends. **The surface walk** is
   what makes "unbound fails open" safe: an AST pin that the only `dispatch`
   callers (in `jarvis/`, `longbench/`, `swecompare/`) are
-  `Agent._dispatch_one` (from `_run_turn`, after its bind) and jarvis-mcp's
-  worker, and a probe on every dispatch across sixteen surfaces (CLI,
+  `Agent._dispatch_one` (from `_run_turn`, after its bind), jarvis-mcp's
+  worker and the daemon's jarvis-mcp bridge (each after its own bind; the
+  bridge's ordering is pinned by AST too), and a probe on every dispatch
+  across sixteen surfaces (CLI,
   Discord, the face and its designer included) asserting a toolset was
   bound. Sixteen of its twenty checks fail on 34b6ab2 (the four that pass
   there are the static pin, the deferred pointer, the conversation-surface
