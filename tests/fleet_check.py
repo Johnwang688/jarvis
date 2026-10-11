@@ -81,6 +81,12 @@ class Tracker:
 
 @contextlib.contextmanager
 def bound(tool_names=None, approve=None, stop=None, depth=0):
+    # The bound set is the toolset of the agent that *calls* run_subagent and
+    # run_fleet here, so it holds them: dispatch enforces the caller's toolset
+    # (2026-10-10). Children are intersected with it, and no type carries
+    # either, so adding them changes no child's tools.
+    if tool_names is not None:
+        tool_names = set(tool_names) | {"run_subagent", "run_fleet"}
     token_plan = runtime.bind(
         plan={"text": ""},
         approve=approve if approve is not None else (lambda *a, **k: True),

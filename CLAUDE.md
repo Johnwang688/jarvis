@@ -1124,7 +1124,7 @@ jarvis/
    exactly that and were changed with it. That is the failure mode to watch
    for: it is not an error, it is the mechanism quietly not working.
 
-   Two properties hold it together, and one deliberate non-property:
+   Three properties hold it together:
 
    - **The set is mutable and per-agent, reached through `runtime.py`** — the
      working plan's mechanism, for the working plan's reason. `load_tools`
@@ -1137,22 +1137,64 @@ jarvis/
    - **An agent handed an explicit toolset cannot widen itself.** `loadable()`
      requires the group's core tools to already be in the agent's own set, the
      same intersection rule that stops a workflow reaching the browser through
-     a child.
-   - **It is not a boundary, and the code says so.** A deferred tool stays in
-     `REGISTRY`, so `dispatch` refuses it with a pointer to `load_tools`
-     rather than running it — but that guard **fails open** when no agent
-     context is bound, unlike everything else in `runtime.py`. The reason is
-     correctness, not security: dispatch has always let any agent call any
-     registered tool by name (the approver is the actual gate), and what is
-     genuinely new is that a model guessing a deferred tool's *name* has
-     guessed its *arguments* too. An unbound context is a script or a test,
-     not an agent reaching past its toolset.
+     a child — and since 2026-10-10 that is enforced, not only advertised:
+     `load_tools` refuses a group whose core the caller does not hold, and
+     `_sync_tools` folds in no such group however it reached `loaded_groups`.
+     It had to be: the set `_sync_tools` re-binds is the one dispatch enforces.
+   - **The toolset is enforced at dispatch** (2026-10-10; see *A toolset is a
+     boundary* in Safety design). The bound `tool_names` is the agent's
+     *current* toolset, expansions included, and `dispatch` refuses any tool
+     outside it — as text, before the arguments are read. A deferred tool the
+     agent *could* load (it holds `load_tools` and the group's core) gets the
+     pointer to `load_tools`, because a model guessing a deferred tool's *name*
+     has guessed its *arguments* too; anything else gets "not available to
+     this agent". This paragraph used to say the opposite — "dispatch has
+     always let any agent call any registered tool by name (the approver is
+     the actual gate)" — which was only true while every tool that mattered
+     to a boundary was `dangerous`, and it never was. **Unbound fails open**:
+     no agent context is a script or a test, and no real path dispatches
+     unbound (`tests/dispatch_toolset_check.py` walks them).
 
 ## Safety design (deliberate, do not loosen without asking)
 
 - Tools are **narrow and typed**, not one god-tool, so the harness has
   something to gate on. `run_readonly` (allowlisted binaries, no shell
   operators) vs `run_command` (`dangerous=True`, prompts the user).
+- **A toolset is a boundary, enforced at dispatch — not only by what the
+  request offers** (2026-10-10, `tools._toolset_refusal`). `dispatch` used to
+  look a call up in the global `REGISTRY` and nowhere else, so a model that
+  *named* a tool its agent was never offered reached it: a dangerous one still
+  met the approver, a non-dangerous one simply ran. Found by a reviewer of PR
+  #33 with a scripted v2 fast-path turn whose `write_file` created a file.
+  Every toolset in the codebase was advisory: the fast path's §8.1 "no tool
+  can change anything", a workflow's "no browser" (`browser_*` are not
+  dangerous), a sub-agent's intersection with its parent, an attended task's
+  "no spawning, no desktop", a goal's "no desktop", agent-bench's no-network
+  list and long-bench's `--no-shell`. Worse than "the approver is the gate":
+  under a human-backed gate an ALLOW-verdict command auto-runs, so on main a
+  fleet child of `jarvis chat` — an explorer, which holds no `run_command` —
+  ran `touch` with nobody asked.
+
+  Now `dispatch` refuses any tool outside `runtime.current_tools()` (the same
+  ContextVar sub-agents intersect with), as text keyed to its call id, before
+  the arguments are parsed and before the approver. What binds it: `Agent.
+  _run_turn` from the agent's tool specs at the top of every turn (`run_turn`
+  puts the previous value back when the turn ends, so "bound" means "inside a
+  turn", never "an agent once ran on this thread"), `_sync_tools`
+  on a `load_tools` expansion, `_dispatch_calls`' per-worker `copy_context()`
+  (now load-bearing twice: without it a pool worker would hold an unbound
+  approver, which denies, *and* an unbound toolset, which is not enforced), and
+  jarvis-mcp's worker, which binds the list it exposes. A tool an agent was
+  handed explicitly (PR #33's `EXPLICIT_ONLY` shape) is in that set like any
+  other. **Unbound fails open** — deliberately: nothing bound means no agent is
+  calling, and the only callers of `dispatch` under `jarvis/` are
+  `Agent._dispatch_one` (reached only from `_run_turn`, after its bind) and
+  `v2/mcp.call_tool`. `tests/dispatch_toolset_check.py` pins that set of call
+  sites by AST and checks a binding at every dispatch across sixteen surfaces;
+  **a new caller of `dispatch` must bind a toolset first**, or it runs
+  unconfined. Not covered: `jarvis/runtime.py` and `jarvis/agent.py` are not
+  SELF_PROTECTED, so the binding half of this boundary is editable by an
+  agent with a write tool (the check itself, in `tools/__init__.py`, is).
 - `write_file` enforces **read-before-write** — refuses to clobber a file the
   agent hasn't read this session.
 - Browser: **public internet open, private network closed** (2026-07-31).
@@ -2090,6 +2132,38 @@ jarvis/
   stated in the reply, the mid-tool-call note landing *after* the results, and
   an ordinary reply gaining nothing. Run after touching `run_turn`,
   `_dispatch_calls`, or `PARALLEL_SAFE`.
+- `tests/dispatch_toolset_check.py` — free checks that `dispatch()` enforces
+  the calling agent's toolset (2026-10-10), `llm.chat` scripted per
+  conversation and the world-touching tools (browser, desktop, shell, task
+  spawning, Spotify, the network) replaced by recorders under their own names;
+  HOME and every config path are temp. Each surface against the boundary it
+  claims: a workflow naming `browser_*`, a sub-agent outside its intersection
+  (alone and in a fleet), an attended task naming `task_start`/`desktop_*`, a
+  goal naming `desktop_*`, a v2 fast-path turn naming `write_file`/
+  `edit_file`/`run_command` (nothing written) and a brief's narrower set,
+  agent-bench naming `fetch_page`, and jarvis-mcp binding its list. Then the
+  refusal itself (text keyed to its call id, before argument parsing, the
+  agent's own tools listed, capped), a parallel batch with one refused call,
+  the deferred pointer only for an agent that could load the group, no
+  widening into a group whose core it lacks (`load_tools` and `_sync_tools`),
+  an explicit-only tool for the agent handed it, the unbound decision, and a
+  turn's toolset being restored when the turn ends. **The surface walk** is
+  what makes "unbound fails open" safe: an AST pin that the only `dispatch`
+  callers (in `jarvis/`, `longbench/`, `swecompare/`) are
+  `Agent._dispatch_one` (from `_run_turn`, after its bind) and jarvis-mcp's
+  worker, and a probe on every dispatch across sixteen surfaces (CLI,
+  Discord, the face and its designer included) asserting a toolset was
+  bound. Sixteen of its twenty checks fail on 34b6ab2 (the four that pass
+  there are the static pin, the deferred pointer, the conversation-surface
+  binding and the unbound decision — guards by design); dropping the
+  per-worker `copy_context()`, `load_tools`' core check or `_sync_tools`'
+  core filter in a scratch copy each fails its check. Since dispatch
+  enforces the caller's toolset, **a suite that binds a toolset by hand and
+  then dispatches must hold the tool it calls** (`fleet_check`'s `bound()`
+  adds the spawning tools; `longhorizon_check` binds `run_subagent`). Run
+  after touching `tools._dispatch`, `runtime.py`, `Agent.run_turn`/
+  `_run_turn`/`_sync_tools`/`_dispatch_calls`, `load_tools`, any new caller
+  of `dispatch`, or any surface's toolset.
 - `tests/files_check.py` — free checks for the file and search tools:
   read_file numbered and paged (a 5000-line file reassembled byte-exact by
   paging, which is the `CLAUDE.md` case), edit_file across unique / ambiguous /
@@ -2714,6 +2788,14 @@ Two findings worth keeping:
   behavior depended on which backend OpenRouter routed to.
 
 ## Decisions already made — don't relitigate
+
+- **A toolset is enforced at dispatch, not only by what the request offers
+  (2026-10-10).** An agent's bound toolset is the set it may call; naming a
+  registered tool outside it is refused, dangerous or not. A deferred tool
+  gets the `load_tools` pointer only when the agent could load it. With no
+  agent bound (a script, a test) dispatch does not enforce — every real
+  caller binds first, and a new caller of `dispatch` must too. Details in
+  *A toolset is a boundary* (Safety design).
 
 - **Agents that cannot ask get a typed git tool, not a broader shell
   (2026-10-09).** `git` left `run_readonly`; workflows and sub-agents reach

@@ -451,7 +451,11 @@ def subagent_toolset_checks() -> None:
 
 
 def subagent_depth_checks() -> None:
-    runtime.bind(depth=runtime.MAX_DEPTH, approve=lambda *a: False, should_stop=lambda: False)
+    # The calling agent holds run_subagent: dispatch enforces the caller's
+    # toolset (2026-10-10), so a stale binding from an earlier check would
+    # refuse the call before the depth cap could answer it.
+    runtime.bind(depth=runtime.MAX_DEPTH, approve=lambda *a: False, should_stop=lambda: False,
+                 tool_names={"run_subagent", "read_file"})
     out = tools.dispatch("run_subagent", json.dumps({"task": "recurse"}))
     assert "depth limit" in out.text, out.text
     runtime.bind(depth=0)
@@ -459,7 +463,8 @@ def subagent_depth_checks() -> None:
 
 
 def subagent_cancel_checks() -> None:
-    runtime.bind(depth=0, approve=lambda *a: False, should_stop=lambda: True)
+    runtime.bind(depth=0, approve=lambda *a: False, should_stop=lambda: True,
+                 tool_names={"run_subagent", "read_file"})
     out = tools.dispatch("run_subagent", json.dumps({"task": "anything"}))
     assert "Cancelled" in out.text, out.text
     runtime.bind(should_stop=lambda: False)

@@ -163,34 +163,79 @@ def default_names() -> list[str]:
     return [name for name in REGISTRY if name not in hidden]
 
 
-def _deferred_refusal(name: str) -> str | None:
-    """Why a registered tool should not run for the agent that called it.
+# How many of an agent's own tool names a refusal lists. Enough to correct a
+# guessed or misremembered name; the schemas themselves are already in the
+# request, so listing a hundred names would only re-send the registry.
+REFUSAL_LIST_CAP = 40
 
-    A deferred tool stays in `REGISTRY` — the group only decides which schemas
-    are *sent* — so a model that guesses the name would otherwise reach it. That
-    is worth catching, and the reason is correctness rather than security: this
-    was never a boundary (dispatch has always let any agent call any registered
-    tool by name, with the approver as the actual gate), but a model that
-    guessed the name guessed the arguments too, and a confident call built from
-    an imagined schema fails in ways that read as the tool being broken.
 
-    So it fails **open** when nothing is bound, unlike everything in runtime.py.
-    An unbound context is a direct call from a test or a script, not an agent
-    reaching past its toolset, and refusing there would be a boundary this does
-    not claim to be.
+def _names_listing(names) -> str:
+    ordered = sorted(names)
+    shown = ordered[:REFUSAL_LIST_CAP]
+    text = ", ".join(shown) if shown else "none"
+    if len(ordered) > len(shown):
+        text += f", and {len(ordered) - len(shown)} more (their schemas are in this request)"
+    return text
+
+
+def _toolset_refusal(name: str) -> str | None:
+    """Why a registered tool must not run for the agent that called it, or None.
+
+    **An agent's toolset is enforced here, not only by what the request offers**
+    (2026-10-10). The registry is global — every tool any module registered is
+    in `REGISTRY` — and dispatch used to look a call up there and nowhere else,
+    so a model that simply *named* a tool it was never offered reached it. A
+    dangerous tool still met the approver; a non-dangerous one ran with nothing
+    in the way. That made every toolset in this codebase advisory: the v2 fast
+    path's "no tool can change anything" (a scripted turn wrote a file with
+    `write_file`), a workflow's "no browser" (`browser_*` are not dangerous), a
+    sub-agent's intersection with its parent, an attended task's "no spawning,
+    no desktop", a goal's "no desktop", a bench's pinned set. Each was only true
+    of the schemas *sent*.
+
+    What an agent holds is `runtime.current_tools()`: bound by `Agent.run_turn`
+    from the agent's tool specs at the top of every turn (and put back as it
+    was when the turn ends, so "bound" means "inside a turn"), re-bound by
+    `Agent._sync_tools` when `load_tools` expands it, carried into each parallel
+    worker by `_dispatch_calls`' per-worker `copy_context()`, and bound by
+    jarvis-mcp's worker to the list it exposes. A tool an agent was handed
+    explicitly (one never in `default_names()`) is in that set like any other.
+
+    Two refusals, both text (invariant 4), both before the arguments are read:
+
+      * a tool of a deferred group this agent **could** load — it holds
+        `load_tools` and the group's core — gets the pointer to `load_tools`,
+        because a model that guessed the name guessed the arguments too;
+      * anything else gets "not available to this agent", with the agent's own
+        tool names (capped). No pointer to `load_tools` for an agent that
+        cannot call it or may not widen into that group.
+
+    **Unbound fails open**, and that is a decision, not an oversight: nothing
+    bound means no agent is calling — a test or a script calling `dispatch`
+    directly — so there is no toolset to enforce. It is safe only because no
+    real path dispatches unbound: the only callers of `dispatch` under
+    `jarvis/` are `Agent._dispatch_one` (reached only from `_run_turn`, after
+    its bind) and `v2/mcp.call_tool` (which binds its exposed list first), and
+    `tests/dispatch_toolset_check.py` asserts both halves — that set of call
+    sites, and a binding at every dispatch on every surface it drives. A new
+    caller of `dispatch` must bind a toolset first, or it runs unconfined.
     """
-    group = group_of(name)
-    if group is None:
-        return None
     from .. import runtime
 
-    held = runtime.parent_tools()
+    held = runtime.current_tools()
     if held is None or name in held:
         return None
+    group = group_of(name)
+    if group is not None and "load_tools" in held and group in loadable(held):
+        return (
+            f"Error: {name} belongs to the '{group.name}' tool group, which is not "
+            f"loaded in this conversation. Call load_tools('{group.name}') first — "
+            "its schema comes with it, so calling it now would be guesswork."
+        )
     return (
-        f"Error: {name} belongs to the '{group.name}' tool group, which is not "
-        f"loaded in this conversation. Call load_tools('{group.name}') first — "
-        "its schema comes with it, so calling it now would be guesswork."
+        f"Error: {name} is not available to this agent, so it was not run. "
+        "Use the tools you were given, or say what you need and let the user "
+        f"decide. Your tools: {_names_listing(held)}."
     )
 
 
@@ -359,12 +404,20 @@ def _dispatch(
 ) -> ToolResult:
     entry = REGISTRY.get(name)
     if entry is None:
+        from .. import runtime
+
+        held = runtime.current_tools()
+        if held is not None:
+            return ToolResult(f"Error: no tool named {name!r}. Available: {_names_listing(held)}")
         visible = sorted(default_names())
         return ToolResult(f"Error: no tool named {name!r}. Available: {', '.join(visible)}")
 
-    deferred = _deferred_refusal(name)
-    if deferred is not None:
-        return ToolResult(deferred)
+    # The calling agent's toolset, checked before anything about the call is
+    # read: a tool this agent does not hold must not get as far as parsing its
+    # arguments, let alone the approver. See _toolset_refusal.
+    refused = _toolset_refusal(name)
+    if refused is not None:
+        return ToolResult(refused)
 
     try:
         arguments = json.loads(raw_arguments or "{}")
