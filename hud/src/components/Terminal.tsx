@@ -915,6 +915,8 @@ export class TermManager {
   private ownerOpening: Promise<void> | null = null;
   /** Every create counts, `+` included: an `ownerOpened` that one overtook adds nothing. */
   private creations = 0;
+  /** Every card that goes up counts: an `ownerOpened` a card came between drops its terminal. */
+  private cards = 0;
   /**
    * The terminals this tab has shown (sessionStorage; lib/terminal.ts,
    * MINE_KEY): inherited only by a reload of the page that released them,
@@ -1091,6 +1093,7 @@ export class TermManager {
     if (this.blocked === blocked) return;
     this.blocked = blocked;
     if (blocked) {
+      this.cards++;
       this.confirm = null;
       this.linkMenu = null;
     }
@@ -1178,8 +1181,12 @@ export class TermManager {
     savePrefs(this.prefs);
   }
 
-  /** A new terminal, shown in the panel or in a pane. Null when refused (said in `error`). */
-  async create(spec: InSpec, where: "panel" | PaneNo): Promise<string | null> {
+  /**
+   * A new terminal, shown in the panel or in a pane. Null when refused (said
+   * in `error`). `place`, asked once the daemon has made it: false leaves it
+   * in the list, shown nowhere and opening nothing (`ownerOpened`).
+   */
+  async create(spec: InSpec, where: "panel" | PaneNo, place?: () => boolean): Promise<string | null> {
     if (this.blocked) return null;
     this.creations++;
     this.error = "";
@@ -1195,6 +1202,10 @@ export class TermManager {
     this.claimed.add(row.id);
     saveMine(this.claimed, PAGE);
     this.remember(row.id, spec);
+    if (place && !place()) {
+      this.changed();
+      return row.id;
+    }
     if (where === "panel") {
       this.prefs = { ...this.prefs, active: row.id };
       savePrefs(this.prefs);
@@ -1212,28 +1223,33 @@ export class TermManager {
    * is none — in the panel, or in that pane as its `+` would (the owner's
    * call, 2026-10-11; WP-D had it on Ctrl+` only). Called from those gestures
    * and nothing else: never a page load, a restored layout, a reload or a
-   * reattach. Nothing under a card; nothing unless a listing asked for now
-   * came back (never one already on its way, which may predate a terminal
-   * another window opened); nothing when any terminal is listed — one another
-   * window shows, or one that exited, included: the panel or the picker shows
-   * it instead; nothing if a terminal was opened meanwhile (`+`), or if
-   * `still` says the place no longer wants one (a pane switched away). One at
-   * a time: a gesture while one is on its way adds nothing, so a double-click
-   * or a key repeat opens one. A refusal (six already open) is said in
-   * `error`, as `+` says it.
+   * reattach. Nothing under a card, and nothing once a card has come and
+   * gone since the gesture (answered or not); nothing unless a listing asked
+   * for now came back (never one already on its way, which may predate a
+   * terminal another window opened); nothing when any terminal is listed —
+   * one another window shows, or one that exited, included: the panel or the
+   * picker shows it instead; nothing if a terminal was opened meanwhile
+   * (`+`), or if `still` says the place no longer wants one (the panel was
+   * closed, the pane switched away). `still` and the cards are asked again
+   * once the daemon has made it: if either changed while it was being made,
+   * it stays in the list and nothing opens or moves. One at a time: a gesture
+   * while one is on its way adds nothing. A refusal (six already open) is
+   * said in `error`, as `+` says it.
    */
-  ownerOpened(where: "panel" | PaneNo, still: () => boolean = () => true): Promise<void> {
+  ownerOpened(where: "panel" | PaneNo, still: () => boolean): Promise<void> {
     if (this.blocked) return Promise.resolve();
     if (this.ownerOpening) return this.ownerOpening;
     const made = this.creations;
+    const cards = this.cards;
+    const holds = () => !this.blocked && this.cards === cards && still();
     this.opening = where;
     this.changed();
     this.ownerOpening = (async () => {
       try {
         const listed = await this.freshList();
-        if (!listed || !this.loaded || this.blocked) return;
-        if (this.rows.length > 0 || this.creations !== made || !still()) return;
-        await this.create(this.defaultIn(), where);
+        if (!listed || !this.loaded || !holds()) return;
+        if (this.rows.length > 0 || this.creations !== made) return;
+        await this.create(this.defaultIn(), where, holds);
       } finally {
         this.opening = null;
         this.ownerOpening = null;
