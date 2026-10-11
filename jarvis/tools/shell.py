@@ -176,5 +176,9 @@ def run_command(
     gate_write = protected_state.refused(command)
     if gate_write is not None:
         return f"Refused: {protected_state.refusal(gate_write)}."
+    # The HUD installer, likewise (decision C-1): never Jarvis's to run.
+    installer = protected_state.owner_op(command)
+    if installer:
+        return f"Refused: {installer}."
 
     return _run(command)
