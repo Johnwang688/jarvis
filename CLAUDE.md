@@ -1070,6 +1070,18 @@ the thread's model and effort and record both (each turn's usage record now
 carries `model` and `effort`), or its numbers are not comparable across runs.
 v1 benches are unaffected: `Agent.effort` is `None` there.
 
+**Bench comparability across PR #34 and its follow-up (2026-10-10/11).**
+Before #34 a bench's toolset was only the set of schemas sent. agent-bench's
+no-network list, long-bench's `--no-shell` and cad-bench's pinned set were
+advisory, and a model that named a tool it was not offered still ran it if
+the tool was not dangerous. After #34 such calls are refused. After the
+follow-up, each bench's prompt also stops naming tools it does not hold
+(agent-bench loses the plan, sub-agent, task, session, web and desktop
+paragraphs; `orchestrate` keeps only its workflow tools, with no paragraph
+about them), and cad-bench gains `skill_list`/`skill_read`. **Numbers taken
+before #34 are not comparable with numbers taken after it**, and the
+follow-up moves them again.
+
 ## What this is
 
 A personal agent ("Jarvis") with a **hand-rolled** tool-calling loop, routed
@@ -1280,6 +1292,26 @@ jarvis/
    without `plan_write` never sees the plan block. Never describe a tool the
    model cannot call.
 
+   **That now holds for the system prompt too** (2026-10-11, the owner's
+   answer 5 on #34's follow-up). `config.SYSTEM_PROMPT` is written for the
+   full conversation toolset and names plan_write, run_subagent, task_start,
+   write_file and the rest, which the fast path, workflows, tasks, goals and
+   the benches do not hold. Since #34 each such mention costs a refused step.
+   `config.PROMPT_TOOL_PARAGRAPHS` lists every paragraph that names a tool,
+   keyed by its opening words, with the versions it may take.
+   `config.system_prompt(names)` picks, per paragraph, the first version whose
+   tools are all held, and drops the paragraph when none is.
+   `Agent.__init__` applies it to any prompt that starts with SYSTEM_PROMPT,
+   so no surface needs code of its own. The narrower versions are the
+   original's own sentences, with a sentence or a tool's name taken out. With
+   every tool held, the result is SYSTEM_PROMPT byte for byte (the wording is
+   tuned). A paragraph that names a tool but has no rule fails
+   `tests/prompt_tools_check.py`, so **adding a tool name to the prompt means
+   adding its rule**. Sub-agent types do the same through
+   `AgentType.needs`: a child that lost a tool its brief names to the parent
+   intersection is not sent, and says which. The case was a builder under
+   long-bench, which holds no git tools.
+
    Consequence worth knowing: the block is a real message, so **anything
    counting messages must exclude it** — `tests/longhorizon_check.py` has a
    `_n()` helper for exactly this, because scripts branching on
@@ -1368,9 +1400,13 @@ jarvis/
      this agent". This paragraph used to say the opposite — "dispatch has
      always let any agent call any registered tool by name (the approver is
      the actual gate)" — which was only true while every tool that mattered
-     to a boundary was `dangerous`, and it never was. **Unbound fails open**:
-     no agent context is a script or a test, and no real path dispatches
-     unbound (`tests/dispatch_toolset_check.py` walks them).
+     to a boundary was `dangerous`, and it never was. **Unbound refuses**
+     (2026-10-11; it failed open until then): no real path dispatches unbound
+     (`tests/dispatch_toolset_check.py` walks them), so an unbound dispatch is
+     a bug and runs nothing. Scripts and tests opt in with
+     `runtime.tools_bound(names)` or `runtime.unconfined()`. A group with an
+     **empty core** is refused by `register_group`, `load_tools` and
+     `_sync_tools` alike — an empty core is "held" by every agent.
 
 ## Safety design (deliberate, do not loosen without asking)
 
@@ -1405,16 +1441,42 @@ jarvis/
   jarvis-mcp bridge, which binds the chat session's offered list (WP-1). A
   tool an agent was
   handed explicitly (PR #33's `EXPLICIT_ONLY` shape) is in that set like any
-  other. **Unbound fails open** — deliberately: nothing bound means no agent is
-  calling, and the only callers of `dispatch` under `jarvis/` are
+  other.
+
+  **Unbound refuses** (2026-10-11, the owner's answer 4 on #34's follow-up:
+  "tool fails. go with your recommendation"). It used to fail open: nothing
+  bound meant no agent was calling, so nothing was enforced. That was safe
+  only while no real path dispatched unbound, and a future bug would have
+  quietly handed its caller the whole registry. Now `dispatch` with no toolset
+  bound runs nothing and lists nothing back ("no agent's toolset is bound
+  here"). The only callers of `dispatch` under `jarvis/` are
   `Agent._dispatch_one` (reached only from `_run_turn`, after its bind),
-  `v2/mcp.call_tool` and `v2/bridge.call` (each binding its list first).
-  `tests/dispatch_toolset_check.py` pins that set of call
-  sites by AST and checks a binding at every dispatch across sixteen surfaces;
-  **a new caller of `dispatch` must bind a toolset first**, or it runs
-  unconfined. Not covered: `jarvis/runtime.py` and `jarvis/agent.py` are not
-  SELF_PROTECTED, so the binding half of this boundary is editable by an
-  agent with a write tool (the check itself, in `tools/__init__.py`, is).
+  `v2/mcp.call_tool` and `v2/bridge.call` (each binding its list first), so
+  no real path changed. `tests/dispatch_toolset_check.py` pins that set of
+  call sites by AST — through any alias of the tools package or the function,
+  relative and star imports, the dotted path, an uncalled reference and
+  `getattr` — checks those two bind before they call, and checks a binding at
+  every dispatch across sixteen surfaces. **A new caller of `dispatch` must
+  bind a toolset first, or every call it makes is refused.**
+
+  Scripts and tests that call `dispatch` themselves opt in, in code:
+  `runtime.tools_bound(names)` binds exactly the tools they call (and puts the
+  old binding back), and `runtime.unconfined()` — for the rare script that
+  really means "every tool" — lets an unbound dispatch run anything
+  registered. Unconfined is a ContextVar that only that context manager sets.
+  It is not an env var, a file or an argument, so nothing a model writes
+  reaches it, and nothing under `jarvis/`, `longbench/` or `swecompare/` names
+  it (the walk pins that). It changes only the unbound case: a toolset bound
+  inside the block, an agent's turn included, is enforced as ever. It does not
+  follow a new thread. The ~20 free suites that dispatch directly each wrap
+  their run in `tools_bound({...})`, listing what they call.
+
+  Not covered: `jarvis/runtime.py` and `jarvis/agent.py` are not
+  SELF_PROTECTED (the owner declined it, 2026-10-11), so the binding half of
+  this boundary, and the opt-out, are editable by an agent with a write tool.
+  The check itself, in `tools/__init__.py`, is protected. An unknown tool name
+  is echoed as a capped `repr` (`NAME_ECHO_CAP`, 64): it is the model's own
+  text, and a 50,000-character name used to come back whole.
 - `write_file` enforces **read-before-write** — refuses to clobber a file the
   agent hasn't read this session.
 - Browser: **public internet open, private network closed** (2026-07-31).
@@ -2369,26 +2431,58 @@ jarvis/
   agent's own tools listed, capped), a parallel batch with one refused call,
   the deferred pointer only for an agent that could load the group, no
   widening into a group whose core it lacks (`load_tools` and `_sync_tools`),
-  an explicit-only tool for the agent handed it, the unbound decision, and a
-  turn's toolset being restored when the turn ends. **The surface walk** is
-  what makes "unbound fails open" safe: an AST pin that the only `dispatch`
+  an explicit-only tool for the agent handed it, and a turn's toolset being
+  restored when the turn ends, including a turn that raises (M7) and a group
+  loaded in one turn and used in the next (M12). Since 2026-10-11: **unbound
+  refuses** (nothing runs, nothing listed); the opt-ins (`tools_bound` holds a
+  script to its set and restores; `unconfined` runs anything only while nothing
+  is bound, on its own thread, inside the block); an unknown name echoed
+  capped and escaped; and an empty-core group refused by `register_group` and
+  widening nothing through `load_tools` or `_sync_tools`. **The surface walk**
+  is why "unbound refuses" costs no real path: an AST pin that the only `dispatch`
   callers (in `jarvis/`, `longbench/`, `swecompare/`) are
   `Agent._dispatch_one` (from `_run_turn`, after its bind), jarvis-mcp's
   worker and the daemon's jarvis-mcp bridge (each after its own bind; the
   bridge's ordering is pinned by AST too), and a probe on every dispatch
   across sixteen surfaces (CLI,
   Discord, the face and its designer included) asserting a toolset was
-  bound. Sixteen of its twenty checks fail on 34b6ab2 (the four that pass
-  there are the static pin, the deferred pointer, the conversation-surface
-  binding and the unbound decision — guards by design); dropping the
-  per-worker `copy_context()`, `load_tools`' core check or `_sync_tools`'
-  core filter in a scratch copy each fails its check. Since dispatch
-  enforces the caller's toolset, **a suite that binds a toolset by hand and
-  then dispatches must hold the tool it calls** (`fleet_check`'s `bound()`
-  adds the spawning tools; `longhorizon_check` binds `run_subagent`). Run
+  bound. The walk resolves aliases (`import jarvis.tools as t`, `from
+  ..tools import dispatch as d`, a star import, `jarvis.tools.dispatch`,
+  `getattr(tools, "dispatch")`, an uncalled reference). Its first version
+  followed only `tools.dispatch(...)`, and `walker_checks` runs it on each of
+  those spellings. It also pins that no product code names `unconfined`.
+  Sixteen of its first twenty checks failed on 34b6ab2. On the
+  follow-up's base, the unbound, opt-in, unknown-name and empty-core checks
+  fail. M7, M12 and the walker were shown to bite in a scratch copy, as were
+  dropping the per-worker `copy_context()`, `load_tools`' core check or
+  `_sync_tools`' core filter. Since dispatch enforces the caller's toolset, and
+  refuses with none, **a suite that dispatches directly binds what it calls**:
+  most wrap `main()` in `runtime.tools_bound({...})`, `fleet_check`'s
+  `bound()` adds the spawning tools, and `longhorizon_check` binds
+  `run_subagent`. Run
   after touching `tools._dispatch`, `runtime.py`, `Agent.run_turn`/
   `_run_turn`/`_sync_tools`/`_dispatch_calls`, `load_tools`, any new caller
   of `dispatch`, or any surface's toolset.
+- `tests/prompt_tools_check.py` — free checks that every surface's prompt
+  names only tools it holds (2026-10-11), `llm.chat` answering at once and
+  every config path temp. Each agent is the one its surface really builds,
+  through its own start path: the CLI, Discord, the face's voice agent and
+  designer, the v2 fast path, a workflow, an attended task, a goal,
+  agent-bench's five tasks, cad-bench, long-bench (shell and no-shell),
+  vocab-bench, and every sub-agent type under every parent that can spawn one.
+  The working-context block is rendered with something in every index (a
+  skill, a session, a task, a plan, an available group). Also checked: the
+  owner's named cases (the fast path names none of task_start, workflow_start,
+  plan_write, run_subagent, write_file; tasks, goals and workflows no
+  task_start) and what narrowing keeps (the fast path still gets the
+  untrusted-content rule and its fence; a no-web bench gets the rule without
+  the fence). `config.system_prompt` with every tool held is SYSTEM_PROMPT byte
+  for byte, every tool-naming paragraph has exactly one rule, and no version
+  names a tool it does not need. Each type's brief names only its `needs`, and
+  a type that would lose one is not sent. Against origin/main every
+  non-conversation surface but vocab-bench fails. Run after touching
+  `config.SYSTEM_PROMPT` or `PROMPT_TOOL_PARAGRAPHS`, a surface's prompt
+  suffix or toolset, an agent type's brief, or `Agent.__init__`.
 - `tests/files_check.py` — free checks for the file and search tools:
   read_file numbered and paged (a 5000-line file reassembled byte-exact by
   paging, which is the `CLAUDE.md` case), edit_file across unique / ambiguous /
@@ -2465,6 +2559,9 @@ jarvis/
   fixture's own work must earn the agent nothing), every task surviving a
   run cut short (0/1 turns), the bench assembly deleted even when the run
   blows up, and part resolution stripping Onshape's invisible LRM marks.
+  Since 2026-10-11 it also checks that the bench's agent holds `skill_list`
+  and `skill_read`, that its context lists the cad skill, and that
+  `skill_read('cad')` runs for it. That check fails on the commit before.
   Run after touching `jarvis/cadbench.py`.
 - `tests/avatars_check.py` — free synthetic checks for avatars: the SVG
   sanitizer against a hostile file (script, `onload`, `foreignObject` drawing
@@ -3017,10 +3114,17 @@ Two findings worth keeping:
 - **A toolset is enforced at dispatch, not only by what the request offers
   (2026-10-10).** An agent's bound toolset is the set it may call; naming a
   registered tool outside it is refused, dangerous or not. A deferred tool
-  gets the `load_tools` pointer only when the agent could load it. With no
-  agent bound (a script, a test) dispatch does not enforce — every real
-  caller binds first, and a new caller of `dispatch` must too. Details in
-  *A toolset is a boundary* (Safety design).
+  gets the `load_tools` pointer only when the agent could load it. **With no
+  toolset bound, dispatch refuses** (2026-10-11, owner's answer 4). Every
+  real caller binds first, and a new caller of `dispatch` must too. Scripts
+  and tests opt in with `runtime.tools_bound(names)` or
+  `runtime.unconfined()`, in code only. Details in *A toolset is a boundary*
+  (Safety design).
+- **Each agent's prompt names only the tools it holds (2026-10-11, owner's
+  answer 5).** `config.system_prompt(names)` narrows SYSTEM_PROMPT paragraph
+  by paragraph (invariant 7). cad-bench holds `skill_list` and `skill_read`,
+  so the CAD skill it measures can load. runtime.py and toolgroups.py are
+  **not** SELF_PROTECTED: the owner declined it (answer 3).
 
 - **Agents that cannot ask get a typed git tool, not a broader shell
   (2026-10-09).** `git` left `run_readonly`; workflows and sub-agents reach
