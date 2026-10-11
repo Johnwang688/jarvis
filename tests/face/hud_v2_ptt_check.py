@@ -30,8 +30,17 @@ nothing of the HUD's and Space is push-to-talk):
   - Space never starts the mic: in the box, on the page, a pane header, a
     separator, and in Monaco — where it used to start the mic and the space
     never appeared;
-  - Monaco's next-match command works on Ctrl+Shift+D, and the Ctrl+K chord on
-    Ctrl+K Ctrl+Shift+D.
+  - Monaco's next-match command works on Ctrl+Shift+D.
+
+The review of PR #40 added, each shown to fail on 6bc1789 (or with the fix
+taken out in a scratch copy):
+  - an aborted click on AUTHORIZE or ALWAYS (pressed, slid off) leaves no focus
+    there, so a Space or Enter after it authorizes nothing;
+  - the folded mic's mode cycle, clicked, does not cycle again on a Space;
+  - the first Space outside a typing target says once that push-to-talk is
+    Ctrl+D now;
+  - Ctrl+K then Ctrl+D in Monaco leaves no chord waiting to swallow a key;
+  - a Ctrl+D the window takes reaches no listener after its capture phase.
 """
 from __future__ import annotations
 
