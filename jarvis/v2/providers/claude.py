@@ -846,15 +846,24 @@ class ClaudeProvider:
         return Decision.DENY
 
     def answer(self, h: SessionHandle, req_id: str, decision: Decision | str) -> None:
-        """Resolve a question this session is blocked on, out of band."""
+        """Withdraw a permission this session is blocked on, out of band.
+
+        Only a DENY. A yes comes from `permit` — the broker, whose card only
+        the owner answers (BR-0) — never from here: `POST /threads/<id>/answer`
+        reaches this method from any client of the API listener, and an ALLOW
+        here used to beat a card the owner had not answered. The Codex
+        provider has always refused it the same way.
+        """
         session = _native(h)
         with session.mutex:
             pending = session.pending.get(req_id)
             if pending is None or pending.ready.is_set():
                 raise ValueError(f"Unknown or resolved Claude request id: {req_id}")
-            if isinstance(decision, str) and not isinstance(decision, Decision):
-                decision = Decision(decision)
-            pending.value = Decision(decision)
+            decision = Decision(decision)
+            if decision is not Decision.DENY:
+                raise ValueError("A Claude tool use is decided by the approval broker; "
+                                 "answer() can only deny it")
+            pending.value = decision
             pending.ready.set()
 
     # -- the turn

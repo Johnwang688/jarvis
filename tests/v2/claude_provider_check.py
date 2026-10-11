@@ -1134,6 +1134,36 @@ def answer_checks() -> None:
             check(True, "a spent request id is dead")
         provider.close(handle)
 
+    # BR-0: an out-of-band answer may only withdraw. The broker's card is the
+    # one place a yes comes from; `POST /threads/<id>/answer` on the API
+    # listener reaches this method, and on a49423c its ALLOW beat the card the
+    # owner had not answered yet (the Codex provider already refused it).
+    released = threading.Event()
+    asked = threading.Event()
+    with fake([Hook("Bash", {"command": "git push origin main"}), result_message()]):
+        handle = provider.start(thread("t-oob"), brief(), lambda *a: (asked.set(), released.wait(10),
+                                                                       Decision.DENY)[-1])
+        stream = provider.send(handle, UserMessage(text="go"))
+        next(stream)  # turn_started
+        request = next(stream)  # approval_requested
+        check(asked.wait(5), "the broker is asking the owner")
+        refused = []
+        for decision in (Decision.ALLOW, "allow"):
+            try:
+                provider.answer(handle, request.data["req_id"], decision)
+            except ValueError:
+                refused.append(decision)
+        eq(len(refused), 2, "an out-of-band ALLOW is refused, as the Codex provider refuses it")
+        released.set()  # the owner (the broker) says no
+        rest = list(stream)
+        resolved = [e for e in rest if e.kind is EventKind.APPROVAL_RESOLVED][0]
+        eq(resolved.data["decision"], "deny", "the broker's answer stands")
+        # (On a49423c the hook got `{}`: under AUTO an ALLOW hands the call to
+        # Claude Code's own classifier, with the owner's card still open.)
+        out = FakeClient.instances[-1].hook_results[0].get("hookSpecificOutput", {})
+        eq(out.get("permissionDecision"), "deny", "...and is what reaches the hook")
+        provider.close(handle)
+
 
 # --- the escape hatch -------------------------------------------------------
 
