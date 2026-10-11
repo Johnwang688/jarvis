@@ -36,6 +36,13 @@ The checks worth keeping, each written to bite:
     away — its own tabs, Open beside, a sidebar thread, a task, New thread —
     and says why.
 
+Eight panes (WP-G1, docs/plans/2026-10-10-hud-split-panes-plan.md §3.8):
+eight chat panes on eight threads in a 4×2 grid, each drawing only its own
+transcript; a turn in pane 7 draws only there; Stop in pane 8 interrupts pane
+8's thread and leaves pane 7's running; a click selects pane 6 and voice lands
+in pane 6's box. (With `PANE_NOS` left at four, panes 5–8 never mount or
+route, and every one of these fails.)
+
 Review of PR #27 — words or a transcript attached to the wrong thread; each
 of these failed on dbd2096:
   - words handed back while a hidden pane held their thread, and a draft
@@ -108,7 +115,9 @@ def multichat_checks(browser, mock, base, check, until, guard, init_script):
                         _w6_grid_checks, _w6_fallback_checks, _w6_one_and_none_checks, _w6_handback_held_checks,
                         # re-review of PR #27 (feb61ff)
                         _rr_compose_fail_moved_checks, _rr_two_cards_checks, _rr_tab_never_authorizes_checks,
-                        _rr_placeholder_stop_checks, _rr_chip_writeback_checks, _rr_drop_checks):
+                        _rr_placeholder_stop_checks, _rr_chip_writeback_checks, _rr_drop_checks,
+                        # eight panes (WP-G1)
+                        _eight_chats_checks):
             try:
                 section(page, mock, check, until)
             except Exception as e:  # a section that cannot run is a failure, and the rest still run
@@ -1598,6 +1607,99 @@ def _rr_drop_checks(page, mock, check, until):
           bool(until(lambda: [f["name"] for f in _chat(page, 1)["files"]] == ["for-t1.txt"], timeout=2)),
           str([f["name"] for f in _chat(page, 1)["files"]]))
     _unstage(page, 1)
+
+# ---------------------------------------------------------------------------
+# eight panes (WP-G1)
+
+EIGHT = json.dumps({"preset": "grid8", "focused": 1, "panes": [{"view": "chat"} for _ in range(8)]})
+EIGHT_THREADS = {1: ("t1", "p1"), 2: ("t2", "p1"), 3: ("t3", "p2"), 4: ("t4", "p1"), 5: ("t5", "p1"),
+                 6: ("t6", "p1"), 7: ("t7", "p1"), 8: ("t8", "p1")}
+
+
+def _seed_eight(mock):
+    """Five more chat threads in jarvis, t4 … t8, each with a transcript of its own."""
+    w = mock.world
+    base = next(t for t in w["threads"] if t["id"] == "t1")
+    for n in range(4, 9):
+        tid = f"t{n}"
+        if any(t["id"] == tid for t in w["threads"]):
+            continue
+        w["threads"].append({**base, "id": tid, "title": f"chat number {n}", "model": None,
+                             "updated": f"2026-09-0{n}T00:00:00+00:00"})
+        w["transcripts"][tid] = [
+            {"role": "user", "text": f"question for pane {n}", "at": f"2026-09-0{n}T00:00:00+00:00"},
+            {"role": "assistant", "text": f"answer from thread {n}", "at": f"2026-09-0{n}T00:00:01+00:00"},
+        ]
+
+
+def _eight_chats_checks(page, mock, check, until):
+    _seed_eight(mock)
+    _fresh(page, mock, until, EIGHT, size=(1920, 1080))
+    ws = '[data-testid="workspace"]'
+    check("setup: 4×2 at 1920x1080, eight chat panes drawn, each with its own box",
+          _attr(page, ws, "data-drawn-preset") == "grid8"
+          and all(_visible(page, _pane(n)) and _attr(page, _pane(n), "data-view") == "chat" for n in range(1, 9))
+          and all(_box(page, n).count() == 1 for n in range(1, 9)))
+    for n, (tid, project) in EIGHT_THREADS.items():
+        _open(page, until, n, tid, project)
+    c = _chats(page)
+    check("eight panes on eight threads: the store holds one conversation per pane",
+          [c[str(n)]["threadId"] for n in range(1, 9)] == [EIGHT_THREADS[n][0] for n in range(1, 9)],
+          str([c[str(n)]["threadId"] for n in range(1, 9)]))
+    logs = {n: _log(page, n) for n in range(4, 9)}
+    check("each of panes 4–8 draws its own thread's transcript and no other's",
+          all(f"question for pane {n}" in logs[n] and all(f"pane {m}" not in logs[n] for m in range(4, 9) if m != n)
+              for n in range(4, 9)), str({n: v[:40] for n, v in logs.items()}))
+    rows = page.locator('[data-testid="sidebar"] [data-pane]')
+    marked = sorted(r.get_attribute("data-pane") for r in rows.all())
+    check("the sidebar marks all eight open threads, each with its pane",
+          marked == [str(n) for n in range(1, 9)], str(marked))
+
+    stop = {n: page.locator(_pane(n, '[data-testid="stop"]')) for n in range(1, 9)}
+    mock.emit("turn_started", {}, thread_id="t7")
+    until(lambda: _chat(page, 7)["busy"], timeout=3)
+    mock.emit("text_delta", {"text": "seven is working"}, thread_id="t7")
+    until(lambda: page.locator(_pane(7, '[data-testid="draft"]')).count() > 0, timeout=3)
+    check("a turn in pane 7's thread draws only in pane 7: its draft and its Stop",
+          "seven is working" in page.locator(_pane(7, '[data-testid="draft"]')).inner_text()
+          and all(page.locator(_pane(n, '[data-testid="draft"]')).count() == 0 for n in range(1, 9) if n != 7)
+          and stop[7].count() == 1 and all(stop[n].count() == 0 for n in range(1, 9) if n != 7)
+          and all(not _chat(page, n)["busy"] for n in range(1, 9) if n != 7))
+    mock.emit("tool_started", {"call_id": "c7", "name": "pytest"}, thread_id="t7")
+    until(lambda: page.locator(_pane(7, '[data-testid="op"]')).count() > 0, timeout=3)
+    check("and its tool call ticks in pane 7 only",
+          all(page.locator(_pane(n, '[data-testid="op"]')).count() == 0 for n in range(1, 9) if n != 7))
+
+    mock.emit("turn_started", {}, thread_id="t8")
+    until(lambda: _chat(page, 8)["busy"], timeout=3)
+    until(lambda: stop[8].count() == 1, timeout=2)
+    i7, i8 = len(mock.sent("POST", "/threads/t7/interrupt")), len(mock.sent("POST", "/threads/t8/interrupt"))
+    stop[8].click()
+    until(lambda: len(mock.sent("POST", "/threads/t8/interrupt")) > i8, timeout=3)
+    time.sleep(0.2)
+    check("Stop in pane 8 interrupts pane 8's thread", len(mock.sent("POST", "/threads/t8/interrupt")) == i8 + 1)
+    check("and leaves pane 7's running, its Stop still there",
+          len(mock.sent("POST", "/threads/t7/interrupt")) == i7 and _chat(page, 7)["busy"] and stop[7].count() == 1)
+    mock.emit("turn_finished", {"stop": "interrupted"}, thread_id="t8")
+    until(lambda: not _chat(page, 8)["busy"], timeout=3)
+    check("pane 8's finish frees pane 8 and only pane 8", _chat(page, 7)["busy"] and stop[7].count() == 1)
+
+    page.locator(_pane(6, '[data-testid="log"]')).click()
+    until(lambda: _sel(page) == 6, timeout=2)
+    check("a click in pane 6 makes it the selected chat: its mark, its mic",
+          _sel(page) == 6 and _attr(page, _pane(6), "data-selected") == "true"
+          and page.locator('[data-testid="pane-6-mic"]').count() == 1
+          and page.locator('[data-testid$="-mic"][data-testid^="pane-"]').count() == 1)
+    page.evaluate(UTTERANCE)
+    check("voice lands in pane 6's box (REVIEW), while pane 7's turn runs",
+          bool(until(lambda: "what is the weather" in _box(page, 6).input_value(), timeout=5))
+          and all(_box(page, n).input_value() == "" for n in range(1, 9) if n != 6),
+          _box(page, 6).input_value())
+    _box(page, 6).fill("")
+    mock.emit("turn_finished", {"stop": "end"}, thread_id="t7")
+    until(lambda: not _chat(page, 7)["busy"], timeout=3)
+    page.evaluate("window.__hud.capture.closeFollowUp()")
+
 
 # ---------------------------------------------------------------------------
 
