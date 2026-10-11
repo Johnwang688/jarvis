@@ -109,11 +109,19 @@ export interface LayoutControl {
   incarnation: Readonly<Partial<Record<PaneNo, number>>>;
 }
 
-/** Focus pane `pane` (an id) for the keyboard: its message box when it has one, else the pane itself. */
-export function focusPaneElement(pane: PaneNo) {
+/**
+ * Focus pane `pane` (an id) for the keyboard: its message box when it has
+ * one, else the pane itself. A pane a split just made may not be drawn yet
+ * when the change came from outside a React event (a socket, a timer): it
+ * is looked for again for a few frames (review of PR #47).
+ */
+export function focusPaneElement(pane: PaneNo, frames = 10) {
   requestAnimationFrame(() => {
     const el = document.querySelector<HTMLElement>(`[data-testid="pane-${pane}"]`);
-    if (!el) return;
+    if (!el || el.offsetParent === null) {
+      if (frames > 0) focusPaneElement(pane, frames - 1);
+      return;
+    }
     const box = el.querySelector<HTMLElement>('[data-testid="input"]');
     (box && !(box as HTMLTextAreaElement).disabled ? box : el).focus();
   });

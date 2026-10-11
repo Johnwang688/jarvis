@@ -1213,8 +1213,8 @@ export class TermManager {
    * in `error`). `place`, asked once the daemon has made it: false leaves it
    * in the list, shown nowhere and opening nothing (`ownerOpened`).
    * `readable: false` (a split of a terminal Jarvis may not read, WP-G2): the
-   * switch is turned off before the terminal is shown anywhere — a copy never
-   * widens what Jarvis can read.
+   * daemon makes it with the switch off — a copy never widens what Jarvis
+   * can read, not even for a round trip.
    */
   async create(
     spec: InSpec, where: "panel" | PaneNo, place?: () => boolean, opts: { readable?: boolean } = {},
@@ -1224,22 +1224,13 @@ export class TermManager {
     this.error = "";
     let row: TerminalRow;
     try {
-      row = await api.createTerminal({ in: spec });
+      // Unreadable from its first byte: the daemon makes it with the switch
+      // off (review of PR #47), never readable for a round trip.
+      row = await api.createTerminal({ in: spec, ...(opts.readable === false ? { readable: false } : {}) });
     } catch (e: any) {
       this.error = e?.message || "the terminal could not be opened";
       this.changed();
       return null;
-    }
-    if (opts.readable === false) {
-      try {
-        row = (await api.setTerminalReadable(row.id, false)) ?? { ...row, readable: false };
-      } catch (e: any) {
-        // Readable when its source is not: it is closed again, never shown.
-        void api.closeTerminal(row.id).catch(() => {});
-        this.error = `the copy was closed: Jarvis could not be kept from reading it (${e?.message || "the switch could not be changed"})`;
-        this.changed();
-        return null;
-      }
     }
     this.updateRow(row);
     this.claimed.add(row.id);

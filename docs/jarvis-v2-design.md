@@ -2497,17 +2497,25 @@ default, and an id a later split reuses mounts fresh.
   diff (S-7); a preview, the same URL, judged again, never the keep-origin
   grant; a terminal, a new shell in the folder the source was opened in
   (S-6), unreadable to Jarvis if the source is — switched off before it is
-  ever shown. Split is refused at eight, when the next shape would not be
-  drawn whole in this window (at 1280×800, six cannot become seven), and
-  when the only ids left are hidden panes holding unsaved edits.
+  ever shown (`POST /terminals` takes `readable`). Split is refused at
+  eight, when the next shape would not be drawn whole in this window (at
+  1280×800, six cannot become seven), and when the only ids left are hidden
+  panes holding unsaved edits. A split takes a free id first, then an empty
+  hidden pane, then one whose compose row holds unsent words, which wait for
+  the next new thread; a stored pre-G1 workspace's panes 2–4 count as
+  hidden, so a split never writes over them.
 - **What × keeps**: a thread's turn keeps running, its sidebar dot stays,
   and the pane that next opens that thread has its Stop; words in its box and
   words a Stop handed back wait for the thread; a composing chat's unsent
   words and a File pane's unsaved edit — one no other pane holds — are asked
   about first, inline, never in a modal (for an edit: Save / Don't save /
-  Cancel, as closing the last tab on one asks); a terminal goes back to the panel, alive, attached, as the
-  selected tab. Focus goes to the pane now in that slot — or, when the
-  selected chat closes, to the chat selected before it — never the page.
+  Cancel, as closing the last tab on one asks; the question goes when it no
+  longer holds); a terminal goes back to the panel, alive, attached, as the
+  selected tab. A compose pane closed while its first message opens the
+  thread leaves that turn for the pane that opens the thread next, Stop and
+  all. Focus goes where the mic is: the selected chat while it is still
+  drawn, else the chat selected before it, else the pane now in that slot —
+  never the page, and never a chat that merely slid into the closed slot.
   One click closes one pane, even when a double-click's second click lands
   on the × that moved under the pointer.
 - **Nothing assumes pane 1**: after it is closed, the window's chat falls

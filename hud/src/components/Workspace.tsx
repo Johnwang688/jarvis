@@ -189,6 +189,13 @@ export function Workspace(props: {
     if (!asking) return;
     document.querySelector<HTMLElement>(`[data-testid="pane-${asking.pane}-close-keep"]`)?.focus({ preventScroll: true });
   }, [asking]);
+  // A question about what the pane no longer holds is not left standing
+  // (review of PR #47): the pane switched to a File with an edit, the words
+  // were sent — "Discard and close" must never answer a question nobody asked.
+  const question = asking ? props.closeQuestion?.(asking.pane) ?? null : null;
+  useEffect(() => {
+    if (asking && question !== asking.question) setAsking(null);
+  }, [asking, question]);
   /** Split and × are buttons: Space and Enter press them and go no further; a held Enter presses once. */
   const buttonKeys = {
     onKeyDown: (e: React.KeyboardEvent) => {
@@ -376,12 +383,16 @@ export function Workspace(props: {
                   ) : null}
                   <button type="button" data-testid={`pane-${n}-close-discard`} disabled={props.blocked}
                           onClick={() => {
-                            if (!props.blocked) closeNow(n);
+                            // Asked again at the click: only the question shown is answered.
+                            if (props.blocked || (props.closeQuestion?.(n) ?? null) !== asking.question) return;
+                            closeNow(n);
                           }}
                           {...buttonKeys}>
                     {asking.save ? "Don't save" : "Discard and close"}
                   </button>
-                  <button type="button" data-testid={`pane-${n}-close-keep`} disabled={props.blocked}
+                  {/* Not disabled under a card (the veil makes it inert): a disabled button drops
+                      focus to the page before the card can record it, so focus could not come back. */}
+                  <button type="button" data-testid={`pane-${n}-close-keep`}
                           onClick={() => setAsking(null)} {...buttonKeys}>
                     {asking.save ? "Cancel" : "Keep"}
                   </button>

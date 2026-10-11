@@ -653,11 +653,12 @@ describe("a stored WP-A or WP-B workspace: no order, no kept", () => {
     }
   });
 
-  it("reads as ids 1…n, nothing kept, the other specs as stored", () => {
+  it("reads as ids 1…n, the stored panes it did not draw kept, the other specs as stored", () => {
     for (const p of Object.keys(LEGACY_CUSTOM) as Preset[]) {
       const w = parseWorkspace(JSON.stringify({ preset: p, panes: [{ view: "diff" }, { view: "file" }] }));
       expect(w.order, p).toEqual(PANE_NOS.slice(0, SHAPES[p].panes));
-      expect(w.kept, p).toEqual([]);
+      // Two panes stored: pane 2 is kept when the preset does not draw it (review of PR #47).
+      expect(w.kept, p).toEqual(SHAPES[p].panes < 2 ? [2] : []);
       expect(w.panes.map((x) => x.view), p)
         .toEqual(["diff", "file", "file", "task", "chat", "chat", "chat", "chat"]);
     }
@@ -668,6 +669,15 @@ describe("a stored WP-A or WP-B workspace: no order, no kept", () => {
     const four = setPreset(one, "grid4");
     expect(four.order).toEqual([1, 2, 3, 4]);
     expect(four.panes.slice(0, 4).map((x) => x.view)).toEqual(["chat", "diff", "terminal", "file"]);
+    // A split never writes over them (review of PR #47, L4): they are kept, so it takes a free id.
+    expect(one.kept).toEqual([2, 3, 4]);
+    expect(allocate(one)).toBe(5);
+    const two = splitPane(one, 1, allocate(one)!, { view: "chat", projectId: null, terminalId: null });
+    expect(two.order).toEqual([1, 5]);
+    expect(two.panes.slice(1, 4).map((x) => x.view)).toEqual(["diff", "terminal", "file"]);
+    expect(two.panes[2].terminalId).toBe("t-1");
+    // A value that says what it keeps is read as it says, and so is one with only a bad order.
+    expect(parseWorkspace(JSON.stringify({ preset: "single", order: [1], kept: [], panes: one.panes })).kept).toEqual([]);
   });
 });
 
@@ -1151,6 +1161,12 @@ describe("split and close (WP-G2, plan §3.4–§3.6)", () => {
     expect(allocate(one)).toBe(8);
     expect(allocate(one, [8])).toBe(7);
     expect(allocate(one, [2, 3, 4, 5, 6, 7, 8])).toBeNull();
+    // A hidden compose row's unsent words can be parked for the next new
+    // thread, an unsaved edit cannot: the empty hidden panes go first, then
+    // the ones holding words (review of PR #47, H1), never a dirty one.
+    expect(allocate(one, [], [8, 7])).toBe(6);
+    expect(allocate(one, [6], [2, 3, 4, 5, 7, 8])).toBe(8);
+    expect(allocate(one, [2, 3, 4, 5, 6], [7, 8])).toBe(8);
     // A hidden pane a split takes back leaves `kept` and shows the copy.
     const took = splitPane(one, 1, 8, chat());
     expect(took.kept).toEqual([2, 3, 4, 5, 6, 7]);

@@ -69,7 +69,8 @@ import {
 } from "./lib/workspace";
 import { ActivitySync, clearsOnRead } from "./lib/activity";
 import {
-  besideTarget, chatProjectId, chatTarget, composeRows, draftKey, drawnShowing, eitherPane, giveBackPane, heldElsewhere,
+  ORPHAN_DRAFT, besideTarget, chatProjectId, chatTarget, composeRows, draftKey, drawnShowing, eitherPane, giveBackPane,
+  heldElsewhere,
   isEmptyChat, nonePerPane, openRows, routeEvent, runningHere, selectedChatOf, shownThread,
 } from "./lib/chats";
 import { useStableHandlers, useStableValue } from "./lib/stable";
@@ -592,6 +593,12 @@ export default function App() {
           dispatch({ type: "mark", local, patch: { mark: undefined } });
           onPane(conversation, { busy: true, turnThreadId: threadId, orb: "thinking", status: "THINKING" });
         }
+        // A first send whose pane was closed while the thread opened (review
+        // of PR #47, M2): nothing tracks or shows the turn now running, so it
+        // is left loose — the pane that opens the thread next has its Stop.
+        if (!steering && status === "started" && turn() === null) {
+          dispatch({ type: "loose", threadId, status: "THINKING" });
+        }
         if (projectId) saveLastProject(projectId);
         if (!chat.threadId) {
           // The compose row becomes the thread — in the pane that still holds
@@ -620,12 +627,19 @@ export default function App() {
         dispatch({ type: "unmessage", local });
         // A first send whose compose row no pane holds any more (the owner
         // opened another thread there meanwhile): its words are parked under
-        // that row, never put in a box showing another thread.
+        // that row, never put in a box showing another thread. A pane that
+        // was closed meanwhile has no next new thread: they wait for the next
+        // one anywhere (review of PR #47).
         const back = conversation();
-        const parkKey = !threadId && back === null ? `compose:${pane}` : null;
+        const { ws } = layoutNow.current;
+        const closed = !ws.order.includes(pane) && !ws.kept.includes(pane);
+        const parkKey = !threadId && back === null ? (closed ? ORPHAN_DRAFT : `compose:${pane}`) : null;
         const went = giveBack(threadId, text, attachments, back, parkKey);
         const error = `Could not send: ${e.message}`
-          + (went === "parked" ? " — what you wrote is kept for the next new thread in this pane." : "");
+          + (went === "parked"
+            ? (closed ? " — what you wrote is kept for the next new thread you start."
+              : " — what you wrote is kept for the next new thread in this pane.")
+            : "");
         if (steering) {
           // A refused steer leaves the running turn as it was: still tracked,
           // still stoppable.
@@ -701,8 +715,12 @@ export default function App() {
       return;
     }
     dispatch({ type: "patch", patch: { threads } });
+    // A loose turn is over once its thread says so — or is no longer listed
+    // (archived or deleted: `GET /threads` hides it, and the 15 s poll would
+    // otherwise run for good; review of PR #47).
     for (const id of loose) {
-      if (threads.find((t) => t.id === id)?.running === false) dispatch({ type: "turn_over", threadId: id });
+      const record = threads.find((t) => t.id === id);
+      if (!record || record.running === false) dispatch({ type: "turn_over", threadId: id });
     }
     for (const n of PANE_NOS) {
       const turn = turns[n];
@@ -1236,12 +1254,12 @@ export default function App() {
       return;
     }
     if (beside) {
-      const to = besideTarget(lay.ws, lay.fit.panes, dirtyIds());
+      const to = besideTarget(lay.ws, lay.fit.panes, dirtyIds(), holdingIds());
       if (to.source !== undefined) {
         // From one pane, or the right of two columns: a split, the thread's
         // chat in the new pane (WP-G2, plan §3.5).
         if (blockedNow.current) return;
-        if (lay.ws.kept.includes(to.pane)) releasePane(to.pane);
+        if (lay.ws.kept.includes(to.pane)) releasePane(to.pane, { keep: true });
         view.split(to.source, to.pane, { view: "chat", projectId: null, terminalId: null });
         openIn(to.pane, id);
         return;
@@ -1262,6 +1280,20 @@ export default function App() {
 
   /** The panes holding an unsaved edit, by id. */
   const dirtyIds = (): PaneNo[] => PANE_NOS.filter((n) => dirtyNow(n));
+  /**
+   * The panes ⊞ hid whose compose row holds unsent words, files or words
+   * handed back: a split takes an empty hidden pane before one of these, and
+   * when it must take one, its words are parked for the next new thread
+   * (review of PR #47, H1) — a hidden pane cannot ask.
+   */
+  const holdingIds = (): PaneNo[] => {
+    const { ws } = layoutNow.current;
+    const chats = live.current.chats;
+    return ws.kept.filter((n) => {
+      const c = chats[n];
+      return !!c.compose && !c.threadId && (!!c.input.trim() || c.files.length > 0 || c.restore.length > 0);
+    });
+  };
   const blockedNow = useRef(blocked);
   blockedNow.current = blocked;
 
@@ -1271,16 +1303,20 @@ export default function App() {
    * files in a thread's box are parked under the thread (they come back when
    * it opens again), words handed back to the box are held for the thread,
    * and a turn it tracked is left for the next pane that opens the thread —
-   * its Stop goes there. A terminal it showed goes back to the panel, alive.
+   * its Stop goes there. A compose row's words are dropped after × asked, and
+   * parked for the next new thread when a split takes a hidden pane back
+   * (`keep`). A terminal it showed goes back to the panel, alive.
    */
-  const releasePane = useCallback((n: PaneNo) => {
+  const releasePane = useCallback((n: PaneNo, opts: { keep?: boolean } = {}) => {
     const at = live.current;
     const spec = layoutNow.current.ws.panes[n - 1];
     const chat = at.chats[n];
     const thread = shownThread(chat, pendingThread.current[n]);
     if (thread) for (const r of chat.restore) heldBack.current.hold(thread, r.text, r.files);
     pendingThread.current[n] = null;
-    dispatch({ type: "release_chat", pane: n });
+    // `keep`: a hidden pane a split takes back could not ask, so a compose
+    // row's unsent words are parked for the next new thread, not dropped.
+    dispatch({ type: "release_chat", pane: n, keep: !!opts.keep });
     if (spec.view === "terminal" && spec.terminalId && layoutNow.current.fit.panes.includes(n)) {
       terminals.releaseToPanel(spec.terminalId);
     }
@@ -1332,11 +1368,15 @@ export default function App() {
     if (blockedNow.current) return;
     const lay = layoutNow.current;
     const at = live.current;
-    // The selected chat closing: focus goes to the chat selected before it
-    // that is still drawn, which so becomes the selected chat (W-6).
-    const then = at.selectedChat === n
-      ? at.selectedOrder.find((k) => k !== n && lay.fit.panes.includes(k) && lay.ws.panes[k - 1].view === "chat") ?? null
-      : null;
+    // Focus goes where the mic already is (W-6: the chat the owner selected
+    // last): the selected chat when it is another drawn pane — closing a File
+    // pane must not hand the mic to the chat that slides into its slot
+    // (review of PR #47, M1) — else, the selected chat closing, the chat
+    // selected before it; else the pane now in that slot.
+    const drawnChat = (k: PaneNo | null): k is PaneNo =>
+      k !== null && k !== n && lay.fit.panes.includes(k) && lay.ws.panes[k - 1].view === "chat";
+    const then = drawnChat(at.selectedChat) ? at.selectedChat
+      : at.selectedChat === n ? at.selectedOrder.find(drawnChat) ?? null : null;
     const next = closePaneOf(lay.ws, n, then);
     if (next === lay.ws) return;
     releasePane(n);
@@ -1362,9 +1402,9 @@ export default function App() {
     const spec = lay.ws.panes[source - 1];
     const dirty = dirtyIds();
     if (!lay.splitVerdict(dirty).ok) return null;
-    const id = allocate(lay.ws, dirty);
+    const id = allocate(lay.ws, dirty, holdingIds());
     if (id === null) return null;
-    if (lay.ws.kept.includes(id)) releasePane(id);
+    if (lay.ws.kept.includes(id)) releasePane(id, { keep: true });
     const copy = copySpec(spec);
     if (copy.view === "chat") {
       const at = live.current;
@@ -1376,8 +1416,10 @@ export default function App() {
     lay.split(source, id, copy, opts);
     if (spec.view === "terminal" && spec.terminalId) {
       const from = spec.terminalId;
-      const readable = terminals.row(from)?.readable !== false;
-      void terminals.create(terminals.specOf(from), id, undefined, readable ? {} : { readable: false });
+      // Readable only when the source is known to be (a copy never widens
+      // what Jarvis can read; an unknown source fails closed).
+      const readable = terminals.row(from)?.readable === true;
+      void terminals.create(terminals.specOf(from), id, undefined, { readable });
     }
     if (opts.focus !== false) focusPaneElement(id);
     return id;

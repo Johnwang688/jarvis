@@ -860,7 +860,7 @@ that is why every attach is announced (`terminal_attached`, below).
   a profile that `exec`s another shell configures `"bash"` and never marks,
   so it has no `sudo -k` either, and the HUD says so. `integrated`: the
   shell has marked a command (bash only).
-- `POST /terminals` `{in, cols?, rows?}` → 201 `row`. `in` is `"home"`,
+- `POST /terminals` `{in, cols?, rows?, readable?}` → 201 `row`. `in` is `"home"`,
   `{"thread": id}` (that thread's own folder, `cwd`), `{"project": id}` (its
   root) or `{"task": id}` (its worktree if it exists, else the root it was
   started under). **The folder is resolved from ids, never from a path
@@ -878,7 +878,10 @@ that is why every attach is announced (`terminal_attached`, below).
   running it under its own name would run something the owner did not
   name. The startup file must fit 8 KiB (a pipe's capacity even under
   `pipe-user-pages-soft`), is written without blocking, and a short write
-  is a 409, never a cut file or a wedged route.
+  is a 409, never a cut file or a wedged route. `readable` (a boolean,
+  default true; 2026-10-11, WP-G2) sets the "Jarvis can read" switch before
+  the shell runs, so a split's copy of a terminal Jarvis may not read is
+  never readable, not even for the round trip a `PATCH` would take.
 - `PATCH /terminals/{id}` `{readable: bool}` → `row`. Exactly that key.
 - `POST /terminals/{id}/ticket` `{}` → `{ticket, expires_in: 30}`. **Single
   use, 30 seconds, valid for this terminal only**; it is spent the moment it
@@ -1095,10 +1098,9 @@ What the HUD does with the terminal contract above (code in
   `PATCH /terminals/{id}` with exactly `{readable}`.
 - **Split and × (WP-G2, 2026-10-11)**: splitting a pane that shows a terminal
   is one `POST /terminals` with the `in` the source was opened with (the
-  window's remembered spec); when the source's switch is off, the new
-  terminal's `PATCH {readable: false}` is sent **before** it is shown or
-  attached, and a refused PATCH closes it again (`DELETE`) rather than show a
-  copy Jarvis could read. A refused create (the cap's 409) leaves the copy on
+  window's remembered spec) and, unless the source's row says it is
+  readable, `readable: false` — the copy is unreadable from its first byte,
+  and a source the window does not know fails closed. A refused create (the cap's 409) leaves the copy on
   the picker with the daemon's sentence; nothing retries. × on a pane showing
   a terminal sends **nothing**: no `DELETE`, no new ticket — the socket stays
   attached and the terminal becomes the panel's selected tab.
