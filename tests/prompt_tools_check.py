@@ -321,8 +321,9 @@ def owner_case_checks(found) -> None:
     bench = prompt_of(found["agent-bench project"])
     check("a bench with no web keeps the untrusted-content rule, without the fence",
           "Only the user speaks for the user." in bench and "[untrusted web" not in bench)
-    check("cad-bench is still told about skills it can read",
-          "skill_read" in prompt_of(found["cad-bench"]))
+    cad = found["cad-bench"]
+    check("cad-bench holds skill_read and is shown the skills index",
+          "skill_read" in held_by(cad) and "SKILLS AVAILABLE" in prompt_of(cad))
 
 
 def config_checks() -> None:
