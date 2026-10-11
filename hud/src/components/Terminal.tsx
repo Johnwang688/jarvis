@@ -910,6 +910,11 @@ export class TermManager {
   confirm: { id: string; title: string; unsure: boolean } | null = null;
   /** A Ctrl+clicked link to a server on this machine: where to open it (WP-E). Screen px. */
   linkMenu: { url: string; x: number; y: number } | null = null;
+  /** Where the terminal an owner's gesture is opening will show, while it is on its way (`ownerOpened`). */
+  opening: "panel" | PaneNo | null = null;
+  private ownerOpening: Promise<void> | null = null;
+  /** Every create counts, `+` included: an `ownerOpened` that one overtook adds nothing. */
+  private creations = 0;
   /**
    * The terminals this tab has shown (sessionStorage; lib/terminal.ts,
    * MINE_KEY): inherited only by a reload of the page that released them,
@@ -1176,6 +1181,7 @@ export class TermManager {
   /** A new terminal, shown in the panel or in a pane. Null when refused (said in `error`). */
   async create(spec: InSpec, where: "panel" | PaneNo): Promise<string | null> {
     if (this.blocked) return null;
+    this.creations++;
     this.error = "";
     let row: TerminalRow;
     try {
@@ -1200,11 +1206,41 @@ export class TermManager {
     return row.id;
   }
 
-  /** Ctrl+` opened the panel: like VS Code, a terminal if there is none. */
-  async keyOpened() {
-    if (this.blocked) return;
-    await this.refresh();
-    if (this.loaded && !this.listError && this.rows.length === 0) await this.create(this.defaultIn(), "panel");
+  /**
+   * The owner opened the panel (Ctrl+`, ⬓, the layout menu's Panel row) or
+   * switched a pane to the terminal view: like VS Code, a terminal when there
+   * is none — in the panel, or in that pane as its `+` would (the owner's
+   * call, 2026-10-11; WP-D had it on Ctrl+` only). Called from those gestures
+   * and nothing else: never a page load, a restored layout, a reload or a
+   * reattach. Nothing under a card; nothing unless a listing asked for now
+   * came back (never one already on its way, which may predate a terminal
+   * another window opened); nothing when any terminal is listed — one another
+   * window shows, or one that exited, included: the panel or the picker shows
+   * it instead; nothing if a terminal was opened meanwhile (`+`), or if
+   * `still` says the place no longer wants one (a pane switched away). One at
+   * a time: a gesture while one is on its way adds nothing, so a double-click
+   * or a key repeat opens one. A refusal (six already open) is said in
+   * `error`, as `+` says it.
+   */
+  ownerOpened(where: "panel" | PaneNo, still: () => boolean = () => true): Promise<void> {
+    if (this.blocked) return Promise.resolve();
+    if (this.ownerOpening) return this.ownerOpening;
+    const made = this.creations;
+    this.opening = where;
+    this.changed();
+    this.ownerOpening = (async () => {
+      try {
+        const listed = await this.freshList();
+        if (!listed || !this.loaded || this.blocked) return;
+        if (this.rows.length > 0 || this.creations !== made || !still()) return;
+        await this.create(this.defaultIn(), where);
+      } finally {
+        this.opening = null;
+        this.ownerOpening = null;
+        this.changed();
+      }
+    })();
+    return this.ownerOpening;
   }
 
   /**
@@ -1676,7 +1712,8 @@ export function TerminalPane(props: { pane: PaneNo; terminalId: string | null; d
   return (
     <div className="tabbody termpick" data-testid={`pane-${props.pane}-terminal-pick`}>
       <div className="pad">
-        <button type="button" data-testid={`pane-${props.pane}-terminal-new`} disabled={mgr.blocked}
+        <button type="button" data-testid={`pane-${props.pane}-terminal-new`}
+                disabled={mgr.blocked || mgr.opening === props.pane}
                 onClick={() => void mgr.create(mgr.defaultIn(), props.pane)}>
           + New terminal here
         </button>
@@ -1697,6 +1734,8 @@ export function TerminalPane(props: { pane: PaneNo; terminalId: string | null; d
             </button>
           ))}
         </div>
+      ) : mgr.opening === props.pane ? (
+        <div className="pad muted" data-testid={`pane-${props.pane}-terminal-opening`}>Opening a terminal…</div>
       ) : (
         <div className="pad muted">No terminals are open.</div>
       )}
@@ -1871,6 +1910,8 @@ export function TerminalPanel(props: {
           <div className="pad muted">…</div>
         ) : mgr.listError && !tabs.length ? (
           <div className="pad err" data-testid="panel-list-error">{mgr.listError}</div>
+        ) : (!tabs.length || !active) && mgr.opening === "panel" ? (
+          <div className="pad muted" data-testid="panel-opening">Opening a terminal…</div>
         ) : !tabs.length || !active ? (
           <div className="pad muted" data-testid="panel-empty">
             No terminals are open.{" "}
