@@ -782,7 +782,17 @@ def cli_options_checks(cli_path: str) -> None:
 def options_checks() -> None:
     print("\n-- options built from the brief")
     provider = claude.ClaudeProvider()
+    from jarvis import config
+    data = tempfile.TemporaryDirectory(prefix="wp3-data-")
+    saved_data, config.V2_DATA_DIR = config.V2_DATA_DIR, Path(data.name)
+    try:
+        _options_checks(provider)
+    finally:
+        config.V2_DATA_DIR = saved_data
+        data.cleanup()
 
+
+def _options_checks(provider) -> None:
     with fake():
         handle = provider.start(
             thread(),
@@ -819,14 +829,27 @@ def options_checks() -> None:
         eq(options.effort, "high", "effort comes from the brief")
         eq(options.max_turns, 12, "max_turns comes from the brief")
         check(options.strict_mcp_config is True, "strict MCP config")
+        # Carried in a private file, never as a dict (which the SDK would put
+        # on the command line as JSON, env and all — plan 2026-10-10 §1.3).
+        check(isinstance(options.mcp_servers, str), "MCP servers are passed as a file path")
+        carrier = Path(options.mcp_servers)
         eq(
-            options.mcp_servers,
-            {"jarvis": {"type": "stdio", "command": "jarvis-mcp"}},
-            "MCP servers come from the brief",
+            json.loads(carrier.read_text()),
+            {"mcpServers": {"jarvis": {"type": "stdio", "command": "jarvis-mcp"}}},
+            "MCP servers come from the brief, through the file",
         )
+        eq(carrier.stat().st_mode & 0o777, 0o600, "the MCP config file is 0600")
+        eq(carrier.parent.stat().st_mode & 0o777, 0o700, "...in a 0700 directory")
         check(options.include_partial_messages is True, "partial messages on, for TEXT_DELTA")
         eq(options.session_id, handle.provider_session_id, "start mints the session id it reports")
         check(options.resume is None, "start does not resume")
+        provider.close(handle)
+        check(not carrier.exists(), "close removes the MCP config file")
+
+    with fake():
+        handle = provider.start(thread(), brief(), allow)
+        options = FakeClient.instances[0].options
+        eq(options.mcp_servers, {}, "no MCP servers: no file and no --mcp-config")
         provider.close(handle)
 
     with fake():

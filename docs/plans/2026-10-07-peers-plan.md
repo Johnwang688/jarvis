@@ -202,14 +202,31 @@ The tools are defined once in `jarvis/v2/tools/peers.py`, over one
 - A fast-path *target* stays structurally read-only. A request to it can only
   make it read, answer, message, or propose a task (§4.1).
 
-**Claude and Codex (through jarvis-mcp).**
-- `_open` mints a per-session token into a run copy of the brief:
-  `mcp_servers["jarvis"].env.JARVIS_PEER_TOKEN`. This is PR #3's `_run_brief`
-  pattern. The token is never written to `brief.json`.
-- The MCP process calls `POST /peer/{list,read,send,steer,suggest,ask}`, and
-  the daemon maps the token to the sender. A missing or unknown token gets 403.
-- Caveat: the token is readable through `/proc` by a shell running as the same
-  user. That is the "confused agent, not adversary" non-goal (design §1.2).
+**Claude and Codex (through jarvis-mcp).** *Updated 2026-10-10: Phase 0 was
+built once, for this plan, terminal_read and B2b — see
+`2026-10-10-terminal-read-mcp-plan.md` §1 (WP-1). What differs from the text
+first written here:*
+- `Daemon._run_brief` mints a per-session token (`jarvis/v2/callers.py`,
+  `jmcp_…`, held only as a digest) into the run copy of the brief:
+  `mcp_servers["jarvis"].env.JARVIS_MCP_TOKEN` — the variable is
+  **`JARVIS_MCP_TOKEN`**, not `JARVIS_PEER_TOKEN`, because the token is not
+  peer-specific. The token is never written to `brief.json`.
+- **The carrier is a file, never the command line.** The SDK puts a dict
+  `mcp_servers` on `claude`'s command line as JSON, which `ps` shows to anyone;
+  so Claude gets a private 0600 file of the session's own,
+  `V2_DATA_DIR/claude/<thread>/mcp-<nonce>.json` (`--mcp-config <path>`),
+  and Codex the `env` table in its private
+  `config.toml`. Both are removed when the session closes.
+- **The routes are the bridge's** (`jarvis/v2/bridge.py`): the relay
+  (`python -m jarvis.v2.mcp_session`, stdlib only) calls `GET /mcp/tools` and
+  `POST /mcp/call` on the API listener with `Authorization: Bearer jmcp_…`, and
+  the daemon runs the registry tool itself with `runtime.caller()` bound. The
+  peer tools are added to `session_tools.SESSION_TOOLS` (preferred, for parity
+  with the fast path); a route of their own, if one is ever needed, uses
+  `callers.authenticate`. A missing, unknown or revoked token gets 403.
+- Caveat: the token is readable through `/proc` (and the carrier file) by a
+  program running as the same user. That is the "confused agent, not
+  adversary" non-goal (design §1.2).
 
 **Parity:** the MCP `list_tools()` schemas must equal the registry's specs. One
 scripted scenario must give identical results through both transports.
@@ -615,8 +632,11 @@ Additions to existing suites:
 - **Phase 0 (prerequisites):**
   - PR #4, then PR #3, then the slash core S1;
   - wire jarvis-mcp into CLI briefs through the run copy with the token
-    (non-dangerous tools);
-  - `runtime.caller()`;
+    (non-dangerous tools) — built as WP-1 of the 2026-10-10 terminal-read
+    plan: `JARVIS_MCP_TOKEN`, carried in a private file (Claude) or the
+    private `config.toml` (Codex), relayed to the bridge's `/mcp/tools` and
+    `/mcp/call`;
+  - `runtime.caller()` (built with it);
   - `origin: "peer"` plumbing and the log kinds;
   - per-turn policy fields read by `build_permit`;
   - verify live:
@@ -707,11 +727,14 @@ Additions to existing suites:
 
 ### Critical files
 - `jarvis/v2/daemon.py`: `send` (peer origin, waking, queueing and batching,
-  owner preemption, `peer_in` logs), `_open` (run-copy brief plus token), the
-  `_Session` per-turn policy fields, `_permit`
+  owner preemption, `peer_in` logs), the `_Session` per-turn policy fields,
+  `_permit` (the run-copy brief plus token is built already: `_run_brief`,
+  `callers.py`, `bridge.py` — 2026-10-10, WP-1)
 - `jarvis/v2/peers.py` (new): `PeerService`, `resolve`, `wrap`, the policy
   merge and admission check, chains and limits, mailboxes, recovery, the
-  `/peer/*` and owner-only routes
+  owner-only routes (the CLI path is the bridge's `/mcp/call` with the peer
+  tools in `session_tools.SESSION_TOOLS`; any peer route of its own uses
+  `callers.authenticate`)
 - `jarvis/v2/permissions.py` (`build_permit` per-turn merge, peer attribution in
   `origin()`, protected `peers.json`) with `jarvis/v2/approvals.py`
   (`allowlistable=False`, `/always` refusal) and `jarvis/v2/providers/claude.py`
