@@ -49,3 +49,5 @@ This governs the plan amendment.
 ## Amendment 1 (2026-10-11)
 
 The plan changes above are worked out in `2026-10-11-hud-browser-plan-amendment-1.md` (driving, profiles, auto-open, seeing, sound, and the re-cut work packages). Its §J decisions BD-1 to BD-4, BD-6, BD-7, BD-9 and BD-11 are adopted as recommended. BD-5 (Chrome sign-in and sync) is answered: on. BD-8 waits for M3, and BD-10 for BR-1a's review.
+
+**B-3 done (2026-10-11):** the owner installed Google Chrome stable through apt (`google-chrome --version` reports 155.0.8059.39).

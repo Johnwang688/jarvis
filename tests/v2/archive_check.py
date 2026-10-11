@@ -251,7 +251,7 @@ class Names(Base):
 
     def test_existing_duplicates_stay_editable(self):
         twin = self.stores.projects.create("Calc", str(self.repo_b))      # the owner's e2e-calc pair
-        self.assertEqual(self.request("PATCH", f"/projects/{twin.id}", {"profile": "ask"})["name"], "Calc")
+        self.assertEqual(self.request("PATCH", f"/projects/{twin.id}", {"profile": "ask"}, owner=True)["name"], "Calc")
         self.assertEqual(self.request("PATCH", f"/projects/{twin.id}", {"name": "calc"})["name"], "calc")
         self.assertEqual(self.request("PATCH", f"/projects/{twin.id}", {"name": "Fresh"})["name"], "Fresh")
 
@@ -279,8 +279,8 @@ class RootChange(Base):
         task = self.task(state=TaskState.BLOCKED)                # started, unfinished
         self.assertEqual(task.root, str(self.repo_a))
         self.assertTrue(Path(task.worktree).is_relative_to(self.repo_a))
-        self.request("PATCH", f"/projects/{self.project.id}", {"root": str(self.root / "nope")}, 400)
-        moved = self.request("PATCH", f"/projects/{self.project.id}", {"root": str(self.repo_b)})
+        self.request("PATCH", f"/projects/{self.project.id}", {"root": str(self.root / "nope")}, 400, owner=True)
+        moved = self.request("PATCH", f"/projects/{self.project.id}", {"root": str(self.repo_b)}, owner=True)
         self.assertEqual(moved["root"], str(self.repo_b))
         # The existing thread keeps its folder; a new one opens in the new root.
         self.assertEqual(self.request("GET", "/threads")[0]["cwd"], str(self.repo_a))
@@ -312,7 +312,7 @@ class RootChange(Base):
         # Only the started task stays on the old folder; the one in intake,
         # with no pinned root and no worktree, starts under the new root.
         self.assertEqual({t["id"] for t in impact["on_root"]["tasks"]}, {task.id})
-        self.request("PATCH", f"/projects/{self.project.id}", {"root": str(self.repo_b)})
+        self.request("PATCH", f"/projects/{self.project.id}", {"root": str(self.repo_b)}, owner=True)
         self.assertEqual(self.stores.tasks.get(task.id).root, str(self.repo_a))
         # A task that has not started yet starts under the new root.
         self.assertIsNone(self.stores.tasks.get(not_started.id).root)
@@ -357,7 +357,7 @@ class Archive(Base):
         self.request("POST", f"/threads/{thread.id}/send", {"text": "hello?"}, 409)
         self.request("POST", "/threads", {"project_id": self.project.id, "role": "chat"}, 409)
         self.request("POST", "/tasks", {"project_id": self.project.id, "brief": "more"}, 409)
-        self.request("PATCH", f"/projects/{self.project.id}", {"profile": "ask"}, 409)
+        self.request("PATCH", f"/projects/{self.project.id}", {"profile": "ask"}, 409, owner=True)
         self.request("PATCH", f"/threads/{thread.id}", {"project_id": self.other.id}, 409)
         self.request("PATCH", f"/threads/{self.chat(self.other).id}", {"project_id": self.project.id}, 409)
         saved = self.daemon.schedules.get(schedule["id"])
@@ -791,6 +791,42 @@ class OwnerOnly(Base):
                 self.request(method, path, body, 403)
                 self.request(method, path, body, 403, port=self.daemon.face_port)
         self.assertIsNone(self.stores.projects.get(self.project.id).archived)
+
+
+class ProjectPolicyIsTheOwners(Base):
+    """BR-0: what a project's threads may do — its permission profile,
+    always-ask list, extra folders and root — changes only from the HUD
+    window. On dfb1d7e every change below answered 200 from the API listener,
+    which every tool's HTTP client reaches, so a client could loosen what
+    asks it."""
+
+    def test_only_the_hud_window_changes_what_asks(self):
+        pid = self.project.id
+        extra = self.root / "extra"
+        extra.mkdir()
+        changes = {"profile": "ask", "always_ask": ["make deploy"],
+                   "extra_dirs": [str(extra)], "root": str(self.repo_b)}
+        before = self.request("GET", f"/projects/{pid}")
+        api, hud = self.daemon.port, self.daemon.face_port
+        for field, value in changes.items():
+            with self.subTest(field=field):
+                body = {field: value}
+                self.request("PATCH", f"/projects/{pid}", body, 403)                # no Origin
+                self.request("PATCH", f"/projects/{pid}", body, 403,
+                             origin=f"http://127.0.0.1:{api}")                     # a page the API served
+                self.request("PATCH", f"/projects/{pid}", body, 403, port=hud)     # the HUD's, no Origin
+                self.request("PATCH", f"/projects/{pid}", body, 403, port=hud,
+                             origin=f"http://127.0.0.1:{self.daemon.workshop_port}")
+                self.assertEqual(self.request("GET", f"/projects/{pid}"), before, "refused means unchanged")
+        # Sent back unchanged it changes nothing, so it needs no owner; a rename
+        # is not one of these fields.
+        same = self.request("PATCH", f"/projects/{pid}", {k: before[k] for k in changes})
+        self.assertEqual({k: same[k] for k in changes}, {k: before[k] for k in changes})
+        self.assertEqual(self.request("PATCH", f"/projects/{pid}", {"name": "Renamed"})["name"], "Renamed")
+        # The HUD window changes each one.
+        for field, value in changes.items():
+            with self.subTest(owner=field):
+                self.assertEqual(self.owner("PATCH", f"/projects/{pid}", {field: value})[field], value)
 
 
 if __name__ == "__main__":
