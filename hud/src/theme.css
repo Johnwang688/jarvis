@@ -979,7 +979,8 @@ body.resizing iframe { pointer-events: none; }
   padding: 4px 12px 6px; font: 600 10px var(--mono); letter-spacing: 0.06em;
   color: var(--text-muted); text-transform: uppercase;
 }
-.laymenu .lm-tiles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; padding: 0 12px 6px; }
+/* Eight tiles, four to a row (WP-G1): one to eight panes. */
+.laymenu .lm-tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; padding: 0 12px 6px; }
 .laymenu .lm-tile {
   height: 34px; padding: 0; display: inline-flex; align-items: center; justify-content: center;
   color: var(--text-2); background: var(--bg-1);
@@ -996,10 +997,12 @@ body.resizing iframe { pointer-events: none; }
 .laymenu .lm-label { flex: 1 1 auto; }
 .laymenu .lm-key { font: 10px var(--mono); color: var(--text-muted); }
 
-/* ---- the centre's panes (2026-10-09, plan §2.2) ----
-   A grid of up to four panes meeting at the same 1px rule the side panes do
+/* ---- the centre's panes (2026-10-09, plan §2.2; eight since WP-G1) ----
+   A grid of up to eight panes meeting at the same 1px rule the side panes do
    (the grid's gap shows the border colour). A pane a preset does not draw is
-   display:none — hidden, never unmounted. */
+   display:none — hidden, never unmounted. 3 over 2 and 4 over 3 lay their
+   rows on unit columns (lib/workspace gridTemplate), so each row has edges of
+   its own. */
 #workspace {
   flex: 1 1 auto; min-height: 0; min-width: 0; position: relative;
   display: grid; gap: 1px; background: var(--border);
@@ -1023,7 +1026,9 @@ body.resizing iframe { pointer-events: none; }
 .tree-row.panesel { color: var(--text); box-shadow: inset 2px 0 var(--border-strong); }
 .tree-row.ghost.panesel { box-shadow: none; color: var(--text-2); }
 
-/* The edges between panes: laid over the 1px rule, taking no room. */
+/* The edges between panes: laid over the 1px rule, taking no room. In 3 over
+   2 and 4 over 3 a column edge spans its own row only (top, height or top
+   set inline: split-col-N the top row, split-colb-N the bottom). */
 .wsplit { position: absolute; z-index: 6; touch-action: none; background: transparent; }
 .wsplit.col { top: 0; bottom: 0; width: 7px; cursor: col-resize; }
 .wsplit.row { height: 7px; cursor: row-resize; }

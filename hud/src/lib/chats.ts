@@ -38,7 +38,7 @@
 import type { Attachment, ChatMessage, Thread, ToolOp } from "../types";
 import type { Compose } from "./compose";
 import type { GiveBack } from "./giveback";
-import { PANE_NOS, panesOf, type PaneNo, type Preset, type Workspace } from "./workspace";
+import { PANE_NOS, orderOf, setPreset, slotOf, type PaneNo, type Preset, type Workspace } from "./workspace";
 
 /** One pane's conversation, and the turn it is waiting on. */
 export interface ChatState {
@@ -92,7 +92,12 @@ export function emptyChat(): ChatState {
 }
 
 export function emptyChats(): Chats {
-  return { 1: emptyChat(), 2: emptyChat(), 3: emptyChat(), 4: emptyChat() };
+  return Object.fromEntries(PANE_NOS.map((n) => [n, emptyChat()])) as Chats;
+}
+
+/** One value per pane, all null: the window's per-pane refs start here. */
+export function nonePerPane(): Record<PaneNo, string | null> {
+  return Object.fromEntries(PANE_NOS.map((n) => [n, null])) as Record<PaneNo, string | null>;
 }
 
 /** Never opened: no thread, no compose row. Such a pane gets a compose row the first time it shows chat. */
@@ -230,7 +235,7 @@ export function selectedChatOf(ws: Workspace, drawn: readonly PaneNo[], order: r
 export function chatTarget(
   ws: Workspace, drawn: readonly PaneNo[], selected: PaneNo | null,
 ): { pane: PaneNo; switches: boolean } {
-  const visible = drawn.length ? drawn : [1 as PaneNo];
+  const visible = drawn.length ? drawn : [orderOf(ws)[0]];
   const focused = visible.includes(ws.focused) ? ws.focused : visible[0];
   if (isChat(ws, focused)) return { pane: focused, switches: false };
   if (selected !== null && visible.includes(selected) && isChat(ws, selected)) return { pane: selected, switches: false };
@@ -261,43 +266,47 @@ export function heldElsewhere(
 
 /**
  * "Open beside" (Alt+click, or the row's ⋯ menu): the next drawn pane to the
- * right of the focused one. From the single layout it is two columns, pane 2
- * (VS Code's "open to the side"); from the last column of two it is a third
- * column; from the last pane of any other shape it wraps to the first drawn
- * pane that is not the focused one.
+ * right of the focused one. From the single layout it is two columns, the
+ * pane in slot 2 (VS Code's "open to the side"); from the last column of two
+ * it is a third column; from the last pane of any other shape it wraps to the
+ * first drawn pane that is not the focused one. A grow takes the pane ⊞ would
+ * bring back there (`setPreset`), so the pane is named by id.
  */
 export function besideTarget(
   ws: Workspace, drawn: readonly PaneNo[],
 ): { preset: Preset; pane: PaneNo } {
-  const visible = drawn.length ? drawn : [1 as PaneNo];
+  const own = orderOf(ws);
+  const visible = drawn.length ? drawn : [own[0]];
+  const grown = (preset: Preset, slot: number) => ({ preset, pane: setPreset({ ...ws, order: own }, preset).order[slot - 1] });
   if (visible.length === 1) {
-    if (ws.preset === "single") return { preset: "cols2", pane: 2 };
+    if (ws.preset === "single") return grown("cols2", 2);
     // A preset drawn as one pane for room: the next of its own panes.
-    const own = panesOf(ws.preset);
     const at = own.indexOf(visible[0]);
     return { preset: ws.preset, pane: own[(at + 1) % own.length] };
   }
   const at = visible.indexOf(ws.focused);
   const from = at < 0 ? 0 : at;
   if (from < visible.length - 1) return { preset: ws.preset, pane: visible[from + 1] };
-  if (ws.preset === "cols2" && visible.length === 2) return { preset: "cols3", pane: 3 };
+  if (ws.preset === "cols2" && visible.length === 2) return grown("cols3", 3);
   return { preset: ws.preset, pane: visible.find((n) => n !== ws.focused) ?? visible[0] };
 }
 
 /**
- * The panes whose conversations the sidebar marks: every drawn chat pane, and
+ * The panes whose conversations the sidebar marks, in slot order: every drawn chat pane, and
  * the last selected chat's always — it is the conversation the window is about
  * even while its pane shows a task or a file, as the one conversation was
  * marked whatever the single pane showed.
  */
 export function sidebarPanes(ws: Workspace, drawn: readonly PaneNo[], active: PaneNo): PaneNo[] {
-  return PANE_NOS.filter((n) => n === active || (drawn.includes(n) && isChat(ws, n)));
+  return PANE_NOS.filter((n) => n === active || (drawn.includes(n) && isChat(ws, n)))
+    .sort((a, b) => slotOf(ws, a) - slotOf(ws, b));
 }
 
 /**
  * The compose rows the sidebar draws: one per marked pane that is composing,
  * numbered by pane when more than one pane is marked (so the number says
- * which pane the new thread is in).
+ * which pane the new thread is in). The number is the pane's slot, the place
+ * the owner sees it in, never its id (plan G-1).
  */
 export function composeRows(
   ws: Workspace, drawn: readonly PaneNo[], chats: Chats, active: PaneNo,
@@ -307,7 +316,8 @@ export function composeRows(
   return panes
     .filter((n) => !!chats[n].compose && !chats[n].threadId)
     .map((n) => ({
-      pane: n, compose: chats[n].compose!, label: numbered ? `New thread · ${n}` : "New thread", active: n === active,
+      pane: n, compose: chats[n].compose!, label: numbered ? `New thread · ${slotOf(ws, n)}` : "New thread",
+      active: n === active,
     }));
 }
 

@@ -20,6 +20,7 @@ import threading
 import time
 from urllib.parse import unquote, urlsplit
 
+from jarvis import config
 from jarvis.tools.secrets import is_protected, scrub
 from jarvis.tools.search import SKIP_DIRS as SEARCH_SKIP_DIRS
 from .ledger import UsageLedger
@@ -34,7 +35,8 @@ FILE_CAP = 2 * 1024 * 1024
 PATCH_CAP = 1024 * 1024
 ATTACH_CAP = 4 * 1024 * 1024
 LOG = logging.getLogger(__name__)
-HUD_DIST = Path(__file__).resolve().parents[2] / "hud" / "dist"
+# What the HUD listener serves; the write tools refuse it (config.HUD_DIST, BR-0).
+HUD_DIST = config.HUD_DIST
 
 # Claude Code's own `/usage` command. Undocumented, so a failure is "not
 # reported", never a number invented from the ledger. The User-Agent has to
