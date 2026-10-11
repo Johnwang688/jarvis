@@ -58,10 +58,14 @@ def hexed(data: bytes | str) -> str:
 
 def read(terminal, lines=200, *, desk=True, depth=0):
     """The tool, through `dispatch()` (so its scrub runs), in a context bound
-    the way the fast path binds an owner's HUD turn — or not at all."""
+    the way the fast path binds an owner's HUD turn — or with no desk slot at
+    all. The toolset is always bound to the tool, as the fast path's turn
+    binds it: dispatch refuses an unbound call before the tool runs (PR #42),
+    and what is under test here is the tool's own refusal."""
     ctx = contextvars.copy_context()
+    ctx.run(runtime.bind, tool_names={"terminal_read"}, depth=depth)
     if desk is not None:
-        ctx.run(runtime.bind, desk={"present": desk}, depth=depth)
+        ctx.run(runtime.bind, desk={"present": desk})
     return ctx.run(tools.dispatch, "terminal_read",
                    json.dumps({"terminal": terminal, "lines": lines})).text
 

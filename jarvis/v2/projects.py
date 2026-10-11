@@ -22,8 +22,10 @@ every move below names its exact path.
 
 **Only the owner, in the HUD (B11).** The routes that archive, restore or
 delete are owner-only: they answer only on the HUD's own listener
-(`FACE_PORT`) and only to a request that carries the HUD's `Origin`. That is
-a speed bump, not a boundary — the boundary is that **no tool reaches these
+(`FACE_PORT`), and only to the HUD's own page — a request carrying the HUD's
+`Origin`, or a plain read (GET/HEAD) that carries no `Origin` and that the
+browser marked `Sec-Fetch-Site: same-origin` (`is_owner`, below). That is a
+speed bump, not a boundary — the boundary is that **no tool reaches these
 routes** (`tests/v2/archive_check.py` asserts it), and a shell command an
 agent might use to call one goes through the permission gate like every other
 command, the same footing as `/approvals` (owner-only through this gate too,
@@ -116,19 +118,56 @@ def refuse_archived_project(project: Project) -> None:
 # -- the owner-only gate ----------------------------------------------------------
 
 def is_owner(handler, daemon) -> bool:
-    """The owner-only test without the 403: the HUD's listener and its Origin.
+    """The owner-only test without the 403: the HUD's listener, and the HUD's
+    own page asking.
+
+    A request is the owner's only when it arrives on the HUD listener
+    (`daemon.face_port`; never the API listener every tool's HTTP client
+    uses, never the preview listener) and either
+
+      (a) carries `Origin: http://<Host>` — what a browser sends on every
+          POST, PATCH, PUT and DELETE and on a WebSocket handshake; or
+      (b) is a plain read — GET or HEAD, not a WebSocket upgrade — with **no**
+          `Origin` header at all, a loopback `Host`, and `Sec-Fetch-Site:
+          same-origin`. Chromium sends no Origin on a same-origin GET, so
+          until 2026-10-11 the HUD's own `GET /terminals` (and every other
+          owner-only read) was refused here and the terminal listing never
+          loaded.
+
+    `Sec-Fetch-Site` is a forbidden header name: page script cannot set or
+    change it. A page on any other origin — the Preview listener, the
+    workshop, any site — is `same-site` or `cross-site`, never
+    `same-origin`, and its cross-origin fetch carries its own `Origin`
+    besides, which (a) refuses. A write with no Origin is never the owner's,
+    whatever else it says, and neither is `Origin: null` (an opaque,
+    sandboxed frame). DNS rebinding is refused on two grounds, measured in
+    Chromium 149: a rebound name (`http://evil.example:<port>`) is not a
+    potentially trustworthy URL, so the browser sends it no fetch metadata
+    at all and (b) never matches; and its `Host` is not loopback, which
+    `hud_api.check_origin`'s strict Host test refuses on every request before
+    any route runs ("untrusted Host"; `terminals._strict_host` again for the
+    terminals, and (b)'s own loopback test here) — keep all three. A program
+    running as the owner can send any of these headers; this was never a
+    boundary against one (module note).
 
     `PATCH /projects` uses it to tag `project_updated` with `by: "owner" |
     "api"` (B1, decisions D4): an owner rename moves the Discord channel at
     once, anything else asks through the approval gate first."""
     port = handler.server.server_address[1]
+    if port != daemon.face_port:
+        return False
     host = handler.headers.get("Host", "")
     origin = handler.headers.get("Origin")
-    return port == daemon.face_port and bool(origin) and origin == f"http://{host}"
+    if origin is not None:
+        return bool(origin) and origin == f"http://{host}"
+    return (handler.command in ("GET", "HEAD")
+            and handler.headers.get("Upgrade") is None
+            and host in (f"127.0.0.1:{port}", f"localhost:{port}")
+            and handler.headers.get("Sec-Fetch-Site") == "same-origin")
 
 
 def owner_only(handler, daemon) -> None:
-    """The HUD's listener and the HUD's Origin, or 403. See the module note."""
+    """The HUD's listener and the HUD's own page (`is_owner`), or 403. See the module note."""
     from .daemon import APIError
     if not is_owner(handler, daemon):
         raise APIError(403, "only the owner can do this, from the HUD")

@@ -24,6 +24,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from jarvis import runtime  # noqa: E402
 from jarvis import command_review, permissions, rules, tools  # noqa: E402
 from jarvis.tools import shell  # noqa: E402
 
@@ -1758,4 +1759,7 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # dispatch() refuses when no toolset is bound (PR #34's follow-up), so
+    # this suite says what it calls directly — and is held to it.
+    with runtime.tools_bound({"run_command", "run_readonly", "write_file"}):
+        sys.exit(main())

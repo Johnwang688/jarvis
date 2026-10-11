@@ -98,6 +98,11 @@ def handle(h, mock, method: str, path: str, body) -> bool:
                 h._err(409, f"{CAP} terminals are open; close one first")
                 return True
             label, pid = resolved
+            # `terminal_create_delay` (one-shot): made that many seconds
+            # later — a terminal on its way while the window changes.
+            delay = mock.__dict__.pop("terminal_create_delay", 0)
+            if delay:
+                time.sleep(delay)
             seq = mock.__dict__.get("terminal_seq", 0) + 1
             mock.terminal_seq = seq
             # `terminal_defaults`: what the next terminals are like (a shell
