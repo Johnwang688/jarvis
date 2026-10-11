@@ -486,6 +486,9 @@ SHAPES = {
     "copy": f"cp {VEXCOM_EXE} /tmp/renamed.exe",
     "xargs": "xargs vexcom < args.txt",
     "fullwidth": "ＶＥＸＣＯＭ --user",
+    # A bracket is read both ways (bash's POSIX classes, fnmatch's first `]`).
+    "posix class argument": "ls ve[[:alpha:]]com",
+    "fnmatch bracket argument": "ls ve[x[:]co[m:]",
 }
 ORDINARY = {   # stays as it was: never DENY for not naming vexcom
     "make -j4": rules.ALLOW, "ls *.exe": rules.ALLOW, "ls *": rules.ALLOW,
@@ -1672,9 +1675,10 @@ RUNS = {
     "a substitution then a name": "$(printf vex)com --user",
     "brace expansion": "{v,x}excom.exe --user",
     "ANSI-C then a glob": "$'\\x2e/v'*.exe --user",
-    "posix class": "./ve[[:alpha:]]com --user",
+    # Fewer than four letters, so only the program reading can refuse these.
+    "posix class": "./v[[:alpha:]]x* --user",
     "negated with ^": "./ve[^a]com --user",
-    "only fnmatch's bracket reading matches": "./ve[x[:]co[m:] --user",
+    "only fnmatch's bracket reading matches": "./v[x[:]x*[m:] --user",
     "fullwidth glob": "ｖ*.exe --user",
 }
 # A program that cannot be told and could be vexcom: ASK in v1, never covered
