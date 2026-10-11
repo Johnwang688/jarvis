@@ -24,6 +24,8 @@ def validate(brief: Brief) -> None:
 
 
 def atomically_write(path: Path, text: str) -> None:
+    """0600 (mkstemp's mode), written aside and renamed into place. The
+    config may carry a jarvis-mcp caller token (plan §1.3)."""
     if path.is_symlink():
         raise BriefRefused("Codex private metadata must not be a symlink")
     fd, tmp = tempfile.mkstemp(prefix=".write-", dir=path.parent)
@@ -66,6 +68,48 @@ def config_text(brief: Brief) -> str:
         lines.append(f"[mcp_servers.{_value(name)}]")
         lines.extend(f"{_value(k)} = {_value(v)}" for k, v in server.items())
     return "\n".join(lines) + "\n"
+
+
+def _mcp_header(line: str) -> bool:
+    """`[mcp_servers]`, `[mcp_servers.x]`, `[mcp_servers."x"]` (any spacing)."""
+    if not line.startswith("["):
+        return False
+    inner = line.lstrip("[").lstrip()
+    return inner.startswith("mcp_servers") and inner[len("mcp_servers"):].lstrip()[:1] in (".", "]")
+
+
+def without_mcp_servers(text: str) -> str:
+    """`config_text`'s output with every `[mcp_servers.*]` table removed.
+
+    A session's jarvis server carries its caller token in its `env` table
+    (plan §1.3), so a closed session's config must not keep it. `config_text`
+    writes each server as one header and inline values, last in the file, and
+    no value spans a line (`_value` is JSON), so a line-wise cut is exact; the
+    result is checked by parsing it, and anything that still names
+    `mcp_servers` is refused rather than written."""
+    import tomllib
+    kept, skipping = [], False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("["):
+            skipping = _mcp_header(stripped)
+        if not skipping:
+            kept.append(line)
+    out = "\n".join(kept) + "\n"
+    if "mcp_servers" in tomllib.loads(out):
+        raise ValueError("mcp_servers survived the cut")
+    return out
+
+
+def strip_mcp_servers(path: Path) -> bool:
+    """Rewrite a private Codex `config.toml` without its MCP servers. True
+    if the file changed. Atomic, refuses a symlink (`atomically_write`)."""
+    import tomllib
+    text = Path(path).read_text(encoding="utf-8")
+    if "mcp_servers" not in tomllib.loads(text):
+        return False
+    atomically_write(Path(path), without_mcp_servers(text))
+    return True
 
 
 def metadata_config_text() -> str:

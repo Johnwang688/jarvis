@@ -108,7 +108,7 @@ When they hold, `_run_brief`:
 ### 1.3 Carrying it: never on the command line
 
 - **Claude.**
-  - `ClaudeProvider._options` writes `{"mcpServers": …}` to `V2_DATA_DIR/claude/<thread_id>/mcp.json` and passes `mcp_servers=str(path)`.
+  - `ClaudeProvider._options` writes `{"mcpServers": …}` to a file of the session's own, `V2_DATA_DIR/claude/<thread_id>/mcp-<nonce>.json` (per thread in the first draft; see §11), and passes `mcp_servers=str(path)`.
   - The directories are 0700 and never symlinks. The file is 0600, written with mkstemp and replace (the `codex_config.atomically_write` pattern).
   - It is written once per `_open`, reused by `set_model`'s reconnect, and deleted by `close()`.
 - **Codex.**
@@ -116,7 +116,7 @@ When they hold, `_run_brief`:
   - `close()` rewrites the file without `mcp_servers`.
 - **Neither CLI's own environment holds the token**, so the model's shell commands never inherit it. Codex's `shell_environment_policy inherit = "all"` passes down the app-server's environment, which has no token.
 - **The relay** removes `JARVIS_MCP_TOKEN` from `os.environ` at start. It never writes the token, or any tool result, to stderr; Claude Code and Codex keep MCP servers' stderr in their own logs.
-- **Start-up sweep.** `Daemon.start` deletes leftover `claude/*/mcp.json` files and strips `mcp_servers` from leftover Codex homes. These are left over from a crash, and their tokens are already dead.
+- **Start-up sweep.** `Daemon.start` deletes leftover Claude carriers (`claude/*/mcp-*.json`) and strips `mcp_servers` from leftover Codex homes, once it holds its ports (§11). These are left over from a crash, and their tokens are already dead.
 
 ### 1.4 Revoking
 
@@ -177,7 +177,7 @@ The token never appears in any of these, and tests cover each one (§7.1):
 ### 1.8 The /proc caveat, stated plainly
 
 **Who can read a live token.** Any program running as you can read one, from any of:
-- the Claude session's `mcp.json`;
+- the Claude session's `mcp-<nonce>.json`;
 - the Codex session's `config.toml`;
 - `/proc/<jarvis-mcp pid>/environ`.
 
@@ -487,3 +487,22 @@ The answers go in `2026-10-10-terminal-read-mcp-decisions.md`.
 - **D-6 Codex sub-agents.** Recommended: ship Claude first. If L4 shows Codex sub-agent calls cannot be told apart, set `features.multi_agent = false` for Codex chat sessions only. You may prefer to leave Codex chats without the tool; letting sub-agents read would break your confirmed rule.
 - **D-7 Model switch.** Recommended: no rotation.
 - **D-8 Steer carry.** Recommended: yes. It costs one extra off-desk turn.
+
+## 11. Notes from the WP-1 review (2026-10-11, PR #35)
+
+WP-1 shipped with two changes to §1.3 that WP-2/WP-3 build on:
+- **The Claude carrier is per session, not per thread:** `V2_DATA_DIR/claude/<thread>/mcp-<nonce>.json`. A thread's old session can still be closing (the daemon drops a lost session under its lock and closes it outside) while the next send opens its successor. With one `mcp.json` per thread, the old close deleted the new session's carrier.
+- **The start-up sweep runs after the bind**, so a second daemon started on the live data folder fails before it touches the live daemon's carriers.
+
+These points are for the WP-2/WP-3 builders. None of them is a WP-1 defect:
+
+1. **Two cards for one dangerous call in an ask-profile Claude chat.** With a dangerous session tool (D-3's `gmail_send`) on Claude under `ask`:
+   - the `PreToolUse` hook asks `permit` about `mcp__jarvis__gmail_send`, and layer 5 raises a card;
+   - after a yes, the bridge asks the session's permit again with `dangerous_tool=True`, and that raises a second card.
+
+   WP-2 should make it one. One way: let `build_permit` treat a non-read-only `mcp__jarvis__*` name as "the bridge will ask", answering ALLOW at a named layer so the bridge's card is the only one.
+2. **Codex may never run the non-read-only D-3 tools.** Only read-only tools get `approval_mode = "approve"`, and every MCP approval Codex raises is declined (an elicitation, or an MCP-approval `requestUserInput`). So `memory_write`, `spotify_play` and `gmail_send` may never run on Codex.
+   - Live check L3 should settle it.
+   - Consider `approve` for **every** offered tool. The bridge already gates the dangerous ones (`dangerous_tool=True`, the owner every time), so Codex's own prompt adds nothing but a decline.
+3. **The Codex carrier is findable.** `CODEX_HOME` is in the model's shell environment, so a shell command can find `config.toml` and the token in it. This is within §1.8's accepted same-user limit. Note it in the WP-3 docs; it is not a regression.
+4. **Query strings on `/mcp/*`.** `_log_path` used to keep the query on `/mcp/*` paths. Nothing leaked, because the relay sends its token in a header and never a query. WP-1's review round strips the query anyway, as it is for `/terminals`.

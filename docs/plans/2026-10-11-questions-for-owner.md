@@ -111,3 +111,5 @@ You asked: "can i login to my chrome profiles as well in my google accounts". Th
 - This is enforced with a Chrome policy file, installed with one more `sudo` command when that part is built.
 
 Reply "ok 6" to keep sync off. If you do want Chrome-level sign-in in the Browser, say so, and passwords will need to come from somewhere else.
+
+**Answer to 6 (2026-10-11):** "chrome sync should be on. keep the sign ins. it's ok for the agents to click and type in stuff with autofill since I'm watching them do it in the HUD. if they try to do something dangerous #1 the classifier will most likely catch it, and #2 if the classifier fails to catch something dangerous for any reason I'm literally right there to stop it". Recorded as BD-5 = on in amendment 1 §C and in the decisions file. The password-store cost (no keyring in this WSL) is stated there.
