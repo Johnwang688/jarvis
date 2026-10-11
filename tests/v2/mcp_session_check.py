@@ -57,7 +57,8 @@ from jarvis.v2.approvals import PendingApprovals  # noqa: E402
 from jarvis.v2.model import PermissionProfile, ProviderName, Role, Thread  # noqa: E402
 from jarvis.v2.permissions import PermitContext, build_permit, deny_all  # noqa: E402
 from jarvis.v2.provider import (Brief, BriefRefused, Decision, Event,  # noqa: E402
-                                EventKind as K, SessionHandle, Usage, UserMessage)
+                                EventKind as K, SessionHandle, SessionLost, Usage,
+                                UserMessage)
 from jarvis.v2.providers import codex, codex_config  # noqa: E402
 from jarvis.v2.stores import Stores  # noqa: E402
 
@@ -142,6 +143,11 @@ class FakeCli:
         # or `close` (a session still closing) until the test releases it.
         self.start_gate = None
         self.close_gate = None
+        # A model switch the provider survives by closing the session
+        # (`SessionLost`), and a hold in `undelivered`, which the daemon calls
+        # at a turn's end outside its lock, before it drops a lost session.
+        self.lose_on_switch = False
+        self.undelivered_gate = None
 
     def health(self):
         return True, "fake"
@@ -185,6 +191,14 @@ class FakeCli:
 
     def set_model(self, h, model, effort):
         self.models.append((h.thread_id, model, effort))
+        if self.lose_on_switch:
+            raise SessionLost("the fake could not switch and closed the session")
+
+    def undelivered(self, h):
+        if self.undelivered_gate is not None:
+            self.undelivered_gate[0].set()
+            self.undelivered_gate[1].wait(5)
+        return []
 
 
 def entry_of(brief: Brief) -> dict:
@@ -660,6 +674,30 @@ class BridgeChecks(DaemonHarness):
                 self.claude.close_gate[1].set()
                 closer.join(10)
         self.assertEqual(status, 403, "a closing session answers no call")
+        self.assertEqual(CALLS, [])
+
+    def test_a_lost_session_is_refused_before_it_is_dropped(self):
+        """A refused model switch that cost the session marks it `lost`
+        under the lock; the turn's end drops it later. In between it is
+        still the thread's live session with a live token, so only the
+        `lost` check refuses a call."""
+        thread = self.chat(CLAUDE)
+        token = token_of(self.run_brief(thread))
+        self.d.set_thread_model(thread.id, {"effort": "low"})
+        self.claude.lose_on_switch = True
+        self.claude.undelivered_gate = (threading.Event(), threading.Event())
+        self.d.send(thread.id, UserMessage("switch"))
+        try:
+            self.assertTrue(self.claude.undelivered_gate[0].wait(5), "the turn is ending")
+            session = self.d._sessions.get(thread.id)
+            self.assertIsNotNone(session, "not dropped yet")
+            self.assertTrue(session.lost)
+            self.assertIsNotNone(self.d.callers.resolve(token), "not revoked yet")
+            status, _ = self.call(token)
+        finally:
+            self.claude.undelivered_gate[1].set()
+        self.wait_idle(thread.id)
+        self.assertEqual(status, 403, "a lost session answers no call")
         self.assertEqual(CALLS, [])
 
     def test_the_identity_check_holds_when_a_revoke_is_missed(self):
