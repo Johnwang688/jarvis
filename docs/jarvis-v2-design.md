@@ -2149,7 +2149,7 @@ owner asked for 6- and 8-pane layouts ("I'm not seeing the 6 and 8 panel
 layouts"). Ten shapes now: WP-A's six plus 3 over 2, 3×2, 4 over 3 and 4×2
 (decisions S-1); ⊞ offers eight tiles, four to a row, 3×2 and 4×2 among them,
 with "Layout · N panes" at the head and no tile checked while a 5- or 7-pane
-shape is current. 5 and 7 are reached by split and close (WP-G2, not yet
+shape is current (it then opens on the first tile, never on a toggle row). 5 and 7 are reached by split and close (WP-G2, not yet
 built; `LADDER` is the shape per count, three being three columns, S-3) or a
 stored value. Every pane can show chat, task, file, diff, preview or a
 terminal (panes 5–8 default to chat), and the chats, terminals and dirty

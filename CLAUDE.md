@@ -998,7 +998,9 @@ the slider. #29's own checks are ported to it: `hud_v2_declutter_check`'s F4
 decisions file beside it wins: S-1 5 = 3 over 2, 6 = 3×2, 7 = 4 over 3, 8 =
 4×2; S-3 three is three columns).** The owner: "I'm not seeing the 6 and 8
 panel layouts." ⊞ now offers 3×2 and 4×2 directly (eight tiles, four to a
-row, the head "Layout · N panes"); 3 over 2 and 4 over 3 exist as presets
+row, the head "Layout · N panes"; it opens on the chosen tile, else the first
+tile — never on a toggle row, where Enter folded the sidebar with 3 over 2
+current, review of PR #37); 3 over 2 and 4 over 3 exist as presets
 (`LADDER` is the shape per count for WP-G2's split and ×, which are **not**
 built yet) and draw from a stored value. Every pane can show chat, task,
 file, diff, preview or a terminal; panes 5–8 default to chat. **A pane's id
@@ -1035,7 +1037,9 @@ never-drop-the-focused-pane property over every shape, focus, order and size,
 the plan's window table, ⊞ 8 → 1 → 8), `layout.test.ts` (focus5…8, AltGr
 symbols), `chats.test.ts`, `hud_v2_layout_check._eight_checks` and
 `hud_v2_multichat_check._eight_chats_checks`; each check the plan names a
-mutation for was shown to fail with it applied in a scratch copy.
+mutation for was shown to fail with it applied in a scratch copy, and so were
+the review's slot-label checks (a stored order `[1, 5, 2]`, so slot ≠ id, for
+both "shown in pane N" notices and the refusal chip).
 
 **Sidebar status dots (2026-10-08, design §18; contract in
 `docs/hud-api.md`).** The `·` left of each sidebar thread and task is what it

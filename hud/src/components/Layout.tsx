@@ -654,9 +654,13 @@ function MenuShell(props: {
 }) {
   const box = useRef<HTMLDivElement>(null);
   const { onClose, opener } = props;
+  // It opens on the chosen tile (a `menuitemradio`), else on the first item —
+  // never on a checked toggle row (`menuitemcheckbox`): with 3 over 2 or 4
+  // over 3 current no tile is checked, and focus used to land on the sidebar
+  // toggle, where Enter folded the sidebar (review of PR #37).
   useLayoutEffect(() => {
     const first =
-      box.current?.querySelector<HTMLElement>('[data-mi][aria-checked="true"]')
+      box.current?.querySelector<HTMLElement>('[data-mi][role="menuitemradio"][aria-checked="true"]')
       || box.current?.querySelector<HTMLElement>("[data-mi]");
     first?.focus();
   }, []);

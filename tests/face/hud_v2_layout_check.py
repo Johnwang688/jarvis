@@ -1902,9 +1902,14 @@ def _eight_checks(page, mock, check, until):
     # Ctrl+Alt+N is a slot, never an id: a stored order of 1, 5, 2.
     page.set_viewport_size({"width": 1920, "height": 1080})
     _set_storage(page, zoom="100", layout="{}")
+    # Pane 2 (slot 3) holds the same terminal as pane 5 (slot 2): one terminal
+    # is drawn in one place, the first in reading order, so pane 2 says where.
+    # The panel's selected tab is that terminal too (review of PR #37: both
+    # "shown in pane N" labels survived an id-for-slot mutant).
     _set_ws(page, json.dumps({"preset": "cols3", "order": [1, 5, 2], "focused": 1,
-                              "panes": [{"view": "chat"}, {"view": "preview"}, {"view": "file"}, {"view": "task"},
-                                        {"view": "terminal", "terminalId": tid}]}))
+                              "panes": [{"view": "chat"}, {"view": "terminal", "terminalId": tid}, {"view": "file"},
+                                        {"view": "task"}, {"view": "terminal", "terminalId": tid}]}))
+    page.evaluate("t => localStorage.setItem('jarvis.hud.terminals', JSON.stringify({active: t, specs: {}}))", tid)
     _boot(page, mock, None, until, reload=True)
     g = _geo(page, (1, 5, 2))
     check("a stored order [1, 5, 2] draws pane 5 in the middle, slot 2",
@@ -1922,13 +1927,38 @@ def _eight_checks(page, mock, check, until):
           _attr(page, _pane(2), "data-focused") == "true" and _last_key(page).get("prevented") is False)
     check("the panes' labels name their slots", _attr(page, _pane(5), "aria-label").startswith("Pane 2:"),
           str(_attr(page, _pane(5), "aria-label")))
+    elsewhere = page.locator('[data-testid="pane-2-terminal-elsewhere"]')
+    until(lambda: elsewhere.count() > 0, timeout=3)
+    check("pane 2 (slot 3), holding the terminal pane 5 draws, says \"shown in pane 2\" — the slot, not id 5",
+          elsewhere.count() == 1 and "shown in pane 2." in elsewhere.inner_text()
+          and page.locator(_pane(5, f'[data-testid="terminal-{tid}"]')).count() == 1,
+          elsewhere.inner_text() if elsewhere.count() else "no notice")
     page.locator('[data-testid="toggle-panel"]').click()
     tab = page.locator(f'[data-testid="panel-tab-{tid}"]')
     until(lambda: tab.count() > 0 and "in pane" in tab.inner_text(), timeout=3)
     check("the terminal in pane 5 (slot 2): its panel tab says \"in pane 2\"",
           tab.count() == 1 and "in pane 2" in tab.inner_text() and tab.get_attribute("data-place") == "pane-5",
           tab.inner_text() if tab.count() else "no tab")
+    there = page.locator('[data-testid="panel-elsewhere"]')
+    until(lambda: there.count() > 0, timeout=3)
+    check("and the panel, on that terminal's tab, says \"shown in pane 2\" too",
+          there.count() == 1 and "shown in pane 2." in there.inner_text(),
+          there.inner_text() if there.count() else "no notice")
     page.locator('[data-testid="toggle-panel"]').click()
+    page.evaluate("localStorage.removeItem('jarvis.hud.terminals')")
+
+    # A stored 3 over 2 has no tile in ⊞: the menu opens on a tile, never on a
+    # toggle row (review of PR #37: Enter on the focused sidebar toggle folded it).
+    _set_ws(page, json.dumps({"preset": "grid5"}))
+    _boot(page, mock, None, until, reload=True)
+    _open_layout_menu(page, until)
+    time.sleep(0.1)
+    checked = [p for p in MENU_TILES if _attr(page, f'[data-testid="layout-preset-{p}"]', "aria-checked") == "true"]
+    check("with 3 over 2 stored, ⊞ checks no tile and opens with focus on the first tile, not a toggle",
+          checked == [] and _active_testid(page) == "layout-preset-single", f"{checked} {_active_testid(page)}")
+    page.keyboard.press("Escape")
+    until(lambda: page.locator('[data-testid="layout-menu"]').count() == 0, timeout=2)
+    check("and the sidebar is still open", _visible(page, "#sidebar"))
 
     # 3 over 2: the bottom row's edge is its own.
     _set_ws(page, json.dumps({"preset": "grid5"}))

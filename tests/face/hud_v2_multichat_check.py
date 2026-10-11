@@ -1205,6 +1205,31 @@ def _rv_beside_refusal_checks(page, mock, check, until):
     save.click()
     until(lambda: save.is_disabled(), timeout=4)
 
+    # The same with an id that is not its slot (review of PR #37): the File
+    # pane is id 5, drawn in slot 2. The refusal names the slot.
+    _fresh(page, mock, until, json.dumps({
+        "preset": "cols2", "order": [1, 5], "focused": 1,
+        "panes": [{"view": "chat"}, {"view": "preview"}, {"view": "file"}, {"view": "task"}, {"view": "file"}]}))
+    _open(page, until, 1, "t1")
+    page.locator(_pane(5, '[data-testid="file-calc.py"]')).click()
+    until(lambda: page.locator(_pane(5, '[data-testid="file-path"]')).inner_text() == "calc.py", timeout=4)
+    _edit(page, until, 5, "\n# slot two, id five")
+    save = page.locator(_pane(5, '[data-testid="file-save"]'))
+    until(lambda: not save.is_disabled(), timeout=4)
+    _focus(page, until, 1)
+    _choose(page, until, "single")
+    until(lambda: not _visible(page, _pane(5)), timeout=2)
+    _expand(page, until, "p2", "thread-t3")
+    page.locator('[data-testid="thread-t3"]').click(modifiers=["Alt"])
+    shown = page.locator('[data-testid="pane-1-refused"]')
+    check("review of #37: the refusal names the hidden File pane by its slot (2), never its id (5)",
+          bool(until(lambda: shown.count() == 1 and shown.is_visible(), timeout=2))
+          and "pane 2 has an unsaved edit" in shown.inner_text() and "pane 5" not in shown.inner_text(),
+          shown.inner_text() if shown.count() else "")
+    _choose(page, until, "cols2")
+    save.click()
+    until(lambda: save.is_disabled(), timeout=4)
+
 
 # ---------------------------------------------------------------------------
 # The owner's rule (decisions W-6): ambiguous input goes to the selected chat.
