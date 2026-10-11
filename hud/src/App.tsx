@@ -57,7 +57,7 @@ import { CollapseButton, Rail, Splitter, TitleBar, useLayout } from "./component
 import { Workspace, type PaneInfo } from "./components/Workspace";
 import { terminalAttached, terminals } from "./components/Terminal";
 import { inTerminal, terminalSpecFor } from "./lib/terminal";
-import { endsTalk, talkKeyAction } from "./lib/talkkey";
+import { SPACE_HINT, SPACE_HINT_KEY, endsTalk, isTalkKey, isTypingTarget, talkKeyAction, wantsSpaceHint } from "./lib/talkkey";
 import { maxWidth } from "./lib/layout";
 import { PANE_NOS, SHAPES, show as showOf, type PaneNo, type PaneSpec, type View } from "./lib/workspace";
 import { ActivitySync, clearsOnRead } from "./lib/activity";
@@ -1599,6 +1599,31 @@ export default function App() {
 
   const release = useCallback(() => capture.release(), [capture]);
 
+  // Space was push-to-talk until 2026-10-10. The first Space pressed outside a
+  // typing target afterwards says, once per browser profile, what the key is
+  // now (on the selected chat's line under the orb, for a few seconds); Space
+  // itself does what it does on any page. Storage that throws says it once
+  // per load.
+  const hintSaid = useRef(false);
+  const sayTalkKeyOnce = useCallback(() => {
+    if (hintSaid.current) return;
+    // Said where it is read — the selected chat's line — and never over a
+    // turn's own status: with no chat on screen, or one busy, it waits.
+    const pane = live.current.selectedChat;
+    if (pane === null || live.current.chats[pane].busy) return;
+    hintSaid.current = true;
+    try {
+      if (window.localStorage.getItem(SPACE_HINT_KEY)) return;
+      window.localStorage.setItem(SPACE_HINT_KEY, "1");
+    } catch {
+      /* said once for this load */
+    }
+    chatPatch(pane, { status: SPACE_HINT });
+    setTimeout(() => {
+      if (live.current.chats[pane]?.status === SPACE_HINT) chatPatch(pane, { status: "" });
+    }, 8000);
+  }, [chatPatch]);
+
   // What the workspace's error boundary calls once it has caught a render
   // error: a paste going out to a shell stops (nothing on screen could show
   // its notice or Resume), and nothing in the microphone's hands is sent.
@@ -1619,9 +1644,24 @@ export default function App() {
   // input, untouched. `talkHeld` is a ref so a re-run of this effect mid-hold
   // cannot lose the release; a window that loses focus mid-hold never sees
   // the keyup, so the blur lets go instead.
+  //
+  // **A hold is one key, decided where it began** (review of PR #40). Its
+  // auto-repeat keydowns are routed by `talkHeld`, not by where focus is now:
+  // a hold that began as push-to-talk — or as a press refused under a card —
+  // stays the window's when focus lands in a terminal mid-hold (a click into
+  // one, or a card answered by mouse, Discord or its timeout handing focus
+  // back), so the shell never gets a run of end-of-input from it.
   const talkHeld = useRef(false);
   useEffect(() => {
     const down = (e: KeyboardEvent) => {
+      if (talkHeld.current && isTalkKey(e)) {
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      }
+      if (wantsSpaceHint(e, { typing: isTypingTarget(e.target), blocked: live.current.approvals.length > 0 })) {
+        sayTalkKeyOnce();
+      }
       const what = talkKeyAction(e, { terminal: inTerminal(e.target), blocked: live.current.approvals.length > 0 });
       if (what !== "talk") return;
       e.preventDefault();
@@ -1646,7 +1686,7 @@ export default function App() {
       window.removeEventListener("keyup", up, true);
       window.removeEventListener("blur", letGo);
     };
-  }, [press, release]);
+  }, [press, release, sayTalkKeyOnce]);
 
   // ---- microphone ---------------------------------------------------------
 

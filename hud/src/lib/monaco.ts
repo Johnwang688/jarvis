@@ -74,12 +74,19 @@ export const NEXT_MATCH_KEY = "Ctrl+Shift+D";
 /**
  * Monaco's keys that would fight the HUD's (2026-10-10). Ctrl+D is push-to-
  * talk in the editor too (lib/talkkey.ts: the window takes it in the capture
- * phase, before Monaco sees it), so Monaco's two Ctrl+D commands take Shift
- * as well: Ctrl+Shift+D, which nothing in Monaco (D is otherwise only a Mac
- * Ctrl binding) or in the HUD binds, and which reads as "add":
+ * phase, before Monaco sees it), so Monaco's two Ctrl+D commands lose it:
  *
  *   add selection to next find match    Ctrl+D         → Ctrl+Shift+D
- *   move last selection to next match   Ctrl+K Ctrl+D  → Ctrl+K Ctrl+Shift+D
+ *   move last selection to next match   Ctrl+K Ctrl+D  → unbound
+ *
+ * Ctrl+Shift+D is bound by nothing in Monaco (D is otherwise only a Mac Ctrl
+ * binding) or in the HUD, and reads as "add". **The chord gets no new key**
+ * (review of PR #40): any Ctrl+K chord makes Ctrl+K start chord mode, and a
+ * Ctrl+K followed by push-to-talk's Ctrl+D — which Monaco never sees — left
+ * it waiting, so the next key typed was swallowed as the chord's end. With
+ * the chord gone, Ctrl+K starts nothing in the HUD's Monaco (multicursor's
+ * was its only Ctrl+K chord). An editor that loads more chords (ED-1) has to
+ * decide what the talk key does to a pending one.
  *
  * The old bindings are removed rather than left shadowed, so Monaco's own
  * record of its keys (its menus and command list) says where they went.
@@ -96,7 +103,6 @@ export function editorKeyRules(m: MonacoKeys): { keybinding: number; command: st
     { keybinding: ctrlD, command: `-${add}` },
     { keybinding: ctrlShiftD, command: add, when: "editorFocus" },
     { keybinding: m.KeyMod.chord(ctrlK, ctrlD), command: `-${move}` },
-    { keybinding: m.KeyMod.chord(ctrlK, ctrlShiftD), command: move, when: "editorFocus" },
   ];
 }
 

@@ -65,6 +65,55 @@ export function talkKeyAction(e: KeyLike, where: { terminal: boolean; blocked: b
   return where.terminal && !where.blocked ? "shell" : "talk";
 }
 
+/**
+ * A `mousedown` handler for a button a pointer must not focus. Its click still
+ * fires and focus stays where it was, so no later Space or Enter presses it.
+ * Space was push-to-talk until 2026-10-10 and swallowed by the window; since
+ * then it presses whatever button has focus, as on any page, and a button the
+ * owner has just clicked still has it. So the ones whose second press matters
+ * take none: the card's AUTHORIZE and ALWAYS (an aborted click — pressed, slid
+ * off — used to leave focus there, and the next Space authorized), the
+ * terminal's "Jarvis can read" switch, the folded mic's mode cycle, and the
+ * Preview's "Keep its origin" (review of PR #40). Tab still reaches the ones
+ * in the Tab order, where a key press is a deliberate one.
+ */
+export const noPointerFocus = (e: { preventDefault(): void }) => e.preventDefault();
+
+/**
+ * Whether keys are going somewhere that types: a text field, a select, an
+ * editable element, Monaco or a terminal. A Space there is a character (or
+ * opens the select) and says nothing about push-to-talk.
+ */
+export function isTypingTarget(target: EventTarget | null): boolean {
+  const el = target as HTMLElement | null;
+  if (!el || typeof (el as any).closest !== "function") return false;
+  if (el.closest('textarea, select, [contenteditable=""], [contenteditable="true"], .monaco-editor, .termslot, .xterm')) {
+    return true;
+  }
+  if (el.tagName === "INPUT") {
+    const type = ((el as HTMLInputElement).type || "text").toLowerCase();
+    return !["button", "checkbox", "radio", "range", "color", "file", "image", "reset", "submit"].includes(type);
+  }
+  return false;
+}
+
+/** What the window says, once, the first time Space is pressed outside a
+ * typing target after the switch: an owner who holds Space to talk learns why
+ * nothing listens. */
+export const SPACE_HINT = "PUSH-TO-TALK IS CTRL+D NOW · HOLD IT TO TALK";
+export const SPACE_HINT_KEY = "jarvis.hud.spaceHint";
+
+/** Whether a keydown is the one to say SPACE_HINT on: a fresh Space (no
+ * modifiers, not auto-repeat) outside a typing target, with no card up. */
+export function wantsSpaceHint(
+  e: { key: string; code?: string; ctrlKey?: boolean; altKey?: boolean; metaKey?: boolean; repeat?: boolean },
+  where: { typing: boolean; blocked: boolean },
+): boolean {
+  if (e.code !== "Space" && e.key !== " ") return false;
+  if (e.ctrlKey || e.altKey || e.metaKey || e.repeat) return false;
+  return !where.typing && !where.blocked;
+}
+
 /** Whether a keyup ends a hold Ctrl+D started: D let go, or Ctrl. */
 export function endsTalk(e: { key: string; code?: string }): boolean {
   if (e.key === "Control") return true;

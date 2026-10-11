@@ -21,14 +21,15 @@ describe("Monaco's keys beside push-to-talk", () => {
     expect(NEXT_MATCH_KEY).toBe("Ctrl+Shift+D");
   });
 
-  it("moves the Ctrl+K Ctrl+D chord too, whose second key is push-to-talk", () => {
+  it("unbinds the Ctrl+K Ctrl+D chord and binds no chord in its place (a pending one swallowed a key)", () => {
     expect(rules).toContainEqual({
       keybinding: chord(CTRL | K, CTRL | D), command: "-editor.action.moveSelectionToNextFindMatch",
     });
-    expect(rules).toContainEqual({
-      keybinding: chord(CTRL | K, CTRL | SHIFT | D), command: "editor.action.moveSelectionToNextFindMatch",
-      when: "editorFocus",
-    });
+    const added = rules.filter((r) => !r.command.startsWith("-"));
+    expect(added).toEqual([
+      { keybinding: CTRL | SHIFT | D, command: "editor.action.addSelectionToNextFindMatch", when: "editorFocus" },
+    ]);
+    expect(rules.some((r) => !r.command.startsWith("-") && r.keybinding > 0xffff)).toBe(false);
   });
 
   it("binds nothing new to plain Ctrl+D: every rule on it is a removal", () => {

@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { endsTalk, isTalkKey, talkKeyAction, type KeyLike } from "./talkkey";
+import {
+  SPACE_HINT, endsTalk, isTalkKey, isTypingTarget, noPointerFocus, talkKeyAction, wantsSpaceHint, type KeyLike,
+} from "./talkkey";
 
 const key = (over: Partial<KeyLike> = {}): KeyLike => ({
   key: "d", code: "KeyD", ctrlKey: true, metaKey: false, altKey: false, shiftKey: false, ...over,
@@ -80,5 +82,66 @@ describe("letting go", () => {
     expect(endsTalk({ key: " ", code: "Space" })).toBe(false);
     expect(endsTalk({ key: "Shift", code: "ShiftLeft" })).toBe(false);
     expect(endsTalk({ key: "a", code: "KeyA" })).toBe(false);
+  });
+});
+
+describe("where Space types", () => {
+  const make = (html: string) => {
+    const host = document.createElement("div");
+    host.innerHTML = html;
+    document.body.appendChild(host);
+    return host;
+  };
+
+  it("is a typing target in a text field, a select, an editable element, Monaco and a terminal", () => {
+    const host = make(`<textarea id="a"></textarea><input id="b"><input id="c" type="search"><select id="d"></select>
+      <div contenteditable="true"><span id="e"></span></div><div class="monaco-editor"><div id="f"></div></div>
+      <div class="termslot"><div class="xterm"><textarea id="g"></textarea></div></div>`);
+    for (const id of ["a", "b", "c", "d", "e", "f", "g"]) expect(isTypingTarget(host.querySelector(`#${id}`))).toBe(true);
+    host.remove();
+  });
+
+  it("is not one on a button, a checkbox, the page or nothing", () => {
+    const host = make(`<button id="a"></button><input id="b" type="checkbox"><div id="c" tabindex="0"></div>`);
+    for (const id of ["a", "b", "c"]) expect(isTypingTarget(host.querySelector(`#${id}`))).toBe(false);
+    expect(isTypingTarget(document.body)).toBe(false);
+    expect(isTypingTarget(null)).toBe(false);
+    host.remove();
+  });
+});
+
+describe("the one-time Space hint", () => {
+  const space = { key: " ", code: "Space" };
+  it("is wanted on a fresh Space outside a typing target, with no card up", () => {
+    expect(wantsSpaceHint(space, { typing: false, blocked: false })).toBe(true);
+    expect(SPACE_HINT).toContain("CTRL+D");
+  });
+
+  it("is not wanted while typing, under a card, on auto-repeat, with a modifier, or for another key", () => {
+    expect(wantsSpaceHint(space, { typing: true, blocked: false })).toBe(false);
+    expect(wantsSpaceHint(space, { typing: false, blocked: true })).toBe(false);
+    expect(wantsSpaceHint({ ...space, repeat: true }, { typing: false, blocked: false })).toBe(false);
+    expect(wantsSpaceHint({ ...space, ctrlKey: true }, { typing: false, blocked: false })).toBe(false);
+    expect(wantsSpaceHint({ key: "d", code: "KeyD" }, { typing: false, blocked: false })).toBe(false);
+  });
+});
+
+describe("a button a pointer must not focus", () => {
+  it("keeps focus where it was and still clicks", () => {
+    const box = document.createElement("input");
+    const button = document.createElement("button");
+    let clicked = 0;
+    button.addEventListener("mousedown", noPointerFocus);
+    button.addEventListener("click", () => clicked++);
+    document.body.append(box, button);
+    box.focus();
+    const down = new MouseEvent("mousedown", { bubbles: true, cancelable: true });
+    button.dispatchEvent(down);
+    button.click();
+    expect(down.defaultPrevented).toBe(true);
+    expect(clicked).toBe(1);
+    expect(document.activeElement).toBe(box);
+    box.remove();
+    button.remove();
   });
 });

@@ -52,6 +52,7 @@ import {
 } from "../lib/terminal";
 import { toCss } from "../lib/layout";
 import { judgePreviewUrl } from "../lib/preview";
+import { noPointerFocus } from "../lib/talkkey";
 import { loadXterm } from "../lib/xterm";
 import { useDaemonPorts } from "../state/daemonPorts";
 import type { PaneNo } from "../lib/workspace";
@@ -1476,6 +1477,9 @@ export function TerminalView(props: { id: string; where: string; pane?: PaneNo; 
           data-testid="term-readable"
           aria-pressed={readable}
           disabled={blocked || !live}
+          // A privacy switch: a click must not leave it focused under a
+          // habitual Space (lib/talkkey.ts, noPointerFocus).
+          onMouseDown={noPointerFocus}
           title={readable
             ? "Jarvis can read this terminal's recent output (a read never includes a recognisable secret). Click to stop."
             : "Jarvis cannot read this terminal. Click to allow."}
