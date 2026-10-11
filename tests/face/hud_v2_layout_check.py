@@ -1885,11 +1885,18 @@ def _open_file(page, until, pane: int, name: str) -> bool:
     rendered view); True once Monaco holds it."""
     row = page.locator(_pane(pane, f'[data-testid="file-{name}"]'))
     picker = page.locator(f'[data-testid="pane-{pane}-folder"]')
-    if not until(lambda: row.count() > 0, timeout=2) and picker.count():
-        picker.select_option("p1")  # no chat to follow: the pane picks its project (E-13)
-    until(lambda: row.count() > 0, timeout=4)
-    row.click()
-    until(lambda: page.locator(_pane(pane, '[data-testid="file-path"]')).inner_text() == name, timeout=4)
+    path = page.locator(_pane(pane, '[data-testid="file-path"]'))
+    # A File pane reopens the file it had when it mounts again (WP-G2), and a
+    # narrow one then hides its tree behind "Files": already open is open.
+    if not (path.count() and path.inner_text() == name):
+        if not until(lambda: row.count() > 0, timeout=2) and picker.count():
+            picker.select_option("p1")  # no chat to follow: the pane picks its project (E-13)
+        until(lambda: row.count() > 0, timeout=4)
+        toggle = page.locator(_pane(pane, '[data-testid="tree-toggle"]'))
+        if not row.first.is_visible() and toggle.count():
+            toggle.click()
+        row.click()
+    until(lambda: path.inner_text() == name, timeout=4)
     if name.endswith(".md"):
         until(lambda: page.locator(_pane(pane, '[data-testid="toggle-rendered"]')).count() > 0, timeout=3)
         if page.locator(_pane(pane, '[data-testid="md-split"]')).count() == 0:
