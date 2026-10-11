@@ -120,6 +120,18 @@ def raw_exchange(port: int, data: bytes, timeout=5.0) -> bytes:
         return buf.partition(b"\r\n\r\n")[0]
 
 
+def raw_all(port: int, data: bytes, timeout=5.0) -> bytes:
+    """Send bytes and read everything the server writes until it closes."""
+    with socket.create_connection(("127.0.0.1", port), timeout=timeout) as sock:
+        sock.sendall(data)
+        buf = b""
+        while True:
+            chunk = sock.recv(65536)
+            if not chunk:
+                return buf
+            buf += chunk
+
+
 class Base(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
@@ -418,7 +430,11 @@ class FrameHeaders(Base):
                     "img-src 'self'; report-to x",
                     "img-src 'self'\r\nX-Injected: 1",            # a header split
                     "img-src 'self'\nX-Injected: 1",
-                    "img-src 'self'\0"):
+                    "img-src 'self'\0",
+                    "img-src 'self'\u2028",                       # not ASCII (strip() ate it silently)
+                    "img-src\u2028'self'",                        # not latin-1: failed after the status line
+                    "img-src 'self' https://exampl\u00e9.com",     # not ASCII
+                    "img-src\t'self'"):                            # not printable
             for builder in (H.content_security_policy, H.workshop_security_policy):
                 with self.subTest(bad=bad, builder=builder.__name__), self.assertRaises(ValueError):
                     builder(bad)
@@ -431,8 +447,28 @@ class FrameHeaders(Base):
             def __getattr__(self, name):
                 raise AssertionError(f"binary wrote something ({name}) before refusing its policy")
 
-        with self.assertRaises(ValueError):
-            H.binary(Recorder(), b"x", "text/plain", csp="img-src 'self', frame-ancestors *")
+        for bad in ("img-src 'self', frame-ancestors *", "img-src 'self'\u2028"):
+            with self.subTest(bad=bad, where="binary"), self.assertRaises(ValueError):
+                H.binary(Recorder(), b"x", "text/plain", csp=bad)
+
+    def test_a_bad_policy_is_one_400_never_two_status_lines(self):
+        # PR #31 re-review: a U+2028 in a response's own directives passed the
+        # check, then failed inside end_headers, after send_response — so the
+        # dispatcher's error answer went out as a second status line on the
+        # same response. It is refused before a byte is written now, and the
+        # dispatcher's answer to a ValueError is a 400 (docs/hud-api.md).
+        for bad in ("img-src\u2028'self'", "img-src 'self'\u2028", "img-src 'self', frame-ancestors *"):
+            def answer(handler, *_args, bad=bad):
+                return H.binary(handler, b"<svg/>", "image/svg+xml", csp=bad)
+            with self.subTest(bad=bad), patch.object(H, "pickers", side_effect=answer):
+                port = self.ports["hud"]
+                data = raw_all(port, f"GET /avatar.svg HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\n\r\n".encode())
+                self.assertEqual(data.count(b"HTTP/1."), 1, data[:300])
+                head, _, body = data.partition(b"\r\n\r\n")
+                status, got = headers_of(head)
+                self.assertEqual(status, 400, head)
+                self.assert_hardened(got, f"the refusal of {bad!r}")
+                self.assertEqual(json.loads(body), {"error": "request failed (ValueError)"})
 
     def test_the_terminal_socket_and_its_refusals_refuse_to_be_framed(self):
         status, _, content = self.ask("hud", "POST", "/terminals", {"in": {"project": self.project.id}})

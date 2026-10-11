@@ -3,7 +3,7 @@ import {
   AttachLedger, CHUNK, InputGate, InputQueue, MINE_KEPT, MINE_KEY, OUTPUT_HIGH_WATER, OutputPipe, attachUrl, chunk,
   clampSize, cleanPaste, cleanText, cleanTitle, counterZoom, encodeInput, fontSizeFor, inTerminal, inheritMine,
   integrationNote, isCtrlC, judgeLink, loadMine, pageNonce, parseControl, parseMine, parsePrefs, parseRow, parseRows,
-  parseSpec, placeMenu, placeTerminals, saveMine, terminalSpecFor, terminalTakesKey,
+  menuWidth, parseSpec, placeMenu, placeTerminals, saveMine, terminalSpecFor, terminalTakesKey,
 } from "./terminal";
 
 const row = (over: Record<string, unknown> = {}) => ({
@@ -216,6 +216,18 @@ describe("the link menu's place (PR #31 review)", () => {
     const q = placeMenu({ x: 200, y: 492 }, tall, z);
     expect(q.top + tall.h).toBeLessThanOrEqual(492);
     expect(inside(q, tall, z)).toBe(true);
+  });
+
+  it("is never wider than the window: a 420px window at 160% (PR #31 re-review)", () => {
+    expect(menuWidth(1280)).toBe(280);
+    expect(menuWidth(800)).toBe(280);
+    const narrow = 420 / 1.6;                     // 262.5 CSS px
+    const w = menuWidth(narrow);
+    expect(w).toBe(254);
+    const p = placeMenu({ x: 200, y: 400 }, { w, h: 164 }, { w: narrow, h: 500 });
+    expect(p.left).toBeGreaterThanOrEqual(4);
+    expect(p.left + w).toBeLessThanOrEqual(narrow - 4);
+    expect(menuWidth(5)).toBe(0);
   });
 
   it("is clamped inside the window on both axes", () => {

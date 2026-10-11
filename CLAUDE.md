@@ -747,8 +747,10 @@ status line passes; the terminal's hand-written `101` passes
 built by `hud_api.content_security_policy(*extra)` — a response's own
 directives (the avatar SVG's) fold in, and **a comma** (it starts a second
 policy: `img-src 'self', frame-ancestors *` let a frame land on the HUD),
-CR/LF/NUL or a reserved `frame-ancestors`/`sandbox`/`report-*` **raises**
-(`_own_directives`; `binary()` checks before writing a byte); the editor's
+anything outside printable ASCII (CR/LF split the header; U+2028 failed
+after the status line) or a reserved `frame-ancestors`/`sandbox`/`report-*`
+**raises** (`_own_directives`; `binary()` checks before writing a byte, so
+it is one 400, never two status lines); the editor's
 full CSP (ED-4) extends that function, never a second header. The preview
 listener (8403) carries **neither** frame header — the HUD frames it — but
 **sandboxes every document it serves** with one CSP, `sandbox allow-scripts

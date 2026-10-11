@@ -2111,7 +2111,8 @@ frame-ancestors 'none'` and `X-Frame-Options: DENY`, added in the daemon
 handler's `end_headers`, the one place every status line passes; one
 function builds the policy (`hud_api.content_security_policy`, which the
 editor's full CSP will extend, and which refuses a response's own
-directives holding a comma — a second policy — CR/LF, or a reserved
+directives holding a comma — a second policy — anything outside printable
+ASCII, or a reserved
 `frame-ancestors`/`sandbox`/`report-*`). The preview origin (8403) carries
 neither, but sandboxes every document it serves with its own CSP (`sandbox
 allow-scripts allow-forms`), so a keep-origin frame that navigates itself

@@ -1052,10 +1052,12 @@ directives (`/avatar.svg`'s `default-src 'none'; style-src 'unsafe-inline'`)
 ride in the same header. **None of them can change the frame rule**: a
 response's own directives holding a comma (which starts a second policy in
 the same header — `img-src 'self', frame-ancestors *` let a frame land on
-the HUD, PR #31 review), CR, LF or NUL, or naming `frame-ancestors`,
-`sandbox`, `report-uri` or `report-to`, raise `ValueError` (a programming
-error; `binary()` checks before writing a byte, so it is a 409, never half a
-response). The editor's full policy (ED-4, `'wasm-unsafe-eval'`) extends
+the HUD, PR #31 review), anything but printable ASCII (CR or LF would split
+the header; U+2028 used to fail after the status line was written), or
+naming `frame-ancestors`, `sandbox`, `report-uri` or `report-to`, raise
+`ValueError` (a programming error; `binary()` checks before writing a byte,
+so the answer is **one 400** — the dispatcher's status for a
+`ValueError` — never half a response or a second status line). The editor's full policy (ED-4, `'wasm-unsafe-eval'`) extends
 that function. The **preview listener (8403) carries neither frame
 header**; instead it sends one CSP, `sandbox allow-scripts allow-forms`
 (`hud_api.workshop_security_policy`, a response's own directives merged and

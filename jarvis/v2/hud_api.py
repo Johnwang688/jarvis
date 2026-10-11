@@ -735,14 +735,17 @@ def _own_directives(extra) -> list[str]:
         first `frame-ancestors` wins — and a browser that sees one ignores
         `X-Frame-Options`, so both frame headers fell at once (PR #31 review,
         shown in Chromium);
-      - CR, LF or NUL: a header split;
+      - anything but printable ASCII (space to `~`): CR or LF splits the
+        header, and a character `latin-1` cannot encode (U+2028) failed only
+        inside `end_headers` — after `send_response`, so the error's own
+        answer went out as a second status line (PR #31 re-review);
       - any directive this module reserves (`_RESERVED`)."""
     directives: list[str] = []
     for chunk in extra:
         if not chunk:
             continue
-        if not isinstance(chunk, str) or any(c in chunk for c in ",\r\n\0"):
-            raise ValueError("a response's own CSP directives may not hold a comma, CR, LF or NUL")
+        if not isinstance(chunk, str) or any(c == "," or not " " <= c <= "~" for c in chunk):
+            raise ValueError("a response's own CSP directives must be printable ASCII with no comma")
         for directive in chunk.split(";"):
             directive = directive.strip()
             if not directive:
@@ -786,7 +789,8 @@ def frame_headers(handler, csp: str | None = None) -> list[tuple[str, str]]:
 
 
 def binary(handler, data, mime, *, csp=None):
-    # Checked before a byte is written: a bad policy is a 409, never half a response.
+    # Checked before a byte is written: a bad policy is one 400 (the
+    # dispatcher's answer to a ValueError), never half a response.
     _own_directives((csp,))
     handler.send_response(200)
     handler.send_header("Content-Type", mime)

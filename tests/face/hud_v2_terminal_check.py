@@ -1263,8 +1263,10 @@ def _menu_edge_checks(page, mock, base, check, until, fake):
     and sit wholly inside the window, both buttons clickable."""
     menu = '[data-testid="term-link-menu"]'
     dev = f"http://127.0.0.1:{mock.dev_port}/"
-    for zoom in (100, 160):
-        tid = _fresh(page, mock, base, until, fake)
+    # The third is a 420px window at 160% (262 CSS px): the menu used to be a
+    # fixed 280 CSS px, wider than the window (PR #31 re-review).
+    for zoom, size_px in ((100, (1280, 800)), (160, (1280, 800)), (160, (420, 800))):
+        tid = _fresh(page, mock, base, until, fake, size=size_px)
         if zoom != 100:
             _store(page, zoom=str(zoom), layout="{}")
             _boot(page, mock, base, until, reload=True)
@@ -1272,8 +1274,13 @@ def _menu_edge_checks(page, mock, base, check, until, fake):
             page.wait_for_timeout(300)
         size = page.evaluate("id => window.__hudTerminals.size(id)", tid)
         last = size["rows"] - 1
-        fake.output(tid, f"\x1b[2J\x1b[{last + 1};1H".encode() + dev.encode())
-        until(lambda: dev.rstrip("/") in _text(page, tid), timeout=3)
+        # In the narrow window the terminal is ~21 columns, and the 23-character
+        # link would wrap off the row clicked: a loopback link that fits. (Not
+        # `127.1`: xterm's link addon keeps only a link whose text starts with
+        # its own normalized host, and that one normalizes to 127.0.0.1.)
+        link = dev if size["cols"] > len(dev) + 4 else f"http://[::1]:{mock.dev_port}/"
+        fake.output(tid, f"\x1b[2J\x1b[{last + 1};1H".encode() + link.encode())
+        until(lambda: link.rstrip("/") in _text(page, tid), timeout=3)
         page.wait_for_timeout(200)
         page.evaluate("window.__opened = []")
         x2, y2, _, _ = _cell(page, tid, 8, last)
@@ -1295,15 +1302,17 @@ def _menu_edge_checks(page, mock, base, check, until, fake):
                 and b["y"] + b["height"] <= vp["height"] + 0.5
         buttons = [page.locator(f'[data-testid="{t}"]').bounding_box()
                    for t in ("term-link-preview", "term-link-browser")] if box else [None, None]
-        check(f"at {zoom}%, a link on the panel terminal's last row opens its menu wholly on screen",
+        at = f"{zoom}% in a {size_px[0]}px window"
+        check(f"at {at}, a link on the panel terminal's last row opens its menu wholly on screen",
               on_screen(box), f"menu {box} viewport {vp} click {x:.0f},{y:.0f}")
-        check(f"at {zoom}%, both of its buttons are on screen", all(on_screen(b) for b in buttons), str(buttons))
-        check(f"at {zoom}%, it flips above the click (no room below) and starts at it",
-              bool(box) and box["y"] + box["height"] <= y + 1 and abs(box["x"] - x) < 40,
+        check(f"at {at}, both of its buttons are on screen", all(on_screen(b) for b in buttons), str(buttons))
+        check(f"at {at}, it flips above the click (no room below) and starts at it",
+              bool(box) and box["y"] + box["height"] <= y + 1
+              and (abs(box["x"] - x) < 40 or box["x"] + box["width"] >= vp["width"] - 12),
               f"menu {box} click {x:.0f},{y:.0f}")
         page.locator('[data-testid="term-link-browser"]').click(timeout=2000)
-        check(f"at {zoom}%, its buttons are clickable (Open in a browser tab opened it)",
-              page.evaluate("window.__opened") == [dev] and not _visible(page, menu),
+        check(f"at {at}, its buttons are clickable (Open in a browser tab opened it)",
+              page.evaluate("window.__opened") == [link] and not _visible(page, menu),
               str(page.evaluate("window.__opened")))
     _store(page, zoom="100", layout="{}")
 

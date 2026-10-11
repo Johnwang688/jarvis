@@ -45,8 +45,8 @@ import type { FitAddon } from "@xterm/addon-fit";
 import { api } from "../api";
 import {
   AttachLedger, InputGate, OutputPipe, attachUrl, cleanPaste, cleanTitle, clampSize, counterZoom, encodeInput,
-  fontSizeFor, integrationNote, isTerminalId, judgeLink, loadMine, loadPrefs, pageNonce, parseControl, placeMenu,
-  saveMine,
+  fontSizeFor, integrationNote, isTerminalId, judgeLink, loadMine, loadPrefs, menuWidth, pageNonce, parseControl,
+  placeMenu, saveMine,
   savePrefs,
   SPECS_KEPT, type InSpec, type TerminalRow,
 } from "../lib/terminal";
@@ -1998,7 +1998,8 @@ export function TerminalLinkMenu(props: { blocked: boolean; zoom: number }) {
     };
   }, [menu, mgr]);
   const verdict = !menu || status === "pending" ? null : judgePreviewUrl(menu.url, ports);
-  const width = 280;
+  // Never wider than the window (less 4px a side), so it can always be placed inside it.
+  const width = menuWidth(toCss(window.innerWidth, props.zoom));
   useLayoutEffect(() => {
     const el = box.current;
     if (!menu || !el) {
@@ -2012,7 +2013,7 @@ export function TerminalLinkMenu(props: { blocked: boolean; zoom: number }) {
       { w: toCss(window.innerWidth, z), h: toCss(window.innerHeight, z) },
     ));
     // The refusal line changes the height once /status has answered.
-  }, [menu, props.zoom, verdict?.ok, verdict?.reason]);
+  }, [menu, props.zoom, width, verdict?.ok, verdict?.reason]);
   if (!menu) return null;
   return (
     <div
