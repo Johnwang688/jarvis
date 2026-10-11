@@ -1774,7 +1774,7 @@ def main():
             browser = pw.chromium.launch(headless=True, args=["--use-fake-ui-for-media-stream",
                                                               "--use-fake-device-for-media-stream"])
             multichat_checks(browser, mock, f"http://127.0.0.1:{mock.port}", H.check, H.until,
-                             lambda ctx: H.guard_live(ctx, H.FAILURES.append), H.FAKE_RECOGNIZER)
+                             H.guard, H.FAKE_RECOGNIZER)
             browser.close()
     finally:
         mock.stop()

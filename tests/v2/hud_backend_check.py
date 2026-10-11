@@ -5,6 +5,7 @@ import base64
 from datetime import datetime, timezone
 import http.client
 import json
+import os
 from pathlib import Path
 import queue
 import subprocess
@@ -168,7 +169,10 @@ class Backend(unittest.TestCase):
                                 # Never the owner's real Discord files: the guild
                                 # file decides `GET /discord`'s answer (B1).
                                 DISCORD_GUILD_PATH=self.root / "discord_guild.json",
-                                DISCORD_TOKEN_PATH=self.root / "discord_token.json").items():
+                                DISCORD_TOKEN_PATH=self.root / "discord_token.json",
+                                # Never the owner's installed HUD (C-1, ED-4).
+                                HUD_DIR=self.root / "hud-installed", HUD_DIST=self.root / "hud-installed",
+                                HUD_DEV=False).items():
             guard = patch.object(config, name, value)
             guard.start()
             self.addCleanup(guard.stop)
@@ -303,20 +307,93 @@ class Backend(unittest.TestCase):
             self.assertIs(status["frame_hardened"], True)
             self.assertEqual(self.headers["X-Frame-Options"], "DENY")
             self.assertIn("frame-ancestors 'none'", self.headers["Content-Security-Policy"])
-            # Either the built HUD (title pinned for FORBIDDEN_TITLES) or, with no
-        # build present, the placeholder naming hud/dist.
-        page = self.request("GET", "/", port=port)
-        self.assertTrue(b"<title>J.A.R.V.I.S.</title>" in page or b"hud/dist" in page)
+            # Nothing installed (C-1): a 503 that names the command, with the
+            # title pinned for FORBIDDEN_TITLES.
+            conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+            try:
+                conn.request("GET", "/")
+                response = conn.getresponse()
+                page = response.read()
+            finally:
+                conn.close()
+            self.assertEqual(response.status, 503, page)
+            self.assertTrue(response.getheader("Content-Type", "").startswith("text/html"))
+            self.assertIn(b"<title>J.A.R.V.I.S.</title>", page)
+            self.assertIn(b"jarvis hud install", page)
         # Simulate a separately built HUD without writing hud/dist.
         dist = self.root / "dist"
         (dist / "assets").mkdir(parents=True)
         (dist / "index.html").write_text("built HUD")
         (dist / "assets" / "app.js").write_text("console.log('HUD')")
-        with patch.object(H, "HUD_DIST", dist):
+        with patch.object(config, "HUD_DIST", dist), patch.object(config, "HUD_DEV", True):
             self.assertEqual(self.request("GET", "/"), b"built HUD")
             self.assertIn(b"console", self.request("GET", "/assets/app.js"))
             self.request("GET", "/assets/no.js", status=404)
             self.request("GET", "/assets/%2e%2e/index.html", status=403)
+            self.assertEqual(self.request("GET", "/status")["hud_build"], "dev")
+        # C-1 (ED-4): the owner's daemon serves the newest installed build,
+        # only files its manifest vouches for.
+        from jarvis.v2 import hud_install
+        self.assertIsNone(self.request("GET", "/status")["hud_build"], "nothing installed yet")
+        root = config.HUD_DIST
+        first = hud_install.install(dist, root, now=1_791_500_000)
+        (dist / "index.html").write_text("built HUD, second")
+        (dist / "assets" / "app.js").unlink()
+        (dist / "assets" / "app2.js").write_text("console.log('two')")
+        second = hud_install.install(dist, root, now=1_791_500_001)
+        self.assertEqual(self.request("GET", "/status")["hud_build"], second.id)
+        self.assertEqual(self.request("GET", "/"), b"built HUD, second", "the newest build is served")
+        self.assertIn(b"two", self.request("GET", "/assets/app2.js"))
+        self.assertIn(b"console", self.request("GET", "/assets/app.js"), "an older build's chunk still loads")
+        self.request("GET", "/assets/%2e%2e/index.html", status=403)
+        self.request("GET", "/assets/..%2fmanifest.json", status=403)
+        self.request("GET", "/manifest.json", status=404)
+        # A file changed behind the manifest's back, a file it never listed,
+        # and a link: none is served.
+        os.chmod(second.path / "assets", 0o755)
+        os.chmod(second.path / "assets" / "app2.js", 0o644)
+        # The same size as what the manifest vouches for, so only the SHA-256
+        # can refuse it (review of PR #44, MED-1).
+        self.assertEqual(len("console.log('XYZ')"), len("console.log('two')"))
+        (second.path / "assets" / "app2.js").write_text("console.log('XYZ')")
+        self.request("GET", "/assets/app2.js", status=404)
+        (second.path / "assets" / "planted.js").write_text("approve()")
+        self.request("GET", "/assets/planted.js", status=404)
+        outside = self.root / "outside.js"
+        outside.write_text("console.log('HUD')")
+        (second.path / "assets" / "linked.js").symlink_to(outside)
+        self.request("GET", "/assets/linked.js", status=404)
+        self.assertNotEqual(first.id, second.id)
+        status = self.request("GET", "/status")
+        self.assertEqual((status["hud_build"], status["hud_state"]), (second.id, "installed"))
+        # Review of PR #44, L1: the newest build's page failing verification
+        # falls back to the newest intact one, and /status says what is
+        # actually served; with none intact the page says so — not "not
+        # installed" — and /status agrees.
+        os.chmod(second.path, 0o755)
+        os.chmod(second.path / "index.html", 0o644)
+        (second.path / "index.html").write_text("built HUD, SECOND")       # same size
+        self.assertEqual(self.request("GET", "/"), b"built HUD", "the newest intact build")
+        status = self.request("GET", "/status")
+        # Never silently "installed" (review of PR #44 at 62db94f).
+        self.assertEqual((status["hud_build"], status["hud_state"], status["hud_passed_over"]),
+                         (first.id, "fallback", [second.id]))
+        os.chmod(first.path, 0o755)
+        os.chmod(first.path / "index.html", 0o644)
+        (first.path / "index.html").write_text("built HUX")
+        conn = http.client.HTTPConnection("127.0.0.1", self.daemon.face_port, timeout=5)
+        try:
+            conn.request("GET", "/")
+            response = conn.getresponse()
+            page = response.read()
+        finally:
+            conn.close()
+        self.assertEqual(response.status, 503, page)
+        self.assertIn(b"failed verification", page)
+        self.assertNotIn(b"not installed", page)
+        status = self.request("GET", "/status")
+        self.assertEqual((status["hud_build"], status["hud_git_head"], status["hud_state"]),
+                         (None, None, "failed verification"))
         preview = self.daemon.workshop_port
         prefix = f"/p/{self.project.id}/"
         self.assertEqual(self.request("GET", prefix + "hello.txt", port=preview), b"hello\n")

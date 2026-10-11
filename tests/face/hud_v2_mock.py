@@ -28,10 +28,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlparse
 
-# The daemon's own frame headers (WP-E), never a copy: the HUD under test is
-# always rendered under exactly what 8402 sends — `frame-ancestors 'none'` and
-# `X-Frame-Options: DENY` — and the mock workshop under the workshop's sandbox.
-from jarvis.v2.hud_api import frame_headers  # noqa: E402
+# The daemon's own headers (WP-E, ED-4), never a copy: the HUD under test is
+# always rendered under exactly what 8402 sends — the whole Content-Security-
+# Policy with `frame-ancestors 'none'`, and `X-Frame-Options: DENY` — so every
+# headless suite runs under the CSP; the mock workshop runs under the
+# workshop's sandbox.
+from jarvis.v2.hud_api import AVATAR_CSP, frame_headers  # noqa: E402
 
 _HUD_LISTENER = SimpleNamespace(server=SimpleNamespace())
 _PREVIEW_LISTENER = SimpleNamespace(server=SimpleNamespace(preview_only=True))
@@ -621,9 +623,12 @@ class MockDaemon:
             def log_message(self, *args):
                 pass
 
+            _csp = None             # a response's own directives (the avatar's)
+
             def end_headers(self):
-                for name, value in frame_headers(_HUD_LISTENER):
+                for name, value in frame_headers(_HUD_LISTENER, self._csp):
                     self.send_header(name, value)
+                self._csp = None
                 super().end_headers()
 
             # -- helpers
@@ -760,6 +765,7 @@ class MockDaemon:
                 if path == "/avatar.svg":
                     body = HOSTILE_SVG.encode()
                     self.send_response(200)
+                    self._csp = AVATAR_CSP          # as the daemon's `pickers` sends it
                     self.send_header("Content-Type", "image/svg+xml")
                     self.send_header("Content-Length", str(len(body)))
                     self.end_headers()
