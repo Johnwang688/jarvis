@@ -247,6 +247,10 @@ def denied_file(target: str) -> str | None:
                 "would widen what runs without anyone being asked, so it is "
                 "the owner's to edit by hand.")
     try:
+        if v1_files._hud_build(resolved):
+            return (f"{path.name} is in the built HUD the daemon serves, whose script "
+                    "can approve what the owner is asked (BR-0). Change the HUD's "
+                    "source instead; the owner rebuilds it.")
         if v1_files._self_protected(path):
             return (f"{path.name} is part of Jarvis's safety layer and can only "
                     "be changed by the owner by hand. Say what you wanted "
@@ -277,6 +281,13 @@ def denied_grant(target: str, access: str = "write") -> str | None:
                     "credentials; no approval can open it")
     if access == "read":
         return None
+    try:
+        dist = _resolve(config.HUD_DIST)
+    except Exception:
+        return f"a grant on {path} cannot be checked against the built HUD; refused"
+    if path == dist or dist in path.parents or path in dist.parents:
+        return (f"a grant on {path} would reach {dist}, the built HUD the daemon serves, "
+                "whose script can approve what the owner is asked; no approval can open it")
     try:
         protected = set(protected_paths()) | set(v1_files._protected_state())
         protected |= {_resolve(Path(config.REPO_ROOT) / rel) for rel in v1_files.SELF_PROTECTED}

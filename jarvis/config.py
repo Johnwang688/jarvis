@@ -266,6 +266,14 @@ CHAT_PROVIDER = os.environ.get("JARVIS_CHAT_PROVIDER", "")
 WORKSHOP_PORT = int(os.environ.get("JARVIS_WORKSHOP_PORT", "8403"))
 DESIGNS_DIR = Path(os.environ.get("JARVIS_DESIGNS", REPO_ROOT / "designs"))
 
+# The built HUD the v2 daemon serves on its HUD listener (`hud_api.HUD_DIST`).
+# Its script runs with the HUD's own Origin there, which is exactly what
+# `POST /approvals` trusts — so a file written into it is a program the
+# owner's next reload runs with the power to approve. The write tools refuse
+# it, v1's and v2's alike (BR-0); `npm run build` through an approved command
+# still writes it.
+HUD_DIST = REPO_ROOT / "hud" / "dist"
+
 # The persistent dangerous-tool allowlist (see permissions.py). Machine-local
 # safety config, so it lives beside the Google token, not in the repo.
 ALLOWLIST_PATH = Path(
