@@ -69,6 +69,14 @@ SELF_PROTECTED = frozenset(
         # rules: an agent that could edit the judge could widen it.
         "jarvis/gitops.py",
         "jarvis/tools/gitctl.py",
+        # Decide which chat may call Jarvis through jarvis-mcp, with which
+        # token, which tools it is offered, and how its calls are gated
+        # (2026-10-10, plan docs/plans/2026-10-10-terminal-read-mcp-plan.md).
+        # An agent that could edit them could hand itself a token or a tool.
+        "jarvis/v2/callers.py",
+        "jarvis/v2/bridge.py",
+        "jarvis/v2/session_tools.py",
+        "jarvis/v2/mcp_session.py",
     }
 )
 
