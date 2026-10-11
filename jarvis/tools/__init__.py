@@ -138,6 +138,12 @@ def register_group(
     extra: tuple[str, ...],
     available: Callable[[], bool],
 ) -> None:
+    # An empty core would make "the agent already holds the group's core" true
+    # of every agent, so any agent holding load_tools could widen into the
+    # group (load_tools and Agent._sync_tools both gate on it). Refused here,
+    # and both of those also refuse an empty core they meet some other way.
+    if not core:
+        raise ValueError(f"tool group {name!r} needs at least one core tool")
     GROUPS[name] = ToolGroup(name, summary, tuple(core), tuple(extra), available)
 
 
@@ -175,6 +181,20 @@ def default_names() -> list[str]:
 # guessed or misremembered name; the schemas themselves are already in the
 # request, so listing a hundred names would only re-send the registry.
 REFUSAL_LIST_CAP = 40
+
+
+# How much of a name the model made up is echoed back. A name is whatever the
+# model wrote in the call, so it is untrusted and unbounded (a 50,000-character
+# name used to come back whole): shown as its repr — which escapes control and
+# invisible characters — and cut to this many characters.
+NAME_ECHO_CAP = 64
+
+
+def _shown_name(name: object) -> str:
+    text = name if isinstance(name, str) else str(name)
+    if len(text) <= NAME_ECHO_CAP:
+        return repr(text)
+    return f"{text[:NAME_ECHO_CAP]!r}… ({len(text)} characters)"
 
 
 def _names_listing(names) -> str:
@@ -218,22 +238,33 @@ def _toolset_refusal(name: str) -> str | None:
         tool names (capped). No pointer to `load_tools` for an agent that
         cannot call it or may not widen into that group.
 
-    **Unbound fails open**, and that is a decision, not an oversight: nothing
-    bound means no agent is calling — a test or a script calling `dispatch`
-    directly — so there is no toolset to enforce. It is safe only because no
-    real path dispatches unbound: the only callers of `dispatch` under
-    `jarvis/` are `Agent._dispatch_one` (reached only from `_run_turn`, after
-    its bind), `v2/mcp.call_tool` (which binds its exposed list first) and the
-    daemon's jarvis-mcp bridge, `v2/bridge.call` (which binds the chat
-    session's offered list first), and
+    **Unbound refuses** (2026-10-11, the owner's call; it failed open before).
+    Nothing bound means no agent is calling, and no real path dispatches that
+    way: the only callers of `dispatch` under `jarvis/` are `Agent._dispatch_one`
+    (reached only from `_run_turn`, after its bind), `v2/mcp.call_tool` (which
+    binds its exposed list first) and the daemon's jarvis-mcp bridge,
+    `v2/bridge.call` (which binds the chat session's offered list first), and
     `tests/dispatch_toolset_check.py` asserts both halves — that set of call
-    sites, and a binding at every dispatch on every surface it drives. A new
-    caller of `dispatch` must bind a toolset first, or it runs unconfined.
+    sites, and a binding at every dispatch on every surface it drives. So an
+    unbound dispatch is a bug, and a bug here should fail loudly rather than
+    quietly hand the caller the whole registry. A script or a test that calls
+    `dispatch` itself says what it may call — `runtime.tools_bound(names)` —
+    or, when it truly means every tool, `runtime.unconfined()`: an opt-in made
+    in code, which nothing a model writes can reach.
     """
     from .. import runtime
 
     held = runtime.current_tools()
-    if held is None or name in held:
+    if held is None:
+        if runtime.is_unconfined():
+            return None
+        return (
+            f"Error: {_shown_name(name)} was not run: no agent's toolset is bound "
+            "here, so there is nothing to check the call against. Every real "
+            "caller binds one before dispatch; a script or a test says what it "
+            "may call with runtime.tools_bound(...) or runtime.unconfined()."
+        )
+    if name in held:
         return None
     group = group_of(name)
     if group is not None and "load_tools" in held and group in loadable(held):
@@ -412,22 +443,25 @@ def dispatch(
 def _dispatch(
     name: str, raw_arguments: str, approve: Callable[[Tool, dict], bool] | None = None
 ) -> ToolResult:
-    entry = REGISTRY.get(name)
-    if entry is None:
-        from .. import runtime
+    from .. import runtime
 
-        held = runtime.current_tools()
-        if held is not None:
-            return ToolResult(f"Error: no tool named {name!r}. Available: {_names_listing(held)}")
-        visible = sorted(default_names())
-        return ToolResult(f"Error: no tool named {name!r}. Available: {', '.join(visible)}")
+    held = runtime.current_tools()
+    entry = REGISTRY.get(name)
+    if entry is None and held is not None:
+        return ToolResult(
+            f"Error: no tool named {_shown_name(name)}. Available: {_names_listing(held)}"
+        )
 
     # The calling agent's toolset, checked before anything about the call is
     # read: a tool this agent does not hold must not get as far as parsing its
-    # arguments, let alone the approver. See _toolset_refusal.
+    # arguments, let alone the approver — and with no toolset bound at all,
+    # nothing runs and no registry listing goes back. See _toolset_refusal.
     refused = _toolset_refusal(name)
     if refused is not None:
         return ToolResult(refused)
+    if entry is None:  # unconfined(): a script, told what there is
+        visible = ", ".join(sorted(default_names()))
+        return ToolResult(f"Error: no tool named {_shown_name(name)}. Available: {visible}")
 
     try:
         arguments = json.loads(raw_arguments or "{}")

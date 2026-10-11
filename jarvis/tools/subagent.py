@@ -79,11 +79,23 @@ def _run_one(job: agents.Job) -> agents.Job:
     from .. import agent as agent_mod
 
     agent_type = agents.get(job.type)
+    names = _child_tools(agent_type)
+    # A type whose brief names a tool the intersection took away would be
+    # told to use a tool it cannot call — a builder with no git_worktree, sent
+    # by a parent that holds no git tools. Not sent; the parent can choose.
+    missing = [name for name in agent_type.needs if name not in names]
+    if missing:
+        job.error = (
+            f"the {agent_type.name} type works with {', '.join(missing)}, which this "
+            "agent does not hold, so it was not sent — choose another type or do "
+            "this part directly"
+        )
+        return job
     try:
         child = agent_mod.Agent(
             model=models.tier("subagent"),
             system=agent_type.prompt(),
-            tool_names=_child_tools(agent_type),
+            tool_names=names,
             max_steps=job.extras.get("max_steps") or agent_type.max_steps,
             approve=runtime.approver(),  # inherited; denies when unbound
             should_stop=runtime.should_stop(),

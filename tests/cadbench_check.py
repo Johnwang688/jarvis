@@ -23,6 +23,7 @@ Run after touching `jarvis/cadbench.py`:
 
 from __future__ import annotations
 
+import contextvars
 import json
 import sys
 import tempfile
@@ -438,6 +439,58 @@ def test_find_channel() -> None:
             cb._bbox_cache.clear()
 
 
+def test_skill_reachable() -> None:
+    """The bench measures the CAD discipline in skills/cad/SKILL.md, so its
+    agent must be able to open it: since PR #34 a skill_read the agent does
+    not hold is refused, where before it quietly ran (owner's answer 5)."""
+    print("\nthe CAD skill")
+    from jarvis import agent as agent_mod
+    from jarvis import runtime, tools
+
+    built: list[dict] = []
+    saved = (cb.find_channel, cb.create_assembly, cb.delete_element,
+             cb.read_assembly, cb.agent_mod.Agent, config.AVATAR_ENV)
+
+    class RecordingAgent:
+        def __init__(self, **kwargs):
+            built.append(kwargs)
+
+        def run_turn(self, prompt):
+            raise RuntimeError("stop here")
+
+    try:
+        cb.find_channel = lambda: dict(PART)
+        cb.create_assembly = lambda name: ASM
+        cb.delete_element = lambda eid: None
+        cb.read_assembly = lambda eid: []
+        cb.agent_mod.Agent = RecordingAgent
+        config.AVATAR_ENV = "jarvis"  # never the owner's saved avatar
+        cb.run_task("fake/model", cb.TASKS[0])
+        cb.agent_mod.Agent = saved[4]
+        names = list(built[0]["tool_names"]) if built else []
+        check("the bench's agent holds skill_read and skill_list",
+              {"skill_read", "skill_list"} <= set(names), str(names))
+
+        agent = agent_mod.Agent(model="fake/model", system=built[0]["system"],
+                                tool_names=names, approve=lambda *a: False)
+        agent._refresh_system()
+        state = agent_mod.durable_state(agent.messages)
+        check("its context lists the cad skill", "SKILLS AVAILABLE" in state
+              and "- cad:" in state)
+        held = {spec["function"]["name"] for spec in agent.tool_specs}
+
+        def read_as_the_agent():  # bound in a copy, so this thread is left as it was
+            runtime.bind(tool_names=held)
+            return tools.dispatch("skill_read", json.dumps({"name": "cad"})).text
+
+        text = contextvars.copy_context().run(read_as_the_agent)
+        check("skill_read('cad') runs for it and returns the skill",
+              text.startswith("Skill: cad"), text[:120])
+    finally:
+        (cb.find_channel, cb.create_assembly, cb.delete_element,
+         cb.read_assembly, cb.agent_mod.Agent, config.AVATAR_ENV) = saved
+
+
 def test_registration() -> None:
     print("\nregistration")
     from jarvis import __main__ as main_mod
@@ -460,6 +513,7 @@ def main() -> int:
     test_empty_and_short_runs()
     test_cleanup_on_crash()
     test_find_channel()
+    test_skill_reachable()
     test_registration()
     print(f"\n{PASSED} passed, {len(FAILED)} failed")
     if FAILED:

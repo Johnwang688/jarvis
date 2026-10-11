@@ -25,6 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import httpx
 
+from jarvis import runtime
 from jarvis import config, onshape_auth, tools
 from jarvis.tools import onshape as cad
 from jarvis.tools import secrets
@@ -398,4 +399,10 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # dispatch() refuses when no toolset is bound (PR #34's follow-up), so
+    # this suite says what it calls directly — and is held to it.
+    with runtime.tools_bound({
+        "cad_assembly", "cad_create_assembly", "cad_delete", "cad_find_part", "cad_insert",
+        "cad_move", "cad_render", "cad_status", "read_file"
+    }):
+        sys.exit(main())
