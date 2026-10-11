@@ -417,7 +417,7 @@ class BrowserPolicy:
         # owner approves dangerous tools, and an agent that can open its own
         # HUD can click its own approval button. A gate you can reach is not
         # a gate.
-        if config.is_face_origin(url):
+        if config.is_face_origin(url) or config.ambiguous_authority(url):
             return False
         host = (urlparse(url).hostname or "").lower()
         if any(
@@ -610,6 +610,11 @@ class Session:
                 raise BrowserError(
                     "that is Jarvis's own control plane, which is off limits. "
                     "Ask the owner directly instead of driving the window."
+                )
+            if config.ambiguous_authority(url):
+                raise BrowserError(
+                    "that URL's host is ambiguous (a backslash or nothing where the "
+                    "host goes, or a tab or line break); write it plainly."
                 )
             if "*" in self.policy.allowed_hosts:
                 raise BrowserError(

@@ -195,6 +195,104 @@ def control_port_policy_checks() -> None:
     print("ok  fetch_page: 8405 refused before the request, and as a redirect's landing")
 
 
+def fetch_redirect_checks() -> None:
+    """BR-0: fetch_page judges every redirect hop *before* requesting it.
+
+    Real httpx against loopback fixtures on ephemeral ports. On dfb1d7e httpx
+    followed the hop itself, so the stand-in control listener was requested
+    (a GET) before fetch_page refused where it had landed.
+    """
+    hits = []
+
+    class Control(SimpleHTTPRequestHandler):
+        def do_GET(self):
+            hits.append(self.path)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.end_headers()
+            self.wfile.write(b"<html><body>control</body></html>")
+
+        def log_message(self, *args):
+            pass
+
+    control = ThreadingHTTPServer(("127.0.0.1", 0), Control)
+    cport = control.server_address[1]
+
+    class Site(SimpleHTTPRequestHandler):
+        def do_GET(self):
+            if self.path == "/to-control":
+                return self._go(f"http://localhost:{cport}/approvals")
+            if self.path == "/to-control-relative":
+                return self._go(f"//127.0.0.1:{cport}/")
+            if self.path == "/set-cookie":
+                return self._go("/needs-cookie", cookie="seen=1")
+            if self.path.startswith("/loop"):
+                return self._go("/loop")
+            if self.path == "/needs-cookie" and "seen=1" not in (self.headers.get("Cookie") or ""):
+                body = b"<html><body>no cookie</body></html>"
+            else:
+                body = (b"<html><body><main><p>" + b"arrived with the cookie " * 12
+                        + b"</p></main></body></html>")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _go(self, where, cookie=None):
+            self.send_response(302)
+            self.send_header("Location", where)
+            if cookie:
+                self.send_header("Set-Cookie", cookie + "; Path=/")
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    site = ThreadingHTTPServer(("127.0.0.1", 0), Site)
+    for server in (control, site):
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{site.server_address[1]}"
+    real = config.DAEMON_PORT
+    config.DAEMON_PORT = cport              # the stand-in is a control port now
+    try:
+        for path in ("/to-control", "/to-control-relative"):
+            out = tools.dispatch("fetch_page", json.dumps({"url": base + path})).text
+            assert "redirected to" in out and "blocked" in out, (path, out)
+        assert hits == [], f"a redirect hop reached the control listener: {hits}"
+        out = tools.dispatch("fetch_page", json.dumps({"url": base + "/set-cookie"})).text
+        assert "arrived with the cookie" in out, out[:300]
+        out = tools.dispatch("fetch_page", json.dumps({"url": base + "/loop"})).text
+        assert "redirected more than" in out, out[:300]
+    finally:
+        config.DAEMON_PORT = real
+        for server in (control, site):
+            server.shutdown()
+            server.server_close()
+    print("ok  fetch_page: each redirect hop judged before it is requested (0 hits on the "
+          "stand-in); an ordinary redirect keeps its cookie; a loop ends")
+
+    # Typed URLs two parsers read differently are refused before any request.
+    real_get = httpx.get
+
+    def must_not_fetch(*args, **kwargs):
+        raise AssertionError("fetch_page requested an ambiguous URL")
+
+    httpx.get = must_not_fetch
+    p = BrowserPolicy()
+    try:
+        for url in ("http:///localhost:8405/", "http://localhost:8405\\@93.184.216.34/",
+                    "http://93.184.216.34\\@localhost:8405/", "http://\\localhost:8405/",
+                    "http://93.184.216.34/\tx", "https:///127.0.0.1:8402/"):
+            out = tools.dispatch("fetch_page", json.dumps({"url": url})).text
+            assert "ambiguous" in out or "control plane" in out, (url, out)
+            assert p.allows(url) is False, url
+    finally:
+        httpx.get = real_get
+    assert p.allows("http://93.184.216.34/path\\with\\backslashes") is True, "only the authority"
+    print("ok  fetch_page and the browser: an empty authority or a backslash in it is refused")
+
+
 def control_port_landing_checks() -> None:
     """A real headless browser cannot load the HUD page from the API listener.
 
@@ -513,6 +611,7 @@ def main() -> int:
     resolver_checks()
     fetch_page_checks()
     control_port_policy_checks()
+    fetch_redirect_checks()
     landing_guard_checks()
     control_port_landing_checks()
     late_landing_checks()

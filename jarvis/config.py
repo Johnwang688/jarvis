@@ -117,6 +117,30 @@ def _names_this_machine(host: str) -> bool:
     return addr.is_loopback or addr.is_unspecified
 
 
+def ambiguous_authority(url: str) -> bool:
+    """True for a URL whose host two parsers would read differently (BR-0).
+
+    The judges here read a host with Python's `urlparse`; Chrome reads it by
+    WHATWG, where a backslash ends the authority of an http(s) URL — so
+    `http://<jarvis port>\\@<public host>/` is a public host to one and
+    Jarvis's own port to the other — and where an empty authority
+    (`http:///host/`) is skipped over to the next one, while `urlparse` sees
+    no host at all (which `is_loopback` counts as local and `is_lan_host`
+    therefore passes). Refused rather than reconciled: no real address needs
+    either shape. ASCII tab, CR and LF are refused too, since one parser
+    deletes them and another may not.
+    """
+    if any(ch in url for ch in "\t\r\n"):
+        return True
+    _, sep, rest = url.partition("://")
+    if not sep:
+        return False
+    authority = rest
+    for stop in "/?#":
+        authority = authority.split(stop, 1)[0]
+    return authority == "" or "\\" in authority
+
+
 def is_face_origin(url: str) -> bool:
     """True if `url` points at one of Jarvis's own control-plane listeners.
 
