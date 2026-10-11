@@ -1306,13 +1306,16 @@ jarvis/
   turn", never "an agent once ran on this thread"), `_sync_tools`
   on a `load_tools` expansion, `_dispatch_calls`' per-worker `copy_context()`
   (now load-bearing twice: without it a pool worker would hold an unbound
-  approver, which denies, *and* an unbound toolset, which is not enforced), and
-  jarvis-mcp's worker, which binds the list it exposes. A tool an agent was
+  approver, which denies, *and* an unbound toolset, which is not enforced),
+  jarvis-mcp's worker, which binds the list it exposes, and the daemon's
+  jarvis-mcp bridge, which binds the chat session's offered list (WP-1). A
+  tool an agent was
   handed explicitly (PR #33's `EXPLICIT_ONLY` shape) is in that set like any
   other. **Unbound fails open** — deliberately: nothing bound means no agent is
   calling, and the only callers of `dispatch` under `jarvis/` are
-  `Agent._dispatch_one` (reached only from `_run_turn`, after its bind) and
-  `v2/mcp.call_tool`. `tests/dispatch_toolset_check.py` pins that set of call
+  `Agent._dispatch_one` (reached only from `_run_turn`, after its bind),
+  `v2/mcp.call_tool` and `v2/bridge.call` (each binding its list first).
+  `tests/dispatch_toolset_check.py` pins that set of call
   sites by AST and checks a binding at every dispatch across sixteen surfaces;
   **a new caller of `dispatch` must bind a toolset first**, or it runs
   unconfined. Not covered: `jarvis/runtime.py` and `jarvis/agent.py` are not
@@ -2276,8 +2279,10 @@ jarvis/
   turn's toolset being restored when the turn ends. **The surface walk** is
   what makes "unbound fails open" safe: an AST pin that the only `dispatch`
   callers (in `jarvis/`, `longbench/`, `swecompare/`) are
-  `Agent._dispatch_one` (from `_run_turn`, after its bind) and jarvis-mcp's
-  worker, and a probe on every dispatch across sixteen surfaces (CLI,
+  `Agent._dispatch_one` (from `_run_turn`, after its bind), jarvis-mcp's
+  worker and the daemon's jarvis-mcp bridge (each after its own bind; the
+  bridge's ordering is pinned by AST too), and a probe on every dispatch
+  across sixteen surfaces (CLI,
   Discord, the face and its designer included) asserting a toolset was
   bound. Sixteen of its twenty checks fail on 34b6ab2 (the four that pass
   there are the static pin, the deferred pointer, the conversation-surface

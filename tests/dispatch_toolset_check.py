@@ -31,7 +31,10 @@ What must hold, each against the surface that claims it:
 
 And the surface walk, which is what makes "unbound fails open" safe: the only
 callers of `dispatch` under `jarvis/` are `Agent._dispatch_one` (reached only
-from `_run_turn`, after its bind) and jarvis-mcp's worker, and every dispatch
+from `_run_turn`, after its bind), jarvis-mcp's worker and the daemon's
+jarvis-mcp bridge (`v2/bridge.py`, which binds the session's offered list
+first — asserted statically here, and by `tests/v2/mcp_session_check.py`
+at run time), and every dispatch
 made by every surface this suite drives — workflow, task, goal, sub-agent,
 fleet, fast path, mcp, agent-bench, the CLI, the Discord agent, the face's
 voice agent and its designer — ran with a toolset bound, equal to that agent's.
@@ -785,8 +788,22 @@ def static_walk_checks() -> None:
         ("jarvis/tools/__init__.py", "dispatch", "_dispatch"),
         ("jarvis/agent.py", "_dispatch_one", "dispatch"),
         ("jarvis/v2/mcp.py", "run", "dispatch"),
+        # The daemon's jarvis-mcp bridge for Claude/Codex chat sessions
+        # (WP-1, 2026-10-10): it binds the session's offered names first.
+        ("jarvis/v2/bridge.py", "run", "dispatch"),
     }
     assert sites == expected, f"dispatch callers changed: {sorted(sites ^ expected)}"
+
+    # The bridge, like `_run_turn`, binds its toolset before it dispatches.
+    bridge_tree = ast.parse((REPO / "jarvis" / "v2" / "bridge.py").read_text(encoding="utf-8"))
+    bridge_run = next(n for n in ast.walk(bridge_tree)
+                      if isinstance(n, ast.FunctionDef) and n.name == "run")
+    bridge_binds = [c for c in _calls_named(bridge_run, "bind")
+                    if any(k.arg == "tool_names" for k in c.keywords)]
+    bridge_dispatches = list(_calls_named(bridge_run, "dispatch"))
+    assert bridge_binds and bridge_dispatches and (
+        min(b.lineno for b in bridge_binds) < min(d.lineno for d in bridge_dispatches)), \
+        "the bridge must bind its toolset before it dispatches"
 
     agent_tree = ast.parse((REPO / "jarvis" / "agent.py").read_text(encoding="utf-8"))
     owner = _enclosing(agent_tree)
@@ -800,7 +817,7 @@ def static_walk_checks() -> None:
     dispatches = list(_calls_named(run_turn, "_dispatch_calls"))
     assert binds and min(b.lineno for b in binds) < min(d.lineno for d in dispatches)
     print("ok  static walk: dispatch is called only by Agent._dispatch_one (from _run_turn, "
-          "after its bind) and jarvis-mcp's worker")
+          "after its bind), jarvis-mcp's worker and the bridge (after its bind)")
 
 
 def dynamic_walk_checks() -> None:
