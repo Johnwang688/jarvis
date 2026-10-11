@@ -2402,6 +2402,30 @@ typed in Monaco still starts push-to-talk and is lost (confirmed headless);
 the owner moved push-to-talk to Ctrl+D (2026-10-10), which its own PR
 delivers. The `monaco-vim` spike is ED-8's (E-11), not this package's.
 
+**The HUD's CSP and installed build (2026-10-11, ED-4 of the same plan;
+decision C-1; contract in `docs/hud-api.md`).** Every HUD and API response
+carries one full Content-Security-Policy (`hud_api.HUD_POLICY` with WP-E's
+`frame-ancestors 'none'`, in the one header): only bundled script, no inline
+script, no `eval`, no `blob:` worker, same-origin `connect-src` (the terminal
+socket included), loopback `frame-src`, and no `'wasm-unsafe-eval'` until
+ED-5's tree-sitter brings the first `.wasm`. A response may only narrow it
+(the avatar). The window that gates approvals is no longer served from the
+repo's agent-writable `hud/dist`: `jarvis hud install` — the owner's or the
+lead's, from their own shell; Jarvis is refused it in every spelling —
+builds `hud/` from a **clean** checkout (uncommitted `hud/` changes are
+refused unless `--allow-dirty`) and installs a read-only copy with a SHA-256
+manifest recording the commit under `~/.local/share/jarvis/hud/<build-id>/`.
+The daemon serves the newest **intact** build, checking every file's hash on
+every read, falls back past a newer build whose page fails, says on `GET /`
+whether nothing is installed or nothing passes, reports what it serves on
+`/status` (`hud_build`, `hud_git_head`, `hud_state`), and warns at start-up
+when that build's commit is not the checkout's HEAD — so a forgotten install
+shows up in the log rather than as a silently old window. An install needs a
+window reload, not a restart (an open window's lazy chunks are still served
+from the older build). Every headless HUD suite runs under the policy with a
+violation watch; `tests/face/hud_v2_csp_check.py` proves the HUD's needs work
+and an attacker's are refused.
+
 **Push-to-talk is Ctrl+D (2026-10-10).** The owner: "can we change the push
 to talk button? change it to Ctrl + D just like it is in claude." It was
 Space, which is a character in every box the owner types in: each typing

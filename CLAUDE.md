@@ -59,7 +59,7 @@ task runner with the intake gate (WP11 — `TaskControl` in
 backend ran one real task end to end on 2026-09-16** (design §17): Claude
 orchestrated, Codex implemented in a worktree, a fresh Claude reviewer
 failed it once and passed it second time, DONE in 198 s. **The HUD v2 landed the same
-day** (WP12a backend + WP12b frontend under `hud/`, `jarvis hud` opens it;
+day** (WP12a backend + WP12b frontend under `hud/`, `jarvis hud` opens it, and since ED-4 the daemon serves only what `jarvis hud install` installed;
 design §12 and §18). **Projects are archived, never deleted in place**
 (2026-10-06, decisions part B): an archived project or thread keeps every
 record and is hidden from lists, placement and schedules; permanent delete
@@ -296,8 +296,11 @@ Jarvis (BR-0, 2026-10-11; plan `docs/plans/2026-10-10-hud-browser-plan.md`
   `edit_file` by resolved path and, through `_self_protected`, to v2's layer
   1 (Claude's Write/Edit, Codex patches); `denied_grant` refuses a Codex write
   grant on, in or above it. **Not a SELF_PROTECTED widening** (the owner
-  declined that): the HUD's source stays writable, and an approved
-  `npm run build` writes the build.
+  declined that): the HUD's source stays writable. Since ED-4 (C-1)
+  `config.HUD_DIST` is the **installed** HUD's root and `files._hud_roots`
+  refuses the install root always (plus `hud/dist` under `JARVIS_HUD_DEV=1`),
+  so this one check covers every installed build; only `jarvis hud install`
+  writes it, and Jarvis is refused that command.
 Free checks: `tests/face/approval_check.py` (`control_port_checks`),
 `tests/browser/policy_check.py` (`control_port_*`, `fetch_redirect_checks`,
 `late_landing_checks` — a port-0 daemon with one card, a stand-in and the
@@ -1128,8 +1131,8 @@ policy: `img-src 'self', frame-ancestors *` let a frame land on the HUD),
 anything outside printable ASCII (CR/LF split the header; U+2028 failed
 after the status line) or a reserved `frame-ancestors`/`sandbox`/`report-*`
 **raises** (`_own_directives`; `binary()` checks before writing a byte, so
-it is one 400, never two status lines); the editor's
-full CSP (ED-4) extends that function, never a second header. The preview
+it is one 400, never two status lines); the HUD's full CSP (ED-4, below)
+is built by that same function, never a second header. The preview
 listener (8403) carries **neither** frame header — the HUD frames it — but
 **sandboxes every document it serves** with one CSP, `sandbox allow-scripts
 allow-forms` (`workshop_security_policy`): a keep-origin frame that navigated
@@ -1267,6 +1270,90 @@ and the guards of rounds 2–4 each shown to fail their check when removed in a
 scratch copy (the PR lists them). Open question, not done: whether `vex.py`
 and `vex_setup.py` join SELF_PROTECTED (the owner declined widening it for
 `runtime.py`).
+
+**The HUD's CSP and installed build, ED-4 (2026-10-11; editor plan §1.7,
+§2.7; decision C-1; contract in `docs/hud-api.md`).** Every HUD and API
+response carries the **full policy** (`hud_api.HUD_POLICY`) in WP-E's one
+header: `default-src 'none'`, `script-src 'self'` (no inline, no eval),
+`worker-src`/`connect-src 'self'` (the same-origin `ws://` terminal socket
+included, CSP3), `style-src 'self' 'unsafe-inline'`, `img-src`/`font-src
+'self' data:`, `media-src 'self'`, `frame-src` on the loopback names a CSP can
+express (so the Preview judge refuses `[::1]` and `127.0.0.2` with a
+sentence), and `base-uri`/`form-action`/`object-src 'none'`. **No
+`'wasm-unsafe-eval'` yet — ED-5 adds it** with its first `.wasm` and the test
+that loads every grammar under the policy. A response's own directives may
+only **narrow** it (`_narrowed`: restate a directive the policy sets with a
+subset of its sources; a `default-src 'none'` drops the fetch directives it
+does not restate — the avatar keeps its old lockdown); anything else raises.
+**The HUD is served from an installed copy (C-1)**, never the repo's
+agent-writable `hud/dist`: `jarvis hud install` (`jarvis/v2/hud_install.py`;
+a human/lead CLI step, **never a tool** — `tests/v2/hud_install_check.py`
+pins that only `__main__` and `hud_api`'s read side import it) runs `npm run
+build` and copies `hud/dist` into `config.HUD_DIR/<build-id>/`
+(`~/.local/share/jarvis/hud/`, `JARVIS_HUD_DIR` overrides), read-only, with a
+SHA-256 manifest, through a temp folder renamed into place, keeping three
+builds; it refuses **uncommitted changes under `hud/`** unless
+`--allow-dirty` (Jarvis's chats leave edits in the main checkout) and records
+`git_head`/`dirty` in the manifest (checked again after the build; its git
+runs hardened through `gitops._git`); it refuses a symlinked root or ancestor, a
+root in the repo or writable by others, and a build output with a link,
+special file, odd name or no `index.html`. The daemon serves the **newest
+intact** build (manifest reads, `index.html` matches — a newer broken one is
+passed over; a hostile manifest is ignored, never raised), only files its
+manifest lists, **SHA-256 checked on every read, never cached** (a stat-keyed
+cache served a same-size rewrite made within one timestamp tick), an asset
+only an older kept build has served from it (so an open window's lazy chunks
+survive an install); serving an older build because a newer one failed is
+`hud_state: "fallback"` (with `hud_passed_over`), never silent; with nothing
+intact `GET /` is a 503 saying "not installed" or "failed verification", and
+`/status` reports what is served (`hud_build`, `hud_git_head`, `hud_state`).
+daemon2 **warns at start-up** in dev mode, on a fallback, with nothing
+served, and when `hud/` changed since the served build's commit (`git diff
+--quiet <commit> HEAD -- hud`) — a forgotten install shows up in the log, a
+Python-only merge does not. `config.HUD_DIST`
+is that install root — **`hud/dist` only under `JARVIS_HUD_DEV=1`**, which
+only tests set — and BR-0's one write check (`files._hud_roots`) refuses the
+install root always, plus `hud/dist` in dev mode, to every agent write tool and
+v2 grant. **Jarvis never runs the installer**: `protected_state.owner_op`
+(**the table `OWNER_OPS` is the extension point** for any other owner-only
+`jarvis` command; `OWNER_OP_MODULES` for its module), asked by `rules.decide`
+(so v1's gate and v2's layer 1) and by `run_command`, makes `jarvis hud
+install` DENY — judged on the **command word** after wrappers and runners
+(`_RUNNERS`: `env -S`, `nohup`, `timeout`, `flock`, `systemd-run`, `uv run`,
+`ssh`, `xargs` with input that may complete it), `python -m jarvis`, a line's
+own `$VAR` or `ln -s` alias, the installer module, Python source that
+*invokes* it, and shells/`eval`/here-documents/substitutions bash would run
+— never on a line that only mentions it (`echo`, `grep`, a commit message,
+single quotes, a quoted here-document): a DENY cannot be approved, so a false
+one blocks the owner. A jarvis argv word only known at run time (an unset
+`$E`, `$@`, a glob, `{hud,install}`) counts as any words, so a line that
+could expand to an op is refused; and **Jarvis's own CLI is ASK in every
+spelling** (`python -m jarvis…`, `uv run jarvis`, the venv's python —
+`protected_state.runs_jarvis`, asked by `rules.decide`), never auto-approved. A cheap line and per-segment filter (`_could_be_owner_op`)
+keeps `rules.decide` at its old speed on lines that cannot hold an op, held
+to the full parse by `hud_install_check`. An agent can edit `hud/src`, so
+running the installer would undo C-1. A shell write *into* the install root
+asks (`protected_state.hud_trees`). A shell can still
+write it in a form nobody sees (the accepted gap). **After a merge, the lead
+runs, from a synced, clean main checkout: `jarvis hud install` (it builds
+`hud/`; run `npm ci` in `hud/` first if `package-lock.json` changed; it
+refuses uncommitted `hud/` changes — commit or stash them, `--allow-dirty`
+only on purpose), then `systemctl --user restart jarvis-daemon2` only if
+Python changed — a HUD-only change needs just a reload of the window** — and
+checks `curl -s localhost:8405/status` shows the new `hud_build`,
+`hud_git_head` equal to the checkout's HEAD and `hud_state: "installed"` (not
+`"fallback"`).
+Never `jarvis hud` to restart. **Tests point
+`config.HUD_DIR`/`HUD_DIST` at temp dirs** (or set `HUD_DEV` with a temp
+dist); never install into the owner's real root. **Every context of every
+headless HUD suite runs under `hud_v2_check.watch_csp`**: a CSP violation
+anywhere fails the run, because a CSP breaks quietly (Monaco even falls back
+to a textarea). `tests/face/hud_v2_csp_check.py` (run by `hud_v2_check` after
+the preview section, on a `MockDaemon(0)` of its own) proves the HUD's needs
+work under it — SSE, the terminal socket, Monaco and its worker, the avatar,
+the mic and `/stt`, a loopback frame — and that an inline or remote script,
+`eval`, a `blob:` worker, WebAssembly, a cross-origin fetch, socket, image,
+object, `<base>`, form or non-loopback frame is refused with a violation.
 
 **Input bar declutter (2026-10-10, PR #29; ported onto WP-B and reviewed the
 same day).** The bar is `📎 [box] ⬆` over one row, `in: project · provider ▾ ·

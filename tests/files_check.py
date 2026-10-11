@@ -252,9 +252,61 @@ def hud_build_checks(tmp: Path) -> None:
         assert "x = 2" in source.read_text(encoding="utf-8"), out
     finally:
         config.HUD_DIST = real
-    assert real == config.REPO_ROOT / "hud" / "dist", real
+    # Since C-1 (ED-4) what is served — and so what is refused — is the
+    # installed copy, unless JARVIS_HUD_DEV=1 serves hud/dist itself.
+    assert real == (config.HUD_BUILD if config.HUD_DEV else config.HUD_DIR), real
     print("ok  guard: the built HUD (config.HUD_DIST) is refused by both write tools, "
           "through a symlink and for a new file; its source stays writable")
+
+
+def installed_hud_checks(tmp: Path) -> None:
+    """C-1 (ED-4): the installed HUD — every build under `config.HUD_DIR`, and
+    a build planted beside them — is refused by both write tools, through the
+    one check BR-0 added (`config.HUD_DIST` is the install root now). Fails on
+    main, where `HUD_DIST` was the repo's hud/dist and the install root was
+    ordinary ground."""
+    from jarvis.v2 import hud_install
+
+    saved = (config.HUD_DIR, config.HUD_DIST, config.HUD_DEV)
+    built = tmp / "c1-build"
+    (built / "assets").mkdir(parents=True)
+    (built / "index.html").write_text("<!doctype html><title>J.A.R.V.I.S.</title>", encoding="utf-8")
+    (built / "assets" / "index-1a2b.js").write_text("console.log(1)", encoding="utf-8")
+    root = tmp / "share" / "jarvis" / "hud"
+    config.HUD_DIR = config.HUD_DIST = root
+    config.HUD_DEV = False
+    try:
+        installed = hud_install.install(built, root)
+        page = installed.path / "index.html"
+        assert "<title>" in call("read_file", path=str(page)), "it stays readable"
+        out = call("edit_file", path=str(page), old_string="J.A.R.V.I.S.", new_string="x")
+        assert "built HUD" in out, out
+        newer = root / "29991231T235959999999Z-0123456789ab"
+        for planted in (page, installed.path / "assets" / "index-1a2b.js", installed.path / "new.js",
+                        newer / "index.html", newer / "manifest.json", root / "stray.js"):
+            out = call("write_file", path=str(planted), content="<script>approve()</script>")
+            assert "built HUD" in out and "jarvis hud install" in out, (planted, out)
+        assert not newer.exists() and not (root / "stray.js").exists()
+        assert hud_install.newest(root).id == installed.id
+        assert hud_install.read(installed, "index.html") == built.joinpath("index.html").read_bytes()
+    finally:
+        config.HUD_DIR, config.HUD_DIST, config.HUD_DEV = saved
+    # The install root is refused always — also in a process whose
+    # JARVIS_HUD_DEV=1 serves hud/dist (review of PR #44, L4), which is then
+    # refused as well.
+    dev_dist = tmp / "c1-dev-dist"
+    dev_dist.mkdir()
+    saved = (config.HUD_DIR, config.HUD_DIST, config.HUD_DEV)
+    config.HUD_DIR, config.HUD_DIST, config.HUD_DEV = root, dev_dist, True
+    try:
+        for target in (root / "29991231T235959999999Z-0123456789ab" / "index.html", dev_dist / "index.html"):
+            out = call("write_file", path=str(target), content="<script>approve()</script>")
+            assert "built HUD" in out, (target, out)
+            assert not target.exists(), target
+    finally:
+        config.HUD_DIR, config.HUD_DIST, config.HUD_DEV = saved
+    print("ok  guard: the installed HUD (every build, and a build planted beside them) is "
+          "refused by both write tools, in dev mode too")
 
 
 def model_state_checks(tmp: Path) -> None:
@@ -609,6 +661,7 @@ def main() -> int:
         protection_checks(tmp)
         gate_state_checks(tmp)
         hud_build_checks(tmp)
+        installed_hud_checks(tmp)
         model_state_checks(tmp)
         numbering_guard_checks(tmp)
         grep_checks(tmp)

@@ -3292,6 +3292,16 @@ def _judge_segment(segment: str) -> Verdict:
     if stem in _INTERPRETERS and _has_inline_source(bare, redirects):
         return Verdict(ASK, f"{stem} with inline source is arbitrary code, not a build step")
 
+    # Jarvis's own CLI or modules, in any spelling — `python -m jarvis`, the
+    # venv's python, `uv run`/`poetry run`/`pipx run` — is asked, never
+    # auto-approved, as bare `jarvis` always was: the CLI has human-only verbs
+    # (`auth`, `voice clone`, `discord commands --sync`, the owner ops) and
+    # `python` and `uv` are on the allow list (review of PR #44 at 75f14c2).
+    from . import protected_state
+    own = protected_state.runs_jarvis(raw)
+    if own:
+        return Verdict(ASK, f"runs {own}; Jarvis's own commands are the owner's to run")
+
     if stem == "systemctl" and "--user" not in tokens:
         return Verdict(ASK, "system-wide systemctl affects the whole machine")
 
@@ -3325,6 +3335,18 @@ def decide(command: str) -> Verdict:
     vex = _vex_line(raw)
     if vex.deny:
         return Verdict(DENY, vex.deny)
+
+    # The installed HUD's one writer, `jarvis hud install`, is the owner's and
+    # the lead's — never Jarvis's, asked or not (decision C-1; review of PR
+    # #44, MED-2: `python -m jarvis hud install` scored ALLOW here, and an
+    # agent that can edit `hud/src` could then install it). One detector,
+    # `protected_state.owner_op` (its table `OWNER_OPS` is where another
+    # owner-only command goes), so v1's gate and v2's layer 1 — both of which
+    # start from this function — refuse every spelling it sees.
+    from . import protected_state
+    why = protected_state.owner_op(command)
+    if why:
+        return Verdict(DENY, why)
 
     # Command substitution runs a command this function never sees. There is no
     # honest verdict except "a human should look".

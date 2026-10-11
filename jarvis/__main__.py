@@ -367,10 +367,19 @@ def cmd_route(args) -> int:
 
 
 def cmd_hud(args) -> int:
-    """Start the v2 service once, then open the owner's app-mode browser."""
+    """Start the v2 service once, then open the owner's app-mode browser.
+
+    `jarvis hud install` builds `hud/` and installs it where the daemon serves
+    it from (decision C-1, ED-4): a human or lead step, never a tool."""
     import subprocess
     import time
+    from .v2 import hud_install
     from .v2.daemon import is_running
+    if getattr(args, "action", "open") == "install":
+        return hud_install.main(allow_dirty=bool(getattr(args, "allow_dirty", False)))
+    if not config.HUD_DEV and hud_install.newest(config.HUD_DIR) is None:
+        console.print("[yellow]No HUD is installed, so the window will say so. "
+                      "Run `jarvis hud install` first.[/yellow]")
     if not is_running(config.DAEMON_PORT):
         child = subprocess.Popen([sys.executable, "-m", "jarvis", "daemon2"],
                                  stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
@@ -413,7 +422,7 @@ def cmd_mcp(args) -> int:
 def cmd_daemon(args) -> int:
     from . import daemon
 
-    if args.action == "install":
+    if getattr(args, "action", "open") == "install":
         return daemon.install()
     return daemon.run()
 
@@ -879,8 +888,13 @@ def main() -> int:
     vexcmd.add_argument("action", choices=["setup"])
     vexcmd.set_defaults(func=cmd_vex)
 
-    hud = sub.add_parser("hud", help="open the v2 HUD (starts the daemon if needed)")
+    hud = sub.add_parser("hud", help="open the v2 HUD (starts the daemon if needed), "
+                                     "or `jarvis hud install` to build and install it (human-only)")
+    hud.add_argument("action", nargs="?", choices=["open", "install"], default="open",
+                     help="install: build hud/ and install it where the daemon serves it from")
     hud.add_argument("--no-window", action="store_true", help="start the daemon without opening a browser")
+    hud.add_argument("--allow-dirty", action="store_true",
+                     help="install: build even with uncommitted changes under hud/")
     hud.set_defaults(func=cmd_hud)
 
     sub.add_parser("daemon2", help="v2 daemon and local API").set_defaults(func=cmd_daemon2)

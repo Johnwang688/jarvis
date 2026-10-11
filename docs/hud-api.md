@@ -11,8 +11,11 @@ come from `WORKSHOP_PORT` (8403), a different origin by design.
 
 ## Static
 
-`GET /` → the built HUD (`hud/dist/index.html`); `GET /assets/*` → its
-assets. `GET /avatar.svg`, `GET /avatars`, `GET /voices`, `GET /models`,
+`GET /` → the HUD's page; `GET /assets/*` → its assets — from the newest
+**installed build** (`config.HUD_DIR/<build-id>/`, decision C-1; see "the
+HUD's CSP and installed build" below), or from `hud/dist` itself only under
+`JARVIS_HUD_DEV=1`. With nothing installed, `GET /` is a 503 page naming
+`jarvis hud install`. `GET /avatar.svg`, `GET /avatars`, `GET /voices`, `GET /models`,
 `GET /models/catalog`, `POST /avatar`, `POST /voice`, `POST /model`,
 `POST /mute`, `POST /say` — **v1 semantics and shapes** (`jarvis/face/
 server.py`), re-homed; `POST /model` sets the **fast path's** global
@@ -1079,8 +1082,9 @@ the header; U+2028 used to fail after the status line was written), or
 naming `frame-ancestors`, `sandbox`, `report-uri` or `report-to`, raise
 `ValueError` (a programming error; `binary()` checks before writing a byte,
 so the answer is **one 400** — the dispatcher's status for a
-`ValueError` — never half a response or a second status line). The editor's full policy (ED-4, `'wasm-unsafe-eval'`) extends
-that function. The **preview listener (8403) carries neither frame
+`ValueError` — never half a response or a second status line). The HUD's
+full policy (ED-4, below) is built by that same function, in the same one
+header. The **preview listener (8403) carries neither frame
 header**; instead it sends one CSP, `sandbox allow-scripts allow-forms`
 (`hud_api.workshop_security_policy`, a response's own directives merged and
 checked the same way), so a workshop page runs with an opaque origin
@@ -1358,3 +1362,112 @@ still goes through). Program terminals count apart from shells: six of each.
   not writable by any agent write tool**, v1's or a v2 provider's, nor by a
   Codex write grant: its script runs with the HUD's Origin. Rebuilding it is
   the owner's (`npm run build`).
+
+## Additions 2026-10-11 (the HUD's CSP and installed build — ED-4)
+
+Editor plan `docs/plans/2026-10-09-hud-editor-plan.md` §1.7 and §2.7;
+decision C-1 (the decisions file wins).
+
+**Every HUD and API response carries the full policy**, in the one
+`Content-Security-Policy` header WP-E's frame rule rides in
+(`hud_api.content_security_policy`, `hud_api.HUD_POLICY`):
+
+    default-src 'none'; script-src 'self'; worker-src 'self';
+    connect-src 'self'; style-src 'self' 'unsafe-inline';
+    img-src 'self' data:; font-src 'self' data:; media-src 'self';
+    frame-src http://localhost:* http://*.localhost:* http://127.0.0.1:* http://0.0.0.0:*;
+    base-uri 'none'; form-action 'none'; object-src 'none';
+    frame-ancestors 'none'
+
+— the page, every `/assets/*` file (a worker takes its policy from its own
+script's response), JSON, SSE, errors and the terminal's `101`. No inline
+script, no script from another origin, no `eval`, no `blob:` worker, no
+plugin, no `<base>`, no form posted anywhere. **No `'wasm-unsafe-eval'`
+yet**: nothing in the HUD compiles WebAssembly; ED-5 adds it together with
+the test that loads every grammar under the policy. `connect-src 'self'`
+covers the same-origin `ws://` terminal socket in Chromium (CSP3). A CSP host
+source cannot name an IPv6 literal or a 127/8 address other than 127.0.0.1,
+so the Preview judge refuses `[::1]` and `127.0.0.2` with a sentence naming
+`http://localhost:<port>/` instead. There is no `<meta>` policy; the header
+is the only one.
+
+A response's own directives may only **narrow** the policy: each must
+restate a directive the policy sets, with a subset of its sources (`'none'`
+always qualifies); a response that states `default-src` (necessarily
+`'none'`) drops every fetch directive it does not restate. Anything else —
+a new directive, a source the policy lacks, a directive twice — raises
+`ValueError` (a 400 before a byte is written). `/avatar.svg` sends
+`default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action
+'none'; frame-ancestors 'none'`.
+
+**The HUD is served from an installed copy (C-1).** `jarvis hud install` — a
+CLI the owner or the lead runs, never a tool — runs `npm run build` in `hud/`
+and copies `hud/dist` into `config.HUD_DIR/<build-id>/` (default
+`~/.local/share/jarvis/hud/`, `JARVIS_HUD_DIR` overrides; ids are
+`YYYYMMDDTHHMMSSffffffZ-<12 hex>`, so they sort by time), files 0444 and
+folders 0555, with `manifest.json` (`format`, `build`, `installed_at`,
+`source`, `git_head`, `dirty`, `files: {path: {sha256, size}}`), through a
+temp folder renamed into place; the newest three builds are kept. It refuses
+**uncommitted changes under `hud/`** (`git status --porcelain -- hud`, which
+counts untracked files) unless `--allow-dirty` is given, looks again once the
+build is done (an edit that landed mid-build is never recorded clean, and a
+checkout that moved is refused), and records the commit and whether it was
+dirty. Its git runs hardened, as `gitops` runs it: an absolute git, `GIT_*`
+dropped, pager and editors pinned, hooks and fsmonitor off; a checkout whose
+own config names a program git would run is not read at all ("cannot say"). It refuses an install root that is, or sits
+under, a symbolic link, one inside the repository, not a folder or writable
+by others, and a build output holding a link, a special file, an odd name or
+no `index.html`.
+
+The daemon serves the **newest intact** build — its manifest reads (a
+malformed, oversized or hostile manifest is ignored, never an error) and its
+`index.html` still matches it; a newer build whose page fails is passed over
+for the one before. Only a file the manifest lists is served, read without
+following a link, its size and SHA-256 checked **on every read** (no cache);
+anything else is a 404, logged. An asset the newest intact build lacks is
+served from an older kept build that has it (Vite names are content hashes),
+so a window loaded before an install keeps its lazy chunks — **an install
+needs a reload, not a daemon restart**. Serving an older build because a
+newer one failed is never silent: `/status` says `"fallback"` and lists the
+build passed over. With no intact build, `GET /` is a 503 page that says
+which: "not installed", or "failed verification" when builds are there but
+none passes. `config.HUD_DIST` is the install root (or
+`hud/dist` under `JARVIS_HUD_DEV=1`), and BR-0's one write check refuses the
+install root always, plus `hud/dist` in dev mode, to every agent write tool
+and v2 grant.
+
+**Jarvis never runs the installer.** `jarvis hud install` is DENY for agents
+through one detector (`protected_state.owner_op`, its table `OWNER_OPS`,
+asked by `rules.decide`, so v1's gate and v2's layer 1), and `run_command`
+refuses it with no approver. It judges the **command word** after peeling
+wrappers and runners (`env` incl. `-S`, `nohup`, `timeout`, `flock`,
+`systemd-run`, `uv run`, `ssh host …`, `xargs` — whose input may complete
+the path), `python -m jarvis`, a `$VAR` or an `ln -s` link the line made, a
+Python run of `jarvis.v2.hud_install`, Python source that *invokes* the
+installer (importing or reading from it is not), and shells, `eval`,
+here-documents and substitutions that bash would run (never inside single
+quotes or a quoted here-document). A jarvis argv word only known at run time —
+an expansion the line did not assign (an unset one vanishes), `$@`/`$*`, a
+glob, a brace — counts as any words, so a line that *could* expand to an op
+is refused too. A refusal that came from a substitution says to single-quote
+text that only mentions the command. A line that only mentions it — `echo
+…`, a `grep` for it, a single-quoted commit message — is untouched: a DENY
+cannot be approved, so a false one would block the owner too. Not seen: a
+link made earlier under another name, `jarvis $(echo hud) install`, a
+launcher or module name from the environment, a Makefile, alias or script.
+Separately, **Jarvis's own CLI is never auto-approved** in any spelling:
+`python -m jarvis…`, the venv's python, `uv run`/`poetry run`/`pipx run
+jarvis` are ASK in `rules.decide`, as bare `jarvis` always was. A shell write **into** the install root (`cp`, `rsync`, a
+redirect) is asked, never auto-approved or covered by an allowlist entry. A
+shell can still write there in a form nobody sees — the accepted shell gap.
+
+**`GET /status` gains `hud_build`, `hud_git_head`, `hud_state` and
+`hud_passed_over`**: what `GET /` actually serves — the build's id (`"dev"`
+under `JARVIS_HUD_DEV=1`, `null` when nothing intact), the commit it was
+installed from, `"installed"`, `"fallback"`, `"dev"`, `"not installed"`,
+`"failed verification"` or `"refused: …"`, and the newer builds passed over.
+daemon2 logs the same at start-up, and **warns** in dev mode, on a fallback,
+when nothing is served, when the build was installed with uncommitted
+changes, and when `hud/` changed between its commit and the checkout's HEAD
+(`git diff --quiet <commit> HEAD -- hud`, so a Python-only merge is quiet).
+
