@@ -330,6 +330,15 @@ def _conflict_checks(page, mock, check, until):
     ro = page.evaluate("""() => (window.__hud.monacoEditors() || []).filter(e => e.uri && e.uri.startsWith('jarvis-disk:'))
       .map(e => e.readOnly)""")
     check("the disk's side is read-only", ro == [True], str(ro))
+    # Another write while comparing: the bar says "again", and Compare's left
+    # side is read again — Keep mine saves against what the owner can see.
+    theirs = "def add(a, b):\n    return a + b  # theirs, again\n"
+    mock.disk_write("calc.py", theirs)
+    orig = cmp_.locator(".editor.original .view-lines").first
+    until(lambda: bar.get_attribute("data-again") == "true" and "again" in orig.inner_text(), timeout=8)
+    check("a write while comparing says 'again', and Compare shows the newer disk",
+          bar.get_attribute("data-again") == "true" and "changed on disk again" in bar.inner_text()
+          and "again" in orig.inner_text().replace("\u00a0", " "), bar.inner_text())
     # Merge in the compare's right side, then Keep mine.
     cmp_.locator(".editor.modified .view-lines").first.click()
     page.keyboard.press("Control+End")

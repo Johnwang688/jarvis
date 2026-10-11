@@ -105,7 +105,7 @@ export function sameTabs(a: Tabs | null | undefined, b: Tabs | null | undefined)
 // ---- the change poll --------------------------------------------------------
 
 /** A buffer's conflict with the disk: changed (with the disk's etag) or gone. */
-export type Conflict = { state: "changed"; etag: string } | { state: "gone" };
+export type Conflict = { state: "changed"; etag: string; again?: boolean } | { state: "gone" };
 
 /** One row of `POST …/files/stat`. */
 export interface StatRow {

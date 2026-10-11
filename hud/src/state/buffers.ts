@@ -149,6 +149,14 @@ export interface BufferView {
 
 export type SaveOutcome = "saved" | "conflict" | "error" | "skipped";
 
+/**
+ * A UTF-8 byte-order mark is the file's, not the text's: it is kept off the
+ * model (Monaco would drop it from `getValue()` and a reload would type it in
+ * as a character) and put back on save when the file had one.
+ */
+const BOM = "\ufeff";
+const unBOM = (text: string) => (text.startsWith(BOM) ? text.slice(1) : text);
+
 /** A pane's tab, as a registry reference: `<pane>|<path>`. */
 export const refOf = (pane: number | string, path: string) => `${pane}|${path}`;
 const paneOfRef = (ref: string) => ref.slice(0, ref.indexOf("|"));
@@ -287,7 +295,7 @@ export class Buffers {
       return existing;
     }
     const kind = r.protected ? "withheld" : parseKind(r.kind);
-    const model = kind === "withheld" ? null : await deps.makeModel(r.content ?? "", abs, kind);
+    const model = kind === "withheld" ? null : await deps.makeModel(unBOM(r.content ?? ""), abs, kind);
     const raced = this.bufs.get(abs);
     if (raced) {
       model?.dispose();
@@ -358,7 +366,8 @@ export class Buffers {
     if (!b || !b.model || b.saving || !EDITABLE.has(b.kind)) return "skipped";
     const deps = this.need();
     const version = b.model.getAlternativeVersionId();
-    const content = b.model.getValue(); // read once, here
+    // Read once, here; the file's byte-order mark, if it had one, put back.
+    const content = (b.encoding === "utf-8-bom" ? BOM : "") + b.model.getValue();
     const expected = "expected" in opts ? opts.expected ?? null : b.etag;
     b.saving = true;
     this.emit();
@@ -389,7 +398,7 @@ export class Buffers {
           }
         }
         if (!this.bufs.has(abs)) return "conflict";
-        if (typeof now === "string") b.conflict = { state: "changed", etag: now };
+        if (typeof now === "string") b.conflict = this.changed(b, now);
         else if (now === null) b.conflict = { state: "gone" };
         this.emit();
         if (now === undefined) this.notice(abs, "changed on disk since it was read");
@@ -401,9 +410,20 @@ export class Buffers {
     }
   }
 
-  /** Keep mine: save against the disk the conflict bar showed (null: recreate). */
-  keepMine(abs: string): Promise<SaveOutcome> {
+  /** The bar for a newer write: "again" once it had already been shown for another. */
+  private changed(b: Buf, etag: string): Conflict {
+    const was = b.conflict;
+    return { state: "changed", etag, again: !!was && (was.state === "gone" || was.etag !== etag) };
+  }
+
+  /**
+   * Keep mine: save against the disk the owner was shown — the etag the bar
+   * (or Compare's left side) was drawn for — so a write that lands after it
+   * is a 409 and the bar again, never overwritten unseen. Gone: recreate.
+   */
+  keepMine(abs: string, shown?: string | null): Promise<SaveOutcome> {
     const b = this.bufs.get(abs);
+    if (shown !== undefined) return this.save(abs, { expected: shown });
     if (!b?.conflict) return this.save(abs);
     return this.save(abs, { expected: b.conflict.state === "changed" ? b.conflict.etag : null });
   }
@@ -430,11 +450,11 @@ export class Buffers {
     if (!this.bufs.has(abs) || !b.model || b.model.isDisposed()) return false;
     if (r.protected || parseKind(r.kind) === "withheld") return false;
     if (opts.onlyIfClean && this.dirtyOf(b)) {
-      if (r.etag && r.etag !== b.etag) b.conflict = { state: "changed", etag: r.etag };
+      if (r.etag && r.etag !== b.etag) b.conflict = this.changed(b, r.etag);
       this.emit();
       return false;
     }
-    this.apply(b, r.content ?? "", r.eol ?? null);
+    this.apply(b, unBOM(r.content ?? ""), r.eol ?? null);
     b.etag = typeof r.etag === "string" ? r.etag : null;
     b.kind = parseKind(r.kind);
     b.readonly = typeof r.readonly === "string" ? r.readonly : null;
@@ -451,13 +471,13 @@ export class Buffers {
     return true;
   }
 
-  /** What is on disk now, for Compare: read through the buffer's own project. */
-  async readDisk(abs: string): Promise<string | null> {
+  /** What is on disk now, and its etag, for Compare: read through the buffer's own project. */
+  async readDisk(abs: string): Promise<{ text: string; etag: string | null } | null> {
     const b = this.bufs.get(abs);
     if (!b) return null;
     try {
       const r = await this.need().read(b.projectId, b.path);
-      return r.protected ? null : r.content ?? "";
+      return r.protected ? null : { text: unBOM(r.content ?? ""), etag: typeof r.etag === "string" ? r.etag : null };
     } catch {
       return null;
     }
@@ -530,7 +550,7 @@ export class Buffers {
                 await this.reload(b.abs, { onlyIfClean: true, toast: true });
                 break;
               case "conflict":
-                b.conflict = { state: "changed", etag: row!.etag as string };
+                b.conflict = this.changed(b, row!.etag as string);
                 this.emit();
                 break;
               case "gone":

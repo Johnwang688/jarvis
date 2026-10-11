@@ -40,9 +40,11 @@ export function ConflictBar(props: {
     );
   }
   return (
-    <div className="toolbar conflictbar" data-testid="editor-conflict" data-state="changed" role="alert">
+    <div className="toolbar conflictbar" data-testid="editor-conflict" data-state="changed"
+         data-etag={conflict.etag} data-again={String(!!conflict.again)} role="alert">
       <span className="msg">
-        ⚠ {props.path} changed on disk {props.dirty ? "while you were editing" : "since it was read"}.
+        ⚠ {props.path} changed on disk{conflict.again ? " again" : ""}{" "}
+        {props.dirty ? "while you were editing" : "since it was read"}.
       </span>
       {asking ? (
         <>

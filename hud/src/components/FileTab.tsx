@@ -172,7 +172,9 @@ export function FileTab(props: {
   const [mdRead, setMdRead] = useState<Record<string, boolean>>({});
   // Reload over an unsaved edit, or closing the last tab on one: what was asked.
   const [ask, setAsk] = useState<{ kind: "reload" | "close"; path: string } | null>(null);
-  const [comparing, setComparing] = useState<{ abs: string; disk: string } | null>(null);
+  // Compare: the disk's text it shows, and the etag of that text — what Keep
+  // mine saves against while it is open.
+  const [comparing, setComparing] = useState<{ abs: string; disk: string; etag: string | null } | null>(null);
   const editorRef = useRef<any>(null);
 
   // Hold what the tabs name; let go of what they no longer do.
@@ -249,10 +251,23 @@ export function FileTab(props: {
     if (p && bufOf(p)?.dirty) setTabs(pinTab(tabsNow.current, p));
   });
 
-  // Compare ends when the conflict does (Keep mine, Take theirs) or the tab changes.
+  // Compare ends when the conflict does (Keep mine, Take theirs) or the tab
+  // changes; when the disk moves again under it, its left side is read again
+  // — Keep mine saves against what the owner can see.
+  const conflictEtag = view?.conflict?.state === "changed" ? view.conflict.etag : null;
   useEffect(() => {
-    if (comparing && (comparing.abs !== activeAbs || !view?.conflict)) setComparing(null);
-  }, [comparing, activeAbs, view?.conflict]);
+    if (!comparing) return;
+    if (comparing.abs !== activeAbs || !view?.conflict) {
+      setComparing(null);
+      return;
+    }
+    if (conflictEtag && comparing.etag !== conflictEtag) {
+      const abs = comparing.abs;
+      void buffers.readDisk(abs).then((d) => {
+        if (d && alive.current) setComparing((c) => (c && c.abs === abs ? { abs, disk: d.text, etag: d.etag } : c));
+      });
+    }
+  }, [comparing, activeAbs, view?.conflict, conflictEtag]);
 
   // ---- gestures ---------------------------------------------------------------
 
@@ -327,7 +342,7 @@ export function FileTab(props: {
       return;
     }
     const disk = await buffers.readDisk(view.abs);
-    if (disk !== null && alive.current) setComparing({ abs: view.abs, disk });
+    if (disk !== null && alive.current) setComparing({ abs: view.abs, disk: disk.text, etag: disk.etag });
   };
 
   // ---- drawing ------------------------------------------------------------------
@@ -429,7 +444,13 @@ export function FileTab(props: {
             comparing={!!comparing}
             busy={view.saving}
             onCompare={() => void toggleCompare()}
-            onKeep={() => void buffers.keepMine(view.abs)}
+            onKeep={() => {
+              // Against the disk the owner was shown: Compare's left side
+              // while it is open, else the etag this bar was drawn for.
+              const shown = comparing && comparing.abs === view.abs ? comparing.etag
+                : view.conflict?.state === "changed" ? view.conflict.etag : null;
+              void buffers.keepMine(view.abs, shown);
+            }}
             onTake={() => {
               setComparing(null);
               void buffers.takeTheirs(view.abs);

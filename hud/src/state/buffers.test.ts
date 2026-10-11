@@ -289,14 +289,14 @@ describe("saving: against the etag it was read as, the text read once", () => {
     w.files.set("/w/a.py", "theirs\n");
     expect(await b.save("/w/a.py")).toBe("conflict");
     expect(w.files.get("/w/a.py")).toBe("theirs\n");
-    expect(b.get("/w/a.py")!.conflict).toEqual({ state: "changed", etag: tagOf("theirs\n") });
+    expect(b.get("/w/a.py")!.conflict).toMatchObject({ state: "changed", etag: tagOf("theirs\n") });
     expect(b.isDirty("/w/a.py")).toBe(true);
     // Another write lands meanwhile: Keep mine against the *shown* etag fails again.
     w.files.set("/w/a.py", "newer\n");
     expect(await b.keepMine("/w/a.py")).toBe("conflict");
     expect(w.writes.at(-1)!.expected_etag).toBe(tagOf("theirs\n"));
     expect(w.files.get("/w/a.py")).toBe("newer\n");
-    expect(b.get("/w/a.py")!.conflict).toEqual({ state: "changed", etag: tagOf("newer\n") });
+    expect(b.get("/w/a.py")!.conflict).toEqual({ state: "changed", etag: tagOf("newer\n"), again: true });
     expect(await b.keepMine("/w/a.py")).toBe("saved");
     expect(w.files.get("/w/a.py")).toBe("one\nmine");
     expect(b.get("/w/a.py")!.conflict).toBeNull();
@@ -322,7 +322,7 @@ describe("saving: against the etag it was read as, the text read once", () => {
       throw new ApiError(409, "file changed since it was read");
     };
     expect(await b.save("/w/a.py")).toBe("conflict");
-    expect(b.get("/w/a.py")!.conflict).toEqual({ state: "changed", etag: tagOf("theirs\n") });
+    expect(b.get("/w/a.py")!.conflict).toMatchObject({ state: "changed", etag: tagOf("theirs\n") });
     w.deps.write = real;
   });
 });
@@ -346,6 +346,20 @@ describe("the change poll", () => {
     expect(b.isDirty("/w/a.py")).toBe(true);
   });
 
+  it("Keep mine with the etag the owner was shown: a write after it is a 409, never overwritten", async () => {
+    await b.open("p1", "a.py", "1|a.py");
+    model("/w/a.py").type("x");
+    w.files.set("/w/a.py", "first\n");
+    await b.poll();
+    const shown = (b.get("/w/a.py")!.conflict as any).etag;
+    w.files.set("/w/a.py", "second\n");
+    await b.poll(); // the bar now says "again", for the newer write
+    expect(b.get("/w/a.py")!.conflict).toEqual({ state: "changed", etag: tagOf("second\n"), again: true });
+    // A click made on what was shown before (Compare's left side) does not clobber it.
+    expect(await b.keepMine("/w/a.py", shown)).toBe("conflict");
+    expect(w.files.get("/w/a.py")).toBe("second\n");
+  });
+
   it("a dirty buffer gets the bar, never a reload; the same write is not raised twice", async () => {
     await b.open("p1", "a.py", "1|a.py");
     model("/w/a.py").type("x");
@@ -354,7 +368,7 @@ describe("the change poll", () => {
     b.subscribe(() => (emits += 1));
     await b.poll();
     expect(b.text("/w/a.py")).toBe("one\nx");
-    expect(b.get("/w/a.py")!.conflict).toEqual({ state: "changed", etag: tagOf("theirs\n") });
+    expect(b.get("/w/a.py")!.conflict).toMatchObject({ state: "changed", etag: tagOf("theirs\n") });
     const after = emits;
     await b.poll();
     expect(emits).toBe(after);
@@ -385,7 +399,7 @@ describe("the change poll", () => {
     await b.poll();
     w.deps.read = read;
     expect(b.text("/w/a.py")).toBe("one\ntyped meanwhile");
-    expect(b.get("/w/a.py")!.conflict).toEqual({ state: "changed", etag: tagOf("theirs\n") });
+    expect(b.get("/w/a.py")!.conflict).toMatchObject({ state: "changed", etag: tagOf("theirs\n") });
   });
 
   it("gone, then back with the same bytes: the bar clears", async () => {
@@ -414,6 +428,25 @@ describe("the change poll", () => {
     w.files.set("/w/c.txt", "a\r\nb\r\nc\r\n");
     await b.poll();
     expect(model("/w/c.txt").getValue()).toBe("a\r\nb\r\nc\r\n");
+  });
+});
+
+describe("a byte-order mark is the file's, not the text's", () => {
+  it("is kept off the model and put back on save", async () => {
+    w.files.set("/w/bom.txt", "\ufeffhi\n");
+    const read = w.deps.read;
+    w.deps.read = async (p, path) => ({ ...(await read(p, path)), encoding: path === "bom.txt" ? "utf-8-bom" : "utf-8" });
+    await b.open("p1", "bom.txt", "1|bom.txt");
+    const m = model("/w/bom.txt");
+    expect(m.getValue()).toBe("hi\n");
+    m.type("x");
+    expect(await b.save("/w/bom.txt")).toBe("saved");
+    expect(w.files.get("/w/bom.txt")).toBe("\ufeffhi\nx");
+    // A reload in place never types the mark in as a character.
+    w.files.set("/w/bom.txt", "\ufeffhi\nthere\n");
+    await b.poll();
+    expect(m.getValue()).toBe("hi\nthere\n");
+    w.deps.read = read;
   });
 });
 
