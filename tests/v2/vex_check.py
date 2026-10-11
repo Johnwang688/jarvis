@@ -318,11 +318,17 @@ class Configuration(Base):
 
     def test_a_path_outside_the_extension_folders_is_refused(self):
         outside = World._install(FAKES / "make.py", self.root / "elsewhere" / "make.exe")
-        self.assert_refused(lambda: vex.parse_config(self.world.doc(make=str(outside))), "outside")
+        self.assert_refused(lambda: vex.parse_config(self.world.doc(make=str(outside))),
+                            "make is outside")
         # A folder beside the extension's, under the same parent, is outside too.
         sibling = World._install(FAKES / "make.py",
                                  self.world.storage.parent / "someone.else" / "make.exe")
-        self.assert_refused(lambda: vex.parse_config(self.world.doc(make=str(sibling))), "outside")
+        self.assert_refused(lambda: vex.parse_config(self.world.doc(make=str(sibling))),
+                            "make is outside")
+        folder = self.root / "sdk-elsewhere" / SDK
+        folder.mkdir(parents=True)
+        self.assert_refused(lambda: vex.parse_config(self.world.doc(cpp_sdk=str(folder))),
+                            "cpp_sdk is outside")
 
     def test_a_relative_or_unnormal_path_is_refused(self):
         self.assert_refused(lambda: vex.parse_config(self.world.doc(make="tools/bin/make.exe")),
@@ -359,7 +365,7 @@ class Configuration(Base):
         other = self.world.extensions / "someone.else-1.0" / "t"
         other.mkdir(parents=True)
         self.assert_refused(lambda: vex.parse_config(self.world.doc(templates=str(other))),
-                            "outside")
+                            "templates is outside")
 
     def test_the_file_itself_is_never_followed_read_past_its_cap_or_a_fifo(self):
         path = Path(config.VEX_PATH)
@@ -411,6 +417,18 @@ class GateState(Base):
         self.assertIsNotNone(v2_permissions.denied_command(line))
         self.assertNotEqual(v1_permissions.static_verdict(line).decision, rules.ALLOW)
         self.assertEqual(Path(target).read_bytes(), before)
+
+    def test_vex_json_is_protected_wherever_it_lives(self):
+        # By its config path when it is not beside the allowlist…
+        elsewhere = self.root / "elsewhere" / "vex-paths.json"
+        with patch.object(config, "VEX_PATH", elsewhere):
+            self.assertIn(elsewhere.resolve(), v1_files._protected_state())
+            self.assertTrue(v1_files._self_protected(elsewhere))
+            self.assertIsNotNone(v2_permissions.denied_file(str(elsewhere)))
+        # …and by name beside the allowlist even when the config path moved.
+        beside = Path(config.ALLOWLIST_PATH).parent / "vex.json"
+        with patch.object(config, "VEX_PATH", elsewhere):
+            self.assertTrue(v1_files._self_protected(beside))
 
 
 # -- the vexcom DENY and the vexbuild ASK -----------------------------------------------------------
