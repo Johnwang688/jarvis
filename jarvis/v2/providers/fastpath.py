@@ -259,7 +259,9 @@ def _summary(name: str, text: str) -> str:
     first line used to, inside the first 200 characters."""
     if name not in DESK_TOOLS:
         return text[:SUMMARY_CHARS]
-    if text.startswith("Refused"):
+    # The tool's own refusals, and dispatch's for a tool this turn does not
+    # hold (PR #34: "… is not available to this agent").
+    if text.startswith("Refused") or " is not available to this agent" in text[:200]:
         return "refused"
     if text.startswith(_NOT_OK):
         return "error"

@@ -132,6 +132,24 @@ class Reads(ReadBase):
         self.assertEqual(read("9"), read("9"))                     # out of range: an error, no event
         self.assertTrue(read("9").startswith("Error:"))
 
+    def test_the_tools_own_desk_check_called_directly(self):
+        """Whatever dispatch does first (PR #34 refuses a tool the turn does
+        not hold), the tool itself refuses off the desk: called straight, with
+        no slot, a slot off the desk, or inside a sub-agent."""
+        tid, client = self.session()
+        self.run_line(client, "echo direct", "\ndirect")
+        self.reads()
+        for bind in ({}, {"desk": {"present": False}}, {"desk": {"present": True}, "depth": 1}):
+            with self.subTest(bind=bind):
+                ctx = contextvars.copy_context()
+                if bind:
+                    ctx.run(runtime.bind, **bind)
+                self.assertEqual(ctx.run(TR.terminal_read, terminal=tid), TR.NOT_AT_DESK)
+        self.assertEqual(self.reads(), [])
+        ctx = contextvars.copy_context()
+        ctx.run(runtime.bind, desk={"present": True}, depth=0)
+        self.assertIn("direct", ctx.run(TR.terminal_read, terminal=tid))
+
     def test_only_at_the_desk(self):
         tid, client = self.session()
         self.run_line(client, "echo desk", "\ndesk")
@@ -428,7 +446,13 @@ def _reply(text="", calls=None):
                      model="stub", latency_s=0.0, cost_usd=0.0)
 
 
-class FastPathTurns(ReadBase):
+def refused_off_desk(text: str) -> bool:
+    """A non-desk turn's call is refused: by dispatch, which since PR #34 runs
+    no tool the turn does not hold, or by the tool's own desk check."""
+    return text == TR.NOT_AT_DESK or text.startswith("Error: terminal_read is not available to this agent")
+
+
+class _FastPathBase(ReadBase):
     """A real fast-path turn reading a real terminal, with `llm.chat` scripted."""
 
     def setUp(self):
@@ -475,6 +499,7 @@ class FastPathTurns(ReadBase):
         result = next(m["content"] for m in seen[-1]["messages"] if m.get("role") == "tool")
         return seen[0]["names"], result
 
+class FastPathTurns(_FastPathBase):
     def test_a_desk_turn_then_a_discord_turn_on_one_handle(self):
         """LOW (2026-10-10 review): the desk slot must not carry over from one
         turn to the next on the same conversation."""
@@ -499,7 +524,7 @@ class FastPathTurns(ReadBase):
         self.assertIn("terminal_read", first_names)
         self.assertIn("turn-marker", first)
         self.assertNotIn("terminal_read", second_names)
-        self.assertEqual(second, TR.NOT_AT_DESK)
+        self.assertTrue(refused_off_desk(second), second)
 
     def test_a_hud_turn_reads_the_terminal(self):
         tid, client = self.session()
@@ -517,11 +542,11 @@ class FastPathTurns(ReadBase):
             with self.subTest(via=message.via, desk=message.desk):
                 names, result = self.turn(message, tid)
                 self.assertNotIn("terminal_read", names)
-                self.assertEqual(result, TR.NOT_AT_DESK)
+                self.assertTrue(refused_off_desk(result), result)
         self.assertEqual(self.reads(), [])
 
 
-class TickerSummary(FastPathTurns):
+class TickerSummary(_FastPathBase):
     """MEDIUM (2026-10-10 review): `tool_finished`'s summary was the result's
     first 200 characters — the fence header and ~30 characters of the
     terminal's first line — and it rides the bus and the thread's
@@ -531,6 +556,8 @@ class TickerSummary(FastPathTurns):
         from jarvis.v2.providers.fastpath import _summary
         self.assertEqual(_summary("terminal_read", "Refused: possible credential in this output"), "refused")
         self.assertEqual(_summary("terminal_read", "Error: no HUD terminal is open"), "error")
+        self.assertEqual(_summary("terminal_read", "Error: terminal_read is not available to this agent, so it "
+                                                   "was not run. Your tools: get_datetime."), "refused")
         self.assertEqual(_summary("get_datetime", "x" * 300), "x" * 200)
         tid, client = self.session()
         marker = "ticker-marker-" + secrets.token_hex(4)
