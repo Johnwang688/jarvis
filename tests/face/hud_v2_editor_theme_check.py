@@ -29,6 +29,8 @@ checks worth keeping, each written to bite:
     the three syntax hues;
   - the find-match highlight is the accent, never Monaco's orange (a guard:
     ED-1 already pinned it, so it passes on ED-1's build too);
+  - a control character (ESC, BEL, a form feed) is not drawn on Monaco's own
+    white-on-dark-red box, which no colour registry holds (review of PR #45);
   - the approval card's computed colours are the same before Monaco ever
     loaded and with the editor open (a guard against the editor's global
     styles reaching the card).
@@ -74,9 +76,13 @@ def lift(self, height=90.0):
     return math.sqrt(height) is None
 '''
 
-FILES = {"auton.cpp": CPP, "arm.py": PY}
+# Control characters as an ANSI build log or a GNU C page break leaves them:
+# ESC, BEL and a form feed (review of PR #45, LOW-1).
+CTL = "int x = 1; /* esc:\x1b[0m bell:\x07 */\n\x0c\n"
+
+FILES = {"auton.cpp": CPP, "arm.py": PY, "ctl.c": CTL}
 TOKENS = ("--text", "--text-2", "--text-muted", "--syn-fn", "--syn-string", "--syn-const", "--syn-type",
-          "--bg-1", "--bg-2", "--accent", "--accent-hi", "--red")
+          "--bg-1", "--bg-2", "--bg-3", "--accent", "--accent-hi", "--red")
 
 
 def editor_theme_checks(browser, mock, base, check, until, guard, init_script):
@@ -100,7 +106,7 @@ def editor_theme_checks(browser, mock, base, check, until, guard, init_script):
         except Exception as e:
             check("card colours before the editor ran to the end", False, str(e).splitlines()[0][:200])
         # The chrome right after C++: its bracket pairs nest three deep.
-        for section in (_cpp_checks, _chrome_checks, _python_checks, _map_checks, _find_checks):
+        for section in (_cpp_checks, _chrome_checks, _python_checks, _map_checks, _find_checks, _control_checks):
             try:
                 section(page, mock, check, until)
             except Exception as e:  # a section that cannot run is a failure; the rest still run
@@ -339,6 +345,27 @@ def _find_checks(page, mock, check, until):
     check("find: no match highlight is Monaco's orange, or any warm colour",
           bool(got["current"]) and not any(warm(v or "") for v in got.values()), str(got))
     page.keyboard.press("Escape")
+
+
+def _control_checks(page, mock, check, until):
+    """Monaco draws a control character on its own box, white on dark red
+    (`.mtkcontrol`, `!important`, viewLines.css) — not a registry colour, so
+    no theme or registry check sees it. theme.css pins it to HUD tokens."""
+    lines = _open(page, mock, until, "ctl.c")
+    check("control-character setup: ctl.c opens in Monaco, coloured", bool(lines))
+    t = _tokens(page)
+    got = page.evaluate("""() => [...document.querySelectorAll(
+        '[data-testid="pane-2"] [data-testid="editor"] .view-line .mtkcontrol')].map(s => {
+          const cs = getComputedStyle(s);
+          return [s.textContent.codePointAt(0).toString(16), cs.color, cs.backgroundColor];
+        })""")
+    check("control-character setup: ESC, BEL and the form feed are drawn as control characters",
+          len(got) >= 3, str(got))
+    hot = [g for g in got if warm(g[1]) or warm(g[2])]
+    check("control characters are not drawn on Monaco's red box: no warm colour or fill",
+          bool(got) and not hot, str(hot or got))
+    check("they are --text-2 on --bg-3",
+          bool(got) and all(_same(c, t["--text-2"]) and _same(bg, t["--bg-3"]) for _, c, bg in got), str(got))
 
 
 CARD = """() => {

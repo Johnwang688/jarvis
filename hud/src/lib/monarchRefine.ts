@@ -76,6 +76,35 @@ export function refine(language: unknown, words: WordClasses): Lang | null {
   };
 }
 
+/**
+ * What a language's tokenizer factory hands Monaco: the refined definition if
+ * it can be made *and* compiled, else the definition as Monaco shipped it —
+ * never a throw. Monaco compiles a factory's definition only after `create`
+ * returns, outside anything that could catch it, and a factory that throws
+ * leaves its language with no colour at all; so the refined copy is compiled
+ * here first (`compile` is Monaco's Monarch compiler, which throws on a bad
+ * definition), on a copy, since it writes into the object it is given.
+ * Review of PR #45, LOW-2.
+ */
+export function refinedOrOwn(
+  languageId: string,
+  language: unknown,
+  words: WordClasses,
+  compile: (languageId: string, definition: unknown) => unknown,
+  log: (message: string) => void = (m) => console.error(m),
+): unknown {
+  try {
+    const refined = refine(language, words);
+    if (!refined) return language;
+    compile(languageId, { ...refined });
+    return refined;
+  } catch (e) {
+    const why = e instanceof Error ? e.message : String(e);
+    log(`editor: ${languageId}'s refined tokenizer failed (${why.split("\n")[0].slice(0, 200)}); Monaco's own is used`);
+    return language;
+  }
+}
+
 // ---- the word lists ---------------------------------------------------------
 
 /** C and C++ (`tree-sitter-c`'s `primitive_type` and literals, as nvim-treesitter colours them). */

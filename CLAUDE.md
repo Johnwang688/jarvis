@@ -1329,7 +1329,16 @@ the plan's list (current line `--bg-2`, line numbers `--text-muted`, cursor
 bracket pairs in the three syntax hues, unicode box `--syn-const`, error
 squiggles `--red`, warnings `--text-2`, diff tints, whitespace, sticky
 scroll) **plus every colour Monaco 0.57 resolves warm anywhere in its
-registry**; red only on a row marked `red: "error" | "removed"`. A
+registry**; red only on a row marked `red: "error" | "removed"`. **A control
+character is not a registry colour**: Monaco draws ESC, BEL or ^L on its own
+`.mtkcontrol` box, white on dark red, `!important` — theme.css pins
+`.monaco-editor .mtkcontrol` to `--text-2` on `--bg-3` (review of PR #45).
+**A theme failure fails soft**: `themeOrFallback` logs the unreadable token by
+name and Monaco loads in plain vs-dark (a rejected `loadMonaco` used to drop
+every editor to its textarea, silently, until reload), and each refined
+tokenizer is compiled in its factory first (`refinedOrOwn`, with Monaco's own
+Monarch compiler) — a throw or a compile error leaves that language Monaco's
+own tokenizer, logged. A
 per-language rule is `<capture>.<lang>` (Monarch's postfix; ED-5 passes the
 language as the token's last modifier — Monaco matches a semantic token's
 type and modifiers joined by dots). **Monarch's C, C++ and Python are
@@ -1342,7 +1351,10 @@ lazy chunk** (`monacoBundle.ts`'s `applyGraphite`, called by `loadMonaco`):
 imported from `monaco.ts` they cost 11 KB of first paint and, because
 Python's definition imports Monaco's API, split Monaco into a second chunk.
 For ED-5: the plan's "bold on `void`" test contradicts its own table (`void`
-is `@type.builtin`, `--syn-type`); the table wins. Vitest reads theme.css
+is `@type.builtin`, `--syn-type`); the table wins. Left for ED-5's tree-sitter
+(fidelity, not safety): Markdown bullets and link URLs, untyped `=`/`*`/`::`/
+`->`, `#define SQ(x)` drawn as a function, Python's `class Foo(Base)` drawn
+as a function, `match` drawn as a keyword, and escapes inside Python strings. Vitest reads theme.css
 raw only because `test.css.include` names it (Vitest empties CSS, `?raw`
 included). Free checks: `editorTheme.test.ts` (≥ 4.5:1 on `--bg-1` and
 `--bg-2`, the warm band 340°–65° at s ≥ 0.35, strict hex, the CSS and the
@@ -1353,10 +1365,11 @@ table agree, every capture and Monarch token resolved through Monaco's own
 by `hud_v2_check` after the preview section, or alone: a C++ and a Python
 file's rendered tokens against the page's `:root` tokens, Monaco's `.mtkN`
 colour map, every `--vscode-*` colour it publishes, bracket pairs, find in
-the accent, and the approval card's computed colours unchanged once Monaco
-has loaded). 30 of its 44 checks fail on b04d6e8; the rest are setup or
-guards (find was already pinned by ED-1), each shown to bite in a scratch
-copy.
+the accent, control characters off Monaco's red box, and the approval card's
+computed colours unchanged once Monaco has loaded). 30 of its first 44 checks
+fail on b04d6e8, and the control-character pair without the theme.css rule;
+the rest are setup or guards (find was already pinned by ED-1), each shown to
+bite in a scratch copy.
 
 **The effort is a slider, not pills (2026-10-10, owner's ask: "like Claude's").**
 `components/EffortSlider.tsx`, rules in `lib/effortSlider.ts`: "Effort

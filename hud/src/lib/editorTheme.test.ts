@@ -4,8 +4,8 @@ import source from "./editorTheme.ts?raw";
 import { TokenMetadata } from "monaco-editor/editor/common/encodedTokenAttributes";
 import { TokenTheme } from "monaco-editor/editor/common/languages/supports/tokenization";
 import {
-  CHROME, LEGEND, SCHEME, SYNTAX_TOKENS, TOKENS, chromeColor, contrast, hueSat, isWarm, parseToken,
-  readPalette, themeColors, themeData, themeRules, type Palette,
+  CHROME, FALLBACK_THEME, LEGEND, SCHEME, SYNTAX_TOKENS, TOKENS, chromeColor, contrast, hueSat, isWarm, parseToken,
+  readPalette, themeColors, themeData, themeOrFallback, themeRules, type Palette,
 } from "./editorTheme";
 
 /** The declarations on theme.css's `:root`, comments stripped. */
@@ -267,5 +267,33 @@ describe("the chrome", () => {
       // Red is only ever --red, and only where a row says why.
       if (row.token === "--red") expect(row.red, row.key).toBeDefined();
     }
+  });
+});
+
+describe("a theme that cannot be built fails soft (review of PR #45, LOW-2)", () => {
+  it("with every token readable it is the Graphite theme, and nothing is logged", () => {
+    const logged: string[] = [];
+    expect(themeOrFallback(() => palette, (m) => logged.push(m))).toEqual(themeData(palette));
+    expect(logged).toEqual([]);
+  });
+
+  it("a token that cannot be read is logged by name, and Monaco gets plain vs-dark instead of a rejected load", () => {
+    const logged: string[] = [];
+    const theme = themeOrFallback(
+      () => readPalette((t) => (t === "--syn-fn" ? "" : decl.get(t) ?? "")),
+      (m) => logged.push(m),
+    );
+    expect(theme).toBe(FALLBACK_THEME);
+    expect(theme).toMatchObject({ base: "vs-dark", inherit: true });
+    expect(logged).toHaveLength(1);
+    expect(logged[0]).toMatch(/--syn-fn/);
+    expect(logged[0]).toMatch(/falls back/);
+  });
+
+  it("whatever the palette throws, it never throws", () => {
+    const logged: string[] = [];
+    expect(themeOrFallback(() => { throw new TypeError("getComputedStyle is broken"); }, (m) => logged.push(m)))
+      .toBe(FALLBACK_THEME);
+    expect(logged[0]).toMatch(/getComputedStyle is broken/);
   });
 });

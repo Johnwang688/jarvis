@@ -3,7 +3,7 @@ import { compile } from "monaco-editor/editor/standalone/common/monarch/monarchC
 import { MonarchTokenizer } from "monaco-editor/editor/standalone/common/monarch/monarchLexer";
 import { language as cpp } from "monaco-editor/languages/definitions/cpp/cpp";
 import { language as python } from "monaco-editor/languages/definitions/python/python";
-import { C_WORDS, PY_WORDS, refine } from "./monarchRefine";
+import { C_WORDS, PY_WORDS, refine, refinedOrOwn } from "./monarchRefine";
 
 /**
  * Monaco's own Monarch compiler and lexer, on the installed definitions: each
@@ -138,5 +138,43 @@ describe("refine", () => {
     const before = JSON.stringify(cpp, (_k, v) => (v instanceof RegExp ? v.source : v));
     refine(cpp, C_WORDS);
     expect(JSON.stringify(cpp, (_k, v) => (v instanceof RegExp ? v.source : v))).toBe(before);
+  });
+});
+
+describe("refinedOrOwn: a refinement that fails leaves Monaco's own tokenizer (review of PR #45, LOW-2)", () => {
+  it("hands Monaco the refined definition when it compiles, and logs nothing", () => {
+    const logged: string[] = [];
+    const out = refinedOrOwn("cpp", cpp, C_WORDS, compile, (m) => logged.push(m)) as any;
+    expect(out).not.toBe(cpp);
+    expect(out.jarvisConstants).toContain("nullptr");
+    expect(logged).toEqual([]);
+    // Compiled once already, it still tokenizes as refined.
+    expect(typeOf(tokenize("cpp", out, CPP), "driveFor", 1)).toBe("function.cpp");
+  });
+
+  it("a refinement that throws: Monaco's own definition, and the reason logged", () => {
+    const logged: string[] = [];
+    const out = refinedOrOwn("cpp", cpp, { ...C_WORDS, constants: null as any }, compile, (m) => logged.push(m));
+    expect(out).toBe(cpp);
+    expect(logged).toHaveLength(1);
+    expect(logged[0]).toMatch(/cpp's refined tokenizer failed/);
+  });
+
+  it("a refined definition Monarch will not compile: Monaco's own definition, and the reason logged", () => {
+    const logged: string[] = [];
+    // A word list must be strings; Monarch's compiler refuses anything else.
+    const out = refinedOrOwn("python", python, { ...PY_WORDS, types: [1 as any] }, compile, (m) => logged.push(m));
+    expect(out).toBe(python);
+    expect(logged).toHaveLength(1);
+    expect(logged[0]).toMatch(/python's refined tokenizer failed .*array of strings/);
+    // Monaco's own still compiles and tokenizes.
+    expect(typeOf(tokenize("python", out, PY), "print")).toBe("keyword.python");
+  });
+
+  it("a definition whose shape moved is Monaco's own, silently (nothing failed)", () => {
+    const logged: string[] = [];
+    const moved = { tokenizer: { root: [[/[a-z]+/, "identifier"]] } };
+    expect(refinedOrOwn("cpp", moved, C_WORDS, compile, (m) => logged.push(m))).toBe(moved);
+    expect(logged).toEqual([]);
   });
 });

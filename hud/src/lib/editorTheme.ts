@@ -331,6 +331,29 @@ export function themeData(p: Palette) {
   return { base: "vs-dark" as const, inherit: false, rules: themeRules(p), colors: themeColors(p) };
 }
 
+/**
+ * Plain vs-dark, for a window whose tokens could not be read: Monaco still
+ * loads (an editor without its scheme beats a textarea without an editor).
+ */
+export const FALLBACK_THEME = { base: "vs-dark" as const, inherit: true, rules: [] as ThemeRule[], colors: {} };
+
+/**
+ * The theme Monaco is given, never a throw. A theme that threw used to reject
+ * `loadMonaco`, which every editor answers with its plain-text fallback and
+ * no word of why, until a reload (review of PR #45, LOW-2). Now the reason —
+ * naming each token that could not be read — goes to the console, and Monaco
+ * loads in plain vs-dark.
+ */
+export function themeOrFallback(palette: () => Palette, log: (message: string) => void = (m) => console.error(m)) {
+  try {
+    return themeData(palette());
+  } catch (e) {
+    const why = e instanceof Error ? e.message : String(e);
+    log(`${why}; the editor falls back to plain vs-dark until the window reloads`);
+    return FALLBACK_THEME;
+  }
+}
+
 // ---- colour arithmetic (the tests' and the headless check's rules) ----------
 
 export function rgbOf(hex: string): [number, number, number] {
