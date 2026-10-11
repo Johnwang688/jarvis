@@ -1115,6 +1115,46 @@ def installed_hud_deny_checks():
             config.HUD_DIR, config.HUD_DIST, config.HUD_DEV = saved
 
 
+def daemon_and_rebuild_ops_checks():
+    """`jarvis restart` (and `jarvis daemon2 restart`), `jarvis hud rebuild`
+    and a `systemctl` that changes the daemon's unit (2026-10-11) are the
+    owner's, from their own terminal: layer 1 DENY, never asked, under AUTO
+    and STRICT — through `protected_state.owner_op`, the one detector.
+    Before, `jarvis restart` and `jarvis hud rebuild` were asked under AUTO
+    only if the provider's own classifier asked, and `systemctl --user
+    restart jarvis-daemon2` was ALLOW in `rules.decide`. A Claude or Codex
+    worker runs under the daemon it would restart."""
+    from jarvis.v2.model import PermissionProfile as P
+    from jarvis.v2.permissions import build_permit
+    from jarvis.v2.provider import Decision
+
+    with Sandbox():
+        for profile in (P.AUTO, P.STRICT):
+            brief = brief_for(profile)
+            asker = Asker(Decision.ALLOW)
+            permit = build_permit(context(brief), asker)
+            for line in ("jarvis restart", "jarvis restart --force", "python -m jarvis restart",
+                         "jarvis daemon2 restart", "/repo/.venv/bin/jarvis hud rebuild --pull --restart",
+                         "uv run jarvis hud rebuild", "bash -lc 'jarvis restart'",
+                         "env A=1 nohup jarvis hud --pull rebuild", "python3 -m jarvis.v2.owner_ops",
+                         'python -c "from jarvis.v2 import owner_ops; owner_ops.restart()"',
+                         "systemctl --user restart jarvis-daemon2",
+                         "systemctl --user stop jarvis-daemon2.service",
+                         "nohup systemctl --user --no-block restart jarvis-daemon2"):
+                before = len(asker.seen)
+                eq(permit(*bash(line), brief), Decision.DENY, f"[{profile.value}] Bash {line!r} is refused")
+                eq(len(asker.seen), before, f"[{profile.value}] {line!r} is never put to the owner")
+        brief = brief_for(P.AUTO)
+        asker = Asker(Decision.ALLOW)
+        permit = build_permit(context(brief), asker)
+        for line in ("echo Run jarvis restart", 'grep -rn "hud rebuild" docs',
+                     "git commit -m 'run `jarvis restart` after merges'",
+                     "cat > notes.md <<'EOF'\njarvis hud rebuild\nEOF",
+                     "systemctl --user status jarvis-daemon2", "journalctl --user -u jarvis-daemon2 -n 50",
+                     "curl -s localhost:8405/status"):
+            ok(permit(*bash(line), brief) != Decision.DENY, f"{line!r} is not refused")
+
+
 def daemon_checks():
     from jarvis.v2 import daemon as daemon_mod
     from jarvis.v2.model import PermissionProfile as P, ProviderName, Role
@@ -1482,7 +1522,7 @@ def discord_checks():
 def main():
     for section in (matrix_checks, always_ask_checks, file_deny_checks,
                     human_backed_checks, log_checks, approvals_checks, hud_build_deny_checks,
-                    installed_hud_deny_checks,
+                    installed_hud_deny_checks, daemon_and_rebuild_ops_checks,
                     daemon_checks, auto_quiet_checks, hatch_checks, discord_checks):
         print(f"-- {section.__name__}")
         section()

@@ -1661,6 +1661,181 @@ def gate_state_complexity_checks() -> None:
           "a second, as too complex to judge — never ALLOW")
 
 
+# --- the owner's operations (2026-10-11) ---------------------------------------------
+#
+# `jarvis restart` (and `jarvis daemon2 restart`), `jarvis hud rebuild` and
+# `jarvis hud install` are the owner's, from their own terminal: the daemon
+# runs Jarvis's agents and holds the owner's pending approvals, and the
+# installed HUD is the code the approval window runs. DENY in every spelling
+# the one detector in `protected_state` sees — never run, never asked, under
+# any allowlist entry and under mode "all" — and so is anything that stops or
+# changes the daemon's systemd unit. Before this change `jarvis restart` and
+# `jarvis hud rebuild` asked, and `systemctl --user restart jarvis-daemon2`
+# was ALLOW: it ran with nobody asked on every human-backed surface. (A
+# `pkill -f jarvis` still matches the daemon and stays ALLOW — the owner's
+# 2026-08-09 matrix above; not decided here.)
+
+OWNER_OPS_DENY = (
+    'jarvis restart',
+    'jarvis restart --force',
+    'jarvis restart --wait 60',
+    'jarvis daemon2 restart',
+    'jarvis daemon2 restart --force',
+    'jarvis daemon2 --force restart',
+    'python -m jarvis restart',
+    'python3 -mjarvis restart',
+    '/home/x/projects/Jarvis/.venv/bin/jarvis restart',
+    '~/.local/bin/jarvis restart',
+    '.venv/bin/python -m jarvis.__main__ daemon2 restart',
+    'uv run jarvis restart',
+    'uv run --directory /x python -m jarvis restart',
+    'env FOO=1 nohup timeout 60 jarvis restart',
+    'systemd-run --user --scope -q -- /x/.venv/bin/python -m jarvis restart',
+    "bash -lc 'cd ~/projects/Jarvis && jarvis restart'",
+    'sh -c "jarvis restart"',
+    'eval jarvis restart',
+    'env -S "jarvis restart"',
+    'J=jarvis; $J restart',
+    'echo $(jarvis restart)',
+    'git pull && jarvis restart',
+    'jarvis \\\n restart',
+    'ssh localhost jarvis restart',
+    'jarvis hud rebuild',
+    'jarvis hud rebuild --pull --restart --force',
+    'jarvis hud --pull rebuild',
+    'python -m jarvis hud rebuild --clean',
+    "bash -c 'jarvis hud rebuild --allow-dirty'",
+    'python3 -m jarvis.v2.owner_ops',
+    'python jarvis/v2/owner_ops.py',
+    'python -c "from jarvis.v2 import owner_ops; owner_ops.restart()"',
+    "python3 - <<'EOF'\nfrom jarvis.v2 import owner_ops\nowner_ops.rebuild()\nEOF",
+    'python -c "import sys; sys.argv = [\'jarvis\', \'restart\']; from jarvis.__main__ import main; main()"',
+    'python -c "import sys; sys.argv = [\'jarvis\', \'hud\', \'rebuild\']; import jarvis.__main__ as m; m.main()"',
+    'systemctl --user restart jarvis-daemon2',
+    'systemctl --user restart jarvis-daemon2.service',
+    'systemctl --user stop jarvis-daemon2',
+    'systemctl --user kill jarvis-daemon2',
+    'systemctl --user --no-block restart jarvis-daemon2',
+    "systemctl restart --user 'jarvis-*'",
+    'systemctl --user try-restart jarvis-daemon2',
+    'systemctl --user disable --now jarvis-daemon2',
+    'systemctl --user mask jarvis-daemon2',
+    'systemctl --user edit jarvis-daemon2',
+    'nohup systemctl --user restart jarvis-daemon2',
+    "bash -c 'systemctl --user stop jarvis-daemon2'",
+    'sleep 5; systemctl --user restart jarvis-daemon2',
+    'systemctl --user exit',
+    # xargs may supply the unit or the pattern; the installer's new entry.
+    'echo jarvis-daemon2 | xargs systemctl --user restart',
+    'echo restart | xargs jarvis',
+    'python -c "from jarvis.v2 import hud_install; hud_install.install_checkout()"',
+    'python -c "from jarvis.__main__ import cmd_restart; cmd_restart(None)"',
+    'python3 -c "import subprocess; subprocess.run([\'jarvis\', \'restart\'])"',
+    'systemctl --user start jarvis-daemon2',
+)
+
+# The other half: lines that mention the commands without running them, the
+# daemon's unit read rather than changed, and kills that miss the daemon.
+# The first three mirror the false positives #44's review found.
+OWNER_OPS_ORDINARY = (
+    'echo Run jarvis restart after merging',
+    'grep -rn "jarvis hud rebuild" docs && python3 tests/x.py',
+    'python3 -c "print(\'hud\', \'rebuild\')"',
+    'python3 -c "print(\'restart\')"',
+    'python3 -c "print(\'jarvis restart\')"',
+    'echo jarvis restart',
+    'grep -n jarvis restart.log',
+    'git commit -m "docs: jarvis restart and jarvis hud rebuild"',
+    'cat jarvis/v2/owner_ops.py',
+    'grep -n restart jarvis/v2/owner_ops.py',
+    'python tests/v2/owner_ops_check.py',
+    'python -m pytest tests/v2/owner_ops_check.py',
+    'jarvis hud',
+    'jarvis hud --no-window',
+    'jarvis chat',
+    'jarvis route',
+    'systemctl --user status jarvis-daemon2',
+    'systemctl --user show jarvis-daemon2 -p ActiveState',
+    'systemctl --user -p ActiveState show jarvis-daemon2',
+    'systemctl --user is-active jarvis-daemon2',
+    'systemctl --user cat jarvis-daemon2',
+    'journalctl --user -u jarvis-daemon2 -n 50 --no-pager',
+    'systemctl --user restart pipewire',
+    'systemctl --user daemon-reload',
+    'curl -s localhost:8405/status',
+    'pkill -f vite',
+    "pkill -f 'python -m http.server 8000'",
+    'pkill -f "node .*vite"',
+    'killall node',
+    'grep -rn "systemctl --user restart jarvis-daemon2" docs',
+    'echo "systemctl --user restart jarvis-daemon2"',
+    'npm ci',
+    'npm run build',
+    'git fetch origin && git merge --ff-only origin/main',
+    'ls | xargs wc -l', 'systemctl --user status', 'pkill -f "python -m jarvis face"',
+    'jarvis daemon2', 'jarvis restart-notes.md', 'systemctl --user restart jarvis',
+    'systemctl --user restart jarvis-daemon',
+    # The coordinator's must-not-DENY set: a mention, a grep, a single-quoted
+    # commit message and here-documents that are data.
+    'echo Run jarvis restart',
+    'grep -rn "hud rebuild" docs',
+    "git commit -m 'run `jarvis restart` and `jarvis hud rebuild` after merges'",
+    "cat > notes.md <<'EOF'\njarvis restart\njarvis hud rebuild\nsystemctl --user restart jarvis-daemon2\nEOF",
+    'cat > notes.md <<EOF\njarvis restart\njarvis daemon2 restart\nEOF',
+    "echo 'systemctl --user stop jarvis-daemon2'",
+)
+
+_OWNER_OPS_STEMS = ("jarvis", "python", "python3", "uv", "env", "nohup", "timeout", "bash", "sh",
+                    "systemctl", "systemd-run", "ssh", "git", "sleep", "echo", "eval", "flock", "xargs")
+
+
+def daemon_and_rebuild_ops_checks() -> None:
+    from jarvis import config, permissions
+    from jarvis import protected_state as S
+
+    with gate_home():
+        config.ALLOWLIST_PATH.write_text(json.dumps(
+            [{"tool": "run_command", "prefix": stem} for stem in _OWNER_OPS_STEMS]))
+        asked: list[str] = []
+
+        def says_yes(tool, args):
+            asked.append(args.get("command", ""))
+            return True
+
+        before = config.ALLOWLIST_PATH.read_text()
+        for command in OWNER_OPS_DENY:
+            assert S.owner_op(command), f"the detector misses {command!r}"
+            assert rules.decide(command).decision == rules.DENY, (command, rules.decide(command))
+            assert permissions.static_verdict(command).decision == rules.DENY, command
+            assert permissions.command_verdict(
+                "run_command", {"command": command}).decision == rules.DENY, command
+            for mode in ("ask", "all"):
+                permissions.set_mode(mode)
+                try:
+                    with recorded() as ran:
+                        asked.clear()
+                        out = tools.dispatch(
+                            "run_command", json.dumps({"command": command, "reason": "r"}),
+                            approve=permissions.gate(says_yes))
+                finally:
+                    permissions.set_mode("ask")
+                assert "Refused" in out.text or "refused" in out.text, (command, out.text)
+                assert not ran, f"[{mode}] an owner operation ran: {command!r}"
+                assert not asked, f"[{mode}] an owner operation was put to the owner: {command!r}"
+            # And with no approver at all: run_command refuses it itself.
+            with recorded() as ran:
+                out = shell.run_command(command, reason="r")
+            assert out.startswith("Refused"), (command, out)
+            assert not ran, command
+        assert config.ALLOWLIST_PATH.read_text() == before
+
+        for command in OWNER_OPS_ORDINARY:
+            assert S.owner_op(command) is None, f"an ordinary line is refused: {command!r}"
+            assert rules.decide(command).decision != rules.DENY, (command, rules.decide(command))
+    print(f"ok  owner ops: {len(OWNER_OPS_DENY)} spellings refused (never run, never asked, any "
+          f"allowlist, mode all, no approver); {len(OWNER_OPS_ORDINARY)} ordinary lines untouched")
+
+
 def fails_against_old_code_checks() -> None:
     """Each new refusal must fail against the code before this change. Rather
     than keep a copy of the old functions, reconstruct the old *decision* for
@@ -1787,6 +1962,7 @@ def main() -> int:
     gate_state_checks()
     gate_state_edge_checks()
     gate_state_complexity_checks()
+    daemon_and_rebuild_ops_checks()
     fails_against_old_code_checks()
     owner_op_checks()
     print("\nall rules checks passed")

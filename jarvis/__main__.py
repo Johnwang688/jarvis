@@ -370,8 +370,7 @@ def cmd_hud(args) -> int:
     action = getattr(args, "action", "open")
     if action != "rebuild":
         stray = [flag for flag, name in (("--pull", "pull"), ("--restart", "restart"),
-                                         ("--clean", "clean"), ("--force", "force"),
-                                         ("--wait", "wait"))
+                                         ("--clean", "clean"), ("--force", "force"))
                  if getattr(args, name, None) not in (None, False)]
         if stray:
             console.print(f"[red]{', '.join(stray)} {'is' if len(stray) == 1 else 'are'} only "
@@ -423,7 +422,7 @@ def cmd_restart(args) -> int:
 def cmd_daemon2(args) -> int:
     if getattr(args, "action", "run") == "restart":
         return cmd_restart(args)
-    stray = [flag for flag, name in (("--force", "force"), ("--wait", "wait"))
+    stray = [flag for flag, name in (("--force", "force"),)
              if getattr(args, name, None) not in (None, False)]
     if stray:
         console.print(f"[red]{', '.join(stray)} {'is' if len(stray) == 1 else 'are'} only for "
@@ -828,7 +827,7 @@ def _seconds(text: str) -> float:
     return value
 
 
-def main() -> int:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="jarvis", description="Your personal agent.")
     sub = parser.add_subparsers(dest="command")
 
@@ -958,8 +957,10 @@ def main() -> int:
                      help="rebuild: run `npm ci` even when node_modules looks current")
     hud.add_argument("--force", action="store_true",
                      help="rebuild --restart: restart even while a turn is running")
-    hud.add_argument("--wait", type=_seconds, default=None, metavar="SECONDS",
-                     help="rebuild --restart: how long to wait for the daemon to answer (default 30)")
+    # No option of `hud` (or `daemon2`) takes a value: the owner-op detector
+    # reads `jarvis hud … rebuild` by its words, and a value before the action
+    # (`--wait 30 rebuild`) would hide it. `jarvis restart --wait` has the
+    # op as its first word. tests/v2/owner_ops_check.py pins this.
     hud.set_defaults(func=cmd_hud)
 
     restart_help = ("restart the v2 daemon (systemd's jarvis-daemon2) and report on it; "
@@ -984,8 +985,6 @@ def main() -> int:
                               "restart: as `jarvis restart`")
     daemon2.add_argument("--force", action="store_true",
                          help="restart: restart even while a turn is running")
-    daemon2.add_argument("--wait", type=_seconds, default=None, metavar="SECONDS",
-                         help="restart: how long to wait for the new daemon (default 30)")
     daemon2.set_defaults(func=cmd_daemon2)
 
     discord = sub.add_parser("discord", help="v2 Discord surface (human-only)")
@@ -1051,7 +1050,11 @@ def main() -> int:
 
     sub.add_parser("tools", help="list registered tools").set_defaults(func=cmd_tools)
     sub.add_parser("config", help="show configured model tiers").set_defaults(func=cmd_config)
+    return parser
 
+
+def main() -> int:
+    parser = build_parser()
     args = parser.parse_args()
     if not getattr(args, "func", None):
         args = parser.parse_args(["chat"])

@@ -4,7 +4,7 @@ The owner asked for "a way for me to restart the daemon and a command to
 force the hud to rebuild with latest changes in the jarvis cli":
 
   jarvis restart [--force] [--wait S]            (alias: jarvis daemon2 restart)
-  jarvis hud rebuild [--pull] [--restart] [--force] [--clean] [--allow-dirty] [--wait S]
+  jarvis hud rebuild [--pull] [--restart] [--force] [--clean] [--allow-dirty]
 
 Both are **the owner's, from their own terminal, never a tool**, and DENY for
 every agent (`protected_state`'s owner-ops detector, asked by `rules.decide`

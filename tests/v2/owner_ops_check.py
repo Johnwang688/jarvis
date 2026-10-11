@@ -795,13 +795,13 @@ class Cli(Base):
         with patch.object(O, "rebuild", return_value=5) as rebuild:
             self.assertEqual(self.main("hud", "rebuild"), 5)
             self.assertEqual(self.main("hud", "rebuild", "--pull", "--restart", "--clean",
-                                       "--allow-dirty", "--force", "--wait", "45"), 5)
+                                       "--allow-dirty", "--force"), 5)
         self.assertEqual(rebuild.call_args_list[0].kwargs,
                          {"pull_first": False, "restart_after": False, "clean": False,
                           "allow_dirty": False, "force": False, "wait": O.WAIT})
         self.assertEqual(rebuild.call_args_list[1].kwargs,
                          {"pull_first": True, "restart_after": True, "clean": True,
-                          "allow_dirty": True, "force": True, "wait": 45.0})
+                          "allow_dirty": True, "force": True, "wait": O.WAIT})
 
     def test_rebuild_options_are_only_for_rebuild(self):
         with patch.object(O, "rebuild") as rebuild, patch.object(hud_install, "main") as install:
@@ -818,6 +818,26 @@ class Cli(Base):
             self.assertEqual(self.main("daemon2", "--force"), 2)
         self.assertEqual(run.call_count, 2)
         restart.assert_not_called()
+
+    def test_no_owner_op_parser_takes_a_value_before_its_action(self):
+        """The owner-op detector reads `jarvis hud … rebuild` and `jarvis
+        daemon2 … restart` by their words, options skipped: an option that
+        took a value (`--wait 30`) could sit between `hud` and `rebuild` and
+        hide it. Only `jarvis restart`, whose op is its first word, has one."""
+        import argparse
+        from jarvis import __main__ as cli
+        from jarvis import protected_state as S
+        parser = cli.build_parser()
+        subs = next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction)).choices
+        for path in S.OWNER_OPS:
+            if len(path) < 2:
+                continue
+            with self.subTest(path=path):
+                takes = [a.option_strings for a in subs[path[0]]._actions
+                         if a.option_strings and a.nargs != 0]
+                self.assertEqual(takes, [], f"`jarvis {path[0]}` has options that take a value")
+        top = [a.option_strings for a in parser._actions if a.option_strings and a.nargs != 0]
+        self.assertEqual(top, [])
 
     def test_wait_is_bounded(self):
         for bad in ("0", "-1", "601", "soon"):

@@ -1026,18 +1026,104 @@ def ask_reason(touch: Touch) -> str:
 # boundary; the installed HUD's real protection is that the write tools and
 # v2's grants refuse its folder, and a shell write into it asks.
 
+_RESTART_WHY = (
+    "this restarts the v2 daemon (`jarvis restart`), the process that runs Jarvis's agents and "
+    "holds the owner's pending approvals — Jarvis's own control plane. Only the owner restarts "
+    "it, from their own terminal; Jarvis never does, asked or not")
 OWNER_OPS: dict[tuple[str, ...], str] = {
     ("hud", "install"): (
         "this runs `jarvis hud install`, which writes the installed HUD — the code the "
         "approval window runs. Only the owner or the lead runs it, from their own shell "
         "(decision C-1); Jarvis never does, asked or not"),
+    # `jarvis hud rebuild` and `jarvis restart` (2026-10-11, `v2/owner_ops.py`).
+    ("hud", "rebuild"): (
+        "this runs `jarvis hud rebuild`, which installs a new HUD — the code the approval "
+        "window runs — and can pull the checkout and restart the v2 daemon. Only the owner runs "
+        "it, from their own terminal (decision C-1); Jarvis never does, asked or not"),
+    ("restart",): _RESTART_WHY,
+    ("daemon2", "restart"): _RESTART_WHY,
 }
 # A module that implements an owner op: (the op's path, the functions whose
 # call performs it). Running the module, or calling one of those from inline
 # source, is the op.
 OWNER_OP_MODULES: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
-    "jarvis.v2.hud_install": (("hud", "install"), ("main", "install", "npm_build", "prune")),
+    "jarvis.v2.hud_install": (("hud", "install"),
+                              ("main", "install", "install_checkout", "npm_build", "prune")),
+    "jarvis.v2.owner_ops": (("hud", "rebuild"),
+                            ("restart", "_restart", "rebuild", "pull", "npm_ci", "systemctl")),
 }
+
+# The daemon's systemd unit, changed directly (2026-10-11): `systemctl
+# --user restart jarvis-daemon2` was ALLOW in `rules.decide` — run with nobody
+# asked on every human-backed surface — and `stop` ends it for good (a clean
+# exit is not one `Restart=on-failure` restarts). Any verb that changes the
+# unit, named or matched by a glob, and the user manager's `exit`/`isolate`,
+# which stop every user unit. Not seen, and not decided here: a `kill` of its
+# pid, and `pkill -f jarvis`, which the owner's 2026-08-09 matrix (rules_check)
+# keeps ALLOW as ordinary process control — it matches the daemon too.
+DAEMON_UNIT = "jarvis-daemon2"
+_DAEMON_UNIT_NAMES = (DAEMON_UNIT, DAEMON_UNIT + ".service")
+_DAEMON_WORDS = ("systemctl",)
+_SYSTEMCTL_VALUES = frozenset({
+    "-t", "--type", "-p", "--property", "-s", "--signal", "-H", "--host", "-M", "--machine",
+    "-n", "--lines", "-o", "--output", "--state", "--kill-whom", "--kill-value", "--root",
+    "--image", "--image-policy", "--job-mode", "--what", "--timestamp", "--check-inhibitors",
+    "--when", "--message", "--drop-in", "--preset-mode", "--boot-loader-menu",
+    "--boot-loader-entry", "--reboot-argument", "--marked"})
+# Verbs that only read; every other verb naming the unit changes it
+# (start, stop, restart, kill, disable, mask, edit, set-property, …).
+_SYSTEMCTL_READS = frozenset({
+    "status", "show", "cat", "help", "is-active", "is-enabled", "is-failed", "list-units",
+    "list-unit-files", "list-dependencies", "list-jobs", "list-timers", "list-sockets",
+    "list-paths", "list-automounts", "list-machines", "show-environment", "get-default",
+    "is-system-running", "whoami", "log-level", "log-target", "service-watchdogs"})
+# Verbs that stop every unit of the *user* manager, the daemon's among them.
+_SYSTEMCTL_USER_STOPS_ALL = frozenset({"exit", "isolate"})
+_DAEMON_UNIT_WHY = (
+    "this {how} — the v2 daemon, the process that runs Jarvis's agents and holds the owner's "
+    "pending approvals, Jarvis's own control plane. Only the owner stops or restarts it, from "
+    "their own terminal (`jarvis restart`); Jarvis never does, asked or not")
+
+
+def _names_daemon_unit(word: str) -> bool:
+    return any(fnmatch(name, word) for name in _DAEMON_UNIT_NAMES)
+
+
+def _systemctl_op(tokens: list[str], appends: bool = False) -> str | None:
+    """`systemctl … VERB … jarvis-daemon2` with a verb that changes the
+    unit; `systemctl --user exit|isolate`; or, behind `xargs`, a changing
+    verb whose units its input supplies."""
+    args, k, verb = tokens[1:], 0, None
+    user = False
+    while k < len(args):
+        token = args[k]
+        if token == "--":
+            k += 1
+            break
+        if token.startswith("-") and len(token) > 1:
+            name = token.split("=", 1)[0]
+            user = user or name == "--user"
+            k += 2 if (name in _SYSTEMCTL_VALUES and "=" not in token) else 1
+            continue
+        verb = token
+        k += 1
+        break
+    if verb is None and k < len(args):
+        verb, k = args[k], k + 1
+    if verb is None or verb in _SYSTEMCTL_READS:
+        return None
+    user = user or "--user" in args[k:]
+    if user and verb in _SYSTEMCTL_USER_STOPS_ALL:
+        return _DAEMON_UNIT_WHY.format(how=f"stops every user unit (`systemctl --user {verb}`), "
+                                           f"{DAEMON_UNIT} among them")
+    if any(_names_daemon_unit(word) for word in args[k:] if not word.startswith("-")):
+        return _DAEMON_UNIT_WHY.format(how=f"changes systemd's {DAEMON_UNIT} (`systemctl {verb}`)")
+    if appends:
+        return _DAEMON_UNIT_WHY.format(how=f"runs `systemctl {verb}` on units its input names "
+                                           f"(`xargs`), {DAEMON_UNIT} perhaps")
+    return None
+
+
 _CLI_MODULES = frozenset({"jarvis", "jarvis.__main__"})
 _LAUNCHERS = frozenset({"jarvis", "jarvis.exe"})
 _PYTHON = re.compile(r"(?:python|pypy)[0-9.]*")
@@ -1363,6 +1449,8 @@ def _owner_command(tokens: list[str], segment: str, state: _Owner, depth: int) -
             link = _owner_word(operands[-1], state)
             state.launchers.add(link.rstrip("/"))
         return None
+    if stem == "systemctl":
+        return _systemctl_op(tokens, appends)
     if _PYTHON.fullmatch(stem):
         kind, what, argv = _python_parse(tokens[1:])
         if kind == "module":
@@ -1481,9 +1569,12 @@ def _could_be_owner_op(command: str) -> bool:
     """A cheap test the full parse can never beat: can this line hold an
     owner op at all? The full parse resolves quotes, backslashes,
     continuations, ANSI-C `$'…'` text and the line's own `$VAR`s, but every
-    path it can find still spells an op's first word (`hud`) in the line's
-    text once quotes and backslashes are gone — or goes through `xargs`,
-    whose input may supply it. A line with neither is skipped, so a
+    path it can find still spells, in the line's text once quotes and
+    backslashes are gone, an op's first word (`hud`, `restart`, `daemon2`),
+    an owner module's name (`hud_install`, `owner_ops` — a module named on
+    its own spells no op word: `python -m jarvis.v2.owner_ops`), or
+    `systemctl` — or goes through `xargs`, whose input may
+    supply it. A line with none of them is skipped, so a
     pathological one (`$($($(…`) costs a substring search, not a parse.
     `owner_op_check` in tests/v2/hud_install_check.py holds the two to
     agreement over a corpus and every spelling."""
@@ -1495,7 +1586,9 @@ def _could_be_owner_op(command: str) -> bool:
     flat = command.replace("\\\n", "")
     for ch in ("'", '"', "\\"):
         flat = flat.replace(ch, "")
-    if "xargs" in flat or any(path[0] in flat for path in OWNER_OPS):
+    if ("xargs" in flat or any(path[0] in flat for path in OWNER_OPS)
+            or any(module.rpartition(".")[2] in flat for module in OWNER_OP_MODULES)
+            or any(word in flat for word in _DAEMON_WORDS)):
         return True
     # A word the line assembles from its own variables (`x=h; jarvis ${x}ud
     # install`) need not spell the op's word anywhere: such a line is parsed.
