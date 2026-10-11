@@ -1728,13 +1728,15 @@ title bar.
   the bar wraps rather than clipping.
 - **⊞ Customize Layout is the one entry point for presets**: six tiles
   (single, two side by side, two stacked, three side by side, one large plus
-  two stacked, 2×2), the three toggles written out with their shortcuts,
+  two stacked, 2×2; eight since WP-G1, below, adding 3×2 and 4×2, four to a
+  row), the three toggles written out with their shortcuts,
   Reset layout (one pane, default widths, panel closed) and, when the window
   is drawing fewer panes than the preset has, "Showing 2 of 3 panes: the
   window is too narrow" plus a badge on ⊞. It is placed from the button's
   rect through `toCss()`, right-aligned; Escape closes it and gives focus
   back; the arrows move between tiles; Space in it is never push-to-talk.
-- **The pane model.** All four pane specs are always stored
+- **The pane model.** All four pane specs (eight since WP-G1, by id, with
+  the drawn ids' reading order beside them) are always stored
   (`jarvis.hud.workspace`, apart from `jarvis.hud.layout` so damage to one
   never resets the other; each field falls back on its own, an unknown
   preset is `single`, the panel opens only on a literal `true`). A pane is
@@ -1742,7 +1744,7 @@ title bar.
   unmounted**. Edges are stored as fractions per preset and clamped to a
   360×200 pane minimum when drawn; they drag, take the arrows (Shift for a
   bigger step, Home/End) and reset to equal on a double-click. Ctrl+Alt+1 … 4
-  focus a pane of the preset, bringing back one the window dropped
+  (… 8 since WP-G1, by slot) focus a pane of the preset, bringing back one the window dropped
   (AltGr+digit types a symbol, so it never fires mid-word); the focused pane
   of a split has an accent line under its header.
 - **Chat stayed a singleton in WP-A** (lifted by WP-B, below): choosing
@@ -2147,6 +2149,52 @@ frame_check.py` (every route family on both listeners, checked against the
 route modules' source), `preview.test.ts`, `hud_v2_preview_check.py` and
 the terminal suite's link section. Not yet: a "dev servers in your
 terminals" list (§2.5 item 5).
+
+**Up to eight panes (2026-10-10, WP-G1 of
+`docs/plans/2026-10-10-hud-split-panes-plan.md`; decisions beside it).** The
+owner asked for 6- and 8-pane layouts ("I'm not seeing the 6 and 8 panel
+layouts"). Ten shapes now: WP-A's six plus 3 over 2, 3×2, 4 over 3 and 4×2
+(decisions S-1); ⊞ offers eight tiles, four to a row, 3×2 and 4×2 among them,
+with "Layout · N panes" at the head and no tile checked while a 5- or 7-pane
+shape is current (it then opens on the first tile, never on a toggle row). 5 and 7 are reached by split and close (WP-G2, not yet
+built; `LADDER` is the shape per count, three being three columns, S-3) or a
+stored value. Every pane can show chat, task, file, diff, preview or a
+terminal (panes 5–8 default to chat), and the chats, terminals and dirty
+guards of WP-B and WP-D work in all eight.
+
+- **Ids are not slots.** A pane keeps its id for life — `pane-<id>`, its React
+  key (with a render-only incarnation WP-G2's close will bump), `chats[id]`,
+  its dirty flag — and `ws.order` lists the ids drawn in reading order; `kept`
+  holds the ones ⊞ hid. Everything the owner reads is the **slot**: "New
+  thread · N", the panel's "in pane N", the refusal chip, aria labels and
+  Ctrl+Alt+1 … 8. A stored WP-A/WP-B value has no `order` and reads as ids 1…n,
+  so it draws exactly what it drew (a golden file of 300 fits made by the old
+  code holds that). ⊞ to fewer panes hides the rest; more panes bring the
+  hidden ones back first, so 8 → 1 → 8 returns every pane where it was.
+- **The grid is derived from rows.** A shape is its panes per row (main2
+  aside); the CSS grid lays each row on the union of all rows' column edges,
+  so 3 over 2 and 4 over 3 have bottom-row edges of their own that drag
+  independently, and each pane's width (for the compact view menu and the
+  folded tree) is read from its own row.
+- **Fitting is generic.** A column drop keeps, in every row, a window one
+  narrower than the widest row — the focused pane's row the leftmost window
+  that holds it — and a row drop keeps the focused pane's row, a four-wide one
+  losing a column too. WP-A's drop tables hold unchanged, the focused pane is
+  never dropped (a property over every shape, focus, order and window size),
+  and a dropped set stays sticky only while these panes in this order could
+  draw it. Eight panes want ~1512px at 100%: 1920×1080 draws all eight (the
+  side panes squeezed to 480, columns at the 360 minimum), 1280×800 draws six
+  with the badge and "Showing 6 of 8", and 150% on that screen draws four;
+  zooming out is the lever on a laptop.
+- **Free checks**: `workspace.test.ts`, `layout.test.ts`, `chats.test.ts`,
+  `hud_v2_layout_check._eight_checks` (⊞ → 6 and → 8 at 1920×1080 with every
+  pane at the minimum and no sideways scroll, every view in a 4×2 grid, the
+  smaller windows, Ctrl+Alt+7 bringing a dropped pane back, a stored `[1, 5,
+  2]` focusing id 5 on Ctrl+Alt+2, 3 over 2's bottom edge, and eight panes
+  with Monaco, a frame and a terminal under a card at 160% and 70%) and
+  `hud_v2_multichat_check._eight_chats_checks` (eight chats on eight threads:
+  a turn in pane 7 draws only there, Stop in 8 leaves 7, voice lands in the
+  selected pane 6).
 
 Remaining: WP13 (the long-bench comparison, the owner's call on cost), a
 native Windows worker, the R8 hook on Codex, and prompt tuning in

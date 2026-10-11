@@ -2208,7 +2208,9 @@ class Backend(unittest.TestCase):
         # still refused, and an archived thread still cannot change model.
         self.request("PATCH", f"/threads/{default_tid}", {"provider": "codex"}, status=400)
         self.assertEqual(self.stores.threads.get(default_tid).provider, P.CLAUDE)
-        self.request("PATCH", self.url, {"profile": "ask"})
+        # A profile change is the owner's, from the HUD window (BR-0).
+        self.request("PATCH", self.url, {"profile": "ask"}, port=self.daemon.face_port,
+                     headers={"Origin": f"http://127.0.0.1:{self.daemon.face_port}"})
         self.assertIn("auto profile", self.chat("codex", status=400)["error"])
         self.assertEqual(thread_model.set_provider_default("codex", "gpt-5.6-terra"), ("gpt-5.6-terra", None))
         self.assertIn("auto profile", self.chat("codex", status=400)["error"],

@@ -28,7 +28,8 @@ browser marked `Sec-Fetch-Site: same-origin` (`is_owner`, below). That is a
 speed bump, not a boundary — the boundary is that **no tool reaches these
 routes** (`tests/v2/archive_check.py` asserts it), and a shell command an
 agent might use to call one goes through the permission gate like every other
-command, the same footing as `/approvals`.
+command, the same footing as `/approvals` (owner-only through this gate too,
+since BR-0).
 """
 from __future__ import annotations
 

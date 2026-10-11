@@ -33,12 +33,13 @@ WebSocket, so the Origin check carries the weight):
 - **Taking over** a terminal another window is showing asks in that window
   first ("Let it / Keep it"), and is refused after 20 s with no answer.
 
-**Stricter than `/approvals`, on purpose.** `POST /approvals/{id}` refuses
-only a *wrong* Origin, so a local client that sends none is accepted there.
-A terminal needs the HUD listener, an Origin that must be present on every
-write and on the socket (only the listing, a same-origin read, may come
-without one), a ticket, and the takeover question. For a browser-based
-attack two independent checks would have to fail at once.
+**Stricter than `/approvals`, on purpose.** `POST /approvals/{id}` is
+owner-only since BR-0 (the HUD listener and an Origin that must be present,
+as on every owner-only write; it used to refuse only a *wrong* Origin). A
+terminal needs that — an Origin on every write and on the socket; only the
+listing, a same-origin read, may come without one — plus a ticket and the
+takeover question. For a browser-based attack two independent checks would
+have to fail at once.
 
 **Not a boundary against a program running as the owner.** Such a program
 (a script an agent wrote and got run, say) can send any Origin it likes,

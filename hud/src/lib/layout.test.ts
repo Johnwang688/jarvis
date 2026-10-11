@@ -280,7 +280,8 @@ describe("dragging and keys", () => {
 });
 
 describe("shortcuts", () => {
-  const k = (key: string, over: Partial<{ ctrlKey: boolean; metaKey: boolean; altKey: boolean; shiftKey: boolean }> = {}) =>
+  const k = (key: string, over: Partial<{ ctrlKey: boolean; metaKey: boolean; altKey: boolean; shiftKey: boolean;
+                                          code: string }> = {}) =>
     shortcutFor({ key, ctrlKey: true, metaKey: false, altKey: false, shiftKey: false, ...over });
 
   it("zooms with Ctrl+= / Ctrl+- / Ctrl+0 in every spelling", () => {
@@ -330,13 +331,19 @@ describe("shortcuts", () => {
     expect(shortcutFor({ key: "`", ctrlKey: false, altKey: false })).toBeNull();
   });
 
-  it("focuses a pane with Ctrl+Alt+1 … 4", () => {
+  it("focuses a pane with Ctrl+Alt+1 … 8 (eight panes, WP-G1)", () => {
     expect(k("1", { altKey: true })).toBe("focus1");
     expect(k("2", { altKey: true })).toBe("focus2");
     expect(k("3", { altKey: true })).toBe("focus3");
     expect(k("4", { altKey: true })).toBe("focus4");
-    expect(k("5", { altKey: true })).toBeNull();
+    expect(k("5", { altKey: true })).toBe("focus5");
+    expect(k("6", { altKey: true })).toBe("focus6");
+    expect(k("7", { altKey: true })).toBe("focus7");
+    expect(k("8", { altKey: true })).toBe("focus8");
+    expect(k("9", { altKey: true })).toBeNull();
     expect(k("0", { altKey: true })).toBeNull();
+    expect(k("12", { altKey: true })).toBeNull();
+    expect(k("F5", { altKey: true })).toBeNull();
     // Without Alt, Ctrl+digit is the browser's (Ctrl+0 is our zoom reset).
     expect(k("1")).toBeNull();
     expect(k("1", { altKey: true, shiftKey: true })).toBeNull();
@@ -344,8 +351,13 @@ describe("shortcuts", () => {
 
   it("never matches what AltGr+digit types on European layouts", () => {
     // AltGr arrives as Ctrl+Alt and reports the symbol, not the digit.
-    for (const sym of ["{", "[", "]", "}", "@", "²", "³", "#", "~", "|", "\\", "€", "¹", "¼"]) {
+    for (const sym of ["{", "[", "]", "}", "@", "²", "³", "#", "~", "|", "\\", "€", "¹", "¼", "`", "^", "½", "¾"]) {
       expect(k(sym, { altKey: true })).toBeNull();
+    }
+    // The digits AltGr types on the keys 5 … 8 of German, French, Polish and
+    // Nordic layouts are symbols too: none of them is a pane.
+    for (const sym of ["[", "{", "`", "]", "}", "\\", "|", "€", "$", "£"]) {
+      expect(k(sym, { altKey: true, code: "Digit7" })).toBeNull();
     }
   });
 
