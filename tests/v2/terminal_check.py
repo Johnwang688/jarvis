@@ -1202,7 +1202,8 @@ class Leaks(Base):
 
         def read():
             ctx = contextvars.copy_context()
-            ctx.run(runtime.bind, desk={"present": True}, depth=0)
+            ctx.run(runtime.bind, desk={"present": True}, depth=0,
+                    tool_names={"terminal_read"})  # dispatch refuses unbound (PR #42)
             return ctx.run(tools.dispatch, "terminal_read",
                            json.dumps({"terminal": tid, "lines": 20})).text
 

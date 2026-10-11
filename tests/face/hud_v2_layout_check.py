@@ -81,7 +81,7 @@ def layout_checks(browser, mock, base, check, until, guard, init_script):
     ctx = browser.new_context(viewport={"width": 1280, "height": 800}, permissions=["microphone"])
     guard(ctx)                      # live ports refused, HTTP and WebSocket alike
     ctx.add_init_script(init_script)
-    # Ctrl+` opens a terminal when there is none, and the 2×2 grid shows one:
+    # ⬓ and Ctrl+` open a terminal when there is none, and the 2×2 grid shows one:
     # the PTY is played in the browser (no shell), on this mock's own port.
     from tests.face.hud_v2_terminal_check import FakePty
     mock.fake_pty = FakePty(ctx, mock)
@@ -1067,7 +1067,8 @@ def _titlebar_checks(page, mock, check, until):
     page.locator('[data-testid="toggle-right"]').click()
     until(lambda: _visible(page, "#right"), timeout=2)
 
-    # ⬓: the bottom panel, an empty dock until WP-D's terminals arrive.
+    # ⬓: the bottom panel, holding the terminals (WP-D). With none open, ⬓
+    # opens one (the owner's call, 2026-10-11).
     panel = '[data-testid="panel"]'
     check("the panel starts hidden and takes no room",
           not _visible(page, panel) and _attr(page, panel, "data-open") == "false"
@@ -1087,8 +1088,10 @@ def _titlebar_checks(page, mock, check, until):
           abs(panel_box["x"] - main_box["x"]) < 1 and abs(panel_box["width"] - main_box["width"]) < 1
           and abs(panel_box["y"] + panel_box["height"] - (main_box["y"] + main_box["height"])) < 1,
           f"{panel_box} in {main_box}")
-    check("it says no terminal is open, and ⬓ opened none", _visible(page, '[data-testid="panel-empty"]')
-          and not mock.world.get("terminals"))
+    until(lambda: len(mock.world.get("terminals", [])) == 1, timeout=4)
+    check("with none open, ⬓ opened exactly one terminal, and the panel shows it",
+          len(mock.world.get("terminals", [])) == 1 and not _visible(page, '[data-testid="panel-empty"]'),
+          str(len(mock.world.get("terminals", []))))
     psep = page.locator('[data-testid="panel-split"]')
     check("its top edge is a horizontal separator",
           psep.get_attribute("role") == "separator" and psep.get_attribute("aria-orientation") == "horizontal")
