@@ -54,7 +54,8 @@ import { guildConfigured, ownerLine } from "./lib/discord";
 import { CollapseButton, Rail, Splitter, TitleBar, useLayout } from "./components/Layout";
 import { Workspace, type PaneInfo } from "./components/Workspace";
 import { terminalAttached, terminals } from "./components/Terminal";
-import { terminalSpecFor } from "./lib/terminal";
+import { inTerminal, terminalSpecFor } from "./lib/terminal";
+import { endsTalk, talkKeyAction } from "./lib/talkkey";
 import { maxWidth } from "./lib/layout";
 import { PANE_NOS, SHAPES, show as showOf, type PaneNo, type PaneSpec, type View } from "./lib/workspace";
 import { ActivitySync, clearsOnRead } from "./lib/activity";
@@ -1574,24 +1575,42 @@ export default function App() {
     setCrashed(true);
   }, [capture]);
 
+  // Push-to-talk's key is Ctrl+D (2026-10-10, lib/talkkey.ts): held to talk,
+  // let go (D or Ctrl) to send. The capture phase on the window, so the chat
+  // box, Monaco, a menu or a chip — each of which keeps its own keys from
+  // bubbling — never stands between the owner and the mic, and nothing under
+  // the cursor acts on the key: its default (Chrome's bookmark dialog) is
+  // always prevented and it stops here, under a card, muted or crashed alike.
+  // A focused terminal is the one exception: there it is the shell's end of
+  // input, untouched. `talkHeld` is a ref so a re-run of this effect mid-hold
+  // cannot lose the release; a window that loses focus mid-hold never sees
+  // the keyup, so the blur lets go instead.
+  const talkHeld = useRef(false);
   useEffect(() => {
     const down = (e: KeyboardEvent) => {
-      if (e.code === "Space" && !e.repeat) {
-        e.preventDefault();
-        press();
-      }
+      const what = talkKeyAction(e, { terminal: inTerminal(e.target), blocked: live.current.approvals.length > 0 });
+      if (what !== "talk") return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.repeat) return;
+      talkHeld.current = true;
+      press();
+    };
+    const letGo = () => {
+      if (!talkHeld.current) return;
+      talkHeld.current = false;
+      release();
     };
     const up = (e: KeyboardEvent) => {
-      if (e.code === "Space") {
-        e.preventDefault();
-        release();
-      }
+      if (endsTalk(e)) letGo();
     };
-    document.addEventListener("keydown", down);
-    document.addEventListener("keyup", up);
+    window.addEventListener("keydown", down, true);
+    window.addEventListener("keyup", up, true);
+    window.addEventListener("blur", letGo);
     return () => {
-      document.removeEventListener("keydown", down);
-      document.removeEventListener("keyup", up);
+      window.removeEventListener("keydown", down, true);
+      window.removeEventListener("keyup", up, true);
+      window.removeEventListener("blur", letGo);
     };
   }, [press, release]);
 

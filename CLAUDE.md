@@ -434,8 +434,8 @@ chord; not on auto-repeat or mid-composition; Ctrl+Shift+B is the browser's).
 The left rail keeps **+ New thread** and a shrunken orb, and the right rail
 shows pending approvals and errors. A folded pane is hidden, **never
 unmounted**, so its state survives. The inner edges are `role="separator"`:
-drag them, use the arrows, or double-click to reset; Space on one is not
-push-to-talk. Widths are unzoomed px (left 180–480, right 240–560). The
+drag them, use the arrows, or double-click to reset; Space on one does
+nothing. Widths are unzoomed px (left 180–480, right 240–560). The
 centre is kept at 480 by shrinking the panes and then, when even their
 minimums do not fit, by **folding them for the render** (right first, then
 left; `fitLayout`) — never by rewriting the stored widths or folded flags,
@@ -672,8 +672,9 @@ else the one selected last — the chat File and Preview panes already follow,
 not W-6's input rule, which is about where words go), `▾` (Home or a project), × per tab; **Ctrl+` opens
 a terminal when there is none, ⬓ never does**; a dot on ⬓ means one in the
 hidden panel exited. In a terminal **Ctrl+B, Ctrl+Alt+B and Ctrl+_ are the
-shell's** (`terminalTakesKey`), the zoom keys, Ctrl+` and Ctrl+Alt+N stay the
-HUD's, and every key stops at the terminal (Space is never push-to-talk).
+shell's** (`terminalTakesKey`), and so is **Ctrl+D** (end of input, never
+push-to-talk: `talkKeyAction`), the zoom keys, Ctrl+` and Ctrl+Alt+N stay the
+HUD's, and every key stops at the terminal.
 **Under a card nothing reaches the shell**: `disableStdin`, a key filter
 that lets every key bubble (Escape denies), a guard on the bytes, a paste in
 flight waits, and the card takes focus (WP-A). **Pastes**: 16 KiB chunks
@@ -765,7 +766,7 @@ closes on Escape (focus back on the button; **under a card it never swallows
 Escape**, which denies), a click outside, focus leaving it, a resize, a zoom
 change, or its button moving (a rAF watch: a fold, a split, a re-layout). It
 opens on the chosen option, the arrows move within a list, Tab goes round its
-stops and never leaves it, none of its keys reach push-to-talk, and its
+stops and never leaves it, its keys stop there, and its
 listeners are set once (the close is read through a ref). The box grows to the
 least of 15 lines (`MAX_LINES`), 35% of its pane (`MAX_PANE_SHARE`), and what
 the pane has left once its fixed parts (header, ticker, the rest of the bar,
@@ -791,6 +792,43 @@ section on a `MockDaemon(0)` of its own, or alone — plus `ModelChip.test.ts`
 section's `_edit` now types until the pane's Save is enabled: it used to type
 into an editor not yet showing the file, and four "unsaved edit" checks failed
 under load.
+
+**Push-to-talk is Ctrl+D (2026-10-10, design §18; the owner: "change it to
+Ctrl + D just like it is in claude").** Held to talk, let go — D or Ctrl, in
+either order — to send; **Space is no longer push-to-talk anywhere** (it
+types a space, presses a focused button, does nothing on a separator — a
+space typed in Monaco used to start the mic and never appear). The rules are
+`hud/src/lib/talkkey.ts` (`isTalkKey`, `talkKeyAction`, `endsTalk`): Ctrl and D
+only — Shift, Alt or Meta make it another key, **AltGr (Ctrl+Alt) never
+matches**, nothing mid-composition, a layout whose D types no Latin letter
+matched on `code` KeyD. App.tsx listens **on the window, capture phase**, so
+the chat box, Monaco, menus, chips, the sidebar and pane headers (each of
+which stops its own keys) never stand in the way, and **its default is always
+prevented and it stops at the window** — no bookmark dialog, nothing under the
+cursor acts on it — under a card, muted or after a crash too; auto-repeat never
+presses twice; a window `blur` mid-hold lets go (the keyup never comes). What
+it does is `press()`/`release()`, unchanged from Space: the selected chat
+(W-6), its turn interrupted first, nothing recorded muted (`MIC MUTED`),
+refused under a card, with a picker or the chip popover open, with no chat on
+screen and after a crash. **In a focused terminal it is the shell's EOF**, left
+to xterm untouched (xterm prevents the default itself; **never
+`preventDefault` it there** — the terminal's key filter drops a key whose
+default is prevented); under a card the window takes it there too, so it is
+never an EOF behind the card. From a terminal push-to-talk is the orb (its
+tooltip names the key). **In Monaco it is push-to-talk**, and Monaco's two
+Ctrl+D commands moved (`lib/monaco.ts` `editorKeyRules`, the old bindings
+removed): add selection to next find match is **Ctrl+Shift+D**, its chord
+Ctrl+K Ctrl+Shift+D — free in Monaco and the HUD, and Chrome's "bookmark all
+tabs" only outside the editor. The HUD's Monaco loaded no contributions until
+then, so the multicursor contribution is imported for it (and brings find:
+Ctrl+F in the editor is Monaco's). A preview frame is another document:
+Ctrl+D in one is the framed page's. Free checks: `talkkey.test.ts`,
+`monaco.test.ts`, `tests/face/hud_v2_ptt_check.py` (after the terminal section
+in `hud_v2_check`, a `MockDaemon(0)` of its own, or alone; its helpers
+`_ptt_on_ctrl_d`/`_hold_keys`/`TALK_PROBE` live in `hud_v2_layout_check.py`),
+and the ported checks in the terminal (`\x04` reaches the PTY; nothing under a
+card), multichat (W-6) and layout (a separator) suites. The v1 `jarvis.html`
+face keeps Space.
 
 **Sidebar status dots (2026-10-08, design §18; contract in
 `docs/hud-api.md`).** The `·` left of each sidebar thread and task is what it

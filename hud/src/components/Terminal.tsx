@@ -221,10 +221,11 @@ export class TermSession {
     this.id = id;
     this.wrap = document.createElement("div");
     this.wrap.className = "termhost";
-    // Every key typed into a terminal is the shell's: Space is never push-to-
-    // talk, Escape never closes a menu behind it. The window's own capture-
-    // phase listener has already run (its zoom keys, Ctrl+`). Under a card
-    // nothing is stopped, so Escape reaches the card and denies.
+    // Every key typed into a terminal is the shell's: Ctrl+D is its end of
+    // input, never push-to-talk (lib/talkkey.ts), and Escape never closes a
+    // menu behind it. The window's own capture-phase listeners have already
+    // run (its zoom keys, Ctrl+`; push-to-talk stands aside here). Under a
+    // card nothing is stopped, so Escape reaches the card and denies.
     const stop = (e: Event) => {
       if (!this.mgr.blocked) e.stopPropagation();
     };
@@ -1794,12 +1795,6 @@ export function TerminalPanel(props: {
           data-testid="panel-new-menu-list"
           style={{ right: menu.right, bottom: menu.bottom }}
           onMouseDown={(e) => e.stopPropagation()}
-          onKeyDown={(e) => {
-            if (e.code === "Space" || e.key === " ") e.stopPropagation();
-          }}
-          onKeyUp={(e) => {
-            if (e.code === "Space" || e.key === " ") e.stopPropagation();
-          }}
         >
           <div className="lm-head">New terminal in</div>
           <button type="button" role="menuitem" className="lm-row" data-testid="panel-new-home" onClick={() => openIn("home")}>

@@ -274,12 +274,13 @@ def input_checks(page, mock):
           str(sent[-1] if sent else None))
     check("and clears the box", page.locator('[data-testid="input"]').input_value() == "")
 
-    # Space typed in the box is a space, never push-to-talk.
+    # Space typed in the box is a space, and never starts the mic (push-to-
+    # talk is Ctrl+D since 2026-10-10; tests/face/hud_v2_ptt_check.py).
     page.evaluate("window.__hud.state()")
     box.click()
     box.fill("")
     box.type("a b c")
-    check("space in the box does not trigger push-to-talk",
+    check("a space typed in the box is a space and never starts the mic",
           page.evaluate("window.__hud.capture.ptt") is None
           and box.input_value() == "a b c", box.input_value())
     box.fill("")
@@ -667,6 +668,13 @@ def approval_checks(page, mock):
     page.keyboard.press("Space")
     check("space does not start recording while a card is up",
           page.evaluate("window.__hud.capture.ptt") is None)
+    page.keyboard.down("Control")
+    page.keyboard.down("d")
+    time.sleep(0.1)
+    held = page.evaluate("window.__hud.capture.ptt")
+    page.keyboard.up("d")
+    page.keyboard.up("Control")
+    check("nor does push-to-talk's Ctrl+D while a card is up", held is None, str(held))
     page.keyboard.type("x")
     check("and neither Space nor typing reaches the box",
           page.locator('[data-testid="input"]').input_value() == box_before
@@ -2025,12 +2033,12 @@ def thread_model_checks(page, mock):
     pick_model(page, "openai/gpt-5.6-luna")
     pick_effort(page, "low")
 
-    # Space on a focused chip never starts push-to-talk.
+    # Space on a focused chip opens it and never starts the mic.
     page.locator(CHIP_BTN).focus()
     page.keyboard.press("Space")
     page.keyboard.press("Escape")
     until(lambda: page.locator(POP).count() == 0)
-    check("space on a chip does not start push-to-talk", page.evaluate("window.__hud.capture.ptt") is None)
+    check("space on a chip never starts the mic", page.evaluate("window.__hud.capture.ptt") is None)
 
     opened = len(mock.posted("/threads"))
     box = page.locator('[data-testid="input"]')
@@ -2466,6 +2474,16 @@ def main():
                                 guard, FAKE_RECOGNIZER)
             finally:
                 terminal_mock.stop()
+
+            # Push-to-talk's key, Ctrl+D (2026-10-10): a context and a mock of
+            # their own, for the same reasons.
+            from tests.face.hud_v2_ptt_check import ptt_checks
+            ptt_mock = MockDaemon(0).start()
+            try:
+                ptt_checks(browser, ptt_mock, f"http://127.0.0.1:{ptt_mock.port}", check, until, guard,
+                           FAKE_RECOGNIZER)
+            finally:
+                ptt_mock.stop()
 
             ctx = browser.new_context(permissions=["microphone"])
             guard(ctx)

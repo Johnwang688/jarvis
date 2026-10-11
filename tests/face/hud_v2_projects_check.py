@@ -122,7 +122,7 @@ def _rename_checks(page, mock, check, until, expand):
     box = page.locator('[data-testid="rename-project-p3"]')
     box.fill("")
     box.type("school work")
-    check("a space typed in the box is text, not push-to-talk",
+    check("a space typed in the box is text, never the mic",
           box.input_value() == "school work" and page.evaluate("window.__hud.capture.ptt") is None,
           box.input_value())
     box.fill("Schoolwork")

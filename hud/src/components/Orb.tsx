@@ -235,6 +235,9 @@ export function Orb(props: {
         id="orb"
         data-testid="orb"
         data-state={props.state}
+        // Push-to-talk's key since 2026-10-10 (lib/talkkey.ts); in a
+        // terminal Ctrl+D is the shell's, and the orb is the way to talk.
+        title="Hold to talk, or hold Ctrl+D"
         onPointerDown={(e) => {
           e.preventDefault();
           props.onPress();

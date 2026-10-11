@@ -1680,7 +1680,7 @@ rules live in `hud/src/lib/layout.ts`; `components/Layout.tsx` applies them.
 - **Resizing.** The inner edge of each pane is a `role="separator"`. It can
   be dragged (pointer capture) or moved with the arrows (Shift for a bigger
   step, Home/End for the ends), and a double-click resets it. Space on a
-  focused separator is not push-to-talk. The left pane runs 180–480px and
+  focused separator does nothing. The left pane runs 180–480px and
   the right 240–560px, **in the HUD's own unzoomed pixels**, so a pane keeps
   its proportion to its text as the zoom changes. Monaco relayouts through
   `automaticLayout`.
@@ -1727,7 +1727,7 @@ title bar.
   is drawing fewer panes than the preset has, "Showing 2 of 3 panes: the
   window is too narrow" plus a badge on ⊞. It is placed from the button's
   rect through `toCss()`, right-aligned; Escape closes it and gives focus
-  back; the arrows move between tiles; Space in it is never push-to-talk.
+  back; the arrows move between tiles; Space on a tile presses it.
 - **The pane model.** All four pane specs are always stored
   (`jarvis.hud.workspace`, apart from `jarvis.hud.layout` so damage to one
   never resets the other; each field falls back on its own, an unknown
@@ -2070,8 +2070,9 @@ after the replay, and stays attached while hidden, so moving a terminal
 between the panel and a pane, or hiding the panel, never reattaches. Ctrl+`
 opens a terminal when there is none (⬓ only shows the panel), and a dot on
 ⬓ says one in the hidden panel exited. In a terminal Ctrl+B, Ctrl+Alt+B and
-Ctrl+_ are the shell's; the zoom keys, Ctrl+` and Ctrl+Alt+N stay the HUD's;
-Space is never push-to-talk. **Under a card nothing reaches the shell** —
+Ctrl+_ are the shell's, and so is Ctrl+D (end of input, never push-to-talk);
+the zoom keys, Ctrl+` and Ctrl+Alt+N stay the HUD's. **Under a card nothing
+reaches the shell** —
 input held, a paste in flight paused, every key left to bubble so Escape
 denies — and output keeps drawing. **A paste never splices**: it goes out in
 paced 16 KiB chunks from a queue that belongs to one socket, stops the
@@ -2095,6 +2096,46 @@ counter-zoomed with its font scaled instead; the 160% and 70% checks guard
 fit and selection. The headless suite plays the PTY inside the browser
 (`route_web_socket`), so no shell ever runs, and the live-port guard now
 refuses WebSockets too. "Open in Preview" for a dev server's link is WP-E.
+
+**Push-to-talk is Ctrl+D (2026-10-10).** The owner: "can we change the push
+to talk button? change it to Ctrl + D just like it is in claude." It was
+Space, which is a character in every box the owner types in: each typing
+surface had to keep Space from bubbling to a document handler, and Monaco
+did not, so a space typed in the editor started the mic and never appeared.
+Now Ctrl+D is held to talk and let go — D or Ctrl, in either order — to
+send (`lib/talkkey.ts`, App.tsx). Ctrl and D only: Shift, Alt or Meta make
+it another key, AltGr (Ctrl+Alt) never matches, auto-repeat never presses
+twice, and nothing fires mid-composition; a layout whose D key types no
+Latin letter (Cyrillic, Greek) is matched on the physical key, as Chrome's
+own Ctrl+D is. The window takes it in the capture phase, so it works from the
+chat box, Monaco, a menu, a chip, the sidebar or a pane header, and nothing
+under the cursor acts on it: its default (Chrome's bookmark dialog) is always
+prevented and it stops at the window — under a card, muted or after a crash
+too. What it then does is what Space did: it goes to the selected chat
+(W-6), interrupts that chat's turn first, records nothing while the mic is
+muted, refuses under a card, with a picker open, with no chat on screen and
+after a crash. A window that loses focus mid-hold lets go (its keyup never
+comes). **In a focused terminal Ctrl+D is the shell's** end of input, left to
+xterm untouched (the owner's answer), the way Ctrl+B, Ctrl+Alt+B and Ctrl+_
+are; from a terminal push-to-talk is the orb, whose tooltip names the key.
+Under a card the window takes it there too, so it is never an EOF behind the
+card. **In Monaco Ctrl+D is push-to-talk**, and Monaco's own two Ctrl+D
+commands take Shift as well: add selection to next find match is
+**Ctrl+Shift+D**, and its chord (move last selection to next match) is
+Ctrl+K Ctrl+Shift+D. Nothing in Monaco or the HUD binds Ctrl+Shift+D (D is
+otherwise only a Mac Ctrl binding in Monaco), and outside the editor it is
+Chrome's "bookmark all tabs", which the editor's binding prevents. The old
+bindings are removed, not shadowed, so Monaco's own record says where they
+went. The HUD's Monaco loaded no contributions until then, so the multi-
+cursor commands are loaded for this (they bring find with it: Ctrl+F in the
+editor is Monaco's find now). **Space is no longer push-to-talk anywhere**:
+it types a space, presses a focused button, and does nothing on a separator.
+A preview frame is another document, so Ctrl+D inside one is the framed
+page's. Free checks: `talkkey.test.ts`, `monaco.test.ts` and
+`tests/face/hud_v2_ptt_check.py` (run by `hud_v2_check` after the terminal
+section, on a `MockDaemon(0)` of its own, or alone), plus the ported checks in
+the terminal (`\x04` to the PTY, nothing under a card), multichat (W-6) and
+layout (a separator) suites.
 
 Remaining: WP13 (the long-bench comparison, the owner's call on cost), a
 native Windows worker, the R8 hook on Codex, and prompt tuning in

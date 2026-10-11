@@ -199,9 +199,9 @@ export function useLayout(blocked = false): LayoutControl {
     setPreferPanel(false);
   }, []);
 
-  // Capture phase on the window: the input bar stops its keys from bubbling
-  // (so Space typed there is not push-to-talk), and these keys must work from
-  // the box the owner's cursor usually sits in. The zoom keys are the HUD's
+  // Capture phase on the window: the input bar stops its keys from bubbling,
+  // and these keys must work from the box the owner's cursor usually sits in
+  // (push-to-talk's Ctrl+D is App's, the same way). The zoom keys are the HUD's
   // everywhere, Monaco and the input bar included — neither binds them, and
   // letting one through is Chrome's page zoom, which this control cannot see
   // and the browser remembers per site. Ctrl+B stands aside in Monaco (its
@@ -269,8 +269,8 @@ export function useLayout(blocked = false): LayoutControl {
  * A draggable edge, on either axis: a 7px hit area over a 1px rule (it takes
  * no room), a resize cursor, and the accent line on hover, focus and while
  * dragging. Keyboard: the caller's `onKey` (arrows, Shift for a bigger step,
- * Home and End); a double-click resets. Space on a focused separator is not
- * push-to-talk. `orientation` is ARIA's: a "vertical" separator stands
+ * Home and End); a double-click resets. Space on a focused separator does
+ * nothing. `orientation` is ARIA's: a "vertical" separator stands
  * between left and right and moves along x.
  */
 export function Separator(props: {
@@ -351,15 +351,10 @@ export function Separator(props: {
       onDoubleClick={() => {
         if (!props.blocked) props.onReset();
       }}
-      // Space on a focused separator is not push-to-talk (the document-level
-      // handler would otherwise hear it), and does nothing here either.
-      onKeyUp={(e) => {
-        if (e.code === "Space" || e.key === " ") e.stopPropagation();
-      }}
+      // Space on a focused separator does nothing (no scroll behind it).
       onKeyDown={(e) => {
         if (e.code === "Space" || e.key === " ") {
           e.preventDefault();
-          e.stopPropagation();
           return;
         }
         if (props.blocked) return;
@@ -618,7 +613,7 @@ function menuAt(el: HTMLElement, zoom: number): MenuAt {
 /**
  * A small menu: closed by Escape (focus back to its opener) and by a press
  * anywhere else; the arrow keys move between its items (`data-mi`), and Space
- * inside it never reaches push-to-talk.
+ * on one presses it.
  */
 function MenuShell(props: {
   at: MenuAt;
@@ -692,18 +687,11 @@ function MenuShell(props: {
       style={{ right: props.at.right, top: props.at.top }}
       onMouseDown={(e) => e.stopPropagation()}
       onKeyDown={(e) => {
-        if (e.code === "Space" || e.key === " ") {
-          e.stopPropagation();
-          return;
-        }
         if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End"].includes(e.key)) {
           e.preventDefault();
           e.stopPropagation();
           move(e);
         }
-      }}
-      onKeyUp={(e) => {
-        if (e.code === "Space" || e.key === " ") e.stopPropagation();
       }}
     >
       {props.children}

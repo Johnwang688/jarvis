@@ -494,13 +494,13 @@ def _popover_keyboard_checks(page, mock, check, until):
     e2 = _focused(page)
     check("review #29 F4: and the arrows move within the effort list",
           e1["testid"] == "effort-opt" and e1["value"] == eff[1] and e2["value"] == eff[0], f"{e1} {e2} of {eff}")
-    # Space on an option is the option's, never push-to-talk.
+    # Space on an option is the option's, never the mic's.
     page.keyboard.press("Shift+Tab")
     page.keyboard.down("Space")
     time.sleep(0.15)
     ptt = page.evaluate("window.__hud.capture.ptt")
     page.keyboard.up("Space")
-    check("review #29 F4: Space on an option never starts push-to-talk (M5)", ptt is None, str(ptt))
+    check("review #29 F4: Space on an option never starts the mic (M5)", ptt is None, str(ptt))
     until(lambda: page.locator(_pop()).count() == 1, timeout=1)
     if page.locator(_pop()).count() == 0:
         page.locator(_btn()).click()

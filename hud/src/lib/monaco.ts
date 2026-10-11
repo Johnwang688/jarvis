@@ -16,7 +16,11 @@ export function loadMonaco(): Promise<typeof MonacoNS> {
       const [monaco, EditorWorker] = await Promise.all([
         import("monaco-editor/esm/vs/editor/editor.api"),
         import("monaco-editor/esm/vs/editor/editor.worker?worker"),
+        // The multi-cursor commands (it brings find with it), so the next-
+        // match command has a key to move to (`editorKeyRules`, below).
+        import("monaco-editor/esm/vs/editor/contrib/multicursor/browser/multicursor.js"),
       ]);
+      monaco.editor.addKeybindingRules(editorKeyRules(monaco as unknown as MonacoKeys));
       (self as any).MonacoEnvironment = {
         getWorker: () => new (EditorWorker.default as any)(),
       };
@@ -56,6 +60,44 @@ export function loadMonaco(): Promise<typeof MonacoNS> {
     })();
   }
   return loading;
+}
+
+/** The bits of Monaco's API the key rules need: a plain object passes in tests. */
+export interface MonacoKeys {
+  KeyMod: { CtrlCmd: number; Shift: number; chord(first: number, second: number): number };
+  KeyCode: { KeyD: number; KeyK: number };
+}
+
+/** Where Monaco's "add selection to next find match" lives now (was Ctrl+D). */
+export const NEXT_MATCH_KEY = "Ctrl+Shift+D";
+
+/**
+ * Monaco's keys that would fight the HUD's (2026-10-10). Ctrl+D is push-to-
+ * talk in the editor too (lib/talkkey.ts: the window takes it in the capture
+ * phase, before Monaco sees it), so Monaco's two Ctrl+D commands take Shift
+ * as well: Ctrl+Shift+D, which nothing in Monaco (D is otherwise only a Mac
+ * Ctrl binding) or in the HUD binds, and which reads as "add":
+ *
+ *   add selection to next find match    Ctrl+D         → Ctrl+Shift+D
+ *   move last selection to next match   Ctrl+K Ctrl+D  → Ctrl+K Ctrl+Shift+D
+ *
+ * The old bindings are removed rather than left shadowed, so Monaco's own
+ * record of its keys (its menus and command list) says where they went.
+ * Ctrl+Shift+D outside the editor is Chrome's "bookmark all tabs"; in the
+ * editor Monaco takes it, and its default is prevented.
+ */
+export function editorKeyRules(m: MonacoKeys): { keybinding: number; command: string; when?: string }[] {
+  const ctrlD = m.KeyMod.CtrlCmd | m.KeyCode.KeyD;
+  const ctrlShiftD = m.KeyMod.CtrlCmd | m.KeyMod.Shift | m.KeyCode.KeyD;
+  const ctrlK = m.KeyMod.CtrlCmd | m.KeyCode.KeyK;
+  const add = "editor.action.addSelectionToNextFindMatch";
+  const move = "editor.action.moveSelectionToNextFindMatch";
+  return [
+    { keybinding: ctrlD, command: `-${add}` },
+    { keybinding: ctrlShiftD, command: add, when: "editorFocus" },
+    { keybinding: m.KeyMod.chord(ctrlK, ctrlD), command: `-${move}` },
+    { keybinding: m.KeyMod.chord(ctrlK, ctrlShiftD), command: move, when: "editorFocus" },
+  ];
 }
 
 /** Monaco's language id for a path, by extension. Unknown means plaintext. */
