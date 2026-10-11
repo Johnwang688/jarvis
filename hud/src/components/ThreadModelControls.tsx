@@ -32,7 +32,11 @@ function paneChips(state: State, pane: PaneNo) {
            composeId: c.compose?.id ?? "" };
 }
 
-export function useThreadModel(state: State, dispatch: React.Dispatch<Action>, onRosterChange?: () => void) {
+/** `crashed`: the window's workspace has crashed (App's `onCrash`, PR #32).
+ * After that nothing is sent on the owner's behalf, so a change — an effort
+ * move the slider's unmount commits as the crash tears it down — is dropped. */
+export function useThreadModel(state: State, dispatch: React.Dispatch<Action>, onRosterChange?: () => void,
+                               crashed?: () => boolean) {
   const [models, setModels] = useState<ThreadModels | null>(null);
   // A refusal belongs to the pane and the conversation it was said about: a
   // pane that moves on to another conversation no longer shows it.
@@ -93,6 +97,7 @@ export function useThreadModel(state: State, dispatch: React.Dispatch<Action>, o
    * thread or compose row it was not made on (review of PR #30). */
   const change = useCallback(
     (pane: PaneNo, next: Choice, from?: string): Promise<void> | undefined => {
+      if (crashed?.()) return;
       const s = now.current;
       const cs = paneChips(s, pane);
       if (from !== undefined && keyOf(cs) !== from) return;

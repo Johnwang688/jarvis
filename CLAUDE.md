@@ -813,7 +813,11 @@ closes, and a commit that lands where the thread already is sends nothing.
 the card change nothing**: a card closes the popover (and disables its
 button), and a key move still settling then is committed like any other close
 — the owner made it before the card — while every key pressed under the card
-reaches the card (inert behind it, the slider gone), so Escape denies.
+reaches the card (inert behind it, the slider gone), so Escape denies. **A
+move made before a crash is dropped**, though — the one exception: once the
+workspace's boundary has caught a crash (PR #32's `onCrash`, `crashedRef`),
+nothing is sent on the owner's behalf, so `change()` drops whatever the
+slider's unmount commits as the crash tears it down.
 **A move belongs to the conversation it was made on** (review of PR #30): the
 chip passes its key (`keyOf(paneChips(…))`: the thread, or **that compose
 row** — every compose row has its own `Compose.id`, minted by the store's
@@ -861,10 +865,13 @@ late), and `tests/face/hud_v2_effort_check.py` (the review's findings, a
 or alone: Tab on an OpenRouter popover with no footer, a pane switch, a thread
 archive, a project archive (OpenRouter and Claude rows), a fresh row in the
 same project, and a swap with a card in one render, each with a move settling;
-a model change under one; an opened row's late success) and `store.test.ts`
+a model change under one; an opened row's late success; a workspace crash
+with a move settling) and `store.test.ts`
 (a compose row's id). A late HTTP success can still overwrite a newer state
-another window's SSE brought (main does too): comparing `updated` would need a
-model change to bump it, which nothing shows it does. **Breaking the close-under-a-card alone bit no check at first**
+another window's SSE brought (main does too). The backend's
+`set_thread_model` does set `thread.updated`, so comparing it would work
+against the daemon; it is left open because the mock never bumps it, so no
+check could show the comparison doing anything. **Breaking the close-under-a-card alone bit no check at first**
 (shown in a scratch copy at the merge): the card taking focus closes the
 popover anyway, by #29's focus-leaving rule. So a card also arrives with focus
 on the chip's own button and the popover open — the one place only the disable

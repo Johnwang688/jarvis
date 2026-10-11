@@ -33,6 +33,12 @@ The re-review (cafdf19) found two more, pinned here the same way:
   RR2 when a pane's conversation changes and a card arrives in one render,
       the slider unmounts without seeing the change, and the `change()` guard
       is the only thing between the move and the other thread.
+
+And the third round (dfdb327):
+
+  RR3 a workspace crash (PR #32's boundary) unmounted the slider, whose
+      unmount commit still sent the move that was settling. After a crash
+      nothing is sent on the owner's behalf, so the move is dropped.
 """
 from __future__ import annotations
 
@@ -72,9 +78,10 @@ def effort_checks(browser, mock, base, check, until, guard, init_script):
         page.goto(base + "/")
         page.wait_for_selector('[data-testid="sidebar"]', state="attached")
         mock.await_reconnect(before)
+        # The crash goes last: it leaves the window on its Reload prompt.
         for section in (_tab_round_checks, _pane_switch_checks, _model_change_checks,
                         _opened_row_checks, _swap_card_checks, _same_project_checks, _project_gone_checks,
-                        _archived_checks):
+                        _archived_checks, _crash_checks):
             try:
                 section(page, mock, check, until)
             except Exception as e:  # a section that cannot run is a failure, and the rest still run
@@ -98,7 +105,7 @@ def _seed(mock):
     w = mock.world
     base = next(t for t in w["threads"] if t["id"] == "t1")
     rows = [("eb1", "fast", None, None), ("eb2", "fast", None, None), ("ec1", "claude", None, None),
-            ("ed1", "fast", LUNA, "low"), ("ea1", "fast", None, None)]
+            ("ed1", "fast", LUNA, "low"), ("ea1", "fast", None, None), ("ek1", "fast", None, None)]
     for i, (tid, provider, model, effort) in enumerate(rows):
         if not any(t["id"] == tid for t in w["threads"]):
             w["threads"].append({**base, "id": tid, "provider": provider, "model": model, "effort": effort,
@@ -405,6 +412,26 @@ def _archived_checks(page, mock, check, until):
     tid = until(lambda: _chat(page)["threadId"], timeout=3)
     if tid:
         mock.emit("turn_finished", {"stop": "end"}, thread_id=tid)
+
+
+# ---- RR3: a crash drops a move still settling --------------------------------
+
+def _crash_checks(page, mock, check, until):
+    _fresh(page, mock, until, SINGLE)
+    _open(page, until, "ek1")
+    _open_pop(page, until)
+    page.locator(SLIDER).focus()
+    n = len(mock.calls)
+    page.keyboard.press("ArrowLeft")
+    # The workspace throws on its next render (Boundary's test probe).
+    page.evaluate("window.__hudCrashProbe = 'workspace'; "
+                  "window.__hud.dispatch({type: 'patch', patch: {error: 'poke'}})")
+    crashed = until(lambda: page.locator('[data-testid="hud-crashed"]').count() > 0, timeout=3)
+    time.sleep(0.9)
+    late = [(p, b) for m, p, b in mock.calls[n:] if m == "PATCH" and p.startswith("/threads/")]
+    check("review #30 RR3: a workspace crash with a move settling sends nothing — the move is dropped",
+          bool(crashed) and not late and _thread(mock, "ek1").get("effort") is None, f"crashed={bool(crashed)} {late}")
+    page.evaluate("window.__hudCrashProbe = undefined")
 
 
 def main():
