@@ -51,6 +51,9 @@ export interface State {
    * row): they come back when a pane takes that conversation up again, and
    * are never left in a box now showing another thread (review of PR #27). */
   drafts: Record<string, { text: string; files: Attachment[] }>;
+  /** The last compose row id minted (`Compose.id`, `c<n>`): kept here so the
+   * reducer stays pure. */
+  composeSeq: number;
   taskId: string | null;
   /** A task was picked more recently than a thread: the File tab follows it. */
   taskFocus: boolean;
@@ -77,7 +80,7 @@ export interface State {
 
 export const initialState: State = {
   projects: [], platforms: {}, threads: [], tasks: [], taskThreads: {}, activity: NO_ACTIVITY,
-  chats: emptyChats(), selectedChat: 1, selectedOrder: [], drafts: {}, taskId: null, taskFocus: false,
+  chats: emptyChats(), selectedChat: 1, selectedOrder: [], drafts: {}, composeSeq: 0, taskId: null, taskFocus: false,
   approvals: [], usage: null, discord: null, schedules: [],
   route: null, avatar: null, wakePatterns: [], dictation: DEFAULT_MODE,
   level: 0, orb: "idle", error: "", moveError: "", picker: null, archivedNames: [],
@@ -165,9 +168,15 @@ export function reduce(s: State, a: Action): State {
 
     case "chat": {
       const { orb, error, ...fields } = a.patch;
+      // A compose row arriving without an identity is a new row: it gets one.
+      let composeSeq = s.composeSeq ?? 0;
+      if (fields.compose && !fields.compose.id) {
+        composeSeq += 1;
+        fields.compose = { ...fields.compose, id: `c${composeSeq}` };
+      }
       const was = s.chats[a.pane];
       const moved = reconverse(s, a.pane, was, { ...was, ...fields });
-      let next = { ...withChat(s, a.pane, moved.next), drafts: moved.drafts };
+      let next = { ...withChat(s, a.pane, moved.next), drafts: moved.drafts, composeSeq };
       if (orb !== undefined && a.pane === s.selectedChat) next = { ...next, orb };
       if (error !== undefined) next = { ...next, error };
       return next;
