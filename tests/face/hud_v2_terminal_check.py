@@ -1480,10 +1480,11 @@ def _split_close_terminal_checks(page, mock, base, check, until, fake):
     sockets = len(fake.of(new))
     fake.output(new, b"still-alive\r\n$ ")
     until(lambda: "still-alive" in _text(page, new), timeout=3)
+    calls = len(mock.calls)
     page.locator('[data-testid="pane-2-close"]').click()
     until(lambda: page.locator('[data-testid="pane-2"]').count() == 0, timeout=3)
     page.wait_for_timeout(600)
-    deletes = [c for c in mock.calls if c[0] == "DELETE" and c[1].startswith("/terminals/")]
+    deletes = [c for c in mock.calls[calls:] if c[0] == "DELETE" and c[1].startswith("/terminals/")]
     check("G2: × on a terminal pane sends no DELETE: the shell lives on",
           deletes == [] and not fake._row(new).get("exited"), str(deletes))
     check("G2: and its socket stays: no new ticket, no reattach",
