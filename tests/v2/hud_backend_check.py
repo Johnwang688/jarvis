@@ -293,6 +293,13 @@ class Backend(unittest.TestCase):
             # is the bound port, never the ephemeral 0 it was asked for.
             self.assertEqual(status["workshop_port"], self.daemon.workshop_port)
             self.assertNotEqual(status["workshop_port"], 0)
+            # WP-E: the Preview pane refuses the HUD and API ports, and offers
+            # "keep its own origin" only once every response here refuses to
+            # be framed (tests/v2/frame_check.py walks every route).
+            self.assertEqual((status["hud_port"], status["api_port"]), (self.daemon.face_port, self.daemon.port))
+            self.assertIs(status["frame_hardened"], True)
+            self.assertEqual(self.headers["X-Frame-Options"], "DENY")
+            self.assertIn("frame-ancestors 'none'", self.headers["Content-Security-Policy"])
             # Either the built HUD (title pinned for FORBIDDEN_TITLES) or, with no
         # build present, the placeholder naming hud/dist.
         page = self.request("GET", "/", port=port)
@@ -311,6 +318,9 @@ class Backend(unittest.TestCase):
         prefix = f"/p/{self.project.id}/"
         self.assertEqual(self.request("GET", prefix + "hello.txt", port=preview), b"hello\n")
         self.assertEqual(self.headers["Cache-Control"], "no-store")
+        # The preview origin is framed by the HUD on purpose: no frame rule here.
+        self.assertNotIn("X-Frame-Options", self.headers)
+        self.assertNotIn("Content-Security-Policy", self.headers)
         self.assertIn("text/plain", self.headers["Content-Type"])
         self.assertIn(b"preview", self.request("GET", prefix, port=preview))
         for path, code in [("/status", 404), ("/", 404), ("/assets/app.js", 404),
