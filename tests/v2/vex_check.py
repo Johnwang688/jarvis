@@ -1324,6 +1324,8 @@ class SettingsNames(DaemonBase):
         self.build()
         settings = self.folder / ".vscode" / "vex_project_settings.json"
         doc = json.loads(settings.read_text())
+        # What `build/../evil.bin` would reach, so only the name rule stops it.
+        (self.folder / "evil.bin").write_bytes(b"not a program")
         for name in ("../evil", "a/b", "a b", "-x"):
             with self.subTest(name=name):
                 doc["project"]["name"] = name
@@ -1367,7 +1369,8 @@ class TemplateFiles(Base):
         listed = [{"id": "cpp_v5_vsc_pipe", "language": "cpp", "label": "Pipe"}]
         with patch.object(vex, "list_templates", lambda _cfg: listed):
             started = time.monotonic()
-            self.assertRaises(vex.VexError, vex.read_template, cfg, "cpp_v5_vsc_pipe")
+            self.assert_refused(lambda: vex.read_template(cfg, "cpp_v5_vsc_pipe"),
+                                "not a regular file")
             self.assertLess(time.monotonic() - started, 3)
 
     def test_a_file_or_a_symlink_mid_path_is_never_written_through(self):
