@@ -218,7 +218,10 @@ class Serving(Base):
         os.chmod(second.path / "index.html", 0o644)
         (second.path / "index.html").write_text("<title>J.A.R.V.I.S.</title> SECOND")  # same size
         built, state = I.state(self.root)
-        self.assertEqual((built.id, state), (self.built.id, "installed"), "the newest intact build")
+        # Served, but never silently: "fallback", naming what was passed over
+        # (review of PR #44 at 62db94f).
+        self.assertEqual((built.id, state), (self.built.id, "fallback"), "the newest intact build")
+        self.assertEqual(I.passed_over(self.root, built), [second.id])
         self.assertEqual(I.newest(self.root).id, self.built.id)
         os.chmod(self.built.path, 0o755)
         os.chmod(self.built.path / "index.html", 0o644)
@@ -399,6 +402,69 @@ class Cli(Base):
         self.assertEqual((manifest["git_head"], manifest["dirty"]), (head, False))
         self.assertIn(head[:12], out)
 
+    def git(self, *args):
+        return subprocess.run(["git", "-C", str(self.repo), *args], check=True, capture_output=True,
+                              text=True, stdin=subprocess.DEVNULL).stdout.strip()
+
+    def test_an_edit_during_the_build_is_never_recorded_clean(self):
+        def edit_mid_build():
+            (self.repo / "hud" / "src" / "main.tsx").write_text("export const late = 1\n")
+        code, out = self.run_main(edit_mid_build)
+        self.assertEqual(code, 1)
+        self.assertIn("uncommitted changes", out)
+        self.assertEqual(I.builds(self.root), [], "nothing installed")
+        lines: list[str] = []
+        self.assertEqual(I.main(build=edit_mid_build, out=lines.append, allow_dirty=True), 0)
+        self.assertIs(I.newest(self.root).dirty, True, "clean before the build, dirty after: dirty")
+
+    def test_a_checkout_that_moves_during_the_build_is_refused(self):
+        def commit_mid_build():
+            (self.repo / "README.md").write_text("moved\n")
+            self.git("add", "README.md")
+            self.git("commit", "-qm", "moved")
+        code, out = self.run_main(commit_mid_build)
+        self.assertEqual(code, 1)
+        self.assertIn("moved while it built", out)
+        self.assertEqual(I.builds(self.root), [])
+
+    def test_git_runs_hardened(self):
+        # A repository's own fsmonitor program ran under the plain `git -C
+        # REPO status` (review of PR #44 at 62db94f).
+        marker = self.tmp / "fsmonitor-ran"
+        hook = self.tmp / "fsmonitor.sh"
+        hook.write_text(f"#!/bin/sh\ntouch {marker}\nexit 1\n")
+        hook.chmod(0o755)
+        self.git("config", "core.fsmonitor", str(hook))
+        subprocess.run(["git", "-C", str(self.repo), "status", "--porcelain"], capture_output=True,
+                       stdin=subprocess.DEVNULL)
+        self.assertTrue(marker.exists(), "sanity: plain git runs it")
+        marker.unlink()
+        self.assertIs(I.hud_dirty(), False)
+        self.assertIsNotNone(I.git_head())
+        self.assertFalse(marker.exists(), "the installer's git never runs the repository's fsmonitor")
+        # A program in the repository's own config: not read at all.
+        self.git("config", "filter.x.clean", str(hook))
+        self.assertIsNone(I.hud_dirty())
+        code, out = self.run_main()
+        self.assertEqual(code, 1)
+        self.assertIn("cannot say", out)
+        self.assertFalse(marker.exists())
+        self.git("config", "--unset", "filter.x.clean")
+        with patch.dict(os.environ, {"GIT_DIR": str(self.tmp / "nowhere")}):
+            self.assertIs(I.hud_dirty(), False, "an inherited GIT_DIR is dropped")
+
+    def test_the_start_up_warning_looks_at_hud_only(self):
+        first = self.git("rev-parse", "HEAD")
+        (self.repo / "README.md").write_text("python only\n")
+        self.git("add", "README.md")
+        self.git("commit", "-qm", "python only")
+        self.assertIs(I.hud_changed_since(first), False, "a merge outside hud/ leaves the HUD current")
+        (self.repo / "hud" / "src" / "main.tsx").write_text("export const v2 = 1\n")
+        self.git("commit", "-qam", "hud change")
+        self.assertIs(I.hud_changed_since(first), True)
+        self.assertIsNone(I.hud_changed_since("0" * 40), "an unknown commit: cannot say")
+        self.assertIsNone(I.hud_changed_since(None))
+
     def test_jarvis_hud_install_dispatches_to_the_installer(self):
         from jarvis import __main__ as cli
         with patch.object(I, "main", return_value=7) as installer:
@@ -462,12 +528,63 @@ class NoAgentInstall(Base):
         "python3 - <<'EOF'\nfrom jarvis.v2 import hud_install\nhud_install.main()\nEOF",
         'python -c "import jarvis.__main__ as m; m.main([\'hud\', \'install\'])"',
     )
+    INSTALLS += (
+        # Review of PR #44 at 62db94f, the cheap additions.
+        "ln -s /x/.venv/bin/jarvis /tmp/jv && /tmp/jv hud install",
+        "echo install | xargs jarvis hud", "printf 'hud\\ninstall\\n' | xargs jarvis",
+        "cat args.txt | xargs -n2 /x/.venv/bin/jarvis",
+        # Obfuscated, and resolved the way the shell resolves them.
+        "j=jar; ${j}vis hud install", "jarvis hud ins\\tall", 'eval "jar""vis hud install"',
+        "x=h; jarvis ${x}ud install", "jarvis $'\\x68ud' install", "jarvis 'h'\"u\"d install",
+        "bash <<EOF\njarvis hud install\nEOF", 'git commit -m "run `jarvis hud install` after"',
+        "cat > notes.md <<EOF\nrun `jarvis hud install`\nEOF", "cat <(jarvis hud install)",
+        'python3 -c "import os; os.system(\'jarvis hud install\')"',
+        'python3 -c "import subprocess; subprocess.run([\'jarvis\', \'hud\', \'install\'])"',
+        'python3 -c "import runpy, sys; sys.argv = [\'jarvis\', \'hud\', \'install\']; '
+        'runpy.run_module(\'jarvis\', run_name=\'__main__\')"',
+        'python3 -c "from jarvis.v2.hud_install import main as go; go()"',
+        'python3 -c "import jarvis.v2.hud_install as h; h.install(1, 2)"',
+    )
     ORDINARY = (
         "jarvis hud", "jarvis hud --no-window", "jarvis install hud", "cat jarvis/v2/hud_install.py",
         "grep -n main jarvis/v2/hud_install.py", "python tests/v2/hud_install_check.py",
         "python -m pytest tests/v2/hud_install_check.py", 'git commit -m "docs: jarvis hud install after merges"',
         'echo "jarvis hud install"', "npm run build", "ls ~/.local/share/jarvis/hud",
+        # The five a differential at 62db94f found DENY: a DENY cannot be
+        # approved, so a false one blocks the owner too.
+        'grep -rn "hud_install.main" jarvis/ && python3 tests/v2/hud_install_check.py',
+        "rg -n 'import hud_install' jarvis && python -m pytest tests",
+        "echo Run jarvis hud install after merging",
+        'python3 -c "from jarvis.v2 import hud_install as I; print(I.builds(\'/tmp/x\'))"',
+        'python3 -c "print(\'hud\', \'install\')"',
+        # Text that never runs: single quotes, a quoted here-document, data.
+        "git commit -m 'run `jarvis hud install` after merges'", "echo 'see $(jarvis hud install)'",
+        "cat > notes.md <<'EOF'\nrun `jarvis hud install`\nEOF", "cat > notes.md <<EOF\njarvis hud install\nEOF",
+        "xargs -n1 echo < files.txt", "ls | xargs wc -l", "echo jarvis | xargs printf",
     )
+
+    def test_the_cheap_filter_never_skips_a_line_the_parse_refuses(self):
+        # Review of PR #44 at 62db94f: the parse made `rules.decide` 7x
+        # slower on nested substitutions; the filter in front of it must
+        # never let a refusal through. Over every spelling here and every
+        # string literal of the gate suites.
+        from jarvis import protected_state as S
+        corpus = list(self.INSTALLS) + list(self.ORDINARY)
+        import ast as _ast
+        for name in ("tests/rules_check.py", "tests/v2/permissions_check.py", "tests/v2/hud_install_check.py",
+                     "tests/permissions_check.py"):
+            tree = _ast.parse((REPO / name).read_text())
+            corpus += [n.value for n in _ast.walk(tree)
+                       if isinstance(n, _ast.Constant) and isinstance(n.value, str) and len(n.value) < 4000]
+        corpus.append("ln -s /x/jarvis /tmp/jv && x=h && /tmp/jv ${x}ud install")
+        refused = 0
+        for line in corpus:
+            full = S.owner_op(line, prefilter=False)       # neither the line's nor a segment's filter
+            if full:
+                refused += 1
+                self.assertTrue(S._could_be_owner_op(line), f"the line filter skips {line!r}")
+                self.assertTrue(S.owner_op(line), f"the filters together skip {line!r}")
+        self.assertGreater(refused, len(self.INSTALLS) - 1)
 
     def test_every_spelling_is_refused_and_never_asked(self):
         from jarvis import permissions as P, rules

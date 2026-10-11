@@ -1184,7 +1184,8 @@ build` and copies `hud/dist` into `config.HUD_DIR/<build-id>/`
 SHA-256 manifest, through a temp folder renamed into place, keeping three
 builds; it refuses **uncommitted changes under `hud/`** unless
 `--allow-dirty` (Jarvis's chats leave edits in the main checkout) and records
-`git_head`/`dirty` in the manifest; it refuses a symlinked root or ancestor, a
+`git_head`/`dirty` in the manifest (checked again after the build; its git
+runs hardened through `gitops._git`); it refuses a symlinked root or ancestor, a
 root in the repo or writable by others, and a build output with a link,
 special file, odd name or no `index.html`. The daemon serves the **newest
 intact** build (manifest reads, `index.html` matches — a newer broken one is
@@ -1192,21 +1193,33 @@ passed over; a hostile manifest is ignored, never raised), only files its
 manifest lists, **SHA-256 checked on every read, never cached** (a stat-keyed
 cache served a same-size rewrite made within one timestamp tick), an asset
 only an older kept build has served from it (so an open window's lazy chunks
-survive an install); with nothing intact `GET /` is a 503 saying "not
-installed" or "failed verification", and `/status` reports what is served
-(`hud_build`, `hud_git_head`, `hud_state`). daemon2 **warns at start-up** in
-dev mode, with nothing served, and when the served build's commit is not the
-checkout's HEAD — a forgotten install shows up in the log. `config.HUD_DIST`
+survive an install); serving an older build because a newer one failed is
+`hud_state: "fallback"` (with `hud_passed_over`), never silent; with nothing
+intact `GET /` is a 503 saying "not installed" or "failed verification", and
+`/status` reports what is served (`hud_build`, `hud_git_head`, `hud_state`).
+daemon2 **warns at start-up** in dev mode, on a fallback, with nothing
+served, and when `hud/` changed since the served build's commit (`git diff
+--quiet <commit> HEAD -- hud`) — a forgotten install shows up in the log, a
+Python-only merge does not. `config.HUD_DIST`
 is that install root — **`hud/dist` only under `JARVIS_HUD_DEV=1`**, which
 only tests set — and BR-0's one write check (`files._hud_roots`) refuses the
 install root always, plus `hud/dist` in dev mode, to every agent write tool and
-v2 grant. **Jarvis never runs the installer**: `protected_state.installs_hud`,
-asked by `rules.decide` (so v1's gate and v2's layer 1) and by `run_command`,
-makes `jarvis hud install` DENY in every spelling it sees (`python -m jarvis`,
-a venv's `bin/jarvis`, `uv run`, wrappers, `bash -lc`, `eval`, `env -S`, the
-installer module, inline or here-document source naming it) — an agent can
-edit `hud/src`, so running the installer would undo C-1 — and a shell write
-*into* the install root asks (`protected_state.hud_trees`). A shell can still
+v2 grant. **Jarvis never runs the installer**: `protected_state.owner_op`
+(**the table `OWNER_OPS` is the extension point** for any other owner-only
+`jarvis` command; `OWNER_OP_MODULES` for its module), asked by `rules.decide`
+(so v1's gate and v2's layer 1) and by `run_command`, makes `jarvis hud
+install` DENY — judged on the **command word** after wrappers and runners
+(`_RUNNERS`: `env -S`, `nohup`, `timeout`, `flock`, `systemd-run`, `uv run`,
+`ssh`, `xargs` with input that may complete it), `python -m jarvis`, a line's
+own `$VAR` or `ln -s` alias, the installer module, Python source that
+*invokes* it, and shells/`eval`/here-documents/substitutions bash would run
+— never on a line that only mentions it (`echo`, `grep`, a commit message,
+single quotes, a quoted here-document): a DENY cannot be approved, so a false
+one blocks the owner. A cheap line and per-segment filter (`_could_be_owner_op`)
+keeps `rules.decide` at its old speed on lines that cannot hold an op, held
+to the full parse by `hud_install_check`. An agent can edit `hud/src`, so
+running the installer would undo C-1. A shell write *into* the install root
+asks (`protected_state.hud_trees`). A shell can still
 write it in a form nobody sees (the accepted gap). **After a merge, the lead
 runs, from a synced, clean main checkout: `jarvis hud install` (it builds
 `hud/`; run `npm ci` in `hud/` first if `package-lock.json` changed; it
@@ -1214,7 +1227,8 @@ refuses uncommitted `hud/` changes — commit or stash them, `--allow-dirty`
 only on purpose), then `systemctl --user restart jarvis-daemon2` only if
 Python changed — a HUD-only change needs just a reload of the window** — and
 checks `curl -s localhost:8405/status` shows the new `hud_build`,
-`hud_git_head` equal to the checkout's HEAD and `hud_state: "installed"`.
+`hud_git_head` equal to the checkout's HEAD and `hud_state: "installed"` (not
+`"fallback"`).
 Never `jarvis hud` to restart. **Tests point
 `config.HUD_DIR`/`HUD_DIST` at temp dirs** (or set `HUD_DEV` with a temp
 dist); never install into the owner's real root. **Every context of every

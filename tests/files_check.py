@@ -291,8 +291,22 @@ def installed_hud_checks(tmp: Path) -> None:
         assert hud_install.read(installed, "index.html") == built.joinpath("index.html").read_bytes()
     finally:
         config.HUD_DIR, config.HUD_DIST, config.HUD_DEV = saved
+    # The install root is refused always — also in a process whose
+    # JARVIS_HUD_DEV=1 serves hud/dist (review of PR #44, L4), which is then
+    # refused as well.
+    dev_dist = tmp / "c1-dev-dist"
+    dev_dist.mkdir()
+    saved = (config.HUD_DIR, config.HUD_DIST, config.HUD_DEV)
+    config.HUD_DIR, config.HUD_DIST, config.HUD_DEV = root, dev_dist, True
+    try:
+        for target in (root / "29991231T235959999999Z-0123456789ab" / "index.html", dev_dist / "index.html"):
+            out = call("write_file", path=str(target), content="<script>approve()</script>")
+            assert "built HUD" in out, (target, out)
+            assert not target.exists(), target
+    finally:
+        config.HUD_DIR, config.HUD_DIST, config.HUD_DEV = saved
     print("ok  guard: the installed HUD (every build, and a build planted beside them) is "
-          "refused by both write tools")
+          "refused by both write tools, in dev mode too")
 
 
 def model_state_checks(tmp: Path) -> None:

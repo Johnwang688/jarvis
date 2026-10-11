@@ -370,7 +370,10 @@ class Daemon:
                     # null; the commit it was installed from; and why
                     # nothing is served when nothing is (review of PR #44).
                     "hud_build": hud["build"], "hud_git_head": hud.get("git_head"),
-                    "hud_state": hud["state"]}
+                    "hud_state": hud["state"],
+                    # The newer builds passed over because they failed
+                    # verification ("fallback"), newest first.
+                    "hud_passed_over": hud.get("passed_over", [])}
 
     def require(self, store, object_id):
         if not isinstance(object_id, str) or not re.fullmatch(r"[0-9a-f]{8}", object_id):
@@ -2157,11 +2160,17 @@ def _log_hud_served() -> None:
                         "Run `jarvis hud install`.", config.HUD_DIR, served["state"])
         else:
             LOG.info("HUD build served: %s (from %s)", served["build"], served["git_head"] or "an unknown commit")
-            head = hud_install.git_head()
-            if head and served["git_head"] and head != served["git_head"]:
-                LOG.warning("The HUD served (%s) was installed from %s, but the checkout is at %s: "
-                            "run `jarvis hud install` if hud/ changed since.",
-                            served["build"], served["git_head"][:12], head[:12])
+            if served["state"] == "fallback":
+                LOG.warning("The newest HUD build (%s) failed verification; serving %s instead. "
+                            "Run `jarvis hud install`.", ", ".join(served["passed_over"]), served["build"])
+            # Only hud/ matters: a Python-only merge leaves the HUD current.
+            changed = hud_install.hud_changed_since(served["git_head"])
+            if changed:
+                LOG.warning("hud/ changed since the HUD served (%s) was installed from %s: "
+                            "run `jarvis hud install`.", served["build"], served["git_head"][:12])
+            elif changed is None:
+                LOG.warning("Cannot tell whether hud/ changed since the HUD served (%s) was "
+                            "installed (from %s).", served["build"], served["git_head"] or "an unknown commit")
             if served.get("dirty"):
                 LOG.warning("The HUD served (%s) was installed with uncommitted changes in hud/.",
                             served["build"])
