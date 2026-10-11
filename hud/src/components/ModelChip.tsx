@@ -12,8 +12,8 @@
 // leaves the chip on what the server holds and shows the server's reason.
 //
 // Every option label is text (a native select or a plain button): model names come off
-// the network and this window draws authorization cards. Space on a focused
-// chip must never start push-to-talk, so key events stop here.
+// the network and this window draws authorization cards. Key events stop
+// here, so nothing behind a focused chip acts on them.
 //
 // Several chat panes (WP-B) draw several chips at once, so each popover says
 // whose it is (`data-pane`). It is reachable by keyboard: it opens on the
@@ -235,7 +235,7 @@ export function placePopover(r: { left: number; top: number; bottom: number }, z
  * fixed-positioned in the zoomed space (`placePopover`). Closed by Escape
  * (focus back on the button), a click outside, focus leaving it, a resize, a
  * zoom change, or the button moving or going (a fold, a re-layout). Keys
- * inside it never reach push-to-talk; an Escape under an authorization card is
+ * inside it stop there; an Escape under an authorization card is
  * the card's (it denies) and is never swallowed here.
  */
 function Popover(props: {
@@ -319,7 +319,8 @@ function Popover(props: {
    * goes round the popover's stops — each list's chosen option, the slider,
    * then the footer — and never leaves it. */
   const onKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
-    // Never to push-to-talk, nor any other window key handler below #root.
+    // Never to a window key handler below #root (push-to-talk's Ctrl+D is
+    // taken at the window first, and refuses while this is open).
     e.stopPropagation();
     const el = ref.current;
     if (!el) return;

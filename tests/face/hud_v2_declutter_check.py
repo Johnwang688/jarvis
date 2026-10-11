@@ -235,6 +235,10 @@ def _card_lever_checks(page, mock, check, until):
           cycle.get_attribute("data-mode") == "off" and "REVIEW" in (cycle.get_attribute("title") or ""),
           f"{cycle.get_attribute('data-mode')} {cycle.get_attribute('title')}")
     until(lambda: not _recog(page), timeout=2)
+    # A pointer no longer focuses the cycle button (review of PR #40: a
+    # habitual Space would cycle the mic on); the keyboard still can, so the
+    # focus F1 is about is put there the keyboard's way.
+    page.evaluate("document.getElementById('modecycle').focus()")
     check("setup: focus is left on the cycle button, OFF", _active_testid(page) == "dictation-cycle"
           and _mode(page) == "off", str(_active_testid(page)))
 
@@ -502,13 +506,13 @@ def _popover_keyboard_checks(page, mock, check, until):
           all(e[0]["testid"] == "effort-slider" for e in (e0, e1, e2))
           and e1[1] == e0[1] + 1 and e2[1] == e0[1] and page.locator(_pop()).count() == 1,
           str([(e[0]["testid"], e[1]) for e in (e0, e1, e2)]))
-    # Space on an option is the option's, never push-to-talk.
+    # Space on an option is the option's, never the mic's.
     page.keyboard.press("Shift+Tab")
     page.keyboard.down("Space")
     time.sleep(0.15)
     ptt = page.evaluate("window.__hud.capture.ptt")
     page.keyboard.up("Space")
-    check("review #29 F4: Space on an option never starts push-to-talk (M5)", ptt is None, str(ptt))
+    check("review #29 F4: Space on an option never starts the mic (M5)", ptt is None, str(ptt))
     until(lambda: page.locator(_pop()).count() == 1, timeout=1)
     if page.locator(_pop()).count() == 0:
         page.locator(_btn()).click()
