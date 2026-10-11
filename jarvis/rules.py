@@ -2246,9 +2246,19 @@ def _substitution_texts(text: str) -> list[str]:
     expands both inside double ones) and `<(…)`/`>(…)` (outside any quotes),
     at the top level of `text` — each is read again for its own. Linear; at
     most `SUBSTITUTION_CAP`."""
+    return _substitutions(text)[0]
+
+
+def _substitutions(text: str) -> tuple[list[str], str]:
+    """(`_substitution_texts`, the text with each of them emptied to `$(_)`,
+    `` `_` `` or `<(_)`). The walk segments the emptied text: what is inside
+    a substitution is its own command line — a `"` or a newline in a commit
+    message inside `"$(cat <<<'…')"` must not end the outer quote or the
+    outer command."""
     out: list[str] = []
+    masked: list[str] = []
     quote = ""
-    i, n = 0, len(text)
+    i, n, last = 0, len(text), 0
     while i < n:
         ch = text[i]
         if quote == "'":
@@ -2278,17 +2288,20 @@ def _substitution_texts(text: str) -> list[str]:
         if text.startswith("$(", i) or (not quote and text.startswith(("<(", ">("), i)):
             j = _close_paren(text, i + 2)
             out.append(text[i + 2:j - 1 if text[j - 1:j] == ")" else n])
-            i = j
+            masked.append(text[last:i + 2] + "_)")
+            i = last = j
         elif ch == "`":
             end = text.find("`", i + 1)
             end = n if end == -1 else end
             out.append(text[i + 1:end])
-            i = end + 1
+            masked.append(text[last:i + 1] + "_`")
+            i = last = end + 1
         else:
             i += 1
         if len(out) > SUBSTITUTION_CAP:
             raise _TooComplex
-    return out
+    masked.append(text[last:])
+    return out, "".join(masked)
 
 
 class _Word(str):
@@ -2692,9 +2705,10 @@ class _Walk:
     def line(self, text: str, certain: bool, depth: int) -> None:
         self._spend(depth)
         text = join_continuations(_inline_heredocs(text))
-        for inner in _substitution_texts(text):
+        inners, outer = _substitutions(text)
+        for inner in inners:
             self.line(inner, certain, depth + 1)
-        for segment in segments(text):
+        for segment in segments(outer):
             here = [r.word for r in redirections(segment) if r.op == "<<<"]
             self.segment(_shell_words(strip_redirections(segment)), certain, depth, here=here)
 

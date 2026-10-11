@@ -1973,6 +1973,7 @@ HEREDOC_ORDINARY = {
     "a double-quoted delimiter": "cat <<\"EOF\"\n/* doc */\nEOF",
     "a command after it": "cat > f.md <<'EOF'\n* one\nEOF\nls -la",
     "inside backticks": "x=`cat <<X\n* one\nX`",
+    "a quote in a message": "git commit -m \"$(cat <<'EOF'\nSay \"hi\" twice\n* one\nEOF\n)\"",
 }
 # Still read: a body fed to a shell, a substitution an unquoted body runs, and
 # every line the lexer must not mistake for a body (each would hide a command).
