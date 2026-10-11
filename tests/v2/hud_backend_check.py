@@ -371,7 +371,10 @@ class Backend(unittest.TestCase):
         os.chmod(second.path / "index.html", 0o644)
         (second.path / "index.html").write_text("built HUD, SECOND")       # same size
         self.assertEqual(self.request("GET", "/"), b"built HUD", "the newest intact build")
-        self.assertEqual(self.request("GET", "/status")["hud_build"], first.id)
+        status = self.request("GET", "/status")
+        # Never silently "installed" (review of PR #44 at 62db94f).
+        self.assertEqual((status["hud_build"], status["hud_state"], status["hud_passed_over"]),
+                         (first.id, "fallback", [second.id]))
         os.chmod(first.path, 0o755)
         os.chmod(first.path / "index.html", 0o644)
         (first.path / "index.html").write_text("built HUX")

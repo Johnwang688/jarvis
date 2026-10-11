@@ -1642,11 +1642,12 @@ def decide(command: str) -> Verdict:
     # The installed HUD's one writer, `jarvis hud install`, is the owner's and
     # the lead's — never Jarvis's, asked or not (decision C-1; review of PR
     # #44, MED-2: `python -m jarvis hud install` scored ALLOW here, and an
-    # agent that can edit `hud/src` could then install it). One detector, in
-    # `protected_state`, so v1's gate and v2's layer 1 — both of which start
-    # from this function — refuse every spelling it sees.
+    # agent that can edit `hud/src` could then install it). One detector,
+    # `protected_state.owner_op` (its table `OWNER_OPS` is where another
+    # owner-only command goes), so v1's gate and v2's layer 1 — both of which
+    # start from this function — refuse every spelling it sees.
     from . import protected_state
-    why = protected_state.installs_hud(command)
+    why = protected_state.owner_op(command)
     if why:
         return Verdict(DENY, why)
 

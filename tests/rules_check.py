@@ -1720,6 +1720,40 @@ def fails_against_old_code_checks() -> None:
     print("ok  rules: the findings each fail against the pre-change rule")
 
 
+def owner_op_checks() -> None:
+    """Owner-only `jarvis` operations are DENY in `rules.decide` itself
+    (decision C-1; review of PR #44): `jarvis hud install` in the spellings
+    an agent would reach for, and never an ordinary line that only mentions
+    it — a DENY cannot be approved, so a false one blocks the owner too.
+    The full spelling table is tests/v2/hud_install_check.py's."""
+    import time
+
+    from jarvis import protected_state
+    for command in ("jarvis hud install", "python -m jarvis hud install", "python3 -mjarvis hud install",
+                    "uv run jarvis hud install", ".venv/bin/jarvis hud install --allow-dirty",
+                    "bash -lc 'jarvis hud install'", "nohup timeout 60 jarvis hud install",
+                    "python -m jarvis.v2.hud_install", "echo install | xargs jarvis hud",
+                    'python3 -c "from jarvis.v2 import hud_install; hud_install.main()"'):
+        verdict = rules.decide(command)
+        assert verdict.decision == rules.DENY, f"{command!r}: {verdict}"
+        assert "hud install" in verdict.reason, verdict.reason
+    for command in ("jarvis hud", "jarvis hud --no-window", "echo Run jarvis hud install after merging",
+                    'grep -rn "hud_install.main" jarvis/ && python3 tests/v2/hud_install_check.py',
+                    "rg -n 'import hud_install' jarvis && python -m pytest tests",
+                    'python3 -c "print(\'hud\', \'install\')"',
+                    'python3 -c "from jarvis.v2 import hud_install as I; print(I.builds(\'/tmp/x\'))"',
+                    "git commit -m 'run `jarvis hud install` after merges'",
+                    "cat > notes.md <<EOF\njarvis hud install\nEOF"):
+        assert rules.decide(command).decision != rules.DENY, f"{command!r} must not be refused"
+    # The cheap filter keeps the parse off lines that cannot hold an op.
+    deep = "echo " + "$(echo " * 3000 + "x" + ")" * 3000
+    start = time.perf_counter()
+    for _ in range(20):
+        protected_state.owner_op(deep)
+    assert time.perf_counter() - start < 0.5, "the filter does not skip a line with no op in it"
+    print("ok  owner-only operations: `jarvis hud install` DENY in rules.decide, ordinary mentions untouched")
+
+
 def main() -> int:
     # Never read (or write) the owner's real allowlist from a test: `gate()`
     # consults it, so a stray entry would silently change what this suite
@@ -1754,6 +1788,7 @@ def main() -> int:
     gate_state_edge_checks()
     gate_state_complexity_checks()
     fails_against_old_code_checks()
+    owner_op_checks()
     print("\nall rules checks passed")
     return 0
 

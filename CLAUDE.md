@@ -1184,7 +1184,8 @@ build` and copies `hud/dist` into `config.HUD_DIR/<build-id>/`
 SHA-256 manifest, through a temp folder renamed into place, keeping three
 builds; it refuses **uncommitted changes under `hud/`** unless
 `--allow-dirty` (Jarvis's chats leave edits in the main checkout) and records
-`git_head`/`dirty` in the manifest; it refuses a symlinked root or ancestor, a
+`git_head`/`dirty` in the manifest (checked again after the build; its git
+runs hardened through `gitops._git`); it refuses a symlinked root or ancestor, a
 root in the repo or writable by others, and a build output with a link,
 special file, odd name or no `index.html`. The daemon serves the **newest
 intact** build (manifest reads, `index.html` matches — a newer broken one is
@@ -1192,21 +1193,33 @@ passed over; a hostile manifest is ignored, never raised), only files its
 manifest lists, **SHA-256 checked on every read, never cached** (a stat-keyed
 cache served a same-size rewrite made within one timestamp tick), an asset
 only an older kept build has served from it (so an open window's lazy chunks
-survive an install); with nothing intact `GET /` is a 503 saying "not
-installed" or "failed verification", and `/status` reports what is served
-(`hud_build`, `hud_git_head`, `hud_state`). daemon2 **warns at start-up** in
-dev mode, with nothing served, and when the served build's commit is not the
-checkout's HEAD — a forgotten install shows up in the log. `config.HUD_DIST`
+survive an install); serving an older build because a newer one failed is
+`hud_state: "fallback"` (with `hud_passed_over`), never silent; with nothing
+intact `GET /` is a 503 saying "not installed" or "failed verification", and
+`/status` reports what is served (`hud_build`, `hud_git_head`, `hud_state`).
+daemon2 **warns at start-up** in dev mode, on a fallback, with nothing
+served, and when `hud/` changed since the served build's commit (`git diff
+--quiet <commit> HEAD -- hud`) — a forgotten install shows up in the log, a
+Python-only merge does not. `config.HUD_DIST`
 is that install root — **`hud/dist` only under `JARVIS_HUD_DEV=1`**, which
 only tests set — and BR-0's one write check (`files._hud_roots`) refuses the
 install root always, plus `hud/dist` in dev mode, to every agent write tool and
-v2 grant. **Jarvis never runs the installer**: `protected_state.installs_hud`,
-asked by `rules.decide` (so v1's gate and v2's layer 1) and by `run_command`,
-makes `jarvis hud install` DENY in every spelling it sees (`python -m jarvis`,
-a venv's `bin/jarvis`, `uv run`, wrappers, `bash -lc`, `eval`, `env -S`, the
-installer module, inline or here-document source naming it) — an agent can
-edit `hud/src`, so running the installer would undo C-1 — and a shell write
-*into* the install root asks (`protected_state.hud_trees`). A shell can still
+v2 grant. **Jarvis never runs the installer**: `protected_state.owner_op`
+(**the table `OWNER_OPS` is the extension point** for any other owner-only
+`jarvis` command; `OWNER_OP_MODULES` for its module), asked by `rules.decide`
+(so v1's gate and v2's layer 1) and by `run_command`, makes `jarvis hud
+install` DENY — judged on the **command word** after wrappers and runners
+(`_RUNNERS`: `env -S`, `nohup`, `timeout`, `flock`, `systemd-run`, `uv run`,
+`ssh`, `xargs` with input that may complete it), `python -m jarvis`, a line's
+own `$VAR` or `ln -s` alias, the installer module, Python source that
+*invokes* it, and shells/`eval`/here-documents/substitutions bash would run
+— never on a line that only mentions it (`echo`, `grep`, a commit message,
+single quotes, a quoted here-document): a DENY cannot be approved, so a false
+one blocks the owner. A cheap line and per-segment filter (`_could_be_owner_op`)
+keeps `rules.decide` at its old speed on lines that cannot hold an op, held
+to the full parse by `hud_install_check`. An agent can edit `hud/src`, so
+running the installer would undo C-1. A shell write *into* the install root
+asks (`protected_state.hud_trees`). A shell can still
 write it in a form nobody sees (the accepted gap). **After a merge, the lead
 runs, from a synced, clean main checkout: `jarvis hud install` (it builds
 `hud/`; run `npm ci` in `hud/` first if `package-lock.json` changed; it
@@ -1214,7 +1227,8 @@ refuses uncommitted `hud/` changes — commit or stash them, `--allow-dirty`
 only on purpose), then `systemctl --user restart jarvis-daemon2` only if
 Python changed — a HUD-only change needs just a reload of the window** — and
 checks `curl -s localhost:8405/status` shows the new `hud_build`,
-`hud_git_head` equal to the checkout's HEAD and `hud_state: "installed"`.
+`hud_git_head` equal to the checkout's HEAD and `hud_state: "installed"` (not
+`"fallback"`).
 Never `jarvis hud` to restart. **Tests point
 `config.HUD_DIR`/`HUD_DIST` at temp dirs** (or set `HUD_DEV` with a temp
 dist); never install into the owner's real root. **Every context of every
@@ -1301,11 +1315,8 @@ language comes from the registry by the model's URI** (`file:///<project>/<path>
 a per-editor query until ED-2's buffers share one model per absolute path);
 `languageFor` is gone. Links open only http/https, `noopener`
 (`registerLinkOpener` answers every other scheme "handled" — Monaco's own
-fallback navigates the window). vs-dark's amber and red token colours and
-the orange/gold chrome of find, bracket pairs and the unicode box are moved
-off those hues until ED-3's scheme (`INTERIM_RULES`, `CHROME`, tested in
-`monaco.test.ts` on one warm band 340°–65° — the plan's two bands leave
-orange, Monaco's own find colour, between them). Diff models live under
+fallback navigates the window). ED-1's interim moves of vs-dark's amber and
+red off those hues are gone: ED-3's scheme (below) replaced them. Diff models live under
 `jarvis-diff:` and are disposed with their view (two leaked per file).
 **Under a card every editor is read-only** (`setEditorsBlocked` from App,
 above the error boundary, beside the terminals' hold) and unfocused (the
@@ -1381,6 +1392,67 @@ picked in the same breath as a keystroke). Every one that guards a behaviour
 fails on origin/main, on the reviewed head (18381b9) or with its fix reverted
 (PR body). Monaco's `getValue()` per keystroke (the change event hands the
 whole text to React) is left for ED-2's buffers.
+
+**The Graphite editor scheme, ED-3 (2026-10-11; plan §2.5, decisions E-4).**
+One scheme, no picker, **no syntax colour amber or red**. `lib/editorTheme.ts`
+is the table: rows keyed by **nvim-treesitter capture names** (`LEGEND` —
+ED-5's semantic token types), Monarch's tokens styled through the same rows,
+each naming a HUD token and a style. Most code is `--text`; keywords bold,
+comments italic `--text-muted`, punctuation `--text-2`, and four new `:root`
+tokens: `--syn-fn` #8ec5d6 (functions, tags, headings), `--syn-string`
+#a6c79b, `--syn-const` #b9aade (numbers, constants, escapes), `--syn-type`
+#a8b5c2 (types, modules, directives, keys) — quieter siblings of HUD hues, so
+`--accent` and `--green` keep single meanings. **theme.css is the one place a
+colour is written**: `cssPalette()` reads the tokens off `:root` when Monaco
+loads and `themeData()` derives the hex, with `inherit: false` (nothing of
+vs-dark's survives; a token no rule names is `--text`); a vitest fails on any
+hex literal in editorTheme.ts's code. The chrome is pinned in the same file —
+the plan's list (current line `--bg-2`, line numbers `--text-muted`, cursor
+`--accent-hi`, selection and find in the accent, word highlight `--selected`,
+bracket pairs in the three syntax hues, unicode box `--syn-const`, error
+squiggles `--red`, warnings `--text-2`, diff tints, whitespace, sticky
+scroll) **plus every colour Monaco 0.57 resolves warm anywhere in its
+registry**; red only on a row marked `red: "error" | "removed"`. **A control
+character is not a registry colour**: Monaco draws ESC, BEL or ^L on its own
+`.mtkcontrol` box, white on dark red, `!important` — theme.css pins
+`.monaco-editor .mtkcontrol` to `--text-2` on `--bg-3` (review of PR #45).
+**A theme failure fails soft**: `themeOrFallback` logs the unreadable token by
+name and Monaco loads in plain vs-dark (a rejected `loadMonaco` used to drop
+every editor to its textarea, silently, until reload), and each refined
+tokenizer is compiled in its factory first (`refinedOrOwn`, with Monaco's own
+Monarch compiler) — a throw or a compile error leaves that language Monaco's
+own tokenizer, logged. A
+per-language rule is `<capture>.<lang>` (Monarch's postfix; ED-5 passes the
+language as the token's last modifier — Monaco matches a semantic token's
+type and modifiers joined by dots). **Monarch's C, C++ and Python are
+refined** (`lib/monarchRefine.ts`): a word before `(` is `function`, a C++
+word before `::` a `module`, and the builtins split into
+`constant`/`type`/`function`/`variable.builtin` (Python's keyword list *was*
+its builtins); the one identifier rule is found by its exact shape, and a
+definition that has moved keeps Monaco's own tokenizer. **Both live in the
+lazy chunk** (`monacoBundle.ts`'s `applyGraphite`, called by `loadMonaco`):
+imported from `monaco.ts` they cost 11 KB of first paint and, because
+Python's definition imports Monaco's API, split Monaco into a second chunk.
+For ED-5: the plan's "bold on `void`" test contradicts its own table (`void`
+is `@type.builtin`, `--syn-type`); the table wins. Left for ED-5's tree-sitter
+(fidelity, not safety): Markdown bullets and link URLs, untyped `=`/`*`/`::`/
+`->`, `#define SQ(x)` drawn as a function, Python's `class Foo(Base)` drawn
+as a function, `match` drawn as a keyword, and escapes inside Python strings. Vitest reads theme.css
+raw only because `test.css.include` names it (Vitest empties CSS, `?raw`
+included). Free checks: `editorTheme.test.ts` (≥ 4.5:1 on `--bg-1` and
+`--bg-2`, the warm band 340°–65° at s ≥ 0.35, strict hex, the CSS and the
+table agree, every capture and Monarch token resolved through Monaco's own
+`TokenTheme`, every warm Monaco default pinned), `monarchRefine.test.ts`
+(Monaco's own Monarch compiler and lexer on the installed definitions), and
+`tests/face/hud_v2_editor_theme_check.py` (a `MockDaemon(0)` of its own, run
+by `hud_v2_check` after the preview section, or alone: a C++ and a Python
+file's rendered tokens against the page's `:root` tokens, Monaco's `.mtkN`
+colour map, every `--vscode-*` colour it publishes, bracket pairs, find in
+the accent, control characters off Monaco's red box, and the approval card's
+computed colours unchanged once Monaco has loaded). 30 of its first 44 checks
+fail on b04d6e8, and the control-character pair without the theme.css rule;
+the rest are setup or guards (find was already pinned by ED-1), each shown to
+bite in a scratch copy.
 
 **The effort is a slider, not pills (2026-10-10, owner's ask: "like Claude's").**
 `components/EffortSlider.tsx`, rules in `lib/effortSlider.ts`: "Effort

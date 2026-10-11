@@ -981,86 +981,481 @@ def ask_reason(touch: Touch) -> str:
             "never runs unasked and no allowlist entry covers it")
 
 
-# --- the installed HUD's one writer (decision C-1; review of PR #44, MED-2) --------
+# --- owner-only operations (decision C-1; review of PR #44, MED-2) ---------------
 #
-# `jarvis hud install` is the one thing that writes the installed HUD, the code
-# the approval window runs. The owner and the lead run it from their own
-# shells, outside Jarvis's gate, so refusing it to Jarvis costs nothing — and
-# letting an agent run it would undo C-1: `hud/src` is writable, so an agent
-# could edit the source and install it. **DENY, never asked**, in every
-# spelling this can see, through this one detector: `rules.decide` asks it
-# (so v1's `static_verdict`/`command_verdict` and v2's layer 1, which both
-# start from `rules.decide`, refuse it) and `run_command` refuses it even with
-# no approver. Not a boundary, as everything in this module: a Makefile, an
-# alias, a script file or a module name built at run time is not seen.
+# Some `jarvis` commands are the owner's and the lead's alone — today `jarvis
+# hud install`, the one thing that writes the installed HUD, the code the
+# approval window runs (an agent can edit `hud/src`, so letting it install
+# would undo C-1). They run them from their own shells, outside Jarvis's gate,
+# so refusing them to Jarvis costs nothing. **DENY, never asked**, through
+# this one detector: `rules.decide` asks it (so v1's `static_verdict`/
+# `command_verdict` and v2's layer 1, which both start from `rules.decide`,
+# refuse it) and `run_command` refuses it even with no approver.
+#
+# **The extension point is `OWNER_OPS`** (and `OWNER_OP_MODULES` for a command
+# whose implementing module can also be run or called directly): add a path
+# there and every spelling below covers it.
+#
+# What counts as running one, judged per command and never by words merely
+# appearing on the line (a DENY cannot be approved, so a false one blocks the
+# owner too — review of PR #44 at 62db94f):
+#   * the **command word** — after assignments, `env` (`-S` split, `-C`,
+#     `-u`), `builtin`, and the wrappers and runners in `_RUNNERS` (`nohup`,
+#     `timeout`, `nice`, `flock FILE`, `xargs`, `systemd-run`, `uv run`,
+#     `uvx`, `poetry/pdm/hatch/rye/pipx run`, `ssh HOST …`) — is `jarvis` (any
+#     path to it, a `$VAR` the line set to it, or a link the line made to it
+#     with `ln`), or a Python run with `-m jarvis` / `-m jarvis.__main__`, and
+#     its argv, options skipped, begins with an owner path; behind `xargs`, a
+#     *prefix* of one is enough (its input may complete it);
+#   * a Python run of an owner module itself: `-m jarvis.v2.hud_install`, or
+#     the file `hud_install.py`;
+#   * Python source — `-c`, a here-string or a here-document fed to it — that
+#     *invokes* an owner op: calls the module's writers (`main()`,
+#     `install(…)`, …) under whatever name it was imported as, runs the module
+#     or the CLI with `runpy`, calls the CLI's entry with the path's words, or
+#     hands a command line that is one to `os.system`/`subprocess`. Importing
+#     the module and reading from it (`hud_install.builds(…)`) is not;
+#   * a shell or `eval` handed a string (`-c` in any cluster), its standard
+#     input from a here-document or here-string, and `$(…)`/backticks — each
+#     a command line of its own, judged the same way.
+# Not seen — the stated limits: a link made earlier under another name
+# (`~/bin/jv hud install`), words built at run time (`jarvis $(echo hud)
+# install`, a word from the environment rather than the line's own
+# assignments), `runpy` or `sys.argv` assembled at run time
+# (`run_module("jar"+"vis")`), a Makefile, alias, function or script file. None of this is a
+# boundary; the installed HUD's real protection is that the write tools and
+# v2's grants refuse its folder, and a shell write into it asks.
 
-_JARVIS_MODULES = frozenset({"jarvis", "jarvis.__main__"})
-_INSTALLER_MODULE = "jarvis.v2.hud_install"
-# Inline source that reaches the installer by name: the module, an import of
-# it, a call on it, or the CLI's own entry handed `hud`, `install`.
-_INSTALL_SOURCE = re.compile(
-    r"jarvis\s*\.\s*v2\s*\.\s*hud_install\b"
-    r"|\bimport\s+(?:[\w.]+\s*,\s*)*hud_install\b"
-    r"|\bhud_install\s*\.\s*(?:main|install|npm_build|prune)\b"
-    r"|\bcmd_hud\s*\("
-    r"|['\"]hud['\"]\s*,\s*['\"]install['\"]")
-_PYTHON = re.compile(r"python[0-9.]*|pypy[0-9.]*")
-_INSTALL_DEPTH = 4
+OWNER_OPS: dict[tuple[str, ...], str] = {
+    ("hud", "install"): (
+        "this runs `jarvis hud install`, which writes the installed HUD — the code the "
+        "approval window runs. Only the owner or the lead runs it, from their own shell "
+        "(decision C-1); Jarvis never does, asked or not"),
+}
+# A module that implements an owner op: (the op's path, the functions whose
+# call performs it). Running the module, or calling one of those from inline
+# source, is the op.
+OWNER_OP_MODULES: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
+    "jarvis.v2.hud_install": (("hud", "install"), ("main", "install", "npm_build", "prune")),
+}
+_CLI_MODULES = frozenset({"jarvis", "jarvis.__main__"})
+_LAUNCHERS = frozenset({"jarvis", "jarvis.exe"})
+_PYTHON = re.compile(r"(?:python|pypy)[0-9.]*")
+_OWNER_DEPTH = 4
+_OWNER_BUDGET = 64 * 1024
+
+# Wrappers and runners that run the command in their arguments: the options
+# that take a value, how many positionals precede the command, a subcommand
+# that must come first (`uv run`), whether the rest is one command *string*
+# (ssh), and whether its input is appended as more arguments (xargs).
+@dataclass(frozen=True)
+class _Runner:
+    values: frozenset = frozenset()
+    positionals: int = 0
+    subcommand: tuple = ()
+    joined: bool = False
+    appends: bool = False
 
 
-def _launches_jarvis(tokens: list[str], k: int, state: _State) -> int | None:
-    """If `tokens[k]` starts a run of the jarvis CLI, the index after it."""
-    token = tokens[k]
-    # `J=jarvis; $J hud install`: the line's own assignments, as text.
-    word = re.sub(r"\$\{?(\w+)\}?",
-                  lambda m: state.variables.get(m.group(1), os.environ.get(m.group(1), "")), token)
-    if rules._basename(word) in ("jarvis", "jarvis.exe"):
-        return k + 1
-    if token == "-m" and k + 1 < len(tokens) and tokens[k + 1] in _JARVIS_MODULES:
-        return k + 2
-    if token.startswith("-m") and token[2:] in _JARVIS_MODULES:
-        return k + 1
+_RUN_VALUES = frozenset({"--directory", "--project", "--with", "--with-requirements", "--with-editable",
+                         "--python", "-p", "--package", "--env-file", "--extra", "--group", "--index",
+                         "--default-index", "--from", "--index-url", "--extra-index-url", "-w",
+                         "--only-group", "--no-group", "--cache-dir", "--config-file", "-e", "--env",
+                         "--spec", "--pip-args"})
+_RUNNERS: dict[str, _Runner] = {
+    "nohup": _Runner(), "setsid": _Runner(), "command": _Runner(), "chronic": _Runner(),
+    "time": _Runner(frozenset({"-f", "--format", "-o", "--output"})),
+    "exec": _Runner(frozenset({"-a"})),
+    "nice": _Runner(frozenset({"-n", "--adjustment"})),
+    "ionice": _Runner(frozenset({"-c", "--class", "-n", "--classdata", "-p", "--pid", "-P", "--pgid",
+                                 "-u", "--uid"})),
+    "stdbuf": _Runner(frozenset({"-i", "-o", "-e", "--input", "--output", "--error"})),
+    "timeout": _Runner(frozenset({"-s", "--signal", "-k", "--kill-after"}), positionals=1),
+    "flock": _Runner(frozenset({"-w", "--timeout", "-E", "--conflict-exit-code"}), positionals=1),
+    "watch": _Runner(frozenset({"-n", "--interval", "-d", "--differences", "-q", "--equexit"}), joined=True),
+    "xargs": _Runner(frozenset({"-I", "-i", "-n", "--max-args", "-L", "-l", "--max-lines", "-d",
+                                "--delimiter", "-a", "--arg-file", "-E", "-e", "--eof", "-P",
+                                "--max-procs", "-s", "--max-chars", "--process-slot-var"}), appends=True),
+    "systemd-run": _Runner(frozenset({"-p", "--property", "-u", "--unit", "--description", "-E",
+                                      "--setenv", "--working-directory", "-M", "--machine", "--slice",
+                                      "-H", "--host", "--uid", "--gid", "--nice", "--on-calendar",
+                                      "--on-active", "--timer-property", "--path-property",
+                                      "--socket-property", "--service-type", "--expand-environment"})),
+    "uv": _Runner(_RUN_VALUES, subcommand=("run", "tool run")),
+    "uvx": _Runner(_RUN_VALUES),
+    "poetry": _Runner(_RUN_VALUES, subcommand=("run",)),
+    "pdm": _Runner(_RUN_VALUES, subcommand=("run",)),
+    "hatch": _Runner(_RUN_VALUES, subcommand=("run",)),
+    "rye": _Runner(_RUN_VALUES, subcommand=("run",)),
+    "pipx": _Runner(_RUN_VALUES, subcommand=("run",)),
+    "ssh": _Runner(frozenset({"-p", "-i", "-l", "-o", "-F", "-J", "-b", "-c", "-D", "-E", "-e", "-I",
+                              "-L", "-m", "-O", "-Q", "-R", "-S", "-W", "-w", "-B"}), positionals=1,
+                   joined=True),
+}
+
+
+@dataclass
+class _Owner:
+    """Per command line: the line's own assignments, links made to the
+    launcher, and the here-document bodies still to be handed out."""
+    variables: dict[str, str] = field(default_factory=dict)
+    launchers: set[str] = field(default_factory=set)
+    bodies: list[str] = field(default_factory=list)
+    # Characters the nested parses (substitutions, shell strings, source) may
+    # still spend — shared by every level, so a line cannot make the parse
+    # cost more than about twice its own length. Past it, nothing deeper is
+    # judged here; `rules.decide` already ASKs any substitution, and no
+    # allowlist entry covers one, so what is not seen is asked, never run.
+    budget: list[int] = field(default_factory=lambda: [_OWNER_BUDGET])
+    filtered: bool = True          # the per-segment cheap test (off only to test it)
+
+    def child(self) -> "_Owner":
+        return _Owner(dict(self.variables), set(self.launchers), budget=self.budget,
+                      filtered=self.filtered)
+
+
+def _owner_substitutions(text: str) -> list[str]:
+    """The command lines inside `$(…)`, backticks and `<(…)`/`>(…)` that bash
+    would run — **not** inside single quotes. (`_substitutions` ignores
+    quoting on purpose, for refusals where checking text that never runs can
+    only add a refusal; a false DENY here would block the owner's own
+    `git commit -m 'run `jarvis hud install` after merging'`.)"""
+    if "(" not in text and "`" not in text:
+        return []
+    live = set(rules.unquoted_indices(text, double_is_quote=False))
+    out: list[str] = []
+    i, n = 0, len(text)
+    while i < n and len(out) < _MAX_SPANS:
+        opener = (2 if i in live and text.startswith(("$(", "<(", ">("), i)
+                  and not text.startswith("$((", i) else 0)
+        if opener:
+            depth, j = 1, i + 2
+            while j < n and depth:
+                depth += {"(": 1, ")": -1}.get(text[j], 0)
+                j += 1
+            out.append(text[i + 2:j - 1] if depth == 0 else text[i + 2:])
+            i = j
+            continue
+        if i in live and text[i] == "`":
+            j = text.find("`", i + 1)
+            while j > 0 and text[j - 1] == "\\":
+                j = text.find("`", j + 1)
+            out.append(text[i + 1:j] if j != -1 else text[i + 1:])
+            i = j + 1 if j != -1 else n
+            continue
+        i += 1
+    return out
+
+
+def _owner_word(token: str, state: _Owner, environ: bool = True) -> str:
+    """A word with the line's own `$VAR`/`${VAR}` assignments put in (and,
+    for the command word only, the environment's)."""
+    return re.sub(r"\$\{?(\w+)\}?",
+                  lambda m: state.variables.get(m.group(1), os.environ.get(m.group(1), "") if environ else
+                                                m.group(0)), token)
+
+
+def _is_launcher(token: str, state: _Owner) -> bool:
+    word = _owner_word(token, state)
+    return (rules._basename(word) in _LAUNCHERS or word in state.launchers
+            or (bool(word) and rules._basename(word) in {rules._basename(l) for l in state.launchers}
+                and "/" in word))
+
+
+def _owner_path(argv: list[str], open_ended: bool) -> str | None:
+    """The refusal for a jarvis argv that is (or, fed more words by xargs,
+    may become) an owner op."""
+    words = [t for t in argv if not t.startswith("-")]
+    for path, why in OWNER_OPS.items():
+        if tuple(words[:len(path)]) == path:
+            return why
+        if open_ended and len(words) < len(path) and tuple(words) == path[:len(words)]:
+            return why + " (its input may complete the command)"
     return None
 
 
-def _cli_install(tokens: list[str], state: _State) -> bool:
-    """`jarvis … hud … install` anywhere among a command's words — behind
-    `env`, `nohup`, `timeout`, `uv run`, `systemd-run`, `ssh host`, a venv's
-    `bin/jarvis` or `python -m jarvis`. Options may sit between the words, as
-    argparse allows."""
-    for k in range(len(tokens)):
-        after = _launches_jarvis(tokens, k, state)
-        if after is None:
+def _python_parse(args: list[str]) -> tuple[str, str | None, list[str]]:
+    """How a Python is told what to run: ("module", name, argv), ("source",
+    text, argv), ("script", path, argv) or ("stdin", None, argv)."""
+    i = 0
+    while i < len(args):
+        token = args[i]
+        i += 1
+        if token == "-":
+            return "stdin", None, args[i:]
+        if token == "--":
+            break
+        if token.startswith("--"):
+            if token in ("--check-hash-based-pycs",):
+                i += 1
             continue
-        rest = [t for t in tokens[after:] if not t.startswith("-")]
-        if rest[:2] == ["hud", "install"]:
-            return True
-    return False
+        if not token.startswith("-") or len(token) == 1:
+            return "script", token, args[i:]
+        letters = token[1:]
+        for k, letter in enumerate(letters):
+            rest = letters[k + 1:]
+            if letter in "mc":
+                value = rest if rest else (args[i] if i < len(args) else "")
+                if not rest:
+                    i += 1
+                return ("module" if letter == "m" else "source"), value, args[i:]
+            if letter in "WX":
+                if not rest:
+                    i += 1
+                break
+    if i < len(args):
+        return "script", args[i], args[i + 1:]
+    return "stdin", None, []
 
 
-def _python_install(tokens: list[str], segment: str) -> bool:
-    """A Python run of the installer module: `-m jarvis.v2.hud_install`, the
-    file itself, or inline source that names it."""
-    if not any(_PYTHON.fullmatch(rules._basename(t)) for t in tokens):
-        return False
-    for k, token in enumerate(tokens):
-        if token == "-m" and k + 1 < len(tokens) and tokens[k + 1] == _INSTALLER_MODULE:
-            return True
-        if token == "-m" + _INSTALLER_MODULE or rules._basename(token) == "hud_install.py":
-            return True
-    source = " ".join(tokens) + " " + " ".join(_here_strings(segment))
-    return bool(_INSTALL_SOURCE.search(source))
+_CALL_SITES = ("system", "popen", "run", "call", "check_call", "check_output", "Popen", "getoutput",
+               "getstatusoutput", "spawnlp", "execlp", "execvp")
 
 
-def _install_line(command: str, state: _State, depth: int) -> bool:
+def _source_invokes(source: str, state: _Owner, depth: int) -> str | None:
+    """Python source that performs an owner op — not one that only names or
+    reads from the module (review of PR #44 at 62db94f)."""
+    if not source:
+        return None
+    for module, (path, writers) in OWNER_OP_MODULES.items():
+        parent, _, last = module.rpartition(".")
+        dotted = re.escape(module).replace(r"\.", r"\s*\.\s*")
+        names = {dotted}
+        for m in re.finditer(r"\bimport\s+" + dotted + r"(?:\s+as\s+(\w+))?", source):
+            names.add(re.escape(m.group(1)) if m.group(1) else dotted)
+        for m in re.finditer(r"\bfrom\s+" + re.escape(parent).replace(r"\.", r"\s*\.\s*")
+                             + r"\s+import\s+([^\n;]+)", source):
+            for item in m.group(1).replace("(", " ").replace(")", " ").split(","):
+                bits = item.split()
+                if bits and bits[0] == last:
+                    names.add(re.escape(bits[2] if len(bits) == 3 and bits[1] == "as" else last))
+        funcs = set()
+        for m in re.finditer(r"\bfrom\s+" + dotted + r"\s+import\s+([^\n;]+)", source):
+            for item in m.group(1).replace("(", " ").replace(")", " ").split(","):
+                bits = item.split()
+                if bits and bits[0] in writers:
+                    funcs.add(re.escape(bits[2] if len(bits) == 3 and bits[1] == "as" else bits[0]))
+        writer = "|".join(map(re.escape, writers))
+        if re.search(r"(?:" + "|".join(names) + r")\s*\.\s*(?:" + writer + r")\s*\(", source):
+            return OWNER_OPS[path]
+        if funcs and re.search(r"(?<![\w.])(?:" + "|".join(funcs) + r")\s*\(", source):
+            return OWNER_OPS[path]
+        if re.search(r"\brun_module\s*\(\s*['\"]" + re.escape(module) + r"['\"]", source):
+            return OWNER_OPS[path]
+        if re.search(r"\brun_path\s*\([^)]*" + re.escape(last) + r"\.py", source):
+            return OWNER_OPS[path]
+    # The CLI itself, with an owner path's words: `runpy.run_module("jarvis")`
+    # with `sys.argv` set, `jarvis.__main__.main([...])`, `cmd_hud(…install…)`.
+    cli = re.search(r"\brun_module\s*\(\s*['\"]jarvis(?:\.__main__)?['\"]"
+                    r"|\b(?:from\s+jarvis(?:\s*\.\s*__main__)?\s+import|import\s+jarvis\s*\.\s*__main__)"
+                    r"|\bjarvis\s*\.\s*__main__\s*\.", source)
+    for path, why in OWNER_OPS.items():
+        literals = r"\s*,\s*".join(r"['\"]" + re.escape(word) + r"['\"]" for word in path)
+        if cli and re.search(literals, source):
+            return why
+        if re.search(r"\bcmd_" + re.escape(path[0]) + r"\s*\(", source) and all(
+                re.search(r"['\"]" + re.escape(word) + r"['\"]", source) for word in path[1:]):
+            return why
+        # An argv list naming the CLI: `["jarvis", "hud", "install"]`.
+        if re.search(r"['\"](?:[^'\"\s]*/)?jarvis['\"]\s*,\s*" + literals, source):
+            return why
+    # A command line handed to a shell from Python: `os.system("jarvis …")`.
+    if depth < _OWNER_DEPTH:
+        call = r"\b(?:" + "|".join(_CALL_SITES) + r")\s*\(\s*[rbuf]*(['\"])(.*?)\1"
+        for m in re.finditer(call, source, re.S):
+            why = _owner_line(m.group(2), state.child(), depth + 1)
+            if why:
+                return why
+    return None
+
+
+def _peel_runner(tokens: list[str], state: _Owner) -> tuple[list[str], bool, bool]:
+    """(the command a line of words runs, whether more words may be appended
+    to it from input, whether it is one command *string*). Peels assignments,
+    `builtin`, `env` and everything in `_RUNNERS`, as far as they nest."""
+    tokens = [t for t in tokens]
+    while tokens and tokens[0] in ("(", "{", "!"):
+        tokens = tokens[1:]
+    if tokens and tokens[0].startswith("(") and len(tokens[0]) > 1:
+        tokens[0] = tokens[0][1:]
+    appends = joined = False
+    for _ in range(12):
+        while tokens and re.fullmatch(r"[A-Za-z_]\w*=.*", tokens[0]):
+            tokens = tokens[1:]
+        if tokens and tokens[0] == "builtin":
+            tokens = tokens[1:]
+            continue
+        if not tokens:
+            break
+        stem = rules._basename(tokens[0])
+        if stem == "env":
+            rest, k = tokens[1:], 0
+            split = None
+            while k < len(rest) and (rest[k].startswith("-") or "=" in rest[k]):
+                if rest[k] == "--":
+                    k += 1
+                    break
+                found = _env_split(rest, k)
+                if found is not None:
+                    split, k = found
+                    break
+                k += 2 if rest[k] in ("-C", "--chdir", "-u", "--unset") else 1
+            if split is not None:
+                try:
+                    words = shlex.split(split)
+                except ValueError:
+                    words = split.split()
+                tokens = ["env"] + words + rest[k:]
+                continue
+            tokens = rest[k:]
+            continue
+        runner = _RUNNERS.get(stem)
+        if runner is None:
+            break
+        rest = tokens[1:]
+        if runner.subcommand:
+            matched = next((sub for sub in runner.subcommand
+                            if rest[:len(sub.split())] == sub.split()), None)
+            if matched is None:
+                break
+            rest = rest[len(matched.split()):]
+        k, positionals = 0, runner.positionals
+        while k < len(rest):
+            token = rest[k]
+            if token == "--":
+                k += 1
+                break
+            if token.startswith("-") and len(token) > 1:
+                name = token.split("=", 1)[0]
+                k += 2 if (name in runner.values and "=" not in token) else 1
+                continue
+            if stem == "timeout" and re.fullmatch(r"[\d.]+[smhd]?", token) and positionals:
+                positionals -= 1
+                k += 1
+                continue
+            if positionals:
+                positionals -= 1
+                k += 1
+                continue
+            break
+        tokens = rest[k:]
+        if stem == "flock" and tokens and tokens[0] in ("-c", "--command"):
+            return tokens[1:2], False, True
+        appends = appends or runner.appends
+        if runner.joined:
+            return tokens, appends, True
+    return tokens, appends, joined
+
+
+def _owner_command(tokens: list[str], segment: str, state: _Owner, depth: int) -> str | None:
+    tokens, appends, joined = _peel_runner(tokens, state)
+    if not tokens:
+        return None
+    if joined:
+        return _owner_line(" ".join(tokens), state, depth + 1) if depth < _OWNER_DEPTH else None
+    stem = rules._basename(tokens[0])
+    if _is_launcher(tokens[0], state):
+        return _owner_path([_owner_word(t, state, environ=False) for t in tokens[1:]], appends)
+    if stem == "ln":
+        # `ln -s …/jarvis /tmp/jv && /tmp/jv hud install`: the link is a launcher.
+        operands = [t for t in tokens[1:] if not t.startswith("-")]
+        if len(operands) >= 2 and rules._basename(_owner_word(operands[0], state)) in _LAUNCHERS:
+            link = _owner_word(operands[-1], state)
+            state.launchers.add(link.rstrip("/"))
+        return None
+    if _PYTHON.fullmatch(stem):
+        kind, what, argv = _python_parse(tokens[1:])
+        if kind == "module":
+            if what in _CLI_MODULES:
+                return _owner_path([_owner_word(t, state, environ=False) for t in argv], appends)
+            if what in OWNER_OP_MODULES:
+                return OWNER_OPS[OWNER_OP_MODULES[what][0]]
+            return None
+        if kind == "script":
+            stem_of = rules._basename(what or "")
+            for module, (path, _) in OWNER_OP_MODULES.items():
+                if stem_of == module.rpartition(".")[2] + ".py":
+                    return OWNER_OPS[path]
+            return None
+        source = what if kind == "source" else ""
+        if kind == "stdin":
+            source = "\n".join(_here_strings(segment) + _take_bodies(segment, state))
+        return _source_invokes(source, state, depth)
+    if stem in _SHELLS and depth < _OWNER_DEPTH:
+        strings, stdin = _shell_strings(tokens)
+        if stdin:
+            strings = strings + _here_strings(segment) + _take_bodies(segment, state)
+        for text in strings:
+            why = _owner_line(text, state, depth + 1)
+            if why:
+                return why
+    return None
+
+
+def _take_bodies(segment: str, state: _Owner) -> list[str]:
+    """The here-document bodies this segment's `<<` redirections read, in order."""
+    count = sum(1 for r in rules.redirections(segment) if r.op in ("<<", "<<-"))
+    taken, state.bodies = state.bodies[:count], state.bodies[count:]
+    return taken
+
+
+def _split_heredocs(command: str) -> tuple[str, list[tuple[str, bool]]]:
+    """The command with every here-document body cut out, and the bodies in
+    order. A body is data to the command that reads it — `cat > notes.md
+    <<EOF` holding the words `jarvis hud install` runs nothing — and is judged
+    only where a shell or a Python reads it as its program."""
+    lines = command.split("\n")
+    kept: list[str] = []
+    bodies: list[tuple[str, bool]] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        kept.append(line)
+        i += 1
+        delimiters = []
+        for r in (rules.redirections(line) if "<<" in line else ()):
+            if r.op in ("<<", "<<-") and r.word:
+                word = r.word.replace("'", "").replace('"', "").replace("\\", "")
+                delimiters.append((word, r.op == "<<-", word == r.word))
+        for word, tabs, expands in delimiters:
+            body = []
+            while i < len(lines):
+                text = lines[i].lstrip("\t") if tabs else lines[i]
+                i += 1
+                if text == word:
+                    break
+                body.append(lines[i - 1])
+            bodies.append(("\n".join(body), expands))
+    return "\n".join(kept), bodies
+
+
+def _owner_line(command: str, state: _Owner, depth: int) -> str | None:
+    if depth:
+        if state.budget[0] < len(command):
+            return None
+        state.budget[0] -= len(command)
     command = _ansi_c(rules.join_continuations(command))
-    if depth < _INSTALL_DEPTH:
-        inner, _ = _substitutions(command, _MAX_SPANS)
-        if any(_install_line(text, _State(state.cwd, dict(state.variables)), depth + 1)
-               for text in inner):
-            return True
-    segments = rules.segments(command)
-    for segment in segments:
+    command, bodies = _split_heredocs(command)
+    state.bodies = [body for body, _ in bodies] + state.bodies
+    if depth < _OWNER_DEPTH:
+        # The line's own substitutions, and those in a here-document whose
+        # delimiter was not quoted — bash expands those bodies too.
+        inner = _owner_substitutions(command)
+        for body, expands in bodies:
+            if expands:
+                inner += _owner_substitutions(body.replace("'", " ").replace('"', " "))
+        for text in inner:
+            why = _owner_line(text, state.child(), depth + 1)
+            if why:
+                return why
+    for segment in rules.segments(command):
+        # The same cheap test per segment: one that cannot hold an op (and
+        # sets no variable, reads no here-document and names no launcher a
+        # later `ln` could alias) is not parsed — on a long line this is
+        # where the time goes.
+        if state.filtered and not (_could_be_owner_op(segment) or "<<" in segment or "jarvis" in segment
+                                   or "=" in segment or state.variables or state.launchers):
+            continue
         segment = _strip_comment(segment)
         words_only = rules.strip_redirections(segment)
         try:
@@ -1074,44 +1469,54 @@ def _install_line(command: str, state: _State, depth: int) -> bool:
         if words and all(re.fullmatch(r"[A-Za-z_]\w*=.*", w) for w in words):
             for word in words:
                 name, value = word.split("=", 1)
-                state.variables[name] = value
+                state.variables[name] = _owner_word(value, state)
             continue
-        tokens, _ = _peel(raw, state)
-        if not tokens:
-            continue
-        if _cli_install(tokens, state) or _python_install(tokens, segment):
-            return True
-        stem = rules._basename(tokens[0])
-        # A shell handed a string, or a shell behind a wrapper this module
-        # does not know (`flock L bash -lc …`): its string is a command line.
-        at = 0 if stem in _SHELLS else next(
-            (k for k, t in enumerate(tokens[1:], 1) if rules._basename(t) in _SHELLS), None)
-        if at is not None and depth < _INSTALL_DEPTH:
-            strings, stdin = _shell_strings(tokens[at:])
-            if stdin:
-                strings += _here_strings(segment)
-            if any(_install_line(text, _State(state.cwd, dict(state.variables)), depth + 1)
-                   for text in strings):
-                return True
-    # Source fed to an interpreter on stdin spreads over the here-document's
-    # lines, which `rules.segments` splits apart: judge the whole line once.
-    if any(_PYTHON.fullmatch(rules._basename(w)) for w in re.findall(r"[\w./-]+", command)):
-        if _INSTALL_SOURCE.search(command):
-            return True
-    return False
+        why = _owner_command(raw, segment, state, depth)
+        if why:
+            return why
+    return None
+
+
+def _could_be_owner_op(command: str) -> bool:
+    """A cheap test the full parse can never beat: can this line hold an
+    owner op at all? The full parse resolves quotes, backslashes,
+    continuations, ANSI-C `$'…'` text and the line's own `$VAR`s, but every
+    path it can find still spells an op's first word (`hud`) in the line's
+    text once quotes and backslashes are gone — or goes through `xargs`,
+    whose input may supply it. A line with neither is skipped, so a
+    pathological one (`$($($(…`) costs a substring search, not a parse.
+    `owner_op_check` in tests/v2/hud_install_check.py holds the two to
+    agreement over a corpus and every spelling."""
+    if "$'" in command:
+        return True
+    # Continuations first (bash drops `\<newline>` before anything), then
+    # every quote and backslash: `h"u"d`, `h\ud` and `hu\<newline>d` all
+    # read as `hud` to the shell, and so they do here.
+    flat = command.replace("\\\n", "")
+    for ch in ("'", '"', "\\"):
+        flat = flat.replace(ch, "")
+    if "xargs" in flat or any(path[0] in flat for path in OWNER_OPS):
+        return True
+    # A word the line assembles from its own variables (`x=h; jarvis ${x}ud
+    # install`) need not spell the op's word anywhere: such a line is parsed.
+    return "$" in flat and re.search(r"(?:^|[\s;&|(])[A-Za-z_]\w*=", flat) is not None
+
+
+def owner_op(command: str, *, prefilter: bool = True) -> str | None:
+    """Why this line runs an owner-only `jarvis` operation, or None — a
+    refusal, never an ask. `prefilter=False` turns both cheap tests off (the
+    line's and each segment's), for the test that holds them to the full
+    parse."""
+    if not command or not command.strip():
+        return None
+    if prefilter and not _could_be_owner_op(command):
+        return None
+    try:
+        return _owner_line(command, _Owner(filtered=prefilter), 0)
+    except RecursionError:
+        return None
 
 
 def installs_hud(command: str, cwd: str | Path | None = None) -> str | None:
-    """Why this line runs the HUD installer, or None — a refusal, never an ask."""
-    if not command or not command.strip():
-        return None
-    base = None
-    if cwd is not None:
-        base = Path(os.path.expanduser(str(cwd)))
-        if not base.is_absolute():
-            base = None
-    if not _install_line(command, _State(base), 0):
-        return None
-    return ("this runs `jarvis hud install`, which writes the installed HUD — the "
-            "code the approval window runs. Only the owner or the lead runs it, from "
-            "their own shell (decision C-1); Jarvis never does, asked or not")
+    """`owner_op`, under the name the first callers used."""
+    return owner_op(command)

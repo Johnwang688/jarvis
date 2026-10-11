@@ -135,8 +135,8 @@ def _read_regular(path: Path, cap: int) -> bytes:
 
 
 def _read_with_stat(path: Path, cap: int) -> tuple[bytes, os.stat_result]:
-    """`_read_regular`, with the fstat of the very descriptor read — so what
-    is cached as verified is the file whose bytes were hashed, never a file
+    """`_read_regular`, with the fstat of the very descriptor read — so the
+    size judged is that of the file whose bytes were hashed, never a file
     renamed into place between a read and a separate stat (review of PR #44,
     L3)."""
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0))
@@ -380,20 +380,31 @@ def newest(root) -> Build | None:
 
 
 def state(root) -> tuple[Build | None, str]:
-    """What `GET /` can serve: (the build, "installed"), or (None, why not) —
-    "not installed" (no build), "failed verification" (builds, none intact)
-    or "refused: …" (the install root itself is not acceptable)."""
+    """What `GET /` can serve: (the build, "installed"); (an older build,
+    "fallback") when a newer one was passed over because it failed
+    verification — never silently "installed" (review of PR #44 at 62db94f;
+    `passed_over` names it); or (None, why not) — "not installed" (no
+    build), "failed verification" (builds, none intact) or "refused: …"
+    (the install root itself is not acceptable)."""
     try:
         why = root_refusal(root)
         if why:
             return None, f"refused: {why}"
         built = newest(root)
         if built is not None:
-            return built, "installed"
+            return built, ("installed" if builds(root)[:1] == [built.id] else "fallback")
         return None, ("failed verification" if builds(root) else "not installed")
     except Exception:     # noqa: BLE001 — never why a request or a start fails
         LOG.warning("could not read the installed HUD in %s", root, exc_info=True)
         return None, "failed verification"
+
+
+def passed_over(root, served: Build | None) -> list[str]:
+    """The builds newer than the one served — each failed verification."""
+    names = builds(root)
+    if served is None:
+        return names
+    return names[:names.index(served.id)] if served.id in names else names
 
 
 def read(built: Build, rel: str) -> bytes | None:
@@ -443,28 +454,50 @@ def find(root, rel: str) -> bytes | None:
 # -- the CLI -------------------------------------------------------------------------
 
 
-def _git(*args: str) -> subprocess.CompletedProcess | None:
+def _git(*args: str) -> tuple[int, str] | None:
+    """git in the checkout, run the way `gitops` runs it (review of PR #44 at
+    62db94f): an absolute git, every inherited `GIT_*` dropped, the pager and
+    editors pinned, hooks and fsmonitor off, never a shell — `git status`
+    used to inherit the environment and the repository's own config, and a
+    repository's `core.fsmonitor` program ran. A checkout whose own config
+    names a program git would run (a filter, a textconv …) is not read at
+    all: None, as if git could not say."""
+    from jarvis import gitops
+    repo = Path(config.REPO_ROOT)
     try:
-        return subprocess.run(["git", "-C", str(config.REPO_ROOT), *args], capture_output=True,
-                              text=True, timeout=20, stdin=subprocess.DEVNULL)
-    except (OSError, subprocess.SubprocessError):
+        if gitops._risky_config(repo):
+            return None
+        code, stdout, _ = gitops._git(repo, list(args), timeout=60)
+    except Exception:     # noqa: BLE001 — no git means "cannot say"
         return None
+    return (code, stdout) if code != 127 else None
 
 
 def git_head() -> str | None:
     """The checkout's HEAD commit, or None when it cannot be read."""
     out = _git("rev-parse", "HEAD")
-    head = out.stdout.strip() if out is not None else ""
-    return head if out is not None and out.returncode == 0 and re.fullmatch(r"[0-9a-f]{40,64}", head) else None
+    head = out[1].strip() if out is not None else ""
+    return head if out is not None and out[0] == 0 and re.fullmatch(r"[0-9a-f]{40,64}", head) else None
 
 
 def hud_dirty() -> bool | None:
-    """Whether `hud/` has uncommitted changes (`git status --porcelain -- hud`),
-    or None when git cannot say."""
-    out = _git("status", "--porcelain", "--", "hud")
-    if out is None or out.returncode != 0:
+    """Whether `hud/` has uncommitted changes (`git status --porcelain -- hud`,
+    untracked files included), or None when git cannot say."""
+    out = _git("status", "--porcelain", "--untracked-files=normal", "--", "hud")
+    if out is None or out[0] != 0:
         return None
-    return bool(out.stdout.strip())
+    return bool(out[1].strip())
+
+
+def hud_changed_since(commit: str | None) -> bool | None:
+    """Whether `hud/` differs between `commit` and HEAD (`git diff --quiet
+    commit HEAD -- hud`); None when git cannot say (an unknown commit)."""
+    if not commit or not re.fullmatch(r"[0-9a-f]{40,64}", commit):
+        return None
+    out = _git("diff", "--quiet", "--no-ext-diff", "--no-textconv", commit, "HEAD", "--", "hud")
+    if out is None or out[0] not in (0, 1):
+        return None
+    return out[0] == 1
 
 
 NPM_BUILD_TIMEOUT = 15 * 60                # seconds; a type check and Vite take about one
@@ -496,6 +529,16 @@ def npm_build(timeout: float = NPM_BUILD_TIMEOUT) -> None:
         raise InstallRefused(f"`npm run build` failed (exit {result.returncode}); nothing was installed")
 
 
+def _clean_enough(dirty: bool | None, allow_dirty: bool) -> None:
+    if dirty is None and not allow_dirty:
+        raise InstallRefused("git cannot say whether hud/ has uncommitted changes (not a git "
+                             "checkout, or its own config names a program git would run); "
+                             "pass --allow-dirty to install anyway")
+    if dirty and not allow_dirty:
+        raise InstallRefused("hud/ has uncommitted changes (`git status -- hud`); commit or "
+                             "stash them, or pass --allow-dirty to install them anyway")
+
+
 def install_checkout(*, build=npm_build, allow_dirty: bool = False) -> Build:
     """Build the checkout's `hud/` and install it; raises `InstallRefused`.
 
@@ -511,15 +554,19 @@ def install_checkout(*, build=npm_build, allow_dirty: bool = False) -> Build:
     why = root_refusal(root)
     if why:
         raise InstallRefused(why)
-    dirty = hud_dirty()
-    if dirty is None and not allow_dirty:
-        raise InstallRefused("git cannot say whether hud/ has uncommitted changes; "
-                             "run from a git checkout, or pass --allow-dirty")
-    if dirty and not allow_dirty:
-        raise InstallRefused("hud/ has uncommitted changes (`git status -- hud`); commit or "
-                             "stash them, or pass --allow-dirty to install them anyway")
+    head, dirty = git_head(), hud_dirty()
+    _clean_enough(dirty, allow_dirty)
     build()
-    return install(config.HUD_BUILD, root, note={"git_head": git_head(), "dirty": dirty})
+    # Looked at again once the build is done: an edit that landed while
+    # it ran, or a checkout that moved, is never recorded as the clean
+    # commit it was not (review of PR #44 at 62db94f).
+    after_head, after = git_head(), hud_dirty()
+    _clean_enough(after, allow_dirty)
+    if after_head != head and not allow_dirty:
+        raise InstallRefused(f"the checkout moved while it built ({head} → {after_head}); "
+                             "nothing was installed — run it again")
+    dirty = True if (dirty or after) else (None if dirty is None or after is None else False)
+    return install(config.HUD_BUILD, root, note={"git_head": after_head, "dirty": dirty})
 
 
 def describe(installed: Build) -> str:

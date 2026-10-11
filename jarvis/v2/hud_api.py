@@ -927,16 +927,23 @@ _FAILED = _hud_page("The installed HUD failed verification: no installed build s
 def hud_served() -> dict:
     """What `GET /` serves (review of PR #44, L1/L6), for `/status` and the
     daemon's start-up log: `build` (the id, "dev" under JARVIS_HUD_DEV=1, or
-    None), `git_head` and `dirty` from that build's manifest, and `state` —
-    "installed", "dev", "not installed", "failed verification" or
-    "refused: …". Never raises."""
+    None), `git_head` and `dirty` from that build's manifest, `state` —
+    "installed", "fallback" (a newer build failed verification and an older
+    one is served), "dev", "not installed", "failed verification" or
+    "refused: …" — and `passed_over`, the newer builds that failed. Never
+    raises."""
     from . import hud_install
     if config.HUD_DEV:
-        return {"build": "dev", "git_head": None, "dirty": None, "state": "dev"}
+        return {"build": "dev", "git_head": None, "dirty": None, "state": "dev", "passed_over": []}
     built, state = hud_install.state(config.HUD_DIST)
+    try:
+        skipped = hud_install.passed_over(config.HUD_DIST, built) if state != "not installed" else []
+    except Exception:     # noqa: BLE001
+        skipped = []
     if built is None:
-        return {"build": None, "git_head": None, "dirty": None, "state": state}
-    return {"build": built.id, "git_head": built.git_head, "dirty": built.dirty, "state": state}
+        return {"build": None, "git_head": None, "dirty": None, "state": state, "passed_over": skipped}
+    return {"build": built.id, "git_head": built.git_head, "dirty": built.dirty, "state": state,
+            "passed_over": skipped}
 
 
 def hud_build_id() -> str | None:
