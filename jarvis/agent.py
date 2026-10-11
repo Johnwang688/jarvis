@@ -224,6 +224,16 @@ class Agent:
         # compaction threshold is judged against, so the threshold means what
         # it says. Per-agent, because it describes one transcript.
         self.meter = context.TokenMeter()
+        # The shared base prompt names tools, and this agent is told only about
+        # the ones it holds — invariant 7's "never describe a tool the model
+        # cannot call", which since dispatch enforces the toolset is also a
+        # refused step saved. Any prompt built on SYSTEM_PROMPT (a surface's
+        # own suffix after it) is narrowed here, so no surface needs code of
+        # its own; see config.PROMPT_TOOL_PARAGRAPHS. Judged on the toolset the
+        # agent starts with: a group loaded later only adds tools.
+        if system.startswith(config.SYSTEM_PROMPT):
+            held = {spec["function"]["name"] for spec in self.tool_specs}
+            system = config.system_prompt(held) + system[len(config.SYSTEM_PROMPT):]
         self._base_system = system
         # How many sub-agents deep this one is; bound into runtime so a child
         # can refuse to spawn past MAX_DEPTH.
