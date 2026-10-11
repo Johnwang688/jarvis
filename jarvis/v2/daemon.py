@@ -1727,6 +1727,13 @@ def _handler(daemon):
                 _object(query, ())
                 return 200, [r.to_json() for r in daemon.approvals.pending()]
             if method == "POST" and len(parts) == 2 and parts[0] == "approvals":
+                # Owner-only (BR-0): the HUD's listener and the HUD's Origin.
+                # The API listener serves the same HUD page, so a page loaded
+                # there passed `check_origin` (its Origin equals its Host) and
+                # could approve — v1's agent browser could load it. Discord
+                # and the escape hatch resolve in-process and never come here.
+                from .projects import owner_only
+                owner_only(self, daemon)
                 body = _object(self._body(), ("decision", "always"), ("decision",))
                 always = body.get("always", False)
                 if not isinstance(always, bool):

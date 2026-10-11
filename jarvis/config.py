@@ -17,9 +17,11 @@ OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
 # that the browser and web tools can refuse to touch it without importing the
 # face (which would drag Playwright and the agent into every import).
 FACE_PORT = int(os.environ.get("JARVIS_FACE_PORT", "8402"))
-# The headless daemon's health/status endpoint (`jarvis daemon`). Read-only —
-# it exists as the single-instance lock and so the face can tell that another
-# process already owns the Discord gateway.
+# The headless daemon's port. v1's `jarvis daemon` serves a read-only
+# health/status endpoint here (the single-instance lock, and how the face can
+# tell that another process already owns the Discord gateway). v2's daemon
+# (`jarvis daemon2`) serves its whole API here, the HUD page included — which
+# is why `control_ports()` lists it beside the face.
 DAEMON_PORT = int(os.environ.get("JARVIS_DAEMON_PORT", "8405"))
 
 # How many model calls one user message may spend before the loop stops. This
@@ -67,23 +69,83 @@ def is_loopback(host: str) -> bool:
     )
 
 
-def is_face_origin(url: str) -> bool:
-    """True if `url` points at the face's own server.
+# Jarvis's own listeners at their default ports: 8402 the face and v2's HUD,
+# 8404 the desktop bridge's listener, 8405 the daemon (v2's API, which serves
+# the HUD page too), 8406 the Spotify consent callback. 8403, the workshop, is
+# deliberately absent: v1's designer browses its own work there, and nothing
+# on it can approve or change anything.
+DEFAULT_CONTROL_PORTS = frozenset({8402, 8404, 8405, 8406})
 
-    Tools refuse these. The face carries the approval gate for dangerous
-    tools, and an agent that can drive its own HUD can click its own approval
-    button — so the one window Jarvis must not be able to reach is his own.
+
+def control_ports() -> frozenset[int]:
+    """Every loopback port that belongs to Jarvis's own control plane.
+
+    The one Python definition (v1's browser and `fetch_page` refuse these
+    through `is_face_origin`; v2's Browser gate reuses it). The configured
+    port of each listener *and* its default: a listener moved by an
+    environment variable in this process may still be running at its default
+    in another one (the v2 daemon under systemd, a face started from another
+    shell), and this process cannot see that. Read at call time, so a test
+    that repoints a port is covered.
+    """
+    return DEFAULT_CONTROL_PORTS | {FACE_PORT, DESKTOP_PORT, DAEMON_PORT, SPOTIFY_AUTH_PORT}
+
+
+def _names_this_machine(host: str) -> bool:
+    """`is_loopback`, plus spellings a browser still resolves to this machine:
+    a trailing dot (`localhost.`), an IPv4 literal in a short, hex, octal or
+    integer form (`127.1`, `0x7f000001`, `2130706433`), an IPv4-mapped IPv6
+    address, the expanded `::1`, and the unspecified `0.0.0.0`/`::`, which
+    Linux connects to locally. No DNS: a *name* that resolves to loopback is
+    `is_lan_host`'s to refuse, and it does."""
+    import ipaddress
+    import socket
+
+    host = (host or "").lower().strip("[]").rstrip(".")
+    if is_loopback(host):
+        return True
+    try:
+        addr = ipaddress.ip_address(host)
+    except ValueError:
+        try:
+            addr = ipaddress.ip_address(socket.inet_aton(host))
+        except (OSError, ValueError):
+            return False
+    mapped = getattr(addr, "ipv4_mapped", None)
+    if mapped is not None:
+        addr = mapped
+    return addr.is_loopback or addr.is_unspecified
+
+
+def is_face_origin(url: str) -> bool:
+    """True if `url` points at one of Jarvis's own control-plane listeners.
+
+    Tools refuse these (v1's browser, including where a page lands after a
+    redirect, and `fetch_page`, before the request and after redirects). The
+    face and v2's HUD carry the approval gate for dangerous tools, and v2's
+    API listener serves the very same HUD page — an agent that can drive its
+    own HUD can click its own approval button, so the windows Jarvis must not
+    be able to reach are his own. The name is older than the check: it
+    covers every port in `control_ports()`, not only the face's.
+
+    What it covers: a loopback host in every spelling `_names_this_machine`
+    knows (`*.localhost` included), on a control port — the URL's own port,
+    or 80/443 by scheme when it has none. What it does not: a public name
+    that resolves to loopback (`is_lan_host` refuses those, on every port),
+    a v2 daemon started on ports this process's configuration does not know
+    of, and a redirect hop `fetch_page` follows before checking where it
+    landed (a GET, which on no control-plane route approves anything).
     """
     from urllib.parse import urlparse
 
     try:
         parsed = urlparse(url)
-        if not is_loopback(parsed.hostname or ""):
+        if not _names_this_machine(parsed.hostname or ""):
             return False
         port = parsed.port
     except ValueError:
         return True  # local host, unparseable port — refuse rather than guess
-    return (port or (443 if parsed.scheme == "https" else 80)) == FACE_PORT
+    return (port or (443 if parsed.scheme == "https" else 80)) in control_ports()
 
 
 def is_lan_host(host: str) -> bool:
