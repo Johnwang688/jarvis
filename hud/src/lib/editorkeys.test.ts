@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { CHORD_MS, chordStep, isSaveKey, type ChordState, type KeyLike } from "./editorkeys";
+import { CHORD_MS, chordSecond, chordStep, isSaveKey, resetChord, type ChordState, type KeyLike } from "./editorkeys";
 import { inMonaco } from "./layout";
 
 const key = (k: string, over: Partial<KeyLike> = {}): KeyLike => ({
@@ -110,5 +110,28 @@ describe("keys going into Monaco", () => {
     for (const id of ["tree", "box"]) expect(inMonaco(root.querySelector(`#${id}`))).toBe(false);
     expect(inMonaco(null)).toBe(false);
     root.remove();
+  });
+});
+
+describe("one chord tracker for the window (PR #40 on ED-1)", () => {
+  const ev = (key: string, t: number, over: Partial<KeyLike> = {}) =>
+    ({ key, ctrlKey: true, altKey: false, shiftKey: false, repeat: false, isComposing: false, timeStamp: t, ...over });
+
+  it("steps a keydown once, whichever listener asks first, and both get the same answer", () => {
+    resetChord();
+    const k = ev("k", 1000);
+    expect(chordSecond(k, true)).toBe(false);
+    expect(chordSecond(k, true)).toBe(false);          // the second listener: the same event, not a second step
+    const d = ev("d", 1500);
+    expect(chordSecond(d, true)).toBe(true);           // Ctrl+K then Ctrl+D in an editor: Monaco's
+    expect(chordSecond(d, true)).toBe(true);
+    expect(chordSecond(ev("d", 1600), true)).toBe(false);
+  });
+
+  it("a blur ends a pending chord", () => {
+    resetChord();
+    expect(chordSecond(ev("k", 1000), true)).toBe(false);
+    resetChord();
+    expect(chordSecond(ev("d", 1100), true)).toBe(false);
   });
 });

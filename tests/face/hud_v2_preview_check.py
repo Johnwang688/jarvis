@@ -42,7 +42,7 @@ if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
 from tests.face.hud_v2_layout_check import (  # noqa: E402
-    _approval, _boot, _pane, _set_storage, _set_ws, _visible, _ws,
+    _active_testid, _approval, _boot, _pane, _set_storage, _set_ws, _visible, _ws,
 )
 
 OFF = "allow-scripts allow-forms"
@@ -226,6 +226,23 @@ def _keep_checks(page, mock, check, until):
     page.locator(KEEP).uncheck()
     until(lambda: _sandbox(page) == OFF, timeout=3)
     check("unchecked, it is off and forgotten", _sandbox(page) == OFF and _stored(page) is None)
+
+    # Review of PR #40: Space is no longer swallowed for push-to-talk, and a
+    # grant the owner just clicked must not sit under a habitual one (Space on
+    # a focused checkbox flips it). Focus starts nowhere.
+    page.evaluate("document.activeElement && document.activeElement.blur()")
+    page.locator(KEEP).check()
+    until(lambda: _sandbox(page) == ON, timeout=3)
+    focused = _active_testid(page)
+    page.keyboard.down("Space")
+    page.wait_for_timeout(100)
+    page.keyboard.up("Space")
+    page.wait_for_timeout(300)
+    check("review #40: a click leaves no focus on 'Keep its origin', so a Space after it flips nothing",
+          focused != "preview-keep-origin" and _keep_checked(page) and _sandbox(page) == ON,
+          f"focus={focused} checked={_keep_checked(page)} sandbox={_sandbox(page)}")
+    page.locator(KEEP).uncheck()
+    until(lambda: _sandbox(page) == OFF, timeout=3)
 
 
 def _stored_checks(page, mock, check, until):

@@ -77,7 +77,7 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from tests.face.hud_v2_layout_check import (  # noqa: E402
-    _active_testid, _approval, _attr, _choose, _edit, _pane, _visible,
+    _active_testid, _approval, _attr, _choose, _edit, _hold_keys, _pane, _visible,
 )
 
 # Both chat panes; files and the task behind them.
@@ -528,12 +528,11 @@ def _voice_checks(page, mock, check, until):
     time.sleep(1.0)
     check("while the selected chat's own turn runs, the mic is suppressed", len(mock.sent("POST", "/stt")) == stt)
 
-    # The orb's press interrupts the selected chat's turn, never another pane's.
+    # The orb's press interrupts the selected chat's turn, never another pane's
+    # (push-to-talk, Ctrl+D since 2026-10-10, is the orb's press).
     i1, i2 = len(mock.sent("POST", "/threads/t1/interrupt")), len(mock.sent("POST", "/threads/t2/interrupt"))
     page.evaluate("document.activeElement && document.activeElement.blur()")
-    page.keyboard.down("Space")
-    time.sleep(0.1)
-    page.keyboard.up("Space")
+    _hold_keys(page, ["Control", "d"], hold=0.1)
     until(lambda: len(mock.sent("POST", "/threads/t2/interrupt")) > i2, timeout=3)
     time.sleep(0.2)
     check("push-to-talk interrupts the selected chat's turn", len(mock.sent("POST", "/threads/t2/interrupt")) == i2 + 1)
@@ -783,6 +782,9 @@ def _card_focus_checks(page, mock, check, until):
     check("so Enter and Space behind the card press nothing",
           _chat(page, 1)["threadId"] == threads_before and page.locator('[data-testid="approval-card"]').count() == 1
           and page.evaluate("window.__hud.capture.ptt") is None)
+    held, _ = _hold_keys(page, ["Control", "d"], hold=0.1)
+    check("and push-to-talk's Ctrl+D behind the card starts nothing",
+          held is None and page.locator('[data-testid="approval-card"]').count() == 1, str(held))
     page.keyboard.press("Escape")
     body = until(lambda: mock.sent("POST", "/approvals/sbfocus1") or None, timeout=4)
     check("and Escape reaches the card and denies", bool(body) and body[-1].get("decision") == "deny")
@@ -1323,9 +1325,7 @@ def _w6_one_and_none_checks(page, mock, check, until):
     check("setup: no chat pane on screen", _sel(page) is None)
     stt, calls = len(mock.sent("POST", "/stt")), len(mock.calls)
     page.evaluate("document.activeElement && document.activeElement.blur()")
-    page.keyboard.down("Space")
-    time.sleep(0.15)
-    page.keyboard.up("Space")
+    _hold_keys(page, ["Control", "d"])
     err = page.evaluate("window.__hud.state().error") or ""
     check("W-6: with no chat on screen, push-to-talk is refused and says why",
           "No chat is open" in err and page.evaluate("window.__hud.capture.ptt") is None, err)
@@ -1525,9 +1525,7 @@ def _rr_placeholder_stop_checks(page, mock, check, until):
         tracked = _chat(page, 1)["turnThreadId"]
         n0 = len(mock.calls)
         page.evaluate("document.activeElement && document.activeElement.blur()")
-        page.keyboard.down("Space")
-        time.sleep(0.1)
-        page.keyboard.up("Space")
+        _hold_keys(page, ["Control", "d"], hold=0.1)
         stop = page.locator(_pane(1, '[data-testid="stop"]'))
         if stop.count():
             stop.click()

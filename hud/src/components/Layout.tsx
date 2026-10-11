@@ -29,7 +29,7 @@ import {
   type DrawnSet, type PaneNo, type Preset, type Split, type View, type Workspace, type WorkspaceFit,
 } from "../lib/workspace";
 import { inTerminal, terminalTakesKey } from "../lib/terminal";
-import { chordStep, isSaveKey, type ChordState } from "../lib/editorkeys";
+import { chordSecond, isSaveKey, resetChord } from "../lib/editorkeys";
 import { terminals, usePanelDot } from "./Terminal";
 
 export interface LayoutControl {
@@ -231,11 +231,11 @@ export function useLayout(blocked = false): LayoutControl {
     setPreferPanel(false);
   }, []);
 
-  // **The one place the HUD's keys are taken.** Capture phase on the window:
-  // the input bar stops its keys from bubbling (so Space typed there is not
-  // push-to-talk), and these keys must work from the box the owner's cursor
-  // usually sits in. The zoom keys are the HUD's everywhere, Monaco and the
-  // input bar included — letting one through is Chrome's page zoom, which
+  // **The one place the HUD's layout keys are taken** (push-to-talk's Ctrl+D
+  // is App's, the same way, and shares the chord tracker below). Capture
+  // phase on the window: the input bar stops its keys from bubbling, and
+  // these keys must work from the box the owner's cursor usually sits in.
+  // The zoom keys are the HUD's everywhere, Monaco and the input bar included — letting one through is Chrome's page zoom, which
   // this control cannot see and the browser remembers per site. Ctrl+B folds
   // the sidebar from Monaco too (decisions E-10), ignores auto-repeat
   // (holding it would flap the pane), and nothing fires mid-composition.
@@ -245,16 +245,15 @@ export function useLayout(blocked = false): LayoutControl {
   // is Monaco's, whatever HUD key it is — Ctrl+K Ctrl+B sets the selection
   // anchor, Ctrl+K Ctrl+0 folds all — and is still kept from Chrome. Every
   // keydown feeds the tracker (lib/editorkeys.ts), so a lone Ctrl+B is told
-  // apart from a chord's.
+  // apart from a chord's. The tracker is the window's, shared with
+  // push-to-talk, which leaves a chord's Ctrl+D to Monaco the same way.
   //
   // Ctrl+S: Chrome's "Save page as" never opens. In an editor that editor's
   // own Ctrl+S action saves its buffer (components/Editor.tsx); in a terminal
   // it is the shell's (XOFF, readline's forward search).
-  const chord = useRef<ChordState>(null);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      const step = chordStep(chord.current, e, inMonaco(e.target), e.timeStamp);
-      chord.current = step.state;
+      const step = { second: chordSecond(e, inMonaco(e.target)) };
       if (e.isComposing) return;
       const what = shortcutFor(e);
       const save = isSaveKey(e);
@@ -307,7 +306,7 @@ export function useLayout(blocked = false): LayoutControl {
     // so does the tracker.
     const onBlur = () => {
       setTimeout(() => {
-        if (!document.hasFocus()) chord.current = null;
+        if (!document.hasFocus()) resetChord();
       }, 0);
     };
     window.addEventListener("keydown", onKey, true);
@@ -331,8 +330,8 @@ export function useLayout(blocked = false): LayoutControl {
  * A draggable edge, on either axis: a 7px hit area over a 1px rule (it takes
  * no room), a resize cursor, and the accent line on hover, focus and while
  * dragging. Keyboard: the caller's `onKey` (arrows, Shift for a bigger step,
- * Home and End); a double-click resets. Space on a focused separator is not
- * push-to-talk. `orientation` is ARIA's: a "vertical" separator stands
+ * Home and End); a double-click resets. Space on a focused separator does
+ * nothing. `orientation` is ARIA's: a "vertical" separator stands
  * between left and right and moves along x.
  */
 export function Separator(props: {
@@ -413,15 +412,10 @@ export function Separator(props: {
       onDoubleClick={() => {
         if (!props.blocked) props.onReset();
       }}
-      // Space on a focused separator is not push-to-talk (the document-level
-      // handler would otherwise hear it), and does nothing here either.
-      onKeyUp={(e) => {
-        if (e.code === "Space" || e.key === " ") e.stopPropagation();
-      }}
+      // Space on a focused separator does nothing (no scroll behind it).
       onKeyDown={(e) => {
         if (e.code === "Space" || e.key === " ") {
           e.preventDefault();
-          e.stopPropagation();
           return;
         }
         if (props.blocked) return;
@@ -684,7 +678,7 @@ function menuAt(el: HTMLElement, zoom: number): MenuAt {
 /**
  * A small menu: closed by Escape (focus back to its opener) and by a press
  * anywhere else; the arrow keys move between its items (`data-mi`), and Space
- * inside it never reaches push-to-talk.
+ * on one presses it.
  */
 function MenuShell(props: {
   at: MenuAt;
@@ -762,18 +756,11 @@ function MenuShell(props: {
       style={{ right: props.at.right, top: props.at.top }}
       onMouseDown={(e) => e.stopPropagation()}
       onKeyDown={(e) => {
-        if (e.code === "Space" || e.key === " ") {
-          e.stopPropagation();
-          return;
-        }
         if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End"].includes(e.key)) {
           e.preventDefault();
           e.stopPropagation();
           move(e);
         }
-      }}
-      onKeyUp={(e) => {
-        if (e.code === "Space" || e.key === " ") e.stopPropagation();
       }}
     >
       {props.children}
