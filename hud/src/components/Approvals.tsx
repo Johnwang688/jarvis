@@ -167,12 +167,25 @@ export function ApprovalVeil(props: {
     if (behindTheCard(was, card)) restore.current = was;
     card?.focus({ preventScroll: true });
     const made: Element[] = [];
-    for (const el of Array.from(veil?.parentElement?.children ?? [])) {
-      if (el === veil || el.hasAttribute("inert")) continue;
+    const hold = (el: Element) => {
+      if (el === veil || el.hasAttribute("inert")) return;
       el.setAttribute("inert", "");
       made.push(el);
-    }
+    };
+    const parent = veil?.parentElement ?? null;
+    for (const el of Array.from(parent?.children ?? [])) hold(el);
+    // And whatever appears beside the card while it is up: the Reload prompt
+    // a render error draws in place of the window (components/Boundary.tsx)
+    // came after this pass and stayed reachable behind the card (review of
+    // PR #32). Its records arrive as a microtask, before the next event.
+    const watch = new MutationObserver((records) => {
+      for (const r of records) {
+        for (const n of Array.from(r.addedNodes)) if (n instanceof Element) hold(n);
+      }
+    });
+    if (parent) watch.observe(parent, { childList: true });
     return () => {
+      watch.disconnect();
       for (const el of made) el.removeAttribute("inert");
       const back = restore.current;
       restore.current = null;
