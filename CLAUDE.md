@@ -741,9 +741,26 @@ sees). Panel: a tab per terminal, `+` (the focused pane's folder **as an
 id**, `terminalSpecFor`; since WP-B a focused chat pane gives its *own*
 conversation, and any other pane defers to `activeChat` — the selected chat,
 else the one selected last — the chat File and Preview panes already follow,
-not W-6's input rule, which is about where words go), `▾` (Home or a project), × per tab; **Ctrl+` opens
-a terminal when there is none, ⬓ never does**; a dot on ⬓ means one in the
-hidden panel exited. In a terminal **Ctrl+B, Ctrl+Alt+B and Ctrl+_ are the
+not W-6's input rule, which is about where words go), `▾` (Home or a project), × per tab; **every
+way the owner opens the panel — Ctrl+`, ⬓, the layout menu's Panel row —
+opens a terminal when there is none, and a pane the owner switches to the
+terminal view opens one there** (the owner's request, 2026-10-11: "when I
+open the terminal pane it needs to auto open a terminal instead of having me
+press another button"; WP-D had it on Ctrl+` only, ⬓ never). One path,
+`LayoutControl.ownerTogglePanel` → `TermManager.ownerOpened(where, still)`;
+`togglePanel` stays the plain flip a stored layout, a reload and
+`showPanel` use, and opens nothing. Only on that gesture — never a load, a
+restored open panel, a reload or a reattach; never under a card (every
+opener is disabled, and a card that arrives while the listing is on its way
+drops it); only on a listing asked for then that came back (never on
+`listError`); never when any terminal is listed, another window's or an
+exited one included; never if a terminal was opened meanwhile or the pane
+was switched away; one at a time (a double-click opens one); a refusal is
+said in the panel, as `+` says it. While it is on its way the panel and the
+pane say "Opening a terminal…" instead of offering a second button. With
+terminals open, a pane switched to the terminal view keeps its picker, "+ New
+terminal here" first. It needed the owner-only read fix above to work on the
+real daemon at all. A dot on ⬓ means one in the hidden panel exited. In a terminal **Ctrl+B, Ctrl+Alt+B and Ctrl+_ are the
 shell's** (`terminalTakesKey`), the zoom keys, Ctrl+` and Ctrl+Alt+N stay the
 HUD's, and every key stops at the terminal (Space is never push-to-talk).
 **Under a card nothing reaches the shell**: `disableStdin`, a key filter
