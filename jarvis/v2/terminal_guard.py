@@ -50,6 +50,14 @@ dev server) loads one, `wc -l < .env` counts one, and `docker inspect
 stays readable for as long as it runs. An interpreter prints a credential
 when it is handed inline source on a line naming one, inline source reading
 the environment (`node -p process.env`), or a credential file as its script.
+Node and bun take a cluster's source from the next argument (`node -pe
+process.env` is `-p -e process.env`); an interpreter that names no program
+reads one from standard input, so a here-string, a piped `echo`/`printf` or
+a here-document's body is its inline source; and a REPL's or a
+here-document's input line (`>>> `, `> `, `... `) that reads the
+environment refuses the read (2026-10-11 delta review). The loading idioms
+`env $(cat .env | xargs) …` and `export $(grep -v '^#' .env | xargs)` stay
+refused, an accepted cost: their error messages can echo part of a value.
 
 **Everything here is linear in what it reads** (2026-10-10 review): a read
 renders at most a ring (1 MiB) at the terminal's width, checks at most
@@ -75,7 +83,9 @@ judges command lines by shape, so it cannot see through an alias, a shell
 function, a script, a symlink or a program that prints a secret on its own
 initiative: their output meets rules 1 and 2 and the heuristic only — and
 so does a script handed a credential file as an argument (`python3 show.py
-.env`): only an interpreter's own inline source or script counts. The
+.env`): only an interpreter's own inline source or script counts — and a
+program piped in from anything but a literal `echo`/`printf` (`cat x.py |
+python3`, `curl … | python3`) is not judged. The
 owner's "Jarvis can read" switch and the HUD note on every read are the
 backstops.
 """

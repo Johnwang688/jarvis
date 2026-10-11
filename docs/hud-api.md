@@ -1186,5 +1186,8 @@ Decisions W-2 in `docs/plans/2026-10-09-hud-workspace-decisions.md`.
 - **The limit**: a secret with no recognisable shape and no keyword beside it
   is not caught, nor is one an alias, a shell function, a script or a symlink
   prints, nor one a script prints from a credential file it was handed as an
-  argument (rule 3 reads command lines by shape). The "Jarvis can read"
+  argument, nor a program piped in from anything but a literal
+  `echo`/`printf` (rule 3 reads command lines by shape). The loading idioms
+  `env $(cat .env | xargs) …` and `export $(grep -v '^#' .env | xargs)` stay
+  refused: their error messages can echo part of a value. The "Jarvis can read"
   switch and the note are the backstops.

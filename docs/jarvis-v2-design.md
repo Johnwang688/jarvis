@@ -2167,8 +2167,14 @@ at most a 128 KiB budget of commands it has not judged before and is refused
 past it (an adversarial screen took 18.6 s and 85.7 s). **The limit**: a
 secret with no recognisable shape and no keyword beside it, or one printed in
 pieces or encoded otherwise, is not caught, and rule 3 cannot see through an
-alias, a shell function, a script, a symlink, or a script handed a credential
-file as an argument; the switch and the note are the backstops.
+alias, a shell function, a script, a symlink, a script handed a credential
+file as an argument, or a program piped in from anything but a literal
+`echo`/`printf`; the switch and the note are the backstops. The delta review
+(same day) made node's and bun's `-pe` take the next argument as its source
+(eb718b5 read `node -pe process.env`, and `node --env-file=.env -pe
+process.env`, refused at 3393daf), judged source fed on standard input and
+REPL input lines, and kept the `env $(cat .env | xargs)` loading idioms
+refused as an accepted cost.
 
 **Preview and dev servers (2026-10-10, WP-E; decisions W-4).** **No HUD or
 API response may be framed**: every response on 8402 and 8405 — the page,

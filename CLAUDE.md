@@ -843,7 +843,19 @@ its log used to be refused for as long as it ran), `wc`/the checksums count
 one, and an interpreter prints only given inline source on a line naming a
 credential file, inline source reading the environment (`node -p
 process.env`, `os.environ`, a secret-named variable), or a credential file
-as its script. Two halves: a real span overlapping the read (or one that
+as its script. **Node and bun take a cluster's source from the next
+argument** (delta review, 2026-10-11): `-pe` read as `-p` with a glued "e"
+took the real source for a script, so `node -pe process.env` read — and
+`node --env-file=.env -pe process.env`, refused at 3393daf, read at eb718b5.
+An interpreter that names no program reads one from standard input, so a
+here-string, a piped `echo`/`printf` and a here-document's body are its
+inline source (rules.py's reading of `… | python3`, through the guard's own
+parse); a REPL's or here-document's input line at a line's start (`>>> `,
+`> `, `... `) that reads the environment refuses the read; a word prompt may
+carry git-status marks (`main*`, `main±`). **Accepted costs**: the loading
+idioms `env $(cat .env | xargs) npm run dev` and `export $(grep -v '^#' .env
+| xargs)` stay refused — `export`/`env` echo a word they cannot use in their
+error message, so part of a value can reach the terminal. Two halves: a real span overlapping the read (or one that
 backgrounds a printer), **and always the text** — any screen or `ink` line
 in the read or the `LOOKBACK` (32 KiB) before it that shows such a command
 at its start, after a prompt glyph or after a prompt made of words (`[proj]
@@ -895,7 +907,9 @@ shape and no keyword beside it, or one printed in pieces or otherwise
 encoded, is not caught; rule 3 judges command lines by shape, so an alias, a
 shell function, a script or a symlink that prints a secret is invisible to it
 (its output still meets rules 1 and 2 and the heuristic), and so is a script
-handed a credential file as an argument (`python3 show.py .env`); a minified
+handed a credential file as an argument (`python3 show.py .env`) and a
+program piped in from anything but a literal `echo`/`printf` (`cat x.py |
+python3`); a minified
 line past `SCAN_LINE_CAP` that holds a bare `process.env` or `.env` is
 refused (the fail-closed side of the bound); the switch and the note are the
 backstops. Free suites:
@@ -939,7 +953,11 @@ no `CANDIDATE_CAP`, no `COMMAND_CUT`, `Terminals.read` dropping the lead,
 ones re-anchored (no text fallback, input redirections, shell keywords,
 substitutions, `find -exec`). The survivor: dropping only the
 `line[:SCAN_LINE_CAP]` slice, which now costs at most ~0.5 s a read and
-nothing else (what lies past the scan is the fail-closed check's).
+nothing else (what lies past the scan is the fail-closed check's). The delta
+review's (`DeltaReview`, 4 of its 5 tests failing on eb718b5): 7 of 7 bite —
+`-pe` reading a glued source, an option taken as the source, stdin never
+read as source, a piped echo not followed, a here-document body not read,
+REPL input not read, no git marks in a word prompt.
 
 **Preview and dev servers, WP-E (2026-10-10; plan
 `docs/plans/2026-10-09-hud-workspace-plan.md` §2.5, decisions W-4; design
