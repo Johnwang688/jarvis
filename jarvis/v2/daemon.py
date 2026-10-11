@@ -189,6 +189,12 @@ class _Session:
     # provider's hands when Stop landed is judged by the turn it was aimed at,
     # even after a later turn has started (Bugbot on PR #22).
     stopped_turns: deque = field(default_factory=lambda: deque(maxlen=8))
+    # The §6 permit this session's provider was handed: the jarvis-mcp bridge
+    # asks it about a dangerous Jarvis tool (`dangerous_tool=True`).
+    permit: Callable | None = None
+    # The digest of this session's jarvis-mcp caller token, while one is live
+    # (`callers.CallerTokens`); never the token itself.
+    caller_key: str | None = None
 
 
 class Daemon:
@@ -252,6 +258,12 @@ class Daemon:
         # lifecycle record, `terminal_attached` (an id and a time), never output.
         from .terminals import Terminals
         self.terminals = Terminals(publish=self.bus.publish)
+        # Per-session jarvis-mcp caller tokens (callers.py, plan 2026-10-10
+        # §1): minted in `_run_brief` for an owner's Claude or Codex chat that
+        # is offered session tools, held only as digests, revoked whenever
+        # the session ends. Memory only: a restart forgets every one.
+        from .callers import CallerTokens
+        self.callers = CallerTokens()
         self.started_at = time.monotonic()
 
     def start(self) -> None:
@@ -280,6 +292,12 @@ class Daemon:
                 raise DaemonError("HUD or preview port is already in use") from exc
             self._server = server
             self.port, self.face_port, self.workshop_port = [s.server_address[1] for s in servers]
+            # Only now, holding all three ports (the bind is the
+            # single-instance lock) and before anything is served: a second
+            # daemon started by hand on the live data folder fails the bind
+            # above and never reaches this, so it cannot delete the live
+            # daemon's carriers (PR #35 review).
+            self._sweep_carriers()
             self.started_at = time.monotonic()
             for listener in servers:
                 listener.daemon_threads = True
@@ -291,6 +309,19 @@ class Daemon:
             from .hud_api import connect_controls
             connect_controls(self)
             self.schedules.start()
+
+    def _sweep_carriers(self) -> None:
+        """Before anything is served: remove jarvis-mcp token carriers a crash
+        left behind (plan §1.3) — their tokens died with that process. Only
+        under the data folder this daemon owns: a test or embedded daemon on a
+        folder of its own never touches the owner's live one."""
+        from .callers import sweep_carriers
+        try:
+            owned = Path(self.stores.root).resolve() == Path(config.V2_DATA_DIR).resolve()
+        except OSError:
+            owned = False
+        if owned:
+            sweep_carriers(Path(config.V2_DATA_DIR))
 
     def status(self) -> dict:
         providers = {}
@@ -425,12 +456,16 @@ class Daemon:
             session = _Session(thread, brief, provider)
             self._sessions[thread.id] = session
         try:
+            self._refuse_jarvis_server(thread, brief)
             # The saved brief is never rewritten; a chat thread's provider is
             # handed a copy carrying the thread's current choice instead, so a
             # resume picks up a model changed since open (decisions A1). The
             # permit is built over that same copy: one brief per session.
+            # The copy is also the only place a jarvis-mcp caller token is
+            # ever written (`_run_brief`): never brief.json.
             run_brief = self._run_brief(session)
             permit = self.permit_factory(thread.id, run_brief)
+            session.permit = permit
             method = provider.resume if thread.provider_session_id else provider.start
             handle = method(thread, run_brief, permit)
             session.handle = handle
@@ -445,11 +480,25 @@ class Daemon:
                 self.stores.threads.save(thread)
             return session
         except BaseException:
+            # A session that never opened keeps no token (plan §1.4).
+            self.callers.revoke(session)
             if session.handle is not None:
                 self._cleanup(session)
             with self._lock:
                 self._sessions.pop(thread.id, None)
             raise
+
+    @staticmethod
+    def _refuse_jarvis_server(thread, brief) -> None:
+        """Only an owner's chat thread may ever have a `jarvis` MCP server,
+        and only in the run copy the daemon makes (plan §1.2). A brief that
+        names one for anything else — a runner change that copied a chat's
+        brief, say — is refused, never run with a server it was not given."""
+        from . import thread_model
+        if (brief.mcp_servers and "jarvis" in brief.mcp_servers
+                and not (thread_model.is_chat(thread) and brief.role == Role.CHAT
+                         and brief.task_id is None)):
+            raise BriefRefused("only an owner's chat thread may have a jarvis MCP server")
 
     # -- the model a chat thread runs on (decisions 2026-10-06, part A) ------
 
@@ -474,14 +523,38 @@ class Daemon:
 
     def _run_brief(self, session):
         """The brief a provider is started with: the saved one, plus — for an
-        owner's chat thread — the thread's effective (model, effort)."""
+        owner's chat thread — the thread's effective (model, effort), and on
+        Claude or Codex, when the chat is offered session tools, a `jarvis`
+        MCP server carrying a caller token minted for this session (plan
+        §1.2). The token lives only in this copy: `_open` writes the saved
+        brief, never this one, to brief.json."""
         from . import thread_model
         if not thread_model.is_chat(session.thread):
             return session.brief
         choice = thread_model.effective(session.thread)
         session.applied = session.announced = choice
         session.applied_record = (session.thread.model, session.thread.effort)
-        return replace(session.brief, model=choice[0], effort=choice[1])
+        # A saved brief never carries a jarvis server (`make_brief` refuses
+        # MCP servers from a caller); if one somehow did, it is not passed on.
+        servers = {name: server for name, server in session.brief.mcp_servers.items()
+                   if name != "jarvis"}
+        token = self._mint(session)
+        if token is not None:
+            from .bridge import server_entry
+            servers["jarvis"] = server_entry(session.thread.provider, self.port, token)
+        return replace(session.brief, model=choice[0], effort=choice[1], mcp_servers=servers)
+
+    def _mint(self, session) -> str | None:
+        """A caller token for an owner's chat on Claude or Codex that is
+        offered at least one session tool; None for anything else (the fast
+        path runs in-process and binds `runtime.caller()` itself)."""
+        from . import session_tools, thread_model
+        thread = session.thread
+        if (not thread_model.is_chat(thread)
+                or thread.provider not in (ProviderName.CLAUDE, ProviderName.CODEX)
+                or not session_tools.for_provider(thread.provider)):
+            return None
+        return self.callers.mint(session)
 
     def _apply_choice(self, session):
         """At a turn's start: hand the provider a changed choice. A default
@@ -1151,6 +1224,12 @@ class Daemon:
         terminal = None
         failed = False
         fatal = False
+        # Who is calling, on this turn's own thread (a fresh context): an
+        # in-process provider reads it as the turn starts (the fast path
+        # hands it to its worker), so a tool knows its thread and turn.
+        from jarvis import runtime
+        runtime.bind_caller(session.thread.id, session.thread.project_id,
+                            session.thread.provider.value, session.turn_id)
         try:
             if session.cancelled.is_set():
                 return
@@ -1293,6 +1372,10 @@ class Daemon:
                           "data": {"req_id": req_id}})
 
     def _cleanup(self, session):
+        # First, before the provider is touched: the session's jarvis-mcp
+        # token dies with it (close, archive, delete, a lost session — plan
+        # §1.4). The provider's close then removes its carrier.
+        self.callers.revoke(session)
         for operation in (session.provider.interrupt, session.provider.close):
             try:
                 operation(session.handle)
@@ -1324,6 +1407,9 @@ class Daemon:
         self.bus.publish(record)
 
     def stop(self):
+        # Before anything else closes: no jarvis-mcp call is answered for a
+        # session from here on (plan §1.4).
+        self.callers.revoke_all()
         self.schedules.stop()
         deadline = time.monotonic() + STOP_TIMEOUT
         with self._lock:
@@ -1437,9 +1523,11 @@ def _text(value, name):
 
 def _log_path(path: str) -> str:
     """A request path for the daemon log. A terminal attach carries its
-    ticket in the query string, so `/terminals` paths are logged without one."""
+    ticket in the query string, so `/terminals` paths are logged without one;
+    so are `/mcp` paths, whose credential is a header the relay never moves
+    into a query — but a confused client could (PR #35 review)."""
     url = urlsplit(path)
-    return url.path if url.path.startswith("/terminals") else path
+    return url.path if url.path.startswith(("/terminals", "/mcp")) else path
 
 
 def _handler(daemon):
@@ -1556,6 +1644,12 @@ def _handler(daemon):
             from . import hud_api
             if getattr(self.server, "preview_only", False):
                 return hud_api.preview_route(self, daemon, parts, query)
+            # jarvis-mcp for chat sessions (bridge.py): the API listener only,
+            # a caller token only; 404 on the HUD listener.
+            from . import bridge
+            mounted = bridge.route(self, daemon, parts, query)
+            if mounted is not None:
+                return mounted
             mounted = hud_api.route(self, daemon, parts, query)
             if mounted is not None:
                 return mounted

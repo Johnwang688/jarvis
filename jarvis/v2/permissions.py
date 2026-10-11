@@ -24,6 +24,14 @@ One exception sits between layers 1 and 2: a call the provider marks as a
 is always asked of a human, with no Always, whatever the profile — strict
 denies it — because the provider's reviewer has already passed it by the time
 it reaches us, so an AUTO "the reviewer decides" would mean no one decided.
+A **dangerous Jarvis tool** the jarvis-mcp bridge runs for a chat
+(`permit(..., dangerous_tool=True)`) is handled the same way, for the same
+reason: the owner, every time, no Always.
+
+Between layers 2 and 4 sits **`jarvis-tool`** (2026-10-10, plan §4.1): a
+read-only Jarvis session tool (`session_tools`, `mcp__jarvis__<tool>`) in an
+owner's chat is ALLOWed, never asked of anyone — the daemon's bridge judges
+each call. It comes after layer 2, so an always-ask rule naming it still asks.
 
 **`Decision.ALLOW` out of this callback means "not refused by Jarvis", not
 "approved by the owner"** — except when layer 2 or layer 5 produced it, which
@@ -59,8 +67,9 @@ from typing import Iterable
 from jarvis import config, permissions as v1_permissions, protected_state, rules
 from jarvis.tools import files as v1_files, secrets as v1_secrets
 from .approvals import ApprovalRequest, DenyAll, clean_line, label, v1_request
-from .model import PermissionProfile, Project, Task, utcnow
+from .model import PermissionProfile, Project, Role, Task, utcnow
 from .provider import Brief, Decision, PermissionCallback
+from . import session_tools
 
 LOG = logging.getLogger(__name__)
 
@@ -69,6 +78,11 @@ L_DENY, L_ALWAYS_ASK, L_REVIEWER, L_JARVIS_ALLOW, L_HUMAN = (
     "deny", "always-ask", "reviewer", "jarvis-allow", "human")
 # A provider-reported sandbox widening (see `build_permit`'s `widening`).
 L_WIDENING = "sandbox-widening"
+# A read-only Jarvis session tool a Claude chat calls through jarvis-mcp
+# (`session_tools`, plan 2026-10-10 §4.1): ALLOWed without asking anyone,
+# because the daemon judges each call itself (the turn, the guard). Not a
+# human decision, and never logged as one.
+L_JARVIS_TOOL = "jarvis-tool"
 
 # Tools that carry a shell command line, per provider.
 COMMAND_TOOLS = frozenset({
@@ -562,7 +576,7 @@ def build_permit(ctx: PermitContext, asker) -> PermissionCallback:
 
     def permit(tool: str, args: dict, brief: Brief | None = None, *,
                widening: str | None = None, grants: Iterable[tuple[str, str]] = (),
-               also_commands: Iterable[str] = ()) -> Decision:
+               also_commands: Iterable[str] = (), dangerous_tool: bool = False) -> Decision:
         """`widening` is set only by a provider whose approval would widen
         its own sandbox if accepted (Codex: extra permissions, network, a
         grant root, terminal input). Such a call is asked of a human every
@@ -574,7 +588,14 @@ def build_permit(ctx: PermitContext, asker) -> PermissionCallback:
         `also_commands` any further command it would run (a running
         terminal's, beside the text typed into it). Layer 1 judges both: a
         grant that is or contains protected state or a credential directory,
-        or a command that is never approvable, is refused unasked."""
+        or a command that is never approvable, is refused unasked.
+
+        `dangerous_tool` is set only by the daemon's jarvis-mcp bridge
+        (`bridge.py`), for a Jarvis tool marked `dangerous` that a Claude or
+        Codex chat called (decisions D-3: `gmail_send`). After layer 1 the
+        owner is asked every time, whatever the profile, with no Always —
+        never a standing yes, never the provider's reviewer — and strict
+        denies. Like `widening`, the model cannot reach it."""
         brief = brief if brief is not None else ctx.brief
         args = dict(args or {})
         profile = brief.profile if brief is not None else PermissionProfile.AUTO
@@ -626,6 +647,23 @@ def build_permit(ctx: PermitContext, asker) -> PermissionCallback:
                             allowlistable=False, headline=widening)
             return finish(decision, L_WIDENING, reason)
 
+        # --- a dangerous Jarvis tool from a chat's jarvis-mcp: the owner ----
+        # The bridge asks here for a `dangerous` registry tool (D-3). Nothing
+        # below may answer for the owner: not the allowlist (layer 4), not
+        # the provider's reviewer (layer 5 under AUTO), so this is asked
+        # every time, and an Always is not offered — it would mint an entry
+        # this path never reads.
+        if dangerous_tool:
+            if profile == PermissionProfile.STRICT:
+                return finish(Decision.DENY, L_HUMAN,
+                              "strict profile refuses a dangerous Jarvis tool")
+            match = always_ask_match(tool, args, brief, ctx.project)
+            reason = ("a dangerous Jarvis tool: the owner decides every call"
+                      + (f" (also always-ask rule {match[0]})" if match else ""))
+            decision = _ask(asker, ctx, tool, args, command, reason, L_HUMAN,
+                            allowlistable=False)
+            return finish(decision, L_HUMAN, reason)
+
         # --- layer 2: the owner is asked whatever the reviewer thought -----
         match = always_ask_match(tool, args, brief, ctx.project)
         if match is None and command.strip():
@@ -643,6 +681,16 @@ def build_permit(ctx: PermitContext, asker) -> PermissionCallback:
             reason = f"always-ask rule {rule_id}" + (f": {why}" if why else "")
             decision = _ask(asker, ctx, tool, args, command, reason, L_ALWAYS_ASK)
             return finish(decision, L_ALWAYS_ASK, reason)
+
+        # --- jarvis-tool: a read-only Jarvis session tool --------------------
+        # After layer 2, so an always-ask rule naming the tool still asks.
+        # Only an owner's chat brief is offered session tools (a task's
+        # threads never get a jarvis server), so only a chat brief is ALLOWed
+        # here; the daemon's bridge judges the call itself.
+        if (brief is not None and brief.role == Role.CHAT and brief.task_id is None
+                and tool in session_tools.read_only_claude_names()):
+            return finish(Decision.ALLOW, L_JARVIS_TOOL,
+                          "read-only Jarvis tool; the daemon checks the turn")
 
         # --- layer 4: the owner's standing yes, human-backed only ----------
         # Layer 3 (the CLI reviewer) is not evaluated here; see the module
