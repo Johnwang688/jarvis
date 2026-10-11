@@ -1628,6 +1628,13 @@ def _judge_segment(segment: str) -> Verdict:
 
     if stem == "systemctl" and "--user" not in tokens:
         return Verdict(ASK, "system-wide systemctl affects the whole machine")
+    if stem == "systemctl":
+        # `--user set-environment` and its kin change what the v2 daemon
+        # starts with next time: asked, never auto-approved (review of PR
+        # #48). What changes the daemon's unit itself is DENY, above.
+        why = protected_state.systemctl_asks(tokens)
+        if why:
+            return Verdict(ASK, why)
 
     if stem in _NEVER_AUTO_STEMS:
         return Verdict(ASK)

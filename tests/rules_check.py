@@ -1786,7 +1786,133 @@ OWNER_OPS_ORDINARY = (
 )
 
 _OWNER_OPS_STEMS = ("jarvis", "python", "python3", "uv", "env", "nohup", "timeout", "bash", "sh",
-                    "systemctl", "systemd-run", "ssh", "git", "sleep", "echo", "eval", "flock", "xargs")
+                    "systemctl", "systemd-run", "ssh", "git", "sleep", "echo", "eval", "flock", "xargs",
+                    "pkill", "kill", "killall", "pgrep", "pidof", "coverage", "busctl", "dbus-send",
+                    "gdbus")
+
+# The review of PR #48 (each DENY here scored ALLOW or ASK on c218da8, merged
+# with main at e95f37f; `review_48_checks` asserts that against a
+# reconstruction of the old verdict where it can, and the PR body lists them):
+#   M1 — systemctl parsed as getopt does, braces expanded, a line's own
+#        variables put in, any user slice/target, `--marked`, D-Bus;
+#   module runners (`-m runpy|cProfile|profile|pdb|trace|coverage`) peeled;
+#   inline source: a star import, `import_module`, an argv list;
+#   the owner's daemon2 kill rule (2026-10-11).
+REVIEW_48_DENY = (
+    # M1: clusters, `-P`, `--capsule`, `--marked` a flag, prefixes, permutation.
+    'systemctl --user -qp status restart jarvis-daemon2',
+    'systemctl --user -P status restart jarvis-daemon2',
+    'systemctl --user -C x restart jarvis-daemon2',
+    'systemctl --user --marked restart jarvis-daemon2',
+    'systemctl --user restart --marked',
+    'systemctl --us restart jarvis-daemon2',
+    # braces, line-local variables, run-time words
+    'systemctl --user restart jarvis-daemon{2,}',
+    'systemctl --user restart jarvis-daemon2{,}',
+    'systemctl --user restart jarvis-daemon{1..3}',
+    'U=jarvis-daemon2; systemctl --user restart $U',
+    'systemctl --user restart $UNIT',
+    'systemctl --user $VERB',
+    'S=systemctl; $S --user stop jarvis-daemon2',
+    'echo restart jarvis-daemon2 | xargs systemctl --user',
+    # the unit's slice and target, any user slice or target, globbed ones
+    'systemctl --user stop app.slice',
+    'systemctl --user kill basic.target',
+    'systemctl --user restart -- -.slice',
+    'systemctl --user freeze app.slice',
+    "systemctl --user stop 'a*.slice'",
+    'systemctl --user start exit.target',
+    'systemctl --user default',
+    # D-Bus
+    'busctl --user call org.freedesktop.systemd1 /org/freedesktop/systemd1 '
+    'org.freedesktop.systemd1.Manager RestartUnit ss jarvis-daemon2.service replace',
+    'dbus-send --session --dest=org.freedesktop.systemd1 /org/freedesktop/systemd1 '
+    'org.freedesktop.systemd1.Manager.StopUnit string:jarvis-daemon2.service string:replace',
+    'gdbus call --session --dest org.freedesktop.systemd1 --object-path /org/freedesktop/systemd1 '
+    '--method org.freedesktop.systemd1.Manager.KillUnit x all 9',
+    'busctl --user call org.freedesktop.systemd1 /org/freedesktop/systemd1/unit/jarvis_2ddaemon2_2eservice '
+    'org.freedesktop.systemd1.Unit Restart s replace',
+    # module runners
+    'python3 -m runpy jarvis hud install',
+    'python3 -m runpy jarvis restart',
+    'python3 -m cProfile -m jarvis restart',
+    'python3 -m cProfile -o /tmp/p -m jarvis.v2.owner_ops',
+    'python3 -m profile -m jarvis hud rebuild',
+    'python3 -m pdb -c continue -m jarvis restart',
+    'python3 -m trace --trace --module jarvis restart',
+    'python3 -m coverage run -m jarvis restart',
+    'coverage run -m jarvis.v2.hud_install',
+    'python3 ~/.local/bin/jarvis restart',
+    # inline source
+    'python3 -c "from jarvis.v2.owner_ops import *; restart()"',
+    'python3 -c "from jarvis.v2.hud_install import *; main()"',
+    "python3 -c \"import importlib; m = importlib.import_module('jarvis.v2.owner_ops'); m.restart()\"",
+    "python3 -c \"__import__('jarvis.v2.hud_install', fromlist=['x']).install_checkout()\"",
+    "python3 -c \"import subprocess; subprocess.run(['systemctl', '--user', 'restart', 'jarvis-daemon2'])\"",
+    "python3 -c \"import os; os.execvp('systemctl', ['systemctl', '--user', 'stop', 'jarvis-daemon2'])\"",
+    # the daemon2 kill rule (the owner's, 2026-10-11)
+    'pkill -f daemon2',
+    "pkill -f 'jarvis daemon2'",
+    "pkill -f 'daemo[n]2'",
+    "pkill -f 'daemon.'",
+    "pkill -f 'jarvis d'",
+    "pkill -f 'n2$'",
+    'pkill -9 -f daemon2',
+    'pkill -KILL -f daemon2',
+    'pkill --signal KILL -f daemon2',
+    'pkill -fdaemon2',
+    'pkill -f -- daemon2',
+    "pkill -f 'jarvis.*'",
+    'P=daemon2; pkill -f $P',
+    'pkill -f $PATTERN',
+    'nohup timeout 5 pkill -f daemon2',
+    "bash -c 'pkill -f daemon2'",
+    'kill $(pgrep -f daemon2)',
+    "kill -9 $(pgrep -f 'jarvis daemon2')",
+    'kill -s KILL $(pgrep -f daemon2)',
+    'kill `pgrep -f daemon2`',
+    'kill $(pidof daemon2)',
+    'pgrep -f daemon2 | xargs kill',
+    'pgrep -f daemon2 | xargs -r kill -9',
+    'P=$(pgrep -f daemon2); kill $P',
+    'killall -r daemon2',
+    "killall -9 -r 'jarvis d'",
+    "python3 -c \"import subprocess; subprocess.run(['pkill', '-f', 'daemon2'])\"",
+)
+# Must not DENY (and, where the matrix or a previous round pins a verdict, keep it).
+REVIEW_48_ORDINARY = (
+    'systemctl --user status jarvis-daemon2', 'systemctl --user -p ActiveState show jarvis-daemon2',
+    'systemctl --user show jarvis-daemon2 --property=ActiveState,SubState',
+    'systemctl --user reset-failed jarvis-daemon2', 'systemctl --user restart pipewire',
+    "systemctl --user restart 'pipewire*'", 'systemctl --user list-dependencies basic.target',
+    'systemctl --user daemon-reload', 'systemctl --user --no-legend list-units',
+    'systemctl --user set-environment FOO=1', 'systemctl --user import-environment PATH',
+    'busctl --user tree org.freedesktop.systemd1',
+    'loginctl terminate-user johnw', 'loginctl disable-linger',
+    'python3 -m runpy jarvis chat', 'python3 -m cProfile -m pytest',
+    'python3 -m trace --count -m mymodule', 'python3 -m pdb script.py',
+    "python3 -c \"import importlib; m = importlib.import_module('jarvis.v2.hud_install'); print(m.builds('/x'))\"",
+    "python3 -c \"print(['systemctl', '--user', 'status', 'jarvis-daemon2'])\"",
+    'pkill -f jarvis', 'pkill -f vite', "pkill -f 'npm run dev'", "pkill -f 'python -m jarvis'",
+    "pkill -f 'python -m jarvis face'", 'pgrep -f daemon2', 'pgrep -af daemon2',
+    'echo pkill -f daemon2', "git commit -m 'stop using pkill -f daemon2'",
+    'kill -0 $(pgrep -f daemon2)', 'pkill -0 -f daemon2', 'pkill daemon2', 'pkill python',
+    'killall python', 'killall daemon2', 'kill %1', 'kill -9 12345', 'kill $(pgrep -f vite)',
+    "pkill -f 'node .*vite'", "pkill -f 'python -m http.server 8000'",
+)
+# Verdicts these lines must keep or take (`rules.decide`).
+REVIEW_48_VERDICTS = {
+    'systemctl --user set-environment FOO=1': "ask",          # was ALLOW
+    'systemctl --user unset-environment FOO': "ask",          # was ALLOW
+    'systemctl --user import-environment PATH': "ask",        # was ALLOW
+    'systemctl --user reset-failed jarvis-daemon2': "allow",  # was DENY
+    'loginctl terminate-user johnw': "ask", 'loginctl kill-user johnw': "ask",
+    'loginctl disable-linger': "ask",
+    'python3 -m runpy jarvis chat': "ask",                     # Jarvis's own CLI, was ALLOW
+    'coverage run -m jarvis chat': "ask",
+    'pkill -f jarvis': "allow", 'pkill -f vite': "allow", "pkill -f 'npm run dev'": "allow",
+    'pgrep -f daemon2': "allow", 'pkill python': "allow",
+}
 
 
 def daemon_and_rebuild_ops_checks() -> None:
@@ -1834,6 +1960,70 @@ def daemon_and_rebuild_ops_checks() -> None:
             assert rules.decide(command).decision != rules.DENY, (command, rules.decide(command))
     print(f"ok  owner ops: {len(OWNER_OPS_DENY)} spellings refused (never run, never asked, any "
           f"allowlist, mode all, no approver); {len(OWNER_OPS_ORDINARY)} ordinary lines untouched")
+
+
+def review_48_checks() -> None:
+    """The review of PR #48: `REVIEW_48_DENY` is DENY everywhere — the
+    detector, `rules.decide`, `static_verdict`, `command_verdict`, and real
+    `dispatch` under an allowlist entry for every stem in sight, in modes
+    "ask" and "all" (never run, never asked), and `run_command` with no
+    approver; `REVIEW_48_ORDINARY` is never DENY; `REVIEW_48_VERDICTS` holds."""
+    from jarvis import config, permissions
+    from jarvis import protected_state as S
+
+    with gate_home():
+        config.ALLOWLIST_PATH.write_text(json.dumps(
+            [{"tool": "run_command", "prefix": stem} for stem in _OWNER_OPS_STEMS]))
+        asked: list[str] = []
+
+        def says_yes(tool, args):
+            asked.append(args.get("command", ""))
+            return True
+
+        before = config.ALLOWLIST_PATH.read_text()
+        for command in REVIEW_48_DENY:
+            assert S.owner_op(command), f"the detector misses {command!r}"
+            assert rules.decide(command).decision == rules.DENY, (command, rules.decide(command))
+            assert permissions.static_verdict(command).decision == rules.DENY, command
+            assert permissions.command_verdict(
+                "run_command", {"command": command}).decision == rules.DENY, command
+            for mode in ("ask", "all"):
+                permissions.set_mode(mode)
+                try:
+                    with recorded() as ran:
+                        asked.clear()
+                        out = tools.dispatch(
+                            "run_command", json.dumps({"command": command, "reason": "r"}),
+                            approve=permissions.gate(says_yes))
+                finally:
+                    permissions.set_mode("ask")
+                assert "efused" in out.text, (command, out.text)
+                assert not ran, f"[{mode}] it ran: {command!r}"
+                assert not asked, f"[{mode}] it was put to the owner: {command!r}"
+            with recorded() as ran:
+                out = shell.run_command(command, reason="r")
+            assert out.startswith("Refused"), (command, out)
+            assert not ran, command
+        assert config.ALLOWLIST_PATH.read_text() == before
+        for command in REVIEW_48_ORDINARY:
+            assert S.owner_op(command) is None, f"an ordinary line is refused: {command!r}"
+            assert rules.decide(command).decision != rules.DENY, (command, rules.decide(command))
+        for command, want in REVIEW_48_VERDICTS.items():
+            got = rules.decide(command).decision
+            assert got == want, f"{command!r}: {got}, not {want}"
+        # The cheap filters never skip a line the full parse refuses.
+        for command in REVIEW_48_DENY + REVIEW_48_ORDINARY:
+            assert bool(S.owner_op(command)) == bool(S.owner_op(command, prefilter=False)), command
+    # No pattern hangs the permit: a pattern that could backtrack without
+    # bound is refused unmatched (Python's `re` has no timeout).
+    import time
+    start = time.perf_counter()
+    for pattern in ("(.*)*x", "(.+)+x", r"(\w|\w)*x", "((.)*)*Q", "(a|b)+c", ".*.*.*.*x"):
+        assert rules.decide(f"pkill -f '{pattern}'").decision == rules.DENY, pattern
+    assert time.perf_counter() - start < 2.0, "a pattern was matched with unbounded backtracking"
+    print(f"ok  review of #48: {len(REVIEW_48_DENY)} spellings refused (never run, never asked, any "
+          f"allowlist, mode all, no approver); {len(REVIEW_48_ORDINARY)} ordinary lines untouched; "
+          f"{len(REVIEW_48_VERDICTS)} verdicts pinned")
 
 
 def fails_against_old_code_checks() -> None:
@@ -1971,6 +2161,7 @@ def main() -> int:
     gate_state_edge_checks()
     gate_state_complexity_checks()
     daemon_and_rebuild_ops_checks()
+    review_48_checks()
     fails_against_old_code_checks()
     owner_op_checks()
     print("\nall rules checks passed")

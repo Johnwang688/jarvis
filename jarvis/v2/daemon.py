@@ -343,11 +343,20 @@ class Daemon:
             hud = hud_served()
         except Exception:
             hud = {"build": None, "git_head": None, "state": "failed verification"}
+        # Broker approvals waiting on the owner — a turn's, and the escape
+        # hatch's, which asks after its turn has finished. `jarvis restart`
+        # refuses while any wait (a restart denies them). Read before
+        # `self._lock`: the broker has a lock of its own.
+        try:
+            approvals_pending = len(self.approvals.pending())
+        except Exception:
+            approvals_pending = 0
         with self._lock:
             return {"jarvis-daemon": True, "version": 2,
                     "uptime": time.monotonic() - self.started_at, "providers": providers,
                     "threads_open": sum(s.handle is not None for s in self._sessions.values()),
                     "turns_running": sum(s.worker is not None for s in self._sessions.values()),
+                    "approvals_pending": approvals_pending,
                     # The HUD builds preview URLs from this rather than a
                     # hard-coded 8403: a HUD served by any other daemon (a
                     # test's, on an ephemeral port) must never reach the

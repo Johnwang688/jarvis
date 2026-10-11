@@ -15,33 +15,52 @@ own control plane. The owner's terminal is outside Jarvis's gate, so the
 refusal costs the owner nothing.
 
 `restart`:
-  1. ask `/status`; a running turn refuses unless `--force` — a restart cuts
-     it off mid-step and denies anything it waits on;
+  1. ask `/status`; a running turn or a waiting approval refuses unless
+     `--force` — a restart cuts a turn off mid-step and denies anything it
+     waits on. A daemon systemd says is up but that does not answer (busy,
+     slow, or this shell's JARVIS_DAEMON_PORT is not its port) is asked
+     again, longer, and then refused the same way: "can't check" is never
+     "nothing running" (review of PR #48, H1). Only a refused connection to
+     a unit that is not running, or a unit that is inactive or failed, is
+     restarted without that check;
   2. the systemd user unit must be installed **and be what runs the
      daemon**: a daemon started another way (`jarvis hud`, a shell) holds the
      ports, and systemd would start a second one that cannot bind them;
-  3. `systemctl --user restart jarvis-daemon2` (argv, never a shell);
-  4. wait for a **new** daemon to answer `/status` — its uptime younger than
+  3. warn about uncommitted Python in the checkout the daemon runs from —
+     the new daemon loads it (Jarvis's chats leave edits on main);
+  4. `systemctl --user restart jarvis-daemon2` (argv, never a shell);
+  5. wait for a **new** daemon to answer `/status` — its uptime younger than
      the restart, so the old one's last answer never passes — up to `--wait`;
-  5. print its uptime, every provider's health and the HUD it serves, and
+  6. print its uptime, every provider's health and the HUD it serves, and
      ask for Ctrl+R in the HUD (its terminals ended with the old daemon).
+  Typed into a HUD terminal — which lives in the daemon's own cgroup, so the
+  restart would end it mid-wait — the checks run there and the restart is
+  handed to a transient unit outside it (`systemd-run --user`), whose report
+  `journalctl --user -u <unit>` shows (review of PR #48, M4).
+  A turn can still start between the check and the restart: the check
+  narrows the window, it cannot close it.
 
 `rebuild` — "build the HUD with the latest changes and make the daemon
 serve it":
   1. `--pull`: fast-forward `main` from `origin/main` — refused off `main` or
      with uncommitted tracked changes; never stashes, resets or forces;
-  2. `npm ci` in `hud/` when `node_modules` is missing, or older than
+  2. the install root and the clean-`hud/` check **before** `npm ci` (review
+     of PR #48, M3: `npm ci` runs package.json's scripts and obeys
+     `hud/.npmrc`, so an edited one ran before the refusal);
+  3. `npm ci` in `hud/` when `node_modules` is missing, or older than
      `package-lock.json`, or `--clean` says so;
-  3. `jarvis hud install`'s own path (`hud_install.install_checkout`: the
-     clean-`hud/` refusal, `npm run build`, the read-only install);
-  4. `--restart`: `restart()`'s own path, refusal on a running turn included
-     (checked before anything is built, and again before restarting) — off
-     by default, since an install needs only a window reload (ED-4);
-  5. check `/status` serves the new build, from HEAD, installed.
+  4. `jarvis hud install`'s own path (`hud_install.install_checkout`: the
+     clean-`hud/` refusal again, `npm run build`, the read-only install);
+  5. `--restart`: `restart()`'s own path, refusals included (checked before
+     anything is built, and again before restarting) — off by default, since
+     an install needs only a window reload (ED-4);
+  6. check `/status` serves the new build, from HEAD, installed.
 
 Exit codes: 0 done (and, for rebuild, verified); 1 refused or failed; 3 a
-turn is running, so nothing was restarted; 4 done but not verified (the
-daemon did not come back, or does not serve the new build).
+turn is running or an approval waiting (or that could not be checked), so
+nothing was restarted; 4 done but not verified (the daemon did not come
+back, does not serve the new build, or the restart was handed off from a
+HUD terminal).
 
 Nothing here runs a shell: every program is an argv list with a timeout.
 """
@@ -49,9 +68,13 @@ from __future__ import annotations
 
 import http.client
 import json
+import os
 from pathlib import Path
+import re
 import shutil
+import socket
 import subprocess
+import sys
 import time
 
 from jarvis import config
@@ -64,13 +87,21 @@ OK, FAILED, BUSY, UNVERIFIED = 0, 1, 3, 4
 
 WAIT = 30.0                    # seconds for a restarted daemon to answer /status
 POLL = 0.25
+STATUS_TIMEOUT = 2.0           # the first /status read
+RETRY_TIMEOUT = 10.0           # the second, for a daemon that is up but did not answer
 SYSTEMCTL_TIMEOUT = 90.0       # a restart waits for the stop (TimeoutStopSec=30)
 NPM_CI_TIMEOUT = 15 * 60
 GIT_TIMEOUT = 60.0
 FETCH_TIMEOUT = 180.0
 STATUS_CAP = 1 << 20
+HANDOFF_GRACE = 1.5            # a handed-off restart waits this long, so the terminal's
+                               # last lines reach the HUD before the daemon goes
+CGROUP = "/proc/self/cgroup"
+HANDED_OFF = "--handed-off"    # the hidden flag a handed-off command runs with
 
 JOURNAL = f"journalctl --user -u {UNIT} -n 50 --no-pager"
+REFUSED = "refused"            # read_status: nothing listens on the port
+UP = ("active", "activating", "reloading", "refreshing")
 
 
 class OpsRefused(Exception):
@@ -92,30 +123,75 @@ def _sleep(seconds: float) -> None:
     time.sleep(seconds)
 
 
-def fetch_status(port: int | None = None, timeout: float = 2.0) -> dict | None:
-    """The daemon's `GET /status` on loopback, or None when nothing answers
-    with a JSON object."""
+def read_status(port: int | None = None, timeout: float = STATUS_TIMEOUT) -> tuple[dict | None, str | None]:
+    """The daemon's `GET /status` on loopback: (its body, None), or (None, why
+    not) — `REFUSED` when nothing listens on the port, else a sentence (no
+    answer in time, another status, not a JSON object). The two are not the
+    same: a refused connection means no daemon there; anything else means
+    one is there and did not say what it is doing (review of PR #48, H1)."""
     port = config.DAEMON_PORT if port is None else port
     conn = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
     try:
         conn.request("GET", "/status")
         response = conn.getresponse()
         if response.status != 200:
-            return None
+            return None, f"/status answered HTTP {response.status}"
         body = json.loads(response.read(STATUS_CAP))
-        return body if isinstance(body, dict) else None
-    except Exception:  # noqa: BLE001 — not answering is an answer here
-        return None
+        if not isinstance(body, dict):
+            return None, "/status did not answer with a JSON object"
+        return body, None
+    except ConnectionRefusedError:
+        return None, REFUSED
+    except (TimeoutError, socket.timeout):
+        return None, f"/status did not answer within {timeout:g} s"
+    except ValueError:
+        return None, "/status did not answer with JSON"
+    except Exception as exc:  # noqa: BLE001 — any other failure is "no answer", never "nobody there"
+        return None, f"/status could not be read ({type(exc).__name__})"
     finally:
         conn.close()
 
 
-def _systemctl_path() -> str:
-    found = shutil.which("systemctl")
+def fetch_status(port: int | None = None, timeout: float = STATUS_TIMEOUT) -> dict | None:
+    """`read_status`'s body, or None."""
+    return read_status(port, timeout)[0]
+
+
+def _which(name: str) -> str:
+    found = shutil.which(name)
     if not found or found.startswith("/mnt/"):
+        return ""
+    return found
+
+
+def _systemctl_path() -> str:
+    found = _which("systemctl")
+    if not found:
         raise OpsRefused("systemctl is not on PATH, so there is no systemd here to restart "
                          f"{UNIT} with; restart the daemon the way it was started")
     return found
+
+
+def _systemd_run_path() -> str:
+    return _which("systemd-run")
+
+
+def _cgroup_text() -> str:
+    try:
+        with open(CGROUP, encoding="utf-8", errors="replace") as handle:
+            return handle.read(64 * 1024)
+    except OSError:
+        return ""
+
+
+def in_daemon_cgroup() -> bool:
+    """Whether this process runs inside the daemon's own cgroup — a HUD
+    terminal does (the daemon starts it), and a restart ends it."""
+    for line in _cgroup_text().splitlines():
+        path = line.split(":", 2)[-1]
+        if f"{UNIT}.service" in path.split("/"):
+            return True
+    return False
 
 
 def systemctl(*args: str, timeout: float = 15.0) -> subprocess.CompletedProcess:
@@ -131,12 +207,12 @@ def systemctl(*args: str, timeout: float = 15.0) -> subprocess.CompletedProcess:
         raise OpsRefused(f"could not run systemctl: {exc.strerror or type(exc).__name__}") from None
 
 
-def _git(*args: str, timeout: float = GIT_TIMEOUT) -> subprocess.CompletedProcess:
+def _git(*args: str, timeout: float = GIT_TIMEOUT, repo=None) -> subprocess.CompletedProcess:
     """git in the checkout, run the way `gitops` runs it (as `hud_install`
     does since #44's review): an absolute git, inherited `GIT_*` dropped,
     prompts, pager and editors pinned, hooks and fsmonitor off, no shell."""
     from jarvis import gitops
-    code, out, err = gitops._git(Path(config.REPO_ROOT), list(args), timeout=timeout)
+    code, out, err = gitops._git(Path(repo or config.REPO_ROOT), list(args), timeout=timeout)
     if code == 124:
         raise OpsRefused(f"`git {' '.join(args)}` did not finish within {timeout:g} s")
     if code == 127:
@@ -154,8 +230,9 @@ def _first_lines(text: str, n: int = 3) -> str:
 
 
 def unit_state() -> dict[str, str]:
-    """The unit's LoadState, ActiveState and SubState, from `systemctl show`."""
-    result = systemctl("show", UNIT, "--property=LoadState,ActiveState,SubState")
+    """The unit's LoadState, ActiveState, SubState, Result and ExecStart,
+    from `systemctl show`."""
+    result = systemctl("show", UNIT, "--property=LoadState,ActiveState,SubState,Result,ExecStart")
     if result.returncode != 0:
         why = _first_lines(result.stderr)
         hint = (" — in WSL, systemd must be on (`[boot] systemd=true` in /etc/wsl.conf)"
@@ -167,6 +244,20 @@ def unit_state() -> dict[str, str]:
         if sep:
             props[key.strip()] = value.strip()
     return props
+
+
+def _start_limit_hint(unit: dict | None = None) -> str:
+    """The way out of systemd's start limit, when the unit is in it."""
+    if unit is None:
+        try:
+            unit = unit_state()
+        except OpsRefused:
+            return ""
+    if unit.get("Result") == "start-limit-hit":
+        return (f" {UNIT} hit systemd's start limit (it failed to start too often): "
+                f"`systemctl --user reset-failed {UNIT}`, then `jarvis restart` again, once "
+                f"`{JOURNAL}` says why it failed.")
+    return ""
 
 
 def _count(value) -> int:
@@ -181,16 +272,35 @@ def _is_v2(status: dict | None) -> bool:
     return isinstance(status, dict) and status.get("version") == 2
 
 
+def _waiting(status: dict | None) -> tuple[int, int]:
+    """(turns running, approvals waiting on the owner) by `/status`."""
+    status = status or {}
+    return _count(status.get("turns_running")), _count(status.get("approvals_pending"))
+
+
+def _waiting_words(turns: int, asks: int) -> str:
+    parts = []
+    if turns:
+        parts.append(f"{_plural(turns, 'turn')} {'is' if turns == 1 else 'are'} running")
+    if asks:
+        parts.append(f"{_plural(asks, 'approval')} {'is' if asks == 1 else 'are'} waiting on you")
+    return " and ".join(parts)
+
+
 def busy_refusal(status: dict | None) -> OpsRefused | None:
-    """The refusal a running turn earns, or None."""
-    busy = _count((status or {}).get("turns_running"))
-    if not busy:
+    """The refusal a running turn or a waiting approval earns, or None."""
+    turns, asks = _waiting(status)
+    if not turns and not asks:
         return None
-    return OpsRefused(
-        f"{_plural(busy, 'turn')} {'is' if busy == 1 else 'are'} running; a restart would cut "
-        f"{'it' if busy == 1 else 'them'} off mid-step and deny anything waiting on you. Let "
-        f"{'it' if busy == 1 else 'them'} finish (or press Stop in the HUD) and run this again, "
-        "or pass --force to restart anyway.", BUSY)
+    if turns:
+        them = "it" if turns == 1 and not asks else "them"
+        cut = (f"a restart would cut {them} off mid-step and deny anything waiting on you. Let "
+               f"{them} finish (or press Stop in the HUD)")
+    else:
+        them = "it" if asks == 1 else "them"
+        cut = f"a restart would deny {them}. Answer {them} (or let {them} time out)"
+    return OpsRefused(f"{_waiting_words(turns, asks)}; {cut} and run this again, or pass --force "
+                      "to restart anyway.", BUSY)
 
 
 def _fresh(status: dict | None, since: float) -> bool:
@@ -207,7 +317,7 @@ def wait_healthy(since: float, wait: float) -> dict | None:
     once `wait` seconds have passed."""
     deadline = _clock() + wait
     while True:
-        status = fetch_status(timeout=1.0)
+        status, _ = read_status(timeout=1.0)
         if _fresh(status, since):
             return status
         if _clock() >= deadline:
@@ -215,16 +325,45 @@ def wait_healthy(since: float, wait: float) -> dict | None:
         _sleep(POLL)
 
 
-def _restart(*, force: bool, wait: float, out) -> dict:
-    """Restart the unit and return the new daemon's `/status`; raises OpsRefused."""
+class _Preflight:
+    """What `_preflight` found: the daemon's `/status` (None when there was
+    no answer), the unit, and what a `--force` overrode."""
+
+    def __init__(self, status, unit, unchecked: str = ""):
+        self.status, self.unit, self.unchecked = status, unit, unchecked
+
+    def say_forced(self, out) -> None:
+        """What `--force` is overriding, said before the restart."""
+        turns, asks = _waiting(self.status)
+        if turns or asks:
+            out(f"--force: {_waiting_words(turns, asks)}; restarting anyway — "
+                + ("a running turn is cut off mid-step and " if turns else "")
+                + "anything waiting on you is denied.")
+        if self.unchecked:
+            out(f"--force: can't check for running turns ({self.unchecked}); restarting anyway.")
+
+
+def _no_answer_detail(port: int, why: str, active: str) -> str:
+    if why == REFUSED:
+        return (f"systemd says {UNIT} is {active}, but nothing answers on 127.0.0.1:{port} — "
+                f"is JARVIS_DAEMON_PORT different in this shell ({port} here) from the daemon's?")
+    return (f"the daemon holds 127.0.0.1:{port} (systemd says {active}) but {why}, asked twice, "
+            f"the second time for {RETRY_TIMEOUT:g} s — it may be busy")
+
+
+def _preflight(force: bool) -> _Preflight:
+    """Everything that can refuse a restart before it is issued; raises
+    OpsRefused. Asks systemd only once `/status` has had its say, so a busy
+    daemon is refused without touching systemctl."""
     port = config.DAEMON_PORT
-    before = fetch_status()
-    if before is not None and not _is_v2(before):
-        raise OpsRefused(f"something other than the v2 daemon answers on 127.0.0.1:{port} "
-                         "(the v1 `jarvis daemon`?); stop it first")
-    busy = busy_refusal(before)
-    if busy is not None and not force:
-        raise busy
+    status, why = read_status()
+    if status is not None:
+        if not _is_v2(status):
+            raise OpsRefused(f"something other than the v2 daemon answers on 127.0.0.1:{port} "
+                             "(the v1 `jarvis daemon`?); stop it first")
+        busy = busy_refusal(status)
+        if busy is not None and not force:
+            raise busy
     unit = unit_state()
     load = unit.get("LoadState", "")
     if load != "loaded":
@@ -234,34 +373,133 @@ def _restart(*, force: bool, wait: float, out) -> dict:
             "WorkingDirectory=%h), then `systemctl --user daemon-reload && "
             f"systemctl --user enable --now {UNIT}`")
     active = unit.get("ActiveState", "")
-    if before is not None and active != "active":
+    unchecked = ""
+    if status is None and active in UP and not (why == REFUSED and active != "active"):
+        # systemd says the daemon runs, and it did not say what it is doing:
+        # ask once more, longer, before calling that "nothing running".
+        status, again = read_status(timeout=RETRY_TIMEOUT)
+        if status is None:
+            unchecked = _no_answer_detail(port, again or why or "?", active)
+            if not force:
+                raise OpsRefused(f"can't check for running turns: {unchecked}. Wait and run this "
+                                 "again, or pass --force to restart anyway.", BUSY)
+        elif not _is_v2(status):
+            raise OpsRefused(f"something other than the v2 daemon answers on 127.0.0.1:{port} "
+                             "(the v1 `jarvis daemon`?); stop it first")
+        else:
+            busy = busy_refusal(status)
+            if busy is not None and not force:
+                raise busy
+    if status is not None and active != "active":
         raise OpsRefused(
             f"a daemon answers on 127.0.0.1:{port}, but systemd's {UNIT} is {active or 'unknown'}: "
             "that daemon was started another way (`jarvis hud`, `jarvis daemon2` in a shell). "
             f"Stop it, then `systemctl --user start {UNIT}`; restarting through systemd now would "
             "start a second daemon that cannot bind the ports")
-    if busy is not None:
-        out(f"--force: {busy.args[0].split(';')[0]}, and will be cut off.")
+    return _Preflight(status, unit, unchecked=unchecked)
+
+
+def daemon_checkout(unit: dict | None) -> Path:
+    """The checkout the daemon's code comes from: `<checkout>/.venv/bin/python`
+    in the unit's ExecStart, else this CLI's own `config.REPO_ROOT`."""
+    m = re.search(r"\bpath=([^ ;]+)", (unit or {}).get("ExecStart", ""))
+    if m:
+        python = Path(m.group(1))
+        if python.parent.name == "bin" and python.parent.parent.name == ".venv":
+            return python.parent.parent.parent
+    return Path(config.REPO_ROOT)
+
+
+def uncommitted_python(repo: Path) -> list[str] | None:
+    """`git status --porcelain -- jarvis pyproject.toml` in `repo`, untracked
+    files included; None when git cannot say (or must not run there)."""
+    if hud_install.config_risk(repo):
+        return None
+    try:
+        result = _git("status", "--porcelain", "--untracked-files=normal", "--", "jarvis",
+                      "pyproject.toml", repo=repo)
+    except OpsRefused:
+        return None
+    if result.returncode != 0:
+        return None
+    return [line[3:] for line in result.stdout.splitlines() if line.strip()]
+
+
+def warn_uncommitted(unit: dict | None, out) -> None:
+    """Warn — never refuse — when the daemon's checkout holds uncommitted
+    Python: the new daemon loads it (review of PR #48, M5)."""
+    repo = daemon_checkout(unit)
+    changed = uncommitted_python(repo)
+    if changed is None:
+        out(f"(Could not check {repo} for uncommitted Python; the new daemon loads whatever is there.)")
+    elif changed:
+        listed = ", ".join(changed[:8]) + (f" and {len(changed) - 8} more" if len(changed) > 8 else "")
+        out(f"Warning: {repo}, the checkout the daemon runs from, has uncommitted changes the new "
+            f"daemon will load: {listed}. Jarvis's chats leave edits on main — commit, stash or "
+            "discard them first if they are not meant to run.")
+
+
+def _restart(*, force: bool, wait: float, out, handed_off: bool = False) -> dict:
+    """Restart the unit and return the new daemon's `/status`; raises OpsRefused."""
+    port = config.DAEMON_PORT
+    checked = _preflight(force)
+    checked.say_forced(out)
+    warn_uncommitted(checked.unit, out)
     out(f"Restarting {UNIT}: open HUD terminals end with the old daemon, and the HUD window "
         "needs a reload (Ctrl+R) once it is back.")
-    if before is None:
+    if checked.status is None and not checked.unchecked:
         out(f"(Nothing answers on 127.0.0.1:{port} right now; restarting the unit anyway.)")
+    if handed_off:
+        _sleep(HANDOFF_GRACE)
     issued = _clock()
     result = systemctl("restart", UNIT, timeout=SYSTEMCTL_TIMEOUT)
     if result.returncode != 0:
         raise OpsRefused(f"`systemctl --user restart {UNIT}` failed (exit {result.returncode}): "
-                         f"{_first_lines(result.stderr)}. See `{JOURNAL}`")
+                         f"{_first_lines(result.stderr)}. See `{JOURNAL}`.{_start_limit_hint()}")
     status = wait_healthy(issued, wait)
     if status is None:
         try:
             now = unit_state()
             seen = f"systemd says {now.get('ActiveState', '?')}/{now.get('SubState', '?')}"
         except OpsRefused:
-            seen = "systemd's state could not be read"
+            now, seen = {}, "systemd's state could not be read"
         raise OpsRefused(f"{UNIT} was restarted but no new daemon answered /status on "
-                         f"127.0.0.1:{port} within {wait:g} s ({seen}). See `{JOURNAL}`",
-                         UNVERIFIED)
+                         f"127.0.0.1:{port} within {wait:g} s ({seen}). See `{JOURNAL}`."
+                         f"{_start_limit_hint(now) if now else ''}", UNVERIFIED)
     return status
+
+
+def hand_off(argv: list[str], out) -> str:
+    """Run `jarvis ARGV --handed-off` as a transient user unit, outside the
+    daemon's cgroup (`systemd-run --user`), and return the unit's name.
+    Raises OpsRefused when it cannot."""
+    run = _systemd_run_path()
+    if not run:
+        raise OpsRefused("this terminal runs inside the daemon, so a restart from here would end it "
+                         "mid-wait, and systemd-run is not on PATH to run the restart outside it. "
+                         "Run it from a terminal outside the HUD (a WSL shell)")
+    name = f"jarvis-owner-op-{time.strftime('%Y%m%dT%H%M%S')}-{os.getpid()}"
+    command = [run, "--user", "--collect", "--quiet", f"--unit={name}",
+               f"--working-directory={Path.home()}", "--", sys.executable, "-m", "jarvis",
+               *argv, HANDED_OFF]
+    out(f"This terminal runs inside the daemon ({UNIT}.service), so the restart would end it "
+        f"mid-wait. Handing the restart to the transient unit {name}; its report: "
+        f"`journalctl --user -u {name} --no-pager`. This terminal closes when the daemon "
+        "restarts — press Ctrl+R in the HUD window then.")
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=30,
+                                stdin=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired:
+        raise OpsRefused("systemd-run did not return within 30 s; nothing was handed off. Run it "
+                         "from a terminal outside the HUD (a WSL shell)") from None
+    except OSError as exc:
+        raise OpsRefused(f"could not run systemd-run ({exc.strerror or type(exc).__name__}); "
+                         "run it from a terminal outside the HUD (a WSL shell)") from None
+    if result.returncode != 0:
+        raise OpsRefused(f"systemd-run failed (exit {result.returncode}): {_first_lines(result.stderr)}; "
+                         "nothing was handed off. Run it from a terminal outside the HUD (a WSL shell)")
+    out(f"Handed off to {name}.")
+    return name
 
 
 def _clean(text, cap: int = 200) -> str:
@@ -305,10 +543,25 @@ def hud_line(status: dict) -> str:
             "`jarvis hud rebuild`.")
 
 
-def restart(*, force: bool = False, wait: float = WAIT, out=print) -> int:
+def _restart_argv(force: bool, wait: float) -> list[str]:
+    return ["restart", *(["--force"] if force else []), "--wait", f"{wait:g}"]
+
+
+def restart(*, force: bool = False, wait: float = WAIT, out=print, handed_off: bool = False) -> int:
     """`jarvis restart`."""
     try:
-        status = _restart(force=force, wait=wait, out=out)
+        if in_daemon_cgroup():
+            if handed_off:
+                raise OpsRefused("the handed-off restart still runs inside the daemon's cgroup, "
+                                 "so it would end itself; nothing was restarted")
+            # A HUD terminal: check here, so a refusal is read where it was
+            # typed, then restart from outside the cgroup the restart ends.
+            checked = _preflight(force)
+            checked.say_forced(out)
+            warn_uncommitted(checked.unit, out)
+            hand_off(_restart_argv(force, wait), out)
+            return UNVERIFIED
+        status = _restart(force=force, wait=wait, out=out, handed_off=handed_off)
     except OpsRefused as exc:
         out(f"jarvis restart: {exc}")
         return exc.code
@@ -369,11 +622,14 @@ def pull(out) -> tuple[str | None, str | None]:
     """Fast-forward `main` from `origin/main`; (HEAD before, HEAD after).
 
     Refuses — never stashes, resets or forces — when the checkout is not on
-    `main`, when tracked files have uncommitted changes, and when `main`
-    cannot be fast-forwarded."""
-    from jarvis import gitops
+    `main`, when tracked files have uncommitted changes, when `main` cannot
+    be fast-forwarded, and when the checkout's git config names a program or
+    cannot be read."""
     repo = config.REPO_ROOT
-    risky = gitops._risky_config(Path(repo))
+    risky = hud_install.config_risk(Path(repo))
+    if risky and "could not be read" in risky:
+        raise OpsRefused(f"--pull does not run git in {repo}: {risky} — pull it yourself, or "
+                         "drop --pull")
     if risky:
         raise OpsRefused(f"the checkout's own git config names a program git would run ({risky}); "
                          "--pull does not run git there — pull it yourself, or drop --pull")
@@ -401,7 +657,13 @@ def pull(out) -> tuple[str | None, str | None]:
                          "this never merges, rebases, resets or forces")
     after = _head()
     if before == after:
-        out(f"main is up to date with origin/main ({(after or '?')[:12]}).")
+        ahead = _git("rev-list", "--count", "origin/main..HEAD")
+        n = ahead.stdout.strip() if ahead.returncode == 0 else ""
+        if n.isdigit() and int(n) > 0:
+            out(f"main is {_plural(int(n), 'commit')} ahead of origin/main ({(after or '?')[:12]}): "
+                "nothing to pull; it builds what is here, unpushed commits included.")
+        else:
+            out(f"main is up to date with origin/main ({(after or '?')[:12]}).")
     else:
         count = _git("rev-list", "--count", f"{before}..{after}")
         n = count.stdout.strip() if count.returncode == 0 else "?"
@@ -421,12 +683,39 @@ def python_changed(before: str | None, after: str | None) -> list[str]:
             if (path.startswith("jarvis/") and path.endswith(".py")) or path == "pyproject.toml"]
 
 
-def verify(installed: hud_install.Build, status: dict | None, out) -> int:
+def _status_for_verify() -> tuple[dict | None, str | None]:
+    """`/status` for the check after an install: a daemon that did not
+    answer is asked once more, longer, before it counts as down."""
+    status, why = read_status()
+    if status is None and why != REFUSED:
+        status, why = read_status(timeout=RETRY_TIMEOUT)
+    return status, why
+
+
+def verify(installed: hud_install.Build, status: dict | None, out, why: str | None = REFUSED) -> int:
     """Does the daemon serve `installed`, from HEAD, as an installed build?"""
     port = config.DAEMON_PORT
     if not _is_v2(status):
-        out(f"Installed {installed.id}, but no v2 daemon answers on 127.0.0.1:{port}, so what it "
-            f"serves cannot be checked. Start it: `systemctl --user start {UNIT}`.")
+        if status is not None:
+            out(f"Installed {installed.id}, but something other than the v2 daemon answers on "
+                f"127.0.0.1:{port}, so what the daemon serves cannot be checked.")
+        elif why != REFUSED:
+            # Up but slow or busy — never "start it" (review of PR #48, H1).
+            out(f"Installed {installed.id}, but the daemon on 127.0.0.1:{port} did not answer "
+                f"({why}), so what it serves cannot be checked. It is not down: reload the HUD "
+                "window (Ctrl+R) in a moment, and `jarvis restart` only if it stays silent.")
+        else:
+            try:
+                active = unit_state().get("ActiveState", "")
+            except OpsRefused:
+                active = ""
+            if active in UP:
+                out(f"Installed {installed.id}, but nothing answers on 127.0.0.1:{port} although "
+                    f"systemd says {UNIT} is {active} — is JARVIS_DAEMON_PORT different in this "
+                    "shell from the daemon's? What it serves cannot be checked from here.")
+            else:
+                out(f"Installed {installed.id}, but no v2 daemon answers on 127.0.0.1:{port}, so what "
+                    f"it serves cannot be checked. Start it: `systemctl --user start {UNIT}`.")
         return UNVERIFIED
     served, state, head = status.get("hud_build"), status.get("hud_state"), status.get("hud_git_head")
     checkout = hud_install.git_head()
@@ -460,14 +749,21 @@ def rebuild(*, pull_first: bool = False, restart_after: bool = False, clean: boo
     """`jarvis hud rebuild`."""
     hud = Path(config.REPO_ROOT) / "hud"
     try:
-        if restart_after and not force:
+        if restart_after:
             # Before anything is pulled or built: a refusal costs nothing now.
-            busy = busy_refusal(fetch_status())
-            if busy is not None:
-                raise OpsRefused(f"--restart: {busy}", busy.code)
+            try:
+                _preflight(force)
+            except OpsRefused as exc:
+                raise OpsRefused(f"--restart: {exc}", exc.code) from None
         moved: list[str] = []
         if pull_first:
             moved = python_changed(*pull(out))
+        # The install root and a clean hud/ before `npm ci`, which runs
+        # package.json's scripts and obeys hud/.npmrc (review of PR #48, M3).
+        why = hud_install.root_refusal(Path(config.HUD_DIR))
+        if why:
+            raise hud_install.InstallRefused(why)
+        hud_install._clean_enough(hud_install.hud_dirty(), allow_dirty)
         reason = npm_ci_reason(hud, clean)
         if reason:
             out(f"Running `npm ci` in {hud} ({reason}) …")
@@ -490,13 +786,22 @@ def rebuild(*, pull_first: bool = False, restart_after: bool = False, clean: boo
                if "pyproject.toml" in moved else "")
             + "): the daemon runs the old code until it restarts — `jarvis restart` when no turn "
             "is running, or pass --restart next time.")
+    why: str | None = None
     if restart_after:
         try:
+            if in_daemon_cgroup():
+                checked = _preflight(force)
+                checked.say_forced(out)
+                warn_uncommitted(checked.unit, out)
+                hand_off(_restart_argv(force, wait), out)
+                out(f"Installed {installed.id}; the restart's report, with the HUD it serves, is "
+                    "in that unit's journal.")
+                return UNVERIFIED
             status = _restart(force=force, wait=wait, out=out)
         except OpsRefused as exc:
             out(f"jarvis hud rebuild: installed {installed.id}, but did not restart: {exc}")
             return exc.code
         report(status, out)
     else:
-        status = fetch_status()
-    return verify(installed, status, out)
+        status, why = _status_for_verify()
+    return verify(installed, status, out, why)

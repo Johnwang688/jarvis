@@ -454,18 +454,36 @@ def find(root, rel: str) -> bytes | None:
 # -- the CLI -------------------------------------------------------------------------
 
 
+def config_risk(repo) -> str:
+    """Why git must not run in `repo`, or "": its own config names a program
+    git would run (`gitops._risky_config`), or — failing closed (review of PR
+    #48) — git cannot list that config at all (`_risky_config` reads that as
+    "nothing risky")."""
+    from jarvis import gitops
+    repo = Path(repo)
+    try:
+        code, _, err = gitops._git(repo, ["config", "--list", "--name-only", "--show-scope"],
+                                   timeout=60)
+        if code != 0:
+            first = next((line.strip() for line in (err or "").splitlines() if line.strip()), "")
+            return f"its git config could not be read ({first[:200] or f'exit {code}'})"
+        return gitops._risky_config(repo)
+    except Exception as exc:     # noqa: BLE001 — not knowing is a refusal here
+        return f"its git config could not be read ({type(exc).__name__})"
+
+
 def _git(*args: str) -> tuple[int, str] | None:
     """git in the checkout, run the way `gitops` runs it (review of PR #44 at
     62db94f): an absolute git, every inherited `GIT_*` dropped, the pager and
     editors pinned, hooks and fsmonitor off, never a shell — `git status`
     used to inherit the environment and the repository's own config, and a
     repository's `core.fsmonitor` program ran. A checkout whose own config
-    names a program git would run (a filter, a textconv …) is not read at
-    all: None, as if git could not say."""
+    names a program git would run (a filter, a textconv …), or whose config
+    cannot be read, is not read at all: None, as if git could not say."""
     from jarvis import gitops
     repo = Path(config.REPO_ROOT)
     try:
-        if gitops._risky_config(repo):
+        if config_risk(repo):
             return None
         code, stdout, _ = gitops._git(repo, list(args), timeout=60)
     except Exception:     # noqa: BLE001 — no git means "cannot say"
@@ -480,13 +498,30 @@ def git_head() -> str | None:
     return head if out is not None and out[0] == 0 and re.fullmatch(r"[0-9a-f]{40,64}", head) else None
 
 
+# Files npm reads from `hud/` itself that git may never show — an ignored
+# `.npmrc` sets `script-shell`, `node-options` or a registry, and both `npm
+# ci` and `npm run build` honour it (review of PR #48, M3).
+NPM_FILES = (".npmrc", "npm-shrinkwrap.json")
+
+
 def hud_dirty() -> bool | None:
     """Whether `hud/` has uncommitted changes (`git status --porcelain -- hud`,
-    untracked files included), or None when git cannot say."""
+    untracked files included), or None when git cannot say. An npm file at
+    `hud/` that git does not track (`NPM_FILES`) counts, ignored or not."""
     out = _git("status", "--porcelain", "--untracked-files=normal", "--", "hud")
     if out is None or out[0] != 0:
         return None
-    return bool(out[1].strip())
+    if out[1].strip():
+        return True
+    hud = Path(config.REPO_ROOT) / "hud"
+    present = [name for name in NPM_FILES if os.path.lexists(hud / name)]
+    if present:
+        tracked = _git("ls-files", "--", *(f"hud/{name}" for name in present))
+        if tracked is None or tracked[0] != 0:
+            return None
+        if set(tracked[1].split()) != {f"hud/{name}" for name in present}:
+            return True
+    return False
 
 
 def hud_changed_since(commit: str | None) -> bool | None:
@@ -535,8 +570,9 @@ def _clean_enough(dirty: bool | None, allow_dirty: bool) -> None:
                              "checkout, or its own config names a program git would run); "
                              "pass --allow-dirty to install anyway")
     if dirty and not allow_dirty:
-        raise InstallRefused("hud/ has uncommitted changes (`git status -- hud`); commit or "
-                             "stash them, or pass --allow-dirty to install them anyway")
+        raise InstallRefused("hud/ has uncommitted changes (`git status -- hud`, or an "
+                             f"untracked {' or '.join(NPM_FILES)} there, which npm would obey); "
+                             "commit or stash them, or pass --allow-dirty to install them anyway")
 
 
 def install_checkout(*, build=npm_build, allow_dirty: bool = False) -> Build:

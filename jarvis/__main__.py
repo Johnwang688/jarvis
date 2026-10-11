@@ -416,7 +416,8 @@ def cmd_restart(args) -> int:
     every agent."""
     from .v2 import owner_ops
 
-    return owner_ops.restart(force=bool(getattr(args, "force", False)), wait=_wait(args))
+    return owner_ops.restart(force=bool(getattr(args, "force", False)), wait=_wait(args),
+                             handed_off=bool(getattr(args, "handed_off", False)))
 
 
 def cmd_daemon2(args) -> int:
@@ -976,6 +977,9 @@ def build_parser() -> argparse.ArgumentParser:
                          help="restart even while a turn is running (it is cut off)")
     restart.add_argument("--wait", type=_seconds, default=None, metavar="SECONDS",
                          help="how long to wait for the new daemon to answer /status (default 30)")
+    # Set only by the restart a HUD terminal hands to a transient unit outside
+    # the daemon's cgroup (`owner_ops.hand_off`), so it never hands off again.
+    restart.add_argument("--handed-off", action="store_true", help=argparse.SUPPRESS)
     restart.set_defaults(func=cmd_restart)
 
     daemon2 = sub.add_parser("daemon2", help="v2 daemon and local API; `daemon2 restart` = "

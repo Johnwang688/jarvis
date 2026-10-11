@@ -68,13 +68,20 @@ REAL_GIT_HEAD = hud_install.git_head
 _real_connect = http.client.HTTPConnection.connect
 
 
+class LivePortReached(BaseException):
+    """Not an Exception: `read_status` turns every Exception into "no
+    answer", and a test reaching a live port must fail, not be read as one."""
+
+
 def _guarded_connect(self):
     if self.port in LIVE_PORTS:
-        raise AssertionError(f"a test reached the live port {self.port}")
+        raise LivePortReached(f"a test reached the live port {self.port}")
     return _real_connect(self)
 
 
 http.client.HTTPConnection.connect = _guarded_connect
+OUTSIDE = "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-test.scope\n"
+INSIDE = "0::/user.slice/user-1000.slice/user@1000.service/app.slice/jarvis-daemon2.service\n"
 
 
 # -- fakes -----------------------------------------------------------------------------
@@ -107,24 +114,37 @@ class Daemon:
         self.hud = {"build": "20261011T000000000000Z-0123456789ab", "git_head": "a" * 40,
                     "state": "installed"}
         self.turns_after_restart = 0
+        self.approvals = 0               # `approvals_pending`
         self.fetches = 0
+        self.slow = 0                    # this many more reads time out (the daemon is up)
+        self.timeouts: list[float] = []  # the timeout of each read that timed out
 
     def restart(self):
         self.down_until = self.clock.now + self.boot
         self.old_started = self.started
         self.started = self.clock.now + self.boot
         self.turns = self.turns_after_restart
+        self.slow = 0
 
-    def status(self, port=None, timeout=2.0):
+    def read(self, port=None, timeout=2.0):
+        """`owner_ops.read_status`: (body, None) or (None, why)."""
         self.fetches += 1
         if self.down_until is not None and self.stale_answers > 0:
             self.stale_answers -= 1
-            return self._body(self.old_started)
+            return self._body(self.old_started), None
         if not self.up:
-            return None
+            return None, O.REFUSED if hasattr(O, "REFUSED") else "refused"
         if self.down_until is not None and (self.clock.now < self.down_until or not self.comes_back):
-            return None
-        return self._body(self.started)
+            return None, O.REFUSED if hasattr(O, "REFUSED") else "refused"
+        if self.slow > 0:
+            self.slow -= 1
+            self.timeouts.append(timeout)
+            return None, f"/status did not answer within {timeout:g} s"
+        return self._body(self.started), None
+
+    def status(self, port=None, timeout=2.0):
+        """`owner_ops.fetch_status` (what c218da8 called): the body or None."""
+        return self.read(port, timeout)[0]
 
     def _body(self, started):
         hud = self.hud() if callable(self.hud) else self.hud
@@ -132,7 +152,7 @@ class Daemon:
                 "providers": {"claude": {"ok": True, "reason": "claude 2.1.300"},
                               "codex": {"ok": False, "reason": "codex is not logged in\nrun codex login"},
                               "fast": {"ok": True, "reason": ""}},
-                "threads_open": 1, "turns_running": self.turns,
+                "threads_open": 1, "turns_running": self.turns, "approvals_pending": self.approvals,
                 "hud_build": hud["build"], "hud_git_head": hud.get("git_head"),
                 "hud_state": hud["state"], "hud_passed_over": hud.get("passed_over", [])}
 
@@ -141,13 +161,16 @@ class Programs:
     """`subprocess.run` for systemctl and npm; everything else really runs."""
 
     def __init__(self, daemon=None, *, load="loaded", active="active", show_rc=0, show_err="",
-                 restart_rc=0, restart_err="", npm_rc=0, npm_raises=None, systemctl_raises=None):
+                 restart_rc=0, restart_err="", npm_rc=0, npm_raises=None, systemctl_raises=None,
+                 result="success", exec_start="", run_rc=0, run_raises=None):
         self.daemon = daemon
         self.load, self.active = load, active
         self.show_rc, self.show_err = show_rc, show_err
         self.restart_rc, self.restart_err = restart_rc, restart_err
         self.npm_rc, self.npm_raises = npm_rc, npm_raises
         self.systemctl_raises = systemctl_raises
+        self.result, self.exec_start = result, exec_start
+        self.run_rc, self.run_raises = run_rc, run_raises   # systemd-run
         self.active_after = None         # ActiveState once the restart was issued
         self.restarted = False
         self.calls: list[tuple[list, dict]] = []
@@ -155,8 +178,8 @@ class Programs:
 
     def run(self, argv, *args, **kwargs):
         name = os.path.basename(argv[0]) if isinstance(argv, list) and argv else None
-        if name not in ("systemctl", "npm"):
-            if isinstance(argv, list) and any(os.path.basename(str(a)) in ("systemctl", "npm")
+        if name not in ("systemctl", "npm", "systemd-run"):
+            if isinstance(argv, list) and any(os.path.basename(str(a)) in ("systemctl", "npm", "systemd-run")
                                               for a in argv[:1]):
                 raise AssertionError(f"a real {argv[0]} was about to run")
             return REAL_RUN(argv, *args, **kwargs)
@@ -170,13 +193,20 @@ class Programs:
             if self.npm_raises:
                 raise self.npm_raises
             return subprocess.CompletedProcess(argv, self.npm_rc)
+        if name == "systemd-run":
+            self.events.append("systemd-run")
+            if self.run_raises:
+                raise self.run_raises
+            return subprocess.CompletedProcess(argv, self.run_rc, "",
+                                               "Failed to start transient service unit" if self.run_rc else "")
         if self.systemctl_raises:
             raise self.systemctl_raises
         verb = argv[2]
         self.events.append("systemctl " + verb)
         if verb == "show":
             active = self.active_after if self.restarted and self.active_after else self.active
-            out = f"LoadState={self.load}\nActiveState={active}\nSubState=running\n"
+            out = (f"LoadState={self.load}\nActiveState={active}\nSubState=running\n"
+                   f"Result={self.result}\n" + (f"ExecStart={self.exec_start}\n" if self.exec_start else ""))
             return subprocess.CompletedProcess(argv, self.show_rc, out if not self.show_rc else "",
                                                self.show_err)
         if verb == "restart":
@@ -215,11 +245,18 @@ class Base(unittest.TestCase):
         patch.object(O, "_systemctl_path", lambda: "/usr/bin/systemctl").start()
         patch.object(hud_install, "npm_path", lambda: "/usr/bin/npm").start()
         patch.object(hud_install, "git_head", lambda: "a" * 40).start()
+        # Not inside the daemon's cgroup (whatever terminal runs the suite),
+        # no uncommitted Python, no systemd-run: each test that needs one
+        # says so.
+        for name, value in (("_cgroup_text", lambda: OUTSIDE), ("uncommitted_python", lambda repo: []),
+                            ("_systemd_run_path", lambda: "/usr/bin/systemd-run")):
+            patch.object(O, name, value, create=True).start()
 
     def world(self, daemon=None, **programs):
         self.daemon = daemon if daemon is not None else Daemon(self.clock)
         self.programs = Programs(self.daemon, **programs)
         patch.object(O, "fetch_status", self.daemon.status).start()
+        patch.object(O, "read_status", self.daemon.read, create=True).start()
         patch.object(subprocess, "run", self.programs.run).start()
         return self.daemon, self.programs
 
@@ -250,7 +287,7 @@ class Restart(Base):
         self.assertIn("restart", programs.verbs())
         restart = [argv for argv, _ in programs.calls if argv[2] == "restart"][0]
         self.assertEqual(restart, ["/usr/bin/systemctl", "--user", "restart", "jarvis-daemon2"])
-        self.assertIn("--force: 1 turn is running, and will be cut off.", self.said())
+        self.assertIn("--force: 1 turn is running; restarting anyway", self.said())
 
     def test_warns_about_terminals_and_reports(self):
         self.world()
@@ -355,7 +392,9 @@ class Restart(Base):
 
     def test_something_else_on_the_port(self):
         daemon, programs = self.world()
-        patch.object(O, "fetch_status", lambda **_: {"jarvis-daemon": True, "uptime": 3}).start()
+        body = {"jarvis-daemon": True, "uptime": 3}
+        patch.object(O, "fetch_status", lambda **_: body).start()
+        patch.object(O, "read_status", lambda **_: (body, None)).start()
         self.assertEqual(O.restart(out=self.out.append), O.FAILED)
         self.assertIn("something other than the v2 daemon", self.said())
         self.assertEqual(programs.calls, [])
@@ -419,8 +458,29 @@ class FetchStatus(unittest.TestCase):
         self.assertIsNone(O.fetch_status(port, timeout=0.5))
 
     def test_the_live_ports_are_guarded(self):
-        with self.assertRaises(AssertionError):
+        with self.assertRaises(LivePortReached):
             http.client.HTTPConnection("127.0.0.1", 8405, timeout=0.1).connect()
+        with self.assertRaises(LivePortReached):            # not swallowed as "no answer"
+            O.read_status(8405, timeout=0.1)
+
+    def test_a_refused_connection_and_no_answer_are_told_apart(self):
+        """H1: "nothing listens" is not "something listens and is silent"."""
+        import socket
+        sock = socket.socket()
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+        sock.close()
+        self.assertEqual(O.read_status(port, timeout=0.5), (None, O.REFUSED))
+        silent = socket.socket()                        # listens, never answers
+        silent.bind(("127.0.0.1", 0))
+        silent.listen(1)
+        self.addCleanup(silent.close)
+        body, why = O.read_status(silent.getsockname()[1], timeout=0.3)
+        self.assertIsNone(body)
+        self.assertNotEqual(why, O.REFUSED)
+        self.assertIn("did not answer within 0.3 s", why)
+        body, why = O.read_status(self.serve(503, b"{}"))
+        self.assertEqual((body, why), (None, "/status answered HTTP 503"))
 
 
 # -- npm ci ----------------------------------------------------------------------------
@@ -608,7 +668,7 @@ class Pull(Checkout):
 # -- rebuild ---------------------------------------------------------------------------
 
 
-class Rebuild(Checkout):
+class RebuildWorld(Checkout):
     def setUp(self):
         super().setUp()
         self.root = self.tmp / "share" / "jarvis" / "hud"
@@ -644,6 +704,8 @@ class Rebuild(Checkout):
     def rebuild(self, **kw):
         return O.rebuild(out=self.out.append, build=self.build, **kw)
 
+
+class Rebuild(RebuildWorld):
     def test_installs_and_verifies(self):
         _, programs = self.world(self.daemon())
         self.assertEqual(self.rebuild(), O.OK, self.said())
@@ -689,7 +751,7 @@ class Rebuild(Checkout):
         self.assertIn("(with uncommitted hud/ changes)", self.said())
 
     def test_unverified_when_the_daemon_is_down(self):
-        self.world(self.daemon(up=False))
+        self.world(self.daemon(up=False), active="inactive")
         self.assertEqual(self.rebuild(), O.UNVERIFIED)
         self.assertIn("no v2 daemon answers", self.said())
         self.assertIn("systemctl --user start jarvis-daemon2", self.said())
@@ -739,7 +801,8 @@ class Rebuild(Checkout):
     def test_restart_after_the_install(self):
         _, programs = self.world(self.daemon())
         self.assertEqual(self.rebuild(restart_after=True), O.OK, self.said())
-        self.assertEqual(programs.events, ["build", "systemctl show", "systemctl restart"])
+        # The unit is checked before anything is built, and again before the restart.
+        self.assertEqual(programs.events, ["systemctl show", "build", "systemctl show", "systemctl restart"])
         built = hud_install.newest(self.root)
         self.assertIn("The daemon is up", self.said())
         self.assertIn(f"The daemon serves {built.id}", self.said())
@@ -785,6 +848,245 @@ class Rebuild(Checkout):
         self.assertNotIn("Python changed", self.said())
 
 
+# -- the review of PR #48 (each check fails on c218da8) --------------------------------
+
+
+class ReviewRestart(Base):
+    """H1: "no answer" is never "nothing running"; approvals count; the
+    start limit names its way out; M5 warns of uncommitted Python; M4 hands
+    a restart typed in a HUD terminal to a unit outside the daemon."""
+
+    def test_h1_a_slow_status_is_asked_again_then_refused(self):
+        daemon, programs = self.world()
+        daemon.slow = 2                                  # up, but silent twice
+        self.assertEqual(O.restart(out=self.out.append), O.BUSY, self.said())
+        self.assertNotIn("restart", programs.verbs(), "nothing was restarted")
+        self.assertIn("can't check for running turns", self.said())
+        self.assertIn("--force", self.said())
+        self.assertEqual(daemon.timeouts, [O.STATUS_TIMEOUT, O.RETRY_TIMEOUT],
+                         "asked again with a longer timeout")
+
+    def test_h1_a_second_answer_is_checked_like_the_first(self):
+        daemon, programs = self.world(Daemon(self.clock, turns=1))
+        daemon.slow = 1
+        self.assertEqual(O.restart(out=self.out.append), O.BUSY, self.said())
+        self.assertIn("1 turn is running", self.said())
+        self.assertNotIn("restart", programs.verbs())
+
+    def test_h1_force_restarts_a_silent_daemon_and_says_so(self):
+        daemon, programs = self.world()
+        daemon.slow = 2
+        self.assertEqual(O.restart(force=True, out=self.out.append), O.OK, self.said())
+        self.assertIn("restart", programs.verbs())
+        self.assertIn("--force: can't check for running turns", self.said())
+
+    def test_h1_refused_while_systemd_says_active_is_a_port_question(self):
+        _, programs = self.world(Daemon(self.clock, up=False))       # active by default
+        self.assertEqual(O.restart(out=self.out.append), O.BUSY, self.said())
+        self.assertIn("JARVIS_DAEMON_PORT", self.said())
+        self.assertNotIn("restart", programs.verbs())
+
+    def test_h1_refused_while_activating_is_the_recovery_path(self):
+        daemon, programs = self.world(Daemon(self.clock, up=False), active="activating")
+        orig = daemon.restart
+
+        def back():
+            orig()
+            daemon.up = True
+        daemon.restart = back
+        self.assertEqual(O.restart(out=self.out.append), O.OK, self.said())
+        self.assertIn("Nothing answers on 127.0.0.1", self.said())
+
+    def test_a_waiting_approval_refuses_like_a_turn(self):
+        daemon, programs = self.world()
+        daemon.approvals = 1
+        self.assertEqual(O.restart(out=self.out.append), O.BUSY, self.said())
+        self.assertIn("1 approval is waiting on you", self.said())
+        self.assertNotIn("restart", programs.verbs())
+
+    def test_the_daemon_reports_waiting_approvals(self):
+        """`/status` carries `approvals_pending` — the broker's, the escape
+        hatch's included — so the busy check can see them."""
+        import threading
+        from types import SimpleNamespace
+        from jarvis.v2 import daemon as D
+        fake = SimpleNamespace(providers={}, _lock=threading.Lock(), _sessions={}, started_at=0.0,
+                               workshop_port=0, face_port=0, port=0, _server=None,
+                               approvals=SimpleNamespace(pending=lambda: ["one", "two"]))
+        with patch.object(config, "HUD_DIR", self.tmp / "hud"), \
+                patch.object(config, "HUD_DIST", self.tmp / "hud"), patch.object(config, "HUD_DEV", False):
+            status = D.Daemon.status(fake)
+        self.assertEqual(status["approvals_pending"], 2)
+        self.assertEqual(status["turns_running"], 0)
+
+    def test_a_unit_at_its_start_limit_names_reset_failed(self):
+        self.world(restart_rc=1, result="start-limit-hit",
+                   restart_err="Job for jarvis-daemon2.service failed.")
+        self.assertEqual(O.restart(out=self.out.append), O.FAILED)
+        self.assertIn("systemctl --user reset-failed jarvis-daemon2", self.said())
+
+    def test_m5_uncommitted_python_is_warned_before_the_restart(self):
+        _, programs = self.world(exec_start="{ path=/x/ckout/.venv/bin/python ; argv[]=/x/ckout/"
+                                            ".venv/bin/python -m jarvis daemon2 ; }")
+        seen = []
+        patch.object(O, "uncommitted_python",
+                     lambda repo: seen.append(repo) or ["jarvis/x.py", "jarvis/y.py"]).start()
+        self.assertEqual(O.restart(out=self.out.append), O.OK, self.said())
+        self.assertEqual(seen, [Path("/x/ckout")], "the checkout the daemon runs from")
+        said = self.said()
+        self.assertIn("uncommitted changes the new daemon will load: jarvis/x.py, jarvis/y.py", said)
+        self.assertLess(said.index("uncommitted changes"), said.index("Restarting"))
+
+    def test_m4_a_hud_terminal_hands_the_restart_off(self):
+        patch.object(O, "_cgroup_text", lambda: INSIDE).start()
+        _, programs = self.world()
+        self.assertEqual(O.restart(out=self.out.append), O.UNVERIFIED, self.said())
+        self.assertEqual(programs.verbs(), ["show"], "checked here, never restarted from here")
+        (argv, _), = [c for c in programs.calls if os.path.basename(c[0][0]) == "systemd-run"]
+        unit = next(a for a in argv if a.startswith("--unit=")).split("=", 1)[1]
+        self.assertTrue(unit.startswith("jarvis-owner-op-"), unit)
+        self.assertEqual(argv[:4], ["/usr/bin/systemd-run", "--user", "--collect", "--quiet"])
+        self.assertEqual(argv[argv.index("--") + 1:],
+                         [sys.executable, "-m", "jarvis", "restart", "--wait", "30", "--handed-off"])
+        said = self.said()
+        self.assertIn(unit, said)
+        self.assertIn(f"journalctl --user -u {unit}", said)
+        self.assertIn("Ctrl+R", said)
+        self.assertIn("closes", said)
+
+    def test_m4_a_hud_terminal_still_refuses_a_busy_daemon_itself(self):
+        patch.object(O, "_cgroup_text", lambda: INSIDE).start()
+        _, programs = self.world(Daemon(self.clock, turns=1))
+        self.assertEqual(O.restart(out=self.out.append), O.BUSY)
+        self.assertEqual(programs.calls, [], "nothing handed off")
+
+    def test_m4_no_systemd_run_says_so_and_restarts_nothing(self):
+        patch.object(O, "_cgroup_text", lambda: INSIDE).start()
+        patch.object(O, "_systemd_run_path", lambda: "").start()
+        _, programs = self.world()
+        self.assertEqual(O.restart(out=self.out.append), O.FAILED)
+        self.assertIn("outside the HUD", self.said())
+        self.assertNotIn("restart", programs.verbs())
+
+    def test_m4_a_failed_hand_off_says_so(self):
+        patch.object(O, "_cgroup_text", lambda: INSIDE).start()
+        _, programs = self.world(run_rc=1)
+        self.assertEqual(O.restart(out=self.out.append), O.FAILED)
+        self.assertIn("systemd-run failed (exit 1)", self.said())
+        self.assertNotIn("restart", programs.verbs())
+
+    def test_m4_the_handed_off_restart_runs_and_never_hands_off_again(self):
+        _, programs = self.world()
+        self.assertEqual(O.restart(handed_off=True, out=self.out.append), O.OK, self.said())
+        self.assertIn("restart", programs.verbs())
+        self.assertNotIn("systemd-run", programs.events)
+        patch.object(O, "_cgroup_text", lambda: INSIDE).start()
+        self.out.clear()
+        _, programs = self.world()
+        self.assertEqual(O.restart(handed_off=True, out=self.out.append), O.FAILED)
+        self.assertNotIn("systemd-run", programs.events)
+        self.assertNotIn("restart", programs.verbs())
+
+    def test_m4_the_cgroup_is_read_right(self):
+        for text, inside in ((INSIDE, True), (OUTSIDE, False), ("", False),
+                             ("12:pids:/user.slice/jarvis-daemon2.service\n", True),
+                             ("0::/app.slice/jarvis-daemon2.service.d\n", False),
+                             ("0::/app.slice/not-jarvis-daemon2.service\n", False)):
+            with self.subTest(text=text), patch.object(O, "_cgroup_text", lambda t=text: t):
+                self.assertEqual(O.in_daemon_cgroup(), inside)
+
+
+class ReviewRebuild(RebuildWorld):
+    """M3: nothing npm runs before the clean-hud/ refusal; an untracked or
+    ignored hud/.npmrc is dirty; H1 for the check after an install; `--pull`
+    says when main is ahead and fails closed on an unreadable config; M4 for
+    `--restart`."""
+
+    def test_m3_a_dirty_hud_is_refused_before_npm_ci(self):
+        _, programs = self.world(self.daemon())
+        self.write(self.repo, "hud/package.json", '{"scripts": {"preinstall": "touch /tmp/x"}}\n')
+        self.assertEqual(self.rebuild(clean=True), O.FAILED)
+        self.assertEqual(programs.verbs("npm"), [], "npm ci never ran")
+        self.assertIn("refused: hud/ has uncommitted changes", self.said())
+
+    def test_m3_an_untracked_npmrc_is_dirty(self):
+        _, programs = self.world(self.daemon())
+        (self.repo / "hud" / ".npmrc").write_text("script-shell=/tmp/evil\n")
+        self.assertEqual(self.rebuild(clean=True), O.FAILED)
+        self.assertEqual(programs.verbs("npm"), [])
+        self.assertIn(".npmrc", self.said())
+
+    def test_m3_an_ignored_npmrc_is_dirty_too(self):
+        _, programs = self.world(self.daemon())
+        (self.repo / ".git" / "info").mkdir(exist_ok=True)
+        (self.repo / ".git" / "info" / "exclude").write_text("hud/.npmrc\n")
+        (self.repo / "hud" / ".npmrc").write_text("node-options=--require /tmp/evil.js\n")
+        self.assertTrue(hud_install.hud_dirty())
+        self.assertEqual(self.rebuild(clean=True), O.FAILED)
+        self.assertEqual(programs.verbs("npm"), [])
+
+    def test_m3_a_refused_install_root_is_refused_before_npm_ci(self):
+        _, programs = self.world(self.daemon())
+        patch.object(config, "HUD_DIR", self.repo / "hud" / "installed").start()
+        self.assertEqual(self.rebuild(clean=True), O.FAILED)
+        self.assertEqual(programs.verbs("npm"), [])
+        self.assertIn("inside the repository", self.said())
+
+    def test_h1_a_slow_daemon_is_not_called_down_after_an_install(self):
+        daemon = self.daemon()
+        daemon.slow = 2
+        self.world(daemon)
+        self.assertEqual(self.rebuild(), O.UNVERIFIED)
+        said = self.said()
+        self.assertIn("did not answer", said)
+        self.assertNotIn("Start it", said)
+        self.assertEqual(daemon.timeouts, [O.STATUS_TIMEOUT, O.RETRY_TIMEOUT])
+
+    def test_h1_a_slow_first_answer_is_asked_again(self):
+        daemon = self.daemon()
+        daemon.slow = 1
+        self.world(daemon)
+        self.assertEqual(self.rebuild(), O.OK, self.said())
+
+    def test_h1_nothing_on_this_port_while_systemd_says_active(self):
+        self.world(self.daemon(up=False))
+        self.assertEqual(self.rebuild(), O.UNVERIFIED)
+        self.assertIn("JARVIS_DAEMON_PORT", self.said())
+        self.assertNotIn("Start it", self.said())
+
+    def test_pull_says_when_main_is_ahead(self):
+        self.write(self.repo, "local.txt", "mine\n")
+        self.commit(self.repo, "local work")
+        O.pull(self.out.append)
+        self.assertIn("main is 1 commit ahead of origin/main", self.said())
+        self.assertNotIn("up to date", self.said())
+
+    def test_pull_fails_closed_when_the_config_cannot_be_listed(self):
+        from jarvis import gitops
+        real = gitops._git
+
+        def no_config(cwd, args, **kw):
+            if args[:2] == ["config", "--list"]:
+                return 128, "", "fatal: bad config line 3 in file .git/config"
+            return real(cwd, args, **kw)
+        before = self.head()
+        self.upstream()
+        with patch.object(gitops, "_git", no_config):
+            with self.assertRaisesRegex(O.OpsRefused, "config could not be read"):
+                O.pull(self.out.append)
+            self.assertIsNone(hud_install.hud_dirty(), "and hud_install cannot say either")
+        self.assertEqual(self.head(), before)
+
+    def test_m4_rebuild_restart_from_a_hud_terminal_hands_off_after_the_install(self):
+        patch.object(O, "_cgroup_text", lambda: INSIDE).start()
+        _, programs = self.world(self.daemon())
+        self.assertEqual(self.rebuild(restart_after=True), O.UNVERIFIED, self.said())
+        self.assertIsNotNone(hud_install.newest(self.root), "installed here")
+        self.assertNotIn("restart", programs.verbs())
+        self.assertEqual(programs.events[-1], "systemd-run")
+        self.assertIn("journalctl --user -u jarvis-owner-op-", self.said())
+
+
 # -- the CLI ---------------------------------------------------------------------------
 
 
@@ -800,9 +1102,13 @@ class Cli(Base):
             self.assertEqual(self.main("restart", "--force", "--wait", "12"), 7)
             self.assertEqual(self.main("daemon2", "restart"), 7)
             self.assertEqual(self.main("daemon2", "restart", "--force"), 7)
+            self.assertEqual(self.main("restart", "--wait", "30", "--handed-off"), 7)
         self.assertEqual([c.kwargs for c in restart.call_args_list],
-                         [{"force": False, "wait": O.WAIT}, {"force": True, "wait": 12.0},
-                          {"force": False, "wait": O.WAIT}, {"force": True, "wait": O.WAIT}])
+                         [{"force": False, "wait": O.WAIT, "handed_off": False},
+                          {"force": True, "wait": 12.0, "handed_off": False},
+                          {"force": False, "wait": O.WAIT, "handed_off": False},
+                          {"force": True, "wait": O.WAIT, "handed_off": False},
+                          {"force": False, "wait": 30.0, "handed_off": True}])
 
     def test_rebuild_spellings(self):
         with patch.object(O, "rebuild", return_value=5) as rebuild:

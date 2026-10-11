@@ -1155,6 +1155,60 @@ def daemon_and_rebuild_ops_checks():
             ok(permit(*bash(line), brief) != Decision.DENY, f"{line!r} is not refused")
 
 
+REVIEW_48_V2_DENY = (
+    # M1
+    "systemctl --user -qp status restart jarvis-daemon2", "systemctl --user -P status stop jarvis-daemon2",
+    "systemctl --user --marked restart jarvis-daemon2", "systemctl --user restart jarvis-daemon{2,}",
+    "U=jarvis-daemon2; systemctl --user restart $U", "systemctl --user stop app.slice",
+    "systemctl --user kill basic.target", "echo restart jarvis-daemon2 | xargs systemctl --user",
+    "busctl --user call org.freedesktop.systemd1 /org/freedesktop/systemd1 "
+    "org.freedesktop.systemd1.Manager RestartUnit ss jarvis-daemon2.service replace",
+    # module runners and inline source
+    "python3 -m runpy jarvis hud install", "python3 -m cProfile -m jarvis restart",
+    "python3 -m pdb -c continue -m jarvis restart", "python3 -m coverage run -m jarvis restart",
+    'python3 -c "from jarvis.v2.owner_ops import *; restart()"',
+    "python3 -c \"import importlib; m = importlib.import_module('jarvis.v2.owner_ops'); m.restart()\"",
+    "python3 -c \"import subprocess; subprocess.run(['systemctl', '--user', 'restart', 'jarvis-daemon2'])\"",
+    # the owner's daemon2 kill rule
+    "pkill -f daemon2", "pkill -9 -f 'jarvis daemon2'", "pkill -KILL -f 'daemo[n]2'",
+    "pkill --signal KILL -f 'n2$'", "pkill -fdaemon2", "pkill -f -- 'jarvis d'",
+    "P=daemon2; pkill -f $P", "kill $(pgrep -f daemon2)", "kill -9 `pgrep -f daemon2`",
+    "kill -s KILL $(pidof daemon2)", "pgrep -f daemon2 | xargs kill -9", "killall -r daemon2",
+    "nohup pkill -f daemon2",
+)
+REVIEW_48_V2_ORDINARY = (
+    "pkill -f jarvis", "pkill -f vite", "pkill -f 'npm run dev'", "pgrep -f daemon2",
+    "echo pkill -f daemon2", "git commit -m 'stop using pkill -f daemon2'",
+    "systemctl --user reset-failed jarvis-daemon2", "systemctl --user restart pipewire",
+    "python3 -m cProfile -m pytest",
+)
+
+
+def review_48_checks():
+    """The review of PR #48 at layer 1: every new spelling is DENY under AUTO
+    and STRICT and never put to the owner; the must-stay lines are not
+    refused. On c218da8 (merged with main) v2's AUTO permit let the kill and
+    module-runner spellings run unasked."""
+    from jarvis.v2.model import PermissionProfile as P
+    from jarvis.v2.permissions import build_permit
+    from jarvis.v2.provider import Decision
+
+    with Sandbox():
+        for profile in (P.AUTO, P.STRICT):
+            brief = brief_for(profile)
+            asker = Asker(Decision.ALLOW)
+            permit = build_permit(context(brief), asker)
+            for line in REVIEW_48_V2_DENY:
+                before = len(asker.seen)
+                eq(permit(*bash(line), brief), Decision.DENY, f"[{profile.value}] Bash {line!r} is refused")
+                eq(len(asker.seen), before, f"[{profile.value}] {line!r} is never put to the owner")
+        brief = brief_for(P.AUTO)
+        asker = Asker(Decision.ALLOW)
+        permit = build_permit(context(brief), asker)
+        for line in REVIEW_48_V2_ORDINARY:
+            ok(permit(*bash(line), brief) != Decision.DENY, f"{line!r} is not refused")
+
+
 def daemon_checks():
     from jarvis.v2 import daemon as daemon_mod
     from jarvis.v2.model import PermissionProfile as P, ProviderName, Role
@@ -1522,7 +1576,7 @@ def discord_checks():
 def main():
     for section in (matrix_checks, always_ask_checks, file_deny_checks,
                     human_backed_checks, log_checks, approvals_checks, hud_build_deny_checks,
-                    installed_hud_deny_checks, daemon_and_rebuild_ops_checks,
+                    installed_hud_deny_checks, daemon_and_rebuild_ops_checks, review_48_checks,
                     daemon_checks, auto_quiet_checks, hatch_checks, discord_checks):
         print(f"-- {section.__name__}")
         section()
