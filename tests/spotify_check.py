@@ -419,16 +419,25 @@ def group_checks(token_path: Path) -> None:
     assert "Error" in tools.dispatch("load_tools", json.dumps({"group": "nope"})).text
 
     # A deferred name is not an unknown name, and saying so is what stops the
-    # model inventing a workaround for a tool that is right there. Note this is
-    # a correctness guard, not a boundary: it fails *open* when no agent context
-    # is bound, because a direct call from a script is not an agent reaching
-    # past its toolset.
-    runtime.bind(loaded_groups=set(), tool_names={"read_file"})
+    # model inventing a workaround for a tool that is right there — for an
+    # agent that could load it (it holds load_tools and the group's core).
+    runtime.bind(loaded_groups=set(), tool_names={"read_file", "load_tools", *group.core})
     hint = tools.dispatch("spotify_search", json.dumps({"query": "x"})).text
     assert "load_tools('spotify')" in hint, hint
     assert "not loaded" in hint, hint
     unknown = tools.dispatch("spotify_teleport", "{}").text
     assert "no tool named" in unknown and "spotify_search" not in unknown, unknown
+
+    # Since 2026-10-10 the toolset is enforced at dispatch (it fails open only
+    # when no agent is bound), so an agent that cannot load the group gets no
+    # pointer to a tool it cannot call: it is told the tool is not its own.
+    # And `load_tools` itself refuses a group whose core the agent lacks.
+    runtime.bind(loaded_groups=set(), tool_names={"read_file"})
+    refused = tools.dispatch("spotify_search", json.dumps({"query": "x"})).text
+    assert "not available to this agent" in refused and "load_tools" not in refused, refused
+    runtime.bind(loaded_groups=set(), tool_names={"read_file", "load_tools"})
+    widen = tools.dispatch("load_tools", json.dumps({"group": "spotify"})).text
+    assert "not available to this agent" in widen and "Loaded" not in widen, widen
     print("ok  groups: an explicit toolset cannot widen itself; deferred ≠ unknown")
 
     assert not [t for t in workflows.SAFE_TOOLS if t.startswith("spotify_")], \
