@@ -362,8 +362,10 @@ unless Jarvis reads it**: on the bus lifecycle records only
 log line (lifecycle only, and `/terminals` paths are logged without their
 query — the ticket rides in it), no thread log, Discord or disk. The
 exception, since WP-F (corrected 2026-10-10): what `terminal_read` returns goes where any tool result goes — the fast-path transcript (and so OpenRouter, with every later request), that conversation's v1 session `messages.json`, `config.SPILL_DIR` if context truncation cuts it later, and anything the model's reply repeats (a reply is mirrored to the chat's Discord thread and spoken); its ticker
-summary is fixed ("read N lines"), so none of it rides `tool_finished` onto
-the bus or into the thread's `log.jsonl`. Startup files: `terminal_rc.bash` (bash
+summary is fixed ("read N lines"), so the tool's own `tool_finished` record
+carries none of it onto the bus or into the thread's `log.jsonl` — **but the
+reply is not filtered**: it reaches `log.jsonl`, the bus, Discord and speech
+like any reply, so whatever the model repeats lands there too. Startup files: `terminal_rc.bash` (bash
 `--rcfile`, login emulation) and the POSIX `terminal_rc.sh` (`$ENV` for an
 `sh`-family shell started `-i`; kept apart because a dash parses every line,
 so bash syntax cannot hide behind an `if`); **zsh, fish and other shells get

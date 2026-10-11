@@ -81,8 +81,9 @@ with every later request; into that conversation's v1 session file
 context truncation later cuts it as an old result; and into anything the
 model's reply repeats — a reply is mirrored to the chat's Discord thread and
 spoken like any other. The tool's ticker summary is fixed ("read N lines",
-"refused"), so none of the text rides `tool_finished` onto the bus or into
-the thread's `log.jsonl`.
+"refused"), so the tool's own `tool_finished` record carries none of the
+text onto the bus or into the thread's `log.jsonl`; the model's reply is not
+filtered, and reaches both (and Discord, and speech) like any reply.
 
 **Shell integration (W-2, item 3).** bash reads `terminal_rc.bash` as its
 --rcfile; a POSIX `sh`-family shell (sh, dash, ash, ksh, mksh, …) reads
@@ -526,6 +527,10 @@ class CommandSpan:
     end: int | None = None
     exit_code: int | None = None
     prompt: int | None = None
+    # The command line was longer than COMMAND_CAP and the part cut off
+    # `could_print`: rule 3 counts the span as a printer (a guard that
+    # cannot see is not a reason to read).
+    unseen: bool = False
 
 
 class Marks:
@@ -623,7 +628,9 @@ class Marks:
                 evicted = self.spans.popleft()
                 self.spans_from = max(self.spans_from,
                                       evicted.end if evicted.end is not None else start)
-            self.spans.append(CommandSpan(command[:COMMAND_CAP], start=end, prompt=self.prompt))
+            self.spans.append(CommandSpan(command[:COMMAND_CAP], start=end, prompt=self.prompt,
+                                          unseen=len(command) > COMMAND_CAP
+                                          and terminal_guard.could_print(command, COMMAND_CAP)))
             self.integrated = True              # output is attributed to commands from here on
         elif kind == b"D" and open_span is not None:
             open_span.end = start

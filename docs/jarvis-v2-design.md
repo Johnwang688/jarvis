@@ -2141,8 +2141,11 @@ chats via jarvis-mcp are a follow-up), and never Discord, DM or scheduled
 turns. **Where read text goes**: like any tool result, into the fast-path
 transcript (and so OpenRouter), that conversation's v1 session
 `messages.json`, `SPILL_DIR` if truncation cuts it later, and whatever the
-model's reply repeats (mirrored to Discord, spoken); the ticker summary is
-fixed ("read N lines"), so none of it reaches the bus or the thread log.
+model's reply repeats (mirrored to Discord, spoken). The tool's ticker
+summary is fixed ("read N lines"), so the tool's own `tool_finished` record
+carries none of it — that is all the fixed summary promises: the model's
+reply is not filtered, and goes to the thread's `log.jsonl`, the bus, Discord
+and speech like any reply, so whatever it repeats lands there too.
 **The review round (2026-10-10)** gave the renderer the terminal's width
 (xterm's autowrap, clamped cursor numbers, capped rows), refused a read that
 starts inside a private key's block or shows its END footer, taught rule 3

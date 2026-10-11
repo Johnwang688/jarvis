@@ -954,7 +954,10 @@ project name or `~`, and logs `/terminals` paths without their query, so
 never a ticket), not in a thread log, not on Discord, not on disk. **The
 exception is a `terminal_read` result (WP-F, below)**: what `terminal_read` returns goes where any tool result goes — the fast-path transcript (and so OpenRouter, with every later request), that conversation's v1 session `messages.json`, `config.SPILL_DIR` if context truncation cuts it later, and anything the model's reply repeats (a reply is mirrored to the chat's Discord thread and spoken).
 Its `tool_finished` summary is fixed ("read N lines", "refused", "error"), so
-none of it reaches the bus or the thread's `log.jsonl`.
+the tool's own record on the bus and in the thread's `log.jsonl` carries none
+of it. That is all the fixed summary promises: the model's reply is not
+filtered — it goes to `log.jsonl`, the bus, Discord and speech like any reply,
+so whatever it repeats of the terminal lands there too.
 
 ## Additions 2026-10-09 (terminal panel and view — WP-D)
 

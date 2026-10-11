@@ -550,9 +550,11 @@ class TickerSummary(_FastPathBase):
     """MEDIUM (2026-10-10 review): `tool_finished`'s summary was the result's
     first 200 characters — the fence header and ~30 characters of the
     terminal's first line — and it rides the bus and the thread's
-    `log.jsonl`. A desk tool's summary is fixed now."""
+    `log.jsonl`. A desk tool's summary is fixed now. (That is all it
+    promises: the model's reply is not filtered and reaches both like any
+    reply — 2026-10-11 review, finding 6.)"""
 
-    def test_no_terminal_text_reaches_the_bus_or_the_thread_log(self):
+    def test_the_tools_own_record_carries_no_terminal_text(self):
         from jarvis.v2.providers.fastpath import _summary
         self.assertEqual(_summary("terminal_read", "Refused: possible credential in this output"), "refused")
         self.assertEqual(_summary("terminal_read", "Error: no HUD terminal is open"), "error")

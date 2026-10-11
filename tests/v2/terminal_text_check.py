@@ -299,6 +299,26 @@ PRINTERS = [
     "cat .env.production", "less ~/app/.env.staging.local", "ps eww", "ps axe",
     "terraform output -raw private_key", "systemctl show-environment", "docker inspect c",
     "aws secretsmanager get-secret-value --secret-id x", "time env", "{ cat .env; }",
+    "f() { cat .env; }; f",
+    # 2026-10-11 review (finding 4): copies, archives and decompressors onto
+    # the terminal, and whole-environment dumps (each False on 3393daf).
+    "cp .env /dev/stdout", "install -m 600 .env.production /dev/stderr", "curl -s file://$PWD/.env",
+    "curl file:///home/u/.aws/credentials", "tar -xOf b.tar .env", "tar xOf b.tar .env",
+    "tar --extract --to-stdout -f b.tar .env.local", "unzip -p a.zip .env", "7z e -so a.7z .env.production",
+    "zcat .env.gz", "gzip -dc .env.gz", "zcat ~/.ssh/id_rsa.gz", "xzcat .env.production.xz",
+    "node -p process.env", "node -e 'console.log(JSON.stringify(process.env))'",
+    "python3 -c 'import os; print(os.environ)'", "python3 -Ic 'import os; print(dict(os.environ))'",
+    "python3 -c 'import os; print(os.environ[\"API_KEY\"])'", "python3 -c 'import os; print(os.environ.copy())'",
+    "ruby -e 'p ENV'", "perl -e 'print %ENV'", "perl -le 'print $ENV{GITHUB_TOKEN}'",
+    "php -r 'print_r(getenv());'", "php -i", "deno eval 'console.log(Deno.env.toObject())'", "bun -p process.env",
+    "pwsh -c 'Get-ChildItem env:'", "pwsh -EncodedCommand ZQBuAHYA", "tmux show-environment", "tmux showenv -g",
+    "node --env-file=.env -p process.env.DATABASE_URL", "node --env-file=.env -e 'console.log(process.env.PORT)'",
+    "python3 .env", "node .env.production", "python -m dotenv list", "python -m base64 .env",
+    "perl -pe 1 .env", "node -e \"require('fs').readFileSync('.env')\"",
+    "docker inspect c --format '{{.Config.Env}}'", "docker inspect c --format '{{json .}}'",
+    "docker inspect -f '{{.}}' c", "docker container inspect c", "podman inspect c --format json",
+    "docker compose config", "docker-compose config", "dotenv list", "sort < .env",
+    "nohup " * 9 + "env", "sudo " * 9 + "cat .env",
 ]
 NOT_PRINTERS = [
     "env FOO=1 ls", "env -i bash", "ls -la", "cat README.md", "cat .env.example", "export FOO=bar",
@@ -308,6 +328,18 @@ NOT_PRINTERS = [
     "ls | xargs grep env", "docker build -t env .", "cat .env.example", "cat .env.sample",
     "cat .env.template", "ls -la", "ps aux", "ps -o pid,user", "for f in *.py; do cat \"$f\"; done",
     "if [ -f x ]; then make; fi", "x=ls; $x", "$(npm bin)/eslint .", "echo $(date)",
+    # 2026-10-11 review (finding 1): ordinary commands that were refused —
+    # an --env-file loads the file, a counter does not print it, and a format
+    # naming a safe field prints no environment (each True on 3393daf but
+    # the last four).
+    "node --env-file=.env server.js", "node --env-file .env server.js", "deno run --env-file=.env main.ts",
+    "bun --env-file=.env server.ts", "bun run --env-file=.env.production dev",
+    "node --env-file=.env server.js | jq", "node --env-file=.env --watch server.js 2>&1 | tee log",
+    "python -m uvicorn app:app --env-file .env", "wc -l < .env", "sha256sum < .env.production",
+    "docker inspect c --format '{{.State.Status}}'", "docker inspect -f '{{.NetworkSettings.IPAddress}}' c",
+    "ls -la .env*", "git log -p -- .env.example", "docker compose --env-file .env.production up -d",
+    "node -e 'console.log(process.env.PORT)'", "python3 manage.py runserver", "tar -tvf b.tar .env",
+    "cp .env .env.bak", "set -a; source .env; set +a", "npx dotenv -e .env -- next dev",
 ]
 
 
@@ -344,6 +376,45 @@ class Printers(unittest.TestCase):
                      "venv", "a > b", "$ ls -la", "drwxr-xr-x  env", "commit " + HEX40):
             with self.subTest(line=line):
                 self.assertFalse(G.shows_printer(line), line)
+
+    # 2026-10-11 review (finding 1): lines a dev server, a log or a commit
+    # message prints, refused on 3393daf — a reader's or an interpreter's
+    # name in prose is not a command, and an --env-file loads the file.
+    ORDINARY_LINES = (
+        "Add tail call before loading .env.production",
+        "Using python 3.12 with settings from .env",
+        "[nodemon] starting `node --env-file=.env server.js`",
+        "$ node --env-file=.env server.js",
+        "john@host:~/app$ node --env-file .env server.js",
+        "$ wc -l < .env",
+        "$ docker inspect web --format '{{.State.Status}}'",
+        # Must keep passing (they did on 3393daf too).
+        "[dotenv@17.2.0] injecting env (3) from .env -- tip: encrypt with dotenvx",
+        "  - Environments: .env.local, .env",
+        "◇ injected env (2) from .env",
+        "$ cat .env.example", "$ ls -la .env*", "$ git log -p -- .env.example",
+        "$ docker compose --env-file .env.production up -d",
+    )
+
+    def test_ordinary_lines_naming_a_credential_file(self):
+        for line in self.ORDINARY_LINES:
+            with self.subTest(line=line):
+                self.assertFalse(G.shows_printer(line), line)
+
+    def test_a_prompt_made_of_words_still_counts(self):
+        for line in ("john@host ~/p cat .env", "[proj] cat .env", "(venv) ~/app tail -n 5 .env.production",
+                     "(venv) python3 -c 'import os; print(os.environ)'", "$ cp .env /dev/stdout",
+                     "$ node -p process.env", "❯ tmux show-environment"):
+            with self.subTest(line=line):
+                self.assertTrue(G.shows_printer(line), line)
+
+    def test_a_glyph_alone_is_not_a_command_word(self):
+        # `_worth_parsing` is the cheap look before a parse: a prompt's glyph
+        # is never a command (its glyph candidate reads what follows).
+        for candidate in ("$ wc -l < .env", "# cat x", "1 john john 4096 Oct 11 notes.txt"):
+            with self.subTest(candidate=candidate):
+                self.assertFalse(G._worth_parsing(candidate))
+        self.assertTrue(G._worth_parsing("cat .env"))
 
 
 # -- the heuristic ---------------------------------------------------------------------
@@ -580,6 +651,31 @@ class AltSplit(unittest.TestCase):
     alternate screen read that screen. Through the real `Terminal.history()`,
     at every byte of each switch form."""
 
+    def test_terminals_read_hands_the_lead_over(self):
+        """LOW (2026-10-11 review, finding 3): the same split, through
+        `Terminals.read` — handing `history.data` from `history.start` (no
+        `lead`) read the alternate screen."""
+        from jarvis.v2 import terminals as T
+        body = b"\x1b[H" + b"ALT-SCREEN-ONLY-TEXT " * 40
+        switch = b"\x1b[?1049h"
+        for split in range(1, len(switch)):
+            with self.subTest(split=split):
+                head = b"normal line\r\n" + b"x" * 100
+                chunks = [head + switch[:split], switch[split:] + body]
+                term = T.Terminal("0000000f", shell="/bin/sh", folder="/", project_id=None,
+                                  label="~", cols=80, rows=24, nonce="0" * 32)
+                terminals = T.Terminals()
+                try:
+                    term._ring = T.Ring(cap=sum(map(len, chunks)) - len(head) - split, on_drop=term._alt.feed)
+                    for chunk in chunks:
+                        term._output(chunk)
+                    terminals._terminals[term.id] = term
+                    read = terminals.read(term.id, lines=50)
+                    self.assertIsNone(read.refused)
+                    self.assertNotIn("ALT-SCREEN", read.text)
+                finally:
+                    term.finish()
+
     def test_a_split_switch_is_parsed_whole(self):
         from jarvis.v2 import terminals as T
         body = b"\x1b[H" + b"ALT-SCREEN-ONLY-TEXT " * 40
@@ -610,6 +706,22 @@ def _fill(unit: bytes) -> bytes:
     return (unit * (MiB // len(unit) + 1))[:MiB]
 
 
+def _dense(lines: int, per_line: int) -> bytes:
+    """Lines of distinct `$ echo $vN | sort ;` candidates: every one worth parsing."""
+    n = iter(range(10 ** 9))
+    return b"".join(b"".join(b"$ echo $v%d | sort ; " % next(n) for _ in range(per_line)) + b"\r\n"
+                    for _ in range(lines))
+
+
+def _redrawn(times: int) -> bytes:
+    """A long wrapped line of candidates, one of its rows revisited and
+    changed `times` times: an ink entry per visit, each a little different."""
+    parts = [_dense(1, 60)[:1000] + b"\r\n"]
+    for i in range(times):
+        parts.append(b"\x1b[A\x1b[5G%d\x1b[%dG%c\x1b[B\r" % (i % 10, 10 + i % 900, 65 + i % 26))
+    return b"".join(parts)
+
+
 class Speed(unittest.TestCase):
     """MEDIUM (2026-10-10 review): a ring of adversarial shapes must render
     and be judged in bounded time — the old renderer had no width and two
@@ -637,6 +749,9 @@ class Speed(unittest.TestCase):
             "glyph soup": _fill("> set > env > cat > $ # % ❯ \r\n".encode()),
             "a runner with thousands of words": _fill(b"$ watch " + b"a " * 4000 + b"\r\n"),
             "backspace rewrites": _fill(b"A" * 2000 + b"\x08x" * 2000),
+            # 2026-10-11 review (finding 2): 18.6 s and 85.7 s on 3393daf.
+            "a window dense with distinct candidates": _dense(1000, 30),
+            "one row redrawn and erased": _redrawn(7600),
         }
 
     def test_every_adversarial_ring_is_judged_in_bounded_time(self):
@@ -655,6 +770,153 @@ class Speed(unittest.TestCase):
         for i in range(4000):
             G.prints_secrets(f"cat file{i}.txt " + "x" * 2000)
         self.assertLessEqual(G._cache_size, G.CACHE_BYTES)
+
+    def test_the_command_cache_is_bounded_by_count(self):
+        # LOW (2026-10-11 review, finding 5): 8-character keys under a 4 MiB
+        # bound were ~524k entries (~+47 MiB).
+        G.prints_secrets.cache_clear()
+        for i in range(G.CACHE_ENTRIES + 5000):
+            G.prints_secrets(f"ls f{i}")
+        self.assertLessEqual(len(G._cache), G.CACHE_ENTRIES)
+
+    def test_long_lines_of_candidates_are_judged_in_time_and_not_refused(self):
+        """LOW (2026-10-11 review, finding 3): what makes these lines cheap is
+        CANDIDATE_CAP, CANDIDATES_PER_LINE and SCAN_LINE_CAP; without any of
+        them the same lines spend the parse budget (and are refused) or run
+        for seconds. Eight 32 KiB lines of distinct candidates, none a
+        printer."""
+        data = b"".join(b"".join(b"$ echo $x%d_%d | sort ; " % (line, k) for k in range(1400)) + b"\r\n"
+                        for line in range(8))
+        G.prints_secrets.cache_clear()
+        start = time.perf_counter()
+        verdict = G.judge(data, 0, lines=G.MAX_LINES, cols=200)
+        self.assertLess(time.perf_counter() - start, self.BUDGET_S)
+        self.assertFalse(verdict.refused)
+
+    def test_a_long_command_is_parsed_only_to_the_cut(self):
+        # Without COMMAND_CUT one 68 KiB command takes seconds to parse.
+        G.prints_secrets.cache_clear()
+        start = time.perf_counter()
+        self.assertFalse(G.prints_secrets("echo $x | sort ; " * 4000))
+        self.assertLess(time.perf_counter() - start, 1.0)
+
+    def test_a_dense_window_is_refused_not_slow(self):
+        # Past PARSE_BUDGET the read is refused: an adversarial screen buys a
+        # refusal, never minutes.
+        G.prints_secrets.cache_clear()
+        start = time.perf_counter()
+        self.assertTrue(G.judge(_dense(1000, 30), 0, lines=G.MAX_LINES).refused)
+        self.assertLess(time.perf_counter() - start, self.BUDGET_S)
+
+
+class OrdinaryReads(unittest.TestCase):
+    """MEDIUM (2026-10-11 review, finding 1): the headline read — a dev
+    server's log — was refused for as long as `node --env-file=.env` ran (the
+    span covered the whole window), and a commit message or a nodemon banner
+    naming `.env` after a reader's or an interpreter's name refused any
+    window holding it. Each refused on 3393daf."""
+
+    def server(self, command: str, banner: bytes = b"") -> tuple[bytes, list]:
+        echo = f"john@host:~/app$ {command}\r\n".encode()
+        log = b"".join(b"GET /api/items/%d 200 3ms\r\n" % i for i in range(120))
+        data = echo + banner + log
+        running = span(data, command, echo, b"", end=None)
+        return data, [running]
+
+    def test_a_dev_server_started_with_an_env_file_is_readable(self):
+        for command in ("node --env-file=.env server.js", "node --env-file .env --watch server.js",
+                        "deno run -A --env-file=.env main.ts", "bun --env-file=.env.local run dev",
+                        "python -m uvicorn app:app --reload --env-file .env"):
+            with self.subTest(command=command):
+                data, spans = self.server(command)
+                verdict = G.judge(data, 0, lines=50, spans=spans, integrated=True)
+                self.assertFalse(verdict.refused, command)
+                self.assertIn("GET /api/items/119 200 3ms", verdict.text)
+
+    def test_banners_and_commit_messages_naming_a_credential_file(self):
+        banners = (b"[nodemon] starting `node --env-file=.env server.js`\r\n",
+                   b"[dotenv@17.2.0] injecting env (3) from .env -- tip: encrypt with dotenvx\r\n",
+                   b"   - Environments: .env.local, .env\r\n",
+                   b"abc1234 Add tail call before loading .env.production\r\n",
+                   b"def5678 Using python 3.12 with settings from .env\r\n")
+        for banner in banners:
+            with self.subTest(banner=banner):
+                data, spans = self.server("npm run dev", banner)
+                self.assertFalse(G.judge(data, 0, lines=50, spans=spans, integrated=True).refused)
+                self.assertFalse(G.judge(data, 0, lines=50).refused)       # the text half alone
+
+    def test_counting_and_inspecting_a_safe_field(self):
+        for line in (b"$ wc -l < .env\r\n4\r\n$ ", b"$ docker inspect web --format '{{.State.Status}}'\r\nrunning\r\n$ "):
+            with self.subTest(line=line):
+                self.assertFalse(G.judge(line, 0).refused)
+
+    def test_the_printers_are_still_refused(self):
+        for line in (b"$ node -p process.env\r\n{ HOME: '/home/x' }\r\n$ ", b"$ cp .env /dev/stdout\r\nX=1\r\n$ ",
+                     b"$ zcat .env.gz\r\nX=1\r\n$ ", b"$ tmux show-environment\r\nX=1\r\n$ ",
+                     b"$ docker inspect web\r\n[ {} ]\r\n$ ", b"$ f() { cat .env; }; f\r\nX=1\r\n$ "):
+            with self.subTest(line=line):
+                self.assertTrue(G.judge(line, 0).refused)
+
+
+class UnseenParts(unittest.TestCase):
+    """LOW (2026-10-11 review, finding 4): a guard that cannot see is not a
+    reason to read — for length as it was for depth. Past each bound on what
+    rule 3 parses, the part never parsed refuses the read when it could hold
+    a printer, and only then. Each printer here read on 3393daf."""
+
+    PAD = "echo aaaa ; " * 60                   # 720 characters: past CANDIDATE_CAP
+
+    def test_a_command_past_the_cut(self):
+        self.assertTrue(G.prints_secrets("echo " + "a" * 5000 + " ; env"))
+        self.assertTrue(G.prints_secrets("true " + "x " * 2500 + "; echo $GITHUB_TOKEN"))
+        self.assertFalse(G.prints_secrets("echo " + "a" * 5000 + " ; make"))     # long, not refused
+
+    def test_a_runner_past_its_tails(self):
+        self.assertTrue(G.prints_secrets("ssh h " + "-o x " * 30 + "cat .env"))
+        self.assertTrue(G.prints_secrets("ssh h " + "-o x " * 30 + "env"))
+        self.assertFalse(G.prints_secrets("ssh h " + "-o x " * 30 + "uptime"))
+
+    def test_wrappers_past_the_unwrap(self):
+        self.assertTrue(G.prints_secrets("nohup " * 9 + "env"))
+        self.assertTrue(G.prints_secrets("timeout 5 " * 9 + "cat .env"))
+        self.assertFalse(G.prints_secrets("nohup " * 3 + "make"))
+
+    def test_a_candidate_past_its_cap(self):
+        for tail in ("env", "echo $GITHUB_TOKEN", "node -p process.env", "tmux show-environment", "cat .e*"):
+            with self.subTest(tail=tail):
+                self.assertTrue(G.shows_printer("$ " + self.PAD + tail))
+        for tail in ("make", "ls -la", "echo done"):
+            with self.subTest(tail=tail):
+                self.assertFalse(G.shows_printer("$ " + self.PAD + tail))
+
+    def test_candidates_past_the_per_line_cap(self):
+        self.assertTrue(G.shows_printer("$ ls " * 17 + "$ env"))
+        self.assertTrue(G.shows_printer("- ok " * 20 + "$ echo $API_TOKEN"))
+        self.assertFalse(G.shows_printer("$ ls " * 40))
+        self.assertFalse(G.shows_printer("- ok " * 40 + "- done"))
+
+    def test_a_line_past_the_scan(self):
+        self.assertTrue(G.shows_printer("x" * 20_000 + " ; env"))
+        self.assertTrue(G.shows_printer("$ " + "x" * 20_000 + " ; cat .env"))
+        self.assertFalse(G.shows_printer("x" * 20_000 + " ; make"))
+        self.assertFalse(G.shows_printer("const e=" + "a.b?c:d[0]*2;" * 2000))  # minified: no hazard
+
+    def test_a_span_command_past_its_cap(self):
+        from urllib.parse import quote as q
+        from jarvis.v2 import terminals as T
+        nonce = "0" * 32
+        for command, printer in (("echo " + "a" * 5000 + " ; env", True),
+                                 ("echo " + "a" * 5000 + " ; make", False)):
+            with self.subTest(printer=printer):
+                marks = T.Marks(nonce)
+                echo = b"$ run\r\n"
+                mark = f"\x1b]133;C;cmdline_url={q(command, safe='')};jarvis={nonce}\x07".encode()
+                data = echo + mark + b"".join(b"line %d\r\n" % i for i in range(50))
+                marks.feed(data)
+                self.assertEqual(len(marks.spans), 1)
+                self.assertLessEqual(len(marks.spans[0].command), T.COMMAND_CAP)
+                verdict = G.judge(data, 0, lines=20, spans=list(marks.spans), integrated=True)
+                self.assertEqual(verdict.refused, printer)
 
 
 class FolderValues(unittest.TestCase):

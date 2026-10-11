@@ -60,6 +60,7 @@ from __future__ import annotations
 import base64
 from bisect import bisect_right
 from dataclasses import dataclass
+import itertools
 import math
 from pathlib import PurePosixPath
 import re
@@ -84,6 +85,10 @@ CANDIDATE_CAP = 512        # characters of one command-line candidate
 CANDIDATES_PER_LINE = 16   # prompt-glyph candidates tried on one line
 RUNNER_TAILS = 24          # argument positions a runner's command may start at
 CACHE_BYTES = 4 << 20      # the prints_secrets cache, by total key size
+CACHE_ENTRIES = 32_768     # … and by count (8-character keys would otherwise be ~524k entries)
+COMMAND_CUT = 4096         # characters of one command line parsed; past it, `could_print`
+PARSE_BUDGET = 128 * 1024  # characters rule 3 may parse (cache misses) in one read; past it, refused
+WORD_PROMPT_CAP = 160      # how far into a line a prompt made of words may reach
 WITHHELD_NOTE = "[{n} line(s) withheld: possible secret]"
 ENTROPY_FLOOR = 3.0        # bits per character, for the heuristic's token
 _DEPTH = 4
@@ -158,12 +163,18 @@ def protected_name(name: str) -> bool:
             or bool(CREDENTIAL_FILE.search(name)))
 
 
+# One compression suffix: `zcat id_rsa.gz` prints the key.
+_COMPRESSED = re.compile(r"\.(?:gz|bz2|xz|zst|lz4|lzma|lz|Z|z|br)$")
+
+
 def _names_credential(arg: str) -> bool:
     """An argument that names a credential file: the word itself, or the path
-    after a `REV:` (`git show HEAD:.env`) or an `--opt=`."""
+    after a `REV:` (`git show HEAD:.env`, `file://…/.env`) or an `--opt=`,
+    with or without one compression suffix."""
     arg = arg.strip("\"'")
-    return any(protected_name(part) for part in {arg, arg.rsplit(":", 1)[-1], arg.split("=", 1)[-1]}
-               if part)
+    parts = {arg, arg.rsplit(":", 1)[-1], arg.split("=", 1)[-1]}
+    parts |= {_COMPRESSED.sub("", part) for part in parts}
+    return any(protected_name(part) for part in parts if part)
 
 
 _NAME_EDGE = r"A-Za-z0-9_.\-"
@@ -194,13 +205,22 @@ def protected_in(text: str) -> bool:
 SECRET_PRINTERS = {
     "environment": "env (with no command to run), printenv, set (bare), export (bare or -p), "
                    "+declare/typeset (bare, or -p), +reading /proc/*/environ, +ps e…, "
-                   "+systemctl show-environment, +docker/podman inspect",
-    "credential files": "cat, less, head, tail, bat (+ the other readers in READERS, + interpreters, "
-                        "+ git show/diff/blame/cat-file/log/grep) of a protected path — "
-                        "secrets.is_protected, + .env.* but the templates, + the CREDENTIAL_FILE "
-                        "paths — named as an operand, after `REV:`, or as an input redirection; "
-                        "+ a reader of `$var`/`{}`/a substitution, find -exec or xargs reader, on "
-                        "a line that names one",
+                   "+systemctl/tmux show-environment, +docker/podman inspect (unless --format "
+                   "names only safe fields), +docker compose config, +dotenv list/get, "
+                   "+an interpreter's inline source that reads the whole environment or a "
+                   "secret-named variable (node -p process.env, python3 -c '…os.environ…'), "
+                   "+php -i",
+    "credential files": "cat, less, head, tail, bat (+ the other readers in READERS, decompressing "
+                        "ones included, + git show/diff/blame/cat-file/log/grep) of a protected "
+                        "path — secrets.is_protected, + .env.* but the templates, + the "
+                        "CREDENTIAL_FILE paths, + either with a compression suffix — named as an "
+                        "operand, after `REV:`, as a file: URL, or as an input redirection (but "
+                        "into a counter: wc, the checksums); + an interpreter given inline source "
+                        "on a line naming one, or running one as its script (never for a "
+                        "--env-file: that loads it); + a copy onto the terminal (cp .env "
+                        "/dev/stdout), an archive member to stdout (tar -xO, unzip -p, 7z -so), "
+                        "a compressor's -c; + a reader of `$var`/`{}`/a substitution, find -exec "
+                        "or xargs reader, on a line that names one",
     "tokens": "gh auth token, gh auth status -t, anything with --show-token, aws configure "
               "get / export-credentials, vercel env pull, git credential fill (+ SUBCOMMANDS)",
     "variables": "+echo/printf of a $VARIABLE whose name holds a heuristic keyword",
@@ -211,6 +231,9 @@ READERS = frozenset({
     "xxd", "od", "hexdump", "strings", "base64", "base32", "grep", "egrep", "fgrep", "rg", "ag",
     "ack", "ugrep", "sed", "awk", "gawk", "mawk", "cut", "sort", "uniq", "column", "jq", "yq",
     "diff", "colordiff", "paste", "fold", "fmt", "pr", "expand", "iconv", "dd", "tr", "rev",
+    # Decompressing readers (2026-10-11 review): `zcat .env.gz`.
+    "zcat", "gzcat", "bzcat", "xzcat", "lzcat", "zstdcat", "lz4cat", "zless", "zmore", "bzless",
+    "bzmore", "xzless", "xzmore", "zgrep", "zegrep", "zfgrep", "bzgrep", "xzgrep", "zstdgrep", "zdiff",
 })
 INTERPRETERS = frozenset({"python", "python3", "node", "ruby", "perl", "php", "deno", "bun",
                           "lua", "Rscript", "tclsh", "pwsh"})
@@ -259,9 +282,23 @@ SUBCOMMANDS: tuple[tuple[frozenset, tuple[str, ...]], ...] = tuple(
         (("security",), ("find-internet-password",)),
         (("terraform", "tofu"), ("output",)),
         (("systemctl",), ("show-environment",)),
-        (("docker", "podman", "nerdctl"), ("inspect",)),
+        # Whole-environment and resolved-config dumps (2026-10-11 review).
+        (("tmux",), ("show-environment",)),
+        (("tmux",), ("showenv",)),
+        (("docker", "podman", "nerdctl"), ("compose", "config")),
+        (("docker-compose", "podman-compose"), ("config",)),
+        (("dotenv",), ("list",)),
+        (("dotenv",), ("get",)),
+        (("dotenvx",), ("get",)),
+        (("dotenvx",), ("decrypt", "--stdout")),
+        (("railway",), ("variables",)),
+        (("netlify", "ntl"), ("env:list",)),
+        (("netlify", "ntl"), ("env:get",)),
     )
 )
+# `docker inspect` prints `Config.Env` unless a format names only safe
+# fields (`_inspect_prints`).
+CONTAINER_CLIS = frozenset({"docker", "podman", "nerdctl"})
 
 # Unmistakable anywhere in a line — in a command line or in output that
 # shows one. Word-bounded.
@@ -271,9 +308,15 @@ _STRONG = re.compile(
     r"|(?<![\w-])vercel\s+env\s+pull\b|(?<![\w-])aws\s+configure\s+get\b"
     r"|/proc/[^\s/]+/environ\b"
 )
-_KEYWORD_VAR = re.compile(
-    r"\$\{?[A-Za-z_]*(?:key|token|secret|pass|pwd|auth|bearer|cred|private)[A-Za-z0-9_]*",
-    re.IGNORECASE)
+# A `$VARIABLE` whose name holds a keyword — matched as the whole name and
+# then searched, so a 1 MiB name is one linear pass, never a backtrack.
+_VAR_WORD = re.compile(r"\$\{?[A-Za-z_][A-Za-z0-9_]*")
+_VAR_KEYWORD = re.compile(r"key|token|secret|pass|pwd|auth|bearer|cred|private", re.IGNORECASE)
+
+
+def _keyword_vars(text: str):
+    """Each `$VARIABLE` in `text` whose name holds a heuristic keyword."""
+    return (m for m in _VAR_WORD.finditer(text) if _VAR_KEYWORD.search(m.group()))
 
 SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh", "mksh", "ash", "fish", "yash", "posh",
                     "busybox", "rbash"})
@@ -314,8 +357,64 @@ _LEADERS = frozenset({"then", "do", "else", "elif", "if", "while", "until", "!",
                       "coproc", "function"})
 _GRAMMAR_WORDS = frozenset({"case", "for", "select", "done", "fi", "esac"})
 _CLOSERS = frozenset({"fi", "done", "esac", "}", ")", "))", ";;", "&&", "||"})
+_NAME = re.compile(r"[A-Za-z_][\w.:-]*")
+_FUNCTION_HEAD = re.compile(r"[A-Za-z_][\w.:-]*\(\)")
 _REDIR = re.compile(r"(?:\d+|\{[A-Za-z_]\w*\})?(<<<|<<-?|<>|<&|>&|&>>|&>|>>|>\||<|>)(.*)", re.DOTALL)
 _PRINTER_WORDS = frozenset({"env", "printenv", "set", "export", "declare", "typeset"})
+
+# An option that loads a file into a program's environment rather than
+# printing it (2026-10-11 review): `node --env-file=.env server.js` is how
+# Node 20 starts a dev server, and that server's log is the read this tool
+# exists for. Deno takes the value only after `=`.
+_LOADER = re.compile(r"--(?:env[-_]?file(?:-if-exists)?|dotenv(?:[-_]path)?)(?=$|=)")
+_LOADER_TEXT = re.compile(r"(?<!\S)--(?:env[-_]?file(?:-if-exists)?|dotenv(?:[-_]path)?)(?:=\S*|\s+(?!-)\S+)?")
+# Programs that read their input without printing it: `wc -l < .env`.
+COUNTERS = frozenset({"wc", "md5sum", "sha1sum", "sha224sum", "sha256sum", "sha384sum", "sha512sum",
+                      "b2sum", "cksum", "sum", "shasum"})
+# Where a copy lands on the terminal: `cp .env /dev/stdout`.
+_TERMINAL_OUT = re.compile(r"/dev/(?:stdout|stderr|tty|console|fd/\d+|pts/\d+)"
+                           r"|/proc/(?:self|thread-self|\d+)/fd/\d+")
+_COMPRESSORS = frozenset({"gzip", "gunzip", "pigz", "unpigz", "bzip2", "bunzip2", "pbzip2", "xz", "unxz",
+                          "lzma", "unlzma", "lzip", "zstd", "unzstd", "lz4", "unlz4", "brotli"})
+_ARCHIVERS = frozenset({"tar", "gtar", "bsdtar", "unzip", "7z", "7za", "7zr", "7zz", "ar"})
+
+# Interpreters: (short letters whose value is inline source, short letters
+# that take a value, short letters that take only a glued value, long
+# inline-source options, long options that take a value). What is not here
+# is read as a flag; a misread costs only when the word taken for the
+# script is itself a credential file.
+_INTERPRETER_OPTIONS: dict[str, tuple[str, str, str, frozenset, frozenset]] = {
+    "python": ("c", "mWXQ", "", frozenset(), frozenset({"--check-hash-based-pycs"})),
+    "node": ("ep", "rC", "", frozenset({"--eval", "--print"}),
+             frozenset({"--require", "--import", "--loader", "--experimental-loader", "--input-type",
+                        "--conditions", "--title", "--inspect-port"})),
+    "bun": ("ep", "r", "", frozenset({"--eval", "--print"}),
+            frozenset({"--require", "--preload", "--config", "--cwd", "--tsconfig-override"})),
+    "deno": ("", "", "", frozenset({"--eval"}), frozenset({"--config", "--import-map", "--lock",
+                                                           "--location", "--cert", "--seed"})),
+    "ruby": ("e", "rICEFx", "i", frozenset(), frozenset()),
+    "perl": ("eE", "IMmx", "il0", frozenset(), frozenset()),
+    "php": ("rBRFE", "dcfz", "", frozenset(), frozenset()),
+    "lua": ("e", "l", "", frozenset(), frozenset()),
+    "Rscript": ("e", "", "", frozenset(), frozenset()),
+}
+_INTERPRETER_OPTIONS["python3"] = _INTERPRETER_OPTIONS["python"]
+_POWERSHELLS = frozenset({"pwsh", "powershell", "pwsh.exe", "powershell.exe"})
+# Python modules that print a file they are handed.
+_PRINTING_MODULES = frozenset({"json.tool", "base64", "quopri", "uu", "gzip", "zipfile", "tarfile",
+                               "tokenize", "ast", "dis", "pickletools", "binascii"})
+# Inline source that reads the environment: the whole of it, or one
+# variable (`.NAME`, `["NAME"]`, `.get("NAME")`, `getenv("NAME")`,
+# `$ENV{NAME}`, `$env:NAME`) — which counts only when the name looks secret.
+_ENV_REF = re.compile(
+    r"process\.env|Bun\.env|Deno\.env(?:\.toObject)?|os\.environb?|os\.getenv|Sys\.getenv"
+    r"|System\.getenv|GetEnvironmentVariables?|(?<![\w.])environ(?!\w)|(?<![\w$%.])ENV(?!\w)|%ENV|\$ENV"
+    r"|(?<![\w.])getenv(?!\w)|\$_ENV|\$_SERVER|\$env:|(?<![\w$-])env:")
+_ENV_NAMED = re.compile(r"\s*(?:\.(?:get|fetch|getenv)\s*\(\s*|\[\s*|\{\s*|\(\s*|\.)\s*[\"']?([A-Za-z_]\w*)")
+_ENV_COLON_NAMED = re.compile(r"([A-Za-z_]\w*)")       # after `$env:`
+_ENV_DUMP_METHODS = frozenset({"toObject", "items", "keys", "values", "copy", "to_h", "to_a", "to_hash",
+                               "inspect", "each", "each_pair", "entries", "__dict__", "data", "all"})
+_SECRET_NAME = re.compile(r"key|token|secret|pass|pwd|auth|bearer|cred|private|dsn|_ur[li]$", re.IGNORECASE)
 
 # A word any rule 3 shape needs; a line with none of them is skipped unparsed.
 _TRIGGER_WORDS = frozenset(
@@ -408,7 +507,13 @@ def _clean(tokens: list[str]) -> tuple[list[str], list[str]]:
     tokens = list(tokens)
     while tokens:
         first = tokens[0]
-        if first in _LEADERS:
+        if first == "function" and len(tokens) > 1:
+            tokens = tokens[2:]                            # `function f { …`: the body runs when called
+            if tokens[:1] == ["()"]:
+                tokens = tokens[1:]
+        elif _FUNCTION_HEAD.fullmatch(first) or (tokens[1:2] == ["()"] and _NAME.fullmatch(first)):
+            tokens = tokens[1 if first.endswith("()") else 2:]   # `f() { cat .env; }; f`
+        elif first in _LEADERS:
             tokens = tokens[1:]
         elif first == "case":
             close = next((k for k in range(1, len(tokens)) if tokens[k].endswith(")")), None)
@@ -497,6 +602,8 @@ def _unwrap(tokens: list[str], depth: int, ctx) -> tuple[list[str], bool]:
         if not rest:
             return [], False                                # `sudo -i`, `sudo -k`: nothing printed here
         tokens = rest
+    if tokens and (_base(tokens[0]) == "env" or _base(tokens[0]) in _WRAPPERS):
+        return [], True                                     # wrappers past the loop: not seen, not read
     return tokens, False
 
 
@@ -510,12 +617,177 @@ def _dynamic(arg: str) -> bool:
     return "$" in arg or "`" in arg or "{}" in arg or "\x01" in arg
 
 
+def reads_environment(source: str, loaded: bool = False) -> bool:
+    """Does an interpreter's inline source print the environment: the whole of
+    it, a variable whose name looks secret, or — after an `--env-file` loaded
+    one — any variable at all?"""
+    for ref in _ENV_REF.finditer(source):
+        if loaded:
+            return True
+        if ref.group().endswith(":"):
+            named = _ENV_COLON_NAMED.match(source, ref.end())
+        else:
+            named = _ENV_NAMED.match(source, ref.end())
+        if named is None:
+            return True                                    # the whole environment
+        name = named.group(1)
+        if name in _ENV_DUMP_METHODS or _SECRET_NAME.search(name):
+            return True
+    return False
+
+
+def _drop_loaders(prog: str, args: list[str]) -> tuple[list[str], bool]:
+    """`args` without `--env-file`-style options and their values, and
+    whether there was one."""
+    out, loaded, i = [], False, 0
+    while i < len(args):
+        arg = args[i]
+        if _LOADER.match(arg):
+            loaded = True
+            i += 1 if ("=" in arg or prog == "deno" or i + 1 >= len(args) or args[i + 1].startswith("-")) else 2
+            continue
+        out.append(arg)
+        i += 1
+    return out, loaded
+
+
+def _interpreter_parts(prog: str, args: list[str]):
+    """(inline sources, the script, the module, what follows the script or
+    module) for an interpreter's arguments. `None` for the sources means an
+    encoded command nobody can read here."""
+    if prog in _POWERSHELLS:
+        for k, arg in enumerate(args):
+            low = arg.lower()
+            if len(low) >= 2 and ("-encodedcommand".startswith(low) or low == "-ec"):
+                return None, None, None, []
+            if len(low) >= 2 and "-command".startswith(low):
+                return [" ".join(args[k + 1:])], None, None, []
+            if len(low) >= 2 and "-file".startswith(low):
+                return [], (args[k + 1] if k + 1 < len(args) else None), None, args[k + 2:]
+        return [], None, None, []
+    inline_s, valued_s, glued_s, inline_l, valued_l = _INTERPRETER_OPTIONS.get(
+        prog, ("", "", "", frozenset(), frozenset()))
+    sources: list[str] = []
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "--":
+            i += 1
+            break
+        if not arg.startswith("-") or arg == "-":
+            break
+        if arg.startswith("--"):
+            name, eq, value = arg.partition("=")
+            if name in inline_l:
+                sources.append(value if eq else (args[i + 1] if i + 1 < len(args) else ""))
+                i += 1 if eq else 2
+            else:
+                i += 2 if (name in valued_l and not eq) else 1
+            continue
+        step, j = 1, 1
+        while j < len(arg):
+            letter, glued = arg[j], arg[j + 1:]
+            j += 1
+            if letter in glued_s:
+                if letter in "l0":                         # perl -l[octal], -0[digits]: the cluster goes on
+                    while j < len(arg) and (arg[j].isdigit() or (letter == "0" and arg[j] in "xX")):
+                        j += 1
+                    continue
+                break                                      # -i[extension]: the rest is the extension
+            if letter in inline_s or letter in valued_s:
+                value = glued or (args[i + 1] if i + 1 < len(args) else "")
+                step = 1 if glued else 2
+                if letter in inline_s:
+                    sources.append(value)
+                elif letter == "m" and prog in ("python", "python3"):
+                    return sources, None, value, args[i + step:]
+                elif letter == "f" and prog == "php":
+                    return sources, value, None, args[i + step:]
+                break
+        i += step
+    rest = args[i:]
+    if prog in ("deno", "bun") and rest and rest[0] in ("run", "eval", "serve", "test", "bench", "x"):
+        verb, rest = rest[0], _skip_options(rest[1:], valued_l)
+        if verb == "eval":
+            return sources + rest[:1], None, None, rest[1:]
+    return sources, (rest[0] if rest else None), None, rest[1:]
+
+
+def _interpreter_prints(prog: str, args: list[str], depth: int, ctx) -> bool:
+    """An interpreter prints a credential when it is handed inline source on
+    a line that names a credential file, or inline source that reads the
+    environment (`node -p process.env`); when the script it runs *is* one
+    (`python3 .env`); or when a module prints one it is handed. Never for an
+    `--env-file`: that loads the file (2026-10-11 review)."""
+    if prog == "php" and any(a in ("-i", "--info") for a in args):
+        return True                                        # phpinfo(): the environment
+    args, loaded = _drop_loaders(prog, args)
+    sources, script, module, rest = _interpreter_parts(prog, args)
+    if sources is None:
+        return True                                        # an encoded command: unseen
+    if sources:
+        return (protected_in(_flat(" ".join(args)))
+                or any(reads_environment(source, loaded) for source in sources))
+    if module is not None:
+        if module in _PRINTING_MODULES and any(_names_credential(a) for a in rest):
+            return True
+        return module not in INTERPRETERS and _simple([module, *rest], depth + 1, ctx)
+    return script is not None and _names_credential(script)
+
+
+_INSPECT_RISKY = re.compile(r"env|config|args?\b|cmd|entrypoint|label|secret|auth|cred|token|pass|key",
+                            re.IGNORECASE)
+
+
+def _inspect_prints(args: list[str]) -> bool:
+    """`docker inspect` prints a container's `Config.Env` — unless a format
+    names only fields that cannot hold one (`{{.State.Status}}`)."""
+    fmt = None
+    for k, arg in enumerate(args):
+        if arg in ("-f", "--format"):
+            fmt = args[k + 1] if k + 1 < len(args) else ""
+        elif arg.startswith("--format="):
+            fmt = arg.split("=", 1)[1]
+        elif arg.startswith("-f") and not arg.startswith("--") and len(arg) > 2:
+            fmt = arg[2:]
+    if fmt is None:
+        return True
+    actions = re.findall(r"\{\{(.*?)\}\}", fmt, re.DOTALL)
+    if not actions:
+        return True                                        # `--format json`: the whole object
+    for action in actions:
+        if _INSPECT_RISKY.search(action) or re.search(r"(?:^|[\s(])\.(?=$|[\s)|])", action.strip()):
+            return True                                    # a risky field, or `.` itself
+    return False
+
+
+def _archive_prints(prog: str, args: list[str]) -> bool:
+    """An archive member or a compressed file written to the terminal:
+    `tar -xOf b.tar .env`, `unzip -p a.zip .env`, `7z e -so a.7z .env`,
+    `gzip -dc .env.gz`."""
+    if not any(_names_credential(a) for a in args if not a.startswith("-") or "/" in a):
+        return False
+    clusters = [a for a in args if re.fullmatch(r"-[A-Za-z]+", a)]
+    if prog in _COMPRESSORS:
+        return any(a in ("--stdout", "--to-stdout") for a in args) or any("c" in a for a in clusters)
+    if prog in ("tar", "gtar", "bsdtar"):
+        first = args[0] if args else ""
+        return (any(a in ("-O", "--to-stdout") for a in args) or any("O" in a for a in clusters)
+                or (re.fullmatch(r"[A-Za-z]+", first) is not None and "O" in first))
+    if prog == "unzip":
+        return any("p" in a or "c" in a for a in clusters)
+    if prog == "ar":
+        return bool(args) and re.fullmatch(r"-?[A-Za-z]+", args[0]) is not None and "p" in args[0]
+    return "-so" in args                                   # 7z
+
+
 class _Context:
     """One command line's state: what it names, what it assigns, its
     substitutions."""
 
     def __init__(self, line: str, inner: list[str]):
-        self.protected = protected_in(_flat(line)) or any(protected_in(_flat(t)) for t in inner)
+        self.protected = (protected_in(_flat(_LOADER_TEXT.sub(" ", line)))
+                          or any(protected_in(_flat(_LOADER_TEXT.sub(" ", t))) for t in inner))
         self.inner = inner
         self.variables: dict[str, str] = {}
 
@@ -525,6 +797,13 @@ def _simple(tokens: list[str], depth: int, ctx: _Context) -> bool:
     prog, args = _base(tokens[0]), tokens[1:]
     if any(a.startswith(("--show-token", "--show-secret")) for a in args):
         return True
+    if any(_names_credential(a) for a in args):
+        if any(_TERMINAL_OUT.fullmatch(a.split("=", 1)[-1]) for a in args):
+            return True                                    # `cp .env /dev/stdout`, `dd … of=/dev/tty`
+        if any("file:" in a.lower() and _names_credential(a[a.lower().index("file:"):]) for a in args):
+            return True                                    # `curl -s file://$PWD/.env`
+        if (prog in _ARCHIVERS or prog in _COMPRESSORS) and _archive_prints(prog, args):
+            return True
     if prog == "printenv":
         return True
     if prog == "set":
@@ -541,8 +820,14 @@ def _simple(tokens: list[str], depth: int, ctx: _Context) -> bool:
         if ctx.protected and (any(_dynamic(a) for a in operands) or not operands):
             return True                                    # `for f in .env; do cat "$f"`
         return v1_secrets.protected_in_command(" ".join(shlex.quote(a) for a in args)) is not None
-    if prog in INTERPRETERS:
-        return protected_in(_flat(" ".join(args)))
+    if prog in INTERPRETERS or prog in _POWERSHELLS:
+        return _interpreter_prints(prog, args, depth, ctx)
+    if prog in CONTAINER_CLIS:
+        rest = _skip_options(args, frozenset({"-H", "--host", "-c", "--context", "--config", "-l",
+                                              "--log-level", "--url", "--connection", "--identity"}))
+        if rest[:1] == ["inspect"] or (rest[1:2] == ["inspect"] and rest[0] in (
+                "container", "image", "network", "volume", "service", "secret", "config", "plugin")):
+            return _inspect_prints(rest)
     if prog == "git":
         rest = _skip_options(args, frozenset({"-C", "-c", "--git-dir", "--work-tree", "--namespace"}))
         if rest and rest[0] in GIT_READS and any(_names_credential(a) for a in rest[1:]):
@@ -568,7 +853,7 @@ def _simple(tokens: list[str], depth: int, ctx: _Context) -> bool:
         # BSD-style options (`ps e`, `ps axe`, `ps eww`) print each process's environment.
         return bool(args) and re.fullmatch(r"[A-Za-z]+", args[0]) is not None and "e" in args[0]
     if prog in ("echo", "printf", "print"):
-        return any(_KEYWORD_VAR.search(a) for a in args)
+        return any(next(_keyword_vars(a), None) is not None for a in args)
     if prog == "pass":
         return bool(args) and args[0] not in ("ls", "list", "find", "search", "init", "git", "insert",
                                               "add", "edit", "generate", "rm", "remove", "mv", "cp",
@@ -592,6 +877,8 @@ def _simple(tokens: list[str], depth: int, ctx: _Context) -> bool:
             inner, printed = _unwrap(tokens[k:], depth + 1, ctx)
             if printed or (inner and _base(inner[0]) not in RUNNERS and _simple(inner, depth + 1, ctx)):
                 return True
+        if len(tokens) > RUNNER_TAILS + 1 and could_print(" ".join(tokens[RUNNER_TAILS + 1:])):
+            return True                                    # tails never tried: not seen, not read
     return False
 
 
@@ -614,7 +901,9 @@ def _command_word(tokens: list[str], ctx: _Context) -> tuple[list[str], bool]:
 def _segment_prints(segment: str, depth: int, ctx: _Context) -> bool:
     words, inputs = _clean(_tokens(segment))
     if any(_names_credential(t) or (ctx.protected and _dynamic(t)) for t in inputs):
-        return True                                        # `< .env cat`, `done < .env`
+        head = _unwrap(list(words), depth, ctx)[0] if words else []
+        if not (head and _base(head[0]) in COUNTERS):
+            return True                                    # `< .env cat`, `done < .env` — not `wc -l < .env`
     if not words:
         return False
     if all(_ASSIGNMENT.fullmatch(w) for w in words):
@@ -644,7 +933,10 @@ _cache_lock = threading.Lock()
 def _prints(command: str, depth: int) -> bool:
     if depth > _DEPTH:
         return True
-    command = rules.join_continuations(str(command or ""))[:4096]
+    full = rules.join_continuations(str(command or ""))
+    command = full[:COMMAND_CUT]
+    if len(full) > COMMAND_CUT and could_print(full, COMMAND_CUT):
+        return True                                        # past the cut: not seen, not read
     if not command.strip():
         return False
     flat = _flat(command)
@@ -659,7 +951,23 @@ def _prints(command: str, depth: int) -> bool:
     return any(_segment_prints(segment, depth, ctx) for segment in rules.segments(body))
 
 
-def prints_secrets(command: str, depth: int = 0) -> bool:
+class Budget:
+    """Characters rule 3 may still parse in one read (`PARSE_BUDGET`). Spent
+    only on cache misses; once it is gone every further command counts as a
+    printer, so the read is refused — an adversarial screen can make a read
+    refused, never slow (2026-10-11 review: 18.6 s and 85.7 s)."""
+
+    __slots__ = ("left",)
+
+    def __init__(self, chars: int | None = None):
+        self.left = PARSE_BUDGET if chars is None else chars
+
+    def spend(self, chars: int) -> bool:
+        self.left -= chars
+        return self.left >= 0
+
+
+def prints_secrets(command: str, depth: int = 0, budget: Budget | None = None) -> bool:
     """True when a command line (as typed) would print a secret, by shape.
 
     Robust to leading whitespace, leading `VAR=value` assignments, paths
@@ -669,22 +977,29 @@ def prints_secrets(command: str, depth: int = 0) -> bool:
     lists (every segment is judged), subshells, `$(…)` and backticks (judged
     as command lines too), `sh -c '…'` strings and `ssh host cmd`. Past
     `_DEPTH` levels of nesting the answer is yes: a guard that cannot see is
-    not a reason to read. Cached by total key size (`CACHE_BYTES`)."""
+    not a reason to read — and so, past `COMMAND_CUT` characters, is a tail
+    that `could_print`. Cached, bounded by total key size (`CACHE_BYTES`)
+    and by count (`CACHE_ENTRIES`). With a `budget`, a cache miss spends its
+    length, and an empty budget answers yes (uncached)."""
     global _cache_size
     command = str(command or "")
     if depth == 0 and len(command) <= 2048:
         hit = _cache.get(command)
         if hit is not None:
             return hit
+        if budget is not None and not budget.spend(len(command)):
+            return True
         answer = _prints(command, 0)
         with _cache_lock:
-            if _cache_size + len(command) > CACHE_BYTES:
+            if _cache_size + len(command) > CACHE_BYTES or len(_cache) >= CACHE_ENTRIES:
                 _cache.clear()
                 _cache_size = 0
             if command not in _cache:
                 _cache[command] = answer
                 _cache_size += len(command)
         return answer
+    if budget is not None and not budget.spend(min(len(command), COMMAND_CUT)):
+        return True
     return _prints(command, depth)
 
 
@@ -710,16 +1025,76 @@ def backgrounds(command: str) -> bool:
     return bool(re.search(r"(?<![\w-])(?:nohup|setsid|disown)(?![\w-])", command))
 
 
+# -- what a part rule 3 never parsed could hold ---------------------------------------
+
+# A guard that cannot see is not a reason to read — for length as for depth
+# (2026-10-11 review). Past each bound on what rule 3 parses (`COMMAND_CUT`,
+# `CANDIDATE_CAP`, `CANDIDATES_PER_LINE`, `SCAN_LINE_CAP`, `RUNNER_TAILS`,
+# the wrappers `_unwrap` peels), the part not parsed refuses the read when it
+# holds anything a secret-printing command line needs: a credential file's
+# name (or a glob onto one), an unmistakable printer, a secret-named
+# variable, a printer word standing alone, a whole-environment dump, or the
+# start of a token-printing subcommand. Regular expressions only — linear —
+# and ordinary long lines hold none of it, so a long command is not refused
+# for being long.
+_BARE_PRINTER = re.compile(r"(?:^|(?<=[\s;&|({`'\"=]))(?:env|printenv|set|export|declare|typeset)"
+                           r"(?=\s*(?:$|[;&|)}`'\"]|-p\b))", re.MULTILINE)
+_DUMP_TEXT = re.compile(
+    r"process\.env(?![\w.\[])|Bun\.env(?![\w.\[])|os\.environb?(?![\w.\[])|%ENV\b|getenv\s*\(\s*\)"
+    r"|Deno\.env\.toObject|show-?env(?:ironment)?\b|GetEnvironmentVariables\b|(?<![\w$-])env:(?!\w)"
+    r"|(?<![\w-])ps\s+[A-Za-z]*e[A-Za-z]*\b|(?<![\w-])php\s+(?:-\w+\s+)*-i\b"
+    r"|(?<![\w./-])(?:docker|podman|nerdctl)\s+(?:\S{1,64}\s+){0,3}?inspect\b"
+    r"|(?<![\w-])pass\s+(?!(?:ls|list|find|search|init|git|insert|add|edit|generate|rm|remove|mv|cp"
+    r"|help|version)\b)[\w/]")
+
+
+def _subcommand_heads() -> re.Pattern:
+    by_prog: dict[str, set[str]] = {}
+    for progs, words in SUBCOMMANDS:
+        for prog in progs:
+            by_prog.setdefault(prog, set()).add(words[0])
+    alternatives = [re.escape(prog) + r"\s+(?:\S{1,64}\s+){0,6}?(?:"
+                    + "|".join(map(re.escape, sorted(words))) + ")"
+                    for prog, words in sorted(by_prog.items())]
+    return re.compile(r"(?<![\w./-])(?:" + "|".join(alternatives) + r")(?![\w-])")
+
+
+_SUBCOMMAND_HEADS = _subcommand_heads()
+# A glob onto a credential file: a dotfile glob at a word's start (`.env*`,
+# `.e*`, `.*`), anything under ~/.ssh, ~/.aws, ~/.gnupg, ~/.kube or ~/.docker,
+# and `id_*`. (`/proc/*/environ` is `_STRONG`'s.) Bounded quantifiers, so
+# linear.
+_GLOB_HAZARD = re.compile(r"(?:^|(?<=[\s'\"`=:]))\.(?!\d)[\w.\-]{0,32}[*?\[]"
+                          r"|\.(?:ssh|aws|gnupg|kube|docker)/[^\s'\"`;|&<>()]{0,64}[*?\[]"
+                          r"|(?<!\w)id_[\w.\-]{0,32}[*?\[]")
+_HAZARDS = (_RAW_PROTECTED, _ENV_VARIANT, _STRONG, _BARE_PRINTER, _DUMP_TEXT, _SUBCOMMAND_HEADS,
+            _GLOB_HAZARD)
+
+
+def last_hazard_end(text: str) -> int:
+    """Where the last thing `could_print` looks for ends in `text`, or -1."""
+    last = -1
+    for pattern in _HAZARDS:
+        for match in pattern.finditer(text):
+            last = max(last, match.end())
+    for match in _keyword_vars(text):
+        last = max(last, match.end())
+    return last
+
+
+def could_print(text: str, after: int = 0) -> bool:
+    """Does `text` hold, ending past `after`, anything a secret-printing
+    command line needs? The fail-closed answer for a part never parsed."""
+    return len(text) > after and last_hazard_end(text) > after
+
+
 # The end of a prompt: a glyph shells and themes end their prompts with
 # (powerline's private-use separators included), then whitespace. What
 # follows may be a command line.
-_PROMPT_END = re.compile("[$#%>❯»›➜λ✗➤▶→-]\\s+")
+_GLYPHS = "$#%>❯»›➜λ✗➤▶→-"
+_PROMPT_END = re.compile("[" + _GLYPHS + "]\\s+")
+_GLYPH = re.compile("[" + _GLYPHS + "]")
 _BARE_WEAK = frozenset({"env", "set", "export", "declare", "typeset"})
-# Where a reading command may start on a line that names a credential file,
-# whatever the prompt looks like (one made of words and spaces has no glyph).
-_READER_WORD = re.compile(r"(?<![\w./\-])(?:" + "|".join(sorted(map(re.escape, READERS | INTERPRETERS
-                                                                    | {"git", "xargs", "find"})))
-                          + r")(?=\s)")
 
 
 def _worth_parsing(candidate: str) -> bool:
@@ -728,38 +1103,72 @@ def _worth_parsing(candidate: str) -> bool:
     if not head:
         return False
     word = _flat(head[0])
+    if _GLYPH.fullmatch(word):
+        return False                                       # a prompt: its glyph candidate reads the command
     return (word in _TRIGGER_WORDS or "=" in word or word[:1] in ("<", "$", "\x01", "`", ">")
             or _base(word) in _TRIGGER_WORDS or protected_in(_flat(candidate)))
 
 
-def shows_printer(line: str) -> bool:
+# A prompt made of words, with no glyph: one to three words before the
+# command, each carrying a prompt's mark (`john@host ~/p`, `[proj]`, `(venv)`).
+_PROMPT_WORD = re.compile(r"\s*[^\s@:~/\])}]*[@:~/\])}][^\s]*\s+")
+
+
+def shows_printer(line: str, budget: Budget | None = None) -> bool:
     """True when a line of terminal text shows a secret-printing command line:
-    one of the unmistakable ones anywhere, or a command after a prompt (or as
-    the whole line, unless it is a single common word that `ls -1` could
-    print). Linear: at most `CANDIDATES_PER_LINE` candidates of at most
-    `CANDIDATE_CAP` characters each."""
-    line = line[:SCAN_LINE_CAP]
+    one of the unmistakable ones anywhere, or a command at the line's start,
+    after a prompt glyph, or after a prompt made of words (unless it is a
+    single common word that `ls -1` could print).
+
+    Linear: at most `CANDIDATES_PER_LINE` glyph candidates of at most
+    `CANDIDATE_CAP` characters, looked for in the first `SCAN_LINE_CAP`.
+    What that leaves unparsed — a candidate's text past its cap, the
+    candidates past the per-line cap, the line past the scan — refuses the
+    read when it `could_print` (2026-10-11 review: these bounds used to fail
+    open). With a `budget`, every parse spends from it."""
     if not line.isascii():
         line = untrusted.strip_invisible(line)
-    flat = _flat(line)
-    if _STRONG.search(line) or _STRONG.search(flat):
+    if _STRONG.search(line) or _STRONG.search(_flat(line)):
         return True
+    last: list[int] = []
+
+    def unseen(after: int) -> bool:
+        if not last:
+            last.append(last_hazard_end(line))
+        return last[0] > after
+
+    if len(line) > SCAN_LINE_CAP and unseen(SCAN_LINE_CAP):
+        return True
+    scan = line[:SCAN_LINE_CAP]
+    flat = _flat(scan)
     if not (_has_trigger(flat) or protected_in(flat)):
         return False
-    whole = line.strip()[:CANDIDATE_CAP]
-    if whole and whole.lower() not in _BARE_WEAK and _worth_parsing(whole) and prints_secrets(whole):
-        return True
-    for count, match in enumerate(_PROMPT_END.finditer(line)):
-        if count >= CANDIDATES_PER_LINE:
-            break
-        rest = line[match.end():match.end() + CANDIDATE_CAP].strip()
-        if rest and _worth_parsing(rest) and prints_secrets(rest):
+    lead = len(scan) - len(scan.lstrip())
+    whole = scan[lead:lead + CANDIDATE_CAP].rstrip()
+    if whole and whole.lower() not in _BARE_WEAK and _worth_parsing(whole):
+        if prints_secrets(whole, budget=budget) or unseen(lead + CANDIDATE_CAP):
             return True
-    if protected_in(flat):
-        for count, match in enumerate(_READER_WORD.finditer(line)):
-            if count >= CANDIDATES_PER_LINE:
-                break
-            if prints_secrets(line[match.start():match.start() + CANDIDATE_CAP]):
+    for count, match in enumerate(_PROMPT_END.finditer(scan)):
+        if count >= CANDIDATES_PER_LINE:
+            if unseen(match.start()):
+                return True
+            break
+        rest = scan[match.end():match.end() + CANDIDATE_CAP].rstrip()
+        if rest and _worth_parsing(rest):
+            if prints_secrets(rest, budget=budget) or unseen(match.end() + CANDIDATE_CAP):
+                return True
+    # After a prompt made of words — and only there (2026-10-11 review: a
+    # reader's or an interpreter's name in prose, "Add tail call before
+    # loading .env.production", "Using python 3.12 …", is not a command).
+    pos = 0
+    for _ in range(3):
+        match = _PROMPT_WORD.match(scan, pos, WORD_PROMPT_CAP)
+        if match is None:
+            break
+        pos = match.end()
+        rest = scan[pos:pos + CANDIDATE_CAP].rstrip()
+        if rest and _worth_parsing(rest):
+            if prints_secrets(rest, budget=budget) or unseen(pos + CANDIDATE_CAP):
                 return True
     return False
 
@@ -862,17 +1271,25 @@ def scan_start(window_start: int, spans, spans_from: int, integrated: bool) -> i
 
 
 def rule3(window_start: int, end: int, lines, ink, spans, spans_from: int, integrated: bool,
-          ink_overflow: int | None = None) -> bool:
+          ink_overflow: int | None = None, budget: Budget | None = None) -> bool:
+    budget = Budget() if budget is None else budget
     for span in spans:
-        if prints_secrets(span.command) and (
-                _span_overlaps(span, window_start, end)
-                or (backgrounds(span.command) and span.start < end)):
+        if span.start >= end:
+            continue
+        if ((getattr(span, "unseen", False) or prints_secrets(span.command, budget=budget))
+                and (_span_overlaps(span, window_start, end) or backgrounds(span.command))):
             return True
     lo = scan_start(window_start, spans, spans_from, integrated)
     if ink_overflow is not None:
         return True                                        # the ink is incomplete: fail closed
-    return (any(line.last >= lo and shows_printer(line.text) for line in lines)
-            or any(line.last >= lo and shows_printer(line.text) for line in ink))
+    judged: set[str] = set()                               # one judgement per text (a redrawn row)
+    for line in itertools.chain(lines, ink):
+        if line.last < lo or line.text in judged:
+            continue
+        judged.add(line.text)
+        if shows_printer(line.text, budget):
+            return True
+    return False
 
 
 _PEM_MARK = re.compile(r"-----(BEGIN|END) (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----")
