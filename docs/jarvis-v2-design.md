@@ -2154,11 +2154,21 @@ substitutions, `find -exec`/`xargs` readers, `.env.*`), made every scan
 linear (a 1 MiB adversarial ring is judged in well under 2 s), handed a
 switch the ring's cut split in two over whole, executed C0 controls inside a
 sequence as xterm does, re-checked the switch after the render, and read
-folder env files so a FIFO cannot hang a read. **The limit**: a secret
-with no recognisable shape and no keyword beside it, or one printed in pieces
-or encoded otherwise, is not caught, and rule 3 cannot see through an alias,
-a shell function, a script or a symlink; the switch and the note are the
-backstops.
+folder env files so a FIFO cannot hang a read. **The re-review
+(2026-10-11)** made the headline read readable again — a dev server started
+with `node --env-file=.env` (an `--env-file` loads a file; an interpreter
+prints one only from inline source, an environment read, or as its script),
+`wc -l < .env`, `docker inspect` with a safe `--format`, and a reader's name
+in a commit message or banner were refused — and closed the other side:
+copies onto the terminal, `file:` URLs, archive members and compressors to
+stdout, whole-environment dumps, and every parse bound, which now fails
+closed when the part it leaves unread could hold a printer. A read parses
+at most a 128 KiB budget of commands it has not judged before and is refused
+past it (an adversarial screen took 18.6 s and 85.7 s). **The limit**: a
+secret with no recognisable shape and no keyword beside it, or one printed in
+pieces or encoded otherwise, is not caught, and rule 3 cannot see through an
+alias, a shell function, a script, a symlink, or a script handed a credential
+file as an argument; the switch and the note are the backstops.
 
 **Preview and dev servers (2026-10-10, WP-E; decisions W-4).** **No HUD or
 API response may be framed**: every response on 8402 and 8405 — the page,

@@ -22,8 +22,11 @@ it never says what matched, where, or which rule:
      whose command line matches — or one that matches and backgrounds its
      work, whose output may land anywhere after it;
    * the text: any line drawn in the read, or in the stretch before it,
-     that shows such a command line (a prompt and the command, or one of the
-     unmistakable ones anywhere). **Spans are advisory**: a program can print
+     that shows such a command line (a command at the line's start, after a
+     prompt glyph or after a prompt made of words, or one of the
+     unmistakable ones anywhere — but never a reader's name in prose: a
+     commit message "Add tail call before loading .env.production" is not
+     `tail`). **Spans are advisory**: a program can print
      anything between real marks, a nested shell (`ssh`, `sudo -i`,
      `python`) sits under the outer command's span, and a shell without the
      startup file has no spans at all. The text is judged on the screen and
@@ -40,18 +43,39 @@ Then the **heuristic** withholds single lines, never the read: a keyword
 password. A bare 40-character hex hash or a UUID stays unless a keyword is
 beside it.
 
+What loads a file is not what prints it (2026-10-11 review): an
+`--env-file` (`node --env-file=.env server.js`, the Node 20 way to start a
+dev server) loads one, `wc -l < .env` counts one, and `docker inspect
+--format '{{.State.Status}}'` prints no environment — so a dev server's log
+stays readable for as long as it runs. An interpreter prints a credential
+when it is handed inline source on a line naming one, inline source reading
+the environment (`node -p process.env`), or a credential file as its script.
+
 **Everything here is linear in what it reads** (2026-10-10 review): a read
 renders at most a ring (1 MiB) at the terminal's width, checks at most
 `LINE_SCAN` characters of each returned line, tries at most
 `CANDIDATES_PER_LINE` command candidates of at most `CANDIDATE_CAP` characters
-on a line, and caches by total size, never by count.
+on a line (looked for in the first `SCAN_LINE_CAP`), judges each distinct
+line text once, and caches by total size and by count. **And bounded**
+(2026-10-11 review): a read parses at most `PARSE_BUDGET` characters of
+commands it has not judged before, and past that it is refused — an
+adversarial screen can buy a refusal, never a slow read. **Every bound fails
+closed**: what a bound leaves unparsed (a command past `COMMAND_CUT`, a
+candidate past its cap, candidates past the per-line cap, a line past the
+scan, a runner's arguments past `RUNNER_TAILS`, wrappers past the unwrap, a
+span command past the backend's `COMMAND_CAP`) refuses the read when it
+`could_print` — names a credential file, a printer, a secret-named variable,
+an environment dump — and only then, so a long command is not refused for
+being long.
 
 **The limit, stated plainly** (W-2): a secret with no recognisable shape and
 no keyword beside it — a random password printed on its own — is not caught;
 nor is one printed in pieces, reversed, or encoded some other way. Rule 3
 judges command lines by shape, so it cannot see through an alias, a shell
 function, a script, a symlink or a program that prints a secret on its own
-initiative: their output meets rules 1 and 2 and the heuristic only. The
+initiative: their output meets rules 1 and 2 and the heuristic only — and
+so does a script handed a credential file as an argument (`python3 show.py
+.env`): only an interpreter's own inline source or script counts. The
 owner's "Jarvis can read" switch and the HUD note on every read are the
 backstops.
 """
@@ -89,6 +113,7 @@ CACHE_ENTRIES = 32_768     # … and by count (8-character keys would otherwise 
 COMMAND_CUT = 4096         # characters of one command line parsed; past it, `could_print`
 PARSE_BUDGET = 128 * 1024  # characters rule 3 may parse (cache misses) in one read; past it, refused
 WORD_PROMPT_CAP = 160      # how far into a line a prompt made of words may reach
+HAZARD_COST = 8            # characters `could_print` scans per character of PARSE_BUDGET
 WITHHELD_NOTE = "[{n} line(s) withheld: possible secret]"
 ENTROPY_FLOOR = 3.0        # bits per character, for the heuristic's token
 _DEPTH = 4
@@ -1067,14 +1092,23 @@ _SUBCOMMAND_HEADS = _subcommand_heads()
 _GLOB_HAZARD = re.compile(r"(?:^|(?<=[\s'\"`=:]))\.(?!\d)[\w.\-]{0,32}[*?\[]"
                           r"|\.(?:ssh|aws|gnupg|kube|docker)/[^\s'\"`;|&<>()]{0,64}[*?\[]"
                           r"|(?<!\w)id_[\w.\-]{0,32}[*?\[]")
-_HAZARDS = (_RAW_PROTECTED, _ENV_VARIANT, _STRONG, _BARE_PRINTER, _DUMP_TEXT, _SUBCOMMAND_HEADS,
-            _GLOB_HAZARD)
+# Each pattern with the substrings one of its matches must contain: a text
+# holding none of them is not scanned by it (C-speed `in` before a regex).
+_HAZARDS = (
+    (_RAW_PROTECTED, _HINTS), (_ENV_VARIANT, (".env.",)),
+    (_STRONG, ("printenv", "--show-", "auth", "credential", "env", "configure", "environ")),
+    (_BARE_PRINTER, ("env", "set", "export", "declare", "typeset")),
+    (_DUMP_TEXT, ("env", "ENV", "environ", "Environment", "ps", "php", "inspect", "pass")),
+    (_SUBCOMMAND_HEADS, None), (_GLOB_HAZARD, ("*", "?", "[")),
+)
 
 
 def last_hazard_end(text: str) -> int:
     """Where the last thing `could_print` looks for ends in `text`, or -1."""
     last = -1
-    for pattern in _HAZARDS:
+    for pattern, needles in _HAZARDS:
+        if needles is not None and not any(needle in text for needle in needles):
+            continue
         for match in pattern.finditer(text):
             last = max(last, match.end())
     for match in _keyword_vars(text):
@@ -1082,10 +1116,21 @@ def last_hazard_end(text: str) -> int:
     return last
 
 
+def unseen_end(text: str) -> int:
+    """`last_hazard_end` of the text and, when it has quotes or backslashes,
+    of the text as the shell reads it (`p""rintenv`). A position in the flat
+    text is never past the same character's in the raw text, so comparing
+    either with a cut in the raw text never places a hazard past it wrongly."""
+    last = last_hazard_end(text)
+    if any(c in text for c in "'\"\\"):
+        last = max(last, last_hazard_end(_flat(text)))
+    return last
+
+
 def could_print(text: str, after: int = 0) -> bool:
     """Does `text` hold, ending past `after`, anything a secret-printing
     command line needs? The fail-closed answer for a part never parsed."""
-    return len(text) > after and last_hazard_end(text) > after
+    return len(text) > after and unseen_end(text) > after
 
 
 # The end of a prompt: a glyph shells and themes end their prompts with
@@ -1128,19 +1173,25 @@ def shows_printer(line: str, budget: Budget | None = None) -> bool:
     open). With a `budget`, every parse spends from it."""
     if not line.isascii():
         line = untrusted.strip_invisible(line)
-    if _STRONG.search(line) or _STRONG.search(_flat(line)):
+    scan = line[:SCAN_LINE_CAP]
+    flat = _flat(scan)
+    if _STRONG.search(scan) or _STRONG.search(flat):
         return True
     last: list[int] = []
 
     def unseen(after: int) -> bool:
         if not last:
-            last.append(last_hazard_end(line))
+            # A line past the scan is bounded by the window; a cut candidate is
+            # not (8M characters of ink), so its scan spends from the budget.
+            if (budget is not None and len(line) <= SCAN_LINE_CAP
+                    and not budget.spend(2 * len(line) // HAZARD_COST)):
+                last.append(len(line))                     # the budget is gone: refused
+            else:
+                last.append(unseen_end(line))
         return last[0] > after
 
     if len(line) > SCAN_LINE_CAP and unseen(SCAN_LINE_CAP):
-        return True
-    scan = line[:SCAN_LINE_CAP]
-    flat = _flat(scan)
+        return True                                        # past the scan: not seen, not read
     if not (_has_trigger(flat) or protected_in(flat)):
         return False
     lead = len(scan) - len(scan.lstrip())

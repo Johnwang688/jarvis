@@ -777,17 +777,40 @@ quoting, `sudo -k`, assignments and `x=env; $x`, paths, wrappers, the
 shell's own words — `then`/`do`/`else`/`elif`/`!`/`{`/`case … )`/`coproc` —
 leading and input redirections (`< .env cat`, `done < .env`), pipelines,
 subshells, `$(…)`/backticks/`<(…)` judged as command lines, `sh -c`, `ssh
-host cmd`, `git show HEAD:.env`, interpreters naming a credential file,
-`find -exec`/`xargs` readers and readers of `$f`/`{}` on a line that names
-one, and `.env.*` — beyond v1's `is_protected`, inside the guard only): a
-real span overlapping the read (or one that backgrounds a printer), **and
-always the text** — any screen or `ink` line in the read or the `LOOKBACK`
-(32 KiB) before it that shows such a command after a prompt (or, on a line
-naming a credential file, starting at a reader's name), raised only to a
-boundary the signed marks prove and never by a span record below
-`spans_from`. **Every scan is linear** (2026-10-10 review): lines are read to
+host cmd`, `git show HEAD:.env`, function definitions, `find -exec`/`xargs`
+readers and readers of `$f`/`{}` on a line that names one, copies onto the
+terminal (`cp .env /dev/stdout`), `file:` URLs, archive members and
+compressors to stdout, decompressing readers, whole-environment dumps
+(`tmux show-environment`, `docker compose config`, `dotenv list`, `php -i`,
+`docker inspect` unless `--format` names only safe fields), and `.env.*` —
+beyond v1's `is_protected`, inside the guard only). **What loads a file is
+not what prints it** (2026-10-11 re-review): an `--env-file` loads one
+(`node --env-file=.env server.js` is how Node 20 starts a dev server, and
+its log used to be refused for as long as it ran), `wc`/the checksums count
+one, and an interpreter prints only given inline source on a line naming a
+credential file, inline source reading the environment (`node -p
+process.env`, `os.environ`, a secret-named variable), or a credential file
+as its script. Two halves: a real span overlapping the read (or one that
+backgrounds a printer), **and always the text** — any screen or `ink` line
+in the read or the `LOOKBACK` (32 KiB) before it that shows such a command
+at its start, after a prompt glyph or after a prompt made of words (`[proj]
+cat .env`; never a reader's name in prose — a commit message "Add tail call
+before loading .env.production" is not `tail`), raised only to a boundary
+the signed marks prove and never by a span record below `spans_from`.
+**Every scan is linear** (2026-10-10 review): lines are read to
 `LINE_SCAN`, at most 16 candidates of 512 characters a line, the heuristic
-in one pass, the command cache bounded by size; a 1 MiB ring of adversarial
+in one pass, each distinct line text judged once, the command cache bounded
+by size and by count (`CACHE_ENTRIES`; ~50 MiB worst case before); **and
+bounded** (2026-10-11): a read parses at most `PARSE_BUDGET` (128 KiB) of
+commands it has not judged before — ordinary reads spend 2–12 KiB — and is
+refused past it, so a screen dense with candidates buys a refusal, not 18 s
+or 85 s. **Every parse bound fails closed**: what a bound leaves unparsed (a
+command past `COMMAND_CUT`, a candidate past its cap, candidates past the
+per-line cap, a line past `SCAN_LINE_CAP`, a runner's arguments past
+`RUNNER_TAILS`, wrappers past the unwrap, a span command past `COMMAND_CAP`
+— `CommandSpan.unseen`) refuses the read when it `could_print` (names a
+credential file or a glob onto one, a printer, a secret-named variable, an
+environment dump), never for length alone. A 1 MiB ring of adversarial
 shapes is judged in well under 2 s (`Speed` in `terminal_text_check`). Rules run on the text after
 `strip_invisible`, so a zero-width character cannot split a key past them.
 The heuristic **withholds lines** (a keyword, then within 40 characters past
@@ -818,8 +841,11 @@ Where read text goes: what `terminal_read` returns goes where any tool result go
 shape and no keyword beside it, or one printed in pieces or otherwise
 encoded, is not caught; rule 3 judges command lines by shape, so an alias, a
 shell function, a script or a symlink that prints a secret is invisible to it
-(its output still meets rules 1 and 2 and the heuristic); the switch and the
-note are the backstops. Free suites:
+(its output still meets rules 1 and 2 and the heuristic), and so is a script
+handed a credential file as an argument (`python3 show.py .env`); a minified
+line past `SCAN_LINE_CAP` that holds a bare `process.env` or `.env` is
+refused (the fail-closed side of the bound); the switch and the note are the
+backstops. Free suites:
 `tests/v2/terminal_text_check.py` (pure), `tests/v2/terminal_read_check.py`
 (real PTY, the fake shell's new `hex` command, holders, fast-path turns), the
 updated `terminal_check` (no-tool, the reader only reads, the bus record),

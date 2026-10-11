@@ -752,6 +752,7 @@ class Speed(unittest.TestCase):
             # 2026-10-11 review (finding 2): 18.6 s and 85.7 s on 3393daf.
             "a window dense with distinct candidates": _dense(1000, 30),
             "one row redrawn and erased": _redrawn(7600),
+            "one line of globs past the scan": _fill(b"ls src/*.py .env.example "),
         }
 
     def test_every_adversarial_ring_is_judged_in_bounded_time(self):
@@ -799,6 +800,23 @@ class Speed(unittest.TestCase):
         start = time.perf_counter()
         self.assertFalse(G.prints_secrets("echo $x | sort ; " * 4000))
         self.assertLess(time.perf_counter() - start, 1.0)
+
+    def test_a_redrawn_row_is_judged_once_per_text(self):
+        # LOW (2026-10-11 review, finding 2): one judgement per distinct text.
+        calls = []
+        real = G.shows_printer
+
+        def counting(text, budget=None):
+            calls.append(text)
+            return real(text, budget)
+
+        ink = [TT.Line("$ echo $v | sort ; make", 0, 10)] * 500 + [TT.Line("$ echo done", 11, 20)] * 500
+        G.shows_printer = counting
+        try:
+            self.assertFalse(G.rule3(0, 100, [], ink, (), 0, False))
+        finally:
+            G.shows_printer = real
+        self.assertEqual(sorted(calls), ["$ echo $v | sort ; make", "$ echo done"])
 
     def test_a_dense_window_is_refused_not_slow(self):
         # Past PARSE_BUDGET the read is refused: an adversarial screen buys a
@@ -869,6 +887,7 @@ class UnseenParts(unittest.TestCase):
     def test_a_command_past_the_cut(self):
         self.assertTrue(G.prints_secrets("echo " + "a" * 5000 + " ; env"))
         self.assertTrue(G.prints_secrets("true " + "x " * 2500 + "; echo $GITHUB_TOKEN"))
+        self.assertTrue(G.prints_secrets("echo " + "a" * 5000 + " ; e''nv"))     # as the shell reads it
         self.assertFalse(G.prints_secrets("echo " + "a" * 5000 + " ; make"))     # long, not refused
 
     def test_a_runner_past_its_tails(self):
@@ -882,7 +901,8 @@ class UnseenParts(unittest.TestCase):
         self.assertFalse(G.prints_secrets("nohup " * 3 + "make"))
 
     def test_a_candidate_past_its_cap(self):
-        for tail in ("env", "echo $GITHUB_TOKEN", "node -p process.env", "tmux show-environment", "cat .e*"):
+        for tail in ("env", "echo $GITHUB_TOKEN", "node -p process.env", "tmux show-environment", "cat .e*",
+                     "e''nv", 'pr""intenv'):
             with self.subTest(tail=tail):
                 self.assertTrue(G.shows_printer("$ " + self.PAD + tail))
         for tail in ("make", "ls -la", "echo done"):
@@ -898,6 +918,7 @@ class UnseenParts(unittest.TestCase):
     def test_a_line_past_the_scan(self):
         self.assertTrue(G.shows_printer("x" * 20_000 + " ; env"))
         self.assertTrue(G.shows_printer("$ " + "x" * 20_000 + " ; cat .env"))
+        self.assertTrue(G.shows_printer("x" * 20_000 + ' ; pr""intenv'))
         self.assertFalse(G.shows_printer("x" * 20_000 + " ; make"))
         self.assertFalse(G.shows_printer("const e=" + "a.b?c:d[0]*2;" * 2000))  # minified: no hazard
 

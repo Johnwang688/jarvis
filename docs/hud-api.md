@@ -1171,8 +1171,20 @@ Decisions W-2 in `docs/plans/2026-10-09-hud-workspace-decisions.md`.
   It is HUD chrome: nothing is written to the PTY or the ring.
 - **Where the text goes** (corrected 2026-10-10): what `terminal_read` returns goes where any tool result goes — the fast-path transcript (and so OpenRouter, with every later request), that conversation's v1 session `messages.json`, `config.SPILL_DIR` if context truncation cuts it later, and anything the model's reply repeats (a reply is mirrored to the chat's Discord thread and spoken). The
   `tool_finished` record's `summary` for `terminal_read` is fixed — "read N
-  lines", "refused" or "error" — never the result's first characters.
+  lines", "refused" or "error" — never the result's first characters. That
+  keeps the tool's own record clean, nothing more: the model's reply is not
+  filtered, and reaches `log.jsonl`, the bus, Discord and speech like any
+  reply (2026-10-11 re-review).
+- **What a dev server prints stays readable** (2026-10-11 re-review): an
+  `--env-file` loads a file (`node --env-file=.env server.js`), `wc -l <
+  .env` counts one, `docker inspect --format '{{.State.Status}}'` prints no
+  environment, and a reader's or an interpreter's name in prose (a commit
+  message, a nodemon banner) is not a command. A screen dense with command
+  candidates is refused past a parse budget rather than read slowly, and
+  what any parse bound leaves unread refuses the read when it could hold a
+  printer.
 - **The limit**: a secret with no recognisable shape and no keyword beside it
   is not caught, nor is one an alias, a shell function, a script or a symlink
-  prints (rule 3 reads command lines by shape). The "Jarvis can read" switch
-  and the note are the backstops.
+  prints, nor one a script prints from a credential file it was handed as an
+  argument (rule 3 reads command lines by shape). The "Jarvis can read"
+  switch and the note are the backstops.
