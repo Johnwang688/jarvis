@@ -16,7 +16,11 @@ wins._
   - Reading the code also says that typing a space in the editor starts
     push-to-talk and the space never appears.
   - ED-1 fixes all of this, and its first test confirms the space bug before
-    fixing it.
+    fixing it. **Amended 2026-10-11 (PR #40):** the space bug is already
+    gone. The owner moved push-to-talk from Space to **Ctrl+D** ("just like
+    it is in claude"), so Space is a space everywhere, and Monaco's next-match
+    is Ctrl+Shift+D. See *Push-to-talk is
+    Ctrl+D* in §1.4 and the keyboard table, §2.10.
 - **A real editor, without the intellisense.** Claude Code is your
   intellisense, so there are no language servers and no AI completions. You
   get Monaco's own editing:
@@ -173,7 +177,15 @@ wins._
   isn't even loaded today.
 - Every layout key is inert while an approval card is up (:112–115).
 
-**Push-to-talk is a document-level Space handler** (`App.tsx:1013–1032`).
+**Push-to-talk was a document-level Space handler** (`App.tsx:1013–1032`).
+*Superseded 2026-10-11 by PR #40, the owner's decision:* push-to-talk is
+**Ctrl+D held**, everywhere in the window, Monaco included, except a focused
+terminal, where Ctrl+D is the shell's end of input. The window takes it in the
+capture phase (`lib/talkkey.ts`, `App.tsx`), always prevents its default and
+stops it there, so no typing surface needs to stop anything for it. A hold is
+decided where it began: its auto-repeat stays push-to-talk's after focus moves
+into a terminal. **Space is no longer push-to-talk anywhere.** What follows
+describes main before PR #40.
 - It calls `preventDefault()` and `press()` unconditionally.
 - Every other typing surface stops Space from bubbling: the input bar,
   pickers, chips, the separator, and the editor's *fallback* textarea
@@ -404,7 +416,7 @@ entry points instead of `editor.api`:
 | Find/replace with regex, case and whole word (Ctrl+F, Ctrl+H) | Hover info, signature help |
 | Folding: indentation first, syntax-aware after ED-6 | Go to definition, references, rename symbol |
 | Comment toggle (Ctrl+/, Shift+Alt+A) | Errors as you type, quick fixes |
-| Multi-cursor (Alt+click, Ctrl+Alt+↑/↓, Ctrl+D), column selection | Format Document |
+| Multi-cursor (Alt+click, Ctrl+Alt+↑/↓, **Ctrl+Shift+D** — Ctrl+D is push-to-talk, PR #40), column selection | Format Document |
 | Bracket matching, auto-close, bracket-pair colours | JSON schema validation |
 | **Word suggestions** from the words in your open files (Ctrl+Space, and as you type) | AI completions |
 | Sticky scroll, go to line (Ctrl+G), move or copy lines, smart select | Breadcrumbs, symbol search |
@@ -428,11 +440,29 @@ entry points instead of `editor.api`:
   spike decides). `inMonaco()` works either way.
 
 **Key and lifecycle fixes in the same package.**
-- **Space**:
-  - goes to push-to-talk only when the event's target is not a typing target;
-  - a pure `isTypingTarget(el)` covers input, textarea, contenteditable,
-    `.monaco-editor` and WP-D's xterm host;
-  - one rule replaces a dozen `stopPropagation`s.
+- **Space** (*amended 2026-10-11: done differently by PR #40, the owner's
+  decision*):
+  - Space is **no longer push-to-talk anywhere**: it types a space in any
+    typing target and presses a focused button elsewhere, as on any page.
+  - **Push-to-talk is Ctrl+D held**, Monaco included; Monaco's "add selection
+    to next find match" is **Ctrl+Shift+D**. In a focused terminal Ctrl+D
+    stays the shell's end of input.
+  - Nothing for ED-1 to do here, except to keep it true: `editorKeyRules`
+    (`lib/monaco.ts`) must still be applied after ED-1's contributions load,
+    or Monaco's Ctrl+D comes back in its menus and command list. A pure
+    `isTypingTarget(el)` already exists in `lib/talkkey.ts` (it decides the
+    one-time "push-to-talk is Ctrl+D now" hint); reuse it rather than add a
+    second.
+  - **A pending Ctrl+K chord and the talk key** (*decided when PR #40 was
+    composed with ED-1*). The window takes Ctrl+D before Monaco sees it, so
+    Ctrl+K followed by push-to-talk would leave Monaco's chord waiting to
+    swallow the next key typed. Ctrl+D as a pending chord's second key is
+    **Monaco's**, the E-10 rule: the window has one chord tracker
+    (`editorkeys.chordSecond`, a keydown stepped once whichever capture
+    listener asks first), and push-to-talk keeps that key from Chrome, leaves
+    it to Monaco and starts nothing. Ctrl+K Ctrl+D (move last selection to
+    next match) keeps its key. Checked: Ctrl+K, Ctrl+D, then `x` types `x`
+    with push-to-talk null.
 - **Ctrl+S** saves the focused buffer. Its default is always prevented, and
   it is inert under a card.
 - **Ctrl+B** folds the sidebar **from the editor too, except as the second key
@@ -1042,13 +1072,14 @@ ring and your window, as WP-C's terminals do.
 
 | Key | Does | Notes |
 |---|---|---|
-| **Space** | Types a space in any typing target; push-to-talk only elsewhere | The headline fix |
+| **Space** | Types a space in any typing target, presses a focused button elsewhere; **never push-to-talk** | Amended 2026-10-11: PR #40, the owner's decision |
+| **Ctrl+D** | **Push-to-talk, held** — in the editor too; a focused terminal's end of input | PR #40. Its default is always prevented (no bookmark dialog). A pending Ctrl+K chord: see §2.2 |
 | Ctrl+S | Save | Chrome's dialog is suppressed |
 | Ctrl+P | Quick open | |
 | Ctrl+Shift+P, F1 | Command palette | Includes Monaco's actions when an editor is focused |
 | Ctrl+Shift+F | Find in files | |
-| Ctrl+F, Ctrl+H, Ctrl+G, Ctrl+/, Ctrl+D, Alt+click, Ctrl+Alt+↑/↓ | Monaco's | Find, replace, line, comment, multi-cursor |
-| Ctrl+K chords | Monaco's | |
+| Ctrl+F, Ctrl+H, Ctrl+G, Ctrl+/, **Ctrl+Shift+D**, Alt+click, Ctrl+Alt+↑/↓ | Monaco's | Find, replace, line, comment, multi-cursor. Ctrl+Shift+D is "add selection to next find match", moved off Ctrl+D (PR #40) |
+| Ctrl+K chords | Monaco's | Ctrl+D as a chord's second key included: push-to-talk stands aside for it (§2.2, decided when PR #40 met ED-1). Ctrl+K Ctrl+D is Monaco's move selection to next match |
 | **Ctrl+B** | Folds the sidebar, **in the editor too, unless it is a Ctrl+K chord's second key** | Decided (E-10). VS Code's VEX extension binds Ctrl+B to build; the HUD does not follow that |
 | Ctrl+Alt+B, Ctrl+= / - / 0, Ctrl+Alt+1–4, Ctrl+\` | HUD's (WP-A, WP-D) | Unchanged |
 | Ctrl+PageUp / Ctrl+PageDown | Previous / next editor tab | Chrome may keep these even in app mode. Confirm live; the palette's "Go to editor" is the fallback |
@@ -1127,8 +1158,8 @@ Each package is a separately mergeable PR with free tests, and updates
   - `Editor.tsx`: models by URI, `jarvis-diff:` models disposed, read-only and
     blurred while blocked, a Ctrl+S command;
   - `FileTab.tsx`: a dirty check before switching files or reloading;
-  - `App.tsx`: push-to-talk ignores typing targets, `blocked` reaches the
-    editors;
+  - `App.tsx`: `blocked` reaches the editors (push-to-talk needs nothing
+    here: it is Ctrl+D, taken at the window, since PR #40);
   - `Layout.tsx` and `layout.ts`: the chord rule;
   - `theme.css`: `isolation: isolate`;
   - `vite.config.ts`.
@@ -1141,7 +1172,8 @@ Each package is a separately mergeable PR with free tests, and updates
     - Ctrl+F opens `.find-widget`;
     - Ctrl+Space shows a word suggestion;
     - **typing `a b` leaves `a b` in the buffer and
-      `window.__hud.capture.ptt` null**;
+      `window.__hud.capture.ptt` null** (already true since PR #40; keep it);
+    - Ctrl+K, then Ctrl+D, then `z` types `z` (§2.2's pending chord);
     - Ctrl+S sends the PUT with its keydown `defaultPrevented`;
     - after five diff files, at most two diff models remain
       (`window.__hud.monacoModels()`);
@@ -1300,7 +1332,8 @@ and frontend)
   - fs refuses protected names, escapes and gate state;
   - delete lands in a temp trash with a `.trashinfo`;
   - the palette is inert under a card, has no download entry, and Space in it
-    is not push-to-talk;
+    types (push-to-talk is Ctrl+D since PR #40, and refuses while a picker
+    is open);
   - add-to-chat sends nothing.
 
 **ED-8: settings and `.editorconfig`** (frontend)

@@ -183,7 +183,7 @@ export function Workspace(props: {
     if (!asking) return;
     document.querySelector<HTMLElement>(`[data-testid="pane-${asking.pane}-close-keep"]`)?.focus({ preventScroll: true });
   }, [asking]);
-  /** Split and × are buttons: Space and Enter press them, and are never push-to-talk; a held Enter presses once. */
+  /** Split and × are buttons: Space and Enter press them and go no further; a held Enter presses once. */
   const buttonKeys = {
     onKeyDown: (e: React.KeyboardEvent) => {
       e.stopPropagation();

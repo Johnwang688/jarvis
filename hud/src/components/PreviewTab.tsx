@@ -29,6 +29,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { judgeKeepOrigin, judgePreviewUrl, keptOrigin, originOf, sandboxFor, workshopUrl } from "../lib/preview";
+import { noPointerFocus } from "../lib/talkkey";
 import { useDaemonPorts } from "../state/daemonPorts";
 
 /** "Open in Preview" from a terminal link: a URL, and a number so the same URL twice loads twice. */
@@ -147,6 +148,9 @@ export function PreviewTab(props: {
         {offer?.ok ? (
           <label
             className="keeporigin"
+            // Never focused by a pointer, so a habitual Space cannot flip the
+            // grant back (lib/talkkey.ts, noPointerFocus); a click still does.
+            onMouseDown={noPointerFocus}
             title={
               "Let this page keep its own origin, so its storage, cookies and live reload work. " +
               "Only for a local dev server: never Jarvis's own ports, and it turns itself off " +

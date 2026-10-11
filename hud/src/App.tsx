@@ -57,8 +57,10 @@ import { guildConfigured, ownerLine } from "./lib/discord";
 import { CollapseButton, Rail, Splitter, TitleBar, focusPaneElement, useLayout } from "./components/Layout";
 import { Workspace, type PaneInfo } from "./components/Workspace";
 import { terminalAttached, terminalRead, terminals } from "./components/Terminal";
-import { terminalSpecFor } from "./lib/terminal";
-import { maxWidth } from "./lib/layout";
+import { inTerminal, terminalSpecFor } from "./lib/terminal";
+import { SPACE_HINT, SPACE_HINT_KEY, TalkHold, isTalkKey, isTypingTarget, wantsSpaceHint } from "./lib/talkkey";
+import { inMonaco, maxWidth } from "./lib/layout";
+import { chordSecond } from "./lib/editorkeys";
 import {
   PANE_NOS, SHAPES, allocate, closePane as closePaneOf, copySpec, orderOf, show as showOf, slotOf, splitTitle,
   type PaneNo, type PaneSpec, type View,
@@ -1771,6 +1773,41 @@ export default function App() {
 
   const release = useCallback(() => capture.release(), [capture]);
 
+  // Space was push-to-talk until 2026-10-10. The first Space pressed outside a
+  // typing target afterwards says, once per browser profile, what the key is
+  // now (on the selected chat's line under the orb, for a few seconds); Space
+  // itself does what it does on any page. Storage that throws says it once
+  // per load.
+  const hintSaid = useRef(false);
+  const sayTalkKeyOnce = useCallback(() => {
+    if (hintSaid.current) return;
+    // Said where it is read — the selected chat's line — and never over a
+    // turn's own status: with no chat on screen, or one busy, it waits.
+    const pane = live.current.selectedChat;
+    if (pane === null || live.current.chats[pane].busy) return;
+    hintSaid.current = true;
+    try {
+      if (window.localStorage.getItem(SPACE_HINT_KEY)) return;
+      window.localStorage.setItem(SPACE_HINT_KEY, "1");
+    } catch {
+      /* said once for this load */
+    }
+    chatPatch(pane, { status: SPACE_HINT });
+    setTimeout(() => {
+      if (live.current.chats[pane]?.status === SPACE_HINT) chatPatch(pane, { status: "" });
+    }, 8000);
+  }, [chatPatch]);
+  // A card that arrives while the hint is up takes the line: a status reads
+  // ahead of ANSWER THE AUTHORIZATION under the orb (`orbLine`), and a hint is
+  // not worth holding the owner's attention off a card (review of PR #40).
+  // Before paint, so the card's line is the first one drawn.
+  useLayoutEffect(() => {
+    if (!blocked) return;
+    for (const n of PANE_NOS) {
+      if (live.current.chats[n]?.status === SPACE_HINT) chatPatch(n, { status: "" });
+    }
+  }, [blocked, chatPatch]);
+
   // What the workspace's error boundary calls once it has caught a render
   // error: a paste going out to a shell stops (nothing on screen could show
   // its notice or Resume), and nothing in the microphone's hands is sent.
@@ -1781,26 +1818,56 @@ export default function App() {
     setCrashed(true);
   }, [capture]);
 
+  // Push-to-talk's key is Ctrl+D (2026-10-10, lib/talkkey.ts): held to talk,
+  // let go (D or Ctrl) to send. The capture phase on the window, so the chat
+  // box, Monaco, a menu or a chip — each of which keeps its own keys from
+  // bubbling — never stands between the owner and the mic, and nothing under
+  // the cursor acts on the key: its default (Chrome's bookmark dialog) is
+  // always prevented and it stops here, under a card, muted or crashed alike.
+  // A focused terminal is the one exception: there it is the shell's end of
+  // input, untouched.
+  //
+  // **A hold is one key, decided where it began** (review of PR #40;
+  // `TalkHold` in lib/talkkey.ts, kept for the window's life so a re-run of
+  // this effect cannot lose a hold): its auto-repeat keydowns stay the
+  // window's when focus lands in a terminal mid-hold — a click into one, a
+  // card answered by mouse, Discord or its timeout handing focus back, or a
+  // Preview frame taking focus and giving it back — so the shell never gets
+  // a run of end-of-input from it. A window that loses focus mid-hold may
+  // never see the keyup, so the blur lets the mic go, but not the hold.
+  const talkHold = useMemo(() => new TalkHold(), []);
   useEffect(() => {
     const down = (e: KeyboardEvent) => {
-      if (e.code === "Space" && !e.repeat) {
-        e.preventDefault();
-        press();
-      }
+      const blocked = live.current.approvals.length > 0;
+      if (wantsSpaceHint(e, { typing: isTypingTarget(e.target), blocked })) sayTalkKeyOnce();
+      // **A pending Monaco chord's second key is Monaco's** (decisions E-10,
+      // the window's one tracker in lib/editorkeys.ts, shared with the layout
+      // keys): Ctrl+K then Ctrl+D in an editor is Monaco's chord, not
+      // push-to-talk — taking it would leave the chord waiting to swallow the
+      // next key typed. Its default is still kept from Chrome; Monaco hears it.
+      const chord = isTalkKey(e) && !e.repeat && chordSecond(e, inMonaco(e.target));
+      const verdict = talkHold.down(e, { terminal: inTerminal(e.target), blocked, chordSecond: chord });
+      if (verdict === "pass") return;
+      e.preventDefault();
+      if (verdict === "monaco") return;
+      e.stopPropagation();
+      if (verdict === "press") press();
     };
     const up = (e: KeyboardEvent) => {
-      if (e.code === "Space") {
-        e.preventDefault();
-        release();
-      }
+      if (talkHold.up(e)) release();
     };
-    document.addEventListener("keydown", down);
-    document.addEventListener("keyup", up);
+    const lost = () => {
+      if (talkHold.blur()) release();
+    };
+    window.addEventListener("keydown", down, true);
+    window.addEventListener("keyup", up, true);
+    window.addEventListener("blur", lost);
     return () => {
-      document.removeEventListener("keydown", down);
-      document.removeEventListener("keyup", up);
+      window.removeEventListener("keydown", down, true);
+      window.removeEventListener("keyup", up, true);
+      window.removeEventListener("blur", lost);
     };
-  }, [press, release]);
+  }, [press, release, sayTalkKeyOnce, talkHold]);
 
   // ---- microphone ---------------------------------------------------------
 
