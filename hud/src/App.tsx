@@ -32,6 +32,7 @@ import { FileTab } from "./components/FileTab";
 import { DiffTab } from "./components/DiffTab";
 import { PreviewTab } from "./components/PreviewTab";
 import { ApprovalQueue, ApprovalVeil } from "./components/Approvals";
+import { CrashProbe, WorkspaceBoundary } from "./components/Boundary";
 import { DecisionsLog, DiscordPanel, SchedulesButton, UsagePanel } from "./components/Panels";
 import { AvatarPicker, ModelPicker, NewProject, NewTask, SettingsDialog, VoicePicker } from "./components/Pickers";
 import { ScheduleDialog } from "./components/ScheduleDialog";
@@ -2032,6 +2033,10 @@ export default function App() {
 
   return (
     <>
+      {/* A render error in here — the title bar, the shell, the orb — shows a
+          Reload prompt in their place and goes no further: the card below is
+          outside it, so it stays up and answerable (components/Boundary.tsx). */}
+      <WorkspaceBoundary>
       <TitleBar view={view} blocked={blocked} onPicker={(which) => patch({ picker: which })} />
       <div
         id="shell"
@@ -2092,6 +2097,7 @@ export default function App() {
         )}
 
         <div className="pane" id="main">
+          <CrashProbe where="workspace" />
           <Workspace
             view={view}
             blocked={blocked}
@@ -2201,6 +2207,7 @@ export default function App() {
         onPress={press}
         onRelease={release}
       />
+      </WorkspaceBoundary>
 
       <ApprovalVeil requests={state.approvals} onDecide={decide} />
 

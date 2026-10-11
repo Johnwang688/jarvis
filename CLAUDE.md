@@ -484,7 +484,17 @@ passes unchanged; `_titlebar_checks`, `_workspace_checks`,
 rest. **The layout section runs against a `MockDaemon` of its own** on an
 ephemeral port (`MockDaemon(0)`; the mock records the port it bound), so its
 saves, `/seen` posts, approval decisions and preview hits never reach the
-world the main suite asserts on.
+world the main suite asserts on. **An event is read in its handler, never
+inside a state updater** (2026-10-10, review of PR #29): ⊞ and ⋯ read the
+click's `currentTarget` in `setX((m) => …)`, which React runs at render time
+whenever an update is already pending — `currentTarget` is null by then, so
+three quick clicks threw inside render and unmounted the whole window, an
+open approval card included. **And a render error can no longer take the
+card with it**: `WorkspaceBoundary` (`components/Boundary.tsx`) wraps the
+title bar, the shell and the orb and draws a plain-text Reload prompt in
+their place (it logs the error's name only), while `ApprovalVeil` sits
+beside it, outside, so the card stays up, Tab stays on it and Escape still
+denies (`_crash_checks`, driven by the test-only `__hudCrashProbe`).
 
 **Several chats at once, WP-B (2026-10-09, design §18; plan §2.2 "Several
 chats at once"; decisions W-6).** Any pane may show chat, each its **own

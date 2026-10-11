@@ -49,6 +49,16 @@ The workspace (2026-10-09, WP-A of docs/plans/2026-10-09-hud-workspace-plan.md):
   - in a 2×2 grid with Monaco and a preview frame on screen, at 160% and 70%,
     the card is wholly on screen, AUTHORIZE is below the fold for a long
     command, and every button is topmost at its own point.
+
+A render error (review of PR #29):
+  - three clicks in one task on ⊞, and on ⋯ when the title bar is folded,
+    leave the window drawn with no page error and the menu open — the menu's
+    position used to be read from the click inside a state updater, which
+    React ran at render time with `currentTarget` null, and the throw
+    unmounted the whole root, an open approval card included;
+  - a workspace child that throws while a card is up (a test-only probe)
+    leaves a Reload prompt in the window's place and the card on screen,
+    readable, its buttons topmost, Tab kept on it and Escape denying.
 """
 from __future__ import annotations
 
@@ -79,7 +89,7 @@ def layout_checks(browser, mock, base, check, until, guard, init_script):
                         _blocked_checks, _small_window_checks, _picker_zoom_checks,
                         _monaco_zoom_checks, _menu_zoom_checks, _model_chip_checks,
                         _titlebar_checks, _workspace_checks, _grid_card_checks, _sticky_checks,
-                        _card_focus_checks, _seen_checks):
+                        _card_focus_checks, _seen_checks, _crash_checks):
             try:
                 section(page, mock, check, until)
             except Exception as e:  # a section that cannot run is a failure, and the rest still run
@@ -1717,4 +1727,98 @@ def _seen_checks(page, mock, check, until):
     time.sleep(0.8)
     check("a task finishing while no pane shows it is not read", seen("/tasks/k1/seen") == before)
     mock.activity("task", "k1", "idle")
+    _reset_all(page, mock, until)
+
+
+# ---------------------------------------------------------------------------
+# a render error must not take the window, or the card, with it (review of
+# PR #29: three quick clicks on ⊞ unmounted the whole root)
+
+# Three clicks in one task, no await between them: the first update is still
+# pending when the second click runs, which is when React deferred the old
+# updater to render time and `e.currentTarget` was null there.
+TRIPLE_CLICK = """(id) => {
+  const b = document.querySelector(`[data-testid="${id}"]`);
+  if (!b) return false;
+  b.click(); b.click(); b.click();
+  return true;
+}"""
+
+
+def _window_whole(page) -> tuple[bool, str]:
+    """The window is still drawn: #root has children, the title bar and the
+    sidebar are there, and no crash prompt stands in their place."""
+    got = page.evaluate("""() => [document.getElementById('root').children.length,
+      !!document.querySelector('[data-testid="titlebar"]'), !!document.querySelector('[data-testid="sidebar"]'),
+      !!document.querySelector('[data-testid="hud-crashed"]')]""")
+    return got[0] > 0 and got[1] and got[2] and not got[3], f"root children, titlebar, sidebar, crashed = {got}"
+
+
+def _crash_checks(page, mock, check, until):
+    errors: list[str] = []
+    listen = lambda e: errors.append(str(e))  # noqa: E731
+    page.on("pageerror", listen)
+    try:
+        for size, opener, menu, what in (
+            ((1280, 800), "layout-customize", "layout-menu", "⊞ (the layout menu)"),
+            # Under 560 HUD pixels the four text buttons fold into ⋯.
+            ((500, 700), "titlebar-more", "titlebar-more-menu", "⋯ (the folded tools menu)"),
+        ):
+            _reset_all(page, mock, until, size=size)
+            errors.clear()
+            clicked = page.evaluate(TRIPLE_CLICK, opener)
+            time.sleep(0.4)
+            ok, why = _window_whole(page)
+            check(f"three quick clicks on {what} leave the window drawn", clicked and ok, why)
+            check("and raise no page error", not errors, "; ".join(errors[:2]))
+            state = page.evaluate(f"""() => [!!document.querySelector('[data-testid="{menu}"]'),
+              document.querySelector('[data-testid="{opener}"]')?.getAttribute('aria-expanded')]""")
+            check(f"and the menu ends open (three toggles), its button saying so", state == [True, "true"], str(state))
+            page.keyboard.press("Escape")
+            until(lambda: page.locator(f'[data-testid="{menu}"]').count() == 0, timeout=2)
+
+        # The boundary: a workspace child that throws while a card is up. The
+        # probe (components/Boundary.tsx) is test-only: it throws only while a
+        # page global names it, and nothing but a test sets that.
+        _reset_all(page, mock, until)
+        errors.clear()
+        _approval(mock, "crash1", "rm -rf /home/johnw/projects/scratch")
+        until(lambda: page.locator('[data-testid="approval-card"]').count() > 0, timeout=4)
+        time.sleep(0.2)
+        page.evaluate("window.__hudCrashProbe = 'workspace'")
+        # Any store change draws the workspace again, and the probe throws.
+        page.evaluate("window.__hud.dispatch({type: 'patch', patch: {error: 'crash probe render'}})")
+        until(lambda: page.locator('[data-testid="hud-crashed"]').count() > 0, timeout=4)
+        time.sleep(0.2)
+        check("a workspace render error shows the Reload prompt in place of the window",
+              page.locator('[data-testid="hud-crashed"]').count() == 1
+              and page.locator('[data-testid="titlebar"]').count() == 0
+              and page.locator('[data-testid="hud-crashed-reload"]').inner_text().strip() == "Reload")
+        check("and is caught: no page error", not errors, "; ".join(errors[:2]))
+        cmd = page.locator('[data-testid="approval-command"]')
+        check("the approval card is still on screen and readable, its whole command there",
+              cmd.count() == 1 and "rm -rf /home/johnw/projects/scratch" in cmd.inner_text())
+        ok, why = _card_on_screen(page)
+        check("and its buttons are on screen and topmost (DENY clickable)", ok, why)
+        page.keyboard.press("Tab")
+        page.keyboard.press("Tab")
+        check("and Tab stays on the card (the Reload behind it is never reached)",
+              page.evaluate("!!document.activeElement.closest('[data-testid=\"approval-card\"]')"),
+              str(_active_testid(page)))
+        page.keyboard.press("Escape")
+        body = until(lambda: mock.sent("POST", "/approvals/crash1") or None, timeout=4)
+        check("and Escape still denies it", bool(body) and body[-1].get("decision") == "deny",
+              str(body[-1] if body else None))
+        until(lambda: page.locator('[data-testid="approval-card"]').count() == 0, timeout=4)
+        before = mock.sse_connections()
+        page.locator('[data-testid="hud-crashed-reload"]').click()
+        page.wait_for_selector('[data-testid="sidebar"]', state="attached")
+        mock.await_reconnect(before)
+        time.sleep(0.2)
+        _probe(page)
+        ok, why = _window_whole(page)
+        check("and Reload brings the window back", ok, why)
+        check("with no page error throughout", not errors, "; ".join(errors[:2]))
+    finally:
+        page.remove_listener("pageerror", listen)
     _reset_all(page, mock, until)
