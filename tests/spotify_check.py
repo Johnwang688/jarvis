@@ -428,9 +428,10 @@ def group_checks(token_path: Path) -> None:
     unknown = tools.dispatch("spotify_teleport", "{}").text
     assert "no tool named" in unknown and "spotify_search" not in unknown, unknown
 
-    # Since 2026-10-10 the toolset is enforced at dispatch (it fails open only
-    # when no agent is bound), so an agent that cannot load the group gets no
-    # pointer to a tool it cannot call: it is told the tool is not its own.
+    # Since 2026-10-10 the toolset is enforced at dispatch (and since PR #42,
+    # with no toolset bound nothing runs at all), so an agent that cannot load
+    # the group gets no pointer to a tool it cannot call: it is told the tool
+    # is not its own.
     # And `load_tools` itself refuses a group whose core the agent lacks.
     runtime.bind(loaded_groups=set(), tool_names={"read_file"})
     refused = tools.dispatch("spotify_search", json.dumps({"query": "x"})).text

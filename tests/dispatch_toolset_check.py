@@ -33,8 +33,9 @@ What must hold, each against the surface that claims it:
   * **unbound refuses** (owner's answer 4, 2026-10-11): with no toolset bound
     nothing runs and no registry listing goes back; a script or a test opts in
     with `runtime.tools_bound(names)` (held to that set, restored after) or
-    `runtime.unconfined()` (anything, only while nothing is bound, only on its
-    own thread, only inside the block);
+    `runtime.unconfined()` (anything, only while nothing is bound, only inside
+    the block, and not into a bare thread — a context copied inside the block
+    carries it, as it carries any ContextVar);
   * an unknown name is echoed capped and escaped, and a group with an empty
     core widens nothing (#34 review).
 
@@ -726,8 +727,10 @@ def unbound_checks() -> None:
 def opt_in_checks() -> None:
     """The opt-ins a script or a test uses instead: `tools_bound(names)` holds
     the calls to that set and puts the old binding back; `unconfined()` runs
-    anything registered while nothing is bound — on its own thread only, never
-    over a bound set, and only inside the block."""
+    anything registered while nothing is bound — never over a bound set, only
+    inside the block, and not into a bare thread. A context copied inside the
+    block carries it, as it carries every ContextVar (PR #42 review, LOW-3: the
+    docstring used to say it did not follow another thread at all)."""
     SURFACE[0] = "opt-in (expected)"
     out = {}
 
@@ -746,6 +749,12 @@ def opt_in_checks() -> None:
             thread.start()
             thread.join()
             out["new_thread"] = other["text"]
+            copied = contextvars.copy_context()
+            thread = threading.Thread(target=lambda: other.update(
+                copied=copied.run(tools.dispatch, "get_datetime", "{}").text))
+            thread.start()
+            thread.join()
+            out["copied"] = other["copied"]
             with runtime.tools_bound({"read_file"}):
                 out["bound_inside"] = tools.dispatch("get_datetime", "{}").text
         out["after_unconfined"] = tools.dispatch("get_datetime", "{}").text
@@ -762,12 +771,14 @@ def opt_in_checks() -> None:
     assert out["after_bound"][0] is None and UNBOUND in out["after_bound"][1], out["after_bound"]
     assert out["unconfined"] == "ran get_datetime", out["unconfined"]
     assert "no tool named 'teleport'" in out["unknown"], out["unknown"]
-    assert UNBOUND in out["new_thread"], "unconfined() must not follow a new thread"
+    assert UNBOUND in out["new_thread"], "unconfined() must not follow a bare thread"
+    assert out["copied"] == "ran get_datetime", "a context copied inside the block carries it"
     assert NOT_AVAILABLE in out["bound_inside"], "a bound set is enforced inside unconfined()"
     assert UNBOUND in out["after_unconfined"], out["after_unconfined"]
-    assert runs == 2, f"get_datetime ran {runs} times, wanted 2"
+    assert runs == 3, f"get_datetime ran {runs} times, wanted 3"
     print("ok  opt-ins: tools_bound holds a script to its set and restores; unconfined runs "
-          "anything only while nothing is bound, on its own thread, inside the block")
+          "anything only while nothing is bound, inside the block, not into a bare thread "
+          "(a copied context carries it)")
 
 
 def name_echo_checks() -> None:

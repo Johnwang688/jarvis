@@ -1395,7 +1395,9 @@ the tool was not dangerous. After #34 such calls are refused. After the
 follow-up, each bench's prompt also stops naming tools it does not hold
 (agent-bench loses the plan, sub-agent, task, session, web and desktop
 paragraphs; `orchestrate` keeps only its workflow tools, with no paragraph
-about them), and cad-bench gains `skill_list`/`skill_read`. **Numbers taken
+about them, and its sandboxed workflows lose the repository paragraph; every
+bench loses the browser's description but keeps its conduct rules), and
+cad-bench gains `skill_list`/`skill_read`. **Numbers taken
 before #34 are not comparable with numbers taken after it**, and the
 follow-up moves them again.
 
@@ -1616,15 +1618,25 @@ jarvis/
    the benches do not hold. Since #34 each such mention costs a refused step.
    `config.PROMPT_TOOL_PARAGRAPHS` lists every paragraph that names a tool,
    keyed by its opening words, with the versions it may take.
-   `config.system_prompt(names)` picks, per paragraph, the first version whose
-   tools are all held, and drops the paragraph when none is.
-   `Agent.__init__` applies it to any prompt that starts with SYSTEM_PROMPT,
-   so no surface needs code of its own. The narrower versions are the
-   original's own sentences, with a sentence or a tool's name taken out. With
-   every tool held, the result is SYSTEM_PROMPT byte for byte (the wording is
-   tuned). A paragraph that names a tool but has no rule fails
+   `config.narrow_prompt(text, names)` picks, per paragraph, the first version
+   whose tools are all held, and drops the paragraph when none is
+   (`config.system_prompt(names)` is it applied to SYSTEM_PROMPT).
+   `Agent.__init__` applies it to the whole of any prompt that starts with
+   SYSTEM_PROMPT — a surface's own paragraphs after it included, so a
+   surface paragraph that names tools gets a rule in the same table (the
+   workflow's "For a change to a repository" paragraph, which agent-bench's
+   sandboxed workflows hold no git tools for) — and no surface needs code of
+   its own. "The browser" counts as a tool (`browser_goto` and
+   `browser_snapshot`): its paragraph and the fence's "and the browser" are
+   narrowed for agents without it, its conduct rules kept. The narrower
+   versions are the original's own sentences, with a sentence or a tool's
+   name taken out. With every tool held, the result is the text byte for byte
+   (the wording is tuned). A paragraph that names a tool but has no rule fails
    `tests/prompt_tools_check.py`, so **adding a tool name to the prompt means
-   adding its rule**. Sub-agent types do the same through
+   adding its rule** — and the narrower versions are copies, held to their
+   original sentence by sentence there, so **a change to a paragraph that has
+   them is a change to each of them** (or the check fails, naming the
+   sentence). Sub-agent types do the same through
    `AgentType.needs`: a child that lost a tool its brief names to the parent
    intersection is not sent, and says which. The case was a builder under
    long-bench, which holds no git tools.
@@ -1753,7 +1765,8 @@ jarvis/
   turn", never "an agent once ran on this thread"), `_sync_tools`
   on a `load_tools` expansion, `_dispatch_calls`' per-worker `copy_context()`
   (now load-bearing twice: without it a pool worker would hold an unbound
-  approver, which denies, *and* an unbound toolset, which is not enforced),
+  approver, which denies, *and* an unbound toolset, on which dispatch refuses
+  every call — a bare worker refuses even the agent's own tools),
   jarvis-mcp's worker, which binds the list it exposes, and the daemon's
   jarvis-mcp bridge, which binds the chat session's offered list (WP-1). A
   tool an agent was
@@ -1785,7 +1798,9 @@ jarvis/
   reaches it, and nothing under `jarvis/`, `longbench/` or `swecompare/` names
   it (the walk pins that). It changes only the unbound case: a toolset bound
   inside the block, an agent's turn included, is enforced as ever. It does not
-  follow a new thread. The ~20 free suites that dispatch directly each wrap
+  follow a bare thread; a context copied inside the block (`contextvars.
+  copy_context()`) carries it, like any ContextVar, wherever that copy runs.
+  The ~20 free suites that dispatch directly each wrap
   their run in `tools_bound({...})`, listing what they call.
 
   Not covered: `jarvis/runtime.py` and `jarvis/agent.py` are not
@@ -2765,7 +2780,8 @@ jarvis/
   loaded in one turn and used in the next (M12). Since 2026-10-11: **unbound
   refuses** (nothing runs, nothing listed); the opt-ins (`tools_bound` holds a
   script to its set and restores; `unconfined` runs anything only while nothing
-  is bound, on its own thread, inside the block); an unknown name echoed
+  is bound, inside the block, and not into a bare thread — a copied context
+  carries it); an unknown name echoed
   capped and escaped; and an empty-core group refused by `register_group` and
   widening nothing through `load_tools` or `_sync_tools`. **The surface walk**
   is why "unbound refuses" costs no real path: an AST pin that the only `dispatch`
@@ -2796,8 +2812,9 @@ jarvis/
   names only tools it holds (2026-10-11), `llm.chat` answering at once and
   every config path temp. Each agent is the one its surface really builds,
   through its own start path: the CLI, Discord, the face's voice agent and
-  designer, the v2 fast path, a workflow, an attended task, a goal,
-  agent-bench's five tasks, cad-bench, long-bench (shell and no-shell),
+  designer, the v2 fast path, a workflow (and one started inside
+  agent-bench's sandbox, whose toolset has no git tools), an attended task, a
+  goal, agent-bench's five tasks, cad-bench, long-bench (shell and no-shell),
   vocab-bench, and every sub-agent type under every parent that can spawn one.
   The working-context block is rendered with something in every index (a
   skill, a session, a task, a plan, an available group). Also checked: the
@@ -2805,11 +2822,26 @@ jarvis/
   plan_write, run_subagent, write_file; tasks, goals and workflows no
   task_start) and what narrowing keeps (the fast path still gets the
   untrusted-content rule and its fence; a no-web bench gets the rule without
-  the fence). `config.system_prompt` with every tool held is SYSTEM_PROMPT byte
-  for byte, every tool-naming paragraph has exactly one rule, and no version
-  names a tool it does not need. Each type's brief names only its `needs`, and
+  the fence; a workflow keeps its repository paragraph only with the git
+  tools; the shared prompt describes the browser only to an agent holding it,
+  and keeps its conduct rules for everyone). `config.system_prompt` with every
+  tool held is SYSTEM_PROMPT byte for byte, every tool-naming paragraph has a
+  rule, each rule's opening names exactly one paragraph across every prompt
+  built on SYSTEM_PROMPT (role briefs included), and no version names a tool
+  it does not need. **Each narrower version is held to its original sentence
+  by sentence** (PR #42 review, MED-2): every sentence it has is the
+  original's, or one of the rewordings the check lists (`REWORDED`: "fetch_page,
+  web_search and the browser return" → "fetch_page and web_search return" /
+  "fetch_page returns", and "web_search or fetch_page" → "fetch_page"); every
+  sentence of the original that names no tool it lacks is kept, in order,
+  unless the check lists it as left out (`DROPPED`: the fence's last two
+  sentences without a web tool, the browser's first without the browser).
+  A dash changed in a copy, or a sentence added to the original and not to
+  its copies, fails. Each type's brief names only its `needs`, and
   a type that would lose one is not sent. Against origin/main every
-  non-conversation surface but vocab-bench fails. Run after touching
+  non-conversation surface but vocab-bench fails; against the follow-up's
+  first head (ede1320) the sandboxed workflow (told of git_worktree, git and
+  git_pull_request) and every no-browser surface fail. Run after touching
   `config.SYSTEM_PROMPT` or `PROMPT_TOOL_PARAGRAPHS`, a surface's prompt
   suffix or toolset, an agent type's brief, or `Agent.__init__`.
 - `tests/files_check.py` — free checks for the file and search tools:
@@ -3450,8 +3482,9 @@ Two findings worth keeping:
   `runtime.unconfined()`, in code only. Details in *A toolset is a boundary*
   (Safety design).
 - **Each agent's prompt names only the tools it holds (2026-10-11, owner's
-  answer 5).** `config.system_prompt(names)` narrows SYSTEM_PROMPT paragraph
-  by paragraph (invariant 7). cad-bench holds `skill_list` and `skill_read`,
+  answer 5).** `config.narrow_prompt` narrows any prompt built on
+  SYSTEM_PROMPT paragraph by paragraph, a surface's own paragraphs included
+  (invariant 7). cad-bench holds `skill_list` and `skill_read`,
   so the CAD skill it measures can load. runtime.py and toolgroups.py are
   **not** SELF_PROTECTED: the owner declined it (answer 3).
 

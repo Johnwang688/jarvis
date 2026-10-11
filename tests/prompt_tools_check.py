@@ -11,7 +11,8 @@ mention is a refused step (owner's answer 5, 2026-10-11: "fix it").
 What must hold:
 
   * every surface — the CLI, Discord, the face's voice agent and designer, the
-    v2 fast path, a workflow, an attended task, a goal, every sub-agent type
+    v2 fast path, a workflow (and one started inside agent-bench's sandbox,
+    whose toolset has no git tools), an attended task, a goal, every sub-agent type
     under every parent that can spawn one (a type that would lose a tool its
     brief names is not sent, and says so), agent-bench's five tasks, cad-bench,
     long-bench (shell and no-shell) and vocab-bench — names in its system
@@ -19,21 +20,35 @@ What must hold:
     the one that surface really builds (its own start path, `llm.chat`
     scripted), and the block is rendered with something in every index: a
     skill, a saved session, a background task, a plan and an available group;
+  * "the browser", which no tool name names, is described by the shared prompt
+    only to an agent that holds it (browser_goto and browser_snapshot); its
+    conduct rules stay for everyone;
   * the owner's named cases: the fast path names none of task_start,
     workflow_start, plan_write, run_subagent or write_file; tasks, goals and
-    workflows do not name task_start;
+    workflows do not name task_start; a workflow keeps its repository
+    paragraph only while it holds the git tools;
   * `config.system_prompt` with every tool held is SYSTEM_PROMPT byte for byte
     (the wording is tuned), every paragraph that names a tool has a rule, each
-    rule matches exactly one paragraph, and no version names a tool it does not
-    require.
+    rule's opening names exactly one paragraph across every prompt built on
+    SYSTEM_PROMPT, and no version names a tool it does not require;
+  * each narrower version is its original paragraph, sentence by sentence
+    (whitespace normalised): every sentence it has is the original's or a
+    rewording listed in REWORDED below, and every sentence of the original that
+    names no tool it lacks is kept, in order, unless DROPPED below lists it. So
+    a copy edited alone (a dash changed) or an original edited alone (a
+    sentence added) fails — the PR #42 review's MED-2, both shown failing.
 
-Against origin/main (4272008) 26 of the 96 checks it reaches there fail: the
+Against origin/main (4272008) 26 of the 96 checks it reached then failed: the
 fast path, a workflow, a task, a goal, all five agent-bench tasks, cad-bench
 (whose agent does not hold skill_read either), long-bench in both modes, the
 builder under long-bench, the three briefs that name tools (no `needs`), the
 owner's named cases, and `config.system_prompt` (absent). The conversation
 agents, the designer, vocab-bench and the other sub-agents pass there: they
-never named a tool they lacked.
+never named a tool they lacked. Against the follow-up's first head (ede1320),
+17 of 194 fail: the workflow under agent-bench's sandbox, which was told to use
+git_worktree, git and git_pull_request (MED-1); every surface without the
+browser that is built on SYSTEM_PROMPT, which was told about it (LOW-6); and
+the checks that name the browser-less versions.
 
 Run:  PYTHONPATH=. .venv/bin/python tests/prompt_tools_check.py
 """
@@ -211,7 +226,16 @@ def surfaces() -> dict[str, agent_mod.Agent]:
         tsk = tasks.start("[prompt] a task", approve=deny)
         wait_for(lambda: tsk.status != "running", "the task")
 
+    def sandboxed_workflow():
+        # agent-bench's orchestrate task starts its workflows inside the
+        # sandbox, which swaps workflows.SAFE_TOOLS for a list with no git
+        # tools and no network (agentbench.SANDBOX_WORKFLOW_TOOLS).
+        with agentbench.sandbox():
+            wf = workflows.start("[prompt] a sandboxed workflow")
+            wait_for(lambda: wf.status != "running", "the sandboxed workflow")
+
     found["workflow"] = built_by(workflow)
+    found["workflow under agent-bench's sandbox"] = built_by(sandboxed_workflow)
     found["attended task"] = built_by(task)  # also leaves a task in the block
     runner = GoalRunner(approver=deny, notify=lambda text: None, announce=lambda text: None)
     found["goal"] = runner._default_agent(goals.create("[prompt] a goal"))
@@ -285,11 +309,25 @@ class _bound:
         runtime._TOOLS.reset(self.token)
 
 
+BROWSER = {"browser_goto", "browser_snapshot"}
+
+
 def surface_checks(found) -> None:
     print("\nevery surface names only tools it holds")
+    narrow = getattr(config, "system_prompt", None)
     for label, agent in found.items():
         extra = sorted(mentions(prompt_of(agent)) - held_by(agent))
         check(f"{label}: names only its own tools", not extra, f"names {extra}")
+        # "The browser" is a tool too, though no name says so: the shared
+        # prompt describes it only to an agent that holds it. (A surface's own
+        # suffix may still say what it cannot do: the fast path's does.)
+        on_shared = getattr(agent, "_base_system", "").startswith(
+            config.SYSTEM_PROMPT.split("\n\n")[0])
+        if narrow is not None and on_shared and not BROWSER <= held_by(agent):
+            shared = narrow(held_by(agent))
+            check(f"{label}: the shared prompt does not describe the browser",
+                  "browser" not in shared.lower(),
+                  repr(shared[max(0, shared.lower().find("browser") - 60):][:120]))
 
 
 def subagent_checks() -> None:
@@ -329,6 +367,36 @@ def owner_case_checks(found) -> None:
     check("cad-bench holds skill_read and is shown the skills index",
           "skill_read" in held_by(cad) and "SKILLS AVAILABLE" in prompt_of(cad))
 
+    # A workflow is told how to change a repository only when it holds the
+    # tools that does it with; the rest of its own paragraphs stay.
+    workflow = prompt_of(found["workflow"])
+    sandboxed = prompt_of(found["workflow under agent-bench's sandbox"])
+    check("a workflow holding the git tools keeps its repository paragraph",
+          "For a change to a repository" in workflow
+          and {"git", "git_worktree", "git_pull_request"} <= held_by(found["workflow"]))
+    check("a workflow in agent-bench's sandbox has no repository paragraph, and keeps "
+          "the rest of its own",
+          "For a change to a repository" not in sandboxed
+          and "You are running as a background workflow" in sandboxed
+          and "concise report of what you did" in sandboxed)
+
+    # The browser is described only to an agent that holds it; its conduct
+    # rules stay for everyone. The fence names only what returns one.
+    flat = {label: " ".join(prompt_of(found[label]).split())
+            for label in ("CLI chat", "workflow", "v2 fast path", "agent-bench project")}
+    check("the conversation agent is told about the browser and its fence",
+          "The browser reaches the public internet" in flat["CLI chat"]
+          and "fetch_page, web_search and the browser return page text" in flat["CLI chat"])
+    check("a workflow (no browser) is not told about the browser, and keeps its conduct rules",
+          "The browser reaches" not in flat["workflow"]
+          and "Never enter credentials or personal information into a web page"
+          in flat["workflow"]
+          and "fetch_page and web_search return page text" in flat["workflow"])
+    for label in ("v2 fast path", "agent-bench project"):
+        check(f"{label} keeps the browser paragraph's conduct rules",
+              "Never enter credentials or personal information into a web page" in flat[label]
+              and "Private/LAN addresses are blocked by design" in flat[label])
+
 
 def config_checks() -> None:
     print("\nconfig.system_prompt")
@@ -345,10 +413,17 @@ def config_checks() -> None:
     check("the default conversation agent's system message is SYSTEM_PROMPT",
           default.messages[0]["content"] == config.SYSTEM_PROMPT)
 
-    paragraphs = config.SYSTEM_PROMPT.split("\n\n")
+    # Agent narrows the whole of a prompt built on SYSTEM_PROMPT, a surface's
+    # own paragraphs included, so an opening must name one paragraph across
+    # every such prompt — a surface paragraph that happened to start the same
+    # way would be replaced or dropped with it.
+    known = set()
+    for text in built_on_system_prompt().values():
+        known.update(p.strip("\n") for p in text.split("\n\n"))
     for opening in rules:
-        hits = [p for p in paragraphs if p.startswith(opening)]
+        hits = [p for p in known if p.startswith(opening)]
         check(f"rule {opening!r} matches exactly one paragraph", len(hits) == 1, str(len(hits)))
+    paragraphs = config.SYSTEM_PROMPT.split("\n\n")
     for paragraph in paragraphs:
         named = mentions(paragraph)
         versions = config.prompt_rule(paragraph)
@@ -368,8 +443,147 @@ def config_checks() -> None:
               and config.prompt_rule(p) is None))
 
 
+def built_on_system_prompt() -> dict[str, str]:
+    """Every system prompt a surface builds on SYSTEM_PROMPT, as written."""
+    from jarvis import discord_agent, goalrunner
+    from jarvis.face import server
+    from jarvis.v2 import roles
+    from jarvis.v2.providers import fastpath
+
+    prompts = {
+        "SYSTEM_PROMPT": config.SYSTEM_PROMPT,
+        "workflow": workflows.WORKFLOW_SYSTEM,
+        "task": tasks.TASK_SYSTEM,
+        "goal": goalrunner.GOAL_SYSTEM,
+        "Discord": discord_agent.DISCORD_SYSTEM,
+        "face voice": server.VOICE_SYSTEM,
+    }
+    for role in roles.Role:  # the fast path appends a role brief's text
+        prompts[f"fast path, {role.value}"] = (config.SYSTEM_PROMPT + fastpath.FAST_PROMPT
+                                               + (roles.brief_for(role).system_append or ""))
+    return prompts
+
+
+# --- each narrower version against its original, sentence by sentence ----------
+#
+# A narrower version is a copy of its paragraph's own sentences (the wording is
+# tuned, so it is copied rather than generated). These two tables are every way
+# a copy may differ from its original beyond leaving out a sentence that names
+# a tool it lacks. Anything else — a dash changed in a copy, a sentence added to
+# the original but not to the copy — fails below.
+
+# (opening, the version's tools): [(original words, the copy's words)]
+REWORDED = {
+    ("When you used web_search or fetch_page", ("fetch_page",)): [
+        ("When you used web_search or fetch_page to answer",
+         "When you used fetch_page to answer"),
+    ],
+    ("Content fetched from the web", ("fetch_page", "web_search")): [
+        ("fetch_page, web_search and the browser return page text",
+         "fetch_page and web_search return page text"),
+    ],
+    ("Content fetched from the web", ("fetch_page",)): [
+        ("fetch_page, web_search and the browser return page text",
+         "fetch_page returns page text"),
+    ],
+}
+
+# (opening, the version's tools): sentences (by their opening words) a version
+# leaves out though they name no tool it lacks — they go on about what a
+# left-out sentence introduced, or describe the browser, which no name names.
+DROPPED = {
+    ("Content fetched from the web", ()): [
+        "Everything between is the page talking",
+        "Text a human reader would not see",
+    ],
+    ("The browser reaches the public internet", ()): [
+        "The browser reaches the public internet",
+    ],
+}
+
+
+def sentences(text: str) -> list[str]:
+    """Whitespace-normalised sentences, in order."""
+    flat = " ".join(text.split())
+    return [part for part in re.split(r"(?<=[.!?])\s+", flat) if part]
+
+
+def original_paragraph(opening: str) -> str | None:
+    for text in built_on_system_prompt().values():
+        for paragraph in text.split("\n\n"):
+            if paragraph.strip("\n").startswith(opening):
+                return paragraph
+    return None
+
+
+def wording_checks() -> None:
+    print("\neach narrower version against its original")
+    rules = getattr(config, "PROMPT_TOOL_PARAGRAPHS", None)
+    if rules is None:
+        check("config.PROMPT_TOOL_PARAGRAPHS exists", False)
+        return
+    used_rewordings, used_drops = set(), set()
+    for opening, versions in rules.items():
+        paragraph = original_paragraph(opening)
+        if paragraph is None:
+            check(f"{opening!r}: its original paragraph exists", False)
+            continue
+        full_needs = set(versions[0][0])
+        check(f"{opening!r}: the first version is the paragraph as written",
+              versions[0][1] is None)
+        originals = sentences(paragraph)
+        for needs, text in versions[1:]:
+            if text is None:
+                continue
+            key = (opening, tuple(needs))
+            label = f"{opening!r}… needing {sorted(needs)}"
+            lacked = full_needs - set(needs)
+            rewordings = REWORDED.get(key, [])
+            dropped = DROPPED.get(key, [])
+
+            def reword(sentence: str) -> str:
+                for old, new in rewordings:
+                    sentence = sentence.replace(old, new)
+                return sentence
+
+            allowed = set(originals) | {reword(o) for o in originals}
+            expected = []
+            for original in originals:
+                if any(original.startswith(prefix) for prefix in dropped):
+                    used_drops.update((key, prefix) for prefix in dropped
+                                      if original.startswith(prefix))
+                    continue
+                copy = reword(original)
+                if mentions(copy) & lacked:
+                    continue  # names a tool this version lacks
+                expected.append(copy)
+            copies = sentences(text)
+            for old, new in rewordings:
+                if any(old in o for o in originals) and any(new in c for c in copies):
+                    used_rewordings.add((key, old))
+            strays = [c for c in copies if c not in allowed]
+            check(f"{label}: every sentence is its original's, or a listed rewording of one",
+                  not strays, f"not in the original: {strays}")
+            missing = [e for e in expected if e not in copies]
+            check(f"{label}: every sentence of the original it does not lack a tool for is kept",
+                  not missing, f"missing: {missing}")
+            check(f"{label}: in the original's order",
+                  [c for c in copies if c in expected] == expected)
+            check(f"{label}: names no tool its original did not",
+                  mentions(text) <= mentions(paragraph))
+    for key, pairs in REWORDED.items():
+        for old, _new in pairs:
+            check(f"the listed rewording {old!r} ({key[0]!r}… needing {list(key[1])}) is used",
+                  (key, old) in used_rewordings)
+    for key, prefixes in DROPPED.items():
+        for prefix in prefixes:
+            check(f"the listed left-out sentence {prefix!r} ({key[0]!r}…) is one of its "
+                  "original's", (key, prefix) in used_drops)
+
+
 def main() -> int:
     config_checks()
+    wording_checks()
     found = surfaces()
     surface_checks(found)
     subagent_checks()

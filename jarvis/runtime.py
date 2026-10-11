@@ -209,8 +209,10 @@ def unconfined() -> Iterator[None]:
     variable, file or argument a model could write reaches it, and nothing under
     `jarvis/` calls it (tests/dispatch_toolset_check.py pins that). It changes
     only the unbound case — a toolset bound inside the block, an agent's turn
-    included, is enforced as ever — and it does not follow a new thread, which
-    starts with an empty context and so refuses again.
+    included, is enforced as ever. It does not follow a bare thread, which
+    starts with an empty context and so refuses again; a context copied with
+    `contextvars.copy_context()` inside the block carries it, as it carries
+    every ContextVar, and keeps it wherever and whenever that copy is run.
     """
     token = _UNCONFINED.set(True)
     try:
