@@ -481,7 +481,10 @@ gives up focus.
 **Logging and secrets.**
 - Terminal output exists in only two places: the in-memory ring and your
   browser. It never goes to the bus, a thread log, the decision log,
-  Discord, disk, or the daemon log.
+  Discord, disk, or the daemon log. (Amended by WP-F, decisions W-2: what
+  `terminal_read` returns goes where any tool result goes, and the model's
+  reply is not filtered — whatever it repeats reaches the thread log, the
+  bus, Discord and speech like any reply.)
 - The daemon log records only lifecycle lines: opened or closed, an exit
   code, and the folder as a project name or `~`.
 - **Terminals are not on the bus at all.** The HUD lists them with
