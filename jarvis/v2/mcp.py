@@ -13,7 +13,7 @@ import queue
 import sys
 import threading
 
-from jarvis import config, tools
+from jarvis import config, runtime, tools
 from .tools import schedules as _schedules  # noqa: F401  (registers schedule_*)
 from jarvis.tools.secrets import scrub
 
@@ -70,9 +70,17 @@ def call_tool(name: str, arguments: dict) -> dict:
 
     def run():
         try:
-            if name not in available_tools():
+            exposed = available_tools()
+            if name not in exposed:
                 completed.put(_result("Error: tool is not exposed or is unavailable.", error=True))
                 return
+            # Bind the exposed list as this caller's toolset, so dispatch()
+            # enforces the same set the check above does (tools._toolset_
+            # refusal). This thread starts with an empty context, and an
+            # unbound toolset is the one case dispatch does not enforce — so
+            # without it, the check above would be the only thing between a
+            # client and the whole registry.
+            runtime.bind(tool_names=exposed)
             declined = False
 
             def approve(entry, args):

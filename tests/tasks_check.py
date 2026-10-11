@@ -396,7 +396,8 @@ def concurrency_checks() -> None:
         except RuntimeError as exc:
             assert "wait" in str(exc)
         out = tools.dispatch("task_start", json.dumps({"task": "also too many"}))
-        assert "Error" in out.text, out.text
+        # The cap's own error, not a toolset refusal (which also starts "Error").
+        assert "Error" in out.text and "already" in out.text, out.text
     finally:
         release.set()
         # Drain before restoring, so a worker that has not yet reached its
