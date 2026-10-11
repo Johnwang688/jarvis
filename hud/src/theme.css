@@ -541,6 +541,11 @@ h2.bar {
 }
 /* Previews are pages that expect a white canvas. */
 .previewframe { flex: 1 1 auto; border: none; width: 100%; background: #fff; }
+/* "Keep its origin" (WP-E): a quiet switch at the toolbar's end. */
+.toolbar .keeporigin {
+  display: inline-flex; align-items: center; gap: 4px; flex: 0 0 auto;
+  font-size: 11px; color: var(--text-2); white-space: nowrap;
+}
 
 /* ---- pickers and dialogs (modal) ---- */
 .pickerveil {
@@ -961,6 +966,9 @@ body.resizing iframe { pointer-events: none; }
 .paneltab-x:hover:not(:disabled) { background: var(--hover); color: var(--text); }
 .panelbody.termpanel { display: flex; flex-direction: column; overflow: hidden; }
 .laymenu.termmenu { width: 220px; }
+/* A Ctrl+clicked local link (WP-E): where to open it. */
+.laymenu.linkmenu { width: 280px; }
+.laymenu .lm-url { padding: 0 12px 6px; font: 11px var(--mono); color: var(--text-2); overflow-wrap: anywhere; }
 
 .termview { flex: 1 1 auto; min-height: 0; min-width: 0; display: flex; flex-direction: column; }
 .termbar {

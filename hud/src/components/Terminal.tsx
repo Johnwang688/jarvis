@@ -23,7 +23,10 @@
 //
 // **Output is hostile bytes.** A title a program sets is text in the pane
 // header, capped, and never `document.title`; a link opens only for http(s),
-// and only on Ctrl+click; there is no clipboard addon (no OSC 52). xterm
+// and only on Ctrl+click; there is no clipboard addon (no OSC 52). A link to
+// a server on this machine (a dev server's `Local:` line) opens a small menu
+// instead — "Open in Preview" or "Open in a browser tab" (WP-E) — and the
+// Preview half is judged like a typed URL: never one of the daemon's ports. xterm
 // answers some output — a cursor-position, device or colour query — through
 // the owner's own input channel, so **a reattach sends nothing until its
 // replay has been parsed** (the ring's old queries are answered into a
@@ -47,7 +50,9 @@ import {
   SPECS_KEPT, type InSpec, type TerminalRow,
 } from "../lib/terminal";
 import { toCss } from "../lib/layout";
+import { judgePreviewUrl } from "../lib/preview";
 import { loadXterm } from "../lib/xterm";
+import { useDaemonPorts } from "../state/daemonPorts";
 import type { PaneNo } from "../lib/workspace";
 import type { Project } from "../types";
 
@@ -896,6 +901,8 @@ export class TermManager {
   notices: AttachNotice[] = [];
   /** A busy terminal the owner asked to close: asked once more. `unsure`: the listing failed. */
   confirm: { id: string; title: string; unsure: boolean } | null = null;
+  /** A Ctrl+clicked link to a server on this machine: where to open it (WP-E). Screen px. */
+  linkMenu: { url: string; x: number; y: number } | null = null;
   /**
    * The terminals this tab has shown (sessionStorage; lib/terminal.ts,
    * MINE_KEY): inherited only by a reload of the page that released them,
@@ -937,6 +944,8 @@ export class TermManager {
   forgetTerminal: (id: string) => void = () => {};
   focusPane: (pane: PaneNo) => void = () => {};
   showPanel: () => void = () => {};
+  /** Load a URL in a Preview pane (App's click rule); false when it did not. */
+  openPreview: (url: string) => boolean = () => false;
 
   subscribe = (fn: () => void) => {
     this.listeners.add(fn);
@@ -1055,7 +1064,10 @@ export class TermManager {
   setBlocked(blocked: boolean) {
     if (this.blocked === blocked) return;
     this.blocked = blocked;
-    if (blocked) this.confirm = null;
+    if (blocked) {
+      this.confirm = null;
+      this.linkMenu = null;
+    }
     for (const s of this.sessions.values()) s.setBlocked(blocked);
     this.changed();
   }
@@ -1299,12 +1311,41 @@ export class TermManager {
     this.changed();
   }
 
-  /** A link in a terminal: http(s) only, on Ctrl+click. Everything else is inert. */
+  /**
+   * A link in a terminal: http(s) only, on Ctrl+click. Everything else is
+   * inert. A link to a server on this machine asks where to open it (the
+   * link menu, WP-E); any other opens in a new browser tab, as before.
+   */
   openLink(e: MouseEvent, uri: string) {
     const v = judgeLink(uri);
     if (!v.ok || this.blocked) return;
     if (!(e.ctrlKey || e.metaKey)) return;
+    if (v.loopback) {
+      this.linkMenu = { url: v.url, x: e.clientX, y: e.clientY };
+      this.changed();
+      return;
+    }
     window.open(v.url, "_blank", "noopener,noreferrer");
+  }
+
+  closeLinkMenu() {
+    if (!this.linkMenu) return;
+    this.linkMenu = null;
+    this.changed();
+  }
+
+  /** The link menu's "Open in Preview": a Preview pane, by the click rule (App). */
+  linkToPreview() {
+    const menu = this.linkMenu;
+    this.closeLinkMenu();
+    if (menu && !this.blocked) this.openPreview(menu.url);
+  }
+
+  /** The link menu's "Open in a browser tab". */
+  linkToBrowser() {
+    const menu = this.linkMenu;
+    this.closeLinkMenu();
+    if (menu && !this.blocked) window.open(menu.url, "_blank", "noopener,noreferrer");
   }
 }
 
@@ -1888,6 +1929,89 @@ export function TerminalToasts(props: { blocked: boolean }) {
           </button>
         </div>
       ))}
+    </div>
+  );
+}
+
+/**
+ * Where a Ctrl+clicked link to a server on this machine opens (WP-E): in a
+ * Preview pane (a drawn one, else the focused pane — App's click rule) or in
+ * a browser tab. "Open in Preview" is judged like a typed URL with the ports
+ * the daemon reported, so a link to the HUD or the API is refused here, with
+ * the reason. Placed at the click (screen px through `toCss`); Escape or a
+ * click elsewhere closes it, and a card closes it (TermManager.setBlocked).
+ */
+export function TerminalLinkMenu(props: { blocked: boolean; zoom: number }) {
+  const mgr = useTerminals();
+  const { status, ports } = useDaemonPorts();
+  const menu = props.blocked ? null : mgr.linkMenu;
+  const first = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (!menu) return;
+    const close = () => mgr.closeLinkMenu();
+    const esc = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      e.stopPropagation();
+      e.preventDefault();
+      mgr.closeLinkMenu();
+    };
+    document.addEventListener("mousedown", close);
+    document.addEventListener("keydown", esc, true);
+    requestAnimationFrame(() => first.current?.focus({ preventScroll: true }));
+    return () => {
+      document.removeEventListener("mousedown", close);
+      document.removeEventListener("keydown", esc, true);
+    };
+  }, [menu, mgr]);
+  if (!menu) return null;
+  const verdict = status === "pending" ? null : judgePreviewUrl(menu.url, ports);
+  const width = 280;
+  const left = Math.max(4, Math.min(Math.round(toCss(menu.x, props.zoom)),
+    Math.round(toCss(window.innerWidth, props.zoom)) - width - 4));
+  const top = Math.max(4, Math.round(toCss(menu.y, props.zoom)) + 4);
+  return (
+    <div
+      className="laymenu linkmenu"
+      role="menu"
+      aria-label="Open this link"
+      data-testid="term-link-menu"
+      style={{ left, top, width }}
+      onMouseDown={(e) => e.stopPropagation()}
+      onKeyDown={(e) => {
+        if (e.code === "Space" || e.key === " ") e.stopPropagation();
+      }}
+      onKeyUp={(e) => {
+        if (e.code === "Space" || e.key === " ") e.stopPropagation();
+      }}
+    >
+      <div className="lm-head">A server on this machine</div>
+      <div className="lm-url" data-testid="term-link-url" title={menu.url}>
+        {menu.url.length > 200 ? `${menu.url.slice(0, 200)}…` : menu.url}
+      </div>
+      <button
+        type="button"
+        ref={verdict?.ok ? first : undefined}
+        role="menuitem"
+        className="lm-row"
+        data-testid="term-link-preview"
+        disabled={!verdict?.ok}
+        onClick={() => mgr.linkToPreview()}
+      >
+        <span className="lm-label">Open in Preview</span>
+      </button>
+      {verdict && !verdict.ok ? (
+        <div className="lm-note" data-testid="term-link-refused">{verdict.reason}</div>
+      ) : null}
+      <button
+        type="button"
+        ref={verdict?.ok ? undefined : first}
+        role="menuitem"
+        className="lm-row"
+        data-testid="term-link-browser"
+        onClick={() => mgr.linkToBrowser()}
+      >
+        <span className="lm-label">Open in a browser tab</span>
+      </button>
     </div>
   );
 }

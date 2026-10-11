@@ -28,6 +28,7 @@
 // Every number here is in the HUD's own (unzoomed) pixels, like layout.ts.
 
 import { MAIN_MIN, fitLayout, type Fitted, type PaneLayout, type Side } from "./layout";
+import { originOf, storableKeepOrigin } from "./preview";
 
 export const WORKSPACE_KEY = "jarvis.hud.workspace";
 
@@ -86,6 +87,13 @@ export interface PaneSpec {
   terminalId: string | null;
   /** Preview: the URL last loaded here, judged again before it is loaded again. */
   previewUrl?: string;
+  /**
+   * Preview (WP-E, decisions W-4): the origin this pane lets its page keep
+   * (`allow-same-origin`), off when absent. Stored as the origin it was given
+   * for, so a URL on another port, host or scheme is never covered by it;
+   * judged again on every load (lib/preview.ts, `keptOrigin`).
+   */
+  keepOrigin?: string;
 }
 
 /** Where a shape's edges are, as fractions: `cols` the cumulative column edges, `row` the row edge. */
@@ -161,6 +169,10 @@ function parsePane(raw: unknown, n: PaneNo): PaneSpec {
   if (typeof v.previewUrl === "string" && v.previewUrl && v.previewUrl.length <= URL_MAX) {
     spec.previewUrl = v.previewUrl;
   }
+  // Only a grant for exactly the stored URL's origin, on a loopback port that
+  // is none of the daemon's defaults; the reported ports are judged on load.
+  const keep = storableKeepOrigin(v.keepOrigin, spec.previewUrl);
+  if (keep) spec.keepOrigin = keep;
   return spec;
 }
 
@@ -318,6 +330,11 @@ export function forgetTerminal(ws: Workspace, id: string): Workspace {
   return { ...ws, panes: ws.panes.map((p) => (p.terminalId === id ? { ...p, terminalId: null } : p)) as Panes };
 }
 
+/**
+ * The URL a Preview pane loaded. A keep-origin grant survives only while the
+ * new URL has the origin it was given for: another port, host or scheme turns
+ * it off (W-4).
+ */
 export function setPreviewUrl(ws: Workspace, pane: PaneNo, url: string): Workspace {
   const cur = ws.panes[pane - 1].previewUrl ?? "";
   if (cur === url || url.length > URL_MAX) return ws;
@@ -326,8 +343,32 @@ export function setPreviewUrl(ws: Workspace, pane: PaneNo, url: string): Workspa
     const next = { ...p };
     if (url) next.previewUrl = url;
     else delete next.previewUrl;
+    if (next.keepOrigin && (!url || originOf(url) !== next.keepOrigin)) delete next.keepOrigin;
     return next;
   }) as Panes;
+  return { ...ws, panes };
+}
+
+/**
+ * Let a Preview pane's page keep its own origin (an origin), or not (null).
+ * Only for exactly the origin of the URL the pane holds, and only one the
+ * static judge allows; anything else leaves the workspace as it was.
+ */
+export function setKeepOrigin(ws: Workspace, pane: PaneNo, origin: string | null): Workspace {
+  const spec = ws.panes[pane - 1];
+  if (origin === null) {
+    if (!spec.keepOrigin) return ws;
+    const panes = ws.panes.map((p, i) => {
+      if (i !== pane - 1) return p;
+      const next = { ...p };
+      delete next.keepOrigin;
+      return next;
+    }) as Panes;
+    return { ...ws, panes };
+  }
+  const keep = storableKeepOrigin(origin, spec.previewUrl);
+  if (!keep || spec.keepOrigin === keep) return ws;
+  const panes = ws.panes.map((p, i) => (i === pane - 1 ? { ...p, keepOrigin: keep } : p)) as Panes;
   return { ...ws, panes };
 }
 
