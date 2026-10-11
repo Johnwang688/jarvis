@@ -1215,7 +1215,11 @@ own `$VAR` or `ln -s` alias, the installer module, Python source that
 *invokes* it, and shells/`eval`/here-documents/substitutions bash would run
 — never on a line that only mentions it (`echo`, `grep`, a commit message,
 single quotes, a quoted here-document): a DENY cannot be approved, so a false
-one blocks the owner. A cheap line and per-segment filter (`_could_be_owner_op`)
+one blocks the owner. A jarvis argv word only known at run time (an unset
+`$E`, `$@`, a glob, `{hud,install}`) counts as any words, so a line that
+could expand to an op is refused; and **Jarvis's own CLI is ASK in every
+spelling** (`python -m jarvis…`, `uv run jarvis`, the venv's python —
+`protected_state.runs_jarvis`, asked by `rules.decide`), never auto-approved. A cheap line and per-segment filter (`_could_be_owner_op`)
 keeps `rules.decide` at its old speed on lines that cannot hold an op, held
 to the full parse by `hud_install_check`. An agent can edit `hud/src`, so
 running the installer would undo C-1. A shell write *into* the install root

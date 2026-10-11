@@ -1162,14 +1162,40 @@ def _is_launcher(token: str, state: _Owner) -> bool:
                 and "/" in word))
 
 
+# A word whose value is only known when it runs: an expansion the line did not
+# assign (unset ones vanish), `$@`/`$*`, a glob, a brace expansion.
+_WILD = re.compile(r"\$|[*?\[]|\{[^{}]*(?:,|\.\.)[^{}]*\}")
+
+
+def _could_spell(words: list[str], path: tuple[str, ...], open_ended: bool) -> bool:
+    """Whether `words` can begin with `path` once the shell is done with them:
+    a wild word may become no word, the next word, or several (`$@`, a glob,
+    `{hud,install}`); a plain one only itself; an open end (xargs input) may
+    supply whatever is still missing."""
+    if not path:
+        return True
+    if not words:
+        return open_ended
+    head, rest = words[0], words[1:]
+    if _WILD.search(head):
+        return _could_spell(rest, path, open_ended) or _could_spell(words, path[1:], open_ended) \
+            or _could_spell(rest, path[1:], open_ended)
+    return head == path[0] and _could_spell(rest, path[1:], open_ended)
+
+
 def _owner_path(argv: list[str], open_ended: bool) -> str | None:
-    """The refusal for a jarvis argv that is (or, fed more words by xargs,
-    may become) an owner op."""
+    """The refusal for a jarvis argv that is, or may become, an owner op —
+    fed more words by xargs, or once the shell expands a word only known at
+    run time (review of PR #44 at 75f14c2: `python3 -m jarvis hud $E install`
+    with `$E` unset, `h${UNSET}ud`, `h?d`, `{hud,install}` all ran)."""
     words = [t for t in argv if not t.startswith("-")]
     for path, why in OWNER_OPS.items():
         if tuple(words[:len(path)]) == path:
             return why
-        if open_ended and len(words) < len(path) and tuple(words) == path[:len(words)]:
+        if _could_spell(words, path, open_ended):
+            if any(_WILD.search(w) for w in words):
+                return why + (" (its words are only known when it runs — an expansion, a glob or a "
+                              "brace — and could spell it; write the command out)")
             return why + " (its input may complete the command)"
     return None
 
@@ -1366,6 +1392,7 @@ def _owner_command(tokens: list[str], segment: str, state: _Owner, depth: int) -
     if _PYTHON.fullmatch(stem):
         kind, what, argv = _python_parse(tokens[1:])
         if kind == "module":
+            what = _owner_word(what or "", state, environ=False)
             if what in _CLI_MODULES:
                 return _owner_path([_owner_word(t, state, environ=False) for t in argv], appends)
             if what in OWNER_OP_MODULES:
@@ -1447,7 +1474,8 @@ def _owner_line(command: str, state: _Owner, depth: int) -> str | None:
         for text in inner:
             why = _owner_line(text, state.child(), depth + 1)
             if why:
-                return why
+                return why + (" — a backtick or $(…) runs its command, even inside double quotes; "
+                              "single-quote the text to only mention it")
     for segment in rules.segments(command):
         # The same cheap test per segment: one that cannot hold an op (and
         # sets no variable, reads no here-document and names no launcher a
@@ -1477,6 +1505,30 @@ def _owner_line(command: str, state: _Owner, depth: int) -> str | None:
     return None
 
 
+def runs_jarvis(tokens: list[str]) -> str | None:
+    """What of Jarvis's own this command runs — "the jarvis CLI" or a module
+    `python -m jarvis…` — after the same wrappers and runners `owner_op`
+    peels; None for anything else. `rules.decide` asks it so that Jarvis's
+    own CLI is never auto-approved in any spelling (review of PR #44 at
+    75f14c2: `python -m jarvis …` and `uv run jarvis …` were ALLOW, and the
+    CLI has human-only verbs — `auth`, `voice clone`, `discord commands
+    --sync`, the owner ops)."""
+    state = _Owner()
+    try:
+        tokens, _, joined = _peel_runner(list(tokens), state)
+    except Exception:     # noqa: BLE001 — a parse failure is not a verdict
+        return None
+    if joined or not tokens:
+        return None
+    if _is_launcher(tokens[0], state):
+        return "the jarvis CLI"
+    if _PYTHON.fullmatch(rules._basename(tokens[0])):
+        kind, what, _ = _python_parse(tokens[1:])
+        if kind == "module" and what and (what.split(".")[0] == "jarvis" or _WILD.search(what)):
+            return f"Jarvis's own `{what}`"
+    return None
+
+
 def _could_be_owner_op(command: str) -> bool:
     """A cheap test the full parse can never beat: can this line hold an
     owner op at all? The full parse resolves quotes, backslashes,
@@ -1496,6 +1548,9 @@ def _could_be_owner_op(command: str) -> bool:
     for ch in ("'", '"', "\\"):
         flat = flat.replace(ch, "")
     if "xargs" in flat or any(path[0] in flat for path in OWNER_OPS):
+        return True
+    # The CLI with a word only known at run time (`jarvis h${E}ud install`).
+    if "jarvis" in flat and _WILD.search(flat):
         return True
     # A word the line assembles from its own variables (`x=h; jarvis ${x}ud
     # install`) need not spell the op's word anywhere: such a line is parsed.

@@ -1616,6 +1616,16 @@ def _judge_segment(segment: str) -> Verdict:
     if stem in _INTERPRETERS and _has_inline_source(bare, redirects):
         return Verdict(ASK, f"{stem} with inline source is arbitrary code, not a build step")
 
+    # Jarvis's own CLI or modules, in any spelling — `python -m jarvis`, the
+    # venv's python, `uv run`/`poetry run`/`pipx run` — is asked, never
+    # auto-approved, as bare `jarvis` always was: the CLI has human-only verbs
+    # (`auth`, `voice clone`, `discord commands --sync`, the owner ops) and
+    # `python` and `uv` are on the allow list (review of PR #44 at 75f14c2).
+    from . import protected_state
+    own = protected_state.runs_jarvis(raw)
+    if own:
+        return Verdict(ASK, f"runs {own}; Jarvis's own commands are the owner's to run")
+
     if stem == "systemctl" and "--user" not in tokens:
         return Verdict(ASK, "system-wide systemctl affects the whole machine")
 

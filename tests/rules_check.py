@@ -1733,6 +1733,9 @@ def owner_op_checks() -> None:
                     "uv run jarvis hud install", ".venv/bin/jarvis hud install --allow-dirty",
                     "bash -lc 'jarvis hud install'", "nohup timeout 60 jarvis hud install",
                     "python -m jarvis.v2.hud_install", "echo install | xargs jarvis hud",
+                    # Words built at run time (review of PR #44 at 75f14c2).
+                    "python3 -m jarvis hud $E install", "python3 -m jarvis h${UNSET}ud install",
+                    "python3 -m jarvis h?d install", "python3 -m jarvis {hud,install}",
                     'python3 -c "from jarvis.v2 import hud_install; hud_install.main()"'):
         verdict = rules.decide(command)
         assert verdict.decision == rules.DENY, f"{command!r}: {verdict}"
@@ -1745,6 +1748,11 @@ def owner_op_checks() -> None:
                     "git commit -m 'run `jarvis hud install` after merges'",
                     "cat > notes.md <<EOF\njarvis hud install\nEOF"):
         assert rules.decide(command).decision != rules.DENY, f"{command!r} must not be refused"
+    # Jarvis's own CLI in any spelling is asked, never auto-approved.
+    for command in ("python -m jarvis auth", "uv run python -m jarvis chat", "uv run jarvis chat",
+                    ".venv/bin/python -m jarvis discord commands --sync"):
+        assert rules.decide(command).decision == rules.ASK, (command, rules.decide(command))
+    assert rules.decide("python -m pytest -x").decision == rules.ALLOW
     # The cheap filter keeps the parse off lines that cannot hold an op.
     deep = "echo " + "$(echo " * 3000 + "x" + ")" * 3000
     start = time.perf_counter()
