@@ -467,21 +467,40 @@ def hud_dirty() -> bool | None:
     return bool(out.stdout.strip())
 
 
-def npm_build() -> None:
-    """`npm run build` in the repo's `hud/` (type check, then Vite)."""
-    hud = Path(config.REPO_ROOT) / "hud"
-    if not (hud / "node_modules").is_dir():
-        raise InstallRefused(f"{hud}/node_modules is missing; run `npm ci` in {hud} first")
+NPM_BUILD_TIMEOUT = 15 * 60                # seconds; a type check and Vite take about one
+
+
+def npm_path() -> str:
+    """The npm to run: the first on PATH, never a Windows one under /mnt/.
+    One resolver for `npm run build` here and `jarvis hud rebuild`'s `npm ci`."""
     npm = shutil.which("npm")
     if not npm or npm.startswith("/mnt/"):
         raise InstallRefused("npm is not on PATH (a Windows npm under /mnt/ is never used)")
-    result = subprocess.run([npm, "run", "build"], cwd=hud, stdin=subprocess.DEVNULL)
+    return npm
+
+
+def npm_build(timeout: float = NPM_BUILD_TIMEOUT) -> None:
+    """`npm run build` in the repo's `hud/` (type check, then Vite)."""
+    hud = Path(config.REPO_ROOT) / "hud"
+    if not (hud / "node_modules").is_dir():
+        raise InstallRefused(f"{hud}/node_modules is missing; run `npm ci` in {hud} first "
+                             "(or `jarvis hud rebuild`, which does)")
+    npm = npm_path()
+    try:
+        result = subprocess.run([npm, "run", "build"], cwd=hud, stdin=subprocess.DEVNULL,
+                                timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise InstallRefused(f"`npm run build` did not finish within {timeout:g} s; "
+                             "nothing was installed") from None
     if result.returncode != 0:
         raise InstallRefused(f"`npm run build` failed (exit {result.returncode}); nothing was installed")
 
 
-def main(*, build=npm_build, out=print, allow_dirty: bool = False) -> int:
-    """`jarvis hud install`: build the HUD and install it for the daemon to serve.
+def install_checkout(*, build=npm_build, allow_dirty: bool = False) -> Build:
+    """Build the checkout's `hud/` and install it; raises `InstallRefused`.
+
+    The one install path: `jarvis hud install` (`main`) prints around it and
+    `jarvis hud rebuild` (`owner_ops.rebuild`) runs it after `npm ci`.
 
     Refuses uncommitted changes under `hud/` unless `allow_dirty` (review of
     PR #44, L5): Jarvis's own chats leave edits in the main checkout, and an
@@ -489,25 +508,35 @@ def main(*, build=npm_build, out=print, allow_dirty: bool = False) -> int:
     it installs what is committed, and says so in the manifest (`git_head`,
     `dirty`)."""
     root = Path(config.HUD_DIR)
+    why = root_refusal(root)
+    if why:
+        raise InstallRefused(why)
+    dirty = hud_dirty()
+    if dirty is None and not allow_dirty:
+        raise InstallRefused("git cannot say whether hud/ has uncommitted changes; "
+                             "run from a git checkout, or pass --allow-dirty")
+    if dirty and not allow_dirty:
+        raise InstallRefused("hud/ has uncommitted changes (`git status -- hud`); commit or "
+                             "stash them, or pass --allow-dirty to install them anyway")
+    build()
+    return install(config.HUD_BUILD, root, note={"git_head": git_head(), "dirty": dirty})
+
+
+def describe(installed: Build) -> str:
+    """The one line that says what was installed."""
+    return (f"Installed HUD build {installed.id} ({len(installed.files)} files) in {installed.path}"
+            + (f", from {installed.git_head[:12]}" if installed.git_head else "")
+            + (" with uncommitted changes in hud/" if installed.dirty else "") + ".")
+
+
+def main(*, build=npm_build, out=print, allow_dirty: bool = False) -> int:
+    """`jarvis hud install`: build the HUD and install it for the daemon to serve."""
     try:
-        why = root_refusal(root)
-        if why:
-            raise InstallRefused(why)
-        dirty = hud_dirty()
-        if dirty is None and not allow_dirty:
-            raise InstallRefused("git cannot say whether hud/ has uncommitted changes; "
-                                 "run from a git checkout, or pass --allow-dirty")
-        if dirty and not allow_dirty:
-            raise InstallRefused("hud/ has uncommitted changes (`git status -- hud`); commit or "
-                                 "stash them, or pass --allow-dirty to install them anyway")
-        build()
-        installed = install(config.HUD_BUILD, root, note={"git_head": git_head(), "dirty": dirty})
+        installed = install_checkout(build=build, allow_dirty=allow_dirty)
     except InstallRefused as exc:
         out(f"jarvis hud install: refused: {exc}")
         return 1
-    out(f"Installed HUD build {installed.id} ({len(installed.files)} files) in {installed.path}"
-        + (f", from {installed.git_head[:12]}" if installed.git_head else "")
-        + (" with uncommitted changes in hud/" if installed.dirty else "") + ".")
+    out(describe(installed))
     if config.HUD_DEV:
         out("Note: JARVIS_HUD_DEV=1 is set here, so a daemon started from this shell would "
             "serve hud/dist, not this install.")
