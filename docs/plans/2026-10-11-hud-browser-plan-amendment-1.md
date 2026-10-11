@@ -2,7 +2,7 @@
 
 **Status:** adopted by the lead, 2026-10-11. A read-only planner wrote it, and the lead settled §J:
 - **Adopted as recommended**, because each follows the owner's answers (B-7, B-9) or is a stricter default the owner can loosen later: BD-1, BD-2, BD-3, BD-4, BD-6, BD-7, BD-9 and BD-11.
-- **Pending the owner:** BD-5, whether Chrome's own sign-in and sync stay off. The owner asked whether they can sign in to their Chrome profiles with their Google accounts. The question is in `2026-10-11-questions-for-owner.md`. BR-1c does not start until it is answered.
+- **Answered by the owner:** BD-5. Chrome sign-in, sync and autofill are **on** (§C).
 - **Deferred:** BD-8 waits for M3. BD-10 is decided at BR-1a's review, after a measurement. `jarvis-daemon2`'s cgroup also holds the Claude and Codex workers the daemon spawns, so a unit-wide `MemoryMax` could kill a worker's test run, not just a runaway tab. A cap scoped to the Chrome processes may be the better shape.
 
 **Precedence:** this amends `docs/plans/2026-10-10-hud-browser-plan.md`, and the decisions file (`2026-10-10-hud-browser-decisions.md`) still wins over both. The amendment applies the owner's answers to B-2, B-4, B-7, B-9, B-12 and B-14, following "Lead's reading of B-9".
@@ -418,25 +418,25 @@ Each of these is owner-only, confirmed inline (never a modal), and disabled unde
 
 That is about **250–350 MB before any tab**, then 50–300 MB per tab. The worst case is 3 profiles plus Private plus 12 tabs, about 3 GB. See BD-10 for a production ceiling.
 
-**Chrome-level sign-in and sync stay off (BD-5, pending your word).**
-1. **A managed policy.** `/etc/opt/chrome/policies/managed/jarvis.json` sets:
-   - `BrowserSignin: 0`;
-   - `SyncDisabled: true`;
-   - `PasswordManagerEnabled: false`;
-   - `AutofillCreditCardEnabled: false`;
-   - `AutofillAddressEnabled: false`;
-   - `BrowserAddPersonEnabled: false`;
-   - `BrowserGuestModeEnabled: false`.
+**Chrome-level sign-in, sync and autofill are ON (BD-5, the owner's answer, 2026-10-11).** The owner's words: "chrome sync should be on. keep the sign ins. it's ok for the agents to click and type in stuff with autofill since I'm watching them do it in the HUD."
+1. **No managed policy turns any of it off.** Neither `--disable-sync` nor the "off" preferences are used. A profile may be signed in to Chrome, sync, save passwords and autofill addresses and cards, like the owner's own Chrome.
+2. **Signing in to Chrome needs a way in.** Headless Chrome has no Chrome UI, so BR-1c must give the owner one, and M4b (§I) finds it:
+   - `chrome://settings/syncSetup` opened in the pane;
+   - or Chrome's identity prompt after a Google website login;
+   - or failing those, one headed launch of that profile under WSLg so the owner can sign in, then headless as usual.
+   Signing in is the owner's act alone. **The hard refusals and the classifier treat `chrome://` URLs, Google's Chrome-sign-in pages and sync settings as an account-security action**: always a card, never an agent's on its own.
+3. **What does not change** (the lead's reading; the owner can say otherwise):
+   - **H1 stands.** An agent never *types* into a password, one-time-code or card field itself. Chrome's autofill fills those fields, and an agent may click into them.
+   - **Submitting a login, 2FA or payment form is still an ASK floor** (§B.4), so the card still stands between an autofilled form and its submit.
+   - **H2 still refuses** a credential in `text` or a URL.
+4. **`/status` → `browser.sync`** reports the password store Chrome actually uses (M12): `basic`, `gnome-libsecret` or `kwallet`.
 
-   It is installed by the same one-time `sudo` command as B-3. Chrome on Linux reads policy only from `/etc`, and it covers every Google Chrome in this WSL, which is only Jarvis's.
-2. **Always also:** `--disable-sync`, plus preferences written **before** first launch: `signin.allowed: false`, `credentials_enable_service: false`, `profile.password_manager_enabled: false` and `autofill.credit_card_enabled: false`.
-3. **`/status` → `browser.policy`** reports `"managed"` or `"flags-only"`.
-
-**What you see:**
-- websites sign in as websites, unchanged;
-- no "Sign in to Chrome" and no "Turn on sync" anywhere (headless Chrome has no Chrome UI, and the HUD toolbar has no account menu);
-- no saved passwords and no autofilled cards.
-
+**What this costs, stated once, plainly** (the owner was told 2026-10-11):
+- **Where synced passwords live.** This WSL has no keyring service: no gnome-keyring, no kwallet, no libsecret (checked 2026-10-11). Chrome on Linux then uses its "basic" store, which encrypts saved passwords and cookies with a fixed, publicly known key.
+- **Who can read them.** Once sync is on, every password synced from the owner's Google account sits in the profile folder, readable by any program running as the owner. That includes a Claude worker's shell, which runs unsandboxed here. That risk is off-screen, so the "I'm watching" reasoning does not cover it.
+- **Mitigations:**
+  - `BROWSER_DIR` is a credential dir (§C), so a v2 worker's command naming it is always-asked, and a Codex grant touching it is denied. That is a guard, not a boundary.
+  - A keyring would encrypt the passwords with a key that isn't public. That means gnome-keyring plus libsecret and `--password-store=gnome-libsecret`, unlocked at login. In WSL that takes an apt install and an unlock step, so it is offered as an option (M12) rather than required.
 **Website logins to Google: M4** (§I). If Google refuses an automated Chrome, the docs say to use Google in your own Chrome. We do not add stealth patches.
 
 ---
@@ -739,6 +739,8 @@ None of these touches `workspace.ts`, `Workspace.tsx`, `Layout.tsx`, `ChatTab`, 
 - **M4** is run by you on live sites, in a fresh profile:
   - sign in at accounts.google.com with (a) Chrome stable headless without `--enable-automation`, (b) with it, and (c) the bundled build;
   - record whether the password page is reached, whether "This browser or app may not be secure" appears, whether 2FA is asked, whether you end up signed in, and whether the session survives a restart.
+- **M4b**: how the owner signs in to Chrome itself (and turns on sync) in a daemon-driven profile. Try `chrome://settings/syncSetup` in a pane, the identity prompt after a Google website login, and, failing both, one headed launch under WSLg.
+- **M12**: which password store Chrome picks under the daemon (`chrome://version` command line, `Local State`, a test credential's `v10`/`v11` prefix in `Login Data`). Also whether gnome-keyring plus libsecret can be made to work in this WSL with an unlock the owner can live with.
 - **M5** measures memory per instance: 1, 2 and 3 profiles, plus Private.
 - **M11, the classifier.** Run by the lead with the real key: 50 judged actions against the fixture. Report p50 and p95 latency and the dollar cost.
 - **L6, live.** A Claude chat and a Codex chat each wait through a 100 s card on `hud_browser_act` without the CLI timing out the call.
@@ -754,7 +756,7 @@ None of these touches `workspace.ts`, `Workspace.tsx`, `Layout.tsx`, `ChatTab`, 
 | BD-2 | Browser cards stay in the HUD | **Yes.** The bus and `GET /approvals` are redacted, Discord gets nothing, and the HUD fetches details from an owner-only route. Otherwise URLs and targets reach `/events` and permanent Discord DMs |
 | BD-3 | Private panes | Seeing stays on (your B-7 answer). **Driving is off unless you switch it on for that pane**, until the pane closes |
 | BD-4 | Classifier model and inputs | A new `browser_review` tier on **Luna**. Include your turn message (outside the fence) so it can ask about unrelated actions. Any failure asks |
-| BD-5 | Chrome sign-in and sync | **Off**, through a managed policy installed with B-3's `sudo` command, plus flags and prefs. Pending your word, as the decisions file says |
+| BD-5 | Chrome sign-in and sync | **Owner, 2026-10-11: ON**, with sign-in and autofill. The planner had recommended off. H1 and the ASK floors still apply; §C states the password-store cost |
 | BD-6 | Uploads | **Always ask.** Files from the chat's project folder only, at most 50 MB |
 | BD-7 | Auto-open with no room to split | The focused pane, unless it is busy (a chat with words or a running turn, a File pane with an unsaved edit, or the source terminal); then a one-click offer |
 | BD-8 | Sound if headless Chrome cannot play (M3.1 fails) | Headed Chrome under Xvfb with `-nolisten tcp` and an auth cookie inside the 0700 browser folder. That is no weaker than the cookies already on disk. Ask again at that point |
