@@ -2570,8 +2570,6 @@ def _inline_heredocs(text: str, keep: bool = True) -> str:
                     lines.append(line)
                 out[slot] = "<<<" + _here_word("".join(l + "\n" for l in lines), quoted, keep)
             pending = []
-            if text[i:i + 1] in ("`", ")"):
-                out.pop()       # the newline before a closer: `$(cat <<<'…')`, one command
             continue
         out.append(ch)
         i += 1

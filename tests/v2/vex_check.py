@@ -1973,7 +1973,9 @@ HEREDOC_ORDINARY = {
     "a double-quoted delimiter": "cat <<\"EOF\"\n/* doc */\nEOF",
     "a command after it": "cat > f.md <<'EOF'\n* one\nEOF\nls -la",
     "inside backticks": "x=`cat <<X\n* one\nX`",
-    "a quote in a message": "git commit -m \"$(cat <<'EOF'\nSay \"hi\" twice\n* one\nEOF\n)\"",
+    "a quote in a message": "git commit -m \"$(cat <<'EOF'\nMount the 5\" wheel\n* one\nEOF\n)\"",
+    "a paren in an unquoted substitution": "notes=$(cat <<'EOF'\n1) first\n* second\nEOF\n)",
+    "a backtick body with no terminator": "echo `cat <<X\n* a\n* b`",
 }
 # Still read: a body fed to a shell, a substitution an unquoted body runs, and
 # every line the lexer must not mistake for a body (each would hide a command).
@@ -1992,7 +1994,8 @@ HEREDOC_RUNS = {
     "a shift in ((…))": f"((x<<=1))\n{R3}",
     "a shift in $[…]": f"echo $[1<<X]\n{R3}",
     "`<<` in ${…}": f"echo ${{x:-<<X}}\n{R3}",
-    "`<<` in quotes": f"echo '<<X'\n{R3}",
+    "`<<` in quotes": f"echo 'a <<X b'\n{R3}",
+    "a here-string, then a line": f"bash <<<'{R3}'\nls",
     "`<<` in a comment": f"# <<X\n{R3}",
     "a backtick's own here-document": f"echo `cat <<X`\n{R3}\nX",
     "a body that ends with its backtick": f"echo `cat <<X\nbody\nX`\n{R3}",
