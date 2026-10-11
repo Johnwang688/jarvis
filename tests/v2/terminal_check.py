@@ -1258,9 +1258,9 @@ class NoTool(Base):
     READER = "jarvis/v2/tools/terminal_read.py"
     READER_IMPORT = "from ..terminals import read_for_tool\n"
     # What `read_for_tool` and everything it calls must never do.
-    WRITES = ("queue_input", "_write(", "resize(", ".control(", "attach(", "ticket(", "create(",
-              "close(", "hangup", "spawn(", "send_text", "send_binary", "readable =", "redeem(",
-              "os.write", "_terminals.pop", "serve(")
+    WRITES = ("queue_input", "_write(", "resize(", ".control(", "attach(", "ticket(", ".create(",
+              "self.close(", "terminals.close(", "terminal.close(", "hangup", "spawn(", "send_text",
+              "send_binary", "readable =", "redeem(", "os.write", "_terminals.pop", "serve(", "finish(")
 
     def _without_reader_import(self, text: str) -> str:
         self.assertEqual(text.count(self.READER_IMPORT), 1, "the reader imports read_for_tool once")
@@ -1309,7 +1309,8 @@ class NoTool(Base):
 
     def test_the_reader_only_reads(self):
         reader = [T.read_for_tool, T.Terminals.read, T.Terminals._resolve,
-                  T.Terminals._read_published, T.Terminal.history, T._secret_values]
+                  T.Terminals._read_published, T.Terminal.history, T._secret_values,
+                  T._env_values, T._folder_env_files]
         for func in reader:
             source = inspect.getsource(func)
             for verb in self.WRITES:

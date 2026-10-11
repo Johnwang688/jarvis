@@ -250,19 +250,10 @@ def _json_values(path: Path) -> tuple[str, ...]:
     return ordered
 
 
-def secret_values(extra_dirs=()) -> list[str]:
-    """Every credential-looking value in a reachable protected file.
-
-    `extra_dirs` adds directories whose `.env` and `.env.local` count too —
-    `terminal_read` passes a terminal's folder and its parents, which need
-    not be anywhere near the process's own working directory."""
+def secret_values() -> list[str]:
+    """Every credential-looking value in a reachable protected file."""
     values: set[str] = set()
-    dirs = list(_search_dirs())
-    for directory in extra_dirs:
-        directory = Path(directory)
-        if directory not in dirs:
-            dirs.append(directory)
-    for directory in dirs:
+    for directory in _search_dirs():
         for name in (".env", ".env.local"):
             values.update(_values_in(directory / name))
     values.update(_json_values(config.GOOGLE_TOKEN_PATH))

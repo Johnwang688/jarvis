@@ -29,6 +29,7 @@ from __future__ import annotations
 import json
 import os
 import queue
+import re
 import threading
 from collections import deque
 from dataclasses import dataclass, field
@@ -246,6 +247,24 @@ def _at_desk(brief: Brief, message: UserMessage) -> bool:
     a message the HUD's own window sent (`UserMessage.desk`), as the owner."""
     return (_owners_chat(brief) and message.desk is True and message.origin == "owner"
             and (message.via or "hud") == "hud")
+
+
+_READ_COUNT = re.compile(r"its last (\d+) line")
+
+
+def _summary(name: str, text: str) -> str:
+    """TOOL_FINISHED's summary: the result's start — except a desk tool's,
+    which is fixed (2026-10-10 review). The summary rides the bus and the
+    thread's `log.jsonl`, and a terminal's text must reach neither: the read's
+    first line used to, inside the first 200 characters."""
+    if name not in DESK_TOOLS:
+        return text[:SUMMARY_CHARS]
+    if text.startswith("Refused"):
+        return "refused"
+    if text.startswith(_NOT_OK):
+        return "error"
+    count = _READ_COUNT.search(text[:400])
+    return f"read {count.group(1)} lines" if count else "read"
 
 
 # --- the handle -------------------------------------------------------------
@@ -794,7 +813,7 @@ class _TurnState:
                 # returns — which is a call that did not happen and must not
                 # render as one that did.
                 "ok": not text.startswith(_NOT_OK),
-                "summary": text[:SUMMARY_CHARS],
+                "summary": _summary(name, text),
             },
         )
 

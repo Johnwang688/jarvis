@@ -13,6 +13,7 @@ from __future__ import annotations
 import base64
 import random
 import sys
+import time
 from pathlib import Path
 import unittest
 from urllib.parse import quote
@@ -84,8 +85,28 @@ class Strip(unittest.TestCase):
     def test_an_unterminated_string_swallows_only_itself(self):
         self.assertEqual(texts(b"before\r\n\x1b]0;never ends\r\nstill osc"), ["before"])
         # An unfinished CSI longer than any real one is not carried for ever.
-        data = b"x\x1b[" + b"1;" * 300 + b"\r\ny"
-        self.assertEqual(texts(data)[-1], "y")
+        renderer = TT.Renderer()
+        renderer.feed(b"x\x1b[")
+        for _ in range(100):
+            renderer.feed(b"1;" * 50)
+        self.assertLessEqual(len(renderer._carry), TT.CARRY_CAP)
+        renderer.feed(b"\x1b[0m\r\ny")
+        self.assertEqual([l.text for l in renderer.finish().lines][-1], "y")
+
+    def test_c0_inside_a_sequence_is_executed_and_the_sequence_goes_on(self):
+        """As xterm does (2026-10-10 review): CR/LF inside a CSI move the
+        cursor and the CSI still completes; DEL is ignored; CAN aborts."""
+        self.assertEqual(texts(b"one\x1b[\r\n2Ktwo"), ["one", "two"])
+        self.assertEqual(texts(b"abc\x1b[1\x7fDX\r\n"), ["abX"])
+        self.assertEqual(texts(b"a\x1b(\r\nBb"), ["a", "b"])
+        self.assertEqual(texts(b"a\x1b\r\n7b"), ["a", "b"])
+        self.assertEqual(texts(b"a\x1b[12\x18b"), ["ab"])
+        # The alternate screen with controls inside its switch: still never read.
+        for switch in (b"\x1b[?10\r49h", b"\x1b\r[?1049h", b"\x1b[\x00?1049\x7fh", b"\xc2\x9b?1\n049h"):
+            with self.subTest(switch=switch):
+                seen = texts(b"keep\r\n" + switch + b"HIDDEN-TEXT\x1b[?1049l\r\nback")
+                self.assertEqual((seen[0], seen[-1]), ("keep", "back"))
+                self.assertNotIn("HIDDEN", "".join(seen))
 
     def test_controls_are_not_drawn(self):
         self.assertEqual(texts(b"a\x07b\x00c\x7fd"), ["abcd"])
@@ -120,7 +141,9 @@ class AltScreen(unittest.TestCase):
         pieces = [b"text ", b"\r\n", b"\x1b[?1049h", b"\x1b[?1049l", b"\x1b[?47h", b"\x1b[?1047l",
                   b"\xc2\x9b?1049h", b"\xc2\x9b?1049l", b"\x1b]0;\x1b[?1049h", b"\x1b]0;t\x07",
                   b"\x1bP", b"\x1b\\", b"\x18", b"\x1b[?10", b"49h", b"\x1b[?1049$h", b"\x1b[?2004h",
-                  b"\x1b[?1049;2004l", b"\x1b", b"[", b"\xc2", b"\x9b", b"?", b"1049", b"h", b"l"]
+                  b"\x1b[?1049;2004l", b"\x1b", b"[", b"\xc2", b"\x9b", b"?", b"1049", b"h", b"l",
+                  b"\r", b"\n", b"\x00", b"\x7f", b"\x1a", b"\x1b[?10\r49h", b"\x1b\n[?1049h",
+                  b"\x1b[\x00?47\x7fl"]
         rng = random.Random(7)
         for _ in range(2000):
             stream = b"".join(rng.choice(pieces) for _ in range(rng.randint(1, 14)))
@@ -194,6 +217,7 @@ FORMATS = {
     "google-api": P("AI", "za", "Sy" + "A1b2C3d4e5" * 3 + "F6g"),
     "stripe": P("sk", "_live_", "a1B2c3D4" * 3),
     "private-key": P("-----BEGIN ", "OPENSSH PRIVATE KEY", "-----"),
+    "private-key-end": P("-----END ", "RSA PRIVATE KEY", "-----"),
     "jwt": P("ey", "JhbGciOiJIUzI1NiJ9", ".", "eyJzdWIiOiIxMjMifQ", ".", "c2lnbmF0dXJlc2ln"),
     "huggingface": P("hf", "_", "AbCdEfGhIj" * 3 + "1234"),
     "npm": P("npm", "_", "A1b2C3d4E5" * 3 + "F6g7H8"),
@@ -264,13 +288,26 @@ PRINTERS = [
     'sh -lc "printenv"', "ssh host cat .env", "ssh -p 22 host printenv", "docker exec c printenv",
     "env -S 'cat .env'", "eval printenv", "kubectl config view --raw", "gcloud auth print-access-token",
     "(sleep 5; cat .env) &", "sudo env", "doas -u root env",
+    # The compound shapes the 2026-10-10 review found (each False before).
+    "if [ -f .env ]; then cat .env; fi", 'for f in .env; do cat "$f"; done',
+    'while read l; do echo "$l"; done < .env', "< .env cat", "<.env cat", "true; then env; fi",
+    "do env; done", "elif env", "!env", "! env", "coproc env", "case x in x) env;; esac",
+    "x=env; $x", "$(echo env)", '"$(which env)"', "echo $(cat .env)", "echo `cat .env`",
+    "diff <(cat .env) x", "e''nv", "find . -name .env -exec cat {} \\;",
+    "find . -name '.env*' -exec grep KEY {} +", "ls .env* | xargs cat", "xargs -a .env echo",
+    "git show HEAD:.env", "git diff .env.production", "python3 -c 'print(open(\".env\").read())'",
+    "cat .env.production", "less ~/app/.env.staging.local", "ps eww", "ps axe",
+    "terraform output -raw private_key", "systemctl show-environment", "docker inspect c",
+    "aws secretsmanager get-secret-value --secret-id x", "time env", "{ cat .env; }",
 ]
 NOT_PRINTERS = [
     "env FOO=1 ls", "env -i bash", "ls -la", "cat README.md", "cat .env.example", "export FOO=bar",
     "set -e", "echo hello", "grep -r token src", "git status", "gh pr list", "aws s3 ls",
     "ENV FOO=bar", "echo $HOME", "sudo -k", "sudo apt update", "vim notes.txt", "",
     "declare -x FOO=bar", "git log --oneline", "make test 2>&1", "find . -name env",
-    "ls | xargs grep env", "docker build -t env .",
+    "ls | xargs grep env", "docker build -t env .", "cat .env.example", "cat .env.sample",
+    "cat .env.template", "ls -la", "ps aux", "ps -o pid,user", "for f in *.py; do cat \"$f\"; done",
+    "if [ -f x ]; then make; fi", "x=ls; $x", "$(npm bin)/eslint .", "echo $(date)",
 ]
 
 
@@ -461,6 +498,176 @@ class Judge(unittest.TestCase):
     def test_a_cleared_command_line_still_counts(self):
         data = b"$ cat .env\r\nA=b\r\n\x1b[H\x1b[2J\x1b[3J$ "
         self.assertTrue(self.read(data, lines=5).refused)
+
+
+# -- the 2026-10-10 review: width, private keys, the split switch, speed -----------------
+
+class Width(unittest.TestCase):
+    """The screen has the terminal's width: a staircase, a wild column and a
+    long line are bounded, and wrap the way xterm does."""
+
+    def test_bare_line_feeds_draw_a_staircase_clamped_at_the_margin(self):
+        self.assertEqual(texts(b"ab\ncd\nef", cols=80), ["ab", "  cd", "    ef"])
+        self.assertEqual(texts(b"\x1b[78Gab\ncd", cols=80), ["                                     "
+                                                             "                                        ab",
+                                                             " " * 79 + "c" + "d"])
+
+    def test_text_wraps_at_the_margin_into_one_logical_line(self):
+        self.assertEqual(texts(b"x" * 100 + b"\r\nnext", cols=40), ["x" * 100, "next"])
+        key = FORMATS["github"]
+        self.assertTrue(G.judge(f"$ x\r\n{key}\r\n".encode(), 0, cols=10).refused)
+
+    def test_wild_cursor_numbers_are_clamped(self):
+        for data in (b"\x1b[999999999Gx", b"\x1b[1;999999999Hx", b"ab\x1b[1D\x1b[999999999@",
+                     b"ab\x1b[999999999X", b"\x1b[999999999C\x1b[999999999Dx", b"\x1b[999999999S" * 1000,
+                     b"\x1b[999999999L" * 1000):
+            with self.subTest(data=data[:24]):
+                start = time.perf_counter()
+                rendered = TT.render(data, cols=80, rows=24)
+                self.assertLess(time.perf_counter() - start, 0.5)
+                self.assertTrue(all(len(line.text) <= 80 for line in rendered.lines))
+                self.assertLessEqual(len(rendered.lines), TT.MAX_ROWS + 1000)
+
+    def test_the_rows_kept_are_capped_like_scrollback(self):
+        rendered = TT.render(b"x\r\n" * 60_000 + b"last", cols=80)
+        self.assertLessEqual(len(rendered.lines), TT.MAX_ROWS + 1000)
+        self.assertEqual(rendered.lines[-1].text, "last")
+
+
+PEM_FORMS = ["PRIVATE KEY", "RSA PRIVATE KEY", "EC PRIVATE KEY", "DSA PRIVATE KEY", "OPENSSH PRIVATE KEY",
+             "ENCRYPTED PRIVATE KEY", "PGP PRIVATE KEY BLOCK"]
+BODY = "TUlJRXZRSUJBREFOQmdrcWhraUc5dzBCQVFFRkFBU0NCS2N3Z2dTakFnRUFBb0lCQVFD"[:64]   # filler, not a key
+
+
+class PrivateKeys(unittest.TestCase):
+    """HIGH (2026-10-10 review): the body of a key came back when the read
+    started below its BEGIN line."""
+
+    def block(self, form, end=True):
+        lines = [P("-----BEGIN ", form, "-----")] + [BODY] * 8
+        if end:
+            lines.append(P("-----END ", form, "-----"))
+        return lines
+
+    def test_a_window_starting_at_any_line_of_the_block_is_refused(self):
+        for form in PEM_FORMS:
+            block = self.block(form)
+            data = ("$ openssl genpkey\r\n" + "\r\n".join(block) + "\r\n$ ").encode()
+            for top in range(len(block)):
+                with self.subTest(form=form, top=top):
+                    verdict = G.judge(data, 0, lines=len(block) - top + 1)
+                    self.assertTrue(verdict.refused)
+                    self.assertNotIn(BODY, verdict.text)
+
+    def test_a_block_with_no_end_is_refused_from_any_line(self):
+        block = self.block("RSA PRIVATE KEY", end=False)
+        data = ("$ head -5 key\r\n" + "\r\n".join(block) + "\r\n").encode()
+        for top in range(1, len(block)):
+            with self.subTest(top=top):
+                self.assertTrue(G.judge(data, 0, lines=len(block) - top).refused)
+
+    def test_a_closed_block_above_does_not_refuse_what_follows(self):
+        data = ("\r\n".join(self.block("EC PRIVATE KEY")) + "\r\n$ ls\r\na b c\r\n$ ").encode()
+        self.assertFalse(G.judge(data, 0, lines=3).refused)
+
+    def test_the_footer_alone_is_a_format(self):
+        for form in PEM_FORMS:
+            self.assertTrue(CP.holds_credential(P("-----END ", form, "-----")), form)
+
+
+class AltSplit(unittest.TestCase):
+    """MEDIUM (2026-10-10 review): a ring whose cut split the switch into the
+    alternate screen read that screen. Through the real `Terminal.history()`,
+    at every byte of each switch form."""
+
+    def test_a_split_switch_is_parsed_whole(self):
+        from jarvis.v2 import terminals as T
+        body = b"\x1b[H" + b"ALT-SCREEN-ONLY-TEXT " * 40
+        for switch in (b"\x1b[?1049h", b"\x1b[?1047h", b"\x1b[?47h", b"\xc2\x9b?1049h",
+                       b"\x1b[?10\r49h", b"\x1b\n[?1049h", b"\x1b[\x00?1049\x7fh"):
+            for split in range(len(switch) + 1):
+                with self.subTest(switch=switch, split=split):
+                    head = b"normal line\r\n" + b"x" * 100
+                    chunks = [head + switch[:split], switch[split:] + body]
+                    term = T.Terminal("0000000e", shell="/bin/sh", folder="/", project_id=None,
+                                      label="~", cols=80, rows=24, nonce="0" * 32)
+                    try:
+                        term._ring = T.Ring(cap=sum(map(len, chunks)) - len(head) - split,
+                                            on_drop=term._alt.feed)
+                        for chunk in chunks:
+                            term._output(chunk)
+                        h = term.history()
+                        verdict = G.judge(h.lead + h.data, h.start - len(h.lead), alt=h.alt)
+                        self.assertNotIn("ALT-SCREEN", verdict.text)
+                    finally:
+                        term.finish()
+
+
+MiB = 1 << 20
+
+
+def _fill(unit: bytes) -> bytes:
+    return (unit * (MiB // len(unit) + 1))[:MiB]
+
+
+class Speed(unittest.TestCase):
+    """MEDIUM (2026-10-10 review): a ring of adversarial shapes must render
+    and be judged in bounded time — the old renderer had no width and two
+    guard scans were quadratic (minutes, gigabytes). Each case is a full
+    1 MiB ring read at the maximum window."""
+
+    BUDGET_S = 2.0
+
+    def cases(self):
+        b64 = (BODY * 6)[:300].encode()
+        return {
+            "minified lines: prompt glyphs, keywords, trigger words":
+                _fill(b'if(a> b){export const time=c.env;let set=new Set();cat(x)}else{d=e> f} $ cat x # key: '
+                      + b"Zx9Qp2Lm8Rt4Vb6Nc1Hs7Kd3 " * 4 + b"\r\n"),
+            "one minified line, no newline":
+                _fill(b'if(a> b){export const key=c.env;let set=new Set();cat .env.x}else{d=e> f}'),
+            "staircase (raw-mode line feeds)": _fill(b"\x1b[70Gx\n"),
+            "staircase of ordinary lines": _fill(b"line 000001 some ordinary output here\n"),
+            "long base64-ish runs beside keywords": _fill(b"token=" + b64 + b" key: " + b64 + b"\r\n"),
+            "many = and :": _fill(b"a=b:c=d:key=e:token=f:pwd=g:" * 30 + b"\r\n"),
+            "keyword then spaces": _fill(b"key" + b" " * 61),
+            "prompt lines with commands": _fill(b"user@host:~/p$ cat file.txt | grep -v env > out\r\nline\r\n"),
+            "cursor-up redraws": _fill(b"\x1b[3A\r\x1b[Klayer a: 10% token=abc\r\n\x1b[Klayer b\r\n\x1b[Kc\r\n"),
+            "substitutions everywhere": _fill(b"$ $(echo $x) `y` <(z) $HOME ${A} " * 10 + b"\r\n"),
+            "glyph soup": _fill("> set > env > cat > $ # % ❯ \r\n".encode()),
+            "a runner with thousands of words": _fill(b"$ watch " + b"a " * 4000 + b"\r\n"),
+            "backspace rewrites": _fill(b"A" * 2000 + b"\x08x" * 2000),
+        }
+
+    def test_every_adversarial_ring_is_judged_in_bounded_time(self):
+        timings = {}
+        for name, data in self.cases().items():
+            with self.subTest(case=name):
+                G.prints_secrets.cache_clear()
+                start = time.perf_counter()
+                G.judge(data, 0, lines=G.MAX_LINES)
+                timings[name] = time.perf_counter() - start
+                self.assertLess(timings[name], self.BUDGET_S, name)
+        print("\n  speed: " + ", ".join(f"{k.split(':')[0]} {v:.2f}s" for k, v in timings.items()))
+
+    def test_the_command_cache_is_bounded_by_size(self):
+        G.prints_secrets.cache_clear()
+        for i in range(4000):
+            G.prints_secrets(f"cat file{i}.txt " + "x" * 2000)
+        self.assertLessEqual(G._cache_size, G.CACHE_BYTES)
+
+
+class FolderValues(unittest.TestCase):
+    def test_env_variants_are_credential_files_here_but_templates_are_not(self):
+        for name in (".env.production", ".env.staging.local", ".env.test", "dir/.env.prod"):
+            self.assertTrue(G.protected_name(name), name)
+        for name in (".env.example", ".env.sample", ".env.template", ".envrc", "my.env"):
+            self.assertFalse(G.protected_name(name), name)
+
+    def test_a_url_with_a_password_is_withheld(self):
+        self.assertTrue(G.withhold(P("DATABASE_URL=postgres://app:", "Zx9Qp2Lm8", "@db:5432/app")))
+        self.assertFalse(G.withhold("see https://example.com/docs for more"))
+        self.assertFalse(G.withhold("postgres://app:****@db/app"))
 
 
 if __name__ == "__main__":

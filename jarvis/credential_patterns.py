@@ -52,8 +52,11 @@ PATTERNS: tuple[tuple[str, re.Pattern], ...] = tuple(
         ("google-api", _B + r"AIza[0-9A-Za-z_\-]{35}" + _E),
         # Stripe secret and restricted keys, live and test.
         ("stripe", _B + r"(?:sk|rk)_(?:live|test)_[0-9A-Za-z]{20,}"),
-        # Any PEM/OpenSSH/PGP private key block header.
+        # Any PEM/OpenSSH/PGP private key block — its header *and* its
+        # footer (PKCS#8, RSA/EC/DSA, OPENSSH, ENCRYPTED, PGP … BLOCK), so a
+        # read that starts below the header still sees the block end.
         ("private-key", r"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----"),
+        ("private-key-end", r"-----END (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----"),
         # JWTs: a base64url JSON header (`eyJ` is `{"`), then two more
         # dot-separated segments (the signature may be empty for alg=none).
         ("jwt", _B + r"eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]*"),

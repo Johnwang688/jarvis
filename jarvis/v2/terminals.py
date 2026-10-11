@@ -68,11 +68,21 @@ are included), then SIGKILL; the session's leader is matched on its start
 time, so a session whose pid was reused is never signalled. **Terminals end
 with the daemon** (`Daemon.stop` closes them all); there is no tmux.
 
-**Output never leaves memory.** It exists in two places: this ring and the
-owner's browser. It never goes to the bus (the only record there is
-`terminal_attached`: ids and a time), a log (the daemon log gets lifecycle
-lines only: opened, attached, exited, closed, with the folder as a project
-name or `~`), a session or thread log, Discord, or disk.
+**Output stays in memory unless Jarvis reads it.** It exists in two places:
+this ring and the owner's browser. It never goes to the bus (the records
+there are `terminal_attached`, ids and a time, and `terminal_read`, ids, a
+line count, a time and whether it was refused), a log (the daemon log gets
+lifecycle lines only: opened, attached, read, exited, closed, with the folder
+as a project name or `~`), a thread log, Discord, or disk. **What a
+`terminal_read` returns is the exception, and it goes where any tool result
+goes**: into the fast-path conversation's transcript, and so to OpenRouter
+with every later request; into that conversation's v1 session file
+(`messages.json` under `config.SESSIONS_DIR`); into `config.SPILL_DIR` if
+context truncation later cuts it as an old result; and into anything the
+model's reply repeats — a reply is mirrored to the chat's Discord thread and
+spoken like any other. The tool's ticker summary is fixed ("read N lines",
+"refused"), so none of the text rides `tool_finished` onto the bus or into
+the thread's `log.jsonl`.
 
 **Shell integration (W-2, item 3).** bash reads `terminal_rc.bash` as its
 --rcfile; a POSIX `sh`-family shell (sh, dash, ash, ksh, mksh, …) reads
@@ -127,6 +137,7 @@ import secrets
 import select
 import shutil
 import signal
+import stat
 import struct
 import subprocess
 import sys
@@ -644,6 +655,12 @@ class History:
     readable: bool
     prompt: int | None = None
     alt: bool = False
+    # A switch into or out of the alternate screen that the ring's cut split
+    # in two: its first bytes, which the ring no longer holds. Render
+    # `lead + data` from `start - len(lead)`, in state `alt`, and the switch is
+    # parsed whole (2026-10-10 review: its second half used to be read as the
+    # first text of the normal screen).
+    lead: bytes = b""
 
 
 # -- one terminal --------------------------------------------------------------------
@@ -911,11 +928,11 @@ class Terminal:
         with self._lock:
             ring_start, held, skip = self._ring.view()
             start, data = ring_start + skip, held[skip:]
-            alt = self._alt.at(held[:skip])
+            alt, lead = self._alt.lead(held[:skip])
             spans = tuple(replace(s) for s in self._marks.spans
                           if s.end is None or s.end > start)
             return History(start, data, spans, self._marks.spans_from, self._marks.integrated,
-                           self.readable, self._marks.prompt, alt)
+                           self.readable, self._marks.prompt, alt, lead)
 
     # -- windows ---------------------------------------------------------------------
 
@@ -1285,10 +1302,15 @@ class Terminals:
             self._read_published(terminal, 0, True)
             return ToolRead(terminal.id, terminal.title, refused=READ_OFF)
         values = _secret_values(terminal.folder)
-        verdict = terminal_guard.judge(history.data, history.start, lines=lines, alt=history.alt,
-                                       rows=terminal.rows, spans=history.spans,
+        verdict = terminal_guard.judge(history.lead + history.data, history.start - len(history.lead),
+                                       lines=lines, alt=history.alt, rows=terminal.rows,
+                                       cols=terminal.cols, spans=history.spans,
                                        spans_from=history.spans_from,
                                        integrated=history.integrated, values=values)
+        if not terminal.readable:
+            # The owner turned reading off while this read was being judged.
+            self._read_published(terminal, 0, True)
+            return ToolRead(terminal.id, terminal.title, refused=READ_OFF)
         self._read_published(terminal, verdict.covered, verdict.refused)
         if verdict.refused:
             return ToolRead(terminal.id, terminal.title, refused=terminal_guard.REFUSAL,
@@ -1453,20 +1475,76 @@ _installed: Terminals | None = None
 _installed_lock = threading.Lock()
 
 
+ENV_FILE_CAP = 100_000
+
+
+def _env_values(path: str) -> set[str]:
+    """The values one env file defines, read so nothing planted there can
+    hang a read (2026-10-10 review: a FIFO named `.env` did): the target
+    opened non-blocking and without following a final symlink, a regular
+    file only, at most ENV_FILE_CAP bytes. Values only; never logged."""
+    try:
+        fd = os.open(os.path.realpath(path), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except OSError:
+        return set()
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return set()
+        chunks, size = [], 0
+        while size < ENV_FILE_CAP:
+            chunk = os.read(fd, ENV_FILE_CAP - size)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            size += len(chunk)
+    except OSError:
+        return set()
+    finally:
+        os.close(fd)
+    from jarvis.tools import secrets as v1_secrets
+    values = set()
+    for line in b"".join(chunks).decode("utf-8", "replace").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        value = line.partition("=")[2].strip().strip("'\"")
+        if len(value) >= v1_secrets.MIN_SECRET_LEN:
+            values.add(value)
+    return values
+
+
+def _folder_env_files(directory: Path) -> list[str]:
+    """`.env`, `.env.local` and every `.env.*` but the templates, in one folder."""
+    names = {".env", ".env.local"}
+    try:
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                if entry.name.startswith(".env.") and entry.name not in terminal_guard.ENV_TEMPLATES:
+                    names.add(entry.name)
+    except OSError:
+        pass
+    return [str(directory / name) for name in sorted(names)]
+
+
 def _secret_values(folder: str) -> list[str]:
     """Rule 1's values: everything `secrets.secret_values()` reaches, plus
-    the `.env` files in the terminal's folder and its parents up to home."""
+    the `.env`, `.env.local` and `.env.*` files (not the templates) in the
+    terminal's folder and its parents up to home."""
     from jarvis.tools import secrets as v1_secrets
-    dirs = []
+    values = set(v1_secrets.secret_values())
     try:
         here, home = Path(folder).resolve(), Path.home().resolve()
+        chain = []
         for directory in [here, *here.parents][:12]:
-            dirs.append(directory)
+            chain.append(directory)
             if directory == home:
                 break
     except (OSError, RuntimeError, ValueError):
-        pass
-    return v1_secrets.secret_values(extra_dirs=dirs)
+        chain = []
+    for directory in chain:
+        for path in _folder_env_files(directory):
+            values |= _env_values(path)
+    return sorted(values, key=len, reverse=True)
 
 
 def read_for_tool(terminal: str, lines: int = terminal_guard.DEFAULT_LINES) -> ToolRead:
