@@ -490,7 +490,10 @@ worktree and no branch is touched; the ledger and decision log are kept.
 
 **Owner only.** Archive, restore, both deletes and the trash empty answer
 only on the HUD's listener (`FACE_PORT`) and only to a request carrying the
-HUD's `Origin`; anything else is 403. No tool reaches them (fast path, MCP,
+HUD's `Origin` — or, for a plain GET/HEAD only, one carrying no `Origin` at
+all that the browser marked `Sec-Fetch-Site: same-origin` (Chromium sends no
+Origin on a same-origin GET; `projects.is_owner`, 2026-10-11); anything else
+is 403. No tool reaches them (fast path, MCP,
 Claude or Codex threads, Discord) — `tests/v2/archive_check.py` asserts
 it. The gate keeps every tool's HTTP client off these routes; it is not a
 boundary against a shell command the permission gate approved, the same
@@ -766,9 +769,13 @@ The owner's terminals (HUD plan §2.4, decisions W-2, W-3, W-5; code in
 shell on a real PTY. **Every route is owner-only**: it answers only on the
 HUD's listener (`FACE_PORT`) and only to a request whose `Origin` is present
 and equals `http://<Host>`, with `Host` exactly `127.0.0.1:<port>` or
-`localhost:<port>`. Anything else is 403: the API listener (8405, every
-tool's client), a missing Origin, `null`, the workshop origin, any other
-site. The preview listener (8403) serves only `/p/...` and answers 404. No
+`localhost:<port>` — except a plain GET (the listing), which Chromium sends
+with no Origin when the HUD's own page asks, and which is accepted with no
+Origin only when the browser marked it `Sec-Fetch-Site: same-origin`
+(a forbidden header no page can set; since 2026-10-11 — before it, the
+HUD's own listing was refused). Anything else is 403: the API listener (8405,
+every tool's client), a missing Origin on a write or the socket, `null`, the
+workshop origin, any other site. The preview listener (8403) serves only `/p/...` and answers 404. No
 tool, MCP tool, fast-path tool or Discord verb names these routes. A
 program running as the owner can still forge an Origin and fetch a ticket:
 that is why every attach is announced (`terminal_attached`, below).
@@ -945,12 +952,19 @@ command's span; and a line kept out of history (a leading space under
 whether or not the terminal is `integrated`; spans can add refusals, never
 remove one.
 
-**Output never leaves memory**: on the bus there are lifecycle ids only
-(`terminal_attached`), never output; the HUD lists terminals with `GET
+**Output stays in memory unless Jarvis reads it**: on the bus there are
+lifecycle records only (`terminal_attached`, and since WP-F `terminal_read`:
+ids, a count, a time), never output; the HUD lists terminals with `GET
 /terminals` and learns of an exit over the socket. Output is not in any log
-(the daemon logs opened / attached / exited / closed with the folder as a
+(the daemon logs opened / attached / read / exited / closed with the folder as a
 project name or `~`, and logs `/terminals` paths without their query, so
-never a ticket), not in a thread log, not on Discord, not on disk.
+never a ticket), not in a thread log, not on Discord, not on disk. **The
+exception is a `terminal_read` result (WP-F, below)**: what `terminal_read` returns goes where any tool result goes — the fast-path transcript (and so OpenRouter, with every later request), that conversation's v1 session `messages.json`, `config.SPILL_DIR` if context truncation cuts it later, and anything the model's reply repeats (a reply is mirrored to the chat's Discord thread and spoken).
+Its `tool_finished` summary is fixed ("read N lines", "refused", "error"), so
+the tool's own record on the bus and in the thread's `log.jsonl` carries none
+of it. That is all the fixed summary promises: the model's reply is not
+filtered — it goes to `log.jsonl`, the bus, Discord and speech like any reply,
+so whatever it repeats of the terminal lands there too.
 
 ## Additions 2026-10-09 (terminal panel and view — WP-D)
 
@@ -1131,6 +1145,64 @@ at 100% and 160%).
 
 Not in this package: §2.5 item 5, a "dev servers in your terminals" list
 built from the listening sockets terminal sessions own.
+
+## Additions 2026-10-10 (Jarvis reads a terminal — WP-F)
+
+Decisions W-2 in `docs/plans/2026-10-09-hud-workspace-decisions.md`.
+
+- **Tool `terminal_read(terminal="", lines=200)`** (`jarvis/v2/tools/
+  terminal_read.py`, v1 registry). `terminal` is what the HUD shows — the
+  id, the title (`bash · Calc`, or just its folder part), or the number in
+  the panel's order; empty means the only one — resolved by the daemon,
+  never a path. `lines` is clamped to 1–1000. It returns the terminal's
+  normal buffer as plain text (no escape sequences, the alternate screen
+  never read), fenced as untrusted web content from `HUD terminal <title>
+  (id <id>)`, with notes after the fence: `[N line(s) withheld: possible
+  secret]`, `[the oldest N line(s) left out to fit]` (48,000 characters at
+  most), `[N long line(s) cut to 2,000 characters]`. Or exactly
+  `Refused: possible credential in this output` (an exact known value or its
+  encodings, a credential format, or a secret-printing command — never which,
+  never where), `Refused: the owner has turned off reading for this terminal
+  (<title>)`, or an `Error:` naming the open terminals.
+- **Who holds it**: `FAST_TOOLS`, and only for an owner's chat turn the HUD's
+  own window sent — the send route sets `UserMessage.desk` only on the HUD's
+  listener with its Origin. A task's thread, a Discord or DM turn, the escape
+  hatch, a schedule, a sub-agent and every v1 surface neither see nor can run
+  it (`runtime.at_desk()` fails closed); jarvis-mcp does not offer it. It is
+  not `dangerous`, asks nobody, and writes nothing.
+- SSE **`terminal_read`** `{kind: "terminal_read", data: {terminal_id,
+  lines, at, refused}}` — exactly those keys — for every read that reaches a
+  terminal, refused or not (`lines` is how many it covered; 0 when the switch
+  refused it). Never output, a command or a reason. The terminal's bar shows
+  the last one: "Jarvis read 200 lines · 15:42", or "refused a read · 15:42".
+  A record of another shape is dropped whole; any other key is never drawn.
+  It is HUD chrome: nothing is written to the PTY or the ring.
+- **Where the text goes** (corrected 2026-10-10): what `terminal_read` returns goes where any tool result goes — the fast-path transcript (and so OpenRouter, with every later request), that conversation's v1 session `messages.json`, `config.SPILL_DIR` if context truncation cuts it later, and anything the model's reply repeats (a reply is mirrored to the chat's Discord thread and spoken). The
+  `tool_finished` record's `summary` for `terminal_read` is fixed — "read N
+  lines", "refused" or "error" — never the result's first characters. That
+  keeps the tool's own record clean, nothing more: the model's reply is not
+  filtered, and reaches `log.jsonl`, the bus, Discord and speech like any
+  reply (2026-10-11 re-review).
+- **What a dev server prints stays readable** (2026-10-11 re-review): an
+  `--env-file` loads a file (`node --env-file=.env server.js`), `wc -l <
+  .env` counts one, `docker inspect --format '{{.State.Status}}'` prints no
+  environment, and a reader's or an interpreter's name in prose (a commit
+  message, a nodemon banner) is not a command. A screen dense with command
+  candidates is refused past a parse budget rather than read slowly, and
+  what any parse bound leaves unread refuses the read when it could hold a
+  printer.
+- **The limit**: a secret with no recognisable shape and no keyword beside it
+  is not caught, nor is one an alias, a shell function, a script or a symlink
+  prints, nor one a script prints from a credential file it was handed as an
+  argument, nor a program piped in from anything but a literal
+  `echo`/`printf` (rule 3 reads command lines by shape). A REPL or
+  here-document input line (`> `, `>>> `, `... `) refuses only for an
+  explicit environment read, never for the bare words `ENV`, `env:` or
+  `getenv`, so an environment read spelled only with those is not caught
+  there. The loading idioms
+  `env $(cat .env | xargs) …` and `export $(grep -v '^#' .env | xargs)` stay
+  refused: their error messages can echo part of a value. The "Jarvis can read"
+  switch and the note are the backstops.
 
 ## Additions 2026-10-11 (BR-0 — only the HUD window approves)
 

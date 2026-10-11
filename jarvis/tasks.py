@@ -86,7 +86,7 @@ TASK_SYSTEM = config.SYSTEM_PROMPT + (
     "approval-needing steps sensibly, and if one is denied, note it in your "
     "report instead of retrying it. Work the task to completion, save durable "
     "output to files or memory, and finish with a concise report of what you "
-    "did and where the results are — it is read back with task_log."
+    "did and where the results are — it is what the conversation reads back."
 )
 
 

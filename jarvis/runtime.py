@@ -19,8 +19,9 @@ be a way to run dangerous tools unguarded (the same rule that makes
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import Any, Callable
+from typing import Any, Callable, Iterable, Iterator
 
 # The working plan, as a one-key mutable dict so a tool can rewrite it in place
 # and the agent that owns it sees the change on its next step.
@@ -47,6 +48,12 @@ _DEPTH: ContextVar[int] = ContextVar("jarvis_depth", default=0)
 # to the browser by spawning a child that has them, or by naming one.
 _TOOLS: ContextVar[frozenset[str] | None] = ContextVar("jarvis_tools", default=None)
 
+# Set only by `unconfined()`: dispatch with nothing bound runs instead of
+# refusing. Unbound refuses by default — every real caller binds a toolset
+# first, so an unbound dispatch is a bug, and a bug should fail loudly rather
+# than quietly open the whole registry.
+_UNCONFINED: ContextVar[bool] = ContextVar("jarvis_unconfined", default=False)
+
 # Who is asking, shown on the approval surfaces (HUD card, Discord DM). Bound
 # once by the surface that owns the thread — a background task's runner binds
 # its label before run_turn — and inherited by children through copy_context,
@@ -69,6 +76,16 @@ _LOADED: ContextVar[set[str] | None] = ContextVar("jarvis_loaded_groups", defaul
 # about proposals, and `bind()` only writes what it is passed, so a slot bound
 # by the provider survives the loop's own bind on the same thread.
 _PROPOSAL: ContextVar[dict | None] = ContextVar("jarvis_proposal", default=None)
+
+# Whether the owner is at the desk for this turn, for `terminal_read` (WP-F,
+# decisions W-2: "foreground chat threads only, where the owner is present").
+# A one-key mutable dict, `{"present": bool}`: the v2 FastPathProvider binds
+# it for an owner's chat turn typed in the HUD, and sets `present` False when
+# a message from anywhere else (Discord, the escape hatch) steers that turn.
+# Unbound — every v1 surface, a workflow, a goal, a task, a script — means
+# nobody is, and the tool refuses. Like the proposal slot, `Agent.run_turn`
+# never sets it, so a slot the provider bound survives the loop's own bind.
+_DESK: ContextVar[dict | None] = ContextVar("jarvis_desk", default=None)
 
 # Which v2 conversation a tool call belongs to (the peers plan's Phase 0,
 # 2026-10-10): `{thread_id, project_id, provider, turn_id}`. The v2 fast path
@@ -93,6 +110,7 @@ def bind(
     origin: str | None = None,
     loaded_groups: set[str] | None = None,
     proposal: dict | None = None,
+    desk: dict | None = None,
     caller: dict | None = None,
 ) -> None:
     """Bind the current agent's per-run state. Called by `Agent.run_turn`."""
@@ -112,6 +130,8 @@ def bind(
         _LOADED.set(loaded_groups)
     if proposal is not None:
         _PROPOSAL.set(proposal)
+    if desk is not None:
+        _DESK.set(desk)
     if caller is not None:
         _CALLER.set({key: caller.get(key) for key in CALLER_KEYS})
 
@@ -154,11 +174,56 @@ def parent_tools() -> frozenset[str] | None:
 def current_tools() -> frozenset[str] | None:
     """The tools the agent running now may call, or None if no agent is bound.
 
-    `dispatch()` refuses anything outside this set. None — a script or a test
-    calling `dispatch` directly — is the one case it does not enforce, and it
-    is reached by no real path (see tools._toolset_refusal).
+    `dispatch()` refuses anything outside this set, and with None — nothing
+    bound — it refuses everything, unless the code calling it opted out with
+    `unconfined()` (see tools._toolset_refusal). Every real caller binds first.
     """
     return _TOOLS.get()
+
+
+@contextmanager
+def tools_bound(names: Iterable[str]) -> Iterator[frozenset[str]]:
+    """Bind `names` as the toolset for the duration, then put back what was.
+
+    For a script or a test that calls `tools.dispatch` itself, with no agent
+    turn to bind one: name the tools it calls, and dispatch holds it to them
+    exactly as it would an agent. Scoped, so the thread is not left holding a
+    toolset no agent owns once the block ends.
+    """
+    held = frozenset(names)
+    token = _TOOLS.set(held)
+    try:
+        yield held
+    finally:
+        _TOOLS.reset(token)
+
+
+@contextmanager
+def unconfined() -> Iterator[None]:
+    """Let `dispatch` run any registered tool on this thread while nothing is
+    bound — for a script or a test that really means "every tool".
+
+    The explicit opt-in that makes "unbound refuses" livable (2026-10-11, the
+    owner's call on PR #34's follow-up). It is code, not configuration: a
+    ContextVar set by this context manager and nothing else, so no environment
+    variable, file or argument a model could write reaches it, and nothing under
+    `jarvis/` calls it (tests/dispatch_toolset_check.py pins that). It changes
+    only the unbound case — a toolset bound inside the block, an agent's turn
+    included, is enforced as ever. It does not follow a bare thread, which
+    starts with an empty context and so refuses again; a context copied with
+    `contextvars.copy_context()` inside the block carries it, as it carries
+    every ContextVar, and keeps it wherever and whenever that copy is run.
+    """
+    token = _UNCONFINED.set(True)
+    try:
+        yield
+    finally:
+        _UNCONFINED.reset(token)
+
+
+def is_unconfined() -> bool:
+    """True inside `unconfined()`. Read by dispatch only when nothing is bound."""
+    return _UNCONFINED.get()
 
 
 def restore_tools(previous: frozenset[str] | None) -> None:
@@ -194,6 +259,13 @@ def proposal_slot() -> dict | None:
     like it worked and then not exist.
     """
     return _PROPOSAL.get()
+
+
+def at_desk() -> bool:
+    """True only inside a turn the v2 fast path bound as the owner's, typed
+    in the HUD, and never steered from elsewhere since. Fails closed."""
+    slot = _DESK.get()
+    return bool(slot is not None and slot.get("present") is True)
 
 
 def caller() -> dict | None:

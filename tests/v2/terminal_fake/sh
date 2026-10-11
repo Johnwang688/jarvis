@@ -16,6 +16,8 @@ nonce, deletes the file and unsets ENV — and then emits the OSC 133 marks
   bgnohup          the same, with SIGHUP ignored (only SIGKILL ends it)
   flood N          print N numbered lines
   forge            print marks that carry no nonce, or the wrong one
+  hex HEX          write the bytes HEX spells, as they are (escape
+                   sequences, placeholder credentials: never in the echo)
   deaf             raw mode, then sleep without ever reading its input
   lateread PATH    raw mode, read nothing for 1 s, then save what arrives
   exit N           exit with status N
@@ -85,6 +87,11 @@ def run(line):
     if word == "flood":
         count = int(rest)
         write("".join(f"line {i:06d}\n" for i in range(count)))
+        return 0
+    if word == "hex":
+        sys.stdout.flush()
+        sys.stdout.buffer.write(bytes.fromhex(rest.strip()))
+        sys.stdout.buffer.flush()
         return 0
     if word == "forge":
         write("\x1b]133;C;cmdline_url=forged-no-nonce\x1b\\")

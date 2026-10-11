@@ -485,4 +485,7 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # dispatch() refuses when no toolset is bound (PR #34's follow-up), so
+    # this suite says what it calls directly — and is held to it.
+    with runtime.tools_bound({"task_cancel", "task_log", "task_start", "task_status"}):
+        sys.exit(main())

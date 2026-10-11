@@ -68,6 +68,15 @@ export interface LayoutControl {
   setSplit: (preset: Preset, split: Partial<Split>) => void;
   equalSplit: (preset: Preset) => void;
   togglePanel: () => void;
+  /**
+   * The owner's own ⬓, the layout menu's Panel row and Ctrl+`: togglePanel,
+   * and opening the panel this way opens a terminal when there is none (the
+   * owner's call, 2026-10-11). A stored layout, a reload and a terminal shown
+   * in the panel open it with togglePanel, which opens nothing. Given a
+   * click, only its first counts: a double-click is one gesture, as Ctrl+`
+   * ignores auto-repeat.
+   */
+  ownerTogglePanel: (click?: { detail?: number }) => void;
   setPanelHeight: (height: number) => void;
   resetPanelHeight: () => void;
   /** Reset layout: one pane, default widths, the panel closed. */
@@ -207,6 +216,13 @@ export function useLayout(blocked = false): LayoutControl {
     setPreferPanel(at.fit.panel.auto || trial.panel.auto);
     setWs((w) => setPanel(w, { open: true }));
   }, []);
+  const ownerTogglePanel = useCallback((click?: { detail?: number }) => {
+    if (blockedRef.current || (click?.detail ?? 0) > 1) return;
+    const opening = !now.current.fit.panel.open;
+    togglePanel();
+    // Closed again before the terminal is made: it is not opened, nor the panel reopened.
+    if (opening) void terminals.ownerOpened("panel", () => now.current.fit.panel.open);
+  }, [togglePanel]);
   const resetAll = useCallback(() => {
     setWs((w) => resetWorkspace(w));
     setLayout({ ...DEFAULT_LAYOUT });
@@ -246,10 +262,8 @@ export function useLayout(blocked = false): LayoutControl {
       if (what === "togglePanel") {
         e.preventDefault();
         if (e.repeat) return;
-        const opening = !now.current.fit.panel.open;
-        togglePanel();
         // VS Code's key: opening the panel opens a terminal when there is none.
-        if (opening) void terminals.keyOpened();
+        ownerTogglePanel();
         return;
       }
       if (what.startsWith("focus")) {
@@ -272,9 +286,10 @@ export function useLayout(blocked = false): LayoutControl {
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [toggle, togglePanel]);
+  }, [toggle, ownerTogglePanel]);
 
   return {
+    ownerTogglePanel,
     zoom, layout, fitted, available, availableH, ws, fit,
     setZoom, zoomBy, setWidth, resetWidth, open, fold, toggle,
     setPreset, setView, focus, show, pin, unpinProject, setPreviewUrl, setKeepOrigin, setTerminal, forgetTerminal, setSplit,
@@ -794,9 +809,12 @@ export function TitleBar(props: {
   const dropped = v.fit.dropped;
   // A terminal in the hidden panel has exited (plan §2.3): a dot on ⬓.
   const panelDot = usePanelDot() && !v.fit.panel.open;
-  const toggles: { area: "left" | "panel" | "right"; open: boolean; auto: boolean; act: () => void }[] = [
+  // `act` gets the click: ⬓ counts only a double-click's first (ownerTogglePanel).
+  const toggles: {
+    area: "left" | "panel" | "right"; open: boolean; auto: boolean; act: (click: React.MouseEvent) => void;
+  }[] = [
     { area: "left", open: !sides.leftFolded, auto: sides.autoLeft, act: () => v.toggle("left") },
-    { area: "panel", open: v.fit.panel.open, auto: v.fit.panel.auto, act: v.togglePanel },
+    { area: "panel", open: v.fit.panel.open, auto: v.fit.panel.auto, act: v.ownerTogglePanel },
     { area: "right", open: !sides.rightFolded, auto: sides.autoRight, act: () => v.toggle("right") },
   ];
 
@@ -924,9 +942,11 @@ export function LayoutMenu(props: {
 }) {
   const v = props.view;
   const sides = v.fit.sides;
-  const rows: { area: "left" | "panel" | "right"; label: string; key: string; on: boolean; act: () => void }[] = [
+  const rows: {
+    area: "left" | "panel" | "right"; label: string; key: string; on: boolean; act: (click: React.MouseEvent) => void;
+  }[] = [
     { area: "left", label: "Sidebar", key: "Ctrl+B", on: !sides.leftFolded, act: () => v.toggle("left") },
-    { area: "panel", label: "Panel", key: "Ctrl+`", on: v.fit.panel.open, act: v.togglePanel },
+    { area: "panel", label: "Panel", key: "Ctrl+`", on: v.fit.panel.open, act: v.ownerTogglePanel },
     { area: "right", label: "Status pane", key: "Ctrl+Alt+B", on: !sides.rightFolded, act: () => v.toggle("right") },
   ];
   const total = SHAPES[v.ws.preset].panes;

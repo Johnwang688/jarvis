@@ -57,9 +57,16 @@ CATEGORIES = ["placement", "clearance", "revision", "discipline"]
 # No cad_create_assembly: the harness creates each run's assembly itself, so
 # cleanup is bounded to exactly the elements the bench made and the graders
 # always know which eid to read back.
+#
+# skill_list and skill_read are here because the CAD discipline this bench was
+# built to measure lives in skills/cad/SKILL.md: without them the agent sees the
+# skills index pointer to nothing it can open, and since PR #34 a call to
+# skill_read is refused rather than quietly run (owner's answer 5, 2026-10-11).
+# Reading only — no skill_write.
 CAD_TOOLS = [
     "cad_status", "cad_find_part", "cad_insert", "cad_assembly",
     "cad_move", "cad_delete", "cad_render",
+    "skill_list", "skill_read",
 ]
 
 _INCH = 0.0254

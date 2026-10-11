@@ -21,6 +21,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from jarvis import runtime
 import jarvis.agent as agent_mod
 from jarvis import tools, workflows
 
@@ -118,4 +119,9 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # dispatch() refuses when no toolset is bound (PR #34's follow-up), so
+    # this suite says what it calls directly — and is held to it.
+    with runtime.tools_bound({
+        "run_command", "workflow_log", "workflow_start", "workflow_status"
+    }):
+        sys.exit(main())

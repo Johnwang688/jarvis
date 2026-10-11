@@ -18,6 +18,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from jarvis import runtime
 from jarvis import tools
 from jarvis.tools.sqlite import query_sqlite
 
@@ -64,4 +65,7 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # dispatch() refuses when no toolset is bound (PR #34's follow-up), so
+    # this suite says what it calls directly — and is held to it.
+    with runtime.tools_bound({"query_sqlite"}):
+        sys.exit(main())

@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import httpx
 
-from jarvis import config, onshape_auth, tools
+from jarvis import config, onshape_auth, runtime, tools
 
 sb = onshape_auth.sandbox()
 r = httpx.get(
@@ -25,6 +25,7 @@ if not asms:
     sys.exit(1)
 for asm in asms:
     print(f"== {asm['name']} ({asm['id']})")
-    out = tools.dispatch("cad_assembly", json.dumps({"assembly_eid": asm["id"]}))
+    with runtime.tools_bound({"cad_assembly"}):  # dispatch refuses with none bound
+        out = tools.dispatch("cad_assembly", json.dumps({"assembly_eid": asm["id"]}))
     print(out.text)
     print()
