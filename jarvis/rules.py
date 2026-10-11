@@ -332,11 +332,15 @@ def _encoded_powershell(text: str) -> list[str]:
     return found
 
 
-def vexcom_reading(command: str, _depth: int = 0) -> str | None:
+def vexcom_reading(command: str, _depth: int = 0, *, shell: bool = True) -> str | None:
     """NAMES if this text names VEX's device tool in any spelling the note
     above lists, COMPLEX if a glob in it is past the caps (or there are too
     many to judge), else None. Pure text work; nothing runs. The make file
-    guard (`vex.makefile_refusal`) reads make files with it too."""
+    guard (`vex.makefile_refusal`) reads make files with it too, with
+    `shell=False`. In a command line the glob words are read with each
+    here-document's body set aside — bash never globs one — keeping only the
+    `$(…)` an unquoted body would run; the name itself is looked for
+    everywhere."""
     import unicodedata
     text = join_continuations(command or "")
     if not text.strip():
@@ -353,6 +357,15 @@ def vexcom_reading(command: str, _depth: int = 0) -> str | None:
             return NAMES
     complex_ = False
     judged: set[str] = set()
+    if shell and "<<" in text:
+        globbed = _inline_heredocs(command or "", keep=False)
+        variants = {globbed, unicodedata.normalize("NFKC", globbed)}
+        variants |= {_ansi_c_decoded(v) for v in list(variants)}
+        variants |= {_DEFAULT_EXPANSIONS.sub(r"\1", v) for v in list(variants)}
+        for v in list(variants):
+            cut = _EMPTY_EXPANSIONS.sub("", v)
+            variants |= {cut, _SPLITTERS.sub("", v), _SPLITTERS.sub("", cut)}
+        variants |= {_BRACES.sub("", v) for v in list(variants)}
     for v in variants:
         for word in _WORD_SPLIT.split(v):
             if word in judged or not any(c in word for c in "*?["):
@@ -2263,14 +2276,8 @@ def _substitution_texts(text: str) -> list[str]:
             i += 3
             continue
         if text.startswith("$(", i) or (not quote and text.startswith(("<(", ">("), i)):
-            j, depth = i + 2, 1
-            while j < n and depth:
-                if text[j] == "(":
-                    depth += 1
-                elif text[j] == ")":
-                    depth -= 1
-                j += 1
-            out.append(text[i + 2:j - 1 if depth == 0 else n])
+            j = _close_paren(text, i + 2)
+            out.append(text[i + 2:j - 1 if text[j - 1:j] == ")" else n])
             i = j
         elif ch == "`":
             end = text.find("`", i + 1)
@@ -2309,14 +2316,255 @@ def _span_end(text: str, i: int) -> int:
     if text[i] == "`":
         end = text.find("`", i + 1)
         return n if end == -1 else end + 1
-    j, depth = i + 2, 1
-    while j < n and depth:
-        if text[j] == "(":
+    return _close_paren(text, i + 2)
+
+
+def _close_paren(text: str, j: int) -> int:
+    """Index just past the `)` that closes a `$(`, `<(` or `>(` whose inside
+    starts at `j` (nesting counted, quoted text skipped, so a `1)` in a
+    quoted message does not end it), or the text's end."""
+    n, depth = len(text), 1
+    while j < n:
+        ch = text[j]
+        if ch == "\\":
+            j += 2
+            continue
+        if ch in "'\"":
+            k = j + 1
+            while k < n and text[k] != ch:
+                k += 2 if ch == '"' and text[k] == "\\" else 1
+            j = k + 1
+            continue
+        if ch == "(":
             depth += 1
-        elif text[j] == ")":
+        elif ch == ")":
             depth -= 1
+            if depth == 0:
+                return j + 1
         j += 1
-    return j
+    return n
+
+
+# --- here-documents ------------------------------------------------------------
+#
+# **A here-document's body is data, not commands** (review round 3): `git
+# commit -m "$(cat <<'EOF'` with a `* raise kP` line, a C doc comment written
+# with `cat > auton.h <<'EOF'`, a crontab line — each body line used to be
+# read as a command, so a `*` or `/*` at its start was "a glob in program
+# position" and the whole line DENY. `_inline_heredocs` moves each body into
+# its operator as a here-string (`cat <<'EOF'⏎…⏎EOF` → `cat <<<'…'`), so the
+# walk reads it only where a shell is fed it (`bash <<EOF`), as it reads a
+# here-string. A quoted delimiter keeps the body literal; an unquoted one
+# leaves its `$(…)` and backticks live, as bash does. The lexer recognises an
+# operator only where bash does — never inside quotes, a comment, `${…}` or
+# arithmetic (`$((1<<2))`, `((x<<=1))`, `$[…]`) — because one recognised where
+# bash would not hides the lines after it.
+_HEREDOC_STOP = " \t\n;|&<>()`"
+
+
+def _heredoc_word(text: str, j: int) -> tuple[str, bool, int]:
+    """(delimiter, quoted, index past it) for the word after `<<`/`<<-`."""
+    n = len(text)
+    while j < n and text[j] in " \t":
+        j += 1
+    out: list[str] = []
+    quoted = False
+    while j < n and text[j] not in _HEREDOC_STOP:
+        ch = text[j]
+        if ch in "'\"":
+            end = text.find(ch, j + 1)
+            end = n if end == -1 else end
+            out.append(text[j + 1:end])
+            quoted, j = True, end + 1
+        elif ch == "\\" and j + 1 < n:
+            out.append(text[j + 1])
+            quoted, j = True, j + 2
+        else:
+            out.append(ch)
+            j += 1
+    return "".join(out), quoted, j
+
+
+def _here_word(body: str, quoted: bool, keep: bool) -> str:
+    """A here-document's body as one quoted word. `keep=False` keeps only
+    what bash would run from it: nothing for a quoted delimiter, and the
+    `$(…)`/backtick spans of an unquoted one (bash never globs a body)."""
+    if not keep:
+        if quoted:
+            return "''"
+        try:
+            spans = _substitution_texts(body)
+        except _TooComplex:
+            spans = [body]
+        body = " ".join(f"$({span})" for span in spans)
+    if quoted:
+        return "'" + body.replace("'", "'\\''") + "'"
+    return '"' + body.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _inline_heredocs(text: str, keep: bool = True) -> str:
+    """The text with each here-document's body moved into its operator as a
+    here-string (see above). Several on one line are read in order, `<<-`
+    strips leading tabs, a body with no terminator runs to the end (as in
+    bash), and an operator with no line after it is left as it was."""
+    if "<<" not in text:
+        return text
+    out: list[str] = []
+    stack: list = []            # '"', "$(", "`", "(", or [kind, depth] for ${…} and arithmetic
+    pending: list[tuple] = []   # (delimiter, strip tabs, quoted, slot in out, as written, depth)
+    i, n = 0, len(text)
+    while i < n:
+        ch = text[i]
+        top = stack[-1] if stack else ""
+        if isinstance(top, list):                       # ${…}, $((…)), ((…)), $[…]: inert
+            opener, closer = ("[", "]") if top[0] == "$[" else ("{", "}") if top[0] == "${" \
+                else ("(", ")")
+            if ch == opener:
+                top[1] += 1
+            elif ch == closer:
+                top[1] -= 1
+                if top[1] == 0:
+                    stack.pop()
+            out.append(ch)
+            i += 1
+            continue
+        if top == '"':
+            if ch == "\\":
+                out.append(text[i:i + 2])
+                i += 2
+                continue
+            if ch == '"':
+                stack.pop()
+            elif text.startswith("${", i):
+                stack.append(["${", 1])
+                out.append("${")
+                i += 2
+                continue
+            elif text.startswith("$((", i):
+                stack.append(["((", 2])
+                out.append("$((")
+                i += 3
+                continue
+            elif text.startswith("$(", i):
+                stack.append("$(")
+                out.append("$(")
+                i += 2
+                continue
+            elif ch == "`":
+                stack.append("`")
+            out.append(ch)
+            i += 1
+            continue
+        # a command context: the top level, `$(…)`, backticks, a group inside `$(…)`
+        if ch == "\\":
+            out.append(text[i:i + 2])
+            i += 2
+            continue
+        if text.startswith("$'", i):
+            j = i + 2
+            while j < n and text[j] != "'":
+                j += 2 if text[j] == "\\" else 1
+            out.append(text[i:j + 1])
+            i = j + 1
+            continue
+        if ch == "'":
+            end = text.find("'", i + 1)
+            end = n if end == -1 else end
+            out.append(text[i:end + 1])
+            i = end + 1
+            continue
+        if ch == '"':
+            stack.append('"')
+            out.append(ch)
+            i += 1
+            continue
+        if ch == "#" and (i == 0 or text[i - 1] in " \t\n;|&()"):
+            end = text.find("\n", i)
+            end = n if end == -1 else end
+            out.append(text[i:end])
+            i = end
+            continue
+        if text.startswith("${", i):
+            stack.append(["${", 1])
+            out.append("${")
+            i += 2
+            continue
+        if text.startswith("$((", i) or (text.startswith("((", i)
+                                         and (i == 0 or text[i - 1] in " \t\n;|&(")):
+            width = 3 if ch == "$" else 2
+            stack.append(["((", 2])
+            out.append(text[i:i + width])
+            i += width
+            continue
+        if text.startswith("$[", i):
+            stack.append(["$[", 1])
+            out.append("$[")
+            i += 2
+            continue
+        if text.startswith("$(", i):
+            stack.append("$(")
+            out.append("$(")
+            i += 2
+            continue
+        if ch == "`":
+            if top == "`":
+                stack.pop()
+                # Backtick text is parsed on its own: a here-document opened
+                # inside it has no body outside it.
+                for entry in [e for e in pending if e[5] > len(stack)]:
+                    out[entry[3]] = entry[4]
+                    pending.remove(entry)
+            else:
+                stack.append("`")
+        elif ch == "(" and top in ("$(", "("):
+            stack.append("(")
+        elif ch == ")" and top in ("$(", "("):
+            stack.pop()
+        elif text.startswith("<<<", i):             # a here-string: one operator, not two
+            out.append("<<<")
+            i += 3
+            continue
+        elif text.startswith("<<", i):
+            strip = text.startswith("<<-", i)
+            delimiter, quoted, j = _heredoc_word(text, i + (3 if strip else 2))
+            if delimiter:
+                pending.append((delimiter, strip, quoted, len(out), text[i:j], len(stack)))
+                out.append("")
+                i = j
+                continue
+        elif ch == "\n" and pending:
+            out.append(ch)
+            i += 1
+            in_tick = "`" in stack
+            for delimiter, strip, quoted, slot, _written, _depth in pending:
+                lines: list[str] = []
+                while i < n:
+                    end = text.find("\n", i)
+                    end = n if end == -1 else end
+                    # Inside backticks the text ends at the closing one: the
+                    # body cannot run past it.
+                    tick = text.find("`", i, end) if in_tick else -1
+                    line = text[i:end if tick == -1 else tick]
+                    i = end + 1 if tick == -1 else tick
+                    if strip:
+                        line = line.lstrip("\t")
+                    if line == delimiter:
+                        break
+                    if tick != -1:
+                        if line:
+                            lines.append(line)
+                        break
+                    lines.append(line)
+                out[slot] = "<<<" + _here_word("".join(l + "\n" for l in lines), quoted, keep)
+            pending = []
+            if text[i:i + 1] in ("`", ")"):
+                out.pop()       # the newline before a closer: `$(cat <<<'…')`, one command
+            continue
+        out.append(ch)
+        i += 1
+    for _delimiter, _strip, _quoted, slot, written, _depth in pending:
+        out[slot] = written                         # no line after it: no body
+    return "".join(out)
 
 
 def _shell_words(segment: str) -> list[str]:
@@ -2443,7 +2691,7 @@ class _Walk:
 
     def line(self, text: str, certain: bool, depth: int) -> None:
         self._spend(depth)
-        text = join_continuations(text)
+        text = join_continuations(_inline_heredocs(text))
         for inner in _substitution_texts(text):
             self.line(inner, certain, depth + 1)
         for segment in segments(text):
@@ -2463,7 +2711,7 @@ class _Walk:
         if _PYTHON.fullmatch(stem) and _module_run(args):
             self.modules = True
         if stem in _WRAPPER_OPTS:
-            self._wrapper(stem, tokens, certain, depth, via_input, replace)
+            self._wrapper(stem, tokens, certain, depth, via_input, replace, here)
         elif stem in _SHELL_STEMS:
             strings, stdin = _shell_command(tokens)
             for text in strings + ([_unquoted(w) for w in here] if stdin else []):
@@ -2492,9 +2740,9 @@ class _Walk:
                     self.modules = True
                 if shell:
                     self.line(" ".join(tokens[p:]), sure, depth + 1)
-                self.segment(tokens[p:], sure, depth, via_input=via_input)
+                self.segment(tokens[p:], sure, depth, via_input=via_input, here=here)
 
-    def _wrapper(self, stem, tokens, certain, depth, via_input, replace) -> None:
+    def _wrapper(self, stem, tokens, certain, depth, via_input, replace, here=()) -> None:
         opts = _WRAPPER_OPTS[stem]
         if stem == "command" and any(t.startswith("-") and set(t[1:]) & {"v", "V"}
                                      for t in tokens[1:2]):
@@ -2518,15 +2766,16 @@ class _Walk:
                 if rest:
                     self.line(" ".join(rest), sure, depth + 1)
                 continue
+            # Standard input flows on to the program, except through xargs,
+            # which reads it as arguments.
             self.segment(rest, sure, depth, via_input=via_input or stem == "xargs",
-                         replace=replace)
+                         replace=replace, here=() if stem == "xargs" else here)
 
 
 def _unquoted(word: str) -> str:
-    try:
-        return " ".join(shlex.split(word))
-    except ValueError:
-        return word
+    """A here-string's text, quotes removed and its lines kept: a body fed to
+    a shell is a script, one command per line."""
+    return " ".join(str(w) for w in _shell_words(word))
 
 
 def _module_run(args) -> bool:
@@ -2754,7 +3003,7 @@ def _vex_line_cached(command: str) -> VexLine:
 def _vex_line(command: str) -> VexLine:
     """The vex reading of a line (`decide`, the allowlist and v2's layer 2
     each ask; short lines are cached, the reading is pure)."""
-    command = join_continuations(command or "")
+    command = command or ""
     return _vex_line_cached(command) if len(command) <= 16384 else _vex_line_uncached(command)
 
 
@@ -2845,7 +3094,8 @@ def decide(command: str) -> Verdict:
     The line is judged as bash will read it: backslash-newline continuations
     are removed first (`join_continuations`).
     """
-    command = join_continuations(command or "")
+    raw = command or ""
+    command = join_continuations(raw)
     if not command.strip():
         return Verdict(ASK, "empty command")
 
@@ -2853,7 +3103,9 @@ def decide(command: str) -> Verdict:
     # that could be it, is DENY (V-2): judged on the whole line, before
     # segmentation, so a `sh -c '…'` string, a substitution, a quoted path or
     # an ALLOW-stem runner cannot carry it past (`_vex_line`).
-    vex = _vex_line(command)
+    # Read from the raw line: a quoted here-document's body is not joined at
+    # a backslash-newline, so joining first could swallow its terminator.
+    vex = _vex_line(raw)
     if vex.deny:
         return Verdict(DENY, vex.deny)
 

@@ -1952,6 +1952,94 @@ class Polish(Base):
         self.assertEqual(leaks, [])
 
 
+# -- review round 3: a here-document's body is data, not commands -----------------------------------
+
+R3 = "./v*.exe --user"
+# Ordinary commands that hold a here-document: never DENY, as on main (each was DENY at c12959c).
+HEREDOC_ORDINARY = {
+    "a commit message": "git commit -m \"$(cat <<'EOF'\nFix the drivetrain PID\n\n* raise kP\n* clamp output\nEOF\n)\"",
+    "gh pr create": "gh pr create --title x --body \"$(cat <<'EOF'\n## Summary\n* one\nEOF\n)\"",
+    "git commit -F -": "git commit -F - <<'EOF'\nFix the drivetrain PID\n\n* raise kP\nEOF",
+    "a C doc comment": "cat > include/auton.h <<'EOF'\n/**\n * @brief Runs the autonomous routine.\n */\nvoid auton();\nEOF",
+    "a C comment, unquoted": "cat > a.c <<EOF\n/* x */\nint main(void) { return 0; }\nEOF",
+    "a markdown file": "cat > notes.md <<'EOF'\n* one\n* two\nEOF",
+    "tee": "tee README.md <<EOF\n# Title\n\n* one\nEOF",
+    "tab-stripped": "cat <<-EOF\n\t* one\n\tEOF",
+    "crontab": "crontab - <<'EOF'\n* * * * * /path/script\nEOF",
+    "python on stdin": "python3 - <<'EOF'\nx = (1\n  * 2)\nprint(x)\nEOF",
+    "two on one line": "cat <<A - <<B\n* one\nA\n/* two */\nB",
+    "a paren in a message": "git commit -m \"$(cat <<'EOF'\nSteps:\n1) first\n* second\nEOF\n)\"",
+    "a spaced operator": "cat << 'EOF'\n* one\nEOF",
+    "a double-quoted delimiter": "cat <<\"EOF\"\n/* doc */\nEOF",
+    "a command after it": "cat > f.md <<'EOF'\n* one\nEOF\nls -la",
+    "inside backticks": "x=`cat <<X\n* one\nX`",
+}
+# Still read: a body fed to a shell, a substitution an unquoted body runs, and
+# every line the lexer must not mistake for a body (each would hide a command).
+HEREDOC_RUNS = {
+    "bash <<EOF": f"bash <<'EOF'\n{GLOBBED}\nEOF",
+    "sh -s": f"sh -s <<EOF\n{R3}\nEOF",
+    "env bash": f"env bash <<'EOF'\n{R3}\nEOF",
+    "a shell in $(…)": f"x=$(bash <<'EOF'\n{R3}\nEOF\n)",
+    "after the terminator": f"cat <<'EOF'\n* one\nEOF\n{R3}",
+    "on the operator's line": f"cat <<X; {R3}\nbody\nX",
+    "after two here-documents": f"cat <<X <<Y\none\nX\ntwo\nY\n{R3}",
+    "after a tab-stripped one": f"cat <<-X\n\tbody\n\tX\n{R3}",
+    "a substitution in an unquoted body": f"cat <<EOF\n$({R3})\nEOF",
+    "a quoted body ending in a backslash": f"cat <<'X'\nfoo \\\nX\n{R3}",
+    "a shift in $((…))": f"echo $((1<<2))\n{R3}",
+    "a shift in ((…))": f"((x<<=1))\n{R3}",
+    "a shift in $[…]": f"echo $[1<<X]\n{R3}",
+    "`<<` in ${…}": f"echo ${{x:-<<X}}\n{R3}",
+    "`<<` in quotes": f"echo '<<X'\n{R3}",
+    "`<<` in a comment": f"# <<X\n{R3}",
+    "a backtick's own here-document": f"echo `cat <<X`\n{R3}\nX",
+    "a body that ends with its backtick": f"echo `cat <<X\nbody\nX`\n{R3}",
+}
+
+
+class HereDocuments(Base):
+    """Round 3: a here-document's body is read only where a shell is fed it."""
+
+    def test_ordinary_here_documents_are_never_refused(self):
+        for label, command in HEREDOC_ORDINARY.items():
+            with self.subTest(label):
+                self.assertEqual(rules.decide(command).decision, rules.ASK, command)
+                self.assertNotEqual(v1_permissions.static_verdict(command).decision, rules.DENY)
+                self.assertIsNone(v2_permissions.denied_command(command))
+                self.assertIsNone(rules.vex_uncoverable(command), command)
+
+    def test_what_a_body_feeds_or_hides_is_still_read(self):
+        for label, command in HEREDOC_RUNS.items():
+            with self.subTest(label):
+                verdict = rules.decide(command)
+                self.assertEqual(verdict.decision, rules.DENY, command)
+                self.assertIn("vexcom", verdict.reason)
+                self.assertIsNotNone(v2_permissions.denied_command(command))
+
+    def test_v2_asks_nothing_new_for_a_commit_message(self):
+        asker = Asker()
+        for profile in (PP.AUTO, PP.ASK):
+            permit = v2_permissions.build_permit(context(self.root, profile), asker)
+            for label in ("a commit message", "a C doc comment", "crontab"):
+                with self.subTest(profile=profile.value, shape=label):
+                    self.assertNotEqual(permit("Bash", {"command": HEREDOC_ORDINARY[label]}),
+                                        Decision.DENY)
+        # Under AUTO no card is raised for them (the provider's reviewer decides).
+        auto = Asker()
+        permit = v2_permissions.build_permit(context(self.root, PP.AUTO), auto)
+        permit("Bash", {"command": HEREDOC_ORDINARY["a commit message"]})
+        self.assertEqual(auto.seen, [])
+
+    def test_a_large_here_document_is_not_too_complex(self):
+        body = "\n".join(f"int *p{i} = a{i} * b[{i}] /* [{i}] */;" for i in range(3000))
+        command = f"cat > big.c <<'EOF'\n{body}\nEOF"
+        started = time.perf_counter()
+        self.assertEqual(rules.decide(command).decision, rules.ASK)
+        self.assertIsNone(rules.vex_uncoverable(command))
+        self.assertLess(time.perf_counter() - started, 1.5)
+
+
 # -- setup ------------------------------------------------------------------------------------------------
 
 class Setup(Base):

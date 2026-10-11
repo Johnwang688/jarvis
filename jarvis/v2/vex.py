@@ -585,7 +585,7 @@ def makefile_refusal(root) -> str | None:
             text = _read_make_file(path, rel)
         except VexError as exc:
             return str(exc)
-        reading = rules.vexcom_reading(text)
+        reading = rules.vexcom_reading(text, shell=False)
         if reading == rules.NAMES:
             return (f"{rel} names vexcom, so Jarvis will not build this project: a build must "
                     "never reach the robot. Remove it, or build in VS Code")
