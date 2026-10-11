@@ -40,6 +40,10 @@ The checks worth keeping, each written to bite:
   - an attach this window did not make is said, quietly; its own never are;
   - an OSC title never reaches `document.title` and renders as text; a
     `javascript:` link is inert, an http link opens only on Ctrl+click;
+  - a Ctrl+clicked link to a server on this machine opens a menu (WP-E):
+    "Open in Preview" lands in a drawn Preview pane, else the focused pane,
+    and is refused, with the reason, for the HUD's and the API's ports;
+    "Open in a browser tab" still opens it; Escape and a card close it;
   - at 160% and 70% the terminal fits its pane, its text scales with the
     HUD, and a drag selects exactly the cells under the pointer;
   - one terminal is drawn in one place: in a pane, its panel tab says so;
@@ -473,7 +477,8 @@ def terminal_checks(browser, mock, base, check, until, guard, init_script):
         _boot(page, mock, base, until)
         for section in (_open_checks, _typing_checks, _card_checks, _paste_checks, _reload_checks,
                         _takeover_checks, _elsewhere_checks, _exit_checks, _busy_checks, _readable_checks,
-                        _integration_checks, _osc_link_checks, _pane_checks, _zoom_checks, _ended_checks,
+                        _integration_checks, _osc_link_checks, _preview_link_checks, _pane_checks, _zoom_checks,
+                        _ended_checks,
                         _flood_checks, _chat_panes_checks):
             if only and section.__name__.strip("_") not in only:
                 continue
@@ -1148,6 +1153,99 @@ def _osc_link_checks(page, mock, base, check, until, fake):
     opened = page.evaluate("window.__opened")
     check("Ctrl+click opens an http link, and an OSC 8 https one, in a new window",
           opened == ["http://example.com/ok-link", "https://example.org/osc8"], str(opened))
+
+
+def _preview_link_checks(page, mock, base, check, until, fake):
+    """WP-E: a link to a server on this machine offers "Open in Preview"."""
+    tid = _fresh(page, mock, base, until, fake, size=(1600, 900))
+    dev = f"http://127.0.0.1:{mock.dev_port}/"
+    hud = f"http://127.0.0.1:{mock.port}/"
+    api = f"http://localhost:{mock.api_port}/"
+    fake.output(tid, b"\x1b[2J\x1b[H" + f"{dev}\r\n{hud}\r\n{api}\r\n".encode())
+    until(lambda: str(mock.api_port) in _text(page, tid), timeout=3)
+    page.wait_for_timeout(200)
+    page.evaluate("window.__opened = []")
+    menu = '[data-testid="term-link-menu"]'
+
+    def ctrl_click(row, col=4):
+        # Through a neighbouring cell first: xterm finds the link under the
+        # pointer only when it enters a new cell, so a second click on the
+        # very cell of the first would find none.
+        x2, y2, _, _ = _cell(page, tid, col + 3, row)
+        page.mouse.move(x2, y2)
+        page.wait_for_timeout(80)
+        x, y, _, _ = _cell(page, tid, col, row)
+        page.mouse.move(x, y)
+        page.wait_for_timeout(120)
+        page.keyboard.down("Control")
+        page.mouse.click(x, y)
+        page.keyboard.up("Control")
+        page.wait_for_timeout(150)
+
+    def frame(n):
+        return page.locator(f'[data-testid="pane-{n}"] [data-testid="preview-frame"]')
+
+    ctrl_click(0)
+    until(lambda: _visible(page, menu), timeout=3)
+    check("Ctrl+click on a local link opens a small menu, not a browser tab",
+          _visible(page, menu) and page.evaluate("window.__opened") == []
+          and page.locator('[data-testid="term-link-url"]').inner_text() == dev,
+          str(page.evaluate("window.__opened")))
+    check("the link to a dev server may go to Preview", page.locator('[data-testid="term-link-preview"]').is_enabled())
+    page.locator('[data-testid="term-link-preview"]').click()
+    until(lambda: frame(1).count() > 0 and frame(1).get_attribute("src") == dev, timeout=4)
+    check("with no Preview pane drawn, Open in Preview shows it in the focused pane (the click rule)",
+          page.locator('[data-testid="pane-1"]').get_attribute("data-view") == "preview"
+          and frame(1).get_attribute("src") == dev and not _visible(page, menu))
+    ws = page.evaluate("window.__hud.workspace()")["ws"]
+    check("the URL is stored with that pane", ws["panes"][0].get("previewUrl") == dev, str(ws["panes"][0]))
+    check("and the frame is sandboxed as any preview is",
+          frame(1).get_attribute("sandbox") == "allow-scripts allow-forms")
+
+    page.locator('[data-testid="pane-1"] [data-testid="tab-chat"]').click()
+    until(lambda: page.locator('[data-testid="pane-1"]').get_attribute("data-view") == "chat", timeout=2)
+    _layout(page, until, "cols2")
+    if page.locator('[data-testid="pane-2"]').get_attribute("data-view") != "preview":
+        page.locator('[data-testid="pane-2"] [data-testid="tab-preview"]').click()
+    page.locator('[data-testid="pane-1"] [data-testid="input"]').click()
+    until(lambda: page.locator('[data-testid="pane-1"]').get_attribute("data-focused") == "true", timeout=2)
+    ctrl_click(0)
+    until(lambda: _visible(page, menu), timeout=3)
+    page.locator('[data-testid="term-link-preview"]').click()
+    until(lambda: frame(2).count() > 0 and frame(2).get_attribute("src") == dev, timeout=4)
+    check("with a Preview pane drawn, it goes there, and the focused chat pane stays a chat",
+          frame(2).get_attribute("src") == dev
+          and page.locator('[data-testid="pane-1"]').get_attribute("data-view") == "chat"
+          and page.locator('[data-testid="pane-2"]').get_attribute("data-focused") == "true")
+
+    for row, url, word in ((1, hud, "HUD"), (2, api, "API")):
+        ctrl_click(row)
+        until(lambda: _visible(page, menu), timeout=3)
+        refused = page.locator('[data-testid="term-link-refused"]')
+        text = refused.inner_text() if refused.count() else ""
+        check(f"a link to the {word}'s port: Open in Preview is refused, and says why",
+              page.locator('[data-testid="term-link-preview"]').is_disabled() and word in text
+              and page.locator('[data-testid="term-link-url"]').inner_text() == url, text)
+        page.keyboard.press("Escape")
+        until(lambda: not _visible(page, menu), timeout=2)
+    check("Escape closes the menu, opening nothing", page.evaluate("window.__opened") == [])
+    ctrl_click(2)
+    until(lambda: _visible(page, menu), timeout=3)
+    page.locator('[data-testid="term-link-browser"]').click()
+    check("Open in a browser tab opens it in a new window, as a plain Ctrl+click used to",
+          page.evaluate("window.__opened") == [api] and not _visible(page, menu), str(page.evaluate("window.__opened")))
+
+    ctrl_click(0)
+    until(lambda: _visible(page, menu), timeout=3)
+    _approval(mock, "lnk1")
+    until(lambda: page.locator('[data-testid="approval-card"]').count() > 0, timeout=4)
+    page.wait_for_timeout(150)
+    check("a card closes the menu", not _visible(page, menu))
+    page.keyboard.press("Escape")
+    body = until(lambda: mock.sent("POST", "/approvals/lnk1") or None, timeout=4)
+    check("and Escape still denies the card", bool(body) and body[-1].get("decision") == "deny")
+    until(lambda: page.locator('[data-testid="approval-card"]').count() == 0, timeout=4)
+    check("nothing reached the API listener", mock.api_hits == [], str(mock.api_hits))
 
 
 def _layout(page, until, preset):

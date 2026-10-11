@@ -984,10 +984,21 @@ def preview_checks(page, mock):
           str(mock.workshop_hits))
     sandbox = frame.get_attribute("sandbox") or ""
     check("the frame is sandboxed", "allow-scripts" in sandbox, sandbox)
-    # allow-scripts together with allow-same-origin is no sandbox at all.
-    check("and never allow-same-origin beside allow-scripts",
-          "allow-same-origin" not in sandbox, sandbox)
-    _ = mock
+    # allow-scripts together with allow-same-origin is no sandbox at all when
+    # the page is the HUD's origin; the workshop never keeps its origin (WP-E).
+    check("and exactly allow-scripts allow-forms: never allow-same-origin, top navigation or popups",
+          sandbox == "allow-scripts allow-forms", sandbox)
+    check("the workshop is never offered 'keep its origin'",
+          page.locator('[data-testid="preview-keep-origin"]').count() == 0)
+    # The daemon's API listener (WP-E): reported on /status, never framed.
+    for bad in (f"http://127.0.0.1:{mock.api_port}/", "http://127.0.0.1:8405/"):
+        page.locator('[data-testid="preview-url"]').fill(bad)
+        page.locator('[data-testid="preview-go"]').click()
+        until(lambda: page.locator('[data-testid="preview-refused"]').count() > 0)
+        check(f"the preview refuses the API listener ({bad})",
+              "API" in page.locator('[data-testid="preview-refused"]').inner_text()
+              and page.locator('[data-testid="preview-frame"]').count() == 0)
+    check("and nothing reached the API listener", mock.api_hits == [], str(mock.api_hits))
 
 
 def panels_checks(page, mock):
@@ -2333,6 +2344,17 @@ def main():
                                 guard, FAKE_RECOGNIZER)
             finally:
                 terminal_mock.stop()
+
+            # The Preview pane's ports and "keep its own origin" (WP-E): a
+            # context and a mock of their own, the dev server and the API
+            # listener on ephemeral ports of the mock's.
+            from tests.face.hud_v2_preview_check import preview_checks as preview_origin_checks
+            preview_mock = MockDaemon(0).start()
+            try:
+                preview_origin_checks(browser, preview_mock, f"http://127.0.0.1:{preview_mock.port}", check, until,
+                                      guard, FAKE_RECOGNIZER)
+            finally:
+                preview_mock.stop()
 
             ctx = browser.new_context(permissions=["microphone"])
             guard(ctx)
