@@ -622,11 +622,31 @@ def read_gate_checks() -> None:
     finally:
         config.FACE_PORT = real
         session.stop(trace_name="policy-check-gate")
+
+    # The event handler knows only the control plane; the whole policy is the
+    # read's own check. A pinned session (what benches use) whose page later
+    # moves itself off its list is refused at the next read, and backed out.
+    pinned = Session(BrowserPolicy(allowed_hosts=["127.0.0.1"], headless=True))
+    off_list = f"http://localhost:{site.server_address[1]}/"
+    try:
+        site_url = f"http://127.0.0.1:{site.server_address[1]}/"
+        pinned.goto(site_url)
+        pinned._submit(lambda: pinned.page.evaluate(
+            f"setTimeout(() => location.href = '{off_list}', 200)"))
+        time.sleep(1.0)
+        try:
+            pinned.snapshot()
+            raise AssertionError("a page that moved itself off the pinned list was read")
+        except BrowserError as exc:
+            assert "backed out" in str(exc), exc
+        assert _pumped_url(pinned) == "about:blank"
+    finally:
+        pinned.stop(trace_name="policy-check-pinned")
         for server in (site, control):
             server.shutdown()
             server.server_close()
     print("ok  browser: the scan reads only the judged document; a screenshot across a move "
-          "onto a control port is withheld")
+          "onto a control port is withheld; a pinned page that moves off its list is not read")
 
 
 def landing_guard_checks() -> None:
