@@ -40,6 +40,8 @@ plan disagree, this file wins.**
 
 - **Merging.** The owner's standing OK to merge after review covers the HUD workspace packages (WP-A to WP-F) and PR #24.
   **Ask the owner before merging editor or VEX packages** unless that OK is extended.
+  **Extended 2026-10-10:** the owner said to merge editor and VEX packages on review too, the same rule as the HUD
+  work. Build started with ED-1 and VX-1 in parallel.
 - **The C-1 restart procedure.** Once C-1 lands, the HUD is live only after `jarvis hud install`. Every post-merge
   restart must run it, and the CLAUDE.md HUD paragraph must say so.
 - **Licences.** VEX's tools may not be decompiled or redistributed. Only use `vexcom` flags from DishPy's MIT source or

@@ -30,19 +30,23 @@ import { placeTerminals, type InSpec } from "../lib/terminal";
 import type { Project } from "../types";
 import { Separator, type LayoutControl } from "./Layout";
 import { Panel } from "./Panel";
-import { TerminalPane, TerminalToasts, terminals, useTerminals } from "./Terminal";
+import { TerminalLinkMenu, TerminalPane, TerminalToasts, terminals, useTerminals } from "./Terminal";
 
 /**
  * The terminals' view of the workspace (WP-D), handed over after each render:
- * which drawn pane shows which terminal, whether a card is up (input held),
- * the zoom (the terminal's font follows it), whether the panel is open, and
- * how to put a terminal in a pane or the panel.
+ * which drawn pane shows which terminal, the zoom (the terminal's font
+ * follows it), whether the panel is open, and how to put a terminal in a pane
+ * or the panel. Whether a card is up (input held) is App's to say, above the
+ * workspace's error boundary: a crash unmounts this, and the hold must not
+ * freeze with it (review of PR #32).
  */
-function useTerminalBridge(v: LayoutControl, blocked: boolean, place: Map<string, number>,
-                           terminalIn?: () => InSpec) {
-  const latest = useRef({ v, terminalIn });
-  latest.current = { v, terminalIn };
+function useTerminalBridge(v: LayoutControl, place: Map<string, number>, terminalIn?: () => InSpec,
+                           openPreview?: (url: string) => boolean) {
+  const latest = useRef({ v, terminalIn, openPreview });
+  latest.current = { v, terminalIn, openPreview };
   useEffect(() => {
+    // A terminal link's "Open in Preview" (WP-E): App's click rule decides the pane.
+    terminals.openPreview = (url) => latest.current.openPreview?.(url) ?? false;
     terminals.defaultIn = () => latest.current.terminalIn?.() ?? "home";
     terminals.setPaneTerminal = (pane, id) => latest.current.v.setTerminal(pane, id);
     terminals.forgetTerminal = (id) => latest.current.v.forgetTerminal(id);
@@ -57,7 +61,6 @@ function useTerminalBridge(v: LayoutControl, blocked: boolean, place: Map<string
     void terminals.refresh();
   }, []);
   const key = [...place].map(([id, n]) => `${id}:${n}`).join(",");
-  useEffect(() => terminals.setBlocked(blocked), [blocked]);
   useEffect(() => terminals.setZoom(v.zoom), [v.zoom]);
   useEffect(() => terminals.setPanelOpen(v.fit.panel.open), [v.fit.panel.open]);
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -108,6 +111,8 @@ export function Workspace(props: {
   onView: (pane: PaneNo, view: View) => void;
   /** Where `+` opens a terminal: the focused pane's folder, as an id (lib/terminal.ts, terminalSpecFor). */
   terminalIn?: () => InSpec;
+  /** A terminal link's "Open in Preview": load it in a Preview pane (WP-E); false when it did not. */
+  openPreview?: (url: string) => boolean;
   /** `+ ▾`'s choices besides Home. */
   projects?: Project[];
 }) {
@@ -117,7 +122,7 @@ export function Workspace(props: {
   // One terminal is drawn in one place at a time (W-1): the first drawn pane
   // holding it, else the panel.
   const place = placeTerminals(ws.panes, fit.panes);
-  useTerminalBridge(v, props.blocked, place, props.terminalIn);
+  useTerminalBridge(v, place, props.terminalIn, props.openPreview);
   const mgr = useTerminals();
   /** A terminal pane's header: the title its program set (text, capped), else its own. */
   const terminalContext = (spec: PaneSpec) => {
@@ -336,6 +341,7 @@ export function Workspace(props: {
       <Panel open={fit.panel.open} height={fit.panel.height} blocked={props.blocked} zoom={v.zoom}
              projects={props.projects ?? []} onHide={v.togglePanel} />
       <TerminalToasts blocked={props.blocked} />
+      <TerminalLinkMenu blocked={props.blocked} zoom={v.zoom} />
     </>
   );
 }

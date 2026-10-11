@@ -245,6 +245,15 @@ export class InputGate {
     this.latched = false;
   }
 
+  /**
+   * The window stopped drawing (a render error, components/Boundary.tsx): the
+   * rest of a paste is thrown away, since nothing on screen could show its
+   * notice or its Resume. Typing is not latched; the socket stays.
+   */
+  abort(): number {
+    return this.q ? this.q.abort() : 0;
+  }
+
   get pending(): number {
     return this.q ? this.q.pending : 0;
   }
@@ -492,6 +501,40 @@ export function judgeLink(uri: string): LinkVerdict {
   if (url.protocol !== "http:" && url.protocol !== "https:") return { ok: false, url: "", loopback: false };
   if (url.username || url.password) return { ok: false, url: "", loopback: false };
   return { ok: true, url: url.href, loopback: isLoopbackHost(url.hostname) };
+}
+
+/**
+ * Where a menu opened at a click goes (the link menu, WP-E), every length in
+ * the HUD's own CSS px (a screen length through `toCss`). Below the click and
+ * starting at it; **above** the click when it does not fit below (a dev
+ * server's `Local:` line is usually the last row of the panel's terminal, so
+ * that is the common case); and in any case clamped so the whole menu is
+ * inside the window, `gap` from every edge. A menu taller than the window
+ * starts at the top.
+ */
+export function placeMenu(
+  click: { x: number; y: number },
+  size: { w: number; h: number },
+  view: { w: number; h: number },
+  gap = 4,
+): { left: number; top: number } {
+  // Whole pixels, and never rounded past the edge it was clamped to: a
+  // window 262.5 CSS px wide (420px at 160%) put a rounded menu half a pixel out.
+  const fit = (v: number, lo: number, hi: number) =>
+    Math.max(Math.ceil(lo), Math.min(Math.round(v), Math.floor(Math.max(lo, hi))));
+  const below = click.y + gap;
+  const above = click.y - gap - size.h;
+  const top = below + size.h + gap <= view.h ? below : above >= gap ? above : below;
+  return { left: fit(click.x, gap, view.w - size.w - gap), top: fit(top, gap, view.h - size.h - gap) };
+}
+
+/**
+ * The link menu's width in CSS px: 280, or the window's width less `gap` on
+ * each side when that is narrower (a 420px window at 160% is 262 CSS px wide;
+ * PR #31 re-review), so `placeMenu` can always fit it.
+ */
+export function menuWidth(viewW: number, max = 280, gap = 4): number {
+  return Math.max(0, Math.min(max, Math.floor(viewW - 2 * gap)));
 }
 
 /** A size the daemon accepts (cols 2–1000, rows 1–500), or null. */

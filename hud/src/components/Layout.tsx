@@ -23,7 +23,7 @@ import {
 import {
   PANEL, PRESETS, SHAPES, TITLEBAR_H, equalSplit as equalSplitOf, fitWorkspace, focusPane, forgetTerminal as forgetTerminalOf,
   loadWorkspace, panesOf, pinPane, resetWorkspace, saveWorkspace, setPaneTerminal, setPanel, setPreset as setPresetOf,
-  setPreviewUrl as setPreviewUrlOf, setSplit as setSplitOf, setView as setViewOf, show as showOf,
+  setKeepOrigin as setKeepOriginOf, setPreviewUrl as setPreviewUrlOf, setSplit as setSplitOf, setView as setViewOf, show as showOf,
   unpinProject as unpinProjectOf,
   type DrawnSet, type PaneNo, type Preset, type Split, type View, type Workspace, type WorkspaceFit,
 } from "../lib/workspace";
@@ -58,6 +58,8 @@ export interface LayoutControl {
   /** A project went away; panes in `keep` (holding an unsaved edit) stay pinned. */
   unpinProject: (projectId: string, keep?: readonly PaneNo[]) => void;
   setPreviewUrl: (pane: PaneNo, url: string) => void;
+  /** A Preview pane's "keep its own origin" grant (an origin), or none (WP-E, W-4). */
+  setKeepOrigin: (pane: PaneNo, origin: string | null) => void;
   /** The terminal a terminal pane shows (null: choose again); no other pane keeps it (W-1). */
   setTerminal: (pane: PaneNo, id: string | null) => void;
   /** A terminal was closed or ended: no pane holds it any more. */
@@ -170,6 +172,9 @@ export function useLayout(blocked = false): LayoutControl {
     (projectId: string, keep: readonly PaneNo[] = []) => setWs((w) => unpinProjectOf(w, projectId, keep)), [],
   );
   const setPreviewUrl = useCallback((pane: PaneNo, url: string) => setWs((w) => setPreviewUrlOf(w, pane, url)), []);
+  const setKeepOrigin = useCallback(
+    (pane: PaneNo, origin: string | null) => setWs((w) => setKeepOriginOf(w, pane, origin)), [],
+  );
   const setTerminal = useCallback((pane: PaneNo, id: string | null) => setWs((w) => setPaneTerminal(w, pane, id)), []);
   const forgetTerminal = useCallback((id: string) => setWs((w) => forgetTerminalOf(w, id)), []);
   const setSplit = useCallback(
@@ -260,7 +265,7 @@ export function useLayout(blocked = false): LayoutControl {
   return {
     zoom, layout, fitted, available, availableH, ws, fit,
     setZoom, zoomBy, setWidth, resetWidth, open, fold, toggle,
-    setPreset, setView, focus, show, pin, unpinProject, setPreviewUrl, setTerminal, forgetTerminal, setSplit,
+    setPreset, setView, focus, show, pin, unpinProject, setPreviewUrl, setKeepOrigin, setTerminal, forgetTerminal, setSplit,
     equalSplit, togglePanel, setPanelHeight, resetPanelHeight, resetAll,
   };
 }
@@ -758,6 +763,16 @@ export function TitleBar(props: {
   const more = useRef<HTMLButtonElement>(null);
   const closeLayout = useCallback(() => setLayoutMenu(null), []);
   const closeTools = useCallback(() => setToolsMenu(null), []);
+  // Where a menu opens is read **in the click**, never inside the updater:
+  // React runs an updater during the click only when nothing is pending, and
+  // otherwise at render time, when the event's `currentTarget` is already
+  // null — `getBoundingClientRect` then threw inside render and, with nothing
+  // to catch it, unmounted the whole window, an approval card included (three
+  // quick clicks on ⊞ did it). An updater reads only its own argument.
+  const toggleMenu = (set: typeof setLayoutMenu, e: React.MouseEvent<HTMLButtonElement>) => {
+    const at = menuAt(e.currentTarget, v.zoom);
+    set((m) => (m ? null : at));
+  };
 
   // An authorization card closes any open menu: nothing behind it may move.
   useEffect(() => {
@@ -792,7 +807,7 @@ export function TitleBar(props: {
             aria-expanded={!!toolsMenu}
             disabled={blocked}
             onMouseDown={(e) => e.stopPropagation()}
-            onClick={(e) => setToolsMenu((m) => (m ? null : menuAt(e.currentTarget, v.zoom)))}
+            onClick={(e) => toggleMenu(setToolsMenu, e)}
           >
             ⋯
           </button>
@@ -833,7 +848,7 @@ export function TitleBar(props: {
           data-dropped={dropped || undefined}
           disabled={blocked}
           onMouseDown={(e) => e.stopPropagation()}
-          onClick={(e) => setLayoutMenu((m) => (m ? null : menuAt(e.currentTarget, v.zoom)))}
+          onClick={(e) => toggleMenu(setLayoutMenu, e)}
         >
           <AreaIcon area="grid" open={false} />
           {dropped ? <span className="tb-badge" data-testid="layout-badge">{dropped}</span> : null}
