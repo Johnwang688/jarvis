@@ -971,7 +971,15 @@ class MockDaemon:
                               thread_id=t["id"], project_id=t["project_id"])
                     mock.emit("thread_updated", dict(t, thread_id=t["id"], changed=["model", "effort"]),
                               thread_id=t["id"], project_id=t["project_id"])
-                    return self._json(t)
+                    # A slow answer, on cue (`patch_delays`, seconds, one per
+                    # request): the change is made and broadcast at once, but
+                    # this request's own answer — the record as it was then —
+                    # arrives late, after any change sent behind it.
+                    answer = dict(t)
+                    delays = w.get("patch_delays")
+                    if delays:
+                        time.sleep(delays.pop(0))
+                    return self._json(answer)
                 if len(parts) == 2 and parts[0] == "threads":
                     for t in w["threads"]:
                         if t["id"] == parts[1]:

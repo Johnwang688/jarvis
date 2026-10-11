@@ -749,7 +749,7 @@ def _small_window_checks(page, mock, check, until):
 
 
 CHIP_CONTROLS = ['[data-testid="provider-chip-select"]', '[data-testid="model-chip-btn"]']
-POP_CONTROLS = ['[data-testid="model-opt"][data-value=""]', '[data-testid="effort-opt"][data-value=""]',
+POP_CONTROLS = ['[data-testid="model-opt"][data-value=""]', '[data-testid="effort-slider"]',
                 '[data-testid="provider-defaults-open"]']
 
 

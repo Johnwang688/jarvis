@@ -24,10 +24,12 @@ import { PANE_NOS, type PaneNo } from "../lib/workspace";
 import { CatalogPicker, ModelChip, ProviderDefaults } from "./ModelChip";
 import { refusal, rosterIds } from "../lib/roster";
 
-/** The chips' view of one pane's conversation (lib/threadmodel `chipState`). */
+/** The chips' view of one pane's conversation (lib/threadmodel `chipState`),
+ * with the compose row's own identity when it is one being composed. */
 function paneChips(state: State, pane: PaneNo) {
   const c = state.chats[pane];
-  return chipState({ threadId: c.threadId, compose: c.compose, threads: state.threads });
+  return { ...chipState({ threadId: c.threadId, compose: c.compose, threads: state.threads }),
+           composeId: c.compose?.id ?? "" };
 }
 
 export function useThreadModel(state: State, dispatch: React.Dispatch<Action>, onRosterChange?: () => void) {
@@ -62,7 +64,12 @@ export function useThreadModel(state: State, dispatch: React.Dispatch<Action>, o
     void reload();
   }, [reload]);
 
-  const keyOf = (cs: ReturnType<typeof paneChips>) => `${cs.targetId ?? ""}|${cs.composing}`;
+  // The conversation a pane's chips show: its thread (or the one its compose
+  // row opened), else **that** compose row — each row has its own id, so two
+  // rows one after another, in the same project or not, are two
+  // conversations (review of PR #30: every row used to be "|true").
+  const keyOf = (cs: ReturnType<typeof paneChips>) =>
+    cs.composing ? `compose:${cs.composeId}` : `${cs.targetId ?? ""}|thread`;
   // Clear a stale refusal when its pane's conversation changes.
   const keys = PANE_NOS.map((n) => keyOf(paneChips(state, n)));
   const keysNow = keys.join(",");
@@ -77,10 +84,18 @@ export function useThreadModel(state: State, dispatch: React.Dispatch<Action>, o
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [keysNow]);
 
+  // Per thread: the sequence number of its latest model or effort change, and
+  // of the latest one whose success has been drawn.
+  const latest = useRef<Record<string, number>>({});
+  const landed = useRef<Record<string, number>>({});
+  /** `from`: the conversation an effort move was made on (the chip's key when
+   * it started). The pane showing another by now drops it — never onto a
+   * thread or compose row it was not made on (review of PR #30). */
   const change = useCallback(
-    (pane: PaneNo, next: Choice) => {
+    (pane: PaneNo, next: Choice, from?: string): Promise<void> | undefined => {
       const s = now.current;
       const cs = paneChips(s, pane);
+      if (from !== undefined && keyOf(cs) !== from) return;
       const { choice, targetId, composing } = cs;
       const compose = s.chats[pane].compose;
       setErrors((e) => (e[pane] ? { ...e, [pane]: undefined } : e));
@@ -96,9 +111,21 @@ export function useThreadModel(state: State, dispatch: React.Dispatch<Action>, o
       const body = patchBody(choice, next);
       if (!body) return;
       const key = keyOf(cs);
-      api
+      // An older answer must not undo a newer one: the effort slider can send
+      // two in quick succession, and the first answer can arrive last. So a
+      // success is drawn unless a later change's success already was — but it
+      // is drawn when the later one was refused or is still on its way, since
+      // it is then what the server holds (an opened compose row has no
+      // `thread_updated` to put it right; review of PR #30). Only the latest
+      // change's refusal is said. The SSE `thread_updated` still carries every
+      // change, in the order the daemon made them.
+      const n = (latest.current[targetId] = (latest.current[targetId] || 0) + 1);
+      const isLatest = () => latest.current[targetId] === n;
+      return api
         .setThreadModel(targetId, body)
         .then((record) => {
+          if ((landed.current[targetId] || 0) > n) return;
+          landed.current[targetId] = n;
           dispatch({ type: "thread_patch", id: record.id, patch: record });
           // An opened-but-unsent thread's chips read the compose row: keep it
           // on what the server now holds — the row that holds that thread
@@ -107,7 +134,7 @@ export function useThreadModel(state: State, dispatch: React.Dispatch<Action>, o
           // fresh compose row (New thread pressed meanwhile) back on the old
           // thread (re-review of PR #27).
           const s2 = now.current;
-          const holder = PANE_NOS.find((n) => s2.chats[n].compose?.openedId === targetId);
+          const holder = PANE_NOS.find((p) => s2.chats[p].compose?.openedId === targetId);
           const row = holder !== undefined ? s2.chats[holder].compose : null;
           if (holder !== undefined && row)
             dispatch({
@@ -116,9 +143,10 @@ export function useThreadModel(state: State, dispatch: React.Dispatch<Action>, o
             });
         })
         .catch((e) => {
+          if (!isLatest()) return;
           // Said in the pane still on that conversation, if any.
           const s2 = now.current;
-          const at = PANE_NOS.find((n) => keyOf(paneChips(s2, n)) === key);
+          const at = PANE_NOS.find((p) => keyOf(paneChips(s2, p)) === key);
           if (at !== undefined) setErrors((all) => ({ ...all, [at]: { key, text: `Could not change model: ${e.message}` } }));
         });
     },
@@ -195,7 +223,8 @@ export function useThreadModel(state: State, dispatch: React.Dispatch<Action>, o
         modelEditable={cs.editable.model}
         disabled={state.approvals.length > 0}
         error={err && err.key === keyOf(cs) ? err.text : ""}
-        onChange={(next) => change(pane, next)}
+        onChange={(next, from) => change(pane, next, from)}
+        conversation={keyOf(cs)}
         onSearch={() => openCatalog("thread", pane)}
         refusals={refusals}
         onDefaults={(provider) => {

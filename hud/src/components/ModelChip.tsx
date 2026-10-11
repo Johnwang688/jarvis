@@ -1,7 +1,9 @@
 // provider ▾ · model · effort ▾, beside `in: <project> ▾` in the input bar
 // (decisions 2026-10-06, part A). Since 2026-10-10 the model and effort are one
 // button that opens one popover with a Model section and an Effort section
-// (and the provider's "set default"); the provider stays a select.
+// (and the provider's "set default"); the provider stays a select. The effort
+// is a slider (components/EffortSlider), and the popover stays open while it
+// moves (PR #30); Escape, a click outside or focus leaving closes it.
 //
 // While composing every chip is free and nothing reaches the server: the
 // choice rides the first message's `POST /threads`. After it the provider is
@@ -15,10 +17,12 @@
 //
 // Several chat panes (WP-B) draw several chips at once, so each popover says
 // whose it is (`data-pane`). It is reachable by keyboard: it opens on the
-// chosen option, the arrows move within a list, Tab goes round the popover,
-// and Escape closes it and gives focus back to the button. It never outlives
-// its button: a card, a click outside, focus leaving it, a resize, a zoom, a
-// fold or a re-layout that moves the button closes it (review of PR #29).
+// chosen option, the arrows move within a list (on the effort slider they move
+// the slider), Tab goes round the popover — each list's chosen option, the
+// slider, then the footer — and Escape closes it and gives focus back to the
+// button. It never outlives its button: a card, a click outside, focus leaving
+// it, a resize, a zoom, a fold or a re-layout that moves the button closes it
+// (review of PR #29).
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
@@ -27,8 +31,9 @@ import { toCss } from "../lib/layout";
 import {
   PROVIDERS, PROVIDER_LABELS, SEARCH, applyEffort, applyModel, applyProvider, canSetDefault,
   defaultChosenHere, defaultEffortOptions, defaultModel, defaultRows, defaultSourceLabel, effective,
-  effortOptions, modelLabel, modelOptions, resetTitle, shortId, type Choice, type ThreadModels,
+  modelLabel, modelOptions, resetTitle, shortId, type Choice, type ThreadModels,
 } from "../lib/threadmodel";
+import { EffortSlider } from "./EffortSlider";
 
 const stop = (e: React.KeyboardEvent) => e.stopPropagation();
 
@@ -41,7 +46,11 @@ export function ModelChip(props: {
   modelEditable: boolean;
   disabled?: boolean;
   error?: string;
-  onChange: (next: Choice) => void;
+  /** May return the request's promise: the effort slider draws its change
+   * until that settles. `from` is the conversation an effort move was made
+   * on (`conversation` when it started); the change is dropped if the chip
+   * shows another by then. */
+  onChange: (next: Choice, from?: string) => void | Promise<unknown>;
   onSearch: () => void;
   /** Per provider, why the project cannot use it (greyed out), or null. */
   refusals?: Partial<Record<ProviderName, string | null>>;
@@ -51,11 +60,13 @@ export function ModelChip(props: {
   pane?: number;
   /** The HUD zoom in percent, for placing the popover (lib/layout `toCss`). */
   zoom?: number;
+  /** The conversation the chip shows (its pane's thread or compose row): an
+   * effort move is tied to it (review of PR #30). */
+  conversation?: string;
 }) {
   const c = props.choice;
   const refused = props.refusals?.[c.provider] || null;
   const eff = effective(props.models, c);
-  const efforts = effortOptions(props.models, c);
   const title = props.modelEditable
     ? props.providerEditable
       ? "Chosen for this new thread; sent with its first message"
@@ -144,31 +155,13 @@ export function ModelChip(props: {
                   </button>
                 ))}
               </div>
-              {efforts.length ? (
-                <>
-                  <div className="msec">Effort</div>
-                  <div className="mefforts" role="listbox" aria-label="Effort" data-testid="effort-list">
-                    {efforts.map((o) => (
-                      <button
-                        type="button"
-                        key={o.value}
-                        role="option"
-                        aria-selected={o.value === (c.effort ?? "")}
-                        className={"mopt pill" + (o.value === (c.effort ?? "") ? " sel" : "")}
-                        data-testid="effort-opt"
-                        data-value={o.value}
-                        tabIndex={o.value === (c.effort ?? "") ? 0 : -1}
-                        onClick={() => {
-                          props.onChange(applyEffort(props.models, c, o.value || null));
-                          close(true);
-                        }}
-                      >
-                        {o.label}
-                      </button>
-                    ))}
-                  </div>
-                </>
-              ) : null}
+              <EffortSlider
+                models={props.models}
+                choice={c}
+                disabled={props.disabled}
+                conversation={props.conversation}
+                onCommit={(effort, from) => props.onChange(applyEffort(props.models, c, effort), from)}
+              />
               {props.onDefaults && canSetDefault(props.models, c.provider) ? (
                 <div className="mfoot">
                   <button
@@ -321,8 +314,10 @@ function Popover(props: {
     };
   }, [anchor, at]);
 
-  /** Within a list the arrows move (and wrap); Tab goes round the popover's
-   * stops — each list's chosen option, then the footer — and never leaves it. */
+  /** Within a list the arrows move (and wrap); the effort slider takes its
+   * own arrows, Home and End (components/EffortSlider stops them there). Tab
+   * goes round the popover's stops — each list's chosen option, the slider,
+   * then the footer — and never leaves it. */
   const onKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
     // Never to push-to-talk, nor any other window key handler below #root.
     e.stopPropagation();
@@ -343,7 +338,8 @@ function Popover(props: {
     if (e.key === "Tab") {
       e.preventDefault();
       const stops: HTMLElement[] = [];
-      for (const child of Array.from(el.querySelectorAll<HTMLElement>('[role="listbox"], .mfoot button'))) {
+      const sel = '[role="listbox"], [role="slider"]:not([aria-disabled="true"]), .mfoot button';
+      for (const child of Array.from(el.querySelectorAll<HTMLElement>(sel))) {
         if (child.getAttribute("role") === "listbox") {
           const opt = child.querySelector<HTMLElement>('[role="option"][aria-selected="true"]')
             ?? child.querySelector<HTMLElement>('[role="option"]');

@@ -18,6 +18,13 @@ import type { Project, ProviderName, Task, Thread } from "../types";
  * thread but its first message has not gone through, so a retry reuses it
  * instead of opening a second one. */
 export interface Compose {
+  /** This compose row's own identity, minted by the store when a row enters a
+   * pane without one (state/store `chat`): a row spread from another keeps it,
+   * a fresh one — New thread, a re-aim when a project or thread goes — gets a
+   * new one, even in the same project. The model chip keys its conversation
+   * on it, so a move made on one row never lands on the next (review of
+   * PR #30). Never sent anywhere. */
+  id?: string;
   projectId: string | null;
   openedId?: string | null;
   /** The provider, model and effort chosen while composing (lib/threadmodel).
