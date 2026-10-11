@@ -2129,9 +2129,26 @@ the desk), the escape hatch, a schedule, a sub-agent, a workflow, a goal or
 any v1 surface (`tools.EXPLICIT_ONLY` keeps it out of "the whole registry"),
 and not jarvis-mcp, which cannot tell a chat from a task worker until the
 peers plan's per-session tokens land, so it fails closed. A steer from
-anywhere but the desk takes the running turn off it. **The limit**: a secret
+anywhere but the desk takes the running turn off it. The owner confirmed both
+limits on 2026-10-10: fast-path desk turns only for now (Claude and Codex
+chats via jarvis-mcp are a follow-up), and never Discord, DM or scheduled
+turns. **Where read text goes**: like any tool result, into the fast-path
+transcript (and so OpenRouter), that conversation's v1 session
+`messages.json`, `SPILL_DIR` if truncation cuts it later, and whatever the
+model's reply repeats (mirrored to Discord, spoken); the ticker summary is
+fixed ("read N lines"), so none of it reaches the bus or the thread log.
+**The review round (2026-10-10)** gave the renderer the terminal's width
+(xterm's autowrap, clamped cursor numbers, capped rows), refused a read that
+starts inside a private key's block or shows its END footer, taught rule 3
+the shell's compound shapes (`then`/`do`/`!`/`case … )`, redirections,
+substitutions, `find -exec`/`xargs` readers, `.env.*`), made every scan
+linear (a 1 MiB adversarial ring is judged in well under 2 s), handed a
+switch the ring's cut split in two over whole, executed C0 controls inside a
+sequence as xterm does, re-checked the switch after the render, and read
+folder env files so a FIFO cannot hang a read. **The limit**: a secret
 with no recognisable shape and no keyword beside it, or one printed in pieces
-or encoded otherwise, is not caught; the switch and the note are the
+or encoded otherwise, is not caught, and rule 3 cannot see through an alias,
+a shell function, a script or a symlink; the switch and the note are the
 backstops.
 
 Remaining: WP13 (the long-bench comparison, the owner's call on cost), a

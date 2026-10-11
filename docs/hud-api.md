@@ -940,12 +940,16 @@ command's span; and a line kept out of history (a leading space under
 whether or not the terminal is `integrated`; spans can add refusals, never
 remove one.
 
-**Output never leaves memory**: on the bus there are lifecycle ids only
-(`terminal_attached`, and since WP-F `terminal_read`), never output; the HUD lists terminals with `GET
+**Output stays in memory unless Jarvis reads it**: on the bus there are
+lifecycle records only (`terminal_attached`, and since WP-F `terminal_read`:
+ids, a count, a time), never output; the HUD lists terminals with `GET
 /terminals` and learns of an exit over the socket. Output is not in any log
-(the daemon logs opened / attached / exited / closed with the folder as a
+(the daemon logs opened / attached / read / exited / closed with the folder as a
 project name or `~`, and logs `/terminals` paths without their query, so
-never a ticket), not in a thread log, not on Discord, not on disk.
+never a ticket), not in a thread log, not on Discord, not on disk. **The
+exception is a `terminal_read` result (WP-F, below)**: what `terminal_read` returns goes where any tool result goes — the fast-path transcript (and so OpenRouter, with every later request), that conversation's v1 session `messages.json`, `config.SPILL_DIR` if context truncation cuts it later, and anything the model's reply repeats (a reply is mirrored to the chat's Discord thread and spoken).
+Its `tool_finished` summary is fixed ("read N lines", "refused", "error"), so
+none of it reaches the bus or the thread's `log.jsonl`.
 
 ## Additions 2026-10-09 (terminal panel and view — WP-D)
 
@@ -1054,5 +1058,10 @@ Decisions W-2 in `docs/plans/2026-10-09-hud-workspace-decisions.md`.
   the last one: "Jarvis read 200 lines · 15:42", or "refused a read · 15:42".
   A record of another shape is dropped whole; any other key is never drawn.
   It is HUD chrome: nothing is written to the PTY or the ring.
+- **Where the text goes** (corrected 2026-10-10): what `terminal_read` returns goes where any tool result goes — the fast-path transcript (and so OpenRouter, with every later request), that conversation's v1 session `messages.json`, `config.SPILL_DIR` if context truncation cuts it later, and anything the model's reply repeats (a reply is mirrored to the chat's Discord thread and spoken). The
+  `tool_finished` record's `summary` for `terminal_read` is fixed — "read N
+  lines", "refused" or "error" — never the result's first characters.
 - **The limit**: a secret with no recognisable shape and no keyword beside it
-  is not caught. The "Jarvis can read" switch and the note are the backstops.
+  is not caught, nor is one an alias, a shell function, a script or a symlink
+  prints (rule 3 reads command lines by shape). The "Jarvis can read" switch
+  and the note are the backstops.

@@ -36,6 +36,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from terminal_check import Base, eventually  # noqa: E402
 
 from jarvis import config, llm, runtime, tools  # noqa: E402
+from jarvis.agent import CONTEXT_BLOCK_PREFIX  # noqa: E402
 from jarvis.v2 import terminal_guard as G, terminals as T  # noqa: E402
 from jarvis.v2.model import ProviderName, Role, Thread  # noqa: E402
 from jarvis.v2.provider import Brief, BriefRefused, Decision, UserMessage  # noqa: E402
@@ -323,6 +324,56 @@ class Holders(unittest.TestCase):
         self.assertFalse(at(task, UserMessage("hi", via="hud", desk=True)))
 
 
+class ReadEdges(ReadBase):
+    def test_turning_reading_off_mid_read_refuses(self):
+        """LOW (2026-10-10 review): the switch is checked again after the
+        render, before anything is returned."""
+        tid, client = self.session()
+        self.run_line(client, "echo mid-read", "\nmid-read")
+        real = T.terminal_guard.judge
+
+        def flip(*args, **kwargs):
+            verdict = real(*args, **kwargs)
+            self.term(tid).readable = False
+            return verdict
+        self.reads()
+        with patch.object(T.terminal_guard, "judge", flip):
+            text = read(tid)
+        self.assertTrue(text.startswith(f"Refused: {T.READ_OFF}"), text)
+        self.assertNotIn("mid-read", text)
+        self.assertEqual([r["data"]["refused"] for r in self.reads()], [True])
+
+    def test_a_fifo_named_env_in_the_folder_chain_does_not_hang_a_read(self):
+        """LOW (2026-10-10 review): a FIFO named `.env` (or `.env.*`) used to
+        block the read for ever."""
+        os.mkfifo(self.work / ".env")
+        os.mkfifo(self.work / ".env.production")
+        (self.work / ".env.dir").mkdir()
+        tid, client = self.session()
+        self.run_line(client, "echo fifo-ok", "\nfifo-ok")
+        out = []
+        worker = threading.Thread(target=lambda: out.append(read(tid)), daemon=True)
+        worker.start()
+        worker.join(10)
+        self.assertFalse(worker.is_alive(), "the read hung on a FIFO")
+        self.assertIn("fifo-ok", out[0])
+
+    def test_env_variant_values_count_and_templates_do_not(self):
+        """MEDIUM (2026-10-10 review): `.env.production` is exactly what the
+        owner asked to be denied; `.env.example` is meant to be read."""
+        value = P("prod-placeholder-", secrets.token_hex(10))
+        sample = P("sample-placeholder-", secrets.token_hex(10))
+        (self.work / ".env.production").write_text(f"PLACEHOLDER_PROD_TOKEN={value}\n")
+        (self.work / ".env.example").write_text(f"PLACEHOLDER_SAMPLE={sample}\n")
+        tid, client = self.session()
+        self.run_line(client, "hex " + hexed(("shown: " + sample + "\n").encode()), "\nshown: ")
+        self.settle(tid)
+        self.assertIn(sample, read(tid))
+        self.run_line(client, "hex " + hexed(("shown: " + value + "\n").encode()), value[:10])
+        self.settle(tid)
+        self.assertEqual(read(tid), REFUSED)
+
+
 class DeskFlag(ReadBase):
     """`UserMessage.desk` is set only by the HUD's own window: the send
     route on the HUD's listener, with the HUD's Origin. The API listener —
@@ -400,7 +451,9 @@ class FastPathTurns(ReadBase):
                 return _reply("a title")
             names = [t["function"]["name"] for t in tools]
             seen.append({"names": names, "messages": list(messages)})
-            if len(seen) == 1:
+            real = [m for m in messages if not (m.get("role") == "user" and str(m.get("content", ""))
+                                                .startswith(CONTEXT_BLOCK_PREFIX))]
+            if real[-1].get("role") != "tool":            # each turn's first step reads
                 return _reply(calls=[("terminal_read", json.dumps({"terminal": tid, "lines": 20}))])
             return _reply("done")
         llm.chat = chat
@@ -422,6 +475,32 @@ class FastPathTurns(ReadBase):
         result = next(m["content"] for m in seen[-1]["messages"] if m.get("role") == "tool")
         return seen[0]["names"], result
 
+    def test_a_desk_turn_then_a_discord_turn_on_one_handle(self):
+        """LOW (2026-10-10 review): the desk slot must not carry over from one
+        turn to the next on the same conversation."""
+        tid, client = self.session()
+        self.run_line(client, "echo turn-marker", "\nturn-marker")
+        provider = FastPathProvider()
+        thread = Thread(id="t" + secrets.token_hex(3), project_id=self.project.id, role=Role.CHAT,
+                        provider=ProviderName.FAST)
+        handle = provider.start(thread, Brief(role=Role.CHAT, cwd=str(self.work)),
+                                lambda *_: Decision.ALLOW)
+        try:
+            results = []
+            for message in (UserMessage("look", via="hud", desk=True), UserMessage("again", via="discord")):
+                seen: list = []
+                with self.scripted(tid, seen):
+                    list(provider.send(handle, message))
+                tool = [m["content"] for m in seen[-1]["messages"] if m.get("role") == "tool"]
+                results.append((seen[0]["names"], tool[-1]))
+        finally:
+            provider.close(handle)
+        (first_names, first), (second_names, second) = results
+        self.assertIn("terminal_read", first_names)
+        self.assertIn("turn-marker", first)
+        self.assertNotIn("terminal_read", second_names)
+        self.assertEqual(second, TR.NOT_AT_DESK)
+
     def test_a_hud_turn_reads_the_terminal(self):
         tid, client = self.session()
         self.run_line(client, "echo turn-marker", "\nturn-marker")
@@ -440,6 +519,51 @@ class FastPathTurns(ReadBase):
                 self.assertNotIn("terminal_read", names)
                 self.assertEqual(result, TR.NOT_AT_DESK)
         self.assertEqual(self.reads(), [])
+
+
+class TickerSummary(FastPathTurns):
+    """MEDIUM (2026-10-10 review): `tool_finished`'s summary was the result's
+    first 200 characters — the fence header and ~30 characters of the
+    terminal's first line — and it rides the bus and the thread's
+    `log.jsonl`. A desk tool's summary is fixed now."""
+
+    def test_no_terminal_text_reaches_the_bus_or_the_thread_log(self):
+        from jarvis.v2.providers.fastpath import _summary
+        self.assertEqual(_summary("terminal_read", "Refused: possible credential in this output"), "refused")
+        self.assertEqual(_summary("terminal_read", "Error: no HUD terminal is open"), "error")
+        self.assertEqual(_summary("get_datetime", "x" * 300), "x" * 200)
+        tid, client = self.session()
+        marker = "ticker-marker-" + secrets.token_hex(4)
+        self.run_line(client, f"echo {marker}", f"\n{marker}")
+        self.daemon.providers[ProviderName.FAST] = FastPathProvider()
+        thread = self.daemon.open_thread(self.project.id, "chat", "fast", {})
+        records = []
+        bus = self.daemon.bus.subscribe()
+        seen: list = []
+        with self.scripted(tid, seen):
+            status, _ = self.request("POST", f"/threads/{thread.id}/send", {"text": "look"})
+            self.assertEqual(status, 202)
+
+            def finished():
+                while True:
+                    try:
+                        records.append(bus.get_nowait())
+                    except Exception:
+                        break
+                return any(r.get("kind") == "turn_finished" for r in records)
+            eventually(finished, timeout=15, what="the turn to finish")
+        tool = [m["content"] for m in seen[-1]["messages"] if m.get("role") == "tool"]
+        self.assertIn(marker, tool[-1], "the read itself reached the model")
+        summaries = [r.get("data", {}).get("summary") for r in records if r.get("kind") == "tool_finished"]
+        self.assertEqual(len(summaries), 1, summaries)
+        self.assertRegex(summaries[0], r"^read \d+ lines$")
+        self.assertNotIn(marker, json.dumps(records))
+        log = (config.V2_DATA_DIR / "threads" / thread.id / "log.jsonl")
+        self.assertTrue(log.exists(), log)
+        self.assertNotIn(marker, log.read_text())
+        # Where it does go, and the docs say so: the v1 session's transcript.
+        sessions = list(Path(config.SESSIONS_DIR).rglob("messages.json"))
+        self.assertTrue(any(marker in p.read_text() for p in sessions), sessions)
 
 
 if __name__ == "__main__":

@@ -356,10 +356,14 @@ window shows), which is why **every attach publishes `terminal_attached`
 with exactly `{terminal_id, at}`** for WP-D to flag. **No tool, MCP tool,
 fast-path tool or Discord verb may reach `terminals`**;
 `tests/v2/terminal_check.py` greps every module under `jarvis/` but the
-daemon, `hud_api` and the module itself. **Terminal output never leaves
-memory**: on the bus lifecycle ids only, no log line (lifecycle only, and
-`/terminals` paths are logged without their query — the ticket rides in it),
-no thread log, Discord or disk. Startup files: `terminal_rc.bash` (bash
+daemon, `hud_api` and the module itself. **Terminal output stays in memory
+unless Jarvis reads it**: on the bus lifecycle records only
+(`terminal_attached`, and WP-F's `terminal_read` — ids, a count, a time), no
+log line (lifecycle only, and `/terminals` paths are logged without their
+query — the ticket rides in it), no thread log, Discord or disk. The
+exception, since WP-F (corrected 2026-10-10): what `terminal_read` returns goes where any tool result goes — the fast-path transcript (and so OpenRouter, with every later request), that conversation's v1 session `messages.json`, `config.SPILL_DIR` if context truncation cuts it later, and anything the model's reply repeats (a reply is mirrored to the chat's Discord thread and spoken); its ticker
+summary is fixed ("read N lines"), so none of it rides `tool_finished` onto
+the bus or into the thread's `log.jsonl`. Startup files: `terminal_rc.bash` (bash
 `--rcfile`, login emulation) and the POSIX `terminal_rc.sh` (`$ENV` for an
 `sh`-family shell started `-i`; kept apart because a dash parses every line,
 so bash syntax cannot hide behind an `if`); **zsh, fish and other shells get
@@ -729,27 +733,48 @@ content and through `dispatch()`'s scrub. `jarvis/v2/terminal_text.py`
 split anywhere; collapses CR, backspace, cursor motion, erases and `clear`
 to what the terminal shows; and **never reads the alternate screen** — the
 ring feeds every byte it drops to an `AltTracker`, so `history().alt` knows a
-read starts inside vim even when the switch left the ring. It also keeps
-`ink`, every state a line was in, so a command line cleared off the screen
-still counts. `jarvis/v2/terminal_guard.py` (pure) **refuses the whole read**
-with exactly "possible credential in this output" — never what, where or
-which rule — for (1) a `secret_values()` value (plus the terminal folder's
-`.env` files: `secret_values(extra_dirs=)`), its base64 at any alignment or
-its URL-encoding; (2) a format in `jarvis/credential_patterns.py` (one list);
-(3) a secret-printing command (`SECRET_PRINTERS`/`READERS`/`SUBCOMMANDS`, one
-place; robust to whitespace, `sudo -k`, assignments, paths, wrappers,
-pipelines, subshells, `sh -c`, `ssh host cmd`): a real span overlapping the
-read (or one that backgrounds a printer), **and always the text** — any
-`ink` line in the read or the `LOOKBACK` (32 KiB) before it that shows such
-a command after a prompt, raised only to a boundary the signed marks prove
-and never by a span record below `spans_from`. Rules run on the text after
+read starts inside vim even when the switch left the ring, and a switch the
+cut split in two comes back whole as `history().lead`. It also keeps `ink`,
+the states rows were in before they were changed again, erased or let go
+(lazily: a row nobody returns to is read on screen), so a command line
+cleared off the screen still counts. **The screen has the terminal's
+`cols`** (xterm's autowrap: a wrapped row continues its logical line,
+cursor numbers clamped, at most `MAX_ROWS` rows, ink capped and fail-closed
+past it), and **a C0 control inside a sequence is executed and the sequence
+goes on**, as in xterm. `jarvis/v2/terminal_guard.py` (pure) **refuses the
+whole read** with exactly "possible credential in this output" — never what,
+where or which rule — for (1) a `secret_values()` value, or one from the
+terminal folder chain's `.env`, `.env.local` and `.env.*` files (not the
+`.example`/`.sample`/`.template` ones; read `O_NOFOLLOW|O_NONBLOCK`, regular
+files only, capped — a FIFO named `.env` used to hang the read), its base64
+at any alignment or its URL-encoding; (2) a format in
+`jarvis/credential_patterns.py` (one list; a private key's END footer too),
+or a read that starts inside a `BEGIN … PRIVATE KEY` block opened in the
+look-back and not closed there; (3) a secret-printing command
+(`SECRET_PRINTERS`/`READERS`/`SUBCOMMANDS`, one place; robust to whitespace,
+quoting, `sudo -k`, assignments and `x=env; $x`, paths, wrappers, the
+shell's own words — `then`/`do`/`else`/`elif`/`!`/`{`/`case … )`/`coproc` —
+leading and input redirections (`< .env cat`, `done < .env`), pipelines,
+subshells, `$(…)`/backticks/`<(…)` judged as command lines, `sh -c`, `ssh
+host cmd`, `git show HEAD:.env`, interpreters naming a credential file,
+`find -exec`/`xargs` readers and readers of `$f`/`{}` on a line that names
+one, and `.env.*` — beyond v1's `is_protected`, inside the guard only): a
+real span overlapping the read (or one that backgrounds a printer), **and
+always the text** — any screen or `ink` line in the read or the `LOOKBACK`
+(32 KiB) before it that shows such a command after a prompt (or, on a line
+naming a credential file, starting at a reader's name), raised only to a
+boundary the signed marks prove and never by a span record below
+`spans_from`. **Every scan is linear** (2026-10-10 review): lines are read to
+`LINE_SCAN`, at most 16 candidates of 512 characters a line, the heuristic
+in one pass, the command cache bounded by size; a 1 MiB ring of adversarial
+shapes is judged in well under 2 s (`Speed` in `terminal_text_check`). Rules run on the text after
 `strip_invisible`, so a zero-width character cannot split a key past them.
 The heuristic **withholds lines** (a keyword, then within 40 characters past
 `=`/`:`/space a ≥20-character token of entropy ≥ 3 that is not a path, dotted
 name or joined words; a bare hash or UUID stays) and says `[N line(s)
-withheld: possible secret]`. The switch off refuses by name. **Every read
-that reaches a terminal publishes `terminal_read` with exactly
-`{terminal_id, lines, at, refused}`**, and the terminal's bar says "Jarvis
+withheld: possible secret]`. The switch off refuses by name — checked again after the render, so turning
+it off mid-read refuses. **Every read that reaches a terminal publishes
+`terminal_read` with exactly `{terminal_id, lines, at, refused}`**, and the terminal's bar says "Jarvis
 read 200 lines · 15:42" / "refused a read · 15:42" (`TermManager.reads`,
 `parseRead`; HUD chrome only). **Who holds it** (the holder decision): the
 fast path only, and only for an owner's chat turn **the HUD's own window
@@ -764,10 +789,16 @@ a workflow, a goal, an attended task or any v1 surface —
 `tools.EXPLICIT_ONLY` keeps it out of `default_names()`. **jarvis-mcp does not
 offer it**: it is a separate process with no channel to the daemon's
 terminals and no way to tell a chat from a task worker (the peers plan's
-per-session tokens have not landed), so it fails closed. The guard modules
-and the tool are SELF_PROTECTED. **The limit**: a secret with no shape and no
-keyword beside it, or one printed in pieces or otherwise encoded, is not
-caught; the switch and the note are the backstops. Free suites:
+per-session tokens have not landed), so it fails closed. **The owner
+confirmed both limits (2026-10-10): fast-path desk turns only for now;
+Claude and Codex chats via jarvis-mcp are a follow-up; Discord, DM and
+scheduled turns never.** The guard modules and the tool are SELF_PROTECTED.
+Where read text goes: what `terminal_read` returns goes where any tool result goes — the fast-path transcript (and so OpenRouter, with every later request), that conversation's v1 session `messages.json`, `config.SPILL_DIR` if context truncation cuts it later, and anything the model's reply repeats (a reply is mirrored to the chat's Discord thread and spoken). **The limit**: a secret with no
+shape and no keyword beside it, or one printed in pieces or otherwise
+encoded, is not caught; rule 3 judges command lines by shape, so an alias, a
+shell function, a script or a symlink that prints a secret is invisible to it
+(its output still meets rules 1 and 2 and the heuristic); the switch and the
+note are the backstops. Free suites:
 `tests/v2/terminal_text_check.py` (pure), `tests/v2/terminal_read_check.py`
 (real PTY, the fake shell's new `hex` command, holders, fast-path turns), the
 updated `terminal_check` (no-tool, the reader only reads, the bus record),
@@ -781,6 +812,7 @@ the desk, skip the `readable` check, the tool skipping its desk check, any
 HUD-route message counting as the desk, a Discord steer leaving the desk on,
 `EXPLICIT_ONLY` not honoured, rules before `strip_invisible`, no base64
 forms, no folder `.env` values, and `ink` forgetting cleared lines.
+REVIEW_MUTATIONS_PLACEHOLDER
 
 **Input bar declutter (2026-10-10, PR #29; ported onto WP-B and reviewed the
 same day).** The bar is `📎 [box] ⬆` over one row, `in: project · provider ▾ ·
