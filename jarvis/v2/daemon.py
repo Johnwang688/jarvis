@@ -2179,6 +2179,13 @@ def main() -> int:
         daemon.runner.serve()                   # idempotent if Discord served it
         purger.start()
         LOG.info("Jarvis v2 listening on 127.0.0.1:%s", daemon.port)
+        from .hud_api import hud_build_id
+        served = hud_build_id()
+        if served is None:
+            LOG.warning("No HUD is installed in %s: the window will say so. Run `jarvis hud install`.",
+                        config.HUD_DIR)
+        else:
+            LOG.info("HUD build served: %s", served)
         claude_cli = _cli_status(daemon.providers.get(ProviderName.CLAUDE))
         if claude_cli is not None:
             # Once, at start-up: which `claude` every Claude session spawns.
