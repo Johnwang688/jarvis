@@ -439,18 +439,21 @@ def _dispatch(
 
     held = runtime.current_tools()
     entry = REGISTRY.get(name)
-    if entry is None and (held is not None or runtime.is_unconfined()):
-        listing = _names_listing(held if held is not None else default_names())
-        return ToolResult(f"Error: no tool named {_shown_name(name)}. Available: {listing}")
+    if entry is None and held is not None:
+        return ToolResult(
+            f"Error: no tool named {_shown_name(name)}. Available: {_names_listing(held)}"
+        )
 
     # The calling agent's toolset, checked before anything about the call is
     # read: a tool this agent does not hold must not get as far as parsing its
     # arguments, let alone the approver — and with no toolset bound at all,
-    # nothing runs (and no registry listing goes back). See _toolset_refusal.
+    # nothing runs and no registry listing goes back. See _toolset_refusal.
     refused = _toolset_refusal(name)
     if refused is not None:
         return ToolResult(refused)
-    assert entry is not None  # an unknown name was answered above
+    if entry is None:  # unconfined(): a script, told what there is
+        visible = ", ".join(sorted(default_names()))
+        return ToolResult(f"Error: no tool named {_shown_name(name)}. Available: {visible}")
 
     try:
         arguments = json.loads(raw_arguments or "{}")
