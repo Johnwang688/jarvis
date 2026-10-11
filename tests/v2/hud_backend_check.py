@@ -349,7 +349,10 @@ class Backend(unittest.TestCase):
         # and a link: none is served.
         os.chmod(second.path / "assets", 0o755)
         os.chmod(second.path / "assets" / "app2.js", 0o644)
-        (second.path / "assets" / "app2.js").write_text("fetch('/approvals')")
+        # The same size as what the manifest vouches for, so only the SHA-256
+        # can refuse it (review of PR #44, MED-1).
+        self.assertEqual(len("console.log('XYZ')"), len("console.log('two')"))
+        (second.path / "assets" / "app2.js").write_text("console.log('XYZ')")
         self.request("GET", "/assets/app2.js", status=404)
         (second.path / "assets" / "planted.js").write_text("approve()")
         self.request("GET", "/assets/planted.js", status=404)
@@ -358,6 +361,33 @@ class Backend(unittest.TestCase):
         (second.path / "assets" / "linked.js").symlink_to(outside)
         self.request("GET", "/assets/linked.js", status=404)
         self.assertNotEqual(first.id, second.id)
+        status = self.request("GET", "/status")
+        self.assertEqual((status["hud_build"], status["hud_state"]), (second.id, "installed"))
+        # Review of PR #44, L1: the newest build's page failing verification
+        # falls back to the newest intact one, and /status says what is
+        # actually served; with none intact the page says so — not "not
+        # installed" — and /status agrees.
+        os.chmod(second.path, 0o755)
+        os.chmod(second.path / "index.html", 0o644)
+        (second.path / "index.html").write_text("built HUD, SECOND")       # same size
+        self.assertEqual(self.request("GET", "/"), b"built HUD", "the newest intact build")
+        self.assertEqual(self.request("GET", "/status")["hud_build"], first.id)
+        os.chmod(first.path, 0o755)
+        os.chmod(first.path / "index.html", 0o644)
+        (first.path / "index.html").write_text("built HUX")
+        conn = http.client.HTTPConnection("127.0.0.1", self.daemon.face_port, timeout=5)
+        try:
+            conn.request("GET", "/")
+            response = conn.getresponse()
+            page = response.read()
+        finally:
+            conn.close()
+        self.assertEqual(response.status, 503, page)
+        self.assertIn(b"failed verification", page)
+        self.assertNotIn(b"not installed", page)
+        status = self.request("GET", "/status")
+        self.assertEqual((status["hud_build"], status["hud_git_head"], status["hud_state"]),
+                         (None, None, "failed verification"))
         preview = self.daemon.workshop_port
         prefix = f"/p/{self.project.id}/"
         self.assertEqual(self.request("GET", prefix + "hello.txt", port=preview), b"hello\n")

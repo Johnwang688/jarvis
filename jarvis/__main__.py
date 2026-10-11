@@ -366,7 +366,7 @@ def cmd_hud(args) -> int:
     from .v2 import hud_install
     from .v2.daemon import is_running
     if getattr(args, "action", "open") == "install":
-        return hud_install.main()
+        return hud_install.main(allow_dirty=bool(getattr(args, "allow_dirty", False)))
     if not config.HUD_DEV and hud_install.newest(config.HUD_DIR) is None:
         console.print("[yellow]No HUD is installed, so the window will say so. "
                       "Run `jarvis hud install` first.[/yellow]")
@@ -878,6 +878,8 @@ def main() -> int:
     hud.add_argument("action", nargs="?", choices=["open", "install"], default="open",
                      help="install: build hud/ and install it where the daemon serves it from")
     hud.add_argument("--no-window", action="store_true", help="start the daemon without opening a browser")
+    hud.add_argument("--allow-dirty", action="store_true",
+                     help="install: build even with uncommitted changes under hud/")
     hud.set_defaults(func=cmd_hud)
 
     sub.add_parser("daemon2", help="v2 daemon and local API").set_defaults(func=cmd_daemon2)

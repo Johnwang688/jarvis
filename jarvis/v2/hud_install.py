@@ -48,7 +48,6 @@ import shutil
 import stat
 import subprocess
 import tempfile
-import threading
 import time
 
 from jarvis import config
@@ -76,6 +75,8 @@ class Build:
     id: str
     path: Path
     files: dict           # posix relative path -> (sha256, size)
+    git_head: str | None = None     # the checkout's HEAD when it was installed
+    dirty: bool | None = None       # whether hud/ had uncommitted changes then
 
 
 # -- the install root ---------------------------------------------------------------
@@ -130,6 +131,14 @@ def root_refusal(root) -> str | None:
 
 def _read_regular(path: Path, cap: int) -> bytes:
     """A regular file's bytes, never through a link at the last component."""
+    return _read_with_stat(path, cap)[0]
+
+
+def _read_with_stat(path: Path, cap: int) -> tuple[bytes, os.stat_result]:
+    """`_read_regular`, with the fstat of the very descriptor read — so what
+    is cached as verified is the file whose bytes were hashed, never a file
+    renamed into place between a read and a separate stat (review of PR #44,
+    L3)."""
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0))
     try:
         info = os.fstat(fd)
@@ -146,7 +155,7 @@ def _read_regular(path: Path, cap: int) -> bytes:
             if total > cap:
                 raise InstallRefused(f"{path} is larger than {cap} bytes")
             chunks.append(chunk)
-        return b"".join(chunks)
+        return b"".join(chunks), info
     finally:
         os.close(fd)
 
@@ -320,13 +329,20 @@ def builds(root) -> list[str]:
 
 def load(root, name: str) -> Build | None:
     """One build's manifest, checked; None if it is missing or malformed."""
-    path = Path(root) / name
     try:
-        if not _BUILD.match(name) or not stat.S_ISDIR(os.lstat(path).st_mode):
-            return None
-        raw = json.loads(_read_regular(path / MANIFEST, MANIFEST_CAP))
-    except (OSError, ValueError, InstallRefused):
+        return _load(Path(root) / name, name)
+    except Exception:     # noqa: BLE001 — a manifest is never why a request or a start fails
+        # Anything at all — a manifest of 200,000 `[` overflowing the JSON
+        # parser's recursion (review of PR #44, L2), a file past the cap, a
+        # read error — means "malformed, ignored", never an exception out of
+        # the routes or the daemon's start-up.
         return None
+
+
+def _load(path: Path, name: str) -> Build | None:
+    if not _BUILD.match(name) or not stat.S_ISDIR(os.lstat(path).st_mode):
+        return None
+    raw = json.loads(_read_regular(path / MANIFEST, MANIFEST_CAP))
     if not isinstance(raw, dict) or raw.get("format") != FORMAT or raw.get("build") != name:
         return None
     listed = raw.get("files")
@@ -341,29 +357,55 @@ def load(root, name: str) -> Build | None:
         if not isinstance(sha, str) or not _SHA.match(sha) or type(size) is not int or size < 0:
             return None
         files[rel] = (sha, size)
-    return Build(name, path, files)
+    head = raw.get("git_head")
+    dirty = raw.get("dirty")
+    return Build(name, path, files,
+                 head if isinstance(head, str) and re.fullmatch(r"[0-9a-f]{40,64}", head) else None,
+                 dirty if isinstance(dirty, bool) else None)
 
 
 def newest(root) -> Build | None:
-    """The build the daemon serves: the newest one whose manifest reads."""
+    """The build the daemon serves: the newest **intact** one — its manifest
+    reads and its `index.html` still matches it. A newer build whose page
+    fails verification is passed over for the one before it, never answered
+    with "not installed" while `/status` names the broken one (review of PR
+    #44, L1)."""
     if root_refusal(root):
         return None
     for name in builds(root):
         built = load(root, name)
-        if built is not None:
+        if built is not None and read(built, "index.html") is not None:
             return built
     return None
 
 
-_verified: dict[tuple, bool] = {}
-_verified_lock = threading.Lock()
+def state(root) -> tuple[Build | None, str]:
+    """What `GET /` can serve: (the build, "installed"), or (None, why not) —
+    "not installed" (no build), "failed verification" (builds, none intact)
+    or "refused: …" (the install root itself is not acceptable)."""
+    try:
+        why = root_refusal(root)
+        if why:
+            return None, f"refused: {why}"
+        built = newest(root)
+        if built is not None:
+            return built, "installed"
+        return None, ("failed verification" if builds(root) else "not installed")
+    except Exception:     # noqa: BLE001 — never why a request or a start fails
+        LOG.warning("could not read the installed HUD in %s", root, exc_info=True)
+        return None, "failed verification"
 
 
 def read(built: Build, rel: str) -> bytes | None:
     """A file of `built`, only if its manifest lists it and it still matches.
 
     No link is followed anywhere inside the build; a file whose size or
-    SHA-256 differs from the manifest is refused (and logged)."""
+    SHA-256 differs from the manifest is refused (and logged). **Hashed on
+    every read, never cached** (review of PR #44, MED-1): a cache keyed on
+    the file's stat let a same-size rewrite inside one timestamp tick (Linux
+    stamps files from a coarse clock) be served as verified. The size comes
+    from the fstat of the descriptor read (L3). A whole HUD is a few MB, so
+    a reload costs milliseconds."""
     meta = built.files.get(rel)
     if meta is None:
         return None
@@ -372,21 +414,11 @@ def read(built: Build, rel: str) -> bytes | None:
         LOG.warning("HUD build %s: %s goes through a link; refused", built.id, rel)
         return None
     try:
-        data = _read_regular(path, FILE_CAP)
-        info = os.stat(path, follow_symlinks=False)
+        data, info = _read_with_stat(path, FILE_CAP)
     except (OSError, InstallRefused):
         return None
     sha, size = meta
-    key = (str(path), info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns, sha)
-    with _verified_lock:
-        known = _verified.get(key)
-    if known is None:
-        known = len(data) == size and hashlib.sha256(data).hexdigest() == sha
-        with _verified_lock:
-            if len(_verified) > 4096:
-                _verified.clear()
-            _verified[key] = known
-    if not known or len(data) != size:
+    if info.st_size != size or len(data) != size or hashlib.sha256(data).hexdigest() != sha:
         LOG.warning("HUD build %s: %s does not match its manifest; refused", built.id, rel)
         return None
     return data
@@ -394,28 +426,45 @@ def read(built: Build, rel: str) -> bytes | None:
 
 def find(root, rel: str) -> bytes | None:
     """An asset from the newest build, else from an older kept build that has it."""
-    if root_refusal(root):
-        return None
-    for name in builds(root):
-        built = load(root, name)
-        if built is not None and rel in built.files:
-            data = read(built, rel)
-            if data is not None:
-                return data
+    try:
+        if root_refusal(root):
+            return None
+        for name in builds(root):
+            built = load(root, name)
+            if built is not None and rel in built.files:
+                data = read(built, rel)
+                if data is not None:
+                    return data
+    except Exception:     # noqa: BLE001 — a bad build is a 404, never a 500
+        LOG.warning("could not read %s from the installed HUD", rel, exc_info=True)
     return None
 
 
 # -- the CLI -------------------------------------------------------------------------
 
 
-def _git_head() -> str | None:
+def _git(*args: str) -> subprocess.CompletedProcess | None:
     try:
-        out = subprocess.run(["git", "-C", str(config.REPO_ROOT), "rev-parse", "HEAD"],
-                             capture_output=True, text=True, timeout=10, stdin=subprocess.DEVNULL)
+        return subprocess.run(["git", "-C", str(config.REPO_ROOT), *args], capture_output=True,
+                              text=True, timeout=20, stdin=subprocess.DEVNULL)
     except (OSError, subprocess.SubprocessError):
         return None
-    head = out.stdout.strip()
-    return head if out.returncode == 0 and re.fullmatch(r"[0-9a-f]{40,64}", head) else None
+
+
+def git_head() -> str | None:
+    """The checkout's HEAD commit, or None when it cannot be read."""
+    out = _git("rev-parse", "HEAD")
+    head = out.stdout.strip() if out is not None else ""
+    return head if out is not None and out.returncode == 0 and re.fullmatch(r"[0-9a-f]{40,64}", head) else None
+
+
+def hud_dirty() -> bool | None:
+    """Whether `hud/` has uncommitted changes (`git status --porcelain -- hud`),
+    or None when git cannot say."""
+    out = _git("status", "--porcelain", "--", "hud")
+    if out is None or out.returncode != 0:
+        return None
+    return bool(out.stdout.strip())
 
 
 def npm_build() -> None:
@@ -431,19 +480,34 @@ def npm_build() -> None:
         raise InstallRefused(f"`npm run build` failed (exit {result.returncode}); nothing was installed")
 
 
-def main(*, build=npm_build, out=print) -> int:
-    """`jarvis hud install`: build the HUD and install it for the daemon to serve."""
+def main(*, build=npm_build, out=print, allow_dirty: bool = False) -> int:
+    """`jarvis hud install`: build the HUD and install it for the daemon to serve.
+
+    Refuses uncommitted changes under `hud/` unless `allow_dirty` (review of
+    PR #44, L5): Jarvis's own chats leave edits in the main checkout, and an
+    install is the owner accepting what will run in the approval window — so
+    it installs what is committed, and says so in the manifest (`git_head`,
+    `dirty`)."""
     root = Path(config.HUD_DIR)
     try:
         why = root_refusal(root)
         if why:
             raise InstallRefused(why)
+        dirty = hud_dirty()
+        if dirty is None and not allow_dirty:
+            raise InstallRefused("git cannot say whether hud/ has uncommitted changes; "
+                                 "run from a git checkout, or pass --allow-dirty")
+        if dirty and not allow_dirty:
+            raise InstallRefused("hud/ has uncommitted changes (`git status -- hud`); commit or "
+                                 "stash them, or pass --allow-dirty to install them anyway")
         build()
-        installed = install(config.HUD_BUILD, root, note={"git_head": _git_head()})
+        installed = install(config.HUD_BUILD, root, note={"git_head": git_head(), "dirty": dirty})
     except InstallRefused as exc:
         out(f"jarvis hud install: refused: {exc}")
         return 1
-    out(f"Installed HUD build {installed.id} ({len(installed.files)} files) in {installed.path}.")
+    out(f"Installed HUD build {installed.id} ({len(installed.files)} files) in {installed.path}"
+        + (f", from {installed.git_head[:12]}" if installed.git_head else "")
+        + (" with uncommitted changes in hud/" if installed.dirty else "") + ".")
     if config.HUD_DEV:
         out("Note: JARVIS_HUD_DEV=1 is set here, so a daemon started from this shell would "
             "serve hud/dist, not this install.")

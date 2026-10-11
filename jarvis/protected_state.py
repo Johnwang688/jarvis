@@ -83,6 +83,37 @@ def protected_paths() -> set[Path]:
     return _protected_state()
 
 
+def hud_trees() -> set[Path]:
+    """The installed HUD's folders (`files._hud_roots`: the install root, and
+    `hud/dist` under JARVIS_HUD_DEV=1). Not files but trees: a command that
+    writes anything at or below one — `cp`, `rsync`, a redirect — is **asked**
+    (review of PR #44, MED-2), the same way an uncertain gate-state write is;
+    the write tools refuse it outright. Empty when a root cannot be resolved —
+    the write tools refuse then, and a shell write is not the boundary."""
+    from .tools.files import _hud_roots
+
+    try:
+        return _hud_roots()
+    except (OSError, RuntimeError):
+        return set()
+
+
+def _in_tree(text: str, trees: set[Path]) -> Path | None:
+    """The HUD tree `text` lies in (or is), or one it holds within two levels
+    (`rm -rf ~/.local/share/jarvis`), else None."""
+    if not trees:
+        return None
+    if _GLOB.search(text):
+        text = str(Path(*[p for p in Path(text).parts if not _GLOB.search(p)] or ["."]))
+    resolved = _resolve(text)
+    for tree in trees:
+        if resolved == tree or tree in resolved.parents:
+            return tree
+        if resolved in tree.parents and len(tree.relative_to(resolved).parts) <= 2:
+            return tree
+    return None
+
+
 # --- how a command relates to a path ------------------------------------------
 
 # Stems whose ordinary use writes, moves, links, deletes or re-permissions the
@@ -183,6 +214,7 @@ class Touch:
     certain: bool
     why: str
     opaque: bool = False
+    hud: bool = False              # inside the installed HUD's tree (always uncertain: asks)
 
     @property
     def name(self) -> str:
@@ -670,6 +702,9 @@ def _segment(segment: str, state: _State, protected: set[Path], ids: dict,
         hit = _exact(text, protected, ids)
         if hit is not None:
             seen.touches.append(Touch(hit, True, f"a redirect onto {hit.name}"))
+        tree = _in_tree(text, hud_trees())
+        if tree is not None:
+            seen.touches.append(Touch(tree, False, f"a redirect into {text}", hud=True))
 
     # A shell handed a string is a command line in its own right — from `-c`
     # (in any cluster), `eval`, or a here-string on its standard input.
@@ -766,6 +801,10 @@ def _segment(segment: str, state: _State, protected: set[Path], ids: dict,
         hit = _exact(text, protected, ids)
         if hit is not None:
             seen.touches.append(Touch(hit, kind == "writer", f"{stem} on {hit.name}"))
+            continue
+        tree = _in_tree(text, hud_trees())
+        if tree is not None and kind != "reader":
+            seen.touches.append(Touch(tree, False, f"{stem} on {text}", hud=True))
             continue
         others = [o for o in everyone if o is not operand]
         other_names = {rules._basename(o.rstrip("/")) for o in others}
@@ -930,9 +969,149 @@ def refusal(touch: Touch) -> str:
 
 
 def ask_reason(touch: Touch) -> str:
+    if touch.hud:
+        return (f"{touch.why}: {touch.path} holds the installed HUD, the code the "
+                "approval window runs, so this never runs unasked and no allowlist "
+                "entry covers it; `jarvis hud install` is how a build gets there")
     if touch.opaque:
         return (f"this line is too complex to judge ({touch.why}), so whether it "
                 "writes Jarvis's own configuration cannot be told; it never runs "
                 "unasked and no allowlist entry covers it")
     return (f"{touch.why}: {touch.name} is Jarvis's own configuration, so this "
             "never runs unasked and no allowlist entry covers it")
+
+
+# --- the installed HUD's one writer (decision C-1; review of PR #44, MED-2) --------
+#
+# `jarvis hud install` is the one thing that writes the installed HUD, the code
+# the approval window runs. The owner and the lead run it from their own
+# shells, outside Jarvis's gate, so refusing it to Jarvis costs nothing — and
+# letting an agent run it would undo C-1: `hud/src` is writable, so an agent
+# could edit the source and install it. **DENY, never asked**, in every
+# spelling this can see, through this one detector: `rules.decide` asks it
+# (so v1's `static_verdict`/`command_verdict` and v2's layer 1, which both
+# start from `rules.decide`, refuse it) and `run_command` refuses it even with
+# no approver. Not a boundary, as everything in this module: a Makefile, an
+# alias, a script file or a module name built at run time is not seen.
+
+_JARVIS_MODULES = frozenset({"jarvis", "jarvis.__main__"})
+_INSTALLER_MODULE = "jarvis.v2.hud_install"
+# Inline source that reaches the installer by name: the module, an import of
+# it, a call on it, or the CLI's own entry handed `hud`, `install`.
+_INSTALL_SOURCE = re.compile(
+    r"jarvis\s*\.\s*v2\s*\.\s*hud_install\b"
+    r"|\bimport\s+(?:[\w.]+\s*,\s*)*hud_install\b"
+    r"|\bhud_install\s*\.\s*(?:main|install|npm_build|prune)\b"
+    r"|\bcmd_hud\s*\("
+    r"|['\"]hud['\"]\s*,\s*['\"]install['\"]")
+_PYTHON = re.compile(r"python[0-9.]*|pypy[0-9.]*")
+_INSTALL_DEPTH = 4
+
+
+def _launches_jarvis(tokens: list[str], k: int, state: _State) -> int | None:
+    """If `tokens[k]` starts a run of the jarvis CLI, the index after it."""
+    token = tokens[k]
+    # `J=jarvis; $J hud install`: the line's own assignments, as text.
+    word = re.sub(r"\$\{?(\w+)\}?",
+                  lambda m: state.variables.get(m.group(1), os.environ.get(m.group(1), "")), token)
+    if rules._basename(word) in ("jarvis", "jarvis.exe"):
+        return k + 1
+    if token == "-m" and k + 1 < len(tokens) and tokens[k + 1] in _JARVIS_MODULES:
+        return k + 2
+    if token.startswith("-m") and token[2:] in _JARVIS_MODULES:
+        return k + 1
+    return None
+
+
+def _cli_install(tokens: list[str], state: _State) -> bool:
+    """`jarvis … hud … install` anywhere among a command's words — behind
+    `env`, `nohup`, `timeout`, `uv run`, `systemd-run`, `ssh host`, a venv's
+    `bin/jarvis` or `python -m jarvis`. Options may sit between the words, as
+    argparse allows."""
+    for k in range(len(tokens)):
+        after = _launches_jarvis(tokens, k, state)
+        if after is None:
+            continue
+        rest = [t for t in tokens[after:] if not t.startswith("-")]
+        if rest[:2] == ["hud", "install"]:
+            return True
+    return False
+
+
+def _python_install(tokens: list[str], segment: str) -> bool:
+    """A Python run of the installer module: `-m jarvis.v2.hud_install`, the
+    file itself, or inline source that names it."""
+    if not any(_PYTHON.fullmatch(rules._basename(t)) for t in tokens):
+        return False
+    for k, token in enumerate(tokens):
+        if token == "-m" and k + 1 < len(tokens) and tokens[k + 1] == _INSTALLER_MODULE:
+            return True
+        if token == "-m" + _INSTALLER_MODULE or rules._basename(token) == "hud_install.py":
+            return True
+    source = " ".join(tokens) + " " + " ".join(_here_strings(segment))
+    return bool(_INSTALL_SOURCE.search(source))
+
+
+def _install_line(command: str, state: _State, depth: int) -> bool:
+    command = _ansi_c(rules.join_continuations(command))
+    if depth < _INSTALL_DEPTH:
+        inner, _ = _substitutions(command, _MAX_SPANS)
+        if any(_install_line(text, _State(state.cwd, dict(state.variables)), depth + 1)
+               for text in inner):
+            return True
+    segments = rules.segments(command)
+    for segment in segments:
+        segment = _strip_comment(segment)
+        words_only = rules.strip_redirections(segment)
+        try:
+            raw = shlex.split(words_only)
+        except ValueError:
+            raw = words_only.split()
+        raw = _strip_closers(raw)
+        if not raw:
+            continue
+        words = raw[1:] if raw[0] in ("export", "declare", "local", "readonly") else raw
+        if words and all(re.fullmatch(r"[A-Za-z_]\w*=.*", w) for w in words):
+            for word in words:
+                name, value = word.split("=", 1)
+                state.variables[name] = value
+            continue
+        tokens, _ = _peel(raw, state)
+        if not tokens:
+            continue
+        if _cli_install(tokens, state) or _python_install(tokens, segment):
+            return True
+        stem = rules._basename(tokens[0])
+        # A shell handed a string, or a shell behind a wrapper this module
+        # does not know (`flock L bash -lc …`): its string is a command line.
+        at = 0 if stem in _SHELLS else next(
+            (k for k, t in enumerate(tokens[1:], 1) if rules._basename(t) in _SHELLS), None)
+        if at is not None and depth < _INSTALL_DEPTH:
+            strings, stdin = _shell_strings(tokens[at:])
+            if stdin:
+                strings += _here_strings(segment)
+            if any(_install_line(text, _State(state.cwd, dict(state.variables)), depth + 1)
+                   for text in strings):
+                return True
+    # Source fed to an interpreter on stdin spreads over the here-document's
+    # lines, which `rules.segments` splits apart: judge the whole line once.
+    if any(_PYTHON.fullmatch(rules._basename(w)) for w in re.findall(r"[\w./-]+", command)):
+        if _INSTALL_SOURCE.search(command):
+            return True
+    return False
+
+
+def installs_hud(command: str, cwd: str | Path | None = None) -> str | None:
+    """Why this line runs the HUD installer, or None — a refusal, never an ask."""
+    if not command or not command.strip():
+        return None
+    base = None
+    if cwd is not None:
+        base = Path(os.path.expanduser(str(cwd)))
+        if not base.is_absolute():
+            base = None
+    if not _install_line(command, _State(base), 0):
+        return None
+    return ("this runs `jarvis hud install`, which writes the installed HUD — the "
+            "code the approval window runs. Only the owner or the lead runs it, from "
+            "their own shell (decision C-1); Jarvis never does, asked or not")

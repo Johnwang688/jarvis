@@ -77,8 +77,17 @@ class Base(unittest.TestCase):
         self.addCleanup(lambda: (writable(self.tmp), __import__("shutil").rmtree(self.tmp)))
         self.root = self.tmp / "share" / "jarvis" / "hud"
         self.dist = make_dist(self.tmp / "dist")
+        # A checkout of its own, so "is hud/ dirty" and "which commit" are
+        # this test's, never the worktree it runs from.
+        self.repo = self.tmp / "repo"
+        (self.repo / "hud" / "src").mkdir(parents=True)
+        (self.repo / "hud" / "src" / "main.tsx").write_text("export {}\n")
+        for args in (("init", "-q"), ("config", "user.email", "t@example.invalid"),
+                     ("config", "user.name", "Test"), ("add", "."), ("commit", "-qm", "base")):
+            subprocess.run(["git", "-C", str(self.repo), *args], check=True, capture_output=True,
+                           stdin=subprocess.DEVNULL)
         for name, value in dict(HUD_DIR=self.root, HUD_DIST=self.root, HUD_DEV=False,
-                                HUD_BUILD=self.dist).items():
+                                HUD_BUILD=self.dist, REPO_ROOT=self.repo).items():
             guard = patch.object(config, name, value)
             guard.start()
             self.addCleanup(guard.stop)
@@ -158,8 +167,13 @@ class Serving(Base):
         self.poke("assets/index-1a2b.js", b"fetch('/approvals')")
         self.assertIsNone(I.read(self.built, "assets/index-1a2b.js"))
         self.assertIsNone(I.find(self.root, "assets/index-1a2b.js"))
-        self.poke("assets/index-1a2b.js", b"console.log('HU')")      # same size, other bytes
+        # The same size, other bytes: only the SHA-256 can tell (review of
+        # PR #44, MED-1 — a shorter tamper was caught by the size alone).
+        same = b"console.log('XYZ')"
+        self.assertEqual(len(same), self.built.files["assets/index-1a2b.js"][1])
+        self.poke("assets/index-1a2b.js", same)
         self.assertIsNone(I.read(self.built, "assets/index-1a2b.js"))
+        self.assertIsNone(I.find(self.root, "assets/index-1a2b.js"))
 
     def test_an_unlisted_file_is_never_served(self):
         os.chmod(self.built.path / "assets", 0o755)
@@ -193,6 +207,56 @@ class Serving(Base):
         self.assertEqual(I.newest(self.root).id, self.built.id, "a malformed manifest skips the build")
         (fake / I.MANIFEST).write_text(json.dumps({"format": 1, "build": "other", "files": {}}))
         self.assertEqual(I.newest(self.root).id, self.built.id, "a manifest naming another build too")
+
+    def test_a_newer_build_whose_page_fails_is_passed_over(self):
+        # Review of PR #44, L1: it used to answer "not installed" while
+        # `/status` named the broken build.
+        (self.dist / "index.html").write_text("<title>J.A.R.V.I.S.</title> second")
+        second = I.install(self.dist, self.root, now=T0 + 1)
+        self.assertEqual(I.state(self.root)[0].id, second.id)
+        os.chmod(second.path, 0o755)
+        os.chmod(second.path / "index.html", 0o644)
+        (second.path / "index.html").write_text("<title>J.A.R.V.I.S.</title> SECOND")  # same size
+        built, state = I.state(self.root)
+        self.assertEqual((built.id, state), (self.built.id, "installed"), "the newest intact build")
+        self.assertEqual(I.newest(self.root).id, self.built.id)
+        os.chmod(self.built.path, 0o755)
+        os.chmod(self.built.path / "index.html", 0o644)
+        (self.built.path / "index.html").write_text("tampered")
+        self.assertEqual(I.state(self.root), (None, "failed verification"),
+                         "builds there, none intact: not 'not installed'")
+        empty = self.tmp / "empty-root"
+        empty.mkdir()
+        self.assertEqual(I.state(empty), (None, "not installed"))
+
+    def test_a_hostile_manifest_is_ignored_never_raised(self):
+        # Review of PR #44, L2: 200,000 `[` overflowed the JSON parser's
+        # recursion out of newest()/find() — every `/` a 409, and the
+        # daemon's start-up crashed into a restart loop.
+        for name, body in (("29991231T235959999999Z-0123456789ab", b"[" * 200_000),
+                           ("29991231T235959999998Z-0123456789ab", b" " * (I.MANIFEST_CAP + 1)),
+                           ("29991231T235959999997Z-0123456789ab", b'{"format": 1, "build": [}')):
+            folder = self.root / name
+            os.chmod(self.root, 0o755)
+            folder.mkdir()
+            (folder / I.MANIFEST).write_bytes(body)
+            (folder / "index.html").write_text("<title>evil</title>")
+            with self.subTest(name=name):
+                self.assertIsNone(I.load(self.root, name))
+        self.assertEqual(I.newest(self.root).id, self.built.id)
+        self.assertEqual(I.state(self.root)[0].id, self.built.id)
+        self.assertIsNotNone(I.find(self.root, "assets/index-1a2b.js"))
+        from jarvis.v2 import daemon as D, hud_api as HA
+        self.assertEqual(HA.hud_served()["build"], self.built.id)
+        D._log_hud_served()                      # never raises
+        with patch.object(I, "state", side_effect=RecursionError("deep")):
+            D._log_hud_served()                  # not even when reading the root does
+
+    def test_read_uses_the_descriptor_it_read(self):
+        # Review of PR #44, L3: no second stat — the fstat of the very fd
+        # whose bytes were hashed. With os.stat broken, read() still works.
+        with patch("os.stat", side_effect=OSError("no separate stat")):
+            self.assertIsNotNone(I.read(self.built, "assets/index-1a2b.js"))
 
     def test_a_symlinked_root_serves_nothing(self):
         moved = self.tmp / "moved"
@@ -229,8 +293,8 @@ class Refusals(Base):
     def test_other_bad_targets_are_refused(self):
         self.assertIn("absolute", I.root_refusal(Path("relative/hud")))
         self.assertIn("'..'", I.root_refusal(self.tmp / "a" / ".." / "hud"))
-        self.assertIn("repository", I.root_refusal(REPO / "hud" / "installed"))
-        self.assertIn("repository", I.root_refusal(REPO))
+        self.assertIn("repository", I.root_refusal(self.repo / "hud" / "installed"))
+        self.assertIn("repository", I.root_refusal(self.repo))
         a_file = self.tmp / "a-file"
         a_file.write_text("x")
         self.assertIn("not a folder", I.root_refusal(a_file))
@@ -302,11 +366,54 @@ class Cli(Base):
         self.assertIn("npm run build", out)
         self.assertEqual(I.builds(self.root), [])
 
+    def test_uncommitted_hud_changes_are_refused_unless_allowed(self):
+        # Review of PR #44, L5: Jarvis's chats leave edits in the checkout.
+        (self.repo / "hud" / "src" / "main.tsx").write_text("export const planted = 1\n")
+        calls = []
+        code, out = self.run_main(lambda: calls.append("built"))
+        self.assertEqual(code, 1)
+        self.assertIn("uncommitted changes", out)
+        self.assertEqual(calls, [], "nothing is built from a dirty hud/")
+        self.assertEqual(I.builds(self.root), [])
+        (self.repo / "hud" / "src" / "new.ts").write_text("x\n")          # untracked counts too
+        out_lines: list[str] = []
+        self.assertEqual(I.main(build=lambda: None, out=out_lines.append, allow_dirty=True), 0)
+        built = I.newest(self.root)
+        self.assertIs(built.dirty, True)
+        self.assertIn("uncommitted", "\n".join(out_lines))
+        # Changes outside hud/ do not count.
+        subprocess.run(["git", "-C", str(self.repo), "checkout", "-q", "--", "hud"], check=True)
+        (self.repo / "hud" / "src" / "new.ts").unlink()
+        (self.repo / "README.md").write_text("elsewhere\n")
+        code, out = self.run_main()
+        self.assertEqual(code, 0, out)
+
+    def test_the_manifest_records_the_commit_and_a_clean_tree(self):
+        head = subprocess.run(["git", "-C", str(self.repo), "rev-parse", "HEAD"], capture_output=True,
+                              text=True, check=True).stdout.strip()
+        code, out = self.run_main()
+        self.assertEqual(code, 0, out)
+        built = I.newest(self.root)
+        self.assertEqual((built.git_head, built.dirty), (head, False))
+        manifest = json.loads((built.path / I.MANIFEST).read_text())
+        self.assertEqual((manifest["git_head"], manifest["dirty"]), (head, False))
+        self.assertIn(head[:12], out)
+
     def test_jarvis_hud_install_dispatches_to_the_installer(self):
         from jarvis import __main__ as cli
         with patch.object(I, "main", return_value=7) as installer:
             self.assertEqual(cli.cmd_hud(SimpleNamespace(action="install", no_window=False)), 7)
-        installer.assert_called_once_with()
+            self.assertEqual(cli.cmd_hud(SimpleNamespace(action="install", no_window=False,
+                                                         allow_dirty=True)), 7)
+        self.assertEqual(installer.call_args_list[0].kwargs, {"allow_dirty": False})
+        self.assertEqual(installer.call_args_list[1].kwargs, {"allow_dirty": True})
+        # The owner's CLI still parses the command (MED-2 refuses it to Jarvis only).
+        out = subprocess.run([sys.executable, "-m", "jarvis", "hud", "--help"], cwd=str(REPO),
+                             capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL,
+                             env={**os.environ, "HOME": str(self.tmp / "home"), "PYTHONPATH": str(REPO)})
+        self.assertEqual(out.returncode, 0, out.stderr[-400:])
+        self.assertIn("install", out.stdout)
+        self.assertIn("--allow-dirty", out.stdout)
         source = (REPO / "jarvis" / "__main__.py").read_text()
         self.assertRegex(source, r'choices=\["open", "install"\]')
 
@@ -332,6 +439,99 @@ class Cli(Base):
         self.assertEqual(read(JARVIS_HUD_DEV="0")[3], False)
 
 
+class NoAgentInstall(Base):
+    """Review of PR #44, MED-2: `jarvis hud install` is the owner's and the
+    lead's, never Jarvis's — DENY in every spelling, through one detector
+    (`protected_state.installs_hud`, asked by `rules.decide`, so v1's gate and
+    v2's layer 1 alike) — and a shell write into the install root asks."""
+
+    INSTALLS = (
+        "jarvis hud install", "jarvis hud install --allow-dirty", "jarvis hud --no-window install",
+        "python -m jarvis hud install", "python3 -mjarvis hud install",
+        "/home/x/projects/Jarvis/.venv/bin/jarvis hud install", "~/.local/bin/jarvis hud install",
+        ".venv/bin/python -m jarvis.__main__ hud install", "python3 -m jarvis.v2.hud_install",
+        "python jarvis/v2/hud_install.py", "uv run jarvis hud install",
+        "uv run --directory /x python -m jarvis hud install",
+        "env JARVIS_HUD_DIR=/tmp/x nohup timeout 600 jarvis hud install",
+        "systemd-run --user --scope -q -- /x/.venv/bin/python -m jarvis hud install",
+        "bash -lc 'cd ~/projects/Jarvis && jarvis hud install'", 'sh -c "jarvis hud install"',
+        "flock /tmp/l bash -c 'jarvis hud install'", "eval jarvis hud install",
+        'env -S "jarvis hud install"', "J=jarvis; $J hud install", "echo $(jarvis hud install)",
+        "git pull && jarvis hud install", "jarvis \\\n hud install", "ssh localhost jarvis hud install",
+        'python -c "from jarvis.v2 import hud_install; hud_install.main()"',
+        "python3 - <<'EOF'\nfrom jarvis.v2 import hud_install\nhud_install.main()\nEOF",
+        'python -c "import jarvis.__main__ as m; m.main([\'hud\', \'install\'])"',
+    )
+    ORDINARY = (
+        "jarvis hud", "jarvis hud --no-window", "jarvis install hud", "cat jarvis/v2/hud_install.py",
+        "grep -n main jarvis/v2/hud_install.py", "python tests/v2/hud_install_check.py",
+        "python -m pytest tests/v2/hud_install_check.py", 'git commit -m "docs: jarvis hud install after merges"',
+        'echo "jarvis hud install"', "npm run build", "ls ~/.local/share/jarvis/hud",
+    )
+
+    def test_every_spelling_is_refused_and_never_asked(self):
+        from jarvis import permissions as P, rules
+        from jarvis import protected_state as S
+        for line in self.INSTALLS:
+            with self.subTest(line=line):
+                self.assertTrue(S.installs_hud(line), "the detector sees it")
+                self.assertEqual(rules.decide(line).decision, rules.DENY)
+                self.assertEqual(P.static_verdict(line).decision, rules.DENY)
+                self.assertEqual(P.command_verdict("run_command", {"command": line}).decision, rules.DENY)
+
+    def test_ordinary_lines_are_not_refused_for_it(self):
+        from jarvis import rules
+        from jarvis import protected_state as S
+        for line in self.ORDINARY:
+            with self.subTest(line=line):
+                self.assertIsNone(S.installs_hud(line))
+                self.assertNotEqual(rules.decide(line).decision, rules.DENY)
+
+    def test_run_command_refuses_it_even_with_no_approver(self):
+        from jarvis.tools import shell
+        ran = []
+        with patch.object(shell, "_run", side_effect=lambda c: ran.append(c) or "ran"):
+            out = shell.run_command("python -m jarvis hud install", reason="install the HUD")
+        self.assertIn("Refused", out)
+        self.assertEqual(ran, [])
+
+    def test_a_shell_write_into_the_install_root_asks(self):
+        from jarvis import permissions as P, rules
+        built = I.install(self.dist, self.root, now=T0)
+        for line in (f"cp /tmp/x.js {built.path}/assets/x.js", f"rsync -a /tmp/dist/ {self.root}/new/",
+                     f"echo pwned > {built.path}/index.html", f"mv /tmp/b {self.root}/b",
+                     f"rm -rf {self.root.parent}"):
+            with self.subTest(line=line):
+                verdict = P.static_verdict(line)
+                self.assertEqual(verdict.decision, rules.ASK, verdict)
+                self.assertIn("installed HUD", verdict.reason)
+        # Readers stay reads.
+        self.assertEqual(P.static_verdict(f"cat {built.path}/index.html").decision, rules.ALLOW)
+
+    def test_no_allowlist_entry_covers_a_write_into_it(self):
+        from jarvis import permissions as P
+        built = I.install(self.dist, self.root, now=T0)
+        allow = self.tmp / "allowlist.json"
+        allow.write_text(json.dumps([{"tool": "run_command", "prefix": "cp"},
+                                     {"tool": "run_command", "prefix": "jarvis"},
+                                     {"tool": "run_command", "prefix": "python"}]))
+        with patch.object(config, "ALLOWLIST_PATH", allow):
+            self.assertFalse(P.allows("run_command", {"command": f"cp /tmp/x {built.path}/x.js"}))
+            self.assertTrue(P.allows("run_command", {"command": "cp /tmp/a /tmp/b"}), "sanity")
+
+    def test_the_write_tools_refuse_the_install_root_in_dev_mode_too(self):
+        # Review of PR #44, L4: a process with JARVIS_HUD_DEV=1 serves
+        # hud/dist, and its tools used to leave the install root writable.
+        from jarvis.tools import files
+        dev_dist = self.tmp / "repo-dist"
+        dev_dist.mkdir()
+        with patch.object(config, "HUD_DEV", True), patch.object(config, "HUD_DIST", dev_dist):
+            for target in (self.root / "b" / "index.html", dev_dist / "index.html"):
+                with self.subTest(target=target):
+                    self.assertTrue(files._hud_build(target.resolve()))
+            self.assertFalse(files._hud_build((self.tmp / "elsewhere.js").resolve()))
+
+
 class NoLever(unittest.TestCase):
     def test_only_the_cli_and_the_daemon_read_side_import_the_installer(self):
         importers = []
@@ -341,10 +541,12 @@ class NoLever(unittest.TestCase):
             if re.search(r"import\s+hud_install\b|\bhud_install\s+import\b|import\s+[\w.]*\.hud_install\b",
                          path.read_text()):
                 importers.append(path.relative_to(REPO).as_posix())
-        self.assertEqual(importers, ["jarvis/__main__.py", "jarvis/v2/hud_api.py"], importers)
-        api = (REPO / "jarvis" / "v2" / "hud_api.py").read_text()
-        for writer in ("install(", "prune(", "main(", "npm_build("):
-            self.assertNotIn(f"hud_install.{writer}", api, "the daemon only reads builds")
+        self.assertEqual(importers, ["jarvis/__main__.py", "jarvis/v2/daemon.py", "jarvis/v2/hud_api.py"],
+                         importers)
+        for name in ("hud_api.py", "daemon.py"):
+            text = (REPO / "jarvis" / "v2" / name).read_text()
+            for writer in ("install(", "prune(", "main(", "npm_build("):
+                self.assertNotIn(f"hud_install.{writer}", text, f"{name} only reads builds")
 
     def test_no_registered_tool_reaches_it(self):
         from jarvis import tools

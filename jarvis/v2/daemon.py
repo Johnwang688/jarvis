@@ -338,11 +338,11 @@ class Daemon:
             cli = _cli_status(provider)
             if cli is not None:
                 providers[name.value]["cli"] = cli
-        from .hud_api import hud_build_id
+        from .hud_api import hud_served
         try:
-            hud_build = hud_build_id()
+            hud = hud_served()
         except Exception:
-            hud_build = None
+            hud = {"build": None, "git_head": None, "state": "failed verification"}
         with self._lock:
             return {"jarvis-daemon": True, "version": 2,
                     "uptime": time.monotonic() - self.started_at, "providers": providers,
@@ -367,8 +367,10 @@ class Daemon:
                         and getattr(self._server.RequestHandlerClass, "frame_hardened", False)),
                     # Which HUD `GET /` serves (decision C-1, ED-4): the
                     # installed build's id, "dev" under JARVIS_HUD_DEV=1, or
-                    # null when nothing is installed (`jarvis hud install`).
-                    "hud_build": hud_build}
+                    # null; the commit it was installed from; and why
+                    # nothing is served when nothing is (review of PR #44).
+                    "hud_build": hud["build"], "hud_git_head": hud.get("git_head"),
+                    "hud_state": hud["state"]}
 
     def require(self, store, object_id):
         if not isinstance(object_id, str) or not re.fullmatch(r"[0-9a-f]{8}", object_id):
@@ -2137,6 +2139,36 @@ def load_codex_catalog_at_start() -> bool:
     return bool(loaded)
 
 
+def _log_hud_served() -> None:
+    """Say at start-up which HUD is served, and warn when it is not today's
+    (review of PR #44, L6): dev mode, nothing installed or intact, or a
+    build installed from another commit than the checkout's — a forgotten
+    `jarvis hud install` reads as a warning, never as a silently old window.
+    Never raises: a bad install is not why the daemon fails to start (L2)."""
+    try:
+        from . import hud_install
+        from .hud_api import hud_served
+        served = hud_served()
+        if served["state"] == "dev":
+            LOG.warning("JARVIS_HUD_DEV=1: serving %s directly, not an installed build — "
+                        "the agent-writable build, for tests only", config.HUD_DIST)
+        elif served["build"] is None:
+            LOG.warning("No HUD is served from %s (%s): the window will say so. "
+                        "Run `jarvis hud install`.", config.HUD_DIR, served["state"])
+        else:
+            LOG.info("HUD build served: %s (from %s)", served["build"], served["git_head"] or "an unknown commit")
+            head = hud_install.git_head()
+            if head and served["git_head"] and head != served["git_head"]:
+                LOG.warning("The HUD served (%s) was installed from %s, but the checkout is at %s: "
+                            "run `jarvis hud install` if hud/ changed since.",
+                            served["build"], served["git_head"][:12], head[:12])
+            if served.get("dirty"):
+                LOG.warning("The HUD served (%s) was installed with uncommitted changes in hud/.",
+                            served["build"])
+    except Exception:     # noqa: BLE001
+        LOG.warning("could not tell which HUD is served", exc_info=True)
+
+
 def main() -> int:
     # Imported here, not at module scope: the hatch reads the daemon it is
     # given and nothing in the daemon needs it, so keeping the edge one-way
@@ -2182,13 +2214,7 @@ def main() -> int:
         daemon.runner.serve()                   # idempotent if Discord served it
         purger.start()
         LOG.info("Jarvis v2 listening on 127.0.0.1:%s", daemon.port)
-        from .hud_api import hud_build_id
-        served = hud_build_id()
-        if served is None:
-            LOG.warning("No HUD is installed in %s: the window will say so. Run `jarvis hud install`.",
-                        config.HUD_DIR)
-        else:
-            LOG.info("HUD build served: %s", served)
+        _log_hud_served()
         claude_cli = _cli_status(daemon.providers.get(ProviderName.CLAUDE))
         if claude_cli is not None:
             # Once, at start-up: which `claude` every Claude session spawns.

@@ -1639,6 +1639,17 @@ def decide(command: str) -> Verdict:
     if not command.strip():
         return Verdict(ASK, "empty command")
 
+    # The installed HUD's one writer, `jarvis hud install`, is the owner's and
+    # the lead's — never Jarvis's, asked or not (decision C-1; review of PR
+    # #44, MED-2: `python -m jarvis hud install` scored ALLOW here, and an
+    # agent that can edit `hud/src` could then install it). One detector, in
+    # `protected_state`, so v1's gate and v2's layer 1 — both of which start
+    # from this function — refuse every spelling it sees.
+    from . import protected_state
+    why = protected_state.installs_hud(command)
+    if why:
+        return Verdict(DENY, why)
+
     # Command substitution runs a command this function never sees. There is no
     # honest verdict except "a human should look".
     if has_substitution(command):

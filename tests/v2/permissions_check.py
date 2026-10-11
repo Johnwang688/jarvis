@@ -1084,6 +1084,33 @@ def installed_hud_deny_checks():
                    f"a write grant on {grant} would reach the installed HUD")
             eq(denied_grant(str(root), "read"), None, "reading it is not a lever")
             eq(denied_grant(str(built), "write"), None, "the build output itself is ordinary ground")
+
+            # Review of PR #44, MED-2: the installer is never Jarvis's to run
+            # (layer 1 DENY, never asked, under AUTO), and a shell write into
+            # the install root always asks (layer 2) — on main, every one of
+            # these was ALLOW under AUTO.
+            for line in ("jarvis hud install", "python -m jarvis hud install",
+                         "/repo/.venv/bin/jarvis hud install --allow-dirty",
+                         "uv run python -m jarvis hud install", "python3 -m jarvis.v2.hud_install",
+                         "bash -lc 'jarvis hud install'", "env JARVIS_HUD_DIR=/tmp/x nohup jarvis hud install",
+                         'python -c "from jarvis.v2 import hud_install; hud_install.main()"'):
+                before = len(asker.seen)
+                eq(permit(*bash(line), brief), Decision.DENY, f"Bash {line!r} is refused")
+                eq(len(asker.seen), before, f"{line!r} is never put to the owner")
+            for line in (f"cp /tmp/x.js {installed.path}/assets/x.js",
+                         f"rsync -a /tmp/dist/ {root}/29991231T235959999999Z-0123456789ab/",
+                         f"echo pwned > {installed.path}/index.html"):
+                before = len(asker.seen)
+                permit(*bash(line), brief)
+                eq(len(asker.seen), before + 1, f"{line!r} is asked (always-ask: the installed HUD)")
+                ok("installed HUD" in asker.seen[-1].reason,
+                   f"{line!r} says why it asks ({asker.seen[-1].reason!r})")
+            asker_no = Asker(Decision.DENY)
+            permit_no = build_permit(context(brief), asker_no)
+            for line in ("jarvis hud", "cat jarvis/v2/hud_install.py",
+                         'git commit -m "docs: run jarvis hud install after a merge"'):
+                eq(rules.decide(line).decision != rules.DENY, True,
+                   f"{line!r} is not refused by the installer rule")
         finally:
             config.HUD_DIR, config.HUD_DIST, config.HUD_DEV = saved
 

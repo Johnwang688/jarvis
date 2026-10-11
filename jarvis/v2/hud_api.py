@@ -747,8 +747,10 @@ _RESERVED = ("frame-ancestors", "sandbox", "report-uri", "report-to")
 #   - `connect-src 'self'`: `fetch`, the `/events` stream, the `/stt` upload
 #     and — CSP3, as Chromium implements it — same-origin `ws://` for the
 #     terminal socket (proved headless by tests/face/hud_v2_csp_check.py).
-#   - `style-src 'self' 'unsafe-inline'`: Monaco and xterm inject `<style>`
-#     elements and React writes `style=` attributes. Styles cannot run code.
+#   - `style-src 'self' 'unsafe-inline'`: xterm (and Monaco) inject `<style>`
+#     elements at run time, which only `'unsafe-inline'` admits. React's
+#     `style={…}` is not the reason — it sets properties through the CSSOM,
+#     which CSP does not govern. Styles cannot run code.
 #   - `img-src 'self' data:`: the avatar `<img>` (`/avatar.svg`) and Monaco's
 #     `data:` SVG squiggles. `font-src 'self' data:`: the codicon font.
 #   - `media-src 'self'`: same-origin audio only (`/say`), should playback
@@ -906,28 +908,51 @@ def binary(handler, data, mime, *, csp=None, status=200):
 
 # -- the HUD's own files (decision C-1, ED-4) -------------------------------------------
 
-_NOT_INSTALLED = (b"<!doctype html><meta charset=\"utf-8\"><title>J.A.R.V.I.S.</title>"
-                  b"<p>The HUD is not installed. Run <code>jarvis hud install</code> "
-                  b"in a terminal, then reload this window.</p>\n")
 _HUD_CAP = 64 * 1024 * 1024
 
 
-def hud_build_id() -> str | None:
-    """Which HUD this daemon serves: a build id, "dev" (hud/dist under
-    JARVIS_HUD_DEV=1), or None when nothing is installed."""
+def _hud_page(sentence: str) -> bytes:
+    import html as _html
+    return (b"<!doctype html><meta charset=\"utf-8\"><title>J.A.R.V.I.S.</title><p>"
+            + _html.escape(sentence).encode() + b"</p>\n")
+
+
+_NOT_INSTALLED = _hud_page("The HUD is not installed. Run `jarvis hud install` in a terminal, "
+                           "then reload this window.")
+_FAILED = _hud_page("The installed HUD failed verification: no installed build still matches "
+                    "its manifest, so none is served. Run `jarvis hud install` in a terminal, "
+                    "then reload this window. The daemon's log names what did not match.")
+
+
+def hud_served() -> dict:
+    """What `GET /` serves (review of PR #44, L1/L6), for `/status` and the
+    daemon's start-up log: `build` (the id, "dev" under JARVIS_HUD_DEV=1, or
+    None), `git_head` and `dirty` from that build's manifest, and `state` —
+    "installed", "dev", "not installed", "failed verification" or
+    "refused: …". Never raises."""
     from . import hud_install
     if config.HUD_DEV:
-        return "dev"
-    built = hud_install.newest(config.HUD_DIST)
-    return built.id if built else None
+        return {"build": "dev", "git_head": None, "dirty": None, "state": "dev"}
+    built, state = hud_install.state(config.HUD_DIST)
+    if built is None:
+        return {"build": None, "git_head": None, "dirty": None, "state": state}
+    return {"build": built.id, "git_head": built.git_head, "dirty": built.dirty, "state": state}
+
+
+def hud_build_id() -> str | None:
+    """Which HUD this daemon serves: a build id, "dev", or None."""
+    return hud_served()["build"]
 
 
 def hud_files(handler, parts):
-    """`GET /` and `GET /assets/*`: the HUD, from the newest installed build.
+    """`GET /` and `GET /assets/*`: the HUD, from the newest intact installed
+    build (`hud_install.state`).
 
     Under JARVIS_HUD_DEV=1 (the headless suites) it is `hud/dist` as it is,
     no link followed; otherwise only a file the build's manifest lists, still
-    matching its SHA-256 (`hud_install.read`)."""
+    matching its size and SHA-256 (`hud_install.read`). With no intact build
+    `GET /` is a 503 page that says which: nothing installed, or nothing that
+    passed verification."""
     from . import hud_install
     name = "index.html" if parts == [""] else unquote("/".join(parts))
     if ".." in Path(name).parts or name.startswith("/") or "\\" in name or "\0" in name:
@@ -946,10 +971,13 @@ def hud_files(handler, parts):
     else:
         root = config.HUD_DIST
         if parts == [""]:
-            built = hud_install.newest(root)
+            built, state = hud_install.state(root)
             data = hud_install.read(built, "index.html") if built else None
             if data is None:
-                return binary(handler, _NOT_INSTALLED, "text/html; charset=utf-8", status=503)
+                page = (_NOT_INSTALLED if state == "not installed" else _FAILED
+                        if state == "failed verification" or built is not None
+                        else _hud_page(f"The HUD install folder was {state}"))
+                return binary(handler, page, "text/html; charset=utf-8", status=503)
         else:
             data = hud_install.find(root, name)
             if data is None:
