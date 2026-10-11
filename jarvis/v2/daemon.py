@@ -252,6 +252,10 @@ class Daemon:
         # lifecycle record, `terminal_attached` (an id and a time), never output.
         from .terminals import Terminals
         self.terminals = Terminals(publish=self.bus.publish)
+        # VEX V5 (VX-1, vex.py): its builds, downloads and brain terminal run
+        # as program terminals above; owner-only routes; nothing on the bus.
+        from .vex import Vex
+        self.vex = Vex(self)
         self.started_at = time.monotonic()
 
     def start(self) -> None:
@@ -1363,6 +1367,7 @@ class Daemon:
                 session.retired = True
             self._sessions.clear()
         self.terminals.finish_all(max(deadline, time.monotonic() + 0.2))
+        self.vex.stop()
         self.bus.close()
         for server, worker in self._listeners:
             server.shutdown()

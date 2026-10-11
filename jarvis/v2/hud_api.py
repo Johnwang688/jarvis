@@ -1096,6 +1096,13 @@ def route(handler, daemon, parts, query):
         # and the attach socket also needs a single-use ticket.
         from . import terminals as _terminals
         return _terminals.route(handler, daemon, parts, query)
+    # VEX V5 (VX-1): build, download, the brain terminal, new projects.
+    # Owner-only, the HUD listener only; mounted before `/projects/...` so
+    # `/projects/{id}/vex...` reaches it.
+    from . import vex as _vex
+    mounted = _vex.route(handler, daemon, parts, query)
+    if mounted is not None:
+        return mounted
     # Archive, restore, permanent delete and the trash (decisions part B).
     from . import projects as _projects
     mounted = _projects.route(handler, daemon, parts, query)
