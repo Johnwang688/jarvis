@@ -46,6 +46,7 @@ export function CodeEditor(props: {
     let dead = false;
     let model: any = null;
     let unhold = () => {};
+    let saveKey: { dispose(): void } | null = null;
     setLanguage(null);
     loadMonaco()
       .then((monaco: Monaco) => {
@@ -62,8 +63,21 @@ export function CodeEditor(props: {
         });
         editor.current = ed;
         ed.onDidChangeModelContent(() => onChange.current(ed.getValue()));
-        ed.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
-          onSave.current?.(ed.getValue());
+        // Ctrl+S saves *this* editor. An action, never `addCommand`: in 0.57
+        // `addCommand` is a global keybinding with no condition, so the last
+        // editor created took Ctrl+S for every editor, and outlived itself —
+        // a disposed editor's text is "", and its FileTab's `save` still
+        // named that file (review of PR #43: Ctrl+S in a Diff wrote the file
+        // blank). An action's keybinding holds only while this editor has
+        // focus (Monaco scopes it by `editorId`), and is disposed with it.
+        saveKey = ed.addAction({
+          id: "jarvis.saveFile",
+          label: "Save",
+          keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS],
+          run: () => {
+            if (dead || !ed.getModel()) return;
+            onSave.current?.(ed.getValue());
+          },
         });
         unhold = onEditorsBlocked((b) => {
           ed.updateOptions({ readOnly: b || readOnly.current });
@@ -75,6 +89,7 @@ export function CodeEditor(props: {
     return () => {
       dead = true;
       unhold();
+      saveKey?.dispose();
       editor.current?.dispose();
       editor.current = null;
       model?.dispose();

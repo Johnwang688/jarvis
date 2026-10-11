@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { effectiveZoom, keepOnScreen } from "./zoomfix";
+import { effectiveZoom, keepOnScreen, placePopup } from "./zoomfix";
 
 describe("Monaco's popups under the HUD's CSS zoom", () => {
   it("a box already on screen does not move", () => {
@@ -46,5 +46,41 @@ describe("Monaco's popups under the HUD's CSS zoom", () => {
     expect(effectiveZoom(view, inline)).toBeCloseTo(1.6);
     expect(effectiveZoom(null, inline)).toBe(1);
     root.remove();
+  });
+});
+
+describe("where a popup goes, with its size as drawn", () => {
+  const vp = { width: 1600, height: 900 };
+  const at = (x: number, y: number) => ({ left: x, top: y, width: 2, height: 2 });
+  const menu = { width: 300, height: 200 };
+
+  it("below and right of the pointer when it fits", () => {
+    expect(placePopup(at(100, 100), menu, vp)).toEqual({ left: 100, top: 102 });
+  });
+
+  it("above the pointer when below does not fit: its bottom on the pointer, not short of it", () => {
+    // At 70% Monaco flipped by its unzoomed height and left the menu 45 px
+    // above a pointer at y=1050 (review of PR #43).
+    const p = placePopup(at(100, 800), menu, vp);
+    expect(p.top + menu.height).toBe(800);
+  });
+
+  it("left of the pointer when right does not fit: its right edge on the pointer", () => {
+    const p = placePopup(at(1500, 100), menu, vp);
+    expect(p.left + menu.width).toBe(1502);
+  });
+
+  it("as the popup asks first (above, right-aligned) when that fits", () => {
+    const p = placePopup(at(800, 500), menu, vp, { above: true, alignRight: true });
+    expect(p).toEqual({ left: 502, top: 300 });
+  });
+
+  it("kept on screen when neither side fits", () => {
+    const tall = { width: 300, height: 380 };
+    const p = placePopup(at(100, 200), tall, { width: 1600, height: 400 });
+    expect(p.top).toBeGreaterThanOrEqual(0);
+    expect(p.top + tall.height).toBeLessThanOrEqual(400);
+    const wide = placePopup(at(100, 100), { width: 2000, height: 100 }, vp);
+    expect(wide.left).toBe(0);
   });
 });

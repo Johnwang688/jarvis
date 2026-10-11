@@ -288,8 +288,20 @@ export function useLayout(blocked = false): LayoutControl {
       if (what === "zoomReset") setZoomState(ZOOM_DEFAULT);
       else setZoomState((z) => stepZoom(z, what === "zoomIn" ? 1 : -1));
     };
+    // Monaco leaves a chord when the document loses focus (it polls
+    // `document.hasFocus()`, which stays true while a frame inside has it);
+    // so does the tracker.
+    const onBlur = () => {
+      setTimeout(() => {
+        if (!document.hasFocus()) chord.current = null;
+      }, 0);
+    };
     window.addEventListener("keydown", onKey, true);
-    return () => window.removeEventListener("keydown", onKey, true);
+    window.addEventListener("blur", onBlur);
+    return () => {
+      window.removeEventListener("keydown", onKey, true);
+      window.removeEventListener("blur", onBlur);
+    };
   }, [toggle, togglePanel]);
 
   return {

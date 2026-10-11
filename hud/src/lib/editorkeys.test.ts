@@ -62,8 +62,18 @@ describe("Monaco's Ctrl+K chords (decisions E-10)", () => {
     expect(run([[key("K", { metaKey: true, ctrlKey: false }), true, 0], [key("b"), true, 50]])).toEqual([false, true]);
   });
 
-  it("a second key that lands outside the editor is the HUD's, and the chord is over", () => {
-    expect(run([[key("k"), true, 0], [key("b"), false, 50], [key("b"), true, 90]])).toEqual([false, false, false]);
+  it("a key outside the editor is the HUD's and leaves the chord waiting, as Monaco's does", () => {
+    // Monaco's keybinding service hears only keys typed in an editor: Ctrl+K
+    // in the editor, a letter in the chat box, then Ctrl+B in the editor is
+    // still its chord (review of PR #43).
+    expect(run([[key("k"), true, 0], [key("x", { ctrlKey: false }), false, 50], [key("b"), true, 90]]))
+      .toEqual([false, false, true]);
+    expect(run([[key("k"), true, 0], [key("b"), false, 50], [key("b"), true, 90]])).toEqual([false, false, true]);
+  });
+
+  it("a chord that has timed out is not ended by a key outside the editor either", () => {
+    expect(run([[key("k"), true, 0], [key("x", { ctrlKey: false }), false, CHORD_MS + 1], [key("b"), true, CHORD_MS + 2]]))
+      .toEqual([false, false, false]);
   });
 
   it("Monaco gives up waiting after five seconds, and so does the tracker", () => {

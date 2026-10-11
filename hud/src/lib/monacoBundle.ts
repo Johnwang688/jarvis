@@ -29,7 +29,7 @@
 
 import * as monaco from "monaco-editor/editor";
 import { ContextView } from "monaco-editor/base/browser/ui/contextview/contextview";
-import { effectiveZoom, keepOnScreen } from "./zoomfix";
+import { effectiveZoom, placePopup, type Rect } from "./zoomfix";
 
 import "monaco-editor/features/codeEditor/register";
 import "monaco-editor/features/codicon/register";
@@ -77,28 +77,43 @@ import "monaco-editor/features/wordPartOperations/register";
 import "monaco-editor/languages/definitions/register.all";
 
 // Monaco's context view (the right-click menu, its buttons' tooltips) under the
-// HUD's CSS zoom. It lays itself out in viewport pixels and writes them as CSS
-// lengths, which the zoom on #root then scales again — at 160% a right-click
-// in the middle of the window opened the menu off its right edge. After its
-// own layout, the lengths are divided by the zoom they sit under and the box
-// is kept on screen (lib/zoomfix.ts). Monaco patches its own find widget the
-// same way (features/find/register).
+// HUD's CSS zoom. It lays itself out in viewport pixels from a size it measures
+// unzoomed and writes CSS lengths, which the zoom on #root scales again — at
+// 160% a right-click in the middle of the window opened the menu off its
+// right edge, and at 70% a flip upward stopped 45 px short of the pointer.
+// After its own layout, the popup is placed again with its size as drawn
+// (`placePopup`) and the answer converted to the CSS lengths that land it
+// there. Monaco patches its own find widget the same way (features/find).
 const doLayout = ContextView.prototype.doLayout;
 ContextView.prototype.doLayout = function patchedDoLayout(this: any) {
   doLayout.call(this);
-  if (!this.isVisible?.() || !this.view) return;
-  const z = effectiveZoom(this.view);
+  if (!this.isVisible?.() || !this.view || !this.delegate) return;
+  const view = this.view as HTMLElement;
+  const z = effectiveZoom(view);
   if (Math.abs(z - 1) < 1e-6) return;
-  const s = this.view.style as CSSStyleDeclaration;
-  const left = (parseFloat(s.left) || 0) / z;
-  const top = (parseFloat(s.top) || 0) / z;
-  s.left = `${left}px`;
-  s.top = `${top}px`;
-  const d = keepOnScreen(this.view.getBoundingClientRect(), window.innerWidth, window.innerHeight, z);
-  if (d.dx || d.dy) {
-    s.left = `${left + d.dx}px`;
-    s.top = `${top + d.dy}px`;
+  const raw = this.delegate.getAnchor();
+  let anchor: Rect;
+  if (raw instanceof HTMLElement) {
+    const r = raw.getBoundingClientRect();
+    anchor = { left: r.left, top: r.top, width: r.width, height: r.height };
+  } else if (typeof raw?.x === "number") {
+    anchor = { left: raw.x, top: raw.y, width: raw.width || 1, height: raw.height || 2 };
+  } else {
+    anchor = { left: raw?.posx ?? 0, top: raw?.posy ?? 0, width: 2, height: 2 };
   }
+  // Measured where the lengths are zero: the origin they count from, and the
+  // size with the whole width available (near an edge a popup can wrap).
+  view.style.left = "0px";
+  view.style.top = "0px";
+  const origin = view.getBoundingClientRect();
+  const at = placePopup(
+    anchor,
+    { width: origin.width, height: origin.height },
+    { width: window.innerWidth, height: window.innerHeight },
+    { above: this.delegate.anchorPosition === 1, alignRight: this.delegate.anchorAlignment === 1 },
+  );
+  view.style.left = `${(at.left - origin.left) / z}px`;
+  view.style.top = `${(at.top - origin.top) / z}px`;
 };
 
 export { monaco };

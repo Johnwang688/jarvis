@@ -19,7 +19,7 @@
 // component by that project: a different project is a fresh mount with
 // nothing open, so a save can never land anywhere but where it was read.
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { api, ApiError } from "../api";
 import type { Tree, TreeEntry } from "../types";
 import { CodeEditor } from "./Editor";
@@ -119,6 +119,18 @@ export function FileTab(props: {
   // a prop that changed under an open buffer would be a bug, not a feature.
   const [pid] = useState(props.projectId);
   const onOpened = props.onOpened;
+  // Which buffer this is: bumped each time a file is read in. A save's
+  // answer lands only on the buffer it was sent from — "Discard and open"
+  // during a save used to put the old path back over the new file's text,
+  // and the next save wrote that text to the old file (review of PR #43).
+  const generation = useRef(0);
+  const fileRef = useRef(file);
+  fileRef.current = file;
+  // An unsaved edit is said out loud, so App can refuse to close this
+  // buffer behind the owner's back (a "follow chat", a project picked in the
+  // header, a project that went away, a window closing).
+  const tell = useRef(props.onDirty);
+  tell.current = props.onDirty;
 
   const read = useCallback(
     async (path: string) => {
@@ -127,6 +139,7 @@ export function FileTab(props: {
       setAsk(null);
       try {
         const r = await api.readFile(pid, path);
+        generation.current += 1;
         setFile({ path: r.path, content: r.content || "", mtime: r.mtime, protected: !!r.protected });
         setText(r.content || "");
         setRenderedOnly(isMarkdown(path));
@@ -151,16 +164,22 @@ export function FileTab(props: {
   // `content` is the editor's own text when Ctrl+S saves: a keystroke's
   // re-render may not have landed in `text` yet.
   const save = async (content: string = text) => {
-    if (!pid || !file || file.protected || content === file.content) return;
+    const sent = fileRef.current;
+    if (!pid || !sent || sent.protected || content === sent.content) return;
+    const gen = generation.current;
     try {
       const r = await api.writeFile(pid, {
-        path: file.path,
+        path: sent.path,
         content,
-        expected_mtime: file.mtime,
+        expected_mtime: sent.mtime,
       });
-      setFile({ ...file, mtime: r.mtime, content });
+      // Another file was read in while this was on its way: its answer is
+      // not this buffer's.
+      if (generation.current !== gen) return;
+      setFile((cur) => (cur && cur.path === sent.path ? { ...cur, mtime: r.mtime, content } : cur));
       setNote("saved");
     } catch (e: any) {
+      if (generation.current !== gen) return;
       if (e instanceof ApiError && e.status === 409) {
         // Someone else wrote it. Never clobber: offer the reload.
         setNote("changed on disk since it was read — reload to see it, then re-apply your edit");
@@ -170,13 +189,19 @@ export function FileTab(props: {
     }
   };
 
-  // An unsaved edit is said out loud, so App can refuse to close this
-  // buffer behind the owner's back (a "follow chat", a project that went
-  // away, a window closing). The minimal guard; the editor plan does more.
-  const tell = useRef(props.onDirty);
-  tell.current = props.onDirty;
-  useEffect(() => tell.current?.(dirty), [dirty]);
+  // Said as it happens, never a frame later: a keystroke tells App from the
+  // editor's own change event (`edit`, below), and every other change of
+  // `dirty` (a save, a read) in a layout effect, before the window paints.
+  // A passive effect left 22–44 ms in which Save was enabled but App still
+  // thought the pane clean, and a project picked in that window remounted
+  // the pane and dropped the edit (review of PR #43).
+  useLayoutEffect(() => tell.current?.(dirty), [dirty]);
   useEffect(() => () => tell.current?.(false), []);
+  const edit = useCallback((value: string) => {
+    setText(value);
+    const f = fileRef.current;
+    tell.current?.(!!f && !f.protected && value !== f.content);
+  }, []);
 
   if (!pid) return <div className="pad muted">Pick a project.</div>;
 
@@ -252,13 +277,13 @@ export function FileTab(props: {
           </div>
         ) : isMarkdown(file.path) ? (
           <div className="mdsplit" data-testid="md-split">
-            <CodeEditor projectId={pid} path={file.path} value={text} onChange={setText} onSave={save} />
+            <CodeEditor projectId={pid} path={file.path} value={text} onChange={edit} onSave={save} />
             <div className="mdrender" data-testid="md-preview">
               <Markdown text={text} className="" />
             </div>
           </div>
         ) : (
-          <CodeEditor projectId={pid} path={file.path} value={text} onChange={setText} onSave={save} />
+          <CodeEditor projectId={pid} path={file.path} value={text} onChange={edit} onSave={save} />
         )}
       </div>
     </div>

@@ -120,13 +120,19 @@ export default function App() {
   // closing the window asks (2026-10-09, the minimal guard), and since WP-B
   // nothing switches the pane to another view — a tab, a sidebar click, a
   // chat landing there — until the edit is saved or discarded.
+  //
+  // The ref is the truth the guards read (`mayShow`, the project picker, the
+  // archive path), written at once by `markDirty` — FileTab calls it from the
+  // editor's own change event — and the state follows for drawing. A ref
+  // copied from the state at render time lagged a frame behind the edit, and
+  // a project picked in that frame dropped it (review of PR #43).
   const [dirtyPanes, setDirtyPanes] = useState<Record<number, boolean>>({});
-  const dirtyNow = useRef(dirtyPanes);
-  dirtyNow.current = dirtyPanes;
-  const markDirty = useCallback(
-    (pane: PaneNo, dirty: boolean) => setDirtyPanes((m) => (!!m[pane] === dirty ? m : { ...m, [pane]: dirty })),
-    [],
-  );
+  const dirtyNow = useRef<Record<number, boolean>>({});
+  const markDirty = useCallback((pane: PaneNo, dirty: boolean) => {
+    if (!!dirtyNow.current[pane] === dirty) return;
+    dirtyNow.current = { ...dirtyNow.current, [pane]: dirty };
+    setDirtyPanes((m) => (!!m[pane] === dirty ? m : { ...m, [pane]: dirty }));
+  }, []);
   const anyDirty = Object.values(dirtyPanes).some(Boolean);
   useEffect(() => {
     if (!anyDirty) return;

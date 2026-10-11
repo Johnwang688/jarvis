@@ -966,9 +966,24 @@ def monaco_key_checks(page, mock):
     if link.count():
         link.first.click(modifiers=["Control"])
     opened = until(lambda: page.evaluate("window.__opened"), timeout=3)
-    page.evaluate("() => { window.open = window.__open; }")
     check("a link in the text opens on Ctrl+click, http(s) only and with noopener",
           opened == [["https://example.com/a", "_blank", "noopener,noreferrer"]], str(opened))
+    # Any other scheme opens nothing, and never navigates the window that
+    # gates approvals (Monaco's own fallback does).
+    page.evaluate("() => { window.__opened = []; }")
+    href = page.evaluate("location.href")
+    lines.click()
+    page.keyboard.press("Control+End")
+    page.keyboard.type("\n#file:///etc/hosts")
+    flink = page.locator('[data-testid="editor"] .detected-link', has_text="file:///etc/hosts")
+    until(lambda: flink.count() > 0, timeout=5)
+    if flink.count():
+        flink.first.click(modifiers=["Control"])
+    time.sleep(0.5)
+    check("a file: link opens nothing and the window stays where it is",
+          flink.count() > 0 and page.evaluate("window.__opened") == [] and page.evaluate("location.href") == href,
+          f"links {flink.count()}, opened {page.evaluate('window.__opened')}")
+    page.evaluate("() => { window.open = window.__open; }")
 
     # Ctrl+B folds the sidebar from the editor too, except as the second key
     # of Monaco's Ctrl+K chord (decisions E-10).

@@ -31,19 +31,30 @@ const isCtrlK = (e: KeyLike) =>
  * anchor). The same holds for every HUD key: Ctrl+K Ctrl+0 is Monaco's fold
  * all, not the HUD's zoom reset, as in VS Code.
  *
+ * It waits exactly as Monaco's keybinding service does, because the two must
+ * agree on which key ends the chord (review of PR #43: a key typed in the
+ * chat box ended ours but not Monaco's, so the Ctrl+B after it both folded
+ * the sidebar and set the anchor):
+ *  - a chord starts only with Ctrl+K typed in an editor;
+ *  - only a key typed in an editor ends it — Monaco's one keybinding service
+ *    hears every editor's keys and no other key — so a key anywhere else
+ *    leaves it waiting;
+ *  - bare modifiers, auto-repeat and IME composition change nothing;
+ *  - it gives up after `CHORD_MS`, and when the window loses focus
+ *    (`useLayout` resets it on `blur`; Monaco checks `document.hasFocus()`).
+ *
  * Feed it every keydown, with whether the key is going into an editor and
  * the time. `second` says this key finishes a chord, so the HUD leaves it to
- * Monaco. A chord starts only with Ctrl+K typed in an editor, and waits as
- * Monaco does: until the next key that is not a bare modifier, for at most
- * `CHORD_MS`. Auto-repeat and IME composition change nothing (a held Ctrl+K
- * is still one chord start; a key that belongs to the IME is not Monaco's).
+ * Monaco.
  */
 export function chordStep(
   state: ChordState, e: KeyLike, inEditor: boolean, now: number,
 ): { state: ChordState; second: boolean } {
-  if (e.isComposing || e.repeat || MODIFIERS.has(e.key)) return { state, second: false };
-  if (state !== null && now - state <= CHORD_MS) return { state: null, second: inEditor };
-  if (inEditor && isCtrlK(e)) return { state: now, second: false };
+  const live = state !== null && now - state <= CHORD_MS ? state : null;
+  if (e.isComposing || e.repeat || MODIFIERS.has(e.key)) return { state: live, second: false };
+  if (!inEditor) return { state: live, second: false };
+  if (live !== null) return { state: null, second: true };
+  if (isCtrlK(e)) return { state: now, second: false };
   return { state: null, second: false };
 }
 
