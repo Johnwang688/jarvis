@@ -1235,7 +1235,10 @@ class NoTool(Base):
 
     NEEDLES = re.compile(r"""['"]/terminals|\.terminals\b|import\s+terminals\b|\bterminals\s+import|"""
                          r"""jarvis\.v2\.terminals|\bTerminals\(|\bterminals\.(route|serve|create)""")
-    ALLOWED = {"jarvis/v2/daemon.py", "jarvis/v2/hud_api.py", "jarvis/v2/terminals.py"}
+    # vex.py (VX-1) creates program terminals, from its own argv tables, behind
+    # owner-only routes; tests/v2/vex_check.py holds it to that.
+    ALLOWED = {"jarvis/v2/daemon.py", "jarvis/v2/hud_api.py", "jarvis/v2/terminals.py",
+               "jarvis/v2/vex.py"}
 
     def test_no_tool_is_named_for_a_terminal(self):
         from jarvis import tools

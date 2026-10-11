@@ -1145,14 +1145,14 @@ class Vex:
             raise VexError(f"build/{detected.name}.bin is older than the sources; Build first, "
                            "then download")
         argv = download_argv(cfg, name, slot, to_windows(str(Path(root) / found["path"])))
+        # The device first (one device action at a time, said as such), then
+        # the project's build lock, held for the download so no build rewrites
+        # the binary while it is being sent.
+        self._reserve_device("download")
         lock = BuildLock(root)
         if not lock.acquire():
+            self._release_device()
             raise VexError("a build of this project is running; download when it has finished")
-        try:
-            self._reserve_device("download")
-        except BaseException:
-            lock.release()
-            raise
         with self._lock:
             self._held.add(lock)
 
