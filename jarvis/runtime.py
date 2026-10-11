@@ -37,11 +37,14 @@ _SHOULD_STOP: ContextVar[Callable[[], bool] | None] = ContextVar(
 # How many sub-agents deep we are. The backstop against a spawn loop.
 _DEPTH: ContextVar[int] = ContextVar("jarvis_depth", default=0)
 
-# The running agent's own tool names. A sub-agent's toolset is intersected with
-# this, so a child can never reach a tool its parent was not given — which is
-# what keeps a background workflow (no browser tools, because they would
-# interleave on the one shared Playwright page) from getting to the browser by
-# spawning a child that has them.
+# The running agent's own tool names — its *current* toolset, groups expanded
+# by `load_tools` included (`Agent._sync_tools` re-binds it). Two readers, one
+# rule: `dispatch()` refuses any tool not in it (tools._toolset_refusal — the
+# toolset is a boundary, not only a list of schemas sent), and a sub-agent's
+# toolset is intersected with it, so a child can never reach a tool its parent
+# was not given — which is what keeps a background workflow (no browser tools,
+# because they would interleave on the one shared Playwright page) from getting
+# to the browser by spawning a child that has them, or by naming one.
 _TOOLS: ContextVar[frozenset[str] | None] = ContextVar("jarvis_tools", default=None)
 
 # Who is asking, shown on the approval surfaces (HUD card, Discord DM). Bound
@@ -119,8 +122,32 @@ def depth() -> int:
 
 
 def parent_tools() -> frozenset[str] | None:
-    """The running agent's toolset, or None if nothing is bound."""
+    """The running agent's toolset, or None if nothing is bound.
+
+    Named for its first reader: to a sub-agent being built, the agent running
+    now is its parent. `current_tools()` is the same value, named for dispatch.
+    """
     return _TOOLS.get()
+
+
+def current_tools() -> frozenset[str] | None:
+    """The tools the agent running now may call, or None if no agent is bound.
+
+    `dispatch()` refuses anything outside this set. None — a script or a test
+    calling `dispatch` directly — is the one case it does not enforce, and it
+    is reached by no real path (see tools._toolset_refusal).
+    """
+    return _TOOLS.get()
+
+
+def restore_tools(previous: frozenset[str] | None) -> None:
+    """Put the toolset back to what it was before a turn bound its own.
+
+    `bind()` cannot do this — it skips None, and None (nothing bound) is the
+    usual thing to restore. Called by `Agent.run_turn` when a turn ends, so
+    "bound" means "inside an agent's turn" and never "an agent ran here once".
+    """
+    _TOOLS.set(previous)
 
 
 def origin() -> str:

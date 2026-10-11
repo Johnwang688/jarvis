@@ -79,21 +79,30 @@ def accept_value(key: str) -> str:
     return base64.b64encode(hashlib.sha1((key + GUID).encode()).digest()).decode()
 
 
-def upgrade(handler, key: str, **options) -> "WebSocket":
+def upgrade(handler, key: str, *, headers=(), **options) -> "WebSocket":
     """Answer `101 Switching Protocols` on a request already validated by the
     route, and hand the connection to a WebSocket.
 
     The status line is written by hand: `send_response` would say HTTP/1.0,
-    which browsers reject. The handler's 2-second socket timeout (`setup`) is
-    lifted here — the socket goes non-blocking, and this module waits with
-    `select` from now on — and any bytes the handler's buffered reader has
-    already pulled off the socket are carried over, so a client that sends a
-    frame hard on the heels of its handshake loses nothing.
+    which browsers reject. So it bypasses the handler's `end_headers`, and
+    the caller passes the headers every response on its listener carries
+    (`hud_api.frame_headers`, WP-E) as `headers`. The handler's 2-second
+    socket timeout (`setup`) is lifted here — the socket goes non-blocking,
+    and this module waits with `select` from now on — and any bytes the
+    handler's buffered reader has already pulled off the socket are carried
+    over, so a client that sends a frame hard on the heels of its handshake
+    loses nothing.
     """
+    extra = b""
+    for name, value in headers:
+        if any(c in f"{name}{value}" for c in "\r\n\0"):
+            raise ValueError("a header line cannot hold CR, LF or NUL")
+        extra += f"{name}: {value}\r\n".encode("latin-1")
     handler.wfile.write(
         b"HTTP/1.1 101 Switching Protocols\r\n"
         b"Upgrade: websocket\r\n"
         b"Connection: Upgrade\r\n"
+        + extra +
         b"Sec-WebSocket-Accept: " + accept_value(key).encode() + b"\r\n\r\n")
     handler.wfile.flush()
     handler._streaming = True

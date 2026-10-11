@@ -1399,7 +1399,10 @@ def route(handler, daemon, parts, query):
                 _fail(400, str(exc))
             if not terminals.redeem(query.get("ticket"), terminal.id):
                 _fail(403, "a fresh ticket for this terminal is required")
-            sock = ws.upgrade(handler, key)
+            # The 101 is written by hand, past `end_headers`: it carries the
+            # listener's frame headers explicitly (WP-E, every response).
+            from .hud_api import frame_headers
+            sock = ws.upgrade(handler, key, headers=frame_headers(handler))
             terminals.serve(terminal, sock)
             return 200, None
     _fail(404, "route not found")
