@@ -2160,14 +2160,21 @@ too. What it then does is what Space did: it goes to the selected chat
 (W-6), interrupts that chat's turn first, records nothing while the mic is
 muted, refuses under a card, with a picker open, with no chat on screen and
 after a crash. A window that loses focus mid-hold lets go (its keyup never
-comes). **In a focused terminal Ctrl+D is the shell's** end of input, left to
+comes). A hold is decided where it began: once Ctrl+D began as push-to-talk,
+or as a press refused under a card, its auto-repeat stays the window's when
+focus lands in a terminal mid-hold (a card answered elsewhere hands focus
+back, or the owner clicks into one), so the shell never gets a run of
+end-of-input from it. **In a focused terminal Ctrl+D is the shell's** end of input, left to
 xterm untouched (the owner's answer), the way Ctrl+B, Ctrl+Alt+B and Ctrl+_
 are; from a terminal push-to-talk is the orb, whose tooltip names the key.
 Under a card the window takes it there too, so it is never an EOF behind the
 card. **In Monaco Ctrl+D is push-to-talk**, and Monaco's own two Ctrl+D
-commands take Shift as well: add selection to next find match is
-**Ctrl+Shift+D**, and its chord (move last selection to next match) is
-Ctrl+K Ctrl+Shift+D. Nothing in Monaco or the HUD binds Ctrl+Shift+D (D is
+commands move: add selection to next find match is **Ctrl+Shift+D**, and
+its chord (Ctrl+K Ctrl+D, move last selection to next match) is unbound with
+no chord in its place — any Ctrl+K chord makes Ctrl+K start chord mode, and
+Ctrl+K followed by push-to-talk, which Monaco never sees, left the chord
+waiting to swallow the next key typed (ED-1, loading Monaco's other chords,
+decides what the talk key does to a pending one). Nothing in Monaco or the HUD binds Ctrl+Shift+D (D is
 otherwise only a Mac Ctrl binding in Monaco), and outside the editor it is
 Chrome's "bookmark all tabs", which the editor's binding prevents. The old
 bindings are removed, not shadowed, so Monaco's own record says where they
@@ -2175,12 +2182,19 @@ went. The HUD's Monaco loaded no contributions until then, so the multi-
 cursor commands are loaded for this (they bring find with it: Ctrl+F in the
 editor is Monaco's find now). **Space is no longer push-to-talk anywhere**:
 it types a space, presses a focused button, and does nothing on a separator.
-A preview frame is another document, so Ctrl+D inside one is the framed
-page's. Free checks: `talkkey.test.ts`, `monaco.test.ts` and
-`tests/face/hud_v2_ptt_check.py` (run by `hud_v2_check` after the terminal and preview
-section, on a `MockDaemon(0)` of its own, or alone), plus the ported checks in
-the terminal (`\x04` to the PTY, nothing under a card), multichat (W-6) and
-layout (a separator) suites.
+So a button whose second press matters never takes focus from a pointer (its
+click still works): the approval card's AUTHORIZE and ALWAYS (an aborted
+click — pressed, slid off — used to leave focus there, and the next Space or
+Enter authorized), the terminal's "Jarvis can read" switch, the folded mic's
+mode cycle and the Preview's "Keep its origin". The first Space pressed
+outside a typing target says once, under the orb, that push-to-talk is
+Ctrl+D now. A preview frame is another document, so Ctrl+D inside one is the
+framed page's. Free checks: `talkkey.test.ts`, `monaco.test.ts` and
+`tests/face/hud_v2_ptt_check.py` (run by `hud_v2_check` after the terminal
+and preview sections, on a `MockDaemon(0)` of its own, or alone), plus the
+ported checks in the terminal (`\x04` to the PTY, nothing under a card, no
+EOF from a hold that moved into a terminal, the readable switch), multichat
+(W-6), layout (a separator) and preview (Keep its origin) suites.
 
 Remaining: WP13 (the long-bench comparison, the owner's call on cost), a
 native Windows worker, the R8 hook on Codex, and prompt tuning in

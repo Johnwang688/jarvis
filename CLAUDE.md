@@ -1004,8 +1004,12 @@ the chat box, Monaco, menus, chips, the sidebar and pane headers (each of
 which stops its own keys) never stand in the way, and **its default is always
 prevented and it stops at the window** — no bookmark dialog, nothing under the
 cursor acts on it — under a card, muted or after a crash too; auto-repeat never
-presses twice; a window `blur` mid-hold lets go (the keyup never comes). What
-it does is `press()`/`release()`, unchanged from Space: the selected chat
+presses twice; a window `blur` mid-hold lets go (the keyup never comes); and
+**a hold is decided where it began** (review of PR #40): once Ctrl+D began as
+push-to-talk, or as a press refused under a card, its auto-repeat stays the
+window's (`talkHeld`) when focus lands in a terminal mid-hold, so a card
+answered elsewhere or a click into a terminal never sends the shell
+`\x04\x04\x04`. What it does is `press()`/`release()`, unchanged from Space: the selected chat
 (W-6), its turn interrupted first, nothing recorded muted (`MIC MUTED`),
 refused under a card, with a picker or the chip popover open, with no chat on
 screen and after a crash. **In a focused terminal it is the shell's EOF**, left
@@ -1015,17 +1019,32 @@ default is prevented); under a card the window takes it there too, so it is
 never an EOF behind the card. From a terminal push-to-talk is the orb (its
 tooltip names the key). **In Monaco it is push-to-talk**, and Monaco's two
 Ctrl+D commands moved (`lib/monaco.ts` `editorKeyRules`, the old bindings
-removed): add selection to next find match is **Ctrl+Shift+D**, its chord
-Ctrl+K Ctrl+Shift+D — free in Monaco and the HUD, and Chrome's "bookmark all
-tabs" only outside the editor. The HUD's Monaco loaded no contributions until
+removed): add selection to next find match is **Ctrl+Shift+D** — free in
+Monaco and the HUD, and Chrome's "bookmark all tabs" only outside the editor —
+and Ctrl+K Ctrl+D is **unbound, with no chord in its place**: any Ctrl+K
+chord makes Ctrl+K start chord mode, and Ctrl+K then push-to-talk (which
+Monaco never sees) left it waiting to swallow the next key typed (review of
+PR #40). ED-1, loading more chords, must decide what the talk key does to a
+pending one (its plan §2.2 says so). The HUD's Monaco loaded no contributions until
 then, so the multicursor contribution is imported for it (and brings find:
 Ctrl+F in the editor is Monaco's). A preview frame is another document:
-Ctrl+D in one is the framed page's. Free checks: `talkkey.test.ts`,
+Ctrl+D in one is the framed page's. **Space now presses a focused button**,
+as on any page, so a button whose second press matters never takes focus
+from a pointer (`noPointerFocus`, a `mousedown` preventDefault; its click
+still works): the card's **AUTHORIZE and ALWAYS** (an aborted click — pressed,
+slid off — used to leave focus there, and the next Space or Enter
+authorized), the terminal's "Jarvis can read" switch, the folded mic's mode
+cycle and the Preview's "Keep its origin". The first Space pressed outside a
+typing target (`isTypingTarget`) says once, on the selected chat's line,
+"PUSH-TO-TALK IS CTRL+D NOW" (`jarvis.hud.spaceHint`). Free checks: `talkkey.test.ts`,
 `monaco.test.ts`, `tests/face/hud_v2_ptt_check.py` (after the terminal and
 preview sections in `hud_v2_check`, a `MockDaemon(0)` of its own, or alone; its helpers
-`_ptt_on_ctrl_d`/`_hold_keys`/`TALK_PROBE` live in `hud_v2_layout_check.py`),
-and the ported checks in the terminal (`\x04` reaches the PTY; nothing under a
-card), multichat (W-6) and layout (a separator) suites. The v1 `jarvis.html`
+`_ptt_on_ctrl_d`/`_hold_keys`/`TALK_PROBE` live in `hud_v2_layout_check.py`;
+`TALK_PROBE` also counts a Ctrl+D that gets past the window, which must be
+none), and the ported checks in the terminal (`\x04` reaches the PTY; nothing
+under a card; a hold through a card or into a terminal sends no EOF; the
+readable switch), multichat (W-6), layout (a separator) and preview (Keep its
+origin) suites. The v1 `jarvis.html`
 face keeps Space.
 
 **Sidebar status dots (2026-10-08, design §18; contract in
