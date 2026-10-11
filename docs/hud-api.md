@@ -941,7 +941,7 @@ whether or not the terminal is `integrated`; spans can add refusals, never
 remove one.
 
 **Output never leaves memory**: on the bus there are lifecycle ids only
-(`terminal_attached`), never output; the HUD lists terminals with `GET
+(`terminal_attached`, and since WP-F `terminal_read`), never output; the HUD lists terminals with `GET
 /terminals` and learns of an exit over the socket. Output is not in any log
 (the daemon logs opened / attached / exited / closed with the folder as a
 project name or `~`, and logs `/terminals` paths without their query, so
@@ -1022,3 +1022,37 @@ What the HUD does with the terminal contract above (code in
   in a new window with `noopener`; there is no clipboard addon (no OSC 52)
   and window reports stay off. "Open in Preview" for loopback links is
   WP-E's.
+
+## Additions 2026-10-10 (Jarvis reads a terminal — WP-F)
+
+Decisions W-2 in `docs/plans/2026-10-09-hud-workspace-decisions.md`.
+
+- **Tool `terminal_read(terminal="", lines=200)`** (`jarvis/v2/tools/
+  terminal_read.py`, v1 registry). `terminal` is what the HUD shows — the
+  id, the title (`bash · Calc`, or just its folder part), or the number in
+  the panel's order; empty means the only one — resolved by the daemon,
+  never a path. `lines` is clamped to 1–1000. It returns the terminal's
+  normal buffer as plain text (no escape sequences, the alternate screen
+  never read), fenced as untrusted web content from `HUD terminal <title>
+  (id <id>)`, with notes after the fence: `[N line(s) withheld: possible
+  secret]`, `[the oldest N line(s) left out to fit]` (48,000 characters at
+  most), `[N long line(s) cut to 2,000 characters]`. Or exactly
+  `Refused: possible credential in this output` (an exact known value or its
+  encodings, a credential format, or a secret-printing command — never which,
+  never where), `Refused: the owner has turned off reading for this terminal
+  (<title>)`, or an `Error:` naming the open terminals.
+- **Who holds it**: `FAST_TOOLS`, and only for an owner's chat turn the HUD's
+  own window sent — the send route sets `UserMessage.desk` only on the HUD's
+  listener with its Origin. A task's thread, a Discord or DM turn, the escape
+  hatch, a schedule, a sub-agent and every v1 surface neither see nor can run
+  it (`runtime.at_desk()` fails closed); jarvis-mcp does not offer it. It is
+  not `dangerous`, asks nobody, and writes nothing.
+- SSE **`terminal_read`** `{kind: "terminal_read", data: {terminal_id,
+  lines, at, refused}}` — exactly those keys — for every read that reaches a
+  terminal, refused or not (`lines` is how many it covered; 0 when the switch
+  refused it). Never output, a command or a reason. The terminal's bar shows
+  the last one: "Jarvis read 200 lines · 15:42", or "refused a read · 15:42".
+  A record of another shape is dropped whole; any other key is never drawn.
+  It is HUD chrome: nothing is written to the PTY or the ring.
+- **The limit**: a secret with no recognisable shape and no keyword beside it
+  is not caught. The "Jarvis can read" switch and the note are the backstops.

@@ -69,6 +69,14 @@ SELF_PROTECTED = frozenset(
         # rules: an agent that could edit the judge could widen it.
         "jarvis/gitops.py",
         "jarvis/tools/gitctl.py",
+        # Decide what of the owner's terminal output reaches the model
+        # (WP-F, 2026-10-10): the read guard, the credential formats it and
+        # the renderer it reads through, and the tool. Editing them is editing
+        # what a read refuses.
+        "jarvis/credential_patterns.py",
+        "jarvis/v2/terminal_guard.py",
+        "jarvis/v2/terminal_text.py",
+        "jarvis/v2/tools/terminal_read.py",
     }
 )
 

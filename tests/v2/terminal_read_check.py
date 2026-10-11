@@ -24,6 +24,8 @@ from pathlib import Path
 import secrets
 import sys
 import tempfile
+import threading
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 from urllib.parse import quote
@@ -319,6 +321,50 @@ class Holders(unittest.TestCase):
             with self.subTest(via=message.via, origin=message.origin):
                 self.assertFalse(at(chat, message))
         self.assertFalse(at(task, UserMessage("hi", via="hud", desk=True)))
+
+
+class DeskFlag(ReadBase):
+    """`UserMessage.desk` is set only by the HUD's own window: the send
+    route on the HUD's listener, with the HUD's Origin. The API listener —
+    where every tool's HTTP client goes — and a client with no Origin never
+    make a desk turn."""
+
+    def test_only_the_huds_window_sends_a_desk_message(self):
+        seen = []
+        fake = self.daemon.providers[ProviderName.FAST]
+
+        def send(handle, message):
+            seen.append(message)
+            yield from type(fake).send(fake, handle, message)
+        fake.send = send
+        thread = self.daemon.open_thread(self.project.id, "chat", "fast", {})
+        path = f"/threads/{thread.id}/send"
+        for port, origin, desk in ((self.daemon.face_port, "hud", True),
+                                   (self.daemon.port, None, False),
+                                   (self.daemon.port, f"http://127.0.0.1:{self.daemon.port}", False),
+                                   (self.daemon.face_port, None, False)):
+            with self.subTest(port=port, origin=origin):
+                before = len(seen)
+                status, _ = self.request("POST", path, {"text": "hi"}, port=port, origin=origin)
+                self.assertEqual(status, 202)
+                eventually(lambda: len(seen) > before, what="the message reaching the provider")
+                self.assertIs(seen[-1].desk, desk)
+                self.assertEqual(seen[-1].via, "hud")
+
+
+class Steering(unittest.TestCase):
+    def test_a_steer_from_anywhere_but_the_desk_takes_the_turn_off_it(self):
+        provider = FastPathProvider()
+        native = SimpleNamespace(closed=False, accepting=True, inbox=[], inbox_lock=threading.Lock(),
+                                 brief=Brief(role=Role.CHAT, cwd="/tmp"), desk={"present": True})
+        handle = SimpleNamespace(native=native)
+        provider.steer(handle, UserMessage("and this", via="hud", desk=True))
+        self.assertTrue(native.desk["present"])
+        provider.steer(handle, UserMessage("from my phone", via="discord"))
+        self.assertFalse(native.desk["present"])
+        ctx = contextvars.copy_context()
+        ctx.run(runtime.bind, desk=native.desk, depth=0)
+        self.assertFalse(ctx.run(runtime.at_desk))
 
 
 def _reply(text="", calls=None):
