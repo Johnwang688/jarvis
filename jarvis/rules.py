@@ -2472,26 +2472,54 @@ def _here_word(body: str, quoted: bool, keep: bool) -> str:
     return '"' + body.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
-def _inline_heredocs(text: str, keep: bool = True) -> str:
+def _joins(line: str) -> bool:
+    """Does this physical line of an unquoted body end in a backslash-newline
+    bash removes? Only an odd run: a backslash before a backslash quotes it
+    (bash 5.3's `read_a_line`, checked with `bash -n`)."""
+    return (len(line) - len(line.rstrip("\\"))) % 2 == 1
+
+
+def _inline_heredocs(text: str, keep: bool = True, bodies: list | None = None,
+                     unsure: list | None = None) -> str:
     """The text with each here-document's body moved into its operator as a
     here-string (see above). Several on one line are read in order, `<<-`
     strips leading tabs, a body with no terminator runs to the end (as in
-    bash), and an operator with no line after it is left as it was.
+    bash), and an operator with no line after it is left as it was. Each
+    body, as bash reads it, is also added to `bodies` when one is given
+    (the body backstop reads them, `_body_marker`).
 
-    Raises `_TooComplex` where bash's reading is unsure (round 3b): a
-    delimiter `_heredoc_word` cannot read with a line after it (with none,
+    **An unquoted body is read in logical lines** (round 4): bash removes a
+    backslash-newline while it reads one, before the line is compared with
+    the delimiter, so `EO\\⏎F` ends the body under `<<EOF` (an odd run of
+    backslashes only; `<<-` strips the joined line's tabs). A quoted body is
+    read line by line, as written. Under `<<-` a line is compared both
+    before and after its tabs are stripped (a delimiter can start with a
+    tab).
+
+    Raises `_TooComplex` where bash's reading is unsure (round 3b, round 4):
+    a delimiter `_heredoc_word` cannot read with a line after it (with none,
     there is no body and the word does not matter); a here-document opened
-    inside `$(…)` with a body line that starts with its delimiter and holds
-    a `)` after it (bash 5.3 ends the body at such a line — `EOF)`, and
+    inside a command or process substitution (`$(…)`, `<(…)`, `>(…)`) or
+    backticks with a body line that starts with its delimiter and holds a
+    `)` after it (bash 5.3 ends the body at such a line — `EOF)`, and
     `Exposes a)` under `<<'E'` — and reads the rest as code; bash 5.1 and
     older end it only at `EOF)`; reading on would hide what follows); one
-    opened inside a `$(…)` that closes before its body; and more than
-    `HEREDOC_CAP` open on one line."""
+    opened inside a `$(…)`, `<(…)` or `>(…)` that closes before its body;
+    a backslash in a delimiter or a body line inside backticks (bash takes
+    backslashes out of backtick text before it reads it, and `bash -n` does
+    not parse backticks, so no reading of it was checked); a NUL in a text
+    with a line after `<<` (bash drops NUL bytes as it reads a body line);
+    and more than `HEREDOC_CAP` open on one line. One shape is flagged in
+    `unsure` instead (when given) and read on: a here-document opened in
+    backticks that close before its body — its lines after are read as
+    commands, the stricter reading."""
     if "<<" not in text:
         return text
+    if "\x00" in text and "\n" in text:
+        raise _TooComplex
     out: list[str] = []
     stack: list = []            # '"', "$(", "`", "(", or [kind, depth] for ${…} and arithmetic
-    # (delimiter, strip tabs, quoted, slot in out, as written, depth, inside `$(…)`)
+    # (delimiter, strip tabs, quoted, slot in out, as written, depth, inside a substitution)
     pending: list[tuple] = []
     i, n = 0, len(text)
     last_newline = text.rfind("\n")
@@ -2583,17 +2611,24 @@ def _inline_heredocs(text: str, keep: bool = True) -> str:
             out.append("$[")
             i += 2
             continue
-        if text.startswith("$(", i):
+        if text.startswith("$(", i) or text.startswith("<(", i) or text.startswith(">(", i):
+            # A process substitution is read as bash 5.3 reads a `$(…)`
+            # (round 4, checked with `bash -n`): the same body rules hold.
             stack.append("$(")
-            out.append("$(")
+            out.append(text[i:i + 2])
             i += 2
             continue
         if ch == "`":
             if top == "`":
                 stack.pop()
                 # Backtick text is parsed on its own: a here-document opened
-                # inside it has no body outside it.
-                for entry in [e for e in pending if e[5] > len(stack)]:
+                # inside it has no body outside it. Which lines bash reads as
+                # its body then cannot be checked (`bash -n` does not parse
+                # backticks): flagged, and the lines after read as commands.
+                closing = [e for e in pending if e[5] > len(stack)]
+                if closing and last_newline > i and unsure is not None:
+                    unsure.append("a here-document in backticks that close before its body")
+                for entry in closing:
                     out[entry[3]] = entry[4]
                     pending.remove(entry)
             else:
@@ -2624,8 +2659,10 @@ def _inline_heredocs(text: str, keep: bool = True) -> str:
             if delimiter or quoted:                 # `<<''` ends at the first empty line
                 if len(pending) >= HEREDOC_CAP:
                     raise _TooComplex
+                if "`" in stack and "\\" in text[i:j] and last_newline > i:
+                    raise _TooComplex               # backtick text loses backslashes first
                 pending.append((delimiter, strip, quoted, len(out), text[i:j], len(stack),
-                                "$(" in stack))
+                                "$(" in stack or "`" in stack))
                 out.append("")
                 i = j
                 continue
@@ -2643,18 +2680,37 @@ def _inline_heredocs(text: str, keep: bool = True) -> str:
                     tick = text.find("`", i, end) if in_tick else -1
                     line = text[i:end if tick == -1 else tick]
                     i = end + 1 if tick == -1 else tick
+                    if in_tick and "\\" in line:
+                        raise _TooComplex           # backtick text loses backslashes first
+                    # An unquoted body: a backslash-newline is removed before
+                    # the line is compared (round 4, the review's HIGH). The
+                    # backslash left before a join is an even run, so each
+                    # piece's own run decides whether it joins the next.
+                    if not quoted and tick == -1 and end < n and _joins(line):
+                        parts = [line]
+                        while end < n and _joins(parts[-1]):
+                            parts[-1] = parts[-1][:-1]
+                            end = text.find("\n", i)
+                            end = n if end == -1 else end
+                            parts.append(text[i:end])
+                            i = end + 1
+                        line = "".join(parts)
+                    whole = line                    # `<<-` compares it unstripped too
                     if strip:
                         line = line.lstrip("\t")
-                    if line == delimiter:
+                    if line == delimiter or whole == delimiter:
                         break
                     if in_sub and line.startswith(delimiter) and ")" in line[len(delimiter):]:
-                        raise _TooComplex
+                        raise _TooComplex           # bash 5.3 checks the stripped line
                     if tick != -1:
                         if line:
                             lines.append(line)
                         break
                     lines.append(line)
-                out[slot] = "<<<" + _here_word("".join(l + "\n" for l in lines), quoted, keep)
+                body = "".join(l + "\n" for l in lines)
+                if bodies is not None:
+                    bodies.append(body)
+                out[slot] = "<<<" + _here_word(body, quoted, keep)
             pending = []
             continue
         out.append(ch)
@@ -2780,6 +2836,8 @@ class _Walk:
         self.progs: list[_Prog] = []
         self.modules = False
         self.spent = 0
+        self.bodies: list[str] = []     # every here-document body set aside, for the backstop
+        self.flagged: list[str] = []    # a here-document reading flagged unsure
 
     def _spend(self, depth: int) -> None:
         self.spent += 1
@@ -2788,7 +2846,8 @@ class _Walk:
 
     def line(self, text: str, certain: bool, depth: int) -> None:
         self._spend(depth)
-        text = join_continuations(_inline_heredocs(text))
+        text = join_continuations(_inline_heredocs(text, bodies=self.bodies,
+                                                   unsure=self.flagged))
         inners, outer = _substitutions(text)
         for inner in inners:
             self.line(inner, certain, depth + 1)
@@ -3054,7 +3113,7 @@ class VexLine:
     vexbuild: bool = False
 
 
-def _vex_line_uncached(command: str) -> VexLine:
+def _vex_line_uncached(command: str, backstop: bool = True) -> VexLine:
     if not command.strip():
         return VexLine()
     named = vexcom_reading(command)
@@ -3062,12 +3121,16 @@ def _vex_line_uncached(command: str) -> VexLine:
         return VexLine(deny=VEXCOM_DENIED)
     unsure = TOO_COMPLEX if named == COMPLEX else None
     vexbuild = False
+    bodies: list[str] = []
     for text in _program_variants(command):
         walk = _Walk()
         try:
             walk.line(text, True, 0)
         except _TooComplex:
             unsure = unsure or TOO_COMPLEX
+        if walk.flagged:
+            unsure = unsure or TOO_COMPLEX
+        bodies.extend(walk.bodies)
         vexbuild = vexbuild or walk.modules
         for prog in walk.progs:
             kind = _program_kind(prog)
@@ -3084,7 +3147,51 @@ def _vex_line_uncached(command: str) -> VexLine:
             elif kind == COMPLEX:
                 unsure = unsure or TOO_COMPLEX
             vexbuild = vexbuild or kind == VEXBUILD
+    if unsure is None and backstop and bodies:
+        unsure = _body_marker(bodies)
     return VexLine(unsure=unsure, vexbuild=vexbuild)
+
+
+# **The body backstop** (round 4). Three review rounds each found a shape
+# whose here-document body the lexer kept open past bash's own end (a
+# delimiter formed differently, a terminator joined from a continuation), so
+# the lines after it — commands to bash — were read as data. Whatever the
+# lexer gets wrong next, this bounds the cost: every line of every body it
+# set aside (any here-document, any quoting, as written and with its
+# continuations joined) is read alone as a command, and a line that would be
+# **DENY** that way (it runs something that could be vexcom, or names it)
+# makes the whole line unsure — asked, never covered by an allowlist entry,
+# always-ask in v2 — and never DENY, because it is usually a real mention in
+# data (a `* bullet`, a C comment), which must stay approvable. So a
+# misread body end can at worst turn a DENY into an ask, never into
+# something an allowlist entry or v2's reviewer runs unasked. What the lexer
+# reads as a command keeps its stricter verdict.
+#
+# **Only a DENY reading marks a body, not an unsure one**, by measurement:
+# read alone as a command, a Markdown line with a code span (`` `x` `` is a
+# program that is only an expansion) is unsure, and 45 of this repository's
+# 49 pull-request bodies and 27 of its 546 commit messages hold one, where 0
+# of the commit messages hold a DENY-shaped line. The cost of that choice:
+# a body end misread over a line that is only *unsure* (`$X --user`) gives
+# the general ASK, which v2 under AUTO leaves to the provider's reviewer.
+BODY_MARKER = ("a here-document's body holds a line that would run something that could be "
+               "vexcom, VEX's tool for the robot, or name it, if it were read as a command; "
+               "where a body ends is bash's reading, so it is asked whatever else stands")
+
+
+def _body_marker(bodies: list[str]) -> str | None:
+    """BODY_MARKER if a line of one of these bodies, read alone as a command,
+    is DENY by the vex reading; else None. Each distinct line is read once."""
+    seen: set[str] = set()
+    for body in bodies:
+        for text in (body, join_continuations(body)):
+            for line in text.split("\n"):
+                if line in seen or not line.strip():
+                    continue
+                seen.add(line)
+                if _vex_line_uncached(line, backstop=False).deny:
+                    return BODY_MARKER
+    return None
 
 
 def _quoted_word(word: str) -> str:
@@ -3098,11 +3205,23 @@ def _vex_line_cached(command: str) -> VexLine:
     return _vex_line_uncached(command)
 
 
+_LAST_LONG: tuple = ("", VexLine())
+
+
 def _vex_line(command: str) -> VexLine:
     """The vex reading of a line (`decide`, the allowlist and v2's layer 2
-    each ask; short lines are cached, the reading is pure)."""
+    each ask; short lines are cached, the last long one is kept, the
+    reading is pure)."""
+    global _LAST_LONG
     command = command or ""
-    return _vex_line_cached(command) if len(command) <= 16384 else _vex_line_uncached(command)
+    if len(command) <= 16384:
+        return _vex_line_cached(command)
+    last = _LAST_LONG
+    if last[0] == command:
+        return last[1]
+    line = _vex_line_uncached(command)
+    _LAST_LONG = (command, line)
+    return line
 
 
 def vex_uncoverable(command: str) -> str | None:

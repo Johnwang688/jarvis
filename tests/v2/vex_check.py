@@ -1963,6 +1963,8 @@ class Polish(Base):
 
 R3 = "./v*.exe --user"
 # Ordinary commands that hold a here-document: never DENY, as on main (each was DENY at c12959c).
+# Each body holds a `*` or `/*` line, which read alone as a command would run a glob that could be
+# vexcom, so since round 4 the body backstop asks about each (approvable, never covered).
 HEREDOC_ORDINARY = {
     "a commit message": "git commit -m \"$(cat <<'EOF'\nFix the drivetrain PID\n\n* raise kP\n* clamp output\nEOF\n)\"",
     "gh pr create": "gh pr create --title x --body \"$(cat <<'EOF'\n## Summary\n* one\nEOF\n)\"",
@@ -2040,13 +2042,95 @@ HEREDOC_UNSURE = {
     "an unquoted backslash-newline": f"cat <<E\\\nF\nx\nEF\n{M}",
     "an ANSI-C escape not decoded exactly": f"cat <<$'E\\x4'\nx\nE\x04\n{M}",
     "an extglob": f"cat <<E@(x)\nx\nE@(x)\n{M}",
+    # Round 4 (the review's LOW): a process substitution is read as bash 5.3 reads a `$(…)`
+    # (checked with `bash -n`), and backticks too, where `bash -n` cannot check.
+    "EOF) inside <(…)": f"cat <(cat <<EOF\nhi\nEOF)\n{M}",
+    "EOF) inside >(…)": f"tee >(cat <<EOF\nhi\nEOF)\n{M}",
+    "a <(…) that closes before its body": f"cat <(cat <<E)\nbody\n{M}\nE",
+    "a >(…) that closes before its body": f"tee >(cat <<E)\nbody\n{M}\nE",
+    "a body line in backticks starting with the delimiter, then a )": f"x=`cat <<E\nE {M} )\nE\n`",
+    # Round 4: bash takes backslashes out of backtick text before it reads a body there, and
+    # drops a NUL as it reads a body line.
+    "a backslash in a body line in backticks": f"x=`cat <<EOF\nhi\nEO\\\nF\n{M}\n`",
+    "a backslash in a delimiter in backticks": f"x=`cat <<\\EOF\nhi\nEOF\n{M}\n`",
+    "a NUL in a body line": f"cat <<'EOF'\nx\nEO\x00F\n{M}",
 }
-# A body bash does not end there: its lines stay data.
+# Round 4 (LOW): a here-document in backticks that close before its body. Its lines after are
+# read as commands (a marker there is DENY, `HEREDOC_RUNS`), and the line is unsure.
+HEREDOC_TICK_CLOSES = {
+    "backticks that close before the body": "echo `cat <<X`\nbody\nX",
+    "nested in $(…)": "x=$(echo `cat <<X`\nbody\nX\n)",
+    "in a sh -c string": "sh -c 'echo `cat <<X`\nbody\nX'",
+}
+# A body bash does not end there: its lines are data — asked by the body backstop (round 4) when
+# one would be DENY read as a command, never DENY.
 HEREDOC_DATA = {
     "a terminator with trailing whitespace": f"cat <<'EOF'\nx\nEOF \n{M}",
     "an empty delimiter's body": f"cat <<''\n{M}\n\nls",
     'a "E\\"F" body': f'cat <<"E\\"F"\n{M}\nE"F',
+}
+HEREDOC_NO_BODY = {
     "an unsure delimiter with no line after it": 'cat <<"E$(echo q)F"; cat <<E`echo q`F',
+}
+
+# Round 4 (the review's HIGH): bash 5.3 removes a backslash-newline while it reads an *unquoted*
+# body, before it compares the line with the delimiter, so these bodies end where the pieces join
+# into the delimiter and the marker after them runs (each checked with `bash -n` on bash 5.3: a
+# syntax error on the line after shows it read as code). At 243b0cf each was ASK, not uncoverable.
+BS = "\\"
+HEREDOC_JOINED = {
+    "EO\\ then F": f"cat <<EOF\nx\nEO{BS}\nF\n{M}",
+    "E\\ O\\ F": f"cat <<EOF\nx\nE{BS}\nO{BS}\nF\n{M}",
+    "EO\\ then a lone \\ then F": f"cat <<EOF\nx\nEO{BS}\n{BS}\nF\n{M}",
+    "EOF\\ then an empty line": f"cat <<EOF\nx\nEOF{BS}\n\n{M}",
+    "<<-: a tab, EO\\, then F": f"cat <<-EOF\nx\n\tEO{BS}\nF\n{M}",
+    "<<-: tabs, E\\, then OF": f"cat <<-EOF\nx\n\t\tE{BS}\nOF\n{M}",
+    "in $(…), then )": f"x=$(cat <<EOF\nhi\nEO{BS}\nF\n)\n{M}",
+    "in $(…), the marker inside": f"x=$(cat <<EOF\nhi\nEO{BS}\nF\n{M}\n)",
+    "in ( … ) in $(…)": f"x=$( (cat <<EOF\nhi\nEO{BS}\nF\n) )\n{M}",
+    "the first of two": f"cat <<A <<B\nx\nA{BS}\n\ny\nB\n{M}",
+    "an even run, then EOF": f"cat <<EOF\nx{BS}{BS}\nEOF\n{M}",
+    "<<-: a tab-led delimiter, unstripped": f"cat <<-$'\\tE'\nx\n\tE\n{M}",
+    '<<-: a tab-led "…" delimiter, unstripped': f'cat <<-"\tE"\nx\n\tE\n{M}',
+}
+# Bash does not join these (a quoted delimiter, an even run, a tab after the join point, a join
+# that makes another word): the marker is body, asked by the backstop, never DENY.
+HEREDOC_UNJOINED = {
+    "a quoted delimiter": f"cat <<'EOF'\nx\nEO{BS}\nF\n{M}",
+    "a double-quoted delimiter": f'cat <<"EOF"\nx\nEO{BS}\nF\n{M}',
+    "a backslashed delimiter": f"cat <<{BS}EOF\nx\nEO{BS}\nF\n{M}",
+    '$"EOF"': f'cat <<$"EOF"\nx\nEO{BS}\nF\n{M}',
+    "an even run": f"cat <<EOF\nx\nEO{BS}{BS}\nF\n{M}",
+    "an odd run of three makes EO\\\\F": f"cat <<EOF\nx\nEO{BS}{BS}{BS}\nF\n{M}",
+    "x\\ then EOF makes xEOF": f"cat <<EOF\nx{BS}\nEOF\n{M}",
+    "x\\\\\\ then EOF makes x\\\\EOF": f"cat <<EOF\nx{BS}{BS}{BS}\nEOF\n{M}",
+    "<<-: EO\\ then a tab and F": f"cat <<-EOF\nx\nEO{BS}\n\tF\n{M}",
+    "a CR after the backslash": f"cat <<EOF\nx\nEO{BS}\r\nF\n{M}",
+}
+
+# Round 4 (the body backstop): a marker anywhere in a body — any here-document, any quoting —
+# is asked, never DENY, never allowlist-covered, always asked in v2. At 243b0cf each was ASK
+# and coverable.
+HEREDOC_BACKSTOP = {
+    "a quoted body": f"cat > notes.txt <<'EOF'\n{M} --user\nEOF",
+    "an unquoted body": f"cat > notes.txt <<EOF\nrun {M} later\n{M}\nEOF",
+    "a <<- body": f"cat <<-EOF\n\t{M}\n\tEOF",
+    'a $"…" body': f'cat <<$"EOF"\n{M}\nEOF',
+    "a body in $(…)": f"git commit -m \"$(cat <<'EOF'\nNotes\n\n{M}\nEOF\n)\"",
+    "a body in a sh -c string": f"sh -c 'cat <<E\n{M}\nE'",
+    "an argument glob that names it": "cat <<'EOF'\nls ve?com\nEOF",
+    "a glob only its continuation makes": f"cat <<'EOF'\nls ve{BS}\n?com\nEOF",
+    "a body with no terminator": f"cat <<'EOF'\nfirst\n{R3}",
+    "a body bash ends at a later line": f"cat <<'EOF'\nx\nEOF \n{M}\nEOF",
+}
+# Plain bodies: nothing in them would be DENY read as a command, so nothing new is asked. A line
+# led by a code span (`` `kP` is … ``) is only *unsure* read alone — its program is an expansion —
+# and the backstop does not ask for that (most pull-request bodies hold one).
+HEREDOC_PLAIN = {
+    "a commit message": "git commit -m \"$(cat <<'EOF'\nFix the drivetrain PID\n\n- raise `kP`\n- clamp output (to 127)\n`kP` is now 0.8\nEOF\n)\"",
+    "gh pr create": "gh pr create --title x --body \"$(cat <<'EOF'\n## Summary\n- one\n\n| a | b |\n|---|---|\nEOF\n)\"",
+    "a markdown file": "cat > notes.md <<'EOF'\n# Notes\n- one\n- two\nEOF",
+    "python on stdin": "python3 - <<'EOF'\nprint(1 + 2)\nEOF",
 }
 
 
@@ -2064,13 +2148,34 @@ class HereDocuments(Base):
         bound.__enter__()
         self.addCleanup(bound.__exit__, None, None, None)
 
+    def assert_backstop(self, command):
+        """Asked by the body backstop: ASK, never DENY, never covered, approvable."""
+        verdict = rules.decide(command)
+        self.assertEqual(verdict.decision, rules.ASK, command)
+        self.assertIn("here-document's body", verdict.reason, command)
+        self.assertEqual(v1_permissions.static_verdict(command).decision, rules.ASK)
+        self.assertIsNone(v2_permissions.denied_command(command))
+        self.assertIn("here-document's body", rules.vex_uncoverable(command) or "", command)
+
     def test_ordinary_here_documents_are_never_refused(self):
+        approve = v1_permissions.gate(lambda tool, args: True)
         for label, command in HEREDOC_ORDINARY.items():
             with self.subTest(label):
+                self.assert_backstop(command)
+                tools.dispatch("run_command", json.dumps({"command": command, "reason": "probe"}),
+                               approve)
+        self.assertEqual(sorted(self.ran), sorted(HEREDOC_ORDINARY.values()), "a yes runs each")
+
+    def test_plain_here_documents_ask_nothing_new(self):
+        auto = Asker()
+        permit = v2_permissions.build_permit(context(self.root, PP.AUTO), auto)
+        for label, command in HEREDOC_PLAIN.items():
+            with self.subTest(label):
                 self.assertEqual(rules.decide(command).decision, rules.ASK, command)
-                self.assertNotEqual(v1_permissions.static_verdict(command).decision, rules.DENY)
-                self.assertIsNone(v2_permissions.denied_command(command))
                 self.assertIsNone(rules.vex_uncoverable(command), command)
+                self.assertIsNone(v2_permissions.denied_command(command))
+                self.assertNotEqual(permit("Bash", {"command": command}), Decision.DENY)
+        self.assertEqual(auto.seen, [], "no card under AUTO")
 
     def test_what_a_body_feeds_or_hides_is_still_read(self):
         for label, command in HEREDOC_RUNS.items():
@@ -2080,7 +2185,7 @@ class HereDocuments(Base):
                 self.assertIn("vexcom", verdict.reason)
                 self.assertIsNotNone(v2_permissions.denied_command(command))
 
-    def test_v2_asks_nothing_new_for_a_commit_message(self):
+    def test_v2_never_denies_a_commit_message(self):
         asker = Asker()
         for profile in (PP.AUTO, PP.ASK):
             permit = v2_permissions.build_permit(context(self.root, profile), asker)
@@ -2088,11 +2193,13 @@ class HereDocuments(Base):
                 with self.subTest(profile=profile.value, shape=label):
                     self.assertNotEqual(permit("Bash", {"command": HEREDOC_ORDINARY[label]}),
                                         Decision.DENY)
-        # Under AUTO no card is raised for them (the provider's reviewer decides).
+        # Under AUTO a `* bullet` message is asked (the body backstop, round 4); a plain one is
+        # the provider's reviewer's, as before (`test_plain_here_documents_ask_nothing_new`).
         auto = Asker()
         permit = v2_permissions.build_permit(context(self.root, PP.AUTO), auto)
-        permit("Bash", {"command": HEREDOC_ORDINARY["a commit message"]})
-        self.assertEqual(auto.seen, [])
+        self.assertEqual(permit("Bash", {"command": HEREDOC_ORDINARY["a commit message"]}),
+                         Decision.ALLOW)
+        self.assertEqual(len(auto.seen), 1)
 
     def test_a_delimiter_is_read_as_bash_reads_it(self):
         for label, command in HEREDOC_DELIMITERS.items():
@@ -2135,10 +2242,78 @@ class HereDocuments(Base):
     def test_a_body_bash_does_not_end_stays_data(self):
         for label, command in HEREDOC_DATA.items():
             with self.subTest(label):
+                self.assert_backstop(command)       # data, so never DENY; asked (round 4)
+        for label, command in HEREDOC_NO_BODY.items():
+            with self.subTest(label):
                 self.assertNotEqual(rules.decide(command).decision, rules.DENY, command)
-                self.assertNotEqual(v1_permissions.static_verdict(command).decision, rules.DENY)
-                self.assertIsNone(v2_permissions.denied_command(command))
                 self.assertIsNone(rules.vex_uncoverable(command), command)
+
+    def test_an_unquoted_body_ends_where_its_continuations_join_the_delimiter(self):
+        for label, command in HEREDOC_JOINED.items():
+            with self.subTest(label):
+                verdict = rules.decide(command)
+                self.assertEqual(verdict.decision, rules.DENY, command)
+                self.assertIn("`bin/*`", verdict.reason)
+                self.assertEqual(v1_permissions.static_verdict(command).decision, rules.DENY)
+                self.assertIsNotNone(v2_permissions.denied_command(command))
+        for label, command in HEREDOC_UNJOINED.items():
+            with self.subTest(label):
+                self.assert_backstop(command)
+
+    def test_a_marker_in_any_body_is_asked_never_denied_never_covered(self):
+        asked = []
+        gate = v1_permissions.gate(lambda tool, args: asked.append(args["command"]) or False)
+        for label, command in HEREDOC_BACKSTOP.items():
+            with self.subTest(label):
+                self.assert_backstop(command)
+                stems = {w for pair in rules.command_targets(command) for w in pair}
+                stems |= {"cat", "git", "sh", "ls", "bin/*", "*"}
+                Path(config.ALLOWLIST_PATH).write_text(json.dumps(
+                    [{"tool": "run_command", "prefix": p} for p in stems]))
+                self.assertFalse(v1_permissions.allows("run_command", {"command": command}),
+                                 "an allowlist entry covered it")
+                tools.dispatch("run_command", json.dumps({"command": command, "reason": "probe"}),
+                               gate)
+        self.assertEqual(sorted(asked), sorted(HEREDOC_BACKSTOP.values()), "v1 asked about each")
+        self.assertEqual(self.ran, [], "a no ran nothing")
+        for profile in (PP.AUTO, PP.ASK):
+            asker = Asker(Decision.DENY)
+            permit = v2_permissions.build_permit(context(self.root, profile), asker)
+            for label, command in HEREDOC_BACKSTOP.items():
+                with self.subTest(profile=profile.value, shape=label):
+                    self.assertEqual(permit("Bash", {"command": command}), Decision.DENY)
+            self.assertEqual(len(asker.seen), len(HEREDOC_BACKSTOP), f"v2 asked ({profile})")
+
+    def test_a_marker_on_a_command_line_after_the_body_is_still_deny(self):
+        for label, command in {"after a quoted body": f"cat <<'EOF'\n{M}\nEOF\n{M}",
+                               "after an unquoted one": f"cat <<EOF\nok\nEOF\n{R3}",
+                               "on the operator's line": f"cat <<'EOF'; {M}\n{M}\nEOF"}.items():
+            with self.subTest(label):
+                self.assertEqual(rules.decide(command).decision, rules.DENY, command)
+                self.assertIsNotNone(v2_permissions.denied_command(command))
+
+    def test_backticks_that_close_before_the_body_are_unsure(self):
+        for label, command in HEREDOC_TICK_CLOSES.items():
+            with self.subTest(label):
+                verdict = rules.decide(command)
+                self.assertEqual(verdict.decision, rules.ASK, command)
+                self.assertEqual(verdict.reason, rules.TOO_COMPLEX)
+                self.assertEqual(rules.vex_uncoverable(command), rules.TOO_COMPLEX)
+
+    def test_the_body_backstop_is_judged_fast(self):
+        floods = {
+            "2000 distinct glob lines": "cat <<'EOF'\n" + "\n".join(
+                f"ls {i} " + "[" * 60 for i in range(2000)) + "\nEOF",
+            "a 400 KB body line": "cat <<'EOF'\n" + "a " * 200000 + "\nEOF",
+            "50,000 continuations": "cat <<EOF\n" + ("ab" + BS + "\n") * 50000 + "EOF\nls",
+            "3200 distinct prose lines": "cat > n.md <<'EOF'\n" + "\n".join(
+                f"- note {i}: `x{i}` is {i} * 2 for $HOME/a{i}" for i in range(3200)) + "\nEOF"}
+        for label, command in floods.items():
+            with self.subTest(label):
+                started = time.perf_counter()
+                self.assertNotEqual(rules.decide(command).decision, rules.DENY)
+                rules.vex_uncoverable(command)
+                self.assertLess(time.perf_counter() - started, 1.5, label)
 
     def test_a_large_here_document_is_not_too_complex(self):
         body = "\n".join(f"int *p{i} = a{i} * b[{i}] /* [{i}] */;" for i in range(3000))

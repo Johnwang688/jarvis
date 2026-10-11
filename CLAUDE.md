@@ -1262,8 +1262,8 @@ by the routes: device info (flag from the owner's `vexcom --help`) and Python
 download (spike). Agents' task worktrees are on the Linux filesystem, so
 `vexbuild` builds only in a chat's own project folder. Tests point every
 `config.VEX_*` path, `VEX_MOUNT_ROOT` and `VEXBUILD_PATH` at a temp tree, with a
-non-empty `WSLENV`. `tests/v2/vex_check.py` (98 checks); 69 guards of round 1
-and the round-2 guards each shown to fail their check when removed in a
+non-empty `WSLENV`. `tests/v2/vex_check.py` (111 checks); 69 guards of round 1
+and the guards of rounds 2–4 each shown to fail their check when removed in a
 scratch copy (the PR lists them). Open question, not done: whether `vex.py`
 and `vex_setup.py` join SELF_PROTECTED (the owner declined widening it for
 `runtime.py`).
@@ -2470,7 +2470,26 @@ jarvis/
   a line, and two `$(…)` shapes that differ between bash versions — a
   here-document whose `$(…)` closes before its body, and a body line inside
   `$(…)` that starts with the delimiter and holds a `)` (bash 5.3 ends the body
-  there and runs the rest of the line, `EOF)` included). It runs in `decide`, so v1's
+  there and runs the rest of the line, `EOF)` included). Round 4: an
+  **unquoted** body is read in logical lines, as bash 5.3 reads it — a
+  backslash-newline (an odd run of backslashes only) is removed before the line
+  is compared, so `EO\` then `F` ends the body under `<<EOF` (the review's HIGH:
+  the lines after it ran as code while the lexer read them as data); `<<-`
+  compares a line before and after its tabs are stripped; `<(…)` and `>(…)`
+  are read as `$(…)` (checked with `bash -n`); and backticks join the `)` rule,
+  while a backslash in a backtick here-document, backticks that close before
+  their body, or a NUL make the line too complex (`bash -n` cannot parse
+  backticks). **The body backstop** bounds what any future misreading costs:
+  every line of every body (any here-document, any quoting, as written and with
+  its continuations joined), read alone as a command, that would be DENY makes
+  the line asked — never covered by an allowlist entry, always-ask in v2 —
+  and never DENY, because a `* bullet` or a C comment is a mention and must
+  stay approvable. A misread body end can then at worst turn a DENY into an
+  ask. Only DENY readings count, not unsure ones: a Markdown code span read
+  alone is a program that is only an expansion, and 45 of the repository's 49
+  PR bodies hold one. The cost, measured: a here-document with a `*`- or
+  `/*`-led line or a `**\`code\`**` line asks in v2 under AUTO — 0 of the
+  repository's 546 commit messages, 14 of its 49 PR bodies. It runs in `decide`, so v1's
   `command_verdict` (before any approver, so neither an allowlist entry nor
   mode "all" reaches it) and v2's layer 1 (no card) refuse alike. **The
   accepted cost**: a grep or a commit message that only mentions the word is
