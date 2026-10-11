@@ -74,7 +74,7 @@ A render error (review of PR #29):
     first, and says a reload loses what was not sent; after a crash nothing
     heard is sent — a transcript landing after it, speech in the follow-up
     window or after a wake hit — the wake recognizer stops, and Space on
-    Reload presses Reload rather than push-to-talk; a dialog that throws is
+    Reload presses Reload and never starts the mic; a dialog that throws is
     closed and the window carries on.
 """
 from __future__ import annotations
@@ -535,7 +535,15 @@ def _resize_checks(page, mock, check, until):
     time.sleep(0.15)
     ptt = page.evaluate("window.__hud.capture.ptt")
     page.keyboard.up("Space")
-    check("Space on a focused separator is not push-to-talk", ptt is None, str(ptt))
+    check("Space on a focused separator never starts the mic", ptt is None, str(ptt))
+    # Push-to-talk's Ctrl+D (2026-10-10) works from a focused separator, and
+    # moves nothing.
+    width = _width(page, "#sidebar")
+    sep.focus()
+    held, after, key = _ptt_on_ctrl_d(page)
+    check("Ctrl+D held on a focused separator starts and stops push-to-talk, and moves nothing",
+          held is not None and after is None and key.get("prevented") is True and _width(page, "#sidebar") == width,
+          f"{held} {after} {key}")
     sep.dblclick()
 
     rsep = page.locator('[data-testid="split-right"]')
@@ -960,12 +968,85 @@ def _pane(n: int, sel: str = "") -> str:
 
 
 def _ptt_on_space(page) -> object:
-    """Hold Space where focus is now; what push-to-talk made of it."""
+    """Hold Space where focus is now; what push-to-talk made of it (Space is
+    no key of push-to-talk's since 2026-10-10: it must never start the mic)."""
     page.keyboard.down("Space")
     time.sleep(0.15)
     ptt = page.evaluate("window.__hud.capture.ptt")
     page.keyboard.up("Space")
     return ptt
+
+
+# Push-to-talk's key is Ctrl+D (2026-10-10, hud/src/lib/talkkey.ts). Every
+# keydown of D or Space is kept, so a check can read afterwards whether the
+# window took it from the browser: `defaultPrevented` is final once the event
+# has been dispatched, whichever capture listener ran first (an init script
+# or this, run again after a reload).
+TALK_PROBE = """
+if (!window.__talkKeys) {
+  window.__talkKeys = [];
+  window.addEventListener('keydown', (e) => {
+    if (e.code === 'KeyD' || e.code === 'Space') window.__talkKeys.push(e);
+  }, true);
+  // The first listener after the window's own capture phase: a Ctrl+D the
+  // window took for push-to-talk must never get this far (review of PR #40 —
+  // nothing behind the window may act on it).
+  window.__talkPast = 0;
+  document.addEventListener('keydown', (e) => {
+    if (e.ctrlKey && e.code === 'KeyD') window.__talkPast++;
+  }, true);
+}
+true;
+"""
+
+
+def _talk_past(page) -> int:
+    """How many Ctrl+D keydowns got past the window to the document."""
+    return page.evaluate("window.__talkPast || 0")
+
+
+def _talk_probe(page):
+    page.evaluate(TALK_PROBE)
+
+
+def _talk_keys(page, n: int = 1) -> list[dict]:
+    """The last N D/Space keydowns, as the window left them."""
+    return page.evaluate("""(n) => (window.__talkKeys || []).slice(-n).map((e) => ({
+      key: e.key, code: e.code, ctrl: e.ctrlKey, shift: e.shiftKey, alt: e.altKey, repeat: e.repeat,
+      prevented: e.defaultPrevented }))""", n)
+
+
+def _last_talk_key(page) -> dict:
+    got = _talk_keys(page, 1)
+    return got[0] if got else {}
+
+
+def _hold_keys(page, keys, hold: float = 0.15, ctrl_first: bool = False):
+    """Hold `keys` (pressed in order) where focus is now. Returns push-to-talk
+    while held and after the first key let go (D, or Ctrl when `ctrl_first`)."""
+    _talk_probe(page)
+    for k in keys:
+        page.keyboard.down(k)
+    time.sleep(hold)
+    held = page.evaluate("window.__hud.capture.ptt")
+    order = list(reversed(keys))
+    if ctrl_first and "Control" in order:
+        order.remove("Control")
+        order.insert(0, "Control")
+    page.keyboard.up(order[0])
+    time.sleep(0.05)
+    after = page.evaluate("window.__hud.capture.ptt")
+    for k in order[1:]:
+        page.keyboard.up(k)
+    time.sleep(0.05)
+    return held, after
+
+
+def _ptt_on_ctrl_d(page, hold: float = 0.15, ctrl_first: bool = False):
+    """Hold Ctrl+D where focus is now: (push-to-talk while held, push-to-talk
+    once D — or Ctrl, `ctrl_first` — is let go, the keydown as the window left it)."""
+    held, after = _hold_keys(page, ["Control", "d"], hold, ctrl_first)
+    return held, after, _last_talk_key(page)
 
 
 def _edit(page, until, pane: int, typed: str):
@@ -1127,7 +1208,7 @@ def _titlebar_checks(page, mock, check, until):
     page.keyboard.press("Shift+ArrowDown")
     check("Shift+ArrowDown shorter by a bigger step", _height(page, panel) == 212, str(_height(page, panel)))
     psep.focus()
-    check("Space on the edge is not push-to-talk", _ptt_on_space(page) is None)
+    check("Space on the edge never starts the mic", _ptt_on_space(page) is None)
     psep.dblclick()
     until(lambda: _height(page, panel) == 260, timeout=2)
     _drag_y(page, '[data-testid="panel-split"]', -100)
@@ -1201,7 +1282,7 @@ def _titlebar_checks(page, mock, check, until):
     check("ArrowDown to the tile below, four to a row", _active_testid(page) == "layout-preset-grid4",
           str(_active_testid(page)))
     check("and the arrows chose nothing", _attr(page, '[data-testid="workspace"]', "data-preset") == "single")
-    check("Space in the menu is not push-to-talk", _ptt_on_space(page) is None)
+    check("Space in the menu never starts the mic", _ptt_on_space(page) is None)
     until(lambda: _attr(page, '[data-testid="workspace"]', "data-preset") == "grid4", timeout=2)
     check("it activates the tile under focus instead",
           _attr(page, '[data-testid="workspace"]', "data-preset") == "grid4")
@@ -1307,7 +1388,7 @@ def _workspace_checks(page, mock, check, until):
     check("ArrowLeft on it moves it a step", abs(_width(page, _pane(1)) - (w1 - 16)) <= 2,
           f"{w1} -> {_width(page, _pane(1))}")
     sep.focus()
-    check("Space on it is not push-to-talk", _ptt_on_space(page) is None)
+    check("Space on it never starts the mic", _ptt_on_space(page) is None)
     w1 = _width(page, _pane(1))
     _boot(page, mock, None, until, reload=True)
     check("the preset and the edge survive a reload",
@@ -2676,7 +2757,7 @@ def _crash_checks(page, mock, check, until):
         page.locator('[data-testid="hud-crashed-reload"]').focus()
         ptt: list[object] = []
         reloaded = _reload_to_window(page, mock, until, lambda: ptt.append(_ptt_on_space(page)))
-        check("Space on the focused Reload starts no push-to-talk", ptt == [None], str(ptt))
+        check("Space on the focused Reload never starts the mic", ptt == [None], str(ptt))
         ok, why = _window_whole(page)
         check("it presses Reload: the window comes back", reloaded and ok, why)
         check("with no page error", not errors, "; ".join(errors[:2]))

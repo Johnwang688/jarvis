@@ -1,7 +1,7 @@
 // Inline rename for a sidebar row (decisions B4): Enter saves, Escape
 // cancels, and so does leaving the box — a rename nobody confirmed is not
-// one. The box swallows its own clicks and keys, so typing a space is not
-// push-to-talk and clicking into it does not collapse the row under it.
+// one. The box swallows its own clicks and keys, so nothing behind it acts on
+// what is typed and clicking into it does not collapse the row under it.
 //
 // The backend numbers a colliding name; the box says what it will be saved
 // as before Enter (`uniqueName`, mirrored from the backend), and the row shows

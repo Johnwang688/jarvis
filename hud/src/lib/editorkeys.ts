@@ -59,6 +59,34 @@ export function chordStep(
 }
 
 /**
+ * **One tracker for the window** (PR #40 on ED-1): the layout keys
+ * (`useLayout`) and push-to-talk (App.tsx) both listen on the window in the
+ * capture phase, and both must agree on whether a keydown ends a Monaco
+ * chord — push-to-talk leaves a Ctrl+D that does to Monaco, as the layout
+ * keys leave Ctrl+B. So the state lives here, and a keydown is stepped once,
+ * by whichever listener asks first: the answer is kept per event, so the
+ * second asks for the same event and gets the same answer (the listeners'
+ * order is their registration order, which a re-run effect changes).
+ */
+let shared: ChordState = null;
+const stepped = new WeakMap<object, boolean>();
+
+/** Step the window's tracker with this keydown (once), and say whether it ends a chord. */
+export function chordSecond(e: KeyLike & { timeStamp: number }, inEditor: boolean): boolean {
+  const seen = stepped.get(e);
+  if (seen !== undefined) return seen;
+  const step = chordStep(shared, e, inEditor, e.timeStamp);
+  shared = step.state;
+  stepped.set(e, step.second);
+  return step.second;
+}
+
+/** The window lost focus: Monaco leaves a pending chord, and so does the tracker. */
+export function resetChord(): void {
+  shared = null;
+}
+
+/**
  * Ctrl+S (Cmd+S): save. Matched on `key`, as the layout keys are, and never
  * with Alt — AltGr arrives as Ctrl+Alt, and AltGr+S types a character on some
  * layouts.

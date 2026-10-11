@@ -58,7 +58,7 @@ export function DirPicker(props: {
   }, []);
 
   const keys = (e: React.KeyboardEvent) => {
-    // Space in a text box is a space, never push-to-talk.
+    // The box's keys are the box's; Enter and Escape are the picker's.
     e.stopPropagation();
     if (e.key === "Escape") props.onClose();
     if (e.key === "Enter") load(typed.trim());

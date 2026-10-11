@@ -600,8 +600,8 @@ is the browser's).
 The left rail keeps **+ New thread** and a shrunken orb, and the right rail
 shows pending approvals and errors. A folded pane is hidden, **never
 unmounted**, so its state survives. The inner edges are `role="separator"`:
-drag them, use the arrows, or double-click to reset; Space on one is not
-push-to-talk. Widths are unzoomed px (left 180–480, right 240–560). The
+drag them, use the arrows, or double-click to reset; Space on one does
+nothing. Widths are unzoomed px (left 180–480, right 240–560). The
 centre is kept at 480 by shrinking the panes and then, when even their
 minimums do not fit, by **folding them for the render** (right first, then
 left; `fitLayout`) — never by rewriting the stored widths or folded flags,
@@ -862,8 +862,9 @@ pane say "Opening a terminal…" instead of offering a second button. With
 terminals open, a pane switched to the terminal view keeps its picker, "+ New
 terminal here" first. It needed the owner-only read fix above to work on the
 real daemon at all. A dot on ⬓ means one in the hidden panel exited. In a terminal **Ctrl+B, Ctrl+Alt+B and Ctrl+_ are the
-shell's** (`terminalTakesKey`), the zoom keys, Ctrl+` and Ctrl+Alt+N stay the
-HUD's, and every key stops at the terminal (Space is never push-to-talk).
+shell's** (`terminalTakesKey`), and so is **Ctrl+D** (end of input, never
+push-to-talk: `talkKeyAction`), the zoom keys, Ctrl+` and Ctrl+Alt+N stay the
+HUD's, and every key stops at the terminal.
 **Under a card nothing reaches the shell**: `disableStdin`, a key filter
 that lets every key bubble (Escape denies), a guard on the bytes, a paste in
 flight waits, and the card takes focus (WP-A). **Pastes**: 16 KiB chunks
@@ -1286,7 +1287,7 @@ closes on Escape (focus back on the button; **under a card it never swallows
 Escape**, which denies), a click outside, focus leaving it, a resize, a zoom
 change, or its button moving (a rAF watch: a fold, a split, a re-layout). It
 opens on the chosen option, the arrows move within a list, Tab goes round its
-stops and never leaves it, none of its keys reach push-to-talk, and its
+stops and never leaves it, its keys stop there, and its
 listeners are set once (the close is read through a ref). The box grows to the
 least of 15 lines (`MAX_LINES`), 35% of its pane (`MAX_PANE_SHARE`), and what
 the pane has left once its fixed parts (header, ticker, the rest of the bar,
@@ -1544,6 +1545,67 @@ symbols), `chats.test.ts`, `hud_v2_layout_check._eight_checks` and
 mutation for was shown to fail with it applied in a scratch copy, and so were
 the review's slot-label checks (a stored order `[1, 5, 2]`, so slot ≠ id, for
 both "shown in pane N" notices and the refusal chip).
+
+**Push-to-talk is Ctrl+D (2026-10-10, design §18; the owner: "change it to
+Ctrl + D just like it is in claude").** Held to talk, let go — D or Ctrl, in
+either order — to send; **Space is no longer push-to-talk anywhere** (it
+types a space, presses a focused button, does nothing on a separator — a
+space typed in Monaco used to start the mic and never appear). The rules are
+`hud/src/lib/talkkey.ts` (`isTalkKey`, `talkKeyAction`, `endsTalk`): Ctrl and D
+only — Shift, Alt or Meta make it another key, **AltGr (Ctrl+Alt) never
+matches**, nothing mid-composition, a layout whose D types no Latin letter
+matched on `code` KeyD. App.tsx listens **on the window, capture phase**, so
+the chat box, Monaco, menus, chips, the sidebar and pane headers (each of
+which stops its own keys) never stand in the way, and **its default is always
+prevented and it stops at the window** — no bookmark dialog, nothing under the
+cursor acts on it — under a card, muted or after a crash too; auto-repeat never
+presses twice; and **a hold is decided where it began** (review of PR #40,
+`TalkHold`): once Ctrl+D began as push-to-talk, or as a press refused under
+a card, its **auto-repeat** stays the window's when focus lands in a terminal
+mid-hold, so a card answered elsewhere, a click into a terminal or a Preview
+frame taking focus never sends the shell `\x04\x04\x04`. A window `blur`
+mid-hold lets the mic go (the keyup may never come) but not the hold; a
+**fresh** (non-repeat) press always decides afresh, so a lost keyup cannot
+keep the shell from its next Ctrl+D. What it does is `press()`/`release()`, unchanged from Space: the selected chat
+(W-6), its turn interrupted first, nothing recorded muted (`MIC MUTED`),
+refused under a card, with a picker or the chip popover open, with no chat on
+screen and after a crash. **In a focused terminal it is the shell's EOF**, left
+to xterm untouched (xterm prevents the default itself; **never
+`preventDefault` it there** — the terminal's key filter drops a key whose
+default is prevented); under a card the window takes it there too, so it is
+never an EOF behind the card. From a terminal push-to-talk is the orb (its
+tooltip names the key). **In Monaco it is push-to-talk**, and Monaco's
+add selection to next find match moved to **Ctrl+Shift+D** (`lib/monaco.ts`
+`editorKeyRules`, applied in ED-1's `loadMonaco` after `registerExtras`; the
+old binding removed, not shadowed) — free in Monaco and the HUD, and Chrome's
+"bookmark all tabs" only outside the editor. **A pending Ctrl+K chord's
+Ctrl+D is Monaco's** (E-10, as for Ctrl+B): the window has **one** chord
+tracker (`lib/editorkeys.ts` `chordSecond`/`resetChord`, a keydown stepped
+once whichever capture listener asks first — `useLayout`'s or push-to-talk's,
+whose order a re-run effect changes), and push-to-talk then keeps the key
+from Chrome but leaves it to Monaco, starting nothing; Ctrl+K Ctrl+D keeps
+Monaco's move-to-next-match. Taking it left Monaco's chord waiting to swallow
+the next key typed. A preview frame is another document:
+Ctrl+D in one is the framed page's. **Space now presses a focused button**,
+as on any page, so a button whose second press matters never takes focus
+from a pointer (`noPointerFocus`, a `mousedown` preventDefault; its click
+still works): the card's **AUTHORIZE and ALWAYS** (an aborted click — pressed,
+slid off — used to leave focus there, and the next Space or Enter
+authorized), the terminal's "Jarvis can read" switch, the folded mic's mode
+cycle and the Preview's "Keep its origin". The first Space pressed outside a
+typing target (`isTypingTarget`) says once, on the selected chat's line,
+"PUSH-TO-TALK IS CTRL+D NOW" (`jarvis.hud.spaceHint`); a card that arrives
+meanwhile clears it before paint, so ANSWER THE AUTHORIZATION is the line.
+Free checks: `talkkey.test.ts` (`TalkHold`),
+`editorkeys.test.ts` (the shared tracker), `monaco.test.ts`, `tests/face/hud_v2_ptt_check.py` (after the terminal and
+preview sections in `hud_v2_check`, a `MockDaemon(0)` of its own, or alone; its helpers
+`_ptt_on_ctrl_d`/`_hold_keys`/`TALK_PROBE` live in `hud_v2_layout_check.py`;
+`TALK_PROBE` also counts a Ctrl+D that gets past the window, which must be
+none), and the ported checks in the terminal (`\x04` reaches the PTY; nothing
+under a card; a hold through a card, into a terminal or across a blur sends
+no EOF; the readable switch), multichat (W-6), layout (a separator) and preview (Keep its
+origin) suites. The v1 `jarvis.html`
+face keeps Space.
 
 **Sidebar status dots (2026-10-08, design §18; contract in
 `docs/hud-api.md`).** The `·` left of each sidebar thread and task is what it
