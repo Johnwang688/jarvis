@@ -18,7 +18,11 @@ The safety checks are the ones to keep, and each is written to bite:
   - an `approval_requested` from a task shows its label and the **whole**
     command, never a summary;
   - dictation REVIEW never sends on its own, and OFF uploads nothing;
-  - a wake hit fires once per phrase, not once per recognizer update.
+  - a wake hit fires once per phrase, not once per recognizer update;
+  - (ED-1) the editor makes no request off loopback (a catch-all route
+    refuses and records any), no language-service worker is built or loaded,
+    a link in a file opens only http(s) with noopener, and an unsaved edit is
+    never dropped by opening another file or Reload without asking.
 
 Build first:  cd hud && npm ci && npm run build
 Run:          PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. .venv/bin/python \\
@@ -849,6 +853,185 @@ def task_checks(page, mock):
           page.locator('[data-testid="task-phase"]').first.inner_text())
 
 
+# Every URL the main context requested, and every one it tried off loopback
+# (refused by a catch-all route, which also records it). ED-1.
+REQUESTS: list[str] = []
+OFF_LOOPBACK: list[str] = []
+LOOPBACK = re.compile(r"^https?://(127\.0\.0\.1|localhost|\[::1\])(:\d+)?/")
+
+
+def guard_loopback(ctx):
+    """Refuse and record any request that is not to loopback. Routed by a
+    pattern that matches **only** such requests, so a loopback request never
+    waits on a Python handler (sync route handlers run only during a
+    Playwright call, and a wait on the mock alone would stall it)."""
+    def refuse(route):
+        OFF_LOOPBACK.append(route.request.url)
+        route.abort()
+    ctx.route(re.compile(r"^(?!https?://(127\.0\.0\.1|localhost|\[::1\])(:\d+)?/)https?://"), refuse)
+    ctx.on("request", lambda r: REQUESTS.append(r.url))
+
+
+def _editor_text(page, scope: str = "") -> str:
+    """What the editor shows, spaces as spaces (Monaco draws them as nbsp)."""
+    loc = page.locator(f'{scope} [data-testid="editor"] .view-lines'.strip())
+    return loc.first.inner_text().replace("\u00a0", " ")
+
+
+def monaco_language_checks(page):
+    host = page.locator('[data-testid="editor"]')
+    until(lambda: host.get_attribute("data-language") is not None, timeout=10)
+    check("the language comes from Monaco's registry, by the file's name",
+          host.get_attribute("data-language") == "python", str(host.get_attribute("data-language")))
+    until(lambda: page.locator('[data-testid="editor"] .view-line span[class*="mtk"]').count() > 3, timeout=5)
+    time.sleep(0.3)
+    distinct = page.evaluate("""() => Math.max(0, ...[...document.querySelectorAll('[data-testid="editor"] .view-line')]
+      .map(l => new Set([...l.querySelectorAll('span[class*="mtk"]')]
+        .map(s => (s.className.match(/mtk\\d+/) || [''])[0])).size))""")
+    check("a Python line is coloured: it carries two or more distinct token classes", distinct >= 2, str(distinct))
+    langs = page.evaluate("""() => Object.fromEntries([
+      ['robot-config.h', ''], ['main.cpp', ''], ['pyproject.toml', ''], ['package.json', ''],
+      ['run', '#!/usr/bin/env bash\\necho'], ['tool', '#!/usr/bin/env python3\\n'], ['notes.txt', ''],
+    ].map(([p, t]) => [p, window.__hud.monacoLanguage ? window.__hud.monacoLanguage(p, t) : null]))""")
+    want = {"robot-config.h": "cpp", "main.cpp": "cpp", "pyproject.toml": "toml", "package.json": "json",
+            "run": "shell", "tool": "python", "notes.txt": "plaintext"}
+    check(".h is C++ (VEX headers), .toml and .json have languages, a shebang names its language",
+          langs == want, str(langs))
+
+
+def _pressed(page, keys: str) -> dict:
+    """Press `keys` with focus where it is; what became of its keydown, read
+    after the event has run its course (Monaco stops a key it handles, so a
+    bubbling listener never sees it)."""
+    page.evaluate("""() => { window.__lastKey = null; window.addEventListener('keydown', function f(e) {
+      if (['Control', 'Shift', 'Alt', 'Meta'].includes(e.key)) return;
+      window.__lastKey = e; window.removeEventListener('keydown', f, true); }, true); }""")
+    page.keyboard.press(keys)
+    time.sleep(0.15)
+    return page.evaluate("() => { const e = window.__lastKey; return e ? {key: e.key, prevented: e.defaultPrevented} : {}; }")
+
+
+def monaco_key_checks(page, mock):
+    """The editor's missing half (ED-1): find, word suggestions, Ctrl+S, and
+    Ctrl+B with its Ctrl+K chord."""
+    lines = page.locator('[data-testid="editor"] .view-lines')
+    lines.click()
+    page.keyboard.press("Control+End")
+    seen = _pressed(page, "Control+f")
+    find = page.locator('[data-testid="editor"] .find-widget.visible')
+    until(lambda: find.count() > 0, timeout=3)
+    check("Ctrl+F opens Monaco's find widget", find.count() == 1)
+    check("and Chrome's find-in-page is kept out of it", seen.get("prevented") is True, str(seen))
+    page.keyboard.press("Escape")
+    until(lambda: find.count() == 0, timeout=3)
+
+    lines.click()
+    page.keyboard.press("Control+End")
+    page.keyboard.type("\nre")
+    page.keyboard.press("Control+Space")
+    suggest = page.locator('[data-testid="editor"] .suggest-widget.visible .monaco-list-row')
+    until(lambda: suggest.count() > 0, timeout=5)
+    labels = [suggest.nth(i).get_attribute("aria-label") or "" for i in range(suggest.count())]
+    check("Ctrl+Space suggests a word from the file (no language service: the words themselves)",
+          any(lbl.startswith("return") for lbl in labels), str(labels))
+    page.keyboard.press("Escape")
+    until(lambda: suggest.count() == 0, timeout=3)
+
+    puts = len(mock.sent("PUT", "/projects/p1/file"))
+    mtime = mock.world["files"]["calc.py"]["mtime"]
+    seen = _pressed(page, "Control+s")
+    body = until(lambda: len(mock.sent("PUT", "/projects/p1/file")) > puts or None, timeout=4)
+    sent = mock.sent("PUT", "/projects/p1/file")[-1] if body else {}
+    check("Ctrl+S in the editor saves it, with what the editor holds",
+          bool(body) and sent.get("content", "").endswith("\nre") and sent.get("expected_mtime") == mtime, str(sent))
+    check("and its keydown's default (Chrome's Save page as) is prevented", seen.get("prevented") is True, str(seen))
+    until(lambda: "saved" in page.locator('[data-testid="file-note"]').inner_text(), timeout=3)
+    check("and the save says so", "saved" in page.locator('[data-testid="file-note"]').inner_text())
+    # Outside an editor Ctrl+S saves nothing, and Chrome's dialog still never opens.
+    page.locator('[data-testid="file-path"]').click()
+    puts = len(mock.sent("PUT", "/projects/p1/file"))
+    seen = _pressed(page, "Control+s")
+    check("Ctrl+S outside an editor saves nothing and never reaches Chrome",
+          seen.get("prevented") is True and len(mock.sent("PUT", "/projects/p1/file")) == puts, str(seen))
+
+    # A link in the text opens on Ctrl+click — http(s) only, in a window that
+    # cannot reach this one (lib/monaco.ts, registerLinkOpener).
+    page.evaluate("() => { window.__opened = []; window.__open = window.open;"
+                  " window.open = (...a) => { window.__opened.push(a); return null; }; }")
+    lines.click()
+    page.keyboard.press("Control+End")
+    page.keyboard.type("\n#https://example.com/a")
+    link = page.locator('[data-testid="editor"] .detected-link')
+    until(lambda: link.count() > 0, timeout=5)
+    if link.count():
+        link.first.click(modifiers=["Control"])
+    opened = until(lambda: page.evaluate("window.__opened"), timeout=3)
+    check("a link in the text opens on Ctrl+click, http(s) only and with noopener",
+          opened == [["https://example.com/a", "_blank", "noopener,noreferrer"]], str(opened))
+    # Any other scheme opens nothing, and never navigates the window that
+    # gates approvals (Monaco's own fallback does).
+    page.evaluate("() => { window.__opened = []; }")
+    href = page.evaluate("location.href")
+    lines.click()
+    # Escape first: the word suggestions open while typing, and an Enter
+    # would accept one ("a" became "add") instead of starting a line, gluing
+    # the file: text onto the https link above as its fragment.
+    page.keyboard.press("Escape")
+    page.keyboard.press("Control+End")
+    page.keyboard.press("Enter")
+    page.keyboard.type("#file:///etc/hosts")
+    page.keyboard.press("Escape")
+    flink = page.locator('[data-testid="editor"] .detected-link', has_text=re.compile(r"^file:///etc/hosts$"))
+    until(lambda: flink.count() > 0, timeout=5)
+    if flink.count():
+        flink.first.click(modifiers=["Control"])
+    time.sleep(0.5)
+    check("a file: link opens nothing and the window stays where it is",
+          flink.count() > 0 and page.evaluate("window.__opened") == [] and page.evaluate("location.href") == href,
+          f"links {flink.count()}, opened {page.evaluate('window.__opened')}")
+    page.evaluate("() => { window.open = window.__open; }")
+
+    # Ctrl+B folds the sidebar from the editor too, except as the second key
+    # of Monaco's Ctrl+K chord (decisions E-10).
+    def sidebar_shown():
+        loc = page.locator("#sidebar")
+        return loc.count() > 0 and loc.first.is_visible()
+    lines.click()
+    shown = sidebar_shown()
+    page.keyboard.press("Control+b")
+    until(lambda: sidebar_shown() != shown, timeout=2)
+    check("Ctrl+B in the editor folds the sidebar", shown and not sidebar_shown())
+    page.keyboard.press("Control+b")
+    until(sidebar_shown, timeout=2)
+    in_editor = page.evaluate("!!document.activeElement.closest('.monaco-editor')")
+    page.keyboard.press("Control+k")
+    page.keyboard.press("Control+b")
+    time.sleep(0.3)
+    check("but Ctrl+K Ctrl+B is Monaco's chord (set selection anchor), not a fold",
+          in_editor and sidebar_shown()
+          and page.locator('[data-testid="editor"] .selection-anchor').count() > 0,
+          f"in editor {in_editor}, anchors {page.locator('[data-testid=editor] .selection-anchor').count()}")
+    # The zoom keys too: Ctrl+K Ctrl+0 is Monaco's fold all, a lone Ctrl+0
+    # still the HUD's zoom reset — and neither ever reaches Chrome's zoom.
+    zoom = lambda: float(page.evaluate("getComputedStyle(document.getElementById('root')).zoom") or 0)
+    page.keyboard.press("Control+Equal")
+    until(lambda: abs(zoom() - 1.1) < 1e-6, timeout=2)
+    before = page.locator('[data-testid="editor"] .view-line').count()
+    page.keyboard.press("Control+k")
+    seen = _pressed(page, "Control+0")
+    until(lambda: page.locator('[data-testid="editor"] .view-line').count() < before, timeout=2)
+    check("Ctrl+K Ctrl+0 in the editor is Monaco's fold all, not the HUD's zoom reset",
+          abs(zoom() - 1.1) < 1e-6 and page.locator('[data-testid="editor"] .view-line').count() < before
+          and seen.get("prevented") is True,
+          f"zoom {zoom()}, lines {before} -> {page.locator('[data-testid=editor] .view-line').count()}, {seen}")
+    page.keyboard.press("Control+k")
+    page.keyboard.press("Control+j")
+    seen = _pressed(page, "Control+0")
+    until(lambda: abs(zoom() - 1.0) < 1e-6, timeout=2)
+    check("and a lone Ctrl+0 there is still the HUD's", abs(zoom() - 1.0) < 1e-6 and seen.get("prevented") is True,
+          f"zoom {zoom()}, {seen}")
+
+
 def file_checks(page, mock):
     print("\nfile tab")
     # A project row only expands now; the File tab follows the active
@@ -875,6 +1058,9 @@ def file_checks(page, mock):
     # The save guard: 409 means someone else wrote it, and the only safe answer
     # is to reload rather than to clobber.
     mono = page.locator('[data-testid="editor"]').count() == 1
+    check("Monaco loaded (not the fallback textarea)", mono)
+    if mono:
+        monaco_language_checks(page)
 
     def edit(typed: str):
         """Type into whichever editor mounted. Monaco's text layer sits over its
@@ -903,6 +1089,8 @@ def file_checks(page, mock):
     check("a successful save says so",
           "saved" in page.locator('[data-testid="file-note"]').inner_text(),
           page.locator('[data-testid="file-note"]').inner_text())
+    if mono:
+        monaco_key_checks(page, mock)
 
     # Now a stale write: the mock has moved the mtime on.
     mock.world["files"]["calc.py"]["mtime"] = 999999
@@ -914,8 +1102,28 @@ def file_checks(page, mock):
           "reload" in page.locator('[data-testid="file-note"]').inner_text(),
           page.locator('[data-testid="file-note"]').inner_text())
 
+    # An unsaved edit is never dropped without a word (ED-1): Reload, or
+    # opening another file, over one asks first, and "keep editing" keeps it.
+    ask = page.locator('[data-testid="file-discard-ask"]')
+    page.locator('[data-testid="file-reload"]').click()
+    until(lambda: ask.count() > 0, timeout=2)
+    check("Reload over an unsaved edit asks before throwing it away",
+          ask.count() == 1 and not page.locator('[data-testid="file-save"]').is_disabled())
+    if ask.count():
+        page.locator('[data-testid="file-discard-no"]').click()
+    until(lambda: ask.count() == 0, timeout=2)
+    check("and Keep editing keeps it",
+          ask.count() == 0 and not page.locator('[data-testid="file-save"]').is_disabled()
+          and page.locator('[data-testid="file-path"]').inner_text() == "calc.py")
+
     # A protected credential file: no content, ever.
     page.locator('[data-testid="file-.env"]').click()
+    until(lambda: ask.count() > 0, timeout=2)
+    check("opening another file over an unsaved edit asks first, and nothing has moved yet",
+          ask.count() == 1 and page.locator('[data-testid="file-path"]').inner_text() == "calc.py"
+          and ".env" in ask.inner_text())
+    if ask.count():
+        page.locator('[data-testid="file-discard-yes"]').click()
     until(lambda: page.locator('[data-testid="file-withheld"]').count() > 0)
     withheld = page.locator('[data-testid="file-withheld"]')
     check("a protected file is shown as withheld", withheld.count() == 1)
@@ -957,6 +1165,33 @@ def diff_checks(page, mock):
           page.locator('[data-testid="diff-editor"]').count() == 1
           or page.locator('[data-testid="diff-fallback"]').count() == 1)
     check("the file's two sides were fetched", mock.saw("GET", "/tasks/k1/diff/file"))
+
+    # The diff view used to create two models per file viewed and dispose
+    # neither (ED-1): five files on, ten models.
+    def diff_models():
+        return [u for u in page.evaluate("window.__hud.monacoModels ? window.__hud.monacoModels() : []")
+                if u.startswith("jarvis-diff:")]
+    for f in ("test_calc.py", "calc.py", "test_calc.py", "calc.py"):
+        page.locator(f'[data-testid="diff-{f}"]').click()
+        until(lambda: any(f"/{f}?" in u for u in diff_models())
+              and all(f"/{f}?" in u for u in diff_models()), timeout=6)
+    time.sleep(0.3)
+    left = diff_models()
+    check("after five diff files, at most two diff models remain (the shown file's two sides)",
+          0 < len(left) <= 2 and all("/calc.py?" in u for u in left), str(left))
+
+    # Nothing the editor does leaves loopback, and no language-service worker
+    # exists to load (decisions E-1: no intellisense).
+    off = [u for u in OFF_LOOPBACK]
+    check("no request went off loopback (a catch-all route on everything else)", not off, str(off[:5]))
+    workers = [u for u in REQUESTS if re.search(r"(ts|typescript|json|css|html)\.worker|(ts|json|css|html)Worker", u)]
+    check("no TypeScript, JSON, CSS or HTML worker was requested", not workers, str(workers[:5]))
+    check("the editor's one worker came from the HUD's own origin",
+          any(u.startswith(BASE + "/assets/editor.worker") for u in REQUESTS),
+          str([u for u in REQUESTS if "worker" in u][:5]))
+    built = sorted(p.name for p in (DIST / "assets").iterdir()
+                   if re.search(r"(ts|typescript|json|css|html)\.worker|(ts|json|css|html)Worker", p.name))
+    check("and none is in the build", not built, str(built))
 
 
 def preview_checks(page, mock):
@@ -2805,6 +3040,7 @@ def main():
 
             ctx = browser.new_context(permissions=["microphone"])
             guard(ctx)
+            guard_loopback(ctx)
             ctx.add_init_script(FAKE_RECOGNIZER)
             page = ctx.new_page()
             page.on("pageerror", lambda e: FAILURES.append(f"page error: {e}"))

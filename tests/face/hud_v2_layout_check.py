@@ -19,8 +19,9 @@ The checks worth keeping, each written to bite:
   - every layout key is inert while a card is up, so nothing re-lays the card
     out under a pointer that has not moved;
   - the zoom keys are the HUD's in the input bar and in Monaco too (else they
-    are Chrome's page zoom, which the control cannot see), while Ctrl+B stands
-    aside in Monaco and ignores auto-repeat, composition and Ctrl+Shift+B;
+    are Chrome's page zoom, which the control cannot see); Ctrl+B folds from
+    Monaco too except as the second key of its Ctrl+K chord (ED-1, decisions
+    E-10), and ignores auto-repeat, composition and Ctrl+Shift+B;
   - folding a pane keeps the sidebar's expanded projects, the selected thread
     and a compose draft, and New thread stays reachable from the rail;
   - at 1024x700 and 160% the window folds both panes for the render, without
@@ -48,7 +49,17 @@ The workspace (2026-10-09, WP-A of docs/plans/2026-10-09-hud-workspace-plan.md):
     to another project, its save still goes to the first one;
   - in a 2×2 grid with Monaco and a preview frame on screen, at 160% and 70%,
     the card is wholly on screen, AUTHORIZE is below the fold for a long
-    command, and every button is topmost at its own point.
+    command, and every button is topmost at its own point;
+  - (ED-1) with Monaco's context menu or suggest list open, at 100% and 160%,
+    a card that arrives is topmost at every button, the editor behind it is
+    unfocused and read-only, a typed `y` and Ctrl+S do nothing, and Escape
+    denies;
+  - (ED-1, review of PR #43) Ctrl+S saves the editor it is pressed in and
+    nothing else — not after that editor went away, not another pane's — an
+    editor created under a card is read-only, a save answered after another
+    file opened leaves that file alone, a key outside the editor does not end
+    Monaco's Ctrl+K chord, and the context menu opens at the pointer flipped
+    up or left at 70% and 160% and stays on screen in a short window.
 
 A render error (review of PR #29):
   - three clicks in one task on ⊞, and on ⋯ when the title bar is folded,
@@ -96,7 +107,9 @@ def layout_checks(browser, mock, base, check, until, guard, init_script):
                         _blocked_checks, _small_window_checks, _picker_zoom_checks,
                         _monaco_zoom_checks, _menu_zoom_checks, _model_chip_checks,
                         _titlebar_checks, _workspace_checks, _grid_card_checks, _sticky_checks,
-                        _card_focus_checks, _seen_checks, _eight_checks, _crash_checks):
+                        _card_focus_checks, _editor_card_checks, _save_scope_checks, _late_save_checks,
+                        _chord_checks,
+                        _menu_place_checks, _seen_checks, _eight_checks, _crash_checks):
             try:
                 section(page, mock, check, until)
             except Exception as e:  # a section that cannot run is a failure, and the rest still run
@@ -835,10 +848,18 @@ def _monaco_zoom_checks(page, mock, check, until):
           str(_last_key(page)))
     in_monaco = page.evaluate("!!document.activeElement.closest('.monaco-editor')")
     sidebar = _visible(page, "#sidebar")
+    # Ctrl+B folds the sidebar from Monaco too, except as the second key of
+    # its Ctrl+K chord (decisions E-10; it used to stand aside entirely).
+    page.keyboard.press("Control+k")
     page.keyboard.press("Control+b")
     time.sleep(0.3)
-    check("Ctrl+B inside Monaco is Monaco's (its Ctrl+K Ctrl+B chord), not a fold",
-          in_monaco and _visible(page, "#sidebar") == sidebar, f"in monaco {in_monaco}")
+    check("Ctrl+K Ctrl+B inside Monaco is Monaco's chord, not a fold",
+          in_monaco and sidebar and _visible(page, "#sidebar"), f"in monaco {in_monaco}")
+    page.keyboard.press("Control+b")
+    until(lambda: not _visible(page, "#sidebar"), timeout=2)
+    check("and a lone Ctrl+B inside Monaco folds the sidebar", not _visible(page, "#sidebar"))
+    page.keyboard.press("Control+b")
+    until(lambda: _visible(page, "#sidebar"), timeout=2)
     time.sleep(0.3)
     fit = page.evaluate("""() => {
       const host = document.querySelector('[data-testid="editor"]').getBoundingClientRect();
@@ -960,11 +981,15 @@ def _edit(page, until, pane: int, typed: str):
     editor = page.locator(_pane(pane, '[data-testid="editor"] .view-lines'))
     fallback = page.locator(_pane(pane, '[data-testid="editor-fallback"]'))
     save = page.locator(_pane(pane, '[data-testid="file-save"]'))
+    host = page.locator(_pane(pane, '[data-testid="editor"]'))
+
     def shows_file() -> bool:
-        # One editor (not the old one beside the new), holding the file's text
-        # (not an empty buffer it is about to replace).
+        # One editor (not the old one beside the new), that Monaco has given
+        # its model (`data-language` is set only then, ED-1), holding the
+        # file's text (not an empty buffer it is about to replace).
         try:
-            return editor.count() == 1 and editor.inner_text(timeout=1000).strip() != ""
+            return (editor.count() == 1 and host.get_attribute("data-language", timeout=1000) is not None
+                    and editor.inner_text(timeout=1000).strip() != "")
         except Exception:
             return False
 
@@ -1348,33 +1373,78 @@ def _workspace_checks(page, mock, check, until):
     until(lambda: page.locator(_pane(2, '[data-testid="file-path"]')).inner_text() == "calc.py", timeout=4)
     check("opening a file pins its pane to that project", _ws(page)["ws"]["panes"][1]["projectId"] == "p1",
           str(_ws(page)["ws"]["panes"][1]))
-    check("and says nothing while the chat is in the same project",
-          page.locator('[data-testid="pane-2-project"]').count() == 0)
+    # E-13: the File pane's own Project ▾ (every project, plus Follow chat)
+    # replaced the "in: … · follow chat" chip the File pane used to carry.
+    folder = page.locator('[data-testid="pane-2-folder"]')
+    options = page.evaluate("[...document.querySelectorAll('[data-testid=\"pane-2-folder\"] option')]"
+                            ".map(o => o.value)")
+    check("E-13: the File pane's own picker names the project it is pinned to, offering every project and "
+          "Follow chat", folder.count() == 1 and folder.input_value() == "p1"
+          and options == ["", "p1", "p2"], f"{folder.input_value() if folder.count() else None} {options}")
     page.locator('[data-testid="project-chip-select"]').select_option("p2")
-    until(lambda: page.locator('[data-testid="pane-2-project"]').count() > 0, timeout=3)
+    time.sleep(0.3)
     check("with the chat moved to another project the file stays open, and the pane says where it is",
           page.locator(_pane(2, '[data-testid="file-path"]')).inner_text() == "calc.py"
-          and "jarvis" in page.locator('[data-testid="pane-2-project"]').inner_text())
-    _edit(page, until, 2, "\n# pinned")
+          and folder.input_value() == "p1")
+    edited = _edit(page, until, 2, "\n# pinned")
     save = page.locator(_pane(2, '[data-testid="file-save"]'))
     until(lambda: not save.is_disabled(), timeout=3)
-    follow = page.locator('[data-testid="pane-2-follow"]')
-    until(lambda: follow.is_disabled(), timeout=3)
-    check("with an unsaved edit, follow chat waits and says why",
-          follow.is_disabled() and "Save" in (follow.get_attribute("title") or ""),
-          str(follow.get_attribute("title")))
+    check("setup: the edit landed", edited and not save.is_disabled())
+    until(lambda: "Save or reload" in (folder.get_attribute("title") or ""), timeout=2)
+    refused = page.locator('[data-testid="pane-2-refused"]')
+    for choice, what in (("", "Follow chat"), ("p2", "another project")):
+        folder.select_option(choice)
+        until(lambda: refused.count() > 0, timeout=2)
+        time.sleep(0.15)
+        check(f"E-13: with an unsaved edit, {what} is refused with the chip, and the pane stays where it was",
+              refused.count() == 1 and folder.input_value() == "p1"
+              and _ws(page)["ws"]["panes"][1]["projectId"] == "p1"
+              and page.locator(_pane(2, '[data-testid="file-path"]')).inner_text() == "calc.py",
+              f"{folder.input_value()} {_ws(page)['ws']['panes'][1]}")
     save.click()
     until(lambda: any(m == "PUT" for m, _p, _b in mock.calls[calls_before:]), timeout=4)
     puts = [p for m, p, _b in mock.calls[calls_before:] if m == "PUT"]
     check("and its save goes to the project it was read from, never the one the chat moved to",
           puts == ["/projects/p1/file"], str(puts))
-    until(lambda: not follow.is_disabled(), timeout=3)
-    check("once saved, follow chat is offered again", not follow.is_disabled())
-    follow.click()
+    until(lambda: save.is_disabled(), timeout=3)
+    # The keystroke itself makes the pane dirty for the guard: a pick in the
+    # same breath is refused, never a remount that drops the edit (review of
+    # PR #43, M1 — the guard read state a frame behind the edit).
+    # A clean pane: the keystroke is what makes it dirty.
+    page.locator(_pane(2, '[data-testid="editor"] .view-lines')).click()
+    page.keyboard.press("Control+End")
+    page.keyboard.type("Z")
+    folder.select_option("p2")
+    time.sleep(0.3)
+    check("M1: a project picked in the same breath as a keystroke is refused, and the edit is kept",
+          _ws(page)["ws"]["panes"][1]["projectId"] == "p1"
+          and "Z" in page.locator(_pane(2, '[data-testid="editor"] .view-lines')).inner_text(),
+          str(_ws(page)["ws"]["panes"][1]))
+    if not save.is_disabled():  # (on the old code the edit is gone with the remount)
+        save.click()
+        until(lambda: save.is_disabled(), timeout=3)
+    _approval(mock, "fold1")
+    until(lambda: page.locator('[data-testid="approval-card"]').count() > 0, timeout=4)
+    time.sleep(0.2)
+    check("E-13: under a card the picker is disabled", folder.is_disabled())
+    page.keyboard.press("Escape")
+    until(lambda: page.locator('[data-testid="approval-card"]').count() == 0, timeout=4)
+    until(lambda: not folder.is_disabled(), timeout=2)
+    folder.select_option("")
     until(lambda: page.locator(_pane(2, '[data-testid="file-path"]')).inner_text() == "no file open", timeout=3)
-    check("follow chat unpins it: a fresh tree in the chat's project, nothing open",
-          _ws(page)["ws"]["panes"][1]["projectId"] is None
-          and page.locator('[data-testid="pane-2-project"]').count() == 0)
+    check("once saved, Follow chat unpins it: a fresh tree in the chat's project, nothing open",
+          _ws(page)["ws"]["panes"][1]["projectId"] is None and folder.input_value() == "")
+    others = [q.get("projectId") for i, q in enumerate(_ws(page)["ws"]["panes"]) if i != 1]
+    folder.select_option("p1")
+    until(lambda: _ws(page)["ws"]["panes"][1]["projectId"] == "p1", timeout=3)
+    until(lambda: page.locator(_pane(2, '[data-testid="file-calc.py"]')).count() > 0, timeout=4)
+    check("E-13: picking a project re-pins this pane only, to a fresh tree there",
+          _ws(page)["ws"]["panes"][1]["projectId"] == "p1" and folder.input_value() == "p1"
+          and page.locator(_pane(2, '[data-testid="file-path"]')).inner_text() == "no file open"
+          and [q.get("projectId") for i, q in enumerate(_ws(page)["ws"]["panes"]) if i != 1] == others,
+          str(_ws(page)["ws"]["panes"]))
+    folder.select_option("")
+    until(lambda: _ws(page)["ws"]["panes"][1]["projectId"] is None, timeout=3)
 
     # A project that goes away under an unsaved edit: the edit is kept, and
     # the pane asks before it lets go of it.
@@ -1677,6 +1747,418 @@ def _card_focus_checks(page, mock, check, until):
     time.sleep(0.1)
     check("and focus goes back to the editor",
           page.evaluate("!!document.activeElement.closest('.monaco-editor')"))
+    _reset_all(page, mock, until)
+
+
+def _monaco_editors(page) -> list:
+    return page.evaluate("window.__hud.monacoEditors ? window.__hud.monacoEditors() : []")
+
+
+def _editor_card_checks(page, mock, check, until):
+    """ED-1 loads Monaco's overlays — the context menu, the suggest list —
+    which carry z-indexes in the thousands. With one open, a card that
+    arrives is still on top at every one of its buttons; the editor behind it
+    is unfocused and read-only, Escape denies, and a typed `y` lands nowhere.
+    At 100% and 160%."""
+    two = json.dumps({"preset": "cols2", "focused": 2,
+                      "panes": [{"view": "chat"}, {"view": "file"}, {"view": "preview"}, {"view": "task"}]})
+    host = _pane(2, '[data-testid="editor"]')
+    lines = page.locator(_pane(2, '[data-testid="editor"] .view-lines'))
+    menu = page.locator(_pane(2, ".monaco-menu"))
+    suggest = page.locator(_pane(2, ".suggest-widget.visible .monaco-list-row"))
+    for zoom in ("100", "160"):
+        page.set_viewport_size({"width": 1600, "height": 900})
+        _set_storage(page, zoom=zoom, layout="{}")
+        _set_ws(page, two)
+        _boot(page, mock, None, until, reload=True)
+        page.locator(_pane(2, '[data-testid="file-calc.py"]')).click()
+        until(lambda: page.locator(host).count() > 0
+              and page.locator(host).get_attribute("data-language") is not None, timeout=10)
+        if page.locator(host).count() == 0:
+            check(f"at {zoom}% Monaco loads in a split pane (fell back to a textarea)", False)
+            break
+        for n, (what, opened) in enumerate((("its context menu", menu), ("its suggest list", suggest))):
+            if what == "its context menu":
+                lines.click()
+                line = page.locator(_pane(2, '[data-testid="editor"] .view-line')).first.bounding_box()
+                at = (line["x"] + 30, line["y"] + line["height"] / 2)
+                page.mouse.click(at[0], at[1], button="right")
+            else:
+                lines.click()
+                page.keyboard.press("Control+End")
+                page.keyboard.type("\nre")
+                page.keyboard.press("Control+Space")
+            until(lambda: opened.count() > 0 and opened.first.is_visible(), timeout=4)
+            check(f"at {zoom}% setup: Monaco shows {what}", opened.count() > 0 and opened.first.is_visible())
+            if what == "its context menu":
+                # Monaco places it in viewport pixels and the zoom on #root
+                # used to scale that again: at 160% it opened 60% further out,
+                # off the window's right edge (lib/zoomfix.ts).
+                box = page.evaluate("""() => {
+                  const hosts = [...document.querySelectorAll('[data-testid="pane-2"] .shadow-root-host')];
+                  const menu = hosts.map(h => h.shadowRoot && h.shadowRoot.querySelector('.monaco-menu'))
+                    .find(Boolean);
+                  if (!menu) return null;
+                  const r = menu.getBoundingClientRect();
+                  return {x: r.left, y: r.top, right: r.right, bottom: r.bottom, vw: innerWidth, vh: innerHeight};
+                }""")
+                check(f"at {zoom}% the context menu opens at the pointer, wholly on screen",
+                      bool(box) and abs(box["x"] - at[0]) <= 4 and abs(box["y"] - at[1]) <= 4
+                      and box["right"] <= box["vw"] and box["bottom"] <= box["vh"], f"{box} vs click {at}")
+                # The menu closes when a card takes focus, so the card check
+                # below cannot see where it would have stacked. Lay a layer at
+                # #authveil's z-index over the whole window instead: it must be
+                # what is under the menu's middle — the menu (z 2575) stacks
+                # inside the editor host, never above the veil.
+                top = page.evaluate("""() => {
+                  const hosts = [...document.querySelectorAll('[data-testid="pane-2"] .shadow-root-host')];
+                  const menu = hosts.map(h => h.shadowRoot && h.shadowRoot.querySelector('.monaco-menu'))
+                    .find(Boolean);
+                  if (!menu) return 'no menu';
+                  const r = menu.getBoundingClientRect();
+                  const probe = document.createElement('div');
+                  probe.style.cssText = 'position:fixed;inset:0;z-index:100';
+                  document.getElementById('root').appendChild(probe);
+                  const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+                  probe.remove();
+                  return hit === probe ? 'veil' : (hit && hit.className) || String(hit);
+                }""")
+                check(f"at {zoom}% Monaco's context menu stacks inside the editor, under a layer at the veil's z-index",
+                      top == "veil", str(top))
+            before = lines.inner_text()
+            req = f"edcard{zoom}{n}"
+            _approval(mock, req, LONG_COMMAND)
+            until(lambda: page.locator('[data-testid="approval-card"]').count() > 0, timeout=4)
+            time.sleep(0.25)
+            ok, why = _card_on_screen(page)
+            check(f"at {zoom}% with {what} open, the card arrives on top: every button topmost at its point",
+                  ok, why)
+            eds = _monaco_editors(page)
+            focused = page.evaluate("!!(document.activeElement && document.activeElement.closest('.monaco-editor'))")
+            check(f"at {zoom}% the editor behind the card is unfocused and read-only",
+                  bool(eds) and all(e["readOnly"] and not e["focused"] for e in eds) and not focused
+                  and page.locator(host).get_attribute("data-readonly") == "true", f"{eds} focus in editor {focused}")
+            page.keyboard.type("y")
+            time.sleep(0.15)
+            check(f"at {zoom}% a typed y lands nowhere", lines.inner_text() == before, lines.inner_text()[-40:])
+            puts = len(mock.sent("PUT", "/projects/p1/file"))
+            page.keyboard.press("Control+s")
+            time.sleep(0.2)
+            check(f"at {zoom}% and Ctrl+S saves nothing", len(mock.sent("PUT", "/projects/p1/file")) == puts)
+            page.keyboard.press("Escape")
+            body = until(lambda: mock.sent("POST", f"/approvals/{req}") or None, timeout=4)
+            check(f"at {zoom}% and Escape denies", bool(body) and body[-1].get("decision") == "deny",
+                  str(body[-1] if body else None))
+            until(lambda: page.locator('[data-testid="approval-card"]').count() == 0, timeout=4)
+            until(lambda: not any(e["readOnly"] for e in _monaco_editors(page)), timeout=2)
+            check(f"at {zoom}% once it is answered the editor takes edits again",
+                  not any(e["readOnly"] for e in _monaco_editors(page))
+                  and page.locator(host).get_attribute("data-readonly") == "false")
+            page.keyboard.press("Escape")
+            # Throw the setup's edit away (Reload asks first, ED-1), so the
+            # reload that follows is not held by beforeunload.
+            save = page.locator(_pane(2, '[data-testid="file-save"]'))
+            if not save.is_disabled():
+                page.locator(_pane(2, '[data-testid="file-reload"]')).click()
+                page.locator(_pane(2, '[data-testid="file-discard-yes"]')).click()
+                until(lambda: save.is_disabled(), timeout=3)
+    _reset_all(page, mock, until)
+
+
+def expand(page, until, project_id: str, child: str, tries: int = 4) -> bool:
+    """Click a project row until the child row is on screen (a project row toggles)."""
+    for _ in range(tries):
+        if page.locator(f'[data-testid="{child}"]').count() > 0:
+            return True
+        page.locator(f'[data-testid="project-{project_id}"]').click()
+        until(lambda: page.locator(f'[data-testid="{child}"]').count() > 0, timeout=1.0)
+    return page.locator(f'[data-testid="{child}"]').count() > 0
+
+
+def _puts(mock) -> list:
+    return [b for m, p, b in mock.calls if m == "PUT" and p == "/projects/p1/file"]
+
+
+def _open_file(page, until, pane: int, name: str) -> bool:
+    """Open `name` from pane N's tree in an editor (Markdown's split, not its
+    rendered view); True once Monaco holds it."""
+    row = page.locator(_pane(pane, f'[data-testid="file-{name}"]'))
+    picker = page.locator(f'[data-testid="pane-{pane}-folder"]')
+    if not until(lambda: row.count() > 0, timeout=2) and picker.count():
+        picker.select_option("p1")  # no chat to follow: the pane picks its project (E-13)
+    until(lambda: row.count() > 0, timeout=4)
+    row.click()
+    until(lambda: page.locator(_pane(pane, '[data-testid="file-path"]')).inner_text() == name, timeout=4)
+    if name.endswith(".md"):
+        until(lambda: page.locator(_pane(pane, '[data-testid="toggle-rendered"]')).count() > 0, timeout=3)
+        if page.locator(_pane(pane, '[data-testid="md-split"]')).count() == 0:
+            page.locator(_pane(pane, '[data-testid="toggle-rendered"]')).click()
+    host = page.locator(_pane(pane, '[data-testid="editor"]'))
+    return bool(until(lambda: host.count() == 1 and host.get_attribute("data-language") is not None, timeout=10))
+
+
+def _save_scope_checks(page, mock, check, until):
+    """Ctrl+S saves the editor it is pressed in, and nothing else (review of
+    PR #43, H1). In 0.57 `addCommand` is a global keybinding: the last editor
+    created took Ctrl+S for every editor and outlived itself, so Ctrl+S in a
+    Diff wrote a file blank, and in one pane saved another pane's buffer.
+
+    A 2x2 grid with a chat in pane 1 (the window puts a chat in the focused
+    pane at boot when none is drawn): file in 2, diff in 3, task in 4."""
+    files = mock.world["files"]
+    kept = {k: dict(v) for k, v in files.items()}
+    grid = json.dumps({"preset": "grid4", "focused": 2,
+                       "panes": [{"view": "chat"}, {"view": "file"}, {"view": "diff"}, {"view": "task"}]})
+    page.set_viewport_size({"width": 1600, "height": 900})
+    _set_storage(page, zoom="100", layout="{}")
+    _set_ws(page, grid)
+    _boot(page, mock, None, until, reload=True)
+
+    def restore():
+        # Content only, before the files are opened again: a write that went
+        # astray (the old code's blank calc.py) must not leak into the next
+        # scenario, and the mtime stays what the server last said.
+        for k, v in kept.items():
+            files[k]["content"] = v["content"]
+
+    try:
+        # An editor that went away leaves no Ctrl+S behind.
+        check("setup: calc.py open in pane 2's editor", _open_file(page, until, 2, "calc.py"))
+        expand(page, until, "p1", "task-k1")
+        page.locator('[data-testid="task-k1"]').click()
+        until(lambda: page.locator(_pane(3, '[data-testid="diff-calc.py"]')).count() > 0, timeout=4)
+        page.locator(_pane(3, '[data-testid="diff-calc.py"]')).click()
+        diff = page.locator(_pane(3, '[data-testid="diff-editor"] .editor.modified .view-lines'))
+        until(lambda: diff.count() > 0, timeout=10)
+        _show(page, until, 2, "preview")
+        until(lambda: page.locator(_pane(2, '[data-testid="editor"]')).count() == 0, timeout=3)
+        diff.first.click()
+        before = len(_puts(mock))
+        page.keyboard.press("Control+s")
+        time.sleep(0.5)
+        check("H1: with pane 2's editor gone, Ctrl+S in a diff saves nothing (no file written blank)",
+              len(_puts(mock)) == before and files["calc.py"]["content"] == kept["calc.py"]["content"],
+              str(_puts(mock)[before:]))
+        restore()
+
+        # Two editors alive: each Ctrl+S is its own pane's.
+        _show(page, until, 2, "file")
+        _show(page, until, 3, "file")
+        opened = _open_file(page, until, 2, "calc.py") and _open_file(page, until, 3, "README.md")
+        check("setup: calc.py in pane 2 and README.md in pane 3, both in editors", opened)
+        _edit(page, until, 2, "\n#one")
+        _edit(page, until, 3, "\n#two")
+        page.locator(_pane(2, '[data-testid="editor"] .view-lines')).click()
+        before = len(_puts(mock))
+        page.keyboard.press("Control+s")
+        until(lambda: len(_puts(mock)) > before, timeout=3)
+        time.sleep(0.3)
+        sent = _puts(mock)[before:]
+        check("H1: with two editors alive, Ctrl+S in pane 2 saves pane 2's file, and only it",
+              len(sent) == 1 and sent[0].get("path") == "calc.py" and sent[0].get("content", "").endswith("#one")
+              and not page.locator(_pane(3, '[data-testid="file-save"]')).is_disabled(), str(sent))
+        for n in (2, 3):  # each scenario starts clean, whichever pane the last Ctrl+S wrote
+            button = page.locator(_pane(n, '[data-testid="file-save"]'))
+            if not button.is_disabled():
+                button.click()
+                until(lambda: button.is_disabled(), timeout=3)
+
+        # Pane 3 switched away: Ctrl+S in pane 2 is still pane 2's.
+        _show(page, until, 3, "preview")
+        until(lambda: page.locator(_pane(3, '[data-testid="editor"]')).count() == 0, timeout=3)
+        readme = files["README.md"]["content"]
+        _edit(page, until, 2, "\n#three")
+        page.locator(_pane(2, '[data-testid="editor"] .view-lines')).click()
+        before = len(_puts(mock))
+        page.keyboard.press("Control+s")
+        until(lambda: len(_puts(mock)) > before, timeout=3)
+        time.sleep(0.3)
+        sent = _puts(mock)[before:]
+        check("H1: pane 3 switched away, Ctrl+S in pane 2 saves pane 2, and pane 3's file is byte-identical",
+              len(sent) == 1 and sent[0].get("path") == "calc.py" and sent[0].get("content", "").endswith("#three")
+              and files["README.md"]["content"] == readme, str(sent))
+        restore()
+
+        # An editor that opens while a card is up opens read-only (the first
+        # editor of a session, Monaco loading as a card arrives).
+        _show(page, until, 2, "preview")
+        _show(page, until, 2, "file")
+        until(lambda: page.locator(_pane(2, '[data-testid="file-calc.py"]')).count() > 0, timeout=4)
+        _approval(mock, "edro1")
+        until(lambda: page.locator('[data-testid="approval-card"]').count() > 0, timeout=4)
+        time.sleep(0.2)
+        page.evaluate("document.querySelector('[data-testid=\"pane-2\"] [data-testid=\"file-calc.py\"]').click()")
+        host = page.locator(_pane(2, '[data-testid="editor"]'))
+        until(lambda: host.count() == 1 and host.get_attribute("data-language") is not None, timeout=10)
+        eds = _monaco_editors(page)
+        check("an editor that opens while a card is up opens read-only",
+              host.count() == 1 and host.get_attribute("data-readonly") == "true"
+              and bool(eds) and all(e["readOnly"] for e in eds), str(eds))
+        page.keyboard.press("Escape")
+        until(lambda: page.locator('[data-testid="approval-card"]').count() == 0, timeout=4)
+        until(lambda: host.get_attribute("data-readonly") == "false", timeout=2)
+        check("and takes edits once the card is answered", host.get_attribute("data-readonly") == "false")
+    finally:
+        files.clear()
+        files.update(kept)
+        _reset_all(page, mock, until)
+
+
+def _late_save_checks(page, mock, check, until):
+    """A save's answer lands on the file it was sent for, or nowhere (review
+    of PR #43, L4). The old save closed over the file it started with and
+    wrote that record back when the answer came: a save still on its way
+    when another file was opened turned the new file's record into the old
+    one (its path, its mtime, its content), so the pane named the wrong file
+    and called the buffer dirty."""
+    files = mock.world["files"]
+    kept = {k: dict(v) for k, v in files.items()}
+    two = json.dumps({"preset": "cols2", "focused": 2,
+                      "panes": [{"view": "chat"}, {"view": "file"}, {"view": "preview"}, {"view": "task"}]})
+    page.set_viewport_size({"width": 1600, "height": 900})
+    _set_storage(page, zoom="100", layout="{}")
+    _set_ws(page, two)
+    _boot(page, mock, None, until, reload=True)
+    save = page.locator(_pane(2, '[data-testid="file-save"]'))
+    path = page.locator(_pane(2, '[data-testid="file-path"]'))
+    try:
+        check("setup: calc.py open in pane 2's editor", _open_file(page, until, 2, "calc.py"))
+        check("setup: an edit to save", _edit(page, until, 2, "\n#late"))
+        before = len(_puts(mock))
+        mock.world["put_delays"] = [1.5]
+        save.click()
+        until(lambda: len(_puts(mock)) > before, timeout=2)
+        row = page.locator(_pane(2, '[data-testid="file-README.md"]'))
+        if not row.is_visible():  # a narrow pane folds its tree behind "Files"
+            page.locator(_pane(2, '[data-testid="tree-toggle"]')).click()
+        row.click()
+        discard = page.locator(_pane(2, '[data-testid="file-discard-yes"]'))
+        if until(lambda: discard.count() > 0 or path.inner_text() == "README.md", timeout=2) and discard.count():
+            discard.click()
+        until(lambda: path.inner_text() == "README.md", timeout=3)
+        time.sleep(2.0)  # the answer lands
+        check("L4: a save answered after another file was opened leaves that file's record alone",
+              path.inner_text() == "README.md" and save.is_disabled(),
+              f"{path.inner_text()!r} save {'disabled' if save.is_disabled() else 'enabled'}")
+        if page.locator(_pane(2, '[data-testid="md-split"]')).count() == 0:
+            page.locator(_pane(2, '[data-testid="toggle-rendered"]')).click()
+        _edit(page, until, 2, "\n#mine")
+        before = len(_puts(mock))
+        save.click()
+        until(lambda: len(_puts(mock)) > before, timeout=3)
+        time.sleep(0.3)
+        sent = _puts(mock)[before:]
+        check("and the next save is that file's own, sent with its own mtime (no conflict)",
+              len(sent) == 1 and sent[0].get("path") == "README.md" and files["README.md"]["content"].endswith("#mine")
+              and save.is_disabled(), str(sent))
+    finally:
+        mock.world.pop("put_delays", None)
+        files.clear()
+        files.update(kept)
+        _reset_all(page, mock, until)
+
+
+def _sidebar_shown(page) -> bool:
+    return _visible(page, "#sidebar")
+
+
+def _chord_checks(page, mock, check, until):
+    """The chord tracker waits as Monaco does (review of PR #43, L1): a key
+    typed outside any editor neither ends Monaco's chord nor ours, so Ctrl+K
+    in the editor, a letter in the chat box, then Ctrl+B in the editor is the
+    chord — the anchor, not a fold too."""
+    two = json.dumps({"preset": "cols2", "focused": 2,
+                      "panes": [{"view": "chat"}, {"view": "file"}, {"view": "preview"}, {"view": "task"}]})
+    page.set_viewport_size({"width": 1600, "height": 900})
+    _set_storage(page, zoom="100", layout="{}")
+    _set_ws(page, two)
+    _boot(page, mock, None, until, reload=True)
+    _open_file(page, until, 2, "calc.py")
+    lines = page.locator(_pane(2, '[data-testid="editor"] .view-lines'))
+    lines.click()
+    page.keyboard.press("Control+End")
+    shown = _sidebar_shown(page)
+    page.keyboard.press("Control+k")
+    page.locator('[data-testid="input"]').first.click()
+    page.keyboard.type("x")
+    lines.click()
+    page.keyboard.press("Control+b")
+    time.sleep(0.3)
+    anchors = page.locator(_pane(2, '[data-testid="editor"] .selection-anchor')).count()
+    check("L1: Ctrl+K in the editor, a key in the chat box, then Ctrl+B in the editor is Monaco's chord, not a fold",
+          shown and _sidebar_shown(page) and anchors > 0, f"sidebar {_sidebar_shown(page)}, anchors {anchors}")
+    page.keyboard.press("Control+b")
+    until(lambda: not _sidebar_shown(page), timeout=2)
+    check("and the next lone Ctrl+B folds the sidebar again", not _sidebar_shown(page))
+    page.keyboard.press("Control+b")
+    until(lambda: _sidebar_shown(page), timeout=2)
+    page.locator('[data-testid="input"]').first.fill("")
+    _reset_all(page, mock, until)
+
+
+def _menu_box(page, pane: int):
+    return page.evaluate("""(n) => {
+      const hosts = [...document.querySelectorAll(`[data-testid="pane-${n}"] .shadow-root-host`)];
+      const menu = hosts.map(h => h.shadowRoot && h.shadowRoot.querySelector('.monaco-menu')).find(Boolean);
+      if (!menu) return null;
+      const r = menu.getBoundingClientRect();
+      return {x: r.left, y: r.top, right: r.right, bottom: r.bottom, vw: innerWidth, vh: innerHeight};
+    }""", pane)
+
+
+def _menu_place_checks(page, mock, check, until):
+    """Monaco's context menu where the pointer is, at any zoom and any edge
+    (review of PR #43, L2): it flipped by its unzoomed size, and at 70% a
+    right-click near the bottom put the menu's bottom 45 px above the
+    pointer. And in a window too short for either side, it stays on screen."""
+    # The window puts a chat in the focused pane at boot when none is drawn,
+    # so the file sits beside one; both side panes folded, so the editor's
+    # right edge is near the window's at 160%.
+    two = json.dumps({"preset": "cols2", "focused": 2,
+                      "panes": [{"view": "chat"}, {"view": "file"}, {"view": "preview"}, {"view": "task"}]})
+    folded = json.dumps({"left": 260, "right": 300, "leftCollapsed": True, "rightCollapsed": True})
+    cases = (
+        ("70", (1600, 900), "bottom", lambda b, at: abs(b["bottom"] - at[1]) <= 4 and abs(b["x"] - at[0]) <= 4),
+        ("160", (1600, 900), "right", lambda b, at: abs(b["right"] - at[0]) <= 4 and abs(b["y"] - at[1]) <= 4),
+        ("160", (1600, 400), "short", lambda b, at: True),
+    )
+    for zoom, (w, h), where, at_pointer in cases:
+        page.set_viewport_size({"width": w, "height": h})
+        _set_storage(page, zoom=zoom, layout=folded)
+        _set_ws(page, two)
+        _boot(page, mock, None, until, reload=True)
+        if not _open_file(page, until, 2, "calc.py"):
+            check(f"at {zoom}% Monaco loads ({where})", False)
+            continue
+        ed = page.locator(_pane(2, '[data-testid="editor"]')).bounding_box()
+        # The first line Monaco has drawn (a line can exist before its layout).
+        first_line = """() => { const ls = [...document.querySelectorAll('[data-testid="pane-2"] [data-testid="editor"] .view-line')]
+            .map(l => l.getBoundingClientRect()).filter(r => r.width > 0 && r.height > 0).sort((a, b) => a.top - b.top);
+            return ls.length ? {x: ls[0].left, y: ls[0].top, width: ls[0].width, height: ls[0].height} : null; }"""
+        line = until(lambda: page.evaluate(first_line), timeout=5)
+        if not ed or not line:
+            check(f"at {zoom}% the editor is drawn ({where})", False, f"{ed} {line}")
+            continue
+        # In the text, never the gutter (a right-click there opens no menu).
+        if where == "bottom":
+            at = (line["x"] + 30, ed["y"] + ed["height"] - 12)
+        elif where == "right":
+            at = (ed["x"] + ed["width"] - 30, line["y"] + line["height"] / 2)
+        else:
+            at = (line["x"] + 30, line["y"] + line["height"] / 2)
+        page.locator(_pane(2, '[data-testid="editor"] .view-lines')).click()
+        page.mouse.click(at[0], at[1], button="right")
+        until(lambda: _menu_box(page, 2) is not None, timeout=3)
+        time.sleep(0.2)
+        b = _menu_box(page, 2)
+        on_screen = bool(b) and b["x"] >= -0.5 and b["y"] >= -0.5 and b["right"] <= b["vw"] + 0.5 \
+            and b["bottom"] <= b["vh"] + 0.5
+        what = {"bottom": "near the bottom it opens above the pointer, its bottom on it",
+                "right": "near the right edge it opens left of the pointer, its right edge on it",
+                "short": "in a window too short for either side it stays wholly on screen"}[where]
+        check(f"L2: at {zoom}% on {w}x{h} the context menu {what}", on_screen and at_pointer(b, at),
+              f"{b} vs click {at}")
+        page.keyboard.press("Escape")
     _reset_all(page, mock, until)
 
 
