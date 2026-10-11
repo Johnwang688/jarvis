@@ -283,6 +283,11 @@ export function useThreadModel(state: State, dispatch: React.Dispatch<Action>, o
     overlayOpen: catalogOpen || defaultsFor !== null,
     /** The catalogue for the Model picker's "Pin a model…". */
     openRosterCatalog: () => openCatalog("roster"),
+    /** Both dialogs closed: one threw (App's `DialogBoundary`). */
+    closeDialogs: () => {
+      setCatalogOpen(false);
+      setDefaultsFor(null);
+    },
     imageNoteFor,
   };
 }
