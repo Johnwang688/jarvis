@@ -51,6 +51,19 @@ def load_tools(
             "bound). Report this rather than working around it."
         )
 
+    # Loading widens the toolset `dispatch()` enforces, so it is gated the way
+    # `tools.loadable` is: only an agent already holding the group's core may
+    # expand into the rest. An agent handed an explicit toolset without them
+    # (a sub-agent, a bench, anything narrowed on purpose) must not be able to
+    # widen it by asking — before 2026-10-10 this wrote any available group
+    # into the set and `Agent._sync_tools` folded its tools in.
+    held = runtime.current_tools()
+    if held is not None and not set(entry.core) <= held:
+        return (
+            f"Error: the '{name}' tools are not available to this agent, so they "
+            "cannot be loaded here. Say what you need and let the user decide."
+        )
+
     added = [n for n in entry.extra if n in REGISTRY]
     if name in loaded:
         return f"The '{name}' tools are already loaded: {', '.join(added)}."

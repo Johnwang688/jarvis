@@ -388,10 +388,16 @@ class Agent:
         self._synced_groups = set(self.loaded_groups)
 
         names = list(self._base_tool_names)
+        base = set(names)
         seen = set(names)
         for group_name in self.loaded_groups:
             group = tools.GROUPS.get(group_name)
-            if group is None:
+            # Only a group whose core this agent was given: `load_tools`
+            # refuses the rest, and this is the second half of that rule, for
+            # anything that writes into `loaded_groups` some other way. The
+            # set re-bound below is what `dispatch()` enforces, so folding in
+            # a group the agent was not offered would widen its toolset.
+            if group is None or not set(group.core) <= base:
                 continue
             for name in group.extra:
                 if name in tools.REGISTRY and name not in seen:
@@ -498,8 +504,11 @@ class Agent:
                 # so a bare pool thread starts with nothing bound — and
                 # runtime.py fails closed, meaning an unbound approver *denies*.
                 # Without this, a gated tool would start refusing itself purely
-                # because it ran beside another one. Copies share the plan dict
-                # by reference, so a write through one is seen by its owner.
+                # because it ran beside another one — and, the other way round,
+                # an unbound toolset is one dispatch() does not enforce, so a
+                # bare worker would run a tool this agent was never given
+                # (tools._toolset_refusal). Copies share the plan dict by
+                # reference, so a write through one is seen by its owner.
                 #
                 # copy_context() is called per worker rather than reused: a
                 # single Context cannot be entered by two threads at once.
@@ -543,7 +552,16 @@ class Agent:
             turn = Turn(text=compacted)
             self.on_event("text", turn.text)
         else:
-            turn = self._run_turn(user_input, images)
+            # The toolset `_run_turn` binds is what dispatch() enforces, and
+            # only for as long as the turn runs: afterwards it is put back as
+            # it was, so a thread that ran a turn does not go on holding this
+            # agent's toolset — a later direct dispatch on it would otherwise
+            # be judged against an agent that is no longer running.
+            held_before = runtime.parent_tools()
+            try:
+                turn = self._run_turn(user_input, images)
+            finally:
+                runtime.restore_tools(held_before)
         if self.session is not None:
             try:
                 # Never persist the working-context block: it is regenerated
