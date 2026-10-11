@@ -2245,7 +2245,7 @@ def effort_slider_checks(page, mock):
     """The effort slider (2026-10-10), in place of the pills: one change is one
     request (a drag on release, a click at once, keys once they settle), the
     default stop clears the effort to null, a click lands on the stop under the
-    pointer at any zoom, Space on it is not push-to-talk, nothing is reachable
+    pointer at any zoom, Space on it never starts the mic, nothing is reachable
     under a card, and a late older answer never moves the thumb back."""
     print("\nthe effort slider")
     from tests.face import hud_v2_mock
@@ -2392,7 +2392,7 @@ def effort_slider_checks(page, mock):
     until(lambda: abs(float(page.evaluate(
         "getComputedStyle(document.documentElement).getPropertyValue('--ui-zoom')") or 0) - 1) < 1e-6)
 
-    # Space on the slider is not push-to-talk, and moves nothing.
+    # Space on the slider never starts the mic, and moves nothing.
     open_pop(page)
     slider.focus()
     n = len(patches())
@@ -2402,7 +2402,7 @@ def effort_slider_checks(page, mock):
     ptt = page.evaluate("window.__hud.capture.ptt")
     page.keyboard.up("Space")
     time.sleep(0.5)
-    check("Space on the slider does not start push-to-talk",
+    check("Space on the slider never starts the mic",
           not muted and ptt is None and len(patches()) == n, f"muted={muted} ptt={ptt} {patches()[n:]}")
 
     # A late older answer: the first change's answer arrives after the second's.

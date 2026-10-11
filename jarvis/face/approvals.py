@@ -35,8 +35,9 @@ stream can also approve, because the face binds to 127.0.0.1 and has no user
 auth. That means anything already running as the owner — which could just run
 the command itself instead. The agent's own escape route is the one that
 mattered, and it is closed elsewhere: `config.is_face_origin()` makes the
-browser and web tools refuse the face's origin, so Jarvis cannot open his own
-HUD and click his own button.
+browser and web tools refuse the face's origin — every port in
+`config.control_ports()` since BR-0, v2's API listener included — so Jarvis
+cannot open his own HUD and click his own button.
 """
 
 from __future__ import annotations

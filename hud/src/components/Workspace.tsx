@@ -2,11 +2,14 @@
 // pane (its view strip, its context in a split, and whatever the caller puts
 // on the right — the profile select, a pinned project), the edges between
 // panes, and the bottom panel with its own edge. lib/workspace.ts decides
-// every number; App decides what each view shows.
+// every number (`gridTemplate`, `slotWidths`); App decides what each view
+// shows.
 //
 // A pane is mounted the first time a preset draws it and is then **hidden,
 // never unmounted**, as the side panes are: an unsaved edit or a loaded
-// preview in pane 3 survives switching to one pane and back.
+// preview in pane 3 survives switching to one pane and back. Up to eight
+// panes (WP-G1): a pane is known by its id (`pane-<id>`, its React key) and
+// carries its slot, the number the owner reads, as `data-slot`.
 //
 // In the single layout — the default — pane 1 is the only pane mounted and
 // its header is the old tab row exactly: the five view buttons and, on the
@@ -23,8 +26,8 @@
 import { useEffect, useRef, type ReactNode } from "react";
 import { keyStep } from "../lib/layout";
 import {
-  PANEL, PANE_MIN_H, PANE_MIN_W, PANE_VIEWS, SHAPES, columnWidths, maxPanelHeight, moveColEdge,
-  type PaneNo, type PaneSpec, type View,
+  PANEL, PANE_MIN_H, PANE_MIN_W, PANE_NOS, PANE_VIEWS, gridTemplate, maxPanelHeight, moveColEdge, rowCount,
+  slotOf, slotWidths, uneven, type PaneNo, type PaneSpec, type View,
 } from "../lib/workspace";
 import { placeTerminals, type InSpec } from "../lib/terminal";
 import type { Project } from "../types";
@@ -41,7 +44,7 @@ import { TerminalLinkMenu, TerminalPane, TerminalToasts, terminals, useTerminals
  * freeze with it (review of PR #32).
  */
 function useTerminalBridge(v: LayoutControl, place: Map<string, number>, terminalIn?: () => InSpec,
-                           openPreview?: (url: string) => boolean) {
+                           openPreview?: (url: string) => boolean, slots?: Map<number, number>) {
   const latest = useRef({ v, terminalIn, openPreview });
   latest.current = { v, terminalIn, openPreview };
   useEffect(() => {
@@ -61,10 +64,14 @@ function useTerminalBridge(v: LayoutControl, place: Map<string, number>, termina
     void terminals.refresh();
   }, []);
   const key = [...place].map(([id, n]) => `${id}:${n}`).join(",");
+  // "in pane N" names the slot, never the id (plan G-1).
+  const slotKey = [...(slots ?? [])].map(([n, s]) => `${n}@${s}`).join(",");
   useEffect(() => terminals.setZoom(v.zoom), [v.zoom]);
   useEffect(() => terminals.setPanelOpen(v.fit.panel.open), [v.fit.panel.open]);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => terminals.setPlace(place), [key]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => terminals.setSlots(slots ?? new Map()), [slotKey]);
 }
 
 /** Under this, a split pane's File and Diff views hide their tree behind a toggle. */
@@ -74,6 +81,8 @@ export const COMPACT_W = 520;
 
 export interface PaneInfo {
   pane: PaneNo;
+  /** Where the owner sees it: 1-based, reading order (lib/workspace `slotOf`). */
+  slot: number;
   /** Drawn by this render (a mounted pane may be hidden). */
   drawn: boolean;
   /** More than one pane is drawn. */
@@ -85,15 +94,6 @@ export interface PaneInfo {
   /** A split pane too narrow for the five view words. */
   compact: boolean;
   focused: boolean;
-}
-
-/** Which column a slot sits in, read off the shape's grid areas. */
-function slotColumn(areas: readonly string[], slot: number): number {
-  for (const row of areas) {
-    const i = row.split(" ").indexOf(`s${slot}`);
-    if (i >= 0) return i;
-  }
-  return 0;
 }
 
 export function Workspace(props: {
@@ -122,7 +122,8 @@ export function Workspace(props: {
   // One terminal is drawn in one place at a time (W-1): the first drawn pane
   // holding it, else the panel.
   const place = placeTerminals(ws.panes, fit.panes);
-  useTerminalBridge(v, place, props.terminalIn, props.openPreview);
+  const slots = new Map<number, number>(PANE_NOS.map((n) => [n, slotOf(ws, n)]));
+  useTerminalBridge(v, place, props.terminalIn, props.openPreview, slots);
   const mgr = useTerminals();
   /** A terminal pane's header: the title its program set (text, capped), else its own. */
   const terminalContext = (spec: PaneSpec) => {
@@ -134,16 +135,15 @@ export function Workspace(props: {
   const ever = useRef<Set<PaneNo>>(new Set<PaneNo>([1]));
   for (const n of fit.panes) ever.current.add(n);
 
-  const shape = SHAPES[fit.drawn];
   const split = fit.panes.length > 1;
-  const fracs = columnWidths(fit.cols, 1);
-  const colPx = columnWidths(fit.cols, fit.width);
-  const areas = shape.areas
-    .map((row) => `"${row.replace(/s(\d)/g, (_, i) => `p${fit.panes[Number(i) - 1]}`)}"`)
+  const tpl = gridTemplate(fit.drawn, fit);
+  const widths = slotWidths(fit);
+  const areas = tpl.areas
+    .map((row) => `"${row.replace(/s(\d+)/g, (_, i) => `p${fit.panes[Number(i) - 1]}`)}"`)
     .join(" ");
   const gridStyle: React.CSSProperties = {
-    gridTemplateColumns: fracs.map((f) => `minmax(0, ${f}fr)`).join(" "),
-    gridTemplateRows: shape.rows === 2 ? `minmax(0, ${fit.row}fr) minmax(0, ${1 - fit.row}fr)` : "minmax(0, 1fr)",
+    gridTemplateColumns: tpl.columns.map((f) => `minmax(0, ${f}fr)`).join(" "),
+    gridTemplateRows: tpl.rows.map((f) => `minmax(0, ${f}fr)`).join(" "),
     gridTemplateAreas: areas,
   };
   // The room a drag measures against: what is on screen, else what was fitted.
@@ -151,16 +151,32 @@ export function Workspace(props: {
   const roomH = () => grid.current?.offsetHeight || fit.height;
 
   const info = (n: PaneNo): PaneInfo => {
-    const slot = fit.panes.indexOf(n);
-    const drawn = slot >= 0;
-    const width = drawn ? (split ? colPx[slotColumn(shape.areas, slot + 1)] : fit.width) : NaN;
+    const at = fit.panes.indexOf(n);
+    const drawn = at >= 0;
+    const width = drawn ? (split ? widths[at] : fit.width) : NaN;
     return {
-      pane: n, drawn, split, width,
+      pane: n, slot: slotOf(ws, n), drawn, split, width,
       narrow: split && width < NARROW_W,
       compact: split && width < COMPACT_W,
       focused: ws.focused === n,
     };
   };
+
+  /** A column edge: its key in `Split`, the edges it moves among, and where it is drawn. */
+  const twoRows = rowCount(fit.drawn) === 2;
+  const ownBottom = uneven(fit.drawn);
+  const colEdges: { testid: string; part: "cols" | "bottom"; edges: number[]; i: number; style: React.CSSProperties }[] = [
+    ...fit.cols.map((c, i) => ({
+      testid: `split-col-${i + 1}`, part: "cols" as const, edges: fit.cols, i,
+      // 3 over 2 and 4 over 3: the top row's edges span the top row only.
+      style: ownBottom ? { left: `calc(${c * 100}% - 3px)`, bottom: "auto", height: `${fit.row * 100}%` }
+        : { left: `calc(${c * 100}% - 3px)` },
+    })),
+    ...(ownBottom ? fit.bottom : []).map((c, i) => ({
+      testid: `split-colb-${i + 1}`, part: "bottom" as const, edges: fit.bottom, i,
+      style: { left: `calc(${c * 100}% - 3px)`, top: `${fit.row * 100}%` },
+    })),
+  ];
 
   const panelMax = maxPanelHeight(fit, v.availableH);
 
@@ -175,22 +191,25 @@ export function Workspace(props: {
         className={split ? "split" : undefined}
         style={gridStyle}
       >
-        {([1, 2, 3, 4] as PaneNo[]).filter((n) => ever.current.has(n)).map((n) => {
+        {PANE_NOS.filter((n) => ever.current.has(n)).map((n) => {
           const spec = ws.panes[n - 1];
           const at = info(n);
           const ctx = at.split ? (spec.view === "terminal" ? terminalContext(spec) : props.context(spec, at)) : "";
           return (
             <section
-              key={n}
+              // Keyed by id and incarnation: a pane keeps its id for life, and
+              // one closed and reused later (WP-G2) mounts fresh.
+              key={`${n}.${v.incarnation[n] ?? 0}`}
               className={
                 "wpane" + (at.split && at.focused ? " focused" : "")
                 + (at.split && spec.view === "chat" && n === props.selectedPane ? " selected" : "")
               }
               data-testid={`pane-${n}`}
+              data-slot={at.slot}
               data-view={spec.view}
               data-focused={at.focused ? "true" : "false"}
               data-selected={spec.view === "chat" && n === props.selectedPane ? "true" : undefined}
-              aria-label={`Pane ${n}: ${spec.view}`}
+              aria-label={`Pane ${at.slot}: ${spec.view}`}
               tabIndex={-1}
               style={at.drawn ? { gridArea: `p${n}` } : { display: "none" }}
               onPointerDownCapture={() => v.focus(n)}
@@ -201,7 +220,7 @@ export function Workspace(props: {
                   {at.compact ? (
                     <select
                       data-testid={`pane-${n}-view-select`}
-                      aria-label={`What pane ${n} shows`}
+                      aria-label={`What pane ${at.slot} shows`}
                       value={spec.view}
                       onChange={(e) => props.onView(n, e.target.value as View)}
                       onKeyDown={(e) => e.stopPropagation()}
@@ -247,14 +266,15 @@ export function Workspace(props: {
           );
         })}
 
-        {fit.cols.map((c, i) => {
+        {colEdges.map(({ testid, part, edges, i, style }) => {
+          const c = edges[i];
           const w = Number.isFinite(fit.width) ? fit.width : 0;
-          const lo = (i === 0 ? 0 : fit.cols[i - 1] * w) + PANE_MIN_W;
-          const hi = (i === fit.cols.length - 1 ? w : fit.cols[i + 1] * w) - PANE_MIN_W;
+          const lo = (i === 0 ? 0 : edges[i - 1] * w) + PANE_MIN_W;
+          const hi = (i === edges.length - 1 ? w : edges[i + 1] * w) - PANE_MIN_W;
           return (
             <Separator
-              key={`col-${i}`}
-              testid={`split-col-${i + 1}`}
+              key={testid}
+              testid={testid}
               className="wsplit col"
               orientation="vertical"
               label="Resize the panes"
@@ -264,25 +284,25 @@ export function Workspace(props: {
               max={Math.max(lo, hi)}
               zoom={v.zoom}
               blocked={props.blocked}
-              style={{ left: `calc(${c * 100}% - 3px)` }}
+              style={style}
               onDrag={(start, delta) => {
                 const room = roomW();
-                v.setSplit(fit.drawn, { cols: moveColEdge(fit.cols, i, (start + delta) / room, room) });
+                v.setSplit(fit.drawn, { [part]: moveColEdge(edges, i, (start + delta) / room, room) });
               }}
               onKey={(key, shift) => {
                 const room = roomW();
-                const min = (i === 0 ? 0 : fit.cols[i - 1] * room) + PANE_MIN_W;
-                const max = (i === fit.cols.length - 1 ? room : fit.cols[i + 1] * room) - PANE_MIN_W;
+                const min = (i === 0 ? 0 : edges[i - 1] * room) + PANE_MIN_W;
+                const max = (i === edges.length - 1 ? room : edges[i + 1] * room) - PANE_MIN_W;
                 const next = keyStep("x", c * room, key, shift, min, Math.max(min, max));
                 if (next === null) return false;
-                v.setSplit(fit.drawn, { cols: moveColEdge(fit.cols, i, next / room, room) });
+                v.setSplit(fit.drawn, { [part]: moveColEdge(edges, i, next / room, room) });
                 return true;
               }}
               onReset={() => v.equalSplit(fit.drawn)}
             />
           );
         })}
-        {shape.rows === 2 ? (
+        {twoRows ? (
           <Separator
             testid="split-row"
             className="wsplit row"

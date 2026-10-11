@@ -21,9 +21,10 @@ import {
   type Fitted, type PaneLayout, type Side,
 } from "../lib/layout";
 import {
-  PANEL, PRESETS, SHAPES, TITLEBAR_H, equalSplit as equalSplitOf, fitWorkspace, focusPane, forgetTerminal as forgetTerminalOf,
-  loadWorkspace, panesOf, pinPane, resetWorkspace, saveWorkspace, setPaneTerminal, setPanel, setPreset as setPresetOf,
-  setKeepOrigin as setKeepOriginOf, setPreviewUrl as setPreviewUrlOf, setSplit as setSplitOf, setView as setViewOf, show as showOf,
+  MENU_PRESETS, PANEL, SHAPES, TITLEBAR_H, cellsOf, defaultWorkspace, equalSplit as equalSplitOf, fitWorkspace, focusPane,
+  forgetTerminal as forgetTerminalOf, loadWorkspace, paneAt, pinPane, resetWorkspace, saveWorkspace, setPaneTerminal,
+  setPanel, setPreset as setPresetOf, setKeepOrigin as setKeepOriginOf,
+  setPreviewUrl as setPreviewUrlOf, setSplit as setSplitOf, setView as setViewOf, show as showOf,
   unpinProject as unpinProjectOf,
   type DrawnSet, type PaneNo, type Preset, type Split, type View, type Workspace, type WorkspaceFit,
 } from "../lib/workspace";
@@ -71,9 +72,18 @@ export interface LayoutControl {
   resetPanelHeight: () => void;
   /** Reset layout: one pane, default widths, the panel closed. */
   resetAll: () => void;
+  /**
+   * Render-only, by pane id: how many times that id has been closed. The
+   * workspace keys a pane by id and incarnation, so an id a close frees and a
+   * split reuses (WP-G2) mounts fresh — never the old FileTab, frame or
+   * terminal slot. Nothing closes a pane yet (WP-G1), so every id is 0.
+   */
+  incarnation: Readonly<Partial<Record<PaneNo, number>>>;
 }
 
-/** Focus pane N for the keyboard: its message box when it has one, else the pane itself. */
+const NO_INCARNATIONS: Readonly<Partial<Record<PaneNo, number>>> = Object.freeze({});
+
+/** Focus pane `pane` (an id) for the keyboard: its message box when it has one, else the pane itself. */
 function focusPaneElement(pane: PaneNo) {
   requestAnimationFrame(() => {
     const el = document.querySelector<HTMLElement>(`[data-testid="pane-${pane}"]`);
@@ -211,7 +221,7 @@ export function useLayout(blocked = false): LayoutControl {
   // letting one through is Chrome's page zoom, which this control cannot see
   // and the browser remembers per site. Ctrl+B stands aside in Monaco (its
   // Ctrl+K Ctrl+B chord), ignores auto-repeat (holding it would flap the
-  // pane), and nothing fires mid-composition. Ctrl+` and Ctrl+Alt+1 … 4
+  // pane), and nothing fires mid-composition. Ctrl+` and Ctrl+Alt+1 … 8
   // ignore auto-repeat too.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -242,12 +252,14 @@ export function useLayout(blocked = false): LayoutControl {
         if (opening) void terminals.keyOpened();
         return;
       }
-      if (what === "focus1" || what === "focus2" || what === "focus3" || what === "focus4") {
-        const pane = Number(what.slice(-1)) as PaneNo;
-        // Only a pane the preset has: Ctrl+Alt+3 in two columns is left alone.
-        // One the window dropped for room is brought back into the drawn set
-        // (fitWorkspace keeps a dropped set only while it holds the focus).
-        if (!panesOf(now.current.ws.preset).includes(pane)) return;
+      if (what.startsWith("focus")) {
+        // Slot N, never id N (plan G-1): the pane the owner sees N-th in
+        // reading order. Only a slot the preset has: Ctrl+Alt+3 in two
+        // columns is left alone. A pane the window dropped for room is
+        // brought back into the drawn set (fitWorkspace keeps a dropped set
+        // only while it holds the focus).
+        const pane = paneAt(now.current.ws, Number(what.slice(5)));
+        if (pane === null) return;
         e.preventDefault();
         if (e.repeat) return;
         setWs((w) => focusPane(w, pane));
@@ -266,7 +278,7 @@ export function useLayout(blocked = false): LayoutControl {
     zoom, layout, fitted, available, availableH, ws, fit,
     setZoom, zoomBy, setWidth, resetWidth, open, fold, toggle,
     setPreset, setView, focus, show, pin, unpinProject, setPreviewUrl, setKeepOrigin, setTerminal, forgetTerminal, setSplit,
-    equalSplit, togglePanel, setPanelHeight, resetPanelHeight, resetAll,
+    equalSplit, togglePanel, setPanelHeight, resetPanelHeight, resetAll, incarnation: NO_INCARNATIONS,
   };
 }
 
@@ -582,21 +594,25 @@ function AreaIcon(props: { area: Area; open: boolean }) {
   );
 }
 
-/** A preset tile's diagram: the shape's panes as small rectangles. */
+/**
+ * A preset tile's diagram: the shape's panes as small rectangles, drawn from
+ * the shape itself (lib/workspace `cellsOf`, at its default edges), so a
+ * tile can never disagree with what choosing it draws.
+ */
 function PresetIcon(props: { preset: Preset }) {
-  const cells: Record<Preset, [number, number, number, number][]> = {
-    single: [[1, 1, 22, 14]],
-    cols2: [[1, 1, 10.5, 14], [12.5, 1, 10.5, 14]],
-    rows2: [[1, 1, 22, 6.5], [1, 8.5, 22, 6.5]],
-    cols3: [[1, 1, 6.6, 14], [8.7, 1, 6.6, 14], [16.4, 1, 6.6, 14]],
-    main2: [[1, 1, 13, 14], [15, 1, 8, 6.5], [15, 8.5, 8, 6.5]],
-    grid4: [[1, 1, 10.5, 6.5], [12.5, 1, 10.5, 6.5], [1, 8.5, 10.5, 6.5], [12.5, 8.5, 10.5, 6.5]],
-  };
+  const cells = cellsOf(props.preset, defaultWorkspace().splits[props.preset]);
+  const gap = 1;
   return (
     <svg width="24" height="16" viewBox="0 0 24 16" aria-hidden="true" focusable="false">
-      {cells[props.preset].map(([x, y, w, h], i) => (
-        <rect key={i} x={x} y={y} width={w} height={h} rx="1" fill="none" stroke="currentColor" strokeWidth="1.1" />
-      ))}
+      {cells.map((c, i) => {
+        const x = 1 + c.left * 22 + (c.left > 0 ? gap / 2 : 0);
+        const y = 1 + c.top * 14 + (c.top > 0 ? gap / 2 : 0);
+        const w = (c.right - c.left) * 22 - (c.left > 0 ? gap / 2 : 0) - (c.right < 1 ? gap / 2 : 0);
+        const h = (c.bottom - c.top) * 14 - (c.top > 0 ? gap / 2 : 0) - (c.bottom < 1 ? gap / 2 : 0);
+        return (
+          <rect key={i} x={x} y={y} width={w} height={h} rx="1" fill="none" stroke="currentColor" strokeWidth="1.1" />
+        );
+      })}
     </svg>
   );
 }
@@ -633,9 +649,13 @@ function MenuShell(props: {
 }) {
   const box = useRef<HTMLDivElement>(null);
   const { onClose, opener } = props;
+  // It opens on the chosen tile (a `menuitemradio`), else on the first item —
+  // never on a checked toggle row (`menuitemcheckbox`): with 3 over 2 or 4
+  // over 3 current no tile is checked, and focus used to land on the sidebar
+  // toggle, where Enter folded the sidebar (review of PR #37).
   useLayoutEffect(() => {
     const first =
-      box.current?.querySelector<HTMLElement>('[data-mi][aria-checked="true"]')
+      box.current?.querySelector<HTMLElement>('[data-mi][role="menuitemradio"][aria-checked="true"]')
       || box.current?.querySelector<HTMLElement>("[data-mi]");
     first?.focus();
   }, []);
@@ -890,10 +910,11 @@ export function TitleBar(props: {
 }
 
 /**
- * ⊞'s menu, the one entry point for presets: six tiles (the stored preset
- * checked), the three toggles written out with their shortcuts, Reset layout,
- * and — when the window is drawing fewer panes than the preset has — a line
- * saying so.
+ * ⊞'s menu, the one entry point for presets: eight tiles, four to a row (the
+ * stored preset checked; 3 over 2 and 4 over 3 have no tile, so with one of
+ * them chosen no tile is), the three toggles written out with their
+ * shortcuts, Reset layout, and — when the window is drawing fewer panes than
+ * the preset has — a line saying so.
  */
 export function LayoutMenu(props: {
   view: LayoutControl;
@@ -916,12 +937,12 @@ export function LayoutMenu(props: {
       label="Customize layout"
       opener={props.opener}
       onClose={props.onClose}
-      gridCols={3}
-      gridCount={PRESETS.length}
+      gridCols={4}
+      gridCount={MENU_PRESETS.length}
     >
-      <div className="lm-head">Layout</div>
+      <div className="lm-head" data-testid="layout-head">Layout · {total} pane{total === 1 ? "" : "s"}</div>
       <div className="lm-tiles" role="group" aria-label="Panes">
-        {PRESETS.map((p) => (
+        {MENU_PRESETS.map((p) => (
           <button
             type="button"
             key={p}

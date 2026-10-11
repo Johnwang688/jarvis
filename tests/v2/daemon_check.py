@@ -163,11 +163,16 @@ class DaemonChecks(unittest.TestCase):
         self.addCleanup(self.d.stop)
         self.project = self.stores.projects.create("test", str(self.project_root))
 
-    def request(self, method, path, body=None, expected=200, raw=None):
-        conn = http.client.HTTPConnection("127.0.0.1", self.d.port, timeout=3)
+    def request(self, method, path, body=None, expected=200, raw=None, owner=False):
+        # owner: as the HUD window sends it, its listener and its Origin (BR-0).
+        port = self.d.face_port if owner else self.d.port
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
+        headers = {"Content-Type": "application/json"}
+        if owner:
+            headers["Origin"] = f"http://127.0.0.1:{port}"
         try:
             conn.request(method, path, body=raw if raw is not None else json.dumps(body) if body is not None else None,
-                         headers={"Content-Type": "application/json"})
+                         headers=headers)
             response = conn.getresponse()
             value = json.loads(response.read())
             self.assertEqual(response.status, expected, value)
@@ -289,7 +294,7 @@ class DaemonChecks(unittest.TestCase):
         pid = created["id"]
         self.assertEqual(self.request("GET", "/projects/" + pid), created)
         self.assertEqual(len(self.request("GET", "/projects")), 2)
-        updated = self.request("PATCH", "/projects/" + pid, {"name": "renamed", "routing": {"chains": {"chat": ["fast"]}}, "always_ask": ["deploy"]})
+        updated = self.request("PATCH", "/projects/" + pid, {"name": "renamed", "routing": {"chains": {"chat": ["fast"]}}, "always_ask": ["deploy"]}, owner=True)
         self.assertEqual(updated["name"], "renamed")
         created_thread = self.request("POST", "/threads", {"project_id": pid, "role": "chat", "provider": "fast", "brief": {}}, 201)
         self.assertEqual(self.request("GET", "/threads?project=" + pid), [created_thread])

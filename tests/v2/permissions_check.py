@@ -941,16 +941,105 @@ class PermitProvider:
         pass
 
 
-def http_json(port, method, path, body=None):
+def http_json(port, method, path, body=None, headers=None):
     conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
     try:
         payload = None if body is None else json.dumps(body).encode()
-        headers = {"Content-Type": "application/json"} if payload else {}
+        headers = {**({"Content-Type": "application/json"} if payload else {}), **(headers or {})}
         conn.request(method, path, payload, headers)
         response = conn.getresponse()
         return response.status, json.loads(response.read() or b"null")
     finally:
         conn.close()
+
+
+def hud_json(daemon, method, path, body=None):
+    """A request as the HUD window sends it: its own listener, its Origin."""
+    return http_json(daemon.face_port, method, path, body,
+                     {"Origin": f"http://127.0.0.1:{daemon.face_port}"})
+
+
+def approve_route_owner_only_checks(daemon, req_id):
+    """BR-0: only the HUD window can answer a card over HTTP.
+
+    The API listener serves the same HUD page, so a page loaded there sends an
+    Origin equal to its Host and passed `check_origin`. v1's agent browser
+    could load that page (it refused only the face's port) and click the
+    card's button. Fails on a49423c: the first request below answered 200.
+    """
+    def still_pending():
+        status, pending = http_json(daemon.port, "GET", "/approvals")
+        return status == 200 and [r["req_id"] for r in pending] == [req_id]
+
+    body = {"decision": "allow"}
+    api_origin = {"Origin": f"http://127.0.0.1:{daemon.port}"}
+    status, _ = http_json(daemon.port, "POST", "/approvals/" + req_id, body, api_origin)
+    eq(status, 403, "the API listener refuses an approval sent with its own Origin "
+                    "(a page it served)")
+    ok(still_pending(), "and the request is still waiting for the owner")
+    status, _ = http_json(daemon.port, "POST", "/approvals/" + req_id, body,
+                          {"Origin": f"http://localhost:{daemon.port}"})
+    eq(status, 403, "…in its localhost spelling too")
+    status, _ = http_json(daemon.port, "POST", "/approvals/" + req_id, body)
+    eq(status, 403, "the API listener refuses an approval with no Origin")
+    status, _ = http_json(daemon.port, "POST", "/approvals/" + req_id, body,
+                          {"Origin": f"http://127.0.0.1:{daemon.face_port}"})
+    eq(status, 403, "the API listener refuses the HUD's Origin as well (it is not the HUD's Host)")
+    status, _ = http_json(daemon.face_port, "POST", "/approvals/" + req_id, body)
+    eq(status, 403, "the HUD's listener refuses an approval with no Origin")
+    status, _ = http_json(daemon.face_port, "POST", "/approvals/" + req_id, body,
+                          {"Origin": f"http://127.0.0.1:{daemon.workshop_port}"})
+    eq(status, 403, "the HUD's listener refuses another origin (the workshop's)")
+    ok(still_pending(), "none of those refusals resolved or dropped the request")
+    status, pending = http_json(daemon.port, "GET", "/approvals")
+    eq(status, 200, "reading pending approvals stays open on the API listener")
+
+
+def hud_build_deny_checks():
+    """BR-0: no provider's write tool, and no Codex grant, reaches the built
+    HUD the daemon serves — a script planted there approves with the HUD's own
+    Origin on the owner's next reload. On dfb1d7e every write below was
+    allowed and every grant approvable."""
+    from jarvis.v2.model import PermissionProfile as P
+    from jarvis.v2.permissions import build_permit, denied_file, denied_grant
+    from jarvis.v2.provider import Decision
+
+    real = config.HUD_DIST
+    ok(denied_file(str(real / "index.html")) is not None,
+       "the real config.HUD_DIST (the repo's hud/dist) is refused")
+    with Sandbox() as box:
+        dist = box.root / "hud" / "dist"
+        (dist / "assets").mkdir(parents=True)
+        (box.root / "hud" / "src").mkdir()
+        link = box.root / "looks-ordinary"
+        link.symlink_to(dist, target_is_directory=True)
+        config.HUD_DIST = dist
+        try:
+            for target in (dist / "index.html", dist / "assets" / "planted.js", link / "index.html",
+                           dist / "new" / "nested.js", dist):
+                why = denied_file(str(target))
+                ok(why is not None and "built HUD" in why, f"a write to {target} is refused ({why})")
+            eq(denied_file(str(box.root / "hud" / "src" / "App.tsx")), None,
+               "the HUD's source stays writable")
+            brief = brief_for(P.AUTO)
+            asker = Asker(Decision.ALLOW)
+            permit = build_permit(context(brief), asker)
+            page = str(dist / "index.html")
+            for tool, args in (("Write", {"file_path": page, "content": "<script></script>"}),
+                               ("Edit", {"file_path": page, "old_string": "a", "new_string": "b"}),
+                               ("apply_patch", {"paths": [page]}),
+                               ("write_file", {"path": page, "content": "x"})):
+                before = len(asker.seen)
+                eq(permit(tool, args, brief), Decision.DENY, f"{tool} must not write the built HUD")
+                eq(len(asker.seen), before, f"{tool}'s refusal is never put to the owner")
+            for grant in (dist, dist / "assets", box.root / "hud", link):
+                ok(denied_grant(str(grant), "write") is not None,
+                   f"a write grant on {grant} would reach the built HUD")
+            eq(denied_grant(str(dist), "read"), None, "reading it is not a lever")
+            eq(denied_grant(str(box.root / "hud" / "src"), "write"), None,
+               "a write grant on the HUD's source is not refused for this reason")
+        finally:
+            config.HUD_DIST = real
 
 
 def daemon_checks():
@@ -1002,9 +1091,11 @@ def daemon_checks():
             eq(len(queued), 1, "the always-ask command is queued for the owner")
             eq(queued[0]["command"], "git push origin main",
                "the queue shows the entire command")
-            status, body = http_json(daemon.port, "POST", "/approvals/" + queued[0]["req_id"],
-                                     {"decision": "allow"})
-            eq(status, 200, "POST /approvals answers it")
+            approve_route_owner_only_checks(daemon, queued[0]["req_id"])
+            ok(len(provider.calls) == 1, "no refused approval reached the blocked hook")
+            status, body = hud_json(daemon, "POST", "/approvals/" + queued[0]["req_id"],
+                                    {"decision": "allow"})
+            eq(status, 200, "POST /approvals from the HUD window answers it")
             deadline = time.monotonic() + 5
             while len(provider.calls) < 2 and time.monotonic() < deadline:
                 time.sleep(0.005)
@@ -1018,10 +1109,10 @@ def daemon_checks():
             ok("approval_requested" in seen and "approval_resolved" in seen,
                "both approval events are published on the bus")
 
-            status, _ = http_json(daemon.port, "POST", "/approvals/" + queued[0]["req_id"],
-                                  {"decision": "allow"})
+            status, _ = hud_json(daemon, "POST", "/approvals/" + queued[0]["req_id"],
+                                 {"decision": "allow"})
             eq(status, 404, "an answered request cannot be answered again")
-            status, _ = http_json(daemon.port, "POST", "/approvals/nope", {"decision": "sideways"})
+            status, _ = hud_json(daemon, "POST", "/approvals/nope", {"decision": "sideways"})
             ok(status in (400, 404), "a nonsense decision is refused")
         finally:
             daemon.stop()
@@ -1103,8 +1194,8 @@ def auto_quiet_checks():
                     break
                 time.sleep(0.01)
             eq(len(queued), 1, "the always-ask push is queued for the owner")
-            status, _ = http_json(daemon.port, "POST", "/approvals/" + queued[0]["req_id"],
-                                  {"decision": "deny"})
+            status, _ = hud_json(daemon, "POST", "/approvals/" + queued[0]["req_id"],
+                                 {"decision": "deny"})
             eq(status, 200, "and answered")
             deadline = time.monotonic() + 5
             while len(provider.calls) < len(allowed) + 1 and time.monotonic() < deadline:
@@ -1317,7 +1408,7 @@ def discord_checks():
 
 def main():
     for section in (matrix_checks, always_ask_checks, file_deny_checks,
-                    human_backed_checks, log_checks, approvals_checks,
+                    human_backed_checks, log_checks, approvals_checks, hud_build_deny_checks,
                     daemon_checks, auto_quiet_checks, hatch_checks, discord_checks):
         print(f"-- {section.__name__}")
         section()
