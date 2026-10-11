@@ -801,6 +801,16 @@ class Speed(unittest.TestCase):
         self.assertFalse(G.prints_secrets("echo $x | sort ; " * 4000))
         self.assertLess(time.perf_counter() - start, 1.0)
 
+    def test_tails_of_a_cached_candidate_spend_the_budget(self):
+        # Ink is up to 8M characters: entries whose first CANDIDATE_CAP
+        # characters are one cached candidate and whose tails differ would
+        # each cost a hazard scan of up to 1 KiB. The scans spend the budget.
+        ink = [TT.Line("echo " + "a" * 600 + " ; tail %d " % i + "b" * 400, i, i) for i in range(8000)]
+        G.prints_secrets.cache_clear()
+        start = time.perf_counter()
+        G.rule3(0, 10_000, [], ink, (), 0, False)
+        self.assertLess(time.perf_counter() - start, self.BUDGET_S / 2)
+
     def test_a_redrawn_row_is_judged_once_per_text(self):
         # LOW (2026-10-11 review, finding 2): one judgement per distinct text.
         calls = []
@@ -904,10 +914,12 @@ class UnseenParts(unittest.TestCase):
         for tail in ("env", "echo $GITHUB_TOKEN", "node -p process.env", "tmux show-environment", "cat .e*",
                      "e''nv", 'pr""intenv'):
             with self.subTest(tail=tail):
-                self.assertTrue(G.shows_printer("$ " + self.PAD + tail))
+                self.assertTrue(G.shows_printer("$ " + self.PAD + tail))      # after a prompt
+                self.assertTrue(G.shows_printer(self.PAD + tail))             # the whole line
         for tail in ("make", "ls -la", "echo done"):
             with self.subTest(tail=tail):
                 self.assertFalse(G.shows_printer("$ " + self.PAD + tail))
+                self.assertFalse(G.shows_printer(self.PAD + tail))
 
     def test_candidates_past_the_per_line_cap(self):
         self.assertTrue(G.shows_printer("$ ls " * 17 + "$ env"))
