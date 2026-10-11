@@ -48,3 +48,15 @@ plan disagree, this file wins.**
   from `vexcom --help` as the owner ran it. Tests use a fake `vexcom` and never a device.
 - **Terminal spans are advisory** (PR #25 review). Anything that relies on OSC 133 spans, such as the VEX brain terminal
   being readable through WP-F, must still apply text-pattern refusals to every read.
+
+## Added 2026-10-11
+
+- **E-13: each File pane picks its own folder** (the owner: "for the editor I should be able to select which folder to work in").
+  - **Today** a File pane shows the project of the chat selected last, and pins that project once a file is opened. "Follow chat" unpins it. The pane itself has no picker.
+  - **The change:** the File pane's header gets a project picker, `Project ▾`. It lists every project, plus **Follow chat**.
+    - Picking a project re-pins that pane only.
+    - A pane holding an unsaved edit refuses the change, with the existing refusal chip.
+    - Under an approval card the picker is disabled and inert.
+  - **Only project folders are offered.** The editor stays scoped to project roots, with credential folders withheld (E-8). A folder becomes reachable by making it a project (New project, or link an existing folder), so the folder boundary in `folders.py` stays the only gate.
+  - **Built in ED-1 or ED-2,** whichever touches the File pane's header first. The ED-1 builder takes it if it is still open.
+- **`hud/dist` write protection (§2.7) is being done early in BR-0** (PR #38). The write tools refuse the served HUD dist directory. ED-2 should reuse that one check rather than add a second.
