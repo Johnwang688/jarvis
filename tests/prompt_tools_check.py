@@ -27,9 +27,13 @@ What must hold:
     rule matches exactly one paragraph, and no version names a tool it does not
     require.
 
-Run against origin/main (b54e84c), every surface but the four conversation
-agents, the designer and vocab-bench fails, and the `config` checks fail for
-want of `config.system_prompt`.
+Against origin/main (4272008) 26 of the 96 checks it reaches there fail: the
+fast path, a workflow, a task, a goal, all five agent-bench tasks, cad-bench
+(whose agent does not hold skill_read either), long-bench in both modes, the
+builder under long-bench, the three briefs that name tools (no `needs`), the
+owner's named cases, and `config.system_prompt` (absent). The conversation
+agents, the designer, vocab-bench and the other sub-agents pass there: they
+never named a tool they lacked.
 
 Run:  PYTHONPATH=. .venv/bin/python tests/prompt_tools_check.py
 """

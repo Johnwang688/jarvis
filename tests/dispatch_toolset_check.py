@@ -51,7 +51,7 @@ sub-agent, fleet, fast path, mcp, agent-bench, the CLI, the Discord agent, the
 face's voice agent and its designer — ran with a toolset bound, equal to that
 agent's.
 
-Against origin/main (b54e84c) the unbound, opt-in, unknown-name and
+Against origin/main (4272008) the unbound, opt-in, unknown-name and
 empty-core checks fail; M7, M12 and the walker were shown to bite in a scratch
 copy (the restore's `finally`, `_run_turn` binding the base set, and the old
 walker, each reverted).
