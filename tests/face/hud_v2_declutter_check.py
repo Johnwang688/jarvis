@@ -235,6 +235,10 @@ def _card_lever_checks(page, mock, check, until):
           cycle.get_attribute("data-mode") == "off" and "REVIEW" in (cycle.get_attribute("title") or ""),
           f"{cycle.get_attribute('data-mode')} {cycle.get_attribute('title')}")
     until(lambda: not _recog(page), timeout=2)
+    # A pointer no longer focuses the cycle button (review of PR #40: a
+    # habitual Space would cycle the mic on); the keyboard still can, so the
+    # focus F1 is about is put there the keyboard's way.
+    page.evaluate("document.getElementById('modecycle').focus()")
     check("setup: focus is left on the cycle button, OFF", _active_testid(page) == "dictation-cycle"
           and _mode(page) == "off", str(_active_testid(page)))
 
