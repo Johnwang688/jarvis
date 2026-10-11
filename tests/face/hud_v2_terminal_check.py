@@ -1935,6 +1935,11 @@ def _split_close_terminal_checks(page, mock, base, check, until, fake):
     retried at the cap, and unreadable to Jarvis when the source is. × on a
     terminal pane kills nothing: no DELETE, no reattach, and the terminal is
     the panel's tab again."""
+    # The section before ends with a terminal still attaching: let it, or the
+    # reset below empties the world under it and its ticket is refused (the
+    # suite's "fresh ticket" flake at this boundary).
+    if _created(mock):
+        _attached(page, until, _created(mock)[-1][0], timeout=4)
     tid = _fresh(page, mock, base, until, fake, size=(1600, 900))
     source_in = _created(mock)[-1][1]
     page.locator('[data-testid="pane-1"] [data-testid="tab-terminal"]').click()
