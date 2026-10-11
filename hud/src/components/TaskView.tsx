@@ -1,4 +1,4 @@
-// The task view — the spec with an answer box per blocking question, the plan
+// The task view — the spec with an answer box per open question, the plan
 // with the current step marked, the status record, the routing line, steer,
 // cancel/resume, and the §10.4 report when done.
 //
@@ -10,6 +10,7 @@
 import { useState } from "react";
 import type { Task, TaskThread } from "../types";
 import { routingLine } from "../state/store";
+import { openQuestions } from "../lib/taskQuestions";
 
 function elapsed(s: number) {
   const n = Math.max(0, Math.round(s));
@@ -20,15 +21,41 @@ function elapsed(s: number) {
 export function TaskView(props: {
   task: Task | null;
   threads: TaskThread[];
-  onAnswer: (question: string, answer: string) => void;
+  /** `index` is the question's place in `spec.questions` (lib/taskQuestions).
+   * Rejects with the daemon's sentence when the answer is refused. */
+  onAnswer: (taskId: string, index: number, text: string) => Promise<unknown>;
   onSteer: (text: string) => void;
   onCancel: () => void;
   onResume: () => void;
   onStart: () => void;
 }) {
+  // Keyed `${task}:${index}`, so words typed under one task's question never
+  // show under another's.
   const [answers, setAnswers] = useState<Record<string, string>>({});
+  // A refused answer's sentence, shown under its box; the box keeps the words.
+  const [refused, setRefused] = useState<Record<string, string>>({});
+  const [sending, setSending] = useState<Record<string, true>>({});
   const [steer, setSteer] = useState("");
   const t = props.task;
+
+  const answer = (taskId: string, index: number) => {
+    const key = `${taskId}:${index}`;
+    const text = (answers[key] || "").trim();
+    if (!text || sending[key]) return;
+    const drop = <V,>(all: Record<string, V>) => {
+      const { [key]: _gone, ...rest } = all;
+      return rest;
+    };
+    setSending((all) => ({ ...all, [key]: true }));
+    setRefused(drop);
+    props.onAnswer(taskId, index, text).then(
+      () => setAnswers(drop),
+      (e: unknown) => {
+        const why = (e instanceof Error && e.message) || "the daemon could not be reached";
+        setRefused((all) => ({ ...all, [key]: `Not answered: ${why}` }));
+      },
+    ).finally(() => setSending(drop));
+  };
 
   if (!t) {
     return (
@@ -39,7 +66,9 @@ export function TaskView(props: {
   }
 
   const st = t.status || ({} as Task["status"]);
-  const blocking = (t.spec?.questions || []).filter((q) => q.blocking && !q.answer);
+  // Only what the daemon would take: a CLARIFYING task's blocking,
+  // unanswered questions, each with its index in `spec.questions`.
+  const asked = openQuestions(t);
   const line = routingLine(t);
 
   return (
@@ -105,30 +134,43 @@ export function TaskView(props: {
         {(t.spec?.acceptance || []).map((a, i) => (
           <div className="step" key={i} data-testid="acceptance">· {a}</div>
         ))}
-        {blocking.length ? (
+        {asked.length ? (
           <div style={{ marginTop: 8 }} data-testid="blocking-questions">
-            {blocking.map((q, i) => (
-              <div className="col" key={i} style={{ marginBottom: 8 }}>
-                <div className="small" style={{ color: "var(--amber)" }}>{q.text}</div>
-                {q.options?.length ? <div className="muted small">{q.options.join(" / ")}</div> : null}
-                <input
-                  data-testid={`answer-${i}`}
-                  value={answers[q.text] || ""}
-                  onChange={(e) => setAnswers({ ...answers, [q.text]: e.target.value })}
-                  onKeyDown={(e) => e.stopPropagation()}
-                />
-                <button
-                  type="button"
-                  data-testid={`answer-send-${i}`}
-                  onClick={() => {
-                    const a = (answers[q.text] || "").trim();
-                    if (a) props.onAnswer(q.text, a);
-                  }}
-                >
-                  Answer
-                </button>
-              </div>
-            ))}
+            {asked.map(({ index, question: q }) => {
+              const key = `${t.id}:${index}`;
+              return (
+                <div className="col" key={key} style={{ marginBottom: 8 }} data-testid={`question-${index}`}>
+                  <div className="small" style={{ color: "var(--amber)" }}>{q.text}</div>
+                  {q.options?.length ? <div className="muted small">{q.options.join(" / ")}</div> : null}
+                  <input
+                    data-testid={`answer-${index}`}
+                    value={answers[key] || ""}
+                    onChange={(e) => {
+                      const value = e.target.value;
+                      setAnswers((all) => ({ ...all, [key]: value }));
+                    }}
+                    onKeyDown={(e) => {
+                      e.stopPropagation();
+                      if (e.key === "Enter" && !e.nativeEvent.isComposing) {
+                        e.preventDefault();
+                        answer(t.id, index);
+                      }
+                    }}
+                  />
+                  <button
+                    type="button"
+                    data-testid={`answer-send-${index}`}
+                    disabled={!!sending[key]}
+                    onClick={() => answer(t.id, index)}
+                  >
+                    Answer
+                  </button>
+                  {refused[key] ? (
+                    <div className="err" role="alert" data-testid={`answer-error-${index}`}>{refused[key]}</div>
+                  ) : null}
+                </div>
+              );
+            })}
           </div>
         ) : null}
       </div>

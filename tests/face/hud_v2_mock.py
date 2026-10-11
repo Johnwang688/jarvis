@@ -313,6 +313,42 @@ def _remove_refusal(w, model_id) -> str | None:
                            m["default"], model_id)
 
 
+def _task_verb(mock, task_id: str, verb: str, body) -> tuple[int, dict]:
+    """`POST /tasks/{id}/<verb>` (§11.2): the daemon's own body check
+    (`daemon.task_verb_body`) and, for an answer, the runner's own rule
+    (`control.answer_refusal`) — imported, never copied. This used to answer
+    `{"ok": true}` to anything, which is how the HUD sent `{question, answer}`
+    to `/answer` for weeks with every check green while the daemon answered
+    400 (2026-10-11). An accepted answer is applied as the runner applies it:
+    the question answered, `open_question` the next blocking one, the task
+    still CLARIFYING (the runner only queues it), one `task_status_changed`."""
+    from jarvis.v2.control import answer_refusal
+    from jarvis.v2.daemon import APIError, task_verb_body
+
+    if verb not in ("start", "steer", "cancel", "resume", "answer"):
+        return 404, {"error": "route not found"}
+    try:
+        args = task_verb_body(verb, body)
+    except APIError as exc:
+        return exc.status, {"error": str(exc)}
+    except ValueError as exc:               # the dispatcher's answer to one
+        return 400, {"error": f"request failed ({type(exc).__name__})"}
+    if verb != "answer":
+        return 200, {"ok": True}
+    task = next((t for t in mock.world["tasks"] if t["id"] == task_id), None)
+    if task is None:
+        return 404, {"error": "no such task"}
+    questions = task["spec"]["questions"]
+    refusal = answer_refusal(task_id, task["state"], questions, args["index"], args["text"])
+    if refusal:
+        return 409, {"error": refusal}
+    questions[args["index"]]["answer"] = args["text"].strip()
+    remaining = [q for q in questions if q["blocking"] and q["answer"] is None]
+    task["status"]["open_question"] = remaining[0]["text"] if remaining else None
+    mock.emit("task_status_changed", {"task_id": task_id, "state": task["state"]}, task_id=task_id)
+    return 200, task
+
+
 # --- a chat thread's model (decisions 2026-10-06, A) -----------------------
 # The same rules `jarvis/v2/thread_model.py` applies, small enough to read.
 
@@ -869,7 +905,8 @@ class MockDaemon:
                         status = "idle"
                     return self._json({"status": status})
                 if len(parts) == 3 and parts[0] == "tasks":
-                    return self._json({"ok": True})
+                    status, payload = _task_verb(mock, parts[1], parts[2], body)
+                    return self._json(payload, status)
                 if len(parts) == 2 and parts[0] == "approvals":
                     req_id = parts[1]
                     w["approvals"] = [r for r in w["approvals"] if r["req_id"] != req_id]

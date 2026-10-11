@@ -546,6 +546,15 @@ class NoAgentInstall(Base):
         'python3 -c "from jarvis.v2.hud_install import main as go; go()"',
         'python3 -c "import jarvis.v2.hud_install as h; h.install(1, 2)"',
     )
+    INSTALLS += (
+        # Review of PR #44 at 75f14c2: words the shell only builds when it
+        # runs. Every one scored ALLOW there through `python -m jarvis`.
+        "python3 -m jarvis hud $E install", "python3 -m jarvis h${UNSET}ud install",
+        "python3 -m jarvis h${X:-}ud install", "python3 -m jarvis hud${Z}", "python3 -m jarvis h$@ud",
+        "python3 -m jarvis h$*ud", 'python3 -m jarvis h"$E"ud install', 'python3 -m jarvis "h${E}ud" install',
+        ".venv/bin/python -m jarvis hud ins${E}tall", "python3 -m jarvis h?d install",
+        "python3 -m jarvis {hud,install}", 'jarvis "$@"', "M=jarvis; python3 -m $M hud install",
+    )
     ORDINARY = (
         "jarvis hud", "jarvis hud --no-window", "jarvis install hud", "cat jarvis/v2/hud_install.py",
         "grep -n main jarvis/v2/hud_install.py", "python tests/v2/hud_install_check.py",
@@ -604,6 +613,29 @@ class NoAgentInstall(Base):
             with self.subTest(line=line):
                 self.assertIsNone(S.installs_hud(line))
                 self.assertNotEqual(rules.decide(line).decision, rules.DENY)
+
+    def test_jarvis_own_cli_is_asked_never_auto_approved(self):
+        # Review of PR #44 at 75f14c2: `python -m jarvis …` and `uv run
+        # jarvis …` were ALLOW (python and uv are on the allow list), and the
+        # CLI has human-only verbs. Asked, as bare `jarvis` always was.
+        from jarvis import permissions as P, rules
+        for line in ("python -m jarvis auth", "python3 -mjarvis voice clone x a.wav",
+                     ".venv/bin/python -m jarvis discord commands --sync", "uv run jarvis chat",
+                     "uv run python -m jarvis chat", "poetry run jarvis bench", "python -m jarvis.v2.mcp_session",
+                     "jarvis bench -t $TASK", "python -m jarvis bench --model $M", "jarvis chat -c"):
+            with self.subTest(line=line):
+                self.assertEqual(rules.decide(line).decision, rules.ASK, rules.decide(line))
+                self.assertEqual(P.static_verdict(line).decision, rules.ASK)
+        for line in ("python -m pytest -x", "uv pip install -e .", "python tests/v2/hud_install_check.py",
+                     "python -m http.server 8000"):
+            with self.subTest(line=line):
+                self.assertEqual(rules.decide(line).decision, rules.ALLOW, line)
+
+    def test_a_refusal_from_a_substitution_says_how_to_mention_it(self):
+        from jarvis import rules
+        why = rules.decide('git commit -m "Run `jarvis hud install` after merging"').reason
+        self.assertIn("single-quote the text", why)
+        self.assertNotIn("single-quote", rules.decide("jarvis hud install").reason)
 
     def test_run_command_refuses_it_even_with_no_approver(self):
         from jarvis.tools import shell

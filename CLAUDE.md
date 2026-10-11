@@ -580,6 +580,18 @@ thread** is pinned at the top of the sidebar and starts in the last project
 worked in. A moved thread keeps the folder and permission rules it was
 opened with (`Thread.cwd`); a move re-labels, it never re-roots.
 
+**A task's question is answered by index (2026-10-11).** `POST
+/tasks/{id}/answer` takes exactly `{index, text}`, `index` the place in
+`spec.questions`, and only a CLARIFYING task asks (`hud/src/lib/
+taskQuestions.ts`, the daemon's `open_questions` rule). The HUD sent
+`{question, answer}` and swallowed the 400, so answering from the window
+never worked — and the mock took any body. A refusal now shows its sentence
+under the box and keeps the words, and the mock calls the daemon's
+`task_verb_body` and `control.answer_refusal` instead of answering `ok`.
+Free checks: `tests/face/hud_v2_task_check.py` (own mock), `TaskView.test.ts`,
+`taskQuestions.test.ts`, `api.test.ts`. The other task verbs (steer, cancel,
+resume, start) still swallow a refusal in `App.tsx`.
+
 **HUD zoom and panes (2026-10-08, design §18).** The rules are in
 `hud/src/lib/layout.ts`. Zoom is 70–160% in 10% steps: `− 100% +` in the
 title bar (since 2026-10-09; it used to fold away with the status pane), or
@@ -1216,7 +1228,11 @@ own `$VAR` or `ln -s` alias, the installer module, Python source that
 *invokes* it, and shells/`eval`/here-documents/substitutions bash would run
 — never on a line that only mentions it (`echo`, `grep`, a commit message,
 single quotes, a quoted here-document): a DENY cannot be approved, so a false
-one blocks the owner. A cheap line and per-segment filter (`_could_be_owner_op`)
+one blocks the owner. A jarvis argv word only known at run time (an unset
+`$E`, `$@`, a glob, `{hud,install}`) counts as any words, so a line that
+could expand to an op is refused; and **Jarvis's own CLI is ASK in every
+spelling** (`python -m jarvis…`, `uv run jarvis`, the venv's python —
+`protected_state.runs_jarvis`, asked by `rules.decide`), never auto-approved. A cheap line and per-segment filter (`_could_be_owner_op`)
 keeps `rules.decide` at its old speed on lines that cannot hold an op, held
 to the full parse by `hud_install_check`. An agent can edit `hud/src`, so
 running the installer would undo C-1. A shell write *into* the install root

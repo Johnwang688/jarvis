@@ -122,6 +122,14 @@ since the v1 face and the v2 daemon are separate processes.
   "state": "open"|"closed", "turns", "cost_usd"}]` — the orchestration
   view.
 - `GET /tasks/{id}/journal?after=N` → the journal records.
+- The WP11 verbs' bodies (`daemon.task_verb_body`, 400 for any other
+  shape): `start` and `cancel` `{}`; `steer` `{"text", "spoken"?}`;
+  `resume` `{"provider"?}`; `answer` exactly `{"index", "text"}`, where
+  `index` is the question's place in `spec.questions` — every question,
+  answered and assumable ones included — and only a `clarifying` task takes
+  one (`control.answer_refusal`, 409 with its sentence otherwise). This
+  file named the verbs without their bodies, and the HUD sent `{question,
+  answer}` to `answer` until 2026-10-11.
 
 ## Usage
 
@@ -1332,11 +1340,18 @@ the path), `python -m jarvis`, a `$VAR` or an `ln -s` link the line made, a
 Python run of `jarvis.v2.hud_install`, Python source that *invokes* the
 installer (importing or reading from it is not), and shells, `eval`,
 here-documents and substitutions that bash would run (never inside single
-quotes or a quoted here-document). A line that only mentions the command —
-`echo …`, a `grep` for it, a commit message — is untouched: a DENY cannot be
-approved, so a false one would block the owner too. Not seen: a link made
-earlier under another name, words built at run time (`jarvis $(echo hud)
-install`), a Makefile, alias or script. The same detector refuses `jarvis hud rebuild`,
+quotes or a quoted here-document). A jarvis argv word only known at run time —
+an expansion the line did not assign (an unset one vanishes), `$@`/`$*`, a
+glob, a brace — counts as any words, so a line that *could* expand to an op
+is refused too. A refusal that came from a substitution says to single-quote
+text that only mentions the command. A line that only mentions it — `echo
+…`, a `grep` for it, a single-quoted commit message — is untouched: a DENY
+cannot be approved, so a false one would block the owner too. Not seen: a
+link made earlier under another name, `jarvis $(echo hud) install`, a
+launcher or module name from the environment, a Makefile, alias or script.
+Separately, **Jarvis's own CLI is never auto-approved** in any spelling:
+`python -m jarvis…`, the venv's python, `uv run`/`poetry run`/`pipx run
+jarvis` are ASK in `rules.decide`, as bare `jarvis` always was. The same detector refuses `jarvis hud rebuild`,
 `jarvis restart` and `jarvis daemon2 restart` (2026-10-11, `v2/owner_ops.py`),
 and a `systemctl` verb that changes `jarvis-daemon2`. A shell write **into** the install root (`cp`, `rsync`, a
 redirect) is asked, never auto-approved or covered by an allowlist entry. A
