@@ -64,7 +64,7 @@ sys.path.insert(0, str(REPO))
 
 import websocket  # noqa: E402  (websocket-client, already a dependency)
 
-from jarvis import config, permissions as v1_permissions, rules, tools  # noqa: E402
+from jarvis import config, permissions as v1_permissions, rules, runtime, tools  # noqa: E402
 from jarvis.tools import files as v1_files, shell  # noqa: E402
 from jarvis.v2 import permissions as v2_permissions, terminals as T, vex, vex_setup  # noqa: E402
 from jarvis.v2.daemon import Daemon  # noqa: E402
@@ -529,6 +529,11 @@ class Rules(Base):
         shell._run = lambda command, *a, **k: self.ran.append(command) or "[exit 0]"
         self.addCleanup(setattr, shell, "_run", real)
         self.addCleanup(v1_permissions.set_mode, "ask")
+        # dispatch refuses a call with no toolset bound (PR #42): this test
+        # stands where an agent's turn would, holding run_command alone.
+        bound = runtime.tools_bound({"run_command"})
+        bound.__enter__()
+        self.addCleanup(bound.__exit__, None, None, None)
 
     def test_every_spelling_that_names_vexcom_is_deny(self):
         for label, command in SHAPES.items():
@@ -1719,6 +1724,11 @@ class ProgramPosition(Base):
         shell._run = lambda command, *a, **k: self.ran.append(command) or "[exit 0]"
         self.addCleanup(setattr, shell, "_run", real)
         self.addCleanup(v1_permissions.set_mode, "ask")
+        # dispatch refuses a call with no toolset bound (PR #42): this test
+        # stands where an agent's turn would, holding run_command alone.
+        bound = runtime.tools_bound({"run_command"})
+        bound.__enter__()
+        self.addCleanup(bound.__exit__, None, None, None)
 
     def test_a_glob_or_expansion_the_line_runs_is_deny(self):
         for label, command in RUNS.items():

@@ -1211,12 +1211,11 @@ VEX V5 in the HUD (editor plan §2.9; decisions V-1 to V-5; code in
 VX-2, the new-project dialog VX-3. **Every route is owner-only** on the HUD
 listener with a strict Host: the API listener (8405) is 403, the preview
 listener (8403) 404, a missing or foreign Origin (the workshop's, `null`)
-403, a rebound Host 403. One difference from `projects.owner_only`, which the
-browser forces: **a same-origin `GET` carries no Origin in Chromium**
-(measured 2026-10-10), so a `GET` with no Origin is accepted only when the
-browser's own `Sec-Fetch-Site: same-origin` says the HUD sent it (`none`,
-`same-site` and `cross-site` are 403); every other method needs the HUD's
-Origin. **No request names an executable, a path to run or an argument**:
+403, a rebound Host 403. The rule is the shared one, `projects.is_owner`
+(PR #41): **a same-origin `GET` carries no Origin in Chromium** (measured
+2026-10-10), so a `GET` with no Origin is accepted only when the browser's
+own `Sec-Fetch-Site: same-origin` says the HUD sent it (`none`, `same-site`
+and `cross-site` are 403); every other method needs the HUD's Origin. **No request names an executable, a path to run or an argument**:
 the programs and their argv come from `vex.json` and `vex.py`'s tables, the
 project folder from the project's id, and a body with any field not listed
 (`path`, `args`, `program`) is 400. Every 409 is a sentence. Output lives in

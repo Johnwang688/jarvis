@@ -2243,13 +2243,16 @@ executable (or folder), inside the extension's downloads or a
 vex setup` again". Because those folders are under AppData, which an agent can
 write, setup also records each tool's SHA-256 and every spawn hashes the tools
 it is about to run first (review round 1); a swap between the final check and
-`exec`, and the tools `make.exe` opens later, remain. This is the narrow, deliberate exception to "nothing under
+`exec`, the tools `make.exe` opens later, and a DLL planted beside a tool in
+its AppData folder (Windows loads a program's DLLs from its own folder first;
+the fingerprint covers the executable only) remain. This is the narrow, deliberate exception to "nothing under
 `/mnt/` ever runs" (which is about resolving the Claude and Codex CLIs). A
 request never names an executable, a path or an argument (the `DESKTOP_APPS`
 pattern): the argv tables live in `vex.py`, a project comes from its id, a
 build takes `{action}` and a download `{slot, name}`, validated first; Windows
 paths come from one function that refuses a character a command line or
-make's `cmd.exe` recipes could misread. Programs run as **program terminals**
+make's `cmd.exe` recipes could misread, and anything outside ASCII (Windows'
+"best fit" maps fullwidth quotes and slashes to syntax). Programs run as **program terminals**
 (`terminals.create_program`, called from `vex.py` alone): the same PTY, ring,
 attach and close as the owner's shells, with an environment that empties
 `WSLENV` so nothing of the daemon's crosses into Windows, no typed input but
@@ -2258,8 +2261,10 @@ error|warning:` into an errors list. One build per project (a lock file shared
 with `vexbuild`), one device action at a time (download, info, the brain
 port; a reservation released only by its holder), a 5-minute build timeout,
 and a build refuses a project whose make files name `vexcom`, failing closed
-wherever it cannot read them all — a makefile is project content `make` runs,
-and one that downloaded would make a build a download. **Download is only the owner's
+wherever it cannot read them all (a glob too complex to check, an `include`
+continued onto the next line read as make reads it, one that does not resolve
+in the project refused rather than skipped) — a makefile is project content
+`make` runs, and one that downloaded would make a build a download. **Download is only the owner's
 click** (V-2, V-3): no tool, MCP tool, CLI or Discord verb reaches it, no "run
 after download", and **any agent command line that names `vexcom` is DENY in
 `rules.decide`** — so in v1's dispatch and v2's layer 1 alike, under an
@@ -2267,12 +2272,19 @@ allowlist entry or `--dangerously-skip-permissions`, never put to the owner —
 in every spelling the rule lists: a path (the `/mnt/c` interop path, the Linux
 binary, `C:\…`), a wrapper, a `sh -c`/`cmd /c`/`powershell -c` string, quote
 and escape splits (bash, cmd's `^` and `%X%`, PowerShell's backtick), `$'…'`,
-empty and default-value expansions, brace expansion, a glob that keeps at
-least four of its letters, and a
-PowerShell `-EncodedCommand` that decodes to it. Like every DENY it is an
+empty and default-value expansions, brace expansion, a glob argument that keeps
+at least four of its letters, and a
+PowerShell `-EncodedCommand` that decodes to it — **and any line that runs
+something that could be it** (review round 2): a glob or an expansion in
+program position, past wrappers, as the program a runner starts (options
+parsed), in `sh -c` or `$(…)`, with no letter threshold; a program that cannot
+be told and could be vexcom is asked whatever stands, never allowlist-covered,
+always-ask in v2; a glob past the caps is too complex to judge, asked the same
+way. Like every DENY it is an
 accident guard, not a boundary — and the button is not one either: an agent
-running as the owner can still reach a plugged-in brain through a script, `make
--f`, or a forged-Origin POST to the route. Each device action therefore
+running as the owner can still reach a plugged-in brain through a script, a
+shell fed through a pipe, cmd's or PowerShell's own wildcards, `make -f`, a
+DLL beside the tool, or a forged-Origin POST to the route. Each device action therefore
 publishes an id-only `vex_device {action, at}` record, so one nobody clicked
 is visible. **Agents build through `vexbuild`** (`python -I -m jarvis.v2.vex
 build [--rebuild|--clean]`, isolated so a package planted in the project folder

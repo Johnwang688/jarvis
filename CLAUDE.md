@@ -1182,14 +1182,18 @@ runs before a build, `vexcom.exe` before a download, brain or info — through
 one `O_NOFOLLOW | O_NONBLOCK` fd, then re-stats the spawned path against that
 fd (device, inode, size, mtime, ctime): a mismatch refuses with "the VEX
 tools changed since `jarvis vex setup`". **What remains, stated**: a swap in
-the instant between that stat and `exec`, and the five tools `make.exe` opens
-later on the Windows side, during the build. **No request names an
+the instant between that stat and `exec`, the five tools `make.exe` opens
+later on the Windows side, during the build, and **a DLL planted beside a tool
+in its AppData folder** — Windows loads a program's DLLs from its own folder
+first, and the fingerprint covers the executable only. **No request names an
 executable, a path or an argument**: argv tables in `vex.py`, the project from
 its id, `{action}` / `{slot, name}` validated first (slot an int 1–8; name
 `^[A-Za-z0-9_][A-Za-z0-9_-]{0,19}$`; the settings file's own name is held to
 the `P=` rule before it names `build/<name>.bin`), Windows paths through one
 `to_windows` that refuses `"<>|?*%^&!();,=\:`, invisible characters, a
-trailing dot or space and reserved names (`NUL`, `con.txt`). Programs run as
+trailing dot or space, reserved names (`NUL`, `con.txt`) and **anything outside
+ASCII** (review round 2: Windows' "best fit" for an ANSI program maps U+FF02 to
+`"`, U+FF3C to `\` and U+2215 to `/`). Programs run as
 **program terminals** — `terminals.create_program`, called from `vex.py`
 alone (grep-tested; `terminal_check`'s allowed set now includes `vex.py`):
 same ring and routes as a shell, `WSLENV` emptied, typed input refused but
@@ -1201,13 +1205,20 @@ only by its holder, at most once** — a token, never a wildcard), 5-minute
 build timeout (SIGTERM then SIGKILL, output kept), and **a build refuses a
 project whose make files name `vexcom` and fails closed** where it cannot
 read them all: more than 32, one past 256 KB, a symlink or FIFO among them, a
-symlinked `vex/`, an `include` named by a variable or outside the project.
+symlinked `vex/`, a glob too complex to check, an `include` named by a
+variable, holding a backslash, outside the project, or **not in the project at
+all** (make would search other folders for it; `-include` too) — and it reads
+includes as make does, a backslash-newline joining the next line on (CRLF
+too), so `include a.mk \` + `src/notes.txt` includes the second file.
 **Download is meant to be only the owner's click** (V-2/V-3): no tool, MCP
 tool, CLI or Discord verb, no "run after download", and **any agent command
-naming `vexcom` is DENY in `rules.decide`** (see *Command rules*). **That is
+naming `vexcom`, or running something that could be it, is DENY in
+`rules.decide`** (see *Command rules*). **That is
 not a boundary, and neither is the button — the residual gap, stated**: an
 agent runs as the owner, so it can still reach a plugged-in brain through a
-script it writes and runs, `make -f` on a makefile of its own, or a POST to
+script it writes and runs, a shell fed its commands through a pipe, cmd.exe's
+or PowerShell's own wildcard forms, a launcher `rules.py` does not model,
+`make -f` on a makefile of its own, a DLL beside the tool, or a POST to
 the download route with a forged Origin. What makes such a download visible
 is **one id-only bus record per device action, `vex_device {action, at}`**
 (as `terminal_attached`); closing the gap needs the device to belong to a
@@ -1216,14 +1227,13 @@ jarvis.v2.vex build [--rebuild|--clean]`, nothing else — **isolated**, because
 a plain `-m` puts the agent-writable project folder first on `sys.path`, so a
 planted `jarvis/v2/vex.py` would have run), which asks like any command unless
 allowlisted; running it or its module through a wrapper or a runner (`python
--Im`, `uv run`, `npx`) asks too, naming it as an argument (`cp …/vexbuild`)
-does not. **Every route is owner-only with one deliberate difference**:
-Chromium sends **no Origin on a same-origin GET** (measured), so a VEX `GET`
-without one is accepted only with the browser's `Sec-Fetch-Site:
-same-origin`; every other method needs the HUD's Origin (a TODO names
-`projects.is_owner` for when PR #41's shared rule lands). (`projects.owner_only`
-requires an Origin, so **WP-C's `GET /terminals` is 403 from the real HUD** —
-found here; PR #41, in review, carries the shared rule.) New projects reuse the `project_folder` card:
+-Im`, `uv run --no-project`, `npx --yes`, `python -m runpy`, `uv run
+--module`; review round 2 parses each runner's options) asks too, naming it as
+an argument (`cp …/vexbuild`) does not; `vexbuild build` and plain `vexbuild`
+both build. **Every route is owner-only by the shared rule**,
+`projects.is_owner` (PR #41: the HUD's Origin, or on a plain GET, which
+Chromium sends with no Origin, `Sec-Fetch-Site: same-origin`), plus a strict
+loopback Host. New projects reuse the `project_folder` card:
 **`projects.confirm_folder` is now the one confirmation handler** (moved out
 of `discord/project_commands.py`; still the single caller of
 `make_project_folder`), templates are opened as regular files only, checked
@@ -1235,8 +1245,11 @@ by the routes: device info (flag from the owner's `vexcom --help`) and Python
 download (spike). Agents' task worktrees are on the Linux filesystem, so
 `vexbuild` builds only in a chat's own project folder. Tests point every
 `config.VEX_*` path, `VEX_MOUNT_ROOT` and `VEXBUILD_PATH` at a temp tree, with a
-non-empty `WSLENV`. `tests/v2/vex_check.py` (84 checks); 69 guards each shown
-to fail their check when removed in a scratch copy.
+non-empty `WSLENV`. `tests/v2/vex_check.py` (98 checks); 69 guards of round 1
+and the round-2 guards each shown to fail their check when removed in a
+scratch copy (the PR lists them). Open question, not done: whether `vex.py`
+and `vex_setup.py` join SELF_PROTECTED (the owner declined widening it for
+`runtime.py`).
 
 **Input bar declutter (2026-10-10, PR #29; ported onto WP-B and reviewed the
 same day).** The bar is `📎 [box] ⬆` over one row, `in: project · provider ▾ ·
@@ -2184,7 +2197,26 @@ jarvis/
   character, `-enc VALUE` or `-enc:VALUE`), `${A:-vex}` default values read as
   their words, and a glob only when it keeps at least four of the letters
   (`vexc*`, `ve?com` — never `*vex*`, `v*`, `*.exe`: those DENYed ordinary VEX
-  work until review round 1). It runs in `decide`, so v1's
+  work until review round 1). **That threshold is for arguments only** (review
+  round 2, which found `uv run /mnt/c/…/tools/v*/*/*/v*.exe --user` ALLOW and
+  run unasked): `rules._vex_line` finds every word the line will *run* —
+  command position, past each wrapper, the program a runner starts (`uv run`,
+  `poetry run`, `pipx run`, `npx`, `npm exec`, `bun x`…, each one's options
+  parsed from a table, and an option the table does not know followed both
+  ways), `sh -c` strings, `eval`, `watch`, `find -exec`, `xargs`, `$(…)`,
+  backticks, `<(…)`, a here-string to a shell — read with bash's quoting
+  (`'*'` is a file called `*`; a brace expansion runs its first word), and a
+  glob or an expansion there that could be `vexcom`/`vexcom.exe` by its file
+  name is DENY with no threshold (`…/*/*/win32/*.exe`, `${X}com.exe`,
+  `$(printf vex)com`). A program that **cannot be told** and could be vexcom —
+  only an expansion (`$X`, `"$@"`, `${A}.${B}`), read from input (`xargs env`,
+  `find -exec {}`), or a candidate an unknown option may have moved — is
+  asked whatever stands: ASK, never covered by an allowlist entry
+  (`permissions.allows` asks `rules.vex_uncoverable`), and always-ask at v2's
+  layer 2 under every profile. A glob past the caps (256 characters, 64 of
+  `*?[`, 512 glob words a line) is **too complex to judge** the same way, and
+  the whole reading is linear (`ls [[[[…` took 3.4 s at 20,000 before). Not
+  general runner unwrapping: `uv run rm -rf ~` is judged as before. It runs in `decide`, so v1's
   `command_verdict` (before any approver, so neither an allowlist entry nor
   mode "all" reaches it) and v2's layer 1 (no card) refuse alike. **The
   accepted cost**: a grep or a commit message that only mentions the word is
@@ -2195,7 +2227,11 @@ jarvis/
   otherwise ride an ALLOW stem past the ask. Evidence (review round 1): a
   differential sweep of 25,379 command strings against origin/main moved 62
   verdicts — 39 lines naming vexcom, 15 non-literal spellings pinned in
-  `vex_check`, 8 that run vexbuild or its module — and nothing else.
+  `vex_check`, 8 that run vexbuild or its module — and nothing else. Round 2's
+  sweep (122,447 strings, `decide` and `static_verdict`) moved only vex shapes,
+  globs in command position (bare `*.exe`, `/mcp/*`, markdown bullets read as
+  commands) and runners handed an expansion as their program (`uv run $CC`);
+  the PR has the table.
 
   **`2>&1` is not a redirect to a file** (narrowed 2026-08-17, one round after
   the fixes above). The redirect check had become a raw scan for any unquoted

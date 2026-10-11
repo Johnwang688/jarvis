@@ -1586,25 +1586,16 @@ class Vex:
 
 # -- routes (owner-only, the HUD listener) ------------------------------------------------------
 
-# TODO(VX-1 / PR #41): switch to `projects.is_owner` once #41 (the shared
-# owner rule, which also accepts a same-origin GET's Sec-Fetch-Site) lands —
-# whichever of the two merges second makes the switch.
 def _owner(handler, daemon) -> None:
-    """Owner-only, as `projects.owner_only` is — the HUD's listener, a strict
-    Host, the HUD's Origin — with one difference the browser forces: a
-    **same-origin `GET` carries no Origin** (Chromium, measured 2026-10-10), so
-    a GET is accepted with no Origin only when the browser's own
-    `Sec-Fetch-Site: same-origin` says the HUD sent it. Every other method
-    must carry the HUD's Origin."""
-    port = handler.server.server_address[1]
-    host = handler.headers.get("Host", "")
-    if port != daemon.face_port or host not in (f"127.0.0.1:{port}", f"localhost:{port}"):
-        raise _api(403, "only the owner can do this, from the HUD")
-    origin = handler.headers.get("Origin")
-    if origin is not None:
-        if origin != f"http://{host}":
-            raise _api(403, "only the owner can do this, from the HUD")
-    elif handler.command != "GET" or handler.headers.get("Sec-Fetch-Site") != "same-origin":
+    """Owner-only by the shared rule, `projects.is_owner` (PR #41): the HUD's
+    listener and the HUD's own page — its Origin, or, on a plain GET, which
+    Chromium sends with no Origin, the browser's `Sec-Fetch-Site:
+    same-origin` — and, as `/terminals` has, a strict loopback Host whatever
+    else the request says."""
+    from .projects import is_owner
+    port = daemon.face_port
+    if handler.headers.get("Host", "") not in (f"127.0.0.1:{port}", f"localhost:{port}") \
+            or not is_owner(handler, daemon):
         raise _api(403, "only the owner can do this, from the HUD")
 
 
