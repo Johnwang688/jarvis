@@ -269,7 +269,8 @@ NOT_PRINTERS = [
     "env FOO=1 ls", "env -i bash", "ls -la", "cat README.md", "cat .env.example", "export FOO=bar",
     "set -e", "echo hello", "grep -r token src", "git status", "gh pr list", "aws s3 ls",
     "ENV FOO=bar", "echo $HOME", "sudo -k", "sudo apt update", "vim notes.txt", "",
-    "declare -x FOO=bar", "git log --oneline", "make test 2>&1",
+    "declare -x FOO=bar", "git log --oneline", "make test 2>&1", "find . -name env",
+    "ls | xargs grep env", "docker build -t env .",
 ]
 
 

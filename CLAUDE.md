@@ -376,13 +376,15 @@ in real bash and dash, and scans the disk); a same-uid program outside the
 terminal could only race the shell for the pipe. POSIX marks end in BEL (dash's
 PS1 expansion eats the backslash of `ESC \`). They become `CommandSpan`s
 (`Terminal.history()`: spans, `spans_from` — bytes before it lost their spans
-to the 2000 cap — `integrated`, `readable`, `prompt`) for WP-F's
-`terminal_read`, which does not exist yet. **Spans are advisory**: a
+to the 2000 cap — `integrated`, `readable`, `prompt`, and since WP-F `alt`)
+for WP-F's `terminal_read` (below). **Spans are advisory**: a
 program can print bytes between real marks, nested shells/`sudo -i`/`ssh`/
 `python` sit under the outer span, an `ignorespace` line records its first
-command only — so WP-F's text-pattern refusals apply to every read. When
-`terminal_read` lands, `terminal_check`'s no-tool test must allow exactly
-it. Each terminal has the owner's `readable` switch, **on by default**.
+command only — so WP-F's text-pattern refusals apply to every read.
+`terminal_check`'s no-tool test allows exactly `terminal_read`, whose module
+may hold one line naming this one — `from ..terminals import read_for_tool`
+— and call it once. Each terminal has the owner's `readable` switch, **on by
+default**.
 Follow-ups from the re-review (with WP-D): `integration` is what was
 *configured*, **`marked`** (listing, attach row, one `{"type": "marked"}`) is
 what *took* — a profile that `exec`s another shell reads "bash" but never
@@ -714,6 +716,70 @@ The test-only write hook `__hudTerminals.paste` is gone; the hooks left are
 read-only (`backlog` among them).
 While typing is paused the notice cannot be dismissed: it holds the only
 way to resume.
+
+**Jarvis reads a terminal, WP-F (2026-10-10; decisions W-2 is the spec;
+design §18; contract in `docs/hud-api.md`).** `terminal_read(terminal="",
+lines=200)` — `jarvis/v2/tools/terminal_read.py`, which imports exactly
+`terminals.read_for_tool` — returns the last lines (≤ 1000) of one terminal's
+**normal buffer** as plain text, named by what the HUD shows (id, title, its
+folder part, or the panel number; never a path), fenced as untrusted web
+content and through `dispatch()`'s scrub. `jarvis/v2/terminal_text.py`
+(pure) strips CSI/OSC/DCS/APC/PM/SOS and single escapes and their C1 forms,
+split anywhere; collapses CR, backspace, cursor motion, erases and `clear`
+to what the terminal shows; and **never reads the alternate screen** — the
+ring feeds every byte it drops to an `AltTracker`, so `history().alt` knows a
+read starts inside vim even when the switch left the ring. It also keeps
+`ink`, every state a line was in, so a command line cleared off the screen
+still counts. `jarvis/v2/terminal_guard.py` (pure) **refuses the whole read**
+with exactly "possible credential in this output" — never what, where or
+which rule — for (1) a `secret_values()` value (plus the terminal folder's
+`.env` files: `secret_values(extra_dirs=)`), its base64 at any alignment or
+its URL-encoding; (2) a format in `jarvis/credential_patterns.py` (one list);
+(3) a secret-printing command (`SECRET_PRINTERS`/`READERS`/`SUBCOMMANDS`, one
+place; robust to whitespace, `sudo -k`, assignments, paths, wrappers,
+pipelines, subshells, `sh -c`, `ssh host cmd`): a real span overlapping the
+read (or one that backgrounds a printer), **and always the text** — any
+`ink` line in the read or the `LOOKBACK` (32 KiB) before it that shows such
+a command after a prompt, raised only to a boundary the signed marks prove
+and never by a span record below `spans_from`. Rules run on the text after
+`strip_invisible`, so a zero-width character cannot split a key past them.
+The heuristic **withholds lines** (a keyword, then within 40 characters past
+`=`/`:`/space a ≥20-character token of entropy ≥ 3 that is not a path, dotted
+name or joined words; a bare hash or UUID stays) and says `[N line(s)
+withheld: possible secret]`. The switch off refuses by name. **Every read
+that reaches a terminal publishes `terminal_read` with exactly
+`{terminal_id, lines, at, refused}`**, and the terminal's bar says "Jarvis
+read 200 lines · 15:42" / "refused a read · 15:42" (`TermManager.reads`,
+`parseRead`; HUD chrome only). **Who holds it** (the holder decision): the
+fast path only, and only for an owner's chat turn **the HUD's own window
+sent** — `UserMessage.desk`, set by the send route only on the HUD listener
+with its Origin (`projects.is_owner`); `FastPathProvider` binds
+`runtime._DESK` per turn (`runtime.at_desk()`, fail closed), drops
+`DESK_TOOLS` from the request on any other turn, refuses them in a task's
+brief, and a steer from anywhere but the desk takes the running turn off it.
+**A Discord or DM turn is not at the desk** (W-2 says "where the owner is
+present"), nor is the escape hatch, a schedule, a sub-agent (`depth() != 0`),
+a workflow, a goal, an attended task or any v1 surface —
+`tools.EXPLICIT_ONLY` keeps it out of `default_names()`. **jarvis-mcp does not
+offer it**: it is a separate process with no channel to the daemon's
+terminals and no way to tell a chat from a task worker (the peers plan's
+per-session tokens have not landed), so it fails closed. The guard modules
+and the tool are SELF_PROTECTED. **The limit**: a secret with no shape and no
+keyword beside it, or one printed in pieces or otherwise encoded, is not
+caught; the switch and the note are the backstops. Free suites:
+`tests/v2/terminal_text_check.py` (pure), `tests/v2/terminal_read_check.py`
+(real PTY, the fake shell's new `hex` command, holders, fast-path turns), the
+updated `terminal_check` (no-tool, the reader only reads, the bus record),
+`terminal.test.ts` and `_read_note_checks` in `hud_v2_terminal_check.py`.
+**Verified to bite**, each in a scratch copy of the branch (18 of 18): drop
+the text fallback, trust spans only (skip the text when integrated), forget
+`spans_from`, read the alternate screen (the renderer ignoring the switch;
+the ring's-start state dropped; the tracker not fed evicted bytes), return
+the refusal reason, offer the tool to a task's brief, count a task's turn as
+the desk, skip the `readable` check, the tool skipping its desk check, any
+HUD-route message counting as the desk, a Discord steer leaving the desk on,
+`EXPLICIT_ONLY` not honoured, rules before `strip_invisible`, no base64
+forms, no folder `.env` values, and `ink` forgetting cleared lines.
 
 **Sidebar status dots (2026-10-08, design §18; contract in
 `docs/hud-api.md`).** The `·` left of each sidebar thread and task is what it

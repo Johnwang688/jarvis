@@ -187,13 +187,15 @@ _KEYWORD_VAR = re.compile(
 SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh", "mksh", "ash", "fish", "yash", "posh",
                     "busybox", "rbash"})
 # Programs that run a command they are handed after their own arguments: any
-# tail of their arguments may be that command.
+# tail of their arguments may be that command. (Not `find`, `xargs`, `fd`,
+# `parallel`: they append file names to the command, so `find . -name env`
+# would read as a bare `env` — and what they run on is not visible anyway.)
 RUNNERS = frozenset({
     "ssh", "mosh", "docker", "podman", "nerdctl", "kubectl", "oc", "lxc", "incus", "vagrant", "su",
     "runuser", "script", "flock", "systemd-run", "nsenter", "chroot", "unshare", "firejail",
-    "bwrap", "distrobox", "toolbox", "wsl", "wsl.exe", "sg", "parallel", "watch", "entr",
-    "strace", "ltrace", "xargs", "find", "fd", "npx", "uv", "uvx", "poetry", "pipenv", "nix",
-    "nix-shell", "devbox", "direnv", "dotenv", "op", "doppler", "aws-vault", "chamber",
+    "bwrap", "distrobox", "toolbox", "wsl", "wsl.exe", "sg", "watch", "strace", "ltrace", "npx",
+    "uv", "uvx", "poetry", "pipenv", "nix", "nix-shell", "devbox", "direnv", "dotenv", "op",
+    "doppler", "aws-vault", "chamber",
 })
 
 # Wrappers that run the rest of the line: their options that take a value.
