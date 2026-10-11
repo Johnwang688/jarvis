@@ -941,16 +941,58 @@ class PermitProvider:
         pass
 
 
-def http_json(port, method, path, body=None):
+def http_json(port, method, path, body=None, headers=None):
     conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
     try:
         payload = None if body is None else json.dumps(body).encode()
-        headers = {"Content-Type": "application/json"} if payload else {}
+        headers = {**({"Content-Type": "application/json"} if payload else {}), **(headers or {})}
         conn.request(method, path, payload, headers)
         response = conn.getresponse()
         return response.status, json.loads(response.read() or b"null")
     finally:
         conn.close()
+
+
+def hud_json(daemon, method, path, body=None):
+    """A request as the HUD window sends it: its own listener, its Origin."""
+    return http_json(daemon.face_port, method, path, body,
+                     {"Origin": f"http://127.0.0.1:{daemon.face_port}"})
+
+
+def approve_route_owner_only_checks(daemon, req_id):
+    """BR-0: only the HUD window can answer a card over HTTP.
+
+    The API listener serves the same HUD page, so a page loaded there sends an
+    Origin equal to its Host and passed `check_origin`. v1's agent browser
+    could load that page (it refused only the face's port) and click the
+    card's button. Fails on a49423c: the first request below answered 200.
+    """
+    def still_pending():
+        status, pending = http_json(daemon.port, "GET", "/approvals")
+        return status == 200 and [r["req_id"] for r in pending] == [req_id]
+
+    body = {"decision": "allow"}
+    api_origin = {"Origin": f"http://127.0.0.1:{daemon.port}"}
+    status, _ = http_json(daemon.port, "POST", "/approvals/" + req_id, body, api_origin)
+    eq(status, 403, "the API listener refuses an approval sent with its own Origin "
+                    "(a page it served)")
+    ok(still_pending(), "and the request is still waiting for the owner")
+    status, _ = http_json(daemon.port, "POST", "/approvals/" + req_id, body,
+                          {"Origin": f"http://localhost:{daemon.port}"})
+    eq(status, 403, "…in its localhost spelling too")
+    status, _ = http_json(daemon.port, "POST", "/approvals/" + req_id, body)
+    eq(status, 403, "the API listener refuses an approval with no Origin")
+    status, _ = http_json(daemon.port, "POST", "/approvals/" + req_id, body,
+                          {"Origin": f"http://127.0.0.1:{daemon.face_port}"})
+    eq(status, 403, "the API listener refuses the HUD's Origin as well (it is not the HUD's Host)")
+    status, _ = http_json(daemon.face_port, "POST", "/approvals/" + req_id, body)
+    eq(status, 403, "the HUD's listener refuses an approval with no Origin")
+    status, _ = http_json(daemon.face_port, "POST", "/approvals/" + req_id, body,
+                          {"Origin": f"http://127.0.0.1:{daemon.workshop_port}"})
+    eq(status, 403, "the HUD's listener refuses another origin (the workshop's)")
+    ok(still_pending(), "none of those refusals resolved or dropped the request")
+    status, pending = http_json(daemon.port, "GET", "/approvals")
+    eq(status, 200, "reading pending approvals stays open on the API listener")
 
 
 def daemon_checks():
@@ -1002,9 +1044,11 @@ def daemon_checks():
             eq(len(queued), 1, "the always-ask command is queued for the owner")
             eq(queued[0]["command"], "git push origin main",
                "the queue shows the entire command")
-            status, body = http_json(daemon.port, "POST", "/approvals/" + queued[0]["req_id"],
-                                     {"decision": "allow"})
-            eq(status, 200, "POST /approvals answers it")
+            approve_route_owner_only_checks(daemon, queued[0]["req_id"])
+            ok(len(provider.calls) == 1, "no refused approval reached the blocked hook")
+            status, body = hud_json(daemon, "POST", "/approvals/" + queued[0]["req_id"],
+                                    {"decision": "allow"})
+            eq(status, 200, "POST /approvals from the HUD window answers it")
             deadline = time.monotonic() + 5
             while len(provider.calls) < 2 and time.monotonic() < deadline:
                 time.sleep(0.005)
@@ -1018,10 +1062,10 @@ def daemon_checks():
             ok("approval_requested" in seen and "approval_resolved" in seen,
                "both approval events are published on the bus")
 
-            status, _ = http_json(daemon.port, "POST", "/approvals/" + queued[0]["req_id"],
-                                  {"decision": "allow"})
+            status, _ = hud_json(daemon, "POST", "/approvals/" + queued[0]["req_id"],
+                                 {"decision": "allow"})
             eq(status, 404, "an answered request cannot be answered again")
-            status, _ = http_json(daemon.port, "POST", "/approvals/nope", {"decision": "sideways"})
+            status, _ = hud_json(daemon, "POST", "/approvals/nope", {"decision": "sideways"})
             ok(status in (400, 404), "a nonsense decision is refused")
         finally:
             daemon.stop()
@@ -1103,8 +1147,8 @@ def auto_quiet_checks():
                     break
                 time.sleep(0.01)
             eq(len(queued), 1, "the always-ask push is queued for the owner")
-            status, _ = http_json(daemon.port, "POST", "/approvals/" + queued[0]["req_id"],
-                                  {"decision": "deny"})
+            status, _ = hud_json(daemon, "POST", "/approvals/" + queued[0]["req_id"],
+                                 {"decision": "deny"})
             eq(status, 200, "and answered")
             deadline = time.monotonic() + 5
             while len(provider.calls) < len(allowed) + 1 and time.monotonic() < deadline:
