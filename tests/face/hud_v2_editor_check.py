@@ -168,7 +168,7 @@ def editor_checks(browser, mock, base, check, until, guard, init_script):
         _boot(page, mock, base, until)
         for section in (_tab_checks, _shared_checks, _reload_in_place_checks, _conflict_checks,
                         _gone_checks, _persist_checks, _env_checks, _kinds_checks, _add_to_chat_checks,
-                        _card_checks):
+                        _unmount_checks, _card_checks):
             _fresh(page, mock, until, keep_files=keep)
             try:
                 section(page, mock, check, until)
@@ -480,8 +480,9 @@ def _env_checks(page, mock, check, until):
     check("never into localStorage or sessionStorage",
           ENV_SECRET not in stored and "owner-typed-value" not in stored)
     check("and __hud.buffers() carries no text", ENV_SECRET not in json.dumps(_buffers(page)))
-    # A word from the env file is never suggested while typing in calc.py.
-    _open(page, until, 3, "calc.py")
+    # A word from the env file is never suggested while typing in another
+    # file — a plain-text one, the language an env file would get by its name.
+    _open(page, until, 3, "notes.txt")
     page.locator(_lines(3)).click()
     page.keyboard.press("Control+End")
     page.keyboard.type("\nmoc")
@@ -539,6 +540,35 @@ def _add_to_chat_checks(page, mock, check, until):
           value.startswith("calc.py:L1\n```\ndef add(a, b):\n```"), repr(value))
     check("and sends nothing", sum(1 for m, p, _ in mock.calls if m == "POST" and p.endswith("/send")) == sends)
     box.fill("")
+
+
+def _unmount_checks(page, mock, check, until):
+    """The registry lives outside React: a File pane that unmounts — here the
+    workspace's error boundary taking it down — never takes an edit with it."""
+    check("setup: calc.py open in pane 2", _open(page, until, 2, "calc.py"))
+    check("setup: an edit", _type(page, until, 2, "\n#survives_the_unmount"))
+    page.evaluate("window.__hudCrashProbe = 'workspace'")
+    page.evaluate("window.__hud.dispatch({type: 'patch', patch: {error: 'crash probe render'}})")
+    until(lambda: page.locator('[data-testid="hud-crashed"]').count() > 0, timeout=4)
+    page.evaluate("delete window.__hudCrashProbe")
+    gone = page.locator('[data-testid="editor"]').count() == 0
+    buf = _buf(page, "calc.py") or {}
+    check("with the pane unmounted, the edit is still in its buffer, held by no tab",
+          gone and page.locator('[data-testid="hud-crashed"]').count() == 1
+          and buf.get("dirty") is True and buf.get("refs") == [], str(buf))
+    dialogs: list[str] = []
+
+    def dismiss(d):
+        dialogs.append(d.type)
+        d.dismiss()
+    page.on("dialog", dismiss)
+    try:
+        page.evaluate("location.reload()")
+    except Exception:
+        pass
+    time.sleep(0.6)
+    page.remove_listener("dialog", dismiss)
+    check("and closing the window still asks first", dialogs == ["beforeunload"], str(dialogs))
 
 
 def _card_checks(page, mock, check, until):
