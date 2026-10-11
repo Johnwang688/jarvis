@@ -12,6 +12,12 @@ refused and counted as a failure (`hud_v2_check.guard_live`, which this
 suite also proves bites on sockets).
 
 The checks worth keeping, each written to bite:
+  - opening the panel (⬓, the layout menu's Panel row, Ctrl+`) or switching
+    a pane to the terminal view opens one terminal when there is none (the
+    owner's request, 2026-10-11) — never on a reload with the panel stored
+    open, never under a card (nor once a card that arrived mid-listing is
+    answered), never on a failed listing or with one listed, one for a
+    double- or triple-click, and a refusal said as `+` says it;
   - typing round-trips; Space never fires push-to-talk; Ctrl+B and Ctrl+_
     reach the shell while the zoom keys stay the HUD's;
   - **under a card nothing reaches the shell** — not with the card holding
@@ -404,6 +410,11 @@ def _created(mock) -> list:
     return mock.__dict__.get("terminal_created", [])
 
 
+def _posts(mock) -> int:
+    """`POST /terminals` asked for so far: the mock records one when it arrives."""
+    return len([1 for (m, p, _) in mock.calls if m == "POST" and p == "/terminals"])
+
+
 def _reset(page, mock, base, until, fake, size=(1280, 800)):
     """A clean window: no terminals in the world, default layout, panel shut."""
     mock.world["terminals"] = []
@@ -426,14 +437,31 @@ def _open_terminal(page, mock, until, fake) -> str:
     return tid
 
 
-def _new_terminal(page, mock, until, fake) -> str:
-    """The panel open (⬓ opens nothing by itself), then `+`: a new terminal, attached."""
-    if not _visible(page, '[data-testid="panel"]'):
-        page.locator('[data-testid="toggle-panel"]').click()
-        until(lambda: _visible(page, '[data-testid="panel-new"]'), timeout=3)
+def _show_panel(page, mock, until) -> str | None:
+    """⬓ on a hidden panel. With no terminal listed it opens one by itself
+    (the owner's call, 2026-10-11): that one's id, once it is made."""
     n = len(_created(mock))
-    page.locator('[data-testid="panel-new"]').click()
+    empty = not mock.world.get("terminals")
+    page.locator('[data-testid="toggle-panel"]').click()
+    until(lambda: _visible(page, '[data-testid="panel-new"]'), timeout=3)
+    if not empty:
+        return None
     until(lambda: len(_created(mock)) > n, timeout=4)
+    if len(_created(mock)) == n:
+        raise AssertionError("⬓ opened no terminal, with none open")
+    until(lambda: not _visible(page, '[data-testid="panel-opening"]'), timeout=4)
+    return _created(mock)[-1][0]
+
+
+def _new_terminal(page, mock, until, fake) -> str:
+    """A new terminal in the panel, attached: the one ⬓ opens when none is
+    listed, else `+` in the open panel."""
+    n = len(_created(mock))
+    if not _visible(page, '[data-testid="panel"]'):
+        _show_panel(page, mock, until)
+    if len(_created(mock)) == n:
+        page.locator('[data-testid="panel-new"]').click()
+        until(lambda: len(_created(mock)) > n, timeout=4)
     if len(_created(mock)) == n:
         raise AssertionError("+ opened no terminal")
     tid = _created(mock)[-1][0]
@@ -482,7 +510,9 @@ def terminal_checks(browser, mock, base, check, until, guard, init_script):
     only = set(filter(None, (sys.argv[1] if len(sys.argv) > 1 and __name__ == "__main__" else "").split(",")))
     try:
         _boot(page, mock, base, until)
-        for section in (_open_checks, _typing_checks, _card_checks, _paste_checks, _reload_checks,
+        for section in (_open_checks, _autoopen_reload_checks, _autoopen_pane_checks, _autoopen_menu_checks,
+                        _autoopen_click_checks, _autoopen_card_checks, _autoopen_refusal_checks,
+                        _typing_checks, _card_checks, _paste_checks, _reload_checks,
                         _takeover_checks, _elsewhere_checks, _exit_checks, _busy_checks, _readable_checks,
                         _read_note_checks, _integration_checks, _osc_link_checks, _preview_link_checks,
                         _menu_edge_checks, _pane_checks, _zoom_checks, _ended_checks,
@@ -511,10 +541,28 @@ def _open_checks(page, mock, base, check, until, fake):
     _reset(page, mock, base, until, fake)
     check("a fresh window opens no terminal and attaches nothing",
           not fake.sockets and not _created(mock) and not _visible(page, '[data-testid="panel"]'))
+    # ⬓ opens a terminal when there is none (the owner's call, 2026-10-11 —
+    # WP-D had it on Ctrl+` only), and none when one is open.
     page.locator('[data-testid="toggle-panel"]').click()
-    until(lambda: _visible(page, '[data-testid="panel-empty"]'), timeout=3)
-    check("⬓ shows the panel and says there is no terminal, creating none",
-          _visible(page, '[data-testid="panel-empty"]') and not _created(mock))
+    until(lambda: _created(mock), timeout=4)
+    first = _created(mock)[0][0] if _created(mock) else "none"
+    if _created(mock):
+        _attached(page, until, first)
+    page.wait_for_timeout(300)
+    check("⬓ with no terminal open shows the panel with exactly one new terminal, attached in it",
+          len(_created(mock)) == 1 and _visible(page, f'[data-testid="panel-tab-{first}"]')
+          and _state(page, first) == "attached" and page.locator(_sel(first)).get_attribute("data-where") == "panel",
+          f"{len(_created(mock))} created")
+    check("in the folder `+` would use: the focused chat's project, as an id",
+          bool(_created(mock)) and _created(mock)[0][1] == {"project": "p1"}, str(_created(mock)[:1]))
+    page.locator('[data-testid="toggle-panel"]').click()
+    until(lambda: not _visible(page, '[data-testid="panel"]'), timeout=2)
+    page.locator('[data-testid="toggle-panel"]').click()
+    until(lambda: _visible(page, _sel(first)), timeout=3)
+    page.wait_for_timeout(400)
+    check("⬓ with one open shows it and opens no other", len(_created(mock)) == 1, f"{len(_created(mock))} created")
+    page.locator(f'[data-testid="panel-close-{first}"]').click()
+    until(lambda: not mock.world["terminals"] and _visible(page, '[data-testid="panel-empty"]'), timeout=3)
     page.locator('[data-testid="toggle-panel"]').click()
     until(lambda: not _visible(page, '[data-testid="panel"]'), timeout=2)
     tid = _open_terminal(page, mock, until, fake)
@@ -542,10 +590,317 @@ def _open_checks(page, mock, base, check, until, fake):
     until(lambda: _visible(page, _sel(tid)), timeout=2)
     page.wait_for_timeout(200)
     check("hiding and showing the panel keeps the terminal and its socket (no second terminal, no reattach)",
-          len(_created(mock)) == 1 and len(fake.of(tid)) == 1 and _state(page, tid) == "attached",
+          len(_created(mock)) == 2 and len(fake.of(tid)) == 1 and _state(page, tid) == "attached",
           f"{len(_created(mock))} {len(fake.of(tid))}")
     check("its tab is selected and names it", page.locator(f'[data-testid="panel-tab-{tid}"]')
           .get_attribute("aria-selected") == "true")
+
+
+# Opening the panel, or switching a pane to the terminal view, opens a
+# terminal when there is none (the owner's request, 2026-10-11) — only on
+# the owner's gesture, never under a card, never on a failed listing, never
+# when one is listed, one per gesture, and a refusal said. Six sections, so
+# one that cannot finish (main, with none of this) never hides the next.
+
+
+def _autoopen_reload_checks(page, mock, base, check, until, fake):
+    def made():
+        return len(_created(mock))
+
+    # A stored layout that opens the panel, and a pane stored in the terminal
+    # view with no terminal: a reload opens nothing.
+    _reset(page, mock, base, until, fake, size=(1600, 900))
+    stored = json.dumps({"preset": "cols2", "focused": 1,
+                         "panes": [{"view": "chat"}, {"view": "terminal", "terminalId": None},
+                                   {"view": "file"}, {"view": "task"}],
+                         "panel": {"open": True, "height": 260}})
+    n, socks = made(), len(fake.sockets)
+    _store(page, ws=stored)
+    _boot(page, mock, base, until, reload=True)
+    until(lambda: _visible(page, '[data-testid="panel-empty"]')
+          and _visible(page, '[data-testid="pane-2-terminal-pick"]'), timeout=4)
+    page.wait_for_timeout(800)
+    _boot(page, mock, base, until, reload=True)
+    until(lambda: _visible(page, '[data-testid="panel-empty"]'), timeout=4)
+    page.wait_for_timeout(800)
+    check("a reload with the panel stored open, and a pane stored in the terminal view, opens no terminal",
+          made() == n and _visible(page, '[data-testid="panel-empty"]')
+          and _visible(page, '[data-testid="pane-2-terminal-pick"]') and len(fake.sockets) == socks,
+          f"{made() - n} created, {len(fake.sockets) - socks} sockets")
+
+
+def _autoopen_pane_checks(page, mock, base, check, until, fake):
+    def made():
+        return len(_created(mock))
+
+    # The pane: switched to the terminal view by the owner, it opens one there.
+    _reset(page, mock, base, until, fake, size=(1600, 900))
+    _layout(page, until, "cols2")
+    n = made()
+    page.locator('[data-testid="pane-2"] [data-testid="tab-terminal"]').click()
+    until(lambda: made() > n, timeout=4)
+    tid = _created(mock)[-1][0] if made() > n else "none"
+    if made() > n:
+        _attached(page, until, tid)
+    page.wait_for_timeout(300)
+    check("a pane switched to the terminal view with none open opens one, drawn in that pane",
+          made() == n + 1 and page.locator(_sel(tid)).count() == 1
+          and page.locator(_sel(tid)).get_attribute("data-where") == "pane-2" and _state(page, tid) == "attached",
+          f"{made() - n} created")
+    check("in the folder its `+` would use (the selected chat's: p1), as an id",
+          made() > n and _created(mock)[-1][1] == {"project": "p1"}, str(_created(mock)[-1:]))
+    n = made()
+    page.locator('[data-testid="pane-1"] [data-testid="tab-terminal"]').click()
+    until(lambda: _visible(page, '[data-testid="pane-1-terminal-pick"]'), timeout=3)
+    page.wait_for_timeout(500)
+    first = page.evaluate("""() => { const b = document.querySelector('[data-testid="pane-1-terminal-pick"] button');
+                                      return b && b.getAttribute('data-testid'); }""")
+    check("with one open, a pane switched to the terminal view opens none: it offers it, 'New terminal' first",
+          made() == n and _visible(page, f'[data-testid="pane-1-pick-{tid}"]') and first == "pane-1-terminal-new",
+          f"{made() - n} created, first button {first}")
+    page.locator('[data-testid="pane-1"] [data-testid="tab-chat"]').click()
+    page.locator(_sel(tid, '[data-testid="term-close"]')).click()
+    until(lambda: not mock.world["terminals"] and _visible(page, '[data-testid="pane-2-terminal-pick"]'), timeout=3)
+    page.locator('[data-testid="pane-2"] [data-testid="tab-chat"]').click()
+    # Switched away again before the listing came back: nothing is opened for it.
+    mock.terminal_list_delay = 1.0
+    n = made()
+    page.locator('[data-testid="pane-2"] [data-testid="tab-terminal"]').click()
+    page.wait_for_timeout(150)
+    page.locator('[data-testid="pane-2"] [data-testid="tab-chat"]').click()
+    page.wait_for_timeout(1600)
+    check("a pane switched to the terminal view and away before the listing came back opens nothing",
+          made() == n, f"{made() - n} created")
+    mock.__dict__.pop("terminal_list_delay", None)
+    # Switched away while the terminal was being made: it stays in the list,
+    # never stored on the pane (review of #41: stored, but not drawn).
+    mock.terminal_create_delay = 1.0
+    n = made()
+    before = _posts(mock)
+    page.locator('[data-testid="pane-2"] [data-testid="tab-terminal"]').click()
+    until(lambda: _posts(mock) > before, timeout=3)
+    page.wait_for_timeout(200)                     # the POST is on its way (the mock records it on arrival)
+    page.locator('[data-testid="pane-2"] [data-testid="tab-chat"]').click()
+    until(lambda: made() > n, timeout=4)
+    page.wait_for_timeout(600)
+    tid = _created(mock)[-1][0] if made() > n else "none"
+    stored = page.evaluate("""() => { try { return JSON.parse(localStorage.getItem('jarvis.hud.workspace'))
+                                                   .panes[1].terminalId; } catch (e) { return 'unreadable'; } }""")
+    page.locator('[data-testid="pane-2"] [data-testid="tab-terminal"]').click()
+    until(lambda: _visible(page, '[data-testid="pane-2-terminal-pick"]'), timeout=3)
+    page.wait_for_timeout(400)
+    check("a pane switched away while its terminal was being made: the terminal stays in the list, the pane keeps none",
+          made() == n + 1 and stored is None and _visible(page, f'[data-testid="pane-2-pick-{tid}"]')
+          and page.locator(f'[data-testid="pane-2"] {_sel(tid)}').count() == 0,
+          f"{made() - n} created, stored={stored!r}")
+    mock.__dict__.pop("terminal_create_delay", None)
+
+
+def _autoopen_menu_checks(page, mock, base, check, until, fake):
+    panel = '[data-testid="panel"]'
+
+    def made():
+        return len(_created(mock))
+
+    # The layout menu's Panel row is ⬓.
+    _reset(page, mock, base, until, fake)
+    n = made()
+    page.locator('[data-testid="layout-customize"]').click()
+    page.locator('[data-testid="layout-toggle-panel"]').click()
+    until(lambda: made() > n, timeout=4)
+    tid = _created(mock)[-1][0] if made() > n else "none"
+    if made() > n:
+        _attached(page, until, tid)
+    page.wait_for_timeout(300)
+    check("the layout menu's Panel row opens the panel with one new terminal, as ⬓ does",
+          made() == n + 1 and _visible(page, panel) and _visible(page, f'[data-testid="panel-tab-{tid}"]'),
+          f"{made() - n} created")
+    if page.locator('[data-testid="layout-menu"]').count() == 0:
+        page.locator('[data-testid="layout-customize"]').click()
+    page.locator('[data-testid="layout-toggle-panel"]').click()
+    until(lambda: not _visible(page, panel), timeout=2)
+    page.locator('[data-testid="layout-toggle-panel"]').click()
+    until(lambda: _visible(page, panel), timeout=2)
+    page.wait_for_timeout(500)
+    check("and with one open, the row shows it and opens no other", made() == n + 1, f"{made() - n} created")
+    page.locator('[data-testid="layout-customize"]').click()
+    until(lambda: page.locator('[data-testid="layout-menu"]').count() == 0, timeout=2)
+
+
+def _autoopen_click_checks(page, mock, base, check, until, fake):
+    panel = '[data-testid="panel"]'
+
+    def made():
+        return len(_created(mock))
+
+    # A double-click is one gesture, as Ctrl+` ignores auto-repeat: only its
+    # first click counts, so the panel opens with one terminal (a second
+    # click that closed it would now keep it closed and make none).
+    _reset(page, mock, base, until, fake)
+    n = made()
+    page.locator('[data-testid="toggle-panel"]').dblclick()
+    until(lambda: made() > n, timeout=4)
+    page.wait_for_timeout(800)
+    check("a double-click on ⬓ opens exactly one terminal, and the panel shows it",
+          made() == n + 1 and _visible(page, panel)
+          and _visible(page, f'[data-testid="panel-tab-{_created(mock)[-1][0]}"]'), f"{made() - n} created")
+    _reset(page, mock, base, until, fake)
+    n = made()
+    mock.terminal_list_delay = 0.8
+    page.locator('[data-testid="toggle-panel"]').click(click_count=3)
+    until(lambda: made() > n, timeout=4)
+    page.wait_for_timeout(1000)
+    check("a triple-click while the listing is on its way: one gesture, one terminal, the panel open",
+          made() == n + 1 and _visible(page, panel), f"{made() - n} created")
+    mock.__dict__.pop("terminal_list_delay", None)
+    # Three separate presses — open, close, open — while the listing is on
+    # its way: one terminal (one at a time), in the panel the last press left open.
+    _reset(page, mock, base, until, fake)
+    n = made()
+    mock.terminal_list_delay = 0.8
+    page.evaluate("document.activeElement && document.activeElement.blur()")
+    for _ in range(3):
+        page.keyboard.press("Control+Backquote")
+        page.wait_for_timeout(60)
+    until(lambda: made() > n, timeout=4)
+    page.wait_for_timeout(1000)
+    check("Ctrl+` three times (open, close, open) while the listing is on its way opens exactly one",
+          made() == n + 1 and _visible(page, panel), f"{made() - n} created")
+    mock.__dict__.pop("terminal_list_delay", None)
+
+    # Opened, then closed while the listing is on its way (review of #41): no
+    # terminal, and the panel stays the way the owner left it.
+    _reset(page, mock, base, until, fake)
+    n = made()
+    mock.terminal_list_delay = 0.8
+    page.locator('[data-testid="toggle-panel"]').click()
+    until(lambda: _visible(page, panel), timeout=2)
+    page.wait_for_timeout(150)
+    page.locator('[data-testid="toggle-panel"]').click()
+    until(lambda: not _visible(page, panel), timeout=2)
+    page.wait_for_timeout(1500)
+    check("⬓ opened, then closed while the listing is on its way: no terminal, and the panel stays closed",
+          made() == n and not _visible(page, panel), f"{made() - n} created, panel {_visible(page, panel)}")
+    mock.__dict__.pop("terminal_list_delay", None)
+    # Closed while the terminal is being made: it stays in the list, and the
+    # panel is not reopened under the owner; ⬓ then shows it, and no other.
+    _reset(page, mock, base, until, fake)
+    n = made()
+    mock.terminal_create_delay = 1.0
+    before = _posts(mock)
+    page.locator('[data-testid="toggle-panel"]').click()
+    until(lambda: _posts(mock) > before, timeout=3)
+    page.wait_for_timeout(200)
+    page.locator('[data-testid="toggle-panel"]').click()
+    until(lambda: not _visible(page, panel), timeout=2)
+    until(lambda: made() > n, timeout=4)
+    page.wait_for_timeout(800)
+    check("⬓ closed while the terminal is being made: it is made, but the panel is not reopened",
+          made() == n + 1 and not _visible(page, panel), f"{made() - n} created, panel {_visible(page, panel)}")
+    tid = _created(mock)[-1][0] if made() > n else "none"
+    page.locator('[data-testid="toggle-panel"]').click()
+    until(lambda: _visible(page, _sel(tid)), timeout=3)
+    page.wait_for_timeout(400)
+    check("and ⬓ then shows that terminal, opening no other", made() == n + 1 and _visible(page, _sel(tid)),
+          f"{made() - n} created")
+    mock.__dict__.pop("terminal_create_delay", None)
+
+
+def _autoopen_card_checks(page, mock, base, check, until, fake):
+    panel = '[data-testid="panel"]'
+
+    def made():
+        return len(_created(mock))
+
+    # Under a card: ⬓ cannot be pressed, Ctrl+` does nothing, and a card that
+    # arrives while the listing is on its way stops the terminal it was for.
+    _reset(page, mock, base, until, fake)
+    n = made()
+    _approval(mock, "aoc1")
+    until(lambda: page.locator('[data-testid="approval-card"]').count() > 0, timeout=4)
+    page.wait_for_timeout(150)
+    disabled = page.locator('[data-testid="toggle-panel"]').is_disabled()
+    page.keyboard.press("Control+Backquote")
+    page.wait_for_timeout(600)
+    check("under a card ⬓ is disabled and Ctrl+` opens neither the panel nor a terminal",
+          disabled and made() == n and not _visible(page, panel), f"disabled={disabled} {made() - n} created")
+    page.keyboard.press("Escape")
+    until(lambda: page.locator('[data-testid="approval-card"]').count() == 0, timeout=4)
+    mock.terminal_list_delay = 1.5
+    page.locator('[data-testid="toggle-panel"]').click()
+    until(lambda: _visible(page, '[data-testid="panel-opening"]'), timeout=3)
+    opening = _visible(page, '[data-testid="panel-opening"]') and not _visible(page, '[data-testid="panel-empty-new"]')
+    _approval(mock, "aoc2")
+    until(lambda: page.locator('[data-testid="approval-card"]').count() > 0, timeout=4)
+    page.wait_for_timeout(1800)
+    under = made()
+    page.keyboard.press("Escape")
+    until(lambda: page.locator('[data-testid="approval-card"]').count() == 0, timeout=4)
+    page.wait_for_timeout(600)
+    check("while its listing is on its way the panel says so, offering no second button",
+          opening)
+    check("a card still up when the listing comes back: no terminal, not even once the card is answered",
+          under == n and made() == n and _visible(page, '[data-testid="panel-empty"]'), f"{made() - n} created")
+    mock.__dict__.pop("terminal_list_delay", None)
+    # A card raised and answered before the listing comes back still drops
+    # it (review of #41: the terminal used to be made once the card was gone).
+    page.locator('[data-testid="toggle-panel"]').click()
+    until(lambda: not _visible(page, panel), timeout=2)
+    n = made()
+    mock.terminal_list_delay = 1.5
+    page.locator('[data-testid="toggle-panel"]').click()
+    until(lambda: _visible(page, '[data-testid="panel-opening"]'), timeout=3)
+    _approval(mock, "aoc3")
+    until(lambda: page.locator('[data-testid="approval-card"]').count() > 0, timeout=4)
+    page.keyboard.press("Escape")
+    until(lambda: page.locator('[data-testid="approval-card"]').count() == 0, timeout=4)
+    answered = page.locator('[data-testid="panel-opening"]').count() > 0      # the listing still on its way
+    page.wait_for_timeout(2000)
+    check("a card raised and answered while the listing is on its way: no terminal once it comes back",
+          answered and made() == n and _visible(page, '[data-testid="panel-empty"]'),
+          f"answered before the listing: {answered}, {made() - n} created")
+    mock.__dict__.pop("terminal_list_delay", None)
+
+
+def _autoopen_refusal_checks(page, mock, base, check, until, fake):
+    panel = '[data-testid="panel"]'
+
+    def made():
+        return len(_created(mock))
+
+    # A listing that fails opens nothing; a refused create is said, as `+` says it.
+    _reset(page, mock, base, until, fake)
+    n = made()
+
+    def broken(route):
+        if route.request.method == "GET":
+            route.fulfill(status=500, content_type="application/json", body='{"error": "the listing broke"}')
+        else:
+            route.continue_()
+    def posts():
+        return _posts(mock)
+    is_listing = lambda url: urlparse(url).path == "/terminals"  # noqa: E731
+    before = posts()
+    page.route(is_listing, broken)
+    try:
+        page.locator('[data-testid="toggle-panel"]').click()
+        until(lambda: _visible(page, '[data-testid="panel-list-error"]'), timeout=4)
+        page.wait_for_timeout(600)
+        check("a listing that fails opens no terminal (the panel says the listing failed)",
+              made() == n and posts() == before, f"{made() - n} created, {posts() - before} asked for")
+    finally:
+        page.unroute(is_listing, broken)
+    page.locator('[data-testid="toggle-panel"]').click()
+    until(lambda: not _visible(page, panel), timeout=2)
+    mock.terminal_refuse = "6 terminals are open; close one first"
+    page.locator('[data-testid="toggle-panel"]').click()
+    until(lambda: _visible(page, '[data-testid="terminal-error"]'), timeout=4)
+    error = page.locator('[data-testid="terminal-error"]')
+    err = error.inner_text() if error.count() else ""
+    check("a refused terminal (six open) is said as a sentence in the panel, as `+` says it, and opens nothing",
+          "close one first" in err and made() == n and posts() == before + 1, f"{err!r} {made() - n} created")
+    mock.__dict__.pop("terminal_refuse", None)
+    _reset(page, mock, base, until, fake)
 
 
 def _typing_checks(page, mock, base, check, until, fake):
@@ -922,9 +1277,12 @@ def _elsewhere_checks(page, mock, base, check, until, fake):
     mock.world["terminals"].append(mock_terminals.row(away, "bash · elsewhere", shown=True))
     fake.ring[away] = bytearray(b"other-window-output\r\n$ ")
     sockets = len(fake.sockets)
+    made = len(_created(mock))
     page.locator('[data-testid="toggle-panel"]').click()
     until(lambda: _visible(page, _sel(away, '[data-testid="term-elsewhere"]')), timeout=4)
     page.wait_for_timeout(400)
+    check("⬓ opens no terminal while one another window shows is listed: it counts, and the panel shows it",
+          len(_created(mock)) == made, f"{len(_created(mock)) - made} created")
     check("opening the panel never takes a terminal another window shows: it says so, and attaches nothing",
           _visible(page, _sel(away, '[data-testid="term-show-here"]')) and len(fake.sockets) == sockets
           and not mock.sent("POST", f"/terminals/{away}/ticket"), f"{len(fake.sockets) - sockets} sockets")
@@ -1647,10 +2005,9 @@ def _chat_panes_checks(page, mock, base, check, until, fake):
     MC._open(page, until, 2, "t3", project="p2")
 
     def plus():
-        n = len(_created(mock))
         if not _visible(page, '[data-testid="panel"]'):
-            page.locator('[data-testid="toggle-panel"]').click()
-            until(lambda: _visible(page, '[data-testid="panel-new"]'), timeout=3)
+            _show_panel(page, mock, until)              # with none open, ⬓ opens one first
+        n = len(_created(mock))
         page.locator('[data-testid="panel-new"]').click()
         until(lambda: len(_created(mock)) > n, timeout=4)
         return _created(mock)[-1][1] if len(_created(mock)) > n else None

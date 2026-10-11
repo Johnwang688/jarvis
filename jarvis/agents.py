@@ -72,6 +72,11 @@ class AgentType:
     max_steps: int = 12
     concurrent_safe: bool = True
     """False for types holding a singleton — see fleet dispatch in subagent.py."""
+    needs: tuple[str, ...] = ()
+    """The tools its brief names. A child is intersected with its parent, and
+    one that lost any of these would be told to use a tool it cannot call —
+    so it is not sent (subagent._run_one), and tests/prompt_tools_check.py
+    holds every brief to naming only these."""
 
     def prompt(self) -> str:
         return _COMMON + "\n\n" + self.system
@@ -92,6 +97,7 @@ TYPES: dict[str, AgentType] = {
             "point of sending you is that the bulk stays here."
         ),
         tools=BASE_TOOLS,
+        needs=("grep_files",),
         max_steps=16,
     ),
     "researcher": AgentType(
@@ -142,6 +148,7 @@ TYPES: dict[str, AgentType] = {
             "wrote and a one-line description of what is in it."
         ),
         tools=BASE_TOOLS + WRITE_TOOLS,
+        needs=("edit_file", "write_file"),
         max_steps=16,
     ),
     "builder": AgentType(
@@ -162,6 +169,7 @@ TYPES: dict[str, AgentType] = {
             "reason there is none."
         ),
         tools=BASE_TOOLS + WRITE_TOOLS + GIT_WRITE_TOOLS,
+        needs=("git_worktree", "git", "git_pull_request"),
         max_steps=30,
     ),
     "browser": AgentType(
