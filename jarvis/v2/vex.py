@@ -51,7 +51,8 @@ reach a plugged-in brain through a script it writes and runs, `make -f` on a
 makefile of its own, or a POST to the download route with a forged Origin.
 The `vexcom` DENY stops the obvious spellings; the `vex_device` record makes
 a device action nobody clicked visible. Closing the gap needs the device to
-belong to a user the agent's processes are not.
+belong to a user the agent's processes are not (and a DLL planted beside a
+tool in its AppData folder is not covered by the fingerprint; `verify_tools`).
 
 **Spike items** (the owner runs them once; the plan's §2.9): the build's
 `P=`/`T=` against VS Code's own build log, whether stopping the Linux side of
@@ -333,11 +334,14 @@ def verify_tools(cfg: VexConfig, program: str, also: tuple[str, ...] = ()) -> No
     size, modification and change times). A mismatch refuses.
 
     **What remains, stated:** a file swapped in the instant between that last
-    `stat` and the kernel's `exec` is not seen, and the tools `make.exe` runs
+    `stat` and the kernel's `exec` is not seen; the tools `make.exe` runs
     (`clang.exe`, the `arm-none-eabi-*`) are hashed here but opened by Windows
-    later, during the build. A program running as the owner could win either
-    race; this check turns the easy case — an agent's `cp` over a tool between
-    builds — into a refusal."""
+    later, during the build; and a DLL planted beside a tool in its AppData
+    folder is not hashed at all — Windows loads a program's DLLs from its own
+    folder first, and the fingerprint covers the executable only. A program
+    running as the owner could win either race or plant the DLL; this check
+    turns the easy case — an agent's `cp` over a tool between builds — into a
+    refusal."""
     for key in (*also, program):
         digest, identity = file_sha256(getattr(cfg, key))
         if digest != cfg.digest(key):
