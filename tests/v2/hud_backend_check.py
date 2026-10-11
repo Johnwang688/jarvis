@@ -5,6 +5,7 @@ import base64
 from datetime import datetime, timezone
 import http.client
 import json
+import os
 from pathlib import Path
 import queue
 import subprocess
@@ -326,6 +327,37 @@ class Backend(unittest.TestCase):
             self.assertIn(b"console", self.request("GET", "/assets/app.js"))
             self.request("GET", "/assets/no.js", status=404)
             self.request("GET", "/assets/%2e%2e/index.html", status=403)
+            self.assertEqual(self.request("GET", "/status")["hud_build"], "dev")
+        # C-1 (ED-4): the owner's daemon serves the newest installed build,
+        # only files its manifest vouches for.
+        from jarvis.v2 import hud_install
+        self.assertIsNone(self.request("GET", "/status")["hud_build"], "nothing installed yet")
+        root = config.HUD_DIST
+        first = hud_install.install(dist, root, now=1_791_500_000)
+        (dist / "index.html").write_text("built HUD, second")
+        (dist / "assets" / "app.js").unlink()
+        (dist / "assets" / "app2.js").write_text("console.log('two')")
+        second = hud_install.install(dist, root, now=1_791_500_001)
+        self.assertEqual(self.request("GET", "/status")["hud_build"], second.id)
+        self.assertEqual(self.request("GET", "/"), b"built HUD, second", "the newest build is served")
+        self.assertIn(b"two", self.request("GET", "/assets/app2.js"))
+        self.assertIn(b"console", self.request("GET", "/assets/app.js"), "an older build's chunk still loads")
+        self.request("GET", "/assets/%2e%2e/index.html", status=403)
+        self.request("GET", "/assets/..%2fmanifest.json", status=403)
+        self.request("GET", "/manifest.json", status=404)
+        # A file changed behind the manifest's back, a file it never listed,
+        # and a link: none is served.
+        os.chmod(second.path / "assets", 0o755)
+        os.chmod(second.path / "assets" / "app2.js", 0o644)
+        (second.path / "assets" / "app2.js").write_text("fetch('/approvals')")
+        self.request("GET", "/assets/app2.js", status=404)
+        (second.path / "assets" / "planted.js").write_text("approve()")
+        self.request("GET", "/assets/planted.js", status=404)
+        outside = self.root / "outside.js"
+        outside.write_text("console.log('HUD')")
+        (second.path / "assets" / "linked.js").symlink_to(outside)
+        self.request("GET", "/assets/linked.js", status=404)
+        self.assertNotEqual(first.id, second.id)
         preview = self.daemon.workshop_port
         prefix = f"/p/{self.project.id}/"
         self.assertEqual(self.request("GET", prefix + "hello.txt", port=preview), b"hello\n")

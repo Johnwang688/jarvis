@@ -59,7 +59,7 @@ task runner with the intake gate (WP11 — `TaskControl` in
 backend ran one real task end to end on 2026-09-16** (design §17): Claude
 orchestrated, Codex implemented in a worktree, a fresh Claude reviewer
 failed it once and passed it second time, DONE in 198 s. **The HUD v2 landed the same
-day** (WP12a backend + WP12b frontend under `hud/`, `jarvis hud` opens it;
+day** (WP12a backend + WP12b frontend under `hud/`, `jarvis hud` opens it, and since ED-4 the daemon serves only what `jarvis hud install` installed;
 design §12 and §18). **Projects are archived, never deleted in place**
 (2026-10-06, decisions part B): an archived project or thread keeps every
 record and is hidden from lists, placement and schedules; permanent delete
@@ -296,8 +296,9 @@ Jarvis (BR-0, 2026-10-11; plan `docs/plans/2026-10-10-hud-browser-plan.md`
   `edit_file` by resolved path and, through `_self_protected`, to v2's layer
   1 (Claude's Write/Edit, Codex patches); `denied_grant` refuses a Codex write
   grant on, in or above it. **Not a SELF_PROTECTED widening** (the owner
-  declined that): the HUD's source stays writable, and an approved
-  `npm run build` writes the build.
+  declined that): the HUD's source stays writable. Since ED-4 (C-1)
+  `config.HUD_DIST` is the **installed** HUD's root, so this one check covers
+  every installed build; only `jarvis hud install` writes it.
 Free checks: `tests/face/approval_check.py` (`control_port_checks`),
 `tests/browser/policy_check.py` (`control_port_*`, `fetch_redirect_checks`,
 `late_landing_checks` — a port-0 daemon with one card, a stand-in and the
@@ -889,8 +890,8 @@ policy: `img-src 'self', frame-ancestors *` let a frame land on the HUD),
 anything outside printable ASCII (CR/LF split the header; U+2028 failed
 after the status line) or a reserved `frame-ancestors`/`sandbox`/`report-*`
 **raises** (`_own_directives`; `binary()` checks before writing a byte, so
-it is one 400, never two status lines); the editor's
-full CSP (ED-4) extends that function, never a second header. The preview
+it is one 400, never two status lines); the HUD's full CSP (ED-4, below)
+is built by that same function, never a second header. The preview
 listener (8403) carries **neither** frame header — the HUD frames it — but
 **sandboxes every document it serves** with one CSP, `sandbox allow-scripts
 allow-forms` (`workshop_security_policy`): a keep-origin frame that navigated
@@ -930,6 +931,52 @@ move through another first. The mock serves an API listener and a dev server
 on ephemeral ports (`api_port`, `dev_port`) and asserts the API one is never
 hit; the mock HUD, API and workshop send the real `hud_api.frame_headers()`,
 so the HUD under test is always rendered under them. Not yet: §2.5 item 5, a "dev servers in your terminals" list.
+
+**The HUD's CSP and installed build, ED-4 (2026-10-11; editor plan §1.7,
+§2.7; decision C-1; contract in `docs/hud-api.md`).** Every HUD and API
+response carries the **full policy** (`hud_api.HUD_POLICY`) in WP-E's one
+header: `default-src 'none'`, `script-src 'self'` (no inline, no eval),
+`worker-src`/`connect-src 'self'` (the same-origin `ws://` terminal socket
+included, CSP3), `style-src 'self' 'unsafe-inline'`, `img-src`/`font-src
+'self' data:`, `media-src 'self'`, `frame-src` on the loopback names a CSP can
+express (so the Preview judge refuses `[::1]` and `127.0.0.2` with a
+sentence), and `base-uri`/`form-action`/`object-src 'none'`. **No
+`'wasm-unsafe-eval'` yet — ED-5 adds it** with its first `.wasm` and the test
+that loads every grammar under the policy. A response's own directives may
+only **narrow** it (`_narrowed`: restate a directive the policy sets with a
+subset of its sources; a `default-src 'none'` drops the fetch directives it
+does not restate — the avatar keeps its old lockdown); anything else raises.
+**The HUD is served from an installed copy (C-1)**, never the repo's
+agent-writable `hud/dist`: `jarvis hud install` (`jarvis/v2/hud_install.py`;
+a human/lead CLI step, **never a tool** — `tests/v2/hud_install_check.py`
+pins that only `__main__` and `hud_api`'s read side import it) runs `npm run
+build` and copies `hud/dist` into `config.HUD_DIR/<build-id>/`
+(`~/.local/share/jarvis/hud/`, `JARVIS_HUD_DIR` overrides), read-only, with a
+SHA-256 manifest, through a temp folder renamed into place, keeping three
+builds; it refuses a symlinked root or ancestor, a root in the repo or
+writable by others, and a build output with a link, special file, odd name or
+no `index.html`. The daemon serves the **newest** build, only files its
+manifest lists that still match (an asset only an older kept build has is
+served from it, so an open window's lazy chunks survive an install), and
+`/status` says which (`hud_build`). `config.HUD_DIST` is that install root —
+**`hud/dist` only under `JARVIS_HUD_DEV=1`**, which only tests set — so
+BR-0's one write check refuses it to every agent write tool and v2 grant. A
+shell can still write it (the accepted gap). **After a merge, the lead runs,
+from a synced main checkout: `jarvis hud install` (it builds `hud/`; run `npm
+ci` in `hud/` first if `package-lock.json` changed), then `systemctl --user
+restart jarvis-daemon2` only if Python changed — a HUD-only change needs just
+a reload of the window** — and checks `curl -s localhost:8405/status` shows
+the new `hud_build`. Never `jarvis hud` to restart. **Tests point
+`config.HUD_DIR`/`HUD_DIST` at temp dirs** (or set `HUD_DEV` with a temp
+dist); never install into the owner's real root. **Every context of every
+headless HUD suite runs under `hud_v2_check.watch_csp`**: a CSP violation
+anywhere fails the run, because a CSP breaks quietly (Monaco even falls back
+to a textarea). `tests/face/hud_v2_csp_check.py` (run by `hud_v2_check` after
+the preview section, on a `MockDaemon(0)` of its own) proves the HUD's needs
+work under it — SSE, the terminal socket, Monaco and its worker, the avatar,
+the mic and `/stt`, a loopback frame — and that an inline or remote script,
+`eval`, a `blob:` worker, WebAssembly, a cross-origin fetch, socket, image,
+object, `<base>`, form or non-loopback frame is refused with a violation.
 
 **Input bar declutter (2026-10-10, PR #29; ported onto WP-B and reviewed the
 same day).** The bar is `📎 [box] ⬆` over one row, `in: project · provider ▾ ·

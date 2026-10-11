@@ -1006,7 +1006,7 @@ def hud_build_deny_checks():
 
     real = config.HUD_DIST
     ok(denied_file(str(real / "index.html")) is not None,
-       "the real config.HUD_DIST (the repo's hud/dist) is refused")
+       "the real config.HUD_DIST (the installed HUD since C-1) is refused")
     with Sandbox() as box:
         dist = box.root / "hud" / "dist"
         (dist / "assets").mkdir(parents=True)
@@ -1040,6 +1040,52 @@ def hud_build_deny_checks():
                "a write grant on the HUD's source is not refused for this reason")
         finally:
             config.HUD_DIST = real
+
+
+def installed_hud_deny_checks():
+    """C-1 (ED-4): the installed HUD is what the daemon serves, so it is what
+    BR-0's one check refuses — `config.HUD_DIST` is the install root. Every
+    provider write tool, into a build or as a newer build planted beside them,
+    is denied unasked, and a Codex grant on the root, a build or anything
+    above the root is refused. On main the install root was ordinary ground."""
+    from jarvis.v2 import hud_install
+    from jarvis.v2.model import PermissionProfile as P
+    from jarvis.v2.permissions import build_permit, denied_file, denied_grant
+    from jarvis.v2.provider import Decision
+
+    saved = (config.HUD_DIR, config.HUD_DIST, config.HUD_DEV)
+    with Sandbox() as box:
+        built = box.root / "built"
+        (built / "assets").mkdir(parents=True)
+        (built / "index.html").write_text("<!doctype html><title>J.A.R.V.I.S.</title>")
+        (built / "assets" / "app-1a2b.js").write_text("console.log(1)")
+        root = box.root / "share" / "jarvis" / "hud"
+        config.HUD_DIR = config.HUD_DIST = root
+        config.HUD_DEV = False
+        try:
+            installed = hud_install.install(built, root)
+            newer = root / "29991231T235959999999Z-0123456789ab"
+            brief = brief_for(P.AUTO)
+            asker = Asker(Decision.ALLOW)
+            permit = build_permit(context(brief), asker)
+            for target in (installed.path / "index.html", installed.path / "assets" / "app-1a2b.js",
+                           installed.path / "manifest.json", newer / "index.html", root / "x.js"):
+                why = denied_file(str(target))
+                ok(why is not None and "built HUD" in why and "jarvis hud install" in why,
+                   f"a write to {target} is refused ({why})")
+                for tool, args in (("Write", {"file_path": str(target), "content": "<script></script>"}),
+                                   ("apply_patch", {"paths": [str(target)]}),
+                                   ("write_file", {"path": str(target), "content": "x"})):
+                    before = len(asker.seen)
+                    eq(permit(tool, args, brief), Decision.DENY, f"{tool} must not write {target}")
+                    eq(len(asker.seen), before, f"{tool}'s refusal is never put to the owner")
+            for grant in (root, installed.path, newer, root.parent, box.root / "share"):
+                ok(denied_grant(str(grant), "write") is not None,
+                   f"a write grant on {grant} would reach the installed HUD")
+            eq(denied_grant(str(root), "read"), None, "reading it is not a lever")
+            eq(denied_grant(str(built), "write"), None, "the build output itself is ordinary ground")
+        finally:
+            config.HUD_DIR, config.HUD_DIST, config.HUD_DEV = saved
 
 
 def daemon_checks():
@@ -1409,6 +1455,7 @@ def discord_checks():
 def main():
     for section in (matrix_checks, always_ask_checks, file_deny_checks,
                     human_backed_checks, log_checks, approvals_checks, hud_build_deny_checks,
+                    installed_hud_deny_checks,
                     daemon_checks, auto_quiet_checks, hatch_checks, discord_checks):
         print(f"-- {section.__name__}")
         section()
