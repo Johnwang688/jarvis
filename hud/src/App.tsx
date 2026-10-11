@@ -155,13 +155,15 @@ export default function App() {
   // until the edit is saved or discarded.
   //
   // Since ED-2 the truth is the buffer registry (`state/buffers.ts`): a pane
-  // is dirty when a buffer one of its tabs holds is. It is read where it is
-  // needed (`dirtyNow`), never copied a frame behind: the registry says so in
-  // the keystroke's own change event (#43's M1), and this render follows.
+  // "holds an unsaved edit" when it holds the last view of a dirty buffer —
+  // one no other pane has open (split-panes plan G-3): letting go of a view
+  // another pane still shows loses nothing. It is read where it is needed
+  // (`dirtyNow`), never copied a frame behind: the registry says so in the
+  // keystroke's own change event (#43's M1), and this render follows.
   useSyncExternalStore(buffers.subscribe, buffers.version);
-  const dirtyNow = useCallback((pane: PaneNo) => buffers.paneDirty(pane), []);
+  const dirtyNow = useCallback((pane: PaneNo) => buffers.paneLoses(pane), []);
   const dirtyPanes: Partial<Record<PaneNo, boolean>> = {};
-  for (const n of PANE_NOS) if (buffers.paneDirty(n)) dirtyPanes[n] = true;
+  for (const n of PANE_NOS) if (buffers.paneLoses(n)) dirtyPanes[n] = true;
   // Any unsaved edit at all — a buffer no tab holds any more included.
   const anyDirty = buffers.anyDirty();
   useEffect(() => {

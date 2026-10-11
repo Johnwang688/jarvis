@@ -1338,9 +1338,12 @@ stays (and `beforeunload` asks) until it is reopened or the owner discards it
 read once, at save** (`getValue()` never per keystroke). **Dirty is
 `getAlternativeVersionId() !== saved`**, said from the edit's own change event
 and only when it moves, so App's guards (`dirtyNow(pane)` =
-`buffers.paneDirty`, `mayShow`, the E-13 picker, `unpinProject`'s keep) read
+`buffers.paneLoses`, `mayShow`, the E-13 picker, `unpinProject`'s keep, ×'s
+question and `allocate`) read
 it in the keystroke's breath (#43's M1), and undo back to the saved text reads
-clean. **Tabs** (`PaneSpec.editors {paths, active, preview}`, relative to the
+clean. **A pane "holds an unsaved edit" only when it holds the last view of a
+dirty buffer** (`buffers.paneLoses`; split-panes plan G-3): a view another
+pane still shows may switch away, re-pin or close without asking. **Tabs** (`PaneSpec.editors {paths, active, preview}`, relative to the
 pinned project, per-field fallback, only with a pin; `pinPane`/`unpinProject`
 drop them; `setEditors` pins and sets in one step; a WP-G2 `filePath` with no
 tabs reads as one): a single click opens an italic preview tab the next one

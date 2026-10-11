@@ -1200,7 +1200,8 @@ describe("split and close (WP-G2, plan §3.4–§3.6)", () => {
   it("copies what a pane shows (decisions S-2, plan §3.5)", () => {
     const base = { projectId: "p1", terminalId: "t1", previewUrl: "http://localhost:5173/x", keepOrigin: "http://localhost:5173",
                    filePath: "src/a.ts" };
-    expect(copySpec({ ...base, view: "file" })).toEqual({ view: "file", projectId: "p1", terminalId: null, filePath: "src/a.ts" });
+    // A File pane's files are its tabs (ED-2): a stray filePath is not what it copies.
+    expect(copySpec({ ...base, view: "file" })).toEqual({ view: "file", projectId: "p1", terminalId: null });
     expect(copySpec({ ...base, view: "diff" })).toEqual({ view: "diff", projectId: "p1", terminalId: null, filePath: "src/a.ts" });
     // The keep-origin grant is the owner's choice for one pane: never copied (WP-E).
     expect(copySpec({ ...base, view: "preview" })).toEqual({

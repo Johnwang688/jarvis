@@ -213,6 +213,7 @@ describe("one buffer per file on disk", () => {
     model("/w/b.py").type("y");
     expect(b.paneLosing(2).map((v) => v.path)).toEqual(["b.py"]);
     expect(b.paneLosing(3)).toEqual([]);
+    expect([b.paneLoses(2), b.paneLoses(3), b.paneDirty(3)]).toEqual([true, false, true]);
     expect(await b.savePane(2)).toBe(true);
     expect(w.files.get("/w/b.py")).toBe("two\ny");
     expect(b.paneLosing(2)).toEqual([]);

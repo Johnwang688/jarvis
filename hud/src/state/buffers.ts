@@ -245,6 +245,19 @@ export class Buffers {
       .map((b) => this.view(b));
   }
 
+  /**
+   * Pane `pane` holds an edit no other pane does: letting go of it — a view
+   * switch, another project, ×, a split taking the pane back — would lose it
+   * (split-panes plan G-3: ask only when closing a buffer's last view).
+   */
+  paneLoses(pane: number | string): boolean {
+    const key = String(pane);
+    for (const b of this.bufs.values()) {
+      if (this.dirtyOf(b) && b.refs.size > 0 && [...b.refs].every((r) => paneOfRef(r) === key)) return true;
+    }
+    return false;
+  }
+
   /** Save every edit only pane `pane` holds (closing it, "Save"): true when all saved. */
   async savePane(pane: number | string): Promise<boolean> {
     let ok = true;

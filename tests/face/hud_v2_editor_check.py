@@ -268,6 +268,23 @@ def _shared_checks(page, mock, check, until):
     check("and both tabs carry the dirty dot",
           page.locator(_tab(2, "calc.py")).get_attribute("data-dirty") == "true"
           and page.locator(_tab(3, "calc.py")).get_attribute("data-dirty") == "true")
+    # Letting go of a view another pane still shows loses nothing (plan G-3):
+    # pane 3 may switch away; pane 2, the edit's last view then, may not.
+    _show(page, until, 3, "preview")
+    check("a pane whose unsaved edit another pane also shows may switch away",
+          page.locator(_pane(3)).get_attribute("data-view") == "preview"
+          and page.locator(_tab(2, "calc.py")).get_attribute("data-dirty") == "true")
+    refused = page.locator('[data-testid="pane-2-refused"]')
+    try:
+        _show(page, until, 2, "preview")
+    except Exception:
+        pass
+    until(lambda: refused.count() > 0, timeout=2)
+    check("but the edit's last view may not, and says why",
+          page.locator(_pane(2)).get_attribute("data-view") == "file" and refused.count() == 1)
+    _show(page, until, 3, "file")
+    until(lambda: "#typed_in_pane_2" in _text(page, 3), timeout=6)
+    check("back in pane 3, the edit is there", "#typed_in_pane_2" in _text(page, 3))
     # One undo stack: Ctrl+Z in pane 3 undoes pane 2's typing.
     page.locator(_lines(3)).click()
     for _ in range(25):

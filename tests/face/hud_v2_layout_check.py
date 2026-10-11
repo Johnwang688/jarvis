@@ -3041,6 +3041,8 @@ def _split_file_checks(page, mock, check, until):
     check("a File pane's copy opens the same tabs, right after it",
           _order(page) == [1, 2, 3] and path3.inner_text() == "calc.py" and tabs3.get("paths") == ["calc.py"],
           f"{_order(page)} {tabs3}")
+    until(lambda: len(page.evaluate("window.__hud.buffers()")) == 1
+          and len(page.evaluate("window.__hud.buffers()")[0]["refs"]) == 2, timeout=6)
     bufs = page.evaluate("window.__hud.buffers()")
     check("on the same buffer: one model for the file, held by both panes",
           len(bufs) == 1 and sorted(bufs[0]["refs"]) == ["2|calc.py", "3|calc.py"], str(bufs))

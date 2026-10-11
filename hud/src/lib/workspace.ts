@@ -700,7 +700,6 @@ export function copySpec(spec: PaneSpec): PaneSpec {
       // text, dirty dot and undo stack, and the preview tab is pinned there.
       out.projectId = spec.projectId;
       if (spec.editors) out.editors = { ...spec.editors, paths: [...spec.editors.paths], preview: null };
-      else if (spec.filePath) out.filePath = spec.filePath;
       break;
     case "diff":
       out.projectId = spec.projectId;
