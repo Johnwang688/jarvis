@@ -2252,6 +2252,35 @@ def provider_default_checks(page, mock):
     mock.emit("model", {})
 
 
+LIVE_PORTS = (8402, 8403, 8405)
+
+
+def guard_live(ctx, record, ports=LIVE_PORTS):
+    """Refuse, and record, every request **and every WebSocket** this context
+    makes to the owner's live daemon. `ctx.route` never sees a WebSocket, so
+    it gets a `route_web_socket` of its own (WP-D: the terminal is a socket,
+    and a hard-coded port once sent this suite to the live daemon over HTTP).
+    The terminal suite proves the socket half bites, against a port of its
+    own — never a live one."""
+    alt = "|".join(str(p) for p in ports)
+    http = re.compile(rf"^https?://(127\.0\.0\.1|localhost|\[::1\]):({alt})/")
+    sock = re.compile(rf"^wss?://(127\.0\.0\.1|localhost|\[::1\]):({alt})/")
+
+    def refuse_http(route):
+        record(f"the HUD under test reached a live daemon port: {route.request.url}")
+        route.abort()
+
+    def refuse_socket(ws):
+        # Never `connect_to_server()`: the socket never leaves the browser. It
+        # is not closed here either — a close from inside the route handler
+        # deadlocks the sync API — so the page holds a socket to nowhere and
+        # the record is the failure.
+        record(f"the HUD under test opened a socket to a live daemon port: {ws.url}")
+
+    ctx.route(http, refuse_http)
+    ctx.route_web_socket(sock, refuse_socket)
+
+
 def main():
     if not (DIST / "index.html").exists():
         print("hud/dist is not built. Run: cd hud && npm ci && npm run build")
@@ -2264,14 +2293,12 @@ def main():
                 headless=True,
                 args=["--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream"],
             )
-            # The owner's live daemon listens on these. Nothing this suite
-            # loads may reach it: a hard-coded preview port once did, and its
-            # log filled with `GET /p/p1/index.html -> 400`.
-            live = re.compile(r"^https?://(127\.0\.0\.1|localhost|\[::1\]):(8402|8403|8405)/")
-
-            def refuse_live(route):
-                FAILURES.append(f"the HUD under test reached a live daemon port: {route.request.url}")
-                route.abort()
+            # The owner's live daemon listens on 8402/8403/8405. Nothing this
+            # suite loads may reach it, over HTTP or a WebSocket: a hard-coded
+            # preview port once did, and its log filled with
+            # `GET /p/p1/index.html -> 400`.
+            def guard(ctx):
+                guard_live(ctx, FAILURES.append)
 
             # Zoom, folding panes, resizing and the workspace (2026-10-08/09)
             # first, in a context of its own **and against a mock of its own**
@@ -2282,7 +2309,7 @@ def main():
             layout_mock = MockDaemon(0).start()
             try:
                 layout_checks(browser, layout_mock, f"http://127.0.0.1:{layout_mock.port}", check, until,
-                              (live, refuse_live), FAKE_RECOGNIZER)
+                              guard, FAKE_RECOGNIZER)
             finally:
                 layout_mock.stop()
 
@@ -2293,12 +2320,22 @@ def main():
             multichat_mock = MockDaemon(0).start()
             try:
                 multichat_checks(browser, multichat_mock, f"http://127.0.0.1:{multichat_mock.port}", check, until,
-                                 (live, refuse_live), FAKE_RECOGNIZER)
+                                 guard, FAKE_RECOGNIZER)
             finally:
                 multichat_mock.stop()
 
+            # The terminals (WP-D): a context and a mock of their own too, the
+            # PTY played in the browser (no shell, no HOME).
+            from tests.face.hud_v2_terminal_check import terminal_checks
+            terminal_mock = MockDaemon(0).start()
+            try:
+                terminal_checks(browser, terminal_mock, f"http://127.0.0.1:{terminal_mock.port}", check, until,
+                                guard, FAKE_RECOGNIZER)
+            finally:
+                terminal_mock.stop()
+
             ctx = browser.new_context(permissions=["microphone"])
-            ctx.route(live, refuse_live)
+            guard(ctx)
             ctx.add_init_script(FAKE_RECOGNIZER)
             page = ctx.new_page()
             page.on("pageerror", lambda e: FAILURES.append(f"page error: {e}"))

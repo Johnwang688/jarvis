@@ -84,7 +84,7 @@ def multichat_checks(browser, mock, base, check, until, guard, init_script):
     print("\nseveral chat panes (WP-B)")
     _seed(mock)
     ctx = browser.new_context(viewport={"width": 1600, "height": 900}, permissions=["microphone"])
-    ctx.route(guard[0], guard[1])
+    guard(ctx)                      # live ports refused, HTTP and WebSocket alike (hud_v2_check.guard_live)
     ctx.add_init_script(init_script)
     page = ctx.new_page()
     errors: list[str] = []
@@ -1596,14 +1596,8 @@ def main():
         with sync_playwright() as pw:
             browser = pw.chromium.launch(headless=True, args=["--use-fake-ui-for-media-stream",
                                                               "--use-fake-device-for-media-stream"])
-            live = re.compile(r"^https?://(127\.0\.0\.1|localhost|\[::1\]):(8402|8403|8405)/")
-
-            def refuse_live(route):
-                H.FAILURES.append(f"the HUD under test reached a live daemon port: {route.request.url}")
-                route.abort()
-
             multichat_checks(browser, mock, f"http://127.0.0.1:{mock.port}", H.check, H.until,
-                             (live, refuse_live), H.FAKE_RECOGNIZER)
+                             lambda ctx: H.guard_live(ctx, H.FAILURES.append), H.FAKE_RECOGNIZER)
             browser.close()
     finally:
         mock.stop()
