@@ -113,15 +113,18 @@ export function FileTab(props: {
   const [note, setNote] = useState("");
   const [renderedOnly, setRenderedOnly] = useState(false);
   const [treeOpen, setTreeOpen] = useState(false);
+  // Opening another file (or Reload) over an unsaved edit: what was asked for.
+  const [ask, setAsk] = useState<{ path: string; reload: boolean } | null>(null);
   // Read once, at mount: the key App gives this component is the project, so
   // a prop that changed under an open buffer would be a bug, not a feature.
   const [pid] = useState(props.projectId);
   const onOpened = props.onOpened;
 
-  const open = useCallback(
+  const read = useCallback(
     async (path: string) => {
       if (!pid) return;
       setNote("");
+      setAsk(null);
       try {
         const r = await api.readFile(pid, path);
         setFile({ path: r.path, content: r.content || "", mtime: r.mtime, protected: !!r.protected });
@@ -136,15 +139,26 @@ export function FileTab(props: {
     [pid, onOpened],
   );
 
-  const save = async () => {
-    if (!pid || !file || file.protected) return;
+  // An unsaved edit is never dropped without a word (ED-1): opening another
+  // file, or Reload, over one asks first, and "keep editing" leaves the
+  // buffer exactly as it was.
+  const dirty = !!file && !file.protected && text !== file.content;
+  const open = (path: string) => {
+    if (dirty && file) setAsk({ path, reload: path === file.path });
+    else void read(path);
+  };
+
+  // `content` is the editor's own text when Ctrl+S saves: a keystroke's
+  // re-render may not have landed in `text` yet.
+  const save = async (content: string = text) => {
+    if (!pid || !file || file.protected || content === file.content) return;
     try {
       const r = await api.writeFile(pid, {
         path: file.path,
-        content: text,
+        content,
         expected_mtime: file.mtime,
       });
-      setFile({ ...file, mtime: r.mtime, content: text });
+      setFile({ ...file, mtime: r.mtime, content });
       setNote("saved");
     } catch (e: any) {
       if (e instanceof ApiError && e.status === 409) {
@@ -159,7 +173,6 @@ export function FileTab(props: {
   // An unsaved edit is said out loud, so App can refuse to close this
   // buffer behind the owner's back (a "follow chat", a project that went
   // away, a window closing). The minimal guard; the editor plan does more.
-  const dirty = !!file && !file.protected && text !== file.content;
   const tell = useRef(props.onDirty);
   tell.current = props.onDirty;
   useEffect(() => tell.current?.(dirty), [dirty]);
@@ -204,12 +217,26 @@ export function FileTab(props: {
             type="button"
             data-testid="file-save"
             disabled={!file || file.protected || text === file.content}
-            onClick={save}
+            onClick={() => void save()}
           >
             Save
           </button>
           {note ? <span className="err" data-testid="file-note">{note}</span> : null}
         </div>
+        {ask && file ? (
+          <div className="toolbar warn" data-testid="file-discard-ask" role="alert">
+            <span>
+              {file.path} has an unsaved edit.{" "}
+              {ask.reload ? "Reloading throws it away." : `Opening ${ask.path} throws it away.`}
+            </span>
+            <button type="button" data-testid="file-discard-no" onClick={() => setAsk(null)}>
+              Keep editing
+            </button>
+            <button type="button" data-testid="file-discard-yes" onClick={() => void read(ask.path)}>
+              {ask.reload ? "Discard and reload" : "Discard and open"}
+            </button>
+          </div>
+        ) : null}
         {!file ? (
           <div className="pad muted">Open a file from the tree.</div>
         ) : file.protected ? (
@@ -225,13 +252,13 @@ export function FileTab(props: {
           </div>
         ) : isMarkdown(file.path) ? (
           <div className="mdsplit" data-testid="md-split">
-            <CodeEditor path={file.path} value={text} onChange={setText} />
+            <CodeEditor projectId={pid} path={file.path} value={text} onChange={setText} onSave={save} />
             <div className="mdrender" data-testid="md-preview">
               <Markdown text={text} className="" />
             </div>
           </div>
         ) : (
-          <CodeEditor path={file.path} value={text} onChange={setText} />
+          <CodeEditor projectId={pid} path={file.path} value={text} onChange={setText} onSave={save} />
         )}
       </div>
     </div>

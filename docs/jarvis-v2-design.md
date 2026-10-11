@@ -2096,6 +2096,38 @@ fit and selection. The headless suite plays the PTY inside the browser
 (`route_web_socket`), so no shell ever runs, and the live-port guard now
 refuses WebSockets too. "Open in Preview" for a dev server's link is WP-E.
 
+**The editor's missing half (2026-10-10, ED-1 of
+`docs/plans/2026-10-09-hud-editor-plan.md`; decisions E-1, E-4, E-10).** The
+File tab had loaded only Monaco's bare API: no language was registered, so no
+file had colour, Ctrl+F was Chrome's find, Ctrl+S Chrome's "Save page as",
+and none of find/replace, folding, comment toggle, word suggestions or the
+command list existed. Monaco is now 0.57.0 (pinned) on its supported entry
+points, with a curated feature list and every Monarch definition (each
+tokenizer fetched only when a file of its language opens) — a whole editor
+**without intellisense**: no language server, and no TypeScript, JSON, CSS or
+HTML worker built or loaded ("Claude Code is my intellisense"). The language
+comes from Monaco's registry by the model's URI; `.h` is C++ for VEX, `.json`
+and `.toml` get small definitions of ours, a shebang names its language.
+Links open only http(s), with `noopener`. Until ED-3's Graphite scheme,
+vs-dark's salmon strings, its red tokens and the orange and gold chrome of
+find matches, bracket pairs and the unicode box are moved off amber and red.
+Under an approval card every editor is read-only and unfocused, and the
+editor host is its own stacking context so Monaco's overlays (context menu,
+suggest list, quick input) stay under the card; the checks open each and
+raise a card over it at 100% and 160%. Keys stay in the window's one capture
+handler: Ctrl+B folds the sidebar from the editor too, except as the second
+key of a Ctrl+K chord, which is Monaco's whatever it is (Ctrl+K Ctrl+0 folds
+all, as in VS Code; a lone Ctrl+0 is still the HUD's zoom reset, and neither
+reaches Chrome's zoom). Ctrl+S saves the focused editor and never opens
+Chrome's dialog. Opening another file, or Reload, over an unsaved edit asks
+first. The diff view disposes its models (it leaked two per file viewed).
+Measured: the editor chunk went from 2.30 MB (bare API) to 3.63 MB, the
+worker from 232 KB to 277 KB, the first-paint chunk +5 KB. EditContext stays
+on: headless Chromium types into it. One defect is left on purpose: a space
+typed in Monaco still starts push-to-talk and is lost (confirmed headless);
+the owner moved push-to-talk to Ctrl+D (2026-10-10), which its own PR
+delivers. The `monaco-vim` spike is ED-8's (E-11), not this package's.
+
 Remaining: WP13 (the long-bench comparison, the owner's call on cost), a
 native Windows worker, the R8 hook on Codex, and prompt tuning in
 `roles.py` (§17's over-planning note). The daemon started by hand for the

@@ -429,8 +429,9 @@ AUTHORIZE means scrolling past the whole command, so a long command's tail
 reach. **Every layout key is inert while a card is up** (`useLayout(blocked)`,
 as PTT and wake are), so nothing re-lays the card out under an unmoved
 pointer. Each side pane folds to a 36px rail: `«`/`»`, Ctrl+B for the left,
-Ctrl+Alt+B for the right (not in Monaco, where Ctrl+B finishes its Ctrl+K
-chord; not on auto-repeat or mid-composition; Ctrl+Shift+B is the browser's).
+Ctrl+Alt+B for the right (from Monaco too since ED-1, except as the second
+key of its Ctrl+K chord; not on auto-repeat or mid-composition; Ctrl+Shift+B
+is the browser's).
 The left rail keeps **+ New thread** and a shrunken orb, and the right rail
 shows pending approvals and errors. A folded pane is hidden, **never
 unmounted**, so its state survives. The inner edges are `role="separator"`:
@@ -791,6 +792,57 @@ section on a `MockDaemon(0)` of its own, or alone — plus `ModelChip.test.ts`
 section's `_edit` now types until the pane's Save is enabled: it used to type
 into an editor not yet showing the file, and four "unsaved edit" checks failed
 under load.
+
+**The editor's missing half, ED-1 (2026-10-10; plan
+`docs/plans/2026-10-09-hud-editor-plan.md` §2.2, decisions file beside it
+wins: E-1 no intellisense, E-10).** Monaco is **0.57.0, pinned exactly**, on
+its supported entry points: `lib/monacoBundle.ts` is `monaco-editor/editor`
+plus a **curated** `features/*/register` list (find, folding, comment,
+multi-cursor, brackets, word suggestions, sticky scroll, go to line, F1, the
+context menu …; nothing that needs a language server) and the Monarch
+definitions, one lazy chunk (3.6 MB) behind `loadMonaco()`. **No
+language-service worker exists** — no TS, JSON, CSS or HTML worker is built
+or loaded (`getWorker` refuses any label but `editorWorkerService`), so a
+`.json` file gets a small Monarch definition of ours and `.toml` borrows
+INI's; `.h` is C++ (VEX headers); a shebang names shell or Python. **The
+language comes from the registry by the model's URI** (`file:///<project>/<path>`,
+a per-editor query until ED-2's buffers share one model per absolute path);
+`languageFor` is gone. Links open only http/https, `noopener`
+(`registerLinkOpener` answers every other scheme "handled" — Monaco's own
+fallback navigates the window). vs-dark's amber and red token colours and
+the orange/gold chrome of find, bracket pairs and the unicode box are moved
+off those hues until ED-3's scheme (`INTERIM_RULES`, `CHROME`, tested in
+`monaco.test.ts` on one warm band 340°–65° — the plan's two bands leave
+orange, Monaco's own find colour, between them). Diff models live under
+`jarvis-diff:` and are disposed with their view (two leaked per file).
+**Under a card every editor is read-only and unfocused** (`setEditorsBlocked`
+from App, above the error boundary, beside the terminals' hold), and
+`.editorhost` is `isolation: isolate`, so Monaco's thousand-z overlays stack
+inside it, under `#authveil`. **Keys: the one interception place is still
+`useLayout`'s capture handler.** It feeds every keydown to
+`lib/editorkeys.ts`'s `chordStep`, so **the second key of a Ctrl+K chord
+typed in Monaco is Monaco's, whatever HUD key it is** (Ctrl+K Ctrl+B sets the
+selection anchor, Ctrl+K Ctrl+0 folds all, as in VS Code) and still kept from
+Chrome; a lone Ctrl+B folds the sidebar from Monaco too (E-10), a lone zoom
+key is the HUD's; the tracker waits as Monaco does (next non-modifier key,
+5 s) and ignores repeat and composition. **Ctrl+S never reaches Chrome**: in
+an editor Monaco's own command saves that buffer with the editor's text (inert
+under a card); in a terminal it is the shell's. **An unsaved edit is never
+dropped without a word**: opening another file or Reload over one asks
+(`file-discard-ask`, Keep editing / Discard). EditContext stays on (headless
+Chromium types into it). Space in Monaco **still** starts push-to-talk and
+the space is lost — confirmed headless; it is the Ctrl+D push-to-talk PR's,
+not ED-1's (the owner's decision, 2026-10-10). Test hooks (read-only):
+`__hud.monacoModels()`, `monacoEditors()`, `monacoLanguage(path, text)`; the
+editor host carries `data-language` (set once Monaco holds the file — what
+`_edit` waits on now) and `data-readonly`. Free checks: `editorkeys.test.ts`,
+`monaco.test.ts`, `hud_v2_check`'s file and diff sections (tokens, find,
+suggest, Ctrl+S in and out of an editor, links, Ctrl+B and the chords, the
+discard ask, the diff leak, no request off loopback by a catch-all route, no
+language worker requested or built) and `hud_v2_layout_check`'s
+`_editor_card_checks` (a card over an open context menu or suggest list, at
+100% and 160%). Every one that guards a behaviour fails on origin/main or with
+its fix reverted (PR body).
 
 **Sidebar status dots (2026-10-08, design §18; contract in
 `docs/hud-api.md`).** The `·` left of each sidebar thread and task is what it

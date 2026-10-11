@@ -19,8 +19,9 @@ The checks worth keeping, each written to bite:
   - every layout key is inert while a card is up, so nothing re-lays the card
     out under a pointer that has not moved;
   - the zoom keys are the HUD's in the input bar and in Monaco too (else they
-    are Chrome's page zoom, which the control cannot see), while Ctrl+B stands
-    aside in Monaco and ignores auto-repeat, composition and Ctrl+Shift+B;
+    are Chrome's page zoom, which the control cannot see); Ctrl+B folds from
+    Monaco too except as the second key of its Ctrl+K chord (ED-1, decisions
+    E-10), and ignores auto-repeat, composition and Ctrl+Shift+B;
   - folding a pane keeps the sidebar's expanded projects, the selected thread
     and a compose draft, and New thread stays reachable from the rail;
   - at 1024x700 and 160% the window folds both panes for the render, without
@@ -48,7 +49,11 @@ The workspace (2026-10-09, WP-A of docs/plans/2026-10-09-hud-workspace-plan.md):
     to another project, its save still goes to the first one;
   - in a 2×2 grid with Monaco and a preview frame on screen, at 160% and 70%,
     the card is wholly on screen, AUTHORIZE is below the fold for a long
-    command, and every button is topmost at its own point.
+    command, and every button is topmost at its own point;
+  - (ED-1) with Monaco's context menu or suggest list open, at 100% and 160%,
+    a card that arrives is topmost at every button, the editor behind it is
+    unfocused and read-only, a typed `y` and Ctrl+S do nothing, and Escape
+    denies.
 
 A render error (review of PR #29):
   - three clicks in one task on ⊞, and on ⋯ when the title bar is folded,
@@ -96,7 +101,7 @@ def layout_checks(browser, mock, base, check, until, guard, init_script):
                         _blocked_checks, _small_window_checks, _picker_zoom_checks,
                         _monaco_zoom_checks, _menu_zoom_checks, _model_chip_checks,
                         _titlebar_checks, _workspace_checks, _grid_card_checks, _sticky_checks,
-                        _card_focus_checks, _seen_checks, _crash_checks):
+                        _card_focus_checks, _editor_card_checks, _seen_checks, _crash_checks):
             try:
                 section(page, mock, check, until)
             except Exception as e:  # a section that cannot run is a failure, and the rest still run
@@ -835,10 +840,18 @@ def _monaco_zoom_checks(page, mock, check, until):
           str(_last_key(page)))
     in_monaco = page.evaluate("!!document.activeElement.closest('.monaco-editor')")
     sidebar = _visible(page, "#sidebar")
+    # Ctrl+B folds the sidebar from Monaco too, except as the second key of
+    # its Ctrl+K chord (decisions E-10; it used to stand aside entirely).
+    page.keyboard.press("Control+k")
     page.keyboard.press("Control+b")
     time.sleep(0.3)
-    check("Ctrl+B inside Monaco is Monaco's (its Ctrl+K Ctrl+B chord), not a fold",
-          in_monaco and _visible(page, "#sidebar") == sidebar, f"in monaco {in_monaco}")
+    check("Ctrl+K Ctrl+B inside Monaco is Monaco's chord, not a fold",
+          in_monaco and sidebar and _visible(page, "#sidebar"), f"in monaco {in_monaco}")
+    page.keyboard.press("Control+b")
+    until(lambda: not _visible(page, "#sidebar"), timeout=2)
+    check("and a lone Ctrl+B inside Monaco folds the sidebar", not _visible(page, "#sidebar"))
+    page.keyboard.press("Control+b")
+    until(lambda: _visible(page, "#sidebar"), timeout=2)
     time.sleep(0.3)
     fit = page.evaluate("""() => {
       const host = document.querySelector('[data-testid="editor"]').getBoundingClientRect();
@@ -960,11 +973,15 @@ def _edit(page, until, pane: int, typed: str):
     editor = page.locator(_pane(pane, '[data-testid="editor"] .view-lines'))
     fallback = page.locator(_pane(pane, '[data-testid="editor-fallback"]'))
     save = page.locator(_pane(pane, '[data-testid="file-save"]'))
+    host = page.locator(_pane(pane, '[data-testid="editor"]'))
+
     def shows_file() -> bool:
-        # One editor (not the old one beside the new), holding the file's text
-        # (not an empty buffer it is about to replace).
+        # One editor (not the old one beside the new), that Monaco has given
+        # its model (`data-language` is set only then, ED-1), holding the
+        # file's text (not an empty buffer it is about to replace).
         try:
-            return editor.count() == 1 and editor.inner_text(timeout=1000).strip() != ""
+            return (editor.count() == 1 and host.get_attribute("data-language", timeout=1000) is not None
+                    and editor.inner_text(timeout=1000).strip() != "")
         except Exception:
             return False
 
@@ -1671,6 +1688,84 @@ def _card_focus_checks(page, mock, check, until):
     time.sleep(0.1)
     check("and focus goes back to the editor",
           page.evaluate("!!document.activeElement.closest('.monaco-editor')"))
+    _reset_all(page, mock, until)
+
+
+def _monaco_editors(page) -> list:
+    return page.evaluate("window.__hud.monacoEditors ? window.__hud.monacoEditors() : []")
+
+
+def _editor_card_checks(page, mock, check, until):
+    """ED-1 loads Monaco's overlays — the context menu, the suggest list —
+    which carry z-indexes in the thousands. With one open, a card that
+    arrives is still on top at every one of its buttons; the editor behind it
+    is unfocused and read-only, Escape denies, and a typed `y` lands nowhere.
+    At 100% and 160%."""
+    two = json.dumps({"preset": "cols2", "focused": 2,
+                      "panes": [{"view": "chat"}, {"view": "file"}, {"view": "preview"}, {"view": "task"}]})
+    host = _pane(2, '[data-testid="editor"]')
+    lines = page.locator(_pane(2, '[data-testid="editor"] .view-lines'))
+    menu = page.locator(_pane(2, ".monaco-menu"))
+    suggest = page.locator(_pane(2, ".suggest-widget.visible .monaco-list-row"))
+    for zoom in ("100", "160"):
+        page.set_viewport_size({"width": 1600, "height": 900})
+        _set_storage(page, zoom=zoom, layout="{}")
+        _set_ws(page, two)
+        _boot(page, mock, None, until, reload=True)
+        page.locator(_pane(2, '[data-testid="file-calc.py"]')).click()
+        until(lambda: page.locator(host).count() > 0
+              and page.locator(host).get_attribute("data-language") is not None, timeout=10)
+        if page.locator(host).count() == 0:
+            check(f"at {zoom}% Monaco loads in a split pane (fell back to a textarea)", False)
+            break
+        for n, (what, opened) in enumerate((("its context menu", menu), ("its suggest list", suggest))):
+            if what == "its context menu":
+                lines.click()
+                page.locator(_pane(2, '[data-testid="editor"] .view-line')).first.click(button="right")
+            else:
+                lines.click()
+                page.keyboard.press("Control+End")
+                page.keyboard.type("\nre")
+                page.keyboard.press("Control+Space")
+            until(lambda: opened.count() > 0 and opened.first.is_visible(), timeout=4)
+            check(f"at {zoom}% setup: Monaco shows {what}", opened.count() > 0 and opened.first.is_visible())
+            before = lines.inner_text()
+            req = f"edcard{zoom}{n}"
+            _approval(mock, req, LONG_COMMAND)
+            until(lambda: page.locator('[data-testid="approval-card"]').count() > 0, timeout=4)
+            time.sleep(0.25)
+            ok, why = _card_on_screen(page)
+            check(f"at {zoom}% with {what} open, the card arrives on top: every button topmost at its point",
+                  ok, why)
+            eds = _monaco_editors(page)
+            focused = page.evaluate("!!(document.activeElement && document.activeElement.closest('.monaco-editor'))")
+            check(f"at {zoom}% the editor behind the card is unfocused and read-only",
+                  bool(eds) and all(e["readOnly"] and not e["focused"] for e in eds) and not focused
+                  and page.locator(host).get_attribute("data-readonly") == "true", f"{eds} focus in editor {focused}")
+            page.keyboard.type("y")
+            time.sleep(0.15)
+            check(f"at {zoom}% a typed y lands nowhere", lines.inner_text() == before, lines.inner_text()[-40:])
+            puts = len(mock.sent("PUT", "/projects/p1/file"))
+            page.keyboard.press("Control+s")
+            time.sleep(0.2)
+            check(f"at {zoom}% and Ctrl+S saves nothing", len(mock.sent("PUT", "/projects/p1/file")) == puts)
+            page.keyboard.press("Escape")
+            body = until(lambda: mock.sent("POST", f"/approvals/{req}") or None, timeout=4)
+            check(f"at {zoom}% and Escape denies", bool(body) and body[-1].get("decision") == "deny",
+                  str(body[-1] if body else None))
+            until(lambda: page.locator('[data-testid="approval-card"]').count() == 0, timeout=4)
+            until(lambda: not any(e["readOnly"] for e in _monaco_editors(page)), timeout=2)
+            check(f"at {zoom}% once it is answered the editor takes edits again",
+                  not any(e["readOnly"] for e in _monaco_editors(page))
+                  and page.locator(host).get_attribute("data-readonly") == "false")
+            page.keyboard.press("Escape")
+            # Throw the setup's edit away (Reload asks first, ED-1), so the
+            # reload that follows is not held by beforeunload.
+            save = page.locator(_pane(2, '[data-testid="file-save"]'))
+            if not save.is_disabled():
+                page.locator(_pane(2, '[data-testid="file-reload"]')).click()
+                page.locator(_pane(2, '[data-testid="file-discard-yes"]')).click()
+                until(lambda: save.is_disabled(), timeout=3)
     _reset_all(page, mock, until)
 
 

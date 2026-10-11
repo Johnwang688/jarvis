@@ -28,6 +28,7 @@ import {
   type DrawnSet, type PaneNo, type Preset, type Split, type View, type Workspace, type WorkspaceFit,
 } from "../lib/workspace";
 import { inTerminal, terminalTakesKey } from "../lib/terminal";
+import { chordStep, isSaveKey, type ChordState } from "../lib/editorkeys";
 import { terminals, usePanelDot } from "./Terminal";
 
 export interface LayoutControl {
@@ -199,30 +200,47 @@ export function useLayout(blocked = false): LayoutControl {
     setPreferPanel(false);
   }, []);
 
-  // Capture phase on the window: the input bar stops its keys from bubbling
-  // (so Space typed there is not push-to-talk), and these keys must work from
-  // the box the owner's cursor usually sits in. The zoom keys are the HUD's
-  // everywhere, Monaco and the input bar included — neither binds them, and
-  // letting one through is Chrome's page zoom, which this control cannot see
-  // and the browser remembers per site. Ctrl+B stands aside in Monaco (its
-  // Ctrl+K Ctrl+B chord), ignores auto-repeat (holding it would flap the
-  // pane), and nothing fires mid-composition. Ctrl+` and Ctrl+Alt+1 … 4
-  // ignore auto-repeat too.
+  // **The one place the HUD's keys are taken.** Capture phase on the window:
+  // the input bar stops its keys from bubbling (so Space typed there is not
+  // push-to-talk), and these keys must work from the box the owner's cursor
+  // usually sits in. The zoom keys are the HUD's everywhere, Monaco and the
+  // input bar included — letting one through is Chrome's page zoom, which
+  // this control cannot see and the browser remembers per site. Ctrl+B folds
+  // the sidebar from Monaco too (decisions E-10), ignores auto-repeat
+  // (holding it would flap the pane), and nothing fires mid-composition.
+  // Ctrl+` and Ctrl+Alt+1 … 4 ignore auto-repeat too.
+  //
+  // Monaco's Ctrl+K chords (ED-1): the second key of one typed in an editor
+  // is Monaco's, whatever HUD key it is — Ctrl+K Ctrl+B sets the selection
+  // anchor, Ctrl+K Ctrl+0 folds all — and is still kept from Chrome. Every
+  // keydown feeds the tracker (lib/editorkeys.ts), so a lone Ctrl+B is told
+  // apart from a chord's.
+  //
+  // Ctrl+S: Chrome's "Save page as" never opens. In an editor Monaco's own
+  // Ctrl+S command saves that buffer (components/Editor.tsx); in a terminal
+  // it is the shell's (XOFF, readline's forward search).
+  const chord = useRef<ChordState>(null);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      const step = chordStep(chord.current, e, inMonaco(e.target), e.timeStamp);
+      chord.current = step.state;
       if (e.isComposing) return;
       const what = shortcutFor(e);
-      if (!what) return;
+      const save = isSaveKey(e);
+      if (!what && !save) return;
       if (blockedRef.current) {
         e.preventDefault();
         return;
       }
       // In a terminal the shell gets Ctrl+B and Ctrl+Alt+B (readline back-
-      // char; page up in less and vim) and Ctrl+_ (readline undo). The zoom
-      // keys, Ctrl+` and Ctrl+Alt+N stay the HUD's there too.
-      if (inTerminal(e.target) && terminalTakesKey(what, e.key)) return;
+      // char; page up in less and vim), Ctrl+_ (readline undo) and Ctrl+S.
+      // The zoom keys, Ctrl+` and Ctrl+Alt+N stay the HUD's there too.
+      if (inTerminal(e.target) && (save || terminalTakesKey(what, e.key))) return;
+      if (step.second || save) {
+        e.preventDefault();
+        return;
+      }
       if (what === "toggleLeft" || what === "toggleRight") {
-        if (inMonaco(e.target)) return;
         e.preventDefault();
         if (e.repeat) return;
         toggle(what === "toggleLeft" ? "left" : "right");

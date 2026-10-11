@@ -29,6 +29,7 @@ import { ChatTab } from "./components/ChatTab";
 import { InputBar, MAX_FILES, toAttachment } from "./components/InputBar";
 import { TaskView } from "./components/TaskView";
 import { FileTab } from "./components/FileTab";
+import { monacoEditors, monacoLanguage, monacoModels, setEditorsBlocked } from "./lib/monaco";
 import { DiffTab } from "./components/DiffTab";
 import { PreviewTab } from "./components/PreviewTab";
 import { ApprovalQueue, ApprovalVeil } from "./components/Approvals";
@@ -99,6 +100,9 @@ export default function App() {
   // there froze with it (review of PR #32). A layout effect, so the hold is on
   // before a paste's next chunk can leave.
   useLayoutEffect(() => terminals.setBlocked(blocked), [blocked]);
+  // And nothing reaches an editor: every Monaco goes read-only and gives up
+  // focus while a card is up (ED-1), said from here for the same reason.
+  useLayoutEffect(() => setEditorsBlocked(blocked), [blocked]);
   // A render error stopped the title bar, the shell and the orb drawing
   // (components/Boundary.tsx): the owner sees a Reload prompt and nothing
   // else, so nothing is heard or sent on their behalf from then on — no
@@ -1727,6 +1731,11 @@ export default function App() {
       reconcile: () => reconcileBusy(),
       // The centre's panes as stored and as drawn (lib/workspace.ts).
       workspace: () => ({ ws: layoutNow.current.ws, fit: layoutNow.current.fit }),
+      // Monaco, read-only (lib/monaco.ts): live model URIs, live editors, and
+      // the language the registry gives a path.
+      monacoModels,
+      monacoEditors,
+      monacoLanguage,
     };
   }, [capture, dispatch, onWakeHit, reconcileBusy]);
 
