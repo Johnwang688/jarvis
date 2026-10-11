@@ -208,3 +208,28 @@ describe("a noise that is not a turn", () => {
     vi.useRealTimers();
   });
 });
+
+describe("a window that stopped drawing sends nothing in hand (review of PR #32)", () => {
+  it("abandon() drops a held push-to-talk: releasing it sends nothing", () => {
+    const { cap, sent } = mk();
+    cap.feedMs(2000, QUIET);
+    expect(cap.press()).toBe(true);
+    cap.feedMs(1500, SPEECH);
+    cap.abandon();
+    cap.release();
+    expect(sent).toHaveLength(0);
+  });
+
+  it("abandon() drops an utterance already claimed, and the follow-up window", () => {
+    const { cap, sent } = mk();
+    cap.feedMs(2000, QUIET);
+    cap.openFollowUp();
+    cap.feedMs(600, SPEECH); // open and claimed by the follow-up window
+    cap.abandon();
+    cap.feedMs(800, SPEECH);
+    cap.feedMs(HANGOVER_MS + 300, QUIET);
+    cap.feedMs(1200, SPEECH); // the window is closed too: not claimed
+    cap.feedMs(HANGOVER_MS + 300, QUIET);
+    expect(sent).toHaveLength(0);
+  });
+});

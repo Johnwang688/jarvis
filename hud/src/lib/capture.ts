@@ -69,6 +69,19 @@ export class Capture {
     clearTimeout(this.followUpTimer);
   }
 
+  /**
+   * The window stopped drawing (a render error): nothing in hand is sent — a
+   * push-to-talk being held, an utterance a wake hit or the follow-up window
+   * claimed, a wake hit waiting for one. The caller keeps the detector
+   * suppressed from then on.
+   */
+  abandon() {
+    this.ptt = null;
+    this.segClaimed = false;
+    this.wakeHitAt = -1e9;
+    this.closeFollowUp();
+  }
+
   /** Called when the mic unmutes: everything before this point stays local. */
   markUnmute() {
     this.micFloorSample = this.ring.written;
