@@ -1363,8 +1363,9 @@ chat's box, unsent; W-6) so the env rule has something to disable; ED-7
 extends it, and anything new that carries a buffer's text toward Jarvis must
 ask `jarvisMayRead` first. Polling mock: `mock.disk_write`/`disk_delete`
 write behind the editor; the mock's `files/stat` and etag 409s follow the
-daemon's. Space typed in Monaco is still push-to-talk (#40's), so the
-headless checks type no spaces. Test hook: `__hud.buffers()` (no text).
+daemon's. The headless checks type no spaces (they were written while
+Space was still push-to-talk; #40 moved it to Ctrl+D). Test hook:
+`__hud.buffers()` (no text).
 Free checks: `lib/buffers.test.ts`, `state/buffers.test.ts`,
 `workspace.test.ts` (tabs), `tests/v2/editor_files_check.py` (the name rule,
 the kinds, etag/409/stat, owner-only, env content kept off the bus, logs,
