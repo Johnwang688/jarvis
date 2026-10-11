@@ -31,8 +31,12 @@ that fix reverted:
   F8  the cycle went OFF → AUTO, "LISTENING · SPEAK NOW" and a project-gone
       notice were cut off, under a card the orb said "approval", Steer looked
       like Send, and the popover re-subscribed its listeners every render;
-  F9  (in hud_v2_check.py: the effort list's first entry, and AUTO/REVIEW never
-      saying MUTED) and the cap and the cycle button pinned here.
+  F9  (in hud_v2_check.py: the effort list's first entry — the effort slider's
+      default stop since PR #30 — and AUTO/REVIEW never saying MUTED) and the
+      cap and the cycle button pinned here.
+
+PR #30 made the effort a slider: F4's Tab round and arrows and F6's card are
+checked against it as well.
 """
 from __future__ import annotations
 
@@ -480,20 +484,24 @@ def _popover_keyboard_checks(page, mock, check, until):
     t3 = _focused(page)
     page.keyboard.press("Shift+Tab")
     t4 = _focused(page)
-    check("review #29 F4: Tab goes model list → effort list → Set default… → round, and never leaves",
-          t1["testid"] == "effort-opt" and t1["selected"] == "true" and t2["testid"] == "provider-defaults-open"
+    # The effort is a slider since PR #30: it is the round's second stop.
+    check("review #29 F4: Tab goes model list → effort slider → Set default… → round, and never leaves",
+          t1["testid"] == "effort-slider" and t2["testid"] == "provider-defaults-open"
           and t3["testid"] == "model-opt" and t4["testid"] == "provider-defaults-open"
           and all(t["inPop"] for t in (t1, t2, t3, t4)),
           str([(t["testid"], t["value"]) for t in (t1, t2, t3, t4)]))
     page.keyboard.press("Shift+Tab")
-    eff = page.locator(_pop() + ' [data-testid="effort-opt"]').evaluate_all(
-        "els => els.map(e => e.getAttribute('data-value'))")
+    slider = page.locator(_pop() + ' [data-testid="effort-slider"]')
+    now = lambda: int(slider.get_attribute("aria-valuenow") or -1)
+    e0 = (_focused(page), now())
     page.keyboard.press("ArrowRight")
-    e1 = _focused(page)
+    e1 = (_focused(page), now())
     page.keyboard.press("ArrowLeft")
-    e2 = _focused(page)
-    check("review #29 F4: and the arrows move within the effort list",
-          e1["testid"] == "effort-opt" and e1["value"] == eff[1] and e2["value"] == eff[0], f"{e1} {e2} of {eff}")
+    e2 = (_focused(page), now())
+    check("review #29 F4: and the arrows move the effort slider, focus staying on it",
+          all(e[0]["testid"] == "effort-slider" for e in (e0, e1, e2))
+          and e1[1] == e0[1] + 1 and e2[1] == e0[1] and page.locator(_pop()).count() == 1,
+          str([(e[0]["testid"], e[1]) for e in (e0, e1, e2)]))
     # Space on an option is the option's, never push-to-talk.
     page.keyboard.press("Shift+Tab")
     page.keyboard.down("Space")
@@ -601,6 +609,34 @@ def _escape_under_card_checks(page, mock, check, until):
     page.keyboard.press("Escape")
     denied = until(lambda: [b for b in mock.sent("POST", "/approvals/req-pop-1")] or None, timeout=3)
     check("review #29 F6: and Escape denies the card", bool(denied) and denied[-1].get("decision") == "deny",
+          str(denied))
+    until(lambda: page.locator('[data-testid="approval-card"]').count() == 0, timeout=3)
+
+    # The same with focus on the effort slider (PR #30), whose keys are its
+    # own: the card still closes the popover, the slider's keys reach nothing
+    # under it, and Escape is still the card's.
+    btn = page.locator(_btn())
+    until(lambda: not btn.is_disabled(), timeout=3)
+    _reopen(page)
+    slider = page.locator(_pop() + ' [data-testid="effort-slider"]')
+    slider.focus()
+    on_slider = _active_testid(page) == "effort-slider"
+    patches = len(mock.sent("PATCH", "/threads/t2"))
+    _approval(mock, "req-pop-2")
+    page.wait_for_selector('[data-testid="approval-card"]')
+    check("PR #30 (F6): a card closes the popover with focus on the effort slider",
+          on_slider and bool(until(lambda: page.locator('[data-testid="model-pop"]').count() == 0, timeout=2))
+          and btn.is_disabled(), f"on slider: {on_slider}")
+    for k in ("ArrowRight", "End", "Home", "Space"):
+        page.keyboard.press(k)
+    time.sleep(0.6)
+    check("PR #30: the slider's keys change nothing under the card",
+          len(mock.sent("PATCH", "/threads/t2")) == patches and page.locator('[data-testid="model-pop"]').count() == 0
+          and page.locator('[data-testid="approval-card"]').count() == 1,
+          str(mock.sent("PATCH", "/threads/t2")[patches:]))
+    page.keyboard.press("Escape")
+    denied = until(lambda: [b for b in mock.sent("POST", "/approvals/req-pop-2")] or None, timeout=3)
+    check("PR #30: and Escape still denies the card", bool(denied) and denied[-1].get("decision") == "deny",
           str(denied))
     until(lambda: page.locator('[data-testid="approval-card"]').count() == 0, timeout=3)
 

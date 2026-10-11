@@ -1529,13 +1529,16 @@ def _rr_chip_writeback_checks(page, mock, check, until):
     try:
         btn = page.locator(_pane(1, '[data-testid="model-chip-btn"]'))
         until(lambda: btn.count() > 0, timeout=3)
-        cur = btn.get_attribute("data-effort") or ""
         btn.click()
         pop = '[data-testid="model-pop"][data-pane="1"]'
         page.wait_for_selector(pop)
-        opts = page.locator(pop + ' [data-testid="effort-opt"]').evaluate_all(
-            "els => els.map(e => e.getAttribute('data-value'))")
-        page.locator(pop + f' [data-testid="effort-opt"][data-value="{next(o for o in opts if o != cur)}"]').click()
+        # The effort is a slider (PR #30): click a stop other than the one
+        # the thumb is on, which commits at once.
+        slider = page.locator(pop + ' [data-testid="effort-slider"]')
+        at = int(slider.get_attribute("aria-valuenow") or 0)
+        stops = page.locator(pop + ' [data-testid="effort-stop"]')
+        box = stops.nth(0 if at != 0 else stops.count() - 1).bounding_box()
+        page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
         until(lambda: _pumped(page) and len(held) > 0, timeout=3)
         check("setup: the model change is on its way", len(held) == 1)
         _box(page, 1).fill("")

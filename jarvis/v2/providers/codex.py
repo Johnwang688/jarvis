@@ -88,6 +88,36 @@ _state_lock = threading.Lock()
 _open_homes: set[Path] = set()
 
 
+# Codex asking to approve an MCP tool call (plan 2026-10-10 §4.2). The
+# jarvis server's read-only tools are `approval_mode = "approve"` in the
+# private config, so none should arrive; if one does — an elicitation, or a
+# `requestUserInput` marked as an MCP tool approval — it is declined with a
+# non-fatal ERROR, never a QUESTION for the owner, never an accept.
+MCP_ELICITATION = "mcpServer/elicitation/request"
+MCP_DECLINED = ("Codex asked to approve a Jarvis tool call; declined "
+                "(Jarvis decides its own tools)")
+# What marks a `requestUserInput` as an MCP tool approval (strings in the
+# 0.161 binary: the question id `mcp_tool_call_approval…`, and the
+# `codex_approval_kind` metadata key).
+_MCP_APPROVAL_MARKS = ("mcp_tool_call_approval", "codex_approval_kind")
+
+
+def _mcp_approval(params, depth: int = 0) -> bool:
+    """Whether a server request's params carry an MCP-approval mark, in any
+    key or string value, a few levels down. Wrongly true only declines a
+    question; wrongly false would put an approval in front of the owner."""
+    if depth > 6:
+        return True
+    if isinstance(params, str):
+        return any(mark in params for mark in _MCP_APPROVAL_MARKS)
+    if isinstance(params, dict):
+        return any(_mcp_approval(k, depth + 1) or _mcp_approval(v, depth + 1)
+                   for k, v in list(params.items())[:200])
+    if isinstance(params, list):
+        return any(_mcp_approval(v, depth + 1) for v in params[:200])
+    return False
+
+
 class MetadataBusy(RuntimeError):
     """A Codex session holds the login lock (a turn runs, or one is
     starting): account metadata is not read now. The HUD backs off and keeps
@@ -557,6 +587,15 @@ class CodexProvider:
                                      _Session(rpc, brief, permit, home, returned_id, accounting))
             except BaseException:
                 rpc.close()
+                if brief.mcp_servers:
+                    # The token the config carries died with this session.
+                    try:
+                        codex_config.strip_mcp_servers(home / "config.toml")
+                    except Exception:  # noqa: BLE001
+                        try:
+                            os.unlink(home / "config.toml")
+                        except OSError:
+                            pass
                 with _state_lock:
                     _open_homes.discard(home)
                 raise
@@ -673,6 +712,21 @@ class CodexProvider:
                             s.rpc.reply(msg["id"], error={"code": -32602, "message": "Request identity mismatch"})
                             raise RpcError("Codex server request identity mismatch")
                         s.rpc.reply(msg["id"], {"currentTimeAt": int(time.time())})
+                        continue
+                    if method == MCP_ELICITATION:
+                        # Codex asking to approve an MCP tool call (2026-10-10,
+                        # plan §4.2). It carries no turnId, so it is answered
+                        # here, before the turn-identity check would kill the
+                        # turn over it: declined, never a QUESTION, never an
+                        # accept — Jarvis's own gate decides its tools.
+                        if params.get("threadId") not in (None, s.thread_id):
+                            s.rpc.reply(msg["id"], error={"code": -32602, "message": "Request identity mismatch"})
+                            raise RpcError("Codex server request identity mismatch")
+                        s.rpc.reply(msg["id"], {"action": "decline", "content": None})
+                        if not started:
+                            started = True
+                            yield self._event(h, EventKind.TURN_STARTED)
+                        yield self._event(h, EventKind.ERROR, fatal=False, message=MCP_DECLINED)
                         continue
                     if (params.get("threadId") != s.thread_id
                             or not isinstance(params.get("turnId"), str) or not params["turnId"]
@@ -939,6 +993,14 @@ class CodexProvider:
             if s.rpc.failed.is_set():
                 raise RpcError("Codex transport failed during approval")
             return
+        if method in ("item/tool/requestUserInput", "tool/requestUserInput") and _mcp_approval(p):
+            # "MCP tool approval via request_user_input" (codex 0.161): an
+            # approval in a question's clothes. Declined like an elicitation —
+            # an error answer, so nothing reads as the owner's choice — never
+            # put to the owner as a QUESTION and never accepted.
+            self._reply(s, request, error={"code": -32603, "message": "Jarvis declines MCP tool approvals"})
+            yield self._event(h, EventKind.ERROR, fatal=False, message=MCP_DECLINED)
+            return
         if method in ("item/tool/requestUserInput", "tool/requestUserInput"):
             answers = {}
             questions = p.get("questions", [])
@@ -1136,5 +1198,18 @@ class CodexProvider:
             s.closed.set()
             s.pending.clear()
         s.rpc.close()
+        if s.brief.mcp_servers:
+            # A jarvis server's env holds the session's caller token (plan
+            # §1.3): a closed session's config keeps none. The daemon has
+            # already revoked it; this takes it off the disk.
+            try:
+                codex_config.strip_mcp_servers(s.home / "config.toml")
+            except Exception as exc:  # noqa: BLE001 — close must not raise
+                LOG.warning("Cannot strip MCP servers from a closed Codex config (%s); "
+                            "removing it", type(exc).__name__)
+                try:
+                    os.unlink(s.home / "config.toml")
+                except OSError:
+                    pass
         with _state_lock:
             _open_homes.discard(s.home)
