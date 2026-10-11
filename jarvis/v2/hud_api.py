@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import base64
 import copy
+import dataclasses
 import difflib
 import json
 import logging
@@ -19,6 +20,7 @@ import threading
 import time
 from urllib.parse import unquote, urlsplit
 
+from jarvis import config
 from jarvis.tools.secrets import is_protected, scrub
 from jarvis.tools.search import SKIP_DIRS as SEARCH_SKIP_DIRS
 from .ledger import UsageLedger
@@ -33,7 +35,8 @@ FILE_CAP = 2 * 1024 * 1024
 PATCH_CAP = 1024 * 1024
 ATTACH_CAP = 4 * 1024 * 1024
 LOG = logging.getLogger(__name__)
-HUD_DIST = Path(__file__).resolve().parents[2] / "hud" / "dist"
+# What the HUD listener serves; the write tools refuse it (config.HUD_DIST, BR-0).
+HUD_DIST = config.HUD_DIST
 
 # Claude Code's own `/usage` command. Undocumented, so a failure is "not
 # reported", never a number invented from the ledger. The User-Agent has to
@@ -1259,6 +1262,11 @@ def route(handler, daemon, parts, query):
         if parts[2] == "send" and method == "POST":
             project = daemon.require(stores.projects, thread.project_id)
             message = assemble_turn(project, handler._body())
+            # The owner is at the desk only when the window itself sent this
+            # (the HUD's listener and Origin), never a script on the API one.
+            from .projects import is_owner
+            if is_owner(handler, daemon):
+                message = dataclasses.replace(message, desk=True)
             # Never a dead end while a turn runs (2026-10-08): the message
             # starts a turn, is steered into the running one, or waits behind
             # it — `{"status": "started"|"steered"|"queued", "turn_id", ...}`.

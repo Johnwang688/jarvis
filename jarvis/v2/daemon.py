@@ -54,6 +54,8 @@ STOP_TIMEOUT = 2.0
 GATE_KINDS = {EventKind.APPROVAL_REQUESTED: "gate_requested",
               EventKind.APPROVAL_RESOLVED: "gate_resolved"}
 _TASK_VERBS = ("start", "steer", "cancel", "resume", "answer")
+# `PATCH /projects` fields only the owner may change, from the HUD (BR-0).
+_OWNER_PROJECT_FIELDS = ("profile", "always_ask", "extra_dirs", "root")
 
 # Owner messages that wait on a running chat turn (2026-10-08, steering). One
 # queue and one cap for every surface: the HUD's send and a message typed in
@@ -308,6 +310,8 @@ class Daemon:
             self._server_thread = self._listeners[0][1]
             from .hud_api import connect_controls
             connect_controls(self)
+            # `terminal_read` (WP-F) reads these terminals and no others.
+            self.terminals.install()
             self.schedules.start()
 
     def _sweep_carriers(self) -> None:
@@ -1419,6 +1423,7 @@ class Daemon:
             # Terminals end with the daemon (decision W-3): every window is
             # told and every session gets SIGHUP now; what outlives it is
             # SIGKILLed below, before the listeners close.
+            self.terminals.uninstall()
             self.terminals.hangup_all()
             sessions = list(self._sessions.values())
             # The queue is in memory; what waits on a turn at shutdown says so
@@ -1702,6 +1707,17 @@ def _handler(daemon):
                                               "always_ask"))
                         before = project
                         project = from_json(Project, {**to_json(project), **body})
+                        # What a project's threads may do and where (BR-0): a
+                        # change to its permission profile, always-ask list,
+                        # extra folders or root is the owner's, from the HUD
+                        # window — never any client of the API listener, which
+                        # could otherwise loosen what asks it. A field sent
+                        # back unchanged changes nothing and needs no owner.
+                        guarded = [k for k in _OWNER_PROJECT_FIELDS
+                                   if k in body and to_json(project).get(k) != to_json(before).get(k)]
+                        if guarded:
+                            from .projects import owner_only
+                            owner_only(self, daemon)
                         _validate(project, Project)
                         if "routing" in body:
                             # Only when written: a project saved before the
@@ -1821,6 +1837,13 @@ def _handler(daemon):
                 _object(query, ())
                 return 200, [r.to_json() for r in daemon.approvals.pending()]
             if method == "POST" and len(parts) == 2 and parts[0] == "approvals":
+                # Owner-only (BR-0): the HUD's listener and the HUD's Origin.
+                # The API listener serves the same HUD page, so a page loaded
+                # there passed `check_origin` (its Origin equals its Host) and
+                # could approve — v1's agent browser could load it. Discord
+                # and the escape hatch resolve in-process and never come here.
+                from .projects import owner_only
+                owner_only(self, daemon)
                 body = _object(self._body(), ("decision", "always"), ("decision",))
                 always = body.get("always", False)
                 if not isinstance(always, bool):

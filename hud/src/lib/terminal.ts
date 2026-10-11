@@ -573,7 +573,7 @@ export function inTerminal(target: EventTarget | null): boolean {
  * Which of the HUD's own keys stand aside in a terminal, so the shell gets
  * them (plan §2.2's key table): Ctrl+B and Ctrl+Alt+B (readline back-char,
  * page up in less and vim) and Ctrl+_ (readline undo). Everything else —
- * the zoom keys, Ctrl+`, Ctrl+Alt+1…4 — stays the HUD's even there.
+ * the zoom keys, Ctrl+`, Ctrl+Alt+1…8 — stays the HUD's even there.
  */
 export function terminalTakesKey(shortcut: string | null, key: string): boolean {
   if (shortcut === "toggleLeft" || shortcut === "toggleRight") return true;
@@ -625,6 +625,35 @@ export function placeTerminals(
     if (p && p.view === "terminal" && p.terminalId && !out.has(p.terminalId)) out.set(p.terminalId, n);
   }
   return out;
+}
+
+/**
+ * `terminal_read` on the bus (WP-F, decisions W-2): Jarvis read this terminal,
+ * or asked and was refused. The record is exactly `{terminal_id, lines, at,
+ * refused}` — never output, a command or a reason — and a record that does not
+ * have that shape is dropped whole; any other key is ignored, never drawn.
+ */
+export interface ReadNote {
+  terminalId: string;
+  lines: number;
+  at: string;
+  refused: boolean;
+}
+
+export function parseRead(data: unknown): ReadNote | null {
+  const d = (data ?? {}) as Record<string, unknown>;
+  if (!isTerminalId(d.terminal_id)) return null;
+  const lines = d.lines;
+  if (typeof lines !== "number" || !Number.isInteger(lines) || lines < 0 || lines > 100_000) return null;
+  if (typeof d.refused !== "boolean") return null;
+  return { terminalId: d.terminal_id, lines, at: typeof d.at === "string" ? d.at.slice(0, 64) : "",
+           refused: d.refused };
+}
+
+/** The terminal bar's note: "Jarvis read 200 lines · 15:42", or "refused a read · 15:42". */
+export function readNoteText(note: ReadNote, time: string): string {
+  if (note.refused) return `refused a read · ${time}`;
+  return `Jarvis read ${note.lines} line${note.lines === 1 ? "" : "s"} · ${time}`;
 }
 
 /**

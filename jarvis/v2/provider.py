@@ -144,6 +144,12 @@ class UserMessage:
     spoken: bool = False
     discord_message_id: str | None = None
     discord_channel_id: str | None = None
+    # The owner is at the desk (WP-F): set only by the HUD's own send route,
+    # and only when the request came through the HUD's listener with the
+    # HUD's Origin (`projects.is_owner`) — never by Discord, the API
+    # listener every tool's HTTP client uses, the escape hatch or a schedule.
+    # The fast path holds `terminal_read` only for such a turn.
+    desk: bool = False
 
 
 # Permission callback the daemon hands every provider: the five layers of §6

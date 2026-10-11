@@ -46,9 +46,8 @@ import { api } from "../api";
 import {
   AttachLedger, InputGate, OutputPipe, attachUrl, cleanPaste, cleanTitle, clampSize, counterZoom, encodeInput,
   fontSizeFor, integrationNote, isTerminalId, judgeLink, loadMine, loadPrefs, menuWidth, pageNonce, parseControl,
-  placeMenu, saveMine,
-  savePrefs,
-  SPECS_KEPT, type InSpec, type TerminalRow,
+  parseRead, placeMenu, readNoteText, saveMine, savePrefs,
+  SPECS_KEPT, type InSpec, type ReadNote, type TerminalRow,
 } from "../lib/terminal";
 import { toCss } from "../lib/layout";
 import { judgePreviewUrl } from "../lib/preview";
@@ -906,6 +905,8 @@ export class TermManager {
   sessions = new Map<string, TermSession>();
   /** Attaches this window did not make (`terminal_attached`): quiet, dismissible. */
   notices: AttachNotice[] = [];
+  /** The last `terminal_read` per terminal (WP-F): "Jarvis read 200 lines · 15:42" in its bar. */
+  reads = new Map<string, ReadNote>();
   /** A busy terminal the owner asked to close: asked once more. `unsure`: the listing failed. */
   confirm: { id: string; title: string; unsure: boolean } | null = null;
   /** A Ctrl+clicked link to a server on this machine: where to open it (WP-E). Screen px. */
@@ -936,8 +937,10 @@ export class TermManager {
   panelOpen = false;
   ledger = new AttachLedger();
   prefs = loadPrefs();
-  /** Which drawn pane shows which terminal (lib/terminal.ts, placeTerminals). */
+  /** Which drawn pane shows which terminal (lib/terminal.ts, placeTerminals): pane ids. */
   place = new Map<string, number>();
+  /** Each pane id's slot, the number the owner reads ("in pane 2"): ids are not slots (WP-G1). */
+  private slots = new Map<number, number>();
   /** Exited while nobody could see it: the dot on ⬓. */
   private unseenExits = new Set<string>();
   private noticeSeq = 0;
@@ -1107,6 +1110,18 @@ export class TermManager {
       void this.refresh();
     }
     this.changed();
+  }
+
+  setSlots(slots: Map<number, number>) {
+    const same = slots.size === this.slots.size && [...slots].every(([k, v]) => this.slots.get(k) === v);
+    if (same) return;
+    this.slots = slots;
+    this.changed();
+  }
+
+  /** The slot pane `pane` (an id) is drawn in: what "in pane N" says. */
+  slotOf(pane: number): number {
+    return this.slots.get(pane) ?? pane;
   }
 
   setPlace(place: Map<string, number>) {
@@ -1327,6 +1342,17 @@ export class TermManager {
     this.changed();
   }
 
+  /**
+   * `terminal_read` on the bus: Jarvis read this terminal (or was refused).
+   * HUD chrome only — the note never touches the terminal's stream.
+   */
+  heardRead(data: unknown) {
+    const note = parseRead(data);
+    if (!note) return;
+    this.reads = new Map(this.reads).set(note.terminalId, note);
+    this.changed();
+  }
+
   dismissNotice(key: number) {
     this.notices = this.notices.filter((n) => n.key !== key);
     this.changed();
@@ -1376,6 +1402,11 @@ export const terminals = new TermManager();
 /** The SSE `terminal_attached` record (App's one event stream). */
 export function terminalAttached(data: unknown) {
   terminals.heardAttached(data);
+}
+
+/** The SSE `terminal_read` record (App's one event stream). */
+export function terminalRead(data: unknown) {
+  terminals.heardRead(data);
 }
 
 if (typeof window !== "undefined") {
@@ -1454,6 +1485,7 @@ export function TerminalView(props: { id: string; where: string; pane?: PaneNo; 
   const note = integrationNote(live ? { integration: live.integration, marked: s.marked || live.marked } : null,
                                settled);
   const readable = row ? row.readable : true;
+  const read = mgr.reads.get(props.id);
   const name = s.title || row?.title || `terminal ${props.id}`;
   const blocked = mgr.blocked;
 
@@ -1467,6 +1499,15 @@ export function TerminalView(props: { id: string; where: string; pane?: PaneNo; 
           <span className={"termbadge " + note.kind} data-testid="term-integration" data-kind={note.kind}
                 title={note.title}>
             {note.badge}
+          </span>
+        ) : null}
+        {read ? (
+          <span className={"termreadnote" + (read.refused ? " refused" : "")} data-testid="term-read-note"
+                data-refused={read.refused ? "true" : "false"} role="status"
+                title={read.refused
+                  ? "Jarvis asked to read this terminal and was refused: reading is off, or the output may hold a credential"
+                  : "Jarvis read this terminal's recent output (text only; it never types here)"}>
+            {readNoteText(read, clock(read.at))}
           </span>
         ) : null}
         <button
@@ -1654,7 +1695,7 @@ export function TerminalPane(props: { pane: PaneNo; terminalId: string | null; d
     if (at && at !== props.pane) {
       return (
         <div className="tabbody pad muted" data-testid={`pane-${props.pane}-terminal-elsewhere`}>
-          This terminal is shown in pane {at}.{" "}
+          This terminal is shown in pane {mgr.slotOf(at)}.{" "}
           <button type="button" className="quiet" onClick={() => mgr.focusPane(at as PaneNo)}>Go there</button>
         </div>
       );
@@ -1668,7 +1709,7 @@ export function TerminalPane(props: { pane: PaneNo; terminalId: string | null; d
   }
   const where = (r: TerminalRow) => {
     const n = mgr.place.get(r.id);
-    if (n) return `in pane ${n}`;
+    if (n) return `in pane ${mgr.slotOf(n)}`;
     if (r.exited) return "exited";
     if (mgr.elsewhere(r.id)) return "in another window";
     return "in the panel";
@@ -1758,12 +1799,12 @@ export function TerminalPanel(props: {
                   aria-selected={r.id === active && !pane}
                   data-testid={`panel-tab-${r.id}`}
                   data-place={pane ? `pane-${pane}` : "panel"}
-                  title={pane ? `${r.title} — shown in pane ${pane}; click to go there` : r.title}
+                  title={pane ? `${r.title} — shown in pane ${mgr.slotOf(pane)}; click to go there` : r.title}
                   disabled={props.blocked}
                   onClick={() => (pane ? mgr.focusPane(pane as PaneNo) : mgr.selectTab(r.id))}
                 >
                   <span className="paneltab-name">{r.title || r.id}</span>
-                  {pane ? <span className="paneltab-where">in pane {pane}</span> : null}
+                  {pane ? <span className="paneltab-where">in pane {mgr.slotOf(pane)}</span> : null}
                   {ended ? <span className="paneltab-where">ended</span>
                     : exited ? <span className="paneltab-where">exited</span>
                       : away ? <span className="paneltab-where">in another window</span> : null}
@@ -1881,7 +1922,7 @@ export function TerminalPanel(props: {
           </div>
         ) : mgr.place.has(active) ? (
           <div className="pad muted" data-testid="panel-elsewhere">
-            This terminal is shown in pane {mgr.place.get(active)}.{" "}
+            This terminal is shown in pane {mgr.slotOf(mgr.place.get(active)!)}.{" "}
             <button type="button" className="quiet" data-testid="panel-jump"
                     onClick={() => mgr.focusPane(mgr.place.get(active) as PaneNo)}>
               Go there

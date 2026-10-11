@@ -77,6 +77,16 @@ _LOADED: ContextVar[set[str] | None] = ContextVar("jarvis_loaded_groups", defaul
 # by the provider survives the loop's own bind on the same thread.
 _PROPOSAL: ContextVar[dict | None] = ContextVar("jarvis_proposal", default=None)
 
+# Whether the owner is at the desk for this turn, for `terminal_read` (WP-F,
+# decisions W-2: "foreground chat threads only, where the owner is present").
+# A one-key mutable dict, `{"present": bool}`: the v2 FastPathProvider binds
+# it for an owner's chat turn typed in the HUD, and sets `present` False when
+# a message from anywhere else (Discord, the escape hatch) steers that turn.
+# Unbound — every v1 surface, a workflow, a goal, a task, a script — means
+# nobody is, and the tool refuses. Like the proposal slot, `Agent.run_turn`
+# never sets it, so a slot the provider bound survives the loop's own bind.
+_DESK: ContextVar[dict | None] = ContextVar("jarvis_desk", default=None)
+
 # Which v2 conversation a tool call belongs to (the peers plan's Phase 0,
 # 2026-10-10): `{thread_id, project_id, provider, turn_id}`. The v2 fast path
 # binds it for its own turn; the daemon's jarvis-mcp bridge binds it for each
@@ -100,6 +110,7 @@ def bind(
     origin: str | None = None,
     loaded_groups: set[str] | None = None,
     proposal: dict | None = None,
+    desk: dict | None = None,
     caller: dict | None = None,
 ) -> None:
     """Bind the current agent's per-run state. Called by `Agent.run_turn`."""
@@ -119,6 +130,8 @@ def bind(
         _LOADED.set(loaded_groups)
     if proposal is not None:
         _PROPOSAL.set(proposal)
+    if desk is not None:
+        _DESK.set(desk)
     if caller is not None:
         _CALLER.set({key: caller.get(key) for key in CALLER_KEYS})
 
@@ -244,6 +257,13 @@ def proposal_slot() -> dict | None:
     like it worked and then not exist.
     """
     return _PROPOSAL.get()
+
+
+def at_desk() -> bool:
+    """True only inside a turn the v2 fast path bound as the owner's, typed
+    in the HUD, and never steered from elsewhere since. Fails closed."""
+    slot = _DESK.get()
+    return bool(slot is not None and slot.get("present") is True)
 
 
 def caller() -> dict | None:

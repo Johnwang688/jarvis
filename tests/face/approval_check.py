@@ -9,7 +9,9 @@ Covers, in three layers:
      wakes with it; plus the same-origin and content-type refusals
   3. the self-approval block — the browser and web tools must refuse the
      face's own origin, or the agent could open its own HUD and click its own
-     AUTHORIZE button
+     AUTHORIZE button — and, since BR-0, every port in `config.control_ports()`
+     (v2's API listener serves the same HUD page), in every loopback spelling,
+     while the workshop and ordinary dev ports stay open
 
 Run:  .venv/bin/python tests/face/approval_check.py
 """
@@ -26,6 +28,8 @@ from pathlib import Path
 from queue import Empty, Queue
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+import httpx  # noqa: E402
 
 from jarvis import config, runtime, tools  # noqa: E402
 from jarvis.browser import BrowserPolicy  # noqa: E402
@@ -223,6 +227,67 @@ def block_checks() -> None:
     print("ok  web: fetch_page refuses the face's origin too")
 
 
+# Every spelling of "this machine" a browser connects to locally. The first
+# seven are what `is_loopback` always knew; the rest are BR-0's additions.
+LOOPBACK_SPELLINGS = (
+    "localhost", "LOCALHOST", "127.0.0.1", "127.0.0.2", "[::1]", "0.0.0.0", "foo.localhost",
+    "localhost.", "127.1", "0x7f000001", "2130706433", "0177.0.0.1", "[::ffff:127.0.0.1]",
+    "[0:0:0:0:0:0:0:1]", "[::]", "0",
+)
+
+
+def control_port_checks() -> None:
+    """BR-0: every Jarvis control port is refused, not only the face's.
+
+    v2's API listener (8405) serves the very same HUD page as the face's port,
+    and on a49423c `is_face_origin` refused only 8402 — so v1's browser and
+    `fetch_page` could load the HUD there. Each assertion on 8404/8405/8406
+    fails on a49423c; the numeric spellings fail there on every port.
+    """
+    ports = config.control_ports()
+    assert {8402, 8404, 8405, 8406} <= ports, ports
+    assert 8403 not in ports, "the workshop stays reachable: v1's designer screenshots its own work"
+    default = BrowserPolicy()
+    star = BrowserPolicy(allowed_hosts=["*"])
+    for port in (8402, 8404, 8405, 8406):
+        for host in LOOPBACK_SPELLINGS:
+            for scheme in ("http", "https"):
+                url = f"{scheme}://{host}:{port}/"
+                assert config.is_face_origin(url) is True, url
+                assert default.allows(url) is False, url
+                assert star.allows(url) is False, url
+        assert config.is_face_origin(f"http://localhost:{port}/approvals/abcd") is True
+    print("ok  control ports: 8402, 8404, 8405 and 8406 refused in "
+          f"{len(LOOPBACK_SPELLINGS)} loopback spellings, http and https")
+
+    for port in (8403, 3000, 5173, 8000, 8080, 8431):
+        for host in ("localhost", "127.0.0.1", "foo.localhost", "[::1]"):
+            url = f"http://{host}:{port}/"
+            assert config.is_face_origin(url) is False, url
+        assert default.allows(f"http://localhost:{port}/") is True, port
+        assert default.allows(f"http://127.0.0.1:{port}/") is True, port
+    assert config.is_face_origin("http://localhost/") is False, "no port is 80, not a control port"
+    assert config.is_face_origin("http://93.184.216.34:8405/") is False, "a public host is not us"
+    assert config.is_face_origin("http://example.com:8405/") is False
+    assert config.is_face_origin("http://localhost:99999/") is True, "unparseable local port: refuse"
+    print("ok  control ports: the workshop (8403) and ordinary dev ports stay open")
+
+    real_get = httpx.get
+
+    def must_not_fetch(*args, **kwargs):
+        raise AssertionError("fetch_page reached a control-plane port")
+
+    httpx.get = must_not_fetch
+    try:
+        for port in (8402, 8404, 8405, 8406):
+            for host in ("localhost", "127.0.0.1", "[::1]", "foo.localhost"):
+                out = tools.dispatch("fetch_page", json.dumps({"url": f"http://{host}:{port}/"}))
+                assert "control plane" in out.text, (host, port, out.text)
+    finally:
+        httpx.get = real_get
+    print("ok  web: fetch_page refuses every control port before a byte moves")
+
+
 # -- helpers ----------------------------------------------------------------
 
 
@@ -284,6 +349,7 @@ def main() -> int:
     dispatch_checks()
     http_checks()
     block_checks()
+    control_port_checks()
     print("all approval checks passed")
     return 0
 

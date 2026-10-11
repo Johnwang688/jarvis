@@ -494,7 +494,7 @@ HUD's `Origin`; anything else is 403. No tool reaches them (fast path, MCP,
 Claude or Codex threads, Discord) — `tests/v2/archive_check.py` asserts
 it. The gate keeps every tool's HTTP client off these routes; it is not a
 boundary against a shell command the permission gate approved, the same
-footing as `/approvals`.
+footing as `/approvals` (owner-only too since BR-0, below).
 
 ## Additions 2026-10-07 (Discord slash core — S1)
 
@@ -945,12 +945,19 @@ command's span; and a line kept out of history (a leading space under
 whether or not the terminal is `integrated`; spans can add refusals, never
 remove one.
 
-**Output never leaves memory**: on the bus there are lifecycle ids only
-(`terminal_attached`), never output; the HUD lists terminals with `GET
+**Output stays in memory unless Jarvis reads it**: on the bus there are
+lifecycle records only (`terminal_attached`, and since WP-F `terminal_read`:
+ids, a count, a time), never output; the HUD lists terminals with `GET
 /terminals` and learns of an exit over the socket. Output is not in any log
-(the daemon logs opened / attached / exited / closed with the folder as a
+(the daemon logs opened / attached / read / exited / closed with the folder as a
 project name or `~`, and logs `/terminals` paths without their query, so
-never a ticket), not in a thread log, not on Discord, not on disk.
+never a ticket), not in a thread log, not on Discord, not on disk. **The
+exception is a `terminal_read` result (WP-F, below)**: what `terminal_read` returns goes where any tool result goes — the fast-path transcript (and so OpenRouter, with every later request), that conversation's v1 session `messages.json`, `config.SPILL_DIR` if context truncation cuts it later, and anything the model's reply repeats (a reply is mirrored to the chat's Discord thread and spoken).
+Its `tool_finished` summary is fixed ("read N lines", "refused", "error"), so
+the tool's own record on the bus and in the thread's `log.jsonl` carries none
+of it. That is all the fixed summary promises: the model's reply is not
+filtered — it goes to `log.jsonl`, the bus, Discord and speech like any reply,
+so whatever it repeats of the terminal lands there too.
 
 ## Additions 2026-10-09 (terminal panel and view — WP-D)
 
@@ -1107,9 +1114,10 @@ own server and is unaffected.
   when the framed page is the parent's origin. The port check refuses the
   HUD's origin up front, and `frame-ancestors 'none'` on every HUD and API
   response stops a frame from navigating itself into the HUD later. A page
-  on another origin cannot reach the parent's DOM, and `/approvals` still
-  needs the HUD's own Origin and a JSON body. And a page that sends its
-  frame to the workshop lands opaque there (the workshop's own sandbox).
+  on another origin cannot reach the parent's DOM, and `/approvals` needs
+  the HUD's listener, its own Origin and a JSON body (owner-only, BR-0).
+  And a page that sends its frame to the workshop lands opaque there (the
+  workshop's own sandbox).
 - **A URL carrying a user name or password** is refused, as a terminal
   link is.
 
@@ -1130,3 +1138,102 @@ at 100% and 160%).
 
 Not in this package: §2.5 item 5, a "dev servers in your terminals" list
 built from the listening sockets terminal sessions own.
+
+## Additions 2026-10-10 (Jarvis reads a terminal — WP-F)
+
+Decisions W-2 in `docs/plans/2026-10-09-hud-workspace-decisions.md`.
+
+- **Tool `terminal_read(terminal="", lines=200)`** (`jarvis/v2/tools/
+  terminal_read.py`, v1 registry). `terminal` is what the HUD shows — the
+  id, the title (`bash · Calc`, or just its folder part), or the number in
+  the panel's order; empty means the only one — resolved by the daemon,
+  never a path. `lines` is clamped to 1–1000. It returns the terminal's
+  normal buffer as plain text (no escape sequences, the alternate screen
+  never read), fenced as untrusted web content from `HUD terminal <title>
+  (id <id>)`, with notes after the fence: `[N line(s) withheld: possible
+  secret]`, `[the oldest N line(s) left out to fit]` (48,000 characters at
+  most), `[N long line(s) cut to 2,000 characters]`. Or exactly
+  `Refused: possible credential in this output` (an exact known value or its
+  encodings, a credential format, or a secret-printing command — never which,
+  never where), `Refused: the owner has turned off reading for this terminal
+  (<title>)`, or an `Error:` naming the open terminals.
+- **Who holds it**: `FAST_TOOLS`, and only for an owner's chat turn the HUD's
+  own window sent — the send route sets `UserMessage.desk` only on the HUD's
+  listener with its Origin. A task's thread, a Discord or DM turn, the escape
+  hatch, a schedule, a sub-agent and every v1 surface neither see nor can run
+  it (`runtime.at_desk()` fails closed); jarvis-mcp does not offer it. It is
+  not `dangerous`, asks nobody, and writes nothing.
+- SSE **`terminal_read`** `{kind: "terminal_read", data: {terminal_id,
+  lines, at, refused}}` — exactly those keys — for every read that reaches a
+  terminal, refused or not (`lines` is how many it covered; 0 when the switch
+  refused it). Never output, a command or a reason. The terminal's bar shows
+  the last one: "Jarvis read 200 lines · 15:42", or "refused a read · 15:42".
+  A record of another shape is dropped whole; any other key is never drawn.
+  It is HUD chrome: nothing is written to the PTY or the ring.
+- **Where the text goes** (corrected 2026-10-10): what `terminal_read` returns goes where any tool result goes — the fast-path transcript (and so OpenRouter, with every later request), that conversation's v1 session `messages.json`, `config.SPILL_DIR` if context truncation cuts it later, and anything the model's reply repeats (a reply is mirrored to the chat's Discord thread and spoken). The
+  `tool_finished` record's `summary` for `terminal_read` is fixed — "read N
+  lines", "refused" or "error" — never the result's first characters. That
+  keeps the tool's own record clean, nothing more: the model's reply is not
+  filtered, and reaches `log.jsonl`, the bus, Discord and speech like any
+  reply (2026-10-11 re-review).
+- **What a dev server prints stays readable** (2026-10-11 re-review): an
+  `--env-file` loads a file (`node --env-file=.env server.js`), `wc -l <
+  .env` counts one, `docker inspect --format '{{.State.Status}}'` prints no
+  environment, and a reader's or an interpreter's name in prose (a commit
+  message, a nodemon banner) is not a command. A screen dense with command
+  candidates is refused past a parse budget rather than read slowly, and
+  what any parse bound leaves unread refuses the read when it could hold a
+  printer.
+- **The limit**: a secret with no recognisable shape and no keyword beside it
+  is not caught, nor is one an alias, a shell function, a script or a symlink
+  prints, nor one a script prints from a credential file it was handed as an
+  argument, nor a program piped in from anything but a literal
+  `echo`/`printf` (rule 3 reads command lines by shape). A REPL or
+  here-document input line (`> `, `>>> `, `... `) refuses only for an
+  explicit environment read, never for the bare words `ENV`, `env:` or
+  `getenv`, so an environment read spelled only with those is not caught
+  there. The loading idioms
+  `env $(cat .env | xargs) …` and `export $(grep -v '^#' .env | xargs)` stay
+  refused: their error messages can echo part of a value. The "Jarvis can read"
+  switch and the note are the backstops.
+
+## Additions 2026-10-11 (BR-0 — only the HUD window approves)
+
+- **`POST /approvals/{id}` `{decision, always?}` is owner-only**
+  (`projects.owner_only`): it answers only on the HUD's listener
+  (`FACE_PORT`, 8402) and only to a request whose `Origin` is the HUD's;
+  anything else is **403**, and the request stays pending. The API listener
+  (8405) serves the same HUD page, so a page loaded from it sent an Origin
+  equal to its Host and used to pass `check_origin`. The HUD already calls
+  it from its own listener (`api.resolveApproval`); Discord's buttons and
+  `/yes`/`/no`/`/always`, and the escape hatch, resolve in-process and
+  never call the route. **`GET /approvals` is unchanged** — open on both
+  listeners; reading what waits is not a lever.
+- **`POST /threads/{id}/answer` cannot approve.** Its body is exactly one
+  of `{req_id, text}` (a provider question's answer, passed on as text) or
+  `{req_id, decision}` (a provider's pending approval). For an approval,
+  anything but a deny — as `decision` or as `text` — is **400** on every
+  provider: a yes comes only from the card above (the broker), and this
+  route only withdraws. (The Claude provider used to accept an
+  `allow` here, even as `text`, and it beat a card the owner had not
+  answered.) Provider questions are Codex's alone; the Claude provider and
+  the fast path raise none.
+- **`PATCH /projects/{id}`: a change to `profile`, `always_ask`,
+  `extra_dirs` or `root` is owner-only** (the HUD's listener and Origin,
+  else **403**, nothing changed). A field sent back with its current value
+  needs no owner, and `name`, `routing` and the rest are as before. The HUD
+  already PATCHes from its own listener; nothing else changes these fields
+  over HTTP.
+- **v1's browser and `fetch_page` refuse every Jarvis port**
+  (`config.control_ports()`: 8402, 8404, 8405, 8406, configured and
+  default; never 8403) in every loopback spelling — they used to refuse
+  only 8402, so a v1 agent could open the HUD on 8405. v1's browser judges
+  the page wherever it is, before every act and read (a page that moved
+  itself onto the HUD listener after goto's check was read and its card
+  clicked), and `fetch_page` judges each redirect hop before requesting it.
+  A *cross-site* navigation onto the HUD or API listener was already a 403
+  (`Sec-Fetch-Site`); a same-site page (another `localhost` port) was not.
+- **The built HUD (`config.HUD_DIST`, what `GET /` and `/assets/*` serve) is
+  not writable by any agent write tool**, v1's or a v2 provider's, nor by a
+  Codex write grant: its script runs with the HUD's Origin. Rebuilding it is
+  the owner's (`npm run build`).

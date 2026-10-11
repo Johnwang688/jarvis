@@ -213,6 +213,50 @@ def gate_state_checks(tmp: Path) -> None:
     print("ok  guard: the approval gate's state file is refused by both write tools")
 
 
+def hud_build_checks(tmp: Path) -> None:
+    """BR-0: the built HUD is not writable by the write tools.
+
+    The v2 daemon serves `config.HUD_DIST` on its HUD listener, where the
+    page's script carries the HUD's own Origin — the one request
+    `POST /approvals` accepts. A file written there is a program the owner's
+    next reload runs with the power to approve. On dfb1d7e both write tools
+    wrote it. `config.HUD_DIST` points at a temp dir here; the source beside
+    it stays writable (SELF_PROTECTED is not widened).
+    """
+    real = config.HUD_DIST
+    dist = tmp / "hud" / "dist"
+    (dist / "assets").mkdir(parents=True)
+    page = dist / "index.html"
+    page.write_text("<!doctype html><title>J.A.R.V.I.S.</title>", encoding="utf-8")
+    source = tmp / "hud" / "src" / "App.tsx"
+    source.parent.mkdir(parents=True)
+    source.write_text("export const x = 1;\n", encoding="utf-8")
+    link = tmp / "innocent-looking"
+    link.symlink_to(dist / "assets", target_is_directory=True)
+    config.HUD_DIST = dist
+    try:
+        assert "<title>" in call("read_file", path=str(page)), "it stays readable"
+        out = call("edit_file", path=str(page), old_string="J.A.R.V.I.S.", new_string="x")
+        assert "built HUD" in out, out
+        out = call("write_file", path=str(page), content="<script>approve()</script>")
+        assert "built HUD" in out, out
+        for planted in (dist / "assets" / "index-new.js", link / "via-a-symlink.js",
+                        dist / "fresh" / "dir" / "x.js"):
+            out = call("write_file", path=str(planted), content="approve()")
+            assert "built HUD" in out, (planted, out)
+            assert not planted.exists() and not (dist / "assets" / planted.name).exists(), planted
+        assert "J.A.R.V.I.S." in page.read_text(encoding="utf-8"), "the page was rewritten"
+        # The HUD's source is ordinary work; the owner's build writes dist.
+        call("read_file", path=str(source))
+        out = call("edit_file", path=str(source), old_string="x = 1", new_string="x = 2")
+        assert "x = 2" in source.read_text(encoding="utf-8"), out
+    finally:
+        config.HUD_DIST = real
+    assert real == config.REPO_ROOT / "hud" / "dist", real
+    print("ok  guard: the built HUD (config.HUD_DIST) is refused by both write tools, "
+          "through a symlink and for a new file; its source stays writable")
+
+
 def model_state_checks(tmp: Path) -> None:
     """The files that decide which model answers and where Jarvis may act
     (PR #15 review, 2026-10-08). v2 already refused them; v1's write_file
@@ -564,6 +608,7 @@ def main() -> int:
         edit_checks(tmp)
         protection_checks(tmp)
         gate_state_checks(tmp)
+        hud_build_checks(tmp)
         model_state_checks(tmp)
         numbering_guard_checks(tmp)
         grep_checks(tmp)

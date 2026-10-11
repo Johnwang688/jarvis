@@ -69,6 +69,14 @@ SELF_PROTECTED = frozenset(
         # rules: an agent that could edit the judge could widen it.
         "jarvis/gitops.py",
         "jarvis/tools/gitctl.py",
+        # Decide what of the owner's terminal output reaches the model
+        # (WP-F, 2026-10-10): the read guard, the credential formats it and
+        # the renderer it reads through, and the tool. Editing them is editing
+        # what a read refuses.
+        "jarvis/credential_patterns.py",
+        "jarvis/v2/terminal_guard.py",
+        "jarvis/v2/terminal_text.py",
+        "jarvis/v2/tools/terminal_read.py",
         # Decide which chat may call Jarvis through jarvis-mcp, with which
         # token, which tools it is offered, and how its calls are gated
         # (2026-10-10, plan docs/plans/2026-10-10-terminal-read-mcp-plan.md).
@@ -178,11 +186,29 @@ def _git_internal(resolved: Path) -> bool:
         return True  # cannot tell: refuse
 
 
+# The built HUD the v2 daemon serves (`config.HUD_DIST`, BR-0). Its script runs
+# with the HUD's own Origin on the HUD listener — the one request
+# `POST /approvals` accepts — so writing a file into it is planting a program
+# the owner's next reload runs with the power to approve a card. Keyed on the
+# resolved directory (a symlink into it does not launder a write), read per
+# call so a test can repoint it. Not a widening of SELF_PROTECTED: the HUD's
+# *source* stays writable, and `npm run build` through an approved command
+# still writes the build.
+def _hud_build(resolved: Path) -> bool:
+    try:
+        dist = config.HUD_DIST.expanduser().resolve()
+    except (OSError, RuntimeError):
+        return True  # cannot tell: refuse
+    return resolved == dist or dist in resolved.parents
+
+
 def _self_protected(target: Path) -> bool:
     resolved = target.resolve()
     if resolved in _protected_state():
         return True
     if _git_internal(resolved):
+        return True
+    if _hud_build(resolved):
         return True
     try:
         rel = resolved.relative_to(config.REPO_ROOT)
@@ -197,6 +223,12 @@ def _protect_refusal(target: Path) -> str:
             f"Error: {target.name} is git's own configuration or internals, which git executes "
             "or obeys, so it can only be changed by the owner by hand. Use the git tool for "
             "git operations."
+        )
+    if _hud_build(target.resolve()):
+        return (
+            f"Error: {target.name} is in the built HUD the daemon serves, whose script "
+            "can approve what the owner is asked. Change the HUD's source under "
+            "hud/src instead; the owner rebuilds it."
         )
     return (
         f"Error: {target.name} is part of Jarvis's safety layer and can "
