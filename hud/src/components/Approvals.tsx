@@ -14,7 +14,7 @@
 //   - a chime, best-effort: a browser may block audio before the owner has
 //     interacted with the window.
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ApprovalRequest } from "../types";
 import { headlineLine } from "../lib/approval";
 
@@ -97,21 +97,27 @@ export function ApprovalCard(props: {
       <div className="btns">
         {/* type="button" on every one: nothing on this card is a form default,
             so Enter submits nothing. */}
-        <button type="button" className="deny" disabled={busy} onClick={() => decide(false)}>
+        <button type="button" className="deny" disabled={busy} onClick={() => decide(false)} data-testid="approval-deny">
           DENY
         </button>
+        {/* AUTHORIZE and ALWAYS are out of the Tab order (tabIndex -1): they
+            take a deliberate click, so no Tab or Shift+Tab ever puts one under
+            an Enter (re-review of PR #27). DENY, the cheap action, is the only
+            stop for Tab. */}
         {r.allowlistable === false ? null : (
           <button
             type="button"
             className="always"
             disabled={busy}
+            tabIndex={-1}
+            data-testid="approval-always"
             title="authorize AND allowlist this, so it stops asking (persists across restarts)"
             onClick={() => decide(true, true)}
           >
             ALWAYS
           </button>
         )}
-        <button type="button" disabled={busy} onClick={() => decide(true)} data-testid="approval-allow">
+        <button type="button" disabled={busy} tabIndex={-1} onClick={() => decide(true)} data-testid="approval-allow">
           AUTHORIZE
         </button>
       </div>
@@ -123,16 +129,17 @@ export function ApprovalCard(props: {
 }
 
 /**
- * Where keys were going when a card came up, if that is somewhere the card's
- * rules cannot reach: a frame (a preview iframe gets its own key events, so
- * Escape never reached the card, and keys went on into the framed page), or
- * anything inside the workspace or the panel (Monaco kept typing into the
- * buffer behind the card).
+ * Where keys were going when a card came up, if that is anywhere but the card:
+ * a frame (a preview iframe gets its own key events, so Escape never reached
+ * the card, and keys went on into the framed page), Monaco (it kept typing
+ * into the buffer behind the card), or **any** focused control behind the
+ * veil — a sidebar button, a pane's tab, a chip — which the veil stops the
+ * pointer from reaching but Enter or Space still pressed (review of PR #26).
+ * Only the page itself (`body`, nothing focused) is not behind the card.
  */
-export function behindTheCard(el: Element | null): boolean {
-  if (!el || el === document.body) return false;
-  if (el.tagName === "IFRAME") return true;
-  return typeof (el as HTMLElement).closest === "function" && !!(el as HTMLElement).closest("#workspace, .panel");
+export function behindTheCard(el: Element | null, card: Element | null = null): boolean {
+  if (!el || el === document.body || el === document.documentElement) return false;
+  return !(card && card.contains(el));
 }
 
 /** The veil holds the newest card; the rest are listed in the right pane. */
@@ -142,29 +149,74 @@ export function ApprovalVeil(props: {
 }) {
   const top = props.requests[0];
   const up = !!top;
-  // A card coming up takes focus off a frame, Monaco or anything else in the
-  // workspace or panel, onto the card itself (never a button: nothing here is
-  // keyboard-defaulted), and gives it back when the last card goes.
+  // A card coming up takes focus off whatever had it — a frame, Monaco, a
+  // sidebar button — onto the card itself (never a button: nothing here is
+  // keyboard-defaulted), and **everything outside the veil goes inert**: the
+  // title bar, the shell with its panes and panel, the orb, any picker. The
+  // veil stops the pointer; inert stops Tab and Shift+Tab, which used to walk
+  // focus back onto a Stop behind the card for Enter to press (review of
+  // PR #27). On the way out inert comes off first, then focus goes back to
+  // where it was (WP-A's restore). A layout effect, so nothing behind the
+  // card can take a key between the card drawing and this.
   const restore = useRef<HTMLElement | null>(null);
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!up) return;
+    const veil = document.getElementById("authveil");
+    const card = veil?.querySelector<HTMLElement>('[data-testid="approval-card"]') ?? null;
     const was = document.activeElement as HTMLElement | null;
-    if (behindTheCard(was)) {
-      restore.current = was;
-      document.querySelector<HTMLElement>('[data-testid="approval-card"]')?.focus({ preventScroll: true });
+    if (behindTheCard(was, card)) restore.current = was;
+    card?.focus({ preventScroll: true });
+    const made: Element[] = [];
+    for (const el of Array.from(veil?.parentElement?.children ?? [])) {
+      if (el === veil || el.hasAttribute("inert")) continue;
+      el.setAttribute("inert", "");
+      made.push(el);
     }
     return () => {
+      for (const el of made) el.removeAttribute("inert");
       const back = restore.current;
       restore.current = null;
       if (back && back.isConnected) back.focus({ preventScroll: true });
     };
   }, [up]);
+  // The next queued card is a new card (it is keyed by its request): it takes
+  // focus as the first one did, so Escape and the Tab cycle reach it — the
+  // answered card's button that had focus is gone (re-review of PR #27).
+  // After the effect above, so the first card's restore target is recorded
+  // before anything here moves focus.
+  const topId = top?.req_id ?? null;
+  useLayoutEffect(() => {
+    if (!topId) return;
+    const card = document.querySelector<HTMLElement>('#authveil [data-testid="approval-card"]');
+    if (card && !card.contains(document.activeElement)) card.focus({ preventScroll: true });
+  }, [topId]);
   useEffect(() => {
     if (!top) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         e.preventDefault();
         props.onDecide(top.req_id, false);
+      }
+      // Tab and Shift+Tab go round the card's own tabbable buttons and never
+      // leave it (everything else is inert; this keeps focus off the
+      // browser's own UI too). AUTHORIZE and ALWAYS are tabIndex -1, so they
+      // are never in the round: DENY is (re-review of PR #27). The card
+      // itself is not in the order: nothing is focused for the owner, a key
+      // only moves focus.
+      if (e.key === "Tab") {
+        e.preventDefault();
+        const card = document.querySelector<HTMLElement>('[data-testid="approval-card"]');
+        const items = Array.from(card?.querySelectorAll<HTMLButtonElement>("button") ?? [])
+          .filter((b) => !b.disabled && b.tabIndex >= 0);
+        if (!items.length) {
+          card?.focus({ preventScroll: true });
+          return;
+        }
+        const at = items.indexOf(document.activeElement as HTMLButtonElement);
+        const next = e.shiftKey
+          ? (at <= 0 ? items.length - 1 : at - 1)
+          : (at < 0 || at === items.length - 1 ? 0 : at + 1);
+        items[next].focus({ preventScroll: true });
       }
       // Enter is deliberately not handled: authorize takes a click.
     };
@@ -175,7 +227,10 @@ export function ApprovalVeil(props: {
   if (!top) return null;
   return (
     <div id="authveil" data-testid="authveil">
-      <ApprovalCard request={top} onDecide={props.onDecide} />
+      {/* Keyed by its request: the next queued card is a new card, with its
+          own countdown and live buttons — not the answered card's busy state
+          (re-review of PR #27; main had the same bug). */}
+      <ApprovalCard key={top.req_id} request={top} onDecide={props.onDecide} />
     </div>
   );
 }

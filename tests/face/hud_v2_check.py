@@ -531,6 +531,11 @@ def dictation_checks(page, mock):
 
     # REVIEW puts the transcript in the box and never sends on its own.
     page.locator('[data-testid="dictation-review"]').click()
+    # The orb's line took over from the input bar's hint (PR #29): only OFF may
+    # say MUTED, and REVIEW and AUTO never do (review of #29, M2b).
+    check("REVIEW never says the mic is muted",
+          bool(until(lambda: "MUTED" not in page.locator('[data-testid="orb-status"]').inner_text(), timeout=2)),
+          page.locator('[data-testid="orb-status"]').inner_text())
     sends_before = len(mock.sent("POST", "/threads/t1/send"))
     stt_before = len(mock.sent("POST", "/stt"))
     page.evaluate("""
@@ -552,6 +557,9 @@ def dictation_checks(page, mock):
 
     # AUTO sends a finished utterance: /stt then /send.
     page.locator('[data-testid="dictation-auto"]').click()
+    check("nor does AUTO",
+          bool(until(lambda: "MUTED" not in page.locator('[data-testid="orb-status"]').inner_text(), timeout=2)),
+          page.locator('[data-testid="orb-status"]').inner_text())
     sends_before = len(mock.sent("POST", "/threads/t1/send"))
     page.evaluate("""
       const m = window.__hud.mic;
@@ -649,12 +657,21 @@ def approval_checks(page, mock):
           len(mock.sent("POST", "/approvals/r1")) == resolved_before
           and page.locator('[data-testid="approval-card"]').count() == 1)
 
-    # Push-to-talk and typing are inert while a card is up.
-    check("the input is disabled while a card is up",
-          page.locator('[data-testid="input"]').is_disabled())
+    # Push-to-talk and typing are inert while a card is up. The box is inert,
+    # not disabled (PR #27 re-review: a disabled box dropped focus to the page
+    # before the card recorded it, so focus never came back to it).
+    box_before = page.locator('[data-testid="input"]').input_value()
+    check("the input cannot be reached while a card is up (inert)",
+          page.evaluate("!!document.querySelector('[data-testid=\"input\"]').closest('[inert]')"))
+    page.evaluate("document.querySelector('[data-testid=\"input\"]').focus()")
     page.keyboard.press("Space")
     check("space does not start recording while a card is up",
           page.evaluate("window.__hud.capture.ptt") is None)
+    page.keyboard.type("x")
+    check("and neither Space nor typing reaches the box",
+          page.locator('[data-testid="input"]').input_value() == box_before
+          and page.evaluate("document.activeElement?.getAttribute('data-testid')") != "input",
+          repr(page.locator('[data-testid="input"]').input_value()))
 
     # Escape denies — the cheap action.
     page.keyboard.press("Escape")
@@ -1842,55 +1859,73 @@ PNG_1PX = bytes.fromhex(
 # provider select · [model · effort ▾] -> a popover with a Model and an Effort
 # section. These drive it like the owner does; each leaves the popover as it
 # found it, except pick_model, which (like the real thing) keeps it open so the
-# effort can follow.
-
-CHIP_BTN = '[data-testid="model-chip-btn"]'
-POP = '[data-testid="model-pop"]'
-
-
-def chip_model(page):
-    return page.locator(CHIP_BTN).get_attribute("data-model")
+# effort can follow. Every chat pane has a chip of its own (WP-B), so each
+# helper takes the pane (`pane=1`, the single layout's chat): the button is
+# found inside that pane, and the popover — drawn in #root — by its
+# `data-pane`. Unscoped, Playwright's strict mode fails on the duplicates.
 
 
-def chip_effort(page):
-    return page.locator(CHIP_BTN).get_attribute("data-effort")
+def chip_btn(pane=1):
+    return f'[data-testid="pane-{pane}"] [data-testid="model-chip-btn"]'
 
 
-def open_pop(page):
-    if page.locator(POP).count() == 0:
-        page.locator(CHIP_BTN).click()
-        page.wait_for_selector(POP)
+def pop_of(pane=1):
+    return f'[data-testid="model-pop"][data-pane="{pane}"]'
 
 
-def close_pop(page):
-    if page.locator(POP).count():
-        page.locator(CHIP_BTN).click()
-        until(lambda: page.locator(POP).count() == 0)
+CHIP_BTN = chip_btn(1)
+POP = pop_of(1)
 
 
-def _peek(page, fn):
+def chip_model(page, pane=1):
+    return page.locator(chip_btn(pane)).get_attribute("data-model")
+
+
+def chip_effort(page, pane=1):
+    return page.locator(chip_btn(pane)).get_attribute("data-effort")
+
+
+def open_pop(page, pane=1):
+    if page.locator(pop_of(pane)).count() == 0:
+        page.locator(chip_btn(pane)).click()
+        page.wait_for_selector(pop_of(pane))
+
+
+def close_pop(page, pane=1):
+    if page.locator(pop_of(pane)).count():
+        page.locator(chip_btn(pane)).click()
+        until(lambda: page.locator(pop_of(pane)).count() == 0)
+
+
+def _peek(page, fn, pane=1):
     """Run `fn` with the popover open, then leave it as it was."""
-    was = page.locator(POP).count() > 0
-    open_pop(page)
+    was = page.locator(pop_of(pane)).count() > 0
+    open_pop(page, pane)
     try:
         return fn()
     finally:
         if not was:
-            close_pop(page)
+            close_pop(page, pane)
 
 
-def model_labels(page):
-    return _peek(page, lambda: page.locator('[data-testid="model-opt"]').all_inner_texts())
+def model_labels(page, pane=1):
+    return _peek(page, lambda: page.locator(pop_of(pane) + ' [data-testid="model-opt"]').all_inner_texts(), pane)
 
 
 # The effort is a slider since 2026-10-10 (components/EffortSlider): its stops
 # are `data-stops`, the thumb is `aria-valuenow`, the default stop is
-# `data-default`, and the words are `aria-valuetext` and the header.
+# `data-default`, and the words are `aria-valuetext` and the header. Like the
+# rest, each helper takes the pane, and finds the slider inside that pane's
+# popover.
 SLIDER = '[data-testid="effort-slider"]'
 
 
-def _slider_now(page):
-    s = page.locator(SLIDER)
+def slider_of(pane=1):
+    return pop_of(pane) + " " + SLIDER
+
+
+def _slider_now(page, pane=1):
+    s = page.locator(slider_of(pane))
     if s.count() == 0:
         return None
     return {"stops": (s.get_attribute("data-stops") or "").split(","),
@@ -1898,47 +1933,48 @@ def _slider_now(page):
             "default": int(s.get_attribute("data-default") or -1),
             "min": s.get_attribute("aria-valuemin"), "max": s.get_attribute("aria-valuemax"),
             "text": s.get_attribute("aria-valuetext"),
-            "head": " ".join(page.locator('[data-testid="effort-section"] .es-head').inner_text().split())}
+            "head": " ".join(page.locator(pop_of(pane) + ' [data-testid="effort-section"] .es-head')
+                             .inner_text().split())}
 
 
-def effort_state(page):
-    return _peek(page, lambda: _slider_now(page))
+def effort_state(page, pane=1):
+    return _peek(page, lambda: _slider_now(page, pane), pane)
 
 
-def has_effort(page):
-    return _peek(page, lambda: page.locator(SLIDER).count() > 0)
+def has_effort(page, pane=1):
+    return _peek(page, lambda: page.locator(slider_of(pane)).count() > 0, pane)
 
 
-def click_stop(page, i):
+def click_stop(page, i, pane=1):
     """Click stop `i`'s own spot on the track, as a pointer does."""
-    box = page.locator('[data-testid="effort-stop"]').nth(i).bounding_box()
+    box = page.locator(pop_of(pane) + ' [data-testid="effort-stop"]').nth(i).bounding_box()
     page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
 
 
-def has_defaults_button(page):
-    return _peek(page, lambda: page.locator('[data-testid="provider-defaults-open"]').count() > 0)
+def has_defaults_button(page, pane=1):
+    return _peek(page, lambda: page.locator(pop_of(pane) + ' [data-testid="provider-defaults-open"]').count() > 0,
+                 pane)
 
 
-def pick_model(page, value):
-    open_pop(page)
-    page.locator(f'[data-testid="model-opt"][data-value="{value}"]').click()
+def pick_model(page, value, pane=1):
+    open_pop(page, pane)
+    page.locator(pop_of(pane) + f' [data-testid="model-opt"][data-value="{value}"]').click()
 
 
-def pick_effort(page, value):
+def pick_effort(page, value, pane=1):
     """Click the level's stop ("" is the default stop), then close the
     popover: it stays open while the slider moves."""
-    open_pop(page)
-    st = _slider_now(page)
+    open_pop(page, pane)
+    st = _slider_now(page, pane)
     i = st["default"] if value == "" else st["stops"].index(value)
-    click_stop(page, i)
-    until(lambda: page.locator(SLIDER).get_attribute("aria-valuenow") == str(i))
-    close_pop(page)
+    click_stop(page, i, pane)
+    until(lambda: page.locator(slider_of(pane)).get_attribute("aria-valuenow") == str(i))
+    close_pop(page, pane)
 
 
-def open_defaults(page):
-    open_pop(page)
-    page.locator('[data-testid="provider-defaults-open"]').click()
-
+def open_defaults(page, pane=1):
+    open_pop(page, pane)
+    page.locator(pop_of(pane) + ' [data-testid="provider-defaults-open"]').click()
 
 
 def writes(mock, since):
@@ -2057,6 +2093,11 @@ def thread_model_checks(page, mock):
     box.press("Enter")
     tid = until(lambda: page.evaluate("window.__hud.state().threadId"))
     mock.emit("turn_finished", {"stop": "end"}, thread_id=tid)
+    # PR #27: the retry's turn was tracked under the send's own placeholder
+    # id, so this finish never freed the pane and the mic stayed suppressed.
+    check("the retried first send's turn ends with its thread's turn_finished",
+          until(lambda: page.evaluate("!window.__hud.state().busy")) is True,
+          str(page.evaluate("[window.__hud.state().busy, window.__hud.state().chats[1].turnThreadId]")))
     until(lambda: page.locator('[data-testid="provider-chip"]').count() > 0)
     check("after it the provider is fixed",
           page.locator('[data-testid="provider-chip-select"]').count() == 0
@@ -2216,7 +2257,7 @@ def effort_slider_checks(page, mock):
     def centre(box):
         return box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
 
-    slider = page.locator(SLIDER)
+    slider = page.locator(slider_of())
     open_pop(page)
     st = _slider_now(page)
     check("Claude's slider runs Faster → Smarter over the model's own ladder",
@@ -2379,9 +2420,39 @@ def effort_slider_checks(page, mock):
     time.sleep(0.6)
     check("keys reach no slider under a card", len(patches()) == n and page.locator(POP).count() == 0,
           str(patches()[n:]))
-    mock.emit("approval_resolved", {"req_id": "es-card", "decision": "deny"})
+    # Escape is the card's (review of #29, F6): it denies, and moves nothing.
+    page.keyboard.press("Escape")
+    denied = until(lambda: mock.sent("POST", "/approvals/es-card") or None)
+    check("and Escape under it denies the card, changing no effort",
+          bool(denied) and denied[-1].get("decision") == "deny" and len(patches()) == n,
+          f"{denied} {patches()[n:]}")
     until(lambda: page.locator('[data-testid="approval-card"]').count() == 0)
     until(lambda: not page.locator(CHIP_BTN).is_disabled())
+
+    # The one place nothing but the card's disable closes it: focus on the
+    # chip's own button with the popover open (the popover counts its button
+    # as inside it — a press on the button, still held). Focus leaving the
+    # popover cannot close it then (#29's rule); the card must.
+    open_pop(page)
+    page.locator(CHIP_BTN).focus()
+    time.sleep(0.2)
+    open_before = page.locator(POP).count() == 1 and page.locator(SLIDER).count() == 1
+    n = len(patches())
+    mock.emit("approval_requested", {**req, "req_id": "es-card2", "code": "ES02"})
+    until(lambda: page.locator('[data-testid="approval-card"]').count() > 0)
+    check("with focus on the chip's own button, a card still closes the popover and its slider",
+          open_before and until(lambda: page.locator(SLIDER).count() == 0) is True
+          and page.locator(CHIP_BTN).is_disabled(), f"open before the card: {open_before}")
+    page.keyboard.press("ArrowRight")
+    page.keyboard.press("End")
+    page.keyboard.press("Escape")
+    denied = until(lambda: mock.sent("POST", "/approvals/es-card2") or None)
+    check("and under it no key moves the effort, and Escape denies",
+          bool(denied) and denied[-1].get("decision") == "deny" and len(patches()) == n,
+          f"{denied} {patches()[n:]}")
+    until(lambda: page.locator('[data-testid="approval-card"]').count() == 0)
+    until(lambda: not page.locator(CHIP_BTN).is_disabled())
+    close_pop(page)
 
     # Ultra is a stop on Codex, at the Smarter end, and nowhere else.
     sol = {"id": "gpt-6.1-sol", "name": "GPT-6.1 Sol", "vision": True,
@@ -2528,8 +2599,21 @@ def provider_default_checks(page, mock):
     body = until(lambda: [b for b in mock.sent("POST", "/thread-models") if b.get("effort")] or None)
     check("an effort on the default posts {provider, model, effort}",
           bool(body) and body[-1] == {"provider": "claude", "model": "claude-opus-5-5", "effort": "low"}, str(body))
+    # Read in the chip's own effort slider: its default stop is the default's
+    # effort and the thumb sits on it (review of #29 — reading "· low" off the
+    # button passed a list still saying "default · high"; the pills it read
+    # are a slider since PR #30). The popover cannot open under the dialog's
+    # veil, so the dialog closes for the read and opens again after it.
+    page.locator('[data-testid="pd-close"]').click()
+    until(lambda: page.locator('[data-testid="provider-defaults"]').count() == 0)
+    def default_stop():
+        st = effort_state(page)
+        return st and st["stops"][st["default"]] == "low" and st["now"] == st["default"] \
+            and st["text"] == "Low, default"
     check("and the default thread's effort chip follows it",
-          until(lambda: "· low" in page.locator(CHIP_BTN).inner_text()) is True)
+          until(default_stop) is True, str(effort_state(page)))
+    open_defaults(page)
+    page.wait_for_selector('[data-testid="provider-defaults"]')
 
     # A refusal is shown inline, in the server's words, and changes nothing.
     w["refuse_default"] = "claude-haiku-4-5 is not allowed here for a reason"
@@ -2595,6 +2679,35 @@ def provider_default_checks(page, mock):
     mock.emit("model", {})
 
 
+LIVE_PORTS = (8402, 8403, 8405)
+
+
+def guard_live(ctx, record, ports=LIVE_PORTS):
+    """Refuse, and record, every request **and every WebSocket** this context
+    makes to the owner's live daemon. `ctx.route` never sees a WebSocket, so
+    it gets a `route_web_socket` of its own (WP-D: the terminal is a socket,
+    and a hard-coded port once sent this suite to the live daemon over HTTP).
+    The terminal suite proves the socket half bites, against a port of its
+    own — never a live one."""
+    alt = "|".join(str(p) for p in ports)
+    http = re.compile(rf"^https?://(127\.0\.0\.1|localhost|\[::1\]):({alt})/")
+    sock = re.compile(rf"^wss?://(127\.0\.0\.1|localhost|\[::1\]):({alt})/")
+
+    def refuse_http(route):
+        record(f"the HUD under test reached a live daemon port: {route.request.url}")
+        route.abort()
+
+    def refuse_socket(ws):
+        # Never `connect_to_server()`: the socket never leaves the browser. It
+        # is not closed here either — a close from inside the route handler
+        # deadlocks the sync API — so the page holds a socket to nowhere and
+        # the record is the failure.
+        record(f"the HUD under test opened a socket to a live daemon port: {ws.url}")
+
+    ctx.route(http, refuse_http)
+    ctx.route_web_socket(sock, refuse_socket)
+
+
 def main():
     if not (DIST / "index.html").exists():
         print("hud/dist is not built. Run: cd hud && npm ci && npm run build")
@@ -2607,14 +2720,12 @@ def main():
                 headless=True,
                 args=["--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream"],
             )
-            # The owner's live daemon listens on these. Nothing this suite
-            # loads may reach it: a hard-coded preview port once did, and its
-            # log filled with `GET /p/p1/index.html -> 400`.
-            live = re.compile(r"^https?://(127\.0\.0\.1|localhost|\[::1\]):(8402|8403|8405)/")
-
-            def refuse_live(route):
-                FAILURES.append(f"the HUD under test reached a live daemon port: {route.request.url}")
-                route.abort()
+            # The owner's live daemon listens on 8402/8403/8405. Nothing this
+            # suite loads may reach it, over HTTP or a WebSocket: a hard-coded
+            # preview port once did, and its log filled with
+            # `GET /p/p1/index.html -> 400`.
+            def guard(ctx):
+                guard_live(ctx, FAILURES.append)
 
             # Zoom, folding panes, resizing and the workspace (2026-10-08/09)
             # first, in a context of its own **and against a mock of its own**
@@ -2625,12 +2736,43 @@ def main():
             layout_mock = MockDaemon(0).start()
             try:
                 layout_checks(browser, layout_mock, f"http://127.0.0.1:{layout_mock.port}", check, until,
-                              (live, refuse_live), FAKE_RECOGNIZER)
+                              guard, FAKE_RECOGNIZER)
             finally:
                 layout_mock.stop()
 
+            # Several chat panes at once (WP-B, 2026-10-09): the same reasons
+            # for a context and a mock of its own — its sends, interrupts and
+            # `/seen` posts stay out of the main world.
+            from tests.face.hud_v2_multichat_check import multichat_checks
+            multichat_mock = MockDaemon(0).start()
+            try:
+                multichat_checks(browser, multichat_mock, f"http://127.0.0.1:{multichat_mock.port}", check, until,
+                                 guard, FAKE_RECOGNIZER)
+            finally:
+                multichat_mock.stop()
+
+            # The input bar declutter (PR #29) and its review: a context and a
+            # mock of their own, for the same reasons.
+            from tests.face.hud_v2_declutter_check import declutter_checks
+            declutter_mock = MockDaemon(0).start()
+            try:
+                declutter_checks(browser, declutter_mock, f"http://127.0.0.1:{declutter_mock.port}", check, until,
+                                 guard, FAKE_RECOGNIZER)
+            finally:
+                declutter_mock.stop()
+
+            # The terminals (WP-D): a context and a mock of their own too, the
+            # PTY played in the browser (no shell, no HOME).
+            from tests.face.hud_v2_terminal_check import terminal_checks
+            terminal_mock = MockDaemon(0).start()
+            try:
+                terminal_checks(browser, terminal_mock, f"http://127.0.0.1:{terminal_mock.port}", check, until,
+                                guard, FAKE_RECOGNIZER)
+            finally:
+                terminal_mock.stop()
+
             ctx = browser.new_context(permissions=["microphone"])
-            ctx.route(live, refuse_live)
+            guard(ctx)
             ctx.add_init_script(FAKE_RECOGNIZER)
             page = ctx.new_page()
             page.on("pageerror", lambda e: FAILURES.append(f"page error: {e}"))

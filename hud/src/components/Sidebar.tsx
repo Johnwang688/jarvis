@@ -39,11 +39,21 @@
 // red ⚠ when it failed. A task row shows its phase this way too (the phase
 // word is its tooltip), and a collapsed project shows its most urgent one at
 // the row's end. Each dot has a fixed slot: no status moves a name.
+//
+// **Several chats at once (WP-B, 2026-10-09).** Every drawn chat pane's
+// conversation is marked: the active one (the selected chat, the chat used
+// last) with the accent, the others with a dimmer mark, each row carrying the
+// pane it is open in (`data-pane`). Each composing chat pane has its own
+// compose row, numbered by pane when more than one chat pane is drawn. A
+// click on a thread another pane shows focuses that pane — a thread is open
+// in one pane at most; Alt+click, or "Open beside" in the row's ⋯ menu, opens
+// it in the next pane to the right (from one pane, two columns).
 
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import type { Project, Task, TaskThread, Thread } from "../types";
 import { canMoveThread, wouldMove } from "../lib/threads";
 import { composeMovable, folderName, movedAway, type Compose } from "../lib/compose";
+import type { PaneNo } from "../lib/workspace";
 import { shortId, threadTooltip } from "../lib/threadmodel";
 import { projectNamesTaken, threadTitlesTaken } from "../lib/projects";
 import { InlineRename } from "./InlineRename";
@@ -70,7 +80,13 @@ interface MenuAt {
   y: number;
 }
 
-export function Sidebar(props: {
+/**
+ * The sidebar. Memoized: typing in a chat box re-renders the window (the
+ * box's words are the store's, WP-B), and every thread row redrawn per
+ * keystroke grows with the owner's thread count (re-review of PR #27). The
+ * window hands it stable callbacks and row lists.
+ */
+export const Sidebar = memo(function Sidebar(props: {
   projects: Project[];
   /** Archived projects' names: a rename preview counts them, as the backend does. */
   archivedNames?: string[];
@@ -82,18 +98,21 @@ export function Sidebar(props: {
   activity?: ActivityView;
   /** The active conversation's project, derived, never stored. */
   activeProjectId: string | null;
-  compose: Compose | null;
-  threadId: string | null;
+  /** The threads open in drawn chat panes, the active one (the selected chat) marked. */
+  open: { pane: PaneNo; threadId: string; active: boolean }[];
+  /** The drawn chat panes composing a new thread, each with its row's label. */
+  composing: { pane: PaneNo; compose: Compose; label: string; active: boolean }[];
   taskId: string | null;
   moveError: string;
-  onPickThread: (id: string) => void;
+  /** `beside`: Alt+click or "Open beside" — the next pane to the right. */
+  onPickThread: (id: string, beside?: boolean) => void;
   onPickTask: (id: string) => void;
   onNewProject: () => void;
   onNewThread: () => void;
   /** The row's own project, never "whichever is selected". */
   onNewTask: (projectId: string) => void;
   onMoveThread: (threadId: string, projectId: string) => void;
-  onMoveCompose: (projectId: string) => void;
+  onMoveCompose: (projectId: string, pane: PaneNo) => void;
   onOpen: (what: "schedules" | "usage" | "route") => void;
   // --- rename, edit, archive (decisions B); each resolves with the record
   // the backend saved, whose name may be numbered.
@@ -115,6 +134,8 @@ export function Sidebar(props: {
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [openTasks, setOpenTasks] = useState<Record<string, boolean>>({});
   const [dragging, setDragging] = useState<string | null>(null);
+  // The pane whose compose row is being dragged (the drag itself carries only COMPOSE_DRAG).
+  const [dragPane, setDragPane] = useState<PaneNo | null>(null);
   const [over, setOver] = useState<string | null>(null);
   const [menu, setMenu] = useState<MenuAt | null>(null);
   const [pmenu, setPmenu] = useState<ProjectMenuAt | null>(null);
@@ -128,14 +149,33 @@ export function Sidebar(props: {
 
   // The project holding the active conversation is always open: a new thread
   // or a picked thread must never sit inside a collapsed project.
+  const activeCompose = props.composing.find((c) => c.active)?.compose ?? null;
   useEffect(() => {
     if (props.activeProjectId) reveal(props.activeProjectId);
-  }, [props.activeProjectId, props.compose]);
+  }, [props.activeProjectId, activeCompose]);
+  // And so is each other drawn chat pane's (only a split has any).
+  const others = [
+    ...props.open.filter((o) => !o.active).map((o) => props.threads.find((t) => t.id === o.threadId)?.project_id),
+    ...props.composing.filter((c) => !c.active).map((c) => c.compose.projectId),
+  ].filter((id): id is string => !!id);
+  const othersKey = others.join(",");
+  useEffect(() => {
+    for (const id of others) reveal(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [othersKey]);
 
+  /** Where a thread row is open: the active pane's accent, another pane's dimmer mark. */
+  const openIn = (threadId: string) => props.open.find((o) => o.threadId === threadId) || null;
+  const selClass = (threadId: string) => {
+    const at = openIn(threadId);
+    return at ? (at.active ? " sel" : " panesel") : "";
+  };
+
+  const draggedCompose = props.composing.find((c) => c.pane === dragPane)?.compose ?? null;
   /** Whether the current drag would do anything on this project row. */
   const accepts = (projectId: string) =>
     dragging === COMPOSE_DRAG
-      ? composeMovable(props.compose, projectId)
+      ? composeMovable(draggedCompose, projectId)
       : !!dragging && wouldMove(props.threads, dragging, projectId);
 
   // A menu that outlives what opened it is a menu that acts on the wrong row.
@@ -267,7 +307,7 @@ export function Sidebar(props: {
         {props.projects.map((p) => {
           const plat = props.platforms[p.id];
           const open = isOpen(p.id);
-          const composing = !!props.compose && props.compose.projectId === p.id && !props.threadId;
+          const composing = props.composing.filter((c) => c.compose.projectId === p.id);
           const chats = props.threads.filter((t) => t.project_id === p.id && !t.task_id);
           const tasks = props.tasks.filter((t) => t.project_id === p.id);
           const target = over === p.id;
@@ -295,15 +335,23 @@ export function Sidebar(props: {
                 }}
                 onDragLeave={() => setOver((o) => (o === p.id ? null : o))}
                 onDrop={(e) => {
+                  // Files from outside are not a move: left alone, so the
+                  // window stages them in the selected chat (decisions W-6;
+                  // re-review of PR #27 — this row used to swallow them).
+                  if (!dragging && e.dataTransfer.types.includes("Files")) {
+                    setOver(null);
+                    return;
+                  }
                   e.preventDefault();
                   const id = e.dataTransfer.getData("text/plain") || dragging;
                   setOver(null);
                   setDragging(null);
+                  setDragPane(null);
                   if (!id) return;
                   // The target opens, so what was dropped is still on screen.
                   reveal(p.id);
                   if (id === COMPOSE_DRAG) {
-                    if (composeMovable(props.compose, p.id)) props.onMoveCompose(p.id);
+                    if (dragPane && composeMovable(draggedCompose, p.id)) props.onMoveCompose(p.id, dragPane);
                   } else {
                     props.onMoveThread(id, p.id);
                   }
@@ -354,36 +402,44 @@ export function Sidebar(props: {
               </div>
               {open ? (
                 <>
-                  {composing ? (
+                  {composing.map((c) => (
                     <div
-                      className={"tree-row indent-1 ghost sel" + (dragging === COMPOSE_DRAG ? " dragging" : "")}
+                      key={`compose-${c.pane}`}
+                      className={
+                        "tree-row indent-1 ghost" + (c.active ? " sel" : " panesel") +
+                        (dragging === COMPOSE_DRAG && dragPane === c.pane ? " dragging" : "")
+                      }
                       data-testid="compose-row"
+                      data-pane={c.pane}
                       title="Not sent yet. Change its project with the chip in the input bar, or drag it."
-                      draggable={!props.compose?.openedId}
+                      draggable={!c.compose.openedId}
                       onDragStart={(e) => {
                         e.dataTransfer.setData("text/plain", COMPOSE_DRAG);
                         e.dataTransfer.effectAllowed = "move";
                         setDragging(COMPOSE_DRAG);
+                        setDragPane(c.pane);
                       }}
                       onDragEnd={() => {
                         setDragging(null);
+                        setDragPane(null);
                         setOver(null);
                       }}
                     >
                       <span className="tw">·</span>
-                      <span className="nm">New thread</span>
+                      <span className="nm">{c.label}</span>
                     </div>
-                  ) : null}
+                  ))}
                   {chats.map((t) => (
                     <div
                       key={t.id}
                       className={
                         "tree-row indent-1" +
-                        (t.id === props.threadId ? " sel" : "") +
+                        selClass(t.id) +
                         (dragging === t.id ? " dragging" : "") +
                         (activity.threads[t.id] === "working" ? " act-working" : "")
                       }
                       data-testid={`thread-${t.id}`}
+                      data-pane={openIn(t.id)?.pane}
                       draggable={!(renaming?.kind === "thread" && renaming.id === t.id)}
                       onDragStart={(e) => {
                         e.dataTransfer.setData("text/plain", t.id);
@@ -395,7 +451,7 @@ export function Sidebar(props: {
                         setOver(null);
                       }}
                       onContextMenu={(e) => openMenu(e, t.id)}
-                      onClick={() => props.onPickThread(t.id)}
+                      onClick={(e) => props.onPickThread(t.id, e.altKey)}
                       title={threadTooltip(t, t.cwd)}
                     >
                       <span className="tw">
@@ -478,14 +534,15 @@ export function Sidebar(props: {
                                 key={k.thread_id}
                                 className={
                                   "tree-row indent-2" +
-                                  (k.thread_id === props.threadId ? " sel" : "") +
+                                  selClass(k.thread_id) +
                                   (activity.threads[k.thread_id] === "working" ? " act-working" : "")
                                 }
                                 data-testid={`taskthread-${k.thread_id}`}
+                                data-pane={openIn(k.thread_id)?.pane}
                                 // Not draggable, and the menu says why: tasks
                                 // themselves move, their threads do not.
                                 onContextMenu={(e) => openMenu(e, k.thread_id, t.id)}
-                                onClick={() => props.onPickThread(k.thread_id)}
+                                onClick={(e) => props.onPickThread(k.thread_id, e.altKey)}
                               >
                                 <span className="tw">
                                   <Dot
@@ -605,6 +662,21 @@ export function Sidebar(props: {
           style={{ left: menu.x, top: menu.y }}
           onMouseDown={(e) => e.stopPropagation()}
         >
+          <button
+            type="button"
+            className="mrow"
+            style={{ display: "block", width: "100%", textAlign: "left", border: "none",
+                     background: "none", textTransform: "none", letterSpacing: 0 }}
+            data-testid="tmenu-beside"
+            title="Open it in the next pane to the right (Alt+click)"
+            onClick={() => {
+              setMenu(null);
+              props.onPickThread(menu.threadId, true);
+            }}
+          >
+            Open beside
+          </button>
+          <div className="msep" />
           {movable.ok && menuThread ? (
             <>
               <button
@@ -664,7 +736,7 @@ export function Sidebar(props: {
       ) : null}
     </div>
   );
-}
+});
 
 /** One row's status. Idle is the plain `·` it always was; the rest carry a
  * label for the tooltip and for a screen reader. */

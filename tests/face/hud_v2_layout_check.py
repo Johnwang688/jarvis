@@ -39,7 +39,8 @@ The workspace (2026-10-09, WP-A of docs/plans/2026-10-09-hud-workspace-plan.md):
     status pane no longer takes the zoom control with it;
   - with a card up every title-bar, fold and rail button is disabled and an
     open layout menu closes — Enter on a toggle that kept focus does nothing;
-  - presets draw, resize, swap the single chat, hide a pane without
+  - presets draw, resize, make a second chat with its own box (WP-B lifted
+    WP-A's single-chat swap), hide a pane without
     unmounting it (a loaded preview is the same frame afterwards), keep a
     pane's preview URL across a reload, drop the unfocused pane first on a
     small window, and send sidebar clicks where the plan says;
@@ -61,8 +62,12 @@ LONG_COMMAND = "rm -rf /home/johnw/projects/scratch && " + " && ".join(
 def layout_checks(browser, mock, base, check, until, guard, init_script):
     print("\nzoom, folding and resizing")
     ctx = browser.new_context(viewport={"width": 1280, "height": 800}, permissions=["microphone"])
-    ctx.route(guard[0], guard[1])
+    guard(ctx)                      # live ports refused, HTTP and WebSocket alike
     ctx.add_init_script(init_script)
+    # Ctrl+` opens a terminal when there is none, and the 2×2 grid shows one:
+    # the PTY is played in the browser (no shell), on this mock's own port.
+    from tests.face.hud_v2_terminal_check import FakePty
+    mock.fake_pty = FakePty(ctx, mock)
     page = ctx.new_page()
     errors: list[str] = []
     page.on("pageerror", lambda e: errors.append(str(e)))
@@ -106,7 +111,7 @@ THROWING_STORAGE = """
 
 def _throwing_storage_checks(browser, mock, base, check, until, guard, init_script):
     ctx = browser.new_context(viewport={"width": 1280, "height": 800}, permissions=["microphone"])
-    ctx.route(guard[0], guard[1])
+    guard(ctx)
     ctx.add_init_script(init_script)
     ctx.add_init_script(THROWING_STORAGE)
     page = ctx.new_page()
@@ -926,18 +931,43 @@ def _ptt_on_space(page) -> object:
 
 
 def _edit(page, until, pane: int, typed: str):
-    """Type at the end of the file open in pane N, in Monaco or its fallback."""
+    """Type at the end of the file open in pane N, in Monaco or its fallback,
+    until the pane's Save says the edit landed.
+
+    Under load this was the layout section's flake: it typed as soon as *a*
+    `.view-lines` existed in the pane — the editor going away, or the new one
+    before the file's text had replaced its buffer — and the edit was lost,
+    so four "unsaved edit" checks failed. Now it waits for the editor to show
+    the file, types, and types again (at most four times) until Save is
+    enabled: an edit that did not land is retried, never assumed."""
     editor = page.locator(_pane(pane, '[data-testid="editor"] .view-lines'))
-    until(lambda: editor.count() > 0
-          or page.locator(_pane(pane, '[data-testid="editor-fallback"]')).count() > 0, timeout=10)
-    if editor.count():
-        editor.click()
-        page.keyboard.press("Control+End")
-        page.keyboard.type(typed)
-    else:
-        page.evaluate("([n, t]) => { const h = document.querySelector("
-                      "`[data-testid=\"pane-${n}\"] [data-testid=\"editor-fallback\"]`);"
-                      " h.value += t; h.dispatchEvent(new Event('input', {bubbles: true})); }", [pane, typed])
+    fallback = page.locator(_pane(pane, '[data-testid="editor-fallback"]'))
+    save = page.locator(_pane(pane, '[data-testid="file-save"]'))
+    def shows_file() -> bool:
+        # One editor (not the old one beside the new), holding the file's text
+        # (not an empty buffer it is about to replace).
+        try:
+            return editor.count() == 1 and editor.inner_text(timeout=1000).strip() != ""
+        except Exception:
+            return False
+
+    for attempt in range(4):
+        until(lambda: editor.count() > 0 or fallback.count() > 0, timeout=10)
+        if editor.count():
+            until(shows_file, timeout=5)
+            try:
+                editor.click(timeout=3000)
+            except Exception:
+                continue  # replaced under the click: find the new one
+            page.keyboard.press("Control+End")
+            page.keyboard.type(typed)
+        else:
+            page.evaluate("([n, t]) => { const h = document.querySelector("
+                          "`[data-testid=\"pane-${n}\"] [data-testid=\"editor-fallback\"]`);"
+                          " h.value += t; h.dispatchEvent(new Event('input', {bubbles: true})); }", [pane, typed])
+        if until(lambda: save.count() > 0 and not save.is_disabled(), timeout=2.0 + attempt):
+            return True
+    return False
 
 
 def _approval(mock, req: str, command: str = "ls"):
@@ -1038,7 +1068,8 @@ def _titlebar_checks(page, mock, check, until):
           abs(panel_box["x"] - main_box["x"]) < 1 and abs(panel_box["width"] - main_box["width"]) < 1
           and abs(panel_box["y"] + panel_box["height"] - (main_box["y"] + main_box["height"])) < 1,
           f"{panel_box} in {main_box}")
-    check("it says where the terminal will be", _visible(page, '[data-testid="panel-empty"]'))
+    check("it says no terminal is open, and ⬓ opened none", _visible(page, '[data-testid="panel-empty"]')
+          and not mock.world.get("terminals"))
     psep = page.locator('[data-testid="panel-split"]')
     check("its top edge is a horizontal separator",
           psep.get_attribute("role") == "separator" and psep.get_attribute("aria-orientation") == "horizontal")
@@ -1240,15 +1271,16 @@ def _workspace_checks(page, mock, check, until):
     until(lambda: abs(_width(page, _pane(1)) - _width(page, _pane(2))) <= 2, timeout=2)
     check("a double-click makes the panes equal", abs(_width(page, _pane(1)) - _width(page, _pane(2))) <= 2)
 
-    # One chat: choosing it elsewhere swaps.
+    # Several chats (WP-B): choosing chat in pane 2 makes a second chat; it
+    # used to swap the two panes' views (WP-A's single chat).
     page.locator(_pane(2, '[data-testid="tab-chat"]')).click()
     until(lambda: _attr(page, _pane(2), "data-view") == "chat", timeout=2)
-    check("choosing chat in pane 2 swaps the two panes' views",
-          _attr(page, _pane(2), "data-view") == "chat" and _attr(page, _pane(1), "data-view") == "preview"
-          and page.locator('[data-testid="input"]').count() == 1
+    check("choosing chat in pane 2 makes a second chat beside the first, each with its own box",
+          _attr(page, _pane(2), "data-view") == "chat" and _attr(page, _pane(1), "data-view") == "chat"
+          and page.locator(_pane(1, '[data-testid="input"]')).count() == 1
           and page.locator(_pane(2, '[data-testid="input"]')).count() == 1)
-    page.locator(_pane(1, '[data-testid="tab-chat"]')).click()
-    until(lambda: _attr(page, _pane(1), "data-view") == "chat", timeout=2)
+    page.locator(_pane(2, '[data-testid="tab-preview"]')).click()
+    until(lambda: _attr(page, _pane(2), "data-view") == "preview", timeout=2)
 
     # Hidden, never unmounted: the same frame after one pane and back.
     page.locator(_pane(2, '[data-testid="preview-project"]')).click()
@@ -1461,10 +1493,17 @@ def _workspace_checks(page, mock, check, until):
 
 
 def _grid_card_checks(page, mock, check, until):
-    """A 2×2 grid with Monaco and a preview frame under the card (the
-    terminal joins it with WP-D): the card stays global and on top."""
+    """A 2×2 grid with Monaco, a preview frame and a terminal (WP-D) under
+    the card: the card stays global and on top, and the terminal behind it
+    takes no key."""
+    from tests.face.hud_v2_mock_terminals import row
+    tid = "0a0b0c0d"
+    if not any(r["id"] == tid for r in mock.world.setdefault("terminals", [])):
+        mock.world["terminals"].append(row(tid, "bash · jarvis"))
+    fake = mock.fake_pty
+    term = f'[data-testid="terminal-{tid}"]'
     grid = json.dumps({"preset": "grid4", "panes": [{"view": "chat"}, {"view": "file"}, {"view": "preview"},
-                                                     {"view": "task"}]})
+                                                     {"view": "terminal", "terminalId": tid}]})
     for zoom in ("160", "70"):
         page.set_viewport_size({"width": 1280, "height": 800})
         _set_storage(page, zoom=zoom, layout="{}")
@@ -1477,8 +1516,12 @@ def _grid_card_checks(page, mock, check, until):
               or page.locator(_pane(2, '[data-testid="editor-fallback"]')).count() > 0, timeout=10)
         page.locator(_pane(3, '[data-testid="preview-project"]')).click()
         until(lambda: page.locator(_pane(3, "iframe")).count() > 0, timeout=4)
-        check(f"at {zoom}% Monaco and a preview frame are on screen",
-              _visible(page, _pane(2, '[data-testid="editor"]')) and _visible(page, _pane(3, "iframe")))
+        until(lambda: page.locator(term).count() > 0 and _attr(page, term, "data-state") == "attached", timeout=6)
+        check(f"at {zoom}% Monaco, a preview frame and a terminal are on screen",
+              _visible(page, _pane(2, '[data-testid="editor"]')) and _visible(page, _pane(3, "iframe"))
+              and _visible(page, _pane(4, f"{term} .xterm-screen")) and _attr(page, term, "data-state") == "attached")
+        page.locator(_pane(4, f"{term} .xterm-screen")).click(position={"x": 20, "y": 8})
+        sent = len(fake.sent(tid))
         req = f"grid{zoom}"
         _approval(mock, req, LONG_COMMAND)
         until(lambda: page.locator('[data-testid="approval-card"]').count() > 0, timeout=4)
@@ -1490,6 +1533,11 @@ def _grid_card_checks(page, mock, check, until):
         ok, why = _card_on_screen(page)
         check(f"at {zoom}% over the grid, the card is wholly on screen and every button topmost at its point",
               ok, why)
+        page.keyboard.type("y")
+        page.keyboard.press("Enter")
+        page.wait_for_timeout(150)
+        check(f"at {zoom}% a y⏎ typed with a terminal in the grid reaches no shell",
+              fake.sent(tid)[sent:] == b"", repr(fake.sent(tid)[sent:]))
         page.locator('[data-testid="approval-card"] button.deny').click()
         until(lambda: page.locator('[data-testid="approval-card"]').count() == 0, timeout=4)
     _reset_all(page, mock, until)
@@ -1655,9 +1703,13 @@ def _seen_checks(page, mock, check, until):
     until(lambda: seen("/tasks/k1/seen") > before, timeout=4)
     check("a task finishing in a task pane that is drawn but not focused is read", seen("/tasks/k1/seen") > before)
 
-    _choose(page, until, "single")
+    # The task to pane 2 and the chat back to pane 1 by hand: choosing chat no
+    # longer swaps two panes' views (WP-B).
+    page.locator(_pane(2, '[data-testid="tab-task"]')).click()
+    until(lambda: _attr(page, _pane(2), "data-view") == "task", timeout=2)
     page.locator(_pane(1, '[data-testid="tab-chat"]')).click()
     until(lambda: _attr(page, _pane(1), "data-view") == "chat", timeout=2)
+    _choose(page, until, "single")
     check("setup: one pane showing the chat; the task is hidden",
           _attr(page, _pane(2), "data-view") == "task" and not _visible(page, _pane(2)))
     before = seen("/tasks/k1/seen")

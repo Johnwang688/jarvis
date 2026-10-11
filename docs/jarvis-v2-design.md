@@ -1739,10 +1739,9 @@ title bar.
   focus a pane of the preset, bringing back one the window dropped
   (AltGr+digit types a symbol, so it never fires mid-word); the focused pane
   of a split has an accent line under its header.
-- **Chat stays a singleton in WP-A**: choosing chat in another pane swaps
-  the two panes' **whole specs** (view, pin, preview URL, terminal), so the
-  pane that takes the other view never brings back a stale URL or pin of its
-  own. A sidebar click goes to the pane already showing
+- **Chat stayed a singleton in WP-A** (lifted by WP-B, below): choosing
+  chat in another pane swapped the two panes' **whole specs**. A sidebar
+  click goes to the pane already showing
   that kind of thing, else to the focused pane — a task click leaves a drawn
   task or diff pane following the selection. "Read" means shown in any
   drawn pane. The profile select rides the chat pane's header (the focused
@@ -1777,11 +1776,10 @@ title bar.
   pointer. The last render's set (a render-only ref, never stored) is kept
   while the preset and the drawn shape are the same and it still holds the
   focused pane; focusing a pane it does not draw draws one that does.
-- **The bottom panel is an empty dock until WP-D**: ⬓ and Ctrl+` (no Alt —
-  AltGr+7 is a backtick on French layouts; a dead backtick matches on `code`)
-  show and hide it under the panes, between the side panes; its top edge is
-  a horizontal separator (Up/Down, double-click resets to 260px). WP-D only
-  fills it with terminals.
+- **The bottom panel holds the terminals (WP-D, below)**: ⬓ and Ctrl+` (no
+  Alt — AltGr+7 is a backtick on French layouts; a dead backtick matches on
+  `code`) show and hide it under the panes, between the side panes; its top
+  edge is a horizontal separator (Up/Down, double-click resets to 260px).
 - **Under a card nothing moves**: every title-bar button, fold button and
   rail button is disabled (the veil stops the pointer, but a button that kept
   focus still answered Enter — on main it folded a pane behind the card), an
@@ -1804,6 +1802,156 @@ title bar.
   `MockDaemon` of its own on an ephemeral port, so its saves, `/seen` posts,
   approval decisions and preview hits never reach the world the main suite
   asserts on. Every existing suite passes unchanged in the single layout.
+
+**Several chats at once (2026-10-09, WP-B of the same plan, §2.2; decisions
+W-6).** WP-A kept one conversation; the owner asked for two chats side by side
+as two separate conversations. The pure rules are `hud/src/lib/chats.ts`
+(tested in `chats.test.ts`); the store holds `chats[pane]`, `selectedChat`
+and `selectedOrder`.
+
+- **Each chat pane is its own conversation**, with its own input box,
+  project chip, model chips, Send/Steer and Stop. Where you type is where it
+  goes — a shared box would need a "which pane?" indicator and would be one
+  keystroke from the wrong thread. The per-pane state is exactly what was
+  window-wide: thread or compose row, the turn tracked, busy, status,
+  transcript, draft, tool ticker, hand-backs, a REVIEW transcript, and the
+  box's text and staged files. Send, steer, Stop, give-back, held-back words
+  and the 15-second reconcile are the same code keyed by pane, so the single
+  layout is unchanged.
+- **What a conversation owns moves with the conversation, never with the
+  pane** (review of PR #27). A pane that trades conversations with another
+  takes its box text, files and REVIEW transcript along. A pane that changes
+  thread parks its unsent text under the conversation it leaves (keyed by
+  thread, or by compose row) and gets back what the new one had, so a draft
+  is never left in a pane now showing another thread. `send()` re-finds its
+  pane by conversation after every await — a pane traded away or moved on
+  while the request was out is not patched (this also fixed New thread
+  pressed while a compose send was in flight, in one pane or two). The
+  transcript loader patches whichever pane shows that thread when it
+  arrives and drops it if none does; a pane counts as loaded only once its
+  transcript has arrived. A hand-back goes to a drawn pane showing its
+  thread; if none does, it is held and comes back when one does — never into
+  another conversation, and never into the selected chat as a fallback. A
+  first send that fails after another thread was opened in its pane parks its
+  words under its compose row; the next new thread in that pane gets them
+  back, and the error says so (re-review of PR #27). Files read in for a box
+  (a drop, the picker, a paste) are added, once ready, to the pane holding
+  the conversation they were dropped for, else to its parked draft. A first
+  send's turn is tracked under a placeholder until its thread exists; that
+  id never reaches the daemon — a Stop or orb press meanwhile is held and
+  interrupts the thread once the message is in. A model change whose answer
+  arrives late updates the compose row holding that thread at that moment,
+  not the pane it was asked from.
+- **The single layout changes in one way, deliberately: a draft belongs to
+  its conversation.** Typing in a thread and then opening another thread, or
+  pressing New thread, parks the words (main left them in the box); they
+  come back when that conversation is reopened. New thread while composing
+  still keeps them. There is no sidebar marker for a parked draft yet.
+- **Typing re-renders the window**, because the box's words are the store's
+  (they must move with the conversation), so the transcript (`ChatTab`) is
+  memoized with stable props: redrawing a long transcript per keystroke cost
+  milliseconds per character, per chat pane.
+- **Routing.** An SSE event with a `thread_id` reaches the panes *showing*
+  that thread (deltas, tools, replies, Discord messages, model lines,
+  proposals) and those *tracking its turn* (the finish, an error), so a pane
+  that moved on mid-turn still hears it end. An event with no thread goes to
+  the selected chat. Approvals, activity, task and project lifecycle stay
+  window-wide.
+- **Ambiguous input goes to the selected chat** — the owner's rule (W-6):
+  "any input that is ambiguous and may go into the wrong chat goes into the
+  currently selected chat: with one chat open, that one; with four, the one
+  I most recently clicked on." The selected chat is the chat pane most
+  recently clicked: a pointer or keyboard focus into it, Ctrl+Alt+N, or a
+  sidebar click that opens a thread in it. Clicking a pane that is not a chat
+  (Preview, File, a task) does not change it. It is always a drawn chat
+  pane: when the layout drops it, the chat pane selected before it takes
+  over; one chat drawn is the selected one; with none drawn there is none.
+  Ambiguous means a dictated transcript (AUTO sends it, REVIEW puts it in the
+  box), the orb's press and interrupt, push-to-talk, the follow-up window,
+  files dropped on the window outside any pane, and an SSE event with no
+  thread. A transcript goes to **the selected chat as it is when the
+  transcript lands**: clicking another chat while STT runs sends it there.
+  Input that belongs to a thread — typed text, queued and steered messages,
+  hand-backs and held-back words, a send's own result, a transcript load —
+  stays with its thread; a hand-back whose thread is off screen is held,
+  never put in the selected chat. With no chat drawn, nothing is ever sent:
+  speech waits, unsent, in the box of the next chat selected, and a press or
+  a dropped file is refused with a sentence.
+- **The selected chat is marked and drives the voice.** Only its input bar
+  draws the dictation strip (AUTO / REVIEW / OFF, the meter, the hint), so
+  the strip shows where speech lands; another chat pane shows only its own
+  turn's status. In a split its header carries an accent bar and a mic mark
+  (`pane-N-mic`, `data-selected`). The orb follows and interrupts its turn,
+  the follow-up window opens only when its own turn finishes, capture is
+  suppressed only while *its* turn runs — a long turn in another pane no
+  longer silences the mic — and a capture status ("LISTENING · SPEAK NOW",
+  "TRANSCRIBING", "STT FAILED" …) moves to the newly selected chat rather
+  than staying stale in a pane that no longer draws the strip.
+- **A thread is open in one pane at most.** A click on a thread a drawn pane
+  shows focuses that pane. A thread held off screen — by a pane the preset
+  hides, or a pane now showing another view — trades conversations with the
+  pane it is opened in, so nothing either held (a running turn, hand-backs,
+  the box) is dropped. A pane that switched threads mid-turn hands that
+  turn, Stop included, to the pane that opens the thread; if that pane is
+  itself waiting on a turn of its own, the two trade tracked turns, so
+  neither turn is left without a Stop (it used to refuse, which stranded the
+  first). A thread click lands in the pane showing it, else the focused chat
+  pane, else the selected chat, else the focused pane switches to chat.
+  **Alt+click, or "Open beside" in the row's ⋯ menu**, opens the next pane
+  to the right: from one pane two columns, from the right of two a third
+  column, and round to the first in other shapes.
+- **The sidebar** marks every drawn chat pane's thread — the selected one
+  with the accent, the others with a dimmer mark, each row carrying
+  `data-pane` — and the selected chat's conversation even when its pane shows
+  something else, as the one conversation always was. Each composing pane
+  has its own compose row, numbered by pane ("New thread · 2") when more than
+  one is marked. A pane that shows chat for the first time opens a new thread
+  in the last project worked in.
+- **"Read"** covers every drawn chat pane's thread, focused or not.
+- **An unsaved edit is never switched away.** A File pane holding a dirty
+  buffer refuses every view switch — its own tabs, Open beside, a sidebar
+  thread or task landing there, New thread — and says so where the owner
+  clicked: in its own header ("unsaved edit · save or reload first",
+  `pane-N-refused`), or, when the refusing pane is not drawn, in the focused
+  pane ("pane N has an unsaved edit"). The WP-A guard covered follow-chat and
+  a gone project; a tab switch still closed the buffer.
+- **Nothing outside the card can be reached while it is up.** The card takes
+  focus off anything outside it, not only a frame, the workspace or the
+  panel (a sidebar button that kept focus still answered Enter behind the
+  veil), and everything outside the card is made `inert` until the last card
+  goes, while Tab and Shift+Tab stay on the card — Tab used to walk focus
+  back out behind the veil. AUTHORIZE and ALWAYS are out of the Tab order
+  (`tabIndex=-1`), so no Tab or Shift+Tab puts one under an Enter: they take
+  a click, and DENY is the only stop. Focus goes to the card container,
+  never a button, and comes back (after `inert` is lifted) when the last
+  card goes — to the chat box too, which is no longer `disabled` under a
+  card (inert covers it; a disabled box lost focus before the card could
+  record it). Each card is keyed by its request, so a queued card is a card
+  of its own, with live buttons and its own countdown, and takes the focus
+  (the answered card's busy state used to carry over; main had this too).
+- **A file dropped on a sidebar project row** is staged in the selected
+  chat like any other drop outside a box; the row used to swallow it.
+- **Two single-layout quirks fixed on the way**: a chat pane's project chip
+  and profile select read its own conversation's project (after a task was
+  picked they showed the task's while the message went elsewhere), and a
+  project archived with only its *task* open no longer clears an unrelated
+  chat's transcript (its messages were emptied and never reloaded).
+- **Free checks**: `chats.test.ts`, per-pane cases in `store.test.ts` and
+  `compose.test.ts`, and `tests/face/hud_v2_multichat_check.py` — two
+  threads side by side, a turn in one pane while the owner sends in the
+  other, every event kind to its pane, one pane's Stop never reaching the
+  other, voice to the selected chat, never twice, `/seen` for both, the
+  steer and give-back cases re-run in pane 2, the card taking focus from a
+  sidebar button, and a dirty File pane refusing every switch; then one
+  `review:` check per PR #27 finding and one `W-6:` check per case of the
+  rule (four chats in a 2×2 grid, a click during STT, a selected chat
+  dropped by a narrow window, one chat and none, an off-screen hand-back),
+  each shown to fail on the commit before the fixes; and `review 2:` checks
+  for the re-review (placeholder Stop, two queued cards, the Tab round,
+  late chip answers, a failed send after its pane moved, file drops), each
+  failing on feb61ff and naming the mutation it kills. It runs after the
+  layout section on a `MockDaemon` of its own, or alone. WP-A's three checks
+  of the single-chat swap were rewritten for the new rule.
 
 **Steering a running turn (2026-10-08).** The owner: "I can't steer claude or codex sessions while they are working
 if I want them to do something differently or whatnot and it just throws an
@@ -1903,7 +2051,50 @@ the outer span, and a line kept out of history records only its first
 command — so WP-F's text-pattern refusals of `env`, `gh auth token` and the
 rest (W-2, item 3) must apply to **every** read, not only when no marks
 were seen. Each terminal carries the owner's `readable` switch, on by
-default. Contract: `docs/hud-api.md`.
+default. Contract: `docs/hud-api.md`. Since WP-D the listing also says
+whether the startup file *took* (`marked`, on the first signed prompt mark):
+`integration` is only what was configured, and a profile that `exec`s
+another shell configures "bash" and marks nothing. The startup file must fit
+8 KiB and is written without blocking (a blocking write past a small pipe
+would have wedged every terminal route), and the launcher always runs the
+checked realpath, refusing a renamed shell where `env` cannot set argv[0].
+
+**The terminal panel and view (2026-10-09, WP-D).** The owner's terminals
+are drawn with xterm.js (pinned exactly, lazy-loaded, no clipboard addon, no
+window reports) in the bottom panel — a tab each, `+` in the focused pane's
+folder, `▾` for Home or a project — and in any pane's terminal view; **one
+terminal is drawn in one place at a time** (W-1), and its panel tab says
+which pane has it. A window keeps one session per terminal: it attaches on
+first draw with a fresh ticket and a URL from its own location, resizes only
+after the replay, and stays attached while hidden, so moving a terminal
+between the panel and a pane, or hiding the panel, never reattaches. Ctrl+`
+opens a terminal when there is none (⬓ only shows the panel), and a dot on
+⬓ says one in the hidden panel exited. In a terminal Ctrl+B, Ctrl+Alt+B and
+Ctrl+_ are the shell's; the zoom keys, Ctrl+` and Ctrl+Alt+N stay the HUD's;
+Space is never push-to-talk. **Under a card nothing reaches the shell** —
+input held, a paste in flight paused, every key left to bubble so Escape
+denies — and output keeps drawing. **A paste never splices**: it goes out in
+paced 16 KiB chunks from a queue that belongs to one socket, stops the
+moment the daemon drops a frame, waits for the owner's Resume before typing
+goes again, and dies with its socket rather than continuing on the next one;
+and it is inert as a control stream (ESC stripped), so a pasted end-of-paste
+marker cannot end bracketed paste early. **A replay is never answered**:
+xterm answers some output (a cursor-position or colour query) through the
+input channel, so nothing is sent from a new socket until its replay has been
+parsed, and an older socket's queued output is never parsed into a newer one.
+**A terminal another window shows is never taken unasked** — it reads "in
+another window · Show it here" until the owner says so. Another window's
+takeover is asked here (Let it / Keep it, unanswerable
+under a card, so kept); exit, Jarvis's restart, "taken" and "refused" each
+say so with the next step offered; a busy terminal is asked about before it
+closes; an attach this window did not make is a quiet notice. Output is
+hostile bytes: a title it sets is text in the pane header, never the
+window's title (the desktop bridge matches on `J.A.R.V.I.S.`), and a link
+opens only for http(s) on Ctrl+click. xterm under the HUD's CSS zoom is
+counter-zoomed with its font scaled instead; the 160% and 70% checks guard
+fit and selection. The headless suite plays the PTY inside the browser
+(`route_web_socket`), so no shell ever runs, and the live-port guard now
+refuses WebSockets too. "Open in Preview" for a dev server's link is WP-E.
 
 Remaining: WP13 (the long-bench comparison, the owner's call on cost), a
 native Windows worker, the R8 hook on Codex, and prompt tuning in

@@ -816,7 +816,7 @@ Content-Security-Policy:
 | **Find in files (Ctrl+Shift+F)** | ED-7 | `POST /projects/{id}/search`, on a structured core extracted from `jarvis/tools/search.py`, so it and `grep_files` share **one** protected-file filter. Respects `.gitignore`, with a toggle (decided). 2,000 matches and 10 s at most. Refused on the Inbox, which is too broad |
 | **Command palette (Ctrl+Shift+P)** | ED-7 | A static registry (pure, tested): HUD commands plus Monaco's actions when an editor is focused, including VEX: Build and VEX: Open brain terminal. **Download is not in the palette**: it is only the VEX view's button |
 | Explorer: new file or folder, rename or move, delete | ED-7 | `POST /projects/{id}/fs`, `owner_only`. **Delete moves to the trash** (`trash.Trash.put`), never unlink |
-| "Add selection to chat" | ED-7 | `path:L10-24` plus a fenced excerpt into the voice-target chat's box, **unsent**. This is how your intellisense, Claude, sees what you are looking at |
+| "Add selection to chat" | ED-7 | `path:L10-24` plus a fenced excerpt into the selected chat's box (decisions W-6), **unsent**. This is how your intellisense, Claude, sees what you are looking at |
 | Status bar | ED-7 | Ln/Col, selection count, language, indentation, encoding, EOL, and "syntax: tree / basic" |
 | Settings | ED-8 | Font family (validated to a safe character set), size, tab size, spaces or tabs, word wrap (on for Markdown), minimap (**off**), sticky scroll, whitespace, bracket-pair colours, cursor style. Auto-save is **off** (decided). Stored in `jarvis.hud.editor` behind try/catch |
 | `.editorconfig` | ED-8 | Sets indent style and size and EOL for new lines. **Never rewrites on save**: format-on-save is off, decided |

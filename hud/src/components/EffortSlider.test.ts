@@ -34,11 +34,12 @@ describe("EffortSlider", () => {
   let sent: (string | null)[];
   let answers: Deferred[];
 
-  const render = (choice: Choice) =>
+  const render = (choice: Choice, disabled = false) =>
     act(() => {
       root.render(createElement(EffortSlider, {
         models: TM,
         choice,
+        disabled,
         onCommit: (effort: string | null) => {
           sent.push(effort);
           const d = deferred();
@@ -92,6 +93,49 @@ describe("EffortSlider", () => {
     } finally {
       document.removeEventListener("keydown", listen);
       document.removeEventListener("keyup", listen);
+    }
+    expect(heard).toEqual([]);
+  });
+
+  it("lets Tab go on to the popover's round (ModelChip), and never moves on it", () => {
+    render(onDefault);
+    const heard: string[] = [];
+    const listen = (e: KeyboardEvent) => heard.push(`${e.type}:${e.key}:${e.defaultPrevented}`);
+    host.addEventListener("keydown", listen);
+    try {
+      key("Tab");
+    } finally {
+      host.removeEventListener("keydown", listen);
+    }
+    expect(heard).toEqual(["keydown:Tab:false"]);
+    expect(slider().getAttribute("aria-valuenow")).toBe("2");
+    settle();
+    expect(sent).toEqual([]);
+  });
+
+  it("disabled (an authorization card is up): out of the Tab order, and no key or pointer moves it", () => {
+    render(onDefault, true);
+    expect(slider().getAttribute("tabindex")).toBe("-1");
+    expect(slider().getAttribute("aria-disabled")).toBe("true");
+    for (const k of ["ArrowRight", "End", "Home", "ArrowLeft"]) key(k);
+    // jsdom may lack PointerEvent; React reads the type, button and clientX.
+    const Ptr = (typeof PointerEvent === "undefined" ? MouseEvent : PointerEvent) as typeof MouseEvent;
+    act(() => {
+      slider().dispatchEvent(new Ptr("pointerdown", { button: 0, clientX: 0, bubbles: true }));
+      slider().dispatchEvent(new Ptr("pointerup", { button: 0, clientX: 0, bubbles: true }));
+    });
+    settle();
+    expect(slider().getAttribute("aria-valuenow")).toBe("2");
+    expect(sent).toEqual([]);
+    // Its keys are still kept from push-to-talk while it is disabled.
+    const heard: string[] = [];
+    const listen = (e: KeyboardEvent) => heard.push(e.key);
+    document.addEventListener("keydown", listen);
+    try {
+      key(" ");
+      key("ArrowRight");
+    } finally {
+      document.removeEventListener("keydown", listen);
     }
     expect(heard).toEqual([]);
   });

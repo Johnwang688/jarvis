@@ -13,7 +13,8 @@
 //
 // The HUD is CSS-zoomed on #root: a pointer's screen offset goes through
 // `toCss` before it is measured against the rail's own (unzoomed) width.
-// Keys stop here, so Space on the slider is never push-to-talk.
+// Keys stop here (Tab goes on to the popover's round), so Space on the
+// slider is never push-to-talk.
 
 import { useEffect, useRef, useState } from "react";
 import { toCss } from "../lib/layout";
@@ -138,6 +139,9 @@ export function EffortSlider(props: {
         data-default={m.defaultIndex}
         onKeyUp={stopKeys}
         onKeyDown={(e) => {
+          // Tab is the popover's: it goes round its stops and never leaves it
+          // (ModelChip's Popover, which stops it there in turn).
+          if (e.key === "Tab") return;
           e.stopPropagation();
           // Space and Enter do nothing here — and never reach push-to-talk.
           if (e.key === " " || e.code === "Space" || e.key === "Enter") {

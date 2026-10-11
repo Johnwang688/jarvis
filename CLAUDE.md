@@ -383,6 +383,14 @@ program can print bytes between real marks, nested shells/`sudo -i`/`ssh`/
 command only — so WP-F's text-pattern refusals apply to every read. When
 `terminal_read` lands, `terminal_check`'s no-tool test must allow exactly
 it. Each terminal has the owner's `readable` switch, **on by default**.
+Follow-ups from the re-review (with WP-D): `integration` is what was
+*configured*, **`marked`** (listing, attach row, one `{"type": "marked"}`) is
+what *took* — a profile that `exec`s another shell reads "bash" but never
+marked; the startup file must fit **8 KiB** (a pipe under
+`pipe-user-pages-soft`) and is written **without blocking** under
+`Terminals._lock` — a short write is a 409, never a wedged route; and **the
+checked realpath always runs** — without `env --argv0` a name whose basename
+differs (rbash, `sh` for bash) is refused rather than exec'd by its link.
 Tests point `config.TERMINAL_SHELL` at `tests/v2/terminal_fake/sh` (named
 `sh` so it is started as a POSIX shell) with a temp HOME, and never use
 8402/8403/8405.
@@ -408,7 +416,9 @@ opened with (`Thread.cwd`); a move re-labels, it never re-roots.
 `hud/src/lib/layout.ts`. Zoom is 70–160% in 10% steps: `− 100% +` in the
 title bar (since 2026-10-09; it used to fold away with the status pane), or
 Ctrl+= / Ctrl+- / Ctrl+0 — **the HUD's everywhere**, input
-bar and Monaco included, because a key let through is Chrome's page zoom,
+bar, Monaco and terminals included (inside a terminal only Ctrl+_ —
+Ctrl+Shift+-, readline's undo — goes to the shell instead of zooming out;
+WP-D), because a key let through is Chrome's page zoom,
 which the control cannot see and Chrome remembers per site. It is **CSS
 `zoom` on `#root`**, so **every `vh`/`vw` in `theme.css` must divide by
 `--ui-zoom`**, and a menu positioned from a screen rect must go through
@@ -453,15 +463,15 @@ never dropped**, nothing is stored). **A dropped set is sticky**: the last
 render's panes (a render-only ref) are kept while the preset and drawn shape
 are unchanged and they hold the focused pane — choosing them from focus
 alone made a click into the other pane of a dropped pair redraw a different
-pair under the pointer. **Chat is a singleton until WP-B**: choosing it in
-another pane swaps the two panes' whole specs; sidebar clicks go to the pane
-already showing that kind of thing, else the focused one; "read" is any drawn
-pane. **A File pane pins its project** when it opens a file and `FileTab` is
+pair under the pointer. Chat was a singleton in WP-A (choosing it in
+another pane swapped the two panes' whole specs) — **WP-B lifted that**,
+below; sidebar clicks go to the pane already showing that kind of thing, else
+the focused one; "read" is any drawn pane. **A File pane pins its project** when it opens a file and `FileTab` is
 keyed by it — it used to save to whatever project was current at save time.
 An unsaved edit is never dropped silently: "follow chat" waits, a gone
 project keeps the pane pinned until "discard edit", and closing the window
 asks. Preview keeps its URL per pane, re-judged on load. The bottom panel
-(⬓, Ctrl+`) is an **empty dock until WP-D** fills it with terminals. **Under
+(⬓, Ctrl+`) holds the terminals (WP-D, below). **Under
 a card every title-bar, fold and rail button is disabled**, the layout menu
 closes, and **the card takes focus** off a preview frame, Monaco or anything
 in the workspace or panel (a framed page got its own key events, so Escape
@@ -476,24 +486,293 @@ ephemeral port (`MockDaemon(0)`; the mock records the port it bound), so its
 saves, `/seen` posts, approval decisions and preview hits never reach the
 world the main suite asserts on.
 
-**Input bar declutter (2026-10-10).** The bar is `📎 [box] ⬆` over one row,
-`in: project · provider ▾ · model · effort ▾`. **The mic is on the orb, not in
-the bar**: the dictation mode (AUTO/REVIEW/OFF, testids `dictation-*`) and the
-level meter sit in a strip above the orb (`#micstrip`, inside `#orbdock`; the
-sidebar's bottom padding grew to match), and the hint line is gone — its words
-now ride the orb's status line (`orb-status`: the turn's status, else `MIC
-MUTED`, else the orb state). A folded sidebar scales the dock to a 36px orb, so
-the strip cannot ride in it: `#modecycle` (`dictation-cycle`), a sibling button
-above the mini orb, cycles the mode and goes red at OFF. **Model and effort are
-one button** (`model-chip-btn`, carrying `data-model`/`data-effort`) that opens
-one popover (`ModelChip.tsx` `Popover`, in `#root`, `position: fixed` placed
-from the button's rect divided by the zoom, upward) with Model and Effort
-sections and "Set <provider> default…"; the provider stays a select. The box
-grows to 15 lines (`MAX_LINES`) then scrolls; Send and Attach are SVG icon
-buttons (testids unchanged), Stop a square icon. Tests drive the popover through
-helpers at the top of `hud_v2_check.py` (`pick_model`, `pick_effort`,
-`chip_model`…); a read made while a dialog's veil is up must use the button's
-text, because the popover cannot be opened under a veil.
+**Several chats at once, WP-B (2026-10-09, design §18; plan §2.2 "Several
+chats at once"; decisions W-6).** Any pane may show chat, each its **own
+conversation**: its transcript, box (text and staged files), project and model
+chips, Send/Steer and Stop. What was one set of window-wide fields is
+`state.chats[pane]` (`lib/chats.ts`: threadId or compose, turnThreadId, busy,
+status, messages, draft, ops, restore, pendingTranscript, input, files,
+loadedThread), and the turn machinery — send, steer, Stop, give-back,
+held-back words, the 15 s reconcile — is the old code keyed by pane, so the
+single layout (pane 1) behaves as before, **with one deliberate change: an
+unsent draft belongs to its conversation.** Opening another thread, or New
+thread from a thread, parks the words typed (main left them in the box), and
+they come back when that conversation is reopened; New thread while composing
+still keeps them. There is no sidebar marker for a parked draft yet.
+**What a conversation owns moves
+with the conversation, never with the pane** (PR #27 review): a pane that
+trades conversations takes its box text, files and REVIEW transcript along
+(`chat_swap`); a pane that changes thread parks its unsent text and files
+under that conversation (`drafts`, `draftKey`) and gets back what the new one
+had; files read in for a box (a drop, the picker, a paste) are added, when
+ready, to whichever pane holds the conversation they were dropped for, else
+to its parked draft (`stage`) — never to whatever the pane shows by then;
+`send()` re-finds its pane by conversation after every await and patches
+nothing if none still shows it (which also fixed New thread pressed while a
+compose send was in flight, in one pane or two); the transcript loader patches
+whichever pane shows that thread when it arrives, drops it if none, and a pane
+counts as loaded (`loadedThread`) only once it has; a hand-back goes to a
+drawn pane showing its thread, else is held (`HeldBack`) and comes back when
+one does — never into another conversation. A failed first send whose
+compose row no pane holds any more (another thread was opened there
+meanwhile) parks its words under that row, for the next new thread in that
+pane, and says so; a hand-back never falls back to the selected chat. Until
+its thread exists a first send's turn is tracked under a placeholder
+(`local-N`) that **never reaches the daemon**: a Stop or orb press then is
+held and interrupts the thread once the message is in. A model change whose
+answer lands late updates the compose row holding that thread *then*, so New
+thread meanwhile stays a new thread. **An SSE event with a
+`thread_id` goes to the pane showing that thread or tracking its turn**
+(`routeEvent`); approvals, activity and lifecycle stay window-wide.
+**Ambiguous input goes to the selected chat** (the owner's rule, W-6): the
+chat pane most recently clicked — a pointer or keyboard focus into it,
+Ctrl+Alt+N, a sidebar click that opens a thread there. It is kept as an order
+(`selectedOrder`, `selectedChatOf`), so a chat pane the layout drops gives way
+to the one selected before it; clicking a Preview, File or other pane never
+changes it; one chat drawn is the selected one, and with none drawn there is
+none. Ambiguous means: a dictated transcript (AUTO sends, REVIEW fills the
+box — **to the selected chat as it is when the transcript lands**, so
+clicking another chat during STT sends it there), the orb's press and
+interrupt, push-to-talk, the follow-up window, files dropped on the window
+outside any pane (on the sidebar, a project row included, or a Preview or File
+pane), and an SSE event with no thread. Input that belongs to a
+thread (typed text, queued and steered messages, hand-backs, a send's own
+result, a transcript load) stays with its thread, and a hand-back whose thread
+is off screen is held, never put in the selected chat. With no chat drawn,
+speech waits unsent in the box of the next chat selected, and a press or a
+dropped file is refused with a sentence: nothing is ever sent. The selected
+chat's status is the line under the orb (since PR #29 the dictation strip —
+AUTO/REVIEW/OFF and the meter — is on the orb, acting for the selected chat;
+every other chat pane shows only its own turn's status, `pane-status`), it carries
+`data-selected` and, in a split, an accent bar down its header's edge and a mic
+mark (`pane-N-mic`); **the orb follows and interrupts only its turn**, the
+follow-up window opens only when its turn ends, **only its turn suppresses
+the mic** — a long turn in another pane no longer silences it — and a capture
+status ("LISTENING", "TRANSCRIBING", "STT FAILED" …) moves with the selection
+instead of going stale in a pane that is no longer selected. The store's
+`orb` is window-wide, but a pane's turn event moves it only for the selected
+chat (`select` repaints it from the new one's turn). **A thread is open in one
+pane at most**: a click on a thread a drawn pane shows focuses that pane; one
+held off screen (a hidden pane, or a pane showing another view) trades
+conversations with the pane it opens in (`chat_swap`), so its turn and
+hand-backs move with it; a pane that moved on mid-turn hands that turn, Stop
+and all, to the pane that opens the thread (`open_thread`) — and if that pane
+is itself waiting on another turn, **the two trade tracked turns**, so neither
+is left without a Stop. Click rule (`chatTarget`): the pane showing it, else
+the focused chat pane, else the selected chat, else the focused pane switches
+to chat. **Alt+click or ⋯ → Open beside** opens the next pane to the right
+(single → two columns, the right of two → three). The sidebar marks every
+drawn chat pane's thread — the selected one `sel`, others `panesel`
+(dimmer), each row `data-pane` — plus the selected chat's conversation even
+off screen (as the one conversation was), and numbers compose rows by pane
+when more than one is marked. A pane that shows chat for the first time opens
+a new thread in the last project worked in. "Read" covers every drawn chat
+pane's thread. **A File pane holding an unsaved edit is never switched
+away** — its own tabs, Open beside, a sidebar thread or task, New thread:
+refused, and the refusal shows where the owner clicked (`pane-N-refused` on
+the refusing pane, or on the focused pane naming it when it is not drawn).
+**While a card is up, everything outside it is `inert`** (`Approvals.tsx` sets
+it on every sibling of `#authveil` and takes it off before focus goes back),
+and Tab/Shift+Tab stay on the card: the card takes focus off anything outside
+it (`behindTheCard`), but Tab used to walk focus back behind the veil, where
+Enter pressed things. **AUTHORIZE and ALWAYS are `tabIndex=-1`**, so no Tab
+or Shift+Tab ever puts one under an Enter — DENY is the only stop (they stay
+clickable; the coordinator's default, told to the owner). The chat box is not
+`disabled` under a card (inert covers it): a disabled box dropped focus to
+the page before the card could record it, so focus never came back. **Each
+card is keyed by its request**: a queued card used to inherit the answered
+one's busy state and countdown, its buttons dead (main too), and a new top
+card takes the focus. Two latent single-layout quirks were
+fixed in passing: a pane's project chip and profile select now show *its*
+conversation's project even after a task was picked, and an archived
+project's *task* no longer clears an unrelated chat's transcript.
+`window.__hud.state()` flattens the selected chat's conversation (else the
+one selected last) over the window's fields (the single-layout suites read
+those; `chats` has every pane) and `__hud.dispatch` routes a legacy `patch`
+of conversation fields there. Free checks: `lib/chats.test.ts`, the per-pane
+cases in `store.test.ts` and `compose.test.ts`, and
+`tests/face/hud_v2_multichat_check.py` (run by `hud_v2_check` after the
+layout section, on a `MockDaemon(0)` of its own, or alone) — including one
+`review:` check per PR #27 finding and one `W-6:` check per case of the rule,
+each shown to fail on the commit before the fixes (dbd2096), and `review 2:`
+checks for the re-review (failing on feb61ff), each naming the mutation it
+kills. **Typing re-renders the window** (the box's words are the store's), so
+`ChatTab` is memoized with stable props: a long transcript redrawn per
+keystroke cost milliseconds per character per chat pane.
+
+**HUD terminals, panel and view, WP-D (2026-10-09; plan §2.3–§2.4,
+decisions W-1/W-2/W-5; contract in `docs/hud-api.md`).** xterm.js pinned
+exactly (`@xterm/xterm` 6.0.0, `addon-fit` 0.11.0, `addon-web-links` 0.12.0)
+and lazy-loaded (`lib/xterm.ts`); **no clipboard addon** (no OSC 52), window
+reports off. `lib/terminal.ts` holds the rules (pure, `terminal.test.ts`),
+`components/Terminal.tsx` the sockets and views. **One session per terminal
+per window**: made the first time the window draws it, it attaches with a
+**fresh ticket** and a URL from `location` (never a port), resizes only after
+`replayed`, and **stays attached while hidden**; its xterm element is moved,
+not rebuilt, between the panel and a pane. **A replay is never answered**
+(PR #28 review): xterm answers some output — DA, a cursor-position report,
+an OSC 11 colour, DECRQSS — through the owner's own input channel, so a ring
+holding old queries used to type their answers into the program on every
+reload or dropped socket (50,000 `ESC[6n` → 300 KB in 50k frames, past the
+daemon's 256 KiB latch). Output now goes through `OutputPipe`: one write in
+xterm's hands at a time, **tagged with its socket's generation**, so an older
+socket's queued output is never parsed into a new session; the reset is an
+in-band RIS (a JS `reset()` lets what xterm already holds be drawn again
+after it); and **nothing is sent from a new socket until its replay has been
+parsed** — the flag clears from the pipe's step after the replay, never on
+the `replayed` message itself. **The pipe's backlog is bounded** (re-review):
+output faster than xterm parses (~14 MB/s) used to queue without limit (a
+reviewer reached ~1.5 GB, the display ~40 s behind, once xterm's own 50 MB
+refusal no longer applied); past `OUTPUT_HIGH_WATER` (8 MiB) the backlog is
+dropped, that socket's output ends and the session reattaches, so the replay
+shows the latest 1 MiB, with a notice that it skipped ahead. A `term.write`
+that throws clears the in-flight flag in a `finally`, so it cannot stall the
+pipe. **A terminal another window shows is never
+taken unasked**: listed `shown` and not one this tab has shown (a
+sessionStorage list, `jarvis.hud.terminals.mine`; `taken`/`refused` forget
+an id), it is drawn as "in another window · Show it here" — a takeover
+question the owner did not cause is one they learn to wave through. **A
+copy of the list is not the list** (re-review): Chrome copies sessionStorage
+into a duplicated tab and a reopened closed one, so the list carries its
+`holder`, the live page's per-load nonce (memory only), which that page's
+`pagehide` sets to null; a new page inherits the list only if the holder is
+null **and** its navigation type is `reload` — a duplicate's copy is held by
+its live original, a reopened tab's is released but a restore. A reload
+still attaches straight back even while the daemon counts the old page's
+socket. A first attach reads a fresh listing first, and so does ×
+before deciding whether to ask (`freshList`: never a listing already on its
+way, which may predate `busy`; a failed listing asks, saying it could not
+check). **One terminal is drawn in one
+place** (`placeTerminals`): a drawn pane holding it wins and its panel tab
+reads "in pane N" and jumps there; a hidden panel or undrawn pane attaches
+nothing (a reload must not ask another window for a terminal nobody here
+sees). Panel: a tab per terminal, `+` (the focused pane's folder **as an
+id**, `terminalSpecFor`; since WP-B a focused chat pane gives its *own*
+conversation, and any other pane defers to `activeChat` — the selected chat,
+else the one selected last — the chat File and Preview panes already follow,
+not W-6's input rule, which is about where words go), `▾` (Home or a project), × per tab; **Ctrl+` opens
+a terminal when there is none, ⬓ never does**; a dot on ⬓ means one in the
+hidden panel exited. In a terminal **Ctrl+B, Ctrl+Alt+B and Ctrl+_ are the
+shell's** (`terminalTakesKey`), the zoom keys, Ctrl+` and Ctrl+Alt+N stay the
+HUD's, and every key stops at the terminal (Space is never push-to-talk).
+**Under a card nothing reaches the shell**: `disableStdin`, a key filter
+that lets every key bubble (Escape denies), a guard on the bytes, a paste in
+flight waits, and the card takes focus (WP-A). **Pastes**: 16 KiB chunks
+paced 8 ms from a queue that belongs to **one socket** (`InputGate`);
+`input_dropped` throws the rest away at once and typing waits for the
+owner's **Resume typing** (`input_resume`, retried while refused, with
+Reattach/close as the way out — Ctrl-C is not); a late in-flight
+`input_dropped` adds to the notice and never undoes a resume; **a socket
+that closes takes its paste with it**, never continued on the next.
+**Every paste is inert as a control stream**: a capture-phase listener on the
+host takes it before xterm, strips ESC and C1 (`cleanPaste`), then
+`term.paste()`s it — a pasted `ESC[201~` used to end bracketed paste early
+and run the rest. Keys or a paste dropped while connecting (or not running
+here) are said, never swallowed (an `unsent` notice; only the owner's own
+gestures count, never xterm's answers).
+Takeover asks here (Let it / Keep it, disabled under a card — unanswered is
+kept); "taken", "refused", "exited (code N)" with Restart/Close, "ended"
+with New terminal here (the spec it was opened with, remembered under
+`jarvis.hud.terminals`); a `busy` terminal is asked about before it closes.
+A `terminal_attached` not matched to one of the window's own sockets
+(`AttachLedger`) is a quiet, dismissible notice. Each terminal's bar has the
+"Jarvis can read" switch (owner-only PATCH) and an integration note (`none`,
+or `inactive` when a configured shell has not `marked` 4 s after attaching).
+**An OSC title is text** in the pane header and the bar, capped at 80 —
+**never `document.title`**; links open only for http(s), only on Ctrl+click
+(`judgeLink`); "Open in Preview" for loopback links is WP-E's. **xterm under
+CSS zoom**: the host is counter-zoomed (`zoom: 1/level`) and the font scaled
+by the zoom, so cells and the pointer are measured unzoomed. Free checks:
+`terminal.test.ts`, `workspace.test.ts`, and
+`tests/face/hud_v2_terminal_check.py` — the PTY is **played in the browser
+by `route_web_socket`** (`FakePty`; no shell, no HOME) against a
+`MockDaemon(0)` of its own, the `/terminals` routes in
+`hud_v2_mock_terminals.py`; `hud_v2_layout_check`'s 2×2 grid now holds a
+terminal under the card. **`hud_v2_check.guard_live` refuses HTTP and
+WebSockets to 8402/8403/8405** (`ctx.route` never sees a socket), and the
+terminal suite proves the socket half against a port of its own. Two
+Playwright facts that cost a debugging round: sync route handlers run only
+during a Playwright call, so a wait on the fake's own state must pump
+(`pumping`); and a socket must not be closed from inside its own message
+handler. **Verified to bite**, each mutation in a scratch copy: the key
+filter's card hold alone (Escape stops denying), every hold layer (a typed
+`y⏎` and a pasted `rm -rf` reach the shell), the paste abort (128 of 128
+chunks sent), a queue that outlives its socket (the rest of the paste goes
+out ahead of the next keystroke — the direct check only bit once it typed
+on the new socket), the guard's socket half, and the three backend fixes.
+The review round added, each also shown to bite in a scratch copy: the
+pump's card hold (chunks left while a card was up), a late `input_dropped`
+undoing a resume, input during the replay (a reload, a drop and a 50k-query
+ring each typed answers), clearing the replay flag on `replayed` rather than
+after the parse, the pipe keeping an older socket's queue (vitest), the paste
+listener and `cleanPaste`, "in another window", ×'s fresh listing, a card
+that queues rather than drops, the `unsent` notice, and the tab's own set.
+The re-review's three, likewise: no backlog cap (a 40 MiB flood never
+reattached, the backlog unbounded), no reattach on overflow, a copied list
+trusted (a duplicated tab opened a socket), the navigation test or the
+`pagehide` release dropped, and the `finally` (vitest: the pipe stalls).
+The test-only write hook `__hudTerminals.paste` is gone; the hooks left are
+read-only (`backlog` among them).
+While typing is paused the notice cannot be dismissed: it holds the only
+way to resume.
+
+**Input bar declutter (2026-10-10, PR #29; ported onto WP-B and reviewed the
+same day).** The bar is `📎 [box] ⬆` over one row, `in: project · provider ▾ ·
+model · effort ▾`. **The mic is on the orb, not in any bar**: the dictation
+mode (AUTO/REVIEW/OFF, testids `dictation-*`) and the level meter sit in a
+strip above the orb (`#micstrip`, inside `#orbdock`), acting for the selected
+chat (W-6), and **the line under the orb is the selected chat's status**
+(`orb-status`, lib/dictation `orbLine`: the turn's status, else ANSWER THE
+AUTHORIZATION under a card, else MIC MUTED, else the orb state — only OFF ever
+says MUTED; up to three lines, a little wider than the orb, so nothing is cut
+off). Every other chat pane keeps its own `pane-status` line (an empty one
+takes no room); the selected chat's bar draws one only while the sidebar is
+folded, when the orb is a 36px dot with no line under it. The strip folds into
+one button, `#modecycle` (`dictation-cycle`), that cycles **OFF → REVIEW →
+AUTO → OFF** (`nextMode`: one click from muted never lands on a mic that
+sends on its own) and goes red at OFF — above the mini orb when the sidebar is
+folded, and beside the full orb in a short window (under `MIC_TIGHT_H` = 560
+zoomed px, `#shell.mic-tight`, which gives the sidebar the strip's 44px back
+for its rows). **Under a card the mode buttons are disabled as well as
+inert**, and the card takes focus off them: focus left on the cycle button
+used to let Enter switch OFF to AUTO behind the card. **Model and effort are
+one button per chat pane** (`model-chip-btn`, carrying `data-model` and
+`data-effort`) opening one popover (`ModelChip.tsx` `Popover`, portaled to
+`#root`; `data-pane` says whose) with a Model section, the effort slider
+(below) and "Set
+<provider> default…"; the provider stays a select. It is placed by
+`placePopover` through `toCss` — upward, downward only when there is too little
+room above and more below, never taller than the room it opens into — and
+closes on Escape (focus back on the button; **under a card it never swallows
+Escape**, which denies), a click outside, focus leaving it, a resize, a zoom
+change, or its button moving (a rAF watch: a fold, a split, a re-layout). It
+opens on the chosen option, the arrows move within a list, Tab goes round its
+stops and never leaves it, none of its keys reach push-to-talk, and its
+listeners are set once (the close is read through a ref). The box grows to the
+least of 15 lines (`MAX_LINES`), 35% of its pane (`MAX_PANE_SHARE`), and what
+the pane has left once its fixed parts (header, ticker, the rest of the bar,
+measured with the box at one line) and **the conversation's minimum** —
+`MIN_LOG_PX` 96 zoomed px or `MIN_LOG_SHARE` 30% of the pane, whichever is
+more — are taken out, but never under two lines (`MIN_LINES`): a pane that
+cannot fit the minimum gets a two-line box that scrolls. It is re-measured when
+the pane's height changes (a split, the zoom, the bottom panel), not only its
+width, and when the bar's own parts change. Fifteen lines in a 2×2 grid, two
+rows or a small window at 160% pushed Send and the chips out of the pane and
+left the conversation 32px, and after #28 the panel left a pane at its 200px
+minimum where 35% alone still left 36px. Send and Attach are
+SVG icon buttons (testids unchanged), Stop a square, and Steer an outlined bent
+arrow (`.steer`, `data-steer`) — it must not look like Send. Tests drive the
+popover through helpers at the top of `hud_v2_check.py` (`pick_model`,
+`pick_effort`, `chip_model`… — each takes `pane=1`; unscoped, Playwright's
+strict mode fails on several chips at once); a read made while a dialog's veil
+is up must close the dialog first, because the popover cannot be opened under
+a veil. Free checks: `tests/face/hud_v2_declutter_check.py` — one `review #29
+Fn` check per finding of the review, run by `hud_v2_check` after the multichat
+section on a `MockDaemon(0)` of its own, or alone — plus `ModelChip.test.ts`
+(`placePopover`) and `dictation.test.ts` (`orbLine`, `nextMode`). The layout
+section's `_edit` now types until the pane's Save is enabled: it used to type
+into an editor not yet showing the file, and four "unsaved edit" checks failed
+under load.
 
 **The effort is a slider, not pills (2026-10-10, owner's ask: "like Claude's").**
 `components/EffortSlider.tsx`, rules in `lib/effortSlider.ts`: "Effort
@@ -513,13 +792,29 @@ answer is drawn**: a sequence number in the slider, and one per thread in
 `ThreadModelControls.change` (its write after the PATCH) — the SSE
 `thread_updated` still carries every change in the daemon's order. Pointer math
 goes through `toCss` against the rail's own `offsetWidth`. Keys stop at the
-slider (Space is never push-to-talk) as well as at the popover. The popover now
-stays open while the slider moves. The Model picker's per-model `<select>` and
-the provider-default dialog's `pd-effort` are still selects. Free checks:
-`effortSlider.test.ts`, `EffortSlider.test.ts` (jsdom: keys, settle, unmount
-commit, the sequence guard) and `effort_slider_checks` in `hud_v2_check.py`
-(drives it like the owner, at 70% and 160%; the mock's `patch_delays` holds a
-PATCH's answer to make one arrive late).
+slider (Space is never push-to-talk) as well as at the popover — **except Tab**,
+which goes on to the popover's round (#29's review): the model list's chosen
+option → the slider → "Set default…" → round. The popover now stays open while
+the slider moves. **It lives in #29's reworked popover** (merged 2026-10-10):
+one per chat pane (`data-pane`), and a pick PATCHes only that pane's thread
+(`change(pane, …)`, the per-thread sequence number inside it); under a card
+the popover closes and its button is disabled, so the slider is gone and
+Escape denies the card — and the slider's own `disabled` (out of the Tab
+order, `aria-disabled`, no key or pointer moves it) holds wherever it is
+mounted. The Model picker's per-model `<select>` and the provider-default
+dialog's `pd-effort` are still selects. Free checks: `effortSlider.test.ts`,
+`EffortSlider.test.ts` (jsdom: keys, Tab, disabled, settle, unmount commit, the
+sequence guard), `effort_slider_checks` in `hud_v2_check.py` (drives it like
+the owner, at 70% and 160%, and Escape under a card; the mock's `patch_delays`
+holds a PATCH's answer to make one arrive late). **Breaking the close-under-a-
+card alone bit no check at first** (shown in a scratch copy at the merge): the
+card taking focus closes the popover anyway, by #29's focus-leaving rule. So a
+card also arrives with focus on the chip's own button and the popover open —
+the one place only the disable closes it — and that check fails without it;
+inert still keeps every key off the slider. #29's own checks are ported
+to it: `hud_v2_declutter_check`'s F4 (Tab round, arrows) and F6 (a card with
+focus on the slider), and `hud_v2_multichat_check`'s late-answer writeback,
+which clicks a stop.
 
 **Sidebar status dots (2026-10-08, design §18; contract in
 `docs/hud-api.md`).** The `·` left of each sidebar thread and task is what it

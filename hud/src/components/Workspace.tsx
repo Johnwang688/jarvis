@@ -13,15 +13,56 @@
 // right, the profile select. The split-only chrome (the focus line, the
 // context, the compact view menu) is drawn only when there is more than one
 // pane, so the default window renders as it did.
+//
+// Several chats (WP-B): any pane may show chat, each its own conversation.
+// The selected chat's pane (decisions W-6: the chat pane most recently
+// clicked, where ambiguous input goes) carries `data-selected` and, in a
+// split, an accent down its header's edge and a mic mark. A view switch goes through the caller (`onView`), which refuses
+// to switch a File pane holding an unsaved edit away.
 
-import { useRef, type ReactNode } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 import { keyStep } from "../lib/layout";
 import {
   PANEL, PANE_MIN_H, PANE_MIN_W, PANE_VIEWS, SHAPES, columnWidths, maxPanelHeight, moveColEdge,
   type PaneNo, type PaneSpec, type View,
 } from "../lib/workspace";
+import { placeTerminals, type InSpec } from "../lib/terminal";
+import type { Project } from "../types";
 import { Separator, type LayoutControl } from "./Layout";
 import { Panel } from "./Panel";
+import { TerminalPane, TerminalToasts, terminals, useTerminals } from "./Terminal";
+
+/**
+ * The terminals' view of the workspace (WP-D), handed over after each render:
+ * which drawn pane shows which terminal, whether a card is up (input held),
+ * the zoom (the terminal's font follows it), whether the panel is open, and
+ * how to put a terminal in a pane or the panel.
+ */
+function useTerminalBridge(v: LayoutControl, blocked: boolean, place: Map<string, number>,
+                           terminalIn?: () => InSpec) {
+  const latest = useRef({ v, terminalIn });
+  latest.current = { v, terminalIn };
+  useEffect(() => {
+    terminals.defaultIn = () => latest.current.terminalIn?.() ?? "home";
+    terminals.setPaneTerminal = (pane, id) => latest.current.v.setTerminal(pane, id);
+    terminals.forgetTerminal = (id) => latest.current.v.forgetTerminal(id);
+    terminals.focusPane = (pane) => {
+      latest.current.v.focus(pane);
+      requestAnimationFrame(() =>
+        document.querySelector<HTMLElement>(`[data-testid="pane-${pane}"]`)?.focus({ preventScroll: true }));
+    };
+    terminals.showPanel = () => {
+      if (!latest.current.v.fit.panel.open) latest.current.v.togglePanel();
+    };
+    void terminals.refresh();
+  }, []);
+  const key = [...place].map(([id, n]) => `${id}:${n}`).join(",");
+  useEffect(() => terminals.setBlocked(blocked), [blocked]);
+  useEffect(() => terminals.setZoom(v.zoom), [v.zoom]);
+  useEffect(() => terminals.setPanelOpen(v.fit.panel.open), [v.fit.panel.open]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => terminals.setPlace(place), [key]);
+}
 
 /** Under this, a split pane's File and Diff views hide their tree behind a toggle. */
 export const NARROW_W = 560;
@@ -61,10 +102,29 @@ export function Workspace(props: {
   extras: (spec: PaneSpec, info: PaneInfo) => ReactNode;
   /** The pane's context in a split: the thread title, the file path, the URL. */
   context: (spec: PaneSpec, info: PaneInfo) => string;
+  /** The selected chat (lib/chats `selectedChatOf`); null with no chat drawn. */
+  selectedPane: PaneNo | null;
+  /** Show `view` in `pane` — the strip's buttons and its menu. */
+  onView: (pane: PaneNo, view: View) => void;
+  /** Where `+` opens a terminal: the focused pane's folder, as an id (lib/terminal.ts, terminalSpecFor). */
+  terminalIn?: () => InSpec;
+  /** `+ ▾`'s choices besides Home. */
+  projects?: Project[];
 }) {
   const v = props.view;
   const { fit, ws } = v;
   const grid = useRef<HTMLDivElement>(null);
+  // One terminal is drawn in one place at a time (W-1): the first drawn pane
+  // holding it, else the panel.
+  const place = placeTerminals(ws.panes, fit.panes);
+  useTerminalBridge(v, props.blocked, place, props.terminalIn);
+  const mgr = useTerminals();
+  /** A terminal pane's header: the title its program set (text, capped), else its own. */
+  const terminalContext = (spec: PaneSpec) => {
+    const id = spec.terminalId;
+    if (!id) return "terminal";
+    return mgr.sessions.get(id)?.title || mgr.row(id)?.title || `terminal ${id}`;
+  };
   // Every pane any render has drawn stays mounted (hidden when not drawn).
   const ever = useRef<Set<PaneNo>>(new Set<PaneNo>([1]));
   for (const n of fit.panes) ever.current.add(n);
@@ -113,15 +173,18 @@ export function Workspace(props: {
         {([1, 2, 3, 4] as PaneNo[]).filter((n) => ever.current.has(n)).map((n) => {
           const spec = ws.panes[n - 1];
           const at = info(n);
-          const ctx = at.split ? props.context(spec, at) : "";
+          const ctx = at.split ? (spec.view === "terminal" ? terminalContext(spec) : props.context(spec, at)) : "";
           return (
             <section
               key={n}
-              className={"wpane" + (at.split && at.focused ? " focused" : "")}
+              className={
+                "wpane" + (at.split && at.focused ? " focused" : "")
+                + (at.split && spec.view === "chat" && n === props.selectedPane ? " selected" : "")
+              }
               data-testid={`pane-${n}`}
               data-view={spec.view}
               data-focused={at.focused ? "true" : "false"}
-              data-voice={spec.view === "chat" ? "true" : undefined}
+              data-selected={spec.view === "chat" && n === props.selectedPane ? "true" : undefined}
               aria-label={`Pane ${n}: ${spec.view}`}
               tabIndex={-1}
               style={at.drawn ? { gridArea: `p${n}` } : { display: "none" }}
@@ -135,7 +198,7 @@ export function Workspace(props: {
                       data-testid={`pane-${n}-view-select`}
                       aria-label={`What pane ${n} shows`}
                       value={spec.view}
-                      onChange={(e) => v.setView(n, e.target.value as View)}
+                      onChange={(e) => props.onView(n, e.target.value as View)}
                       onKeyDown={(e) => e.stopPropagation()}
                       onKeyUp={(e) => e.stopPropagation()}
                     >
@@ -150,17 +213,31 @@ export function Workspace(props: {
                         key={view}
                         data-testid={`tab-${view}`}
                         className={spec.view === view ? "on" : ""}
-                        onClick={() => v.setView(n, view)}
+                        onClick={() => props.onView(n, view)}
                       >
                         {view}
                       </button>
                     ))
                   )}
                 </div>
+                {at.split && spec.view === "chat" && n === props.selectedPane ? (
+                  <span className="micmark" data-testid={`pane-${n}-mic`} role="img" aria-label="Selected chat"
+                        title="The selected chat: what you say, the orb, and files dropped outside a chat go here">
+                    <svg width="10" height="13" viewBox="0 0 10 13" aria-hidden="true" focusable="false">
+                      <rect x="3" y="0.75" width="4" height="7" rx="2" fill="currentColor" />
+                      <path d="M1 6.25a4 4 0 0 0 8 0M5 10.25v2" fill="none" stroke="currentColor" strokeWidth="1.2"
+                            strokeLinecap="round" />
+                    </svg>
+                  </span>
+                ) : null}
                 {ctx ? <span className="panectx" title={ctx}>{ctx}</span> : null}
                 <div className="paneextras">{props.extras(spec, at)}</div>
               </div>
-              {props.render(spec, at)}
+              {spec.view === "terminal" ? (
+                <TerminalPane pane={n} terminalId={spec.terminalId} drawn={at.drawn} />
+              ) : (
+                props.render(spec, at)
+              )}
             </section>
           );
         })}
@@ -256,7 +333,9 @@ export function Workspace(props: {
           onReset={v.resetPanelHeight}
         />
       ) : null}
-      <Panel open={fit.panel.open} height={fit.panel.height} blocked={props.blocked} onHide={v.togglePanel} />
+      <Panel open={fit.panel.open} height={fit.panel.height} blocked={props.blocked} zoom={v.zoom}
+             projects={props.projects ?? []} onHide={v.togglePanel} />
+      <TerminalToasts blocked={props.blocked} />
     </>
   );
 }

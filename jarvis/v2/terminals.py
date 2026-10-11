@@ -137,6 +137,7 @@ STOP_GRACE_S = 1.0
 REPLAY_CHUNK = 32 * 1024
 INPUT_CAP = 256 * 1024         # queued input a program is not reading, before a paste is refused
 MARK_CAP = 16 * 1024           # an OSC 133 longer than this is not one of ours
+RC_PIPE_MAX = 8 * 1024         # two pages: what a pipe holds even under pipe-user-pages-soft
 SPAN_CAP = 2000
 COMMAND_CAP = 4096
 CTRL_C = b"\x03"
@@ -268,9 +269,21 @@ def launcher(shell: Shell) -> tuple[list[str], str]:
     their defaults — a signal the daemon inherited as ignored would stay
     ignored in the shell and every job, and a SIGHUP close would not land —
     and giving the shell its own name as argv[0] while the checked realpath
-    is what runs. An env without --argv0 runs the shell by its own name
-    instead, so argv[0] is still right."""
+    is what runs.
+
+    **What runs is always the checked realpath.** An env without --argv0
+    cannot give it another name, so there it runs as itself — but only when
+    that changes nothing: a name whose basename differs from the program's
+    (`rbash` → bash, `sh` → bash or dash, a busybox applet) decides how the
+    program behaves, and running it under its own name would run something
+    the owner did not name (an unrestricted shell for `rbash`), so that is
+    refused. Executing the given name instead, as this used to, ran whatever
+    that path resolved to *at exec time*, not the file that was checked."""
     env, signals, argv0 = _env_probe()
+    if not argv0 and os.path.basename(shell.name) != os.path.basename(shell.path):
+        raise TerminalError(
+            f"this system's env cannot set argv[0], and {shell.name} would not run as itself; "
+            f"set JARVIS_TERMINAL_SHELL to {shell.path}")
     prefix = []
     if env and (signals or argv0):
         prefix = [env]
@@ -279,7 +292,7 @@ def launcher(shell: Shell) -> tuple[list[str], str]:
         if argv0:
             prefix.append(f"--argv0={shell.name}")
         prefix.append("--")
-    return prefix, shell.path if argv0 else shell.name
+    return prefix, shell.path
 
 
 def _dotenv_names(path: Path) -> set[str]:
@@ -494,6 +507,11 @@ class Marks:
         # unattributed, whoever printed them.
         self.spans_from = 0
         self.integrated = False
+        # The startup file is *running*: a signed prompt mark (A) has been
+        # seen. `integration` says what was configured; this says it took — a
+        # profile that `exec`s another shell configures "bash" and marks
+        # nothing, so no `sudo -k` either.
+        self.marked = False
 
     def feed(self, data: bytes) -> None:
         buf = self._carry + data
@@ -556,6 +574,7 @@ class Marks:
             if open_span is not None:           # a prompt with no D: it ended there
                 open_span.end = start
             self.prompt = start
+            self.marked = True
         elif kind == b"C":
             if open_span is not None:
                 open_span.end = start
@@ -716,12 +735,18 @@ class Terminal:
     def _output(self, data: bytes) -> None:
         with self._lock:
             self._ring.append(data)
+            was_marked = self._marks.marked
             self._marks.feed(data)
             self._marks.prune(self._ring.start)
             attached = self._attachment
             if attached is not None and not attached.send_binary(data):
                 # Too far behind: dropped. The window reattaches and replays.
                 self._attachment = None
+                attached = None
+            if attached is not None and self._marks.marked and not was_marked:
+                # The startup file is running: the window drops its "no
+                # integration" note. Sent once, after the bytes that carried it.
+                attached.send_text(json.dumps({"type": "marked"}))
 
     def _check_exit(self, wait: bool = False) -> None:
         proc = self._proc
@@ -845,7 +870,7 @@ class Terminal:
                 "shown": self._attachment is not None, "exited": self.exited,
                 "exit_code": self.exit_code, "readable": self.readable,
                 "busy": self.busy(), "integration": self.integration,
-                "integrated": self._marks.integrated}
+                "integrated": self._marks.integrated, "marked": self._marks.marked}
 
     def history(self) -> History:
         """The ring and its command spans, for WP-F. No route reaches this."""
@@ -1074,11 +1099,23 @@ class Terminals:
         if kind not in self._rc_text:
             self._rc_text[kind] = RC_PATHS[kind].read_bytes()
         content = f"__jarvis_nonce='{nonce}'\n".encode() + self._rc_text[kind]
-        if len(content) > 60 * 1024:           # under a pipe's 64 KiB: the write never blocks
+        # A pipe holds 64 KiB normally but only two pages once the owner is
+        # over `pipe-user-pages-soft`, and nothing reads this one until the
+        # shell starts: a blocking write past that would wedge `create()` —
+        # and, under `Terminals._lock`, every terminal route — for good. So
+        # the file must fit the guaranteed 8 KiB, the write never blocks, and
+        # a short write is a refusal, never a truncated startup file.
+        if len(content) > RC_PIPE_MAX:
             raise TerminalError("the terminal startup file is too large")
         read, write = os.pipe()
         try:
-            os.write(write, content)
+            os.set_blocking(write, False)
+            try:
+                written = os.write(write, content)
+            except BlockingIOError:
+                written = 0
+            if written != len(content):
+                raise TerminalError("the terminal startup file did not fit in its pipe")
         except BaseException:
             os.close(read)
             raise
@@ -1102,15 +1139,28 @@ class Terminals:
             while tid in self._terminals:
                 tid = secrets.token_hex(4)
             nonce = secrets.token_hex(16)
-            terminal = Terminal(tid, shell=shell.name, folder=folder, project_id=project_id,
-                                label=label, cols=cols, rows=rows, nonce=nonce, integration=kind)
+            # The startup file first: a refusal (too large, a short write)
+            # then leaves nothing behind but the pipe it closes itself.
             rc_fd = self._rc_pipe(nonce, kind) if kind != "none" else None
-            argv, extra = shell_command(program, kind,
-                                        f"/dev/fd/{rc_fd}" if rc_fd is not None else None)
-            env = clean_environment(shell.name)
-            env.update(extra)
             try:
-                terminal.spawn([*prefix, *argv], env, rc_fd)
+                terminal = Terminal(tid, shell=shell.name, folder=folder, project_id=project_id,
+                                    label=label, cols=cols, rows=rows, nonce=nonce, integration=kind)
+            except BaseException:
+                if rc_fd is not None:
+                    os.close(rc_fd)
+                raise
+            try:
+                argv, extra = shell_command(program, kind,
+                                            f"/dev/fd/{rc_fd}" if rc_fd is not None else None)
+                env = clean_environment(shell.name)
+                env.update(extra)
+            except BaseException:
+                if rc_fd is not None:
+                    os.close(rc_fd)
+                terminal.finish()               # the wake pipe
+                raise
+            try:
+                terminal.spawn([*prefix, *argv], env, rc_fd)   # closes rc_fd, whatever happens
             except BaseException:
                 terminal.finish()               # the wake pipe
                 raise

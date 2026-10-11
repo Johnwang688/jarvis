@@ -15,6 +15,7 @@ where these expect 403/201/101), and `jarvis.v2.terminals`/`ws` did not exist.
 from __future__ import annotations
 
 import base64
+import fcntl
 import http.client
 import inspect
 import json
@@ -890,15 +891,121 @@ class Lifecycle(Base):
             shell = T.resolve_shell()
         self.assertEqual((shell.path, shell.name), (str(FAKE_SHELL), str(bindir / "myshell")))
         prefix, program = T.launcher(shell)
-        if any(part.startswith("--argv0=") for part in prefix):               # the realpath runs,
-            self.assertEqual(program, str(FAKE_SHELL))                         # under its own name
+        self.assertEqual(program, str(FAKE_SHELL))                             # the realpath runs,
+        if any(part.startswith("--argv0=") for part in prefix):               # under its own name
             self.assertIn(f"--argv0={bindir / 'myshell'}", prefix)
-        else:
-            self.assertEqual(program, str(bindir / "myshell"))
         with patch.object(config, "TERMINAL_SHELL", str(bindir / "winshell")):
             status, body = self.request("POST", "/terminals", {"in": "home"})
         self.assertEqual(status, 409)
         self.assertIn("/mnt/", body["error"])
+
+    def test_without_env_argv0_the_checked_realpath_runs_or_nothing_does(self):
+        # PR #25 re-review: an env without --argv0 used to exec the *given*
+        # name — a link that can point elsewhere by the time it runs — rather
+        # than the realpath that was checked.
+        env = shutil.which("env", path="/usr/bin:/bin")
+        bindir = self.root / "bin"
+        bindir.mkdir()
+        (bindir / "sh").symlink_to(FAKE_SHELL)                 # same basename: argv[0] changes nothing
+        (bindir / "rsh").symlink_to(FAKE_SHELL)                # another name: it would change what runs
+        for signals in (True, False):
+            with patch.object(T, "_env_support", (env, signals, False)):
+                prefix, program = T.launcher(T.Shell(str(FAKE_SHELL), str(bindir / "sh")))
+                self.assertEqual(program, str(FAKE_SHELL))
+                self.assertFalse(any(p.startswith("--argv0=") for p in prefix))
+                self.assertNotIn(str(bindir / "sh"), prefix)
+                with self.assertRaises(T.TerminalError) as caught:
+                    T.launcher(T.Shell(str(FAKE_SHELL), str(bindir / "rsh")))
+                self.assertIn("argv[0]", str(caught.exception))
+        # Through the route: the realpath runs (its pid's exe is the file that
+        # was checked, whatever the link says), and a renamed one is a 409.
+        with patch.object(T, "_env_support", (env, True, False)), \
+                patch.object(config, "TERMINAL_SHELL", str(bindir / "sh")):
+            row = self.open_terminal()
+            tid, client = self.session(row["id"])
+            (bindir / "sh").unlink()                           # the link moves on: nothing changes
+            self.assertEqual(Path(f"/proc/{self.term(tid)._proc.pid}/cmdline").read_bytes().split(b"\0")[1],
+                             str(FAKE_SHELL).encode())
+        with patch.object(T, "_env_support", (env, True, False)), \
+                patch.object(config, "TERMINAL_SHELL", str(bindir / "rsh")):
+            status, body = self.request("POST", "/terminals", {"in": "home"})
+        self.assertEqual(status, 409)
+        self.assertIn("argv[0]", body["error"])
+
+    def test_the_startup_file_never_blocks_its_pipe(self):
+        # PR #25 re-review: a blocking write of the startup file under
+        # Terminals._lock wedged create() — and every terminal route — once
+        # the file outgrew the pipe (two pages under pipe-user-pages-soft).
+        terminals = T.Terminals()
+        for kind in T.RC_PATHS:                                # the shipped files fit, nonce and all
+            content = f"__jarvis_nonce='{'0' * 32}'\n".encode() + T.RC_PATHS[kind].read_bytes()
+            self.assertLessEqual(len(content), T.RC_PIPE_MAX, kind)
+        self.assertEqual(T.RC_PIPE_MAX, 8 * 1024)
+        # Too large for the guaranteed capacity: refused before a pipe exists.
+        before = set(os.listdir("/proc/self/fd"))
+        terminals._rc_text["bash"] = b"#" * T.RC_PIPE_MAX
+        with self.assertRaises(T.TerminalError):
+            terminals._rc_pipe("0" * 32, "bash")
+        # A pipe smaller than the file (one page, as F_SETPIPE_SZ allows): a
+        # short write is a refusal, at once, not a hang and not a cut file.
+        terminals._rc_text["bash"] = b"#" * 6000
+        real_pipe = os.pipe
+
+        def small_pipe():
+            read, write = real_pipe()
+            fcntl.fcntl(write, fcntl.F_SETPIPE_SZ, 4096)
+            return read, write
+        started = time.monotonic()
+        with patch.object(T.os, "pipe", small_pipe), self.assertRaises(T.TerminalError) as caught:
+            terminals._rc_pipe("0" * 32, "bash")
+        self.assertLess(time.monotonic() - started, 2.0)
+        self.assertIn("did not fit", str(caught.exception))
+        self.assertEqual(set(os.listdir("/proc/self/fd")), before, "a descriptor leaked")
+        # And through create(): a 409 with the daemon still answering.
+        self.daemon.terminals._rc_text["posix"] = b"#" * (T.RC_PIPE_MAX + 1)
+        status, body = self.request("POST", "/terminals", {"in": "home"})
+        self.assertEqual(status, 409)
+        self.assertIn("too large", body["error"])
+        self.assertEqual(self.owner("GET", "/terminals"), [])
+        del self.daemon.terminals._rc_text["posix"]
+        self.open_terminal()
+
+    def test_marked_says_the_startup_file_is_running(self):
+        # PR #25 re-review: `integration` is what was configured. A signed
+        # prompt mark is what says it took; the window hears it once.
+        terminal = T.Terminal("0000000d", shell="/bin/sh", folder="/", project_id=None, label="~",
+                              cols=80, rows=24, nonce="ab" * 16, integration="posix")
+        self.addCleanup(terminal.finish)
+
+        class Sock:
+            def __init__(self):
+                self.texts, self.closed = [], threading.Event()
+
+            def send_binary(self, data):
+                return True
+
+            def send_text(self, text):
+                self.texts.append(json.loads(text))
+                return True
+        sock = Sock()
+        terminal._attachment = sock
+        self.assertFalse(terminal.row()["marked"])
+        terminal._output(mark(b"A", nonce="00" * 16) + b"forged$ ")           # the wrong nonce
+        terminal._output(b"\x1b]133;A\x07plain$ ")                             # no nonce at all
+        self.assertFalse(terminal.row()["marked"])
+        self.assertEqual(sock.texts, [])
+        signed = mark(b"A", nonce="ab" * 16)
+        terminal._output(b"$ " + signed[:5])                                   # split across chunks
+        terminal._output(signed[5:] + b"sh$ ")
+        terminal._output(mark(b"A", nonce="ab" * 16) + b"sh$ ")
+        self.assertTrue(terminal.row()["marked"])
+        self.assertEqual(sock.texts, [{"type": "marked"}])                     # once
+        # The fake shell marks its prompt: the listing and the attach say so.
+        tid, client = self.session()
+        eventually(lambda: self.term(tid).row()["marked"], what="marked")
+        client.until(lambda c: c.message("attached")["terminal"]["marked"] or "marked" in c.kinds(),
+                     what="the window told")
+        self.assertTrue(self.owner("GET", "/terminals")[0]["marked"])
 
     def test_a_program_that_does_not_read_never_stalls_the_socket(self):
         self.assertEqual(T.INPUT_CAP, 256 * 1024)
@@ -1497,6 +1604,30 @@ class RealBashStartupFile(NonceHunt, Base):
         eventually(lambda: not terminal.row()["busy"], what="idle")
         client.type("sleep 3")
         eventually(lambda: terminal.row()["busy"], what="busy")
+
+    def test_marked_only_once_the_startup_file_runs(self):
+        # `integration` is what was configured; `marked` is what took. A
+        # profile that `exec`s another shell configures "bash" and gets no
+        # marks and no `sudo -k` — the HUD says so from `marked` (PR #25
+        # re-review).
+        tid = self.open_terminal()["id"]
+        eventually(lambda: self.term(tid).row()["marked"], timeout=15, what="the first signed prompt")
+        if not os.access("/usr/bin/dash", os.X_OK):
+            self.skipTest("no dash on this machine")
+        (self.home / ".profile").write_text("exec /usr/bin/dash -i\n")
+        row = self.open_terminal()
+        self.assertEqual((row["integration"], row["marked"]), ("bash", False))
+        client = self.connect(row["id"])
+        # Typed ahead of dash's prompt, so a line may follow "$ ": the
+        # arithmetic is what proves it ran (the echoed line holds no "42").
+        client.type("echo started-$((40+2))")
+        client.wait_text("started-42\n", timeout=10)
+        client.type("alias sudo; echo done-$((1+1))")
+        client.wait_text("done-2\n", timeout=10)
+        self.assertNotIn("sudo -k", client.text())
+        listed = next(r for r in self.owner("GET", "/terminals") if r["id"] == row["id"])
+        self.assertEqual((listed["integration"], listed["marked"], listed["integrated"]), ("bash", False, False))
+        self.assertNotIn("marked", client.kinds())
 
     def test_a_shell_keeps_the_name_it_was_given(self):
         # rbash is a link to bash; launched as its realpath under its own

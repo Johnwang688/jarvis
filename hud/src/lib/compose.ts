@@ -25,6 +25,12 @@ export interface Compose {
   provider?: ProviderName;
   model?: string | null;
   effort?: string | null;
+  /** The send in flight for this compose row (its local message id): after
+   * each await the send finds the pane holding this row again by it, so a
+   * trade of conversations or another thread opened meanwhile never makes
+   * it write to the wrong pane (review of PR #27). A row the owner replaces
+   * loses it, and the send then leaves that pane alone. */
+  sending?: string;
 }
 
 export const LAST_PROJECT_KEY = "jarvis.hud.lastProject";
