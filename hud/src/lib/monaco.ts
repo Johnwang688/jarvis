@@ -225,9 +225,10 @@ export function diffUri(monaco: Monaco, path: string, side: "original" | "modifi
 
 // ---- the card --------------------------------------------------------------
 
-// While an approval card is up every editor goes read-only and gives up focus
-// (as WP-D's terminals stop taking input), so Escape is the card's and a stray
-// `y⏎` lands nowhere. App says so from above the workspace's error boundary.
+// While an approval card is up every editor goes read-only (as WP-D's
+// terminals stop taking input); the card itself takes focus and makes the
+// rest of the window inert, so Escape is the card's and a stray `y⏎` lands
+// nowhere. App says so from above the workspace's error boundary.
 let blocked = false;
 const holds = new Set<(blocked: boolean) => void>();
 

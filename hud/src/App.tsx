@@ -102,8 +102,9 @@ export default function App() {
   // there froze with it (review of PR #32). A layout effect, so the hold is on
   // before a paste's next chunk can leave.
   useLayoutEffect(() => terminals.setBlocked(blocked), [blocked]);
-  // And nothing reaches an editor: every Monaco goes read-only and gives up
-  // focus while a card is up (ED-1), said from here for the same reason.
+  // And nothing reaches an editor: every Monaco goes read-only while a card
+  // is up (ED-1; the card takes focus itself), said from here for the same
+  // reason.
   useLayoutEffect(() => setEditorsBlocked(blocked), [blocked]);
   // A render error stopped the title bar, the shell and the orb drawing
   // (components/Boundary.tsx): the owner sees a Reload prompt and nothing

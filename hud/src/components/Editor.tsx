@@ -7,21 +7,18 @@
 //    file name, shebang), never from a table of ours;
 //  - a diff view's two models live under `jarvis-diff:` and are disposed with
 //    it (they used to leak two per file viewed);
-//  - under an approval card every editor is read-only and unfocused, so Escape
+//  - under an approval card every editor is read-only (`setEditorsBlocked`,
+//    from App). Focus is the card's own doing: it takes focus off whatever
+//    had it and makes everything behind it inert (Approvals.tsx), so Escape
 //    is the card's and nothing typed lands in a buffer behind it;
 //  - Ctrl+S in an editor saves it (the window's capture handler keeps
-//    Chrome's "Save page as" from ever opening).
+//    Chrome's "Save page as" from ever opening). Under a card no editor has
+//    focus, so no editor command can run.
 
 import { useEffect, useRef, useState } from "react";
 import {
   diffUri, editorsBlocked, fileUri, loadMonaco, onEditorsBlocked, type Monaco,
 } from "../lib/monaco";
-
-/** Blur whatever has focus inside `host`: Monaco has no blur of its own. */
-function blurInside(host: HTMLElement | null) {
-  const el = document.activeElement as HTMLElement | null;
-  if (host && el && host.contains(el)) el.blur();
-}
 
 export function CodeEditor(props: {
   /** The project the file was read through: part of the model's URI. */
@@ -30,7 +27,7 @@ export function CodeEditor(props: {
   value: string;
   readOnly?: boolean;
   onChange: (value: string) => void;
-  /** Ctrl+S in this editor, with its text. Never called under an approval card. */
+  /** Ctrl+S in this editor, with its text. */
   onSave?: (value: string) => void;
 }) {
   const host = useRef<HTMLDivElement>(null);
@@ -66,11 +63,10 @@ export function CodeEditor(props: {
         editor.current = ed;
         ed.onDidChangeModelContent(() => onChange.current(ed.getValue()));
         ed.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
-          if (!editorsBlocked()) onSave.current?.(ed.getValue());
+          onSave.current?.(ed.getValue());
         });
         unhold = onEditorsBlocked((b) => {
           ed.updateOptions({ readOnly: b || readOnly.current });
-          if (b) blurInside(host.current);
           setLocked(b);
         });
         setLanguage(model.getLanguageId());
@@ -130,7 +126,6 @@ export function DiffEditor(props: { path: string; before: string; after: string 
     let ed: any = null;
     let original: any = null;
     let modified: any = null;
-    let unhold = () => {};
     loadMonaco()
       .then((monaco: Monaco) => {
         if (dead || !host.current) return;
@@ -145,14 +140,10 @@ export function DiffEditor(props: { path: string; before: string; after: string 
         original = monaco.editor.createModel(props.before, undefined, diffUri(monaco, props.path, "original"));
         modified = monaco.editor.createModel(props.after, undefined, diffUri(monaco, props.path, "modified"));
         ed.setModel({ original, modified });
-        unhold = onEditorsBlocked((b) => {
-          if (b) blurInside(host.current);
-        });
       })
       .catch(() => setFailed(true));
     return () => {
       dead = true;
-      unhold();
       // The editor first, so nothing still shows the models it lets go of.
       ed?.dispose();
       original?.dispose();

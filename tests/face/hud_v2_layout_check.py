@@ -1729,6 +1729,27 @@ def _editor_card_checks(page, mock, check, until):
                 page.keyboard.press("Control+Space")
             until(lambda: opened.count() > 0 and opened.first.is_visible(), timeout=4)
             check(f"at {zoom}% setup: Monaco shows {what}", opened.count() > 0 and opened.first.is_visible())
+            if what == "its context menu":
+                # The menu closes when a card takes focus, so the card check
+                # below cannot see where it would have stacked. Lay a layer at
+                # #authveil's z-index over the whole window instead: it must be
+                # what is under the menu's middle — the menu (z 2575) stacks
+                # inside the editor host, never above the veil.
+                top = page.evaluate("""() => {
+                  const hosts = [...document.querySelectorAll('[data-testid="pane-2"] .shadow-root-host')];
+                  const menu = hosts.map(h => h.shadowRoot && h.shadowRoot.querySelector('.monaco-menu'))
+                    .find(Boolean);
+                  if (!menu) return 'no menu';
+                  const r = menu.getBoundingClientRect();
+                  const probe = document.createElement('div');
+                  probe.style.cssText = 'position:fixed;inset:0;z-index:100';
+                  document.getElementById('root').appendChild(probe);
+                  const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+                  probe.remove();
+                  return hit === probe ? 'veil' : (hit && hit.className) || String(hit);
+                }""")
+                check(f"at {zoom}% Monaco's context menu stacks inside the editor, under a layer at the veil's z-index",
+                      top == "veil", str(top))
             before = lines.inner_text()
             req = f"edcard{zoom}{n}"
             _approval(mock, req, LONG_COMMAND)

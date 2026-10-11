@@ -872,10 +872,12 @@ off those hues until ED-3's scheme (`INTERIM_RULES`, `CHROME`, tested in
 `monaco.test.ts` on one warm band 340°–65° — the plan's two bands leave
 orange, Monaco's own find colour, between them). Diff models live under
 `jarvis-diff:` and are disposed with their view (two leaked per file).
-**Under a card every editor is read-only and unfocused** (`setEditorsBlocked`
-from App, above the error boundary, beside the terminals' hold), and
-`.editorhost` is `isolation: isolate`, so Monaco's thousand-z overlays stack
-inside it, under `#authveil`. **Keys: the one interception place is still
+**Under a card every editor is read-only** (`setEditorsBlocked` from App,
+above the error boundary, beside the terminals' hold) and unfocused (the
+card's own focus grab, WP-A), and `.editorhost` is `isolation: isolate`, so
+Monaco's thousand-z overlays (its context menu is 2575) stack inside it,
+under `#authveil` — they also close when the card takes focus, so the check
+for the isolation lays a layer at the veil's z-index over an open menu. **Keys: the one interception place is still
 `useLayout`'s capture handler.** It feeds every keydown to
 `lib/editorkeys.ts`'s `chordStep`, so **the second key of a Ctrl+K chord
 typed in Monaco is Monaco's, whatever HUD key it is** (Ctrl+K Ctrl+B sets the
@@ -883,8 +885,9 @@ selection anchor, Ctrl+K Ctrl+0 folds all, as in VS Code) and still kept from
 Chrome; a lone Ctrl+B folds the sidebar from Monaco too (E-10), a lone zoom
 key is the HUD's; the tracker waits as Monaco does (next non-modifier key,
 5 s) and ignores repeat and composition. **Ctrl+S never reaches Chrome**: in
-an editor Monaco's own command saves that buffer with the editor's text (inert
-under a card); in a terminal it is the shell's. **An unsaved edit is never
+an editor Monaco's own command saves that buffer with the editor's text (no
+editor has focus under a card, so it cannot run); in a terminal it is the
+shell's. **An unsaved edit is never
 dropped without a word**: opening another file or Reload over one asks
 (`file-discard-ask`, Keep editing / Discard). EditContext stays on (headless
 Chromium types into it). Space in Monaco **still** starts push-to-talk and
