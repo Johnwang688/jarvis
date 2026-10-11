@@ -49,7 +49,6 @@ from __future__ import annotations
 
 import http.client
 import json
-import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -133,14 +132,16 @@ def systemctl(*args: str, timeout: float = 15.0) -> subprocess.CompletedProcess:
 
 
 def _git(*args: str, timeout: float = GIT_TIMEOUT) -> subprocess.CompletedProcess:
-    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
-    try:
-        return subprocess.run(["git", "-C", str(config.REPO_ROOT), *args], capture_output=True,
-                              text=True, timeout=timeout, stdin=subprocess.DEVNULL, env=env)
-    except subprocess.TimeoutExpired:
-        raise OpsRefused(f"`git {' '.join(args)}` did not finish within {timeout:g} s") from None
-    except OSError as exc:
-        raise OpsRefused(f"could not run git: {exc.strerror or type(exc).__name__}") from None
+    """git in the checkout, run the way `gitops` runs it (as `hud_install`
+    does since #44's review): an absolute git, inherited `GIT_*` dropped,
+    prompts, pager and editors pinned, hooks and fsmonitor off, no shell."""
+    from jarvis import gitops
+    code, out, err = gitops._git(Path(config.REPO_ROOT), list(args), timeout=timeout)
+    if code == 124:
+        raise OpsRefused(f"`git {' '.join(args)}` did not finish within {timeout:g} s")
+    if code == 127:
+        raise OpsRefused(f"could not run git: {_first_lines(err)}")
+    return subprocess.CompletedProcess(["git", *args], code, out, err)
 
 
 def _first_lines(text: str, n: int = 3) -> str:
@@ -293,6 +294,11 @@ def hud_line(status: dict) -> str:
             line += (f" — the checkout is at {checkout[:12]}; `jarvis hud rebuild` if hud/ "
                      "changed since")
         return line + "."
+    if build and state == "fallback":
+        over = status.get("hud_passed_over")
+        over = ", ".join(_clean(b, 80) for b in over[:3]) if isinstance(over, list) and over else "a newer build"
+        return (f"HUD: build {_clean(build, 80)} — a fallback: {over} failed verification and was "
+                "passed over; `jarvis hud rebuild` to install a good one.")
     if state == "dev":
         return "HUD: hud/dist (JARVIS_HUD_DEV=1 is set for the daemon)."
     return (f"HUD: {_clean(state or 'unknown', 120)} — nothing is served; run "
@@ -365,7 +371,12 @@ def pull(out) -> tuple[str | None, str | None]:
     Refuses — never stashes, resets or forces — when the checkout is not on
     `main`, when tracked files have uncommitted changes, and when `main`
     cannot be fast-forwarded."""
+    from jarvis import gitops
     repo = config.REPO_ROOT
+    risky = gitops._risky_config(Path(repo))
+    if risky:
+        raise OpsRefused(f"the checkout's own git config names a program git would run ({risky}); "
+                         "--pull does not run git there — pull it yourself, or drop --pull")
     branch = _git("symbolic-ref", "--quiet", "--short", "HEAD")
     name = branch.stdout.strip() if branch.returncode == 0 else ""
     if name != "main":
@@ -420,8 +431,12 @@ def verify(installed: hud_install.Build, status: dict | None, out) -> int:
     served, state, head = status.get("hud_build"), status.get("hud_state"), status.get("hud_git_head")
     checkout = hud_install.git_head()
     wrong = []
+    over = status.get("hud_passed_over")
     if state == "dev":
         wrong.append("the daemon runs with JARVIS_HUD_DEV=1 and serves hud/dist, not installed builds")
+    elif isinstance(over, list) and installed.id in over:
+        wrong.append(f"the daemon passed {installed.id} over (it failed the daemon's verification) "
+                     f"and serves {_clean(served or 'nothing', 80)} instead")
     elif served != installed.id:
         wrong.append(f"the daemon serves {_clean(served or 'nothing', 80)} ({_clean(state or '?', 80)}), "
                      f"not {installed.id} — was it installed where the daemon looks? (this shell "

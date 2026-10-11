@@ -88,6 +88,8 @@ class Clock:
     def sleep(self, seconds):
         self.slept += 1
         self.now += seconds
+        if self.now - 1000.0 > 600:
+            raise AssertionError("an unbounded wait: ten minutes of fake time went by")
 
 
 class Daemon:
@@ -132,7 +134,7 @@ class Daemon:
                               "fast": {"ok": True, "reason": ""}},
                 "threads_open": 1, "turns_running": self.turns,
                 "hud_build": hud["build"], "hud_git_head": hud.get("git_head"),
-                "hud_state": hud["state"]}
+                "hud_state": hud["state"], "hud_passed_over": hud.get("passed_over", [])}
 
 
 class Programs:
@@ -350,6 +352,13 @@ class Restart(Base):
         daemon.hud = {"build": None, "git_head": None, "state": "not installed"}
         self.assertEqual(O.restart(out=self.out.append), O.OK)
         self.assertIn("HUD: not installed — nothing is served; run `jarvis hud rebuild`.", self.said())
+
+    def test_a_fallback_hud_is_named(self):
+        daemon, _ = self.world()
+        daemon.hud = {"build": "20200101T000000000000Z-ffffffffffff", "git_head": "f" * 40,
+                      "state": "fallback"}
+        self.assertEqual(O.restart(out=self.out.append), O.OK)
+        self.assertIn("a fallback", self.said())
 
     def test_a_hud_from_an_older_commit_is_pointed_out(self):
         self.world()
@@ -680,6 +689,25 @@ class Rebuild(Checkout):
         self.world(daemon)
         self.assertEqual(self.rebuild(), O.UNVERIFIED)
         self.assertIn("JARVIS_HUD_DIR must agree", self.said())
+
+    def test_unverified_when_the_new_build_is_passed_over(self):
+        daemon = self.daemon()
+        self.world(daemon)
+
+        def served():
+            built = hud_install.newest(self.root)
+            return {"build": "20200101T000000000000Z-ffffffffffff", "git_head": "f" * 40,
+                    "state": "fallback", "passed_over": [built.id] if built else []}
+        daemon.hud = served
+        self.assertEqual(self.rebuild(), O.UNVERIFIED)
+        self.assertIn("failed the daemon's verification", self.said())
+
+    def test_a_checkout_whose_config_runs_programs_is_not_pulled(self):
+        self.world(self.daemon())
+        self.git(self.repo, "config", "core.sshCommand", "/bin/true")
+        self.assertEqual(self.rebuild(pull_first=True), O.FAILED)
+        self.assertIn("names a program git would run (core.sshcommand)", self.said().lower())
+        self.assertEqual(self.builds, 0)
 
     def test_unverified_in_dev_mode(self):
         daemon = self.daemon()
