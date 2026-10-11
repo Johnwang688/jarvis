@@ -13,7 +13,11 @@ setup` (`vex_setup.py`) and refused to every agent write tool
 use** (`load_config`): absolute, no symlink anywhere in it, a regular
 executable file or a folder, and inside the extension's own folders
 (`config.VEX_STORAGE_ROOTS`, `config.VEX_EXTENSION_ROOTS`) — otherwise the
-action is refused with "run `jarvis vex setup` again".
+action is refused with "run `jarvis vex setup` again". Those folders are
+under AppData, which agents *can* write, so setup also records **a SHA-256 of
+every tool** and each one is hashed again immediately before every spawn
+(`verify_tools`): a tool rewritten since setup is refused. What remains is
+stated there.
 
 **A request never names an executable, a path to run or an argument** (the
 `DESKTOP_APPS` pattern). The argv of every program is built here, from the
@@ -33,16 +37,21 @@ cannot reach the device.
 from nowhere else): their output lives in the terminal ring and the owner's
 window only — never on the bus, in a log or on disk. The daemon log gets
 lifecycle lines only (started, ended, the exit code, the slot, the project by
-name). One build per project at a time, under a lock file `vexbuild` shares;
+name), and the bus one id-only record per device action, `vex_device
+{action, at}`. One build per project at a time, under a lock file `vexbuild` shares;
 one device action at a time (a download, a device-info read, or the brain
 terminal's user port); a 5-minute build timeout.
 
-**Not a boundary.** A project's makefile is project content and runs under
-`make`; a build refuses a project whose make files name `vexcom` (the same
-accident guard as `rules.py`'s DENY), but a makefile that assembles the name
-at run time is not caught. The boundary is that download exists only as the
-owner's button. And everything here runs as the owner: a program running as
-the owner can drive a plugged-in brain whatever Jarvis does.
+**Not a boundary — the residual gap, stated.** A project's makefile is
+project content and runs under `make`; a build refuses a project whose make
+files name `vexcom`, failing closed where it cannot read them all, but a
+makefile that assembles the name at run time is not caught. Nor is the owner's
+button a boundary: everything here runs as the owner, so an agent can still
+reach a plugged-in brain through a script it writes and runs, `make -f` on a
+makefile of its own, or a POST to the download route with a forged Origin.
+The `vexcom` DENY stops the obvious spellings; the `vex_device` record makes
+a device action nobody clicked visible. Closing the gap needs the device to
+belong to a user the agent's processes are not.
 
 **Spike items** (the owner runs them once; the plan's §2.9): the build's
 `P=`/`T=` against VS Code's own build log, whether stopping the Linux side of
@@ -110,14 +119,20 @@ ORIGIN_NEW = "HUD: new VEX project"
 SETUP_HINT = "run `jarvis vex setup` again"
 
 EXE_KEYS = ("vexcom", "clang", "ar", "ld", "objcopy", "size", "make")
+# What `make.exe` itself runs during a build: hashed with it before each build.
+BUILD_TOOLS = ("clang", "ar", "ld", "objcopy", "size")
 STORAGE_DIR_KEYS = ("cpp_sdk", "python_sdk")
 OPTIONAL_KEYS = ("python_sdk", "templates", "project_folder", "extension_version",
                  "vexcom_version")
 CONFIG_KEYS = frozenset({"version", *EXE_KEYS, *STORAGE_DIR_KEYS, "templates", "project_folder",
-                         "extension_version", "vexcom_version"})
+                         "extension_version", "vexcom_version", "sha256"})
+TOOL_CAP = 1 << 30                 # no VEX tool is a gigabyte; a bigger "tool" is refused
+_HEX64 = re.compile(r"[0-9a-f]{64}")
 _EXTENSION_DIR = re.compile(r"vexrobotics\.vexcode-[0-9][0-9.]*", re.ASCII)
 _VERSION_TEXT = re.compile(r"[0-9][0-9.]{0,31}", re.ASCII)
-_CMD_UNSAFE = frozenset('"<>|?*%^&!')
+# Characters a Windows command line, or make's cmd.exe recipes, could read as
+# syntax: never in a path handed to a Windows program.
+_CMD_UNSAFE = frozenset('"<>|?*%^&!();,=\\')
 _WINDOWS_RESERVED = re.compile(
     r"^(con|prn|aux|nul|conin\$|conout\$|com[0-9¹²³]|lpt[0-9¹²³])(\..*)?$", re.IGNORECASE)
 _ID = re.compile(r"[0-9a-f]{8}")
@@ -144,6 +159,12 @@ class VexConfig:
     project_folder: str = ""
     extension_version: str | None = None
     vexcom_version: str | None = None
+    # (key, sha256) for every executable, recorded by `jarvis vex setup` and
+    # checked immediately before each spawn (`verify_tools`).
+    sha256: tuple = ()
+
+    def digest(self, key: str) -> str | None:
+        return dict(self.sha256).get(key)
 
     @property
     def cpp_sdk_version(self) -> str:
@@ -262,7 +283,71 @@ def parse_config(doc) -> VexConfig:
             if not isinstance(text, str) or not _VERSION_TEXT.fullmatch(text):
                 raise VexError(f"vex.json's {key} is not a version; {SETUP_HINT}")
             values[key] = text
+    hashes = doc.get("sha256")
+    if not isinstance(hashes, dict) or set(hashes) != set(EXE_KEYS) \
+            or not all(isinstance(v, str) and _HEX64.fullmatch(v) for v in hashes.values()):
+        raise VexError(f"vex.json has no fingerprint for each VEX tool; {SETUP_HINT}")
+    values["sha256"] = tuple(sorted(hashes.items()))
     return VexConfig(**values)
+
+
+# -- the tools are the ones setup saw ----------------------------------------------------------
+
+def _identity(info: os.stat_result) -> tuple:
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+def file_sha256(path: str) -> tuple[str, tuple]:
+    """(hex digest, identity) of the file at `path`, read through one fd that
+    was opened without following a symlink, never a FIFO or a device, capped.
+    The identity is that fd's `fstat`, so a caller can tell whether the path
+    still names the file that was hashed."""
+    import hashlib
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except OSError:
+        raise VexError(f"{os.path.basename(path)} cannot be opened; {SETUP_HINT}") from None
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > TOOL_CAP:
+            raise VexError(f"{os.path.basename(path)} is not a regular file; {SETUP_HINT}")
+        digest = hashlib.sha256()
+        while True:
+            chunk = os.read(fd, 1 << 20)
+            if not chunk:
+                break
+            digest.update(chunk)
+    finally:
+        os.close(fd)
+    return digest.hexdigest(), _identity(info)
+
+
+TOOLS_CHANGED = ("the VEX tools changed since `jarvis vex setup` ({key}); run it again")
+
+
+def verify_tools(cfg: VexConfig, program: str, also: tuple[str, ...] = ()) -> None:
+    """Every named tool must hash to what setup recorded, immediately before
+    `program` (the executable about to be spawned) runs; then `program`'s
+    path must still name the very file that was hashed (same device, inode,
+    size, modification and change times). A mismatch refuses.
+
+    **What remains, stated:** a file swapped in the instant between that last
+    `stat` and the kernel's `exec` is not seen, and the tools `make.exe` runs
+    (`clang.exe`, the `arm-none-eabi-*`) are hashed here but opened by Windows
+    later, during the build. A program running as the owner could win either
+    race; this check turns the easy case — an agent's `cp` over a tool between
+    builds — into a refusal."""
+    for key in (*also, program):
+        digest, identity = file_sha256(getattr(cfg, key))
+        if digest != cfg.digest(key):
+            raise VexError(TOOLS_CHANGED.format(key=key))
+        if key == program:
+            try:
+                now = _identity(os.stat(getattr(cfg, key), follow_symlinks=False))
+            except OSError:
+                now = None
+            if now != identity:
+                raise VexError(TOOLS_CHANGED.format(key=key))
 
 
 def load_config() -> VexConfig:
@@ -304,6 +389,9 @@ def to_windows(path, *, spaces: bool = True) -> str:
     for part in rel[1:]:
         if _unseen(part) or set(part) & _CMD_UNSAFE or ":" in part:
             raise VexError(f"{text} holds a character a Windows command line could misread")
+        if part.endswith((".", " ")) or _WINDOWS_RESERVED.match(part) \
+                or _WINDOWS_RESERVED.match(part.split(".")[0]):
+            raise VexError(f"{text} holds a name Windows cannot hold as written ({part[:40]!r})")
         if not spaces and " " in part:
             raise VexError(f"{text} holds a space, which make would split")
     return rel[0].upper() + ":\\" + "\\".join(rel[1:])
@@ -424,38 +512,82 @@ def _regular(path: Path) -> bool:
         return False
 
 
-def makefile_naming_vexcom(root) -> str | None:
-    """The project-relative make file that names `vexcom`, or None.
+def _read_make_file(path: Path, rel: str) -> str:
+    """One make file's text — never through a symlink, never a FIFO, never
+    past the cap; anything else is a refusal (the guard fails closed)."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except OSError:
+        raise VexError(f"{rel} cannot be opened (a symlinked make file is refused), so this "
+                       "project is not built") from None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise VexError(f"{rel} is not a regular file, so this project is not built")
+        data = os.read(fd, MAKEFILE_CAP + 1)
+    finally:
+        os.close(fd)
+    if len(data) > MAKEFILE_CAP:
+        raise VexError(f"{rel} is larger than {MAKEFILE_CAP // 1024} KB, too large to check, so "
+                       "this project is not built")
+    return data.decode("utf-8", "replace")
+
+
+def makefile_refusal(root) -> str | None:
+    """Why this project's make files may not be built, or None.
 
     A makefile is project content that `make` runs; one that called vexcom
     would make a build a download. So a build refuses a project whose make
-    files (the makefile, every `*.mk` at the top or in `vex/`, and what they
-    `include`, bounded) name it — `rules.names_vexcom`, the same accident
-    guard the DENY uses. Not a boundary: a makefile can assemble a name at
-    run time."""
+    files — the makefile, every `*.mk` at the top or in `vex/`, and what they
+    `include` — name it (`rules.names_vexcom`, the same accident guard as the
+    DENY), and it **fails closed** wherever it cannot read all of them: more
+    than `MAKEFILE_LIMIT` files, one past `MAKEFILE_CAP`, a symlink or a
+    non-regular file among them, a `vex/` folder that is a symlink, or an
+    `include` it cannot resolve here (a `$(…)` in the name, an absolute path,
+    a path outside the project). Not a boundary: a makefile can still
+    assemble the name at run time (`$(shell …)`)."""
     root = Path(root)
-    queue = [root / n for n in ("makefile", "Makefile", "GNUmakefile")]
+    queue: list[Path] = []
+    for name in ("makefile", "Makefile", "GNUmakefile"):
+        if os.path.lexists(root / name):
+            queue.append(root / name)
     for folder in (root, root / "vex"):
-        if folder.is_dir() and not folder.is_symlink():
+        if os.path.islink(folder):
+            return f"{folder.relative_to(root).as_posix() or '.'} is a symlink, so this project is not built"
+        if folder.is_dir():
             queue += sorted(p for p in folder.iterdir() if p.suffix == ".mk")
     seen: set[Path] = set()
-    while queue and len(seen) < MAKEFILE_LIMIT:
+    while queue:
         path = queue.pop(0)
-        if path in seen or not _regular(path):
+        if path in seen:
             continue
+        if len(seen) >= MAKEFILE_LIMIT:
+            return (f"the project has more than {MAKEFILE_LIMIT} make files, too many to check, "
+                    "so it is not built")
         seen.add(path)
-        with open(path, "rb") as handle:
-            text = handle.read(MAKEFILE_CAP).decode("utf-8", "replace")
+        rel = path.relative_to(root).as_posix()
+        try:
+            text = _read_make_file(path, rel)
+        except VexError as exc:
+            return str(exc)
         if rules.names_vexcom(text):
-            return path.relative_to(root).as_posix()
+            return (f"{rel} names vexcom, so Jarvis will not build this project: a build must "
+                    "never reach the robot. Remove it, or build in VS Code")
         for match in _INCLUDE.finditer(text):
-            for word in match.group(1).split():
-                if "$" in word or word.startswith("/"):
-                    continue
-                candidates = list(root.glob(word)) if any(c in word for c in "*?[") else [root / word]
+            for word in match.group(1).split("#", 1)[0].split():
+                if "$" in word:
+                    return (f"{rel} includes a file named by a variable ({word[:60]}), which "
+                            "cannot be checked here, so this project is not built")
+                if word.startswith("/"):
+                    return (f"{rel} includes a file outside the project ({word[:60]}), so this "
+                            "project is not built")
+                candidates = sorted(root.glob(word)) if any(c in word for c in "*?[") \
+                    else [root / word]
                 for candidate in candidates:
                     resolved = Path(os.path.normpath(candidate))
-                    if resolved.is_relative_to(root) and not resolved.is_symlink():
+                    if not resolved.is_relative_to(root):
+                        return (f"{rel} includes a file outside the project ({word[:60]}), so "
+                                "this project is not built")
+                    if os.path.lexists(resolved):
                         queue.append(resolved)
     return None
 
@@ -571,7 +703,11 @@ def _iso(ts: float) -> str:
 
 
 def binary(root, name: str) -> dict | None:
-    """`build/<name>.bin`: its project-relative path, size and time, or None."""
+    """`build/<name>.bin`: its project-relative path, size and time, or None.
+    The name comes from the project's own (agent-writable) settings file, so it
+    is held to the `P=` rule first: no `..`, no separator, nothing odd."""
+    if not isinstance(name, str) or not PROJECT_NAME.fullmatch(name):
+        return None
     rel = f"build/{name}.bin"
     path = Path(root) / "build" / f"{name}.bin"
     try:
@@ -726,8 +862,13 @@ def read_template(cfg: VexConfig, template_id: str) -> list[tuple[str, bytes]]:
     if template_id not in {t["id"] for t in list_templates(cfg)}:
         raise ValueError(f"no template {template_id}")
     path = Path(cfg.templates) / f"{template_id}.zip"
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except OSError:
+        raise VexError("the template cannot be opened (a symlink is refused)") from None
     with os.fdopen(fd, "rb") as handle:
+        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+            raise VexError("the template is not a regular file")
         blob = handle.read(TEMPLATE_ZIP_CAP + 1)
     if len(blob) > TEMPLATE_ZIP_CAP:
         raise VexError("the template archive is too large")
@@ -772,26 +913,37 @@ def unpack_plan(blob: bytes) -> list[tuple[str, bytes]]:
     return out
 
 
-def _write_new(folder: Path, rel: str, data: bytes) -> None:
-    """One file, created (never replaced) inside `folder`: every folder on
-    the way made here and checked to be a real folder, the file opened
-    `O_EXCL | O_NOFOLLOW`, so nothing that appeared meanwhile is written
-    through or over."""
+_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+
+
+def _write_new(folder_fd: int, rel: str, data: bytes) -> None:
+    """One file, created (never replaced) inside the folder `folder_fd` holds
+    open: each folder on the way is made, then opened `O_DIRECTORY |
+    O_NOFOLLOW` relative to the one before it (openat-style), and the file is
+    created `O_EXCL | O_NOFOLLOW` relative to the last — so nothing that
+    appears meanwhile, a symlink included, is written through or over."""
     parts = rel.split("/")
-    current = folder
-    for part in parts[:-1]:
-        current = current / part
-        try:
-            os.mkdir(current, 0o755)
-        except FileExistsError:
-            pass
-        info = os.lstat(current)
-        if not stat.S_ISDIR(info.st_mode):
-            raise VexError(f"{rel} would be written through something that is not a folder")
-    fd = os.open(current / parts[-1], os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
-                 | os.O_CLOEXEC, 0o644)
-    with os.fdopen(fd, "wb") as handle:
-        handle.write(data)
+    held: list[int] = []
+    current = folder_fd
+    try:
+        for part in parts[:-1]:
+            try:
+                os.mkdir(part, 0o755, dir_fd=current)
+            except FileExistsError:
+                pass
+            try:
+                current = os.open(part, _DIR_FLAGS, dir_fd=current)
+            except OSError:
+                raise VexError(f"{rel} would be written through something that is not a "
+                               "folder") from None
+            held.append(current)
+        fd = os.open(parts[-1], os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+                     | os.O_CLOEXEC, 0o644, dir_fd=current)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+    finally:
+        for fd in held:
+            os.close(fd)
 
 
 def _creation_date(now: datetime.datetime) -> str:
@@ -822,10 +974,21 @@ def unpack(entries: list[tuple[str, bytes]], folder, settings: dict) -> None:
     folder = Path(folder)
     if os.path.islink(folder) or not folder.is_dir():
         raise VexError(f"{folder} is not a folder")
-    for rel, data in entries:
-        _write_new(folder, rel, data)
-    _write_new(folder, "/".join(SETTINGS_REL),
-               (json.dumps(settings, indent="\t") + "\n").encode("utf-8"))
+    # Held open from here on, so every write lands inside this very folder.
+    # What remains: the folder's own path is resolved once, here, after the
+    # owner's yes — a parent swapped for a symlink in that instant by a
+    # program running as the owner would carry it elsewhere.
+    try:
+        folder_fd = os.open(folder, _DIR_FLAGS)
+    except OSError:
+        raise VexError(f"{folder} is not a folder") from None
+    try:
+        for rel, data in entries:
+            _write_new(folder_fd, rel, data)
+        _write_new(folder_fd, "/".join(SETTINGS_REL),
+                   (json.dumps(settings, indent="\t") + "\n").encode("utf-8"))
+    finally:
+        os.close(folder_fd)
 
 
 # -- records ------------------------------------------------------------------------------------
@@ -951,13 +1114,19 @@ class Vex:
         else:
             self._last[key] = old
 
-    def _start(self, argv, *, folder, label, program, title, project_id=None, input_ok=False,
-               on_exit=None, key=None):
+    def _start(self, argv, *, cfg, tool, also=(), folder, label, program, title, project_id=None,
+               input_ok=False, on_exit=None, key=None):
+        """Spawn `argv` as a program terminal. `argv[0]` is `cfg.<tool>`; it and
+        the tools in `also` are hashed against `vex.json` immediately before
+        the spawn (`verify_tools`), and nothing else runs in between."""
         from .terminals import TerminalError
         if self._stopped:
             raise VexError("Jarvis is stopping")
+        if argv[0] != getattr(cfg, tool):
+            raise VexError("internal: the program is not the configured tool")
         if key is not None:
             self._replace(key)
+        verify_tools(cfg, tool, also)
         try:
             terminal = self.daemon.terminals.create_program(
                 argv, folder=folder, label=label, program=program, title=title,
@@ -985,13 +1154,10 @@ class Vex:
             time.sleep(0.05)
         terminal.signal_program(signal.SIGKILL)
 
-    def _release_device(self, terminal_id=None) -> None:
-        with self._lock:
-            if self._device is not None and (terminal_id is None
-                                             or self._device.get("terminal_id") in (None, terminal_id)):
-                self._device = None
-
-    def _reserve_device(self, kind: str) -> None:
+    def _reserve_device(self, kind: str):
+        """The device, for one action. -> `(release, bind)`, which only this
+        reservation's holder has: `release()` frees it at most once and never
+        another holder's reservation; `bind(terminal_id)` names its terminal."""
         with self._lock:
             busy = self._device
             if busy is not None:
@@ -999,13 +1165,38 @@ class Vex:
                         "download": "A download is running",
                         "info": "A device-info read is running"}[busy["kind"]]
                 raise VexError(f"{what}. One device action at a time.")
-            self._device = {"kind": kind, "terminal_id": None}
+            token = secrets.token_hex(8)
+            self._device = {"kind": kind, "terminal_id": None, "token": token}
+
+        def release() -> bool:
+            with self._lock:
+                if self._device is not None and self._device["token"] == token:
+                    self._device = None
+                    return True
+            return False
+
+        def bind(terminal_id) -> None:
+            with self._lock:
+                if self._device is not None and self._device["token"] == token:
+                    self._device["terminal_id"] = terminal_id
+
+        return release, bind
+
+    def _announce(self, action: str) -> None:
+        """`vex_device` on the bus — the action and the time, nothing else, as
+        WP-C's `terminal_attached` — so a device action the owner did not click
+        (a forged-Origin POST from a program running as the owner) is visible."""
+        try:
+            self.daemon.bus.publish({"kind": "vex_device",
+                                     "data": {"action": action, "at": _utcnow()}})
+        except Exception as exc:  # noqa: BLE001 — a bus problem never stops the owner's action
+            LOG.warning("vex %s: not announced (%s)", action, type(exc).__name__)
 
     # -- status and detection ---------------------------------------------------------
 
     def status(self) -> dict:
         with self._lock:
-            device = dict(self._device) if self._device else None
+            device = {k: v for k, v in self._device.items() if k != "token"} if self._device else None
         view = {"configured": False, "hint": None, "vexcom_version": None, "toolchain": None,
                 "sdks": None, "extension_version": None, "templates": False,
                 "project_folder": None,
@@ -1040,10 +1231,9 @@ class Vex:
         root = project.root
         root_windows = to_windows(root)
         argv = build_argv(cfg, detected, action)
-        offender = makefile_naming_vexcom(root)
-        if offender:
-            raise VexError(f"{offender} names vexcom, so Jarvis will not build this project: a "
-                           "build must never reach the robot. Remove it, or build in VS Code.")
+        refusal = makefile_refusal(root)
+        if refusal:
+            raise VexError(refusal)
         lock = BuildLock(root)
         if not lock.acquire():
             raise VexError("a build of this project is already running (here or through "
@@ -1056,7 +1246,8 @@ class Vex:
             self._keep(self._builds, record.id, record)
             self._held.add(lock)
         try:
-            terminal = self._start(argv, folder=root, label=project.name, program="vex-build",
+            terminal = self._start(argv, cfg=cfg, tool="make", also=BUILD_TOOLS, folder=root,
+                                   label=project.name, program="vex-build",
                                    title=f"vex {action} · {project.name}", project_id=project.id,
                                    on_exit=lambda t: self._build_ended(record, t),
                                    key=("vex-build", project.id))
@@ -1136,6 +1327,9 @@ class Vex:
             raise VexError("Python download waits on one step of the setup spike (which option "
                            "VEX's Python download takes); download Python projects in VS Code "
                            "for now")
+        if not PROJECT_NAME.fullmatch(detected.name):
+            raise VexError("the project's name must be letters, digits, _ and - (at most 64) to "
+                           "download here; rename it in .vscode/vex_project_settings.json")
         cfg = load_config()
         root = project.root
         found = binary(root, detected.name)
@@ -1148,16 +1342,16 @@ class Vex:
         # The device first (one device action at a time, said as such), then
         # the project's build lock, held for the download so no build rewrites
         # the binary while it is being sent.
-        self._reserve_device("download")
+        release, bind = self._reserve_device("download")
         lock = BuildLock(root)
         if not lock.acquire():
-            self._release_device()
+            release()
             raise VexError("a build of this project is running; download when it has finished")
         with self._lock:
             self._held.add(lock)
 
         def ended(terminal):
-            self._release_device(terminal.id)
+            release()
             with self._lock:
                 self._held.discard(lock)
             lock.release()
@@ -1165,19 +1359,19 @@ class Vex:
                      terminal.exit_code)
 
         try:
-            terminal = self._start(argv, folder=root, label=project.name, program="vex-download",
+            terminal = self._start(argv, cfg=cfg, tool="vexcom", folder=root, label=project.name,
+                                   program="vex-download",
                                    title=f"vex download · {project.name} → slot {slot}",
                                    project_id=project.id, on_exit=ended,
                                    key=("vex-download", project.id))
         except BaseException:
-            self._release_device()
+            release()
             with self._lock:
                 self._held.discard(lock)
             lock.release()
             raise
-        with self._lock:
-            if self._device is not None and self._device["kind"] == "download":
-                self._device["terminal_id"] = terminal.id
+        bind(terminal.id)
+        self._announce("download")
         LOG.info("vex download to slot %d started for project %s", slot, project.name)
         self._timer(DOWNLOAD_TIMEOUT_S, self._device_timeout, terminal)
         return {"terminal_id": terminal.id}
@@ -1196,23 +1390,23 @@ class Vex:
                 return {"terminal_id": busy["terminal_id"], "started": False}
         cfg = load_config()
         argv = brain_argv(cfg)
-        self._reserve_device("brain")
+        release, bind = self._reserve_device("brain")
 
         def ended(terminal):
-            self._release_device(terminal.id)
+            release()
             LOG.info("vex brain terminal ended (exit %s)", terminal.exit_code)
 
         try:
-            terminal = self._start(argv, folder=os.path.dirname(cfg.vexcom), label="brain",
+            terminal = self._start(argv, cfg=cfg, tool="vexcom",
+                                   folder=os.path.dirname(cfg.vexcom), label="brain",
                                    program="vex-brain", title="vex brain", input_ok=True,
                                    on_exit=ended, key=("vex-brain",))
         except BaseException:
-            self._release_device()
+            release()
             raise
-        with self._lock:
-            if self._device is not None and self._device["kind"] == "brain" \
-                    and not terminal.exited:
-                self._device["terminal_id"] = terminal.id
+        if not terminal.exited:
+            bind(terminal.id)
+        self._announce("brain")
         LOG.info("vex brain terminal started")
         return {"terminal_id": terminal.id, "started": True}
 
@@ -1221,19 +1415,22 @@ class Vex:
     def info(self) -> dict:
         cfg = load_config()
         argv = info_argv(cfg)
-        self._reserve_device("info")
+        release, bind = self._reserve_device("info")
         done = threading.Event()
 
         def ended(terminal):
-            self._release_device(terminal.id)
+            release()
             done.set()
 
         try:
-            terminal = self._start(argv, folder=os.path.dirname(cfg.vexcom), label="device",
+            terminal = self._start(argv, cfg=cfg, tool="vexcom",
+                                   folder=os.path.dirname(cfg.vexcom), label="device",
                                    program="vex-info", title="vex device info", on_exit=ended)
         except BaseException:
-            self._release_device()
+            release()
             raise
+        bind(terminal.id)
+        self._announce("info")
         answered = done.wait(INFO_TIMEOUT_S)
         if not answered:
             self._stop_program(terminal)
@@ -1242,10 +1439,11 @@ class Vex:
         code = terminal.exit_code
         from .daemon import APIError
         try:
-            self.daemon.terminals.close(terminal.id, grace=0)
+            self.daemon.terminals.close(terminal.id, grace=0)   # fires `ended`, which releases
         except APIError:
             pass
-        self._release_device(terminal.id)
+        if release():                       # only if the exit hook never ran
+            LOG.warning("vex device info: released after its terminal closed without an exit")
         LOG.info("vex device info read (exit %s)", code)
         if not answered:
             raise VexError(f"vexcom did not answer in {int(INFO_TIMEOUT_S)} s")
@@ -1339,6 +1537,9 @@ class Vex:
 
 # -- routes (owner-only, the HUD listener) ------------------------------------------------------
 
+# TODO(VX-1 / PR #41): switch to `projects.is_owner` once #41 (the shared
+# owner rule, which also accepts a same-origin GET's Sec-Fetch-Site) lands —
+# whichever of the two merges second makes the switch.
 def _owner(handler, daemon) -> None:
     """Owner-only, as `projects.owner_only` is — the HUD's listener, a strict
     Host, the HUD's Origin — with one difference the browser forces: a
@@ -1457,10 +1658,9 @@ def cli(argv=None, *, cwd=None, out=None) -> int:
             raise VexError("a Python project has nothing to build")
         root_windows = to_windows(root)
         command = build_argv(cfg, detected, action)
-        offender = makefile_naming_vexcom(root)
-        if offender:
-            raise VexError(f"{offender} names vexcom, so this project is not built: a build "
-                           "must never reach the robot")
+        refusal = makefile_refusal(root)
+        if refusal:
+            raise VexError(refusal)
     except VexError as exc:
         say(str(exc))
         return 2
@@ -1471,6 +1671,11 @@ def cli(argv=None, *, cwd=None, out=None) -> int:
     from .terminals import program_environment
     captured = bytearray()
     try:
+        try:
+            verify_tools(cfg, "make", BUILD_TOOLS)          # immediately before the spawn
+        except VexError as exc:
+            say(str(exc))
+            return 2
         say(f"{action} of {detected.name} started")
         proc = subprocess.Popen(command, cwd=root, env=program_environment(),
                                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,

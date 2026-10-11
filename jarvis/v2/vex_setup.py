@@ -15,9 +15,12 @@ Build, Download and brain terminal run. It:
    `C:\\Users\\johnw\\Documents\\Robotics`), then y/N, then writes
    `~/.config/jarvis/vex.json` (mode 600) — gate state, refused to every
    agent write tool;
-4. offers `~/.local/bin/vexbuild`, the agents' build door (V-2): a
-   three-line wrapper around `python -m jarvis.v2.vex build`, whose stem the
-   gate asks about unless the owner allowlists exactly it.
+4. records each tool's SHA-256 in the same file, which the daemon checks
+   immediately before every spawn;
+5. offers `~/.local/bin/vexbuild`, the agents' build door (V-2): a
+   three-line wrapper around `python -I -m jarvis.v2.vex build` (isolated, so
+   a `jarvis` package planted in the project folder never runs), whose stem
+   the gate asks about unless the owner allowlists exactly it.
 
 Nothing is copied, bundled or run: no VEX program is started here, and
 `vexcom --help` (the device-info flag, a spike item) is the owner's to run.
@@ -138,8 +141,10 @@ def wrapper_text(python: str | None = None) -> str:
             "# It builds the VEX C++ project in the current folder with the toolchain named\n"
             "# in ~/.config/jarvis/vex.json, and never touches the robot: download is only\n"
             "# ever the owner's click in the HUD. Its stem is `vexbuild`, so the permission\n"
-            "# gate asks unless the owner allowlists exactly this tool.\n"
-            f"exec {shlex.quote(python)} -m jarvis.v2.vex build \"$@\"\n")
+            "# gate asks unless the owner allowlists exactly this tool. `-I`: Python's\n"
+            "# isolated mode, so neither the project folder (agent-writable, and first on\n"
+            "# sys.path under a plain `-m`) nor PYTHONPATH can stand in for Jarvis's code.\n"
+            f"exec {shlex.quote(python)} -I -m jarvis.v2.vex build \"$@\"\n")
 
 
 def write_wrapper(text: str) -> Path:
@@ -185,10 +190,20 @@ def run(*, ask=input, out=print, tty: bool | None = None) -> int:
         if templates else 0
     out(f"Templates  {count} VS Code templates" + (f" in {templates}" if templates else ""))
     out(f"Extension  {found.get('extension_version', 'not found')}")
+    # Each tool's fingerprint, which the daemon checks again immediately before
+    # every spawn: a tool rewritten after this (AppData is agent-writable) is
+    # refused until setup runs again.
+    try:
+        hashes = {key: vex.file_sha256(found[key])[0] for key in vex.EXE_KEYS}
+    except (KeyError, vex.VexError) as exc:
+        out(f"\nA VEX tool is missing or unreadable ({exc}). Nothing changed.")
+        return 1
+    for key in vex.EXE_KEYS:
+        out(f"sha256 {key:8} {hashes[key][:16]}…")
     default = _current_folder()
     answer = ask(f"\nNew VEX projects go in [{default}]: ").strip()
     folder = answer or default
-    doc = {"version": 1, **found, "project_folder": folder}
+    doc = {"version": 1, **found, "project_folder": folder, "sha256": hashes}
     try:
         vex.parse_config(doc)
     except vex.VexError as exc:

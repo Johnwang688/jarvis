@@ -176,9 +176,15 @@ class World:
                "cpp_sdk": str(self.storage / "sdk/cpp/V5" / SDK),
                "python_sdk": str(self.storage / "sdk/python/V5" / PY_SDK),
                "templates": str(self.templates), "extension_version": "0.8.2026020401",
-               "project_folder": str(self.robotics)}
+               "project_folder": str(self.robotics), "sha256": self.fingerprints()}
         doc.update(over)
         return {k: v for k, v in doc.items() if v is not None}
+
+    def fingerprints(self) -> dict:
+        import hashlib
+        tools = {"vexcom": self.vexcom, **self.exes}
+        return {key: hashlib.sha256(Path(path).read_bytes()).hexdigest()
+                for key, path in tools.items()}
 
     def write_config(self, **over) -> None:
         path = Path(config.VEX_PATH)
@@ -225,7 +231,8 @@ class Base(unittest.TestCase):
             "HOME": str(self.world.home), "XDG_DATA_HOME": str(self.root / "xdg"),
             "TMPDIR": str(self.root), "JARVIS_CLAUDE_CREDENTIALS": str(self.root / "none.json"),
             # Set so the program-environment check can see they never pass.
-            "OPENROUTER_API_KEY": "placeholder-not-a-key", "JARVIS_PROBE_X": "1"})
+            "OPENROUTER_API_KEY": "placeholder-not-a-key", "JARVIS_PROBE_X": "1",
+            "WSLENV": "JARVIS_PROBE_X/u:OPENROUTER_API_KEY/u"})
         env.start()
         self.addCleanup(env.stop)
         tempfile.tempdir = None
@@ -460,7 +467,14 @@ SHAPES = {
     "empty substitution": "vex$(true)com --user",
     "brace": "vex{com,} --user",
     "continuation": "vex\\\ncom --user",
-    "glob": "find /mnt/c -name 'v*m.exe' -exec {} --user \\;",
+    "glob": "find /mnt/c -name 'vexc*.exe' -exec {} --user \\;",
+    "glob ?": "ls ve?com.exe",
+    "glob class": "ls /opt/ve[a-z]com",
+    "default expansions": "${A:-vex}${B:-com} --user",
+    "assign expansions": "echo ${A:=vex}${B:+com}",
+    "powershell en dash": "powershell \u2013enc " + base64.b64encode("vexcom --user".encode("utf-16-le")).decode(),
+    "powershell colon": "pwsh -EncodedCommand:" + base64.b64encode("vexcom --user".encode("utf-16-le")).decode(),
+    "powershell slash": "powershell /ec " + base64.b64encode("vexcom".encode("utf-16-le")).decode(),
     "copy": f"cp {VEXCOM_EXE} /tmp/renamed.exe",
     "xargs": "xargs vexcom < args.txt",
     "fullwidth": "ＶＥＸＣＯＭ --user",
@@ -470,6 +484,12 @@ ORDINARY = {   # stays as it was: never DENY for not naming vexcom
     "cat .vscode/vex_project_settings.json": rules.ALLOW, "git commit -m 'fix the build'": rules.ALLOW,
     "grep -rn vex_project src": rules.ALLOW, "echo ${HOME}/vex/com": rules.ALLOW,
     "printf '%s %d' a 1": rules.ALLOW, "python3 -m pytest": rules.ALLOW,
+    # The review's false positives: globs and names a VEX project uses daily.
+    "git tag -l 'v*'": rules.ALLOW, "git tag --list 'v*'": rules.ALLOW, "ls include/vex*": rules.ALLOW,
+    "find . -name '*vex*'": rules.ALLOW, "rg -g '*vex*' motor": rules.ALLOW,
+    "grep -r --include='*vex*' motor .": rules.ALLOW, "ls v*": rules.ALLOW,
+    "ls v*m.exe": rules.ALLOW, "cat ~/.local/bin/vexbuild": rules.ALLOW,
+    "grep -rn jarvis.v2.vex tests": rules.ALLOW,
 }
 
 
@@ -549,6 +569,8 @@ class Rules(Base):
 
     def test_vexbuild_asks_like_any_command(self):
         for command in ("vexbuild", "vexbuild --clean", "python -m jarvis.v2.vex build",
+                        "uv run python -m jarvis.v2.vex build", "uv run vexbuild",
+                        "python -Im jarvis.v2.vex build",
                         "python3 -mjarvis.v2.vex build", "/x/.venv/bin/python -I -m jarvis.v2.vex build"):
             self.assertEqual(rules.decide(command).decision, rules.ASK, command)
         # v1: the human is asked, and a no runs nothing.
@@ -1152,6 +1174,300 @@ class NewProject(DaemonBase):
         self.assertEqual(self.daemon.approvals.pending(), [])
 
 
+# -- review round 1: fingerprints, fail-closed guards, holders, coverage -----------------------------
+
+class Fingerprints(DaemonBase):
+    """M3: the tools `vex.json` names live under AppData, which agents can write.
+    Setup records each one's SHA-256; it is checked immediately before each spawn."""
+
+    @staticmethod
+    def tamper(path: Path) -> None:
+        with open(path, "a") as handle:
+            handle.write("\n# rewritten after setup\n")
+
+    def test_a_rewritten_make_or_compiler_refuses_the_build(self):
+        for key in ("make", "clang"):
+            with self.subTest(key=key):
+                original = self.world.exes[key].read_bytes()
+                self.tamper(self.world.exes[key])
+                status, body = self.request("POST", f"/projects/{self.project.id}/vex/build",
+                                            {"action": "build"})
+                self.assertEqual(status, 409)
+                self.assertIn("changed since `jarvis vex setup`", body["error"])
+                self.assertIn(key, body["error"])
+                self.world.exes[key].write_bytes(original)
+        self.assertEqual(self.world.calls("make"), [])
+        self.assertEqual(self.build()["state"], "succeeded")     # the lock was not left held
+
+    def test_a_rewritten_vexcom_refuses_every_device_action(self):
+        self.build()
+        self.tamper(self.world.vexcom)
+        for method, path, body in (("POST", f"/projects/{self.project.id}/vex/download",
+                                    {"slot": 1, "name": "a"}), ("POST", "/vex/brain", {})):
+            with self.subTest(path=path):
+                status, answer = self.request(method, path, body)
+                self.assertEqual(status, 409)
+                self.assertIn("changed since", answer["error"])
+        with patch.object(vex, "INFO_FLAG", "--test-info"):
+            self.assertEqual(self.request("POST", "/vex/device/info", {})[0], 409)
+        self.assertEqual(self.world.calls("vexcom"), [])
+        self.assertIsNone(self.owner("GET", "/vex/status")["device"], "every refusal released it")
+
+    def test_vexbuild_refuses_a_rewritten_tool(self):
+        self.tamper(self.world.exes["ar"])
+        out = io.StringIO()
+        self.assertEqual(vex.cli(["build"], cwd=str(self.folder), out=out), 2)
+        self.assertIn("changed since", out.getvalue())
+        self.assertEqual(self.world.calls("make"), [])
+        self.assertTrue(vex.BuildLock(self.folder).acquire(), "the lock went with the refusal")
+
+    def test_a_config_without_every_fingerprint_is_refused(self):
+        good = self.world.doc()
+        for label, hashes in (("missing", None), ("not a map", "abc"),
+                              ("one short", {k: v for k, v in list(good["sha256"].items())[1:]}),
+                              ("not hex", {**good["sha256"], "make": "x" * 64}),
+                              ("upper case", {**good["sha256"], "make": good["sha256"]["make"].upper()})):
+            with self.subTest(label):
+                doc = {**good, "sha256": hashes} if hashes is not None else \
+                    {k: v for k, v in good.items() if k != "sha256"}
+                self.assert_refused(lambda: vex.parse_config(doc), "fingerprint")
+
+    def test_the_path_must_still_name_the_file_that_was_hashed(self):
+        cfg = vex.load_config()
+        real = vex.file_sha256
+
+        def stale(path):
+            digest, _identity = real(path)
+            return digest, (0, 0, 0, 0, 0)          # the file hashed is not the one there now
+        with patch.object(vex, "file_sha256", stale):
+            self.assert_refused(lambda: vex.verify_tools(cfg, "make"), "changed since")
+        vex.verify_tools(cfg, "make", vex.BUILD_TOOLS)           # the real thing passes
+        fifo = self.world.chain / "tools/bin/fifo.exe"
+        os.mkfifo(fifo)
+        self.assert_refused(lambda: vex.file_sha256(str(fifo)), "not a regular file")
+
+
+class MakeFilesFailClosed(Base):
+    """L1: the makefile guard refuses wherever it cannot read every make file."""
+
+    def setUp(self):
+        super().setUp()
+        self.folder = self.world.project()
+
+    def refused(self, why):
+        reason = vex.makefile_refusal(self.folder)
+        self.assertIsNotNone(reason, why)
+        out = io.StringIO()
+        self.assertEqual(vex.cli(["build"], cwd=str(self.folder), out=out), 2, why)
+        self.assertEqual(self.world.calls("make"), [], why)
+        return reason
+
+    def test_an_ordinary_project_passes(self):
+        (self.folder / "vex" / "mkrules.mk").write_text("include vex/mkenv.mk\nclean:\n\t@echo\n")
+        self.assertIsNone(vex.makefile_refusal(self.folder))
+
+    def test_too_many_make_files(self):
+        for i in range(vex.MAKEFILE_LIMIT + 1):
+            (self.folder / "vex" / f"m{i:02}.mk").write_text("x = 1\n")
+        self.assertIn("too many", self.refused("33 make files"))
+
+    def test_a_make_file_past_the_cap(self):
+        (self.folder / "vex" / "big.mk").write_text("# pad\n" * (vex.MAKEFILE_CAP // 5) + "x:\n\tvexcom\n")
+        self.assertIn("too large", self.refused("past 256 KB"))
+
+    def test_an_include_named_by_a_variable(self):
+        (self.folder / "makefile").write_text("include vex/mkenv.mk\ninclude $(E)rules.inc\n")
+        self.assertIn("variable", self.refused("$(E)rules.inc"))
+
+    def test_an_include_outside_the_project(self):
+        for line in ("include /etc/x.mk", "-include ../outside.mk", "sinclude vex/../../x.mk"):
+            with self.subTest(line):
+                (self.folder / "makefile").write_text(f"{line}\n")
+                self.assertIn("outside the project", self.refused(line))
+
+    def test_a_symlinked_make_file_or_vex_folder(self):
+        real = self.root / "elsewhere.mk"
+        real.write_text("x:\n\tvexcom --user\n")
+        (self.folder / "vex" / "linked.mk").symlink_to(real)
+        self.assertIn("symlink", self.refused("a symlinked .mk"))
+        (self.folder / "vex" / "linked.mk").unlink()
+        (self.folder / "makefile").unlink()
+        (self.folder / "makefile").symlink_to(real)
+        self.assertIn("symlink", self.refused("a symlinked makefile"))
+        (self.folder / "makefile").unlink()
+        shutil.rmtree(self.folder / "vex")
+        (self.folder / "vex").symlink_to(self.root)
+        self.assertIn("symlink", self.refused("a symlinked vex/"))
+
+    def test_a_fifo_make_file_never_hangs(self):
+        os.mkfifo(self.folder / "vex" / "pipe.mk")
+        self.assertIn("not a regular file", self.refused("a FIFO .mk"))
+
+
+class WindowsNames(Base):
+    """L2: characters and names a Windows command line or file system misreads."""
+
+    def test_every_misreadable_part_is_refused(self):
+        user = self.world.user
+        for part in ("a\\b", "dot.", "space ", "NUL", "con.txt", "lpt1", "a(b", "a)b", "a;b",
+                     "a,b", "a=b", "a:b"):
+            with self.subTest(part=part):
+                self.assertRaises(vex.VexError, vex.to_windows, str(user / part))
+        self.assertEqual(vex.to_windows(str(user / "My Robot")), "C:\\Users\\t\\My Robot")
+
+
+class SettingsNames(DaemonBase):
+    def test_a_settings_name_that_is_not_a_plain_name_never_names_a_file(self):
+        self.build()
+        settings = self.folder / ".vscode" / "vex_project_settings.json"
+        doc = json.loads(settings.read_text())
+        for name in ("../evil", "a/b", "a b", "-x"):
+            with self.subTest(name=name):
+                doc["project"]["name"] = name
+                settings.write_text(json.dumps(doc))
+                status, body = self.request("POST", f"/projects/{self.project.id}/vex/download",
+                                            {"slot": 1, "name": "ok"})
+                self.assertEqual(status, 409)
+                self.assertIn("letters, digits", body["error"])
+                self.assertIsNone(vex.binary(self.folder, name))
+        self.assertEqual(self.world.calls("vexcom"), [])
+
+
+class DeviceHolders(unittest.TestCase):
+    """L3: a reservation is released only by its holder, and at most once."""
+
+    def test_a_stale_release_never_frees_another_holders_reservation(self):
+        v = vex.Vex(SimpleNamespace())
+        release_a, bind_a = v._reserve_device("info")
+        self.assertTrue(release_a())
+        self.assertFalse(release_a(), "at most once")
+        release_b, bind_b = v._reserve_device("download")
+        self.assertFalse(release_a(), "A's late release must not free B's download")
+        bind_a("deadbeef")
+        self.assertEqual(v._device["kind"], "download")
+        self.assertIsNone(v._device["terminal_id"], "A cannot name B's terminal")
+        bind_b("cafef00d")
+        self.assertEqual(v._device["terminal_id"], "cafef00d")
+        with self.assertRaises(vex.VexError):
+            v._reserve_device("brain")
+        self.assertTrue(release_b())
+        self.assertIsNone(v._device)
+
+
+class TemplateFiles(Base):
+    """L6: the archive is opened as a regular file only; writes never follow a
+    symlink and never pass through something that is not a folder."""
+
+    def test_a_fifo_template_is_refused_without_hanging(self):
+        cfg = vex.load_config()
+        os.mkfifo(self.world.templates / "cpp_v5_vsc_pipe.zip")
+        listed = [{"id": "cpp_v5_vsc_pipe", "language": "cpp", "label": "Pipe"}]
+        with patch.object(vex, "list_templates", lambda _cfg: listed):
+            started = time.monotonic()
+            self.assertRaises(vex.VexError, vex.read_template, cfg, "cpp_v5_vsc_pipe")
+            self.assertLess(time.monotonic() - started, 3)
+
+    def test_a_file_or_a_symlink_mid_path_is_never_written_through(self):
+        cfg = vex.load_config()
+        settings = vex.settings_document("t", "cpp", cfg)
+        blocked = self.world.robotics / "blocked"
+        blocked.mkdir()
+        (blocked / "src").write_text("a file where a folder would go")
+        self.assert_refused(lambda: vex.unpack([("src/main.cpp", b"x")], blocked, settings),
+                            "not a folder")
+        outside = self.root / "outside"
+        outside.mkdir()
+        linked = self.world.robotics / "linked"
+        linked.mkdir()
+        (linked / "src").symlink_to(outside)
+        self.assert_refused(lambda: vex.unpack([("src/main.cpp", b"x")], linked, settings),
+                            "not a folder")
+        self.assertEqual(list(outside.iterdir()), [], "nothing was written outside")
+
+    def test_unpack_refuses_a_symlinked_folder(self):
+        cfg = vex.load_config()
+        real = self.world.robotics / "real"
+        real.mkdir()
+        link = self.world.robotics / "link"
+        link.symlink_to(real)
+        self.assert_refused(lambda: vex.unpack([("a.txt", b"x")], link,
+                                               vex.settings_document("t", "cpp", cfg)),
+                            "not a folder")
+        self.assertEqual(list(real.iterdir()), [])
+
+
+class Coverage(DaemonBase):
+    """The review's test gaps: each guard, with the check that holds it."""
+
+    def test_an_archived_project_is_refused(self):
+        project = self.stores.projects.get(self.project.id)
+        project.archived = "2026-10-11T00:00:00+00:00"
+        self.stores.projects.save(project)
+        status, body = self.request("POST", f"/projects/{self.project.id}/vex/build",
+                                    {"action": "build"})
+        self.assertEqual(status, 409)
+        self.assertIn("archived", body["error"])
+        self.assertEqual(self.world.calls("make"), [])
+
+    def test_daemon_stop_stops_vex_and_frees_the_build_lock(self):
+        (self.folder / "src" / "SLOW").write_text("")
+        self.build(wait=False)
+        eventually(lambda: self.world.calls("make"), what="make started")
+        self.assertFalse(vex.BuildLock(self.folder).acquire())
+        self.daemon.stop()
+        self.assertTrue(self.daemon.vex._stopped)
+        self.assertEqual(self.daemon.vex._timers, set())
+        self.assertTrue(vex.BuildLock(self.folder).acquire(), "the lock went with the daemon")
+        self.assertRaises(vex.VexError, self.daemon.vex._start, ["x"], cfg=vex.load_config(),
+                          tool="make", folder=str(self.folder), label="x", program="x", title="x")
+
+    def test_a_symlinked_build_folder_is_no_binary(self):
+        self.build()
+        elsewhere = self.root / "elsewhere-build"
+        (self.folder / "build").rename(elsewhere)
+        (self.folder / "build").symlink_to(elsewhere)
+        self.assertTrue((elsewhere / "override.bin").is_file())
+        self.assertIsNone(vex.binary(self.folder, "override"))
+        status, body = self.request("POST", f"/projects/{self.project.id}/vex/download",
+                                    {"slot": 1, "name": "a"})
+        self.assertEqual(status, 409)
+        self.assertIn("Build first", body["error"])
+
+    def test_program_terminals_are_capped_apart_from_shells(self):
+        made = [self.daemon.terminals.create_program(
+            [str(self.world.vexcom), "--user"], folder=str(self.world.vexcom_dir), label="cap",
+            program="cap-test", title=f"cap {i}") for i in range(T.PROGRAM_CAP)]
+        with self.assertRaises(T.TerminalError):
+            self.daemon.terminals.create_program(
+                [str(self.world.vexcom), "--user"], folder=str(self.world.vexcom_dir), label="cap",
+                program="cap-test", title="one too many")
+        # Six programs leave every shell slot free.
+        shells = [self.request("POST", "/terminals", {"in": "home"}, status=201)[1]["id"]
+                  for _ in range(T.TERMINAL_CAP)]
+        self.assertEqual(len(shells), T.TERMINAL_CAP)
+        self.request("POST", "/terminals", {"in": "home"}, status=409)
+        for terminal in made:
+            self.daemon.terminals.close(terminal.id, grace=0)
+
+    def test_a_program_terminal_needs_an_absolute_program(self):
+        for argv in (["vexcom.exe", "--user"], [], ["relative/make.exe"]):
+            with self.subTest(argv=argv), self.assertRaises(T.TerminalError):
+                self.daemon.terminals.create_program(argv, folder=str(self.folder), label="x",
+                                                     program="x", title="x")
+
+    def test_a_post_without_an_origin_is_refused_whatever_sec_fetch_site_says(self):
+        p = self.project.id
+        for path, body in ((f"/projects/{p}/vex/build", {"action": "build"}),
+                           (f"/projects/{p}/vex/download", {"slot": 1, "name": "a"}),
+                           ("/vex/brain", {}), ("/vex/device/info", {}),
+                           ("/vex/projects", {"name": "x", "language": "cpp",
+                                              "template": "cpp_v5_vsc_empty"})):
+            with self.subTest(path=path):
+                self.request("POST", path, body, origin=None,
+                             headers={"Sec-Fetch-Site": "same-origin"}, status=403)
+        self.assertEqual(self.world.calls("make") + self.world.calls("vexcom"), [])
+
+
 # -- leaks and reach --------------------------------------------------------------------------------------
 
 class capture_logs:
@@ -1197,7 +1513,15 @@ class Leaks(DaemonBase):
                 drained.append(events.get_nowait())
             except Exception:
                 break
-        self.assertEqual(drained, [], "a VEX action put a record on the bus")
+        # One id-only record per device action (L5), as `terminal_attached`:
+        # the action and the time, never output, a slot, a name or a path.
+        self.assertEqual([r["kind"] for r in drained], ["vex_device", "vex_device"], drained)
+        self.assertEqual([r["data"]["action"] for r in drained], ["download", "brain"])
+        for record in drained:
+            self.assertEqual(set(record), {"kind", "data"})
+            self.assertEqual(set(record["data"]), {"action", "at"})
+            self.assertRegex(record["data"]["at"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d")
+        self.assertNotIn(marker, json.dumps(drained))
         text = "\n".join(records)
         self.assertIn("vex build started for project override", text)
         self.assertIn("vex download to slot 2 started for project override", text)
@@ -1280,10 +1604,16 @@ class Reach(unittest.TestCase):
 
 class Setup(Base):
     def test_it_refuses_without_a_terminal(self):
+        # Answers that would succeed: only the TTY check can stop this.
         Path(config.VEX_PATH).unlink()
-        said = []
-        self.assertEqual(vex_setup.run(ask=lambda q: "y", out=said.append, tty=False), 1)
-        self.assertFalse(Path(config.VEX_PATH).exists())
+        for tty in (False, None):                  # None: judged from the real stdin
+            with self.subTest(tty=tty), patch("sys.stdin", io.StringIO("")):
+                answers, said = iter(["", "y", "y"]), []
+                self.assertEqual(vex_setup.run(ask=lambda q: next(answers), out=said.append,
+                                               tty=tty), 1)
+                self.assertIn("at a terminal", " ".join(said))
+                self.assertFalse(Path(config.VEX_PATH).exists())
+                self.assertFalse(Path(config.VEXBUILD_PATH).exists())
 
     def test_it_writes_what_it_found_and_offers_vexbuild(self):
         Path(config.VEX_PATH).unlink()
@@ -1294,13 +1624,35 @@ class Setup(Base):
         self.assertEqual(written["vexcom"], str(self.world.vexcom))
         self.assertEqual(written["make"], str(self.world.exes["make"]))
         self.assertEqual(written["project_folder"], str(self.world.robotics))
+        self.assertEqual(written["sha256"], self.world.fingerprints())
         self.assertEqual(stat.S_IMODE(os.stat(config.VEX_PATH).st_mode), 0o600)
         vex.load_config()                                         # passes the daemon's own rule
         wrapper = Path(config.VEXBUILD_PATH)
         self.assertEqual(stat.S_IMODE(wrapper.stat().st_mode), 0o755)
-        self.assertRegex(wrapper.read_text(), r"-m jarvis\.v2\.vex build \"\$@\"\n$")
+        self.assertRegex(wrapper.read_text(), r" -I -m jarvis\.v2\.vex build \"\$@\"\n$")
         self.assertNotRegex(wrapper.read_text(), r"--write|--user|--slot")
         self.assertEqual(rules.decide("vexbuild").decision, rules.ASK)
+
+    def test_the_wrapper_never_runs_a_package_planted_in_the_project(self):
+        # M2: `python -m` puts the working folder first on sys.path, and a
+        # project folder is agent-writable. The wrapper's own exec line, with
+        # only its module swapped for one that exists solely in the project
+        # folder, must not find it — from the folder, or through PYTHONPATH.
+        import subprocess
+        folder = self.world.project()
+        planted = folder / "vexplanted"
+        planted.mkdir()
+        (planted / "__init__.py").write_text("")
+        flag = self.root / "PLANTED-RAN"
+        (planted / "__main__.py").write_text(f"open({str(flag)!r}, 'w').write('ran')\n")
+        text = vex_setup.wrapper_text(sys.executable).replace("jarvis.v2.vex build", "vexplanted")
+        script = self.root / "wrapper-probe.sh"
+        script.write_text(text)
+        script.chmod(0o755)
+        env = {"PATH": "/usr/bin:/bin", "HOME": str(self.world.home), "PYTHONPATH": str(folder)}
+        proc = subprocess.run([str(script)], cwd=folder, env=env, capture_output=True, timeout=60)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertFalse(flag.exists(), "a module planted in the project folder ran")
 
     def test_no_writes_nothing(self):
         Path(config.VEX_PATH).unlink()
