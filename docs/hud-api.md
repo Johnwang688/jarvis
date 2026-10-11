@@ -699,7 +699,8 @@ runs, because the runner retries on exactly that.
   become idle. The HUD calls them on opening a thread (in a chat pane) or
   a task (in a task pane), and when one finishes while open in a visible
   window. Since 2026-10-09 "open" means shown in **any** pane the window
-  draws, not only the focused one (a split centre, design §18). The HUD
+  draws, not only the focused one (a split centre, design §18) — with
+  several chat panes, every drawn chat pane's thread. The HUD
   draws the answer at once (the `activity` record may not reach a window
   whose stream is reconnecting) unless a record for that row, or a snapshot
   sent after the call, has arrived since. A sidecar that cannot be written

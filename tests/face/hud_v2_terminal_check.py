@@ -39,7 +39,9 @@ The checks worth keeping, each written to bite:
     `javascript:` link is inert, an http link opens only on Ctrl+click;
   - at 160% and 70% the terminal fits its pane, its text scales with the
     HUD, and a drag selects exactly the cells under the pointer;
-  - one terminal is drawn in one place: in a pane, its panel tab says so.
+  - one terminal is drawn in one place: in a pane, its panel tab says so;
+  - with several chat panes, `+` opens in the focused chat pane's own
+    conversation, and from any other pane in the selected chat's.
 
 Run (after `cd hud && npm ci && npm run build`):
     PYTHONPATH=. .venv/bin/python tests/face/hud_v2_terminal_check.py
@@ -468,7 +470,8 @@ def terminal_checks(browser, mock, base, check, until, guard, init_script):
         _boot(page, mock, base, until)
         for section in (_open_checks, _typing_checks, _card_checks, _paste_checks, _reload_checks,
                         _takeover_checks, _elsewhere_checks, _exit_checks, _busy_checks, _readable_checks,
-                        _integration_checks, _osc_link_checks, _pane_checks, _zoom_checks, _ended_checks):
+                        _integration_checks, _osc_link_checks, _pane_checks, _zoom_checks, _ended_checks,
+                        _chat_panes_checks):
             if only and section.__name__.strip("_") not in only:
                 continue
             try:
@@ -1260,6 +1263,46 @@ def _ended_checks(page, mock, base, check, until, fake):
     page.locator(_sel("deadbeef", '[data-testid="term-choose"]')).click()
     until(lambda: _visible(page, '[data-testid="pane-2-terminal-pick"]'), timeout=3)
     check("and 'Choose another' lets it choose", _visible(page, '[data-testid="pane-2-terminal-pick"]'))
+    page.set_viewport_size({"width": 1280, "height": 800})
+    _store(page, ws=None)
+
+
+def _chat_panes_checks(page, mock, base, check, until, fake):
+    """`+` with several chat panes (WP-B): a focused chat pane opens the
+    terminal in its *own* conversation's folder; any other pane defers to the
+    chat the window is about (the selected chat, else the one selected last).
+    Last, because it adds threads to this mock's world."""
+    from tests.face import hud_v2_multichat_check as MC
+    if not any(t["id"] == "t3" for t in mock.world["threads"]):
+        MC._seed(mock)                          # t2 beside t1 in jarvis, t3 in schoolwork
+    _reset(page, mock, base, until, fake, size=(1600, 900))
+    _store(page, ws=MC.TWO)
+    _boot(page, mock, base, until, reload=True)
+    MC._open(page, until, 1, "t1")
+    MC._open(page, until, 2, "t3", project="p2")
+
+    def plus():
+        n = len(_created(mock))
+        if not _visible(page, '[data-testid="panel"]'):
+            page.locator('[data-testid="toggle-panel"]').click()
+            until(lambda: _visible(page, '[data-testid="panel-new"]'), timeout=3)
+        page.locator('[data-testid="panel-new"]').click()
+        until(lambda: len(_created(mock)) > n, timeout=4)
+        return _created(mock)[-1][1] if len(_created(mock)) > n else None
+    got = plus()
+    check("several chat panes: `+` from the focused chat pane opens in its own conversation (pane 2: t3)",
+          got == {"thread": "t3"}, str(got))
+    MC._focus(page, until, 1)
+    got = plus()
+    check("and from the other chat pane, in that one's (pane 1: t1)", got == {"thread": "t1"}, str(got))
+    # Pane 2 stops showing chat (its conversation is still t3 underneath):
+    # a terminal pane defers to the chat the window is about — pane 1's.
+    page.locator('[data-testid="pane-2"] [data-testid="tab-terminal"]').click()
+    until(lambda: _visible(page, '[data-testid="pane-2-terminal-pick"]')
+          and page.locator('[data-testid="pane-2"]').get_attribute("data-focused") == "true", timeout=3)
+    got = plus()
+    check("from a pane that is not a chat, the selected chat's conversation (t1), not the pane's own hidden one",
+          got == {"thread": "t1"}, str(got))
     page.set_viewport_size({"width": 1280, "height": 800})
     _store(page, ws=None)
 
