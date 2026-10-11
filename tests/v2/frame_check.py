@@ -284,6 +284,7 @@ def routes(t) -> list[tuple[str, str, object]]:
         ("PATCH", f"/projects/{p}", {"name": "Calc"}), ("PATCH", f"/projects/{p}", {"bogus": 1}),
         ("GET", f"/projects/{p}/tree", None), ("GET", f"/projects/{p}/file?path=hello.txt", None),
         ("GET", f"/projects/{p}/file?path=.env", None), ("PUT", f"/projects/{p}/file?path=x.txt", {"bogus": 1}),
+        ("POST", f"/projects/{p}/files/stat", {"paths": ["hello.txt"]}),
         ("GET", f"/projects/{p}/platform", None), ("GET", f"/projects/{p}/impact", None),
         ("POST", f"/projects/{p}/archive", {}), ("POST", f"/projects/{p}/restore", {}),
         ("DELETE", f"/projects/{p}", None), ("GET", f"/projects/{p}/discord", None),
