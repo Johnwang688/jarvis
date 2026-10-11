@@ -45,3 +45,7 @@ This governs the plan amendment.
 4. **Driving** (B-9): new driving tools behind the classifier, plus the approval-card path, the banner and takeover. This replaces the plan's "no driving" (§6 iii).
 5. **Sound** (B-12): a switch, off by default.
 6. **Rename** (B-14): BR-3a moves up to "right after G1".
+
+## Amendment 1 (2026-10-11)
+
+The plan changes above are worked out in `2026-10-11-hud-browser-plan-amendment-1.md` (driving, profiles, auto-open, seeing, sound, and the re-cut work packages). Its §J decisions BD-1 to BD-4, BD-6, BD-7, BD-9 and BD-11 are adopted as recommended. BD-5 (Chrome sign-in and sync) waits for the owner. BD-8 waits for M3, and BD-10 for BR-1a's review.
