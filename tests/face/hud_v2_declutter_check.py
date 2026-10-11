@@ -60,6 +60,10 @@ ROWS_TOP = json.dumps({"preset": "rows2", "focused": 1, "splits": {"rows2": {"co
 
 # InputBar's MAX_PANE_SHARE: the box never takes more of its pane than this.
 SHARE = 0.35
+# …and MIN_LOG_PX / MIN_LOG_SHARE / MIN_LINES: the conversation keeps at least
+# max(96 zoomed px, 30% of the pane), unless that would leave the box under
+# two lines — then the box stops at two lines and scrolls.
+MIN_LOG_PX, MIN_LOG_SHARE, MIN_LINES = 96, 0.3, 2
 FORTY_LINES = "\n".join(f"line {i} of a long paste" for i in range(1, 41))
 LONG_PROJECT = "Weekend robotics build"
 
@@ -79,7 +83,8 @@ def declutter_checks(browser, mock, base, check, until, guard, init_script):
         page.goto(base + "/")
         page.wait_for_selector('[data-testid="sidebar"]', state="attached")
         mock.await_reconnect(before)
-        for section in (_card_lever_checks, _cap_checks, _folded_status_checks, _popover_keyboard_checks,
+        for section in (_card_lever_checks, _cap_checks, _min_log_checks, _folded_status_checks,
+                        _popover_keyboard_checks,
                         _popover_place_checks, _escape_under_card_checks, _short_window_checks,
                         _orb_line_checks, _steer_look_checks, _listener_checks, _project_gone_checks):
             try:
@@ -337,6 +342,44 @@ def _cap_checks(page, mock, check, until):
           p["box"]["h"] < tall and p["box"]["h"] <= SHARE * p["pane"]["h"] + 1,
           f"{tall:.0f} → {p['box']['h']:.0f} in a pane of {p['pane']['h']:.0f}")
     page.locator(_pane(1, '[data-testid="input"]')).fill("")
+
+
+def _min_log_checks(page, mock, check, until):
+    """The conversation's minimum (coordinator, after #28's bottom panel): at
+    1920x700 and 160% with the panel open the pane is short, and 35% of it
+    still left the log 36px. The box now also stops where the pane, less its
+    fixed parts, would leave the log under max(96px, 30%) — but never under two
+    lines. Killed by dropping the min-log term from InputBar's cap."""
+    z = 1.6
+    for panel_h, where in ((None, "the bottom panel at its default height (the pane at its 200px minimum)"),
+                           (120, "the bottom panel at its smallest")):
+        ws = json.loads(SINGLE)
+        ws["panel"] = {"open": True, "height": panel_h or 260}
+        _fresh(page, mock, until, json.dumps(ws), size=(1920, 700), zoom="160")
+        until(lambda: _visible(page, '[data-testid="panel"]'), timeout=3)
+        _type_long(page, 1)
+        p = _box_parts(page, 1)
+        pane, box = p["pane"]["h"], p["box"]["h"]
+        log = p["log"]["h"] if p["log"] else 0
+        fixed = pane - log - box
+        min_log = max(MIN_LOG_PX * z, MIN_LOG_SHARE * pane)
+        two = (MIN_LINES * p["lineH"] + p["edges"]) * z  # computed style is in zoomed px, rects on screen
+        fits = pane - fixed - min_log >= two
+        detail = (f"pane {pane / z:.0f} fixed {fixed / z:.0f} box {box / z:.0f} log {log / z:.0f} "
+                  f"(min {min_log / z:.0f}, two lines {two / z:.0f}) zoomed px")
+        for name in ("send", "attach", "project", "model"):
+            check(f"review #29 F2: 1920x700 at 160%, {where}, 40 lines typed: {name} is wholly inside the pane",
+                  _inside(p[name], p["pane"]), f"{p[name]} in {p['pane']}")
+        if fits:
+            check(f"review #29 F2: 1920x700 at 160%, {where}, 40 lines typed: the log keeps at least its minimum,"
+                  " max(96px, 30% of the pane)", log >= min_log - 1 and p["scrolls"], detail)
+            check("setup: and there it is the min-log term that stops the box, not 35%",
+                  box < SHARE * pane - 2, detail)
+        else:
+            check(f"review #29 F2: 1920x700 at 160%, {where}, 40 lines typed: the pane cannot fit the log's"
+                  " minimum, so the box stops at two lines and scrolls and the log keeps the rest",
+                  abs(box - two) <= 1.5 and p["scrolls"] and log >= pane - fixed - two - 1, detail)
+        page.locator(_pane(1, '[data-testid="input"]')).fill("")
 
 
 # ---- F3: a folded sidebar still says what the selected chat is doing --------

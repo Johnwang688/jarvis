@@ -747,11 +747,18 @@ Escape**, which denies), a click outside, focus leaving it, a resize, a zoom
 change, or its button moving (a rAF watch: a fold, a split, a re-layout). It
 opens on the chosen option, the arrows move within a list, Tab goes round its
 stops and never leaves it, none of its keys reach push-to-talk, and its
-listeners are set once (the close is read through a ref). The box grows to 15
-lines (`MAX_LINES`) or 35% of its pane (`MAX_PANE_SHARE`), whichever is less —
-re-measured when the pane's height changes, not only its width — then scrolls:
-fifteen lines in a 2×2 grid, two rows or a small window at 160% pushed Send and
-the chips out of the pane and left the conversation 32px. Send and Attach are
+listeners are set once (the close is read through a ref). The box grows to the
+least of 15 lines (`MAX_LINES`), 35% of its pane (`MAX_PANE_SHARE`), and what
+the pane has left once its fixed parts (header, ticker, the rest of the bar,
+measured with the box at one line) and **the conversation's minimum** —
+`MIN_LOG_PX` 96 zoomed px or `MIN_LOG_SHARE` 30% of the pane, whichever is
+more — are taken out, but never under two lines (`MIN_LINES`): a pane that
+cannot fit the minimum gets a two-line box that scrolls. It is re-measured when
+the pane's height changes (a split, the zoom, the bottom panel), not only its
+width, and when the bar's own parts change. Fifteen lines in a 2×2 grid, two
+rows or a small window at 160% pushed Send and the chips out of the pane and
+left the conversation 32px, and after #28 the panel left a pane at its 200px
+minimum where 35% alone still left 36px. Send and Attach are
 SVG icon buttons (testids unchanged), Stop a square, and Steer an outlined bent
 arrow (`.steer`, `data-steer`) — it must not look like Send. Tests drive the
 popover through helpers at the top of `hud_v2_check.py` (`pick_model`,

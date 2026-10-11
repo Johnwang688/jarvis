@@ -39,6 +39,14 @@ export const MAX_LINES = 15;
  * chips out of the pane and squeezed the conversation to nothing (review of
  * PR #29). */
 export const MAX_PANE_SHARE = 0.35;
+/** …and never so tall that the conversation above it gets less than this
+ * (zoomed px) or this share of the pane, whichever is more: at the pane's
+ * minimum, with the bottom panel open, 35% still left the log 36px. */
+export const MIN_LOG_PX = 96;
+export const MIN_LOG_SHARE = 0.3;
+/** But the box itself never stops short of this many lines: a pane that
+ * cannot fit the conversation's minimum gets a two-line box that scrolls. */
+export const MIN_LINES = 2;
 
 const MAX_BYTES = 4 * 1024 * 1024;
 
@@ -157,27 +165,43 @@ export function InputBar(props: {
   const [notes, setNotes] = useState<string[]>([]);
   const box = useRef<HTMLTextAreaElement>(null);
 
-  // The box flexes up with what is typed, to MAX_LINES lines or MAX_PANE_SHARE
-  // of its pane's height, whichever is less, and scrolls past that.
-  // Re-measured when the text changes, when the box's width does (a pane
-  // resize rewraps the same text) and when its pane's height does (a split,
-  // a fold, the zoom) — never on the box's own height change, which it set.
+  // The box flexes up with what is typed, and scrolls past the least of:
+  // MAX_LINES lines, MAX_PANE_SHARE of its pane, and what the pane has left
+  // once its fixed parts (the header, the ticker, the rest of this bar) and
+  // the conversation's minimum (MIN_LOG_PX or MIN_LOG_SHARE of the pane) are
+  // counted — but never less than MIN_LINES lines. Re-measured when the text
+  // changes, when this bar's own parts do (staged files, notes, a status
+  // line), when the box's width does (a pane resize rewraps the same text)
+  // and when its pane's height does (a split, a fold, the zoom, the bottom
+  // panel) — never on the box's own height change, which it set.
   const fit = useRef<() => void>(() => {});
   useLayoutEffect(() => {
     const el = box.current;
     if (!el) return;
     const pane = el.closest<HTMLElement>(".wpane");
     fit.current = () => {
-      el.style.height = "auto";
       const cs = getComputedStyle(el);
       const line = parseFloat(cs.lineHeight) || parseFloat(cs.fontSize) * 1.45;
       const edge = parseFloat(cs.borderTopWidth) + parseFloat(cs.borderBottomWidth);
       const pad = parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom);
-      const one = line + pad + edge;
-      const lines = line * MAX_LINES + pad + edge;
+      const lines = (n: number) => line * n + pad + edge;
+      let cap = lines(MAX_LINES);
       // A hidden pane measures 0: its box is refitted when the pane is drawn.
-      const room = pane && pane.clientHeight > 0 ? pane.clientHeight * MAX_PANE_SHARE : Infinity;
-      const cap = Math.max(one, Math.min(lines, room));
+      const paneH = pane?.clientHeight ?? 0;
+      if (pane && paneH > 0) {
+        cap = Math.min(cap, paneH * MAX_PANE_SHARE);
+        const log = pane.querySelector<HTMLElement>('[data-testid="log"]');
+        if (log) {
+          // The pane's fixed parts, measured with the box at one line, when
+          // nothing overflows: everything but the conversation and the box.
+          el.style.height = `${lines(1)}px`;
+          const fixed = paneH - log.offsetHeight - el.offsetHeight;
+          const minLog = Math.max(MIN_LOG_PX, paneH * MIN_LOG_SHARE);
+          cap = Math.min(cap, paneH - fixed - minLog);
+        }
+      }
+      cap = Math.max(lines(MIN_LINES), cap);
+      el.style.height = "auto";
       const want = el.scrollHeight + edge;
       el.style.height = `${Math.min(want, cap)}px`;
       el.style.overflowY = want > cap ? "auto" : "hidden";
@@ -198,7 +222,7 @@ export function InputBar(props: {
     if (pane) ro.observe(pane);
     return () => ro.disconnect();
   }, []);
-  useLayoutEffect(() => fit.current(), [text]);
+  useLayoutEffect(() => fit.current(), [text, files.length, notes.length, props.imageNote, props.status != null]);
 
   // REVIEW dictation puts the transcript in the box and focuses it. Nothing is
   // ever sent on its own in this mode — that is the whole point of the mode.
