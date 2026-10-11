@@ -2165,7 +2165,12 @@ key of a Ctrl+K chord, which is Monaco's whatever it is (Ctrl+K Ctrl+0 folds
 all, as in VS Code; a lone Ctrl+0 is still the HUD's zoom reset, and neither
 reaches Chrome's zoom). Ctrl+S saves the focused editor and never opens
 Chrome's dialog. Opening another file, or Reload, over an unsaved edit asks
-first. The diff view disposes its models (it leaked two per file viewed).
+first. Each File pane picks its own project (decision E-13): a `Project ▾` in
+its header lists every project and Follow chat, re-pins that pane only,
+refuses while the pane holds an unsaved edit, and is disabled under a card.
+Monaco's right-click menu is placed in viewport pixels, which the HUD's CSS
+zoom scaled a second time (off the window at 160%); it is corrected after
+Monaco's own layout and now opens at the pointer at any zoom. The diff view disposes its models (it leaked two per file viewed).
 Measured: the editor chunk went from 2.30 MB (bare API) to 3.63 MB, the
 worker from 232 KB to 277 KB, the first-paint chunk +5 KB. EditContext stays
 on: headless Chromium types into it. One defect is left on purpose: a space

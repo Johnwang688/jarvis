@@ -1994,6 +1994,33 @@ export default function App() {
               discard edit
             </button>
           </span>
+        ) : spec.view === "file" ? (
+          // A File pane picks its own project (decisions E-13): every project,
+          // or Follow chat. Only project roots are offered — a folder becomes
+          // reachable by becoming a project, so folders.py stays the one gate.
+          // A pane holding an unsaved edit refuses, with the refusal chip, and
+          // the select snaps back; under a card it is disabled (and inert).
+          <select
+            className="panepick"
+            data-testid={`pane-${n}-folder`}
+            value={spec.projectId && !pinGone(spec) ? spec.projectId : ""}
+            disabled={blocked}
+            title={dirty
+              ? "Save or reload the file first: another project closes it"
+              : "The project this pane's files come from"}
+            onChange={(e) => {
+              if (dirtyNow.current[n]) {
+                setRefused((r) => ({ ...r, [n]: { at: Date.now(), pane: n } }));
+                return;
+              }
+              view.pin(n, e.target.value || null);
+            }}
+          >
+            <option value="">Follow chat{activeProjectId ? ` · ${projectName(activeProjectId)}` : ""}</option>
+            {state.projects.map((p) => (
+              <option key={p.id} value={p.id}>{p.name}</option>
+            ))}
+          </select>
         ) : pinnedElsewhere(spec, n) ? (
           <span className="chip panepin" data-testid={`pane-${n}-project`} title="This pane stays in its project">
             in: {projectName(paneProject(spec, n))}

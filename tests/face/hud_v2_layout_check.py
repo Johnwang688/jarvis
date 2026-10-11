@@ -1359,33 +1359,60 @@ def _workspace_checks(page, mock, check, until):
     until(lambda: page.locator(_pane(2, '[data-testid="file-path"]')).inner_text() == "calc.py", timeout=4)
     check("opening a file pins its pane to that project", _ws(page)["ws"]["panes"][1]["projectId"] == "p1",
           str(_ws(page)["ws"]["panes"][1]))
-    check("and says nothing while the chat is in the same project",
-          page.locator('[data-testid="pane-2-project"]').count() == 0)
+    # E-13: the File pane's own Project ▾ (every project, plus Follow chat)
+    # replaced the "in: … · follow chat" chip the File pane used to carry.
+    folder = page.locator('[data-testid="pane-2-folder"]')
+    options = page.evaluate("[...document.querySelectorAll('[data-testid=\"pane-2-folder\"] option')]"
+                            ".map(o => o.value)")
+    check("E-13: the File pane's own picker names the project it is pinned to, offering every project and "
+          "Follow chat", folder.count() == 1 and folder.input_value() == "p1"
+          and options == ["", "p1", "p2"], f"{folder.input_value() if folder.count() else None} {options}")
     page.locator('[data-testid="project-chip-select"]').select_option("p2")
-    until(lambda: page.locator('[data-testid="pane-2-project"]').count() > 0, timeout=3)
+    time.sleep(0.3)
     check("with the chat moved to another project the file stays open, and the pane says where it is",
           page.locator(_pane(2, '[data-testid="file-path"]')).inner_text() == "calc.py"
-          and "jarvis" in page.locator('[data-testid="pane-2-project"]').inner_text())
+          and folder.input_value() == "p1")
     _edit(page, until, 2, "\n# pinned")
     save = page.locator(_pane(2, '[data-testid="file-save"]'))
     until(lambda: not save.is_disabled(), timeout=3)
-    follow = page.locator('[data-testid="pane-2-follow"]')
-    until(lambda: follow.is_disabled(), timeout=3)
-    check("with an unsaved edit, follow chat waits and says why",
-          follow.is_disabled() and "Save" in (follow.get_attribute("title") or ""),
-          str(follow.get_attribute("title")))
+    refused = page.locator('[data-testid="pane-2-refused"]')
+    for choice, what in (("", "Follow chat"), ("p2", "another project")):
+        folder.select_option(choice)
+        until(lambda: refused.count() > 0, timeout=2)
+        time.sleep(0.15)
+        check(f"E-13: with an unsaved edit, {what} is refused with the chip, and the pane stays where it was",
+              refused.count() == 1 and folder.input_value() == "p1"
+              and _ws(page)["ws"]["panes"][1]["projectId"] == "p1"
+              and page.locator(_pane(2, '[data-testid="file-path"]')).inner_text() == "calc.py",
+              f"{folder.input_value()} {_ws(page)['ws']['panes'][1]}")
     save.click()
     until(lambda: any(m == "PUT" for m, _p, _b in mock.calls[calls_before:]), timeout=4)
     puts = [p for m, p, _b in mock.calls[calls_before:] if m == "PUT"]
     check("and its save goes to the project it was read from, never the one the chat moved to",
           puts == ["/projects/p1/file"], str(puts))
-    until(lambda: not follow.is_disabled(), timeout=3)
-    check("once saved, follow chat is offered again", not follow.is_disabled())
-    follow.click()
+    until(lambda: save.is_disabled(), timeout=3)
+    _approval(mock, "fold1")
+    until(lambda: page.locator('[data-testid="approval-card"]').count() > 0, timeout=4)
+    time.sleep(0.2)
+    check("E-13: under a card the picker is disabled", folder.is_disabled())
+    page.keyboard.press("Escape")
+    until(lambda: page.locator('[data-testid="approval-card"]').count() == 0, timeout=4)
+    until(lambda: not folder.is_disabled(), timeout=2)
+    folder.select_option("")
     until(lambda: page.locator(_pane(2, '[data-testid="file-path"]')).inner_text() == "no file open", timeout=3)
-    check("follow chat unpins it: a fresh tree in the chat's project, nothing open",
-          _ws(page)["ws"]["panes"][1]["projectId"] is None
-          and page.locator('[data-testid="pane-2-project"]').count() == 0)
+    check("once saved, Follow chat unpins it: a fresh tree in the chat's project, nothing open",
+          _ws(page)["ws"]["panes"][1]["projectId"] is None and folder.input_value() == "")
+    others = [q.get("projectId") for i, q in enumerate(_ws(page)["ws"]["panes"]) if i != 1]
+    folder.select_option("p1")
+    until(lambda: _ws(page)["ws"]["panes"][1]["projectId"] == "p1", timeout=3)
+    until(lambda: page.locator(_pane(2, '[data-testid="file-calc.py"]')).count() > 0, timeout=4)
+    check("E-13: picking a project re-pins this pane only, to a fresh tree there",
+          _ws(page)["ws"]["panes"][1]["projectId"] == "p1" and folder.input_value() == "p1"
+          and page.locator(_pane(2, '[data-testid="file-path"]')).inner_text() == "no file open"
+          and [q.get("projectId") for i, q in enumerate(_ws(page)["ws"]["panes"]) if i != 1] == others,
+          str(_ws(page)["ws"]["panes"]))
+    folder.select_option("")
+    until(lambda: _ws(page)["ws"]["panes"][1]["projectId"] is None, timeout=3)
 
     # A project that goes away under an unsaved edit: the edit is kept, and
     # the pane asks before it lets go of it.

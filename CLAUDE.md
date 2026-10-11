@@ -943,7 +943,14 @@ an editor Monaco's own command saves that buffer with the editor's text (no
 editor has focus under a card, so it cannot run); in a terminal it is the
 shell's. **An unsaved edit is never
 dropped without a word**: opening another file or Reload over one asks
-(`file-discard-ask`, Keep editing / Discard). EditContext stays on (headless
+(`file-discard-ask`, Keep editing / Discard). **A File pane picks its own
+project** (decisions E-13, built here): its header's `Project ▾`
+(`pane-N-folder`) lists every project plus Follow chat and replaces the File
+pane's "in: … · follow chat" chip (a Preview pane keeps the chip); it re-pins
+that pane only, refuses with the refusal chip while the pane holds an unsaved
+edit (the select snaps back), and is disabled under a card. Only project
+roots are offered — a folder becomes reachable by becoming a project, so
+`folders.py` stays the one gate. EditContext stays on (headless
 Chromium types into it). Space in Monaco **still** starts push-to-talk and
 the space is lost — confirmed headless; it is the Ctrl+D push-to-talk PR's,
 not ED-1's (the owner's decision, 2026-10-10). Test hooks (read-only):

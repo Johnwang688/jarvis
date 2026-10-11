@@ -567,6 +567,8 @@ label.iconbtn.attach:hover { background: var(--bg-3); border-color: var(--border
    container; this makes that container a stacking context, so they stack
    inside the editor and never above #authveil (z 100). ED-1. */
 .editorhost { flex: 1 1 auto; min-height: 0; isolation: isolate; }
+/* A File pane's own project picker (decisions E-13), in its header. */
+select.panepick { max-width: 170px; flex: 0 1 auto; min-width: 0; }
 .mdsplit { display: flex; flex: 1 1 auto; min-height: 0; }
 .mdsplit > * { flex: 1 1 50%; min-width: 0; }
 .mdsplit > * + * { border-left: 1px solid var(--border); }
