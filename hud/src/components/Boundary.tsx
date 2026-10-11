@@ -33,8 +33,9 @@ export function errorName(e: unknown): string {
 }
 
 /**
- * Space and Enter on Reload are Reload's: never push-to-talk (App listens on
- * the document). Only those two: Escape must still reach a card's handler.
+ * Space and Enter on Reload are Reload's: they press it and reach nothing
+ * behind it. Only those two: Escape must still reach a card's handler.
+ * (Push-to-talk is Ctrl+D, taken at the window, and refuses after a crash.)
  */
 const ownKey = (e: React.KeyboardEvent) => {
   if (e.code === "Space" || e.key === " " || e.key === "Enter") e.stopPropagation();

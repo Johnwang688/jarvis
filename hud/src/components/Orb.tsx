@@ -20,6 +20,7 @@
 import { useEffect, useRef } from "react";
 import type { OrbState } from "../state/store";
 import { DICTATION_MODES, nextMode, type DictationMode } from "../lib/dictation";
+import { noPointerFocus } from "../lib/talkkey";
 
 interface Ring {
   r: number;
@@ -235,6 +236,9 @@ export function Orb(props: {
         id="orb"
         data-testid="orb"
         data-state={props.state}
+        // Push-to-talk's key since 2026-10-10 (lib/talkkey.ts); in a
+        // terminal Ctrl+D is the shell's, and the orb is the way to talk.
+        title="Hold to talk, or hold Ctrl+D"
         onPointerDown={(e) => {
           e.preventDefault();
           props.onPress();
@@ -271,6 +275,9 @@ export function Orb(props: {
         data-testid="dictation-cycle"
         data-mode={props.mode}
         disabled={props.blocked}
+        // A click must not leave it focused: a habitual Space would cycle the
+        // mic on again (OFF → REVIEW → AUTO; lib/talkkey.ts, noPointerFocus).
+        onMouseDown={noPointerFocus}
         title={`Dictation: ${props.mode.toUpperCase()} — click for ${next.toUpperCase()}`}
         onClick={() => props.onModeChange(next)}
       >
