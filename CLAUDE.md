@@ -863,43 +863,69 @@ and it is **gate state** (`files._protected_state`, by path and by name beside
 the allowlist). **Every path is re-checked at each use** (`load_config`:
 absolute, `realpath == path` so no symlink anywhere, a regular executable or a
 folder, inside the extension's folders; the file itself `O_NOFOLLOW |
-O_NONBLOCK`, capped). **No request names an executable, a path or an
-argument**: argv tables in `vex.py`, the project from its id, `{action}` /
-`{slot, name}` validated first (slot an int 1–8; name
-`^[A-Za-z0-9_][A-Za-z0-9_-]{0,19}$`), Windows paths through one `to_windows`
-that refuses `"<>|?*%^&!:` and invisible characters. Programs run as
+O_NONBLOCK`, capped). **Those folders are under AppData, which agents can
+write** (`cp payload.exe …/make.exe` is an ALLOW), so setup records **each
+tool's SHA-256** in `vex.json` (required) and **`verify_tools` hashes them
+again immediately before every spawn** — `make.exe` and the five tools it
+runs before a build, `vexcom.exe` before a download, brain or info — through
+one `O_NOFOLLOW | O_NONBLOCK` fd, then re-stats the spawned path against that
+fd (device, inode, size, mtime, ctime): a mismatch refuses with "the VEX
+tools changed since `jarvis vex setup`". **What remains, stated**: a swap in
+the instant between that stat and `exec`, and the five tools `make.exe` opens
+later on the Windows side, during the build. **No request names an
+executable, a path or an argument**: argv tables in `vex.py`, the project from
+its id, `{action}` / `{slot, name}` validated first (slot an int 1–8; name
+`^[A-Za-z0-9_][A-Za-z0-9_-]{0,19}$`; the settings file's own name is held to
+the `P=` rule before it names `build/<name>.bin`), Windows paths through one
+`to_windows` that refuses `"<>|?*%^&!();,=\:`, invisible characters, a
+trailing dot or space and reserved names (`NUL`, `con.txt`). Programs run as
 **program terminals** — `terminals.create_program`, called from `vex.py`
 alone (grep-tested; `terminal_check`'s allowed set now includes `vex.py`):
 same ring and routes as a shell, `WSLENV` emptied, typed input refused but
 Ctrl-C except the brain's, an `on_exit` hook after EOF, six apart from the
 shells' six. One build per project (a `flock` under `V2_DATA_DIR/vex/`,
 shared with `vexbuild`), one device action at a time (download, info, brain;
-the device is reserved before the build lock), 5-minute build timeout (SIGTERM
-then SIGKILL, output kept), and **a build refuses a project whose make files
-name `vexcom`** (a makefile is project content; one that downloaded would make
-a build a download — an accident guard). **Download is only the owner's
-click** (V-2/V-3): no tool, MCP tool, CLI or Discord verb, no "run after
-download", and **any agent command naming `vexcom` is DENY in
-`rules.decide`** (see *Command rules*). Agents build through **`vexbuild`**
-(`python -m jarvis.v2.vex build [--rebuild|--clean]`, nothing else), which
-asks like any command unless allowlisted — and `python -m jarvis.v2.vex` asks
-too. **Every route is owner-only with one deliberate difference**: Chromium
-sends **no Origin on a same-origin GET** (measured), so a VEX `GET` without
-one is accepted only with the browser's `Sec-Fetch-Site: same-origin`; every
-other method needs the HUD's Origin. (`projects.owner_only` requires an
-Origin, so **WP-C's `GET /terminals` is 403 from the real HUD** — a defect
-found here, not fixed in this package.) New projects reuse the
-`project_folder` card: **`projects.confirm_folder` is now the one
-confirmation handler** (moved out of `discord/project_commands.py`; still the
-single caller of `make_project_folder`), templates are checked whole before
-anyone is asked and written `O_EXCL | O_NOFOLLOW`. No VEX action puts a
-record on the bus; the log gets lifecycle lines only. Not yet, said by the
-routes: device info (flag from the owner's `vexcom --help`) and Python
+the device is reserved before the build lock, and **a reservation is released
+only by its holder, at most once** — a token, never a wildcard), 5-minute
+build timeout (SIGTERM then SIGKILL, output kept), and **a build refuses a
+project whose make files name `vexcom` and fails closed** where it cannot
+read them all: more than 32, one past 256 KB, a symlink or FIFO among them, a
+symlinked `vex/`, an `include` named by a variable or outside the project.
+**Download is meant to be only the owner's click** (V-2/V-3): no tool, MCP
+tool, CLI or Discord verb, no "run after download", and **any agent command
+naming `vexcom` is DENY in `rules.decide`** (see *Command rules*). **That is
+not a boundary, and neither is the button — the residual gap, stated**: an
+agent runs as the owner, so it can still reach a plugged-in brain through a
+script it writes and runs, `make -f` on a makefile of its own, or a POST to
+the download route with a forged Origin. What makes such a download visible
+is **one id-only bus record per device action, `vex_device {action, at}`**
+(as `terminal_attached`); closing the gap needs the device to belong to a
+user the agent is not. Agents build through **`vexbuild`** (`python -I -m
+jarvis.v2.vex build [--rebuild|--clean]`, nothing else — **isolated**, because
+a plain `-m` puts the agent-writable project folder first on `sys.path`, so a
+planted `jarvis/v2/vex.py` would have run), which asks like any command unless
+allowlisted; running it or its module through a wrapper or a runner (`python
+-Im`, `uv run`, `npx`) asks too, naming it as an argument (`cp …/vexbuild`)
+does not. **Every route is owner-only with one deliberate difference**:
+Chromium sends **no Origin on a same-origin GET** (measured), so a VEX `GET`
+without one is accepted only with the browser's `Sec-Fetch-Site:
+same-origin`; every other method needs the HUD's Origin (a TODO names
+`projects.is_owner` for when PR #41's shared rule lands). (`projects.owner_only`
+requires an Origin, so **WP-C's `GET /terminals` is 403 from the real HUD** —
+found here; PR #41, in review, carries the shared rule.) New projects reuse the `project_folder` card:
+**`projects.confirm_folder` is now the one confirmation handler** (moved out
+of `discord/project_commands.py`; still the single caller of
+`make_project_folder`), templates are opened as regular files only, checked
+whole before anyone is asked, and written through directory fds (each folder
+opened `O_DIRECTORY | O_NOFOLLOW` relative to the last, the file `O_EXCL |
+O_NOFOLLOW` relative to its folder; what remains is the new folder's own path,
+resolved once after the yes). The log gets lifecycle lines only. Not yet, said
+by the routes: device info (flag from the owner's `vexcom --help`) and Python
 download (spike). Agents' task worktrees are on the Linux filesystem, so
 `vexbuild` builds only in a chat's own project folder. Tests point every
-`config.VEX_*` path, `VEX_MOUNT_ROOT` and `VEXBUILD_PATH` at a temp tree.
-`tests/v2/vex_check.py` (59 checks); 27 guards each shown to fail their check
-when removed in a scratch copy.
+`config.VEX_*` path, `VEX_MOUNT_ROOT` and `VEXBUILD_PATH` at a temp tree, with a
+non-empty `WSLENV`. `tests/v2/vex_check.py` (84 checks); 69 guards each shown
+to fail their check when removed in a scratch copy.
 
 **Input bar declutter (2026-10-10, PR #29; ported onto WP-B and reviewed the
 same day).** The bar is `📎 [box] ⬆` over one row, `in: project · provider ▾ ·
@@ -1709,22 +1735,29 @@ jarvis/
   (asked, not denied); auth commands deliberately **not** denied.
 
   **A line that names `vexcom` is DENY** (2026-10-11, VX-1, decision V-2:
-  sending code to a robot is a physical act, only ever the owner's click in
+  sending code to a robot is a physical act, meant to be only the owner's click in
   the HUD). `rules.names_vexcom` reads the whole line before segmentation,
   case-folded, in every variant a shell or Windows would collapse to the
   word: quotes and backslashes removed (bash), `^` (cmd) and backticks
   (PowerShell), `$'…'` decoded, empty expansions (`${X}`, `$X`, `$()`,
   `%X%`, a backtick substitution) dropped, braces and brackets dropped, NFKC;
-  a glob only it could match (`v*m.exe`, judged against a control name so
-  `*.exe` stays ordinary); and a PowerShell `-EncodedCommand`/`-enc`/`-e`
-  payload decoded from base64 UTF-16LE. It runs in `decide`, so v1's
+  and a PowerShell `-EncodedCommand`/`-enc`/`-e`
+  payload decoded from base64 UTF-16LE (any unique prefix, `-`/`/`/a dash
+  character, `-enc VALUE` or `-enc:VALUE`), `${A:-vex}` default values read as
+  their words, and a glob only when it keeps at least four of the letters
+  (`vexc*`, `ve?com` — never `*vex*`, `v*`, `*.exe`: those DENYed ordinary VEX
+  work until review round 1). It runs in `decide`, so v1's
   `command_verdict` (before any approver, so neither an allowlist entry nor
   mode "all" reaches it) and v2's layer 1 (no card) refuse alike. **The
   accepted cost**: a grep or a commit message that only mentions the word is
   refused too — the `.env` trade. An accident guard, not a boundary (a
-  renamed copy is not caught). `vexbuild` itself is ordinary (ASK), and so is
-  `python -m jarvis.v2.vex` — its module would otherwise ride the `python`
-  stem's ALLOW past the ask.
+  renamed copy, a script, `make -f` and a forged-Origin POST all remain; see
+  the VX-1 paragraph). `vexbuild` itself is ordinary (ASK), and so is running
+  it or `jarvis.v2.vex` through `python -m`, `uv run` or `npx` — they would
+  otherwise ride an ALLOW stem past the ask. Evidence (review round 1): a
+  differential sweep of 25,379 command strings against origin/main moved 62
+  verdicts — 39 lines naming vexcom, 15 non-literal spellings pinned in
+  `vex_check`, 8 that run vexbuild or its module — and nothing else.
 
   **`2>&1` is not a redirect to a file** (narrowed 2026-08-17, one round after
   the fixes above). The redirect check had become a raw scan for any unquoted

@@ -2157,7 +2157,10 @@ every agent write tool, v1 and v2, as gate state; **every path in it is
 re-checked at each use** — absolute, no symlink anywhere in it, a regular
 executable (or folder), inside the extension's downloads or a
 `vexrobotics.vexcode-*` install — or the action is refused with "run `jarvis
-vex setup` again". This is the narrow, deliberate exception to "nothing under
+vex setup` again". Because those folders are under AppData, which an agent can
+write, setup also records each tool's SHA-256 and every spawn hashes the tools
+it is about to run first (review round 1); a swap between the final check and
+`exec`, and the tools `make.exe` opens later, remain. This is the narrow, deliberate exception to "nothing under
 `/mnt/` ever runs" (which is about resolving the Claude and Codex CLIs). A
 request never names an executable, a path or an argument (the `DESKTOP_APPS`
 pattern): the argv tables live in `vex.py`, a project comes from its id, a
@@ -2170,9 +2173,10 @@ attach and close as the owner's shells, with an environment that empties
 Ctrl-C except the brain's, and an exit hook that parses `file:line:col:
 error|warning:` into an errors list. One build per project (a lock file shared
 with `vexbuild`), one device action at a time (download, info, the brain
-port), a 5-minute build timeout, and a build refuses a project whose make
-files name `vexcom` — a makefile is project content `make` runs, and one that
-downloaded would make a build a download. **Download is only the owner's
+port; a reservation released only by its holder), a 5-minute build timeout,
+and a build refuses a project whose make files name `vexcom`, failing closed
+wherever it cannot read them all — a makefile is project content `make` runs,
+and one that downloaded would make a build a download. **Download is only the owner's
 click** (V-2, V-3): no tool, MCP tool, CLI or Discord verb reaches it, no "run
 after download", and **any agent command line that names `vexcom` is DENY in
 `rules.decide`** — so in v1's dispatch and v2's layer 1 alike, under an
@@ -2182,11 +2186,15 @@ binary, `C:\…`), a wrapper, a `sh -c`/`cmd /c`/`powershell -c` string, quote
 and escape splits (bash, cmd's `^` and `%X%`, PowerShell's backtick), `$'…'`,
 empty expansions, brace expansion, a glob only it could match, and a
 PowerShell `-EncodedCommand` that decodes to it. Like every DENY it is an
-accident guard, not a boundary: a renamed copy or a name assembled at run time
-is not caught. **Agents build through `vexbuild`** (`python -m jarvis.v2.vex
-build [--rebuild|--clean]`, the same argv table and lock, no other
-subcommand), which asks like any command unless the owner allowlists exactly
-it, as does its module through `python -m`. A new project goes through the
+accident guard, not a boundary — and the button is not one either: an agent
+running as the owner can still reach a plugged-in brain through a script, `make
+-f`, or a forged-Origin POST to the route. Each device action therefore
+publishes an id-only `vex_device {action, at}` record, so one nobody clicked
+is visible. **Agents build through `vexbuild`** (`python -I -m jarvis.v2.vex
+build [--rebuild|--clean]`, isolated so a package planted in the project folder
+never runs, the same argv table and lock, no other subcommand), which asks like
+any command unless the owner allowlists exactly it, as does running it or its
+module through `python -m`, `uv run` or `npx`. A new project goes through the
 same `project_folder` card Discord's `/project new` raises —
 `projects.confirm_folder` is now the one confirmation handler both call — and
 the template is checked whole (no absolute paths, `..`, drive letters,

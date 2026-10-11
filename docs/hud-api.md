@@ -1146,9 +1146,18 @@ browser's own `Sec-Fetch-Site: same-origin` says the HUD sent it (`none`,
 Origin. **No request names an executable, a path to run or an argument**:
 the programs and their argv come from `vex.json` and `vex.py`'s tables, the
 project folder from the project's id, and a body with any field not listed
-(`path`, `args`, `program`) is 400. Every 409 is a sentence. No VEX action
-puts a record on the bus or its output in the log; output lives in the
-program terminal's ring and the window, as WP-C's terminals do.
+(`path`, `args`, `program`) is 400. Every 409 is a sentence. Output lives in
+the program terminal's ring and the window only, as WP-C's terminals do —
+never on the bus or in the log. **Every action that spawns a VEX tool first
+hashes it** (and, for a build, the five tools `make.exe` runs) against the
+SHA-256 `jarvis vex setup` recorded, and is 409 "the VEX tools changed since
+`jarvis vex setup` (<tool>); run it again" on a mismatch.
+
+**SSE `vex_device`** `{action: "download"|"brain"|"info", at}` — one per
+device action, when it starts; nothing else (no slot, name, path or output),
+as `terminal_attached`. A device action the window did not cause (a
+program running as the owner POSTing with a forged Origin) shows up here; the
+HUD can flag one it cannot match to its own click.
 
 - `GET /vex/status` → `{configured, hint, vexcom_version, toolchain,
   sdks: {cpp, python}, extension_version, templates, project_folder, device,
@@ -1166,8 +1175,10 @@ program terminal's ring and the window, as WP-C's terminals do.
 - `POST /projects/{id}/vex/build` `{action: "build"|"rebuild"|"clean"}` →
   202 `{build_id, terminal_id}`. C++ only, the project on a Windows drive,
   one build per project at a time (a lock file `vexbuild` shares: 409 "a
-  build of this project is already running"), and refused (409) when the
-  project's make files name `vexcom`. Runs `make.exe P=<name> T=<SDK>
+  build of this project is already running"), and refused (409, with the
+  reason) when the project's make files name `vexcom` — or cannot all be read
+  (more than 32, one past 256 KB, a symlink or FIFO among them, a symlinked
+  `vex/`, an `include` named by a variable or outside the project). Runs `make.exe P=<name> T=<SDK>
   CC=… CXX=… OBJCOPY=… SIZE=… LINK=… ARCH=… [PRINTF_FLOAT=1]`, plus `-B` for
   rebuild and `clean` for clean, every path converted to `C:\…`, in the
   project folder, as a program terminal (`program: "vex-build"`); it replaces
@@ -1183,6 +1194,7 @@ program terminal's ring and the window, as WP-C's terminals do.
   `slot` an integer 1–8 (not a string, not a bool); `name`
   `^[A-Za-z0-9_][A-Za-z0-9_-]{0,19}$` — both 400 otherwise. 409 when there
   is no `build/<name>.bin` or it is older than the sources ("Build first";
+  the settings file's name must pass the `P=` rule before it names a file;
   VX-2 chains Build then Download on the one click), while another device
   action runs, while the brain terminal holds the port, while a build of the
   project runs, and for a Python project (its download flag is a spike
