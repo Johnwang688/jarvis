@@ -167,13 +167,15 @@ def protected(raw, resolved):
     """A credential file — a bundle by name (`secrets.PROTECTED_NAMES`), a
     credential env file (`secrets.is_env_credential`, the owner's `.env*`
     rule), or anything the editor withholds (a credential folder, a login
-    file: `editor_policy`) — as written or where it resolves. What a diff,
-    the preview origin and an `@path` attachment refuse. The editor's own
-    routes ask `editor_policy` instead, which lets the owner open an env file
-    (and only the owner: those routes are owner-only)."""
+    file, a tool's credential store, v2's session carriers: `editor_policy`)
+    — as written or where it resolves. What a diff, the preview origin and an
+    `@path` attachment refuse. **No gate exemption here** (review of PR #49,
+    LOW2): the gate's state stays readable in the editor's own routes only,
+    which ask `editor_policy` directly and also let the owner open an env
+    file (and only the owner: those routes are owner-only)."""
     return (is_protected(raw) or is_protected(resolved)
             or is_env_credential(raw) or is_env_credential(resolved)
-            or editor_policy.Policy().is_withheld(Path(raw), Path(resolved)))
+            or editor_policy.Policy().withheld_anywhere(Path(raw), Path(resolved)))
 
 
 def read_file(path, limit=FILE_CAP):
@@ -225,7 +227,7 @@ def tree(project, name, depth):
             is_dir = actual.is_dir()
             if not is_dir and not actual.is_file():
                 continue
-            flag = policy.tree_flag(raw, actual)
+            flag = policy.tree_flag(raw, actual, is_dir=is_dir)
             row = dict(name=str(child.relative_to(directory)), kind="dir" if is_dir else "file",
                        size=stat.st_size, mtime=stat.st_mtime)
             inner = only
@@ -307,22 +309,25 @@ def _editor_target(project, name):
 def read_for_editor(project, name):
     """`GET /projects/{id}/file`: the file, its etag and what the editor may do.
 
-    `kind` is `editor_policy`'s; `readonly` is the sentence the editor shows
-    beside its lock (null when the file is editable and Jarvis may read it). A
-    withheld file comes back with no content and no etag, ever."""
+    `kind` is `editor_policy`'s; `editable` is whether the editor may save it
+    (the HUD follows it, never the kind alone: an env file that is not UTF-8
+    is `env` and not editable); `readonly` is the sentence the editor shows
+    beside its lock (null when the file is editable and Jarvis may read it).
+    A withheld file comes back with no content and no etag, ever."""
     raw, target, verdict = _editor_target(project, name)
     if verdict.withheld:
         return dict(path=name, abs=str(target), kind=verdict.kind, readonly=verdict.reason,
-                    protected=True)
+                    editable=False, protected=True)
     data, stat = read_file(target)
     verdict = editor_policy.classify_bytes(verdict, data)
-    text = verdict.kind != editor_policy.BINARY
+    text = editor_policy.is_text(data)
     content = data.decode("utf-8", errors="replace")
     return dict(path=name, abs=str(target), content=content, etag=editor_policy.etag(data),
                 mtime=stat.st_mtime, mtime_ns=stat.st_mtime_ns, size=stat.st_size,
                 encoding=("utf-8-bom" if data.startswith(b"\xef\xbb\xbf") else "utf-8") if text else None,
                 eol=editor_policy.eol_of(content) if text else None,
-                kind=verdict.kind, readonly=verdict.reason if verdict.kind != editor_policy.TEXT else None,
+                kind=verdict.kind, editable=verdict.editable,
+                readonly=verdict.reason if verdict.kind != editor_policy.TEXT else None,
                 protected=False)
 
 
@@ -336,7 +341,10 @@ def _atomic_write(target: Path, data: bytes, mode: int, *, exclusive: bool) -> b
     comes back)."""
     import tempfile
     target.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.", suffix=".tmp")
+    # Named after the file itself (`.env.production.<x>.tmp`), so a temp of
+    # an env file is an env file by name too — credential to every rule, and
+    # ignored by a `.env*` gitignore line (review of PR #49, LOW4).
+    fd, tmp_name = tempfile.mkstemp(dir=target.parent, prefix=f"{target.name}.", suffix=".tmp")
     tmp = Path(tmp_name)
     try:
         with os.fdopen(fd, "wb") as handle:
@@ -370,9 +378,10 @@ def save_for_editor(daemon, project, body):
     (the editor never overwrites bytes it could not show exactly); 409 with
     the current `etag` (null: the file is gone) when the bytes on disk are not
     the ones the save was made against. A file's mode is kept; a new file is
-    0644, a new env file 0600."""
+    0644, a new env file 0600. An unexpected error from the disk is a 500
+    (permission denied, a 403), never the dispatcher's 409, which the HUD
+    reads as a conflict."""
     from .daemon import _object
-    from .permissions import denied_file
     body = _object(body, ("path", "content", "expected_etag", "expected_mtime"), ("path", "content"))
     has_etag, has_mtime = "expected_etag" in body, "expected_mtime" in body
     if has_etag == has_mtime:
@@ -392,48 +401,61 @@ def save_for_editor(daemon, project, body):
         fail(400, "content is not valid Unicode text")
     if len(data) > FILE_CAP:
         fail(413, "file exceeds 2 MB")
-    with daemon._lock:
-        daemon._active()
-        raw, target, verdict = _editor_target(project, body["path"])
-        if not verdict.editable:
-            fail(403, "read-only here: " + (verdict.reason or "this file cannot be written from the editor"))
-        if verdict.kind != editor_policy.ENV and (denied_file(str(raw)) or denied_file(str(target))):
-            fail(403, "protected file cannot be written")
-        if target.exists() and not target.is_file():
-            fail(400, "target is not a regular file")
-        current = st = None
-        if target.exists():
-            with target.open("rb") as handle:
-                current = handle.read(FILE_CAP + 1)
-                st = os.fstat(handle.fileno())
-            if len(current) > FILE_CAP:
-                fail(413, "file on disk exceeds 2 MB")
-            if not editor_policy.is_text(current):
-                fail(403, "read-only here: the file on disk is not UTF-8 text, and the editor never "
-                          "rewrites bytes it could not show exactly")
-        if has_etag:
-            now = editor_policy.etag(current) if current is not None else None
-            if now != expected:
-                return 409, {"error": ("file is gone since it was read" if now is None
-                                       else "file exists" if expected is None
-                                       else "file changed on disk since it was read"),
-                             "etag": now}
-        else:
-            if (st.st_mtime if st is not None else None) != expected_mtime:
-                fail(409, "file changed since it was read")
-        if st is not None:
-            mode = st.st_mode & 0o7777
-        else:
-            mode = 0o600 if verdict.kind == editor_policy.ENV else 0o644
-        if not _atomic_write(target, data, mode, exclusive=current is None):
-            # Created by someone else between the check and the write.
-            return 409, {"error": "file exists", "etag": _cached_etag(target, target.stat())}
-        after = target.stat()
-        tag = editor_policy.etag(data)
-        with _ETAGS_LOCK:
-            _ETAGS[str(target)] = (_stat_key(after), tag)
-        return 200, {"etag": tag, "abs": str(target), "mtime": after.st_mtime,
-                     "mtime_ns": after.st_mtime_ns, "size": after.st_size}
+    try:
+        with daemon._lock:
+            daemon._active()
+            return _save_locked(project, body, data, has_etag, expected, expected_mtime)
+    except PermissionError as exc:
+        # The filesystem said no: not a conflict (a 409 is the conflict bar).
+        fail(403, f"the file could not be written: permission denied ({type(exc).__name__})")
+    except OSError as exc:
+        # Anything else unexpected from the disk is the daemon's failure, not
+        # a conflict the owner could resolve: 500, never the dispatcher's 409.
+        fail(500, f"the file could not be written ({type(exc).__name__})")
+
+
+def _save_locked(project, body, data, has_etag, expected, expected_mtime):
+    from .permissions import denied_file
+    raw, target, verdict = _editor_target(project, body["path"])
+    if not verdict.editable:
+        fail(403, "read-only here: " + (verdict.reason or "this file cannot be written from the editor"))
+    if verdict.kind != editor_policy.ENV and (denied_file(str(raw)) or denied_file(str(target))):
+        fail(403, "protected file cannot be written")
+    if target.exists() and not target.is_file():
+        fail(400, "target is not a regular file")
+    current = st = None
+    if target.exists():
+        with target.open("rb") as handle:
+            current = handle.read(FILE_CAP + 1)
+            st = os.fstat(handle.fileno())
+        if len(current) > FILE_CAP:
+            fail(413, "file on disk exceeds 2 MB")
+        if not editor_policy.is_text(current):
+            fail(403, "read-only here: the file on disk is not UTF-8 text, and the editor never "
+                      "rewrites bytes it could not show exactly")
+    if has_etag:
+        now = editor_policy.etag(current) if current is not None else None
+        if now != expected:
+            return 409, {"error": ("file is gone since it was read" if now is None
+                                   else "file exists" if expected is None
+                                   else "file changed on disk since it was read"),
+                         "etag": now}
+    else:
+        if (st.st_mtime if st is not None else None) != expected_mtime:
+            fail(409, "file changed since it was read")
+    if st is not None:
+        mode = st.st_mode & 0o7777
+    else:
+        mode = 0o600 if verdict.kind == editor_policy.ENV else 0o644
+    if not _atomic_write(target, data, mode, exclusive=current is None):
+        # Created by someone else between the check and the write.
+        return 409, {"error": "file exists", "etag": _cached_etag(target, target.stat())}
+    after = target.stat()
+    tag = editor_policy.etag(data)
+    with _ETAGS_LOCK:
+        _ETAGS[str(target)] = (_stat_key(after), tag)
+    return 200, {"etag": tag, "abs": str(target), "mtime": after.st_mtime,
+                 "mtime_ns": after.st_mtime_ns, "size": after.st_size}
 
 
 def stat_for_editor(project, body):
@@ -568,7 +590,8 @@ def assemble_turn(project, body, *, paths: bool = True):
             fail(400, "attachment fields must be strings")
         name, mime = (item["name"] or "attachment")[:200], item["mime"] or "text/plain"
         if (is_protected(item["name"].replace("\\", "/"))
-                or is_env_credential_name(item["name"].replace("\\", "/").rsplit("/", 1)[-1])):
+                or is_env_credential_name(item["name"].replace("\\", "/").rsplit("/", 1)[-1])
+                or editor_policy.credential_name(item["name"])):
             notes.append(f"[{name} holds live credentials — not attached]")
             continue
         try:
@@ -1278,6 +1301,28 @@ def check_origin(handler, *, preview=False):
                 fail(400, "expected application/json")
 
 
+def _not_a_page(project, raw, target) -> bool:
+    """What the preview origin refuses beyond `protected` (review of PR #49,
+    LOW3). The preview listener has no owner check by design — the HUD frames
+    it — and it answers any loopback client, v1's `fetch_page` included
+    (loopback is allowed and 8403 is not a control port), while the Inbox is
+    rooted at `~`. So: no path with a hidden component inside the project
+    (`.docker/config.json`, `.kube/config`, `.npmrc`, a tool's dotfolder),
+    except `.well-known`; and nothing under Jarvis's own config and data
+    folders (session carriers, transcripts), wherever the project is."""
+    roots = [Path(project.root).resolve()] + [Path(p).expanduser().resolve() for p in project.extra_dirs]
+    for path in (Path(raw), Path(target)):
+        rel = next((path.relative_to(r) for r in roots if path.is_relative_to(r)), None)
+        if rel is None:
+            return True
+        if any(part.startswith(".") and part != ".well-known" for part in rel.parts):
+            return True
+        lexical = Path(os.path.abspath(path))
+        if any(p == d or p.is_relative_to(d) for d in editor_policy.jarvis_dirs() for p in (lexical, path.resolve())):
+            return True
+    return False
+
+
 def preview_route(handler, daemon, parts, query):
     if handler.command != "GET" or len(parts) < 2 or parts[0] != "p":
         fail(404, "preview route not found")
@@ -1286,7 +1331,7 @@ def preview_route(handler, daemon, parts, query):
     raw, target = scope(project, name)
     if target.is_dir():
         raw, target = scope(project, str(target / "index.html"))
-    if protected(raw, target):
+    if protected(raw, target) or _not_a_page(project, raw, target):
         fail(403, "protected file")
     data, _ = read_file(target, 32 * 1024 * 1024)
     return binary(handler, data, mimetypes.guess_type(target.name)[0] or "application/octet-stream")

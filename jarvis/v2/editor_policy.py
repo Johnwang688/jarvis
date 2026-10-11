@@ -16,17 +16,22 @@ The kinds, in the order they are decided (the first that matches wins):
 |            | allowlist, models.json, routing.json …), even inside         |                      |
 |            | `~/.config/jarvis` (E-8: "gate-state files stay readable")   |                      |
 | `withheld` | a credential bundle (`secrets.PROTECTED_NAMES` other than    | no content, ever     |
-|            | the env files), anything under `config.V2_CREDENTIAL_DIRS`,  |                      |
-|            | and the login files (Claude's, Codex's, git's, `.netrc`)     |                      |
+|            | the env files), anything under `config.V2_CREDENTIAL_DIRS`   |                      |
+|            | or v2's session carriers (`V2_DATA_DIR/claude`, `/codex`),   |                      |
+|            | and the login files (Claude's, Codex's, git's, `.netrc`,     |                      |
+|            | docker's, kube's, `.npmrc`, `.pypirc`)                       |                      |
 | `safety`   | SELF_PROTECTED, git's own internals and configuration, the   | readable, read-only  |
 |            | built HUD the daemon serves (`files._self_protected`)        |                      |
 | `env`      | a credential env file (`secrets.is_env_credential`): the     | the owner edits it;  |
-|            | owner's to edit, Jarvis's never to read                      | Jarvis can't read it |
+|            | owner's to edit, Jarvis's never to read — never demoted:     | Jarvis can't read it |
+|            | one that is not UTF-8 stays `env`, read-only (`writable`)    |                      |
 | `binary`   | not UTF-8 text, or a NUL in the first 8 KiB (`classify_bytes`)| readable, read-only |
 | `text`     | everything else                                              | editable             |
 
 `gate` comes before `withheld` because the gate's state lives inside a
-credential folder and E-8 keeps it readable; `withheld` before `safety`
+credential folder and E-8 keeps it readable — only a gate path that resolves
+to itself and is no credential by another rule (`Policy._readable_gate`),
+and only in the editor's own routes: `hud_api.protected` has no exemption; `withheld` before `safety`
 because `files._git_internal` names `~/.git-credentials` (a credential the
 editor must never show); `safety` before `env`, so a `.env` inside the
 served HUD build stays unwritable.
@@ -78,10 +83,14 @@ class Verdict:
     kind: str
     # The sentence the editor shows beside a lock (read-only, withheld or env).
     reason: str | None = None
+    # False: an editable kind the editor may still not write — an env file
+    # whose bytes are not UTF-8 text keeps its kind (the lock, Add to chat
+    # closed, its own language) but is read-only (`classify_bytes`).
+    writable: bool = True
 
     @property
     def editable(self) -> bool:
-        return self.kind in EDITABLE
+        return self.kind in EDITABLE and self.writable
 
     @property
     def withheld(self) -> bool:
@@ -131,20 +140,83 @@ def login_files() -> set[Path]:
     in full."""
     home = Path.home()
     out = {home / ".claude" / ".credentials.json", home / ".codex" / "auth.json",
-           home / ".git-credentials", home / ".netrc"}
+           home / ".git-credentials", home / ".netrc",
+           # The common tool credential stores (review of PR #49, LOW3): a
+           # registry login, a cluster's client certificate, a package
+           # index's upload token. `~/.aws`, `~/.gnupg` and `~/.config/gh`
+           # are credential folders already (`config.V2_CREDENTIAL_DIRS`).
+           home / ".docker" / "config.json", home / ".kube" / "config",
+           home / ".npmrc", home / ".pypirc"}
     claude = os.environ.get("JARVIS_CLAUDE_CREDENTIALS")
     if claude:
         out.add(Path(claude))
     codex = os.environ.get("CODEX_HOME")
     if codex:
         out.add(Path(codex) / "auth.json")
+    docker = os.environ.get("DOCKER_CONFIG")
+    if docker:
+        out.add(Path(docker) / "config.json")
+    for kube in (os.environ.get("KUBECONFIG") or "").split(os.pathsep):
+        if kube:
+            out.add(Path(kube))
+    npmrc = os.environ.get("NPM_CONFIG_USERCONFIG")
+    if npmrc:
+        out.add(Path(npmrc))
     xdg = os.environ.get("XDG_CONFIG_HOME")
     out.add((Path(xdg) if xdg else home / ".config") / "git" / "credentials")
     return {_resolve(p) for p in out}
 
 
+def carrier_dirs() -> list[Path]:
+    """Where v2 keeps a session's credential carriers: Claude's private
+    `mcp-<nonce>.json` (a jarvis-mcp caller token) and each Codex thread's
+    private home (`config.toml`'s env table carries the same token)."""
+    data = Path(config.V2_DATA_DIR)
+    return [_resolve(data / "claude"), _resolve(data / "codex")]
+
+
+# A dropped file arrives with a name and no place on this machine (a browser
+# sends the base name; Windows paths are judged with `/`). These names are
+# credential stores wherever they sit; a name that carries its folder is
+# judged by its tail too (`.docker/config.json`, `.aws/credentials`).
+CREDENTIAL_FILE_NAMES = frozenset({".npmrc", ".pypirc", ".netrc", "_netrc", ".git-credentials"})
+CREDENTIAL_FILE_TAILS = (("docker", "config.json"), (".docker", "config.json"), (".kube", "config"),
+                         (".aws", "credentials"), (".aws", "config"), ("gh", "hosts.yml"),
+                         (".claude", ".credentials.json"), (".codex", "auth.json"), ("git", "credentials"),
+                         (".ssh",), (".gnupg",))
+
+
+def credential_name(name: str) -> bool:
+    """A dropped file's name is a credential store's (LOW3): never attached."""
+    parts = [p for p in name.replace("\\", "/").split("/") if p]
+    if not parts:
+        return False
+    lower = [p.lower() for p in parts]
+    if lower[-1] in CREDENTIAL_FILE_NAMES:
+        return True
+    for tail in CREDENTIAL_FILE_TAILS:
+        if len(tail) == 1 and tail[0] in lower[:-1]:
+            return True
+        if len(tail) == 2 and lower[-2:] == list(tail):
+            return True
+    return False
+
+
 def credential_dirs() -> list[Path]:
-    return [_resolve(Path(d)) for d in config.V2_CREDENTIAL_DIRS]
+    return [_resolve(Path(d)) for d in config.V2_CREDENTIAL_DIRS] + carrier_dirs()
+
+
+def jarvis_dirs() -> list[Path]:
+    """Jarvis's own config and data folders: nothing in them is a page.
+
+    The preview origin refuses every path under one (review of PR #49,
+    LOW3): it answers any loopback client, `fetch_page` included, and the
+    Inbox is rooted at `~`."""
+    home = Path.home()
+    dirs = {home / ".config" / "jarvis", home / ".local" / "share" / "jarvis",
+            Path(config.V2_DATA_DIR), Path(config.SESSIONS_DIR), Path(config.SPILL_DIR),
+            Path(config.GOALS_DIR), Path(config.VOICES_DIR)}
+    return [_resolve(d) for d in dirs]
 
 
 def _under(path: Path, directory: Path) -> bool:
@@ -157,12 +229,46 @@ class Policy:
     times. Build a new one per request — the sets follow `config` and HOME."""
 
     def __init__(self) -> None:
-        from .permissions import protected_paths
-        self.gate = protected_paths()
         self.credential_dirs = credential_dirs()
         self.login_files = login_files()
+        self.gate = self._readable_gate()
+
+    def _readable_gate(self) -> set[Path]:
+        """The gate's state files E-8 keeps readable in the editor.
+
+        A gate path counts only when it **resolves to itself** — no symlink
+        anywhere on its way — and is not a credential by any other rule: a
+        protected or env name, a login file, or a credential folder other than
+        the gate's own (`~/.config/jarvis`, where E-8 keeps it readable). A
+        `models.json -> ~/.ssh/id_x` symlink used to put the key itself on the
+        gate's list, and the gate's readable exemption then let the preview
+        origin serve it and an `@path` attach it (review of PR #49, LOW2).
+
+        The exemption is the editor's own read path only: `hud_api.protected`
+        asks `withheld_anywhere`, which has none."""
+        from .permissions import protected_paths
+        from jarvis.tools.files import _protected_state_paths
+        own = _resolve(Path("~/.config/jarvis"))
+        configured = {Path(os.path.abspath(p.expanduser())) for p in _protected_state_paths()}
+        ok = set()
+        for path in configured:
+            real = _resolve(path)
+            if real != path:
+                continue  # a symlink, here or on the way: judged where it goes, as any file
+            if v1_secrets.is_protected(real) or is_env_credential(real) or real in self.login_files:
+                continue
+            if any(_under(real, d) for d in self.credential_dirs if d != own):
+                continue
+            ok.add(real)
+        # Never wider than the set the write tools refuse.
+        return ok & protected_paths()
 
     # -- by path ---------------------------------------------------------------
+
+    def withheld_anywhere(self, raw: Path, resolved: Path) -> bool:
+        """Withheld, with no gate exemption: what an `@path`, the preview
+        origin and a task diff refuse (`hud_api.protected`)."""
+        return self._withheld(raw, resolved)
 
     def _withheld(self, raw: Path, resolved: Path) -> bool:
         for candidate in (raw, resolved):
@@ -209,12 +315,13 @@ class Policy:
                     "read-only here. Change the HUD's source and rebuild.")
         return "part of Jarvis's safety layer: read-only here. Edit it by hand."
 
-    def tree_flag(self, raw: Path, resolved: Path) -> str | None:
+    def tree_flag(self, raw: Path, resolved: Path, *, is_dir: bool = False) -> str | None:
         """What a tree row may say before anything is read: `withheld` or
-        `env`, else None (read-only kinds are said when the file opens)."""
+        `env`, else None (read-only kinds are said when the file opens). Only
+        a file is an env file: a virtualenv folder named `.env` is a folder."""
         if self.is_withheld(raw, resolved):
             return WITHHELD
-        if is_env_credential(raw) or is_env_credential(resolved):
+        if not is_dir and (is_env_credential(raw) or is_env_credential(resolved)):
             return ENV
         return None
 
@@ -225,9 +332,17 @@ class Policy:
 
 
 def classify_bytes(verdict: Verdict, data: bytes) -> Verdict:
-    """A readable kind, demoted to `binary` when its bytes are not text."""
+    """A readable kind, made read-only when its bytes are not text.
+
+    Text becomes `binary`. **An env file stays `env`** — it is never demoted:
+    a UTF-16 `.env.production` (PowerShell 5.1 writes those, and the VEX
+    projects live on `/mnt/c`) or a Latin-1 one is still a credential, so it
+    keeps the lock, Add to chat stays closed and its language stays
+    `dotenv`; it is only no longer writable (review of PR #49, MED1)."""
     if verdict.kind in (TEXT, ENV) and not is_text(data):
         why = ("it holds NUL bytes" if b"\x00" in data[:NUL_PROBE] else "it is not UTF-8")
-        return Verdict(BINARY, f"read-only here: {why}, and the editor never rewrites a file it cannot "
-                               "show exactly.")
+        tail = f"read-only here: {why}, and the editor never rewrites a file it cannot show exactly."
+        if verdict.kind == ENV:
+            return Verdict(ENV, f"{REASONS[ENV]} And {tail}", writable=False)
+        return Verdict(BINARY, tail)
     return verdict

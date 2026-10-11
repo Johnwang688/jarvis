@@ -31,7 +31,7 @@ import { TaskView } from "./components/TaskView";
 import { FileTab } from "./components/FileTab";
 import { makeModel, monacoEditors, monacoLanguage, monacoModels, setEditorsBlocked } from "./lib/monaco";
 import { buffers, PlainModel } from "./state/buffers";
-import { touchedPath } from "./lib/buffers";
+import { writtenPaths } from "./lib/buffers";
 import { DiffTab } from "./components/DiffTab";
 import { PreviewTab, type PreviewRequest } from "./components/PreviewTab";
 import { judgePreviewUrl } from "./lib/preview";
@@ -806,10 +806,12 @@ export default function App() {
           for (const n of mine) dispatch({ type: "settle", pane: n, text: data.text || "" });
           break;
         case "tool_started": {
-          // A running turn named a file (any thread, a task's included): if
-          // that file is open and reloads in place, the toast says who wrote it.
-          const touched = touchedPath(data.args);
-          if (touched) buffers.noteTouch(touched, writerOf(tid, at));
+          // A running turn's write tool named a file (any thread, a task's
+          // included): if that file is open and reloads in place, the toast
+          // says who wrote it. Absolute paths only — a relative one is judged
+          // from the thread's own folder, never matched by its tail.
+          const cwd = tid ? at.threads.find((t) => t.id === tid)?.cwd : null;
+          for (const p of writtenPaths(data.name, data.args, cwd)) buffers.noteTouch(p, writerOf(tid, at));
           for (const n of mine) {
             chatPatch(n, { status: `RUNNING · ${data.name || "tool"}`, orb: "tool" });
             dispatch({
@@ -1432,8 +1434,12 @@ export default function App() {
       // The task view it showed is empty now: the status line says why.
       if (taskGone && !displaced) chatPatch(activePane(at), { status });
       // A File or Preview pane pinned to it follows the chat again — except
-      // one holding an unsaved edit, which waits for the owner to discard it.
-      view.unpinProject(id, PANE_NOS.filter((n) => dirtyNow(n)));
+      // the ones holding an unsaved edit no pane outside them holds, which
+      // wait for the owner to discard it. Asked of the pinned panes together
+      // (`panesHolding`): pane by pane, two panes sharing one edit each let
+      // go and the edit lost every tab (review of PR #49, H2).
+      const pinned = PANE_NOS.filter((n) => layoutNow.current.ws.panes[n - 1].projectId === id);
+      view.unpinProject(id, buffers.panesHolding(pinned).map((k) => Number(k) as PaneNo));
       if (displaced || taskGone) placeChat(chatPaneNow());
       void refreshThreads();
       void refreshTasks();
@@ -2156,6 +2162,17 @@ export default function App() {
   };
   /** The pane's pinned project went away (archived, deleted). */
   const pinGone = (spec: PaneSpec) => !!spec.projectId && !state.projects.some((p) => p.id === spec.projectId);
+  // The File panes pinned to a project that went away which hold an unsaved
+  // edit no pane outside that project's panes holds: they stay on it, with
+  // the gone prompt. Asked of the panes on the project together — two panes
+  // sharing the edit each hold a view another pane also shows, so a per-pane
+  // last-view rule let both go and the edit lost its every tab (review of PR
+  // #49, H2).
+  const goneHeld: Partial<Record<PaneNo, boolean>> = {};
+  for (const pid of new Set(ws.panes.filter(pinGone).map((p) => p.projectId as string))) {
+    const on = PANE_NOS.filter((k) => ws.panes[k - 1].projectId === pid);
+    for (const k of buffers.panesHolding(on)) goneHeld[Number(k) as PaneNo] = true;
+  }
   /**
    * A File or Preview pane's project: its pin while that project exists, else
    * the chat's. A File pane whose pinned project went away while it held an
@@ -2163,7 +2180,7 @@ export default function App() {
    * would remount it and drop the edit; the header asks first instead.
    */
   const paneProject = (spec: PaneSpec, pane: PaneNo): string | null =>
-    spec.projectId && (!pinGone(spec) || (spec.view === "file" && dirtyPanes[pane]))
+    spec.projectId && (!pinGone(spec) || (spec.view === "file" && goneHeld[pane]))
       ? spec.projectId : activeProjectId;
   const pinnedElsewhere = (spec: PaneSpec, pane: PaneNo) =>
     (spec.view === "file" || spec.view === "preview") && paneProject(spec, pane) !== activeProjectId;
@@ -2304,7 +2321,7 @@ export default function App() {
               : `pane ${slotOf(ws, refusal.pane)} has an unsaved edit · save or reload it first`}
           </span>
         ) : null}
-        {dirty && pinGone(spec) ? (
+        {spec.view === "file" && goneHeld[n] && pinGone(spec) ? (
           // The one remount nothing can avoid: ask before it drops the edit.
           <span className="chip panepin warn" data-testid={`pane-${n}-gone`}
                 title="The project this file was read from is gone; the unsaved edit is kept here until you discard it">
@@ -2315,7 +2332,9 @@ export default function App() {
               data-testid={`pane-${n}-discard`}
               onClick={() => {
                 // The owner threw the edit away: the pane's holds go, and with
-                // them every buffer no other pane holds.
+                // them every buffer of this pane's no other pane holds — one
+                // another pane on the gone project still holds stays, with its
+                // own prompt there.
                 buffers.releasePane(n, { discard: true });
                 view.pin(n, null);
               }}
@@ -2482,7 +2501,7 @@ export default function App() {
       {/* A render error in here — the title bar, the shell, the orb — shows a
           Reload prompt in their place and goes no further: the card below is
           outside it, so it stays up and answerable (components/Boundary.tsx). */}
-      <WorkspaceBoundary onCrash={onCrash}>
+      <WorkspaceBoundary onCrash={onCrash} blocked={blocked}>
       <TitleBar view={view} blocked={blocked} onPicker={(which) => patch({ picker: which })} />
       <div
         id="shell"

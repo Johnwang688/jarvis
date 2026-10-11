@@ -85,6 +85,11 @@ SELF_PROTECTED = frozenset(
         "jarvis/v2/bridge.py",
         "jarvis/v2/session_tools.py",
         "jarvis/v2/mcp_session.py",
+        # Decides what the HUD's editor may show and write, and what an
+        # `@path`, the preview origin and a task diff withhold (ED-2,
+        # 2026-10-11). Editing it is editing which credentials the window
+        # serves.
+        "jarvis/v2/editor_policy.py",
     }
 )
 
@@ -145,7 +150,9 @@ _NUMBER_FIELD = 6
 # `config.ROUTING_PATH` joined it — `JARVIS_ROUTING` can put the live routing
 # file outside the allowlist's directory. The saved Codex catalog joined it in
 # PR #20: it is loaded as the Codex model table at daemon start.
-def _protected_state() -> set[Path]:
+def _protected_state_paths() -> set[Path]:
+    """The gate's state files as configured, unresolved: the editor's read
+    path (`v2/editor_policy.py`) needs to know which of them is a symlink."""
     names = ("allowlist.json", "models.json", "routing.json", "discord_guild.json",
              "provider_defaults.json")
     allow = config.ALLOWLIST_PATH.expanduser()
@@ -153,7 +160,11 @@ def _protected_state() -> set[Path]:
              config.DISCORD_GUILD_PATH.expanduser(), config.ROUTING_PATH.expanduser(),
              config.CODEX_CATALOG_PATH.expanduser()}
     paths |= {allow.parent / name for name in names}
-    return {p.resolve() for p in paths}
+    return paths
+
+
+def _protected_state() -> set[Path]:
+    return {p.resolve() for p in _protected_state_paths()}
 
 
 # A repository's own `.git` (hooks, config, the refs and the worktree

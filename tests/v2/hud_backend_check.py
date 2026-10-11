@@ -683,7 +683,7 @@ class Backend(unittest.TestCase):
     def test_file_read_write_conflict_and_caps(self):
         value = self.getfile("hello.txt")
         self.assertEqual(set(value), {"path", "abs", "content", "etag", "mtime", "mtime_ns", "size", "encoding",
-                                      "eol", "kind", "readonly", "protected"})
+                                      "eol", "kind", "editable", "readonly", "protected"})
         self.assertEqual((value["content"], value["kind"], value["readonly"]), ("hello\n", "text", None))
         saved = self.owner("PUT", self.url + "/file", dict(path="hello.txt", content="changed", expected_etag=value["etag"]))
         self.assertIsInstance(saved["mtime"], float)
