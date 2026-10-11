@@ -1068,6 +1068,11 @@ describe("split and close (WP-G2, plan §3.4–§3.6)", () => {
     const last = closePane(focusPane(closed, 3), 3);
     expect(last.focused).toBe(2); // no slot 3 any more: the one before
     expect(closePane(focusPane(closed, 1), 3).focused).toBe(1); // focus elsewhere stays put
+    // The window names where focus goes when the selected chat closes: the chat selected before it.
+    const grid = setPreset(defaultWorkspace(), "grid4");
+    expect(closePane(grid, 1, 3).focused).toBe(3);
+    expect(closePane(grid, 1, 1).focused).toBe(2); // not drawn after the close: the slot's pane
+    expect(closePane(grid, 1, null).focused).toBe(2);
   });
 
   it("splits without moving focus when asked not to ({focus: false}, the browser's dev-server pane)", () => {

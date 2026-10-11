@@ -64,7 +64,7 @@ def preview_checks(browser, mock, base, check, until, guard, init_script):
     try:
         _boot(page, mock, base, until)
         for section in (_port_checks, _keep_checks, _stored_checks, _hardened_checks, _card_checks,
-                        _workshop_hijack_checks, _served_under_checks):
+                        _workshop_hijack_checks, _served_under_checks, _split_checks):
             try:
                 section(page, mock, check, until)
             except Exception as e:  # a section that cannot run is a failure; the rest still run
@@ -312,6 +312,31 @@ def _card_checks(page, mock, check, until):
           not page.locator(KEEP).is_disabled() and not _keep_checked(page) and _sandbox(page) == OFF)
 
 
+def _split_checks(page, mock, check, until):
+    """WP-G2 (plan §3.5): a Preview pane's copy loads the same URL, judged
+    again, and never inherits the keep-origin grant — that is the owner's
+    choice for one pane."""
+    _setup(page, mock, until)
+    dev = f"http://127.0.0.1:{mock.dev_port}/"
+    origin = f"http://127.0.0.1:{mock.dev_port}"
+    _load(page, dev)
+    until(lambda: _count(page, KEEP) > 0, timeout=4)
+    page.locator(KEEP).check()
+    until(lambda: _sandbox(page) == ON and _stored(page) == origin, timeout=3)
+    page.locator('[data-testid="pane-2-split"]').click()
+    until(lambda: _ws(page)["ws"]["order"] == [1, 2, 3], timeout=3)
+    frame3 = _pane(3, '[data-testid="preview-frame"]')
+    until(lambda: _count(page, frame3) > 0, timeout=4)
+    keep3 = page.locator(_pane(3, '[data-testid="preview-keep-origin"]'))
+    spec3 = _ws(page)["ws"]["panes"][2]
+    check("G2: a Preview pane's copy loads the same URL beside it",
+          page.locator(frame3).get_attribute("src") == dev and spec3.get("previewUrl") == dev, str(spec3))
+    check("G2: without the source's keep-origin grant: its frame is sandboxed as any page is, the switch off",
+          page.locator(frame3).get_attribute("sandbox") == OFF and "keepOrigin" not in spec3
+          and keep3.count() == 1 and not keep3.is_checked(), str(page.locator(frame3).get_attribute("sandbox")))
+    check("G2: and the source keeps its own", _sandbox(page) == ON and _stored(page) == origin)
+
+
 def main():
     from playwright.sync_api import sync_playwright
     from tests.face import hud_v2_check as v2
@@ -342,3 +367,4 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
+

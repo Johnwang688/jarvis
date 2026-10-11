@@ -167,12 +167,15 @@ export function Workspace(props: {
     const question = props.closeQuestion?.(n) ?? null;
     if (question) {
       setAsking({ pane: n, question });
-      requestAnimationFrame(() =>
-        document.querySelector<HTMLElement>(`[data-testid="pane-${n}-close-keep"]`)?.focus({ preventScroll: true }));
       return;
     }
     closeNow(n);
   };
+  // The question takes focus on Keep: Enter there never discards anything.
+  useEffect(() => {
+    if (!asking) return;
+    document.querySelector<HTMLElement>(`[data-testid="pane-${asking.pane}-close-keep"]`)?.focus({ preventScroll: true });
+  }, [asking]);
   /** Split and × are buttons: Space and Enter press them, and are never push-to-talk; a held Enter presses once. */
   const buttonKeys = {
     onKeyDown: (e: React.KeyboardEvent) => {

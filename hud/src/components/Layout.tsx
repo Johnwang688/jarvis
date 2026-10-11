@@ -83,8 +83,8 @@ export interface LayoutControl {
    * leaves focus where it is. An id ⊞ had hidden mounts fresh.
    */
   split: (source: PaneNo, id: PaneNo, spec: PaneSpec, opts?: { focus?: boolean }) => void;
-  /** × (lib/workspace `closePane`): that pane goes, and mounts fresh if a split reuses its id. */
-  close: (pane: PaneNo) => void;
+  /** × (lib/workspace `closePane`): that pane goes, and mounts fresh if a split reuses its id; focus to `then` if drawn. */
+  close: (pane: PaneNo, then?: PaneNo | null) => void;
   /** Whether one more pane can be drawn in this window now (`dirty`: ids holding an unsaved edit). */
   splitVerdict: (dirty?: readonly PaneNo[]) => { ok: boolean; why: SplitWhy };
   /**
@@ -233,12 +233,12 @@ export function useLayout(blocked = false): LayoutControl {
     if (now.current.ws.kept.includes(id)) bump(id);
     setWs((w) => splitPaneOf(w, source, id, spec, opts));
   }, [bump]);
-  const close = useCallback((pane: PaneNo) => {
+  const close = useCallback((pane: PaneNo, then: PaneNo | null = null) => {
     if (blockedRef.current) return;
     const at = now.current.ws;
     if (closePaneOf(at, pane) === at) return;
     bump(pane);
-    setWs((w) => closePaneOf(w, pane));
+    setWs((w) => closePaneOf(w, pane, then));
   }, [bump]);
   const splitVerdict = useCallback((dirty: readonly PaneNo[] = []) => {
     const at = now.current;

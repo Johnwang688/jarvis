@@ -634,16 +634,19 @@ export function splitPane(
  * × on pane `id` (plan §3.6): it leaves `order`, its spec goes back to the
  * default, and the shape is the ladder's for one pane fewer. `kept` and every
  * preset's edges are untouched. Focus, when it was on the closed pane, goes to
- * the pane now in that slot, else the slot before. The last pane is never
- * closed, and neither is one that is not drawn.
+ * `then` when that is still drawn — the window passes the chat selected
+ * before the closed one, so the owner's last choice keeps the microphone
+ * (decisions W-6) — else to the pane now in that slot, else the slot before.
+ * The last pane is never closed, and neither is one that is not drawn.
  */
-export function closePane(ws: Workspace, id: PaneNo): Workspace {
+export function closePane(ws: Workspace, id: PaneNo, then: PaneNo | null = null): Workspace {
   const order = orderOf(ws);
   const at = order.indexOf(id);
   if (at < 0 || order.length <= 1) return ws;
   const next = order.filter((n) => n !== id);
   const panes = ws.panes.map((p, i) => (i === id - 1 ? defaultPane(id) : p)) as Panes;
-  const focused = ws.focused !== id && next.includes(ws.focused) ? ws.focused : next[Math.min(at, next.length - 1)];
+  const focused = ws.focused !== id && next.includes(ws.focused) ? ws.focused
+    : then !== null && next.includes(then) ? then : next[Math.min(at, next.length - 1)];
   return { ...ws, preset: LADDER[next.length], order: next, kept: ws.kept.filter((n) => n !== id), panes, focused };
 }
 

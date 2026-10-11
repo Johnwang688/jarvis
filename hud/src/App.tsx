@@ -1216,10 +1216,16 @@ export default function App() {
   const closePane = useCallback((n: PaneNo) => {
     if (blockedNow.current) return;
     const lay = layoutNow.current;
-    const next = closePaneOf(lay.ws, n);
+    const at = live.current;
+    // The selected chat closing: focus goes to the chat selected before it
+    // that is still drawn, which so becomes the selected chat (W-6).
+    const then = at.selectedChat === n
+      ? at.selectedOrder.find((k) => k !== n && lay.fit.panes.includes(k) && lay.ws.panes[k - 1].view === "chat") ?? null
+      : null;
+    const next = closePaneOf(lay.ws, n, then);
     if (next === lay.ws) return;
     releasePane(n);
-    lay.close(n);
+    lay.close(n, then);
     requestAnimationFrame(() => {
       if (blockedNow.current) return;
       document.querySelector<HTMLElement>(`[data-testid="pane-${next.focused}"]`)?.focus({ preventScroll: true });
