@@ -87,4 +87,12 @@ Recommended: a follow-up that gives each surface a prompt naming only the tools 
 
 ---
 
-_Answers so far: none yet._
+## Answers (2026-10-11 morning)
+
+1. **Browser:** answered item by item. See `2026-10-10-hud-browser-decisions.md`. B-4 (accounts) and B-9 (agents may drive behind a classifier) change the plan, and an amendment is being written.
+2. **BR-0:** "implement it as a small pr". It is being built.
+3. **SELF_PROTECTED for runtime.py and toolgroups.py:** "you don't have to do". Not done.
+4. **Fail closed when no tool list is bound:** "tool fails, go with your recommendation". Being built, with an opt-in for scripts.
+5. **Prompts that name tools a surface lacks:** "fix it". Being built in the same follow-up PR as 4, along with cad-bench's `skill_read`.
+
+Also answered: the daemon now **auto-starts with WSL**, as an enabled systemd user unit.
