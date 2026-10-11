@@ -1062,7 +1062,7 @@ def backgrounds(command: str) -> bool:
 # start of a token-printing subcommand. Regular expressions only — linear —
 # and ordinary long lines hold none of it, so a long command is not refused
 # for being long.
-_BARE_PRINTER = re.compile(r"(?:^|(?<=[\s;&|({`'\"=]))(?:env|printenv|set|export|declare|typeset)"
+_BARE_PRINTER = re.compile(r"(?:^|(?<=[\s;&|({`'\"=/]))(?:env|printenv|set|export|declare|typeset)"
                            r"(?=\s*(?:$|[;&|)}`'\"]|-p\b))", re.MULTILINE)
 _DUMP_TEXT = re.compile(
     r"process\.env(?![\w.\[])|Bun\.env(?![\w.\[])|os\.environb?(?![\w.\[])|%ENV\b|getenv\s*\(\s*\)"

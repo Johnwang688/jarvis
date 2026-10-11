@@ -795,10 +795,11 @@ class Speed(unittest.TestCase):
         self.assertFalse(verdict.refused)
 
     def test_a_long_command_is_parsed_only_to_the_cut(self):
-        # Without COMMAND_CUT one 68 KiB command takes seconds to parse.
+        # Without COMMAND_CUT one 1 MiB command takes ~5 s to parse; with it,
+        # ~0.1 s (the cut part is only scanned by `could_print`).
         G.prints_secrets.cache_clear()
         start = time.perf_counter()
-        self.assertFalse(G.prints_secrets("echo $x | sort ; " * 4000))
+        self.assertFalse(G.prints_secrets("echo $x | sort ; " * 64_000))
         self.assertLess(time.perf_counter() - start, 1.0)
 
     def test_tails_of_a_cached_candidate_spend_the_budget(self):
@@ -898,6 +899,7 @@ class UnseenParts(unittest.TestCase):
         self.assertTrue(G.prints_secrets("echo " + "a" * 5000 + " ; env"))
         self.assertTrue(G.prints_secrets("true " + "x " * 2500 + "; echo $GITHUB_TOKEN"))
         self.assertTrue(G.prints_secrets("echo " + "a" * 5000 + " ; e''nv"))     # as the shell reads it
+        self.assertTrue(G.prints_secrets("echo " + "a" * 5000 + " ; /usr/bin/env"))
         self.assertFalse(G.prints_secrets("echo " + "a" * 5000 + " ; make"))     # long, not refused
 
     def test_a_runner_past_its_tails(self):
