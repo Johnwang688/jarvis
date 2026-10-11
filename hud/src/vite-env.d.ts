@@ -13,3 +13,9 @@ declare module "monaco-editor/languages/definitions/ini/ini" {
   export const conf: unknown;
   export const language: unknown;
 }
+
+// Monaco's context view class, patched for the HUD's CSS zoom in
+// lib/monacoBundle.ts. Internal; the package ships no declaration for it.
+declare module "monaco-editor/base/browser/ui/contextview/contextview" {
+  export const ContextView: { prototype: { doLayout(): void } };
+}

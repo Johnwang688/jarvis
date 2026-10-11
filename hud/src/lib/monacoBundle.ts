@@ -28,6 +28,8 @@
 //    editor — a keyboard user is otherwise trapped in it).
 
 import * as monaco from "monaco-editor/editor";
+import { ContextView } from "monaco-editor/base/browser/ui/contextview/contextview";
+import { effectiveZoom, keepOnScreen } from "./zoomfix";
 
 import "monaco-editor/features/codeEditor/register";
 import "monaco-editor/features/codicon/register";
@@ -73,5 +75,30 @@ import "monaco-editor/features/wordPartOperations/register";
 // This is the fallback colour under tree-sitter (ED-5) and the source of each
 // language's comment, bracket and auto-close rules.
 import "monaco-editor/languages/definitions/register.all";
+
+// Monaco's context view (the right-click menu, its buttons' tooltips) under the
+// HUD's CSS zoom. It lays itself out in viewport pixels and writes them as CSS
+// lengths, which the zoom on #root then scales again — at 160% a right-click
+// in the middle of the window opened the menu off its right edge. After its
+// own layout, the lengths are divided by the zoom they sit under and the box
+// is kept on screen (lib/zoomfix.ts). Monaco patches its own find widget the
+// same way (features/find/register).
+const doLayout = ContextView.prototype.doLayout;
+ContextView.prototype.doLayout = function patchedDoLayout(this: any) {
+  doLayout.call(this);
+  if (!this.isVisible?.() || !this.view) return;
+  const z = effectiveZoom(this.view);
+  if (Math.abs(z - 1) < 1e-6) return;
+  const s = this.view.style as CSSStyleDeclaration;
+  const left = (parseFloat(s.left) || 0) / z;
+  const top = (parseFloat(s.top) || 0) / z;
+  s.left = `${left}px`;
+  s.top = `${top}px`;
+  const d = keepOnScreen(this.view.getBoundingClientRect(), window.innerWidth, window.innerHeight, z);
+  if (d.dx || d.dy) {
+    s.left = `${left + d.dx}px`;
+    s.top = `${top + d.dy}px`;
+  }
+};
 
 export { monaco };

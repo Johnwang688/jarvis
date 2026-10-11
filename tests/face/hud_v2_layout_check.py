@@ -1721,7 +1721,9 @@ def _editor_card_checks(page, mock, check, until):
         for n, (what, opened) in enumerate((("its context menu", menu), ("its suggest list", suggest))):
             if what == "its context menu":
                 lines.click()
-                page.locator(_pane(2, '[data-testid="editor"] .view-line')).first.click(button="right")
+                line = page.locator(_pane(2, '[data-testid="editor"] .view-line')).first.bounding_box()
+                at = (line["x"] + 30, line["y"] + line["height"] / 2)
+                page.mouse.click(at[0], at[1], button="right")
             else:
                 lines.click()
                 page.keyboard.press("Control+End")
@@ -1730,6 +1732,20 @@ def _editor_card_checks(page, mock, check, until):
             until(lambda: opened.count() > 0 and opened.first.is_visible(), timeout=4)
             check(f"at {zoom}% setup: Monaco shows {what}", opened.count() > 0 and opened.first.is_visible())
             if what == "its context menu":
+                # Monaco places it in viewport pixels and the zoom on #root
+                # used to scale that again: at 160% it opened 60% further out,
+                # off the window's right edge (lib/zoomfix.ts).
+                box = page.evaluate("""() => {
+                  const hosts = [...document.querySelectorAll('[data-testid="pane-2"] .shadow-root-host')];
+                  const menu = hosts.map(h => h.shadowRoot && h.shadowRoot.querySelector('.monaco-menu'))
+                    .find(Boolean);
+                  if (!menu) return null;
+                  const r = menu.getBoundingClientRect();
+                  return {x: r.left, y: r.top, right: r.right, bottom: r.bottom, vw: innerWidth, vh: innerHeight};
+                }""")
+                check(f"at {zoom}% the context menu opens at the pointer, wholly on screen",
+                      bool(box) and abs(box["x"] - at[0]) <= 4 and abs(box["y"] - at[1]) <= 4
+                      and box["right"] <= box["vw"] and box["bottom"] <= box["vh"], f"{box} vs click {at}")
                 # The menu closes when a card takes focus, so the card check
                 # below cannot see where it would have stacked. Lay a layer at
                 # #authveil's z-index over the whole window instead: it must be
