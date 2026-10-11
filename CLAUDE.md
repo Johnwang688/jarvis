@@ -1205,26 +1205,47 @@ for the isolation lays a layer at the veil's z-index over an open menu.
 (and its buttons' tooltips) out in viewport pixels and writes them as CSS
 lengths, which `#root`'s zoom scales again — at 160% the menu opened off the
 window. `monacoBundle.ts` patches `ContextView.prototype.doLayout` (Monaco
-patches its own find widget the same way) to divide by the zoom it sits
-under, across the shadow root, and keep the box on screen
-(`lib/zoomfix.ts`). **Keys: the one interception place is still
+patches its own find widget the same way) to **lay the view out again in the
+pixels it is drawn in** — its drawn size, the anchor's drawn rect, below or
+above and left or right by what fits (Monaco's preference first), then kept
+on screen (`lib/zoomfix.ts` `placePopup`), written back divided by the zoom it
+sits under, across the shadow root. Dividing Monaco's own numbers was not
+enough (review of PR #43): it flips by its *unzoomed* size, so at 70% a
+right-click near the bottom put the menu's bottom 45 px above the pointer.
+**Keys: the one interception place is still
 `useLayout`'s capture handler.** It feeds every keydown to
 `lib/editorkeys.ts`'s `chordStep`, so **the second key of a Ctrl+K chord
 typed in Monaco is Monaco's, whatever HUD key it is** (Ctrl+K Ctrl+B sets the
 selection anchor, Ctrl+K Ctrl+0 folds all, as in VS Code) and still kept from
 Chrome; a lone Ctrl+B folds the sidebar from Monaco too (E-10), a lone zoom
-key is the HUD's; the tracker waits as Monaco does (next non-modifier key,
-5 s) and ignores repeat and composition. **Ctrl+S never reaches Chrome**: in
-an editor Monaco's own command saves that buffer with the editor's text (no
-editor has focus under a card, so it cannot run); in a terminal it is the
-shell's. **An unsaved edit is never
+key is the HUD's. **The tracker follows Monaco's own chord state**: it counts
+only keys typed in an editor (Monaco dispatches only those, so a key in the
+chat box between Ctrl+K and Ctrl+B ends neither chord), leaves the chord after
+5 s or when the window loses focus, and ignores repeat and composition.
+**Ctrl+S never reaches Chrome**: in an editor it saves **that editor's**
+buffer — an `addAction` keybinding, scoped by Monaco to its `editorId`,
+disposed with the editor and dead once it is (no editor has focus under a
+card, so it cannot run); in a terminal it is the shell's. **Never
+`addCommand`** (review of PR #43, the HIGH): in 0.57 it is a global
+keybinding with no condition, so the last editor created owned Ctrl+S for
+every editor and outlived itself — Ctrl+S in a Diff wrote the file blank (a
+disposed editor's text is ""), and Ctrl+S in one pane saved another pane's
+buffer. The other global registrations (languages, the link opener, the
+theme) are made once in `loadMonaco` and hold no editor. **A save's answer
+lands only on the buffer it was sent from** (a generation bumped per read): a
+save still on its way when another file was opened used to put the old
+file's record back over the new one's text. **An unsaved edit is never
 dropped without a word**: opening another file or Reload over one asks
 (`file-discard-ask`, Keep editing / Discard). **A File pane picks its own
 project** (decisions E-13, built here): its header's `Project ▾`
 (`pane-N-folder`) lists every project plus Follow chat and replaces the File
 pane's "in: … · follow chat" chip (a Preview pane keeps the chip); it re-pins
 that pane only, refuses with the refusal chip while the pane holds an unsaved
-edit (the select snaps back), and is disabled under a card. Only project
+edit (the select snaps back), and is disabled under a card. **The dirty flag
+the guards read is set in the keystroke's own change event** (`markDirty`
+writes App's ref at once; the state follows for drawing): read from state a
+frame behind, a project picked in the same breath as a keystroke remounted the
+pane and dropped the edit. Only project
 roots are offered — a folder becomes reachable by becoming a project, so
 `folders.py` stays the one gate. EditContext stays on (headless
 Chromium types into it). Space in Monaco **still** starts push-to-talk and
@@ -1236,10 +1257,18 @@ editor host carries `data-language` (set once Monaco holds the file — what
 `monaco.test.ts`, `zoomfix.test.ts`, `hud_v2_check`'s file and diff sections (tokens, find,
 suggest, Ctrl+S in and out of an editor, links, Ctrl+B and the chords, the
 discard ask, the diff leak, no request off loopback by a catch-all route, no
-language worker requested or built) and `hud_v2_layout_check`'s
-`_editor_card_checks` (a card over an open context menu or suggest list, at
-100% and 160%). Every one that guards a behaviour fails on origin/main or with
-its fix reverted (PR body).
+language worker requested or built, a `file:` link opening nothing) and
+`hud_v2_layout_check`'s `_editor_card_checks` (a card over an open context
+menu or suggest list, at 100% and 160%), `_save_scope_checks` (Ctrl+S in a
+Diff after the file pane's editor went away, two editors alive, one switched
+away; an editor created under a card is read-only), `_late_save_checks` (the
+mock's `put_delays` holds a write's answer), `_chord_checks`,
+`_menu_place_checks` (70% near the bottom, 160% near the right, a window too
+short for either side) and the E-13 checks in `_workspace_checks` (a project
+picked in the same breath as a keystroke). Every one that guards a behaviour
+fails on origin/main, on the reviewed head (18381b9) or with its fix reverted
+(PR body). Monaco's `getValue()` per keystroke (the change event hands the
+whole text to React) is left for ED-2's buffers.
 
 **The effort is a slider, not pills (2026-10-10, owner's ask: "like Claude's").**
 `components/EffortSlider.tsx`, rules in `lib/effortSlider.ts`: "Effort

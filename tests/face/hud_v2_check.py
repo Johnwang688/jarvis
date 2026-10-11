@@ -973,9 +973,15 @@ def monaco_key_checks(page, mock):
     page.evaluate("() => { window.__opened = []; }")
     href = page.evaluate("location.href")
     lines.click()
+    # Escape first: the word suggestions open while typing, and an Enter
+    # would accept one ("a" became "add") instead of starting a line, gluing
+    # the file: text onto the https link above as its fragment.
+    page.keyboard.press("Escape")
     page.keyboard.press("Control+End")
-    page.keyboard.type("\n#file:///etc/hosts")
-    flink = page.locator('[data-testid="editor"] .detected-link', has_text="file:///etc/hosts")
+    page.keyboard.press("Enter")
+    page.keyboard.type("#file:///etc/hosts")
+    page.keyboard.press("Escape")
+    flink = page.locator('[data-testid="editor"] .detected-link', has_text=re.compile(r"^file:///etc/hosts$"))
     until(lambda: flink.count() > 0, timeout=5)
     if flink.count():
         flink.first.click(modifiers=["Control"])

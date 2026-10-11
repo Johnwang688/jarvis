@@ -2285,14 +2285,22 @@ raise a card over it at 100% and 160%. Keys stay in the window's one capture
 handler: Ctrl+B folds the sidebar from the editor too, except as the second
 key of a Ctrl+K chord, which is Monaco's whatever it is (Ctrl+K Ctrl+0 folds
 all, as in VS Code; a lone Ctrl+0 is still the HUD's zoom reset, and neither
-reaches Chrome's zoom). Ctrl+S saves the focused editor and never opens
-Chrome's dialog. Opening another file, or Reload, over an unsaved edit asks
+reaches Chrome's zoom); the window's chord tracker follows Monaco's, counting
+only keys typed in an editor and leaving the chord after 5 s or when the
+window loses focus. Ctrl+S saves the editor it is pressed in — an action
+scoped to that editor and disposed with it, never Monaco's global
+`addCommand`, whose last-created editor owned Ctrl+S everywhere and outlived
+itself (the review of PR #43 found Ctrl+S in a diff writing a file blank) —
+and never opens Chrome's dialog; a save's answer lands only on the buffer it
+was sent from. Opening another file, or Reload, over an unsaved edit asks
 first. Each File pane picks its own project (decision E-13): a `Project ▾` in
 its header lists every project and Follow chat, re-pins that pane only,
-refuses while the pane holds an unsaved edit, and is disabled under a card.
+refuses while the pane holds an unsaved edit — known from the keystroke's own
+change event, never a frame later — and is disabled under a card.
 Monaco's right-click menu is placed in viewport pixels, which the HUD's CSS
-zoom scaled a second time (off the window at 160%); it is corrected after
-Monaco's own layout and now opens at the pointer at any zoom. The diff view
+zoom scaled a second time (off the window at 160%), and flipped by its
+unzoomed size; it is laid out again after Monaco's own layout, in drawn
+pixels, and opens at the pointer at any zoom and edge. The diff view
 disposes its models (it leaked two per file viewed).
 Measured: the editor chunk went from 2.30 MB (bare API) to 3.63 MB, the
 worker from 232 KB to 277 KB, the first-paint chunk +5 KB. EditContext stays

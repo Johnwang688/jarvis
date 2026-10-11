@@ -101,7 +101,8 @@ def layout_checks(browser, mock, base, check, until, guard, init_script):
                         _blocked_checks, _small_window_checks, _picker_zoom_checks,
                         _monaco_zoom_checks, _menu_zoom_checks, _model_chip_checks,
                         _titlebar_checks, _workspace_checks, _grid_card_checks, _sticky_checks,
-                        _card_focus_checks, _editor_card_checks, _save_scope_checks, _chord_checks,
+                        _card_focus_checks, _editor_card_checks, _save_scope_checks, _late_save_checks,
+                        _chord_checks,
                         _menu_place_checks, _seen_checks, _eight_checks, _crash_checks):
             try:
                 section(page, mock, check, until)
@@ -1410,8 +1411,9 @@ def _workspace_checks(page, mock, check, until):
           _ws(page)["ws"]["panes"][1]["projectId"] == "p1"
           and "Z" in page.locator(_pane(2, '[data-testid="editor"] .view-lines')).inner_text(),
           str(_ws(page)["ws"]["panes"][1]))
-    save.click()
-    until(lambda: save.is_disabled(), timeout=3)
+    if not save.is_disabled():  # (on the old code the edit is gone with the remount)
+        save.click()
+        until(lambda: save.is_disabled(), timeout=3)
     _approval(mock, "fold1")
     until(lambda: page.locator('[data-testid="approval-card"]').count() > 0, timeout=4)
     time.sleep(0.2)
@@ -1902,6 +1904,14 @@ def _save_scope_checks(page, mock, check, until):
     _set_storage(page, zoom="100", layout="{}")
     _set_ws(page, grid)
     _boot(page, mock, None, until, reload=True)
+
+    def restore():
+        # Content only, before the files are opened again: a write that went
+        # astray (the old code's blank calc.py) must not leak into the next
+        # scenario, and the mtime stays what the server last said.
+        for k, v in kept.items():
+            files[k]["content"] = v["content"]
+
     try:
         # An editor that went away leaves no Ctrl+S behind.
         check("setup: calc.py open in pane 2's editor", _open_file(page, until, 2, "calc.py"))
@@ -1920,6 +1930,7 @@ def _save_scope_checks(page, mock, check, until):
         check("H1: with pane 2's editor gone, Ctrl+S in a diff saves nothing (no file written blank)",
               len(_puts(mock)) == before and files["calc.py"]["content"] == kept["calc.py"]["content"],
               str(_puts(mock)[before:]))
+        restore()
 
         # Two editors alive: each Ctrl+S is its own pane's.
         _show(page, until, 2, "file")
@@ -1937,8 +1948,11 @@ def _save_scope_checks(page, mock, check, until):
         check("H1: with two editors alive, Ctrl+S in pane 2 saves pane 2's file, and only it",
               len(sent) == 1 and sent[0].get("path") == "calc.py" and sent[0].get("content", "").endswith("#one")
               and not page.locator(_pane(3, '[data-testid="file-save"]')).is_disabled(), str(sent))
-        page.locator(_pane(3, '[data-testid="file-save"]')).click()
-        until(lambda: page.locator(_pane(3, '[data-testid="file-save"]')).is_disabled(), timeout=3)
+        for n in (2, 3):  # each scenario starts clean, whichever pane the last Ctrl+S wrote
+            button = page.locator(_pane(n, '[data-testid="file-save"]'))
+            if not button.is_disabled():
+                button.click()
+                until(lambda: button.is_disabled(), timeout=3)
 
         # Pane 3 switched away: Ctrl+S in pane 2 is still pane 2's.
         _show(page, until, 3, "preview")
@@ -1954,6 +1968,7 @@ def _save_scope_checks(page, mock, check, until):
         check("H1: pane 3 switched away, Ctrl+S in pane 2 saves pane 2, and pane 3's file is byte-identical",
               len(sent) == 1 and sent[0].get("path") == "calc.py" and sent[0].get("content", "").endswith("#three")
               and files["README.md"]["content"] == readme, str(sent))
+        restore()
 
         # An editor that opens while a card is up opens read-only (the first
         # editor of a session, Monaco loading as a card arrives).
@@ -1975,6 +1990,60 @@ def _save_scope_checks(page, mock, check, until):
         until(lambda: host.get_attribute("data-readonly") == "false", timeout=2)
         check("and takes edits once the card is answered", host.get_attribute("data-readonly") == "false")
     finally:
+        files.clear()
+        files.update(kept)
+        _reset_all(page, mock, until)
+
+
+def _late_save_checks(page, mock, check, until):
+    """A save's answer lands on the file it was sent for, or nowhere (review
+    of PR #43, L4). The old save closed over the file it started with and
+    wrote that record back when the answer came: a save still on its way
+    when another file was opened turned the new file's record into the old
+    one (its path, its mtime, its content), so the pane named the wrong file
+    and called the buffer dirty."""
+    files = mock.world["files"]
+    kept = {k: dict(v) for k, v in files.items()}
+    two = json.dumps({"preset": "cols2", "focused": 2,
+                      "panes": [{"view": "chat"}, {"view": "file"}, {"view": "preview"}, {"view": "task"}]})
+    page.set_viewport_size({"width": 1600, "height": 900})
+    _set_storage(page, zoom="100", layout="{}")
+    _set_ws(page, two)
+    _boot(page, mock, None, until, reload=True)
+    save = page.locator(_pane(2, '[data-testid="file-save"]'))
+    path = page.locator(_pane(2, '[data-testid="file-path"]'))
+    try:
+        check("setup: calc.py open in pane 2's editor", _open_file(page, until, 2, "calc.py"))
+        check("setup: an edit to save", _edit(page, until, 2, "\n#late"))
+        before = len(_puts(mock))
+        mock.world["put_delays"] = [1.5]
+        save.click()
+        until(lambda: len(_puts(mock)) > before, timeout=2)
+        row = page.locator(_pane(2, '[data-testid="file-README.md"]'))
+        if not row.is_visible():  # a narrow pane folds its tree behind "Files"
+            page.locator(_pane(2, '[data-testid="tree-toggle"]')).click()
+        row.click()
+        discard = page.locator(_pane(2, '[data-testid="file-discard-yes"]'))
+        if until(lambda: discard.count() > 0 or path.inner_text() == "README.md", timeout=2) and discard.count():
+            discard.click()
+        until(lambda: path.inner_text() == "README.md", timeout=3)
+        time.sleep(2.0)  # the answer lands
+        check("L4: a save answered after another file was opened leaves that file's record alone",
+              path.inner_text() == "README.md" and save.is_disabled(),
+              f"{path.inner_text()!r} save {'disabled' if save.is_disabled() else 'enabled'}")
+        if page.locator(_pane(2, '[data-testid="md-split"]')).count() == 0:
+            page.locator(_pane(2, '[data-testid="toggle-rendered"]')).click()
+        _edit(page, until, 2, "\n#mine")
+        before = len(_puts(mock))
+        save.click()
+        until(lambda: len(_puts(mock)) > before, timeout=3)
+        time.sleep(0.3)
+        sent = _puts(mock)[before:]
+        check("and the next save is that file's own, sent with its own mtime (no conflict)",
+              len(sent) == 1 and sent[0].get("path") == "README.md" and files["README.md"]["content"].endswith("#mine")
+              and save.is_disabled(), str(sent))
+    finally:
+        mock.world.pop("put_delays", None)
         files.clear()
         files.update(kept)
         _reset_all(page, mock, until)
@@ -2053,7 +2122,14 @@ def _menu_place_checks(page, mock, check, until):
             check(f"at {zoom}% Monaco loads ({where})", False)
             continue
         ed = page.locator(_pane(2, '[data-testid="editor"]')).bounding_box()
-        line = page.locator(_pane(2, '[data-testid="editor"] .view-line')).first.bounding_box()
+        # The first line Monaco has drawn (a line can exist before its layout).
+        first_line = """() => { const ls = [...document.querySelectorAll('[data-testid="pane-2"] [data-testid="editor"] .view-line')]
+            .map(l => l.getBoundingClientRect()).filter(r => r.width > 0 && r.height > 0).sort((a, b) => a.top - b.top);
+            return ls.length ? {x: ls[0].left, y: ls[0].top, width: ls[0].width, height: ls[0].height} : null; }"""
+        line = until(lambda: page.evaluate(first_line), timeout=5)
+        if not ed or not line:
+            check(f"at {zoom}% the editor is drawn ({where})", False, f"{ed} {line}")
+            continue
         # In the text, never the gutter (a right-click there opens no menu).
         if where == "bottom":
             at = (line["x"] + 30, ed["y"] + ed["height"] - 12)
