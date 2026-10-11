@@ -408,6 +408,13 @@ _ARCHIVERS = frozenset({"tar", "gtar", "bsdtar", "unzip", "7z", "7za", "7zr", "7
 # inline-source options, long options that take a value). What is not here
 # is read as a flag; a misread costs only when the word taken for the
 # script is itself a credential file.
+#
+# Node and bun read a cluster letter by letter and take an inline source
+# from the *next* argument, never from the rest of the cluster: `node -pe
+# process.env` is `-p -e process.env` (2026-10-11 delta review — reading
+# `-pe` as `-p` with a glued "e" took the real source for the script, and
+# `node --env-file=.env -pe process.env` read).
+_NEXT_ARGUMENT_SOURCES = {"node": "ep", "bun": "ep"}
 _INTERPRETER_OPTIONS: dict[str, tuple[str, str, str, frozenset, frozenset]] = {
     "python": ("c", "mWXQ", "", frozenset(), frozenset({"--check-hash-based-pycs"})),
     "node": ("ep", "rC", "", frozenset({"--eval", "--print"}),
@@ -525,8 +532,9 @@ def _substitutions(command: str) -> tuple[str, list[str]]:
     return "".join(out), inner
 
 
-def _clean(tokens: list[str]) -> tuple[list[str], list[str]]:
-    """(the command's words, the files it reads by redirection): the shell's
+def _clean(tokens: list[str]) -> tuple[list[str], list[str], list[str], bool]:
+    """(the command's words, the files it reads by redirection, its
+    here-strings, whether it reads a here-document): the shell's
     own leading words (`then`, `do`, `!`, `{`, `case … )`, …) and every
     redirection taken off, and trailing closers (`fi`, `done`, `}`) dropped."""
     tokens = list(tokens)
@@ -547,7 +555,7 @@ def _clean(tokens: list[str]) -> tuple[list[str], list[str]]:
             tokens = [first[1:]] + tokens[1:]
         else:
             break
-    words, inputs, k = [], [], 0
+    words, inputs, here, heredoc, k = [], [], [], False, 0
     while k < len(tokens):
         match = _REDIR.fullmatch(tokens[k])
         if match is not None:
@@ -557,6 +565,10 @@ def _clean(tokens: list[str]) -> tuple[list[str], list[str]]:
                 target = tokens[k]
             if op in ("<", "<>"):
                 inputs.append(target)
+            elif op == "<<<":
+                here.append(target)
+            elif op in ("<<", "<<-"):
+                heredoc = True
             k += 1
             continue
         words.append(tokens[k])
@@ -565,7 +577,7 @@ def _clean(tokens: list[str]) -> tuple[list[str], list[str]]:
         words.pop()
     if words and words[-1].endswith(")") and words[-1] != ")":
         words[-1] = words[-1].rstrip(")")
-    return [w for w in words if w], inputs
+    return [w for w in words if w], inputs, here, heredoc
 
 
 def _skip_options(args: list[str], valued: frozenset) -> list[str]:
@@ -710,9 +722,16 @@ def _interpreter_parts(prog: str, args: list[str]):
                 i += 2 if (name in valued_l and not eq) else 1
             continue
         step, j = 1, 1
+        next_only = _NEXT_ARGUMENT_SOURCES.get(prog, "")
         while j < len(arg):
             letter, glued = arg[j], arg[j + 1:]
             j += 1
+            if letter in next_only:
+                following = args[i + 1] if i + 1 < len(args) else ""
+                if step == 1 and not following.startswith("-"):
+                    sources.append(following)              # `-pe`: one source, the next argument
+                    step = 2
+                continue                                   # `-p -e x`: the source is -e's
             if letter in glued_s:
                 if letter in "l0":                         # perl -l[octal], -0[digits]: the cluster goes on
                     while j < len(arg) and (arg[j].isdigit() or (letter == "0" and arg[j] in "xX")):
@@ -757,6 +776,11 @@ def _interpreter_prints(prog: str, args: list[str], depth: int, ctx) -> bool:
         if module in _PRINTING_MODULES and any(_names_credential(a) for a in rest):
             return True
         return module not in INTERPRETERS and _simple([module, *rest], depth + 1, ctx)
+    if script in (None, "-") and getattr(ctx, "stdin", None):
+        # No program named: it reads one from standard input, which is
+        # inline source by another route — rules.py's own reading of
+        # `… | python3` (2026-10-11 delta review).
+        return any(protected_in(_flat(text)) or reads_environment(text, loaded) for text in ctx.stdin)
     return script is not None and _names_credential(script)
 
 
@@ -815,6 +839,10 @@ class _Context:
                           or any(protected_in(_flat(_LOADER_TEXT.sub(" ", t))) for t in inner))
         self.inner = inner
         self.variables: dict[str, str] = {}
+        # The texts the current segment's command reads on standard input,
+        # as far as the line shows them (here-strings, a piped echo, a
+        # here-document's body).
+        self.stdin: list[str] = []
 
 
 def _simple(tokens: list[str], depth: int, ctx: _Context) -> bool:
@@ -923,8 +951,13 @@ def _command_word(tokens: list[str], ctx: _Context) -> tuple[list[str], bool]:
     return tokens, False
 
 
-def _segment_prints(segment: str, depth: int, ctx: _Context) -> bool:
-    words, inputs = _clean(_tokens(segment))
+def _segment_prints(segment: str, depth: int, ctx: _Context, piped: str | None = None,
+                    rest: str = "") -> bool:
+    """One segment. `piped` is the text the previous segment of a pipeline
+    writes, when the line says it (`echo '…' | python3`); `rest` is the
+    command text after this segment (a here-document's body)."""
+    words, inputs, here, heredoc = _clean(_tokens(segment))
+    ctx.stdin = here + ([piped] if piped is not None else []) + ([rest] if heredoc else [])
     if any(_names_credential(t) or (ctx.protected and _dynamic(t)) for t in inputs):
         head = _unwrap(list(words), depth, ctx)[0] if words else []
         if not (head and _base(head[0]) in COUNTERS):
@@ -950,6 +983,17 @@ def _segment_prints(segment: str, depth: int, ctx: _Context) -> bool:
     return bool(inner) and _simple(inner, depth, ctx)
 
 
+def _written(segment: str) -> str | None:
+    """What a segment writes to its standard output when the line itself
+    says so — `echo`/`printf`/`print` of literal words — else None."""
+    words = _clean(_tokens(segment))[0]
+    while words and _ASSIGNMENT.fullmatch(words[0]):
+        words = words[1:]
+    if not words or _base(words[0]) not in ("echo", "printf", "print"):
+        return None
+    return " ".join(a for a in words[1:] if not (a.startswith("-") and len(a) <= 3))
+
+
 _cache: dict[str, bool] = {}
 _cache_size = 0
 _cache_lock = threading.Lock()
@@ -973,7 +1017,19 @@ def _prints(command: str, depth: int) -> bool:
     if any(_prints(text, depth + 1) for text in inner):
         return True
     ctx = _Context(command, inner)
-    return any(_segment_prints(segment, depth, ctx) for segment in rules.segments(body))
+    pos, previous = 0, None
+    for segment in rules.segments(body):
+        at = body.find(segment, pos)
+        piped = None
+        if at >= 0:
+            between = body[pos:at]
+            if previous is not None and "|" in between and "||" not in between:
+                piped = _written(previous)
+            pos = at + len(segment)
+        if _segment_prints(segment, depth, ctx, piped, body[pos:]):
+            return True
+        previous = segment
+    return False
 
 
 class Budget:
@@ -1155,8 +1211,14 @@ def _worth_parsing(candidate: str) -> bool:
 
 
 # A prompt made of words, with no glyph: one to three words before the
-# command, each carrying a prompt's mark (`john@host ~/p`, `[proj]`, `(venv)`).
-_PROMPT_WORD = re.compile(r"\s*[^\s@:~/\])}]*[@:~/\])}][^\s]*\s+")
+# command, each carrying a prompt's mark (`john@host ~/p`, `[proj]`, `(venv)`,
+# a git branch's status marks: `main*`, `main±`, `main↑1`).
+_PROMPT_MARKS = "@:~/\\])}*±✔✘✚↑↓⇡⇣"
+_PROMPT_WORD = re.compile(r"\s*[^\s" + _PROMPT_MARKS + r"]*[" + _PROMPT_MARKS + r"][^\s]*\s+")
+# Input to a REPL or a here-document at a line's start (`>>> `, `... `, `> `):
+# what follows is source the interpreter runs, so an environment read there
+# prints the environment (2026-10-11 delta review).
+_REPL_INPUT = re.compile(r"\s*(?:>>>|\.\.\.|>)\s+")
 
 
 def shows_printer(line: str, budget: Budget | None = None) -> bool:
@@ -1192,6 +1254,10 @@ def shows_printer(line: str, budget: Budget | None = None) -> bool:
 
     if len(line) > SCAN_LINE_CAP and unseen(SCAN_LINE_CAP):
         return True                                        # past the scan: not seen, not read
+    repl = _REPL_INPUT.match(scan)
+    if repl is not None and (reads_environment(scan[repl.end():repl.end() + CANDIDATE_CAP])
+                             or unseen(repl.end() + CANDIDATE_CAP)):
+        return True
     if not (_has_trigger(flat) or protected_in(flat)):
         return False
     lead = len(scan) - len(scan.lstrip())

@@ -954,6 +954,70 @@ class UnseenParts(unittest.TestCase):
                 self.assertEqual(verdict.refused, printer)
 
 
+class DeltaReview(unittest.TestCase):
+    """2026-10-11 delta review of eb718b5. MEDIUM: `-pe` read as `-p` with a
+    glued "e", so node's and bun's real source (the next argument) was taken
+    for a script; each shape below read on eb718b5, and the two `--env-file`
+    ones were refused on 3393daf. LOW: source on standard input, git-status
+    marks in a word prompt, REPL input."""
+
+    PE = ("node -pe process.env", 'node -pe "JSON.stringify(process.env)"', 'node -pe "process.env.X_KEY"',
+          "node -ep process.env", "bun -pe Bun.env", "npx -y node -pe process.env",
+          "node --env-file=.env -pe process.env", "bun --env-file=.env -pe Bun.env",
+          "node -p -e process.env", "bun -p -e 'JSON.stringify(Bun.env)'")
+    STDIN = ("echo 'import os; print(os.environ)' | python3", "python3 - <<< 'import os; print(os.environ)'",
+             "node <<< 'console.log(process.env)'", "printf '%s' 'console.log(process.env)' | node",
+             "echo 'print(open(\".env\").read())' | python3", "python3 <<EOF\nimport os\nprint(os.environ)\nEOF")
+
+    def test_node_and_bun_take_the_source_from_the_next_argument(self):
+        for command in self.PE:
+            with self.subTest(command=command):
+                self.assertTrue(G.prints_secrets(command), command)                 # the span half
+                self.assertTrue(G.shows_printer("john@host:~/app$ " + command), command)   # the text half
+                self.assertTrue(G.judge(f"$ {command}\r\n{{}}\r\n$ ".encode(), 0).refused, command)
+        for command in ("node -pe 1+1", "bun -pe 'Bun.version'", "node -pe 'process.env.PORT'",
+                        "node --env-file=.env server.js", "node -r dotenv/config server.js", "node -p"):
+            with self.subTest(command=command):
+                self.assertFalse(G.prints_secrets(command), command)
+
+    def test_source_on_standard_input_is_inline_source(self):
+        for command in self.STDIN:
+            with self.subTest(command=command):
+                self.assertTrue(G.prints_secrets(command), command)
+        for line in (self.STDIN[:5]):
+            with self.subTest(line=line):
+                self.assertTrue(G.shows_printer("$ " + line), line)
+        for command in ("echo 'print(1)' | python3", "python3 - <<< 'print(1)'", "cat script.py | python3",
+                        "echo 'os.environ' | python3 app.py", "echo hi | tee out.txt"):
+            with self.subTest(command=command):
+                self.assertFalse(G.prints_secrets(command), command)
+
+    def test_repl_and_here_document_input(self):
+        for line in (">>> import os; os.environ", "> console.log(process.env)", "... print(os.environ)",
+                     ">>> print(os.environ['API_KEY'])"):
+            with self.subTest(line=line):
+                self.assertTrue(G.shows_printer(line), line)
+        for line in ("> print(1)", "=> [2/5] ENV NODE_ENV=production", ">>> os.environ.get('HOME')",
+                     "> const port = process.env.PORT"):
+            with self.subTest(line=line):
+                self.assertFalse(G.shows_printer(line), line)
+
+    def test_a_word_prompt_with_git_status_marks(self):
+        for line in ("~/p main* cat .env", "~/p main± cat .env.production", "~/p main↑1 printf %s $API_TOKEN"):
+            with self.subTest(line=line):
+                self.assertTrue(G.shows_printer(line), line)
+        self.assertFalse(G.shows_printer("Fix *bold* cat .env readers"))
+
+    def test_loading_idioms_stay_refused(self):
+        # An accepted cost, not an oversight: `export`/`env` print a word
+        # they cannot use in their error message ("not a valid identifier",
+        # "No such file or directory"), so a value split by xargs can reach
+        # the terminal. Reads of a dev server started this way are refused.
+        for command in ("env $(cat .env | xargs) npm run dev", "export $(grep -v '^#' .env | xargs)"):
+            with self.subTest(command=command):
+                self.assertTrue(G.prints_secrets(command), command)
+
+
 class FolderValues(unittest.TestCase):
     def test_env_variants_are_credential_files_here_but_templates_are_not(self):
         for name in (".env.production", ".env.staging.local", ".env.test", "dir/.env.prod"):
