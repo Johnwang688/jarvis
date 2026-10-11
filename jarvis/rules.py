@@ -1651,6 +1651,12 @@ def _program_named(stem: str, args: list[str]) -> bool:
 
 
 _VEX_MODULE = re.compile(r"jarvis\.v2\.vex(\.[\w.]*)?")
+# A word after which the next word is the program a runner starts.
+_RUNNER_WORDS = frozenset({"run", "exec", "x", "--"})
+_RUNNERS = frozenset({"npx", "bunx", "uvx", "pnpx"})
+# Whose `run`/`exec`/`x` starts a program (npm's `run` starts a package.json
+# script by that name, which is not the program).
+_PROGRAM_RUNNERS = frozenset({"uv", "pipx", "poetry", "pdm", "hatch", "pixi", "conda", "bun"})
 
 
 def _runs_vex_build(tokens: list[str]) -> bool:
@@ -1661,7 +1667,11 @@ def _runs_vex_build(tokens: list[str]) -> bool:
     if _stem(tokens) in _READONLY:
         return False
     for i, token in enumerate(tokens):
-        if _basename(token) == "vexbuild":
+        # In command position, or handed to a runner — never as an argument
+        # (`cp ~/.local/bin/vexbuild x` copies it; it does not run it).
+        if _basename(token) == "vexbuild" and (
+                i == 0 or _basename(tokens[i - 1]) in _RUNNERS
+                or (tokens[i - 1] in _RUNNER_WORDS and _stem(tokens) in _PROGRAM_RUNNERS)):
             return True
         if _VEX_MODULE.fullmatch(token) and i and tokens[i - 1].startswith("-") \
                 and tokens[i - 1].endswith("m") and not tokens[i - 1].startswith("--"):

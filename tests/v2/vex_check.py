@@ -490,6 +490,9 @@ ORDINARY = {   # stays as it was: never DENY for not naming vexcom
     "grep -r --include='*vex*' motor .": rules.ALLOW, "ls v*": rules.ALLOW,
     "ls v*m.exe": rules.ALLOW, "cat ~/.local/bin/vexbuild": rules.ALLOW,
     "grep -rn jarvis.v2.vex tests": rules.ALLOW,
+    # Naming the wrapper is not running it.
+    "cp ~/.local/bin/vexbuild ~/backup/": rules.ALLOW, "make ~/.local/bin/vexbuild": rules.ALLOW,
+    "python3 -m pytest tests/v2/vex_check.py": rules.ALLOW, "npm run vexbuild": rules.ALLOW,
 }
 
 
