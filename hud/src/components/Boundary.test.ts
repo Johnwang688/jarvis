@@ -4,7 +4,7 @@
 
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { CrashProbe, WorkspaceBoundary, errorName } from "./Boundary";
+import { CrashProbe, DialogBoundary, WorkspaceBoundary, errorName } from "./Boundary";
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -50,6 +50,8 @@ describe("WorkspaceBoundary", () => {
     error.mockRestore();
   });
 
+  let crashes = 0;
+
   function draw() {
     act(() =>
       root.render(
@@ -58,7 +60,7 @@ describe("WorkspaceBoundary", () => {
           null,
           createElement(
             WorkspaceBoundary,
-            null,
+            { onCrash: () => crashes++ },
             createElement("div", { id: "work" }, "work", createElement(CrashProbe, { where: "workspace" })),
           ),
           createElement("div", { id: "card" }, "the card"),
@@ -85,8 +87,47 @@ describe("WorkspaceBoundary", () => {
     expect(fallback).not.toBeNull();
     expect(fallback!.querySelector('[data-testid="hud-crashed-reload"]')?.textContent).toBe("Reload");
     // Plain text: the only elements are the two sentences and the button.
-    expect(Array.from(fallback!.querySelectorAll("*")).map((el) => el.tagName)).toEqual(["P", "P", "BUTTON"]);
+    expect(Array.from(fallback!.querySelectorAll("*")).map((el) => el.tagName)).toEqual(["P", "P", "P", "BUTTON"]);
     expect(host.querySelector("#card")?.textContent).toBe("the card");
+  });
+
+  it("tells App once, so it can stop what would carry on unseen", () => {
+    crashes = 0;
+    draw();
+    (window as any).__hudCrashProbe = "workspace";
+    draw();
+    draw();
+    expect(crashes).toBe(1);
+  });
+
+  it("warns that a reload loses what was not sent (review of PR #32)", () => {
+    draw();
+    (window as any).__hudCrashProbe = "workspace";
+    draw();
+    expect(host.querySelector('[data-testid="hud-crashed"]')?.textContent).toContain(
+      "Reloading loses anything not yet sent: words typed in a box and files staged for it.",
+    );
+  });
+
+  it("keeps Space and Enter on Reload to itself: they never reach the document (push-to-talk)", () => {
+    draw();
+    (window as any).__hudCrashProbe = "workspace";
+    draw();
+    const seen: string[] = [];
+    const listen = (e: KeyboardEvent) => seen.push(e.type + ":" + e.code);
+    document.addEventListener("keydown", listen);
+    document.addEventListener("keyup", listen);
+    const reload = host.querySelector('[data-testid="hud-crashed-reload"]')!;
+    for (const type of ["keydown", "keyup"]) {
+      for (const code of ["Space", "Enter"]) {
+        reload.dispatchEvent(new KeyboardEvent(type, { code, key: code === "Space" ? " " : "Enter", bubbles: true }));
+      }
+    }
+    // Escape is not Reload's: it must still reach a card's handler.
+    reload.dispatchEvent(new KeyboardEvent("keydown", { code: "Escape", key: "Escape", bubbles: true }));
+    document.removeEventListener("keydown", listen);
+    document.removeEventListener("keyup", listen);
+    expect(seen).toEqual(["keydown:Escape"]);
   });
 
   it("logs the error's name and nothing of its message", () => {
@@ -96,5 +137,62 @@ describe("WorkspaceBoundary", () => {
     const logged = warn.mock.calls.map((c: unknown[]) => c.map(String).join(" ")).join("\n");
     expect(logged).toContain("Error");
     expect(logged).not.toContain("crash probe");
+  });
+});
+
+describe("DialogBoundary", () => {
+  let host: HTMLDivElement;
+  let root: Root;
+  let warn: ReturnType<typeof vi.spyOn>;
+  let error: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    host = document.createElement("div");
+    document.body.appendChild(host);
+    root = createRoot(host);
+    warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    error = vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    act(() => root.unmount());
+    host.remove();
+    delete (window as any).__hudCrashProbe;
+    warn.mockRestore();
+    error.mockRestore();
+  });
+
+  function draw(resetKey: string, onCrash: () => void) {
+    act(() =>
+      root.render(
+        createElement(
+          "div",
+          null,
+          createElement(
+            DialogBoundary,
+            { resetKey, onCrash },
+            createElement("div", { id: "dialog" }, "a dialog", createElement(CrashProbe, { where: "dialog" })),
+          ),
+          createElement("div", { id: "card" }, "the card"),
+        ),
+      ),
+    );
+  }
+
+  it("closes a dialog that throws and draws again once the open set moves on", () => {
+    let closed = 0;
+    draw("model", () => closed++);
+    expect(host.querySelector("#dialog")).not.toBeNull();
+    (window as any).__hudCrashProbe = "dialog";
+    draw("model", () => closed++);
+    expect(host.querySelector("#dialog")).toBeNull();
+    expect(host.querySelector("#card")?.textContent).toBe("the card");
+    expect(closed).toBe(1);
+    // Still failed while nothing changed; drawn again for the next picker.
+    delete (window as any).__hudCrashProbe;
+    draw("model", () => closed++);
+    expect(host.querySelector("#dialog")).toBeNull();
+    draw("voice", () => closed++);
+    expect(host.querySelector("#dialog")).not.toBeNull();
   });
 });

@@ -32,7 +32,7 @@ import { FileTab } from "./components/FileTab";
 import { DiffTab } from "./components/DiffTab";
 import { PreviewTab } from "./components/PreviewTab";
 import { ApprovalQueue, ApprovalVeil } from "./components/Approvals";
-import { CrashProbe, WorkspaceBoundary } from "./components/Boundary";
+import { CrashProbe, DialogBoundary, WorkspaceBoundary } from "./components/Boundary";
 import { DecisionsLog, DiscordPanel, SchedulesButton, UsagePanel } from "./components/Panels";
 import { AvatarPicker, ModelPicker, NewProject, NewTask, SettingsDialog, VoicePicker } from "./components/Pickers";
 import { ScheduleDialog } from "./components/ScheduleDialog";
@@ -53,7 +53,7 @@ import { afterProjectGone, afterThreadGone, forgetLastProject, projectNamesTaken
 import { guildConfigured, ownerLine } from "./lib/discord";
 import { CollapseButton, Rail, Splitter, TitleBar, useLayout } from "./components/Layout";
 import { Workspace, type PaneInfo } from "./components/Workspace";
-import { terminalAttached } from "./components/Terminal";
+import { terminalAttached, terminals } from "./components/Terminal";
 import { terminalSpecFor } from "./lib/terminal";
 import { maxWidth } from "./lib/layout";
 import { PANE_NOS, SHAPES, show as showOf, type PaneNo, type PaneSpec, type View } from "./lib/workspace";
@@ -93,6 +93,20 @@ export default function App() {
   // is up (as PTT is), and every layout button is disabled.
   const blocked = state.approvals.length > 0;
   const view = useLayout(blocked);
+  // Under a card nothing reaches a shell (WP-D). Said from here, above the
+  // workspace's error boundary: a render error unmounts the workspace, but
+  // the terminals' sockets and paste pumps live on, and a hold driven from in
+  // there froze with it (review of PR #32). A layout effect, so the hold is on
+  // before a paste's next chunk can leave.
+  useLayoutEffect(() => terminals.setBlocked(blocked), [blocked]);
+  // A render error stopped the title bar, the shell and the orb drawing
+  // (components/Boundary.tsx): the owner sees a Reload prompt and nothing
+  // else, so nothing is heard or sent on their behalf from then on — no
+  // push-to-talk, wake word, follow-up window or dictated send (review of
+  // PR #32). The ref is what the capture hooks read; the state re-runs the
+  // wake recognizer's effect, which stops it.
+  const [crashed, setCrashed] = useState(false);
+  const crashedRef = useRef(false);
   // File panes holding an unsaved edit (FileTab's `onDirty`): such a buffer
   // is never closed behind the owner's back — "follow chat" waits, a project
   // that goes away keeps the pane pinned until the owner discards the edit,
@@ -279,7 +293,8 @@ export default function App() {
           live.current.chats[live.current.selectedChat].busy ||
           live.current.approvals.length > 0 ||
           live.current.picker !== null ||
-          chipOverlay.current,
+          chipOverlay.current ||
+          crashedRef.current,
         muted: () => isMuted(live.current.dictation),
         onLevel: (level) => dispatch({ type: "patch", patch: { level } }),
         onListening: () => {
@@ -314,6 +329,8 @@ export default function App() {
         if (n !== null) chatPatch(n, p);
         else if (p.error !== undefined) dispatch({ type: "patch", patch: { error: p.error } });
       };
+      // A crashed window uploads nothing, and sends nothing, for anyone.
+      if (crashedRef.current) return;
       const mode = live.current.dictation;
       const what = outcomeFor(mode);
       // OFF never reaches here (Capture refuses to claim while muted), but the
@@ -328,6 +345,9 @@ export default function App() {
         say({ orb: "error", status: "STT FAILED", error: e.message });
         return;
       }
+      // The window crashed while this was being transcribed: the words go
+      // nowhere — not to a chat the owner cannot see, not into a box.
+      if (crashedRef.current) return;
       if (!text.trim()) {
         say({ orb: "idle", status: "DIDN'T CATCH THAT" });
         return;
@@ -1455,6 +1475,7 @@ export default function App() {
     const SR: any = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
     if (!SR) return;
     if (isMuted(state.dictation)) return; // a muted mic stops the recognizer outright
+    if (crashed) return; // so does a window that stopped drawing
     const gate = new WakeGate();
     let recog: any = new SR();
     let dead = false;
@@ -1505,9 +1526,10 @@ export default function App() {
       delete (window as any).__hudRecog;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state.dictation]);
+  }, [state.dictation, crashed]);
 
   const onWakeHit = useCallback(() => {
+    if (crashedRef.current) return;
     if (live.current.approvals.length) return; // never talk over a pending authorization
     if (live.current.picker || chipOverlay.current) return;
     capture.onWake();
@@ -1517,6 +1539,7 @@ export default function App() {
   // ---- push to talk -------------------------------------------------------
 
   const press = useCallback(() => {
+    if (crashedRef.current) return; // nothing on screen to talk to
     if (live.current.approvals.length) return; // answer the authorization first
     if (live.current.picker || chipOverlay.current) return;
     // Push-to-talk and the orb act on the selected chat (decisions W-6): with
@@ -1540,6 +1563,16 @@ export default function App() {
   }, [capture, chatPatch, dispatch, interruptTurn]);
 
   const release = useCallback(() => capture.release(), [capture]);
+
+  // What the workspace's error boundary calls once it has caught a render
+  // error: a paste going out to a shell stops (nothing on screen could show
+  // its notice or Resume), and nothing in the microphone's hands is sent.
+  const onCrash = useCallback(() => {
+    crashedRef.current = true;
+    terminals.abortPastes();
+    capture.abandon();
+    setCrashed(true);
+  }, [capture]);
 
   useEffect(() => {
     const down = (e: KeyboardEvent) => {
@@ -2036,7 +2069,7 @@ export default function App() {
       {/* A render error in here — the title bar, the shell, the orb — shows a
           Reload prompt in their place and goes no further: the card below is
           outside it, so it stays up and answerable (components/Boundary.tsx). */}
-      <WorkspaceBoundary>
+      <WorkspaceBoundary onCrash={onCrash}>
       <TitleBar view={view} blocked={blocked} onPicker={(which) => patch({ picker: which })} />
       <div
         id="shell"
@@ -2211,6 +2244,16 @@ export default function App() {
 
       <ApprovalVeil requests={state.approvals} onDecide={decide} />
 
+      {/* A picker or dialog that throws is closed, and the window carries on
+          (components/Boundary.tsx). */}
+      <DialogBoundary
+        resetKey={`${state.picker ?? ""}|${threadModel.overlayOpen}`}
+        onCrash={() => {
+          threadModel.closeDialogs();
+          patch({ picker: null, error: "A dialog hit an error and was closed. Reload if it keeps happening." });
+        }}
+      >
+      <CrashProbe where="dialog" />
       {state.picker === "model" ? (
         <ModelPicker
           view={roster}
@@ -2365,6 +2408,7 @@ export default function App() {
           onClose={() => patch({ picker: null })}
         />
       ) : null}
+      </DialogBoundary>
     </>
   );
 }

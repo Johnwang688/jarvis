@@ -489,12 +489,21 @@ inside a state updater** (2026-10-10, review of PR #29): ⊞ and ⋯ read the
 click's `currentTarget` in `setX((m) => …)`, which React runs at render time
 whenever an update is already pending — `currentTarget` is null by then, so
 three quick clicks threw inside render and unmounted the whole window, an
-open approval card included. **And a render error can no longer take the
-card with it**: `WorkspaceBoundary` (`components/Boundary.tsx`) wraps the
-title bar, the shell and the orb and draws a plain-text Reload prompt in
-their place (it logs the error's name only), while `ApprovalVeil` sits
-beside it, outside, so the card stays up, Tab stays on it and Escape still
-denies (`_crash_checks`, driven by the test-only `__hudCrashProbe`).
+open approval card included. **A render error in the title bar, the shell
+or the orb no longer takes the card with it**: `WorkspaceBoundary`
+(`components/Boundary.tsx`) draws a plain-text Reload prompt in their place
+(it logs the error's name only, and says a reload loses unsent words and
+staged files), while `ApprovalVeil` sits beside it, outside, so the card
+stays up, Tab stays on it and Escape still denies; the veil makes the
+prompt inert whichever came first. Its `onCrash` tells App, which aborts
+every paste going out to a shell and stops the microphone (no push-to-talk,
+wake word, follow-up window or dictated send), and **the terminals' hold
+under a card is App's, above the boundary**, so it never freezes with the
+workspace (review of PR #32). A picker or dialog that throws is closed
+(`DialogBoundary`). **A throw anywhere else — App's own render, the store's
+reducer, the veil itself — still unmounts the whole window, card
+included.** (`_crash_checks` in the layout and terminal suites, driven by
+the test-only `__hudCrashProbe`.)
 
 **Several chats at once, WP-B (2026-10-09, design §18; plan §2.2 "Several
 chats at once"; decisions W-6).** Any pane may show chat, each its **own

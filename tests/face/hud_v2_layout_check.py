@@ -58,11 +58,18 @@ A render error (review of PR #29):
     unmounted the whole root, an open approval card included;
   - a workspace child that throws while a card is up (a test-only probe)
     leaves a Reload prompt in the window's place and the card on screen,
-    readable, its buttons topmost, Tab kept on it and Escape denying.
+    readable, its buttons topmost, Tab kept on it and Escape denying;
+  - (review of PR #32) the prompt is inert behind a card whichever came
+    first, and says a reload loses what was not sent; after a crash nothing
+    heard is sent — a transcript landing after it, speech in the follow-up
+    window or after a wake hit — the wake recognizer stops, and Space on
+    Reload presses Reload rather than push-to-talk; a dialog that throws is
+    closed and the window carries on.
 """
 from __future__ import annotations
 
 import json
+import threading
 import time
 
 LONG_COMMAND = "rm -rf /home/johnw/projects/scratch && " + " && ".join(
@@ -1754,6 +1761,46 @@ def _window_whole(page) -> tuple[bool, str]:
     return got[0] > 0 and got[1] and got[2] and not got[3], f"root children, titlebar, sidebar, crashed = {got}"
 
 
+def _crash(page, until) -> bool:
+    """Make a workspace child throw (the test-only probe in components/Boundary.tsx)
+    and draw the window again; true once the Reload prompt is up."""
+    page.evaluate("window.__hudCrashProbe = 'workspace'")
+    # Any store change draws the workspace again, and the probe throws.
+    page.evaluate("window.__hud.dispatch({type: 'patch', patch: {error: 'crash probe render'}})")
+    return bool(until(lambda: page.locator('[data-testid="hud-crashed"]').count() > 0, timeout=4))
+
+
+# The Reload prompt can be neither reached nor focused behind a card: inert,
+# and a scripted focus() does not take.
+RELOAD_HELD = """() => {
+  const b = document.querySelector('[data-testid="hud-crashed-reload"]');
+  if (!b) return [false, 'no Reload'];
+  const inert = !!b.closest('[inert]');
+  b.focus();
+  const took = document.activeElement === b;
+  return [inert && !took, 'inert ' + inert + ', focus took ' + took];
+}"""
+
+
+def _sends(mock) -> int:
+    """Every message the window has sent or thread it has opened to send one."""
+    return sum(1 for m, p, _ in mock.calls if m == "POST" and (p == "/threads" or p.endswith("/send")))
+
+
+def _reload_to_window(page, mock, until, act) -> bool:
+    """Do `act` (which reloads the page) and wait for the window to boot again."""
+    before = mock.sse_connections()
+    act()
+    try:
+        page.wait_for_selector('[data-testid="sidebar"]', state="attached", timeout=5000)
+    except Exception:
+        return False
+    mock.await_reconnect(before)
+    time.sleep(0.2)
+    _probe(page)
+    return True
+
+
 def _crash_checks(page, mock, check, until):
     errors: list[str] = []
     listen = lambda e: errors.append(str(e))  # noqa: E731
@@ -1773,7 +1820,7 @@ def _crash_checks(page, mock, check, until):
             check("and raise no page error", not errors, "; ".join(errors[:2]))
             state = page.evaluate(f"""() => [!!document.querySelector('[data-testid="{menu}"]'),
               document.querySelector('[data-testid="{opener}"]')?.getAttribute('aria-expanded')]""")
-            check(f"and the menu ends open (three toggles), its button saying so", state == [True, "true"], str(state))
+            check("and the menu ends open (three toggles), its button saying so", state == [True, "true"], str(state))
             page.keyboard.press("Escape")
             until(lambda: page.locator(f'[data-testid="{menu}"]').count() == 0, timeout=2)
 
@@ -1785,21 +1832,24 @@ def _crash_checks(page, mock, check, until):
         _approval(mock, "crash1", "rm -rf /home/johnw/projects/scratch")
         until(lambda: page.locator('[data-testid="approval-card"]').count() > 0, timeout=4)
         time.sleep(0.2)
-        page.evaluate("window.__hudCrashProbe = 'workspace'")
-        # Any store change draws the workspace again, and the probe throws.
-        page.evaluate("window.__hud.dispatch({type: 'patch', patch: {error: 'crash probe render'}})")
-        until(lambda: page.locator('[data-testid="hud-crashed"]').count() > 0, timeout=4)
+        _crash(page, until)
         time.sleep(0.2)
         check("a workspace render error shows the Reload prompt in place of the window",
               page.locator('[data-testid="hud-crashed"]').count() == 1
               and page.locator('[data-testid="titlebar"]').count() == 0
               and page.locator('[data-testid="hud-crashed-reload"]').inner_text().strip() == "Reload")
+        check("and warns, in words, that a reload loses what was not sent",
+              "Reloading loses anything not yet sent: words typed in a box and files staged for it."
+              in page.locator('[data-testid="hud-crashed"]').inner_text())
         check("and is caught: no page error", not errors, "; ".join(errors[:2]))
         cmd = page.locator('[data-testid="approval-command"]')
         check("the approval card is still on screen and readable, its whole command there",
               cmd.count() == 1 and "rm -rf /home/johnw/projects/scratch" in cmd.inner_text())
         ok, why = _card_on_screen(page)
         check("and its buttons are on screen and topmost (DENY clickable)", ok, why)
+        ok, why = page.evaluate(RELOAD_HELD)
+        check("card first, crash second: the Reload prompt behind the card is inert, not even script-focusable",
+              ok, why)
         page.keyboard.press("Tab")
         page.keyboard.press("Tab")
         check("and Tab stays on the card (the Reload behind it is never reached)",
@@ -1810,15 +1860,94 @@ def _crash_checks(page, mock, check, until):
         check("and Escape still denies it", bool(body) and body[-1].get("decision") == "deny",
               str(body[-1] if body else None))
         until(lambda: page.locator('[data-testid="approval-card"]').count() == 0, timeout=4)
-        before = mock.sse_connections()
-        page.locator('[data-testid="hud-crashed-reload"]').click()
-        page.wait_for_selector('[data-testid="sidebar"]', state="attached")
-        mock.await_reconnect(before)
-        time.sleep(0.2)
-        _probe(page)
+        check("once the card is answered, the Reload prompt is not inert any more",
+              page.evaluate("!document.querySelector('[data-testid=\"hud-crashed\"]').closest('[inert]')"))
+        reloaded = _reload_to_window(page, mock, until,
+                                     lambda: page.locator('[data-testid="hud-crashed-reload"]').click())
         ok, why = _window_whole(page)
-        check("and Reload brings the window back", ok, why)
+        check("and Reload brings the window back", reloaded and ok, why)
         check("with no page error throughout", not errors, "; ".join(errors[:2]))
+
+        # Crash first, card second: the veil's own pass makes the prompt inert.
+        _reset_all(page, mock, until)
+        _crash(page, until)
+        _approval(mock, "crash2")
+        until(lambda: page.locator('[data-testid="approval-card"]').count() > 0, timeout=4)
+        time.sleep(0.2)
+        ok, why = page.evaluate(RELOAD_HELD)
+        check("crash first, card second: the Reload prompt is inert behind the card too", ok, why)
+        page.keyboard.press("Escape")
+        body = until(lambda: mock.sent("POST", "/approvals/crash2") or None, timeout=4)
+        check("and Escape denies that card", bool(body) and body[-1].get("decision") == "deny",
+              str(body[-1] if body else None))
+        until(lambda: page.locator('[data-testid="approval-card"]').count() == 0, timeout=4)
+
+        # The microphone after a crash: nothing heard is sent, to a chat the
+        # owner cannot see or anywhere else. AUTO, so a transcript would send.
+        page.evaluate("localStorage.setItem('jarvis.dictation', 'auto')")
+        _reset_all(page, mock, until)
+        errors.clear()
+        check("setup: AUTO, and the wake recognizer running",
+              page.evaluate("!!window.__hudRecog")
+              and page.locator('[data-testid="dictation-auto"]').get_attribute("aria-pressed") == "true")
+        _crash(page, until)
+        stt0, sends0 = len(mock.sent("POST", "/stt")), _sends(mock)
+        page.evaluate("""() => { const m = window.__hud.mic; m.feedMs(1500, 0.001);
+          window.__hud.capture.openFollowUp(); m.feedMs(1600, 0.06); m.feedMs(2200, 0.0005);
+          window.__hud.mic.wake(); m.feedMs(1600, 0.06); m.feedMs(2200, 0.0005); }""")
+        time.sleep(0.8)
+        check("after a crash, speech in the follow-up window or after a wake hit uploads nothing",
+              len(mock.sent("POST", "/stt")) == stt0 and _sends(mock) == sends0,
+              f"{len(mock.sent('POST', '/stt')) - stt0} uploads, {_sends(mock) - sends0} sends")
+        check("and the wake recognizer is stopped", page.evaluate("!window.__hudRecog"))
+        page.locator('[data-testid="hud-crashed-reload"]').focus()
+        ptt: list[object] = []
+        reloaded = _reload_to_window(page, mock, until, lambda: ptt.append(_ptt_on_space(page)))
+        check("Space on the focused Reload starts no push-to-talk", ptt == [None], str(ptt))
+        ok, why = _window_whole(page)
+        check("it presses Reload: the window comes back", reloaded and ok, why)
+        check("with no page error", not errors, "; ".join(errors[:2]))
+
+        # A transcript still in flight when the window crashes lands nowhere.
+        _reset_all(page, mock, until)
+        mock.stt_gate = threading.Event()
+        try:
+            stt0, sends0 = len(mock.sent("POST", "/stt")), _sends(mock)
+            page.evaluate("""() => { const m = window.__hud.mic; m.feedMs(2000, 0.001);
+              window.__hud.capture.openFollowUp(); m.feedMs(1600, 0.06); m.feedMs(2200, 0.0005); }""")
+            until(lambda: len(mock.sent("POST", "/stt")) > stt0, timeout=4)
+            check("setup: an utterance is being transcribed", len(mock.sent("POST", "/stt")) > stt0)
+            _crash(page, until)
+        finally:
+            mock.stt_gate.set()
+        time.sleep(1.0)
+        check("a transcript that lands after the crash is sent nowhere (AUTO)", _sends(mock) == sends0,
+              f"{_sends(mock) - sends0} sends")
+        mock.stt_gate = None
+        page.evaluate("localStorage.removeItem('jarvis.dictation')")
+
+        # A picker or dialog that throws is closed; the window carries on.
+        _reset_all(page, mock, until)
+        errors.clear()
+        page.locator('[data-testid="open-settings"]').click()
+        until(lambda: page.locator('[data-testid="picker"]').count() > 0, timeout=3)
+        page.evaluate("window.__hudCrashProbe = 'dialog'")
+        page.evaluate("window.__hud.dispatch({type: 'patch', patch: {error: 'dialog probe render'}})")
+        until(lambda: page.locator('[data-testid="picker"]').count() == 0, timeout=3)
+        time.sleep(0.2)
+        ok, why = _window_whole(page)
+        check("a dialog that throws is closed and the window stays drawn",
+              page.locator('[data-testid="picker"]').count() == 0 and ok, why)
+        check("and says so", "dialog hit an error" in (page.evaluate(
+            "document.querySelector('[data-testid=\"error\"]')?.textContent") or ""))
+        check("and is caught: no page error", not errors, "; ".join(errors[:2]))
+        page.evaluate("delete window.__hudCrashProbe")
+        page.locator('[data-testid="open-settings"]').click()
+        until(lambda: page.locator('[data-testid="picker"]').count() > 0, timeout=3)
+        check("and the next picker opened is drawn", page.locator('[data-testid="picker"]').count() > 0)
+        page.keyboard.press("Escape")
+        until(lambda: page.locator('[data-testid="picker"]').count() == 0, timeout=2)
     finally:
         page.remove_listener("pageerror", listen)
+        mock.stt_gate = None
     _reset_all(page, mock, until)
