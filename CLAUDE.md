@@ -1231,7 +1231,10 @@ allowlisted; running it or its module through a wrapper or a runner (`python
 -Im`, `uv run --no-project`, `npx --yes`, `python -m runpy`, `uv run
 --module`; review round 2 parses each runner's options) asks too, naming it as
 an argument (`cp …/vexbuild`) does not; `vexbuild build` and plain `vexbuild`
-both build. **Every route is owner-only by the shared rule**,
+both build. **`terminal_read` (#33) can read a program terminal** as it reads
+a shell, under the same "Jarvis can read" switch and guard — for the brain
+terminal that includes the owner's typed input, which the PTY echoes back.
+**Every route is owner-only by the shared rule**,
 `projects.is_owner` (PR #41: the HUD's Origin, or on a plain GET, which
 Chromium sends with no Origin, `Sec-Fetch-Site: same-origin`), plus a strict
 loopback Host. New projects reuse the `project_folder` card:
@@ -2303,7 +2306,12 @@ jarvis/
   parsed from a table, and an option the table does not know followed both
   ways), `sh -c` strings, `eval`, `watch`, `find -exec`, `xargs`, `$(…)`,
   backticks, `<(…)`, a here-string to a shell — read with bash's quoting
-  (`'*'` is a file called `*`; a brace expansion runs its first word), and a
+  (`'*'` is a file called `*`; a brace expansion runs its first word; **a
+  here-document's body is data**, moved into its operator as a here-string
+  by `_inline_heredocs` and read as commands only where a shell is fed it —
+  review round 3 found every `git commit -m "$(cat <<'EOF'` with a `* item`
+  line, every C doc comment written with `cat > f.h <<'EOF'` and every
+  crontab line DENY), and a
   glob or an expansion there that could be `vexcom`/`vexcom.exe` by its file
   name is DENY with no threshold (`…/*/*/win32/*.exe`, `${X}com.exe`,
   `$(printf vex)com`). A program that **cannot be told** and could be vexcom —
@@ -2314,7 +2322,13 @@ jarvis/
   layer 2 under every profile. A glob past the caps (256 characters, 64 of
   `*?[`, 512 glob words a line) is **too complex to judge** the same way, and
   the whole reading is linear (`ls [[[[…` took 3.4 s at 20,000 before). Not
-  general runner unwrapping: `uv run rm -rf ~` is judged as before. It runs in `decide`, so v1's
+  general runner unwrapping: `uv run rm -rf ~` is judged as before — and an
+  allowlist entry for `uv` or `npx` covers `uv run vexbuild`, by the general
+  stem-entry rule (an entry is a yes to everything the stem runs). The
+  here-document lexer recognises an operator only where bash does — never in
+  quotes, a comment, `${…}` or arithmetic (`$((1<<2))`, `((x<<=1))`,
+  `$[…]`), and a backtick's own here-document ends at its backtick —
+  because one recognised where bash would not hides the lines after it. It runs in `decide`, so v1's
   `command_verdict` (before any approver, so neither an allowlist entry nor
   mode "all" reaches it) and v2's layer 1 (no card) refuse alike. **The
   accepted cost**: a grep or a commit message that only mentions the word is
@@ -2329,7 +2343,10 @@ jarvis/
   sweep (122,447 strings, `decide` and `static_verdict`) moved only vex shapes,
   globs in command position (bare `*.exe`, `/mcp/*`, markdown bullets read as
   commands) and runners handed an expansion as their program (`uv run $CC`);
-  the PR has the table.
+  round 3 added 38,199 real multi-line here-document commands (commit
+  messages, PR bodies, files written with `cat > f <<'EOF'`, `<<-`, Python on
+  stdin), of which none moves but for a body that names vexcom (round 1's
+  accepted cost) or a body fed to a shell; the PR has the tables.
 
   **`2>&1` is not a redirect to a file** (narrowed 2026-08-17, one round after
   the fixes above). The redirect check had become a raw scan for any unquoted

@@ -2280,7 +2280,12 @@ program position, past wrappers, as the program a runner starts (options
 parsed), in `sh -c` or `$(…)`, with no letter threshold; a program that cannot
 be told and could be vexcom is asked whatever stands, never allowlist-covered,
 always-ask in v2; a glob past the caps is too complex to judge, asked the same
-way. Like every DENY it is an
+way. A here-document's body is data, read as commands only where a shell is
+fed it (review round 3: a `* item` in a commit message or a C doc comment
+written through `cat > f <<'EOF'` had made the whole line DENY). An allowlist
+entry for `uv` or `npx` still covers `uv run vexbuild` (the general stem-entry
+rule), and `terminal_read` can read the brain terminal, the owner's echoed
+typing included, while its "Jarvis can read" switch is on. Like every DENY it is an
 accident guard, not a boundary — and the button is not one either: an agent
 running as the owner can still reach a plugged-in brain through a script, a
 shell fed through a pipe, cmd's or PowerShell's own wildcards, `make -f`, a

@@ -24,6 +24,10 @@ What matters most, each written to fail with its guard removed:
   program a runner starts (its options parsed), inside `sh -c` or `$(…)` —
   that could be vexcom is DENY; a program that cannot be told and could be
   vexcom is asked, never allowlist-covered, and always asked in v2.
+* **A here-document's body is data** (review round 3): a `* item` in a commit
+  message, a C doc comment, a crontab line is never read as a command; a
+  body fed to a shell still is, and the lexer never sees an operator where
+  bash would not (quotes, comments, `${…}`, arithmetic, backticks).
 * **A glob past the caps is too complex to judge** — asked, and judged in
   well under a second however it is built; the make file guard refuses one.
 * **`vexbuild` asks like any command** (and its module through `python -m`,
