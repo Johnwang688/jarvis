@@ -87,4 +87,29 @@ Recommended: a follow-up that gives each surface a prompt naming only the tools 
 
 ---
 
-_Answers so far: none yet._
+## Answers (2026-10-11 morning)
+
+1. **Browser:** answered item by item. See `2026-10-10-hud-browser-decisions.md`. B-4 (accounts) and B-9 (agents may drive behind a classifier) change the plan, and an amendment is being written.
+2. **BR-0:** "implement it as a small pr". It is being built.
+3. **SELF_PROTECTED for runtime.py and toolgroups.py:** "you don't have to do". Not done.
+4. **Fail closed when no tool list is bound:** "tool fails, go with your recommendation". Being built, with an opt-in for scripts.
+5. **Prompts that name tools a surface lacks:** "fix it". Being built in the same follow-up PR as 4, along with cad-bench's `skill_read`.
+
+Also answered: the daemon now **auto-starts with WSL**, as an enabled systemd user unit.
+
+---
+
+## 6. Signing in to Chrome itself, in the HUD Browser (BD-5, open)
+
+You asked: "can i login to my chrome profiles as well in my google accounts". There are two kinds of sign-in:
+
+- **Signing in to Google websites** (Gmail, YouTube, Drive, and so on) inside a Browser profile. **This works.** Each profile keeps its own logins, so "Main" can hold one Google account and "Work" another, both signed in at once. The one risk is that Google sometimes refuses sign-in from a Chrome a program is driving. Measurement M4 will show whether it does here.
+- **Signing in to Chrome itself and turning on sync.** This is the "Turn on sync" button in your normal Chrome. It would copy your saved passwords, payment cards, history and bookmarks from your Google account into the Browser that Jarvis, Claude and Codex can now click and type in.
+
+**Recommendation:** websites yes, Chrome sync no.
+- The Browser is blocked from saving passwords and filling in cards. That way an agent can never pull one out of autofill, even by accident.
+- This is enforced with a Chrome policy file, installed with one more `sudo` command when that part is built.
+
+Reply "ok 6" to keep sync off. If you do want Chrome-level sign-in in the Browser, say so, and passwords will need to come from somewhere else.
+
+**Answer to 6 (2026-10-11):** "chrome sync should be on. keep the sign ins. it's ok for the agents to click and type in stuff with autofill since I'm watching them do it in the HUD. if they try to do something dangerous #1 the classifier will most likely catch it, and #2 if the classifier fails to catch something dangerous for any reason I'm literally right there to stop it". Recorded as BD-5 = on in amendment 1 §C and in the decisions file. The password-store cost (no keyring in this WSL) is stated there.
