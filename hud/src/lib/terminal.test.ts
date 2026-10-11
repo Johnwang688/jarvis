@@ -3,7 +3,7 @@ import {
   AttachLedger, CHUNK, InputGate, InputQueue, MINE_KEPT, MINE_KEY, OUTPUT_HIGH_WATER, OutputPipe, attachUrl, chunk,
   clampSize, cleanPaste, cleanText, cleanTitle, counterZoom, encodeInput, fontSizeFor, inTerminal, inheritMine,
   integrationNote, isCtrlC, judgeLink, loadMine, pageNonce, parseControl, parseMine, parsePrefs, parseRow, parseRows,
-  parseSpec, placeTerminals, saveMine, terminalSpecFor, terminalTakesKey,
+  parseRead, parseSpec, placeTerminals, readNoteText, saveMine, terminalSpecFor, terminalTakesKey,
 } from "./terminal";
 
 const row = (over: Record<string, unknown> = {}) => ({
@@ -515,5 +515,27 @@ describe("a write that throws", () => {
     expect(() => pending.shift()!()).toThrow("xterm refused it");   // a's callback hands over boom
     await Promise.resolve();
     expect(parsed).toEqual(["after", "a", "c"]);
+  });
+});
+
+describe("Jarvis's reads (terminal_read, WP-F)", () => {
+  const ok = { terminal_id: "0a1b2c3d", lines: 200, at: "2026-10-10T15:42:00+00:00", refused: false };
+
+  it("takes exactly {terminal_id, lines, at, refused} and says what happened", () => {
+    const note = parseRead(ok)!;
+    expect(note).toEqual({ terminalId: "0a1b2c3d", lines: 200, at: ok.at, refused: false });
+    expect(readNoteText(note, "15:42")).toBe("Jarvis read 200 lines · 15:42");
+    expect(readNoteText({ ...note, lines: 1 }, "15:42")).toBe("Jarvis read 1 line · 15:42");
+    expect(readNoteText({ ...note, refused: true, lines: 0 }, "15:42")).toBe("refused a read · 15:42");
+  });
+
+  it("drops a record of the wrong shape, and never carries anything else", () => {
+    for (const bad of [null, {}, { ...ok, terminal_id: "../etc" }, { ...ok, lines: -1 }, { ...ok, lines: 2.5 },
+                       { ...ok, lines: "200" }, { ...ok, refused: "no" }, { ...ok, lines: 10 ** 9 }]) {
+      expect(parseRead(bad)).toBeNull();
+    }
+    const note = parseRead({ ...ok, output: "SECRET", command: "printenv", reason: "rule 1" })!;
+    expect(Object.keys(note).sort()).toEqual(["at", "lines", "refused", "terminalId"]);
+    expect(parseRead({ ...ok, at: "x".repeat(500) })!.at.length).toBe(64);
   });
 });
