@@ -869,7 +869,24 @@ switch not handed over, the tracker blind to C0 inside a switch, C0 aborting a
 CSI, the desk slot carried over between turns, no re-check of the switch
 after the render, a blocking env reader (the FIFO hangs), and URL passwords
 not withheld. At bd95320 the `Speed` rings took over 30 s, 12.6 s or ran out
-of a 3 GiB cap where they now take under 1 s.
+of a 3 GiB cap where they now take under 1 s. The re-review round's
+(2026-10-11; `OrdinaryReads`, `UnseenParts` and new `Speed`/`Printers`
+cases, most failing on 3393daf) — 40 of 41 mutations bite: an `--env-file`
+read as a file, interpreters judged as before, counters printing, `inspect`
+always printing, any prose word as a prompt, a loader naming a credential
+for the line, a glyph as a command word, function heads unparsed, no copy
+onto the terminal, no `file:` URLs, no archives, no environment reads, no
+compression suffix, and each fail-closed bound dropped (the cut, the whole
+line's and a prompt candidate's tails, the per-line cap, the scan, the
+runner tails, the wrappers, a span's `unseen` ignored or not recorded, the
+glob, keyword-variable and flat-form hazards), no parse budget, no dedupe,
+free hazard scans, `SCAN_LINE_CAP` out of reach, no `CANDIDATES_PER_LINE`,
+no `CANDIDATE_CAP`, no `COMMAND_CUT`, `Terminals.read` dropping the lead,
+`_worth_parsing` always true, an unbounded cache count, and five earlier
+ones re-anchored (no text fallback, input redirections, shell keywords,
+substitutions, `find -exec`). The survivor: dropping only the
+`line[:SCAN_LINE_CAP]` slice, which now costs at most ~0.5 s a read and
+nothing else (what lies past the scan is the fail-closed check's).
 
 **Preview and dev servers, WP-E (2026-10-10; plan
 `docs/plans/2026-10-09-hud-workspace-plan.md` §2.5, decisions W-4; design
