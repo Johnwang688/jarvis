@@ -111,6 +111,18 @@ describe("the input gate", () => {
     expect(g.open()).toBe(CHUNK);                        // a reattach drops the old queue too
     expect(g.next()).toBeNull();
   });
+
+  it("throws a paste away when the window stops drawing, typing not latched (review of PR #32)", () => {
+    const g = new InputGate();
+    g.open();
+    g.input(paste(CHUNK * 6));
+    g.next();
+    expect(g.abort()).toBe(CHUNK * 5);
+    expect(g.next()).toBeNull();
+    expect(g.pending).toBe(0);
+    expect(g.latched).toBe(false);
+    expect(g.connected).toBe(true);
+  });
 });
 
 describe("control messages", () => {

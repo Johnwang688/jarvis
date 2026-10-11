@@ -44,7 +44,11 @@ The checks worth keeping, each written to bite:
     HUD, and a drag selects exactly the cells under the pointer;
   - one terminal is drawn in one place: in a pane, its panel tab says so;
   - with several chat panes, `+` opens in the focused chat pane's own
-    conversation, and from any other pane in the selected chat's.
+    conversation, and from any other pane in the selected chat's;
+  - after a render error stops the window drawing (review of PR #32), a
+    paste going out stops at the crash, and a card raised after it still
+    holds every terminal: nothing reaches a shell, not even xterm's answers
+    to a program's queries.
 
 Run (after `cd hud && npm ci && npm run build`):
     PYTHONPATH=. .venv/bin/python tests/face/hud_v2_terminal_check.py
@@ -473,8 +477,8 @@ def terminal_checks(browser, mock, base, check, until, guard, init_script):
         _boot(page, mock, base, until)
         for section in (_open_checks, _typing_checks, _card_checks, _paste_checks, _reload_checks,
                         _takeover_checks, _elsewhere_checks, _exit_checks, _busy_checks, _readable_checks,
-                        _read_note_checks, _integration_checks, _osc_link_checks, _pane_checks, _zoom_checks, _ended_checks,
-                        _flood_checks, _chat_panes_checks):
+                        _read_note_checks, _integration_checks, _osc_link_checks, _pane_checks, _zoom_checks,
+                        _ended_checks, _flood_checks, _chat_panes_checks, _crash_checks):
             if only and section.__name__.strip("_") not in only:
                 continue
             try:
@@ -1433,6 +1437,52 @@ def _chat_panes_checks(page, mock, base, check, until, fake):
     _store(page, ws=None)
 
 
+def _crash_checks(page, mock, base, check, until, fake):
+    """A render error stops the window drawing (components/Boundary.tsx), but
+    the terminals live on outside React — their sockets, xterm and paste
+    pumps — and the hold for a card was driven from inside the workspace, so
+    it froze with it: a paste kept reaching the shell under a card raised
+    after the crash (review of PR #32). Now a crash ends a paste going out,
+    and the hold is App's, above the boundary."""
+    tid = _fresh(page, mock, base, until, fake)
+    big = "".join(f"{i:07d}\n" for i in range(256 * 1024))           # 2 MiB: 128 chunks
+    sock = fake.holders[tid]
+    n0 = len(sock["frames"])
+    _focus_term(page, tid)
+    _paste(page, tid, big)
+    until(lambda: len(sock["frames"]) - n0 >= 4, timeout=4)
+    page.evaluate("window.__hudCrashProbe = 'workspace'")
+    page.evaluate("window.__hud.dispatch({type: 'patch', patch: {error: 'crash probe render'}})")
+    until(lambda: page.locator('[data-testid="hud-crashed"]').count() > 0, timeout=4)
+    page.wait_for_timeout(200)                     # chunks already on their way are counted
+    at_crash = len(sock["frames"])
+    if len(b"".join(sock["frames"][n0:at_crash])) >= len(big):
+        raise AssertionError("setup: the paste finished before the crash")
+    page.wait_for_timeout(1000)
+    check("a crash mid-paste ends the paste: no chunk leaves after it (nothing could show its notice)",
+          len(sock["frames"]) == at_crash,
+          f"{at_crash - n0} chunks before the crash, {len(sock['frames']) - at_crash} after")
+    check("setup: the terminal's socket is still open behind the Reload prompt", sock["open"])
+    _approval(mock, "tcr1")
+    until(lambda: page.locator('[data-testid="approval-card"]').count() > 0, timeout=4)
+    page.wait_for_timeout(150)
+    check("a card raised after the crash holds the terminals (the hold is App's, above the boundary)",
+          page.evaluate("window.__hudTerminals.blocked && window.__hudTerminals.blocked()") is True)
+    before = len(sock["frames"])
+    fake.output(tid, b"\r\n" + QUERIES + b"after-crash-output\r\n")
+    page.wait_for_timeout(1500)
+    check("and nothing reaches the shell while it is up: not the paste, not xterm's answers to queries",
+          len(sock["frames"]) == before, repr(sock["frames"][before:][:3])[:200])
+    page.keyboard.press("Escape")
+    body = until(lambda: mock.sent("POST", "/approvals/tcr1") or None, timeout=4)
+    check("and Escape denies it", bool(body) and body[-1].get("decision") == "deny",
+          str(body[-1] if body else None))
+    until(lambda: page.locator('[data-testid="approval-card"]').count() == 0, timeout=4)
+    check("once it is answered the hold comes off",
+          page.evaluate("window.__hudTerminals.blocked && window.__hudTerminals.blocked()") is False)
+    _reset(page, mock, base, until, fake)
+
+
 def _guard_selftest(browser, mock, base, check, until, init_script):
     """The live-port guard bites on sockets too: a WebSocket to a guarded
     port never leaves the browser. Proved against a port of the test's own
@@ -1512,3 +1562,4 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
+

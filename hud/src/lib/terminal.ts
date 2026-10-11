@@ -245,6 +245,15 @@ export class InputGate {
     this.latched = false;
   }
 
+  /**
+   * The window stopped drawing (a render error, components/Boundary.tsx): the
+   * rest of a paste is thrown away, since nothing on screen could show its
+   * notice or its Resume. Typing is not latched; the socket stays.
+   */
+  abort(): number {
+    return this.q ? this.q.abort() : 0;
+  }
+
   get pending(): number {
     return this.q ? this.q.pending : 0;
   }

@@ -496,6 +496,17 @@ label.iconbtn.attach:hover { background: var(--bg-3); border-color: var(--border
 .row { display: flex; gap: 6px; align-items: center; }
 .col { display: flex; flex-direction: column; gap: 6px; }
 
+/* What a render error leaves in place of the title bar, the shell and the orb
+   (components/Boundary.tsx): a sentence and Reload. Under the card's veil and
+   any picker, so an authorization card stays on top and answerable. */
+#crashed {
+  position: fixed; inset: 0; z-index: 50; background: var(--bg-0); color: var(--text);
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 6px; padding: 16px; text-align: center;
+}
+#crashed p { margin: 0; }
+#crashed button { margin-top: 10px; }
+
 /* ---- approvals ----
    The card is the most prominent thing on screen: a dark veil, an amber top
    bar and border, a faint amber glow. DENY is red and cheap, ALWAYS amber,

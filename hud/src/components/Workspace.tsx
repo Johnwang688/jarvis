@@ -34,12 +34,13 @@ import { TerminalPane, TerminalToasts, terminals, useTerminals } from "./Termina
 
 /**
  * The terminals' view of the workspace (WP-D), handed over after each render:
- * which drawn pane shows which terminal, whether a card is up (input held),
- * the zoom (the terminal's font follows it), whether the panel is open, and
- * how to put a terminal in a pane or the panel.
+ * which drawn pane shows which terminal, the zoom (the terminal's font
+ * follows it), whether the panel is open, and how to put a terminal in a pane
+ * or the panel. Whether a card is up (input held) is App's to say, above the
+ * workspace's error boundary: a crash unmounts this, and the hold must not
+ * freeze with it (review of PR #32).
  */
-function useTerminalBridge(v: LayoutControl, blocked: boolean, place: Map<string, number>,
-                           terminalIn?: () => InSpec) {
+function useTerminalBridge(v: LayoutControl, place: Map<string, number>, terminalIn?: () => InSpec) {
   const latest = useRef({ v, terminalIn });
   latest.current = { v, terminalIn };
   useEffect(() => {
@@ -57,7 +58,6 @@ function useTerminalBridge(v: LayoutControl, blocked: boolean, place: Map<string
     void terminals.refresh();
   }, []);
   const key = [...place].map(([id, n]) => `${id}:${n}`).join(",");
-  useEffect(() => terminals.setBlocked(blocked), [blocked]);
   useEffect(() => terminals.setZoom(v.zoom), [v.zoom]);
   useEffect(() => terminals.setPanelOpen(v.fit.panel.open), [v.fit.panel.open]);
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -117,7 +117,7 @@ export function Workspace(props: {
   // One terminal is drawn in one place at a time (W-1): the first drawn pane
   // holding it, else the panel.
   const place = placeTerminals(ws.panes, fit.panes);
-  useTerminalBridge(v, props.blocked, place, props.terminalIn);
+  useTerminalBridge(v, place, props.terminalIn);
   const mgr = useTerminals();
   /** A terminal pane's header: the title its program set (text, capped), else its own. */
   const terminalContext = (spec: PaneSpec) => {
