@@ -68,6 +68,9 @@ export interface Thread {
    * wedge it. Absent from an older daemon. */
   running?: boolean;
   queued?: number;
+  /** Live, never stored (WP-H): when the running turn began (ISO), present
+   * only while `running`. The thinking line counts from it after a reload. */
+  running_since?: string | null;
 }
 
 export interface ThreadDiscord {

@@ -2215,6 +2215,32 @@ class Backend(unittest.TestCase):
         self.send_and_settle(tid)
         self.assertEqual(fakes[P.CODEX].changes, [], "same model, same effort: nothing to switch")
 
+    def test_a_running_thread_says_since_when_and_only_while_it_runs(self):
+        """WP-H, H-b: every thread record carries `running_since` (ISO) while
+        a turn runs, so a reloaded HUD's thinking line counts the true elapsed
+        time — and none once the turn is over, nor before it began."""
+        fakes = self.model_fakes()
+        tid = self.chat()["id"]
+        record = lambda: next(t for t in self.request("GET", "/threads") if t["id"] == tid)
+        self.assertNotIn("running_since", record(), "a thread with no turn says no start")
+        fakes[P.FAST].hold = threading.Event()
+        before = datetime.now(timezone.utc).replace(microsecond=0)
+        self.request("POST", f"/threads/{tid}/send", {"text": "long"}, status=202)
+        eventually(fakes[P.FAST].entered.is_set)
+        running = record()
+        self.assertTrue(running["running"])
+        since = datetime.fromisoformat(running["running_since"])
+        self.assertTrue(before <= since <= datetime.now(timezone.utc), running["running_since"])
+        fakes[P.FAST].hold.set()
+        eventually(lambda: self.daemon._sessions[tid].worker is None)
+        fakes[P.FAST].hold = None
+        done = record()
+        self.assertFalse(done["running"])
+        self.assertNotIn("running_since", done, "set while running, absent after")
+        self.assertIsNone(self.daemon._sessions[tid].running_since)
+        stored = json.loads((config.V2_DATA_DIR / "threads" / tid / "thread.json").read_text())
+        self.assertNotIn("running_since", stored, "live, never stored")
+
     def test_patch_mid_turn_lands_on_the_next_turn(self):
         fakes = self.model_fakes()
         self.request("POST", "/models", {"add": "test/thinker"})

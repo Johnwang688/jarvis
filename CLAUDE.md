@@ -792,6 +792,56 @@ section's `_edit` now types until the pane's Save is enabled: it used to type
 into an editor not yet showing the file, and four "unsaved edit" checks failed
 under load.
 
+**The thinking line, WP-H (2026-10-10; plan
+`docs/plans/2026-10-10-hud-split-panes-plan.md` §4, decisions S-4; design
+§18; contract in `docs/hud-api.md`).** While a chat's turn runs, its foot —
+`[data-testid=thinking]`, right after the log's scroller and before the ticker,
+**outside `[data-testid=log]`** — reads mini orb · word · elapsed (`12s`,
+`3m 07s`, `1h 02m`). The word is a pure precedence table (`lib/thinking.ts`
+`thinkingLine`): "Error" (an `error` in the running turn) · "Ended on an error"
+(static, no time, until the next turn or send) · "Waiting for approval" (an
+approval with this `thread_id`) · "Waiting for your answer" (`needs_input`,
+no approval) · "Running <tool>…" (an unfinished call **this turn** made in this
+pane, name cleaned and capped at 40) · "Thinking…". **The turn is keyed by
+thread, window-wide** (`State.turns`, H-1): `turn_started`, `error`,
+`turn_finished` (`stop`, `next`), this window's sends (a steer leaves the
+running turn's time alone; a failed send takes back only the entry it made)
+and the activity records feed it, so it follows its thread across trades of
+conversations, Discord-started turns and reloads. **Only a change of a
+thread's activity counts, and "working" reaches the line only through the
+entry it makes**: the record that turns a thread idle follows its
+`turn_finished`, so a view still saying "working" must never outlive a finish
+already heard. Into working/needs_input with no entry (or an ended one) is a
+turn noticed late, timed from the record's **`running_since`** (H-b — the
+daemon's live, never-stored field, present only while `running`) else from now
+and corrected when the records arrive; into failed makes it ended; into
+idle/unread deletes it — never one a send in flight made, never an ended one.
+**A running turn no pane tracks is adopted** (H-3) by the drawn chat pane
+showing it when that pane waits on nothing, so Stop and Enter-to-steer return
+after a reload — only with a live entry *and* "working", so a pane a finish
+just freed is never adopted back; the 15 s reconcile undoes a wrong one.
+**The mini orb is an 18px inline SVG, never a canvas** (`components/MiniOrb.tsx`,
+H-2): CSS `transform` keyframes only, no requestAnimationFrame, `aria-hidden`;
+the word is the `role="status"`, the time is not; reduced motion stops every
+animation and leaves colour, word and time. **The palette is one module both
+orbs import** (`lib/orbpalette.ts`; a grep test refuses a second `palette()`,
+`ACCENTABLE` or amber/red hue in any source): the avatar's accent recolours
+"Thinking…" only, and an accent that is not `r,g,b` is ignored. The times
+share **one 1 s clock** that runs only while a drawn line shows one, and only
+those spans redraw on a tick — never the window or a transcript; each pane's
+line is handed to the memoized `ChatTab` as the same object while it says the
+same thing. The line is in flow, no z-index, no button or link,
+`pointer-events: none`, inert under a card, and never says Authorize, Approve or
+Deny. The input bar's status words stay (the suites read them; removing the
+duplicate is a follow-up), and **the input bar re-measures its box's cap when
+the line comes and goes** (`footLine`), or a long draft held at the
+conversation's minimum would let the line take the log below it. Free checks:
+`thinking.test.ts`, `orbpalette.test.ts`, the `turns` cases in
+`store.test.ts`, `hud_backend_check`'s `running_since` case, and the
+`_thinking_*` sections of `tests/face/hud_v2_multichat_check.py` (the mock's
+`thread_running(tid, since)` sets `running`/`running_since`), every mutation
+named in the plan's table shown to bite in a scratch copy.
+
 **Sidebar status dots (2026-10-08, design §18; contract in
 `docs/hud-api.md`).** The `·` left of each sidebar thread and task is what it
 is doing: idle `·`, working (pulsing ring, sweeping row), needs input

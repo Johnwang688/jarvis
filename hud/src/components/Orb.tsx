@@ -20,6 +20,7 @@
 import { useEffect, useRef } from "react";
 import type { OrbState } from "../state/store";
 import { DICTATION_MODES, nextMode, type DictationMode } from "../lib/dictation";
+import { palette } from "../lib/orbpalette";
 
 interface Ring {
   r: number;
@@ -47,31 +48,9 @@ export const RING_SETS: Record<string, Ring[]> = {
   triangles: [{ r: 1.008, poly: 3, copies: 2, w: 1.6, speed: 0.04, alpha: 0.45 }, ...INNER_RINGS],
 };
 
-// The avatar's accent recolours the cyan family only. Amber (tool, pending
-// authorization) and red (error) are *meanings*, not decoration — an avatar
-// that could repaint them could make a running command look idle.
-const ACCENTABLE = new Set(["idle", "listening", "transcribing", "thinking", "composing", "speaking"]);
-
-function palette(state: OrbState, accent?: string | null) {
-  const p = (() => {
-    switch (state) {
-      // Graphite: the cool states are the glacier accent (111,195,223) and its
-      // lighter step (154,214,234). Idle is a little dimmer and slower, so the
-      // orb is present without glowing at you all session.
-      case "listening": return { hue: "154,214,234", boost: 1.35, spin: 1.6 };
-      case "transcribing": return { hue: "154,214,234", boost: 1.2, spin: 2.2 };
-      case "thinking": return { hue: "111,195,223", boost: 1.15, spin: 3.4 };
-      case "composing": return { hue: "125,205,200", boost: 1.3, spin: 1.8 };
-      case "tool": return { hue: "251,191,36", boost: 1.2, spin: 3.4 };
-      case "approval": return { hue: "251,191,36", boost: 1.5, spin: 0.35 };
-      case "speaking": return { hue: "154,214,234", boost: 1.5, spin: 1.2 };
-      case "error": return { hue: "248,113,113", boost: 1.3, spin: 0.6 };
-      default: return { hue: "111,195,223", boost: 0.85, spin: 0.8 };
-    }
-  })();
-  if (accent && ACCENTABLE.has(state)) p.hue = accent;
-  return p;
-}
+// The state palette — and the rule that the avatar's accent recolours the
+// cyan family only, never amber (a tool, an authorization) or red (an error)
+// — is lib/orbpalette.ts, shared with each chat's mini orb (WP-H).
 
 const SIZE = 132;
 

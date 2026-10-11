@@ -1022,3 +1022,20 @@ What the HUD does with the terminal contract above (code in
   in a new window with `noopener`; there is no clipboard addon (no OSC 52)
   and window reports stay off. "Open in Preview" for loopback links is
   WP-E's.
+
+## Additions 2026-10-10 (the thinking line — WP-H)
+
+- Every thread record (`GET /threads`, `POST /threads`, `thread_updated`)
+  carries live, never-stored `"running_since": "<ISO 8601>"` — when the
+  running turn began (the moment its worker was started; a queued message
+  that runs as the next turn starts a new one) — **present only while
+  `"running": true`**, absent otherwise and from an older daemon. The HUD's
+  thinking line counts from it when it notices a turn late (a reload, a turn
+  started from Discord before any pane showed the thread); with none it
+  counts from when it noticed. It is a display hint only: nothing waits on
+  it, and `running` stays what the HUD reconciles its busy state against.
+- Nothing else changed on the wire. The line is drawn from events the HUD
+  already receives: `turn_started`, `tool_started`/`tool_finished`, `error`,
+  `turn_finished` (`stop`, `next`), `approval_requested`/`approval_resolved`
+  (by `thread_id`) and the `activity` records (`working`, `needs_input`,
+  `failed`, `unread`, `idle`).

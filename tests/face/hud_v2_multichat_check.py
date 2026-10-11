@@ -57,6 +57,19 @@ recently clicked, as it is when the input is delivered; a click on a Preview
 or File pane does not change it; a selected pane the window drops falls back
 to the one selected before it; one chat pane is selected; with none drawn
 nothing is sent; and input that belongs to a thread stays with it.
+
+The thinking line (WP-H, decisions S-4), the `_thinking_*` sections: a mini
+orb, a word and the elapsed time at the foot of whichever chat pane shows a
+running turn — and nothing in the others; each row of the precedence table as
+its event arrives (a tool in amber, an approval for that thread with the card
+still topmost, a question, an error in red and the static ended line the next
+send clears); a turn started from Discord before its thread was opened
+(kills a line driven only by the pane's busy flag); adoption, and a reload
+timed from `running_since`; reduced motion (kills reduced motion ignored); no
+canvas and no animation-frame loop of their own in a grid of lines, one clock
+for them all; the log's text unchanged with the line up (kills the line inside
+the log); the avatar's accent on "Thinking…" only; and the input bar's cap
+measured again when the line comes.
 """
 from __future__ import annotations
 
@@ -108,7 +121,11 @@ def multichat_checks(browser, mock, base, check, until, guard, init_script):
                         _w6_grid_checks, _w6_fallback_checks, _w6_one_and_none_checks, _w6_handback_held_checks,
                         # re-review of PR #27 (feb61ff)
                         _rr_compose_fail_moved_checks, _rr_two_cards_checks, _rr_tab_never_authorizes_checks,
-                        _rr_placeholder_stop_checks, _rr_chip_writeback_checks, _rr_drop_checks):
+                        _rr_placeholder_stop_checks, _rr_chip_writeback_checks, _rr_drop_checks,
+                        # the thinking line (WP-H)
+                        _thinking_pane_checks, _thinking_discord_checks, _thinking_adopt_checks,
+                        _thinking_motion_checks, _thinking_many_checks, _thinking_log_checks,
+                        _thinking_accent_checks, _thinking_box_cap_checks):
             try:
                 section(page, mock, check, until)
             except Exception as e:  # a section that cannot run is a failure, and the rest still run
@@ -1598,6 +1615,412 @@ def _rr_drop_checks(page, mock, check, until):
           bool(until(lambda: [f["name"] for f in _chat(page, 1)["files"]] == ["for-t1.txt"], timeout=2)),
           str([f["name"] for f in _chat(page, 1)["files"]]))
     _unstage(page, 1)
+
+
+# ---------------------------------------------------------------------------
+# The thinking line (WP-H, decisions S-4; plan §4): a mini orb, a word and the
+# elapsed time at the foot of each chat while its turn runs. Each check that
+# names a mutation was shown failing with it applied in a scratch copy.
+
+AMBER_RGB = "rgb(251, 191, 36)"
+RED_RGB = "rgb(248, 113, 113)"
+HOOT_RGB = "rgb(168, 85, 247)"
+
+LINE_JS = """(n) => {
+  const p = document.querySelector(`[data-testid="pane-${n}"]`);
+  const el = p && p.querySelector('[data-testid="thinking"]');
+  if (!el) return null;
+  const w = el.querySelector('[data-testid="thinking-word"]');
+  const t = el.querySelector('[data-testid="thinking-time"]');
+  const orb = el.querySelector('[data-testid="miniorb"]');
+  const part = (sel) => { const x = orb && orb.querySelector(sel); return x ? getComputedStyle(x) : null; };
+  const outer = part('.mo-outer'), inner = part('.mo-inner'), core = part('.mo-core');
+  const cs = getComputedStyle(el);
+  return {
+    word: w ? w.textContent : null, time: t ? t.textContent : null, kind: el.getAttribute('data-word'),
+    orb: el.getAttribute('data-orb'), stroke: outer ? outer.stroke : null, coreFill: core ? core.fill : null,
+    anims: [outer, inner, core].map((c) => c ? c.animationName : null),
+    still: orb ? orb.classList.contains('still') : null, inLog: !!el.closest('[data-testid="log"]'),
+    afterLog: !!(el.previousElementSibling && el.previousElementSibling.matches('[data-testid="log"]')),
+    beforeOps: !!(el.nextElementSibling && el.nextElementSibling.matches('[data-testid="ops"]')),
+    canvas: el.querySelectorAll('canvas').length, svg: el.querySelectorAll('svg').length,
+    role: w ? w.getAttribute('role') : null, timeRole: t ? t.getAttribute('role') : null,
+    ariaHidden: orb ? orb.getAttribute('aria-hidden') : null,
+    levers: el.querySelectorAll('button, a, input, select, textarea, [tabindex], [onclick]').length,
+    position: cs.position, z: cs.zIndex, wordColor: w ? getComputedStyle(w).color : null,
+    visible: el.getClientRects().length > 0,
+  };
+}"""
+
+
+def _line(page, n: int):
+    return page.evaluate(LINE_JS, n)
+
+
+def _secs(text) -> int:
+    """'12s', '3m 07s', '1h 02m' as seconds; -1 for no time."""
+    if not text:
+        return -1
+    m = re.fullmatch(r"(?:(\d+)h )?(?:(\d+)m )?(\d+)s|(\d+)h (\d+)m", text.strip())
+    if not m:
+        return -1
+    if m.group(4):
+        return int(m.group(4)) * 3600 + int(m.group(5)) * 60
+    return int(m.group(1) or 0) * 3600 + int(m.group(2) or 0) * 60 + int(m.group(3))
+
+
+def _clock(page) -> dict:
+    return page.evaluate("window.__hud.thinkingClock()")
+
+
+def _seed_thinking(mock):
+    """A fourth chat thread (t4), for a grid of lines."""
+    w = mock.world
+    if not any(t["id"] == "t4" for t in w["threads"]):
+        base = next(t for t in w["threads"] if t["id"] == "t1")
+        w["threads"].append({**base, "id": "t4", "title": "fourth chat", "updated": "2026-09-12T00:00:00+00:00",
+                             "model": None})
+        w["transcripts"]["t4"] = [{"role": "user", "text": "fourth thread question",
+                                   "at": "2026-09-12T00:00:00+00:00"}]
+
+
+def _idle_all(page, mock, until, tids=("t1", "t2", "t3", "t4")):
+    """End every turn the section left running, here and in the mock's world
+    (a start first, so an ended error is cleared too)."""
+    for tid in tids:
+        mock.emit("turn_started", {}, thread_id=tid)
+        mock.emit("turn_finished", {"stop": "end"}, thread_id=tid)
+        if mock.world["activity"]["threads"].get(tid):
+            mock.activity("thread", tid, "idle")
+        mock.thread_running(tid, None)
+    until(lambda: not page.evaluate("Object.keys(window.__hud.state().turns).length"), timeout=3)
+
+
+def _thinking_pane_checks(page, mock, check, until):
+    """A turn in pane 2: the line there, nothing in pane 1, and each row of the
+    precedence table as the events arrive."""
+    _seed_thinking(mock)
+    _fresh(page, mock, until, TWO)
+    _open(page, until, 1, "t1")
+    _open(page, until, 2, "t2")
+    check("thinking: no line in either pane while nothing runs", _line(page, 1) is None and _line(page, 2) is None)
+    check("thinking: and the one clock does not run", _clock(page)["running"] is False, str(_clock(page)))
+
+    mock.emit("turn_started", {}, thread_id="t2")
+    until(lambda: _line(page, 2) is not None, timeout=3)
+    first = _line(page, 2)
+    check("thinking: a turn in pane 2 shows the mini orb and 'Thinking…' there",
+          first["word"] == "Thinking…" and first["svg"] == 1 and first["kind"] == "thinking", str(first))
+    check("thinking: and nothing in pane 1", _line(page, 1) is None, str(_line(page, 1)))
+    check("thinking: under the transcript — after the log's scroller, before the ticker, outside the log",
+          first["afterLog"] and first["beforeOps"] and not first["inLog"], str(first))
+    t0 = _secs(first["time"])
+    time.sleep(2.2)
+    t1 = _secs(_line(page, 2)["time"])
+    check("thinking: with a time that ticks", 0 <= t0 < t1, f"{first['time']!r} → {_line(page, 2)['time']!r}")
+    check("thinking: one clock, ticking for the one drawn line",
+          _clock(page) == {"subscribers": 1, "running": True}, str(_clock(page)))
+    check("thinking: the orb is aria-hidden, the word is the status and the time is not",
+          first["ariaHidden"] == "true" and first["role"] == "status" and first["timeRole"] is None, str(first))
+    check("thinking: in the pane's flow, nothing to press — no position, no z-index, no button or link",
+          first["levers"] == 0 and first["position"] == "static" and first["z"] == "auto", str(first))
+
+    mock.emit("tool_started", {"call_id": "th1", "name": "ls"}, thread_id="t2")
+    until(lambda: (_line(page, 2) or {}).get("kind") == "tool", timeout=3)
+    tool = _line(page, 2)
+    check("thinking: tool_started gives 'Running ls…'", tool["word"] == "Running ls…", str(tool))
+    check("thinking: with a computed stroke of rgb(251,191,36)", tool["stroke"] == AMBER_RGB, str(tool["stroke"]))
+    check("thinking: and the word in amber too", tool["wordColor"] == AMBER_RGB, str(tool["wordColor"]))
+    check("thinking: and the time keeps counting from the turn's start, not the tool's",
+          _secs(tool["time"]) >= t1, f"{tool['time']!r}")
+
+    mock.emit("approval_requested", {
+        "req_id": "think-ap1", "code": "TH01", "tool": "run_command", "args": {"command": "ls"}, "command": "ls",
+        "reason": "asks", "layer": "human", "origin": "chat: second chat", "thread_id": "t2", "allowlistable": True,
+        "timeout_s": 120,
+    })
+    until(lambda: page.locator('[data-testid="approval-card"]').count() == 1, timeout=3)
+    until(lambda: (_line(page, 2) or {}).get("kind") == "approval", timeout=3)
+    ap = _line(page, 2)
+    check("thinking: an approval for that thread gives 'Waiting for approval' (ahead of the tool)",
+          ap["word"] == "Waiting for approval" and ap["stroke"] == AMBER_RGB, str(ap))
+    check("thinking: and pane 1, another thread, is not waiting", _line(page, 1) is None)
+    top = page.evaluate("""() => Array.from(document.querySelectorAll('[data-testid="approval-card"] button')).map((b) => {
+        const r = b.getBoundingClientRect();
+        const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+        return !!hit && (hit === b || b.contains(hit));
+      })""")
+    check("thinking: and the card's buttons are topmost", bool(top) and all(top), str(top))
+    check("thinking: the line never says Authorize, Approve or Deny",
+          not re.search(r"authori[sz]e|approve|deny", ap["word"], re.I))
+    page.locator('[data-testid="approval-deny"]').click()
+    until(lambda: page.locator('[data-testid="approval-card"]').count() == 0, timeout=3)
+    until(lambda: (_line(page, 2) or {}).get("kind") == "tool", timeout=3)
+    check("thinking: the card answered, the line goes back to the tool", _line(page, 2)["word"] == "Running ls…")
+    mock.emit("tool_finished", {"call_id": "th1", "name": "ls", "ok": True}, thread_id="t2")
+    until(lambda: (_line(page, 2) or {}).get("kind") == "thinking", timeout=3)
+
+    mock.activity("thread", "t2", "needs_input")
+    until(lambda: (_line(page, 2) or {}).get("kind") == "answer", timeout=3)
+    q = _line(page, 2)
+    check("thinking: needs_input with no approval gives 'Waiting for your answer'",
+          q["word"] == "Waiting for your answer" and q["stroke"] == AMBER_RGB, str(q))
+    mock.activity("thread", "t2", "working")
+    until(lambda: (_line(page, 2) or {}).get("kind") == "thinking", timeout=3)
+
+    mock.emit("error", {"message": "two is cooling", "fatal": False}, thread_id="t2")
+    until(lambda: (_line(page, 2) or {}).get("kind") == "error", timeout=3)
+    err = _line(page, 2)
+    check("thinking: error turns it red", err["word"] == "Error" and err["stroke"] == RED_RGB
+          and err["wordColor"] == RED_RGB and not err["still"], str(err))
+    mock.emit("turn_finished", {"stop": "error"}, thread_id="t2")
+    until(lambda: _chat(page, 2)["busy"] is False, timeout=3)
+    mock.activity("thread", "t2", "failed")
+    time.sleep(0.3)
+    ended = _line(page, 2)
+    check("thinking: turn_finished{stop: 'error'} leaves the static red line",
+          bool(ended) and ended["word"] == "Ended on an error" and ended["stroke"] == RED_RGB and ended["still"]
+          and ended["time"] is None and ended["anims"] == ["none", "none", "none"], str(ended))
+    page.evaluate("window.__hud.dispatch({type: 'patch', patch: {error: ''}})")
+    box2 = _box(page, 2)
+    box2.click()
+    box2.fill("try again")
+    box2.press("Enter")
+    until(lambda: (_line(page, 2) or {}).get("kind") == "thinking", timeout=3)
+    again = _line(page, 2)
+    check("thinking: the next send clears it", again["word"] == "Thinking…" and again["stroke"] != RED_RGB, str(again))
+    mock.emit("turn_started", {}, thread_id="t2")
+    mock.emit("turn_finished", {"stop": "end"}, thread_id="t2")
+    mock.activity("thread", "t2", "idle")
+    until(lambda: _line(page, 2) is None, timeout=3)
+    check("thinking: and a turn that ends well leaves no line", _line(page, 2) is None)
+    until(lambda: _clock(page)["running"] is False, timeout=3)
+    check("thinking: with no line drawn the clock stops", _clock(page)["running"] is False, str(_clock(page)))
+
+
+def _thinking_discord_checks(page, mock, check, until):
+    """A turn started from Discord — before any pane showed the thread, and in
+    a thread a pane shows. Kills: a line driven only by the pane's busy flag."""
+    _fresh(page, mock, until, TWO)
+    _open(page, until, 1, "t1")
+    _open(page, until, 2, "t2")
+    mock.emit("user_message", {"text": "from my phone", "typed": "from my phone", "via": "discord"},
+              thread_id="t3", project_id="p2")
+    mock.emit("turn_started", {}, thread_id="t3")
+    until(lambda: "t3" in page.evaluate("window.__hud.state().turns"), timeout=3)
+    check("thinking: a Discord turn in a thread no pane shows draws nothing yet",
+          _line(page, 1) is None and _line(page, 2) is None)
+    time.sleep(1.3)
+    _open(page, until, 2, "t3", "p2")
+    until(lambda: _line(page, 2) is not None, timeout=3)
+    line = _line(page, 2)
+    c2 = _chat(page, 2)
+    check("thinking: a Discord-started turn (user_message via discord, then turn_started) shows when its thread "
+          "is opened, timed from its start — with the pane not busy",
+          bool(line) and line["word"] == "Thinking…" and _secs(line["time"]) >= 1 and c2["busy"] is False,
+          f"{line} busy={c2['busy']}")
+    mock.emit("user_message", {"text": "and another", "typed": "and another", "via": "discord"},
+              thread_id="t1", project_id="p1")
+    mock.emit("turn_started", {}, thread_id="t1")
+    until(lambda: _line(page, 1) is not None, timeout=3)
+    check("thinking: and one in a thread pane 1 shows draws there at once", _line(page, 1)["word"] == "Thinking…")
+    mock.emit("turn_finished", {"stop": "end"}, thread_id="t1")
+    until(lambda: _line(page, 1) is None, timeout=3)
+    check("thinking: its finish takes it away", _line(page, 1) is None and _line(page, 2) is not None)
+
+
+def _thinking_adopt_checks(page, mock, check, until):
+    """A running turn no pane tracks is adopted (H-3): Stop comes back. And
+    after a reload the line counts from the thread record's running_since (H-b)."""
+    stop2 = page.locator(_pane(2, '[data-testid="stop"]'))
+    check("setup: pane 2 shows t3's Discord turn without tracking it, so it has no Stop",
+          _chat(page, 2)["threadId"] == "t3" and stop2.count() == 0 and _line(page, 2) is not None)
+    mock.activity("thread", "t3", "working")
+    until(lambda: _chat(page, 2)["busy"], timeout=3)
+    c2 = _chat(page, 2)
+    check("thinking: the daemon calling it working, the pane showing it adopts the turn: busy, tracking it, Stop",
+          c2["busy"] and c2["turnThreadId"] == "t3" and bool(until(lambda: stop2.count() == 1, timeout=2)), str(c2))
+    i3 = len(mock.sent("POST", "/threads/t3/interrupt"))
+    stop2.click()
+    until(lambda: len(mock.sent("POST", "/threads/t3/interrupt")) > i3, timeout=3)
+    check("thinking: and that Stop interrupts it", len(mock.sent("POST", "/threads/t3/interrupt")) == i3 + 1)
+
+    # A reload while it runs: the activity snapshot says working, the record when it began.
+    mock.thread_running("t3", time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(time.time() - 95)))
+    _fresh(page, mock, until, TWO)
+    _open(page, until, 1, "t1")
+    _open(page, until, 2, "t3", "p2")
+    until(lambda: _line(page, 2) is not None, timeout=3)
+    line = _line(page, 2)
+    check("thinking: reopening a working thread after a reload shows the line, timed from running_since (H-b)",
+          line["word"] == "Thinking…" and 94 <= _secs(line["time"]) <= 110, str(line))
+    check("thinking: and Stop (adoption)", bool(until(lambda: stop2.count() == 1, timeout=3))
+          and _chat(page, 2)["turnThreadId"] == "t3")
+    check("thinking: a pane showing another thread adopts nothing", _chat(page, 1)["busy"] is False
+          and _line(page, 1) is None)
+    mock.emit("turn_finished", {"stop": "interrupted"}, thread_id="t3")
+    until(lambda: _chat(page, 2)["busy"] is False, timeout=3)
+    time.sleep(0.3)
+    check("thinking: a finish heard before the idle record is never adopted back (the entry went with it)",
+          _chat(page, 2)["busy"] is False and stop2.count() == 0 and _line(page, 2) is None,
+          f"{_chat(page, 2)['busy']} {_line(page, 2)}")
+    _idle_all(page, mock, until)
+
+
+def _thinking_motion_checks(page, mock, check, until):
+    """Reduced motion: nothing turns or flexes, the word and the time still
+    say it. Kills: reduced motion ignored."""
+    _fresh(page, mock, until, TWO)
+    _open(page, until, 1, "t1")
+    mock.emit("turn_started", {}, thread_id="t1")
+    until(lambda: _line(page, 1) is not None, timeout=3)
+    moving = _line(page, 1)
+    check("setup: the orb's rings turn and its core flexes",
+          moving["anims"] == ["mo-spin", "mo-spin", "mo-flex"], str(moving["anims"]))
+    try:
+        page.emulate_media(reduced_motion="reduce")
+        time.sleep(0.2)
+        still = _line(page, 1)
+        check("thinking: under emulate_media(reduced_motion='reduce') the computed animation-name is none",
+              still["anims"] == ["none", "none", "none"], str(still["anims"]))
+        check("thinking: and the word still shows", still["word"] == "Thinking…" and still["visible"], str(still))
+        a = _secs(still["time"])
+        time.sleep(1.2)
+        check("thinking: and the time still counts", _secs(_line(page, 1)["time"]) > a)
+    finally:
+        page.emulate_media(reduced_motion="no-preference")
+    time.sleep(0.2)
+    check("thinking: motion back when it is allowed", _line(page, 1)["anims"] == ["mo-spin", "mo-spin", "mo-flex"])
+    _idle_all(page, mock, until)
+
+
+def _thinking_many_checks(page, mock, check, until):
+    """Every chat pane at once, a line in each: no canvas in any line, and no
+    animation frame loop of its own (CSS on the compositor). Eight once the
+    workspace has eight panes (WP-G1); four until then."""
+    _seed_thinking(mock)
+    count = len(page.evaluate("window.__hud.state().chats"))
+    preset = {4: "grid4", 8: "grid8"}.get(count, "grid4")
+    ws = json.dumps({"preset": preset, "focused": 1, "panes": [{"view": "chat"}] * count})
+    _fresh(page, mock, until, ws, size=(1920, 1080))
+    tids = ["t1", "t2", "t3", "t4"][:count]
+    for n, tid in enumerate(tids, 1):
+        _open(page, until, n, tid, "p2" if tid == "t3" else "p1")
+    raf = """() => new Promise((done) => {
+        const real = window.requestAnimationFrame; let calls = 0;
+        window.requestAnimationFrame = (cb) => { calls++; return real.call(window, cb); };
+        setTimeout(() => { window.requestAnimationFrame = real; done(calls); }, 1000);
+      })"""
+    canvases = page.locator("canvas").count()
+    before = page.evaluate(raf)
+    for tid in tids:
+        mock.emit("turn_started", {}, thread_id=tid)
+    mock.emit("tool_started", {"call_id": "many1", "name": "pytest"}, thread_id=tids[-1])
+    until(lambda: all(_line(page, n) is not None for n in range(1, len(tids) + 1)), timeout=4)
+    lines = [_line(page, n) for n in range(1, len(tids) + 1)]
+    check(f"thinking: {len(lines)} lines at once, one in every chat pane",
+          all(l and l["visible"] for l in lines) and lines[-1]["word"] == "Running pytest…",
+          str([l and l["word"] for l in lines]))
+    check("thinking: no canvas in any line", all(l["canvas"] == 0 and l["svg"] == 1 for l in lines),
+          str([(l["canvas"], l["svg"]) for l in lines]))
+    check("thinking: and no canvas added anywhere by them", page.locator("canvas").count() == canvases,
+          f"{canvases} → {page.locator('canvas').count()}")
+    during = page.evaluate(raf)
+    check("thinking: and no animation-frame loop of their own (the big orb's alone)",
+          during <= before * 1.25 + 5, f"{before} frames/s before, {during} with {len(lines)} lines")
+    check("thinking: one clock for them all", _clock(page) == {"subscribers": len(lines), "running": True},
+          str(_clock(page)))
+    _choose(page, until, "single")
+    until(lambda: _clock(page)["subscribers"] == 1, timeout=3)
+    check("thinking: a pane the layout hides stops ticking (only drawn lines keep the clock)",
+          _clock(page) == {"subscribers": 1, "running": True}, str(_clock(page)))
+    _idle_all(page, mock, until)
+
+
+def _thinking_log_checks(page, mock, check, until):
+    """The single layout's log says exactly what it said before the line came
+    up. Kills: the line inside the log."""
+    _fresh(page, mock, until, SINGLE)
+    _open(page, until, 1, "t1")
+    before = page.locator(_pane(1, '[data-testid="log"]')).inner_text()
+    mock.emit("turn_started", {}, thread_id="t1")
+    until(lambda: _line(page, 1) is not None, timeout=3)
+    after = page.locator(_pane(1, '[data-testid="log"]')).inner_text()
+    check("thinking: the single layout's [data-testid=log] text is identical with the line up",
+          before == after and "Thinking" not in after, f"{before!r} vs {after!r}")
+    check("thinking: and the line is no part of the log",
+          page.locator('[data-testid="log"] [data-testid="thinking"]').count() == 0)
+    _idle_all(page, mock, until)
+
+
+def _thinking_accent_checks(page, mock, check, until):
+    """An avatar's accent recolours 'Thinking…' and never amber or red."""
+    _fresh(page, mock, until, TWO)
+    _open(page, until, 1, "t1")
+    _open(page, until, 2, "t2")
+    try:
+        mock.world["avatars"]["active"] = "hoot"
+        mock.emit("avatar", {})
+        until(lambda: (page.evaluate("window.__hud.state().avatar") or {}).get("slug") == "hoot", timeout=3)
+        mock.emit("turn_started", {}, thread_id="t1")
+        mock.emit("turn_started", {}, thread_id="t2")
+        mock.emit("tool_started", {"call_id": "acc1", "name": "ls"}, thread_id="t2")
+        until(lambda: (_line(page, 2) or {}).get("kind") == "tool" and _line(page, 1) is not None, timeout=3)
+        think, tool = _line(page, 1), _line(page, 2)
+        check("thinking: the avatar accent recolours 'Thinking…'",
+              think["stroke"] == HOOT_RGB and think["coreFill"] == HOOT_RGB, str(think["stroke"]))
+        check("thinking: and only it: a tool line stays amber", tool["stroke"] == AMBER_RGB, str(tool["stroke"]))
+        mock.emit("error", {"message": "boom", "fatal": False}, thread_id="t2")
+        until(lambda: (_line(page, 2) or {}).get("kind") == "error", timeout=3)
+        check("thinking: and an error stays red", _line(page, 2)["stroke"] == RED_RGB, str(_line(page, 2)["stroke"]))
+        check("thinking: the word 'Thinking…' is not painted with the accent (it stays sparing)",
+              think["wordColor"] != HOOT_RGB, str(think["wordColor"]))
+    finally:
+        mock.world["avatars"]["active"] = ""
+        mock.emit("avatar", {})
+    page.evaluate("window.__hud.dispatch({type: 'patch', patch: {error: ''}})")
+    _idle_all(page, mock, until)
+
+def _thinking_box_cap_checks(page, mock, check, until):
+    """The line is one more fixed part above the input bar: a long draft held
+    at the conversation's minimum (PR #29's cap) is measured again when it
+    comes, so the line never takes the log below that minimum. Kills: the
+    input bar not refitting when the line comes and goes."""
+    from tests.face.hud_v2_declutter_check import (
+        FORTY_LINES, MIN_LOG_PX, MIN_LOG_SHARE, SHARE, SINGLE as D_SINGLE, _box_parts, _fresh as d_fresh,
+    )
+    z = 1.6
+    ws = json.loads(D_SINGLE)
+    ws["panel"] = {"open": True, "height": 120}
+    d_fresh(page, mock, until, json.dumps(ws), size=(1920, 700), zoom="160")
+    _open(page, until, 1, "t1")
+    box = _box(page, 1)
+    box.click()
+    box.fill(FORTY_LINES)
+    time.sleep(0.3)
+
+    def log_ok(where: str):
+        p = _box_parts(page, 1)
+        pane, log, b = p["pane"]["h"], (p["log"]["h"] if p["log"] else 0), p["box"]["h"]
+        min_log = max(MIN_LOG_PX * z, MIN_LOG_SHARE * pane)
+        return p, log >= min_log - 1, f"{where}: pane {pane:.0f} log {log:.0f} (min {min_log:.0f}) box {b:.0f}"
+
+    p, ok, detail = log_ok("no line")
+    check("setup: the min-log term holds the box, and the log is at its minimum",
+          ok and p["box"]["h"] < SHARE * p["pane"]["h"] - 2 and p["scrolls"], detail)
+    # A line that comes without the pane turning busy (a question open on the
+    # thread): no Stop appears to narrow the box and refit it by the way.
+    mock.activity("thread", "t1", "needs_input")
+    until(lambda: _line(page, 1) is not None, timeout=3)
+    time.sleep(0.3)
+    p, ok, detail = log_ok("line up")
+    check("setup: the line came with no Stop (nothing else changed the input bar)",
+          page.locator(_pane(1, '[data-testid="stop"]')).count() == 0 and _chat(page, 1)["busy"] is False)
+    check("thinking: with the line up the box is capped again, and the log keeps its minimum", ok, detail)
+    mock.activity("thread", "t1", "idle")
+    until(lambda: _line(page, 1) is None, timeout=3)
+    box.fill("")
+
 
 # ---------------------------------------------------------------------------
 

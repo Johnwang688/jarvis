@@ -2096,6 +2096,53 @@ fit and selection. The headless suite plays the PTY inside the browser
 (`route_web_socket`), so no shell ever runs, and the live-port guard now
 refuses WebSockets too. "Open in Preview" for a dev server's link is WP-E.
 
+**A thinking line at the foot of each chat (2026-10-10, WP-H of
+`docs/plans/2026-10-10-hud-split-panes-plan.md`, §4; decisions S-4).** The
+owner asked for Claude Code's animated logo in each chat: while a chat's turn
+runs, its foot — right after the transcript's scroller, before the ticker and
+the input bar — reads mini orb · word · elapsed time: "Thinking…", "Running
+<tool>…" (one cleaned line, capped at 40), "Waiting for approval", "Waiting
+for your answer", "Error", or the static "Ended on an error" that stays until
+the next turn or send. The precedence is a pure table (`lib/thinking.ts`):
+an error in the turn, the ended error, an approval for this thread, a
+question, a tool call this turn runs, the turn itself. Times read `12s`,
+`3m 07s`, `1h 02m`.
+
+- **The turn is keyed by thread, window-wide** (`State.turns`, H-1), fed by
+  the turn events *and* the activity records, so the line follows its thread
+  across a trade of conversations, a turn started from Discord before any
+  pane showed it, and a reload. Only a *change* of a thread's activity
+  counts (the daemon publishes on change, and the record that turns a thread
+  idle follows its `turn_finished`, so a view still saying "working" must not
+  revive a turn whose finish was heard). "Working" reaches the line through
+  the entry it makes, never directly.
+- **A running turn no pane tracks is adopted** (H-3) by the drawn chat pane
+  showing it, if that pane waits on nothing: Stop and Enter-to-steer come back
+  after a reload or a Discord-started turn. Only for a live entry, so a pane a
+  finish just freed is never adopted back before the idle record arrives; the
+  15 s reconcile undoes a wrong one.
+- **The daemon says since when** (H-b): every thread record carries
+  `running_since` (ISO) while `running`, never stored, so a reloaded line
+  counts the true elapsed time.
+- **The mini orb is an 18px inline SVG, not a canvas** (H-2): a 24-tick ring
+  and a two-arc ring turning opposite ways and a flexing core, all CSS
+  `transform` keyframes the compositor runs — no requestAnimationFrame, so a
+  pane full of them costs the main thread nothing. Its colour is the big orb's
+  palette, now one module (`lib/orbpalette.ts`) both orbs import: the avatar's
+  accent recolours "Thinking…", never amber (a tool, an approval) or red (an
+  error). `aria-hidden`; the word is the `role="status"`, the time is not.
+  Reduced motion stops every animation and leaves the colour, the word and the
+  ticking time. The times share one 1 s clock that runs only while a drawn line
+  shows one, and only those spans redraw on a tick.
+- **The card stays the loudest thing on screen.** The line is in the pane's
+  flow — no position, no z-index, no button or link, `pointer-events: none` —
+  inert under a card like everything else, and it never says Authorize,
+  Approve or Deny. It is outside `[data-testid=log]`, so the log says the
+  conversation and nothing else. The input bar's own status words are left as
+  they are (the suites read them); removing the duplicate is a follow-up. The
+  input bar re-measures its box's cap when the line comes and goes, so a long
+  draft held at the conversation's minimum (PR #29) is not pushed below it.
+
 Remaining: WP13 (the long-bench comparison, the owner's call on cost), a
 native Windows worker, the R8 hook on Codex, and prompt tuning in
 `roles.py` (§17's over-planning note). The daemon started by hand for the
