@@ -19,81 +19,6 @@ export type Monaco = typeof MonacoNS;
 let loading: Promise<Monaco> | null = null;
 let loaded: Monaco | null = null;
 
-// ---- colours --------------------------------------------------------------
-
-/**
- * The editor's colours until ED-3's Graphite scheme replaces them
- * (decisions E-4: no syntax colour may be amber or red). ED-1 is what first
- * tokenizes anything, so vs-dark's token colours finally show — and several
- * of them are exactly what E-4 rules out: strings and attribute values in
- * #ce9178 (salmon), `invalid` and `string.sql` in red, `annotation` and
- * `metatag` in red. Those, and only those, are moved onto the sibling hues the
- * plan's scheme uses (§2.5); everything else stays vs-dark's until ED-3.
- */
-export const INTERIM_RULES: { token: string; foreground?: string; fontStyle?: string }[] = [
-  { token: "string", foreground: "a6c79b" },
-  { token: "string.sql", foreground: "a6c79b" },
-  { token: "string.value.json", foreground: "a6c79b" },
-  { token: "attribute.value", foreground: "a6c79b" },
-  { token: "meta.tag", foreground: "a6c79b" },
-  { token: "keyword.json", foreground: "b9aade" },
-  { token: "metatag", foreground: "8ec5d6" },
-  { token: "annotation", foreground: "a8b5c2" },
-  { token: "invalid", foreground: "e2dfd7" },
-];
-
-/**
- * Graphite chrome. vs-dark's own was drawn for #1e1e1e, so it sits naturally
- * on the pane colour; what moves is the chrome, and — now that ED-1 loads find,
- * bracket-pair colours and the unicode highlighter — every chrome colour Monaco
- * defaults to orange, gold or amber (find matches, the first bracket pair,
- * the unicode border, warnings). Amber is the HUD's "waiting on you" and red
- * its error; the editor may not borrow either.
- */
-export const CHROME: Record<string, string> = {
-  "editor.background": "#1a1a19",
-  "editorGutter.background": "#1a1a19",
-  "editorLineNumber.foreground": "#88847b",
-  "editorLineNumber.activeForeground": "#b4b0a8",
-  "editor.lineHighlightBackground": "#222221",
-  "editor.lineHighlightBorder": "#00000000",
-  "editor.selectionBackground": "#6fc3df40",
-  "editor.inactiveSelectionBackground": "#6fc3df22",
-  "editorCursor.foreground": "#9ad6ea",
-  "editorIndentGuide.background1": "#2c2c2a",
-  "editorIndentGuide.activeBackground1": "#46453f",
-  "editorWidget.background": "#222221",
-  "editorWidget.border": "#46453f",
-  "scrollbarSlider.background": "#ffffff14",
-  "scrollbarSlider.hoverBackground": "#ffffff22",
-  "scrollbarSlider.activeBackground": "#ffffff30",
-  // Find: Monaco's other-match colour is orange.
-  "editor.findMatchBackground": "#6fc3df59",
-  "editor.findMatchBorder": "#6fc3df",
-  "editor.findMatchHighlightBackground": "#6fc3df26",
-  "editorOverviewRuler.findMatchForeground": "#6fc3df99",
-  // Bracket pairs: Monaco's first colour is gold, which reads as amber, and
-  // an unmatched bracket is red.
-  "editorBracketHighlight.foreground1": "#8ec5d6",
-  "editorBracketHighlight.foreground2": "#b9aade",
-  "editorBracketHighlight.foreground3": "#a8b5c2",
-  "editorBracketHighlight.unexpectedBracket.foreground": "#e2dfd7",
-  "editorBracketMatch.border": "#98948b",
-  // The unicode highlighter's box is amber-ish by default.
-  "editorUnicodeHighlight.border": "#b9aade",
-  // Nothing raises a warning today (no language service); should anything,
-  // it is never painted amber.
-  "editorWarning.foreground": "#b4b0a8",
-  "editorOverviewRuler.warningForeground": "#b4b0a8",
-  // Red here means "removed", the universal diff convention; the low alpha
-  // keeps it from reading as an error.
-  "diffEditor.insertedTextBackground": "#6dd08f26",
-  "diffEditor.removedTextBackground": "#f8717126",
-  "diffEditor.insertedLineBackground": "#6dd08f12",
-  "diffEditor.removedLineBackground": "#f8717112",
-  "diffEditor.diagonalFill": "#2c2c2a",
-};
-
 // ---- languages and links --------------------------------------------------
 
 function registerExtras(monaco: Monaco) {
@@ -175,7 +100,7 @@ const JSON_MONARCH = {
 export function loadMonaco(): Promise<Monaco> {
   if (!loading) {
     loading = (async () => {
-      const [{ monaco }, EditorWorker] = await Promise.all([
+      const [{ monaco, applyGraphite }, EditorWorker] = await Promise.all([
         import("./monacoBundle"),
         import("monaco-editor/editor/editor.worker?worker"),
       ]);
@@ -187,12 +112,10 @@ export function loadMonaco(): Promise<Monaco> {
           return new (EditorWorker.default as any)();
         },
       };
-      monaco.editor.defineTheme("jarvis", {
-        base: "vs-dark",
-        inherit: true,
-        rules: INTERIM_RULES,
-        colors: CHROME,
-      });
+      // The Graphite editor scheme (ED-3): the theme "jarvis", built from the
+      // HUD's tokens on :root, and C, C++ and Python's tokenizers refined so
+      // its rows show under Monarch (lib/editorTheme.ts, lib/monarchRefine.ts).
+      applyGraphite();
       registerExtras(monaco as unknown as Monaco);
       // Push-to-talk owns Ctrl+D (PR #40); Monaco's next-match moves.
       monaco.editor.addKeybindingRules(editorKeyRules(monaco as unknown as MonacoKeys));
