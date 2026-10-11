@@ -298,7 +298,7 @@ export function keyStep(
 
 export type Shortcut =
   | "zoomIn" | "zoomOut" | "zoomReset" | "toggleLeft" | "toggleRight" | "togglePanel"
-  | "focus1" | "focus2" | "focus3" | "focus4";
+  | "focus1" | "focus2" | "focus3" | "focus4" | "focus5" | "focus6" | "focus7" | "focus8";
 
 /**
  * Ctrl+= / Ctrl+- / Ctrl+0 zoom (with the numpad and shifted spellings), Ctrl+B
@@ -310,10 +310,12 @@ export type Shortcut =
  * The workspace's keys (2026-10-09). Ctrl+` shows or hides the bottom panel
  * (VS Code's key). It takes no Alt, because AltGr+7 *is* a backtick on French
  * layouts; where the backtick is a dead key `key` reads "Dead", so there, and
- * only there, the physical key (`code` Backquote) is accepted. Ctrl+Alt+1 … 4
- * focus a pane: AltGr+digit types `{[]}` on European layouts, which reports
- * the symbol and not the digit, so it never fires mid-word. There is no cycle
- * key, because every bracket is a character on some AltGr layout.
+ * only there, the physical key (`code` Backquote) is accepted. Ctrl+Alt+1 … 8
+ * focus the pane in that slot (WP-G1; plan G-10): AltGr+digit types `{[]}`
+ * on European layouts, which reports the symbol and not the digit, so it
+ * never fires mid-word. There is no cycle key, because every bracket is a
+ * character on some AltGr layout, and no key for split or close: Ctrl+W and
+ * Ctrl+F4 are Chrome's, and Ctrl+\ is SIGQUIT in a terminal.
  */
 export function shortcutFor(e: {
   key: string; code?: string; ctrlKey: boolean; metaKey?: boolean; altKey: boolean; shiftKey?: boolean;
@@ -325,7 +327,7 @@ export function shortcutFor(e: {
     return e.altKey ? "toggleRight" : "toggleLeft";
   }
   if (e.altKey) {
-    if (!e.shiftKey && (k === "1" || k === "2" || k === "3" || k === "4")) return `focus${k}` as Shortcut;
+    if (!e.shiftKey && k.length === 1 && k >= "1" && k <= "8") return `focus${k}` as Shortcut;
     return null;
   }
   if (k === "`" || (k === "Dead" && e.code === "Backquote")) return e.shiftKey ? null : "togglePanel";
