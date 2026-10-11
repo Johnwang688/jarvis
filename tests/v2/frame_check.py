@@ -158,7 +158,10 @@ class Base(unittest.TestCase):
                                 AVATAR_ENV="",
                                 DISCORD_GUILD_PATH=self.root / "guild.json",
                                 DISCORD_TOKEN_PATH=self.root / "discord_token.json",
-                                TERMINAL_SHELL=str(FAKE_SHELL)).items():
+                                TERMINAL_SHELL=str(FAKE_SHELL),
+                                # Never the owner's installed HUD (C-1, ED-4).
+                                HUD_DIR=self.root / "hud-installed", HUD_DIST=self.root / "hud-installed",
+                                HUD_DEV=False).items():
             guard = patch.object(config, name, value)
             guard.start()
             self.addCleanup(guard.stop)
@@ -231,11 +234,16 @@ class Base(unittest.TestCase):
         self.seen.append((listener, method, path, status))
         return status, got, content
 
-    def assert_hardened(self, got, what):
+    def assert_hardened(self, got, what, own=None):
+        """One CSP header, and it is the whole HUD policy (ED-4) with the frame
+        rule (WP-E) — narrowed only where the response states its own
+        directives (`own`: the avatar's) — plus `X-Frame-Options: DENY`."""
         csp = [v for n, v in got if n.lower() == CSP.lower()]
         xfo = [v for n, v in got if n.lower() == XFO.lower()]
         self.assertEqual(len(csp), 1, f"{what}: exactly one CSP header, got {csp}")
-        self.assertIn("frame-ancestors 'none'", csp[0], what)
+        self.assertEqual(csp[0], H.content_security_policy(own), what)
+        self.assertTrue(csp[0].endswith("; frame-ancestors 'none'"), what)
+        self.assertEqual(csp[0].count("frame-ancestors"), 1, what)
         self.assertEqual(xfo, ["DENY"], f"{what}: X-Frame-Options")
 
     def assert_workshop(self, got, what):
@@ -330,7 +338,8 @@ class FrameHeaders(Base):
                     status, got, _ = self.ask(listener, method, path, body,
                                               read_body=not path.startswith("/events"))
                     statuses.add(status)
-                    self.assert_hardened(got, f"{listener} {method} {path} -> {status}")
+                    own = H.AVATAR_CSP if path.split("?")[0] == "/avatar.svg" and status == 200 else None
+                    self.assert_hardened(got, f"{listener} {method} {path} -> {status}", own)
         # The walk really spans successes, refusals and errors.
         for status in (200, 201, 400, 403, 404, 409):
             self.assertIn(status, statuses, f"the walk never produced a {status}")
@@ -393,7 +402,7 @@ class FrameHeaders(Base):
         (dist / "assets").mkdir(parents=True)
         (dist / "index.html").write_text("<!doctype html><title>J.A.R.V.I.S.</title>")
         (dist / "assets" / "app.js").write_text("console.log('HUD')")
-        with patch.object(H, "HUD_DIST", dist):
+        with patch.object(config, "HUD_DIST", dist), patch.object(config, "HUD_DEV", True):
             for listener in ("hud", "api"):
                 for path in ("/", "/assets/app.js"):
                     with self.subTest(listener=listener, path=path):
@@ -402,18 +411,98 @@ class FrameHeaders(Base):
                         self.assertTrue(content)
                         self.assert_hardened(got, f"{listener} {path}")
 
+    def test_the_installed_hud_and_its_assets_carry_the_policy(self):
+        # C-1: what the owner's daemon serves is an installed build. The page,
+        # a script, a worker and a `.wasm` (a worker takes its policy from its
+        # own response, so the policy must ride on every asset), on both
+        # listeners; and the "not installed" page too.
+        from jarvis.v2 import hud_install
+        root = self.root / "hud-installed"
+        for listener in ("hud", "api"):
+            status, got, content = self.ask(listener, "GET", "/")
+            self.assertEqual(status, 503, content)
+            self.assertIn(b"jarvis hud install", content)
+            self.assert_hardened(got, f"{listener} not installed")
+        dist = self.root / "built"
+        (dist / "assets").mkdir(parents=True)
+        (dist / "index.html").write_text("<!doctype html><title>J.A.R.V.I.S.</title>")
+        (dist / "assets" / "app-1a2b.js").write_text("console.log('HUD')")
+        (dist / "assets" / "editor.worker-3c4d.js").write_text("self.onmessage = () => {}")
+        (dist / "assets" / "grammar-5e6f.wasm").write_bytes(b"\0asm\1\0\0\0")
+        hud_install.install(dist, root)
+        for listener in ("hud", "api"):
+            for path, mime in (("/", "text/html"), ("/assets/app-1a2b.js", "javascript"),
+                               ("/assets/editor.worker-3c4d.js", "javascript"),
+                               ("/assets/grammar-5e6f.wasm", "application/wasm"),
+                               ("/status", "application/json")):
+                with self.subTest(listener=listener, path=path):
+                    status, got, content = self.ask(listener, "GET", path)
+                    self.assertEqual(status, 200, content)
+                    self.assertIn(mime, dict(got)["Content-Type"])
+                    self.assert_hardened(got, f"{listener} installed {path}")
+            status, got, _ = self.ask(listener, "GET", "/assets/absent.js")
+            self.assertEqual(status, 404)
+            self.assert_hardened(got, f"{listener} absent asset")
+
     def test_a_response_with_its_own_policy_keeps_both_halves_in_one_header(self):
         # The avatar's SVG locks itself down further; the frame rule rides in
         # the same header (two policies would both apply, but one builder
         # keeps the next change from dropping the frame rule).
         status, got, content = self.ask("hud", "GET", "/avatar.svg")
         self.assertEqual(status, 200, content)
-        self.assert_hardened(got, "avatar.svg")
+        self.assert_hardened(got, "avatar.svg", H.AVATAR_CSP)
         csp = next(v for n, v in got if n == CSP)
-        self.assertIn("default-src 'none'", csp)
-        self.assertIn("style-src 'unsafe-inline'", csp)
-        self.assertEqual(H.content_security_policy(), "frame-ancestors 'none'")
-        self.assertEqual(H.content_security_policy("img-src 'self'"), "img-src 'self'; frame-ancestors 'none'")
+        # Exactly the lockdown the avatar had before the HUD had a policy, plus
+        # the HUD's base-uri/form-action: no script, no fetch of any kind.
+        self.assertEqual(csp, "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; "
+                              "form-action 'none'; frame-ancestors 'none'")
+
+    def test_the_policy_says_what_the_plan_says(self):
+        # Editor plan §2.7, read directive by directive, so a change to the
+        # policy is a change to this test too.
+        policy = H.content_security_policy()
+        directives = [d.split() for d in policy.split("; ")]
+        names = [d[0] for d in directives]
+        self.assertEqual(len(names), len(set(names)), "no directive twice")
+        got = {d[0]: d[1:] for d in directives}
+        self.assertEqual(got["default-src"], ["'none'"])
+        self.assertEqual(got["script-src"], ["'self'"], "no inline, no eval, no wasm until ED-5")
+        self.assertEqual(got["worker-src"], ["'self'"])
+        self.assertEqual(got["connect-src"], ["'self'"])
+        self.assertEqual(got["style-src"], ["'self'", "'unsafe-inline'"])
+        self.assertEqual(got["img-src"], ["'self'", "data:"])
+        self.assertEqual(got["font-src"], ["'self'", "data:"])
+        self.assertEqual(got["media-src"], ["'self'"])
+        self.assertEqual(got["frame-src"], ["http://localhost:*", "http://*.localhost:*", "http://127.0.0.1:*",
+                                            "http://0.0.0.0:*"])
+        for name in ("base-uri", "form-action", "object-src", "frame-ancestors"):
+            self.assertEqual(got[name], ["'none'"], name)
+        self.assertEqual(names[-1], "frame-ancestors")
+        for word in ("'unsafe-eval'", "'wasm-unsafe-eval'", "'unsafe-hashes'", "blob:", " * ", "https:"):
+            self.assertNotIn(word, f" {policy} ", word)
+
+    def test_a_response_may_only_narrow_the_policy(self):
+        base = H.content_security_policy()
+        self.assertEqual(H.content_security_policy("img-src 'self'"),
+                         base.replace("img-src 'self' data:", "img-src 'self'"))
+        self.assertEqual(H.content_security_policy("SCRIPT-SRC 'SELF'"), base, "keywords fold case")
+        self.assertEqual(H.content_security_policy("script-src 'none'"),
+                         base.replace("script-src 'self'", "script-src 'none'"))
+        self.assertEqual(H.content_security_policy("connect-src 'none'; img-src 'none'"),
+                         base.replace("connect-src 'self'", "connect-src 'none'")
+                             .replace("img-src 'self' data:", "img-src 'none'"))
+        for loosening in ("script-src 'self' 'unsafe-eval'", "script-src 'self' 'unsafe-inline'",
+                          "script-src 'self' 'wasm-unsafe-eval'", "script-src *", "script-src https:",
+                          "connect-src https://example.com", "connect-src ws:", "img-src 'self' blob:",
+                          "img-src *", "default-src 'self'", "frame-src *", "frame-src http://example.com",
+                          "worker-src blob:", "base-uri 'self'", "form-action 'self'", "object-src 'self'",
+                          "manifest-src 'self'", "script-src-elem 'self'", "upgrade-insecure-requests",
+                          "require-trusted-types-for 'script'", "img-src 'self'; img-src data:",
+                          "img-src 'none' 'self'", "script-src"):
+            with self.subTest(loosening=loosening), self.assertRaises(ValueError):
+                H.content_security_policy(loosening)
+            with self.subTest(loosening=loosening, where="binary"), self.assertRaises(ValueError):
+                H.binary(SimpleNamespace(server=SimpleNamespace()), b"x", "text/plain", csp=loosening)
 
     def test_a_response_cannot_change_the_frame_rule_through_its_own_directives(self):
         # PR #31 review, shown in Chromium: a comma starts a second policy, so

@@ -192,14 +192,28 @@ def _git_internal(resolved: Path) -> bool:
 # the owner's next reload runs with the power to approve a card. Keyed on the
 # resolved directory (a symlink into it does not launder a write), read per
 # call so a test can repoint it. Not a widening of SELF_PROTECTED: the HUD's
-# *source* stays writable, and `npm run build` through an approved command
-# still writes the build.
+# *source* stays writable. Since C-1 (ED-4) `config.HUD_DIST` is the install
+# root `config.HUD_DIR`, so this one check covers every installed build and a
+# build planted beside them; `jarvis hud install` (the owner's or the lead's
+# CLI, never a tool) is what writes it.
+def _hud_roots() -> set[Path]:
+    """Every folder the HUD is or could be served from, resolved: the install
+    root `config.HUD_DIR` always — even in a process started with
+    JARVIS_HUD_DEV=1, whose tools would otherwise leave it writable (review of
+    PR #44, L4) — and `config.HUD_DIST`, which is `hud/dist` under that flag.
+    The one definition the write tools, v2's grants and `protected_state`'s
+    shell check share. Raises OSError/RuntimeError when a root cannot be
+    resolved; callers refuse then."""
+    return {Path(config.HUD_DIR).expanduser().resolve(),
+            Path(config.HUD_DIST).expanduser().resolve()}
+
+
 def _hud_build(resolved: Path) -> bool:
     try:
-        dist = config.HUD_DIST.expanduser().resolve()
+        roots = _hud_roots()
     except (OSError, RuntimeError):
         return True  # cannot tell: refuse
-    return resolved == dist or dist in resolved.parents
+    return any(resolved == root or root in resolved.parents for root in roots)
 
 
 def _self_protected(target: Path) -> bool:
@@ -228,7 +242,7 @@ def _protect_refusal(target: Path) -> str:
         return (
             f"Error: {target.name} is in the built HUD the daemon serves, whose script "
             "can approve what the owner is asked. Change the HUD's source under "
-            "hud/src instead; the owner rebuilds it."
+            "hud/src instead; the owner installs it with `jarvis hud install`."
         )
     return (
         f"Error: {target.name} is part of Jarvis's safety layer and can "

@@ -363,15 +363,18 @@ def control_port_landing_checks() -> None:
 # owner-only route, with whatever Origin the browser sends.
 STAND_IN_HUD = b"""<!doctype html><html><head><title>J.A.R.V.I.S.</title></head><body>
 <div role="dialog"><p>git push origin main</p>
-<button id="auth" onclick="approve()">AUTHORIZE</button><button>DENY</button></div>
-<script>
-async function approve() {
+<button id="auth">AUTHORIZE</button><button>DENY</button></div>
+<script src="/assets/stand-in.js"></script></body></html>"""
+# Its script is an asset, not inline: the HUD's CSP (ED-4) blocks inline
+# script, and a stand-in whose AUTHORIZE could never run would make "the card
+# was not approved" true for the wrong reason.
+STAND_IN_JS = b"""document.getElementById('auth').addEventListener('click', async () => {
   const pending = await (await fetch('/approvals')).json();
   for (const r of pending)
     await fetch('/approvals/' + r.req_id, {method: 'POST',
       headers: {'Content-Type': 'application/json'}, body: JSON.stringify({decision: 'allow'})});
-}
-</script></body></html>"""
+});
+"""
 
 
 def _pumped_url(session: Session) -> str:
@@ -461,25 +464,28 @@ def late_landing_checks() -> None:
     """
     import tempfile
 
-    from jarvis.v2 import hud_api
 
     huds = [("stand-in card", None)]
-    if (hud_api.HUD_DIST / "index.html").is_file():
-        huds.append(("the built HUD", hud_api.HUD_DIST))
+    if (config.HUD_BUILD / "index.html").is_file():
+        huds.append(("the built HUD", config.HUD_BUILD))
     real_ports = (config.FACE_PORT, config.DAEMON_PORT)
-    real_dist = hud_api.HUD_DIST
+    # Served as the headless suites serve it (JARVIS_HUD_DEV=1): straight from
+    # a dist folder, never from the owner's installed build.
+    real_dist = (config.HUD_DIST, config.HUD_DEV)
     for label, dist in huds:
         with tempfile.TemporaryDirectory(prefix="br0-late-") as tmp:
             tmp = Path(tmp)
+            config.HUD_DIST, config.HUD_DEV = dist, True
             if dist is None:
-                (tmp / "dist").mkdir()
+                (tmp / "dist" / "assets").mkdir(parents=True)
                 (tmp / "dist" / "index.html").write_bytes(STAND_IN_HUD)
-                hud_api.HUD_DIST = tmp / "dist"
+                (tmp / "dist" / "assets" / "stand-in.js").write_bytes(STAND_IN_JS)
+                config.HUD_DIST = tmp / "dist"
             try:
                 daemon, answer = _daemon_with_a_card(tmp)
             except BaseException:
                 _restore_config()
-                hud_api.HUD_DIST = real_dist
+                config.HUD_DIST, config.HUD_DEV = real_dist
                 raise
             config.FACE_PORT, config.DAEMON_PORT = daemon.face_port, daemon.port
             hud = f"http://localhost:{daemon.face_port}/"
@@ -554,7 +560,7 @@ def late_landing_checks() -> None:
                 assert answer == [] and len(daemon.approvals.pending()) == 1, answer
             finally:
                 config.FACE_PORT, config.DAEMON_PORT = real_ports
-                hud_api.HUD_DIST = real_dist
+                config.HUD_DIST, config.HUD_DEV = real_dist
                 session.stop(trace_name="policy-check-late")
                 attacker.shutdown()
                 attacker.server_close()

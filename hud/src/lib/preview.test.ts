@@ -23,6 +23,19 @@ describe("preview URL policy", () => {
     }
   });
 
+  it("refuses a loopback host the HUD's CSP cannot frame, with the spelling that works (ED-4)", () => {
+    for (const bad of ["http://[::1]:5173/", "http://127.0.0.2:5173/app?x=1", "http://127.1.2.3:3000/"]) {
+      const v = judgePreviewUrl(bad, PORTS);
+      expect(v.ok).toBe(false);
+      expect(v.reason).toMatch(/frames only localhost/);
+      expect(v.reason).toMatch(/http:\/\/localhost:\d+\//);
+    }
+    for (const good of ["http://localhost:5173/", "http://127.0.0.1:5173/", "http://app.localhost:5173/",
+                        "http://0.0.0.0:5173/", "https://localhost:5173/"]) {
+      expect(judgePreviewUrl(good, PORTS).ok).toBe(true);
+    }
+  });
+
   it("refuses the daemon's API listener too (WP-E), default and reported", () => {
     for (const bad of ["http://127.0.0.1:8405/", "http://localhost:8405/status"]) {
       const v = judgePreviewUrl(bad);

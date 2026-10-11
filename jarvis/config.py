@@ -266,13 +266,28 @@ CHAT_PROVIDER = os.environ.get("JARVIS_CHAT_PROVIDER", "")
 WORKSHOP_PORT = int(os.environ.get("JARVIS_WORKSHOP_PORT", "8403"))
 DESIGNS_DIR = Path(os.environ.get("JARVIS_DESIGNS", REPO_ROOT / "designs"))
 
-# The built HUD the v2 daemon serves on its HUD listener (`hud_api.HUD_DIST`).
-# Its script runs with the HUD's own Origin there, which is exactly what
-# `POST /approvals` trusts — so a file written into it is a program the
-# owner's next reload runs with the power to approve. The write tools refuse
-# it, v1's and v2's alike (BR-0); `npm run build` through an approved command
-# still writes it.
-HUD_DIST = REPO_ROOT / "hud" / "dist"
+# The HUD the v2 daemon serves on its HUD listener. Its script runs with the
+# HUD's own Origin there, which is exactly what `POST /approvals` trusts — so
+# a file written into it is a program the owner's next reload runs with the
+# power to approve. The write tools refuse it, v1's and v2's alike (BR-0).
+#
+# Decision C-1 (editor plan §2.7, ED-4): what is served is an **installed
+# copy**, never the repo's agent-writable `hud/dist`. `jarvis hud install`
+# (a human/lead CLI step, never a tool) builds `hud/` and copies the output
+# into `HUD_DIR/<build-id>/` with a SHA-256 manifest (`v2/hud_install.py`),
+# and the daemon serves the newest build there. `HUD_DIST` is that install
+# root, so BR-0's one write check (`files._hud_build`, `permissions.
+# denied_grant`) covers every installed build and any build planted beside
+# them. Only `JARVIS_HUD_DEV=1` (the headless suites, never the owner's
+# daemon) serves `hud/dist` directly, and then `HUD_DIST` is that folder,
+# so the same check covers what is served either way. A shell command can
+# still write either place — the accepted shell gap of 2026-10-08.
+HUD_BUILD = REPO_ROOT / "hud" / "dist"      # what `npm run build` writes
+HUD_DIR = Path(
+    os.environ.get("JARVIS_HUD_DIR") or Path.home() / ".local" / "share" / "jarvis" / "hud"
+).expanduser()
+HUD_DEV = os.environ.get("JARVIS_HUD_DEV", "") == "1"
+HUD_DIST = HUD_BUILD if HUD_DEV else HUD_DIR
 
 # The persistent dangerous-tool allowlist (see permissions.py). Machine-local
 # safety config, so it lives beside the Google token, not in the repo.
