@@ -936,8 +936,10 @@ export class TermManager {
   panelOpen = false;
   ledger = new AttachLedger();
   prefs = loadPrefs();
-  /** Which drawn pane shows which terminal (lib/terminal.ts, placeTerminals). */
+  /** Which drawn pane shows which terminal (lib/terminal.ts, placeTerminals): pane ids. */
   place = new Map<string, number>();
+  /** Each pane id's slot, the number the owner reads ("in pane 2"): ids are not slots (WP-G1). */
+  private slots = new Map<number, number>();
   /** Exited while nobody could see it: the dot on ⬓. */
   private unseenExits = new Set<string>();
   private noticeSeq = 0;
@@ -1107,6 +1109,18 @@ export class TermManager {
       void this.refresh();
     }
     this.changed();
+  }
+
+  setSlots(slots: Map<number, number>) {
+    const same = slots.size === this.slots.size && [...slots].every(([k, v]) => this.slots.get(k) === v);
+    if (same) return;
+    this.slots = slots;
+    this.changed();
+  }
+
+  /** The slot pane `pane` (an id) is drawn in: what "in pane N" says. */
+  slotOf(pane: number): number {
+    return this.slots.get(pane) ?? pane;
   }
 
   setPlace(place: Map<string, number>) {
@@ -1654,7 +1668,7 @@ export function TerminalPane(props: { pane: PaneNo; terminalId: string | null; d
     if (at && at !== props.pane) {
       return (
         <div className="tabbody pad muted" data-testid={`pane-${props.pane}-terminal-elsewhere`}>
-          This terminal is shown in pane {at}.{" "}
+          This terminal is shown in pane {mgr.slotOf(at)}.{" "}
           <button type="button" className="quiet" onClick={() => mgr.focusPane(at as PaneNo)}>Go there</button>
         </div>
       );
@@ -1668,7 +1682,7 @@ export function TerminalPane(props: { pane: PaneNo; terminalId: string | null; d
   }
   const where = (r: TerminalRow) => {
     const n = mgr.place.get(r.id);
-    if (n) return `in pane ${n}`;
+    if (n) return `in pane ${mgr.slotOf(n)}`;
     if (r.exited) return "exited";
     if (mgr.elsewhere(r.id)) return "in another window";
     return "in the panel";
@@ -1758,12 +1772,12 @@ export function TerminalPanel(props: {
                   aria-selected={r.id === active && !pane}
                   data-testid={`panel-tab-${r.id}`}
                   data-place={pane ? `pane-${pane}` : "panel"}
-                  title={pane ? `${r.title} — shown in pane ${pane}; click to go there` : r.title}
+                  title={pane ? `${r.title} — shown in pane ${mgr.slotOf(pane)}; click to go there` : r.title}
                   disabled={props.blocked}
                   onClick={() => (pane ? mgr.focusPane(pane as PaneNo) : mgr.selectTab(r.id))}
                 >
                   <span className="paneltab-name">{r.title || r.id}</span>
-                  {pane ? <span className="paneltab-where">in pane {pane}</span> : null}
+                  {pane ? <span className="paneltab-where">in pane {mgr.slotOf(pane)}</span> : null}
                   {ended ? <span className="paneltab-where">ended</span>
                     : exited ? <span className="paneltab-where">exited</span>
                       : away ? <span className="paneltab-where">in another window</span> : null}
@@ -1881,7 +1895,7 @@ export function TerminalPanel(props: {
           </div>
         ) : mgr.place.has(active) ? (
           <div className="pad muted" data-testid="panel-elsewhere">
-            This terminal is shown in pane {mgr.place.get(active)}.{" "}
+            This terminal is shown in pane {mgr.slotOf(mgr.place.get(active)!)}.{" "}
             <button type="button" className="quiet" data-testid="panel-jump"
                     onClick={() => mgr.focusPane(mgr.place.get(active) as PaneNo)}>
               Go there

@@ -505,9 +505,12 @@ wins).** A 28px window-wide **title bar** holds Model · Voice · Avatar ·
 Settings │ zoom │ ⊞ ◧ ⬓ ◨ (`components/Layout.tsx`, `TitleBar`). The
 toggles are `aria-pressed` and follow what is **drawn**: a window-folded pane
 reads closed with `data-auto`, and opening it folds the other. ⊞'s menu is
-the only way to pick one of six presets (single, cols2, rows2, cols3, main2,
-grid4). `lib/workspace.ts` is the pure pane model: four pane specs always
-stored under `jarvis.hud.workspace` (apart from `jarvis.hud.layout`), a pane
+the only way to pick a preset: eight tiles, four to a row, since WP-G1
+(single, cols2, rows2, cols3, main2, grid4, grid6, grid8; grid5 and grid7
+come from split and close in WP-G2, or a stored value — below).
+`lib/workspace.ts` is the pure pane model: eight pane specs always stored
+under `jarvis.hud.workspace` (apart from `jarvis.hud.layout`) by **id**, with
+`order` the ids drawn in reading order and `kept` the ones ⊞ hid, a pane
 mounted on first draw and then **hidden, never unmounted**, edges as
 fractions per preset clamped to 360×200, and `fitWorkspace` (side panes fold
 first against the shape's own centre minimum, then columns drop, then — down
@@ -529,8 +532,8 @@ a card every title-bar, fold and rail button is disabled**, the layout menu
 closes, and **the card takes focus** off a preview frame, Monaco or anything
 in the workspace or panel (a framed page got its own key events, so Escape
 never reached the card) — Enter on a focused toggle used to fold a pane
-behind the card. Ctrl+Alt+1–4 focus a pane of the preset, bringing a
-dropped one back. In the single layout — the default — every existing suite
+behind the card. Ctrl+Alt+1–8 focus the pane in that **slot** of the preset
+(never id N), bringing a dropped one back. In the single layout — the default — every existing suite
 passes unchanged; `_titlebar_checks`, `_workspace_checks`,
 `_grid_card_checks`, `_sticky_checks`, `_card_focus_checks` and
 `_seen_checks` in `hud_v2_layout_check.py` plus `workspace.test.ts` cover the
@@ -989,6 +992,54 @@ closes it — and that check fails without it; inert still keeps every key off
 the slider. #29's own checks are ported to it: `hud_v2_declutter_check`'s F4
 (Tab round, arrows) and F6 (a card with focus on the slider), and
 `hud_v2_multichat_check`'s late-answer writeback, which clicks a stop.
+
+**Up to eight panes, WP-G1 (2026-10-10, design §18; plan
+`docs/plans/2026-10-10-hud-split-panes-plan.md` §3.1–§3.3, §3.7–§3.8,
+decisions file beside it wins: S-1 5 = 3 over 2, 6 = 3×2, 7 = 4 over 3, 8 =
+4×2; S-3 three is three columns).** The owner: "I'm not seeing the 6 and 8
+panel layouts." ⊞ now offers 3×2 and 4×2 directly (eight tiles, four to a
+row, the head "Layout · N panes"; it opens on the chosen tile, else the first
+tile — never on a toggle row, where Enter folded the sidebar with 3 over 2
+current, review of PR #37); 3 over 2 and 4 over 3 exist as presets
+(`LADDER` is the shape per count for WP-G2's split and ×, which are **not**
+built yet) and draw from a stored value. Every pane can show chat, task,
+file, diff, preview or a terminal; panes 5–8 default to chat. **A pane's id
+is not its slot** (plan G-1): `pane-<id>`, its React key (`${id}.${incarnation}`
+— the incarnation is render-only and stays 0 until WP-G2's close bumps it),
+`chats[id]` and the dirty flag are by id for life; `ws.order` lists the ids
+drawn in reading order, and **every number the owner reads is the slot**
+(`slotOf`): "New thread · N", the terminal panel's "in pane N" (the manager's
+`slotOf`, fed by the workspace), the dirty-refusal chip, aria labels, each
+section's `data-slot`, and Ctrl+Alt+N (`paneAt`). A stored WP-A/WP-B value has
+no `order`, so it reads as ids 1…n — **the same fit as before**, held to a
+golden file (`workspace.legacy-fits.json`, 300 fits produced by main's
+`workspace.ts`). ⊞ to fewer panes moves the rest to `kept` (most recently
+hidden first); more panes take `kept` back first, then the lowest free ids,
+so 8 → 1 → 8 restores every pane in its place (plan G-2: ⊞ hides, never
+closes). `ShapeSpec.rows` (panes per row; null for main2) replaced the static
+grid areas: `cellsOf`/`gridTemplate` lay each row on the union of every row's
+edges, so 3 over 2 and 4 over 3 have **bottom-row edges of their own**
+(`Split.bottom`, separators `split-colb-N`, the top row's `split-col-N`
+spanning the top row only), and `slotWidths` gives each slot its own row's
+width for `narrow`/`compact`. The drops are generic over rows: a column drop
+keeps, in every row, the window as wide as the widest row less one — the
+focused pane's row the leftmost window holding it, the others the same start,
+clamped — and a row drop keeps the focused pane's row (a four-wide one also
+losing a column, so there is no drawn-only cols4); main2 keeps its own cases,
+and WP-A's drop expectations hold unchanged. **A sticky set is kept only if
+these panes in this order can draw it** (the same drops from some focused pane
+give exactly it), so a reordered workspace is never drawn from a stale set.
+Eight panes need ~1512px at 100% (4 × 360 plus two rails): 1920×1080 draws all
+eight with the side panes squeezed to 480; 1280×800 draws 6 of 8 on both
+rails; 1280×800 at 150% draws 4. Free checks: `workspace.test.ts` (the golden
+file, field-by-field parse fallback, all ten grids, the generic drops plus a
+never-drop-the-focused-pane property over every shape, focus, order and size,
+the plan's window table, ⊞ 8 → 1 → 8), `layout.test.ts` (focus5…8, AltGr
+symbols), `chats.test.ts`, `hud_v2_layout_check._eight_checks` and
+`hud_v2_multichat_check._eight_chats_checks`; each check the plan names a
+mutation for was shown to fail with it applied in a scratch copy, and so were
+the review's slot-label checks (a stored order `[1, 5, 2]`, so slot ≠ id, for
+both "shown in pane N" notices and the refusal chip).
 
 **Sidebar status dots (2026-10-08, design §18; contract in
 `docs/hud-api.md`).** The `·` left of each sidebar thread and task is what it
