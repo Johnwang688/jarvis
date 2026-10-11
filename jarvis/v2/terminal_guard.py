@@ -54,8 +54,13 @@ Node and bun take a cluster's source from the next argument (`node -pe
 process.env` is `-p -e process.env`); an interpreter that names no program
 reads one from standard input, so a here-string, a piped `echo`/`printf` or
 a here-document's body is its inline source; and a REPL's or a
-here-document's input line (`>>> `, `> `, `... `) that reads the
-environment refuses the read (2026-10-11 delta review). The loading idioms
+here-document's input line (`>>> `, `> `, `... `, `php > `) that reads the
+environment *explicitly* (`process.env`, `os.environ`, `ENV[`, `$ENV{`, a
+getenv call — never the bare words `ENV`, `env:` or `getenv`, which YAML,
+Dockerfiles and prose hold) refuses the read (2026-10-11 delta and third
+reviews). `--print`/`--eval` never take an option-looking argument as the
+source either, and after one (or `--`) the first operand left is judged as a
+source too: an ambiguous parse fails toward refusing. The loading idioms
 `env $(cat .env | xargs) …` and `export $(grep -v '^#' .env | xargs)` stay
 refused, an accepted cost: their error messages can echo part of a value.
 

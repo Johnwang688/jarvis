@@ -851,8 +851,16 @@ An interpreter that names no program reads one from standard input, so a
 here-string, a piped `echo`/`printf` and a here-document's body are its
 inline source (rules.py's reading of `… | python3`, through the guard's own
 parse); a REPL's or here-document's input line at a line's start (`>>> `,
-`> `, `... `) that reads the environment refuses the read; a word prompt may
-carry git-status marks (`main*`, `main±`). **Accepted costs**: the loading
+`> `, `... `, `php > `) that reads the environment **explicitly** refuses the
+read — `process.env`, `os.environ`, `ENV[`/`ENV.`, `$ENV{`, a getenv call,
+`Bun.env`, `Deno.env`, never the bare words `ENV`, `env:`, `environ` or
+`getenv` (third review: those refused a here-doc of a Kubernetes manifest or
+a Dockerfile, a README blockquote, an email-style quote and a REPL
+assignment, and one such line refused everything after it); `--print`/
+`--eval` never take an option-looking argument as the source, after one or
+`--` the first operand left is judged as a source too (an ambiguous parse
+fails toward refusing), and `bun run`'s own options are parsed; a word
+prompt may carry git-status marks (`main*`, `main±`). **Accepted costs**: the loading
 idioms `env $(cat .env | xargs) npm run dev` and `export $(grep -v '^#' .env
 | xargs)` stay refused — `export`/`env` echo a word they cannot use in their
 error message, so part of a value can reach the terminal. Two halves: a real span overlapping the read (or one that
@@ -957,7 +965,11 @@ nothing else (what lies past the scan is the fail-closed check's). The delta
 review's (`DeltaReview`, 4 of its 5 tests failing on eb718b5): 7 of 7 bite —
 `-pe` reading a glued source, an option taken as the source, stdin never
 read as source, a piped echo not followed, a here-document body not read,
-REPL input not read, no git marks in a word prompt.
+REPL input not read, no git marks in a word prompt. The third review's
+(`ThirdReview`, all 3 failing or erroring on 38cb5e6): 8 of 8 bite — bare
+words counted on input lines, a bare `ENV`, `env:`/`environ`, a prose
+`getenv()`, no PHP shell prompt, a long option taking an option as its
+source, a pending source never judged, a verb's options skipped.
 
 **Preview and dev servers, WP-E (2026-10-10; plan
 `docs/plans/2026-10-09-hud-workspace-plan.md` §2.5, decisions W-4; design

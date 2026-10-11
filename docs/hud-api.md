@@ -1187,7 +1187,11 @@ Decisions W-2 in `docs/plans/2026-10-09-hud-workspace-decisions.md`.
   is not caught, nor is one an alias, a shell function, a script or a symlink
   prints, nor one a script prints from a credential file it was handed as an
   argument, nor a program piped in from anything but a literal
-  `echo`/`printf` (rule 3 reads command lines by shape). The loading idioms
+  `echo`/`printf` (rule 3 reads command lines by shape). A REPL or
+  here-document input line (`> `, `>>> `, `... `) refuses only for an
+  explicit environment read, never for the bare words `ENV`, `env:` or
+  `getenv`, so an environment read spelled only with those is not caught
+  there. The loading idioms
   `env $(cat .env | xargs) …` and `export $(grep -v '^#' .env | xargs)` stay
   refused: their error messages can echo part of a value. The "Jarvis can read"
   switch and the note are the backstops.
