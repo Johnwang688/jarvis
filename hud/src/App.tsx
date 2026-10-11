@@ -59,11 +59,11 @@ import { Workspace, type PaneInfo } from "./components/Workspace";
 import { terminalAttached, terminals } from "./components/Terminal";
 import { terminalSpecFor } from "./lib/terminal";
 import { maxWidth } from "./lib/layout";
-import { PANE_NOS, SHAPES, show as showOf, type PaneNo, type PaneSpec, type View } from "./lib/workspace";
+import { PANE_NOS, SHAPES, show as showOf, slotOf, type PaneNo, type PaneSpec, type View } from "./lib/workspace";
 import { ActivitySync, clearsOnRead } from "./lib/activity";
 import {
   besideTarget, chatProjectId, chatTarget, composeRows, draftKey, drawnShowing, eitherPane, giveBackPane, heldElsewhere,
-  isEmptyChat, openRows, routeEvent, runningHere, selectedChatOf, shownThread,
+  isEmptyChat, nonePerPane, openRows, routeEvent, runningHere, selectedChatOf, shownThread,
 } from "./lib/chats";
 import { useStableHandlers, useStableValue } from "./lib/stable";
 
@@ -86,7 +86,7 @@ const REFUSED_MS = 6000;
 const MIC_TIGHT_H = 560;
 
 /** One value per pane, all null: the window's per-pane refs start here. */
-const perPane = (): Record<PaneNo, string | null> => ({ 1: null, 2: null, 3: null, 4: null });
+const perPane = nonePerPane;
 
 export default function App() {
   const { state, dispatch } = useStore();
@@ -1974,7 +1974,7 @@ export default function App() {
                 title="Switching that pane away would close its file and drop the edit">
             {refusal.pane === n
               ? "unsaved edit · save or reload first"
-              : `pane ${refusal.pane} has an unsaved edit · save or reload it first`}
+              : `pane ${slotOf(ws, refusal.pane)} has an unsaved edit · save or reload it first`}
           </span>
         ) : null}
         {dirty && pinGone(spec) ? (

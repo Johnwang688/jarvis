@@ -573,7 +573,7 @@ export function inTerminal(target: EventTarget | null): boolean {
  * Which of the HUD's own keys stand aside in a terminal, so the shell gets
  * them (plan §2.2's key table): Ctrl+B and Ctrl+Alt+B (readline back-char,
  * page up in less and vim) and Ctrl+_ (readline undo). Everything else —
- * the zoom keys, Ctrl+`, Ctrl+Alt+1…4 — stays the HUD's even there.
+ * the zoom keys, Ctrl+`, Ctrl+Alt+1…8 — stays the HUD's even there.
  */
 export function terminalTakesKey(shortcut: string | null, key: string): boolean {
   if (shortcut === "toggleLeft" || shortcut === "toggleRight") return true;

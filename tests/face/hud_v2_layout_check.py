@@ -101,7 +101,7 @@ def layout_checks(browser, mock, base, check, until, guard, init_script):
                         _blocked_checks, _small_window_checks, _picker_zoom_checks,
                         _monaco_zoom_checks, _menu_zoom_checks, _model_chip_checks,
                         _titlebar_checks, _workspace_checks, _grid_card_checks, _sticky_checks,
-                        _card_focus_checks, _editor_card_checks, _seen_checks, _crash_checks):
+                        _card_focus_checks, _editor_card_checks, _seen_checks, _eight_checks, _crash_checks):
             try:
                 section(page, mock, check, until)
             except Exception as e:  # a section that cannot run is a failure, and the rest still run
@@ -1013,6 +1013,8 @@ def _approval(mock, req: str, command: str = "ls"):
 
 
 TOGGLES = ("left", "panel", "right")
+# ⊞'s tiles, in order (WP-G1, decisions S-1: 6 and 8 in the menu; 5 and 7 by split or close).
+MENU_TILES = ("single", "cols2", "rows2", "cols3", "main2", "grid4", "grid6", "grid8")
 
 
 def _fills(page) -> list:
@@ -1176,21 +1178,22 @@ def _titlebar_checks(page, mock, check, until):
     _set_storage(page, zoom="100")
     _boot(page, mock, None, until, reload=True)
     _open_layout_menu(page, until)
-    checked = [p for p in ("single", "cols2", "rows2", "cols3", "main2", "grid4")
+    checked = [p for p in MENU_TILES
                if _attr(page, f'[data-testid="layout-preset-{p}"]', "aria-checked") == "true"]
-    check("six preset tiles, the current one checked", checked == ["single"]
-          and page.locator('[data-testid^="layout-preset-"]').count() == 6, str(checked))
+    check("eight preset tiles (WP-G1: 6 and 8 among them), the current one checked", checked == ["single"]
+          and page.locator('[data-testid^="layout-preset-"]').count() == 8, str(checked))
     check("the menu opens with focus on the current preset", _active_testid(page) == "layout-preset-single",
           str(_active_testid(page)))
     page.keyboard.press("ArrowRight")
     check("ArrowRight moves to the next tile", _active_testid(page) == "layout-preset-cols2", str(_active_testid(page)))
     page.keyboard.press("ArrowDown")
-    check("ArrowDown to the tile below", _active_testid(page) == "layout-preset-main2", str(_active_testid(page)))
+    check("ArrowDown to the tile below, four to a row", _active_testid(page) == "layout-preset-grid4",
+          str(_active_testid(page)))
     check("and the arrows chose nothing", _attr(page, '[data-testid="workspace"]', "data-preset") == "single")
     check("Space in the menu is not push-to-talk", _ptt_on_space(page) is None)
-    until(lambda: _attr(page, '[data-testid="workspace"]', "data-preset") == "main2", timeout=2)
+    until(lambda: _attr(page, '[data-testid="workspace"]', "data-preset") == "grid4", timeout=2)
     check("it activates the tile under focus instead",
-          _attr(page, '[data-testid="workspace"]', "data-preset") == "main2")
+          _attr(page, '[data-testid="workspace"]', "data-preset") == "grid4")
     rows = [r for r in TOGGLES if page.locator(f'[data-testid="layout-toggle-{r}"]').count() == 1]
     keys = page.locator('[data-testid="layout-menu"] .lm-key').all_inner_texts()
     check("the menu writes the three toggles out with their shortcuts",
@@ -1893,6 +1896,291 @@ def _seen_checks(page, mock, check, until):
     time.sleep(0.8)
     check("a task finishing while no pane shows it is not read", seen("/tasks/k1/seen") == before)
     mock.activity("task", "k1", "idle")
+    _reset_all(page, mock, until)
+
+
+# ---------------------------------------------------------------------------
+# six and eight panes (WP-G1, docs/plans/2026-10-10-hud-split-panes-plan.md
+# §3.1–§3.3, §3.7, §3.8; decisions S-1)
+
+def _geo(page, ids) -> list:
+    """Each pane's [x, y, offsetWidth, offsetHeight, data-slot] (offsets in the HUD's own px)."""
+    return page.evaluate("""(ids) => ids.map(n => {
+      const el = document.querySelector(`[data-testid="pane-${n}"]`);
+      if (!el || el.offsetParent === null) return null;
+      const r = el.getBoundingClientRect();
+      return [Math.round(r.x), Math.round(r.y), el.offsetWidth, el.offsetHeight, el.getAttribute('data-slot')];
+    })""", list(ids))
+
+
+def _no_hscroll(page) -> tuple[bool, str]:
+    got = page.evaluate("""() => {
+      const d = document.documentElement, w = document.getElementById('workspace');
+      return [d.scrollWidth, d.clientWidth, w.scrollWidth, w.clientWidth];
+    }""")
+    return got[0] <= got[1] and got[2] <= got[3], str(got)
+
+
+def _reading_order(geo) -> bool:
+    """Left to right, then top to bottom: each pane after the previous one."""
+    pts = [(g[1], g[0]) for g in geo]
+    return all(pts[i] < pts[i + 1] for i in range(len(pts) - 1))
+
+
+def _show(page, until, n: int, view: str):
+    """Pane N shows `view`: its words, or its `view ▾` menu when the pane is narrow."""
+    sel = page.locator(f'[data-testid="pane-{n}-view-select"]')
+    if sel.count():
+        sel.select_option(view)
+    else:
+        page.locator(_pane(n, f'[data-testid="tab-{view}"]')).click()
+    until(lambda: _attr(page, _pane(n), "data-view") == view, timeout=2)
+
+
+def _eight_checks(page, mock, check, until):
+    """The owner's words: "I'm not seeing the 6 and 8 panel layouts". ⊞ offers
+    them; at 1920x1080 every pane is drawn at least the pane minimum with no
+    horizontal scroll, and every pane can show chat, file, preview, diff or a
+    terminal; smaller windows draw what fits and say so; Ctrl+Alt+N is a slot,
+    never an id; 3 over 2's bottom row has edges of its own; and over eight
+    panes holding Monaco, a preview frame, a terminal and chats the card is
+    still whole and on top."""
+    from tests.face.hud_v2_mock_terminals import row
+    ws = '[data-testid="workspace"]'
+    # A terminal to show in a pane, there before the window lists them.
+    tid = "0e0e0e08"
+    if not any(r["id"] == tid for r in mock.world.setdefault("terminals", [])):
+        mock.world["terminals"].append(row(tid, "bash · eight"))
+    _reset_all(page, mock, until, (1920, 1080))
+    _open_layout_menu(page, until)
+    tiles = [t.get_attribute("data-testid") for t in page.locator('[data-testid^="layout-preset-"]').all()]
+    check("⊞ offers eight shapes, four to a row, 3×2 and 4×2 among them",
+          tiles == [f"layout-preset-{p}" for p in MENU_TILES], str(tiles))
+    boxes = [page.locator(f'[data-testid="layout-preset-{p}"]').bounding_box() for p in ("single", "grid4", "main2")]
+    check("the tiles sit four to a row: the fifth starts the second row",
+          abs(boxes[0]["x"] - boxes[2]["x"]) < 1 and boxes[2]["y"] > boxes[0]["y"]
+          and boxes[1]["y"] > boxes[0]["y"], str(boxes))
+    check("its head counts the panes", page.locator('[data-testid="layout-head"]').inner_text().strip().lower()
+          == "layout · 1 pane", page.locator('[data-testid="layout-head"]').inner_text())
+    page.keyboard.press("Escape")
+
+    for preset, n in (("grid6", 6), ("grid8", 8)):
+        _choose(page, until, preset)
+        geo = _geo(page, range(1, n + 1))
+        check(f"⊞ → {n}: all {n} panes drawn, at 1920x1080",
+              _attr(page, ws, "data-drawn-preset") == preset and all(geo)
+              and page.locator('[data-testid="layout-badge"]').count() == 0, str(geo))
+        check(f"⊞ → {n}: every pane at least the 360px minimum (less the 1px rules between them)",
+              all(g and g[2] >= 358 for g in geo), str([g and g[2] for g in geo]))
+        check(f"⊞ → {n}: in reading order, each pane carrying its slot",
+              all(geo) and _reading_order(geo) and [g[4] for g in geo] == [str(i) for i in range(1, n + 1)],
+              str(geo))
+        ok, why = _no_hscroll(page)
+        check(f"⊞ → {n}: and nothing scrolls sideways", ok, why)
+        _open_layout_menu(page, until)
+        check(f"⊞ → {n}: the menu checks that tile and counts {n} panes",
+              _attr(page, f'[data-testid="layout-preset-{preset}"]', "aria-checked") == "true"
+              and page.locator('[data-testid="layout-head"]').inner_text().strip().lower() == f"layout · {n} panes")
+        page.keyboard.press("Escape")
+        until(lambda: page.locator('[data-testid="layout-menu"]').count() == 0, timeout=2)
+    geo8 = _geo(page, range(1, 9))
+    check("4×2: two rows of four, the halves equal",
+          len({g[1] for g in geo8}) == 2 and len({g[0] for g in geo8}) == 4
+          and max(g[2] for g in geo8) - min(g[2] for g in geo8) <= 2, str(geo8))
+
+    # Every pane can show what any pane shows: chat, file, preview, diff, a terminal.
+    views = {1: "chat", 2: "file", 3: "preview", 4: "diff", 5: "terminal", 6: "chat", 7: "file", 8: "preview"}
+    for n, view in views.items():
+        _show(page, until, n, view)
+    page.locator('[data-testid="task-k1"]').click()
+    until(lambda: page.locator(_pane(4, '[data-testid="difflist"]')).count() > 0, timeout=4)
+    until(lambda: page.locator(f'[data-testid="pane-5-pick-{tid}"]').count() > 0, timeout=4)
+    page.locator(f'[data-testid="pane-5-pick-{tid}"]').click()
+    term = f'[data-testid="terminal-{tid}"]'
+    until(lambda: page.locator(_pane(5, term)).count() > 0 and _attr(page, term, "data-state") == "attached", timeout=6)
+    page.locator(_pane(7, '[data-testid="file-calc.py"]')).click()
+    until(lambda: page.locator(_pane(7, '[data-testid="file-path"]')).inner_text() == "calc.py", timeout=4)
+    page.locator(_pane(8, '[data-testid="preview-project"]')).click()
+    until(lambda: page.locator(_pane(8, "iframe")).count() > 0, timeout=4)
+    shows = {
+        1: _visible(page, _pane(1, '[data-testid="input"]')),
+        2: _visible(page, _pane(2, '[data-testid="filetree"]')) or _visible(page, _pane(2, '[data-testid="tree-toggle"]')),
+        3: _visible(page, _pane(3, '[data-testid="preview-url"]')),
+        4: page.locator(_pane(4, '[data-testid="difflist"]')).count() > 0,
+        5: _visible(page, _pane(5, f"{term} .xterm-screen")),
+        6: _visible(page, _pane(6, '[data-testid="input"]')),
+        7: page.locator(_pane(7, '[data-testid="file-path"]')).inner_text() == "calc.py",
+        8: _visible(page, _pane(8, "iframe")),
+    }
+    check("in 4×2 every pane shows what it was given: two chats, two files, two previews, a diff, a terminal",
+          all(shows.values()) and all(_attr(page, _pane(n), "data-view") == v for n, v in views.items()), str(shows))
+    check("the chats in panes 1 and 6 are two conversations, each with its own box",
+          page.locator(_pane(1, '[data-testid="input"]')).count() == 1
+          and page.locator(_pane(6, '[data-testid="input"]')).count() == 1
+          and page.locator('[data-testid="compose-row"]').count() == 2)
+    page.evaluate("document.querySelector('[data-testid=\"pane-8\"] iframe').__kept = 88")
+    _choose(page, until, "single")
+    check("⊞ to one pane: panes 2–8 are hidden, not unmounted",
+          all(page.locator(_pane(n)).count() == 1 and not _visible(page, _pane(n)) for n in range(2, 9))
+          and page.evaluate("document.querySelector('[data-testid=\"pane-8\"] iframe').__kept") == 88)
+    _choose(page, until, "grid8")
+    check("and back to eight: the very panes, still showing what they showed (pane 8's frame not reloaded)",
+          all(_attr(page, _pane(n), "data-view") == v for n, v in views.items())
+          and page.locator(_pane(7, '[data-testid="file-path"]')).inner_text() == "calc.py"
+          and _visible(page, _pane(8, "iframe")) and _visible(page, _pane(5, f"{term} .xterm-screen"))
+          and page.evaluate("document.querySelector('[data-testid=\"pane-8\"] iframe').__kept") == 88)
+
+    # Smaller windows draw what fits, and say so.
+    page.set_viewport_size({"width": 1280, "height": 800})
+    page.locator(_pane(1, '[data-testid="input"]')).click()
+    until(lambda: _attr(page, ws, "data-drawn-preset") == "grid6", timeout=3)
+    note = ""
+    _open_layout_menu(page, until)
+    if page.locator('[data-testid="layout-dropped"]').count():
+        note = page.locator('[data-testid="layout-dropped"]').inner_text()
+    page.keyboard.press("Escape")
+    drawn = [n for n in range(1, 9) if _visible(page, _pane(n))]
+    check("1280x800: eight panes draw as six, with a badge and \"Showing 6 of 8\"",
+          _attr(page, ws, "data-drawn-preset") == "grid6" and len(drawn) == 6
+          and page.locator('[data-testid="layout-badge"]').inner_text().strip() == "2"
+          and "Showing 6 of 8 panes" in note, f"{drawn} {note!r}")
+    check("1280x800: the focused pane is one of them, and every drawn pane keeps the minimum",
+          1 in drawn and all(g and g[2] >= 358 for g in _geo(page, drawn)), str(_geo(page, drawn)))
+    _set_storage(page, zoom="150")
+    _boot(page, mock, None, until, reload=True)
+    drawn = [n for n in range(1, 9) if _visible(page, _pane(n))]
+    check("1280x800 at 150%: four of the eight", _attr(page, ws, "data-drawn-preset") == "grid4" and len(drawn) == 4
+          and page.locator('[data-testid="layout-badge"]').inner_text().strip() == "4", str(drawn))
+    check("setup: pane 7 is not among them", 7 not in drawn, str(drawn))
+    _press_on_body(page, "Control+Alt+7")
+    until(lambda: _visible(page, _pane(7)), timeout=3)
+    check("Ctrl+Alt+7 brings the dropped pane 7 into the drawn set, focused",
+          _visible(page, _pane(7)) and _attr(page, _pane(7), "data-focused") == "true"
+          and _attr(page, ws, "data-drawn-preset") == "grid4" and _last_key(page).get("prevented") is True)
+
+    # Ctrl+Alt+N is a slot, never an id: a stored order of 1, 5, 2.
+    page.set_viewport_size({"width": 1920, "height": 1080})
+    _set_storage(page, zoom="100", layout="{}")
+    # Pane 2 (slot 3) holds the same terminal as pane 5 (slot 2): one terminal
+    # is drawn in one place, the first in reading order, so pane 2 says where.
+    # The panel's selected tab is that terminal too (review of PR #37: both
+    # "shown in pane N" labels survived an id-for-slot mutant).
+    _set_ws(page, json.dumps({"preset": "cols3", "order": [1, 5, 2], "focused": 1,
+                              "panes": [{"view": "chat"}, {"view": "terminal", "terminalId": tid}, {"view": "file"},
+                                        {"view": "task"}, {"view": "terminal", "terminalId": tid}]}))
+    page.evaluate("t => localStorage.setItem('jarvis.hud.terminals', JSON.stringify({active: t, specs: {}}))", tid)
+    _boot(page, mock, None, until, reload=True)
+    g = _geo(page, (1, 5, 2))
+    check("a stored order [1, 5, 2] draws pane 5 in the middle, slot 2",
+          all(g) and g[0][0] < g[1][0] < g[2][0] and [x[4] for x in g] == ["1", "2", "3"], str(g))
+    _press_on_body(page, "Control+Alt+2")
+    until(lambda: _attr(page, _pane(5), "data-focused") == "true", timeout=2)
+    check("Ctrl+Alt+2 focuses the pane in slot 2 (id 5), not pane 2",
+          _attr(page, _pane(5), "data-focused") == "true" and _attr(page, _pane(2), "data-focused") == "false")
+    _press_on_body(page, "Control+Alt+3")
+    until(lambda: _attr(page, _pane(2), "data-focused") == "true", timeout=2)
+    check("and Ctrl+Alt+3 the pane in slot 3 (id 2)", _attr(page, _pane(2), "data-focused") == "true")
+    _press_on_body(page, "Control+Alt+4")
+    time.sleep(0.15)
+    check("Ctrl+Alt+4 does nothing in three panes and is left to the browser",
+          _attr(page, _pane(2), "data-focused") == "true" and _last_key(page).get("prevented") is False)
+    check("the panes' labels name their slots", _attr(page, _pane(5), "aria-label").startswith("Pane 2:"),
+          str(_attr(page, _pane(5), "aria-label")))
+    elsewhere = page.locator('[data-testid="pane-2-terminal-elsewhere"]')
+    until(lambda: elsewhere.count() > 0, timeout=3)
+    check("pane 2 (slot 3), holding the terminal pane 5 draws, says \"shown in pane 2\" — the slot, not id 5",
+          elsewhere.count() == 1 and "shown in pane 2." in elsewhere.inner_text()
+          and page.locator(_pane(5, f'[data-testid="terminal-{tid}"]')).count() == 1,
+          elsewhere.inner_text() if elsewhere.count() else "no notice")
+    page.locator('[data-testid="toggle-panel"]').click()
+    tab = page.locator(f'[data-testid="panel-tab-{tid}"]')
+    until(lambda: tab.count() > 0 and "in pane" in tab.inner_text(), timeout=3)
+    check("the terminal in pane 5 (slot 2): its panel tab says \"in pane 2\"",
+          tab.count() == 1 and "in pane 2" in tab.inner_text() and tab.get_attribute("data-place") == "pane-5",
+          tab.inner_text() if tab.count() else "no tab")
+    there = page.locator('[data-testid="panel-elsewhere"]')
+    until(lambda: there.count() > 0, timeout=3)
+    check("and the panel, on that terminal's tab, says \"shown in pane 2\" too",
+          there.count() == 1 and "shown in pane 2." in there.inner_text(),
+          there.inner_text() if there.count() else "no notice")
+    page.locator('[data-testid="toggle-panel"]').click()
+    page.evaluate("localStorage.removeItem('jarvis.hud.terminals')")
+
+    # A stored 3 over 2 has no tile in ⊞: the menu opens on a tile, never on a
+    # toggle row (review of PR #37: Enter on the focused sidebar toggle folded it).
+    _set_ws(page, json.dumps({"preset": "grid5"}))
+    _boot(page, mock, None, until, reload=True)
+    _open_layout_menu(page, until)
+    time.sleep(0.1)
+    checked = [p for p in MENU_TILES if _attr(page, f'[data-testid="layout-preset-{p}"]', "aria-checked") == "true"]
+    check("with 3 over 2 stored, ⊞ checks no tile and opens with focus on the first tile, not a toggle",
+          checked == [] and _active_testid(page) == "layout-preset-single", f"{checked} {_active_testid(page)}")
+    page.keyboard.press("Escape")
+    until(lambda: page.locator('[data-testid="layout-menu"]').count() == 0, timeout=2)
+    check("and the sidebar is still open", _visible(page, "#sidebar"))
+
+    # 3 over 2: the bottom row's edge is its own.
+    _set_ws(page, json.dumps({"preset": "grid5"}))
+    _boot(page, mock, None, until, reload=True)
+    top0 = [g[2] for g in _geo(page, (1, 2, 3))]
+    bot0 = [g[2] for g in _geo(page, (4, 5))]
+    check("3 over 2: three panes over two, the bottom row's edges its own",
+          _attr(page, ws, "data-drawn-preset") == "grid5" and page.locator('[data-testid="split-colb-1"]').count() == 1
+          and page.locator('[data-testid="split-col-2"]').count() == 1 and abs(bot0[0] - bot0[1]) <= 2, f"{top0} {bot0}")
+    _drag(page, '[data-testid="split-colb-1"]', 120)
+    top1 = [g[2] for g in _geo(page, (1, 2, 3))]
+    bot1 = [g[2] for g in _geo(page, (4, 5))]
+    check("dragging split-colb-1 moves only the bottom row's edge",
+          abs(bot1[0] - (bot0[0] + 120)) <= 3 and abs(bot1[1] - (bot0[1] - 120)) <= 3 and top1 == top0,
+          f"top {top0} -> {top1}, bottom {bot0} -> {bot1}")
+    _drag(page, '[data-testid="split-col-1"]', -60)
+    top2 = [g[2] for g in _geo(page, (1, 2, 3))]
+    bot2 = [g[2] for g in _geo(page, (4, 5))]
+    check("and the top row's edge only the top row's", bot2 == bot1 and abs(top2[0] - (top1[0] - 60)) <= 3,
+          f"top {top1} -> {top2}, bottom {bot1} -> {bot2}")
+    stored = json.loads(page.evaluate("localStorage.getItem('jarvis.hud.workspace')") or "{}")
+    check("both survive in what is stored", len(stored.get("splits", {}).get("grid5", {}).get("bottom", [])) == 1,
+          str(stored.get("splits", {}).get("grid5")))
+
+    # Eight panes under a card: Monaco, a preview frame, a terminal and chats.
+    grid8 = json.dumps({"preset": "grid8", "focused": 1, "panes": [
+        {"view": "chat"}, {"view": "file"}, {"view": "preview"}, {"view": "task"},
+        {"view": "terminal", "terminalId": tid}, {"view": "chat"}, {"view": "chat"}, {"view": "file"}]})
+    fake = mock.fake_pty
+    for zoom in ("160", "70"):
+        page.set_viewport_size({"width": 1920, "height": 1080})
+        _set_storage(page, zoom=zoom, layout="{}")
+        _set_ws(page, grid8)
+        _boot(page, mock, None, until, reload=True)
+        page.locator(_pane(2, '[data-testid="file-calc.py"]')).click()
+        until(lambda: page.locator(_pane(2, '[data-testid="editor"] .view-line')).count() > 0
+              or page.locator(_pane(2, '[data-testid="editor-fallback"]')).count() > 0, timeout=10)
+        page.locator(_pane(3, '[data-testid="preview-project"]')).click()
+        until(lambda: page.locator(_pane(3, "iframe")).count() > 0, timeout=4)
+        until(lambda: page.locator(term).count() > 0 and _attr(page, term, "data-state") == "attached", timeout=6)
+        drawn = [n for n in range(1, 9) if _visible(page, _pane(n))]
+        check(f"at {zoom}% on 1920x1080 eight panes draw ({len(drawn)} of them), Monaco, a frame and a terminal on screen",
+              {1, 2, 3, 5, 6}.issubset(drawn) and _visible(page, _pane(2, '[data-testid="editor"]'))
+              and _visible(page, _pane(3, "iframe")) and _visible(page, _pane(5, f"{term} .xterm-screen")),
+              f"{drawn} {_attr(page, ws, 'data-drawn-preset')}")
+        page.locator(_pane(5, f"{term} .xterm-screen")).click(position={"x": 20, "y": 8})
+        sent = len(fake.sent(tid))
+        req = f"eight{zoom}"
+        _approval(mock, req, LONG_COMMAND)
+        until(lambda: page.locator('[data-testid="approval-card"]').count() > 0, timeout=4)
+        time.sleep(0.2)
+        if zoom == "160":
+            ok, why = _authorize_below_fold(page)
+            check(f"at {zoom}% over eight panes, AUTHORIZE is below the fold until the command is scrolled past", ok, why)
+        ok, why = _card_on_screen(page)
+        check(f"at {zoom}% over eight panes, the card is wholly on screen and every button topmost at its point", ok, why)
+        page.keyboard.type("y")
+        page.keyboard.press("Enter")
+        page.wait_for_timeout(150)
+        check(f"at {zoom}% a y⏎ typed with a terminal among eight panes reaches no shell",
+              fake.sent(tid)[sent:] == b"", repr(fake.sent(tid)[sent:]))
+        page.locator('[data-testid="approval-card"] button.deny').click()
+        until(lambda: page.locator('[data-testid="approval-card"]').count() == 0, timeout=4)
     _reset_all(page, mock, until)
 
 
