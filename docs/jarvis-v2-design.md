@@ -2149,14 +2149,14 @@ owner asked for 6- and 8-pane layouts ("I'm not seeing the 6 and 8 panel
 layouts"). Ten shapes now: WP-A's six plus 3 over 2, 3×2, 4 over 3 and 4×2
 (decisions S-1); ⊞ offers eight tiles, four to a row, 3×2 and 4×2 among them,
 with "Layout · N panes" at the head and no tile checked while a 5- or 7-pane
-shape is current (it then opens on the first tile, never on a toggle row). 5 and 7 are reached by split and close (WP-G2, not yet
-built; `LADDER` is the shape per count, three being three columns, S-3) or a
+shape is current (it then opens on the first tile, never on a toggle row). 5 and 7 are reached by split and close (WP-G2,
+below; `LADDER` is the shape per count, three being three columns, S-3) or a
 stored value. Every pane can show chat, task, file, diff, preview or a
 terminal (panes 5–8 default to chat), and the chats, terminals and dirty
 guards of WP-B and WP-D work in all eight.
 
 - **Ids are not slots.** A pane keeps its id for life — `pane-<id>`, its React
-  key (with a render-only incarnation WP-G2's close will bump), `chats[id]`,
+  key (with a render-only incarnation WP-G2's close bumps), `chats[id]`,
   its dirty flag — and `ws.order` lists the ids drawn in reading order; `kept`
   holds the ones ⊞ hid. Everything the owner reads is the **slot**: "New
   thread · N", the panel's "in pane N", the refusal chip, aria labels and
@@ -2188,6 +2188,47 @@ guards of WP-B and WP-D work in all eight.
   `hud_v2_multichat_check._eight_chats_checks` (eight chats on eight threads:
   a turn in pane 7 draws only there, Stop in 8 leaves 7, voice lands in the
   selected pane 6).
+
+**Split and close (2026-10-11, WP-G2 of the same plan; decisions S-2,
+S-6–S-8).** The owner asked for a × on every pane, more than once, and a
+VS Code split button. Every pane's strip now carries both: the split button
+(the title bar's icon button, an outline with one divider) in every layout,
+the × whenever more than one pane is drawn. A split adds a **copy of the
+pane right after it** and focuses it, on the ladder's shape for the new
+count (2 columns, 3 columns, 2×2, 3 over 2, 3×2, 4 over 3, 4×2); a × removes
+exactly that pane and the rest reflow onto the ladder's shape for one fewer.
+⊞ still hides and restores; × discards — the pane's spec goes back to its
+default, and an id a later split reuses mounts fresh.
+
+- **What a copy shows**: a chat, a new thread in the same project (a thread
+  is open in one pane only); a file, the same file (the source must be saved
+  first, S-8; a save in either reloads the other when it is clean and warns
+  it when it is not); a diff, the same task and file; a task, that task's
+  diff (S-7); a preview, the same URL, judged again, never the keep-origin
+  grant; a terminal, a new shell in the folder the source was opened in
+  (S-6), unreadable to Jarvis if the source is — switched off before it is
+  ever shown. Split is refused at eight, when the next shape would not be
+  drawn whole in this window (at 1280×800, six cannot become seven), and
+  when the only ids left are hidden panes holding unsaved edits.
+- **What × keeps**: a thread's turn keeps running, its sidebar dot stays,
+  and the pane that next opens that thread has its Stop; words in its box and
+  words a Stop handed back wait for the thread; a composing chat's unsent
+  words and a File pane's unsaved edit are asked about first, inline, never
+  in a modal; a terminal goes back to the panel, alive, attached, as the
+  selected tab. Focus goes to the pane now in that slot — or, when the
+  selected chat closes, to the chat selected before it — never the page.
+  One click closes one pane, even when a double-click's second click lands
+  on the × that moved under the pointer.
+- **Nothing assumes pane 1**: after it is closed, the window's chat falls
+  back to the pane in slot 1, the header ids and Ctrl+Alt+1 follow the slot,
+  and a reload keeps the order.
+- **Under a card** every split, × and close question is disabled and inert,
+  the card keeps focus and stays on top at 160% and 70% over eight panes.
+- **Free checks**: `workspace.test.ts`, `chats.test.ts`, `store.test.ts`,
+  `filesync.test.ts`, and sections of the layout, multichat, terminal and
+  preview suites; each was shown to fail against its mutation (the PR's
+  table). Not built: WP-G3's shared buffer (the owner chose save-first) and
+  WP-H's thinking line.
 
 Remaining: WP13 (the long-bench comparison, the owner's call on cost), a
 native Windows worker, the R8 hook on Codex, and prompt tuning in

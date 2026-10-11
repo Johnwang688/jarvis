@@ -1036,7 +1036,7 @@ describe("split and close (WP-G2, plan §3.4–§3.6)", () => {
     expect(up).toEqual(["cols2", "cols3", "grid4", "grid5", "grid6", "grid7", "grid8"]);
     expect(splitAt(w, 1)).toBe(w); // eight is the most
     const down: Preset[] = [];
-    while (w.order.length > 1) {
+    for (let i = 0; i < 8 && w.order.length > 1; i++) {
       w = closePane(w, w.order[w.order.length - 1]);
       down.push(w.preset);
     }
@@ -1168,7 +1168,9 @@ describe("split and close (WP-G2, plan §3.4–§3.6)", () => {
   it("decides the split button from the count and the room (G-5)", () => {
     const at = (n: number, w: number, h: number, zoom = 100) => {
       let x = defaultWorkspace();
-      while (x.order.length < n) x = splitAt(x, x.order.length);
+      // Bounded, so a split that stops working fails rather than hangs.
+      for (let i = 0; i < 8 && x.order.length < n; i++) x = splitAt(x, x.order.length);
+      expect(x.order).toHaveLength(n);
       const [aw, ah] = room(w, h - 80, zoom);
       return splitVerdict(DEFAULT_LAYOUT, x, aw, ah);
     };
