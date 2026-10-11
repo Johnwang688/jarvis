@@ -644,10 +644,25 @@ def _card_checks(page, mock, base, check, until, fake):
     page.evaluate(f"document.querySelector('{_sel(tid)} .xterm-helper-textarea').focus()")
     held, _, key = _ptt_on_ctrl_d(page)
     page.wait_for_timeout(150)
-    check("Ctrl+D under the card, the terminal focused behind it: no EOF to the shell, no push-to-talk",
+    check("Ctrl+D under the card, the terminal asked for focus behind it: no EOF to the shell, no push-to-talk",
           held is None and fake.sent(tid)[before:] == b"", f"ptt={held} sent={fake.sent(tid)[before:]!r}")
     check("and the window still takes it from the browser (no bookmark dialog)", key.get("prevented") is True,
           str(key))
+    # The card keeps focus (everything behind it is inert), so a real key never
+    # reaches the terminal under one. Sent straight at the terminal's textarea,
+    # Ctrl+D is still the window's, not the shell's: xterm's filter drops keys
+    # under a card without preventing them, so leaving it to xterm there would
+    # leave Chrome's bookmark dialog to open behind the card.
+    got = page.evaluate("""(sel) => {
+      const t = document.querySelector(sel + ' .xterm-helper-textarea');
+      const e = new KeyboardEvent('keydown', {key: 'd', code: 'KeyD', ctrlKey: true, bubbles: true, cancelable: true});
+      t.dispatchEvent(e);
+      return {prevented: e.defaultPrevented, ptt: window.__hud.capture.ptt};
+    }""", _sel(tid))
+    page.wait_for_timeout(150)
+    check("Ctrl+D sent straight at the terminal behind the card: the window takes it — no EOF, no push-to-talk, "
+          "its default prevented", got["prevented"] is True and got["ptt"] is None and fake.sent(tid)[before:] == b"",
+          f"{got} sent={fake.sent(tid)[before:]!r}")
     fake.output(tid, b"\r\noutput-under-card\r\n$ ")
     until(lambda: "output-under-card" in _text(page, tid), timeout=3)
     check("output keeps drawing under the card", "output-under-card" in _text(page, tid))
