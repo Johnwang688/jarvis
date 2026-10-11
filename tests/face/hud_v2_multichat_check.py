@@ -117,7 +117,9 @@ def multichat_checks(browser, mock, base, check, until, guard, init_script):
                         _rr_compose_fail_moved_checks, _rr_two_cards_checks, _rr_tab_never_authorizes_checks,
                         _rr_placeholder_stop_checks, _rr_chip_writeback_checks, _rr_drop_checks,
                         # eight panes (WP-G1)
-                        _eight_chats_checks):
+                        _eight_chats_checks,
+                        # split and close (WP-G2)
+                        _split_close_chat_checks, _split_close_selected_checks):
             try:
                 section(page, mock, check, until)
             except Exception as e:  # a section that cannot run is a failure, and the rest still run
@@ -317,18 +319,23 @@ def _never_twice_checks(page, mock, check, until):
           c["2"]["threadId"] == "t1" and sum(1 for n in "1234" if c[n]["threadId"] == "t2") == 1,
           str(c["2"]["threadId"]))
 
-    # Open beside, from one pane: two columns, the thread in pane 2.
+    # Open beside, from one pane: two columns, the thread in slot 2. Since
+    # WP-G2 that is a split into a free id (3): pane 2, hidden by ⊞, keeps
+    # the conversation it held.
     _expand(page, until, "p2", "thread-t3")
     page.locator('[data-testid="thread-t3"]').click(modifiers=["Alt"])
     until(lambda: _attr(page, '[data-testid="workspace"]', "data-preset") == "cols2", timeout=3)
-    until(lambda: _chat(page, 2)["threadId"] == "t3", timeout=3)
-    check("from one pane, Alt+click opens the thread beside it: two columns, pane 2",
+    until(lambda: _chat(page, 3)["threadId"] == "t3", timeout=3)
+    check("from one pane, Alt+click opens the thread beside it: two columns, a new pane in slot 2",
           _attr(page, '[data-testid="workspace"]', "data-preset") == "cols2"
-          and _attr(page, _pane(2), "data-view") == "chat" and _chat(page, 2)["threadId"] == "t3"
-          and _attr(page, _pane(2), "data-focused") == "true" and _chat(page, 1)["threadId"] == "t2")
-    until(lambda: "homework question" in _log(page, 2), timeout=3)
-    check("and its transcript is drawn there", "homework question" in _log(page, 2))
-    chips = [page.locator(_pane(n, '[data-testid="project-chip"]')).inner_text() for n in (1, 2)]
+          and _attr(page, _pane(3), "data-view") == "chat" and _chat(page, 3)["threadId"] == "t3"
+          and _attr(page, _pane(3), "data-slot") == "2"
+          and _attr(page, _pane(3), "data-focused") == "true" and _chat(page, 1)["threadId"] == "t2")
+    check("and the pane ⊞ hid keeps its conversation, still hidden",
+          _chat(page, 2)["threadId"] == "t1" and not _visible(page, _pane(2)))
+    until(lambda: "homework question" in _log(page, 3), timeout=3)
+    check("and its transcript is drawn there", "homework question" in _log(page, 3))
+    chips = [page.locator(_pane(n, '[data-testid="project-chip"]')).inner_text() for n in (1, 3)]
     check("each pane's project chip names its own conversation's project",
           "jarvis" in chips[0] and "schoolwork" in chips[1], str(chips))
 
@@ -339,10 +346,10 @@ def _never_twice_checks(page, mock, check, until):
     until(lambda: page.locator('[data-testid="tmenu-beside"]').count() > 0, timeout=2)
     check("a thread's ⋯ menu offers Open beside", page.locator('[data-testid="tmenu-beside"]').count() == 1)
     page.locator('[data-testid="tmenu-beside"]').click()
-    until(lambda: _chat(page, 2)["threadId"] == "t1", timeout=3)
+    until(lambda: _chat(page, 3)["threadId"] == "t1", timeout=3)
     check("which opens it in the next pane to the right",
-          _chat(page, 2)["threadId"] == "t1" and _chat(page, 1)["threadId"] == "t2"
-          and _attr(page, _pane(2), "data-focused") == "true")
+          _chat(page, 3)["threadId"] == "t1" and _chat(page, 1)["threadId"] == "t2"
+          and _attr(page, _pane(3), "data-focused") == "true")
 
 
 def _two_turns_checks(page, mock, check, until):
@@ -969,7 +976,7 @@ def _rv_compose_swap_race_checks(page, mock, check, until):
         new = (_chat(page, 1).get("compose") or {}).get("openedId")
         check("setup: pane 1's first send has opened its thread and is in flight", bool(new) and len(held) == 1, str(new))
         _focus(page, until, 2)
-        page.set_viewport_size({"width": 700, "height": 900})
+        page.set_viewport_size({"width": 760, "height": 900})
         until(lambda: not _visible(page, _pane(1)), timeout=3)
         mock.emit("thread_opened", {}, thread_id=new)
         if page.locator('[data-testid="expand-left"]').count():
@@ -1183,8 +1190,10 @@ def _rv_stale_status_checks(page, mock, check, until):
 
 
 def _rv_beside_refusal_checks(page, mock, check, until):
-    """Open beside into a dirty File pane the layout hides: the refusal is
-    said where the owner is, not in the hidden pane."""
+    """Open beside next to a dirty File pane the layout hides. Since WP-G2,
+    from one pane that is a split into a free id: the hidden edit is never
+    touched. Into a pane the window dropped for room (two columns drawn as
+    one), the refusal is said where the owner is, not in the hidden pane."""
     _fresh(page, mock, until, CHAT_FILE)
     _open(page, until, 1, "t1")
     page.locator(_pane(2, '[data-testid="file-calc.py"]')).click()
@@ -1197,38 +1206,58 @@ def _rv_beside_refusal_checks(page, mock, check, until):
     until(lambda: not _visible(page, _pane(2)), timeout=2)
     _expand(page, until, "p2", "thread-t3")
     page.locator('[data-testid="thread-t3"]').click(modifiers=["Alt"])
+    until(lambda: _chat(page, 3)["threadId"] == "t3", timeout=3)
+    check("G2: Open beside from one pane splits into a free pane, leaving the hidden dirty File pane alone",
+          _attr(page, '[data-testid="workspace"]', "data-preset") == "cols2" and _attr(page, _pane(3), "data-slot") == "2"
+          and not _visible(page, _pane(2)) and _attr(page, _pane(2), "data-view") == "file"
+          and not save.is_disabled() and page.locator('[data-testid="pane-1-refused"]').count() == 0)
+    _choose(page, until, "grid4")
+    until(lambda: _visible(page, _pane(2)), timeout=2)
+    save.click()
+    until(lambda: save.is_disabled(), timeout=4)
+
+    def narrow_refusal(file_pane: int, order: list):
+        """Two columns drawn as one (760px: one pane fits beside the sidebar, two do not even on both
+        rails): Open beside aims at the dropped File pane."""
+        panes = [{"view": "chat"}, {"view": "preview"}, {"view": "file"}, {"view": "task"}, {"view": "file"}]
+        if file_pane == 2:
+            panes[1] = {"view": "file"}
+        _fresh(page, mock, until, json.dumps({"preset": "cols2", "order": order, "focused": 1, "panes": panes}))
+        _open(page, until, 1, "t1")
+        page.locator(_pane(file_pane, '[data-testid="file-calc.py"]')).click()
+        until(lambda: page.locator(_pane(file_pane, '[data-testid="file-path"]')).inner_text() == "calc.py", timeout=4)
+        _edit(page, until, file_pane, "\n# hidden and dirty")
+        dirty = page.locator(_pane(file_pane, '[data-testid="file-save"]'))
+        until(lambda: not dirty.is_disabled(), timeout=4)
+        _focus(page, until, 1)
+        page.set_viewport_size({"width": 760, "height": 900})
+        until(lambda: not _visible(page, _pane(file_pane)), timeout=3)
+        _expand(page, until, "p2", "thread-t3")
+        page.locator('[data-testid="thread-t3"]').click(modifiers=["Alt"])
+        return dirty
+
+    save = narrow_refusal(2, [1, 2])
     shown = page.locator('[data-testid="pane-1-refused"]')
     check("review: Open beside into a hidden dirty File pane is refused where the owner can see it",
           bool(until(lambda: shown.count() == 1 and shown.is_visible(), timeout=2))
           and "pane 2" in shown.inner_text(), shown.inner_text() if shown.count() else "")
-    check("review: and nothing moved", _attr(page, '[data-testid="workspace"]', "data-preset") == "single"
-          and _chat(page, 2)["threadId"] is None)
-    _choose(page, until, "cols2")
+    check("review: and nothing moved", _attr(page, '[data-testid="workspace"]', "data-preset") == "cols2"
+          and _attr(page, _pane(2), "data-view") == "file" and _chat(page, 2)["threadId"] is None)
+    page.set_viewport_size({"width": 1600, "height": 900})
+    until(lambda: _visible(page, _pane(2)), timeout=3)
     save.click()
     until(lambda: save.is_disabled(), timeout=4)
 
     # The same with an id that is not its slot (review of PR #37): the File
     # pane is id 5, drawn in slot 2. The refusal names the slot.
-    _fresh(page, mock, until, json.dumps({
-        "preset": "cols2", "order": [1, 5], "focused": 1,
-        "panes": [{"view": "chat"}, {"view": "preview"}, {"view": "file"}, {"view": "task"}, {"view": "file"}]}))
-    _open(page, until, 1, "t1")
-    page.locator(_pane(5, '[data-testid="file-calc.py"]')).click()
-    until(lambda: page.locator(_pane(5, '[data-testid="file-path"]')).inner_text() == "calc.py", timeout=4)
-    _edit(page, until, 5, "\n# slot two, id five")
-    save = page.locator(_pane(5, '[data-testid="file-save"]'))
-    until(lambda: not save.is_disabled(), timeout=4)
-    _focus(page, until, 1)
-    _choose(page, until, "single")
-    until(lambda: not _visible(page, _pane(5)), timeout=2)
-    _expand(page, until, "p2", "thread-t3")
-    page.locator('[data-testid="thread-t3"]').click(modifiers=["Alt"])
+    save = narrow_refusal(5, [1, 5])
     shown = page.locator('[data-testid="pane-1-refused"]')
     check("review of #37: the refusal names the hidden File pane by its slot (2), never its id (5)",
           bool(until(lambda: shown.count() == 1 and shown.is_visible(), timeout=2))
           and "pane 2 has an unsaved edit" in shown.inner_text() and "pane 5" not in shown.inner_text(),
           shown.inner_text() if shown.count() else "")
-    _choose(page, until, "cols2")
+    page.set_viewport_size({"width": 1600, "height": 900})
+    until(lambda: _visible(page, _pane(5)), timeout=3)
     save.click()
     until(lambda: save.is_disabled(), timeout=4)
 
@@ -1761,3 +1790,142 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
+
+
+# ---------------------------------------------------------------------------
+# WP-G2: split and close a chat pane (plan §3.5–§3.6)
+
+def _order(page) -> list:
+    return page.evaluate("window.__hud.workspace().ws.order")
+
+
+def _split_close_chat_checks(page, mock, check, until):
+    """A chat's copy is a new compose row in its project, the thread still in
+    one pane. × on a chat pane mid-turn: the turn keeps running, the words in
+    its box and the words a Stop handed back wait for the thread, and the pane
+    that opens the thread next has its Stop. A compose row's unsent words are
+    asked about, and Discard really drops them."""
+    w = mock.world
+    _fresh(page, mock, until, SINGLE)
+    _open(page, until, 1, "t3", "p2")
+    page.locator('[data-testid="pane-1-split"]').click()
+    until(lambda: _order(page) == [1, 2], timeout=2)
+    until(lambda: (_chat(page, 2)["compose"] or {}).get("projectId") == "p2", timeout=3)
+    c = _chats(page)
+    check("G2: splitting a thread's chat opens a new compose row in the same project, focused beside it",
+          c["2"]["compose"]["projectId"] == "p2" and c["2"]["threadId"] is None
+          and _attr(page, _pane(2), "data-focused") == "true", str(c["2"]["compose"]))
+    check("G2: and the thread is open in one pane only",
+          sum(1 for n in c if c[n]["threadId"] == "t3") == 1 and c["1"]["threadId"] == "t3")
+
+    # Mid-turn: a queued message, half-typed words, then × on pane 1.
+    mock.emit("turn_started", {}, thread_id="t3")
+    until(lambda: _chat(page, 1)["busy"], timeout=3)
+    mock.activity("thread", "t3", "working")
+    w["send_status"] = "queued"
+    box1 = _box(page, 1)
+    box1.fill("queued words")
+    box1.press("Enter")
+    until(lambda: "queued" in page.locator(_pane(1, '[data-testid="msg-user"]')).last.inner_text(), timeout=3)
+    queued_id = f"msg-{w['sends']}"
+    box1.fill("half typed")
+    page.locator('[data-testid="pane-1-close"]').click()
+    until(lambda: _order(page) == [2], timeout=2)
+    time.sleep(0.5)
+    check("G2: × on a thread's chat mid-turn closes it at once (its words can wait for the thread)",
+          page.locator('[data-testid="pane-1-close-ask"]').count() == 0 and page.locator(_pane(1)).count() == 0)
+    check("G2: the turn is left running for the thread, and its sidebar dot still says working",
+          page.evaluate("window.__hud.state().loose").get("t3") is not None
+          and page.locator('[data-testid="activity-t3"]').get_attribute("data-status") == "working",
+          str(page.evaluate("window.__hud.state().loose")))
+    mock.emit("text_delta", {"text": "streaming on"}, thread_id="t3")
+    mock.emit("queue_cleared", {"reason": "stopped", "messages": [
+        {"message_id": queued_id, "typed": "queued words", "via": "hud"}]}, thread_id="t3")
+    page.wait_for_timeout(400)
+    check("G2: the stream goes on with no pane drawing it, and handed-back words land in no other box",
+          _box(page, 2).input_value() == "" and "streaming on" not in _chat(page, 2)["draft"], _box(page, 2).input_value())
+    w.pop("send_status", None)
+
+    _expand(page, until, "p2", "thread-t3")
+    page.locator('[data-testid="thread-t3"]').click()
+    until(lambda: _chat(page, 2)["threadId"] == "t3", timeout=3)
+    stop2 = page.locator(_pane(2, '[data-testid="stop"]'))
+    check("G2: reopening the thread in another pane brings its Stop there",
+          bool(until(lambda: stop2.count() == 1, timeout=3)) and _chat(page, 2)["busy"]
+          and _chat(page, 2)["turnThreadId"] == "t3")
+    box2 = _box(page, 2)
+    check("G2: and the words that were in the closed pane's box, and the words the Stop handed back",
+          bool(until(lambda: "half typed" in box2.input_value() and "queued words" in box2.input_value(), timeout=3)),
+          repr(box2.input_value()))
+    calls = len(mock.sent("POST", "/threads/t3/interrupt"))
+    stop2.click()
+    check("G2: and that Stop interrupts the turn the closed pane started",
+          bool(until(lambda: len(mock.sent("POST", "/threads/t3/interrupt")) > calls, timeout=3)))
+    mock.emit("turn_finished", {"stop": "interrupted"}, thread_id="t3")
+    until(lambda: _chat(page, 2)["busy"] is False, timeout=3)
+    mock.activity("thread", "t3", "idle")
+    box2.fill("")
+
+    # A compose row's unsent words: × asks; Keep keeps; Discard drops them.
+    page.locator('[data-testid="pane-2-split"]').click()
+    until(lambda: len(_order(page)) == 2, timeout=2)
+    new = _order(page)[1]
+    until(lambda: _chat(page, new)["compose"] is not None, timeout=3)
+    _box(page, new).fill("never sent")
+    page.locator(f'[data-testid="pane-{new}-close"]').click()
+    ask = page.locator(f'[data-testid="pane-{new}-close-ask"]')
+    until(lambda: ask.count() > 0, timeout=2)
+    check("G2: × on a compose row with unsent words asks first",
+          ask.is_visible() and "unsent" in ask.inner_text() and new in _order(page))
+    page.locator(f'[data-testid="pane-{new}-close-keep"]').click()
+    until(lambda: ask.count() == 0, timeout=2)
+    check("G2: Keep keeps the pane and its words", new in _order(page) and _box(page, new).input_value() == "never sent")
+    time.sleep(0.5)
+    page.locator(f'[data-testid="pane-{new}-close"]').click()
+    until(lambda: ask.count() > 0, timeout=2)
+    page.locator(f'[data-testid="pane-{new}-close-discard"]').click()
+    until(lambda: new not in _order(page), timeout=2)
+    time.sleep(0.5)
+    page.locator('[data-testid="pane-2-split"]').click()
+    until(lambda: len(_order(page)) == 2, timeout=2)
+    again = _order(page)[1]
+    until(lambda: _chat(page, again)["compose"] is not None, timeout=3)
+    check("G2: Discard closes it, and its words come back nowhere — not in the next copy that reuses its id",
+          again == new and _box(page, again).input_value() == ""
+          and "never sent" not in json.dumps(page.evaluate("window.__hud.state().drafts")))
+    _box(page, 2).fill("")
+
+
+def _split_close_selected_checks(page, mock, check, until):
+    """× on the selected chat: the selection goes to the chat selected before
+    it that is still drawn, and voice lands there. A split the owner did not
+    ask for (`{focus: false}`) moves no focus and no selection."""
+    _fresh(page, mock, until, GRID_CHATS)
+    _focus(page, until, 2)
+    _focus(page, until, 3)
+    _focus(page, until, 1)
+    check("setup: pane 1 selected, pane 3 before it, then pane 2", _sel(page) == 1
+          and page.evaluate("window.__hud.state().selectedOrder")[:3] == [1, 3, 2])
+    page.locator('[data-testid="pane-1-close"]').click()
+    until(lambda: 1 not in _order(page), timeout=2)
+    check("G2: closing the selected chat selects the one selected before it (pane 3)",
+          bool(until(lambda: _sel(page) == 3, timeout=2)) and _attr(page, _pane(3), "data-selected") == "true"
+          and 1 not in page.evaluate("window.__hud.state().selectedOrder"), str(_sel(page)))
+    page.evaluate(UTTERANCE)
+    check("G2: and what is said next lands in pane 3's box",
+          bool(until(lambda: "what is the weather" in _box(page, 3).input_value(), timeout=5))
+          and all(_box(page, n).input_value() == "" for n in (2, 4)))
+    _box(page, 3).fill("")
+
+    _box(page, 3).click()
+    active = page.evaluate("document.activeElement && document.activeElement.closest('[data-testid^=\"pane-\"]')"
+                           ".getAttribute('data-testid')")
+    focused = page.evaluate("window.__hud.workspace().ws.focused")
+    got = page.evaluate("window.__hud.split(4, {focus: false})")
+    until(lambda: len(_order(page)) == 4, timeout=2)
+    time.sleep(0.3)
+    after = page.evaluate("document.activeElement && document.activeElement.closest('[data-testid^=\"pane-\"]')"
+                          ".getAttribute('data-testid')")
+    check("G2: a split with {focus: false} adds the pane after its source and moves nothing the owner is using",
+          got is not None and _order(page)[-1] == got and page.evaluate("window.__hud.workspace().ws.focused") == focused
+          and active == after == "pane-3" and _sel(page) == 3, f"{got} {_order(page)} {active} {after} {_sel(page)}")

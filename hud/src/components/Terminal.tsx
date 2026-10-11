@@ -1074,6 +1074,16 @@ export class TermManager {
     this.changed();
   }
 
+  /**
+   * The pane showing terminal `id` was closed (WP-G2, plan §3.6): the
+   * terminal goes back to the panel as its selected tab. The shell lives on —
+   * no DELETE — its session stays attached, and the panel is left open or
+   * closed as it was.
+   */
+  releaseToPanel(id: string) {
+    this.selectTab(id);
+  }
+
   get dot(): boolean {
     return !this.panelOpen && this.unseenExits.size > 0;
   }
@@ -1202,8 +1212,13 @@ export class TermManager {
    * A new terminal, shown in the panel or in a pane. Null when refused (said
    * in `error`). `place`, asked once the daemon has made it: false leaves it
    * in the list, shown nowhere and opening nothing (`ownerOpened`).
+   * `readable: false` (a split of a terminal Jarvis may not read, WP-G2): the
+   * switch is turned off before the terminal is shown anywhere — a copy never
+   * widens what Jarvis can read.
    */
-  async create(spec: InSpec, where: "panel" | PaneNo, place?: () => boolean): Promise<string | null> {
+  async create(
+    spec: InSpec, where: "panel" | PaneNo, place?: () => boolean, opts: { readable?: boolean } = {},
+  ): Promise<string | null> {
     if (this.blocked) return null;
     this.creations++;
     this.error = "";
@@ -1214,6 +1229,17 @@ export class TermManager {
       this.error = e?.message || "the terminal could not be opened";
       this.changed();
       return null;
+    }
+    if (opts.readable === false) {
+      try {
+        row = (await api.setTerminalReadable(row.id, false)) ?? { ...row, readable: false };
+      } catch (e: any) {
+        // Readable when its source is not: it is closed again, never shown.
+        void api.closeTerminal(row.id).catch(() => {});
+        this.error = `the copy was closed: Jarvis could not be kept from reading it (${e?.message || "the switch could not be changed"})`;
+        this.changed();
+        return null;
+      }
     }
     this.updateRow(row);
     this.claimed.add(row.id);

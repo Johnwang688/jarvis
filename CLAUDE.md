@@ -632,7 +632,7 @@ toggles are `aria-pressed` and follow what is **drawn**: a window-folded pane
 reads closed with `data-auto`, and opening it folds the other. ⊞'s menu is
 the only way to pick a preset: eight tiles, four to a row, since WP-G1
 (single, cols2, rows2, cols3, main2, grid4, grid6, grid8; grid5 and grid7
-come from split and close in WP-G2, or a stored value — below).
+come from split and × — WP-G2 — or a stored value; below).
 `lib/workspace.ts` is the pure pane model: eight pane specs always stored
 under `jarvis.hud.workspace` (apart from `jarvis.hud.layout`) by **id**, with
 `order` the ids drawn in reading order and `kept` the ones ⊞ hid, a pane
@@ -1538,11 +1538,11 @@ panel layouts." ⊞ now offers 3×2 and 4×2 directly (eight tiles, four to a
 row, the head "Layout · N panes"; it opens on the chosen tile, else the first
 tile — never on a toggle row, where Enter folded the sidebar with 3 over 2
 current, review of PR #37); 3 over 2 and 4 over 3 exist as presets
-(`LADDER` is the shape per count for WP-G2's split and ×, which are **not**
-built yet) and draw from a stored value. Every pane can show chat, task,
+(`LADDER` is the shape per count for WP-G2's split and ×, below) and draw
+from a stored value. Every pane can show chat, task,
 file, diff, preview or a terminal; panes 5–8 default to chat. **A pane's id
 is not its slot** (plan G-1): `pane-<id>`, its React key (`${id}.${incarnation}`
-— the incarnation is render-only and stays 0 until WP-G2's close bumps it),
+— the incarnation is render-only, bumped by WP-G2's close),
 `chats[id]` and the dirty flag are by id for life; `ws.order` lists the ids
 drawn in reading order, and **every number the owner reads is the slot**
 (`slotOf`): "New thread · N", the terminal panel's "in pane N" (the manager's
@@ -1638,6 +1638,79 @@ under a card; a hold through a card, into a terminal or across a blur sends
 no EOF; the readable switch), multichat (W-6), layout (a separator) and preview (Keep its
 origin) suites. The v1 `jarvis.html`
 face keeps Space.
+
+**Split and close, WP-G2 (2026-10-11, design §18; plan
+`docs/plans/2026-10-10-hud-split-panes-plan.md` §3.4–§3.6, decisions file
+beside it wins: S-2 a split is a copy, S-6 a terminal's copy is a new shell in
+its folder, S-7 a task's copy is its diff, S-8 a dirty file is saved first —
+lifted by ED-2's shared buffers, below).**
+The owner asked for the × several times. Every pane's strip has a **split
+button** (`pane-<id>-split`, the title bar's `.tb-icon` — the rules were
+lifted off `#titlebar` — an outline with one divider), in the single layout
+too, and while more than one pane is drawn a **×** at its right end
+(`pane-<id>-close`). Both are pure in `lib/workspace.ts`: `splitPane(ws,
+source, id, spec, {focus})` inserts the id **right after its source** and
+lands on `LADDER`'s shape for the new count (rows2 and main2 are ⊞'s alone);
+`closePane(ws, id, then)` drops it, resets only its spec, leaves `kept` and
+every edge alone, and never closes the last pane; `allocate` takes the
+lowest free id, else the oldest hidden pane with no unsaved edit; `copySpec`
+copies a file pane's project and tabs (`editors`, ED-2: the same buffers), a
+diff's project and `filePath`, a preview's URL — **never
+its keep-origin grant** — turns a task into its diff, and leaves a chat or a
+terminal for App to fill; `splitVerdict` refuses past eight (`max`), when
+the next shape would not be drawn whole even with the side panes and panel
+folded (`room`, so at 1280×800 six panes cannot become seven), and when every
+free id is a hidden dirty pane. A dirty File pane splits like any other since
+ED-2: the copy holds the same buffers, edit and all. `{focus: false}` (the browser amendment's dev-server pane,
+§D.2) moves neither `ws.focused`, DOM focus nor the selected chat
+(`__hud.split(source, {focus})` is its test hook). **App does what a pane
+held** (`releasePane`): a thread's unsent words and files are parked under
+the thread (they come back when it opens anywhere), words handed back are
+held for it, a turn the pane tracked is left in `State.loose` and **the next
+pane that opens that thread takes it up, Stop and all** (`open_thread`,
+trading a turn of its own into `loose`; `turn_finished` and the 15 s
+reconcile clear it); a compose row's unsent words are asked about (G-9) and
+Discard drops them for good; a terminal goes back to the panel as its
+selected tab (`releaseToPanel`) — **no DELETE, no new ticket, the shell lives
+on**. × asks first, in an inline strip (`pane-<id>-close-ask`, focus on
+Keep/Cancel, never a modal), for a compose row's unsent words (Discard and
+close / Keep) or an unsaved edit **no other pane holds**
+(`buffers.paneLosing`; Save / Don't save / Cancel — `pane-<id>-close-save`,
+`-close-discard`, `-close-keep` — Save closing only once every edit is on
+disk).
+Focus after a close goes to the pane now in that slot (else the slot before)
+— the pane itself, never its box, so a held Enter cannot send — and when the
+selected chat closes, to the chat selected before it (W-6: the owner's last
+choice keeps the mic). **One click closes one pane**: a × click within 400 ms
+of a close, or the second of a double-click, does nothing (3 over 2's top-
+right × sits exactly where 2×2's lands). A split's chat copy is a compose row
+in the source's project, written before the layout changes; a terminal's is
+`terminals.create(specOf(source), id, {readable: false} if the source is
+off)` — the switch goes off **before** the terminal is shown, and if it
+cannot, the copy is closed: a copy never widens what Jarvis can read. A
+reused id mounts fresh: Workspace unmounts a pane neither drawn nor `kept`,
+and `useLayout` bumps the incarnation on a close and when a split takes back
+a hidden pane (else its old FileTab stayed). File panes store their tabs
+(ED-2's `editors`; a WP-G2 `filePath` reads as one tab) and reopen them on
+mount; two File panes on one file share its buffer, so G2's save-and-reload
+messages (`lib/filesync.ts`) are gone; Diff panes store and seed their file
+(`filePath`).
+Open beside's two grow cases are splits now (a free id, so a pane ⊞ hid keeps
+what it showed). **Nothing assumes pane 1**: the store starts with no
+selected chat, `activePane` falls back to `home` (the pane in slot 1, which
+App syncs), `#tabs` is slot 1's, and Workspace no longer seeds pane 1;
+WP-G1's surviving unit mutants (U4 bottom edges unclamped, U34 a preferred
+panel's row drop unrecorded, U35 no side refit, U36/U37 fallbacks to id 1)
+each have a test now. Under a card every split, × and question button is
+disabled and inert, and the eight-pane card check asserts it at 160% and
+70%. Free checks: `workspace.test.ts`, `chats.test.ts`, `store.test.ts`,
+the layout suite's `_split_checks`,
+`_split_close_one_checks` and `_split_file_checks`, the multichat suite's
+`_split_close_chat_checks` and `_split_close_selected_checks`, the terminal
+suite's `_split_close_terminal_checks` and the preview suite's
+`_split_checks`; the PR's mutation table shows each failing with its
+mutation. WP-G3's shared buffer arrived with ED-2. Not done: WP-H's
+thinking line.
 
 **Sidebar status dots (2026-10-08, design §18; contract in
 `docs/hud-api.md`).** The `·` left of each sidebar thread and task is what it

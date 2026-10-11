@@ -519,7 +519,7 @@ def terminal_checks(browser, mock, base, check, until, guard, init_script):
                         _hold_checks,
                         _read_note_checks, _integration_checks, _osc_link_checks, _preview_link_checks,
                         _menu_edge_checks, _pane_checks, _zoom_checks, _ended_checks,
-                        _flood_checks, _chat_panes_checks, _crash_checks):
+                        _flood_checks, _chat_panes_checks, _split_close_terminal_checks, _crash_checks):
             if only and section.__name__.strip("_") not in only:
                 continue
             try:
@@ -1927,6 +1927,83 @@ def _pane_checks(page, mock, base, check, until, fake):
     page.wait_for_timeout(200)
     check("a pane the layout stops drawing gives its terminal back to the panel",
           page.locator(f'[data-testid="panel-tab-{new}"]').get_attribute("data-place") == "panel")
+
+
+def _split_close_terminal_checks(page, mock, base, check, until, fake):
+    """WP-G2 (decisions S-6, plan G-7 and §3.6): splitting a terminal pane
+    opens a new terminal in the folder the source was opened in — once, never
+    retried at the cap, and unreadable to Jarvis when the source is. × on a
+    terminal pane kills nothing: no DELETE, no reattach, and the terminal is
+    the panel's tab again."""
+    # The section before ends with a terminal still attaching: let it, or the
+    # reset below empties the world under it and its ticket is refused (the
+    # suite's "fresh ticket" flake at this boundary).
+    if _created(mock):
+        _attached(page, until, _created(mock)[-1][0], timeout=4)
+    tid = _fresh(page, mock, base, until, fake, size=(1600, 900))
+    source_in = _created(mock)[-1][1]
+    page.locator('[data-testid="pane-1"] [data-testid="tab-terminal"]').click()
+    until(lambda: _visible(page, f'[data-testid="pane-1-pick-{tid}"]'), timeout=3)
+    page.locator(f'[data-testid="pane-1-pick-{tid}"]').click()
+    until(lambda: page.locator(_sel(tid)).get_attribute("data-where") == "pane-1", timeout=3)
+    sw = page.locator(_sel(tid, '[data-testid="term-readable"]'))
+    sw.click()
+    until(lambda: sw.get_attribute("aria-pressed") == "false", timeout=3)
+
+    posts = lambda: [c for c in mock.calls if c[0] == "POST" and c[1] == "/terminals"]  # noqa: E731
+    n = len(posts())
+    page.locator('[data-testid="pane-1-split"]').click()
+    until(lambda: len(_created(mock)) > 0 and _created(mock)[-1][0] != tid, timeout=4)
+    new = _created(mock)[-1][0]
+    _attached(page, until, new)
+    check("G2: splitting a terminal pane opens one new terminal, in the source's folder, beside it",
+          len(posts()) == n + 1 and _created(mock)[-1][1] == source_in
+          and page.locator(_sel(new)).get_attribute("data-where") == "pane-2", f"{_created(mock)[-1]} vs {source_in}")
+    check("G2: the source was unreadable to Jarvis, so the copy is too, switched off before it is shown",
+          mock.sent("PATCH", f"/terminals/{new}") == [{"readable": False}] and fake._row(new)["readable"] is False
+          and page.locator(_sel(new, '[data-testid="term-readable"]')).get_attribute("aria-pressed") == "false",
+          str(mock.sent("PATCH", f"/terminals/{new}")))
+
+    # At the cap the copy is the picker, with the daemon's sentence, and nothing retries.
+    mock.terminal_refuse = "6 terminals are open; close one first"
+    n = len(posts())
+    page.locator('[data-testid="pane-1-split"]').click()
+    until(lambda: len(posts()) > n, timeout=3)
+    pick = page.locator('[data-testid="pane-3-terminal-pick"]')
+    until(lambda: _visible(page, '[data-testid="pane-3-terminal-pick"]'), timeout=3)
+    page.wait_for_timeout(1200)
+    err = pick.locator('[data-testid="terminal-error"]')
+    check("G2: at the cap the copy shows the picker and the daemon's sentence, and asks once",
+          err.count() == 1 and "close one first" in err.inner_text() and len(posts()) == n + 1,
+          f"{len(posts()) - n} posts, {err.all_inner_texts()}")
+    mock.terminal_refuse = None
+    page.wait_for_timeout(500)
+    page.locator('[data-testid="pane-3-close"]').click()
+    until(lambda: page.locator('[data-testid="pane-3"]').count() == 0, timeout=3)
+    page.wait_for_timeout(500)
+
+    # × on the pane showing the copy: the shell lives on, in the panel.
+    tickets = lambda: [c for c in mock.calls if c[0] == "POST" and c[1] == f"/terminals/{new}/ticket"]  # noqa: E731
+    t0 = len(tickets())
+    sockets = len(fake.of(new))
+    fake.output(new, b"still-alive\r\n$ ")
+    until(lambda: "still-alive" in _text(page, new), timeout=3)
+    calls = len(mock.calls)
+    page.locator('[data-testid="pane-2-close"]').click()
+    until(lambda: page.locator('[data-testid="pane-2"]').count() == 0, timeout=3)
+    page.wait_for_timeout(600)
+    deletes = [c for c in mock.calls[calls:] if c[0] == "DELETE" and c[1].startswith("/terminals/")]
+    check("G2: × on a terminal pane sends no DELETE: the shell lives on",
+          deletes == [] and not fake._row(new).get("exited"), str(deletes))
+    check("G2: and its socket stays: no new ticket, no reattach",
+          len(tickets()) == t0 and len(fake.of(new)) == sockets, f"{len(tickets()) - t0} tickets")
+    if not _visible(page, '[data-testid="panel"]'):
+        page.locator('[data-testid="toggle-panel"]').click()
+    tab = page.locator(f'[data-testid="panel-tab-{new}"]')
+    until(lambda: tab.count() > 0 and tab.get_attribute("aria-selected") == "true", timeout=3)
+    check("G2: it is the panel's selected tab, drawn there with what it said",
+          tab.get_attribute("aria-selected") == "true" and tab.get_attribute("data-place") == "panel"
+          and page.locator(_sel(new)).get_attribute("data-where") == "panel" and "still-alive" in _text(page, new))
 
 
 def _zoom_checks(page, mock, base, check, until, fake):

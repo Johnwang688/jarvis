@@ -205,6 +205,24 @@ describe("one buffer per file on disk", () => {
     expect(b.paneDirty(3)).toBe(true);
   });
 
+  it("what closing a pane would lose: only the edits no other pane holds; savePane saves them", async () => {
+    await b.open("p1", "a.py", "2|a.py");
+    await b.open("p1", "b.py", "2|b.py");
+    await b.open("p1", "a.py", "3|a.py");
+    model("/w/a.py").type("x");
+    model("/w/b.py").type("y");
+    expect(b.paneLosing(2).map((v) => v.path)).toEqual(["b.py"]);
+    expect(b.paneLosing(3)).toEqual([]);
+    expect(await b.savePane(2)).toBe(true);
+    expect(w.files.get("/w/b.py")).toBe("two\ny");
+    expect(b.paneLosing(2)).toEqual([]);
+    expect(b.isDirty("/w/a.py")).toBe(true); // pane 3's too: not saved by closing pane 2
+    w.files.set("/w/a.py", "theirs\n");
+    b.release("/w/a.py", "3|a.py");
+    expect(await b.savePane(2)).toBe(false); // a conflict: the pane stays open
+    expect(w.files.get("/w/a.py")).toBe("theirs\n");
+  });
+
   it("a read that fails rejects and holds nothing", async () => {
     await expect(b.open("p1", "missing.py", "1|missing.py")).rejects.toMatchObject({ status: 404 });
     expect(b.snapshot()).toHaveLength(0);

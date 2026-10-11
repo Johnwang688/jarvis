@@ -234,6 +234,24 @@ export class Buffers {
     return false;
   }
 
+  /**
+   * The unsaved edits only pane `pane` holds: what closing it would lose. A
+   * dirty buffer another pane also holds is not lost when this one closes.
+   */
+  paneLosing(pane: number | string): BufferView[] {
+    const key = String(pane);
+    return [...this.bufs.values()]
+      .filter((b) => this.dirtyOf(b) && b.refs.size > 0 && [...b.refs].every((r) => paneOfRef(r) === key))
+      .map((b) => this.view(b));
+  }
+
+  /** Save every edit only pane `pane` holds (closing it, "Save"): true when all saved. */
+  async savePane(pane: number | string): Promise<boolean> {
+    let ok = true;
+    for (const b of this.paneLosing(pane)) ok = (await this.save(b.abs)) === "saved" && ok;
+    return ok && this.paneLosing(pane).length === 0;
+  }
+
   anyDirty(): boolean {
     for (const b of this.bufs.values()) if (this.dirtyOf(b)) return true;
     return false;

@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_LAYOUT, PANE, RAIL } from "./layout";
 import {
-  LADDER, MENU_PRESETS, PANEL, PANE_MIN_H, PANE_MIN_W, PANE_NOS, PANE_VIEWS, PATH_MAX, PRESETS, SHAPES, TITLEBAR_H,
-  WORKSPACE_KEY, cellsOf, clampCols, clampPanelHeight, clampRow, columnWidths, defaultWorkspace, dropColumn, dropRow,
+  LADDER, MAX_PANES, MENU_PRESETS, PANEL, PANE_MIN_H, PANE_MIN_W, PANE_NOS, PANE_VIEWS, PATH_MAX, PRESETS, SHAPES,
+  TITLEBAR_H, WORKSPACE_KEY, allocate, cellsOf, clampCols, clampPanelHeight, clampRow, closePane, columnWidths, copySpec,
+  defaultPane, defaultWorkspace, dropColumn, dropRow, setFilePath, splitPane, splitTitle, splitVerdict,
   equalSplit, fitWorkspace, focusPane, forgetTerminal, gridTemplate, loadWorkspace, maxPanelHeight, moveColEdge,
   orderOf, paneAt, paneSequence, parseWorkspace, pinPane, resetWorkspace, saveWorkspace, setKeepOrigin, setPaneTerminal,
   setEditors, setPanel, setPreset, setPreviewUrl, setSplit, setView, show, slotOf, slotWidths, unpinProject,
@@ -1063,5 +1064,237 @@ describe("fitting eight panes: the plan's windows (§3.3)", () => {
   it("1280×800 at 80% (1600 wide): eight fit, on both rails (1528 ≥ 1440)", () => {
     for (const p of ["grid4", "grid6", "grid8"] as Preset[]) expect(at(p, 1280, 800, 80)).toMatchObject({ drawn: p, dropped: 0 });
     expect(at("grid8", 1280, 800, 80)).toMatchObject({ width: 1528, sides: { leftFolded: true, rightFolded: true } });
+  });
+});
+
+// ---- WP-G2: split and close ----------------------------------------------------
+
+describe("split and close (WP-G2, plan §3.4–§3.6)", () => {
+  const chat = (): ReturnType<typeof defaultPane> => ({ view: "chat", projectId: null, terminalId: null });
+  /** Split the pane in slot `slot` into the lowest free id, as the window does. */
+  const splitAt = (w: Workspace, slot: number) => splitPane(w, orderOf(w)[slot - 1], allocate(w)!, chat());
+
+  it("climbs the ladder 1 → 8 and back, one pane at a time, on exactly the ladder's shapes", () => {
+    let w = defaultWorkspace();
+    const up: Preset[] = [];
+    for (let n = 1; n < 8; n++) {
+      w = splitAt(w, n);
+      up.push(w.preset);
+      expect(w.order).toHaveLength(n + 1);
+      expect(SHAPES[w.preset].panes).toBe(n + 1);
+    }
+    expect(up).toEqual(["cols2", "cols3", "grid4", "grid5", "grid6", "grid7", "grid8"]);
+    expect(splitAt(w, 1)).toBe(w); // eight is the most
+    const down: Preset[] = [];
+    for (let i = 0; i < 8 && w.order.length > 1; i++) {
+      w = closePane(w, w.order[w.order.length - 1]);
+      down.push(w.preset);
+    }
+    expect(down).toEqual(["grid7", "grid6", "grid5", "grid4", "cols3", "cols2", "single"]);
+    expect(closePane(w, w.order[0])).toBe(w); // the last pane is never closed
+  });
+
+  it("lands on the ladder's shape whatever the shape it starts from: rows2 splits to cols3, main2 closes to cols2", () => {
+    const rows2 = setPreset(defaultWorkspace(), "rows2");
+    expect(splitPane(rows2, 1, 3, chat()).preset).toBe("cols3");
+    const main2 = setPreset(defaultWorkspace(), "main2");
+    expect(closePane(main2, 3).preset).toBe("cols2");
+  });
+
+  it("puts the new pane right after its source, in reading order — never at the end", () => {
+    const three = setPreset(defaultWorkspace(), "cols3");
+    const w = splitPane(three, 2, 4, chat());
+    expect(w.order).toEqual([1, 2, 4, 3]);
+    expect(slotOf(w, 4)).toBe(3);
+    expect(w.preset).toBe("grid4");
+  });
+
+  it("focuses the new pane; × hands focus to the pane now in that slot, else the slot before", () => {
+    const w = splitPane(setPreset(defaultWorkspace(), "cols3"), 2, 4, chat());
+    expect(w.focused).toBe(4);
+    const closed = closePane(w, 4);
+    expect(closed.order).toEqual([1, 2, 3]);
+    expect(closed.focused).toBe(3); // slot 3 is pane 3 now
+    const last = closePane(focusPane(closed, 3), 3);
+    expect(last.focused).toBe(2); // no slot 3 any more: the one before
+    expect(closePane(focusPane(closed, 1), 3).focused).toBe(1); // focus elsewhere stays put
+    // The window names where focus goes when the selected chat closes: the chat selected before it.
+    const grid = setPreset(defaultWorkspace(), "grid4");
+    expect(closePane(grid, 1, 3).focused).toBe(3);
+    expect(closePane(grid, 1, 1).focused).toBe(2); // not drawn after the close: the slot's pane
+    expect(closePane(grid, 1, null).focused).toBe(2);
+  });
+
+  it("splits without moving focus when asked not to ({focus: false}, the browser's dev-server pane)", () => {
+    const w = focusPane(setPreset(defaultWorkspace(), "cols2"), 1);
+    const quiet = splitPane(w, 2, 3, { view: "preview", projectId: null, terminalId: null }, { focus: false });
+    expect(quiet.order).toEqual([1, 2, 3]);
+    expect(quiet.focused).toBe(1);
+    expect(splitPane(w, 2, 3, chat()).focused).toBe(3);
+  });
+
+  it("refuses an id already drawn, a source not drawn, and a ninth pane", () => {
+    const w = setPreset(defaultWorkspace(), "cols2");
+    expect(splitPane(w, 1, 2, chat())).toBe(w);
+    expect(splitPane(w, 5, 3, chat())).toBe(w);
+    const eight = setPreset(defaultWorkspace(), "grid8");
+    expect(eight.order).toHaveLength(MAX_PANES);
+    expect(splitPane(eight, 1, 2, chat())).toBe(eight);
+  });
+
+  it("allocates the lowest free id, else the oldest hidden pane with no unsaved edit, else none", () => {
+    expect(allocate(defaultWorkspace())).toBe(2);
+    const gap = closePane(setPreset(defaultWorkspace(), "grid4"), 2);
+    expect(allocate(gap)).toBe(2);
+    // All eight used: 1 drawn, 2…8 hidden (8 hidden longest, it is last).
+    const one = setPreset(setPreset(defaultWorkspace(), "grid8"), "single");
+    expect(allocate(one)).toBe(8);
+    expect(allocate(one, [8])).toBe(7);
+    expect(allocate(one, [2, 3, 4, 5, 6, 7, 8])).toBeNull();
+    // A hidden pane a split takes back leaves `kept` and shows the copy.
+    const took = splitPane(one, 1, 8, chat());
+    expect(took.kept).toEqual([2, 3, 4, 5, 6, 7]);
+    expect(took.order).toEqual([1, 8]);
+  });
+
+  it("resets only the closed pane's spec, and leaves kept and every preset's edges alone", () => {
+    let w = setPreset(defaultWorkspace(), "grid8");
+    w = setPreset(w, "grid6"); // 7 and 8 hidden
+    w = setSplit(w, "grid6", { cols: [0.2, 0.5], row: 0.3 });
+    w = setSplit(w, "grid5", { cols: [0.25, 0.5], bottom: [0.7], row: 0.4 });
+    w = setPreviewUrl(setView(w, 3, "preview"), 3, "http://localhost:5173/");
+    w = setView(w, 4, "file");
+    const closed = closePane(w, 3);
+    expect(closed.panes[2]).toEqual(defaultPane(3));
+    expect(closed.panes.filter((_, i) => i !== 2)).toEqual(w.panes.filter((_, i) => i !== 2));
+    expect(closed.kept).toEqual(w.kept);
+    expect(closed.splits).toEqual(w.splits);
+    expect(closed.preset).toBe("grid5");
+    expect(closed.order).toEqual([1, 2, 4, 5, 6]);
+  });
+
+  it("closes and splits ids, never slots: after pane 1 is closed nothing assumes it is there", () => {
+    const w = closePane(setPreset(defaultWorkspace(), "cols3"), 1);
+    expect(w.order).toEqual([2, 3]);
+    expect(paneAt(w, 1)).toBe(2);
+    expect(slotOf(w, 3)).toBe(2);
+    // A free id 1 is the next a split takes, and it lands after its source.
+    const back = splitPane(w, 3, allocate(w)!, chat());
+    expect(back.order).toEqual([2, 3, 1]);
+    expect(slotOf(back, 1)).toBe(3);
+    // Stored and read back, the order survives without a pane 1 first.
+    const m = memory();
+    saveWorkspace(w, m);
+    expect(loadWorkspace(m).order).toEqual([2, 3]);
+    expect(loadWorkspace(m).focused).toBe(2);
+  });
+
+  it("with nothing drawn, the fallbacks are the first pane in reading order, never id 1 (U36/U37)", () => {
+    const w = closePane(setPreset(defaultWorkspace(), "cols2"), 1); // only pane 2, which shows a preview
+    expect(w.order).toEqual([2]);
+    expect(show(w, "file", []).panes[1].view).toBe("file");
+    expect(show(w, "file", []).panes[0].view).toBe(w.panes[0].view);
+    expect(show(w, "file", []).focused).toBe(2);
+  });
+
+  it("copies what a pane shows (decisions S-2, plan §3.5)", () => {
+    const base = { projectId: "p1", terminalId: "t1", previewUrl: "http://localhost:5173/x", keepOrigin: "http://localhost:5173",
+                   filePath: "src/a.ts" };
+    expect(copySpec({ ...base, view: "file" })).toEqual({ view: "file", projectId: "p1", terminalId: null, filePath: "src/a.ts" });
+    expect(copySpec({ ...base, view: "diff" })).toEqual({ view: "diff", projectId: "p1", terminalId: null, filePath: "src/a.ts" });
+    // The keep-origin grant is the owner's choice for one pane: never copied (WP-E).
+    expect(copySpec({ ...base, view: "preview" })).toEqual({
+      view: "preview", projectId: "p1", terminalId: null, previewUrl: "http://localhost:5173/x" });
+    // A task view's copy is that task's diff (S-7).
+    expect(copySpec({ ...base, view: "task" })).toEqual({ view: "diff", projectId: null, terminalId: null });
+    // A chat and a terminal start empty: the window fills them (a compose row, a new terminal).
+    expect(copySpec({ ...base, view: "chat" })).toEqual({ view: "chat", projectId: null, terminalId: null });
+    expect(copySpec({ ...base, view: "terminal" })).toEqual({ view: "terminal", projectId: null, terminalId: null });
+    // A File pane's tabs (ED-2): the copy holds the same buffers; its preview tab is pinned there.
+    const tabs = { paths: ["a.py", "b.py"], active: "b.py", preview: "b.py" };
+    expect(copySpec({ view: "file", projectId: "p1", terminalId: null, editors: tabs })).toEqual({
+      view: "file", projectId: "p1", terminalId: null, editors: { paths: ["a.py", "b.py"], active: "b.py", preview: null } });
+    // An empty pane copies empty.
+    expect(copySpec({ view: "file", projectId: null, terminalId: null })).toEqual({ view: "file", projectId: null, terminalId: null });
+    expect(copySpec({ view: "preview", projectId: null, terminalId: null })).toEqual({ view: "preview", projectId: null, terminalId: null });
+  });
+
+  it("decides the split button from the count and the room (G-5)", () => {
+    const at = (n: number, w: number, h: number, zoom = 100) => {
+      let x = defaultWorkspace();
+      // Bounded, so a split that stops working fails rather than hangs.
+      for (let i = 0; i < 8 && x.order.length < n; i++) x = splitAt(x, x.order.length);
+      expect(x.order).toHaveLength(n);
+      const [aw, ah] = room(w, h - 80, zoom);
+      return splitVerdict(DEFAULT_LAYOUT, x, aw, ah);
+    };
+    expect(at(2, 1280, 800)).toEqual({ ok: true, why: "" });
+    expect(at(6, 1280, 800)).toEqual({ ok: false, why: "room" });
+    expect(at(7, 1920, 1080)).toEqual({ ok: true, why: "" });
+    expect(at(8, 1920, 1080)).toEqual({ ok: false, why: "max" });
+    // A window already dropping panes can still split when the next shape fits:
+    // three columns drawn as two at 900 can become 2×2 (720 wide).
+    const three = setPreset(defaultWorkspace(), "cols3");
+    expect(fitWorkspace(DEFAULT_LAYOUT, three, 900, 700).dropped).toBe(1);
+    expect(splitVerdict(DEFAULT_LAYOUT, three, 900, 700)).toEqual({ ok: true, why: "" });
+    // Every free id hidden with an unsaved edit.
+    const one = setPreset(setPreset(defaultWorkspace(), "grid8"), "single");
+    expect(splitVerdict(DEFAULT_LAYOUT, one, 1920, 1000, null, false, [2, 3, 4, 5, 6, 7, 8]))
+      .toEqual({ ok: false, why: "hidden-edit" });
+    expect(splitVerdict(DEFAULT_LAYOUT, one, 1920, 1000, null, false, [2])).toEqual({ ok: true, why: "" });
+  });
+
+  it("says why on the button", () => {
+    expect(splitTitle("", 2)).toBe("Split: a copy of this pane beside it");
+    expect(splitTitle("max", 8)).toBe("Eight panes is the most");
+    expect(splitTitle("room", 6)).toBe("No room for 7 panes in this window: widen it, zoom out (Ctrl+-) or close a pane");
+    expect(splitTitle("hidden-edit", 1)).toBe("A hidden pane has an unsaved edit: show it from ⊞ first");
+  });
+
+  it("remembers the file a File or Diff pane has open, and forgets it when the pane moves project", () => {
+    let w = setFilePath(pinPane(defaultWorkspace(), 3, "p1"), 3, "src/a.ts");
+    expect(w.panes[2]).toMatchObject({ projectId: "p1", filePath: "src/a.ts" });
+    expect(setFilePath(w, 3, "src/a.ts")).toBe(w);
+    expect(setFilePath(w, 3, "x".repeat(PATH_MAX + 1)).panes[2].filePath).toBeUndefined();
+    expect(pinPane(w, 3, "p2").panes[2]).toEqual({ view: "file", projectId: "p2", terminalId: null });
+    expect(unpinProject(w, "p1").panes[2].filePath).toBeUndefined();
+    expect(unpinProject(w, "p1", [3]).panes[2].filePath).toBe("src/a.ts"); // an unsaved edit keeps its pin and file
+    w = setFilePath(w, 3, null);
+    expect("filePath" in w.panes[2]).toBe(false);
+  });
+});
+
+describe("fitting: the mutants WP-G1's review left alive (U4, U34, U35)", () => {
+  it("U4: clamps the bottom row's own edges like the top row's", () => {
+    // A stored 3 over 2 whose bottom edge sits 5% in: at 1100 wide that pane would be 55px.
+    const w = setSplit(setPreset(defaultWorkspace(), "grid5"), "grid5", { bottom: [0.05] });
+    const f = fitWorkspace({ ...DEFAULT_LAYOUT, leftCollapsed: true, rightCollapsed: true }, w, 1172, 900);
+    expect(f.drawn).toBe("grid5");
+    expect(f.bottom[0] * f.width).toBeGreaterThanOrEqual(PANE_MIN_W - 1e-6);
+    expect(slotWidths(f).every((x) => x >= PANE_MIN_W - 1e-6)).toBe(true);
+  });
+
+  it("U34: a row the preferred panel dropped counts for the sticky set", () => {
+    // 3×2 at 900 x 450 with the panel preferred: a column goes (2×2), then a
+    // row for the panel (two columns). Focus on pane 3 draws [2, 3]; moving
+    // focus to pane 2, inside that pair, keeps [2, 3] — not [1, 2].
+    const w = setPanel(focusPane(setPreset(defaultWorkspace(), "grid6"), 3), { open: true });
+    const f1 = fitWorkspace(DEFAULT_LAYOUT, w, 900, 450, null, true);
+    expect(f1).toMatchObject({ drawn: "cols2", panes: [2, 3] });
+    expect(f1.panel.open).toBe(true);
+    const prev: DrawnSet = { preset: w.preset, drawn: f1.drawn, panes: f1.panes };
+    const f2 = fitWorkspace(DEFAULT_LAYOUT, focusPane(w, 2), 900, 450, null, true, prev);
+    expect(f2.panes).toEqual([2, 3]);
+  });
+
+  it("U35: a dropped row that needs less width gives the side panes back their room", () => {
+    // 3 over 2 needs 1080 across: at 1366 that folds the status pane. Too
+    // short for two rows with focus in the bottom row, it is two columns
+    // (720), and the status pane comes back.
+    const w = focusPane(setPreset(defaultWorkspace(), "grid5"), 5);
+    expect(fitWorkspace(DEFAULT_LAYOUT, w, 1366, 900).sides.rightFolded).toBe(true);
+    const f = fitWorkspace(DEFAULT_LAYOUT, w, 1366, 300);
+    expect(f).toMatchObject({ drawn: "cols2", panes: [4, 5] });
+    expect(f.sides).toMatchObject({ leftFolded: false, rightFolded: false });
   });
 });
