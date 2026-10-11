@@ -347,7 +347,8 @@ out-of-range are protocol errors), **nothing sent after our close** (one
 lock for the check and the put), the `101` written as `HTTP/1.1` by hand,
 and the handler's 2 s timeout lifted. **The agent never gets a lever on a
 terminal**: every route is `projects.owner_only` (HUD listener + an Origin
-that must be present), the attach also needs a **single-use 30 s ticket
+that must be present — on a plain GET, `Sec-Fetch-Site: same-origin` with no
+Origin at all instead, since 2026-10-11, below), the attach also needs a **single-use 30 s ticket
 bound to one terminal**, and a terminal another window shows is only taken
 after that window says yes (refused after 20 s) — stricter than
 `/approvals`, and still not a boundary against a program running as the
@@ -394,6 +395,24 @@ differs (rbash, `sh` for bash) is refused rather than exec'd by its link.
 Tests point `config.TERMINAL_SHELL` at `tests/v2/terminal_fake/sh` (named
 `sh` so it is started as a POSIX shell) with a temp HOME, and never use
 8402/8403/8405.
+
+**Owner-only reads (2026-10-11, `projects.is_owner`).** Chromium sends no
+`Origin` on a same-origin GET, and `is_owner` demanded one, so on the
+owner's live daemon **every `GET /terminals` from the HUD was 403**: the
+panel only worked through its "could not check" fallback, and opening it
+could never open a terminal. The HUD suites missed it because `MockDaemon`
+does not enforce `owner_only` — **a gate checked only against a mock is a
+gate checked against the mock's idea of the browser.** Now a request is the
+owner's when it arrives on the HUD listener and either (a) carries `Origin:
+http://<Host>`, as before, or (b) is a plain GET/HEAD — not a WebSocket
+upgrade — with **no** Origin header at all, a loopback Host and
+`Sec-Fetch-Site: same-origin` (a forbidden header no page can set; any other
+origin is `same-site`/`cross-site`). Never a missing Origin on a write or a
+socket, never `Origin: null`. `hud_api.check_origin`'s strict Host test
+(and `terminals._strict_host`) stays what stops DNS rebinding, since a
+rebound page's own GETs are `same-origin` too. `tests/v2/owner_read_check.py`
+runs a real port-0 daemon and real headless Chromium and reads the headers
+where the daemon receives them; its same-origin read fails on main.
 
 Briefs for every package, including the ones in flight, are in
 `docs/codex-briefs/`; each merged package left a `*-notes.md` beside its

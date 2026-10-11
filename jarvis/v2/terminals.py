@@ -15,10 +15,14 @@ WebSocket, so the Origin check carries the weight):
 - Every route is `projects.owner_only`: it answers only on the HUD's own
   listener (`FACE_PORT`), never the API listener every tool's HTTP client
   uses (8405) and never the preview origin (8403, which serves only
-  `/p/...`), and only to a request whose `Origin` is present and equals the
-  HUD's own (`http://127.0.0.1:<port>` or `http://localhost:<port>`, matching
-  `Host`). A missing Origin, `null` (the sandboxed Preview frame), the
-  workshop's 8403 and every other site are refused.
+  `/p/...`), and only to the HUD's own page: a request whose `Origin` is
+  present and equals the HUD's own (`http://127.0.0.1:<port>` or
+  `http://localhost:<port>`, matching `Host`) — every write and every socket
+  — or a plain GET with no Origin that the browser marked `Sec-Fetch-Site:
+  same-origin`, which is how Chromium sends the HUD's own listing (it omits
+  Origin on a same-origin GET; until 2026-10-11 that listing was refused).
+  A missing Origin on anything else, `null` (the sandboxed Preview frame),
+  the workshop's 8403 and every other site are refused.
 - `Host` must be literally `127.0.0.1:<port>` or `localhost:<port>`
   (`hud_api.check_origin`, and again here), so DNS rebinding cannot reach it.
 - The socket also needs a **ticket**: single use, 30 s, valid for one
@@ -31,9 +35,10 @@ WebSocket, so the Origin check carries the weight):
 
 **Stricter than `/approvals`, on purpose.** `POST /approvals/{id}` refuses
 only a *wrong* Origin, so a local client that sends none is accepted there.
-A terminal needs the HUD listener, an Origin that must be present, a ticket,
-and the takeover question. For a browser-based attack two independent
-checks would have to fail at once.
+A terminal needs the HUD listener, an Origin that must be present on every
+write and on the socket (only the listing, a same-origin read, may come
+without one), a ticket, and the takeover question. For a browser-based
+attack two independent checks would have to fail at once.
 
 **Not a boundary against a program running as the owner.** Such a program
 (a script an agent wrote and got run, say) can send any Origin it likes,
