@@ -486,6 +486,7 @@ def terminal_checks(browser, mock, base, check, until, guard, init_script):
         _boot(page, mock, base, until)
         for section in (_open_checks, _typing_checks, _card_checks, _paste_checks, _reload_checks,
                         _takeover_checks, _elsewhere_checks, _exit_checks, _busy_checks, _readable_checks,
+                        _hold_checks,
                         _integration_checks, _osc_link_checks, _preview_link_checks, _menu_edge_checks,
                         _pane_checks, _zoom_checks, _ended_checks,
                         _flood_checks, _chat_panes_checks, _crash_checks):
@@ -1124,6 +1125,83 @@ def _readable_checks(page, mock, base, check, until, fake):
     sw.click()
     until(lambda: sw.get_attribute("aria-pressed") == "true", timeout=3)
     check("and back on", mock.sent("PATCH", f"/terminals/{tid}")[-1] == {"readable": True})
+    # Review of PR #40: Space is no longer swallowed for push-to-talk, and a
+    # privacy switch the owner just clicked must not sit under a habitual one.
+    # (Focus starts nowhere: a Space would press whatever button had it, as on
+    # any page — the "+" that made this terminal, say.)
+    page.evaluate("document.activeElement && document.activeElement.blur()")
+    sw.click()
+    until(lambda: sw.get_attribute("aria-pressed") == "false", timeout=3)
+    n = len(mock.sent("PATCH", f"/terminals/{tid}"))
+    focused = page.evaluate("document.activeElement && document.activeElement.getAttribute('data-testid')")
+    page.keyboard.down("Space")
+    page.wait_for_timeout(150)
+    page.keyboard.up("Space")
+    page.keyboard.press("Enter")
+    page.wait_for_timeout(300)
+    check("review #40: a click leaves no focus on the switch, so a Space or Enter after it flips nothing back",
+          focused != "term-readable" and len(mock.sent("PATCH", f"/terminals/{tid}")) == n
+          and sw.get_attribute("aria-pressed") == "false", f"focus={focused} patches={mock.sent('PATCH', f'/terminals/{tid}')[n:]}")
+    sw.click()
+    until(lambda: sw.get_attribute("aria-pressed") == "true", timeout=3)
+
+
+def _hold_checks(page, mock, base, check, until, fake):
+    """Review of PR #40: a Ctrl+D hold is decided where it began. Its auto-
+    repeat must never reach a shell as end-of-input because focus landed in a
+    terminal mid-hold — after a card it was refused under, or after a click
+    into the terminal while talking."""
+    tid = _fresh(page, mock, base, until, fake)
+    _focus_term(page, tid)
+    check("setup: typing into the terminal", _in_term(page))
+    before = len(fake.sent(tid))
+    _approval(mock, "hold1")
+    until(lambda: page.locator('[data-testid="approval-card"]').count() > 0, timeout=4)
+    page.wait_for_timeout(200)
+    page.keyboard.down("Control")
+    page.keyboard.down("d")                       # refused under the card
+    page.wait_for_timeout(100)
+    mock.emit("approval_resolved", {"req_id": "hold1", "decision": "deny"})   # answered on Discord
+    until(lambda: page.locator('[data-testid="approval-card"]').count() == 0, timeout=4)
+    page.wait_for_timeout(200)
+    back = _in_term(page)
+    for _ in range(3):                            # auto-repeat, focus back in the terminal
+        page.keyboard.down("d")
+        page.wait_for_timeout(40)
+    page.keyboard.up("d")
+    page.keyboard.up("Control")
+    page.wait_for_timeout(200)
+    check("review #40 (a): a Ctrl+D held through a card answered elsewhere sends the shell no end-of-input "
+          "when focus comes back", back and fake.sent(tid)[before:] == b"" and
+          page.evaluate("window.__hud.capture.ptt") is None, f"back={back} sent={fake.sent(tid)[before:]!r}")
+    before = len(fake.sent(tid))
+    page.keyboard.press("Control+d")
+    until(lambda: fake.sent(tid)[before:] == b"\x04", timeout=2)
+    check("and once it is let go, Ctrl+D in the terminal is the shell's again",
+          fake.sent(tid)[before:] == b"\x04", repr(fake.sent(tid)[before:]))
+
+    # (b) Talking, then a click into the terminal mid-hold.
+    page.evaluate("document.activeElement && document.activeElement.blur()")
+    before = len(fake.sent(tid))
+    page.keyboard.down("Control")
+    page.keyboard.down("d")
+    page.wait_for_timeout(100)
+    talking = page.evaluate("window.__hud.capture.ptt")
+    page.locator(_sel(tid, ".xterm-screen")).click()
+    page.wait_for_timeout(150)
+    inside = _in_term(page)
+    for _ in range(3):
+        page.keyboard.down("d")
+        page.wait_for_timeout(40)
+    still = page.evaluate("window.__hud.capture.ptt")
+    page.keyboard.up("d")
+    page.keyboard.up("Control")
+    page.wait_for_timeout(200)
+    check("review #40 (b): talking, a click into a terminal mid-hold sends the shell no end-of-input, "
+          "and the mic stays open until Ctrl+D is let go",
+          talking is not None and inside and still is not None and fake.sent(tid)[before:] == b""
+          and page.evaluate("window.__hud.capture.ptt") is None,
+          f"talking={talking} inside={inside} still={still} sent={fake.sent(tid)[before:]!r}")
 
 
 def _integration_checks(page, mock, base, check, until, fake):

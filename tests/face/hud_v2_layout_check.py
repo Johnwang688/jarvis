@@ -967,9 +967,21 @@ if (!window.__talkKeys) {
   window.addEventListener('keydown', (e) => {
     if (e.code === 'KeyD' || e.code === 'Space') window.__talkKeys.push(e);
   }, true);
+  // The first listener after the window's own capture phase: a Ctrl+D the
+  // window took for push-to-talk must never get this far (review of PR #40 —
+  // nothing behind the window may act on it).
+  window.__talkPast = 0;
+  document.addEventListener('keydown', (e) => {
+    if (e.ctrlKey && e.code === 'KeyD') window.__talkPast++;
+  }, true);
 }
 true;
 """
+
+
+def _talk_past(page) -> int:
+    """How many Ctrl+D keydowns got past the window to the document."""
+    return page.evaluate("window.__talkPast || 0")
 
 
 def _talk_probe(page):

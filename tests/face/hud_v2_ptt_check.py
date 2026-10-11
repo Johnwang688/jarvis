@@ -44,7 +44,8 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from tests.face.hud_v2_layout_check import (  # noqa: E402
-    TALK_PROBE, _active_testid, _approval, _attr, _crash, _hold_keys, _pane, _ptt_on_ctrl_d, _ptt_on_space,
+    TALK_PROBE, _active_testid, _approval, _attr, _crash, _hold_keys, _pane, _press_on_body, _ptt_on_ctrl_d,
+    _ptt_on_space, _talk_past,
     _reload_to_window, _talk_keys, _talk_probe, _window_whole,
 )
 
@@ -76,7 +77,7 @@ def ptt_checks(browser, mock, base, check, until, guard, init_script):
         # Run alone, `python tests/face/hud_v2_ptt_check.py box_checks,monaco_checks` runs those only.
         only = set(filter(None, (sys.argv[1] if len(sys.argv) > 1 and __name__ == "__main__" else "").split(",")))
         for section in (_box_checks, _places_checks, _modifier_checks, _repeat_checks, _card_checks,
-                        _muted_checks, _blur_checks, _space_checks, _monaco_checks, _crash_checks):
+                        _muted_checks, _cycle_checks, _blur_checks, _space_checks, _monaco_checks, _crash_checks):
             if only and section.__name__.strip("_") not in only:
                 continue
             try:
@@ -171,8 +172,11 @@ def _box_checks(page, mock, check, until):
     box = _box(page)
     box.click()
     box.fill("draft words")
+    past = _talk_past(page)
     held, after, key = _ptt_on_ctrl_d(page)
     check("Ctrl+D held in the chat box starts push-to-talk", held is not None, str(held))
+    check("review #40: and stops at the window: nothing behind it hears the key (no listener after the "
+          "window's capture phase)", _talk_past(page) == past, str(_talk_past(page) - past))
     check("and letting go of D ends it", after is None, str(after))
     check("the window takes it from the browser there: its default is prevented (no bookmark dialog)",
           key.get("prevented") is True and key.get("ctrl") is True, str(key))
@@ -231,9 +235,11 @@ def _places_checks(page, mock, check, until):
           held is not None and after is None and key.get("prevented") is True
           and _attr(page, _pane(1), "data-view") == "chat", f"{held} {after} {key}")
     _blur(page)
+    past = _talk_past(page)
     held, after, key = _ptt_on_ctrl_d(page)
     check("and with nothing focused at all", held is not None and after is None and key.get("prevented") is True,
           f"{held} {after} {key}")
+    check("review #40: and stops at the window there too", _talk_past(page) == past, str(_talk_past(page) - past))
 
 
 # ---- modifiers and auto-repeat -----------------------------------------------
@@ -288,6 +294,27 @@ def _card_checks(page, mock, check, until):
     held, _, key = _ptt_on_ctrl_d(page)
     check("nor with the box focused behind the card", held is None and key.get("prevented") is True, f"{held} {key}")
     check("and the card is still up", page.locator('[data-testid="approval-card"]').count() == 1)
+    # Review of PR #40 (M1): Space is no longer swallowed for push-to-talk, so
+    # a button left focused presses on it. An aborted click — pressed on
+    # AUTHORIZE or ALWAYS, slid off, released — must leave neither focused.
+    card = page.locator('[data-testid="approval-card"]').bounding_box()
+    for testid in ("approval-allow", "approval-always"):
+        b = page.locator(f'[data-testid="{testid}"]').bounding_box()
+        page.mouse.move(b["x"] + b["width"] / 2, b["y"] + b["height"] / 2)
+        page.mouse.down()
+        page.mouse.move(card["x"] + 24, card["y"] + 18, steps=4)   # off the button, onto the card's head
+        page.mouse.up()
+        focused = _active_testid(page)
+        page.keyboard.down("Space")
+        time.sleep(0.1)
+        page.keyboard.up("Space")
+        page.keyboard.press("Enter")
+        time.sleep(0.3)
+        sent = mock.sent("POST", "/approvals/pttcard1")
+        check(f"review #40: an aborted click on {testid.split('-')[1].upper()} leaves no focus on it, so a "
+              "Space or Enter after it authorizes nothing",
+              focused != testid and not sent and page.locator('[data-testid="approval-card"]').count() == 1,
+              f"focus={focused} sent={sent}")
     check("Escape still denies it", _deny(page, mock, until, "pttcard1"))
     held, after, _ = _ptt_on_ctrl_d(page)
     check("with the card answered Ctrl+D works again", held is not None and after is None, f"{held} {after}")
@@ -310,6 +337,27 @@ def _muted_checks(page, mock, check, until):
     check("muted, it still stops his turn (the orb's interrupt half) and records nothing",
           held is None and _interrupts(mock) == i0 + 1, f"held={held} interrupts={_interrupts(mock) - i0}")
     _end_t1(page, mock, until)
+
+
+def _cycle_checks(page, mock, check, until):
+    """Review of PR #40 (L1): the folded mic's mode cycle, clicked, must not sit
+    under a habitual Space (OFF → REVIEW → AUTO turns the mic on)."""
+    _fresh(page, mock, until, mode="off")
+    _press_on_body(page, "Control+b")
+    cycle = page.locator('[data-testid="dictation-cycle"]')
+    until(lambda: cycle.count() > 0 and cycle.is_visible(), timeout=3)
+    cycle.click()
+    until(lambda: cycle.get_attribute("data-mode") == "review", timeout=2)
+    focused = _active_testid(page)
+    page.keyboard.down("Space")
+    time.sleep(0.1)
+    page.keyboard.up("Space")
+    page.keyboard.press("Enter")
+    time.sleep(0.3)
+    check("review #40: a click leaves no focus on the mode cycle, so a Space or Enter after it does not "
+          "cycle the mic on further", focused != "dictation-cycle" and cycle.get_attribute("data-mode") == "review",
+          f"focus={focused} mode={cycle.get_attribute('data-mode')}")
+    _press_on_body(page, "Control+b")
 
 
 def _blur_checks(page, mock, check, until):
@@ -342,7 +390,17 @@ def _space_checks(page, mock, check, until):
           ptt is None and box.input_value() == "a ", f"{ptt} {box.input_value()!r}")
     box.fill("")
     _blur(page)
+    page.evaluate("localStorage.removeItem('jarvis.hud.spaceHint')")
     check("Space held with nothing focused never starts the mic", _ptt_on_space(page) is None)
+    hint = (_chat1(page).get("status") or "")
+    line = page.locator('[data-testid="orb-status"]').inner_text()
+    check("review #40: the first Space outside a typing target says, once, that push-to-talk is Ctrl+D now",
+          "CTRL+D" in hint and "CTRL+D" in line.upper(), f"{hint!r} / {line!r}")
+    _fresh(page, mock, until)
+    _blur(page)
+    _ptt_on_space(page)
+    check("and never again (it is remembered)", "CTRL+D" not in (_chat1(page).get("status") or ""),
+          repr(_chat1(page).get("status")))
     page.locator(_pane(1, '[data-testid="tab-chat"]')).focus()
     check("nor on a pane header", _ptt_on_space(page) is None)
     page.locator('[data-testid="split-left"]').focus()
@@ -399,12 +457,13 @@ def _monaco_checks(page, mock, check, until):
 
     _select_first(page, 3)
     check("setup: one cursor, the first foo selected", _cursors(page) == 1, str(_cursors(page)))
+    past = _talk_past(page)
     held, after, key = _ptt_on_ctrl_d(page)
     check("Ctrl+D held in Monaco starts and stops push-to-talk", held is not None and after is None,
           f"{held} {after}")
     check("and Monaco never sees it: no second selection, its default prevented",
-          _cursors(page) == 1 and key.get("prevented") is True and _editor_text(page).startswith("foo bar"),
-          f"cursors={_cursors(page)} {key}")
+          _cursors(page) == 1 and key.get("prevented") is True and _editor_text(page).startswith("foo bar")
+          and _talk_past(page) == past, f"cursors={_cursors(page)} {key} past={_talk_past(page) - past}")
 
     page.keyboard.press("Control+Shift+D")
     until(lambda: _cursors(page) == 2, timeout=2)
@@ -415,13 +474,17 @@ def _monaco_checks(page, mock, check, until):
     check("and typing replaces both foos", _editor_text(page).rstrip("\n") == "X bar X bar foo ",
           repr(_editor_text(page)))
 
-    _select_first(page, 1)
+    # Review of PR #40 (L2): Ctrl+K then push-to-talk must not leave a Monaco
+    # chord waiting to swallow the next key typed.
+    page.keyboard.press("Escape")
+    page.keyboard.press("Control+End")
     page.keyboard.press("Control+k")
-    page.keyboard.press("Control+Shift+D")
-    page.keyboard.type("Y")
-    until(lambda: "Y" in _editor_text(page), timeout=2)
-    check("and its Ctrl+K chord is Ctrl+K Ctrl+Shift+D: the selection moves to the next X",
-          _editor_text(page).rstrip("\n") == "X bar Y bar foo ", repr(_editor_text(page)))
+    held, after, _ = _ptt_on_ctrl_d(page)
+    page.keyboard.type("z")
+    until(lambda: _editor_text(page).rstrip("\n").endswith("z"), timeout=2)
+    check("review #40: Ctrl+K then Ctrl+D talks, and the next key typed still types (no chord left waiting)",
+          held is not None and after is None and _editor_text(page).rstrip("\n") == "X bar X bar foo z",
+          f"{held} {after} {_editor_text(page)!r}")
 
 
 # ---- after a crash -----------------------------------------------------------------
