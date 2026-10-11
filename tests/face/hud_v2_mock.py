@@ -1065,7 +1065,13 @@ class MockDaemon:
                         return self._err(409, "changed on disk")
                     rec["content"] = body.get("content", "")
                     rec["mtime"] = rec["mtime"] + 1
-                    return self._json({"mtime": rec["mtime"]})
+                    answer = {"mtime": rec["mtime"]}
+                    # A slow answer, on cue (`put_delays`, seconds, one per
+                    # write): the file is written at once, the answer late.
+                    delays = w.get("put_delays")
+                    if delays:
+                        time.sleep(delays.pop(0))
+                    return self._json(answer)
                 return self._err(404, "no such route")
 
             def do_DELETE(self):
