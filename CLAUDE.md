@@ -395,6 +395,53 @@ Tests point `config.TERMINAL_SHELL` at `tests/v2/terminal_fake/sh` (named
 `sh` so it is started as a POSIX shell) with a temp HOME, and never use
 8402/8403/8405.
 
+**jarvis-mcp for chat sessions, WP-1 (2026-10-10; plan
+`docs/plans/2026-10-10-terminal-read-mcp-plan.md` §1–§2, §4, decisions file
+beside it — the peers plan's Phase 0, built once).** Plumbing only, **no
+behaviour change**: `jarvis/v2/session_tools.py` (the per-session tool list,
+flags `read_only`/`foreground_only`/`desk_only`, `for_provider`) **ships
+empty**, and with nothing in it no token is minted and no session gets a
+jarvis server. When it holds something (WP-2: `terminal_read` plus the D-3
+tools), `Daemon._run_brief` mints a caller token (`jarvis/v2/callers.py`:
+`jmcp_` + `token_urlsafe(32)`, **held only as a sha256 digest**) for an
+owner's chat thread on Claude or Codex, and puts `mcp_servers["jarvis"] =
+bridge.server_entry(...)` (`python -m jarvis.v2.mcp_session`, env
+`JARVIS_MCP_TOKEN`/`JARVIS_DAEMON_PORT`/`PYTHONPATH`) in **the run copy
+only** — never brief.json; `_open` refuses a non-chat brief naming `jarvis`.
+**Never on a command line**: the SDK puts a dict `mcp_servers` on `claude`'s
+argv as JSON (world-readable through `ps`), so Claude gets a private 0600
+`V2_DATA_DIR/claude/<thread>/mcp.json` in 0700 dirs and `--mcp-config
+<path>` (checked with the SDK's own command builder), reused by `set_model`,
+deleted by `close()`; Codex carries it in its private `config.toml`'s `env`
+table, with `approval_mode = "approve"` per read-only tool, stripped on close.
+`Daemon.start` sweeps leftover carriers — **only under the data folder it
+owns** (`stores.root == V2_DATA_DIR`), so a test daemon never touches the live
+one's. The relay is **stdlib only and never runs a tool**: it pops the token
+from its environment, writes nothing to stderr, lists `[]` and answers
+`Error:` when it cannot reach the daemon. The bridge (`jarvis/v2/bridge.py`)
+serves `GET /mcp/tools` and `POST /mcp/call` **on the API listener only**
+(404 on the HUD and preview listeners), `Authorization: Bearer` only, 403
+`not a Jarvis chat session` for any `Origin` or bad/revoked token or a
+session that is not the thread's live one (`_sessions.get(id) is session` —
+a missed revoke cannot reach a newer session) or not an owner's Claude/Codex
+chat; 404 not offered, 400, 413 over 16 KiB. A call runs through the bridge's
+**one** registry dispatch in a fresh `contextvars.Context()` with
+`runtime.caller()` (`{thread_id, project_id, provider, turn_id}`, new) bound,
+depth 0 and the offered names as the toolset; a **dangerous** tool goes to
+the session's permit with `dangerous_tool=True` — the owner every time, no
+Always, never the allowlist or the reviewer. Tokens are revoked by
+`_cleanup` (close, archive, delete, a lost session), `_open`'s failure and
+`stop()` (`revoke_all` first); a model switch keeps the token (D-7). Claude's
+hook explicitly allows a read-only session tool under both profiles (after
+`permit`'s new **`jarvis-tool`** layer, which follows layer 2 so an
+always-ask rule still asks) and refuses a `foreground_only` one for a
+sub-agent (`agent_id`) without asking `permit`; Codex declines an MCP
+elicitation (before the turn-identity check, which used to kill the turn
+over it) or an MCP-approval `requestUserInput` with a non-fatal ERROR, never
+a QUESTION. The fast path binds `runtime.caller()` in its turn (the daemon
+binds it on the turn thread, so the turn id is the daemon's). All four new
+modules are SELF_PROTECTED. Free suite: `tests/v2/mcp_session_check.py`.
+
 Briefs for every package, including the ones in flight, are in
 `docs/codex-briefs/`; each merged package left a `*-notes.md` beside its
 brief with what its implementer verified and what it proposes.

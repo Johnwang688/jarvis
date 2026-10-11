@@ -52,6 +52,7 @@ import logging
 import os
 import re
 import subprocess
+import tempfile
 import threading
 import queue
 import uuid
@@ -169,6 +170,9 @@ SETTING_SOURCES = ["user", "project"]
 # provider is the first thing in the codebase whose child process holds it.
 _TOKENISH = re.compile(r"\b(?:sk|oat|rt)[-_][A-Za-z0-9_\-]{12,}", re.IGNORECASE)
 _JWTISH = re.compile(r"\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]+")
+# A jarvis-mcp caller token (`callers.TOKEN_PREFIX`, plan 2026-10-10 §1.1):
+# the CLI's stderr could quote its MCP config back at us.
+_JMCPISH = re.compile(r"jmcp_[A-Za-z0-9_\-]{8,}")
 _REDACTED = "[redacted]"
 
 
@@ -183,7 +187,62 @@ def _safe(text: Any) -> str:
     """
     out = secrets.scrub(str(text or ""))
     out = _TOKENISH.sub(_REDACTED, out)
+    out = _JMCPISH.sub(_REDACTED, out)
     return _JWTISH.sub(_REDACTED, out)
+
+
+# --- the MCP config carrier (plan 2026-10-10 §1.3) ---------------------------
+#
+# The SDK puts a dict `mcp_servers` on the CLI's command line as one JSON
+# argument (`--mcp-config '<json>'`, env included), and a command line is
+# world-readable (`ps`, /proc/<pid>/cmdline): a chat's jarvis-mcp caller token
+# would show to anything that ran `ps aux`. So the servers go in a private
+# file instead and the SDK is handed its path, which it passes as
+# `--mcp-config <path>`. Written once per session, reused by `set_model`'s
+# reconnect, deleted by `close()`; `Daemon.start` sweeps any a crash left.
+
+_THREAD_DIR = re.compile(r"[A-Za-z0-9_-]{1,64}")
+
+
+def mcp_config_path(thread_id: str) -> Path:
+    """`V2_DATA_DIR/claude/<thread_id>/mcp.json`."""
+    if not isinstance(thread_id, str) or not _THREAD_DIR.fullmatch(thread_id):
+        raise BriefRefused("invalid Claude thread id for an MCP config")
+    return Path(config.V2_DATA_DIR) / "claude" / thread_id / "mcp.json"
+
+
+def write_mcp_config(thread_id: str, servers: dict) -> Path:
+    """The servers as `{"mcpServers": …}`, 0600 in 0700 directories, written
+    aside and renamed into place; never through a symlink."""
+    path = mcp_config_path(thread_id)
+    for directory in (path.parent.parent, path.parent):
+        if directory.is_symlink():
+            raise BriefRefused("the Claude MCP config directory must not be a symlink")
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        directory.chmod(0o700)
+    if path.is_symlink():
+        raise BriefRefused("the Claude MCP config must not be a symlink")
+    data = json.dumps({"mcpServers": servers}, ensure_ascii=True, allow_nan=False)
+    fd, tmp = tempfile.mkstemp(prefix=".mcp-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(data)
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+    return path
+
+
+def remove_mcp_config(path: Path | None) -> None:
+    if path is None:
+        return
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        LOG.warning("Cannot remove a Claude MCP config (%s)", type(exc).__name__)
 
 
 # The seam the free tests replace: everything that would spawn a `claude`
@@ -533,6 +592,9 @@ class _Session:
     # as a late turn, it is interrupted and its words dropped (review of PR
     # #22, round 2): stop means stop, even across sends.
     stopped: set = field(default_factory=set)
+    # The private file the brief's MCP servers are carried in (plan
+    # 2026-10-10 §1.3), or None when the brief has none.
+    mcp_config: Path | None = None
 
     def emit(self, kind: EventKind, **data: Any) -> None:
         """Put an event on the turn's queue. Silent outside a turn by design.
@@ -628,12 +690,17 @@ class ClaudeProvider:
             session_id=session_id,
             resumable=resume,
         )
-        options = self._options(brief, session, resume=resume, session_id=session_id)
         try:
+            if brief.mcp_servers:
+                session.mcp_config = write_mcp_config(thread.id, dict(brief.mcp_servers))
+            options = self._options(brief, session, resume=resume, session_id=session_id)
             session.client = _client_factory(options)
             _await(loop, session.client.connect(), CONNECT_TIMEOUT_S)
         except BaseException as exc:  # noqa: BLE001 — a failed start must not leak a thread
             _stop_loop(loop, runner)
+            remove_mcp_config(session.mcp_config)
+            if isinstance(exc, BriefRefused):
+                raise BriefRefused(_safe(exc)) from None
             raise BriefRefused(f"claude session failed to start: {_safe(exc)}") from None
         handle = SessionHandle(
             thread_id=thread.id,
@@ -658,6 +725,8 @@ class ClaudeProvider:
             raise BriefRefused(
                 f"effort {brief.effort!r} is not one of {', '.join(EFFORT_LEVELS)}"
             )
+        if brief.mcp_servers and session.mcp_config is None:
+            raise BriefRefused("the brief's MCP servers have no config file")
         auto = brief.profile is PermissionProfile.AUTO
         kwargs: dict[str, Any] = {
             "cwd": brief.cwd,
@@ -672,7 +741,10 @@ class ClaudeProvider:
             "permission_mode": "auto" if auto else "default",
             "include_partial_messages": True,
             "strict_mcp_config": True,
-            "mcp_servers": dict(brief.mcp_servers),
+            # A path, never a dict: the SDK puts a dict on the command line
+            # as JSON, env and caller token included (plan 2026-10-10 §1.3).
+            # The file is the brief's servers, written by `_open`.
+            "mcp_servers": str(session.mcp_config) if session.mcp_config is not None else {},
             # R1: an entry here is auto-approved before any callback runs.
             # Nothing gated may ever appear in it, and everything is gated.
             "allowed_tools": [],
@@ -732,6 +804,13 @@ class ClaudeProvider:
         allow decision, so the classifier (layer 3) still runs. An explicit
         allow would skip it — and would also skip `can_use_tool`, per the SDK.
         Under `ask` layer 3 is skipped by design, so ALLOW is explicit there.
+
+        Two exceptions, both for a Jarvis session tool on this session's
+        jarvis server (`session_tools`, plan 2026-10-10 §3.4/§4.1): one marked
+        `foreground_only` is denied outright when a sub-agent calls it (the
+        hook input carries `agent_id`), without asking `permit`; and one
+        marked `read_only` that `permit` ALLOWs (its `jarvis-tool` layer) gets
+        an explicit allow under both profiles.
         """
 
         async def pre_tool(input_data, tool_use_id, context):  # noqa: ANN001
@@ -739,7 +818,36 @@ class ClaudeProvider:
             name = str(data.get("tool_name") or "")
             args = data.get("tool_input")
             args = dict(args) if isinstance(args, dict) else {}
+            # A Jarvis session tool (`mcp__jarvis__<tool>`, plan 2026-10-10).
+            from .. import session_tools
+            jarvis = session_tools.claude_tool(name)
+            if jarvis is not None and jarvis.foreground_only and data.get("agent_id"):
+                # A sub-agent's call (the hook input names its agent): refused
+                # without asking `permit`, so no one is ever asked about it.
+                return {
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "permissionDecision": "deny",
+                        "permissionDecisionReason": (
+                            f"Jarvis refuses {jarvis.name} for a sub-agent: it runs only "
+                            "in the conversation itself. Do not retry it from a sub-agent."
+                        ),
+                    }
+                }
             decision = await self._decide(session, name, args)
+            if (decision is Decision.ALLOW and jarvis is not None and jarvis.read_only
+                    and "jarvis" in session.brief.mcp_servers):
+                # Explicit under both profiles (D-5): under ASK it pre-empts the
+                # CLI's own prompt, under AUTO it skips the classifier, whose
+                # job here the daemon does on every call. Never "approved":
+                # nobody approved anything.
+                return {
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "permissionDecision": "allow",
+                        "permissionDecisionReason": "a read-only Jarvis tool",
+                    }
+                }
             if decision is Decision.ALLOW and session.brief.profile is PermissionProfile.AUTO:
                 return {}
             if decision is Decision.ALLOW:
@@ -1446,6 +1554,9 @@ class ClaudeProvider:
         except Exception:  # noqa: BLE001 — close must not raise
             pass
         _stop_loop(session.loop, session.runner)
+        # The carrier goes with the session: its token is already revoked.
+        remove_mcp_config(session.mcp_config)
+        session.mcp_config = None
 
 
 # --- helpers ----------------------------------------------------------------

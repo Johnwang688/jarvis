@@ -257,6 +257,8 @@ class _Native:
     inbox_lock: threading.Lock = field(default_factory=threading.Lock)
     accepting: bool = False
     leftover: list = field(default_factory=list)
+    # The thread's project, for `runtime.caller()` (the peers plan's Phase 0).
+    project_id: str | None = None
 
 
 # --- the provider -----------------------------------------------------------
@@ -330,6 +332,7 @@ class FastPathProvider:
             brief=brief,
             model=brief.model,
             effort=brief.effort,
+            project_id=thread.project_id,
         )
         native.agent.should_stop = native.stop.is_set
         native.agent.take_steering = lambda: self._take_steering(native)
@@ -563,11 +566,21 @@ class FastPathProvider:
 
         result: dict[str, Any] = {}
 
+        # Who is calling (`runtime.caller()`, the peers plan's Phase 0): this
+        # thread, its project, and the daemon's turn id — which the daemon
+        # bound on the thread this generator runs on; read here, before the
+        # worker (a fresh context) starts. A tool reads the caller from
+        # there, never from an argument the model wrote.
+        from ... import runtime
+
+        bound = runtime.caller() or {}
+        caller = {"thread_id": thread_id, "project_id": native.project_id,
+                  "provider": ProviderName.FAST.value,
+                  "turn_id": bound.get("turn_id") if bound.get("thread_id") == thread_id else None}
+
         def work() -> None:
             try:
-                from ... import runtime
-
-                runtime.bind(proposal=proposal)
+                runtime.bind(proposal=proposal, caller=caller)
                 result["turn"] = native.agent.run_turn(
                     text, images=list(message.images) or None
                 )
