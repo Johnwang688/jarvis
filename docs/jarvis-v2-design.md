@@ -2270,6 +2270,52 @@ guards of WP-B and WP-D work in all eight.
   a turn in pane 7 draws only there, Stop in 8 leaves 7, voice lands in the
   selected pane 6).
 
+**The editor's missing half (2026-10-10, ED-1 of
+`docs/plans/2026-10-09-hud-editor-plan.md`; decisions E-1, E-4, E-10).** The
+File tab had loaded only Monaco's bare API: no language was registered, so no
+file had colour, Ctrl+F was Chrome's find, Ctrl+S Chrome's "Save page as",
+and none of find/replace, folding, comment toggle, word suggestions or the
+command list existed. Monaco is now 0.57.0 (pinned) on its supported entry
+points, with a curated feature list and every Monarch definition (each
+tokenizer fetched only when a file of its language opens) — a whole editor
+**without intellisense**: no language server, and no TypeScript, JSON, CSS or
+HTML worker built or loaded ("Claude Code is my intellisense"). The language
+comes from Monaco's registry by the model's URI; `.h` is C++ for VEX, `.json`
+and `.toml` get small definitions of ours, a shebang names its language.
+Links open only http(s), with `noopener`. Until ED-3's Graphite scheme,
+vs-dark's salmon strings, its red tokens and the orange and gold chrome of
+find matches, bracket pairs and the unicode box are moved off amber and red.
+Under an approval card every editor is read-only and unfocused, and the
+editor host is its own stacking context so Monaco's overlays (context menu,
+suggest list, quick input) stay under the card; the checks open each and
+raise a card over it at 100% and 160%. Keys stay in the window's one capture
+handler: Ctrl+B folds the sidebar from the editor too, except as the second
+key of a Ctrl+K chord, which is Monaco's whatever it is (Ctrl+K Ctrl+0 folds
+all, as in VS Code; a lone Ctrl+0 is still the HUD's zoom reset, and neither
+reaches Chrome's zoom); the window's chord tracker follows Monaco's, counting
+only keys typed in an editor and leaving the chord after 5 s or when the
+window loses focus. Ctrl+S saves the editor it is pressed in — an action
+scoped to that editor and disposed with it, never Monaco's global
+`addCommand`, whose last-created editor owned Ctrl+S everywhere and outlived
+itself (the review of PR #43 found Ctrl+S in a diff writing a file blank) —
+and never opens Chrome's dialog; a save's answer lands only on the buffer it
+was sent from. Opening another file, or Reload, over an unsaved edit asks
+first. Each File pane picks its own project (decision E-13): a `Project ▾` in
+its header lists every project and Follow chat, re-pins that pane only,
+refuses while the pane holds an unsaved edit — known from the keystroke's own
+change event, never a frame later — and is disabled under a card.
+Monaco's right-click menu is placed in viewport pixels, which the HUD's CSS
+zoom scaled a second time (off the window at 160%), and flipped by its
+unzoomed size; it is laid out again after Monaco's own layout, in drawn
+pixels, and opens at the pointer at any zoom and edge. The diff view
+disposes its models (it leaked two per file viewed).
+Measured: the editor chunk went from 2.30 MB (bare API) to 3.63 MB, the
+worker from 232 KB to 277 KB, the first-paint chunk +5 KB. EditContext stays
+on: headless Chromium types into it. One defect is left on purpose: a space
+typed in Monaco still starts push-to-talk and is lost (confirmed headless);
+the owner moved push-to-talk to Ctrl+D (2026-10-10), which its own PR
+delivers. The `monaco-vim` spike is ED-8's (E-11), not this package's.
+
 **Push-to-talk is Ctrl+D (2026-10-10).** The owner: "can we change the push
 to talk button? change it to Ctrl + D just like it is in claude." It was
 Space, which is a character in every box the owner types in: each typing
@@ -2292,23 +2338,28 @@ comes). A hold is decided where it began: once Ctrl+D began as push-to-talk,
 or as a press refused under a card, its auto-repeat stays the window's when
 focus lands in a terminal mid-hold (a card answered elsewhere hands focus
 back, or the owner clicks into one), so the shell never gets a run of
-end-of-input from it. **In a focused terminal Ctrl+D is the shell's** end of input, left to
+end-of-input from it — and a window blur mid-hold (a Preview frame taking
+focus) releases the mic but not the hold, so the repeats after it are still
+the window's, until D or Ctrl comes up or a fresh press, which always decides
+afresh (`TalkHold`). **In a focused terminal Ctrl+D is the shell's** end of input, left to
 xterm untouched (the owner's answer), the way Ctrl+B, Ctrl+Alt+B and Ctrl+_
 are; from a terminal push-to-talk is the orb, whose tooltip names the key.
 Under a card the window takes it there too, so it is never an EOF behind the
-card. **In Monaco Ctrl+D is push-to-talk**, and Monaco's own two Ctrl+D
-commands move: add selection to next find match is **Ctrl+Shift+D**, and
-its chord (Ctrl+K Ctrl+D, move last selection to next match) is unbound with
-no chord in its place — any Ctrl+K chord makes Ctrl+K start chord mode, and
-Ctrl+K followed by push-to-talk, which Monaco never sees, left the chord
-waiting to swallow the next key typed (ED-1, loading Monaco's other chords,
-decides what the talk key does to a pending one). Nothing in Monaco or the HUD binds Ctrl+Shift+D (D is
-otherwise only a Mac Ctrl binding in Monaco), and outside the editor it is
-Chrome's "bookmark all tabs", which the editor's binding prevents. The old
-bindings are removed, not shadowed, so Monaco's own record says where they
-went. The HUD's Monaco loaded no contributions until then, so the multi-
-cursor commands are loaded for this (they bring find with it: Ctrl+F in the
-editor is Monaco's find now). **Space is no longer push-to-talk anywhere**:
+card. **In Monaco Ctrl+D is push-to-talk**, and Monaco's own Ctrl+D, add
+selection to next find match, moves to **Ctrl+Shift+D** (`editorKeyRules`,
+applied in ED-1's `loadMonaco` after its extras; the old binding is removed,
+not shadowed, so Monaco's own record says where it went). Nothing in Monaco
+or the HUD binds Ctrl+Shift+D (D is otherwise only a Mac Ctrl binding in
+Monaco), and outside the editor it is Chrome's "bookmark all tabs", which the
+editor's binding prevents. **A pending Ctrl+K chord's Ctrl+D is Monaco's**
+(decisions E-10, as for Ctrl+B): the window's one chord tracker
+(`lib/editorkeys.ts`, now shared by the layout keys and push-to-talk, a
+keydown stepped once whichever asks first) says so, and push-to-talk then
+keeps the key from Chrome and leaves it to Monaco — Ctrl+K Ctrl+D, move last
+selection to next match, keeps its key. Taking it would leave Monaco's chord
+waiting to swallow the next key typed. (Before ED-1 loaded Monaco's chords,
+this PR loaded multi-cursor and find itself and unbound the chord; ED-1's
+bundle replaced both.) **Space is no longer push-to-talk anywhere**:
 it types a space, presses a focused button, and does nothing on a separator.
 So a button whose second press matters never takes focus from a pointer (its
 click still works): the approval card's AUTHORIZE and ALWAYS (an aborted
@@ -2316,7 +2367,7 @@ click — pressed, slid off — used to leave focus there, and the next Space or
 Enter authorized), the terminal's "Jarvis can read" switch, the folded mic's
 mode cycle and the Preview's "Keep its origin". The first Space pressed
 outside a typing target says once, under the orb, that push-to-talk is
-Ctrl+D now. A preview frame is another document, so Ctrl+D inside one is the
+Ctrl+D now; a card that arrives meanwhile takes the line at once. A preview frame is another document, so Ctrl+D inside one is the
 framed page's. Free checks: `talkkey.test.ts`, `monaco.test.ts` and
 `tests/face/hud_v2_ptt_check.py` (run by `hud_v2_check` after the terminal
 and preview sections, on a `MockDaemon(0)` of its own, or alone), plus the

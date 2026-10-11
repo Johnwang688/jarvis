@@ -29,6 +29,7 @@ import {
   type DrawnSet, type PaneNo, type Preset, type Split, type View, type Workspace, type WorkspaceFit,
 } from "../lib/workspace";
 import { inTerminal, terminalTakesKey } from "../lib/terminal";
+import { chordSecond, isSaveKey, resetChord } from "../lib/editorkeys";
 import { terminals, usePanelDot } from "./Terminal";
 
 export interface LayoutControl {
@@ -230,30 +231,46 @@ export function useLayout(blocked = false): LayoutControl {
     setPreferPanel(false);
   }, []);
 
-  // Capture phase on the window: the input bar stops its keys from bubbling,
-  // and these keys must work from the box the owner's cursor usually sits in
-  // (push-to-talk's Ctrl+D is App's, the same way). The zoom keys are the HUD's
-  // everywhere, Monaco and the input bar included — neither binds them, and
-  // letting one through is Chrome's page zoom, which this control cannot see
-  // and the browser remembers per site. Ctrl+B stands aside in Monaco (its
-  // Ctrl+K Ctrl+B chord), ignores auto-repeat (holding it would flap the
-  // pane), and nothing fires mid-composition. Ctrl+` and Ctrl+Alt+1 … 8
-  // ignore auto-repeat too.
+  // **The one place the HUD's layout keys are taken** (push-to-talk's Ctrl+D
+  // is App's, the same way, and shares the chord tracker below). Capture
+  // phase on the window: the input bar stops its keys from bubbling, and
+  // these keys must work from the box the owner's cursor usually sits in.
+  // The zoom keys are the HUD's everywhere, Monaco and the input bar included — letting one through is Chrome's page zoom, which
+  // this control cannot see and the browser remembers per site. Ctrl+B folds
+  // the sidebar from Monaco too (decisions E-10), ignores auto-repeat
+  // (holding it would flap the pane), and nothing fires mid-composition.
+  // Ctrl+` and Ctrl+Alt+1 … 8 ignore auto-repeat too.
+  //
+  // Monaco's Ctrl+K chords (ED-1): the second key of one typed in an editor
+  // is Monaco's, whatever HUD key it is — Ctrl+K Ctrl+B sets the selection
+  // anchor, Ctrl+K Ctrl+0 folds all — and is still kept from Chrome. Every
+  // keydown feeds the tracker (lib/editorkeys.ts), so a lone Ctrl+B is told
+  // apart from a chord's. The tracker is the window's, shared with
+  // push-to-talk, which leaves a chord's Ctrl+D to Monaco the same way.
+  //
+  // Ctrl+S: Chrome's "Save page as" never opens. In an editor that editor's
+  // own Ctrl+S action saves its buffer (components/Editor.tsx); in a terminal
+  // it is the shell's (XOFF, readline's forward search).
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      const step = { second: chordSecond(e, inMonaco(e.target)) };
       if (e.isComposing) return;
       const what = shortcutFor(e);
-      if (!what) return;
+      const save = isSaveKey(e);
+      if (!what && !save) return;
       if (blockedRef.current) {
         e.preventDefault();
         return;
       }
       // In a terminal the shell gets Ctrl+B and Ctrl+Alt+B (readline back-
-      // char; page up in less and vim) and Ctrl+_ (readline undo). The zoom
-      // keys, Ctrl+` and Ctrl+Alt+N stay the HUD's there too.
-      if (inTerminal(e.target) && terminalTakesKey(what, e.key)) return;
+      // char; page up in less and vim), Ctrl+_ (readline undo) and Ctrl+S.
+      // The zoom keys, Ctrl+` and Ctrl+Alt+N stay the HUD's there too.
+      if (inTerminal(e.target) && (save || terminalTakesKey(what, e.key))) return;
+      if (step.second || save || !what) {
+        e.preventDefault();
+        return;
+      }
       if (what === "toggleLeft" || what === "toggleRight") {
-        if (inMonaco(e.target)) return;
         e.preventDefault();
         if (e.repeat) return;
         toggle(what === "toggleLeft" ? "left" : "right");
@@ -284,8 +301,20 @@ export function useLayout(blocked = false): LayoutControl {
       if (what === "zoomReset") setZoomState(ZOOM_DEFAULT);
       else setZoomState((z) => stepZoom(z, what === "zoomIn" ? 1 : -1));
     };
+    // Monaco leaves a chord when the document loses focus (it polls
+    // `document.hasFocus()`, which stays true while a frame inside has it);
+    // so does the tracker.
+    const onBlur = () => {
+      setTimeout(() => {
+        if (!document.hasFocus()) resetChord();
+      }, 0);
+    };
     window.addEventListener("keydown", onKey, true);
-    return () => window.removeEventListener("keydown", onKey, true);
+    window.addEventListener("blur", onBlur);
+    return () => {
+      window.removeEventListener("keydown", onKey, true);
+      window.removeEventListener("blur", onBlur);
+    };
   }, [toggle, ownerTogglePanel]);
 
   return {

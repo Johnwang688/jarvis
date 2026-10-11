@@ -594,8 +594,9 @@ AUTHORIZE means scrolling past the whole command, so a long command's tail
 reach. **Every layout key is inert while a card is up** (`useLayout(blocked)`,
 as PTT and wake are), so nothing re-lays the card out under an unmoved
 pointer. Each side pane folds to a 36px rail: `«`/`»`, Ctrl+B for the left,
-Ctrl+Alt+B for the right (not in Monaco, where Ctrl+B finishes its Ctrl+K
-chord; not on auto-repeat or mid-composition; Ctrl+Shift+B is the browser's).
+Ctrl+Alt+B for the right (from Monaco too since ED-1, except as the second
+key of its Ctrl+K chord; not on auto-repeat or mid-composition; Ctrl+Shift+B
+is the browser's).
 The left rail keeps **+ New thread** and a shrunken orb, and the right rail
 shows pending approvals and errors. A folded pane is hidden, **never
 unmounted**, so its state survives. The inner edges are `role="separator"`:
@@ -1215,6 +1216,103 @@ section's `_edit` now types until the pane's Save is enabled: it used to type
 into an editor not yet showing the file, and four "unsaved edit" checks failed
 under load.
 
+**The editor's missing half, ED-1 (2026-10-10; plan
+`docs/plans/2026-10-09-hud-editor-plan.md` §2.2, decisions file beside it
+wins: E-1 no intellisense, E-10).** Monaco is **0.57.0, pinned exactly**, on
+its supported entry points: `lib/monacoBundle.ts` is `monaco-editor/editor`
+plus a **curated** `features/*/register` list (find, folding, comment,
+multi-cursor, brackets, word suggestions, sticky scroll, go to line, F1, the
+context menu …; nothing that needs a language server) and the Monarch
+definitions, one lazy chunk (3.6 MB) behind `loadMonaco()`. **No
+language-service worker exists** — no TS, JSON, CSS or HTML worker is built
+or loaded (`getWorker` refuses any label but `editorWorkerService`), so a
+`.json` file gets a small Monarch definition of ours and `.toml` borrows
+INI's; `.h` is C++ (VEX headers); a shebang names shell or Python. **The
+language comes from the registry by the model's URI** (`file:///<project>/<path>`,
+a per-editor query until ED-2's buffers share one model per absolute path);
+`languageFor` is gone. Links open only http/https, `noopener`
+(`registerLinkOpener` answers every other scheme "handled" — Monaco's own
+fallback navigates the window). vs-dark's amber and red token colours and
+the orange/gold chrome of find, bracket pairs and the unicode box are moved
+off those hues until ED-3's scheme (`INTERIM_RULES`, `CHROME`, tested in
+`monaco.test.ts` on one warm band 340°–65° — the plan's two bands leave
+orange, Monaco's own find colour, between them). Diff models live under
+`jarvis-diff:` and are disposed with their view (two leaked per file).
+**Under a card every editor is read-only** (`setEditorsBlocked` from App,
+above the error boundary, beside the terminals' hold) and unfocused (the
+card's own focus grab, WP-A), and `.editorhost` is `isolation: isolate`, so
+Monaco's thousand-z overlays (its context menu is 2575) stack inside it,
+under `#authveil` — they also close when the card takes focus, so the check
+for the isolation lays a layer at the veil's z-index over an open menu.
+**Monaco's context view under the HUD's zoom**: it lays the right-click menu
+(and its buttons' tooltips) out in viewport pixels and writes them as CSS
+lengths, which `#root`'s zoom scales again — at 160% the menu opened off the
+window. `monacoBundle.ts` patches `ContextView.prototype.doLayout` (Monaco
+patches its own find widget the same way) to **lay the view out again in the
+pixels it is drawn in** — its drawn size, the anchor's drawn rect, below or
+above and left or right by what fits (Monaco's preference first), then kept
+on screen (`lib/zoomfix.ts` `placePopup`), written back divided by the zoom it
+sits under, across the shadow root. Dividing Monaco's own numbers was not
+enough (review of PR #43): it flips by its *unzoomed* size, so at 70% a
+right-click near the bottom put the menu's bottom 45 px above the pointer.
+**Keys: the one interception place is still
+`useLayout`'s capture handler.** It feeds every keydown to
+`lib/editorkeys.ts`'s `chordStep`, so **the second key of a Ctrl+K chord
+typed in Monaco is Monaco's, whatever HUD key it is** (Ctrl+K Ctrl+B sets the
+selection anchor, Ctrl+K Ctrl+0 folds all, as in VS Code) and still kept from
+Chrome; a lone Ctrl+B folds the sidebar from Monaco too (E-10), a lone zoom
+key is the HUD's. **The tracker follows Monaco's own chord state**: it counts
+only keys typed in an editor (Monaco dispatches only those, so a key in the
+chat box between Ctrl+K and Ctrl+B ends neither chord), leaves the chord after
+5 s or when the window loses focus, and ignores repeat and composition.
+**Ctrl+S never reaches Chrome**: in an editor it saves **that editor's**
+buffer — an `addAction` keybinding, scoped by Monaco to its `editorId`,
+disposed with the editor and dead once it is (no editor has focus under a
+card, so it cannot run); in a terminal it is the shell's. **Never
+`addCommand`** (review of PR #43, the HIGH): in 0.57 it is a global
+keybinding with no condition, so the last editor created owned Ctrl+S for
+every editor and outlived itself — Ctrl+S in a Diff wrote the file blank (a
+disposed editor's text is ""), and Ctrl+S in one pane saved another pane's
+buffer. The other global registrations (languages, the link opener, the
+theme) are made once in `loadMonaco` and hold no editor. **A save's answer
+lands only on the buffer it was sent from** (a generation bumped per read): a
+save still on its way when another file was opened used to put the old
+file's record back over the new one's text. **An unsaved edit is never
+dropped without a word**: opening another file or Reload over one asks
+(`file-discard-ask`, Keep editing / Discard). **A File pane picks its own
+project** (decisions E-13, built here): its header's `Project ▾`
+(`pane-N-folder`) lists every project plus Follow chat and replaces the File
+pane's "in: … · follow chat" chip (a Preview pane keeps the chip); it re-pins
+that pane only, refuses with the refusal chip while the pane holds an unsaved
+edit (the select snaps back), and is disabled under a card. **The dirty flag
+the guards read is set in the keystroke's own change event** (`markDirty`
+writes App's ref at once; the state follows for drawing): read from state a
+frame behind, a project picked in the same breath as a keystroke remounted the
+pane and dropped the edit. Only project
+roots are offered — a folder becomes reachable by becoming a project, so
+`folders.py` stays the one gate. EditContext stays on (headless
+Chromium types into it). Space in Monaco **still** starts push-to-talk and
+the space is lost — confirmed headless; it is the Ctrl+D push-to-talk PR's,
+not ED-1's (the owner's decision, 2026-10-10). Test hooks (read-only):
+`__hud.monacoModels()`, `monacoEditors()`, `monacoLanguage(path, text)`; the
+editor host carries `data-language` (set once Monaco holds the file — what
+`_edit` waits on now) and `data-readonly`. Free checks: `editorkeys.test.ts`,
+`monaco.test.ts`, `zoomfix.test.ts`, `hud_v2_check`'s file and diff sections (tokens, find,
+suggest, Ctrl+S in and out of an editor, links, Ctrl+B and the chords, the
+discard ask, the diff leak, no request off loopback by a catch-all route, no
+language worker requested or built, a `file:` link opening nothing) and
+`hud_v2_layout_check`'s `_editor_card_checks` (a card over an open context
+menu or suggest list, at 100% and 160%), `_save_scope_checks` (Ctrl+S in a
+Diff after the file pane's editor went away, two editors alive, one switched
+away; an editor created under a card is read-only), `_late_save_checks` (the
+mock's `put_delays` holds a write's answer), `_chord_checks`,
+`_menu_place_checks` (70% near the bottom, 160% near the right, a window too
+short for either side) and the E-13 checks in `_workspace_checks` (a project
+picked in the same breath as a keystroke). Every one that guards a behaviour
+fails on origin/main, on the reviewed head (18381b9) or with its fix reverted
+(PR body). Monaco's `getValue()` per keystroke (the change event hands the
+whole text to React) is left for ED-2's buffers.
+
 **The effort is a slider, not pills (2026-10-10, owner's ask: "like Claude's").**
 `components/EffortSlider.tsx`, rules in `lib/effortSlider.ts`: "Effort
 <level> · default (?)", Faster … Smarter, a dot per stop, a tick with
@@ -1363,12 +1461,14 @@ the chat box, Monaco, menus, chips, the sidebar and pane headers (each of
 which stops its own keys) never stand in the way, and **its default is always
 prevented and it stops at the window** — no bookmark dialog, nothing under the
 cursor acts on it — under a card, muted or after a crash too; auto-repeat never
-presses twice; a window `blur` mid-hold lets go (the keyup never comes); and
-**a hold is decided where it began** (review of PR #40): once Ctrl+D began as
-push-to-talk, or as a press refused under a card, its auto-repeat stays the
-window's (`talkHeld`) when focus lands in a terminal mid-hold, so a card
-answered elsewhere or a click into a terminal never sends the shell
-`\x04\x04\x04`. What it does is `press()`/`release()`, unchanged from Space: the selected chat
+presses twice; and **a hold is decided where it began** (review of PR #40,
+`TalkHold`): once Ctrl+D began as push-to-talk, or as a press refused under
+a card, its **auto-repeat** stays the window's when focus lands in a terminal
+mid-hold, so a card answered elsewhere, a click into a terminal or a Preview
+frame taking focus never sends the shell `\x04\x04\x04`. A window `blur`
+mid-hold lets the mic go (the keyup may never come) but not the hold; a
+**fresh** (non-repeat) press always decides afresh, so a lost keyup cannot
+keep the shell from its next Ctrl+D. What it does is `press()`/`release()`, unchanged from Space: the selected chat
 (W-6), its turn interrupted first, nothing recorded muted (`MIC MUTED`),
 refused under a card, with a picker or the chip popover open, with no chat on
 screen and after a crash. **In a focused terminal it is the shell's EOF**, left
@@ -1376,17 +1476,18 @@ to xterm untouched (xterm prevents the default itself; **never
 `preventDefault` it there** — the terminal's key filter drops a key whose
 default is prevented); under a card the window takes it there too, so it is
 never an EOF behind the card. From a terminal push-to-talk is the orb (its
-tooltip names the key). **In Monaco it is push-to-talk**, and Monaco's two
-Ctrl+D commands moved (`lib/monaco.ts` `editorKeyRules`, the old bindings
-removed): add selection to next find match is **Ctrl+Shift+D** — free in
-Monaco and the HUD, and Chrome's "bookmark all tabs" only outside the editor —
-and Ctrl+K Ctrl+D is **unbound, with no chord in its place**: any Ctrl+K
-chord makes Ctrl+K start chord mode, and Ctrl+K then push-to-talk (which
-Monaco never sees) left it waiting to swallow the next key typed (review of
-PR #40). ED-1, loading more chords, must decide what the talk key does to a
-pending one (its plan §2.2 says so). The HUD's Monaco loaded no contributions until
-then, so the multicursor contribution is imported for it (and brings find:
-Ctrl+F in the editor is Monaco's). A preview frame is another document:
+tooltip names the key). **In Monaco it is push-to-talk**, and Monaco's
+add selection to next find match moved to **Ctrl+Shift+D** (`lib/monaco.ts`
+`editorKeyRules`, applied in ED-1's `loadMonaco` after `registerExtras`; the
+old binding removed, not shadowed) — free in Monaco and the HUD, and Chrome's
+"bookmark all tabs" only outside the editor. **A pending Ctrl+K chord's
+Ctrl+D is Monaco's** (E-10, as for Ctrl+B): the window has **one** chord
+tracker (`lib/editorkeys.ts` `chordSecond`/`resetChord`, a keydown stepped
+once whichever capture listener asks first — `useLayout`'s or push-to-talk's,
+whose order a re-run effect changes), and push-to-talk then keeps the key
+from Chrome but leaves it to Monaco, starting nothing; Ctrl+K Ctrl+D keeps
+Monaco's move-to-next-match. Taking it left Monaco's chord waiting to swallow
+the next key typed. A preview frame is another document:
 Ctrl+D in one is the framed page's. **Space now presses a focused button**,
 as on any page, so a button whose second press matters never takes focus
 from a pointer (`noPointerFocus`, a `mousedown` preventDefault; its click
@@ -1395,14 +1496,16 @@ slid off — used to leave focus there, and the next Space or Enter
 authorized), the terminal's "Jarvis can read" switch, the folded mic's mode
 cycle and the Preview's "Keep its origin". The first Space pressed outside a
 typing target (`isTypingTarget`) says once, on the selected chat's line,
-"PUSH-TO-TALK IS CTRL+D NOW" (`jarvis.hud.spaceHint`). Free checks: `talkkey.test.ts`,
-`monaco.test.ts`, `tests/face/hud_v2_ptt_check.py` (after the terminal and
+"PUSH-TO-TALK IS CTRL+D NOW" (`jarvis.hud.spaceHint`); a card that arrives
+meanwhile clears it before paint, so ANSWER THE AUTHORIZATION is the line.
+Free checks: `talkkey.test.ts` (`TalkHold`),
+`editorkeys.test.ts` (the shared tracker), `monaco.test.ts`, `tests/face/hud_v2_ptt_check.py` (after the terminal and
 preview sections in `hud_v2_check`, a `MockDaemon(0)` of its own, or alone; its helpers
 `_ptt_on_ctrl_d`/`_hold_keys`/`TALK_PROBE` live in `hud_v2_layout_check.py`;
 `TALK_PROBE` also counts a Ctrl+D that gets past the window, which must be
 none), and the ported checks in the terminal (`\x04` reaches the PTY; nothing
-under a card; a hold through a card or into a terminal sends no EOF; the
-readable switch), multichat (W-6), layout (a separator) and preview (Keep its
+under a card; a hold through a card, into a terminal or across a blur sends
+no EOF; the readable switch), multichat (W-6), layout (a separator) and preview (Keep its
 origin) suites. The v1 `jarvis.html`
 face keeps Space.
 

@@ -406,6 +406,13 @@ def _space_checks(page, mock, check, until):
     line = page.locator('[data-testid="orb-status"]').inner_text()
     check("review #40: the first Space outside a typing target says, once, that push-to-talk is Ctrl+D now",
           "CTRL+D" in hint and "CTRL+D" in line.upper(), f"{hint!r} / {line!r}")
+    # A card that arrives while the hint is up takes the line under the orb.
+    _approval(mock, "ptthint1")
+    until(lambda: page.locator('[data-testid="approval-card"]').count() > 0, timeout=4)
+    line = page.locator('[data-testid="orb-status"]').inner_text().upper()
+    check("review #40: a card that arrives while the hint is up takes the line under the orb",
+          "ANSWER THE AUTHORIZATION" in line and "CTRL+D" not in line, repr(line))
+    _deny(page, mock, until, "ptthint1")
     _fresh(page, mock, until)
     _blur(page)
     _ptt_on_space(page)
@@ -484,17 +491,25 @@ def _monaco_checks(page, mock, check, until):
     check("and typing replaces both foos", _editor_text(page).rstrip("\n") == "X bar X bar foo ",
           repr(_editor_text(page)))
 
-    # Review of PR #40 (L2): Ctrl+K then push-to-talk must not leave a Monaco
-    # chord waiting to swallow the next key typed.
+    # A pending Ctrl+K chord's Ctrl+D is Monaco's (E-10, composed with ED-1):
+    # push-to-talk stands aside, so the chord is not left waiting to swallow
+    # the next key typed. The cursor sits after a space, so Monaco's
+    # move-to-next-match finds no word and changes nothing.
     page.keyboard.press("Escape")
     page.keyboard.press("Control+End")
+    past = _talk_past(page)
     page.keyboard.press("Control+k")
-    held, after, _ = _ptt_on_ctrl_d(page)
-    page.keyboard.type("z")
-    until(lambda: _editor_text(page).rstrip("\n").endswith("z"), timeout=2)
-    check("review #40: Ctrl+K then Ctrl+D talks, and the next key typed still types (no chord left waiting)",
-          held is not None and after is None and _editor_text(page).rstrip("\n") == "X bar X bar foo z",
+    held, after, key = _ptt_on_ctrl_d(page)
+    page.keyboard.type("x")
+    until(lambda: _editor_text(page).rstrip("\n").endswith("x"), timeout=2)
+    check("Ctrl+K then Ctrl+D in Monaco is Monaco's chord: no push-to-talk, the next key typed still types",
+          held is None and after is None and _editor_text(page).rstrip("\n") == "X bar X bar foo x",
           f"{held} {after} {_editor_text(page)!r}")
+    check("and the chord's Ctrl+D is kept from Chrome but reaches Monaco (it is not stopped at the window)",
+          key.get("prevented") is True and _talk_past(page) > past, f"{key} past={_talk_past(page) - past}")
+    held, after, key = _ptt_on_ctrl_d(page)
+    check("once the chord is done, Ctrl+D in Monaco talks again", held is not None and after is None
+          and key.get("prevented") is True, f"{held} {after} {key}")
 
 
 # ---- after a crash -----------------------------------------------------------------

@@ -17,10 +17,9 @@ wins._
     push-to-talk and the space never appears.
   - ED-1 fixes all of this, and its first test confirms the space bug before
     fixing it. **Amended 2026-10-11 (PR #40):** the space bug is already
-    gone, and so are Monaco's find and Ctrl+D multi-cursor gaps. The owner
-    moved push-to-talk from Space to **Ctrl+D** ("just like it is in
-    claude"), so Space is a space everywhere, and PR #40 loaded the
-    multicursor contribution (which brings find). See *Push-to-talk is
+    gone. The owner moved push-to-talk from Space to **Ctrl+D** ("just like
+    it is in claude"), so Space is a space everywhere, and Monaco's next-match
+    is Ctrl+Shift+D. See *Push-to-talk is
     Ctrl+D* in §1.4 and the keyboard table, §2.10.
 - **A real editor, without the intellisense.** Claude Code is your
   intellisense, so there are no language servers and no AI completions. You
@@ -454,15 +453,16 @@ entry points instead of `editor.api`:
     `isTypingTarget(el)` already exists in `lib/talkkey.ts` (it decides the
     one-time "push-to-talk is Ctrl+D now" hint); reuse it rather than add a
     second.
-  - **A pending Ctrl+K chord and the talk key.** The window takes Ctrl+D
-    before Monaco sees it, so once ED-1 loads Monaco's other Ctrl+K chords,
-    Ctrl+K followed by push-to-talk leaves the chord waiting, and the next key
-    typed is swallowed as its end. PR #40 avoided it by binding no Ctrl+K chord
-    at all (multicursor's Ctrl+K Ctrl+D was the only one loaded). ED-1's
-    `chordPending` tracker must decide it, in the E-10 way: either Ctrl+D as a
-    pending chord's second key is Monaco's (it cancels the chord and does not
-    talk), or it talks and the chord is cancelled. Test it either way: Ctrl+K,
-    Ctrl+D, then `z` must type `z`.
+  - **A pending Ctrl+K chord and the talk key** (*decided when PR #40 was
+    composed with ED-1*). The window takes Ctrl+D before Monaco sees it, so
+    Ctrl+K followed by push-to-talk would leave Monaco's chord waiting to
+    swallow the next key typed. Ctrl+D as a pending chord's second key is
+    **Monaco's**, the E-10 rule: the window has one chord tracker
+    (`editorkeys.chordSecond`, a keydown stepped once whichever capture
+    listener asks first), and push-to-talk keeps that key from Chrome, leaves
+    it to Monaco and starts nothing. Ctrl+K Ctrl+D (move last selection to
+    next match) keeps its key. Checked: Ctrl+K, Ctrl+D, then `x` types `x`
+    with push-to-talk null.
 - **Ctrl+S** saves the focused buffer. Its default is always prevented, and
   it is inert under a card.
 - **Ctrl+B** folds the sidebar **from the editor too, except as the second key
@@ -1079,7 +1079,7 @@ ring and your window, as WP-C's terminals do.
 | Ctrl+Shift+P, F1 | Command palette | Includes Monaco's actions when an editor is focused |
 | Ctrl+Shift+F | Find in files | |
 | Ctrl+F, Ctrl+H, Ctrl+G, Ctrl+/, **Ctrl+Shift+D**, Alt+click, Ctrl+Alt+↑/↓ | Monaco's | Find, replace, line, comment, multi-cursor. Ctrl+Shift+D is "add selection to next find match", moved off Ctrl+D (PR #40) |
-| Ctrl+K chords | Monaco's | Except that Ctrl+D as a chord's second key is push-to-talk's, never Monaco's, until ED-1 decides otherwise (§2.2). Ctrl+K Ctrl+D (move selection to next match) is unbound |
+| Ctrl+K chords | Monaco's | Ctrl+D as a chord's second key included: push-to-talk stands aside for it (§2.2, decided when PR #40 met ED-1). Ctrl+K Ctrl+D is Monaco's move selection to next match |
 | **Ctrl+B** | Folds the sidebar, **in the editor too, unless it is a Ctrl+K chord's second key** | Decided (E-10). VS Code's VEX extension binds Ctrl+B to build; the HUD does not follow that |
 | Ctrl+Alt+B, Ctrl+= / - / 0, Ctrl+Alt+1–4, Ctrl+\` | HUD's (WP-A, WP-D) | Unchanged |
 | Ctrl+PageUp / Ctrl+PageDown | Previous / next editor tab | Chrome may keep these even in app mode. Confirm live; the palette's "Go to editor" is the fallback |

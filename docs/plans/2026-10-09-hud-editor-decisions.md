@@ -62,7 +62,8 @@ plan disagree, this file wins.**
 - **`hud/dist` write protection (§2.7) is being done early in BR-0** (PR #38). The write tools refuse the served HUD dist directory. ED-2 should reuse that one check rather than add a second.
 - **Push-to-talk is Ctrl+D (PR #40, the owner's decision).** It replaced Space. In Monaco Ctrl+D is push-to-talk, and
   Monaco's "add selection to next find match" moved to **Ctrl+Shift+D**; Ctrl+K Ctrl+D (move selection to next match)
-  is unbound. In a focused terminal Ctrl+D stays the shell's end of input. The plan's Space rule (§2.2, §2.10, ED-1) is
+  stays Monaco's, because a pending chord's second key is Monaco's (E-10) and push-to-talk stands aside for it (one
+  shared chord tracker, `editorkeys.chordSecond`). In a focused terminal Ctrl+D stays the shell's end of input. The plan's Space rule (§2.2, §2.10, ED-1) is
   amended to match.
   - **E-11 (vim keybindings) is affected.** Vim's Ctrl+D (half a page down) would be taken by push-to-talk, since the
     window takes Ctrl+D before Monaco sees it. If vim mode is ever turned on, the owner has to decide: push-to-talk

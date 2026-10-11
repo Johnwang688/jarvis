@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  SPACE_HINT, endsTalk, isTalkKey, isTypingTarget, noPointerFocus, talkKeyAction, wantsSpaceHint, type KeyLike,
+  SPACE_HINT, TalkHold, endsTalk, isTalkKey, isTypingTarget, noPointerFocus, talkKeyAction, wantsSpaceHint, type KeyLike,
 } from "./talkkey";
 
 const key = (over: Partial<KeyLike> = {}): KeyLike => ({
@@ -143,5 +143,58 @@ describe("a button a pointer must not focus", () => {
     expect(document.activeElement).toBe(box);
     box.remove();
     button.remove();
+  });
+});
+
+describe("a Ctrl+D hold, from its first keydown to its keyup (review of PR #40)", () => {
+  const press = (over: Partial<KeyLike & { repeat: boolean }> = {}) => ({ ...key(), repeat: false, ...over });
+  const at = (over: Partial<{ terminal: boolean; blocked: boolean; chordSecond: boolean }> = {}) =>
+    ({ terminal: false, blocked: false, chordSecond: false, ...over });
+
+  it("presses once, and swallows its auto-repeat anywhere — a terminal included", () => {
+    const h = new TalkHold();
+    expect(h.down(press(), at())).toBe("press");
+    expect(h.down(press({ repeat: true }), at())).toBe("swallow");
+    expect(h.down(press({ repeat: true }), at({ terminal: true }))).toBe("swallow");
+    expect(h.up({ key: "d", code: "KeyD" })).toBe(true);
+    expect(h.down(press(), at({ terminal: true }))).toBe("pass");
+  });
+
+  it("a press refused under a card is still a hold: its repeats never reach the shell once the card goes", () => {
+    const h = new TalkHold();
+    expect(h.down(press(), at({ terminal: true, blocked: true }))).toBe("press");
+    expect(h.down(press({ repeat: true }), at({ terminal: true }))).toBe("swallow");
+  });
+
+  it("a blur lets the mic go but not the hold: repeats after it still never reach the shell", () => {
+    const h = new TalkHold();
+    expect(h.down(press(), at())).toBe("press");
+    expect(h.blur()).toBe(true);
+    expect(h.blur()).toBe(false);
+    expect(h.down(press({ repeat: true }), at({ terminal: true }))).toBe("swallow");
+    expect(h.up({ key: "Control", code: "ControlLeft" })).toBe(false);
+    expect(h.down(press({ repeat: true }), at({ terminal: true }))).toBe("pass");
+  });
+
+  it("a fresh press decides afresh, so a keyup never seen cannot keep the shell from its Ctrl+D", () => {
+    const h = new TalkHold();
+    expect(h.down(press(), at())).toBe("press");
+    // The keyup was lost (no blur either); the next press is in a terminal.
+    expect(h.down(press(), at({ terminal: true }))).toBe("pass");
+    expect(h.down(press({ repeat: true }), at({ terminal: true }))).toBe("pass");
+  });
+
+  it("a pending Monaco chord's second key is Monaco's: no press, no hold", () => {
+    const h = new TalkHold();
+    expect(h.down(press(), at({ chordSecond: true }))).toBe("monaco");
+    expect(h.down(press({ repeat: true }), at())).toBe("swallow");
+    expect(h.up({ key: "d", code: "KeyD" })).toBe(false);
+  });
+
+  it("leaves every other key alone", () => {
+    const h = new TalkHold();
+    expect(h.down({ ...press(), key: " ", code: "Space", ctrlKey: false }, at())).toBe("pass");
+    expect(h.down({ ...press(), shiftKey: true, key: "D" }, at())).toBe("pass");
+    expect(h.up({ key: "a", code: "KeyA" })).toBe(false);
   });
 });

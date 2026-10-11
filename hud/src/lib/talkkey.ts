@@ -114,6 +114,69 @@ export function wantsSpaceHint(
   return !where.typing && !where.blocked;
 }
 
+/** What the window does with a keydown, given what the hold so far was. */
+export type TalkVerdict = "pass" | "monaco" | "swallow" | "press";
+
+/**
+ * One Ctrl+D hold, from its first keydown to its keyup (review of PR #40).
+ * **A hold is decided where it began**, never one event at a time:
+ *  - a hold the window took — push-to-talk, or a press refused under a card —
+ *    keeps every **auto-repeat** keydown the window's (`"swallow"`), wherever
+ *    focus has gone since: a card answered elsewhere hands focus back to a
+ *    terminal, the owner clicks into one while talking, or the window loses
+ *    focus to a Preview frame and gets it back. Left to xterm, each repeat
+ *    was an end-of-input, and one at an empty prompt closes the shell;
+ *  - **a fresh press decides afresh**: a non-repeat Ctrl+D is never swallowed
+ *    for an earlier hold, so a keyup the window never saw cannot keep the
+ *    shell from its next Ctrl+D;
+ *  - **a blur releases the mic but not the hold**: the keyup may never come,
+ *    so push-to-talk lets go (`blur()` says to release), while the hold's
+ *    repeats stay the window's until D or Ctrl comes up or a fresh press;
+ *  - a pending Monaco chord's second key is Monaco's (`"monaco"`: its default
+ *    kept from Chrome, Monaco hears it, nothing talks).
+ * `"press"` starts push-to-talk; `"pass"` leaves the key alone (not the talk
+ * key, or a focused terminal's end of input).
+ */
+export class TalkHold {
+  /** A hold the window took, until D or Ctrl comes up or a fresh press. */
+  private holding = false;
+  /** Push-to-talk pressed by this hold and not yet let go. */
+  private talking = false;
+
+  down(e: KeyLike & { repeat?: boolean }, where: { terminal: boolean; blocked: boolean; chordSecond: boolean }): TalkVerdict {
+    if (!isTalkKey(e)) return "pass";
+    if (e.repeat) {
+      if (this.holding) return "swallow";
+    } else {
+      this.holding = false;
+      if (where.chordSecond) return "monaco";
+    }
+    if (talkKeyAction(e, where) !== "talk") return "pass";
+    if (e.repeat) return "swallow";
+    this.holding = true;
+    this.talking = true;
+    return "press";
+  }
+
+  /** A keyup. True when push-to-talk is to be let go: D or Ctrl came up. */
+  up(e: { key: string; code?: string }): boolean {
+    if (!endsTalk(e)) return false;
+    this.holding = false;
+    return this.letGo();
+  }
+
+  /** The window lost focus. True when push-to-talk is to be let go; the hold stays. */
+  blur(): boolean {
+    return this.letGo();
+  }
+
+  private letGo(): boolean {
+    const was = this.talking;
+    this.talking = false;
+    return was;
+  }
+}
+
 /** Whether a keyup ends a hold Ctrl+D started: D let go, or Ctrl. */
 export function endsTalk(e: { key: string; code?: string }): boolean {
   if (e.key === "Control") return true;

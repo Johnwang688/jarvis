@@ -29,6 +29,7 @@ import { ChatTab } from "./components/ChatTab";
 import { InputBar, MAX_FILES, toAttachment } from "./components/InputBar";
 import { TaskView } from "./components/TaskView";
 import { FileTab } from "./components/FileTab";
+import { monacoEditors, monacoLanguage, monacoModels, setEditorsBlocked } from "./lib/monaco";
 import { DiffTab } from "./components/DiffTab";
 import { PreviewTab, type PreviewRequest } from "./components/PreviewTab";
 import { judgePreviewUrl } from "./lib/preview";
@@ -57,8 +58,9 @@ import { CollapseButton, Rail, Splitter, TitleBar, useLayout } from "./component
 import { Workspace, type PaneInfo } from "./components/Workspace";
 import { terminalAttached, terminalRead, terminals } from "./components/Terminal";
 import { inTerminal, terminalSpecFor } from "./lib/terminal";
-import { SPACE_HINT, SPACE_HINT_KEY, endsTalk, isTalkKey, isTypingTarget, talkKeyAction, wantsSpaceHint } from "./lib/talkkey";
-import { maxWidth } from "./lib/layout";
+import { SPACE_HINT, SPACE_HINT_KEY, TalkHold, isTalkKey, isTypingTarget, wantsSpaceHint } from "./lib/talkkey";
+import { inMonaco, maxWidth } from "./lib/layout";
+import { chordSecond } from "./lib/editorkeys";
 import { PANE_NOS, SHAPES, show as showOf, slotOf, type PaneNo, type PaneSpec, type View } from "./lib/workspace";
 import { ActivitySync, clearsOnRead } from "./lib/activity";
 import {
@@ -102,6 +104,10 @@ export default function App() {
   // there froze with it (review of PR #32). A layout effect, so the hold is on
   // before a paste's next chunk can leave.
   useLayoutEffect(() => terminals.setBlocked(blocked), [blocked]);
+  // And nothing reaches an editor: every Monaco goes read-only while a card
+  // is up (ED-1; the card takes focus itself), said from here for the same
+  // reason.
+  useLayoutEffect(() => setEditorsBlocked(blocked), [blocked]);
   // A render error stopped the title bar, the shell and the orb drawing
   // (components/Boundary.tsx): the owner sees a Reload prompt and nothing
   // else, so nothing is heard or sent on their behalf from then on — no
@@ -116,13 +122,19 @@ export default function App() {
   // closing the window asks (2026-10-09, the minimal guard), and since WP-B
   // nothing switches the pane to another view — a tab, a sidebar click, a
   // chat landing there — until the edit is saved or discarded.
+  //
+  // The ref is the truth the guards read (`mayShow`, the project picker, the
+  // archive path), written at once by `markDirty` — FileTab calls it from the
+  // editor's own change event — and the state follows for drawing. A ref
+  // copied from the state at render time lagged a frame behind the edit, and
+  // a project picked in that frame dropped it (review of PR #43).
   const [dirtyPanes, setDirtyPanes] = useState<Record<number, boolean>>({});
-  const dirtyNow = useRef(dirtyPanes);
-  dirtyNow.current = dirtyPanes;
-  const markDirty = useCallback(
-    (pane: PaneNo, dirty: boolean) => setDirtyPanes((m) => (!!m[pane] === dirty ? m : { ...m, [pane]: dirty })),
-    [],
-  );
+  const dirtyNow = useRef<Record<number, boolean>>({});
+  const markDirty = useCallback((pane: PaneNo, dirty: boolean) => {
+    if (!!dirtyNow.current[pane] === dirty) return;
+    dirtyNow.current = { ...dirtyNow.current, [pane]: dirty };
+    setDirtyPanes((m) => (!!m[pane] === dirty ? m : { ...m, [pane]: dirty }));
+  }, []);
   const anyDirty = Object.values(dirtyPanes).some(Boolean);
   useEffect(() => {
     if (!anyDirty) return;
@@ -1641,6 +1653,16 @@ export default function App() {
       if (live.current.chats[pane]?.status === SPACE_HINT) chatPatch(pane, { status: "" });
     }, 8000);
   }, [chatPatch]);
+  // A card that arrives while the hint is up takes the line: a status reads
+  // ahead of ANSWER THE AUTHORIZATION under the orb (`orbLine`), and a hint is
+  // not worth holding the owner's attention off a card (review of PR #40).
+  // Before paint, so the card's line is the first one drawn.
+  useLayoutEffect(() => {
+    if (!blocked) return;
+    for (const n of PANE_NOS) {
+      if (live.current.chats[n]?.status === SPACE_HINT) chatPatch(n, { status: "" });
+    }
+  }, [blocked, chatPatch]);
 
   // What the workspace's error boundary calls once it has caught a render
   // error: a paste going out to a shell stops (nothing on screen could show
@@ -1659,52 +1681,49 @@ export default function App() {
   // the cursor acts on the key: its default (Chrome's bookmark dialog) is
   // always prevented and it stops here, under a card, muted or crashed alike.
   // A focused terminal is the one exception: there it is the shell's end of
-  // input, untouched. `talkHeld` is a ref so a re-run of this effect mid-hold
-  // cannot lose the release; a window that loses focus mid-hold never sees
-  // the keyup, so the blur lets go instead.
+  // input, untouched.
   //
-  // **A hold is one key, decided where it began** (review of PR #40). Its
-  // auto-repeat keydowns are routed by `talkHeld`, not by where focus is now:
-  // a hold that began as push-to-talk — or as a press refused under a card —
-  // stays the window's when focus lands in a terminal mid-hold (a click into
-  // one, or a card answered by mouse, Discord or its timeout handing focus
-  // back), so the shell never gets a run of end-of-input from it.
-  const talkHeld = useRef(false);
+  // **A hold is one key, decided where it began** (review of PR #40;
+  // `TalkHold` in lib/talkkey.ts, kept for the window's life so a re-run of
+  // this effect cannot lose a hold): its auto-repeat keydowns stay the
+  // window's when focus lands in a terminal mid-hold — a click into one, a
+  // card answered by mouse, Discord or its timeout handing focus back, or a
+  // Preview frame taking focus and giving it back — so the shell never gets
+  // a run of end-of-input from it. A window that loses focus mid-hold may
+  // never see the keyup, so the blur lets the mic go, but not the hold.
+  const talkHold = useMemo(() => new TalkHold(), []);
   useEffect(() => {
     const down = (e: KeyboardEvent) => {
-      if (talkHeld.current && isTalkKey(e)) {
-        e.preventDefault();
-        e.stopPropagation();
-        return;
-      }
-      if (wantsSpaceHint(e, { typing: isTypingTarget(e.target), blocked: live.current.approvals.length > 0 })) {
-        sayTalkKeyOnce();
-      }
-      const what = talkKeyAction(e, { terminal: inTerminal(e.target), blocked: live.current.approvals.length > 0 });
-      if (what !== "talk") return;
+      const blocked = live.current.approvals.length > 0;
+      if (wantsSpaceHint(e, { typing: isTypingTarget(e.target), blocked })) sayTalkKeyOnce();
+      // **A pending Monaco chord's second key is Monaco's** (decisions E-10,
+      // the window's one tracker in lib/editorkeys.ts, shared with the layout
+      // keys): Ctrl+K then Ctrl+D in an editor is Monaco's chord, not
+      // push-to-talk — taking it would leave the chord waiting to swallow the
+      // next key typed. Its default is still kept from Chrome; Monaco hears it.
+      const chord = isTalkKey(e) && !e.repeat && chordSecond(e, inMonaco(e.target));
+      const verdict = talkHold.down(e, { terminal: inTerminal(e.target), blocked, chordSecond: chord });
+      if (verdict === "pass") return;
       e.preventDefault();
+      if (verdict === "monaco") return;
       e.stopPropagation();
-      if (e.repeat) return;
-      talkHeld.current = true;
-      press();
-    };
-    const letGo = () => {
-      if (!talkHeld.current) return;
-      talkHeld.current = false;
-      release();
+      if (verdict === "press") press();
     };
     const up = (e: KeyboardEvent) => {
-      if (endsTalk(e)) letGo();
+      if (talkHold.up(e)) release();
+    };
+    const lost = () => {
+      if (talkHold.blur()) release();
     };
     window.addEventListener("keydown", down, true);
     window.addEventListener("keyup", up, true);
-    window.addEventListener("blur", letGo);
+    window.addEventListener("blur", lost);
     return () => {
       window.removeEventListener("keydown", down, true);
       window.removeEventListener("keyup", up, true);
-      window.removeEventListener("blur", letGo);
+      window.removeEventListener("blur", lost);
     };
-  }, [press, release, sayTalkKeyOnce]);
+  }, [press, release, sayTalkKeyOnce, talkHold]);
 
   // ---- microphone ---------------------------------------------------------
 
@@ -1838,6 +1857,11 @@ export default function App() {
       reconcile: () => reconcileBusy(),
       // The centre's panes as stored and as drawn (lib/workspace.ts).
       workspace: () => ({ ws: layoutNow.current.ws, fit: layoutNow.current.fit }),
+      // Monaco, read-only (lib/monaco.ts): live model URIs, live editors, and
+      // the language the registry gives a path.
+      monacoModels,
+      monacoEditors,
+      monacoLanguage,
     };
   }, [capture, dispatch, onWakeHit, reconcileBusy]);
 
@@ -2061,6 +2085,33 @@ export default function App() {
               discard edit
             </button>
           </span>
+        ) : spec.view === "file" ? (
+          // A File pane picks its own project (decisions E-13): every project,
+          // or Follow chat. Only project roots are offered — a folder becomes
+          // reachable by becoming a project, so folders.py stays the one gate.
+          // A pane holding an unsaved edit refuses, with the refusal chip, and
+          // the select snaps back; under a card it is disabled (and inert).
+          <select
+            className="panepick"
+            data-testid={`pane-${n}-folder`}
+            value={spec.projectId && !pinGone(spec) ? spec.projectId : ""}
+            disabled={blocked}
+            title={dirty
+              ? "Save or reload the file first: another project closes it"
+              : "The project this pane's files come from"}
+            onChange={(e) => {
+              if (dirtyNow.current[n]) {
+                setRefused((r) => ({ ...r, [n]: { at: Date.now(), pane: n } }));
+                return;
+              }
+              view.pin(n, e.target.value || null);
+            }}
+          >
+            <option value="">Follow chat{activeProjectId ? ` · ${projectName(activeProjectId)}` : ""}</option>
+            {state.projects.map((p) => (
+              <option key={p.id} value={p.id}>{p.name}</option>
+            ))}
+          </select>
         ) : pinnedElsewhere(spec, n) ? (
           <span className="chip panepin" data-testid={`pane-${n}-project`} title="This pane stays in its project">
             in: {projectName(paneProject(spec, n))}

@@ -1561,6 +1561,36 @@ def _hold_checks(page, mock, base, check, until, fake):
           and page.evaluate("window.__hud.capture.ptt") is None,
           f"talking={talking} inside={inside} still={still} sent={fake.sent(tid)[before:]!r}")
 
+    # (c) Talking, the window loses focus (a Preview frame taking it), then
+    # a click into the terminal, still holding: the blur lets the mic go but
+    # not the hold, so its repeats are still the window's (delta review of #40).
+    page.evaluate("document.activeElement && document.activeElement.blur()")
+    before = len(fake.sent(tid))
+    page.keyboard.down("Control")
+    page.keyboard.down("d")
+    page.wait_for_timeout(100)
+    talking = page.evaluate("window.__hud.capture.ptt")
+    page.evaluate("window.dispatchEvent(new Event('blur'))")
+    released = page.evaluate("window.__hud.capture.ptt")
+    page.locator(_sel(tid, ".xterm-screen")).click()
+    page.wait_for_timeout(150)
+    inside = _in_term(page)
+    for _ in range(3):
+        page.keyboard.down("d")
+        page.wait_for_timeout(40)
+    page.keyboard.up("d")
+    page.keyboard.up("Control")
+    page.wait_for_timeout(200)
+    check("review #40 (c): a hold that crosses a window blur lets the mic go, and its repeats in a terminal "
+          "send the shell no end-of-input", talking is not None and released is None and inside
+          and fake.sent(tid)[before:] == b"", f"talking={talking} released={released} inside={inside} "
+          f"sent={fake.sent(tid)[before:]!r}")
+    before = len(fake.sent(tid))
+    page.keyboard.press("Control+d")
+    until(lambda: fake.sent(tid)[before:] == b"\x04", timeout=2)
+    check("and a fresh Ctrl+D after it is the shell's again", fake.sent(tid)[before:] == b"\x04",
+          repr(fake.sent(tid)[before:]))
+
 
 def _read_note_checks(page, mock, base, check, until, fake):
     """WP-F: `terminal_read` on the bus is said in that terminal's bar —
