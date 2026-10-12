@@ -1717,7 +1717,9 @@ key, narrower than §F's stated limit), and so does the window losing focus
 to another program or being hidden (the HUD never hears the pointer leave a
 frame, so one that left the window from inside a page would else count on).
 **While a HUD text control has the keyboard** (an input, a textarea, Monaco,
-a terminal, contenteditable; `isTypingTarget`) **the shield steps aside only
+a terminal, contenteditable; `isTypingTarget`), **or another Browser page
+does** (delta review: crossing page B while typing in page A gave B the
+keys), **the shield steps aside only
 on a press**, never a move or a wheel, and the HUD then puts the keyboard in
 the page with `contentWindow.focus()` (the lead's option (a) on review M2): a
 pointer crossing a page mid-typing is never "over" it. The cost, accepted:

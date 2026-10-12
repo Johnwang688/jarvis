@@ -948,6 +948,45 @@ def _guard_typing_pointer_checks(page, mock, check, until):
           and _count(page, STOLEN) == 0, f"{_active_frame(page)} keys={len(mock.dev_keys) - keys}")
 
 
+    # Page to page: the keyboard is in page A and the pointer crosses page B,
+    # which grabs on its first move (PR #78 delta review, MED).
+    _three(page, mock, until, _focus_url(mock, "focus-none", who="PA"), _focus_url(mock, "focus-pointer", who="PB"))
+    _away(page)
+    check("setup: a click put the keyboard in page A", _click_into(page, until, FRAME))
+    page.keyboard.type("ab", delay=40)
+    keys = len(mock.dev_keys)
+    ax, ay = _centre(page, FRAME)
+    bx, by = _centre(page, FRAME3)
+    page.mouse.move(bx - 200, by)
+    page.mouse.move(bx + 200, by, steps=8)
+    page.mouse.move(ax, ay, steps=6)
+    page.keyboard.type("password", delay=50)
+    page.wait_for_timeout(400)
+    check("M2: crossing page B while typing in page A never gives B the keyboard",
+          not any("PB" in k for k in mock.dev_keys[keys:]) and _count(page, STOLEN3) == 0,
+          f"keys={mock.dev_keys[keys:][:3]} stolen={_count(page, STOLEN3)}")
+
+    # The HUD focusing a text control raises the shields: a pointer resting
+    # over a page with nothing focused stops counting once the box has the
+    # keyboard, so the page grabbing then is removed (review LOW).
+    _setup(page, mock, until, {"browserUrl": _focus_url(mock, "focus-none", who="RS")})
+    until(lambda: _count(page, FRAME) > 0, timeout=4)
+    _away(page)
+    page.evaluate("document.activeElement && document.activeElement.blur && document.activeElement.blur()")
+    x, y = _centre(page, FRAME)
+    page.mouse.move(x - 20, y)
+    page.mouse.move(x, y, steps=4)
+    box = page.locator(INPUT1)
+    box.focus()
+    keys = len(mock.dev_keys)
+    _grab(page, FRAME, 300)
+    page.wait_for_timeout(450)
+    page.keyboard.type("abc", delay=40)
+    page.wait_for_timeout(300)
+    check("M2: a text control taking focus raises the shields: a page resting under the pointer grabbing then is removed",
+          _count(page, FRAME) == 0 and _count(page, STOLEN) == 1 and mock.dev_keys[keys:] == [],
+          f"stolen={_count(page, STOLEN)} keys={mock.dev_keys[keys:][:3]}")
+
 def _guard_survivor_checks(page, mock, check, until):
     """The review's two surviving mutants: a page reloading itself must not
     keep the owner's load alive; a page the owner once clicked into must not

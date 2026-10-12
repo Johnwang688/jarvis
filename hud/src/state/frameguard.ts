@@ -447,7 +447,12 @@ function onPointer(e: Event) {
   const t = e.target as Node | null;
   const mine = t instanceof Element ? shields.get(t) : undefined;
   if (mine) {
-    const typing = isTypingTarget(document.activeElement);
+    // The keyboard is the owner's where they type: a HUD text control, or
+    // another page they put it in (PR #78 delta review: crossing page B while
+    // typing in page A let B take the keys).
+    const active = document.activeElement;
+    const typing = isTypingTarget(active)
+      || (active instanceof HTMLIFrameElement && entries.has(active) && active !== mine.frame);
     if (e.type === "pointerdown") {
       setOver(mine, true);
       if (typing) {
