@@ -615,16 +615,26 @@ The provider passed it through as each turn's cost and the daemon summed it,
 so thread 447ff25e read $109.97 for $23.22. Now every result's USAGE carries
 what that result added (`running_cost.step`: a new session measured from 0, a
 resume from `Thread.provider_cost_total`, which the daemon saves from the
-event's `cost_total`; a figure below that is a total that started again from
-zero; a zeroed or missing one is no reading and stays `None`), so a steer's,
-a background notice's, a stopped and a `/compact` turn's result each count
-once. Tokens need none of it (`usage` is per turn). Once per Claude thread,
-at daemon start, `recount_threads` puts a pre-fix total right from its own log
-and marks it (`cost_recount`) — only when the logged figures add up to the
-stored total; never a Codex or fast-path thread. Not recounted: the ledger's
-per-day rows and a finished task's stored status. Free checks:
-`tests/v2/running_cost_check.py` and `running_cost_checks`/`daemon_cost_checks`
-in `claude_provider_check.py`.
+event's `cost_total`, and zeroed by the CLI's `ConversationResetMessage`; a
+positive figure below the baseline is a total that started again from zero; a
+missing figure stays `None`, and so does a zero below a positive baseline,
+which the baseline outlives), so a steer's, a background notice's, a stopped
+and a `/compact` turn's result each count once. Tokens need none of it
+(`usage` is per turn). **History:** a Claude thread the daemon opens is born
+`cost_recount: 1`; one from before the fix (0) is recounted once at daemon
+start (`recount_threads`) from its own log — derived with `step` from the
+pre-fix running totals, while a record carrying `cost_total` keeps its logged
+delta (the provider saw a `/clear` the log never records; review of PR #63) —
+only when the logged figures add up to the stored total, and marked 1; one
+whose log is unreadable or does not add up is marked -1, its cost left as it
+was, said once. Never a Codex or fast-path thread. The ledger's pre-fix Claude
+rows are not rewritten: `ceiling_hit` leaves out a Claude row's dollars
+without `per_result` (each held a running total) and reads the task's threads
+as stored now rather than a status saved before the recount; the HUD's daily
+`equivalent_usd` still includes them for the day of the deploy. Free checks:
+`tests/v2/running_cost_check.py`, `running_cost_checks`/`daemon_cost_checks`
+in `claude_provider_check.py` and the ledger suite's
+`test_ceiling_reads_recounted_threads_not_pre_fix_claude_rows`.
 
 Briefs for every package, including the ones in flight, are in
 `docs/codex-briefs/`; each merged package left a `*-notes.md` beside its

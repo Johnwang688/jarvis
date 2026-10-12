@@ -111,6 +111,12 @@ class UsageLedger:
                 if provider != ProviderName.CODEX and usage.cost_usd is not None:
                     key = "equivalent_usd" if provider == ProviderName.CLAUDE else "spend_usd"
                     row[key] = _number(usage.cost_usd)
+                if provider == ProviderName.CLAUDE and "cost_total" in data:
+                    # Since 2026-10-12 a Claude event's dollars are one
+                    # result's own; a row without this mark is older and holds
+                    # the CLI's running total (`running_cost`), so `ceiling_hit`
+                    # does not add it up.
+                    row["per_result"] = True
             self._append(row)
 
     def totals(self, *, provider=None, task_id=None, day=None):
@@ -173,16 +179,49 @@ class UsageLedger:
             return {"state": state, "reason": reason, "totals": totals}
 
     def ceiling_hit(self, task):
-        totals = self.totals(task_id=task.id)
+        totals = self._ceiling_totals(task.id)
         elapsed = task.status.elapsed_s
         if task.status.started:
             start = datetime.fromisoformat(task.status.started)
             if start.tzinfo is None:
                 start = start.replace(tzinfo=timezone.utc)
             elapsed = max(elapsed, self.clock() - start.timestamp())
-        values = {"usd": max(task.status.cost_usd, totals["equivalent_usd"] + totals["spend_usd"]),
+        values = {"usd": max(self._threads_usd(task), totals["equivalent_usd"] + totals["spend_usd"]),
                   "tokens": max(task.status.tokens, totals["work_tokens"]), "hours": elapsed / 3600}
         for kind, used in values.items():
             if kind in task.ceilings and used >= task.ceilings[kind]:
                 return f"{kind} ceiling hit: {used:g} >= {task.ceilings[kind]:g}"
         return None
+
+    def _ceiling_totals(self, task_id):
+        """`totals(task_id=...)`, less the dollars of Claude rows from before
+        2026-10-12 (no `per_result` mark): each holds the CLI's running total,
+        so adding them up re-counts every earlier turn. The task's threads,
+        recounted at daemon start, carry those dollars instead."""
+        result = {"work_tokens": 0, "equivalent_usd": 0.0, "spend_usd": 0.0}
+        with self._lock:
+            for row in self._rows:
+                if row["task_id"] != task_id:
+                    continue
+                for key in result:
+                    if (key == "equivalent_usd" and row["provider"] == ProviderName.CLAUDE.value
+                            and not row.get("per_result")):
+                        continue
+                    result[key] += row.get(key, 0)
+        return result
+
+    def _threads_usd(self, task):
+        """What the task's threads cost as stored now — Claude's recounted at
+        daemon start — rather than a status figure saved before the recount.
+        A task with no threads, or one that cannot be read, keeps its status."""
+        if not task.thread_ids:
+            return task.status.cost_usd
+        spent = 0.0
+        for thread_id in task.thread_ids:
+            try:
+                thread = self.stores.threads.get(thread_id)
+            except Exception:  # noqa: BLE001 — unreadable: fall back, never under-count
+                return max(task.status.cost_usd, spent)
+            if thread is not None:
+                spent += thread.cost_usd
+        return spent

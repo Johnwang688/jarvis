@@ -2812,6 +2812,8 @@ def daemon_cost_checks() -> None:
                 opened = daemon.open_thread(project.id, Role.IMPLEMENTER, ProviderName.CLAUDE,
                                             Brief(Role.IMPLEMENTER, str(project_root),
                                                   profile=PermissionProfile.ASK))
+                eq(stores.threads.get(opened.id).cost_recount, 1,
+                   "a Claude thread opened since the fix is born marked: no recount ever reads it")
                 client = FakeClient.instances[-1]
                 for text, running in (("one", 0.10), ("two", 0.25), ("three", 0.45)):
                     client.script = [result_message(total_cost_usd=running)]
@@ -2852,6 +2854,45 @@ def daemon_cost_checks() -> None:
                       f"a total that started again from zero is counted from its own zero "
                       f"(got {record.cost_usd!r})")
                 check(near(record.provider_cost_total, 0.03), "and that total is the one saved")
+            finally:
+                daemon.stop()
+
+    # Review of PR #63 (MED-1, its probe P1): 0.50, the owner's `/clear` (the
+    # CLI's ConversationResetMessage, which the log never records), then 1.00.
+    # Live is 1.50; the next start's recount used to rewrite it to 1.00.
+    from claude_agent_sdk import ConversationResetMessage
+
+    with _temp_config() as root:
+        from jarvis import config
+
+        project_root = root / "project"
+        project_root.mkdir()
+        stores = Stores(config.V2_DATA_DIR)
+        project = stores.projects.create("p", str(project_root))
+        with fake():
+            daemon = daemon_mod.Daemon(stores, {ProviderName.CLAUDE: claude.ClaudeProvider()}, None, 0)
+            daemon.start()
+            try:
+                cleared = daemon.open_thread(project.id, Role.IMPLEMENTER, ProviderName.CLAUDE,
+                                             Brief(Role.IMPLEMENTER, str(project_root),
+                                                   profile=PermissionProfile.ASK))
+                client = FakeClient.instances[-1]
+                client.script = [result_message(total_cost_usd=0.50)]
+                run(daemon, cleared.id, "one")
+                reset = ConversationResetMessage(new_conversation_id="c2", uuid="u-reset",
+                                                 session_id=SESSION_ID)
+                client.script = [reset, result_message(total_cost_usd=1.00)]
+                run(daemon, cleared.id, "/clear, then a bigger turn")
+                check(near(stores.threads.get(cleared.id).cost_usd, 1.50),
+                      "a /clear: live, the thread holds both sides of the reset")
+            finally:
+                daemon.stop()
+        with fake():
+            daemon = daemon_mod.Daemon(stores, {ProviderName.CLAUDE: claude.ClaudeProvider()}, None, 0)
+            daemon.start()
+            try:
+                after = stores.threads.get(cleared.id).cost_usd
+                check(near(after, 1.50), f"a /clear: the next start's recount leaves it so (got {after!r})")
             finally:
                 daemon.stop()
 

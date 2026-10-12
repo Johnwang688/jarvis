@@ -84,6 +84,15 @@ def recount_checks() -> None:
     new = [usage(0.1, cost_total=0.1), usage(0.15, cost_total=0.25)]
     found = recount(new, 0.25)
     check(found is not None and near(found[0], 0.25), "a thread counted since the fix recounts to itself")
+    # Review of PR #63 (MED-1): 0.50, then the owner's `/clear` (the provider
+    # resets on the CLI's ConversationResetMessage, which the log never
+    # records), then 1.00. Live is 1.50; re-deriving from cost_total said 1.00.
+    cleared = [usage(0.5, cost_total=0.5), usage(1.0, cost_total=1.0)]
+    found = recount(cleared, 1.5)
+    check(found is not None and near(found[0], 1.5) and near(found[1], 1.0),
+          f"after a /clear the log never records, a post-fix thread keeps the provider's own "
+          f"deltas (got {found})")
+    check(recount([usage(0.1, cost_total="x")], 0.1) is None, "a cost_total that is not a number: cannot say")
     check(recount(old, 4.0) is None, "a stored total the logged figures do not add up to: the log cannot say")
     check(recount([usage("1.0")], 1.0) is None, "a figure that is not a number: the log cannot say")
     check(recount([{"kind": "usage", "data": "x"}], 0.0) is None, "a usage record with no data: cannot say")
@@ -117,7 +126,9 @@ def recount_thread_checks() -> None:
         broken = make(m.ProviderName.CLAUDE, (1.0,), 1.0)
         with stores.threads.path(broken).with_name("log.jsonl").open("a") as handle:
             handle.write("{not json\n")
-        untouched = {t: raw(t) for t in (codex, fast, unexplained, migrated, broken)}
+        untouched = {t: raw(t) for t in (codex, fast, migrated)}
+        opened = make(m.ProviderName.CLAUDE, (0.5, 1.0), 1.5, cost_recount=running_cost.RECOUNTED)
+        untouched[opened] = raw(opened)
 
         lines = Lines()
         changed = recount_threads(stores, m.ProviderName.CLAUDE, log=_logger(lines))
@@ -126,27 +137,37 @@ def recount_thread_checks() -> None:
         check(near(done.cost_usd, 4.0) and near(done.provider_cost_total, 4.0) and done.cost_recount == 1,
               "it now holds its last running total, saved for the next resume, and is marked")
         check(all(raw(t) == data for t, data in untouched.items()),
-              "Codex, fast, an unexplained total, a v1 migration and a corrupt log: byte for byte untouched")
+              "Codex, fast, a v1 migration and a thread born marked: byte for byte untouched")
+        for label, thread_id, cost in (("an unexplained total", unexplained, 9.0), ("a corrupt log", broken, 1.0)):
+            left = stores.threads.get(thread_id)
+            check(left.cost_usd == cost and left.cost_recount == running_cost.UNEXPLAINED
+                  and left.provider_cost_total is None,
+                  f"{label}: its cost exactly as it was, marked checked-and-left")
         check(stores.threads.get(right).cost_recount == 1 and stores.threads.get(right).cost_usd == 0.0,
               "a Claude thread already right is marked, its cost unchanged")
         check(f"thread {claude} cost recounted" in lines.messages,
               "one lifecycle line for the thread changed")
-        without_ids = [line.replace(claude, "").replace(broken, "") for line in lines.messages]
-        check(len(lines.messages) == 2 and not any(ch.isdigit() for line in without_ids for ch in line),
-              f"and no figure in any line, the skipped one's included ({lines.messages})")
+        check(f"thread {unexplained} cost left as it was: its log does not explain it" in lines.messages
+              and f"thread {broken} cost left as it was: its log could not be read (StoreError)"
+              in lines.messages, f"one line each for the two left as they were ({lines.messages})")
+        without_ids = [line.replace(claude, "").replace(broken, "").replace(unexplained, "")
+                       for line in lines.messages]
+        check(len(lines.messages) == 3 and not any(ch.isdigit() for line in without_ids for ch in line),
+              f"and no figure in any line ({lines.messages})")
         check(sum("recounted" in line for line in lines.messages) == 1, "and none for the unchanged")
 
-        before = {t: raw(t) for t in (claude, right)}
+        before = {t: raw(t) for t in (claude, right, unexplained, broken)}
         read, real_read = [], stores.threads.read_log
         stores.threads.read_log = lambda thread_id: read.append(thread_id) or real_read(thread_id)
+        again = Lines()
         try:
-            check(recount_threads(stores, m.ProviderName.CLAUDE, log=_logger(Lines())) == [],
+            check(recount_threads(stores, m.ProviderName.CLAUDE, log=_logger(again)) == [],
                   "a second run changes nothing")
         finally:
             stores.threads.read_log = real_read
         check(all(raw(t) == data for t, data in before.items()), "and rewrites nothing it marked")
-        check(claude not in read and right not in read and codex not in read and fast not in read,
-              f"and reads no marked thread's log, nor any other provider's (read {sorted(read)})")
+        check(read == [], f"and reads no log at all: every Claude thread is marked (read {sorted(read)})")
+        check(again.messages == [], f"and says nothing, the left ones included ({again.messages})")
 
 
 def _logger(handler: logging.Handler) -> logging.Logger:

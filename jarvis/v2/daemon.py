@@ -471,9 +471,12 @@ class Daemon:
             brief = self._chat_brief(provider, brief)
         with self._lock:
             self._active()
+            # A Claude thread opened now counts each result's own cost from
+            # its first turn: born marked, the start-up recount never reads it.
+            recounted = running_cost.RECOUNTED if provider == ProviderName.CLAUDE else 0
             thread = self.stores.threads.create(project_id, role, provider,
                                                model=brief.model, effort=brief.effort, task_id=brief.task_id,
-                                               cwd=brief.cwd)
+                                               cwd=brief.cwd, cost_recount=recounted)
         try:
             self._open(thread, brief)
         except BaseException:

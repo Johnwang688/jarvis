@@ -27,8 +27,12 @@ from typing import Any, Iterable
 
 LOG = logging.getLogger(__name__)
 
-# The marker `recount_threads` leaves on a Claude thread it has checked.
+# `Thread.cost_recount`: 0, a Claude thread from before the fix, not yet
+# checked; RECOUNTED, counted right (recounted, or opened since the fix, whose
+# usage is per result from the start); UNEXPLAINED, checked once and left as
+# it was, because its log cannot say what it cost. Only 0 is ever read again.
 RECOUNTED = 1
+UNEXPLAINED = -1
 
 
 def figure(value: Any) -> float | None:
@@ -71,12 +75,15 @@ def recount(records: Iterable[dict], stored: float) -> tuple[float, float] | Non
     """What a Claude thread's log says its cost is.
 
     `records` is its `log.jsonl` in order. A usage record from before this
-    fix carries the CLI's running total as `cost_usd`; one written since
-    carries the provider's delta as `cost_usd` and the running total as
-    `cost_total`. -> (the thread's cost, the running total its next resume
-    is measured from), or None when the log cannot say: a figure that is not
-    a number, or logged figures that do not add up to `stored` (something
-    else wrote that total, so the log does not explain it).
+    fix carries the CLI's running total as `cost_usd`, so its cost is derived
+    with `step`. One written since carries the provider's own delta as
+    `cost_usd`, which is taken as it is: the provider measured it live and saw
+    what the log never records (a `/clear`'s reset — review of PR #63), and
+    its `cost_total` is only where the next figure is measured from.
+    -> (the thread's cost, the running total its next resume is measured
+    from), or None when the log cannot say: a figure that is not a number, or
+    logged figures that do not add up to `stored` (something else wrote that
+    total, so the log does not explain it).
     """
     total, last, logged = 0.0, 0.0, 0.0
     for record in records:
@@ -90,13 +97,16 @@ def recount(records: Iterable[dict], stored: float) -> tuple[float, float] | Non
             if figure(added) is None:
                 return None
             logged += float(added)
-        raw = data["cost_total"] if "cost_total" in data else added
-        if raw is None:
+        if "cost_total" in data:
+            total += float(added) if added is not None else 0.0
+            if data["cost_total"] is not None:
+                last = figure(data["cost_total"])
+                if last is None:
+                    return None
             continue
-        running = figure(raw)
-        if running is None:
-            return None
-        delta, last = step(last, running)
+        if added is None:
+            continue
+        delta, last = step(last, float(added))
         total += delta or 0.0
     if not math.isclose(logged, stored, rel_tol=1e-9, abs_tol=1e-9):
         return None
@@ -107,37 +117,49 @@ def recount_threads(stores, provider_name, *, log: logging.Logger = LOG) -> list
     """Once, at daemon start: put right the cost of every Claude thread whose
     total was counted before 2026-10-12, from its own log. -> the ids changed.
 
-    Claude threads only (`provider_name`), never a Codex or fast-path one.
-    Each checked thread is marked (`cost_recount`), so this runs once per
-    thread however often the daemon starts; one the log cannot explain, or
-    that came from a v1 session, is left untouched and unmarked. Reads and
-    writes go through the store, under its lock. One lifecycle line per
-    thread changed, no figures. Never raises: a thread that fails is skipped.
+    Claude threads only (`provider_name`), never a Codex or fast-path one,
+    and only those still at 0: a thread opened since the fix is created
+    RECOUNTED (`Daemon.open_thread`), so a post-fix log is never re-derived.
+    Each one checked is marked, so this reads a thread's log once however
+    often the daemon starts: RECOUNTED when its log explains its total,
+    UNEXPLAINED — its cost left exactly as it was, one line said once — when
+    the log is unreadable or does not add up. One from a v1 session is never
+    read. Reads and writes go through the store, under its lock. One lifecycle
+    line per thread changed, no figures. Never raises: a thread whose record
+    cannot be read or written is skipped.
     """
     from . import stores as stores_mod
 
     changed = []
     threads = stores.threads
     for thread_id in threads.ids():
+        moved, said = False, None
         try:
             with stores_mod._lock:
                 thread = threads.get(thread_id)
                 if (thread is None or thread.provider != provider_name
-                        or thread.cost_recount >= RECOUNTED or thread.migrated_from):
+                        or thread.cost_recount != 0 or thread.migrated_from):
                     continue
-                found = recount(threads.read_log(thread_id), thread.cost_usd)
+                try:
+                    found = recount(threads.read_log(thread_id), thread.cost_usd)
+                except Exception as exc:  # noqa: BLE001 — an unreadable log
+                    found, said = None, type(exc).__name__
                 if found is None:
-                    continue
-                cost, running = found
-                moved = not math.isclose(cost, thread.cost_usd, rel_tol=1e-9, abs_tol=1e-9)
-                thread.cost_usd = cost
-                thread.provider_cost_total = running
-                thread.cost_recount = RECOUNTED
+                    thread.cost_recount = UNEXPLAINED
+                else:
+                    cost, running = found
+                    moved = not math.isclose(cost, thread.cost_usd, rel_tol=1e-9, abs_tol=1e-9)
+                    thread.cost_usd = cost
+                    thread.provider_cost_total = running
+                    thread.cost_recount = RECOUNTED
                 threads.save(thread)
         except Exception as exc:  # noqa: BLE001 — one thread never stops a start
             log.warning("thread %s cost recount skipped (%s)", thread_id, type(exc).__name__)
             continue
-        if moved:
+        if found is None:
+            log.warning("thread %s cost left as it was: its log %s", thread_id,
+                        f"could not be read ({said})" if said else "does not explain it")
+        elif moved:
             changed.append(thread_id)
             log.info("thread %s cost recounted", thread_id)
     return changed
