@@ -121,6 +121,20 @@ def metadata_config_text() -> str:
     return "\n".join(f"{k} = {_value(v)}" for k, v in values.items()) + "\n"
 
 
+def title_config_text(model: str, effort: str | None) -> str:
+    """The chat titler's one-turn config (titles.py): read-only sandbox,
+    never asks, no web search, no MCP servers, nothing trusted. Each of
+    these is also requested on `thread/start`/`turn/start` and checked in
+    the reply (`CodexProvider.one_shot`)."""
+    values = dict(model_provider="openai", forced_login_method="chatgpt",
+                  cli_auth_credentials_store="file", sandbox_mode="read-only",
+                  approval_policy="never", web_search="disabled",
+                  check_for_update_on_startup=False, model=model)
+    if effort is not None:
+        values["model_reasoning_effort"] = effort
+    return "\n".join(f"{k} = {_value(v)}" for k, v in values.items()) + "\n"
+
+
 def owner_home() -> Path:
     return Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))).resolve()
 
@@ -133,7 +147,8 @@ def clean_env(home: Path, auth_home: Path | None = None) -> dict[str, str]:
     return env
 
 
-def _prepare_home(name: str, text: str, binary: str | None) -> tuple[list[str], dict[str, str], Path]:
+def _prepare_home(name: str, text: str, binary: str | None, *,
+                  skills: bool = True) -> tuple[list[str], dict[str, str], Path]:
     if not re.fullmatch(r"[A-Za-z0-9_-]+", name):
         raise BriefRefused("Invalid Codex private thread directory id")
     auth_home = owner_home()
@@ -162,8 +177,9 @@ def _prepare_home(name: str, text: str, binary: str | None) -> tuple[list[str], 
     else:
         link.symlink_to(auth.resolve())
     # Preserve installed skills without importing personal config or plugins.
+    link_skills = skills
     skills = home / "skills"
-    if not skills.exists() and not skills.is_symlink() and (auth_home / "skills").is_dir():
+    if link_skills and not skills.exists() and not skills.is_symlink() and (auth_home / "skills").is_dir():
         skills.symlink_to(auth_home / "skills", target_is_directory=True)
     atomically_write(home / "config.toml", text)
     return [str(Path(binary).resolve()), "app-server", "--strict-config", "--stdio"], clean_env(home), home
@@ -183,3 +199,9 @@ def prepare(thread_id: str, brief: Brief, binary: str | None = None) -> tuple[li
 def prepare_metadata(binary: str | None = None) -> tuple[list[str], dict[str, str], Path]:
     """An isolated app-server home for read-only account metadata RPCs."""
     return _prepare_home("_metadata", metadata_config_text(), binary)
+
+
+def prepare_title(binary: str, model: str, effort: str | None) -> tuple[list[str], dict[str, str], Path]:
+    """The chat titler's private home: its own config (`title_config_text`),
+    the owner's login linked as every session's is, and no skills."""
+    return _prepare_home("_titles", title_config_text(model, effort), binary, skills=False)

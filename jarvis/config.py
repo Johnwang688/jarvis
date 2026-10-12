@@ -397,6 +397,13 @@ CODEX_CATALOG_PATH = Path(
 CODEX_CLI = os.environ.get("JARVIS_CODEX_CLI", "")
 CODEX_STRICT = os.environ.get("JARVIS_CODEX_STRICT", "") == "1"
 
+# Chat titles (v2 `titles.py`, 2026-10-12): the Codex model that names a chat,
+# when the Codex provider is healthy and the account's catalog lists it; else
+# the default OpenRouter model (the one a default fast-path thread runs on).
+# The owner's choice: "use codex gpt 6 luna, if that is unavailable then use
+# whatever the default openrouter model is".
+TITLE_CODEX_MODEL = os.environ.get("JARVIS_TITLE_CODEX_MODEL", "gpt-6-luna").strip()
+
 # Which `claude` binary the v2 Claude provider drives (`providers/claude.py`,
 # `resolve_cli`). Empty means "find it": the first real `claude` on PATH that is
 # not a Windows shim under /mnt/, then ~/.local/bin/claude, and only then the

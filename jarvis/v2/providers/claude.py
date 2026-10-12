@@ -39,8 +39,14 @@ deliberately not pinned: the install updates itself, and that is the point.
 
 A note on money: `ResultMessage.total_cost_usd` is reported even on a
 subscription, where nothing is billed (R1: 0.28 for a three-tool turn). It is
-passed through unchanged as an **equivalent** figure; what it means is the
-ledger's decision (§8.3), not this provider's.
+an **equivalent** figure; what it means is the ledger's decision (§8.3), not
+this provider's. It is also the CLI process's **running total** for the
+conversation, not the turn's cost (2026-10-12: thread 447ff25e read $109.97
+for $23.22), and a resumed CLI continues from the total its transcript saved.
+So each result's USAGE carries what that result added (`running_cost.step`,
+measured from the last figure seen on this conversation, a resume from the
+total the thread saved), and the figure itself rides along as `cost_total`
+for the daemon to save. Tokens need none of this: `usage` is per turn.
 """
 
 from __future__ import annotations
@@ -65,6 +71,7 @@ from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
     ClaudeSDKClient,
+    ConversationResetMessage,
     HookMatcher,
     PermissionResultAllow,
     PermissionResultDeny,
@@ -81,6 +88,7 @@ from claude_agent_sdk import (
 from ... import config
 from ...tools import secrets
 from ..model import PermissionProfile, ProviderName, Thread
+from .. import running_cost
 from ..provider import (
     Brief,
     BriefRefused,
@@ -609,7 +617,14 @@ class _Session:
     interrupted: bool = False
     closed: bool = False
     tools_seen: dict[str, tuple[str, dict]] = field(default_factory=dict)
+    # What this handle's results added (the per-result deltas, summed).
     usage: Usage = field(default_factory=Usage)
+    # The CLI's running cost total as the last result on this conversation
+    # left it: what the next result's figure is measured from. 0.0 for a new
+    # session; on a resume, the total the thread saved (the CLI continues from
+    # what its transcript saved); None when that is unknown. Kept across a
+    # model switch, whose new process resumes the same conversation.
+    cost_seen: float | None = 0.0
     stderr: deque = field(default_factory=lambda: deque(maxlen=STDERR_LINES))
     # Whether the CLI holds this session on disk yet — true after a resume or
     # once a turn has produced a result. Decides how `set_model` reconnects.
@@ -728,6 +743,8 @@ class ClaudeProvider:
             runner=runner,
             session_id=session_id,
             resumable=resume,
+            cost_seen=(running_cost.figure(getattr(thread, "provider_cost_total", None))
+                       if resume else 0.0),
         )
         try:
             if brief.mcp_servers:
@@ -1570,6 +1587,12 @@ class ClaudeProvider:
             session.resumable = True
             out.extend(self._result(session, msg))
             return out
+        if isinstance(msg, ConversationResetMessage):
+            # The CLI zeroes its running totals here (a `/clear`): the next
+            # result's figure starts again from nothing.
+            with session.mutex:
+                session.cost_seen = 0.0
+            return out
         return out
 
     def _tool_result(self, session: _Session, block: Any) -> list[Event]:
@@ -1614,8 +1637,20 @@ class ClaudeProvider:
 
     def _result(self, session: _Session, msg: ResultMessage) -> list[Event]:
         reported = dict(msg.usage or {})
-        cost = msg.total_cost_usd
+        # Every result is translated here exactly once, whoever's CLI turn it
+        # ends (the message's, a steer's, a background notice's, a stopped
+        # one's, `/compact`'s), so each adds exactly what it spent.
+        running = running_cost.figure(msg.total_cost_usd)
+        with session.mutex:
+            unknown = session.cost_seen is None
+            cost, session.cost_seen = running_cost.step(session.cost_seen, running)
+            seen = session.cost_seen
+        if unknown and seen is not None:
+            LOG.info("claude %s: resumed with no saved cost total; the first figure is "
+                     "taken as the baseline, its own cost not counted", session.thread_id)
         turn = Usage(
+            # `usage` is the main loop's, per turn (the CLI's own description:
+            # "per-turn in streaming-input sessions"): no running total here.
             input_tokens=int(reported.get("input_tokens") or 0),
             output_tokens=int(reported.get("output_tokens") or 0),
             cached_tokens=int(reported.get("cache_read_input_tokens") or 0),
@@ -1626,7 +1661,7 @@ class ClaudeProvider:
         total.output_tokens += turn.output_tokens
         total.cached_tokens += turn.cached_tokens
         if cost is not None:
-            total.cost_usd = (total.cost_usd or 0.0) + float(cost)
+            total.cost_usd = (total.cost_usd or 0.0) + cost
         return [
             Event(
                 EventKind.USAGE,
@@ -1636,9 +1671,13 @@ class ClaudeProvider:
                     "output": turn.output_tokens,
                     "cached": turn.cached_tokens,
                     # An *equivalent* figure on a subscription, where nothing
-                    # is billed (R1). Passed through unchanged; what it means
-                    # is the ledger's call, not this provider's.
+                    # is billed (R1): what this result added to the CLI's
+                    # running total, or None when that cannot be told. What
+                    # it means is the ledger's call, not this provider's.
                     "cost_usd": cost,
+                    # The running total it is measured from now, for the
+                    # daemon to save: a resume starts from it.
+                    "cost_total": seen,
                     "provider_reported": reported,
                 },
             ),

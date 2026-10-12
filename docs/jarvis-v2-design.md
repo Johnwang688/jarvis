@@ -356,9 +356,12 @@ Five layers, evaluated in this order for every tool call from every provider.
 The first layer to answer wins.
 
 1. **DENY** — v1 `rules.py`'s never-approvable set (sudo, dd, `rm -rf` at a
-   root, fork bombs, raw block writes) and the secrets layer (`.env`, token
-   bundles, the allowlist file). Not approvable by anyone, from any path,
-   including the escape hatch.
+   root, fork bombs, raw block writes, and since ENV-1 a shell write onto a
+   credential env file) and the secrets layer (every credential env file —
+   `.env`, `.env.<anything>`, not `*.example` — token bundles, the allowlist
+   file), for file tools, read tools (Claude's Read, Grep, Glob,
+   NotebookRead) and sandbox grants that are or hold one alike. Not
+   approvable by anyone, from any path, including the escape hatch.
 2. **ALWAYS-ASK** — a short, explicit list that goes to the owner regardless
    of the reviewer: prod deploys (`vercel --prod`, `gh release`, anything
    the project marks as a deploy), prod database migrations, pushes to
@@ -576,8 +579,14 @@ model selector, re-homed).
 The UsageLedger keeps, per provider: tokens per task and per day (uncached
 input plus output, the firm's `work_tokens`), dollars where reported
 (OpenRouter, BYOK upstream cost — the v1 lesson: a number that arrives as
-zero is not zero), and the provider's own signals. From those it publishes
-one of four states, shown on the HUD's SYSTEMS panel and in `status`:
+zero is not zero), and the provider's own signals. Every usage event carries
+what that one result spent: Claude's figure arrives as the CLI's running total
+for the conversation (continued, not restarted, by a resume), so the provider
+turns it into a per-result delta before it reaches the ledger or a thread's
+total (2026-10-12, `running_cost.py`); Codex's cumulative counters are
+differenced the same way against the session's baseline. From those it
+publishes one of four states, shown on the HUD's SYSTEMS panel and in
+`status`:
 
 - **available.**
 - **over threshold** — above the project's or global `no_new_work` fraction
@@ -2672,7 +2681,8 @@ another file, and its text goes nowhere but its own save: not the bus, a log,
 localStorage, an `@path` attachment, a diff or the preview origin (which
 also refuse withheld files now — the preview origin had served a key out of
 the Inbox's `.ssh`). The Jarvis-side refusals of env files (v1 tools, the
-shell, the scrub, Claude's hook, Codex's grants) are ENV-1's, on this rule.
+shell, the scrub, Claude's hook, Codex's grants, terminal_read) are ENV-1's,
+on this rule, built 2026-10-12 (CLAUDE.md's ENV-1 paragraph).
 "Add to chat" is here in its smallest form (the selection or the line, as
 `path:Lx-y` and a fence, into the selected chat's box, unsent) so the env
 rule has something to disable; ED-7 extends it.
@@ -2812,6 +2822,27 @@ parse, with the worker gone, in a language it does not cover, and always for
 an env file, which never reaches the worker — Monaco folds by indentation, as
 before; and the fold query has the colour queries' 250 ms budget (twice over
 it, that file folds by indentation from then on).
+
+**Chat titles (2026-10-12).** The owner: "right now each chat just displays
+its id. we should keep the id in the three dots but have the main display be
+the title and have the title wrap after a certain length." A chat names
+itself from the owner's first message (`jarvis/v2/titles.py`): Codex
+`gpt-6-luna` at effort low when Codex is healthy and the account lists it,
+in a tool-less, read-only, one-turn app-server that never waits on the login
+lock (a busy lock is tried again over ~90 s, then OpenRouter); else the
+default OpenRouter model. The Codex turn has no environment
+(`environments: []`), which no live run has verified: if a ChatGPT-auth turn
+ignores it, a read-only command can run before the turn is refused; its
+output is discarded, and the title comes from OpenRouter. Chats from before are titled by a backfill at
+start-up. A title is written only onto an empty one, so **a rename always
+wins**, before or during generation, and it follows to the chat's Discord
+thread like a rename — except for a chat archived in the HUD, whose Discord
+thread keeps its name (and stays archived) until the chat or its project is
+restored. The Archive view names archived chats by title as well. In the sidebar the title **wraps**, clamped at three
+lines with the whole title as its tooltip; an untitled chat reads "New
+thread" (or "Untitled" for an older one the backfill has not reached), muted
+and italic, never its id — the id is "Copy id" in the row's ⋯ menu. A split's
+chat header names it the same way. No agent can set or regenerate a title.
 
 **The git gutter and the explorer's git colours (2026-10-12, ED-9 of the
 editor plan, §2.5 and §2.8).** Beside the line numbers each open file shows

@@ -169,6 +169,59 @@ def protection_checks(tmp: Path) -> None:
     print("ok  guard: edit_file refuses every safety-layer file and .env")
 
 
+def env_file_checks(tmp: Path) -> None:
+    """ENV-1, the owner's `.env*` rule: Jarvis reads no credential env file
+    (`.env`, `.env.<anything>`, any depth, any case — not `*.example`) and
+    writes only `*.example`. On main only `.env` and `.env.local` were
+    refused: `.env.production` was readable and writable by both tools."""
+    root = tmp / "envs"
+    root.mkdir()
+    secret = "FAKE-PROD-VALUE-0123456789"
+    credential = {
+        ".env.production": f"API_KEY={secret}\n",
+        ".env.staging.local": f"API_KEY={secret}\n",
+        ".ENV.Test": f"API_KEY={secret}\n",
+        ".env.sample": f"API_KEY={secret}\n",
+        ".env.example.bak": f"API_KEY={secret}\n",
+    }
+    for name, text in credential.items():
+        (root / name).write_text(text, encoding="utf-8")
+    # A symlink either way: an innocent name to a credential, and an
+    # `.example` name that leads (through a `.env` hop) to one.
+    (root / "settings.txt").symlink_to(".env.production")
+    (root / "real.txt").write_text(f"API_KEY={secret}\n", encoding="utf-8")
+    (root / ".env").symlink_to("real.txt")
+    (root / ".env.local.example").symlink_to(".env")
+    paths = [root / n for n in credential] + [root / "settings.txt", root / ".env.local.example"]
+
+    for path in paths:
+        before = path.read_bytes()
+        out = call("read_file", path=str(path))
+        assert out.startswith("Error:") and "protected" in out, (path.name, out)
+        assert secret not in out, (path.name, out)
+        out = call("write_file", path=str(path), content="clobbered")
+        assert out.startswith("Error:") and "protected" in out, (path.name, out)
+        out = call("edit_file", path=str(path), old_string="API_KEY", new_string="X")
+        assert out.startswith("Error:") and "protected" in out, (path.name, out)
+        assert path.read_bytes() == before, f"{path.name} was modified"
+    # Creating one from nothing is refused too.
+    out = call("write_file", path=str(root / "deep" / ".env.preview"), content="X=1\n")
+    assert out.startswith("Error:") and "protected" in out, out
+    assert not (root / "deep" / ".env.preview").exists()
+
+    # `*.example` stays readable and writable: create, read, edit, rewrite.
+    for name in (".env.example", "config/.env.development.example"):
+        target = root / name
+        out = call("write_file", path=str(target), content="API_KEY=\n")
+        assert out.startswith("Wrote"), (name, out)
+        assert "API_KEY=" in call("read_file", path=str(target)), name
+        out = call("edit_file", path=str(target), old_string="API_KEY=", new_string="API_KEY=xxx")
+        assert out.startswith("Edited"), (name, out)
+        assert target.read_text(encoding="utf-8") == "API_KEY=xxx\n", name
+    print(f"ok  guard: {len(paths)} credential env files (case, templates, symlinks either way) "
+          "refused by read_file/write_file/edit_file; *.example read and written")
+
+
 def gate_state_checks(tmp: Path) -> None:
     """SELF_PROTECTED froze the gate's code. Nothing froze the gate's *data*.
 
@@ -659,6 +712,7 @@ def main() -> int:
         read_checks(tmp)
         edit_checks(tmp)
         protection_checks(tmp)
+        env_file_checks(tmp)
         gate_state_checks(tmp)
         hud_build_checks(tmp)
         installed_hud_checks(tmp)

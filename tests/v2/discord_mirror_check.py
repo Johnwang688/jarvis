@@ -973,6 +973,44 @@ class LifecycleChecks(Harness):
         self.assertFalse(M.sidecar_path(self.stores, chat.id).parent.exists(),
                          "the mirror recreated a deleted chat's folder")
 
+    def _no_rename_while_archived(self, chat, place, title):
+        """The review of PR #62 (M1): Discord answers a rename of an archived
+        thread with 50083, and the poster used to unarchive it to retry — so
+        the start-up title backfill reopened every archived chat on Discord."""
+        self.transport.fail.append(("PATCH", lambda path: path == f"/channels/{place}", 400,
+                                    {"code": 50083, "message": "Thread is archived"}, 1))
+        before = len(self.transport.patches(place))
+        self.assertTrue(P.auto_title(self.daemon, chat.id, title))
+        wait_for(lambda: M.read_sidecar(self.stores, chat.id).get("name") == title, what="the stored name")
+        time.sleep(0.4)
+        self.assertEqual(self.transport.patches(place)[before:], [],
+                         "an archived chat's Discord thread was renamed or unarchived")
+        self.assertTrue(M.read_sidecar(self.stores, chat.id).get("rename_pending"))
+        self.transport.fail.clear()
+
+    def test_a_title_for_an_archived_chat_waits_for_its_restore(self):
+        chat = self.open_chat()
+        place = self.started(chat)
+        P.archive_thread(self.daemon, chat.id)
+        wait_for(lambda: {"archived": True} in self.transport.patches(place), what="archive")
+        self._no_rename_while_archived(chat, place, "Biology Essay Plan")
+        P.restore_thread(self.daemon, chat.id)
+        wait_for(lambda: {"name": "Biology Essay Plan"} in self.transport.patches(place), what="the rename")
+        posts, names = self.transport.texts(place), self.transport.patches(place)
+        self.assertIn("Restored.", posts)
+        self.assertNotIn("rename_pending", M.read_sidecar(self.stores, chat.id))
+        self.assertEqual(names[-1], {"name": "Biology Essay Plan"})
+
+    def test_a_title_in_an_archived_project_waits_for_its_restore(self):
+        chat = self.open_chat()
+        place = self.started(chat)
+        token = P.impact(self.daemon, self.school.id)["token"]
+        P.archive_project(self.daemon, self.school.id, token)
+        self._no_rename_while_archived(chat, place, "Chemistry Lab Notes")
+        P.restore_project(self.daemon, self.school.id)
+        wait_for(lambda: {"name": "Chemistry Lab Notes"} in self.transport.patches(place), what="the rename")
+        self.assertNotIn("rename_pending", M.read_sidecar(self.stores, chat.id))
+
     def test_an_archive_the_bot_may_not_do_is_reported(self):
         chat = self.open_chat()
         place = self.started(chat)

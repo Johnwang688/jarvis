@@ -1638,22 +1638,17 @@ def _env_values(path: str) -> set[str]:
 
 
 def _folder_env_files(directory: Path) -> list[str]:
-    """`.env`, `.env.local` and every `.env.*` but the templates, in one folder."""
-    names = {".env", ".env.local"}
-    try:
-        with os.scandir(directory) as entries:
-            for entry in entries:
-                if entry.name.startswith(".env.") and entry.name not in terminal_guard.ENV_TEMPLATES:
-                    names.add(entry.name)
-    except OSError:
-        pass
-    return [str(directory / name) for name in sorted(names)]
+    """Every credential env file in one folder: `secrets.env_files_in`, the
+    owner's `.env*` rule (`.env`, `.env.local`, every `.env.*` but a name
+    ending `.example`; ENV-1) — one definition, not a copy."""
+    from jarvis.tools import secrets as v1_secrets
+    return [str(path) for path in v1_secrets.env_files_in(directory)]
 
 
 def _secret_values(folder: str) -> list[str]:
     """Rule 1's values: everything `secrets.secret_values()` reaches, plus
-    the `.env`, `.env.local` and `.env.*` files (not the templates) in the
-    terminal's folder and its parents up to home."""
+    every credential env file in the terminal's folder and its parents up to
+    home."""
     from jarvis.tools import secrets as v1_secrets
     values = set(v1_secrets.secret_values())
     try:

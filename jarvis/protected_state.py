@@ -221,6 +221,7 @@ class Touch:
     why: str
     opaque: bool = False
     hud: bool = False              # inside the installed HUD's tree (always uncertain: asks)
+    env: bool = False              # a credential env file (ENV-1): certain is refused, like the allowlist
 
     @property
     def name(self) -> str:
@@ -229,7 +230,12 @@ class Touch:
 
 @dataclass
 class _Budget:
+    """What one analysis shares across every level of it: the substitution
+    count, and whether a write target may be resolved on the filesystem to
+    judge it a credential env file (`follow_links`; off for `rules.decide`'s
+    name-only reading, which has no folder to resolve in)."""
     spans: int = 0
+    follow_links: bool = True
 
 
 @dataclass
@@ -326,6 +332,61 @@ def _ancestor_of(text: str, protected: set[Path]) -> list[tuple[Path, tuple[str,
     resolved = _resolve(text)
     return [(path, path.relative_to(resolved).parts)
             for path in protected if resolved != path and resolved in path.parents]
+
+
+# --- credential env files (ENV-1, 2026-10-12) ---------------------------------
+#
+# The owner's `.env*` rule: Jarvis never reads a credential env file and
+# writes only the `*.example` ones (docs/plans/2026-10-11-env-files.md). A
+# shell **write** onto one is DENY — never run, never asked, under an
+# allowlist entry and under `--dangerously-skip-permissions` alike — through
+# this module's own parse of where a line writes (redirects, writers'
+# operands, a copier's destination, the reader hazards' files), with the
+# name judged by the one rule, `secrets.is_env_credential_name`, and a
+# target that exists resolved through its symlinks (`is_env_credential`).
+# A write it cannot pin down — a glob that only *may* expand onto one
+# (`rm *.production`), a name whose ending is an unknown variable
+# (`.env.$STAGE` may be `.env.example`) — asks. Reads are the secrets
+# layer's (`protected_in_command`), as for `.env` since 2026-07-30.
+
+def _secrets():
+    """Late: `jarvis.tools` imports the shell tool, which imports this module."""
+    from .tools import secrets
+
+    return secrets
+
+
+_EXPANSION = re.compile(r"\$\{[^}]*\}|\$\w+|\$.")
+
+
+def _env_target(operand: str, text: str | None, state: _State, verb: str) -> Touch | None:
+    """The credential env file a write of `operand` lands on, or None.
+    `text` is the operand expanded (None when a variable or the folder is
+    unknown); `verb` heads the reason ("a redirect onto", "cp on")."""
+    s = _secrets()
+    shown = text if text is not None else operand
+    name = os.path.basename(shown.rstrip("/")) or shown
+    where = Path(shown)
+    if "$" in name:
+        # Only when unexpanded: try the unknown parts as nothing and as a word.
+        if any(s.is_env_credential_name(_EXPANSION.sub(fill, name)) for fill in ("", "x")):
+            return Touch(where, False, f"{verb} {operand}, which may be a credential env file",
+                         env=True)
+        return None
+    if s.is_env_credential_name(name):
+        return Touch(where, True, f"{verb} {name}", env=True)
+    if _GLOB.search(name):
+        # Only a dot-led glob can expand onto one (`secrets.env_glob_reaches`,
+        # exact); `rm *.production` never reaches `.env.production` in bash.
+        if s.env_glob_reaches(name):
+            # Spelled from `.env`, whatever it expands to (or, matching
+            # nothing, the literal name bash leaves) is a credential env file.
+            return Touch(where, name.casefold().startswith(".env"),
+                         f"{verb} {name}, a glob that reaches credential env files", env=True)
+        return None
+    if text is not None and state.budget.follow_links and s.is_env_credential(text):
+        return Touch(where, True, f"{verb} {name}, which leads to a credential env file", env=True)
+    return None
 
 
 def _strip_comment(segment: str) -> str:
@@ -648,6 +709,71 @@ def _nested(strings: list[str], local: _State, state: _State, protected: set[Pat
     return True
 
 
+def _redirect_touches(segment: str, local: _State, protected: set[Path], ids: dict,
+                      seen: _Seen) -> None:
+    """Every protected file a redirect in this segment writes, into `seen`:
+    gate state, the installed HUD's tree, and credential env files."""
+    for target in _redirect_targets(segment):
+        text = _expand(target, local)
+        env = _env_target(target, text, local, "a redirect onto")
+        if env is not None:
+            seen.touches.append(env)
+        if text is None:
+            for path in protected:
+                if Path(target).name == path.name:
+                    seen.touches.append(Touch(path, False, f"a redirect into {target}"))
+            continue
+        hit = _exact(text, protected, ids)
+        if hit is not None:
+            seen.touches.append(Touch(hit, True, f"a redirect onto {hit.name}"))
+        tree = _in_tree(text, hud_trees())
+        if tree is not None:
+            seen.touches.append(Touch(tree, False, f"a redirect into {text}", hud=True))
+
+
+# `git checkout -- PATH` and `git restore PATH` overwrite PATH with a stored
+# version (ENV-1 review, NIT 3): for the env rule they write their operands.
+_GIT_PATH_WRITERS = frozenset({"checkout", "restore"})
+
+
+def _git_subcommand(tokens: list[str]) -> str | None:
+    """git's subcommand: the first word after git's own options (`-C DIR`,
+    `-c K=V`, `--git-dir=…` …)."""
+    i = 1
+    while i < len(tokens):
+        token = tokens[i]
+        if token in ("-C", "-c", "--git-dir", "--work-tree", "--namespace"):
+            i += 2
+            continue
+        if token.startswith("-"):
+            i += 1
+            continue
+        return token
+    return None
+
+
+def _edits_in_place(stem: str, tokens: list[str]) -> bool:
+    """`perl -pi`/`-i.bak` (an `i` in a short-option cluster) and `awk`/`gawk
+    -i inplace` rewrite the files they are handed (ENV-1 review, NIT 3)."""
+    if stem == "perl":
+        for token in tokens[1:]:
+            if not token.startswith("-") or token.startswith("--") or token == "-":
+                continue
+            for letter in token[1:]:
+                if letter == "i":
+                    return True
+                if letter in "MmIeExCdDF0l":     # the rest of the cluster is a value
+                    break
+        return False
+    if stem in ("awk", "gawk"):
+        for k, token in enumerate(tokens[1:], 1):
+            if token in ("-i", "--include") and k + 1 < len(tokens) and tokens[k + 1] == "inplace":
+                return True
+            if token in ("-iinplace", "--include=inplace"):
+                return True
+    return False
+
+
 def _segment(segment: str, state: _State, protected: set[Path], ids: dict,
              depth: int) -> _Seen:
     seen = _Seen()
@@ -665,12 +791,17 @@ def _segment(segment: str, state: _State, protected: set[Path], ids: dict,
         raw, parsed = words_only.split(), False
     raw = _strip_closers(raw)
     if not raw:
+        # A redirect with no command still opens its target for writing:
+        # `>.env.x`, or the `} > .env.x` left of `{ …; } > .env.x` (ENV-1
+        # review, NIT 3).
+        _redirect_touches(segment, state, protected, ids, seen)
         return seen
 
     # `D=~/.config/jarvis` on its own, or `export D=…`: remembered for the
     # segments after it, which is when the shell would expand it.
     words = raw[1:] if raw[0] in ("export", "declare", "local", "readonly") else raw
     if words and all(re.fullmatch(r"[A-Za-z_]\w*=.*", w) for w in words):
+        _redirect_touches(segment, state, protected, ids, seen)
         for word in words:
             name, value = word.split("=", 1)
             expanded = _expand(value, state) if value else ""
@@ -682,6 +813,7 @@ def _segment(segment: str, state: _State, protected: set[Path], ids: dict,
 
     tokens, chdir = _peel(raw, state)
     if not tokens:
+        _redirect_touches(segment, state, protected, ids, seen)
         return seen
     stem = rules._basename(tokens[0])
 
@@ -698,19 +830,7 @@ def _segment(segment: str, state: _State, protected: set[Path], ids: dict,
     local = _State(chdir if chdir is not None else state.cwd, state.variables, state.budget)
 
     # A redirect writes its target whatever the stem is: `echo x>~/…/allowlist.json`.
-    for target in _redirect_targets(segment):
-        text = _expand(target, local)
-        if text is None:
-            for path in protected:
-                if Path(target).name == path.name:
-                    seen.touches.append(Touch(path, False, f"a redirect into {target}"))
-            continue
-        hit = _exact(text, protected, ids)
-        if hit is not None:
-            seen.touches.append(Touch(hit, True, f"a redirect onto {hit.name}"))
-        tree = _in_tree(text, hud_trees())
-        if tree is not None:
-            seen.touches.append(Touch(tree, False, f"a redirect into {text}", hud=True))
+    _redirect_touches(segment, local, protected, ids, seen)
 
     # A shell handed a string is a command line in its own right — from `-c`
     # (in any cluster), `eval`, or a here-string on its standard input.
@@ -794,9 +914,37 @@ def _segment(segment: str, state: _State, protected: set[Path], ids: dict,
         if hit is not None:
             seen.read.add(hit)
 
+    # Credential env files (ENV-1): only what a writing program is handed —
+    # a writer's operands, a reader's writing form (`sed -i`, `sort -o`, a
+    # sed `w FILE`), a copier's destination. An interpreter or an unknown
+    # program handed one is not judged a writer of it here: the secrets layer
+    # refuses any line naming one, and "writes a credential env file" would
+    # misdescribe `node --env-file=.env.production server.js`. Three that
+    # rewrite their operands without a writing stem count too: `git checkout
+    # -- PATH`/`git restore PATH`, `perl -pi`, `awk -i inplace`.
+    env_writer = (stem in _WRITERS or hazard is not None or _edits_in_place(stem, tokens)
+                  or (stem == "git" and _git_subcommand(tokens) in _GIT_PATH_WRITERS))
+    if env_writer and split is not None and read_only and written:
+        # `cp /tmp/.env.production dir/` writes `dir/.env.production`: a
+        # source named like one lands under its own name in a folder.
+        dest = written[0]
+        dest_text = _expand(dest, local)
+        into = (dest.endswith("/") or os.path.basename(dest) in (".", "..")
+                or (dest_text is not None and local.budget.follow_links
+                    and os.path.isdir(dest_text)))
+        if into:
+            for source in read_only:
+                env = _env_target(os.path.basename(source.rstrip("/")) or source, None, local,
+                                  f"{stem} into {dest}:")
+                if env is not None:
+                    seen.touches.append(env)
     everyone = written + read_only
     for operand in written:
         text = _expand(operand, local)
+        if env_writer:
+            env = _env_target(operand, text, local, f"{stem} on")
+            if env is not None:
+                seen.touches.append(env)
         if text is None:
             # `$UNSET/allowlist.json`, or a relative name after a `cd` that
             # could not be followed: the right name, an unknowable place.
@@ -948,33 +1096,67 @@ def command_touches(command: str, cwd: str | Path | None = None) -> list[Touch]:
 def command_touch(command: str, cwd: str | Path | None = None) -> Touch | None:
     """The most serious protected file this line reaches, or None.
 
-    Order: a certain write to the allowlist, any other certain write, then the
-    uncertain ones in the same order.
+    Order: a certain write to the allowlist or to a credential env file (both
+    refused, `denies`), any other certain write, then the uncertain ones in
+    the same order.
     """
     touches = command_touches(command, cwd)
     if not touches:
         return None
     gate = gate_paths()
-    return min(touches, key=lambda t: (not t.certain, t.path not in gate))
+    return min(touches, key=lambda t: (not t.certain, not (t.env or t.path in gate)))
+
+
+def denies(touch: Touch | None) -> bool:
+    """True for a touch no one may approve: a write that provably lands on
+    the allowlist, or on a credential env file (ENV-1). The one test v1's
+    gate, `run_command` and v2's layer 1 share."""
+    return (touch is not None and touch.certain
+            and (touch.env or touch.path in gate_paths()))
 
 
 def refused(command: str, cwd: str | Path | None = None) -> Touch | None:
     """The touch that makes this line unrunnable by Jarvis, or None: a write
-    that provably lands on the allowlist. Everything else this module sees is
-    an ASK, decided by the caller."""
+    that provably lands on the allowlist or on a credential env file.
+    Everything else this module sees is an ASK, decided by the caller."""
     touch = command_touch(command, cwd)
-    if touch is not None and touch.certain and touch.path in gate_paths():
-        return touch
-    return None
+    return touch if denies(touch) else None
 
 
 def refusal(touch: Touch) -> str:
+    if touch.env:
+        return (f"{touch.why}: a credential env file is the owner's, edited in the HUD's "
+                "editor; Jarvis never reads or writes one, asked or not (only names ending "
+                "in .example, like .env.example, are Jarvis's to write)")
     return (f"{touch.why}: {touch.name} is the approval gate's own allowlist, and "
             "a command that writes it would decide what runs without anyone "
             "being asked. Only the owner changes it, by hand")
 
 
+def env_write_refusal(command: str) -> str | None:
+    """`rules.decide`'s reading (ENV-1): the refusal for a line that provably
+    writes a credential env file **by name** — no folder, no filesystem, so
+    the same line gets the same verdict wherever it is judged — else None.
+    A write behind a symlink is seen where the folder is known
+    (`command_touches(command, cwd)`: v1's `static_verdict`, `run_command`,
+    v2's layer 1 with the brief's folder)."""
+    text = _ansi_c(rules.join_continuations(command or ""))
+    # Cheap first: a line that cannot spell `.env` once its quotes and
+    # backslashes are gone names no env file (`.e''nv` and `.e\nv` do).
+    if ".env" not in text.casefold().translate(_UNQUOTE):
+        return None
+    state = _State(Path("/"), budget=_Budget(follow_links=False))
+    touches = [t for t in _analyse(command, state, set(), {}).touches if t.env and t.certain]
+    return refusal(touches[0]) if touches else None
+
+
+_UNQUOTE = str.maketrans("", "", "'\"\\")
+
+
 def ask_reason(touch: Touch) -> str:
+    if touch.env:
+        return (f"{touch.why}: this may write a credential env file, which only the owner "
+                "changes; it never runs unasked and no allowlist entry covers it")
     if touch.hud:
         return (f"{touch.why}: {touch.path} holds the installed HUD, the code the "
                 "approval window runs, so this never runs unasked and no allowlist "

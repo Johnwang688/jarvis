@@ -60,6 +60,7 @@ import type { RosterView } from "./lib/roster";
 import { moveThreadTo } from "./lib/threads";
 import { lastProject, loadLastProject, saveLastProject } from "./lib/compose";
 import { composeChoice, threadBody } from "./lib/threadmodel";
+import { threadLabel } from "./lib/threadTitle";
 import { HeldBack, nextNonce } from "./lib/giveback";
 import { useThreadModel } from "./components/ThreadModelControls";
 import { ProjectDialog } from "./components/Pickers";
@@ -3015,8 +3016,10 @@ export default function App() {
     switch (spec.view) {
       case "chat": {
         const chat = state.chats[info.pane];
-        return threadOf(chat.threadId)?.title
-          || (chat.compose ? `New thread in ${projectName(chat.compose.projectId)}` : "");
+        // Its title, or "New thread"/"Untitled" — never the id (chat titles).
+        const thread = threadOf(chat.threadId);
+        if (thread) return threadLabel(thread).text;
+        return chat.compose ? `New thread in ${projectName(chat.compose.projectId)}` : "";
       }
       case "task":
         return task?.brief || "";
