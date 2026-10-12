@@ -177,6 +177,14 @@ export const api = {
   fileOp: (projectId: string, body: { op: "new_file" | "new_folder" | "rename" | "delete"; path: string; to?: string }) =>
     req<import("./types").FsResult>(`/projects/${projectId}/fs`, json(body)),
 
+  // --- the editor's git (ED-9): owner-only, like every file route ---------
+  /** What HEAD holds for a file (the gutter's base). Refused for env, withheld and gate files. */
+  gitBase: (projectId: string, path: string) =>
+    req<import("./types").GitBase>(`/projects/${projectId}/git/base?path=${encodeURIComponent(path)}`),
+  /** The explorer's colours; the daemon caches it for 2 s. */
+  gitStatus: (projectId: string) =>
+    req<import("./types").GitStatus>(`/projects/${projectId}/git/status`),
+
   // --- diff ---------------------------------------------------------------
   diff: (taskId: string) => req<Diff>(`/tasks/${taskId}/diff`),
   diffFile: (taskId: string, path: string) =>

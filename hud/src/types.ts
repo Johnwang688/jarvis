@@ -185,6 +185,32 @@ export interface FileList {
   source: "git" | "walk";
 }
 
+/** `GET /projects/{id}/git/status` (ED-9): the explorer's colours, project-relative. */
+export interface GitStatus {
+  repo: boolean;
+  /** HEAD's commit id; null before the first commit or outside a repository. */
+  head: string | null;
+  branch: string | null;
+  /** File path → modified, added, untracked, ignored, renamed, deleted or conflict. */
+  files: Record<string, string>;
+  /** A folder git reported whole (untracked or ignored); "" is the project's own folder. */
+  dirs: Record<string, string>;
+  truncated: boolean;
+  note?: string;
+}
+
+/** `GET /projects/{id}/git/base?path=` (ED-9): what HEAD holds for a file, for the gutter. */
+export interface GitBase {
+  path: string;
+  /** ok, new (not in HEAD), no_repo, no_head, binary, too_large, not_a_file or unavailable. */
+  state: string;
+  head: string | null;
+  /** HEAD's text, only when `state` is ok. */
+  text: string | null;
+  size?: number;
+  renamed?: boolean;
+}
+
 export interface SearchQuery {
   query: string;
   /** The searching view: its newer search cancels its older one on the daemon. */
