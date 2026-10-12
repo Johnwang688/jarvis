@@ -2574,7 +2574,12 @@ jarvis/
   stay approvable. A misread body end can then at worst turn a DENY into an
   ask. Only DENY readings count, not unsure ones: a Markdown code span read
   alone is a program that is only an expansion, and 45 of the repository's 49
-  PR bodies hold one. The cost, measured: a here-document with a `*`- or
+  PR bodies hold one. **Except** an unsure line the general rules alone would
+  ALLOW (`_general_verdict`: an ALLOW-stem runner given an option its table
+  does not know, `npx --frob $X x`, or a glob past the caps), which nothing
+  else would ask, so it counts too (round 4 delta review); a code-span line
+  holds a substitution, is general ASK, and still counts for nothing, so the
+  measured cost is unchanged. The cost, measured: a here-document with a `*`- or
   `/*`-led line or a `**\`code\`**` line asks in v2 under AUTO — 0 of the
   repository's 546 commit messages, 14 of its 49 PR bodies. It runs in `decide`, so v1's
   `command_verdict` (before any approver, so neither an allowlist entry nor

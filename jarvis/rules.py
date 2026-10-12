@@ -3174,6 +3174,17 @@ def _vex_line_uncached(command: str, backstop: bool = True) -> VexLine:
 # of the commit messages hold a DENY-shaped line. The cost of that choice:
 # a body end misread over a line that is only *unsure* (`$X --user`) gives
 # the general ASK, which v2 under AUTO leaves to the provider's reviewer.
+#
+# **Except where the general rules would ALLOW it** (round 4 delta review).
+# Some lines are only unsure read alone yet ALLOW by every general rule: an
+# ALLOW-stem runner given an option its table does not know, whose program
+# could then be an expansion (`npx --frob $X x`), or an ALLOW stem with a
+# glob past the caps (`ls [[[…`). Hidden by a misread body end, nothing else would
+# turn such a line into an ask, so an allowlist entry or a human-backed v1
+# surface would run it unasked. So an unsure line marks the body too when its
+# general verdict alone (`_general_verdict`, `decide` with the vex reading
+# off) is ALLOW. A Markdown code-span line holds a substitution, so its
+# general verdict is ASK and it still marks nothing.
 BODY_MARKER = ("a here-document's body holds a line that would run something that could be "
                "vexcom, VEX's tool for the robot, or name it, if it were read as a command; "
                "where a body ends is bash's reading, so it is asked whatever else stands")
@@ -3181,7 +3192,8 @@ BODY_MARKER = ("a here-document's body holds a line that would run something tha
 
 def _body_marker(bodies: list[str]) -> str | None:
     """BODY_MARKER if a line of one of these bodies, read alone as a command,
-    is DENY by the vex reading; else None. Each distinct line is read once."""
+    is DENY by the vex reading, or is unsure by it and ALLOW by the general
+    rules; else None. Each distinct line is read once."""
     seen: set[str] = set()
     for body in bodies:
         for text in (body, join_continuations(body)):
@@ -3189,7 +3201,13 @@ def _body_marker(bodies: list[str]) -> str | None:
                 if line in seen or not line.strip():
                     continue
                 seen.add(line)
-                if _vex_line_uncached(line, backstop=False).deny:
+                alone = _vex_line_uncached(line, backstop=False)
+                if alone.deny:
+                    return BODY_MARKER
+                # Unsure alone, and nothing but the vex reading would ask it:
+                # the general verdict is read only for an unsure line.
+                if alone.unsure and \
+                        _general_verdict(join_continuations(line)).decision == ALLOW:
                     return BODY_MARKER
     return None
 
@@ -3336,13 +3354,29 @@ def decide(command: str) -> Verdict:
     if vex.deny:
         return Verdict(DENY, vex.deny)
 
+    worst = _general_verdict(command)
+    # A line that may run vexcom and cannot be told, or is too complex to
+    # judge, asks whatever else stands (and no allowlist entry covers it:
+    # `vex_uncoverable`); `vexbuild` asks like any command unless allowlisted.
+    if worst.decision != DENY:
+        if vex.unsure:
+            worst = Verdict(ASK, vex.unsure)
+        elif vex.vexbuild:
+            worst = Verdict(ASK, VEXBUILD_ASKS)
+    return worst
+
+
+def _general_verdict(command: str) -> Verdict:
+    """`decide`'s reading with the vex reading off: the owner ops, command
+    substitution and every segment, worst wins. `command` is already joined
+    (`join_continuations`). The body backstop reads it too (`_body_marker`)."""
     # The installed HUD's one writer, `jarvis hud install`, is the owner's and
     # the lead's — never Jarvis's, asked or not (decision C-1; review of PR
     # #44, MED-2: `python -m jarvis hud install` scored ALLOW here, and an
     # agent that can edit `hud/src` could then install it). One detector,
     # `protected_state.owner_op` (its table `OWNER_OPS` is where another
     # owner-only command goes), so v1's gate and v2's layer 1 — both of which
-    # start from this function — refuse every spelling it sees.
+    # start from `decide` — refuse every spelling it sees.
     from . import protected_state
     why = protected_state.owner_op(command)
     if why:
@@ -3362,12 +3396,4 @@ def decide(command: str) -> Verdict:
             worst = verdict
         if worst.decision == DENY:
             break
-    # A line that may run vexcom and cannot be told, or is too complex to
-    # judge, asks whatever else stands (and no allowlist entry covers it:
-    # `vex_uncoverable`); `vexbuild` asks like any command unless allowlisted.
-    if worst.decision != DENY:
-        if vex.unsure:
-            worst = Verdict(ASK, vex.unsure)
-        elif vex.vexbuild:
-            worst = Verdict(ASK, VEXBUILD_ASKS)
     return worst

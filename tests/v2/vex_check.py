@@ -2123,6 +2123,29 @@ HEREDOC_BACKSTOP = {
     "a body with no terminator": f"cat <<'EOF'\nfirst\n{R3}",
     "a body bash ends at a later line": f"cat <<'EOF'\nx\nEOF \n{M}\nEOF",
 }
+# The round 4 delta review: a body line that is only unsure read alone, yet ALLOW by every general
+# rule, marks the body too — hidden by a misread body end, nothing else would ask it, so an
+# allowlist entry or a human-backed v1 surface would run it. At 0f947ba each was ASK and coverable.
+HEREDOC_UNSURE_ALLOW_LINES = {
+    "npx with an option its table does not know": "npx --frobnicate $X thing",
+    "uv run, the same": "uv run --frobnicate $X thing",
+    "poetry run, the same": "poetry run --frobnicate $TOOL build",
+    "an ALLOW stem with a glob past the caps": "ls " + "[" * 70,
+}
+# Unsure alone but ASK by the general rules: the general ASK already asks, so nothing is marked.
+HEREDOC_UNSURE_ASK_LINES = {
+    "an expansion as the program": "$X --user",
+    "a code span as the program": "`kP` is now 0.8",
+    "an unknown program with a glob past the caps": "./" + "a*" * 70,
+}
+# DENY alone: marked, as since round 4.
+HEREDOC_DENY_LINES = {"an argument glob that names it": "ls ve?com", "the bin/* marker": M}
+
+
+def in_a_body(line):
+    return f"cat > notes.txt <<'EOF'\n{line}\nEOF"
+
+
 # Plain bodies: nothing in them would be DENY read as a command, so nothing new is asked. A line
 # led by a code span (`` `kP` is … ``) is only *unsure* read alone — its program is an expansion —
 # and the backstop does not ask for that (most pull-request bodies hold one).
@@ -2283,6 +2306,59 @@ class HereDocuments(Base):
                 with self.subTest(profile=profile.value, shape=label):
                     self.assertEqual(permit("Bash", {"command": command}), Decision.DENY)
             self.assertEqual(len(asker.seen), len(HEREDOC_BACKSTOP), f"v2 asked ({profile})")
+
+    @staticmethod
+    def alone(line):
+        """(the vex reading of a body line read alone, `decide`'s with the vex reading off)."""
+        with patch.object(rules, "_vex_line", lambda command: rules.VexLine()):
+            general = rules.decide(line).decision
+        return rules._vex_line_uncached(line, backstop=False), general
+
+    def test_an_unsure_line_the_general_rules_allow_marks_the_body(self):
+        asked = []
+        gate = v1_permissions.gate(lambda tool, args: asked.append(args["command"]) or False)
+        commands = []
+        for label, line in HEREDOC_UNSURE_ALLOW_LINES.items():
+            with self.subTest(label):
+                reading, general = self.alone(line)
+                self.assertIsNone(reading.deny, line)
+                self.assertIsNotNone(reading.unsure, line)
+                self.assertEqual(general, rules.ALLOW, line)
+                command = in_a_body(line)
+                commands.append(command)
+                self.assert_backstop(command)
+                Path(config.ALLOWLIST_PATH).write_text(json.dumps(
+                    [{"tool": "run_command", "prefix": p}
+                     for p in ("cat", "npx", "uv", "poetry", "ls", "$X", "$TOOL", "*")]))
+                self.assertFalse(v1_permissions.allows("run_command", {"command": command}),
+                                 "an allowlist entry covered it")
+                tools.dispatch("run_command", json.dumps({"command": command, "reason": "probe"}),
+                               gate)
+        self.assertEqual(sorted(asked), sorted(commands), "v1 asked about each")
+        self.assertEqual(self.ran, [], "a no ran nothing")
+        asker = Asker(Decision.DENY)
+        permit = v2_permissions.build_permit(context(self.root, PP.AUTO), asker)
+        for command in commands:
+            self.assertEqual(permit("Bash", {"command": command}), Decision.DENY)
+        self.assertEqual(len(asker.seen), len(commands), "v2 asked under AUTO")
+
+    def test_an_unsure_line_the_general_rules_ask_marks_nothing(self):
+        for label, line in HEREDOC_UNSURE_ASK_LINES.items():
+            with self.subTest(label):
+                reading, general = self.alone(line)
+                self.assertIsNone(reading.deny, line)
+                self.assertIsNotNone(reading.unsure, line)
+                self.assertEqual(general, rules.ASK, line)
+                command = in_a_body(line)
+                self.assertEqual(rules.decide(command).decision, rules.ASK, command)
+                self.assertIsNone(rules.vex_uncoverable(command), command)
+
+    def test_a_deny_line_still_marks_the_body(self):
+        for label, line in HEREDOC_DENY_LINES.items():
+            with self.subTest(label):
+                reading, _ = self.alone(line)
+                self.assertIsNotNone(reading.deny, line)
+                self.assert_backstop(in_a_body(line))
 
     def test_a_marker_on_a_command_line_after_the_body_is_still_deny(self):
         for label, command in {"after a quoted body": f"cat <<'EOF'\n{M}\nEOF\n{M}",
