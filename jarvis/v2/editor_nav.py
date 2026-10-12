@@ -84,17 +84,23 @@ def _under(path: Path, directory: Path) -> bool:
     return path == directory or directory in path.parents
 
 
-def _policy_for(root: Path) -> editor_policy.Policy:
+def _policy_for(root: Path, *also: Path) -> editor_policy.Policy:
     """The one classifier, narrowed to the credential folders that can matter
-    under `root` — **for quick open's listing only**, which walks the root and
-    nothing else and admits a symlink only when it lands inside the root, so a
-    folder that neither holds `root` nor sits inside it can match nothing
-    there. The judgement is still the policy's own `is_withheld`; this skips
-    folders it could never match, so 50,000 files are not each compared with
-    every credential folder. Search and the explorer use the whole policy: a
-    project's extra folders are roots too (review of PR #53)."""
+    under `root` (and any of `also`) — for **quick open's listing** and **the
+    git status** (ED-9, `editor_git.status`) only. Both judge nothing but
+    paths below those roots: quick open walks the root and admits a symlink
+    only when it lands inside it; the git status judges the names git reports
+    under the project's root, lexically, joined to the root as resolved and
+    as written (passed as `also`). A folder that neither holds a root nor sits
+    inside one can match nothing there. The judgement is still the policy's
+    own `is_withheld`; this skips folders it could never match, so 50,000
+    files are not each compared with every credential folder. Search and the
+    explorer use the whole policy: a project's extra folders are roots too
+    (review of PR #53)."""
     policy = editor_policy.Policy()
-    policy.credential_dirs = [d for d in policy.credential_dirs if _under(d, root) or _under(root, d)]
+    roots = (root, *also)
+    policy.credential_dirs = [d for d in policy.credential_dirs
+                              if any(_under(d, r) or _under(r, d) for r in roots)]
     return policy
 
 

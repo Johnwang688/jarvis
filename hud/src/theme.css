@@ -730,6 +730,31 @@ label.iconbtn.attach:hover { background: var(--bg-3); border-color: var(--border
   flex: 0 0 8px; width: 8px; height: 8px; margin-left: auto; margin-right: 2px; border-radius: 50%;
   background: var(--text-2);
 }
+/* The explorer's git colours (ED-9, lib/gitMarks.ts): the name only, in the
+   gutter's hues — changed --syn-fn, added or untracked --syn-string, a merge
+   conflict --syn-const — and ignored dimmed. Never amber or red. */
+.tree-row[data-git="modified"] .nm, .tree-row[data-git="deleted"] .nm { color: var(--syn-fn); }
+.tree-row[data-git="added"] .nm, .tree-row[data-git="renamed"] .nm,
+.tree-row[data-git="untracked"] .nm { color: var(--syn-string); }
+.tree-row[data-git="conflict"] .nm { color: var(--syn-const); }
+.tree-row[data-git="ignored"] .nm, .tree-row[data-git="ignored"] .ficon,
+.tree-row[data-git="ignored"] .tw { opacity: 0.5; }
+/* The git gutter (ED-9, state/gitGutter.ts), ED-3's table: added --syn-string,
+   modified --syn-fn, deleted a --red wedge at 60% (the diff's "removed").
+   A 3px bar at the left of Monaco's line-decorations strip, clear of the
+   folding chevrons; the wedge sits on the boundary where lines went. */
+.monaco-editor .margin-view-overlays .jgit::before {
+  content: ""; position: absolute; left: 2px; top: 0; bottom: 0; width: 3px; pointer-events: none;
+}
+.monaco-editor .margin-view-overlays .jgit-add::before { background: var(--syn-string); }
+.monaco-editor .margin-view-overlays .jgit-mod::before { background: var(--syn-fn); }
+.monaco-editor .margin-view-overlays .jgit-del::before {
+  top: auto; bottom: -5px; width: 0; height: 0; z-index: 1; opacity: 0.6;
+  border-top: 5px solid transparent; border-bottom: 5px solid transparent; border-left: 6px solid var(--red);
+}
+.monaco-editor .margin-view-overlays .jgit-del.jgit-top::before {
+  top: 0; bottom: auto; border-top: 0; border-bottom-width: 7px;
+}
 /* A File pane's own project picker (decisions E-13), in its header. */
 select.panepick { max-width: 170px; flex: 0 1 auto; min-width: 0; }
 .mdsplit { display: flex; flex: 1 1 auto; min-height: 0; }

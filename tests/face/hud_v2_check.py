@@ -3209,6 +3209,16 @@ def main():
             finally:
                 marks_mock.stop()
 
+            # The git gutter and the explorer's git colours (ED-9): a mock of
+            # their own, whose world gains a repository for the run.
+            from tests.face.hud_v2_git_check import git_checks
+            git_mock = MockDaemon(0).start()
+            try:
+                git_checks(browser, git_mock, f"http://127.0.0.1:{git_mock.port}", check, until, guard,
+                           FAKE_RECOGNIZER)
+            finally:
+                git_mock.stop()
+
             ctx = browser.new_context(permissions=["microphone"])
             guard(ctx)
             guard_loopback(ctx)
