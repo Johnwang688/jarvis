@@ -2255,6 +2255,56 @@ route modules' source), `preview.test.ts`, `hud_v2_preview_check.py` (now `brows
 the terminal suite's link section. Not yet: a "dev servers in your
 terminals" list (§2.5 item 5).
 
+**Dev servers announced in a terminal (2026-10-12, BR-8a of
+`docs/plans/2026-10-10-hud-browser-plan.md`, amendment 1 §D.1; decisions
+B-2).** The daemon half of "a dev server started in a HUD terminal opens in a
+Browser pane by itself"; BR-8b, the window half, opens the pane
+(`lib/devopen.ts`, BR-2). While the owner's **Open dev servers
+automatically** switch is on (`browser.json` → `auto_open`, on by default,
+protected state, changed only by the owner-only `PATCH /browser/settings`;
+one file beside BR-1a's `lan` and `local_servers`, read and written only by
+`jarvis/v2/browser/settings.py`, which the gate, the host, `/status` and the
+terminals all share),
+`Terminal._output` feeds each shell terminal's **live** output to
+`jarvis/v2/devurl.py`, under the lock it already holds. It reads only a
+command's output — from the shell's signed OSC 133 marks it skips the prompt
+and the typed line (bash: `B` to `C`; a shell that marks no command, like the
+POSIX startup file: `B` to the end of that line), so typing `curl
+http://localhost:3000` opens nothing — never the alternate screen, and it
+strips escapes by `terminal_text`'s own grammar. A line that announces a
+server in one of the known shapes (Vite, Next, Create React App, Angular,
+webpack-dev-server, `python -m http.server`, Flask, uvicorn, Django, Puma,
+Hugo, Jekyll, Streamlit, Gradio, `php -S`, `serve`, Expo, Jupyter, Astro,
+Storybook …) gives its URL, kept only if it is loopback http(s) with an
+explicit port, no user name, and none of Jarvis's ports
+(`config.control_ports()`, the workshop's, and the daemon's listeners as
+bound), with the query and fragment dropped and the host always written
+`localhost` (the window can frame no other loopback name). Two cheap tests
+run first and change no answer — a loopback host spelling and one of the
+shapes' words, as substring searches over a chunk's whole run of lines — and
+a chunk matches at most 32 lines against the table, so URL-dense output stays
+far above what xterm draws (PR #70 review: another host's URLs had slowed
+the terminal to ~9 MB/s). It is sent
+as one `{"type": "dev_url", "url"}` frame **on that terminal's own attached
+socket**, after the bytes that carried it — once per origin among the last
+four, at most one a second and four a minute per terminal, recorded only once
+the socket has taken the frame; with no window attached it is dropped and not
+remembered, and a ring replay never sends one. **Nothing else ever carries it**: no bus record,
+log line, thread log, Discord post or file, and Jarvis never sees it (the
+"Jarvis can read" switch is unrelated: this is the owner's window).
+**Auto-open never opens a port in the Remote gate** (amendment 2): the
+window loads the URL only in a Direct frame, and only the owner's own
+navigation opens a loopback port there. The sniffer holds at most a 512-byte line, a 64-byte escape carry and four
+origins. Its limits: a server started with `&` in bash whose banner lands
+while the prompt is up is skipped (it sits between `B` and `C`); input typed
+ahead while a command runs is echoed inside its output and read as output;
+text that only looks like a banner (`cat` of a log) is read as one, and the
+window judges every URL again. Free suites: `tests/v2/devurl_check.py` (every
+shape split anywhere with escapes, the refusals, the marks, the bounds, the
+rate limit, the settings file) and `terminal_check`'s `DevUrls` (the frame
+on that socket alone; nothing on the bus, in a log or a file; the switch
+off feeds the sniffer nothing; the switch is the owner's).
+
 **The VEX backend (2026-10-11, VX-1 of
 `docs/plans/2026-10-09-hud-editor-plan.md`; decisions V-1 to V-5).** The HUD
 can build a VEX V5 C++ project, download it to a slot on the brain, open the
@@ -3001,6 +3051,27 @@ A file opened and edited while its diff is still being computed swaps to the
 buffer quietly (the computation is cancelled first), and a buffer that goes
 away while shown reads "…" until the file is read again, never as an empty
 side.
+
+**The Diff pane's follow-ups (2026-10-12).** The change list draws only the
+rows in view, so the status's 20,000-file cap costs typing elsewhere in the
+window nothing (about 2 ms a character beside it, where every row drawn cost
+~100 ms). It takes keys: ↑ ↓, Page Up/Down, Home and End move the selection
+and scroll it into view, Enter reads it again; a selection scrolled out of
+view stays selected, its diff still shown, and the keys move on from it; a
+reload scrolls the pane's file into view. A held key moves the highlight at
+once and reads only the row it stops on (after 150 ms of no keys), and a
+read no longer wanted is dropped, so on a slow repository the last row's
+diff is not stuck behind every row passed. A screen reader hears each row's
+place in the whole list and the selected row as the keys move. **The Task pane's header clears its
+task** ("task <id> · clear", off under a card): the 2×2 grid draws a Task
+pane, and while it shows a task every Diff pane shows that task's diff, so
+clearing is the way back to a project's uncommitted changes — a Diff pane
+still never shows another task than the Task pane. The task diff and Compare
+cancel a diff still being computed when they close, as the uncommitted
+changes' diff already did, and never touch the buffer Compare shows; and the
+uncommitted changes' diff is drawn with the owner's editor settings (font,
+size, whitespace, bracket colours, sticky scroll), live, as the task diff and
+Compare are.
 
 **The Browser's action rules and reviewer (2026-10-12, BR-9a; amendment 1 to
 the Browser plan, §B.3–§B.5).** Before an agent's click, keystroke or

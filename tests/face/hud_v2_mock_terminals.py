@@ -139,6 +139,11 @@ def handle(h, mock, method: str, path: str, body) -> bool:
                 return True
             ticket = secrets.token_urlsafe(16)
             tickets[ticket] = rec["id"]
+            # `terminal_ticket_delay` (one-shot): a ticket minted now, answered
+            # that many seconds later — the terminal may be closed meanwhile.
+            delay = mock.__dict__.pop("terminal_ticket_delay", 0)
+            if delay:
+                time.sleep(delay)
             h._json({"ticket": ticket, "expires_in": 30})
             return True
     h._err(404, "route not found")

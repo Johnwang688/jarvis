@@ -1,8 +1,57 @@
 import { describe, expect, it } from "vitest";
 import {
-  candidateDirs, configPath, deadline, globCost, GLOB_TOKENS_MAX, GLOB_TOTAL_MAX, matchGlob, overrideOf,
-  parseEditorConfig, RESOLVE_MS, resolveProps, SECTIONS_MAX, type ConfigFile,
+  candidateDirs, CHECK_STEPS, configPath, deadline, globCost, GLOB_TOKENS_MAX, GLOB_TOTAL_MAX, matchGlob, overrideOf,
+  parseEditorConfig, RESOLVE_MS, resolveProps, SECTIONS_MAX, type ConfigFile, type Deadline,
 } from "./editorconfig";
+
+// Load-proof timing (the flaky-test fix; `state/editorconfig.test.ts` has the
+// same two tools). `held` is how long `fn` held the thread: the least of its
+// wall time and the process's CPU time, each at least the thread's own CPU
+// time, and only the first inflated by a CPU taken away under load (the
+// thread's own CPU clock is read a scheduler tick stale on Linux, so it is no
+// use at 16 ms); `leastHeld` takes the best of up to three fresh runs, since
+// a GC pause inflates both measures. `workDeadline` reads the work done as its clock, so
+// `RESOLVE_MS` is a fixed number of steps: a check whose point is not the time
+// (a cap found, a small config's answer) cannot be timed out by a slow machine.
+const proc = (globalThis as { process?: { cpuUsage?: () => { user: number; system: number } } }).process;
+const cpuUsage = proc?.cpuUsage ? () => proc.cpuUsage!() : null;
+const cpuMs = () => {
+  const u = cpuUsage!();
+  return (u.user + u.system) / 1000;
+};
+function held(fn: () => void): number {
+  const w = performance.now();
+  const c = cpuUsage ? cpuMs() : 0;
+  fn();
+  const wall = performance.now() - w;
+  return cpuUsage ? Math.min(wall, cpuMs() - c) : wall;
+}
+/**
+ * `held` for a fresh run of `prepare()`'s job, the least of up to three: a GC
+ * pause (the garbage of the 600 ms test before) or a preemption lands on one
+ * run, while the guard's own cost is paid by every run, so a broken guard
+ * fails all three. Stops at the first run under `bound`; the result is the
+ * fastest run's.
+ */
+function leastHeld<T>(bound: number, prepare: () => () => T): { ms: number; result: T } {
+  let best: { ms: number; result: T } | null = null;
+  for (let i = 0; i < 3 && !(best && best.ms < bound); i++) {
+    const run = prepare();
+    let result: T | undefined;
+    const ms = held(() => {
+      result = run();
+    });
+    if (!best || ms < best.ms) best = { ms, result: result as T };
+  }
+  return best!;
+}
+/** Nanoseconds one step stands for on the work clock: about this machine's rate (3–4 ns). */
+const WORK_NS = 4;
+function workDeadline(): Deadline {
+  let d: Deadline | undefined;
+  d = deadline(RESOLVE_MS, () => ((d?.total ?? 0) * WORK_NS) / 1e6);
+  return d;
+}
 
 describe("parsing an .editorconfig (the spec's INI)", () => {
   it("reads the preamble's root, sections, pairs and comments", () => {
@@ -195,6 +244,32 @@ describe("a resolution is held to the clock", () => {
     return { c, d: deadline(RESOLVE_MS, () => c.reads++) };
   };
 
+  // The guard's strength is pinned, not timed (review of PR #72, LOW 1): the
+  // checks below bound how long a job held the thread, and the least-of-runs
+  // that makes them hold under load also lets a longer deadline through (at
+  // 20 ms every one passed). So the deadline's length, how often the clock is
+  // read, and that it is the real clock are asserted directly.
+  it("the guard's strength: a 5 ms deadline on the real clock, looked at every 256 steps", () => {
+    expect(RESOLVE_MS).toBe(5);
+    expect(CHECK_STEPS).toBe(256);
+    const now = 1000;
+    expect(deadline(undefined, () => now).until - now).toBe(5);
+    const before = performance.now();
+    const real = deadline();
+    const after = performance.now();
+    expect(real.until).toBeGreaterThanOrEqual(before + 5);
+    expect(real.until).toBeLessThanOrEqual(after + 5);
+    // The clock is looked at every few hundred steps of work (on average at
+    // least every 512: a large step can carry a look past 256).
+    const looks = { n: 0 };
+    const d = deadline(1e9, () => (looks.n++, 0));
+    const file = parseEditorConfig("root = true\n[*]\nindent_size = 4\n[*.{c,h,cpp}]\nindent_size = 2\n[src/**/vendor/**]\nindent_size = unset\n");
+    const r = resolveProps([{ dir: "", file }], `src/${"deep/".repeat(40)}robot.cpp`, d);
+    expect(r.over).toBeNull();
+    expect(d.total).toBeGreaterThan(4096);
+    expect(looks.n).toBeGreaterThanOrEqual(d.total / 512);
+  });
+
   it("the shape is what the review built: 123 sections of 64 alternatives", () => {
     const file = heavy();
     expect(file.sections).toHaveLength(123);
@@ -202,9 +277,7 @@ describe("a resolution is held to the clock", () => {
   });
 
   it("stops at the deadline: no configuration, and the file to blame named", () => {
-    const t = performance.now();
-    const r = resolveProps([{ dir: "", file: heavy() }], PATH);
-    const ms = performance.now() - t;
+    const { ms, result: r } = leastHeld(16, () => () => resolveProps([{ dir: "", file: heavy() }], PATH));
     expect(r).toMatchObject({ over: "time", props: {}, culprit: 0 });
     expect(ms).toBeLessThan(16);
   });
@@ -226,24 +299,26 @@ describe("a resolution is held to the clock", () => {
 
   it("32 configs deep stop in time too (the review's walk)", () => {
     const deep = `${Array.from({ length: 31 }, (_, i) => `d${i + 1}`).join("/")}/main.cpp`;
-    const walk = Array.from({ length: 32 }, (_, i) => ({
-      dir: deep.split("/").slice(0, i).join("/"),
-      file: parseEditorConfig(lines.slice(1).join("\n")), // no root: every one applies
-    }));
-    const t = performance.now();
-    const r = resolveProps(walk, deep);
-    expect(performance.now() - t).toBeLessThan(16);
+    const { ms, result: r } = leastHeld(16, () => {
+      const walk = Array.from({ length: 32 }, (_, i) => ({
+        dir: deep.split("/").slice(0, i).join("/"),
+        file: parseEditorConfig(lines.slice(1).join("\n")), // no root: every one applies
+      }));
+      return () => resolveProps(walk, deep);
+    });
+    expect(ms).toBeLessThan(16);
     expect(r).toMatchObject({ over: "time", props: {} });
   });
 
   it("the number-range shape stops in time, its digits counted without slicing", () => {
     const nums = ["root = true"];
     for (let n = 0; n < 123; n++) nums.push(`[${"{0..999999999}".repeat(30)}${n}x]`, "indent_size = 2");
-    const file = parseEditorConfig(nums.join("\n"));
     const name = "9".repeat(1000);
-    const t = performance.now();
-    const r = resolveProps([{ dir: "", file }], name);
-    expect(performance.now() - t).toBeLessThan(16);
+    const { ms, result: r } = leastHeld(16, () => {
+      const file = parseEditorConfig(nums.join("\n"));
+      return () => resolveProps([{ dir: "", file }], name);
+    });
+    expect(ms).toBeLessThan(16);
     expect(r.over).toBe("time");
     // And a range still matches as the spec says.
     expect(matchGlob("file{1..300}.c", "file250.c")).toBe(true);
@@ -258,7 +333,9 @@ describe("a resolution is held to the clock", () => {
       "[*.{json,yml,yaml}]", "indent_size = 2", "[*.md]", "trim_trailing_whitespace = false",
       "[src/**/vendor/**]", "indent_size = unset", "[lib/**.js]", "indent_size = 2",
     ].join("\n"));
-    const r = resolveProps([{ dir: "", file: real }], `src/${"deep/".repeat(40)}robot.cpp`);
+    // On the work clock: its ~20,000 steps look at the clock ~75 times, and a
+    // real one under load ran out during them (the flake this replaces).
+    const r = resolveProps([{ dir: "", file: real }], `src/${"deep/".repeat(40)}robot.cpp`, workDeadline());
     expect(r.over).toBeNull();
     expect(r.props).toMatchObject({ indent_style: "space", indent_size: "2" });
     // A few thousand steps of a few nanoseconds: nowhere near the deadline, on any machine.
@@ -268,7 +345,8 @@ describe("a resolution is held to the clock", () => {
   it("a glob over a cap configures nothing, and names its file (the caller poisons it)", () => {
     const ok = parseEditorConfig("[*.c]\nindent_size = 2\n");
     const capped = parseEditorConfig(`[*.c]\nindent_size = 3\n[${"{a,b}".repeat(7)}]\nindent_size = 4\n`);
-    const r = resolveProps([{ dir: "", file: ok }, { dir: "", file: capped }], "x.c");
+    // The work clock: finding the cap looks at the clock, which a real one under load could end first.
+    const r = resolveProps([{ dir: "", file: ok }, { dir: "", file: capped }], "x.c", workDeadline());
     expect(r).toMatchObject({ over: "cap", props: {}, culprit: 1 });
   });
 
@@ -279,7 +357,8 @@ describe("a resolution is held to the clock", () => {
     const r = resolveProps([{ dir: "", file: many }], "f0.c");
     expect(r).toMatchObject({ over: "sections", props: {} });
     const fits = parseEditorConfig(Array.from({ length: SECTIONS_MAX }, (_, i) => `[f${i}.c]\nindent_size = 2`).join("\n"));
-    expect(resolveProps([{ dir: "", file: fits }], "f0.c").props).toMatchObject({ indent_size: "2" });
+    // The work clock: 128 sections look at the clock, and a real one ran out under load.
+    expect(resolveProps([{ dir: "", file: fits }], "f0.c", workDeadline()).props).toMatchObject({ indent_size: "2" });
   });
 
   it("a section's glob is compiled once and kept with its file", () => {

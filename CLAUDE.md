@@ -687,7 +687,9 @@ daemon, `hud_api` and the module itself. **Terminal output stays in memory
 unless Jarvis reads it**: on the bus lifecycle records only
 (`terminal_attached`, and WP-F's `terminal_read` — ids, a count, a time), no
 log line (lifecycle only, and `/terminals` paths are logged without their
-query — the ticket rides in it), no thread log, Discord or disk. The
+query — the ticket rides in it), no thread log, Discord or disk (BR-8a's
+`dev_url` frame, below, goes to that terminal's own socket and nowhere
+else). The
 exception, since WP-F (corrected 2026-10-10): what `terminal_read` returns goes where any tool result goes — the fast-path transcript (and so OpenRouter, with every later request), that conversation's v1 session `messages.json`, `config.SPILL_DIR` if context truncation cuts it later, and anything the model's reply repeats (a reply is mirrored to the chat's Discord thread and spoken); its ticker
 summary is fixed ("read N lines"), so the tool's own `tool_finished` record
 carries none of it onto the bus or into the thread's `log.jsonl` — **but the
@@ -1560,6 +1562,127 @@ move through another first. The mock serves an API listener and a dev server
 on ephemeral ports (`api_port`, `dev_port`) and asserts the API one is never
 hit; the mock HUD, API and workshop send the real `hud_api.frame_headers()`,
 so the HUD under test is always rendered under them. Not yet: §2.5 item 5, a "dev servers in your terminals" list.
+**Known gap, open (2026-10-12, review of PR #74; reproduced in Chrome 155):**
+a framed page can take the keyboard with no user activation.
+`el.focus()`/`window.focus()` inside the `allow-scripts allow-forms` frame
+moves focus out of the HUD's box, and later keys go to the page, which can
+send them to its own server: chat words, an editor's `.env` value, a
+password typed in a terminal. `inert`, `display: none`, re-focusing the box
+and `contentWindow.blur()` do not stop it, even from a hidden frame. Only
+removing the iframe in the parent's `blur` handler does. AO-2
+(`docs/plans/2026-10-12-hud-browser-plan-amendment-2.md` §E.8) adds that
+guard for every Browser frame: a frame that gains focus without the owner's
+gesture is unmounted ("This page took the keyboard · Reload").
+
+**Dev servers announced in a terminal, BR-8a (2026-10-12; Browser plan
+`docs/plans/2026-10-10-hud-browser-plan.md`, amendment 1 §D.1/§G/§H, the
+decisions file wins: B-2; design §18; contract in `docs/hud-api.md`).** The
+daemon half of "a dev server opens in a Browser pane by itself"; BR-8b opens
+the pane. `jarvis/v2/devurl.py` (pure) is fed a **shell** terminal's **live**
+output by `Terminal._sniff`, from `_output` under the lock it already holds,
+**only while `browser.json` → `auto_open` is on** — off, the sniffer is told
+the marks' letters and never fed a byte. It reads **only a command's
+output**: `Marks.events` hands it the letters of *signed* OSC 133 marks, and
+it skips `A`/`B` to `C` once the shell has marked a command (bash), else
+`B` to that line's line feed (the POSIX startup file marks no command), so a
+typed `curl http://localhost:3000` opens nothing; never the alternate screen.
+Escapes are stripped by **`terminal_text`'s own compiled patterns** (imported,
+not copied) — colour draws nothing (a run of text and whole SGRs is one
+C-level match, `_PLAIN`), cursor forward is a space, cursor back,
+BS or a deleted character spoils the line, any other move, CR and the line
+feeds end it. **Two cheap tests that cannot change an answer run before the
+table** (PR #70 review, LOW: a line holding `://` ran up to 17 regexes, and
+URL-dense output went through `_output` at ~9 MB/s): a loopback host
+spelling (`_HOSTS`: `localhost` in any ASCII case, `127.`, `0.0.0.0`, `[:`,
+`[0`) and one of the shapes' words (`_WORDS`; `local` only before a space or
+`:`), as plain substring searches first (`_has_host`, `_has_word` — the
+latter folds the four characters IGNORECASE equates with ASCII letters, ſ ı
+İ and the Kelvin sign, so it is the regex or wider), over a chunk's whole run
+of lines and then per line; and a chunk (or a mark) matches at most
+`MATCH_BUDGET` (32) lines against the table — only a flood of real
+announcements reaches it, and one frame a second can go anyway. **A new
+`SHAPES` row adds its word to `_WORDS` and `_WORD_LITERALS`**; devurl_check's
+`Prefilter` differential (20,000 lines, every case and fold) fails
+otherwise. Measured through `_output` with a socket that takes everything:
+another host's URLs 191 MB/s (was 9.8), a loopback access log 103 (10.9),
+plain logs 262 (124), colour 44 (21), repeated or distinct announcements
+62–69 (7.1 and 2.7); xterm draws ~14. A finished line is matched against `devurl.SHAPES` (Vite,
+Next, CRA, Angular, webpack-dev-server, `http.server`, Flask, uvicorn,
+Django, Puma, Hugo, Jekyll, Streamlit, Gradio, `php -S`, `serve`, Expo,
+Jupyter, Astro, Storybook, Parcel, MkDocs, Eleventy) and `devurl.clean` keeps
+only **loopback http(s) with an explicit port** (`localhost`, `127/8`,
+`[::1]`, `0.0.0.0`, `[::]`) and **sends every one as `localhost`**, the port
+and path kept (PR #70 review: the window can frame no other loopback name,
+and `[::1]` or `127.0.0.2` only burned the server's frame), no userinfo,
+**never Jarvis's
+ports** (`devurl.jarvis_ports()` = `config.control_ports()` ∪ 8403 ∪ the
+configured workshop, plus the daemon's listeners as bound, `own_ports`), the
+query and fragment dropped (a Jupyter `?token=` never travels). **Memory: a
+512-byte line (dropped whole past it), a 64-byte escape carry, the last four
+origins and four send times** — nothing else, whatever it is fed. **One
+`{"type": "dev_url", "url"}` frame on that terminal's attached socket**,
+after the bytes that carried it; `may_send` de-duplicates by (scheme, port)
+and rate-limits (one a second, four a minute per terminal), and **`sent`
+records a URL only once `send_text` has taken its frame** (PR #70 review: it
+used to be recorded first, and a socket closing or too far behind cost the
+server its frame for good); **no window attached: dropped and not recorded**;
+a replay never reaches it; a
+sniffer that raises is dropped for that terminal (one log line, the
+exception's type) and never stops its output.
+**Nothing on the bus, in a log line, a thread log, Discord or a file carries a
+URL or a byte of the text**; the "Jarvis can read" switch is unrelated.
+**`browser.json`** (`config.BROWSER_SETTINGS_PATH`, env
+`JARVIS_BROWSER_SETTINGS` — empty means unset, never `.`, which would put the
+working folder in the protected state) holds BR-1a's `lan` and
+`local_servers` (both off) and `auto_open` (**on**). **One reader and one
+writer: `jarvis/v2/browser/settings.py`** (`BrowserSettings`), the daemon's
+`browser_settings`, which the gate (`value("lan")`, per connection), the host
+(`value("local_servers")`), `/status` → `browser` and the terminals
+(`auto_open()`) all read — never a second loader; a test fails on a second
+definition of the path, a second `load_settings`/`save_settings` or another
+module naming `browser.json`. It is **gate state** (`files.
+_protected_state_paths`, by path and by name beside the allowlist) and
+changes only by **owner-only `GET`/`PATCH /browser/settings`** in
+`browser/routes.py`, which owns every `/browser*` path (`is_owner` plus a
+strict loopback Host, no query; a body of any non-empty subset of `{lan,
+local_servers, auto_open}`, each a boolean, an unknown field counted and
+never named); written atomically at 0600 keeping keys it does not know
+(BR-10's sound); read without blocking, never through a symlink, re-`stat`ed
+at most once a second so a hand edit lands without a restart. **An embedded
+or test daemon keeps it in memory** (`BrowserSettings()`); daemon2's
+`main()` attaches the owner's file, as it loads the Codex catalog. **Auto-open
+never opens a port in the Remote gate** (amendment 2): the window loads the
+URL only in a Direct frame; only the owner's own navigation opens one. The
+HUD ignores the frame until BR-8b (`parseControl` drops unknown types). **Limits**: in bash a server
+started with `&` whose banner lands while the prompt is up is skipped
+(between `B` and `C`); typed-ahead input echoed during a running command is
+read as that command's output; text that only looks like a banner (`cat` of a
+log) is read as one — the window judges the URL again. Free suites:
+`tests/v2/devurl_check.py` (every `SHAPES` row from real banner text, whole,
+split at every byte and at random cuts, with escapes in every form; the
+refusals; the marks; 10 MB leaving at most a line; the rate limit and
+de-dup; the settings file and its gate-state refusal) and `terminal_check`'s
+`DevUrls` (one window hears it, another does not; the typed line never read;
+Jarvis's ports never sent; bus, log and disk clean; off feeds nothing; a
+replay or a second announcement sends nothing; the switch is the owner's;
+an unattached URL not remembered; a forged mark moves nothing; a failing sniffer
+never stops the output; a frame the socket refuses not remembered; five
+floods at twice xterm's rate through `_output`); `frame_check`
+walks `/browser`. Seven guard removals, each in a scratch copy, fail all nine
+of their checks (a control port passed — both suites, a URL on the bus, marks
+ignored — both suites, escapes kept, the query kept, `auto_open` ignored,
+whole lines kept); an unmutated copy passes them. The review round's seven
+fail all nine of theirs: the prefilter removed (another host's URLs spend the
+budget, so an announcement among them is missed), the prefilter and the
+budget removed (both speed checks), a prefilter too strict (no bracketed
+hosts; no `token=`: the differential), recorded before the send, the host
+sent as printed, and the empty setting read as `.`. The reconciliation with
+BR-1a's six fail theirs (`devurl_check`'s `test_one_reader_one_writer` and
+`terminal_check`'s `test_one_set_of_switches_for_every_reader`): a second
+definition of the path in `config.py`, a second reader in `host.py` (the
+gate's `local_servers` from the file), a second writer in `routes.py`, a host
+keeping a `BrowserSettings` of its own, the daemon's constructor reading the
+owner's file, and the empty setting read as `.` on the merged definition.
 
 **The Browser's pure HUD modules, BR-2 (2026-10-12; browser plan
 `docs/plans/2026-10-10-hud-browser-plan.md` §2, §5, §8, §9, §11; amendment 1
@@ -1600,7 +1723,9 @@ is). `devopen.ts`: `autoOpenPlan` → split (focus never moves) | focused |
 offer | wait (under a card; 30 s) | skip (off, the WP-E judge
 `judgeBrowserUrl` or Jarvis's control ports, an origin already opened or shown, one per 10 s per terminal,
 three a minute); the query and fragment are dropped; a Browser pane already
-showing a page counts as busy. `annotate.ts`: the
+showing a page counts as busy. (Amendment 2, 2026-10-12, replaces `focused`
+and `offer` with a tab in a drawn Browser pane, else a prompt, and the 30 s
+wait with "until the card goes"; AO-3 rewrites it.) `annotate.ts`: the
 whiteboard's ops model in the still's pixels (pen, arrow, box, text; three
 colours), `render` at any scale, undo/clear, the zoom-aware letterbox fit, and
 the staged picture's size and type (1920 px; `page.jpg` at 0.9 past 3.5 MB).
@@ -3385,10 +3510,13 @@ match all spend through one `Deadline` (`RESOLVE_MS` 5 ms), which reads
 `performance.now()` every `CHECK_STEPS` (256) steps from inside the parser,
 the compiler and the matcher and throws `OutOfTime`; the file then has **no
 configuration at all, never a partial one**; (b) **poison** — the config
-(by folder and etag) that spent the time takes a strike, and **two strikes**
-(one GC pause must not cost a real config its effect) **or any cap** poison
-it: every later resolution touching it, for any path, is O(1) and never
-queued, until its etag changes; (c) **no batching** — resolutions run one per
+(by folder and etag) that spent the time takes a strike, and **two strikes
+in a row** (one GC pause must not cost a real config its effect) **or any
+cap** poison it: every later resolution touching it, for any path, is O(1)
+and never queued, until its etag changes. **A resolution that judges a config
+in time resets its strikes** (PR #72, LOW 3): with no reset, two time-outs
+any distance apart poisoned the owner's real config, and on a loaded core
+the real-world config timed out in 2.4% of 3,000 resolutions; (c) **no batching** — resolutions run one per
 macrotask through a queue (`MessageChannel` in the window, `setTimeout` in
 Node), so restored tabs never pile into one long task; `prepare` still
 applies before the buffer records its text. Compiled globs are kept with
@@ -3496,8 +3624,8 @@ worker is still computing — before any model goes. Handed `{original,
 modified}`, Monaco 0.57 keeps a reference to the view model it makes that
 nothing releases, so its computation was never cancelled, and a row picked
 then opened and edited at once threw `no diff result available`, uncaught.
-The task `DiffEditor` and `CompareEditor` in `Editor.tsx` still pass
-`{original, modified}`; not changed here. Both sides
+The task `DiffEditor` and `CompareEditor` in `Editor.tsx` own theirs too
+since the follow-ups (below). Both sides
 read-only, side by side even in a narrow pane; ↻ reads again; the right
 side of an unopened file is re-read when the status moves. **Env files are
 listed and never diffed**: `rowShows` sends a `.env*` row (fileIcons'
@@ -3527,6 +3655,87 @@ read; the Task pane left out of the mode, the Diff follows the chat. Not
 done: SCM actions; a file not open in the
 editor that changes on disk while the project's git states stay the same is
 re-read only on ↻ or a click; the list is flat (no staged/unstaged groups).
+
+**The Diff pane's follow-ups (2026-10-12; PR #67's reviews; design §18).**
+**The change list is windowed** (`ProjectDiff.tsx` `ScmList`; the arithmetic
+is `lib/scm.ts` `scmWindow`/`revealTop`): only the rows in view, and
+`SCM_OVERSCAN` (12) either side, are in the DOM, in a spacer as tall as every
+row; **every row is `SCM_ROW_PX` (24) CSS px, pinned inline**, so where a row
+is needs no measuring, and `scrollTop` is the list's own CSS px (the HUD's
+zoom does not change it; checked at 160%). **How much is in view is the
+drawn height over `currentCSSZoom`** (`viewOf`), never `clientHeight`, which
+is rounded: at 160% a list 400.6 px tall read as 401, and End clipped 0.8
+drawn px of its row (review of PR #73, NIT). The window is
+computed each render from where the list is scrolled, kept in whole rows (a
+scroll redraws the list only when it crosses a row, and only the list: it is
+`memo`'d, with a stable pick). At git/status's 20,000 cap a DOM of every row
+made each chat keystroke beside it cost ~100 ms (the reviewer's measure;
+74–103 ms here), and drawing took 0.2–0.4 s; windowed it is ~2 ms, the same
+as no Diff pane. **Keys** (the list is a focusable `listbox`, focused by a
+row click or Tab): ↑ ↓, Page Up/Down, Home, End (`scmKeyStep`) move the
+selection and scroll it into view; Enter reads the selected row again. **A
+key moves the highlight at once and reads the row only once the keys have
+settled** (`SCM_KEY_SETTLE_MS`, 150 ms; the pane keeps `sel`, the highlight,
+apart from `shown`, the file read, and says "…" between); a click and Enter
+read at once, and a key pick never folds a narrow pane's list (a click
+does). **A read nobody waits for is aborted**: `api.gitBase`/`api.readFile`
+take a signal, aborted in `ScmFile`'s effect cleanup. Review of PR #73, MED:
+↓ held over 60 rows started 60 `git/base` requests and reads, and against a
+slow repository (the owner's VEX projects on /mnt/c) the last row's diff came
+4 s late at 0.5 s a request; now one request and one read go out, the diff
+0.65 s after the last key. **For a screen reader** each option carries an
+id, `aria-setsize` (the whole list) and `aria-posinset`, and the listbox's
+`aria-activedescendant` names the selected option whenever it is drawn (a
+key always draws it; no dangling id when it is scrolled away). **The
+selection is a path, never a drawn row**: scrolled out of the window it
+stays selected, its diff stays shown, and the keys move from it. A file the
+pane had (a reload) is scrolled into view once, when the rows first arrive —
+or, in a narrow pane where a picked file folds the list, once the list is
+shown again (ResizeObserver) — and never on a poll, which would pull the list
+back from where the owner scrolled it. **The way out of a Task pane's hold:
+the Task pane's header clears its task** (`pane-N-task` chip, `pane-N-task-clear`;
+`taskId: null`, `taskFocus: false`), disabled under a card. The default 2×2
+grid draws a Task pane (`DEFAULT_VIEWS` slot 4), and while it shows a task
+every Diff pane shows that task's diff (L3) with its picker off — nothing took
+the window off a task once one was picked. Of the brief's two ways out this
+is the simpler: `diffMode` is unchanged, and a Diff pane still never shows
+another task than a drawn Task pane (there is none to show). The held
+picker's title names it. **Every diff view owns its view model**: the task
+`DiffEditor` and `CompareEditor` (`Editor.tsx`) now do as `ScmDiffEditor`
+does since L1 — `createViewModel`, set on the editor, disposed first (which
+cancels a diff still waiting on the worker) and once on every path (`vm` is
+cleared as it goes), then `setModel(null)`, then the editor, then the
+models it made; Compare's right side is the buffer's model, which it never
+disposes, and it lets go of it on the model's `onWillDispose`. Its text,
+undo stack and dirty state are untouched (checked: edit kept, still dirty,
+Ctrl+Z still undoes it). **`ScmDiffEditor` draws with ED-8's
+`displayOptions`**, live on a settings change (`onEditorSettings`, then
+`reapplyEditorConfig()`, as the other two) — it had a fixed `fontSize: 12`.
+Free checks: `lib/scm.test.ts` (26), `components/ProjectDiff.test.ts` (4: the
+20,000-row window in jsdom and the keys past it, five keys read nothing until
+they settle and then the last row once, a click at once; the ARIA; nothing
+moved under a card) and `tests/face/hud_v2_scm_check.py` (now 110;
+`ONLY=<section>` runs one):
+`_scale_checks` (20,000 rows, a window drawn, chat typing under 15 ms a
+character, the last row reached, the keys, a selection held and moved out of
+the window, a reload's file revealed at 160%, and at 160% Page Down and End
+clipping nothing of a list 400.6 px tall), `_hold_checks` (↓ held at ~33 a
+second over 60 rows, the mock's `git/base` taking 0.5 s (`base_delay`): at
+most 3 requests and the last diff within 2 s; a row clicked away from before
+HEAD answered is aborted), `_clear_task_checks` (the 2×2
+grid with a Task pane), `_settings_checks` and `_midcompute_checks` (a
+40,000-line task-diff file keeps Monaco's one editor worker busy for its 5 s
+diff limit; a task diff, then Compare, is opened and closed while its own
+diff waits behind it — main's code threw `no diff result available` each
+time). Shown to bite in a scratch copy: every row drawn (the window and
+out-of-window checks fail; main's build also fails the typing check at
+74 ms); `clear` keeping the task id (three checks); the task diff or Compare
+back to `{original, modified}`, or the task diff's view model never
+disposed (`no diff result available`); the settings not live, or not used at
+all (12px where 16px was chosen); keys that never scroll (five checks); the
+review round's: no settle (60 `git/base`), neither settle nor abort (60, and
+the last diff 4.14 s late), no abort (the clicked-away request completes),
+the rounded `clientHeight` (End clips 0.812 px at 160%).
 
 **The effort is a slider, not pills (2026-10-10, owner's ask: "like Claude's").**
 `components/EffortSlider.tsx`, rules in `lib/effortSlider.ts`: "Effort
@@ -5542,6 +5751,38 @@ jarvis/
   already paid for, is in `swecompare/RUNBOOK.md`.
 - Context-management tests are synthetic and free — no API, fully repeatable.
   Prefer that pattern for new logic.
+- **A check must hold under load** (2026-10-12, the flaky-test fix). The lead
+  runs several suites at once, and a check that fails only when the CPU is
+  busy hides real failures. Four rules, each from a flake this fixed:
+  - **Bind port 0** and read the port back. A fixed port fails when another
+    run holds it (attach/cancel shared 8476).
+  - **Wait for the state, never for a time.** Read a value only after the
+    thing that sets it has happened: Monaco's text after it is drawn, a
+    banner after it appears, a worker's back-off after it records it (move
+    a fake clock only then), the error page a refused load commits before
+    the next goto. In one `evaluate`, set a probe and fire the render that
+    trips it.
+  - **Time work, not the wall.** A real-clock bound measures how long the
+    work held the thread: the least of its wall time and the process's CPU
+    time (`held` in the `.editorconfig` vitests). The thread's own CPU clock
+    is a tick stale on Linux. A GC pause inflates both, so judge the best of
+    up to three fresh runs: a pause hits one run, and a break that costs
+    CPU is slow in every run. A check of a guard's logic runs on a clock
+    made of the work done (`workDeadline`). Keep the tight bound, not a
+    generous one.
+  - **Pin the constants that set a guard's strength.** A held-time bound
+    under load cannot tell a 5 ms deadline from a 20 ms one, and the work
+    clock scales with the deadline. So `RESOLVE_MS`, `CHECK_STEPS`,
+    `STRIKES`, and the real-clock default of `deadline()` are asserted
+    directly (PR #72, LOW 1).
+  - **Count the HUD's fault, not the test's.** The terminal suite's
+    fresh-ticket check still judges every socket's ticket. Only a fresh
+    ticket for a terminal the test itself removed (`_reset`, `end`; held in
+    `fake.removed`) is counted apart. A socket for a terminal the HUD closed
+    itself counts against it.
+  To reproduce, widen the window: `taskset` with busy loops, Chromium's
+  `Emulation.setCPUThrottlingRate`, late animation frames, or a sleep where
+  the race is. "Passes alone" proves nothing.
 - `tests/context_check.py` — free synthetic checks for `context.py`, and the
   one CLAUDE.md claimed existed for months but did not, which is how the
   cut-point orphan bug survived in the compaction path (it only fires past
@@ -6360,6 +6601,16 @@ Two findings worth keeping:
   (invariant 7). cad-bench holds `skill_list` and `skill_read`,
   so the CAD skill it measures can load. runtime.py and toolgroups.py are
   **not** SELF_PROTECTED: the owner declined it (answer 3).
+- **Auto-opened dev servers are Direct only, and never open a port in the
+  Remote browser's gate (2026-10-12, the lead's decision L2,
+  `docs/plans/2026-10-12-hud-browser-plan-amendment-2.md`).** Since the
+  owner asked for servers that Jarvis, Claude and Codex start to open too,
+  an agent can trigger an auto-open. Counting one as the owner's own
+  navigation would hand agents a lever on the gate. Only the owner's typed
+  URL, click or "Open in Remote" opens a loopback port there. This
+  **reverses** the note BR-1a's review first carried: that BR-8b's auto-open
+  counted as the owner's opening. #69 merged with that note already
+  corrected, in the BR-1a paragraph and the "closed like the LAN" bullet.
 
 - **Agents that cannot ask get a typed git tool, not a broader shell
   (2026-10-09).** `git` left `run_readonly`; workflows and sub-agents reach
