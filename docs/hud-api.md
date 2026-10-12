@@ -2009,6 +2009,98 @@ three dots but have the main display be the title". No new route.
   "New thread" (`turns` 0) or "Untitled", and the id is the ⋯ menu's "Copy
   id" (`tmenu-copyid`, the id shown in `tmenu-id`). A title is text.
 
+## Additions 2026-10-12 (the Browser's engine — BR-1a)
+
+The owner's built-in Browser, backend only (plan
+`docs/plans/2026-10-10-hud-browser-plan.md` §2–§4, amendment 1 §C): a
+daemon-owned Google Chrome behind a SOCKS gate. The stream, input, dialogs,
+downloads and the tab strip are BR-1b's; profile management is BR-1c's.
+
+**Every `/browser` route is the owner's**: `projects.owner_only` (the HUD
+listener, and the HUD's own page — its Origin, or a same-origin GET with no
+Origin) plus a strict loopback `Host`, checked before a body is read, a tab
+is looked up or Chrome is started; anything else is **403**. No route takes
+a query string (**400**); a URL travels only in a JSON body, and no refusal
+ever contains one. Nothing starts Chrome but `POST /browser/tabs`.
+
+| Route | Body | Answer |
+|---|---|---|
+| `GET /browser` | — | `/status` → `browser` (below) plus `profiles: [{id, label, created}]` and `settings` |
+| `GET /browser/settings` | — | `{lan, local_servers}` |
+| `PATCH /browser/settings` | `{lan?: bool, local_servers?: bool}`, at least one | `{lan, local_servers}`; writes `browser.json` (0600, protected state), keeping keys it does not know |
+| `GET /browser/tabs` | — | `[{tab_id, profile, ctx, url, title}]` — the title cleaned to one line of 120; `[]` while nothing runs |
+| `POST /browser/tabs` | `{profile?, ctx?, url?}` | **201** `{tab_id, profile, ctx, loaded, error?}` |
+| `DELETE /browser/tabs/<id>` | — | `{tab_id, closed: true}` |
+| `POST /browser/tabs/<id>/navigate` | exactly `{url}` | `{tab_id, loaded, error?}` |
+| `POST /browser/tabs/<id>/history` | exactly `{action: "back" \| "forward" \| "reload"}` | `{tab_id, loaded, error?}` |
+| `POST /browser/profiles/<id>/forget` | `{}` | `{profile, forgotten: true}` |
+
+- **`profile`**: omitted means the first profile (**Main**, which the first
+  start creates), `"private"`, or a `p-<8 hex>` id from `GET /browser`
+  (404 if unknown, 400 if not that shape). **`ctx`** (8 hex) names a Private
+  context: `profile: "private"` with no `ctx` makes a new off-the-record
+  context and answers its id; with one, the tab opens in it (404 if gone).
+  A context closes with its last tab.
+- **The URL judge** runs first on every `url` (typed, stored, "Open in
+  Browser"): exactly `about:blank`, or an absolute `http`/`https` URL with a
+  host. Refused (**400**, one of fixed sentences): any other scheme (`file:`,
+  `chrome:`, `chrome-untrusted:`, `devtools:`, `view-source:`,
+  `chrome-extension:`, `javascript:`, `data:`, any `about:` but blank, `ftp:`,
+  `ws:` …), a user name or password, a host two parsers read differently
+  (`config.ambiguous_authority`), a control or invisible character, more than
+  16 KiB, and **one of Jarvis's own ports** (`refused_ports`) in any loopback
+  spelling (`localhost`, `*.localhost`, `127.1`, `0x7f000001`, `[::1]`,
+  `[::ffff:127.0.0.1]`, `0.0.0.0`, a trailing dot …).
+- **A URL on this machine opens its port** (review of PR #69, the lead's
+  decision): a `url` naming this machine in any loopback spelling, sent to
+  `POST /browser/tabs` or `…/navigate`, opens that port in the gate from
+  then until the Browser stops (never one of `refused_ports`). Loopback is
+  otherwise closed like the LAN: a page's own move, `…/history`, and anything
+  that is not these two owner routes never open a port. `local_servers: true`
+  in the settings opens every loopback port that is not Jarvis's.
+- **An unknown field** in any body (here and on every other route) is
+  **400** `unknown fields (N)`: the count, never the names.
+- **`loaded: false`** with **`error`** — Chrome's `net::ERR_…` code only,
+  never its message (it names the URL) — when a load fails; a connection the
+  gate refused reads `net::ERR_SOCKS_CONNECTION_FAILED`. Navigation answers
+  once the load commits.
+- **409** sentences: Chrome is not installed, the Browser's folder is a
+  symlink, not ours or open to others (it must be 0700), `profiles.json` is
+  unreadable, Chrome could not start, the tab cap (`JARVIS_BROWSER_TAB_CAP`,
+  12) is reached, the Browser is stopping. **504** when the Browser does not
+  answer in time.
+- **forget** ("Sign out of everything", plan §3): that profile's Chrome
+  stops, its folder and downloads are removed and an empty 0700 folder made;
+  the label stays. `private` closes every Private context.
+
+**`GET /status`** gains:
+
+- **`browser`**: `{available, running, version, instances: [{profile, tabs,
+  contexts}], tabs, tab_cap, lan, local_servers, loopback_opened,
+  landing_guard, gate}` — `loopback_opened` is how many loopback ports the
+  owner opened (never which); `gate` is `{port, connections, allowed,
+  failed, open, refused: {class: count}}` while running, else null. Profile
+  ids only: **no URL, title or label**.
+- **`refused_ports`**: every port the Browser's gate refuses on this machine
+  — `config.control_ports()` (8402, 8404, 8405, 8406, configured and
+  default), this daemon's `hud_port` and `api_port`, and 8403 unless it is
+  this daemon's `workshop_port`. The HUD's Direct (Preview) judge reads it.
+
+**The gate** refuses, for every connection Chrome makes, Jarvis's ports and
+its own on every address; a name that resolves to loopback; a loopback port
+the owner has not opened (unless `local_servers`); private addresses unless
+`lan` is true; a name answering with another kind of address than the one
+it was first allowed on; a private answer for a name it has no room to pin;
+multicast, reserved and unresolvable destinations; a lookup that waited its
+whole 5 s for one of its domain's four resolver slots. It counts each refusal
+by class (`jarvis_port`, `own_port`, `name_to_loopback`, `loopback_closed`,
+`private_network`, `rebinding`, `pins_full`, `not_a_host`, `unresolvable`,
+`dns_busy`, `bad_request`, `unsupported`, `busy`) and logs nothing else about
+it.
+Chrome sends no UDP at all (no QUIC; WebRTC held to proxied transports, so
+no ICE candidate, STUN or mDNS). **Nothing about browsing goes on the bus**
+in BR-1a.
+
 ## Additions 2026-10-12 (File reads as the editor, Preview is the Browser — BR-3a)
 
 The owner: "also rename "File" to "Editor" and "Preview" to "Browser"".

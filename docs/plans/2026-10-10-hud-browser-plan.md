@@ -167,7 +167,18 @@ Three layers. The second is the real boundary.
 - `--proxy-server=socks5://127.0.0.1:<gate>`;
 - `--proxy-bypass-list=<-loopback>`, so loopback goes through the gate too;
 - `--disable-quic`;
-- `--force-webrtc-ip-handling-policy=disable_non_proxied_udp`.
+- `--webrtc-ip-handling-policy=disable_non_proxied_udp` (as built; this plan
+  first said `--force-webrtc-ip-handling-policy`, a switch Chrome does not
+  have and ignores without a word — PR #69's review measured ICE candidates,
+  158 STUN datagrams and mDNS under it);
+- `--disable-features=…,WebRtcHideLocalIpsWithMdns`, because WebRTC's mDNS
+  responder joins the mDNS group on every interface as soon as a page makes an
+  `RTCPeerConnection` (measured: an IGMP join on the LAN).
+
+Each is held to its effect, not its spelling: a free check finds no ICE
+candidate and no datagram at a loopback UDP sink, and the same suite run in a
+private network namespace with a packet sniffer sees nothing leave on any
+interface but loopback.
 
 Every TCP connection passes through the gate: pages, redirects, iframes, fetch, XHR, WebSockets, workers, service workers and prefetch. For each one the gate:
 - **resolves the name itself and connects to the address it checked**, so there is no DNS rebinding between check and connect;
@@ -176,7 +187,9 @@ Every TCP connection passes through the gate: pages, redirects, iframes, fetch, 
 - refuses its own port;
 - refuses unresolvable names;
 - refuses private-network addresses unless the LAN switch is on (`config.is_lan_host` semantics);
-- allows public addresses and any other loopback port (your dev servers).
+- **refuses this machine's ports until you open one** (as built, PR #69's review, the lead's decision): a loopback port opens when you open a URL on it in a tab yourself (the owner-only routes), for as long as the Browser runs, never one of Jarvis's ports. A page's own move or an agent's navigation never opens one. A `local_servers` switch in `browser.json`, off, opens them all. Before this, a public page could read a CORS-permissive service on your machine: Chrome's Local Network Access check cannot see an address behind a proxy;
+- keeps each name to the kind of address it first resolved to (public stays public, private stays private), so a rebinding name is refused on its second answer;
+- allows public addresses.
 
 It logs counts and the class of each refusal, never a host or URL. A refused or failed connection shows as a network error page. BR-1a's first test must confirm that Chrome sends hostnames to a SOCKS5 proxy (remote DNS).
 
@@ -189,7 +202,7 @@ On every main-frame `framenavigated`, a URL with a disallowed scheme (other than
 - **One port list.** `config.control_ports()` is the single Python definition, read by the gate, by BR-0's v1 fix, and by `/status` → `refused_ports`. The HUD's Direct judge (WP-E) reads that list and keeps refusing the defaults.
 - **Your LAN (B-5):** off by default.
   - A Settings switch turns it on. It is stored in `~/.config/jarvis/browser.json`, which becomes protected state so no agent can flip it.
-  - Chrome's own Local Network Access check is a second layer against public pages probing your LAN (M7).
+  - Chrome's own Local Network Access check was meant as a second layer against public pages probing your LAN (M7). Behind the SOCKS gate it cannot see where a connection lands, so it does nothing here: the gate's rules are the only layer (PR #69's review).
   - In NAT mode, Windows-side services are reachable only at the host's private IP, so they need the switch or Direct mode.
 - **Refused outright:**
   - extensions (`--disable-extensions`);
