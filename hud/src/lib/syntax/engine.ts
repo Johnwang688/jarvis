@@ -1,6 +1,6 @@
 // The syntax worker's engine (ED-5, editor plan §2.6): documents, their trees,
-// incremental reparse, injections, the budgets, and semantic tokens for a
-// range of lines. No messages and no timers here — `worker.ts` is the shell
+// incremental reparse, injections, the budgets, semantic tokens for a range
+// of lines, and fold ranges (ED-6, folds.ts). No messages and no timers here — `worker.ts` is the shell
 // that owns those — so the tests drive this directly, under Node, with the
 // same web-tree-sitter and the same grammars the window loads.
 
@@ -11,6 +11,7 @@ import { GRAMMARS, STYLED_AS, injectionGrammar, type GrammarName } from "./gramm
 import { NONE_TYPE, modifierOf, typeOf } from "./legend";
 import { applyChange, Lines, queryRange, TsLines, type Change } from "./positions";
 import { BUDGETS, type BasicReason, type Budgets, type DocState } from "./budgets";
+import { foldRanges, type FoldRange } from "./folds";
 
 export { BUDGETS };
 export type { BasicReason, Budgets, DocState };
@@ -19,6 +20,8 @@ export interface GrammarAssets {
   language: Language;
   highlights: Query;
   injections: Query | null;
+  /** nvim's folds query (ED-6); null for a grammar with none. */
+  folds: Query | null;
 }
 
 export interface EngineOptions {
@@ -53,6 +56,10 @@ interface Doc {
   injections: Injection[] | null;
   /** Injections queries cancelled in a row; at `maxCancels` the document's injections stay off. */
   injectionCancels: number;
+  /** Folds queries cancelled in a row; at `maxCancels` the document folds by indentation from then on (ED-6). */
+  foldCancels: number;
+  /** The last folds, for the version and tree they were read from (Monaco's folding and its sticky scroll both ask). */
+  foldCache: { version: number; tree: Tree; ranges: FoldRange[] } | null;
 }
 
 export interface TokensResult {
@@ -63,6 +70,20 @@ export interface TokensResult {
   reason?: BasicReason;
   /** The last line tokens were computed for, when a budget stopped short of `last`. */
   truncatedAt?: number;
+  stale?: boolean;
+}
+
+export interface FoldsResult {
+  version: number;
+  /**
+   * null: no folds from the tree for this answer (not ready, on Monarch, a
+   * version it never saw, the folds query over its budget, or a grammar with
+   * no folds query) — Monaco folds by indentation instead.
+   */
+  ranges: FoldRange[] | null;
+  state: DocState;
+  reason?: BasicReason;
+  /** Read from the last tree, edited but not yet reparsed (a reparse over budget); a retry follows. */
   stale?: boolean;
 }
 
@@ -129,7 +150,7 @@ export class SyntaxEngine {
     this.close(id);
     const doc: Doc = {
       id, grammar, modifier: modifierOf(styledAs), text, version, tree: null, dirty: false,
-      state: "loading", cancels: 0, lines: null, injections: null, injectionCancels: 0,
+      state: "loading", cancels: 0, lines: null, injections: null, injectionCancels: 0, foldCancels: 0, foldCache: null,
     };
     this.docs.set(id, doc);
     if (text.length > this.budgets.maxChars) return this.basic(doc, "large file");
@@ -282,6 +303,45 @@ export class SyntaxEngine {
     }
     const data = encode(flatten(captures), lines, doc.text, first, done, NONE_TYPE);
     return { ...base, data, ...(truncatedAt !== undefined ? { truncatedAt } : {}) };
+  }
+
+  // ---- folds (ED-6) ------------------------------------------------------
+
+  /**
+   * Fold ranges for version `version`, from nvim's folds query over the whole
+   * tree, within `matchMs`. A reparse over budget leaves the last tree, edited
+   * to the text: its folds are read from that (`stale`; ranges move with the
+   * edits) rather than none. The query and the reading of its matches share
+   * one `matchMs`: over it, the answer is null (Monaco folds by indentation),
+   * and twice running the document folds by indentation from then on. Host
+   * language only: a fence in Markdown is one fold, its injected code none of
+   * its own.
+   */
+  folds(id: string, version: number): FoldsResult {
+    const doc = this.docs.get(id);
+    if (!doc) return { version: -1, ranges: null, state: "basic" };
+    const base = { version: doc.version, state: doc.state, reason: doc.reason };
+    if (doc.state !== "ready" || version !== doc.version) return { ...base, ranges: null };
+    const r = this.reparse(id);
+    if (r === "basic") return { version: doc.version, ranges: null, state: "basic", reason: doc.reason };
+    const stale = r === "stale" ? { stale: true } : {};
+    const query = this.assets.get(doc.grammar)?.folds;
+    const tree = doc.tree;
+    if (!query || !tree || doc.foldCancels >= this.budgets.maxCancels) return { ...base, ranges: null, ...stale };
+    const cached = doc.foldCache;
+    if (cached && cached.version === doc.version && cached.tree === tree) return { ...base, ranges: cached.ranges, ...stale };
+    // One budget for the query and for reading its matches: `matchMs`.
+    const deadline = this.now() + this.budgets.matchMs;
+    const { matches, cancelled } = this.matches(query, tree.rootNode);
+    const lines = (doc.lines ??= new Lines(doc.text));
+    const ranges = cancelled ? null : foldRanges(query, matches, doc.text, lines, workerPredicates, () => this.now() > deadline);
+    if (!ranges) {
+      doc.foldCancels++;
+      return { ...base, ranges: null, ...stale };
+    }
+    doc.foldCancels = 0;
+    doc.foldCache = { version: doc.version, tree, ranges };
+    return { ...base, ranges, ...stale };
   }
 
   /** The document's own captures over `[from, to)`; false when the query ran past its budget. */

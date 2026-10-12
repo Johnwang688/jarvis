@@ -1,4 +1,4 @@
-The highlight and injection queries in this directory are derived from
+The highlight, injection and fold queries in this directory are derived from
 nvim-treesitter (https://github.com/nvim-treesitter/nvim-treesitter), runtime/queries/,
 at commit f603a2f4da48728f80257fb5fbb90145fd1dc173 (2026-09-19), licensed under the Apache License,
 Version 2.0 (LICENSE beside this file). The unmodified files are vendored under

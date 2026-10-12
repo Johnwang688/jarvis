@@ -6,6 +6,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { Language, Parser, Query } from "web-tree-sitter";
 import { SyntaxEngine, type EngineOptions, type GrammarAssets } from "./engine";
 import { GRAMMARS, type GrammarName } from "./grammars";
+import type { QueryKind } from "./translate";
 
 /** `hud/`, as a filesystem path ending in `/`. */
 export const HUD = decodeURIComponent(new URL("../../../", import.meta.url).pathname);
@@ -27,15 +28,18 @@ export function language(g: GrammarName): Promise<Language> {
   return p;
 }
 
-export const bundledQuery = (g: GrammarName, kind: "highlights" | "injections") => read(`src/syntax/queries/${g}/${kind}.scm`);
+export const bundledQuery = (g: GrammarName, kind: QueryKind) => read(`src/syntax/queries/${g}/${kind}.scm`);
+
+/** A bundled query compiled, or null for one with no patterns (as the worker does). */
+const compiled = (lang: Language, text: string) => (/\(/.test(text.replace(/;[^\n]*/g, "")) ? new Query(lang, text) : null);
 
 export async function assets(g: GrammarName): Promise<GrammarAssets> {
   const lang = await language(g);
-  const inj = bundledQuery(g, "injections");
   return {
     language: lang,
     highlights: new Query(lang, bundledQuery(g, "highlights")),
-    injections: /\(/.test(inj.replace(/;[^\n]*/g, "")) ? new Query(lang, inj) : null,
+    injections: compiled(lang, bundledQuery(g, "injections")),
+    folds: compiled(lang, bundledQuery(g, "folds")),
   };
 }
 

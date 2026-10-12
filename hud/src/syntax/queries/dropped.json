@@ -17,6 +17,15 @@
       "patterns": 10,
       "dropped": [],
       "stripped": []
+    },
+    "folds": {
+      "files": [
+        "c",
+        "cpp"
+      ],
+      "patterns": 3,
+      "dropped": [],
+      "stripped": []
     }
   },
   "python": {
@@ -33,6 +42,14 @@
         "python"
       ],
       "patterns": 4,
+      "dropped": [],
+      "stripped": []
+    },
+    "folds": {
+      "files": [
+        "python"
+      ],
+      "patterns": 2,
       "dropped": [],
       "stripped": []
     }
@@ -68,6 +85,16 @@
       "patterns": 21,
       "dropped": [],
       "stripped": []
+    },
+    "folds": {
+      "files": [
+        "ecma",
+        "jsx",
+        "javascript"
+      ],
+      "patterns": 2,
+      "dropped": [],
+      "stripped": []
     }
   },
   "typescript": {
@@ -86,6 +113,15 @@
         "typescript"
       ],
       "patterns": 22,
+      "dropped": [],
+      "stripped": []
+    },
+    "folds": {
+      "files": [
+        "ecma",
+        "typescript"
+      ],
+      "patterns": 2,
       "dropped": [],
       "stripped": []
     }
@@ -123,6 +159,17 @@
       "patterns": 23,
       "dropped": [],
       "stripped": []
+    },
+    "folds": {
+      "files": [
+        "ecma",
+        "typescript",
+        "jsx",
+        "tsx"
+      ],
+      "patterns": 3,
+      "dropped": [],
+      "stripped": []
     }
   },
   "json": {
@@ -135,6 +182,14 @@
       "stripped": []
     },
     "injections": {
+      "files": [
+        "json"
+      ],
+      "patterns": 1,
+      "dropped": [],
+      "stripped": []
+    },
+    "folds": {
       "files": [
         "json"
       ],
@@ -159,6 +214,14 @@
       "patterns": 8,
       "dropped": [],
       "stripped": []
+    },
+    "folds": {
+      "files": [
+        "bash"
+      ],
+      "patterns": 1,
+      "dropped": [],
+      "stripped": []
     }
   },
   "css": {
@@ -171,6 +234,14 @@
       "stripped": []
     },
     "injections": {
+      "files": [
+        "css"
+      ],
+      "patterns": 1,
+      "dropped": [],
+      "stripped": []
+    },
+    "folds": {
       "files": [
         "css"
       ],
@@ -209,6 +280,14 @@
         }
       ],
       "stripped": []
+    },
+    "folds": {
+      "files": [
+        "html"
+      ],
+      "patterns": 1,
+      "dropped": [],
+      "stripped": []
     }
   },
   "yaml": {
@@ -227,6 +306,14 @@
       "patterns": 9,
       "dropped": [],
       "stripped": []
+    },
+    "folds": {
+      "files": [
+        "yaml"
+      ],
+      "patterns": 1,
+      "dropped": [],
+      "stripped": []
     }
   },
   "toml": {
@@ -239,6 +326,14 @@
       "stripped": []
     },
     "injections": {
+      "files": [
+        "toml"
+      ],
+      "patterns": 1,
+      "dropped": [],
+      "stripped": []
+    },
+    "folds": {
       "files": [
         "toml"
       ],
@@ -261,6 +356,14 @@
         "markdown"
       ],
       "patterns": 5,
+      "dropped": [],
+      "stripped": []
+    },
+    "folds": {
+      "files": [
+        "markdown"
+      ],
+      "patterns": 2,
       "dropped": [],
       "stripped": []
     }
@@ -295,6 +398,12 @@
         "markdown_inline"
       ],
       "patterns": 2,
+      "dropped": [],
+      "stripped": []
+    },
+    "folds": {
+      "files": [],
+      "patterns": 0,
       "dropped": [],
       "stripped": []
     }

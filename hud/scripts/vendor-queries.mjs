@@ -5,25 +5,27 @@
 //     node scripts/vendor-queries.mjs            # fetch, then build
 //     node scripts/vendor-queries.mjs --offline  # build from what is vendored
 //
-// 1. **Fetch** (network): nvim-treesitter's `highlights.scm` and
-//    `injections.scm` for every language in lib/syntax/grammars.ts, and every
-//    file they inherit, at the pinned commit, into
-//    `vendor/nvim-treesitter/queries/`, with its LICENSE; and the Markdown
-//    grammar's two release `.wasm` files and LICENSE into
+// 1. **Fetch** (network): nvim-treesitter's `highlights.scm`,
+//    `injections.scm` and (ED-6) `folds.scm` for every language in
+//    lib/syntax/grammars.ts, and every file they inherit, at the pinned
+//    commit, into `vendor/nvim-treesitter/queries/`, with its LICENSE; and the
+//    Markdown grammar's two release `.wasm` files and LICENSE into
 //    `vendor/tree-sitter/`, each checked against the SHA-256 pinned below.
 // 2. **Build** (offline): each language's bundled query
 //    (`src/syntax/queries/<grammar>/`) from those files — `inherits` resolved,
 //    translated for web-tree-sitter, compiled against its own grammar with the
 //    pinned runtime, any pattern the grammar refuses dropped and listed
-//    (lib/syntax/translate.ts) — plus `dropped.json`, the NOTICE, and
-//    `vendor/tree-sitter/manifest.json` (every shipped `.wasm`'s SHA-256).
+//    (lib/syntax/translate.ts) — plus `dropped.json`, the NOTICE,
+//    `vendor/tree-sitter/manifest.json` (every shipped `.wasm`'s SHA-256) and
+//    `vendor/nvim-treesitter/manifest.json` (every vendored nvim file's size
+//    and SHA-256, with the commit).
 //
 // `src/lib/syntax/vendor.test.ts` repeats step 2 and fails on any difference,
 // so the bundled queries are always exactly what this script makes of the
 // vendored ones.
 
 import { createHash } from "node:crypto";
-import { mkdir, readFile, writeFile, copyFile, stat } from "node:fs/promises";
+import { mkdir, readFile, readdir, writeFile, copyFile, stat } from "node:fs/promises";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -35,7 +37,7 @@ const HUD = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const NVIM_DIR = path.join(HUD, "vendor/nvim-treesitter");
 const TS_DIR = path.join(HUD, "vendor/tree-sitter");
 const OUT = path.join(HUD, "src/syntax/queries");
-const KINDS = ["highlights", "injections"];
+const KINDS = ["highlights", "injections", "folds"];
 
 const sha256 = (buf) => createHash("sha256").update(buf).digest("hex");
 
@@ -110,7 +112,9 @@ async function build() {
     for (const kind of KINDS) {
       const built = buildQuery(GRAMMARS[g].nvim, kind, readNvim, compiles);
       const header = `; Built by scripts/vendor-queries.mjs from nvim-treesitter ${NVIM.commit} (Apache-2.0):\n`
-        + `; ${built.files.map((f) => `runtime/queries/${f}/${kind}.scm`).join(", ")}.\n`
+        + (built.files.length
+          ? `; ${built.files.map((f) => `runtime/queries/${f}/${kind}.scm`).join(", ")}.\n`
+          : `; nvim-treesitter has no runtime/queries/${GRAMMARS[g].nvim}/${kind}.scm: no patterns.\n`)
         + `; Modified for web-tree-sitter; see NOTICE and dropped.json beside this directory.\n\n`;
       const to = path.join(OUT, g, `${kind}.scm`);
       await mkdir(path.dirname(to), { recursive: true });
@@ -137,7 +141,25 @@ async function build() {
   }
   await copyFile(path.join(HUD, "node_modules/web-tree-sitter/LICENSE"), path.join(TS_DIR, "licenses", "web-tree-sitter.txt"));
   await writeFile(path.join(TS_DIR, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
-  console.log("wrote src/syntax/queries/ and vendor/tree-sitter/manifest.json");
+  await writeFile(path.join(NVIM_DIR, "manifest.json"), `${JSON.stringify(await nvimManifest(), null, 2)}\n`);
+  console.log("wrote src/syntax/queries/, vendor/tree-sitter/manifest.json and vendor/nvim-treesitter/manifest.json");
+}
+
+/** Every vendored nvim-treesitter file (the manifest itself aside): its size and SHA-256, by path, and the commit. */
+async function nvimManifest() {
+  const files = {};
+  const walk = async (dir) => {
+    for (const d of (await readdir(dir, { withFileTypes: true })).sort((a, b) => (a.name < b.name ? -1 : 1))) {
+      const p = path.join(dir, d.name);
+      if (d.isDirectory()) await walk(p);
+      else if (p !== path.join(NVIM_DIR, "manifest.json")) {
+        const buf = await readFile(p);
+        files[path.relative(NVIM_DIR, p).split(path.sep).join("/")] = { bytes: buf.length, sha256: sha256(buf) };
+      }
+    }
+  };
+  await walk(NVIM_DIR);
+  return { repo: NVIM.repo, commit: NVIM.commit, files };
 }
 
 async function entry({ wasm, source }) {
@@ -147,7 +169,7 @@ async function entry({ wasm, source }) {
 }
 
 function notice() {
-  return `The highlight and injection queries in this directory are derived from
+  return `The highlight, injection and fold queries in this directory are derived from
 nvim-treesitter (https://github.com/${NVIM.repo}), runtime/queries/,
 at commit ${NVIM.commit} (${NVIM.date}), licensed under the Apache License,
 Version 2.0 (LICENSE beside this file). The unmodified files are vendored under

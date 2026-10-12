@@ -57,6 +57,21 @@ import markdownInjections from "../../syntax/queries/markdown/injections.scm?raw
 import markdownInlineHighlights from "../../syntax/queries/markdown_inline/highlights.scm?raw";
 import markdownInlineInjections from "../../syntax/queries/markdown_inline/injections.scm?raw";
 
+// Folds (ED-6, lib/syntax/folds.ts). Markdown's inline grammar has none: it is only ever injected.
+import cppFolds from "../../syntax/queries/cpp/folds.scm?raw";
+import pythonFolds from "../../syntax/queries/python/folds.scm?raw";
+import javascriptFolds from "../../syntax/queries/javascript/folds.scm?raw";
+import typescriptFolds from "../../syntax/queries/typescript/folds.scm?raw";
+import tsxFolds from "../../syntax/queries/tsx/folds.scm?raw";
+import jsonFolds from "../../syntax/queries/json/folds.scm?raw";
+import bashFolds from "../../syntax/queries/bash/folds.scm?raw";
+import cssFolds from "../../syntax/queries/css/folds.scm?raw";
+import htmlFolds from "../../syntax/queries/html/folds.scm?raw";
+import yamlFolds from "../../syntax/queries/yaml/folds.scm?raw";
+import tomlFolds from "../../syntax/queries/toml/folds.scm?raw";
+import markdownFolds from "../../syntax/queries/markdown/folds.scm?raw";
+import markdownInlineFolds from "../../syntax/queries/markdown_inline/folds.scm?raw";
+
 import type { GrammarName } from "./grammars";
 
 export const RUNTIME_URL: string = runtimeUrl;
@@ -77,20 +92,20 @@ export const WASM_URLS: Readonly<Record<GrammarName, string>> = {
   markdown_inline: markdownInlineUrl,
 };
 
-export const QUERIES: Readonly<Record<GrammarName, { highlights: string; injections: string }>> = {
-  cpp: { highlights: cppHighlights, injections: cppInjections },
-  python: { highlights: pythonHighlights, injections: pythonInjections },
-  javascript: { highlights: javascriptHighlights, injections: javascriptInjections },
-  typescript: { highlights: typescriptHighlights, injections: typescriptInjections },
-  tsx: { highlights: tsxHighlights, injections: tsxInjections },
-  json: { highlights: jsonHighlights, injections: jsonInjections },
-  bash: { highlights: bashHighlights, injections: bashInjections },
-  css: { highlights: cssHighlights, injections: cssInjections },
-  html: { highlights: htmlHighlights, injections: htmlInjections },
-  yaml: { highlights: yamlHighlights, injections: yamlInjections },
-  toml: { highlights: tomlHighlights, injections: tomlInjections },
-  markdown: { highlights: markdownHighlights, injections: markdownInjections },
-  markdown_inline: { highlights: markdownInlineHighlights, injections: markdownInlineInjections },
+export const QUERIES: Readonly<Record<GrammarName, { highlights: string; injections: string; folds: string }>> = {
+  cpp: { highlights: cppHighlights, injections: cppInjections, folds: cppFolds },
+  python: { highlights: pythonHighlights, injections: pythonInjections, folds: pythonFolds },
+  javascript: { highlights: javascriptHighlights, injections: javascriptInjections, folds: javascriptFolds },
+  typescript: { highlights: typescriptHighlights, injections: typescriptInjections, folds: typescriptFolds },
+  tsx: { highlights: tsxHighlights, injections: tsxInjections, folds: tsxFolds },
+  json: { highlights: jsonHighlights, injections: jsonInjections, folds: jsonFolds },
+  bash: { highlights: bashHighlights, injections: bashInjections, folds: bashFolds },
+  css: { highlights: cssHighlights, injections: cssInjections, folds: cssFolds },
+  html: { highlights: htmlHighlights, injections: htmlInjections, folds: htmlFolds },
+  yaml: { highlights: yamlHighlights, injections: yamlInjections, folds: yamlFolds },
+  toml: { highlights: tomlHighlights, injections: tomlInjections, folds: tomlFolds },
+  markdown: { highlights: markdownHighlights, injections: markdownInjections, folds: markdownFolds },
+  markdown_inline: { highlights: markdownInlineHighlights, injections: markdownInlineInjections, folds: markdownInlineFolds },
 };
 
 export class RefusedUrl extends Error {}
