@@ -2235,7 +2235,8 @@ templates — with the Windows `vexcom.exe` and toolchain the owner's VS Code
 VEX extension already downloaded, **run in place through WSL interop**:
 nothing copied, bundled or committed (VEX's licence forbids redistribution
 and decompiling, so the only `vexcom` flags used are DishPy's: `--name
---slot --write --progress` and `--user`). **Which files those are is
+--slot --write --progress` and `--user` — plus the two reads the owner's
+own `vexcom --help` lists, `--json` and `--programs`). **Which files those are is
 `vex.json`**, written only by the human-run `jarvis vex setup` (it looks in
 the extension's own folders for VS Code and Cursor, prints what it found,
 checks it by the daemon's own rule, asks y/N, writes mode 600) and refused to
@@ -2304,9 +2305,14 @@ same `project_folder` card Discord's `/project new` raises —
 the template is checked whole (no absolute paths, `..`, drive letters,
 symlinks or `.git`; at most 200 entries, 1 MB each, 10 MB in all, read with a
 cap) before anyone is asked, then written by Jarvis's code with `O_EXCL |
-O_NOFOLLOW`, then the settings file in the extension's v2 shape. Not yet, and
-said so by the routes: device info (the flag waits on the owner's `vexcom
---help`) and Python download (its flag is a spike item). Spike items, the
+O_NOFOLLOW`, then the settings file in the extension's v2 shape. **Device
+reads** (2026-10-12): the owner's `vexcom --help` lists `--json` ("system
+info in json format") and `--programs` ("shows programs") as its reads, so
+device info runs exactly `vexcom --json` (pretty-printed as text) and a
+second read, `vexcom --programs`, lists the programs on the brain — the same
+device reservation and fingerprint check, and nothing else from that help.
+Not yet, and said so by the routes: Python download (its flag is a spike
+item). Spike items, the
 owner's: the build against VS Code's own build log, and whether stopping the
 Linux side of an interop process ends `make.exe` on Windows. Agents' task
 worktrees live on the Linux filesystem, so `vexbuild` builds only in a chat's
@@ -2352,10 +2358,11 @@ that found nothing to do vouch for one: an edited header the makefile does
 not list makes the click's chain run one rebuild, then download (review
 rounds M2 and MED-1). With no `vex.json` the view says the one command to
 run, `jarvis vex setup`, and checks again every few seconds and on focus. Device
-info and every error message are drawn as text. A `vex_device` record this
+info, the programs list (**Read device info** and **List programs**, one
+device read at a time, headed by which it was and a non-zero exit) and every
+error message are drawn as text. A `vex_device` record this
 window cannot match to its own click is said in the view. Not yet: a Python
-project's download (VX-1's spike), device info until the owner records the
-flag, a "dev servers" style list of past builds (only the last build per
+project's download (VX-1's spike), a "dev servers" style list of past builds (only the last build per
 project is kept, across a reload by id). Free checks: `lib/vex.test.ts`,
 `tests/face/hud_v2_vex_check.py`.
 
@@ -2754,8 +2761,26 @@ only the runtime and the grammars built into its map, from the HUD's own
 `/assets/`, refusing any other URL before a request is made. Nothing loads
 until the first file of a covered language opens: first paint grows by 168 bytes,
 the worker is 213 KB, and the grammars (about 10 MB in all) load one by one
-as their languages first appear. Not yet: folding and sticky scroll from the
-tree (ED-6).
+as their languages first appear. Folding and sticky scroll from the tree
+followed in ED-6 (below).
+
+**Folding and sticky scroll from the tree (2026-10-12, ED-6 of the editor
+plan, §2.6).** In the same languages, folds follow the code rather than its
+indentation: nvim-treesitter's own `folds.scm` (vendored at ED-5's pin, each
+file's size and SHA-256 in a manifest) is run by the syntax worker over the
+tree it already holds, so a C++ file folds at its includes, classes,
+functions (at the signature, even with the brace on a line of its own),
+`if`s, `for`s, lambdas and block comments, a Python file at its defs,
+classes, docstrings and multi-line brackets, and a Markdown file at each
+heading's whole section and each fence. As in VS Code, a block's own closing
+`}` (or `]`, `)`, end tag) stays visible below a folded block, so `class A {`
+folds to `class A { ⋯` over its `};`. **Sticky scroll reads the same
+ranges**: deep in a function, the line held at the top is the function's
+signature. Wherever tree-sitter is not serving a file — past 1 MB, on a slow
+parse, with the worker gone, in a language it does not cover, and always for
+an env file, which never reaches the worker — Monaco folds by indentation, as
+before; and the fold query has the colour queries' 250 ms budget (twice over
+it, that file folds by indentation from then on).
 
 Remaining: WP13 (the long-bench comparison, the owner's call on cost), a
 native Windows worker, the R8 hook on Codex, and prompt tuning in
