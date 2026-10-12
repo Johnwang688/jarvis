@@ -2262,6 +2262,7 @@ export default function App() {
             narrow={info.narrow}
             blocked={blocked}
             onAddToChat={addToChat}
+            root={pid ? state.projects.find((p) => p.id === pid)?.root ?? null : null}
           />
         );
       }

@@ -606,12 +606,29 @@ label.iconbtn.attach:hover { background: var(--bg-3); border-color: var(--border
 .edtab.conflict .edtab-name { color: var(--amber); }
 .edtab-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .edtab-mark { font-size: 10px; }
-.edtab-dot { flex: 0 0 7px; width: 7px; height: 7px; border-radius: 50%; }
-.edtab-dot.on { background: var(--text-2); }
-.edtab-x { padding: 0 4px; line-height: 14px; border: none; background: none; color: var(--text-muted); }
+/* The close slot, as VS Code draws it (the owner's ask): × on the active tab
+   and under the pointer; on a dirty tab a light dot stands in ×'s place, and
+   hovering or focusing the tab brings × back. The dot is a zero-width item
+   drawn over ×'s box (× goes transparent, never display:none, so it stays
+   where it was and clickable), so becoming dirty moves nothing. Never amber
+   or red: those are "pending" and "error". */
+.edtab-dot { display: none; }
+.edtab-dot.on {
+  display: block; position: relative; flex: 0 0 0; width: 0; height: 8px; margin-right: -5px; pointer-events: none;
+}
+.edtab-dot.on::before {
+  content: ""; position: absolute; top: 0; left: 5px; width: 8px; height: 8px; border-radius: 50%;
+  background: var(--text-2);
+}
+.edtab-x {
+  flex: 0 0 18px; width: 18px; padding: 0; text-align: center; line-height: 14px; border: none; background: none;
+  color: var(--text-muted);
+}
 .edtab-x:hover { color: var(--text); background: var(--bg-3); }
 .edtab:not(.on):not(:hover) .edtab-x { visibility: hidden; }
-.edtab.on .edtab-dot.on + .edtab-x, .edtab .edtab-dot.on + .edtab-x { visibility: visible; }
+.edtab-dot.on + .edtab-x { opacity: 0; }
+.edtab:hover .edtab-dot.on::before, .edtab:focus-visible .edtab-dot.on::before { display: none; }
+.edtab:hover .edtab-dot.on + .edtab-x, .edtab:focus-visible .edtab-dot.on + .edtab-x { opacity: 1; visibility: visible; }
 /* Amber: it waits on the owner's decision. HUD chrome, never syntax. */
 .toolbar.conflictbar { background: var(--amber-soft); border-bottom-color: var(--amber-line); flex-wrap: wrap; }
 .toolbar.conflictbar .msg { color: var(--amber); font-size: 12px; }
@@ -629,6 +646,20 @@ label.iconbtn.attach:hover { background: var(--bg-3); border-color: var(--border
 .edstatus .warnish { color: var(--text); }
 .tree-row.withheld { color: var(--text-muted); cursor: default; }
 .tree-row .treemark { margin-left: auto; font: 9.5px var(--mono); color: var(--text-muted); }
+/* A File pane's tree, as VS Code's explorer draws it (the owner's screenshot):
+   a folder is its chevron and its name, a file an icon after the twistie's
+   room, both drawn in currentColor (components/FileIcon.tsx; each icon's
+   colour is a token from lib/fileIcons.ts). The unsaved-changes dot sits at
+   the row's end, on a dirty file or on a collapsed folder holding one. */
+.tree-row .tw .chev { display: block; margin-top: 1px; }
+.ficon {
+  flex: 0 0 16px; width: 16px; height: 16px; display: inline-flex; align-items: center; justify-content: center;
+}
+.ficon svg { display: block; }
+.dirtydot {
+  flex: 0 0 8px; width: 8px; height: 8px; margin-left: auto; margin-right: 2px; border-radius: 50%;
+  background: var(--text-2);
+}
 /* A File pane's own project picker (decisions E-13), in its header. */
 select.panepick { max-width: 170px; flex: 0 1 auto; min-width: 0; }
 .mdsplit { display: flex; flex: 1 1 auto; min-height: 0; }

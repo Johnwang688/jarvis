@@ -29,6 +29,9 @@ import type { Tree, TreeEntry } from "../types";
 import { CompareEditor, PaneEditor } from "./Editor";
 import { ConflictBar } from "./ConflictBar";
 import { EditorTabs, type TabInfo } from "./EditorTabs";
+import { Chevron, FileIcon } from "./FileIcon";
+import { DirtyDot, useDirtyMarks } from "./DirtyMark";
+import { NO_MARKS, type Marks } from "../lib/dirtyMarks";
 import { Markdown } from "./Markdown";
 import { isMarkdown } from "../lib/monaco";
 import {
@@ -46,7 +49,10 @@ function Node(props: {
   depth: number;
   onOpen: (path: string, pin: boolean) => void;
   selected: string;
+  /** Which rows wear the unsaved-changes dot (lib/dirtyMarks.ts). */
+  marks?: Marks;
 }) {
+  const marks = props.marks ?? NO_MARKS;
   const [tree, setTree] = useState<Tree | null>(null);
   const [open, setOpen] = useState<Record<string, boolean>>({});
   const [err, setErr] = useState("");
@@ -78,9 +84,10 @@ function Node(props: {
                 title={withheld ? "A credential folder: its contents are never listed here" : undefined}
                 onClick={() => !withheld && setOpen({ ...open, [path]: !isOpen })}
               >
-                <span className="tw">{withheld ? "·" : isOpen ? "▾" : "▸"}</span>
+                <span className="tw">{withheld ? "·" : <Chevron open={isOpen} />}</span>
                 <span className="nm">{e.name}</span>
                 {withheld ? <span className="treemark">withheld</span> : null}
+                {!withheld && !isOpen && marks.folder(path) ? <DirtyDot folder testid={`dirty-${path}`} /> : null}
               </div>
               {isOpen ? (
                 <Node
@@ -89,6 +96,7 @@ function Node(props: {
                   depth={props.depth + 1}
                   onOpen={props.onOpen}
                   selected={props.selected}
+                  marks={props.marks}
                 />
               ) : null}
             </div>
@@ -104,8 +112,10 @@ function Node(props: {
             onClick={() => props.onOpen(path, false)}
             onDoubleClick={() => props.onOpen(path, true)}
           >
-            <span className="tw">{e.policy === "env" ? "🔒" : "·"}</span>
+            <span className="tw" />
+            <FileIcon name={e.name} policy={e.policy} />
             <span className="nm">{e.name}</span>
+            {marks.file(path) ? <DirtyDot testid={`dirty-${path}`} /> : null}
           </div>
         );
       })}
@@ -133,11 +143,15 @@ export function FileTab(props: {
   blocked?: boolean;
   /** "Add to chat": the selected chat's box gets this text, unsent. A sentence back is a refusal. */
   onAddToChat?: (text: string) => string | null;
+  /** The project's folder: a file read through another project is marked dirty here too. */
+  root?: string | null;
 }) {
   // Read once, at mount: App keys this component by its project.
   const [pid] = useState(props.projectId);
   const pane = props.pane;
   useSyncExternalStore(buffers.subscribe, buffers.version);
+  // The tree's unsaved-changes dots: redrawn when a buffer goes clean or dirty, never per keystroke.
+  const marks = useDirtyMarks(pid, props.root);
   const tabs = props.tabs ?? NO_TABS;
   // The latest tabs, written ahead of the render that brings them back: two
   // gestures between renders must not undo each other.
@@ -365,7 +379,7 @@ export function FileTab(props: {
   return (
     <div className="split">
       <div className="filetree" data-testid="filetree" style={showTree ? undefined : { display: "none" }}>
-        <Node projectId={pid} dir="" depth={0} onOpen={open} selected={active || ""} />
+        <Node projectId={pid} dir="" depth={0} onOpen={open} selected={active || ""} marks={marks} />
       </div>
       <div className="editorwrap">
         <EditorTabs
