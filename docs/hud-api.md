@@ -1558,3 +1558,79 @@ when nothing is served, when the build was installed with uncommitted
 changes, and when `hud/` changed between its commit and the checkout's HEAD
 (`git diff --quiet <commit> HEAD -- hud`, so a Python-only merge is quiet).
 
+
+## Additions 2026-10-11 (the editor's navigation — ED-7)
+
+Every route here is **owner-only** (`projects.owner_only`: the HUD listener
+and the HUD's own page, never the API listener), checked before the body is
+read; `jarvis/v2/editor_nav.py` holds them. None keeps a copy of a rule: what
+a path is comes from `editor_policy`, where it may go from `hud_api.scope`,
+a search's protected-file filter from `tools.search.refused` (the one
+`grep_files` uses), and a delete goes to `trash.Trash.put`.
+
+- `GET /projects/{id}/files` → `{"files": [rel, …], "env": [rel, …],
+  "truncated": bool, "source": "git"|"walk"}`: what quick open may offer.
+  In a repository, `git ls-files --cached --others --exclude-standard`
+  (`gitops._git`, hardened: no hooks, fsmonitor or pager), so `.gitignore`d
+  build output is not listed; elsewhere a walk. **Dotfiles are listed**
+  (`.github/…`, `.clang-format`, env files — named in `env` for their lock).
+  Never listed: a withheld file, anything in a credential folder (never
+  entered), the gate's own state, `SKIP_DIRS` (`node_modules`, `.git`,
+  `.venv`, `.jarvis` …), a symlinked folder (never entered), and a symlink
+  whose target is outside the project or not a regular file. At most 50,000
+  files, 20 folders deep and 5 s (`truncated: true` past any). 403 when the
+  project's root is itself a credential folder.
+- `POST /projects/{id}/search` `{"query", "regex"?, "case"?, "word"?,
+  "glob"?, "ignore"?}` → `{"matches": [{"path", "line", "text", "ranges":
+  [[start, end], …]}], "files", "truncated", "timed_out", "backend",
+  "limit"}`. Find in files on `tools.search.search_bounded`, the core
+  `grep_files` also uses, so **both refuse exactly the same files**:
+  `secrets.PROTECTED_NAMES` and every credential env file
+  (`secrets.is_env_credential`) — grep_files gained the env half with this
+  route (`tools.search.refused`). On top of it a hit is shown only when
+  `scope` places it in the project and `editor_policy` says it is not
+  withheld, the gate's state or an env file. `query` 1–1,000 characters, a
+  literal unless `regex`; `case` is case-sensitive (default off); `word`
+  whole words; `glob` a ripgrep glob (`*.cpp`, `src/**`); `ignore` respects
+  `.gitignore` (default **on**; off searches ignored files too). Hidden files
+  are searched, `SKIP_DIRS` never. At most **2,000 matches and 10 s**
+  (`truncated` / `timed_out`); a line is cut at 1,000 characters; `ranges`
+  are UTF-16 offsets. **400 on the Inbox** (it is the whole home folder), on
+  a pattern neither engine accepts, and on any other key.
+- `POST /projects/{id}/fs` `{"op": "new_file"|"new_folder"|"rename"|"delete",
+  "path", "to"?}` → `{"ok", "op", "path", "abs", "kind"?, "from"?,
+  "from_abs"?, "dir"?, "trash"?}`. `path` and `to` are relative to the
+  project; each must pass `scope` (no `..`, no `SKIP_DIRS` component, inside
+  the project lexically and resolved — so a symlink out is refused) and every
+  name must be a real one (no control or invisible character; on `/mnt/<drive>`
+  nothing Windows reserves or cannot hold). **Refused (403)**: a path
+  `editor_policy` calls the gate's state, withheld (a credential bundle by
+  name, anything in a credential folder, a login file) or the safety layer
+  (SELF_PROTECTED, git's internals and configuration, the HUD install root and
+  `config.HUD_DIST`), and a **folder that holds any of those** — by absolute
+  path wherever it sits below (the gate's files, the credential folders and
+  login files, the HUD roots, Jarvis's SELF_PROTECTED files) and by a walk of
+  at most 20,000 entries that never follows a symlink or enters `SKIP_DIRS`
+  (past the cap the folder is refused rather than judged in part). A project
+  root itself is never renamed or deleted.
+  - `new_file` makes an empty file (0644; a credential env file 0600 — the
+    owner may make one); `new_folder` a folder; both make missing parents and
+    are 409 when something is there.
+  - `rename` (a move too) **never replaces anything**: 409 when `to` exists
+    (a case-only rename on a case-folding drive is allowed), 400 when its
+    folder is missing or a folder would go inside itself. **An env file keeps
+    an env name**: renamed to a name Jarvis can read it is 403 (the owner's
+    own shell can do that on purpose). A file renamed *to* an env name becomes
+    one. The answer's `abs`/`from_abs` let the window move its buffers.
+  - `delete` **moves to the trash**, never an unlink: the freedesktop home
+    trash with a `.trashinfo` (`$XDG_DATA_HOME/Trash`), or the Windows Recycle
+    Bin for a `/mnt/<drive>` path (`trash.Trash.put`, under a `Trash` owned by
+    the project, so Jarvis's own retention purge never empties it). 404 when
+    nothing is there.
+  - One explorer operation at a time (its own lock, not the daemon's: a
+    Recycle Bin move can take PowerShell a while).
+
+The window's half (`hud/src/components/QuickOpen.tsx`, `SearchView.tsx`,
+`EditorStatus.tsx`, `FileTab.tsx`'s explorer): keys and rules in CLAUDE.md's
+ED-7 paragraph. Find in files sends the query, the flags and the glob to the
+search route and nothing else; quick open lists once per project for 15 s.
