@@ -237,13 +237,44 @@ class Refusals(Repo):
         script.chmod(0o755)
         (self.proj / ".gitattributes").write_text("*.txt filter=probe\n")
         git(self.proj, "config", "filter.probe.clean", str(script))
-        (self.proj / "plain.txt").write_text("changed\n")
-        os.utime(self.proj / "plain.txt", (1, 1))  # stat-dirty: status would re-read it
+        # The same size and a moved mtime: git must hash it, through the filter.
+        (self.proj / "plain.txt").write_text("one\ntwo\nthreE\n")
+        os.utime(self.proj / "plain.txt", (1, 1))
+        origin = {"Origin": f"http://127.0.0.1:{self.face}"}
+        status, got = self.raw("GET", f"{self.purl}/git/status", origin)
+        self.assertFalse(marker.exists(), "the repository's filter program ran")
+        self.assertEqual(status, 403)
+        self.assertIn("filter.probe.clean", got["error"])
         got = self.base("plain.txt", status=403)
         self.assertIn("filter.probe.clean", got["error"])
-        got = self.status(status=403)
-        self.assertIn("filter.probe.clean", got["error"])
         self.assertFalse(marker.exists(), "the repository's filter program ran")
+
+    def test_a_submodules_config_program_never_runs(self):
+        # A submodule's own config is not the superproject's: the status never
+        # goes into it, and its file's base is judged by the submodule's config.
+        lib = self.root / "libsrc"
+        lib.mkdir()
+        (lib / "a.txt").write_text("a\n")
+        git(lib, "init", "-q")
+        git(lib, "add", "a.txt")
+        git(lib, "commit", "-qm", "lib")
+        git(self.proj, "-c", "protocol.file.allow=always", "submodule", "-q", "add", str(lib), "lib")
+        git(self.proj, "commit", "-qm", "sub")
+        marker = self.root / "sub-filter-ran"
+        script = self.root / "subclean.sh"
+        script.write_text(f"#!/bin/sh\ntouch '{marker}'\ncat\n")
+        script.chmod(0o755)
+        sub = self.proj / "lib"
+        (sub / ".gitattributes").write_text("*.txt filter=probe\n")
+        git(sub, "config", "filter.probe.clean", str(script))
+        (sub / "a.txt").write_text("b\n")  # same size, moved mtime: hashed through the filter
+        os.utime(sub / "a.txt", (1, 1))
+        got = self.status()
+        self.assertFalse(marker.exists(), "the submodule's filter program ran")
+        self.assertNotIn("lib/a.txt", got["files"])
+        # (A submodule's config also sets `core.worktree`, which gitops refuses first.)
+        self.assertIn("own git config sets", self.base("lib/a.txt", status=403)["error"])
+        self.assertFalse(marker.exists(), "the submodule's filter program ran")
 
     def test_a_cached_refusal_stays_a_refusal(self):
         git(self.proj, "config", "core.sshCommand", "/bin/false")

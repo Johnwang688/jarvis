@@ -291,8 +291,11 @@ def _status_now(root: Path, raw_root: Path, policy) -> dict:
     risky = _risky(root)
     if risky:
         fail(403, _risky_refusal(risky))
+    # Never into a submodule: its own config is not the one `_risky` read, and
+    # a status there would obey it (a filter it names would run).
     code, out, err = _git(root, ["status", "--porcelain=v2", "-z", "--branch", "--untracked-files=normal",
-                                 "--ignored=traditional", "--renames", "--", "."], STATUS_SECONDS)
+                                 "--ignored=traditional", "--renames", "--ignore-submodules=all", "--", "."],
+                          STATUS_SECONDS)
     if code != 0:
         result = _no_repo()
         result.update(repo=True, truncated=True,
