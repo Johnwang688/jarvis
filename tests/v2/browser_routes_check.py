@@ -680,11 +680,14 @@ class BrowserStream(unittest.TestCase):
         self.assertEqual(self.refused(tab, self.ticket(tab), origin=None), 403, "a socket needs the HUD's Origin")
         # A ticket is single use: once an attach has spent it, it opens nothing.
         ticket = self.ticket(tab)
-        status = self.ask("GET", f"/browser/tabs/{tab}/attach?ticket={ticket}", raw=True,
-                          headers={"Upgrade": "websocket", "Connection": "Upgrade",
-                                   "Sec-WebSocket-Version": "13",
-                                   "Sec-WebSocket-Key": "dGhlIHNhbXBsZSBub25jZQ=="})[0]
+        status, got, _ = self.ask("GET", f"/browser/tabs/{tab}/attach?ticket={ticket}", raw=True,
+                                  headers={"Upgrade": "websocket", "Connection": "Upgrade",
+                                           "Sec-WebSocket-Version": "13",
+                                           "Sec-WebSocket-Key": "dGhlIHNhbXBsZSBub25jZQ=="})
         self.assertEqual(status, 101)
+        # The hand-written 101 carries the listener's frame headers (WP-E).
+        self.assertIn("frame-ancestors 'none'", got["Content-Security-Policy"])
+        self.assertEqual(got["X-Frame-Options"], "DENY")
         self.wait(lambda: not self.host._tabs[tab].stream.attached(), 5, "the raw attach let go")
         self.assertEqual(self.refused(tab, ticket), 403, "a ticket is spent by being presented")
         self.assertEqual(self.refused(tab, self.ticket(tab), origin="http://evil.example"), 403)
@@ -1205,6 +1208,22 @@ class BrowserStream(unittest.TestCase):
         self.assertEqual(self.ask("POST", path, {"chooser": chooser["id"], "files": files("notes.txt")})[0], 409,
                          "a chooser is answered once")
         window.close()
+
+    def test_14b_a_private_tab_streams_too(self):
+        # One Chrome at a time: Main stops first, and Private is its own Chrome.
+        main = self.owner("GET", "/browser")["profiles"][0]["id"]
+        self.host.close_profile(main)
+        self.wait(lambda: not chrome_tree(config.BROWSER_DIR / "profiles"), 10, "Main stopped")
+        row = self.owner("POST", "/browser/tabs", {"profile": "private", "url": self.url("/input")})
+        window = self.attached(row["tab_id"])
+        window.until(lambda w: w.frames, what="a Private frame")
+        click(window, 250, 320)
+        type_keys(window, "pv")
+        self.wait(lambda: self.js(row["tab_id"], "t.value") == "pv", what="Private input")
+        self.owner("DELETE", f"/browser/tabs/{row['tab_id']}")
+        window.wait_for("closed")
+        self.host.close_profile("private")
+        type(self).tab = self.owner("POST", "/browser/tabs", {"url": self.url("/input")})["tab_id"]
 
     # -- 11: nothing leaves memory, and the end ------------------------------------------------------------
 

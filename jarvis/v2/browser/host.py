@@ -1460,7 +1460,13 @@ class BrowserHost:
                     continue
                 if not stream.deliverable(seq, gen):
                     continue
-                await self._deliver(tab, msg.method, msg.params)
+                try:
+                    await self._deliver(tab, msg.method, msg.params)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # noqa: BLE001 - one event lost, never the pump
+                    LOG.info("browser tab %s: an input event was not delivered (%s)", tab.id,
+                             type(exc).__name__)
 
     @staticmethod
     def _let_go(params: dict) -> dict:
