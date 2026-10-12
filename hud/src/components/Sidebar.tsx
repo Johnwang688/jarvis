@@ -55,6 +55,7 @@ import { canMoveThread, wouldMove } from "../lib/threads";
 import { composeMovable, folderName, movedAway, type Compose } from "../lib/compose";
 import type { PaneNo } from "../lib/workspace";
 import { shortId, threadTooltip } from "../lib/threadmodel";
+import { shortThreadId, threadLabel } from "../lib/threadTitle";
 import { projectNamesTaken, threadTitlesTaken } from "../lib/projects";
 import { InlineRename } from "./InlineRename";
 import { CollapseButton } from "./Layout";
@@ -433,7 +434,7 @@ export const Sidebar = memo(function Sidebar(props: {
                     <div
                       key={t.id}
                       className={
-                        "tree-row indent-1" +
+                        "tree-row indent-1 titled" +
                         selClass(t.id) +
                         (dragging === t.id ? " dragging" : "") +
                         (activity.threads[t.id] === "working" ? " act-working" : "")
@@ -465,18 +466,25 @@ export const Sidebar = memo(function Sidebar(props: {
                           onSave={(title) => saveRename("thread", t.id, title)}
                           onCancel={() => setRenaming(null)}
                         />
-                      ) : (
-                        <span
-                          className="nm"
-                          data-testid={`thread-name-${t.id}`}
-                          onDoubleClick={(e) => {
-                            e.stopPropagation();
-                            if (props.onRenameThread) setRenaming({ kind: "thread", id: t.id });
-                          }}
-                        >
-                          {t.title || t.id}
-                        </span>
-                      )}
+                      ) : (() => {
+                        // The title, wrapped and clamped at three lines (its
+                        // whole as the tooltip); never the id, which is in ⋯.
+                        const label = threadLabel(t);
+                        return (
+                          <span
+                            className={"nm ttl" + (label.untitled ? " untitled" : "")}
+                            data-testid={`thread-name-${t.id}`}
+                            data-untitled={label.untitled ? "true" : undefined}
+                            title={label.untitled ? undefined : label.text}
+                            onDoubleClick={(e) => {
+                              e.stopPropagation();
+                              if (props.onRenameThread) setRenaming({ kind: "thread", id: t.id });
+                            }}
+                          >
+                            {label.text}
+                          </span>
+                        );
+                      })()}
                       {movedAway(t, p) ? (
                         <span className="moved" data-testid={`moved-${t.id}`}>↪ {folderName(t.cwd)}</span>
                       ) : null}
@@ -675,6 +683,26 @@ export const Sidebar = memo(function Sidebar(props: {
             }}
           >
             Open beside
+          </button>
+          {/* Chat titles: the id lives here now, not on the row. */}
+          <button
+            type="button"
+            className="mrow"
+            style={{ display: "block", width: "100%", textAlign: "left", border: "none",
+                     background: "none", textTransform: "none", letterSpacing: 0 }}
+            data-testid="tmenu-copyid"
+            title={`Copy the thread id ${menu.threadId}`}
+            onClick={() => {
+              const id = menu.threadId;
+              setMenu(null);
+              try {
+                void navigator.clipboard?.writeText(id).catch(() => {});
+              } catch {
+                /* no clipboard here: the id is still shown in the menu */
+              }
+            }}
+          >
+            Copy id <span className="mid" data-testid="tmenu-id">{shortThreadId(menu.threadId)}</span>
           </button>
           <div className="msep" />
           {movable.ok && menuThread ? (

@@ -3199,6 +3199,16 @@ def main():
             finally:
                 marks_mock.stop()
 
+            # Chat titles (2026-10-12): the row's title, wrapped and clamped,
+            # Copy id in ⋯, and a title arriving live — a mock of their own.
+            from tests.face.hud_v2_titles_check import titles_checks
+            titles_mock = MockDaemon(0).start()
+            try:
+                titles_checks(browser, titles_mock, f"http://127.0.0.1:{titles_mock.port}", check, until,
+                              guard, FAKE_RECOGNIZER)
+            finally:
+                titles_mock.stop()
+
             ctx = browser.new_context(permissions=["microphone"])
             guard(ctx)
             guard_loopback(ctx)

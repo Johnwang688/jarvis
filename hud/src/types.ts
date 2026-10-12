@@ -51,6 +51,9 @@ export interface Thread {
   provider_session_id: string | null;
   task_id: string | null;
   title: string;
+  /** Chat titles (2026-10-12): who named it — "" nobody yet, "auto" the
+   * daemon's titler, "owner" a rename. Absent from an older daemon. */
+  title_source?: "" | "auto" | "owner";
   created: string;
   updated: string;
   turns: number;

@@ -234,6 +234,18 @@ h2.bar {
   .act.working, .tree-row.act-working { animation: none; }
 }
 .tree-row .nm { overflow: hidden; text-overflow: ellipsis; }
+/* Chat titles (2026-10-12): a chat row's title wraps, never an ellipsis,
+   clamped at three lines (lib/threadTitle.ts TITLE_LINES); the whole title is
+   its tooltip. An untitled chat reads "New thread" or "Untitled", muted. */
+.tree-row.titled { align-items: flex-start; white-space: normal; }
+/* The title keeps room for a few words; a pinned model's badge gives way. */
+.tree-row.titled > .badge.pin { flex: 0 1 auto; min-width: 3em; }
+.tree-row .nm.ttl {
+  flex: 1 1 8em; min-width: 6em; white-space: normal; overflow-wrap: anywhere;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3;
+  overflow: hidden; line-height: 1.35;
+}
+.tree-row .nm.ttl.untitled { font-style: italic; color: var(--text-muted); padding-right: 3px; }
 .indent-1 { padding-left: 26px; }
 .indent-2 { padding-left: 40px; }
 .indent-3 { padding-left: 54px; }
@@ -902,6 +914,7 @@ details.decisions[open] summary { color: var(--text); margin-bottom: 8px; }
 .threadmenu .mrow { padding: 5px 12px; cursor: pointer; font-size: 12px; white-space: nowrap; border-radius: 0; }
 /* The row's own inline style clears its background, so hover has to insist. */
 .threadmenu .mrow:hover { background: var(--hover) !important; }
+.threadmenu .mrow .mid { margin-left: 8px; font: 10.5px var(--mono); color: var(--text-muted); }
 .threadmenu .mhead {
   padding: 5px 12px; font: 600 10px var(--mono); letter-spacing: 0.06em;
   color: var(--text-muted); text-transform: uppercase;
