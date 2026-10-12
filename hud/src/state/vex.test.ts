@@ -1,0 +1,174 @@
+// The VEX store's download chain, on its own (VX-2 delta review): the view's
+// disabled buttons hide these rules, so they are held here without them.
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const buildFirst = (sentence = "build/override.bin is older than the sources; Build first, then download") =>
+  Object.assign(new Error(sentence), { status: 409, body: { error: sentence, code: "build_first" } });
+
+const h = vi.hoisted(() => ({
+  downloads: [] as { pid: string; slot: number; name: string }[],
+  builds: [] as { pid: string; action: string }[],
+  download: null as null | ((pid: string) => Promise<{ terminal_id: string }>),
+  brain: null as string | null,
+  brainOpened: 0,
+}));
+
+vi.mock("../api", () => ({
+  api: {
+    vexStatus: async () => ({ configured: true, hint: null, vexcom_version: null, extension_version: null,
+                              sdks: null, templates: false, device: null, brain: h.brain }),
+    vexDownload: (pid: string, body: { slot: number; name: string }) => {
+      h.downloads.push({ pid, ...body });
+      return h.download!(pid);
+    },
+    vexBuild: async (pid: string, action: string) => {
+      h.builds.push({ pid, action });
+      return { build_id: `0000000${h.builds.length}`, terminal_id: `a000000${h.builds.length}` };
+    },
+    vexBuildState: async (id: string) => ({
+      id, project_id: "p3", action: "build", state: "succeeded", terminal_id: null, exit_code: 0, errors: [],
+      bin: null, started: "", ended: "",
+    }),
+    closeTerminal: async (id: string) => {
+      if (id === h.brain) h.brain = null;
+      return { ok: true };
+    },
+    vexBrain: async () => {
+      h.brainOpened += 1;
+      h.brain = "c0000002";
+      return { terminal_id: "c0000002", started: true };
+    },
+    vexProject: async () => ({}),
+  },
+}));
+vi.mock("../components/Terminal", () => ({
+  terminals: {
+    showProgram: async () => {},
+    gone: () => {},
+    refresh: async () => {},
+    row: () => ({ exited: true, exit_code: 0 }),
+    sessions: new Map(),
+  },
+}));
+
+import { VexStore } from "./vex";
+
+beforeEach(() => {
+  h.downloads.length = 0;
+  h.builds.length = 0;
+  h.download = null;
+  h.brain = null;
+  h.brainOpened = 0;
+});
+
+describe("one download chain per window (review M1), held by the store itself", () => {
+  it("refuses a second download for any project while one runs, and says why", async () => {
+    const store = new VexStore();
+    let release!: (v: { terminal_id: string }) => void;
+    h.download = () => new Promise((res) => { release = res; });
+    const first = store.download("p3", 1, "override", "override");
+    await vi.waitFor(() => expect(h.downloads).toHaveLength(1));
+    expect(store.chain?.projectId).toBe("p3");
+    // No button in the way: the store's own refusal.
+    await store.download("p5", 2, "flywheel", "flywheel");
+    expect(h.downloads).toHaveLength(1);
+    expect(store.run("p5").note).toMatch(/already running for override/);
+    expect(store.run("p5").busy).toBeNull();
+    release({ terminal_id: "b0000001" });
+    await first;
+    expect(store.chain).toBeNull();
+    // Once it has ended, the other project's goes.
+    h.download = async () => ({ terminal_id: "b0000002" });
+    await store.download("p5", 2, "flywheel", "flywheel");
+    expect(h.downloads.map((d) => d.pid)).toEqual(["p3", "p5"]);
+  });
+});
+
+describe("Build first (delta review MED-1): a build, then one rebuild, never a third", () => {
+  it("a build that leaves it stale is followed by one rebuild, then the download", async () => {
+    const store = new VexStore();
+    const answers = [buildFirst(), buildFirst(), null];
+    h.download = async () => {
+      const a = answers.shift();
+      if (a) throw a;
+      return { terminal_id: "b0000009" };
+    };
+    await store.download("p3", 1, "override", "override");
+    expect(h.builds.map((b) => b.action)).toEqual(["build", "rebuild"]);
+    expect(h.downloads).toHaveLength(3);
+    expect(store.run("p3").downloaded?.ok).toBe(true);
+  });
+
+  it("still stale after the rebuild: stops, says the daemon's sentence, sends nothing more", async () => {
+    const store = new VexStore();
+    h.download = async () => {
+      throw buildFirst();
+    };
+    await store.download("p3", 1, "override", "override");
+    expect(h.builds.map((b) => b.action)).toEqual(["build", "rebuild"]);
+    expect(h.downloads).toHaveLength(3);
+    expect(store.run("p3").note).toMatch(/after a build and a rebuild/);
+    expect(store.run("p3").note).toContain("Build first, then download");
+    expect(store.chain).toBeNull();
+  });
+
+  it("a refusal without the code builds nothing", async () => {
+    const store = new VexStore();
+    h.download = async () => {
+      throw Object.assign(new Error("A download is running. One device action at a time."), {
+        status: 409, body: { error: "A download is running. One device action at a time." },
+      });
+    };
+    await store.download("p3", 1, "override", "override");
+    expect(h.builds).toEqual([]);
+    expect(store.run("p3").note).toMatch(/One device action/);
+  });
+});
+
+describe("what stopped a chain is what it says (delta review NIT)", () => {
+  it("a crash is a crash, not an approval card", async () => {
+    const store = new VexStore();
+    h.download = async () => {
+      store.crash();
+      throw buildFirst();
+    };
+    await store.download("p3", 1, "override", "override");
+    expect(h.builds).toEqual([]);
+    expect(store.run("p3").note).toMatch(/window hit an error/);
+    expect(store.run("p3").note).not.toMatch(/approval card/);
+  });
+
+  it("a card that comes and goes while the download runs keeps the brain terminal closed", async () => {
+    const store = new VexStore();
+    h.brain = "c0000001";
+    h.download = async () => {
+      store.setBlocked(true);
+      store.setBlocked(false);
+      return { terminal_id: "b0000003" };
+    };
+    await store.download("p3", 1, "override", "override");
+    expect(h.downloads).toHaveLength(1);               // already on its way: it goes
+    expect(h.brainOpened).toBe(0);
+    expect(store.brainNote).toMatch(/closed for the download/);
+  });
+
+  it("with no card, the brain terminal is opened again after the download", async () => {
+    const store = new VexStore();
+    h.brain = "c0000001";
+    h.download = async () => ({ terminal_id: "b0000004" });
+    await store.download("p3", 1, "override", "override");
+    await vi.waitFor(() => expect(h.brainOpened).toBe(1));
+  });
+
+  it("a card is a card", async () => {
+    const store = new VexStore();
+    h.download = async () => {
+      store.setBlocked(true);
+      store.setBlocked(false);
+      throw buildFirst();
+    };
+    await store.download("p3", 1, "override", "override");
+    expect(h.builds).toEqual([]);
+    expect(store.run("p3").note).toMatch(/approval card came up before it built/);
+  });
+});

@@ -119,6 +119,12 @@ export function Workspace(props: {
   selectedPane: PaneNo | null;
   /** Show `view` in `pane` — the strip's buttons and its menu. */
   onView: (pane: PaneNo, view: View) => void;
+  /**
+   * Whether the strip offers the VEX view in this pane (VX-2): only when the
+   * pane's project is a VEX project (lib/vex.ts `offersVex`). A pane already
+   * showing it keeps the button, so the owner can see where they are.
+   */
+  offersVex?: (spec: PaneSpec, info: PaneInfo) => boolean;
   /** Where `+` opens a terminal: the focused pane's folder, as an id (lib/terminal.ts, terminalSpecFor). */
   terminalIn?: () => InSpec;
   /** A terminal link's "Open in Preview": load it in a Preview pane (WP-E); false when it did not. */
@@ -265,6 +271,8 @@ export function Workspace(props: {
           const spec = ws.panes[n - 1];
           const at = info(n);
           const ctx = at.split ? (spec.view === "terminal" ? terminalContext(spec) : props.context(spec, at)) : "";
+          const views = PANE_VIEWS.filter((view) =>
+            view !== "vex" || spec.view === "vex" || (at.drawn && !!props.offersVex?.(spec, at)));
           return (
             <section
               // Keyed by id and incarnation: a pane keeps its id for life, and
@@ -296,12 +304,12 @@ export function Workspace(props: {
                       onKeyDown={(e) => e.stopPropagation()}
                       onKeyUp={(e) => e.stopPropagation()}
                     >
-                      {PANE_VIEWS.map((view) => (
+                      {views.map((view) => (
                         <option key={view} value={view}>{view}</option>
                       ))}
                     </select>
                   ) : (
-                    PANE_VIEWS.map((view) => (
+                    views.map((view) => (
                       <button
                         type="button"
                         key={view}
