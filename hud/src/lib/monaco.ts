@@ -190,11 +190,16 @@ export const ENV_LANGUAGE = "dotenv";
  */
 export async function makeModel(text: string, abs: string, kind: string) {
   const monaco = await loadMonaco();
-  const uri = abs.startsWith("/")
+  let uri = abs.startsWith("/")
     ? monaco.Uri.file(abs)
     : monaco.Uri.from({ scheme: "jarvis-buffer", path: `/${abs}` });
-  // One buffer per file, so a model at this URI is a leftover: replace it.
-  monaco.editor.getModel(uri)?.dispose();
+  // Never dispose a model already at this URI: it may be a live buffer's (two
+  // reads of one file through two projects used to make two models here, and
+  // the second disposed the first under its tab — "Model is disposed!",
+  // review of PR #49, L1). The registry makes one per file; should a second
+  // ever be asked for, it goes beside the first, under its own query (the
+  // language still comes from the path).
+  if (monaco.editor.getModel(uri)) uri = uri.with({ query: `b=${++serial}` });
   return monaco.editor.createModel(text, kind === "env" ? ENV_LANGUAGE : undefined, uri);
 }
 

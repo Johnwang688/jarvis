@@ -2990,6 +2990,43 @@ def guard_live(ctx, record, ports=LIVE_PORTS):
     ctx.route_web_socket(sock, refuse_socket)
 
 
+# Every `securitypolicyviolation` the HUD's CSP (ED-4) raises, reported to
+# the suite through a binding (CDP-injected, so the policy itself cannot stop
+# the report). A CSP breaks quietly — a blocked worker, socket or style is a
+# feature that silently degrades (Monaco even has a textarea fallback) — so
+# **every** context of every section runs under this watch, and any violation
+# fails the run. tests/face/hud_v2_csp_check.py proves the watch bites.
+CSP_WATCH = """
+document.addEventListener('securitypolicyviolation', (e) => {
+  try {
+    window.__hudCspViolation({
+      directive: String(e.effectiveDirective || e.violatedDirective || ''),
+      blocked: String(e.blockedURI || ''), sample: String(e.sample || '').slice(0, 80),
+      source: String(e.sourceFile || ''), line: e.lineNumber || 0,
+    });
+  } catch (_) {}
+}, true);
+"""
+
+
+def watch_csp(ctx, record):
+    """Record every CSP violation any page of `ctx` raises (see CSP_WATCH)."""
+    def seen(source, v):
+        page = source.get("page") if isinstance(source, dict) else None
+        where = page.url if page is not None else "?"
+        record(f"CSP violation at {where}: {v.get('directive')} blocked {v.get('blocked')!r}"
+               f" ({v.get('source')}:{v.get('line')} {v.get('sample')!r})")
+    ctx.expose_binding("__hudCspViolation", seen)
+    ctx.add_init_script(CSP_WATCH)
+
+
+def guard(ctx):
+    """What every context of this suite runs under: no live daemon port, and
+    no CSP violation."""
+    guard_live(ctx, FAILURES.append)
+    watch_csp(ctx, FAILURES.append)
+
+
 def main():
     if not (DIST / "index.html").exists():
         print("hud/dist is not built. Run: cd hud && npm ci && npm run build")
@@ -3006,9 +3043,6 @@ def main():
             # suite loads may reach it, over HTTP or a WebSocket: a hard-coded
             # preview port once did, and its log filled with
             # `GET /p/p1/index.html -> 400`.
-            def guard(ctx):
-                guard_live(ctx, FAILURES.append)
-
             # Zoom, folding panes, resizing and the workspace (2026-10-08/09)
             # first, in a context of its own **and against a mock of its own**
             # on an ephemeral port: its localStorage, its reloads, its saves,
@@ -3073,6 +3107,18 @@ def main():
                                       guard, FAKE_RECOGNIZER)
             finally:
                 preview_mock.stop()
+
+            # The CSP (ED-4): what the HUD needs runs with no violation, and
+            # what an attacker needs is refused — on a mock of its own, in a
+            # context whose violations it counts itself (it raises some on
+            # purpose). Every other context runs under `watch_csp` too.
+            from tests.face.hud_v2_csp_check import csp_checks
+            csp_mock = MockDaemon(0).start()
+            try:
+                csp_checks(browser, csp_mock, f"http://127.0.0.1:{csp_mock.port}", check, until,
+                           lambda ctx: guard_live(ctx, FAILURES.append), FAKE_RECOGNIZER)
+            finally:
+                csp_mock.stop()
 
             # The Graphite editor scheme (ED-3): a context and a mock of their
             # own — its world gains a C++ and a Python file, and its card

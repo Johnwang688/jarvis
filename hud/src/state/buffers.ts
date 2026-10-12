@@ -30,9 +30,12 @@
 
 import type { FileRead } from "../types";
 import {
-  EDITABLE, eolOf, minimalEdit, parseKind, pollAction, TOUCHES_MAX, TOUCH_MS, writerOf,
+  editableOf, eolOf, minimalEdit, parseKind, pollAction, TOUCHES_MAX, TOUCH_MS, writerOf,
   type Conflict, type Kind, type StatRow, type Touch,
 } from "../lib/buffers";
+
+/** An etag as the daemon writes one: 32 lowercase hex digits. */
+const ETAG = /^[0-9a-f]{32}$/;
 
 /** The part of a Monaco text model the registry uses (and the fallback's shim). */
 export interface TextModel {
@@ -114,6 +117,8 @@ interface Buf {
   projectId: string;
   path: string;
   kind: Kind;
+  /** The daemon said the editor may save it (`editableOf`): never the kind alone. */
+  editable: boolean;
   readonly: string | null;
   etag: string | null;
   encoding: string | null;
@@ -135,6 +140,7 @@ export interface BufferView {
   projectId: string;
   path: string;
   kind: Kind;
+  editable: boolean;
   readonly: string | null;
   etag: string | null;
   encoding: string | null;
@@ -159,7 +165,8 @@ const unBOM = (text: string) => (text.startsWith(BOM) ? text.slice(1) : text);
 
 /** A pane's tab, as a registry reference: `<pane>|<path>`. */
 export const refOf = (pane: number | string, path: string) => `${pane}|${path}`;
-const paneOfRef = (ref: string) => ref.slice(0, ref.indexOf("|"));
+/** The pane a reference belongs to, as a string. */
+export const paneOfRef = (ref: string) => ref.slice(0, ref.indexOf("|"));
 
 const SAVE_NOTE = "saved";
 
@@ -168,6 +175,8 @@ export class Buffers {
   private bufs = new Map<string, Buf>();
   private byKey = new Map<string, string>();
   private pending = new Map<string, Promise<Buf>>();
+  /** A buffer being made, by abs: a second read of the same file waits for it. */
+  private making = new Map<string, Promise<Buf>>();
   private listeners = new Set<() => void>();
   private noticeFns = new Set<(abs: string, text: string) => void>();
   private touches: Touch[] = [];
@@ -258,11 +267,49 @@ export class Buffers {
     return false;
   }
 
+  /**
+   * The unsaved edits the panes of `panes` hold together and no pane outside
+   * them does: what letting go of all of them at once would lose. A project
+   * going away unpins every pane on it in one step, so the last-view rule is
+   * asked of the set, never pane by pane — two panes sharing an edit each
+   * read "another pane holds it" and both let go (review of PR #49, H2).
+   */
+  panesLose(panes: readonly (number | string)[]): BufferView[] {
+    const keys = new Set(panes.map(String));
+    return [...this.bufs.values()]
+      .filter((b) => this.dirtyOf(b) && b.refs.size > 0 && [...b.refs].every((r) => keys.has(paneOfRef(r))))
+      .map((b) => this.view(b));
+  }
+
+  /** The panes of `panes` that hold one of the edits `panesLose(panes)` names: the ones to keep. */
+  panesHolding(panes: readonly (number | string)[]): string[] {
+    const held = new Set<string>();
+    for (const v of this.panesLose(panes)) for (const r of v.refs) held.add(paneOfRef(r));
+    return panes.map(String).filter((p) => held.has(p));
+  }
+
   /** Save every edit only pane `pane` holds (closing it, "Save"): true when all saved. */
   async savePane(pane: number | string): Promise<boolean> {
     let ok = true;
     for (const b of this.paneLosing(pane)) ok = (await this.save(b.abs)) === "saved" && ok;
     return ok && this.paneLosing(pane).length === 0;
+  }
+
+  /** How many buffers hold an unsaved edit, whether or not a tab holds them. */
+  dirtyCount(): number {
+    let n = 0;
+    for (const b of this.bufs.values()) if (this.dirtyOf(b)) n += 1;
+    return n;
+  }
+
+  /**
+   * Save every unsaved edit, a buffer no tab holds included: the crash
+   * prompt's way out, since the registry outlives the workspace (review of PR
+   * #49, L3). True when nothing is left unsaved.
+   */
+  async saveAll(): Promise<boolean> {
+    for (const b of [...this.bufs.values()]) if (this.dirtyOf(b)) await this.save(b.abs);
+    return this.dirtyCount() === 0;
   }
 
   anyDirty(): boolean {
@@ -277,7 +324,8 @@ export class Buffers {
 
   private view(b: Buf): BufferView {
     return {
-      abs: b.abs, projectId: b.projectId, path: b.path, kind: b.kind, readonly: b.readonly, etag: b.etag,
+      abs: b.abs, projectId: b.projectId, path: b.path, kind: b.kind, editable: b.editable,
+      readonly: b.readonly, etag: b.etag,
       encoding: b.encoding, eol: b.eol, dirty: this.dirtyOf(b), saving: b.saving, conflict: b.conflict,
       refs: [...b.refs], language: b.model?.getLanguageId?.() ?? null,
       modelEol: b.model?.getEOL ? (b.model.getEOL() === "\r\n" ? "CRLF" : "LF") : null,
@@ -285,7 +333,7 @@ export class Buffers {
   }
 
   private dirtyOf(b: Buf): boolean {
-    return EDITABLE.has(b.kind) && !!b.model && !b.model.isDisposed()
+    return b.editable && !!b.model && !b.model.isDisposed()
       && b.model.getAlternativeVersionId() !== b.saved;
   }
 
@@ -319,22 +367,47 @@ export class Buffers {
     const deps = this.need();
     const r = await deps.read(projectId, path);
     const abs = typeof r.abs === "string" && r.abs ? r.abs : `${projectId}:${r.path || path}`;
+    // The same file through another project or another name: one buffer —
+    // whether it is made already or still being made. Two reads of one file
+    // under two keys (a restored Inbox tab on `src/main.py` and a project's on
+    // `main.py`) both used to make a model at the same URI; the second
+    // replaced the first's, and the tab on it died with "Model is disposed!"
+    // (review of PR #49, L1).
     const existing = this.bufs.get(abs);
     if (existing) {
-      // The same file through another project or another name: one buffer.
       this.byKey.set(key, abs);
       return existing;
     }
+    const making = this.making.get(abs);
+    if (making) {
+      const buf = await making;
+      this.byKey.set(key, abs);
+      return buf;
+    }
+    const made = this.make(r, projectId, path, abs);
+    this.making.set(abs, made);
+    try {
+      const buf = await made;
+      this.byKey.set(key, abs);
+      return buf;
+    } finally {
+      this.making.delete(abs);
+    }
+  }
+
+  private async make(r: FileRead, projectId: string, path: string, abs: string): Promise<Buf> {
+    const deps = this.need();
     const kind = r.protected ? "withheld" : parseKind(r.kind);
     const model = kind === "withheld" ? null : await deps.makeModel(unBOM(r.content ?? ""), abs, kind);
     const raced = this.bufs.get(abs);
     if (raced) {
-      model?.dispose();
-      this.byKey.set(key, abs);
+      // Cannot happen while `making` dedupes by abs; if it ever does, the
+      // live buffer's model is kept and only the new one goes.
+      if (model && model !== raced.model) model.dispose();
       return raced;
     }
     const buf: Buf = {
-      abs, projectId, path: r.path || path, kind,
+      abs, projectId, path: r.path || path, kind, editable: editableOf(kind, r.editable),
       readonly: typeof r.readonly === "string" ? r.readonly : kind === "withheld" ? "withheld" : null,
       etag: typeof r.etag === "string" ? r.etag : null,
       encoding: r.encoding ?? null, eol: r.eol ?? null,
@@ -344,7 +417,12 @@ export class Buffers {
     if (model) {
       // Said the moment it changes (App's guards read it in the same event
       // as the keystroke: #43's M1), and only when dirtiness moved.
+      // A reload in place (`apply`) is not an edit: while it runs nothing is
+      // said, so it never reads dirty for a moment — which pinned a preview
+      // tab and flashed the dirty dot (review of PR #49, L4). The reload says
+      // what it leaves once it is done.
       buf.sub = model.onDidChangeContent(() => {
+        if (buf.applying) return;
         const now = this.dirtyOf(buf);
         if (now !== buf.wasDirty) {
           buf.wasDirty = now;
@@ -353,7 +431,6 @@ export class Buffers {
       });
     }
     this.bufs.set(abs, buf);
-    this.byKey.set(key, abs);
     return buf;
   }
 
@@ -368,12 +445,25 @@ export class Buffers {
     this.emit();
   }
 
-  /** Every tab of pane `pane` lets go, its edits thrown away where no other pane holds them. */
+  /**
+   * Every tab of pane `pane` lets go. Only the buffers this pane held are
+   * touched: one goes once no tab holds it and it is clean, or `discard`
+   * says the owner threw this pane's edit away. A buffer no tab held before
+   * the call — another pane's edit kept after its pane unmounted — is never
+   * this pane's to discard: closing any pane used to drop every such edit
+   * (review of PR #49, H1).
+   */
   releasePane(pane: number | string, opts: { discard?: boolean } = {}) {
     const key = String(pane);
     for (const b of [...this.bufs.values()]) {
-      for (const r of [...b.refs]) if (paneOfRef(r) === key) b.refs.delete(r);
-      if (!b.refs.size && (!this.dirtyOf(b) || opts.discard)) this.drop(b);
+      let held = false;
+      for (const r of [...b.refs]) {
+        if (paneOfRef(r) === key) {
+          b.refs.delete(r);
+          held = true;
+        }
+      }
+      if (held && !b.refs.size && (!this.dirtyOf(b) || opts.discard)) this.drop(b);
     }
     this.emit();
   }
@@ -394,7 +484,10 @@ export class Buffers {
    */
   async save(abs: string, opts: { expected?: string | null } = {}): Promise<SaveOutcome> {
     const b = this.bufs.get(abs);
-    if (!b || !b.model || b.saving || !EDITABLE.has(b.kind)) return "skipped";
+    // One save at a time per buffer: a second Ctrl+S while the first is on
+    // its way would send the same stale etag, and its 409 would raise a
+    // conflict bar against the owner's own write.
+    if (!b || !b.model || b.saving || !b.editable) return "skipped";
     const deps = this.need();
     const version = b.model.getAlternativeVersionId();
     // Read once, here; the file's byte-order mark, if it had one, put back.
@@ -405,7 +498,9 @@ export class Buffers {
     try {
       const r = await deps.write(b.projectId, { path: b.path, content, expected_etag: expected });
       b.saving = false;
-      if (!this.bufs.has(abs)) return "saved";
+      // A late answer lands only on the buffer it was sent from: one dropped
+      // and read again meanwhile is another buffer, never marked saved by it.
+      if (this.bufs.get(abs) !== b) return "saved";
       b.etag = r.etag;
       b.saved = version;
       b.wasDirty = this.dirtyOf(b);
@@ -418,17 +513,20 @@ export class Buffers {
       b.saving = false;
       if (e?.status === 409) {
         // The daemon says what is on disk now: an etag, or null for gone. An
-        // answer without one (a daemon from before ED-2) is asked for it.
-        let now: string | null | undefined = e?.body && "etag" in e.body ? e.body.etag : undefined;
+        // answer without one (a daemon from before ED-2), or with one that is
+        // not an etag, is asked for it; still unknown, the owner is told.
+        const said = e?.body && typeof e.body === "object" && "etag" in e.body ? e.body.etag : undefined;
+        let now: string | null | undefined = said === null || (typeof said === "string" && ETAG.test(said))
+          ? said : undefined;
         if (now === undefined) {
           try {
             const row = (await deps.stat(b.projectId, [b.path])).files?.[b.path];
-            now = row?.gone ? null : typeof row?.etag === "string" ? row.etag : undefined;
+            now = row?.gone ? null : typeof row?.etag === "string" && ETAG.test(row.etag) ? row.etag : undefined;
           } catch {
             now = undefined;
           }
         }
-        if (!this.bufs.has(abs)) return "conflict";
+        if (this.bufs.get(abs) !== b) return "conflict";
         if (typeof now === "string") b.conflict = this.changed(b, now);
         else if (now === null) b.conflict = { state: "gone" };
         this.emit();
@@ -478,7 +576,7 @@ export class Buffers {
       } else this.notice(abs, e?.message || "reload failed");
       return false;
     }
-    if (!this.bufs.has(abs) || !b.model || b.model.isDisposed()) return false;
+    if (this.bufs.get(abs) !== b || !b.model || b.model.isDisposed()) return false;
     if (r.protected || parseKind(r.kind) === "withheld") return false;
     if (opts.onlyIfClean && this.dirtyOf(b)) {
       if (r.etag && r.etag !== b.etag) b.conflict = this.changed(b, r.etag);
@@ -488,6 +586,7 @@ export class Buffers {
     this.apply(b, unBOM(r.content ?? ""), r.eol ?? null);
     b.etag = typeof r.etag === "string" ? r.etag : null;
     b.kind = parseKind(r.kind);
+    b.editable = editableOf(b.kind, r.editable);
     b.readonly = typeof r.readonly === "string" ? r.readonly : null;
     b.encoding = r.encoding ?? null;
     b.eol = r.eol ?? null;
@@ -603,8 +702,12 @@ export class Buffers {
     }
   }
 
-  /** A running turn named a file in a tool call (any thread): the toast can say who. */
+  /**
+   * A running turn's write tool named a file (any thread): the toast can say
+   * who. `path` is absolute (`writtenPaths`): a relative one is ignored.
+   */
   noteTouch(path: string, writer: string) {
+    if (!path.startsWith("/")) return;
     const now = this.deps?.now() ?? Date.now();
     this.touches.push({ path, writer, at: now });
     if (this.touches.length > TOUCHES_MAX || now - this.touches[0].at > TOUCH_MS) {
@@ -622,6 +725,7 @@ export class Buffers {
     for (const b of [...this.bufs.values()]) this.drop(b);
     this.byKey.clear();
     this.pending.clear();
+    this.making.clear();
     this.touches = [];
     this.emit();
   }

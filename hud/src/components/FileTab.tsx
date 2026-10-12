@@ -35,7 +35,7 @@ import { NO_MARKS, type Marks } from "../lib/dirtyMarks";
 import { Markdown } from "./Markdown";
 import { isMarkdown } from "../lib/monaco";
 import {
-  EDITABLE, NO_TABS, chatExcerpt, closeTab, jarvisMayRead, openTab, pinTab, sameTabs, type Tabs,
+  NO_TABS, TABS_MAX, chatExcerpt, closeTab, jarvisMayRead, openTab, pinTab, sameTabs, type Tabs,
 } from "../lib/buffers";
 import { buffers, refOf, type BufferView } from "../state/buffers";
 
@@ -127,6 +127,7 @@ const READONLY_LABEL: Record<string, string> = {
   gate: "read-only: permission state",
   safety: "read-only: safety layer",
   binary: "read-only: not text",
+  unknown: "read-only: not a kind this window knows",
 };
 
 export function FileTab(props: {
@@ -257,15 +258,21 @@ export function FileTab(props: {
 
   // Compare ends when the conflict does (Keep mine, Take theirs) or the tab
   // changes; when the disk moves again under it, its left side is read again
-  // — Keep mine saves against what the owner can see.
+  // — Keep mine saves against what the owner can see. Read again once per
+  // new conflict etag (`rereadFor`), never "until the two agree": a disk that
+  // moved again after the bar's etag answered with a third etag, and the
+  // re-read looped — 343 GETs a second, unbounded while the window was hidden
+  // and the poll asleep (review of PR #49, M2).
   const conflictEtag = view?.conflict?.state === "changed" ? view.conflict.etag : null;
+  const rereadFor = useRef<string | null>(null);
   useEffect(() => {
     if (!comparing) return;
     if (comparing.abs !== activeAbs || !view?.conflict) {
       setComparing(null);
       return;
     }
-    if (conflictEtag && comparing.etag !== conflictEtag) {
+    if (conflictEtag && comparing.etag !== conflictEtag && rereadFor.current !== conflictEtag) {
+      rereadFor.current = conflictEtag;
       const abs = comparing.abs;
       void buffers.readDisk(abs).then((d) => {
         if (d && alive.current) setComparing((c) => (c && c.abs === abs ? { abs, disk: d.text, etag: d.etag } : c));
@@ -281,7 +288,14 @@ export function FileTab(props: {
     // A narrow pane folds its tree behind "Files" the moment a file opens, so
     // there is no browsing click to click: every open there is a pinned tab.
     const pinned = pin || !!props.narrow;
-    setTabs(openTab(tabsNow.current, path, { pin: pinned, keepPreview: (p) => !!bufOf(p)?.dirty }));
+    const dirty = (p: string) => !!bufOf(p)?.dirty;
+    const next = openTab(tabsNow.current, path, { pin: pinned, keepPreview: dirty, dirty });
+    if (!next) {
+      // Past the cap only a clean tab is ever closed to make room (M1).
+      setNote(`${TABS_MAX} tabs are open and every other one holds an unsaved edit: save or close one first`);
+      return;
+    }
+    setTabs(next);
   };
 
   const close = (path: string, discard = false) => {
@@ -301,7 +315,7 @@ export function FileTab(props: {
     const abs = path ? held.current.get(path) : undefined;
     if (!abs) return "skipped";
     const b = buffers.get(abs);
-    if (!b || !EDITABLE.has(b.kind)) {
+    if (!b || !b.editable) {
       if (b) setNote(`${b.path} is read-only here`);
       return "skipped";
     }
@@ -357,13 +371,14 @@ export function FileTab(props: {
     return {
       dirty: b.dirty,
       conflict: !!b.conflict,
-      mark: b.kind === "env" ? "env" : b.kind === "withheld" ? "withheld" : EDITABLE.has(b.kind) ? null : "readonly",
+      mark: b.kind === "env" ? "env" : b.kind === "withheld" ? "withheld" : b.editable ? null : "readonly",
     };
   };
 
   const md = !!active && isMarkdown(active);
   const read = md && mdRead[active!] !== false;
-  const editable = !!view && EDITABLE.has(view.kind);
+  // The read's `editable`, never the kind alone (MED1).
+  const editable = !!view && view.editable;
   const model = view && view.kind !== "withheld" ? buffers.model(view.abs) : null;
   // The editor exists from the first buffer it shows, and stays: its model is swapped.
   const [everEditor, setEverEditor] = useState(false);
@@ -406,9 +421,12 @@ export function FileTab(props: {
             <span className="chip edlock" data-testid="editor-lock" title={view?.readonly || undefined}>
               🔒 Jarvis can't read this file
             </span>
-          ) : view && !EDITABLE.has(view.kind) && view.kind !== "withheld" ? (
+          ) : null}
+          {view && !view.editable && view.kind !== "withheld" ? (
+            // An env file that is not UTF-8 carries both: Jarvis can't read
+            // it, and the editor won't write it (MED1).
             <span className="chip edro" data-testid="editor-readonly-reason" title={view.readonly || undefined}>
-              🔒 {READONLY_LABEL[view.kind] || "read-only"}
+              🔒 {READONLY_LABEL[view.kind === "env" ? "binary" : view.kind] || "read-only"}
             </span>
           ) : null}
           {md ? (

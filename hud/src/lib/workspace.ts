@@ -273,6 +273,8 @@ export function clampPanelHeight(h: unknown): number {
 }
 
 const ID_MAX = 200;
+/** How many panes a workspace stored before WP-G1 held (`Panes` was a 4-tuple). */
+const LEGACY_PANES = 4;
 const URL_MAX = 2048;
 export const PATH_MAX = 1024;
 
@@ -359,8 +361,15 @@ export function parseWorkspace(raw: unknown): Workspace {
   const preset = isPreset(v.preset) ? v.preset : "single";
   const n = SHAPES[preset].panes;
   const order = parseOrder(v.order, n) ?? PANE_NOS.slice(0, n);
-  const kept = parseKept(v.kept, order);
   const rawPanes = Array.isArray(v.panes) ? v.panes : [];
+  // A WP-A or WP-B value has no `order` and no `kept`: its four panes were
+  // positions, and the ones its preset did not draw were hidden, specs kept.
+  // They are `kept` here (review of PR #47), so a split takes a free id rather
+  // than writing over what pane 3 showed, and a grow still brings them back
+  // first, in the order they always came back.
+  const legacy = v.order === undefined && v.kept === undefined;
+  const kept = !legacy ? parseKept(v.kept, order)
+    : PANE_NOS.filter((id) => id <= LEGACY_PANES && id <= rawPanes.length && !order.includes(id));
   const panes = PANE_NOS.map((id) => parsePane(rawPanes[id - 1], id));
   const rawSplits = isObj(v.splits) ? v.splits : {};
   const splits = {} as Record<Preset, Split>;
@@ -624,16 +633,21 @@ export const MAX_PANES = PANE_NOS.length;
 
 /**
  * The id a split takes (plan §3.4): the lowest id neither drawn nor hidden;
- * else the oldest hidden (`kept`) pane holding no unsaved edit, which the
- * caller closes first; else none — every id is drawn, or hidden with an
- * unsaved edit (`dirty`, by id) that a split must never throw away.
+ * else the oldest hidden (`kept`) pane that holds nothing; else the oldest
+ * one whose only content can be kept elsewhere (`holding`: a compose row's
+ * unsent words, which the caller parks for the next new thread — review of
+ * PR #47); else none — every id is drawn, or hidden with an unsaved edit
+ * (`dirty`, by id) that a split must never throw away. The caller closes
+ * the hidden pane it takes first.
  */
-export function allocate(ws: Pick<Workspace, "order" | "kept">, dirty: readonly PaneNo[] = []): PaneNo | null {
+export function allocate(
+  ws: Pick<Workspace, "order" | "kept">, dirty: readonly PaneNo[] = [], holding: readonly PaneNo[] = [],
+): PaneNo | null {
   const free = PANE_NOS.find((n) => !ws.order.includes(n) && !ws.kept.includes(n));
   if (free !== undefined) return free;
   // `kept` is most recently hidden first: the oldest is the last.
-  for (let i = ws.kept.length - 1; i >= 0; i--) if (!dirty.includes(ws.kept[i])) return ws.kept[i];
-  return null;
+  const oldest = (ok: (n: PaneNo) => boolean) => [...ws.kept].reverse().find(ok) ?? null;
+  return oldest((n) => !dirty.includes(n) && !holding.includes(n)) ?? oldest((n) => !dirty.includes(n));
 }
 
 /**
@@ -735,6 +749,7 @@ export function splitVerdict(
 ): { ok: boolean; why: SplitWhy } {
   const order = orderOf(ws);
   if (order.length >= MAX_PANES) return { ok: false, why: "max" };
+  // Words a hidden compose row holds are parked, never lost: only an unsaved edit blocks.
   const id = allocate(ws, dirty);
   const probe = id ?? PANE_NOS.find((n) => !order.includes(n))!;
   const trial = splitPane({ ...ws, order }, order[order.length - 1], probe, defaultPane(probe));

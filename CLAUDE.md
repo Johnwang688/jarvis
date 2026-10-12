@@ -59,7 +59,7 @@ task runner with the intake gate (WP11 — `TaskControl` in
 backend ran one real task end to end on 2026-09-16** (design §17): Claude
 orchestrated, Codex implemented in a worktree, a fresh Claude reviewer
 failed it once and passed it second time, DONE in 198 s. **The HUD v2 landed the same
-day** (WP12a backend + WP12b frontend under `hud/`, `jarvis hud` opens it;
+day** (WP12a backend + WP12b frontend under `hud/`, `jarvis hud` opens it, and since ED-4 the daemon serves only what `jarvis hud install` installed;
 design §12 and §18). **Projects are archived, never deleted in place**
 (2026-10-06, decisions part B): an archived project or thread keeps every
 record and is hidden from lists, placement and schedules; permanent delete
@@ -296,8 +296,11 @@ Jarvis (BR-0, 2026-10-11; plan `docs/plans/2026-10-10-hud-browser-plan.md`
   `edit_file` by resolved path and, through `_self_protected`, to v2's layer
   1 (Claude's Write/Edit, Codex patches); `denied_grant` refuses a Codex write
   grant on, in or above it. **Not a SELF_PROTECTED widening** (the owner
-  declined that): the HUD's source stays writable, and an approved
-  `npm run build` writes the build.
+  declined that): the HUD's source stays writable. Since ED-4 (C-1)
+  `config.HUD_DIST` is the **installed** HUD's root and `files._hud_roots`
+  refuses the install root always (plus `hud/dist` under `JARVIS_HUD_DEV=1`),
+  so this one check covers every installed build; only `jarvis hud install`
+  writes it, and Jarvis is refused that command.
 Free checks: `tests/face/approval_check.py` (`control_port_checks`),
 `tests/browser/policy_check.py` (`control_port_*`, `fetch_redirect_checks`,
 `late_landing_checks` — a port-0 daemon with one card, a stand-in and the
@@ -1128,8 +1131,8 @@ policy: `img-src 'self', frame-ancestors *` let a frame land on the HUD),
 anything outside printable ASCII (CR/LF split the header; U+2028 failed
 after the status line) or a reserved `frame-ancestors`/`sandbox`/`report-*`
 **raises** (`_own_directives`; `binary()` checks before writing a byte, so
-it is one 400, never two status lines); the editor's
-full CSP (ED-4) extends that function, never a second header. The preview
+it is one 400, never two status lines); the HUD's full CSP (ED-4, below)
+is built by that same function, never a second header. The preview
 listener (8403) carries **neither** frame header — the HUD frames it — but
 **sandboxes every document it serves** with one CSP, `sandbox allow-scripts
 allow-forms` (`workshop_security_policy`): a keep-origin frame that navigated
@@ -1169,6 +1172,90 @@ move through another first. The mock serves an API listener and a dev server
 on ephemeral ports (`api_port`, `dev_port`) and asserts the API one is never
 hit; the mock HUD, API and workshop send the real `hud_api.frame_headers()`,
 so the HUD under test is always rendered under them. Not yet: §2.5 item 5, a "dev servers in your terminals" list.
+
+**The HUD's CSP and installed build, ED-4 (2026-10-11; editor plan §1.7,
+§2.7; decision C-1; contract in `docs/hud-api.md`).** Every HUD and API
+response carries the **full policy** (`hud_api.HUD_POLICY`) in WP-E's one
+header: `default-src 'none'`, `script-src 'self'` (no inline, no eval),
+`worker-src`/`connect-src 'self'` (the same-origin `ws://` terminal socket
+included, CSP3), `style-src 'self' 'unsafe-inline'`, `img-src`/`font-src
+'self' data:`, `media-src 'self'`, `frame-src` on the loopback names a CSP can
+express (so the Preview judge refuses `[::1]` and `127.0.0.2` with a
+sentence), and `base-uri`/`form-action`/`object-src 'none'`. **No
+`'wasm-unsafe-eval'` yet — ED-5 adds it** with its first `.wasm` and the test
+that loads every grammar under the policy. A response's own directives may
+only **narrow** it (`_narrowed`: restate a directive the policy sets with a
+subset of its sources; a `default-src 'none'` drops the fetch directives it
+does not restate — the avatar keeps its old lockdown); anything else raises.
+**The HUD is served from an installed copy (C-1)**, never the repo's
+agent-writable `hud/dist`: `jarvis hud install` (`jarvis/v2/hud_install.py`;
+a human/lead CLI step, **never a tool** — `tests/v2/hud_install_check.py`
+pins that only `__main__` and `hud_api`'s read side import it) runs `npm run
+build` and copies `hud/dist` into `config.HUD_DIR/<build-id>/`
+(`~/.local/share/jarvis/hud/`, `JARVIS_HUD_DIR` overrides), read-only, with a
+SHA-256 manifest, through a temp folder renamed into place, keeping three
+builds; it refuses **uncommitted changes under `hud/`** unless
+`--allow-dirty` (Jarvis's chats leave edits in the main checkout) and records
+`git_head`/`dirty` in the manifest (checked again after the build; its git
+runs hardened through `gitops._git`); it refuses a symlinked root or ancestor, a
+root in the repo or writable by others, and a build output with a link,
+special file, odd name or no `index.html`. The daemon serves the **newest
+intact** build (manifest reads, `index.html` matches — a newer broken one is
+passed over; a hostile manifest is ignored, never raised), only files its
+manifest lists, **SHA-256 checked on every read, never cached** (a stat-keyed
+cache served a same-size rewrite made within one timestamp tick), an asset
+only an older kept build has served from it (so an open window's lazy chunks
+survive an install); serving an older build because a newer one failed is
+`hud_state: "fallback"` (with `hud_passed_over`), never silent; with nothing
+intact `GET /` is a 503 saying "not installed" or "failed verification", and
+`/status` reports what is served (`hud_build`, `hud_git_head`, `hud_state`).
+daemon2 **warns at start-up** in dev mode, on a fallback, with nothing
+served, and when `hud/` changed since the served build's commit (`git diff
+--quiet <commit> HEAD -- hud`) — a forgotten install shows up in the log, a
+Python-only merge does not. `config.HUD_DIST`
+is that install root — **`hud/dist` only under `JARVIS_HUD_DEV=1`**, which
+only tests set — and BR-0's one write check (`files._hud_roots`) refuses the
+install root always, plus `hud/dist` in dev mode, to every agent write tool and
+v2 grant. **Jarvis never runs the installer**: `protected_state.owner_op`
+(**the table `OWNER_OPS` is the extension point** for any other owner-only
+`jarvis` command; `OWNER_OP_MODULES` for its module), asked by `rules.decide`
+(so v1's gate and v2's layer 1) and by `run_command`, makes `jarvis hud
+install` DENY — judged on the **command word** after wrappers and runners
+(`_RUNNERS`: `env -S`, `nohup`, `timeout`, `flock`, `systemd-run`, `uv run`,
+`ssh`, `xargs` with input that may complete it), `python -m jarvis`, a line's
+own `$VAR` or `ln -s` alias, the installer module, Python source that
+*invokes* it, and shells/`eval`/here-documents/substitutions bash would run
+— never on a line that only mentions it (`echo`, `grep`, a commit message,
+single quotes, a quoted here-document): a DENY cannot be approved, so a false
+one blocks the owner. A jarvis argv word only known at run time (an unset
+`$E`, `$@`, a glob, `{hud,install}`) counts as any words, so a line that
+could expand to an op is refused; and **Jarvis's own CLI is ASK in every
+spelling** (`python -m jarvis…`, `uv run jarvis`, the venv's python —
+`protected_state.runs_jarvis`, asked by `rules.decide`), never auto-approved. A cheap line and per-segment filter (`_could_be_owner_op`)
+keeps `rules.decide` at its old speed on lines that cannot hold an op, held
+to the full parse by `hud_install_check`. An agent can edit `hud/src`, so
+running the installer would undo C-1. A shell write *into* the install root
+asks (`protected_state.hud_trees`). A shell can still
+write it in a form nobody sees (the accepted gap). **After a merge, the lead
+runs, from a synced, clean main checkout: `jarvis hud install` (it builds
+`hud/`; run `npm ci` in `hud/` first if `package-lock.json` changed; it
+refuses uncommitted `hud/` changes — commit or stash them, `--allow-dirty`
+only on purpose), then `systemctl --user restart jarvis-daemon2` only if
+Python changed — a HUD-only change needs just a reload of the window** — and
+checks `curl -s localhost:8405/status` shows the new `hud_build`,
+`hud_git_head` equal to the checkout's HEAD and `hud_state: "installed"` (not
+`"fallback"`).
+Never `jarvis hud` to restart. **Tests point
+`config.HUD_DIR`/`HUD_DIST` at temp dirs** (or set `HUD_DEV` with a temp
+dist); never install into the owner's real root. **Every context of every
+headless HUD suite runs under `hud_v2_check.watch_csp`**: a CSP violation
+anywhere fails the run, because a CSP breaks quietly (Monaco even falls back
+to a textarea). `tests/face/hud_v2_csp_check.py` (run by `hud_v2_check` after
+the preview section, on a `MockDaemon(0)` of its own) proves the HUD's needs
+work under it — SSE, the terminal socket, Monaco and its worker, the avatar,
+the mic and `/stt`, a loopback frame — and that an inline or remote script,
+`eval`, a `blob:` worker, WebAssembly, a cross-origin fetch, socket, image,
+object, `<base>`, form or non-loopback frame is refused with a violation.
 
 **Input bar declutter (2026-10-10, PR #29; ported onto WP-B and reviewed the
 same day).** The bar is `📎 [box] ⬆` over one row, `in: project · provider ▾ ·
@@ -1347,17 +1434,22 @@ pane still shows may switch away, re-pin or close without asking. **Tabs** (`Pan
 pinned project, per-field fallback, only with a pin; `pinPane`/`unpinProject`
 drop them; `setEditors` pins and sets in one step; a WP-G2 `filePath` with no
 tabs reads as one): a single click opens an italic preview tab the next one
-replaces, a double click or an edit pins it (a narrow pane's tree waits 400 ms
-before folding so a double click lands), middle-click or × closes, the last
-tab on an unsaved edit asks Save / Don't save / Cancel. Reload over an edit
+replaces, a double click or an edit pins it (a narrow pane opens every file
+pinned and folds its tree at once), middle-click or × closes, the last
+tab on an unsaved edit asks Save / Don't save / Cancel. Past 40 tabs the
+oldest **clean** one closes; with every other tab dirty nothing opens and the
+pane says why (a dirty tab is never closed unasked). Reload over an edit
 still asks; opening another file just opens a tab. **One editor per pane**
 (`PaneEditor`), its model swapped, created at the first buffer and kept.
 **Saving is by content**: `expected_etag` (null: must not exist), 409 with the
 disk's etag, never a force; `expected_mtime` is accepted one more release.
 **The poll** (`buffers.poll`, App, every 2 s while visible and on focus):
 clean + moved → reload in place (`minimalEdit`, one undo stop each side, EOL
-followed), toast naming the writer (`tool_started` args through `touchedPath`
-→ `noteTouch`); dirty + moved or a 409 → the amber `ConflictBar` (Compare —
+followed), toast naming the writer (a `tool_started` of a **write** tool only
+— Write/Edit/MultiEdit/NotebookEdit, `apply_patch`, `write_file`/`edit_file`
+— through `writtenPaths` → `noteTouch`, **absolute paths only**, a relative
+one resolved from the thread's `cwd`, never matched by its tail); dirty +
+moved or a 409 → the amber `ConflictBar` (Compare —
 `CompareEditor`, the disk read-only left via a `jarvis-disk:` model, the
 buffer itself right, `useInlineViewWhenSpaceIsLimited: false`; Keep mine
 against the shown etag; Take theirs asks once, undoable); gone → Save to
@@ -1383,7 +1475,58 @@ Free checks: `lib/buffers.test.ts`, `state/buffers.test.ts`,
 the kinds, etag/409/stat, owner-only, env content kept off the bus, logs,
 API listener, diffs, preview and attachments; real Chromium for the owner's
 own page) and `tests/face/hud_v2_editor_check.py` (run by `hud_v2_check` on a
-`MockDaemon(0)` of its own, or alone).
+`MockDaemon(0)` of its own, or alone, under `hud_v2_check.guard` — no CSP
+violation).
+
+**ED-2's review round (2026-10-11, PR #49; each check failing on f869543).**
+The rules the two reviews left, in one place:
+- **An env file is never demoted** (MED1): `editor_policy.classify_bytes`
+  keeps a non-UTF-8 env file `env` (UTF-16LE from PowerShell 5.1, Latin-1)
+  with `Verdict.writable=False`; every read carries **`editable`**, and the
+  HUD's editability is `editableOf(kind, editable)` — the read's word and an
+  editable kind, both, never the kind alone — so the lock, closed Add to chat
+  and `dotenv` stay while the file is read-only (`editor-readonly-reason` too).
+- **The gate's readable exemption is the editor's own, and only for a gate
+  path that resolves to itself** (LOW2, `Policy._readable_gate`): not a
+  symlink anywhere on its way, not a protected/env name or login file, not in
+  a credential folder other than `~/.config/jarvis`. `hud_api.protected` (an
+  `@path`, the preview origin, a diff) asks `withheld_anywhere`, which has no
+  exemption — the allowlist is no longer attachable by `@path`.
+  `files._protected_state_paths()` is the unresolved list it reads.
+- **Withheld widened** (LOW3): `~/.docker/config.json` (and
+  `$DOCKER_CONFIG`), `~/.kube/config` (and `$KUBECONFIG`), `~/.npmrc` (and
+  `$NPM_CONFIG_USERCONFIG`), `~/.pypirc` as login files; v2's session
+  carriers (`V2_DATA_DIR/claude`, `V2_DATA_DIR/codex`) as credential folders;
+  a dropped file named like a store (`editor_policy.credential_name`) is never
+  attached. **The preview origin refuses any path with a hidden component
+  inside the project except `.well-known`, and anything under Jarvis's config
+  and data folders** (`hud_api._not_a_page`, `editor_policy.jarvis_dirs`): it
+  answers any loopback client, `fetch_page` included.
+- The atomic write's temp is `<name>.<x>.tmp` (an env file's temp is an env
+  file by name, LOW4); a save's unexpected `OSError` is 500 and a
+  `PermissionError` 403, never the dispatcher's 409 (the conflict bar); a tree
+  row is `env` only for a file; `jarvis/v2/editor_policy.py` is SELF_PROTECTED.
+- **`Buffers.releasePane` touches only buffers this pane held** (H1): × on any
+  pane used to discard every edit no tab held. **A project going away asks
+  the panes on it together** (H2, `panesLose`/`panesHolding`): two panes
+  sharing an edit each read "another pane holds it", both unpinned and the
+  edit lost every tab; now each one holding it stays pinned with
+  `pane-N-gone`, and FileTab stays keyed by the gone project (`goneHeld`).
+- Compare re-reads once per new conflict etag (M2, `rereadFor`; it looped at
+  ~340 GET/s while the disk disagreed with the poll, unbounded when hidden).
+  Loads dedupe by `abs` after the read (L1, `making`), and `makeModel` never
+  disposes a model at its URI — a second goes beside it under a query. An
+  unknown kind is `unknown`: read-only, closed to Jarvis (L2). The crash
+  prompt has **Save N unsaved files** (`hud-crashed-save`, `saveAll`; disabled
+  and inert under a card, L3). A reload in place says nothing while it runs
+  (`applying`, L4 — it used to read dirty for a moment and pin a preview
+  tab). A save's late answer lands only on its own buffer; a 409 whose etag
+  is not one asks the poll route and, still unknown, tells the owner; one
+  save at a time per buffer (a double Ctrl+S sends one PUT).
+Checks: `editor_files_check`'s `Review*` classes, the `review of PR #49`
+blocks in `state/buffers.test.ts` and `lib/buffers.test.ts`, and the
+`_rv49_*` sections of `hud_v2_editor_check` (the mock serves `editable`,
+`uneditable` and on-cue `stat_etags`).
 
 **The Graphite editor scheme, ED-3 (2026-10-11; plan §2.5, decisions E-4).**
 One scheme, no picker, **no syntax colour amber or red**. `lib/editorTheme.ts`
@@ -1656,7 +1799,10 @@ source, id, spec, {focus})` inserts the id **right after its source** and
 lands on `LADDER`'s shape for the new count (rows2 and main2 are ⊞'s alone);
 `closePane(ws, id, then)` drops it, resets only its spec, leaves `kept` and
 every edge alone, and never closes the last pane; `allocate` takes the
-lowest free id, else the oldest hidden pane with no unsaved edit; `copySpec`
+lowest free id, else the oldest hidden pane holding nothing, else the oldest
+whose compose row holds unsent words (`holding` — **its words are parked for
+the next new thread, `ORPHAN_DRAFT`**, never dropped: a hidden pane cannot
+ask; review of PR #47, H1), never one with an unsaved edit; `copySpec`
 copies a file pane's project and tabs (`editors`, ED-2: the same buffers), a
 diff's project and `filePath`, a preview's URL — **never
 its keep-origin grant** — turns a task into its diff, and leaves a chat or a
@@ -1672,25 +1818,35 @@ the thread (they come back when it opens anywhere), words handed back are
 held for it, a turn the pane tracked is left in `State.loose` and **the next
 pane that opens that thread takes it up, Stop and all** (`open_thread`,
 trading a turn of its own into `loose`; `turn_finished` and the 15 s
-reconcile clear it); a compose row's unsent words are asked about (G-9) and
-Discard drops them for good; a terminal goes back to the panel as its
+reconcile clear it, the reconcile also when the thread is no longer listed —
+archived or deleted). **A first send whose pane closed while its thread
+opened** leaves the new turn `loose` too (`send()`: nothing tracks or shows
+it), and one that fails after the close parks its words for the next new
+thread anywhere and says so (review of PR #47, M2). A compose row's unsent
+words are asked about (G-9) and Discard drops them for good; a terminal goes back to the panel as its
 selected tab (`releaseToPanel`) — **no DELETE, no new ticket, the shell lives
 on**. × asks first, in an inline strip (`pane-<id>-close-ask`, focus on
 Keep/Cancel, never a modal), for a compose row's unsent words (Discard and
 close / Keep) or an unsaved edit **no other pane holds**
 (`buffers.paneLosing`; Save / Don't save / Cancel — `pane-<id>-close-save`,
 `-close-discard`, `-close-keep` — Save closing only once every edit is on
-disk).
-Focus after a close goes to the pane now in that slot (else the slot before)
-— the pane itself, never its box, so a held Enter cannot send — and when the
-selected chat closes, to the chat selected before it (W-6: the owner's last
-choice keeps the mic). **One click closes one pane**: a × click within 400 ms
+disk); the strip is dropped when the question no longer holds (the pane
+switched, the words were sent) and Discard re-asks at the click, so it never
+answers a question nobody asked; Keep/Cancel is not `disabled` under a card
+(inert covers it), so focus comes back to it. **Focus after a close goes where
+the mic is** (W-6): the selected chat while it is another drawn pane — closing
+a File pane never hands the mic, or dropped files, to the chat that slides
+into its slot (review of PR #47, M1) — else, the selected chat closing, the
+chat selected before it, else the pane now in that slot (else the slot
+before); always the pane itself, never its box, so a held Enter cannot send.
+**One click closes one pane**: a × click within 400 ms
 of a close, or the second of a double-click, does nothing (3 over 2's top-
 right × sits exactly where 2×2's lands). A split's chat copy is a compose row
 in the source's project, written before the layout changes; a terminal's is
-`terminals.create(specOf(source), id, {readable: false} if the source is
-off)` — the switch goes off **before** the terminal is shown, and if it
-cannot, the copy is closed: a copy never widens what Jarvis can read. A
+`terminals.create(specOf(source), id, …, {readable})` — **`POST /terminals`
+takes `readable` now, so a copy of a terminal Jarvis may not read is made
+with the switch off from its first byte** (never PATCHed after), and a source
+whose row is unknown fails closed: a copy never widens what Jarvis can read. A
 reused id mounts fresh: Workspace unmounts a pane neither drawn nor `kept`,
 and `useLayout` bumps the incarnation on a close and when a split takes back
 a hidden pane (else its old FileTab stayed). File panes store their tabs
@@ -1699,7 +1855,12 @@ mount; two File panes on one file share its buffer, so G2's save-and-reload
 messages (`lib/filesync.ts`) are gone; Diff panes store and seed their file
 (`filePath`).
 Open beside's two grow cases are splits now (a free id, so a pane ⊞ hid keeps
-what it showed). **Nothing assumes pane 1**: the store starts with no
+what it showed). **A stored WP-A/WP-B value's panes 2–4 are `kept`** when its
+preset does not draw them (it has no `order` or `kept`), so a split takes a
+free id rather than writing over what pane 3 showed, and a grow brings them
+back in the order it always did. `focusPaneElement` looks for a pane a split
+just made for a few frames, since a split from a socket or a timer is drawn
+after the next frame. **Nothing assumes pane 1**: the store starts with no
 selected chat, `activePane` falls back to `home` (the pane in slot 1, which
 App syncs), `#tabs` is slot 1's, and Workspace no longer seeds pane 1;
 WP-G1's surviving unit mutants (U4 bottom edges unclamped, U34 a preferred
@@ -1709,10 +1870,12 @@ disabled and inert, and the eight-pane card check asserts it at 160% and
 70%. Free checks: `workspace.test.ts`, `chats.test.ts`, `store.test.ts`,
 the layout suite's `_split_checks`,
 `_split_close_one_checks` and `_split_file_checks`, the multichat suite's
-`_split_close_chat_checks` and `_split_close_selected_checks`, the terminal
-suite's `_split_close_terminal_checks` and the preview suite's
-`_split_checks`; the PR's mutation table shows each failing with its
-mutation. WP-G3's shared buffer arrived with ED-2. Not done: WP-H's
+`_split_close_chat_checks`, `_split_close_selected_checks` and the
+`_rv47_*` review checks (each failing on bf09633), the terminal suite's
+`_split_close_terminal_checks`, the preview suite's `_split_checks` and
+`tests/v2/terminal_check.py`'s unreadable-from-the-first-byte case; the PR's
+mutation tables show each failing with its mutation. WP-G3's shared buffer
+arrived with ED-2. Not done: WP-H's
 thinking line.
 
 **Sidebar status dots (2026-10-08, design §18; contract in

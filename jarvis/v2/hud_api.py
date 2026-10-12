@@ -34,8 +34,9 @@ FILE_CAP = 2 * 1024 * 1024
 PATCH_CAP = 1024 * 1024
 ATTACH_CAP = 4 * 1024 * 1024
 LOG = logging.getLogger(__name__)
-# What the HUD listener serves; the write tools refuse it (config.HUD_DIST, BR-0).
-HUD_DIST = config.HUD_DIST
+# What the HUD listener serves is `config.HUD_DIST`, read per request (the
+# write tools refuse the same folder, BR-0): the newest installed build
+# (`hud_install`, decision C-1), or `hud/dist` itself under JARVIS_HUD_DEV=1.
 
 # Claude Code's own `/usage` command. Undocumented, so a failure is "not
 # reported", never a number invented from the ledger. The User-Agent has to
@@ -166,13 +167,15 @@ def protected(raw, resolved):
     """A credential file — a bundle by name (`secrets.PROTECTED_NAMES`), a
     credential env file (`secrets.is_env_credential`, the owner's `.env*`
     rule), or anything the editor withholds (a credential folder, a login
-    file: `editor_policy`) — as written or where it resolves. What a diff,
-    the preview origin and an `@path` attachment refuse. The editor's own
-    routes ask `editor_policy` instead, which lets the owner open an env file
-    (and only the owner: those routes are owner-only)."""
+    file, a tool's credential store, v2's session carriers: `editor_policy`)
+    — as written or where it resolves. What a diff, the preview origin and an
+    `@path` attachment refuse. **No gate exemption here** (review of PR #49,
+    LOW2): the gate's state stays readable in the editor's own routes only,
+    which ask `editor_policy` directly and also let the owner open an env
+    file (and only the owner: those routes are owner-only)."""
     return (is_protected(raw) or is_protected(resolved)
             or is_env_credential(raw) or is_env_credential(resolved)
-            or editor_policy.Policy().is_withheld(Path(raw), Path(resolved)))
+            or editor_policy.Policy().withheld_anywhere(Path(raw), Path(resolved)))
 
 
 def read_file(path, limit=FILE_CAP):
@@ -224,7 +227,7 @@ def tree(project, name, depth):
             is_dir = actual.is_dir()
             if not is_dir and not actual.is_file():
                 continue
-            flag = policy.tree_flag(raw, actual)
+            flag = policy.tree_flag(raw, actual, is_dir=is_dir)
             row = dict(name=str(child.relative_to(directory)), kind="dir" if is_dir else "file",
                        size=stat.st_size, mtime=stat.st_mtime)
             inner = only
@@ -306,22 +309,25 @@ def _editor_target(project, name):
 def read_for_editor(project, name):
     """`GET /projects/{id}/file`: the file, its etag and what the editor may do.
 
-    `kind` is `editor_policy`'s; `readonly` is the sentence the editor shows
-    beside its lock (null when the file is editable and Jarvis may read it). A
-    withheld file comes back with no content and no etag, ever."""
+    `kind` is `editor_policy`'s; `editable` is whether the editor may save it
+    (the HUD follows it, never the kind alone: an env file that is not UTF-8
+    is `env` and not editable); `readonly` is the sentence the editor shows
+    beside its lock (null when the file is editable and Jarvis may read it).
+    A withheld file comes back with no content and no etag, ever."""
     raw, target, verdict = _editor_target(project, name)
     if verdict.withheld:
         return dict(path=name, abs=str(target), kind=verdict.kind, readonly=verdict.reason,
-                    protected=True)
+                    editable=False, protected=True)
     data, stat = read_file(target)
     verdict = editor_policy.classify_bytes(verdict, data)
-    text = verdict.kind != editor_policy.BINARY
+    text = editor_policy.is_text(data)
     content = data.decode("utf-8", errors="replace")
     return dict(path=name, abs=str(target), content=content, etag=editor_policy.etag(data),
                 mtime=stat.st_mtime, mtime_ns=stat.st_mtime_ns, size=stat.st_size,
                 encoding=("utf-8-bom" if data.startswith(b"\xef\xbb\xbf") else "utf-8") if text else None,
                 eol=editor_policy.eol_of(content) if text else None,
-                kind=verdict.kind, readonly=verdict.reason if verdict.kind != editor_policy.TEXT else None,
+                kind=verdict.kind, editable=verdict.editable,
+                readonly=verdict.reason if verdict.kind != editor_policy.TEXT else None,
                 protected=False)
 
 
@@ -335,7 +341,10 @@ def _atomic_write(target: Path, data: bytes, mode: int, *, exclusive: bool) -> b
     comes back)."""
     import tempfile
     target.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.", suffix=".tmp")
+    # Named after the file itself (`.env.production.<x>.tmp`), so a temp of
+    # an env file is an env file by name too — credential to every rule, and
+    # ignored by a `.env*` gitignore line (review of PR #49, LOW4).
+    fd, tmp_name = tempfile.mkstemp(dir=target.parent, prefix=f"{target.name}.", suffix=".tmp")
     tmp = Path(tmp_name)
     try:
         with os.fdopen(fd, "wb") as handle:
@@ -369,9 +378,10 @@ def save_for_editor(daemon, project, body):
     (the editor never overwrites bytes it could not show exactly); 409 with
     the current `etag` (null: the file is gone) when the bytes on disk are not
     the ones the save was made against. A file's mode is kept; a new file is
-    0644, a new env file 0600."""
+    0644, a new env file 0600. An unexpected error from the disk is a 500
+    (permission denied, a 403), never the dispatcher's 409, which the HUD
+    reads as a conflict."""
     from .daemon import _object
-    from .permissions import denied_file
     body = _object(body, ("path", "content", "expected_etag", "expected_mtime"), ("path", "content"))
     has_etag, has_mtime = "expected_etag" in body, "expected_mtime" in body
     if has_etag == has_mtime:
@@ -391,48 +401,61 @@ def save_for_editor(daemon, project, body):
         fail(400, "content is not valid Unicode text")
     if len(data) > FILE_CAP:
         fail(413, "file exceeds 2 MB")
-    with daemon._lock:
-        daemon._active()
-        raw, target, verdict = _editor_target(project, body["path"])
-        if not verdict.editable:
-            fail(403, "read-only here: " + (verdict.reason or "this file cannot be written from the editor"))
-        if verdict.kind != editor_policy.ENV and (denied_file(str(raw)) or denied_file(str(target))):
-            fail(403, "protected file cannot be written")
-        if target.exists() and not target.is_file():
-            fail(400, "target is not a regular file")
-        current = st = None
-        if target.exists():
-            with target.open("rb") as handle:
-                current = handle.read(FILE_CAP + 1)
-                st = os.fstat(handle.fileno())
-            if len(current) > FILE_CAP:
-                fail(413, "file on disk exceeds 2 MB")
-            if not editor_policy.is_text(current):
-                fail(403, "read-only here: the file on disk is not UTF-8 text, and the editor never "
-                          "rewrites bytes it could not show exactly")
-        if has_etag:
-            now = editor_policy.etag(current) if current is not None else None
-            if now != expected:
-                return 409, {"error": ("file is gone since it was read" if now is None
-                                       else "file exists" if expected is None
-                                       else "file changed on disk since it was read"),
-                             "etag": now}
-        else:
-            if (st.st_mtime if st is not None else None) != expected_mtime:
-                fail(409, "file changed since it was read")
-        if st is not None:
-            mode = st.st_mode & 0o7777
-        else:
-            mode = 0o600 if verdict.kind == editor_policy.ENV else 0o644
-        if not _atomic_write(target, data, mode, exclusive=current is None):
-            # Created by someone else between the check and the write.
-            return 409, {"error": "file exists", "etag": _cached_etag(target, target.stat())}
-        after = target.stat()
-        tag = editor_policy.etag(data)
-        with _ETAGS_LOCK:
-            _ETAGS[str(target)] = (_stat_key(after), tag)
-        return 200, {"etag": tag, "abs": str(target), "mtime": after.st_mtime,
-                     "mtime_ns": after.st_mtime_ns, "size": after.st_size}
+    try:
+        with daemon._lock:
+            daemon._active()
+            return _save_locked(project, body, data, has_etag, expected, expected_mtime)
+    except PermissionError as exc:
+        # The filesystem said no: not a conflict (a 409 is the conflict bar).
+        fail(403, f"the file could not be written: permission denied ({type(exc).__name__})")
+    except OSError as exc:
+        # Anything else unexpected from the disk is the daemon's failure, not
+        # a conflict the owner could resolve: 500, never the dispatcher's 409.
+        fail(500, f"the file could not be written ({type(exc).__name__})")
+
+
+def _save_locked(project, body, data, has_etag, expected, expected_mtime):
+    from .permissions import denied_file
+    raw, target, verdict = _editor_target(project, body["path"])
+    if not verdict.editable:
+        fail(403, "read-only here: " + (verdict.reason or "this file cannot be written from the editor"))
+    if verdict.kind != editor_policy.ENV and (denied_file(str(raw)) or denied_file(str(target))):
+        fail(403, "protected file cannot be written")
+    if target.exists() and not target.is_file():
+        fail(400, "target is not a regular file")
+    current = st = None
+    if target.exists():
+        with target.open("rb") as handle:
+            current = handle.read(FILE_CAP + 1)
+            st = os.fstat(handle.fileno())
+        if len(current) > FILE_CAP:
+            fail(413, "file on disk exceeds 2 MB")
+        if not editor_policy.is_text(current):
+            fail(403, "read-only here: the file on disk is not UTF-8 text, and the editor never "
+                      "rewrites bytes it could not show exactly")
+    if has_etag:
+        now = editor_policy.etag(current) if current is not None else None
+        if now != expected:
+            return 409, {"error": ("file is gone since it was read" if now is None
+                                   else "file exists" if expected is None
+                                   else "file changed on disk since it was read"),
+                         "etag": now}
+    else:
+        if (st.st_mtime if st is not None else None) != expected_mtime:
+            fail(409, "file changed since it was read")
+    if st is not None:
+        mode = st.st_mode & 0o7777
+    else:
+        mode = 0o600 if verdict.kind == editor_policy.ENV else 0o644
+    if not _atomic_write(target, data, mode, exclusive=current is None):
+        # Created by someone else between the check and the write.
+        return 409, {"error": "file exists", "etag": _cached_etag(target, target.stat())}
+    after = target.stat()
+    tag = editor_policy.etag(data)
+    with _ETAGS_LOCK:
+        _ETAGS[str(target)] = (_stat_key(after), tag)
+    return 200, {"etag": tag, "abs": str(target), "mtime": after.st_mtime,
+                 "mtime_ns": after.st_mtime_ns, "size": after.st_size}
 
 
 def stat_for_editor(project, body):
@@ -567,7 +590,8 @@ def assemble_turn(project, body, *, paths: bool = True):
             fail(400, "attachment fields must be strings")
         name, mime = (item["name"] or "attachment")[:200], item["mime"] or "text/plain"
         if (is_protected(item["name"].replace("\\", "/"))
-                or is_env_credential_name(item["name"].replace("\\", "/").rsplit("/", 1)[-1])):
+                or is_env_credential_name(item["name"].replace("\\", "/").rsplit("/", 1)[-1])
+                or editor_policy.credential_name(item["name"])):
             notes.append(f"[{name} holds live credentials — not attached]")
             continue
         try:
@@ -994,6 +1018,62 @@ WORKSHOP_SANDBOX = "sandbox allow-scripts allow-forms"
 # violations somewhere of its own choosing).
 _RESERVED = ("frame-ancestors", "sandbox", "report-uri", "report-to")
 
+# -- the HUD's Content-Security-Policy (editor plan §2.7, ED-4) ------------------------
+#
+# Sent on **every** response from the HUD and API listeners — the page, every
+# `/assets/*` file (a worker takes its policy from its own script's response,
+# not the page's), JSON, SSE, errors and the terminal socket's `101` — in the
+# one header WP-E's frame rule already rides in. Only code bundled at build
+# time runs in the window that gates approvals: no inline script, no script
+# from another origin, no `eval`, no plugin, no `<base>`, no form posting
+# anywhere. Why each line:
+#   - `script-src 'self'`: the bundle only. **No `'unsafe-eval'`, and no
+#     `'wasm-unsafe-eval'` yet**: nothing in the HUD compiles WebAssembly
+#     today (Monaco 0.57, xterm 6 and the HUD's own code have none), so it is
+#     left out until ED-5's tree-sitter brings the first `.wasm` and the test
+#     that loads every grammar under this policy (decided: ED-5, not here).
+#   - `worker-src 'self'`: Monaco's one `editor.worker`, a module worker
+#     Vite emits under `/assets/` (no `blob:` worker).
+#   - `connect-src 'self'`: `fetch`, the `/events` stream, the `/stt` upload
+#     and — CSP3, as Chromium implements it — same-origin `ws://` for the
+#     terminal socket (proved headless by tests/face/hud_v2_csp_check.py).
+#   - `style-src 'self' 'unsafe-inline'`: xterm (and Monaco) inject `<style>`
+#     elements at run time, which only `'unsafe-inline'` admits. React's
+#     `style={…}` is not the reason — it sets properties through the CSSOM,
+#     which CSP does not govern. Styles cannot run code.
+#   - `img-src 'self' data:`: the avatar `<img>` (`/avatar.svg`) and Monaco's
+#     `data:` SVG squiggles. `font-src 'self' data:`: the codicon font.
+#   - `media-src 'self'`: same-origin audio only (`/say`), should playback
+#     ever come back; the microphone and the approval chime are Web Audio,
+#     which no CSP directive governs.
+#   - `frame-src`: the Preview pane's loopback frames, by the host names a
+#     CSP can express (an IPv6 literal or another 127/8 address cannot be
+#     named, so the Preview judge refuses those with a sentence). An
+#     `http:` source also matches `https:` (CSP3). The judge already refuses
+#     the daemon's own ports; `frame-ancestors 'none'` stops the frame from
+#     becoming the HUD.
+#   - `base-uri`, `form-action`, `object-src 'none'`: nothing to allow.
+HUD_POLICY: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("default-src", ("'none'",)),
+    ("script-src", ("'self'",)),
+    ("worker-src", ("'self'",)),
+    ("connect-src", ("'self'",)),
+    ("style-src", ("'self'", "'unsafe-inline'")),
+    ("img-src", ("'self'", "data:")),
+    ("font-src", ("'self'", "data:")),
+    ("media-src", ("'self'",)),
+    ("frame-src", ("http://localhost:*", "http://*.localhost:*", "http://127.0.0.1:*",
+                   "http://0.0.0.0:*")),
+    ("base-uri", ("'none'",)),
+    ("form-action", ("'none'",)),
+    ("object-src", ("'none'",)),
+)
+# The avatar SVG's own lockdown (`GET /avatar.svg`): nothing but its own
+# inline styles, should the file ever be opened as a document.
+AVATAR_CSP = "default-src 'none'; style-src 'unsafe-inline'"
+_FETCH = frozenset({"default-src", "script-src", "worker-src", "connect-src", "style-src", "img-src",
+                    "font-src", "media-src", "frame-src", "object-src"})
+
 
 def _own_directives(extra) -> list[str]:
     """A response's own CSP directives, checked.
@@ -1027,16 +1107,57 @@ def _own_directives(extra) -> list[str]:
     return directives
 
 
+def _source(token: str) -> str:
+    # Keywords and schemes are case-insensitive; compare them folded.
+    return token.lower() if token.startswith("'") or token.endswith(":") else token
+
+
+def _narrowed(own: list[str]) -> list[tuple[str, tuple[str, ...]]]:
+    """`HUD_POLICY` with a response's own directives folded in — narrowing only.
+
+    A response may restate a directive the policy sets, with a subset of its
+    sources (`'none'` is the empty set, so it always narrows); anything else
+    raises ValueError: a source the policy does not allow, a directive it
+    does not set, the same directive twice. A response that states its own
+    `default-src` (necessarily `'none'`) also drops every fetch directive of
+    the policy it does not restate, so they fall back to its `'none'` — the
+    avatar's `default-src 'none'; style-src 'unsafe-inline'` keeps exactly the
+    lockdown it had before the policy existed."""
+    base = dict(HUD_POLICY)
+    stated: dict[str, tuple[str, ...]] = {}
+    for directive in own:
+        name, *sources = directive.split()
+        name = name.lower()
+        if name in stated:
+            raise ValueError(f"a response states the CSP directive {name!r} twice")
+        if name not in base:
+            raise ValueError(f"a response may only narrow a directive the HUD policy sets, not {name!r}")
+        wanted = tuple(_source(t) for t in sources)
+        allowed = {_source(t) for t in base[name]} - {"'none'"}
+        if not wanted or not (set(wanted) - {"'none'"} <= allowed) or ("'none'" in wanted and len(wanted) > 1):
+            raise ValueError(f"a response's own {name!r} may only narrow the HUD policy's")
+        stated[name] = wanted
+    merged = []
+    for name, sources in HUD_POLICY:
+        if name in stated:
+            merged.append((name, stated[name]))
+        elif "default-src" in stated and name in _FETCH:
+            continue
+        else:
+            merged.append((name, sources))
+    return merged
+
+
 def content_security_policy(*extra: str | None) -> str:
     """The one `Content-Security-Policy` the HUD and API listeners send.
 
-    Always `frame-ancestors 'none'`; a response may add directives of its own
-    (an avatar's SVG locks itself down further), checked by `_own_directives`
-    so none of them can change the frame rule. This is the function to extend
-    when the HUD gains a full policy (editor plan ED-4, which adds
-    `'wasm-unsafe-eval'`): one builder, so no response sends a second,
-    conflicting policy that drops the frame rule."""
-    return "; ".join([*_own_directives(extra), FRAME_ANCESTORS])
+    `HUD_POLICY` (ED-4) and `frame-ancestors 'none'` (WP-E), in one header; a
+    response may add directives of its own (an avatar's SVG locks itself
+    down further), checked by `_own_directives` (no comma, printable ASCII,
+    nothing reserved) and by `_narrowed` (they may only narrow the policy).
+    One builder, so no response ever sends a second, conflicting policy."""
+    merged = _narrowed(_own_directives(extra))
+    return "; ".join([*(f"{name} {' '.join(sources)}" for name, sources in merged), FRAME_ANCESTORS])
 
 
 def workshop_security_policy(*extra: str | None) -> str:
@@ -1058,11 +1179,11 @@ def frame_headers(handler, csp: str | None = None) -> list[tuple[str, str]]:
     return [("Content-Security-Policy", content_security_policy(csp)), ("X-Frame-Options", "DENY")]
 
 
-def binary(handler, data, mime, *, csp=None):
+def binary(handler, data, mime, *, csp=None, status=200):
     # Checked before a byte is written: a bad policy is one 400 (the
     # dispatcher's answer to a ValueError), never half a response.
-    _own_directives((csp,))
-    handler.send_response(200)
+    frame_headers(handler, csp)
+    handler.send_response(status)
     handler.send_header("Content-Type", mime)
     handler.send_header("Content-Length", str(len(data)))
     handler.send_header("Cache-Control", "no-store")
@@ -1072,7 +1193,93 @@ def binary(handler, data, mime, *, csp=None):
     handler.end_headers()
     handler._streaming = True
     handler.wfile.write(data)
-    return 200, None
+    return status, None
+
+
+# -- the HUD's own files (decision C-1, ED-4) -------------------------------------------
+
+_HUD_CAP = 64 * 1024 * 1024
+
+
+def _hud_page(sentence: str) -> bytes:
+    import html as _html
+    return (b"<!doctype html><meta charset=\"utf-8\"><title>J.A.R.V.I.S.</title><p>"
+            + _html.escape(sentence).encode() + b"</p>\n")
+
+
+_NOT_INSTALLED = _hud_page("The HUD is not installed. Run `jarvis hud install` in a terminal, "
+                           "then reload this window.")
+_FAILED = _hud_page("The installed HUD failed verification: no installed build still matches "
+                    "its manifest, so none is served. Run `jarvis hud install` in a terminal, "
+                    "then reload this window. The daemon's log names what did not match.")
+
+
+def hud_served() -> dict:
+    """What `GET /` serves (review of PR #44, L1/L6), for `/status` and the
+    daemon's start-up log: `build` (the id, "dev" under JARVIS_HUD_DEV=1, or
+    None), `git_head` and `dirty` from that build's manifest, `state` —
+    "installed", "fallback" (a newer build failed verification and an older
+    one is served), "dev", "not installed", "failed verification" or
+    "refused: …" — and `passed_over`, the newer builds that failed. Never
+    raises."""
+    from . import hud_install
+    if config.HUD_DEV:
+        return {"build": "dev", "git_head": None, "dirty": None, "state": "dev", "passed_over": []}
+    built, state = hud_install.state(config.HUD_DIST)
+    try:
+        skipped = hud_install.passed_over(config.HUD_DIST, built) if state != "not installed" else []
+    except Exception:     # noqa: BLE001
+        skipped = []
+    if built is None:
+        return {"build": None, "git_head": None, "dirty": None, "state": state, "passed_over": skipped}
+    return {"build": built.id, "git_head": built.git_head, "dirty": built.dirty, "state": state,
+            "passed_over": skipped}
+
+
+def hud_build_id() -> str | None:
+    """Which HUD this daemon serves: a build id, "dev", or None."""
+    return hud_served()["build"]
+
+
+def hud_files(handler, parts):
+    """`GET /` and `GET /assets/*`: the HUD, from the newest intact installed
+    build (`hud_install.state`).
+
+    Under JARVIS_HUD_DEV=1 (the headless suites) it is `hud/dist` as it is,
+    no link followed; otherwise only a file the build's manifest lists, still
+    matching its size and SHA-256 (`hud_install.read`). With no intact build
+    `GET /` is a 503 page that says which: nothing installed, or nothing that
+    passed verification."""
+    from . import hud_install
+    name = "index.html" if parts == [""] else unquote("/".join(parts))
+    if ".." in Path(name).parts or name.startswith("/") or "\\" in name or "\0" in name:
+        fail(403, "asset outside HUD")
+    if config.HUD_DEV:
+        root = Path(config.HUD_DIST)
+        path = (root / name).resolve()
+        if not path.is_relative_to(root.resolve()) or (root / name).is_symlink():
+            fail(403, "asset outside HUD")
+        if not path.is_file():
+            if parts == [""]:
+                return binary(handler, b"<!doctype html><title>J.A.R.V.I.S.</title>hud/dist is absent; "
+                              b"build the HUD first.\n", "text/html; charset=utf-8", status=503)
+            fail(404, "file not found")
+        data, _ = read_file(path, _HUD_CAP)
+    else:
+        root = config.HUD_DIST
+        if parts == [""]:
+            built, state = hud_install.state(root)
+            data = hud_install.read(built, "index.html") if built else None
+            if data is None:
+                page = (_NOT_INSTALLED if state == "not installed" else _FAILED
+                        if state == "failed verification" or built is not None
+                        else _hud_page(f"The HUD install folder was {state}"))
+                return binary(handler, page, "text/html; charset=utf-8", status=503)
+        else:
+            data = hud_install.find(root, name)
+            if data is None:
+                fail(404, "file not found")
+    return binary(handler, data, mimetypes.guess_type(name)[0] or "application/octet-stream")
 
 
 def check_origin(handler, *, preview=False):
@@ -1094,6 +1301,28 @@ def check_origin(handler, *, preview=False):
                 fail(400, "expected application/json")
 
 
+def _not_a_page(project, raw, target) -> bool:
+    """What the preview origin refuses beyond `protected` (review of PR #49,
+    LOW3). The preview listener has no owner check by design — the HUD frames
+    it — and it answers any loopback client, v1's `fetch_page` included
+    (loopback is allowed and 8403 is not a control port), while the Inbox is
+    rooted at `~`. So: no path with a hidden component inside the project
+    (`.docker/config.json`, `.kube/config`, `.npmrc`, a tool's dotfolder),
+    except `.well-known`; and nothing under Jarvis's own config and data
+    folders (session carriers, transcripts), wherever the project is."""
+    roots = [Path(project.root).resolve()] + [Path(p).expanduser().resolve() for p in project.extra_dirs]
+    for path in (Path(raw), Path(target)):
+        rel = next((path.relative_to(r) for r in roots if path.is_relative_to(r)), None)
+        if rel is None:
+            return True
+        if any(part.startswith(".") and part != ".well-known" for part in rel.parts):
+            return True
+        lexical = Path(os.path.abspath(path))
+        if any(p == d or p.is_relative_to(d) for d in editor_policy.jarvis_dirs() for p in (lexical, path.resolve())):
+            return True
+    return False
+
+
 def preview_route(handler, daemon, parts, query):
     if handler.command != "GET" or len(parts) < 2 or parts[0] != "p":
         fail(404, "preview route not found")
@@ -1102,7 +1331,7 @@ def preview_route(handler, daemon, parts, query):
     raw, target = scope(project, name)
     if target.is_dir():
         raw, target = scope(project, str(target / "index.html"))
-    if protected(raw, target):
+    if protected(raw, target) or _not_a_page(project, raw, target):
         fail(403, "protected file")
     data, _ = read_file(target, 32 * 1024 * 1024)
     return binary(handler, data, mimetypes.guess_type(target.name)[0] or "application/octet-stream")
@@ -1122,7 +1351,7 @@ def pickers(handler, daemon, parts, query):
             art = avatars.svg(av) if av else None
             if not art:
                 fail(404, "no avatar art")
-            return binary(handler, art.encode(), "image/svg+xml", csp="default-src 'none'; style-src 'unsafe-inline'")
+            return binary(handler, art.encode(), "image/svg+xml", csp=AVATAR_CSP)
         if name == "voices":
             return 200, {"current": voice.selected_voice(), "override": voice._voice_override, "voices": voice.catalog()}
         if name == "models":
@@ -1348,17 +1577,7 @@ def route(handler, daemon, parts, query):
     from .daemon import _object, safe_list
     method, stores = handler.command, daemon.stores
     if method == "GET" and (parts == [""] or parts[0] == "assets"):
-        if parts == [""]:
-            path = HUD_DIST / "index.html"
-            if not path.is_file():
-                return binary(handler, b"<!doctype html><title>J.A.R.V.I.S.</title>hud/dist is absent; build the HUD first.\n", "text/html; charset=utf-8")
-        else:
-            name = unquote("/".join(parts))
-            path = (HUD_DIST / name).resolve()
-            if ".." in Path(name).parts or not path.is_relative_to(HUD_DIST.resolve()) or path.is_symlink():
-                fail(403, "asset outside HUD")
-        data, _ = read_file(path, 32 * 1024 * 1024)
-        return binary(handler, data, mimetypes.guess_type(path.name)[0] or "application/octet-stream")
+        return hud_files(handler, parts)
     if "/".join(parts) in ("avatar.svg", "avatars", "avatar", "voices", "voice", "models", "models/catalog", "model", "mute", "say", "stt"):
         return pickers(handler, daemon, parts, query)
     if parts[0] == "terminals":

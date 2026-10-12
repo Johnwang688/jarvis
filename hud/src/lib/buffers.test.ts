@@ -1,39 +1,45 @@
 import { describe, expect, it } from "vitest";
 import {
   NO_TABS, TABS_MAX, chatExcerpt, closeTab, eolOf, jarvisMayRead, minimalEdit, openTab, parseKind, parseTabs,
-  pinTab, pollAction, sameTabs, touchedPath, writerOf, type Tabs,
+  editableOf, pinTab, pollAction, sameTabs, writerOf, writtenPaths, type Tabs,
 } from "./buffers";
 
 const tabs = (paths: string[], active: string | null = paths[0] ?? null, preview: string | null = null): Tabs =>
   ({ paths, active, preview });
+/** `openTab` where the case opens: a refusal (null) fails the case. */
+const ot = (t: Tabs, path: string, opts?: Parameters<typeof openTab>[2]): Tabs => {
+  const next = openTab(t, path, opts);
+  if (!next) throw new Error(`openTab refused ${path}`);
+  return next;
+};
 
 describe("tabs: a single click previews, a double click or an edit pins (§2.3)", () => {
   it("a single click opens a preview tab, and the next single click replaces it", () => {
-    let t = openTab(NO_TABS, "a.py");
+    let t = ot(NO_TABS, "a.py");
     expect(t).toEqual(tabs(["a.py"], "a.py", "a.py"));
-    t = openTab(t, "b.py");
+    t = ot(t, "b.py");
     expect(t).toEqual(tabs(["b.py"], "b.py", "b.py"));
   });
 
   it("a preview holding an edit is pinned, never replaced", () => {
-    const t = openTab(tabs(["a.py"], "a.py", "a.py"), "b.py", { keepPreview: (p) => p === "a.py" });
+    const t = ot(tabs(["a.py"], "a.py", "a.py"), "b.py", { keepPreview: (p) => p === "a.py" });
     expect(t).toEqual(tabs(["a.py", "b.py"], "b.py", "b.py"));
   });
 
   it("a double click pins: a new pinned tab, or the preview made permanent", () => {
-    let t = openTab(NO_TABS, "a.py", { pin: true });
+    let t = ot(NO_TABS, "a.py", { pin: true });
     expect(t).toEqual(tabs(["a.py"], "a.py", null));
-    t = openTab(t, "b.py");
-    t = openTab(t, "b.py", { pin: true });
+    t = ot(t, "b.py");
+    t = ot(t, "b.py", { pin: true });
     expect(t).toEqual(tabs(["a.py", "b.py"], "b.py", null));
     // A third file is a new preview beside the pinned ones.
-    expect(openTab(t, "c.py")).toEqual(tabs(["a.py", "b.py", "c.py"], "c.py", "c.py"));
+    expect(ot(t, "c.py")).toEqual(tabs(["a.py", "b.py", "c.py"], "c.py", "c.py"));
   });
 
   it("an open tab is only activated, and a new one goes right of the active one", () => {
     const t = tabs(["a", "b", "c"], "a");
-    expect(openTab(t, "c")).toEqual(tabs(["a", "b", "c"], "c"));
-    expect(openTab(t, "x", { pin: true }).paths).toEqual(["a", "x", "b", "c"]);
+    expect(ot(t, "c")).toEqual(tabs(["a", "b", "c"], "c"));
+    expect(ot(t, "x", { pin: true }).paths).toEqual(["a", "x", "b", "c"]);
   });
 
   it("pinTab pins only the preview", () => {
@@ -52,10 +58,30 @@ describe("tabs: a single click previews, a double click or an edit pins (§2.3)"
 
   it("never more than TABS_MAX tabs, and the one just opened always stays", () => {
     let t = NO_TABS;
-    for (let i = 0; i < TABS_MAX + 5; i++) t = openTab(t, `f${i}`, { pin: true });
+    for (let i = 0; i < TABS_MAX + 5; i++) t = ot(t, `f${i}`, { pin: true });
     expect(t.paths.length).toBe(TABS_MAX);
     expect(t.active).toBe(`f${TABS_MAX + 4}`);
     expect(t.paths).toContain(`f${TABS_MAX + 4}`);
+  });
+
+  it("past the cap the oldest CLEAN tab goes, never one on an unsaved edit (review of PR #49, M1)", () => {
+    let t = NO_TABS;
+    for (let i = 0; i < TABS_MAX; i++) t = ot(t, `f${i}`, { pin: true });
+    const dirty = new Set(["f0", "f1"]);
+    t = ot(t, "new", { pin: true, dirty: (p) => dirty.has(p) });
+    expect(t.paths).toContain("f0");
+    expect(t.paths).toContain("f1");
+    expect(t.paths).not.toContain("f2");
+    expect(t.paths).toContain("new");
+    expect(t.paths.length).toBe(TABS_MAX);
+    // Every other tab dirty: nothing opens, nothing closes.
+    const all = new Set(t.paths);
+    expect(openTab(t, "one-more", { pin: true, dirty: (p) => all.has(p) })).toBeNull();
+    // A preview tab that was the one dropped is no longer the preview.
+    const u = tabs(["pv", ...Array.from({ length: TABS_MAX - 1 }, (_, i) => `g${i}`)], "g0", "pv");
+    const v = ot(u, "x", { pin: true, dirty: () => false });
+    expect(v.paths).not.toContain("pv");
+    expect(v.preview).toBeNull();
   });
 
   it("parses field by field: a bad active or preview falls back alone; no paths is none", () => {
@@ -143,30 +169,55 @@ describe("the rest", () => {
     expect(["a\nb", "a\r\nb", "a\rb", "a\r\nb\n", "ab", ""].map(eolOf)).toEqual(["LF", "CRLF", "CR", "mixed", null, null]);
   });
 
-  it("kinds: unknown is text; Jarvis reads neither an env file nor a withheld one", () => {
-    expect(["text", "env", "gate", "safety", "binary", "withheld", "x", 3].map(parseKind))
-      .toEqual(["text", "env", "gate", "safety", "binary", "withheld", "text", "text"]);
+  it("kinds fail closed: an unknown one is read-only and closed to Jarvis, never text (review of PR #49, L2)", () => {
+    expect(["text", "env", "gate", "safety", "binary", "withheld", "x", 3, undefined].map(parseKind))
+      .toEqual(["text", "env", "gate", "safety", "binary", "withheld", "unknown", "unknown", "unknown"]);
     expect(jarvisMayRead("env")).toBe(false);
     expect(jarvisMayRead("withheld")).toBe(false);
+    expect(jarvisMayRead("unknown")).toBe(false);
+    expect(editableOf("unknown", true)).toBe(false);
     for (const k of ["text", "gate", "safety", "binary"] as const) expect(jarvisMayRead(k)).toBe(true);
   });
 
-  it("touchedPath reads the runner's file keys", () => {
-    expect(touchedPath({ file_path: "/a/b.py" })).toBe("/a/b.py");
-    expect(touchedPath({ path: " src/x.ts " })).toBe("src/x.ts");
-    expect(touchedPath({ command: "ls" })).toBeNull();
-    expect(touchedPath(null)).toBeNull();
+  it("editable follows the read, never the kind alone (review of PR #49, MED1)", () => {
+    expect(editableOf("text", true)).toBe(true);
+    expect(editableOf("env", true)).toBe(true);
+    expect(editableOf("env", false)).toBe(false);   // an env file that is not UTF-8
+    expect(editableOf("text", undefined)).toBe(false);
+    expect(editableOf("gate", true)).toBe(false);
+    expect(editableOf("binary", true)).toBe(false);
   });
 
-  it("writerOf: an absolute path exactly, a relative one at a path boundary, newest first, recent only", () => {
+  it("writtenPaths: write tools only, absolute, a relative one from the thread's folder (review of PR #49)", () => {
+    expect(writtenPaths("Write", { file_path: "/a/b.py" })).toEqual(["/a/b.py"]);
+    expect(writtenPaths("Edit", { file_path: "/a/./c/../b.py" })).toEqual(["/a/b.py"]);
+    expect(writtenPaths("NotebookEdit", { notebook_path: "/n.ipynb" })).toEqual(["/n.ipynb"]);
+    expect(writtenPaths("write_file", { path: "src/x.ts" }, "/w/app")).toEqual(["/w/app/src/x.ts"]);
+    expect(writtenPaths("apply_patch", { paths: ["/w/a.py", "b.py"], changes: [{ path: "/w/c.py" }] }, "/w"))
+      .toEqual(["/w/a.py", "/w/b.py", "/w/c.py"]);
+    // A read names a file too, and is no writer.
+    expect(writtenPaths("Read", { file_path: "/a/b.py" })).toEqual([]);
+    expect(writtenPaths("read_file", { path: "/a/b.py" })).toEqual([]);
+    expect(writtenPaths("Grep", { path: "/a" })).toEqual([]);
+    // A relative path with no folder to judge it from names nothing.
+    expect(writtenPaths("write_file", { path: "main.py" })).toEqual([]);
+    expect(writtenPaths("write_file", { path: "../../x" }, "/w")).toEqual([]);
+    expect(writtenPaths("Write", null)).toEqual([]);
+    expect(writtenPaths(undefined, { file_path: "/a" })).toEqual([]);
+    expect(writtenPaths("toString", { file_path: "/a" })).toEqual([]);
+  });
+
+  it("writerOf: an absolute path exactly — never a relative suffix across projects — newest first, recent only", () => {
     const now = 1_000_000;
     const t = [
       { path: "/w/app/main.py", writer: "Claude · chat", at: now - 10 },
-      { path: "app/main.py", writer: "Codex · task 41", at: now - 5 },
-      { path: "ain.py", writer: "nope", at: now - 4 },
+      { path: "/w/app/main.py", writer: "Codex · task 41", at: now - 5 },
+      { path: "app/main.py", writer: "a suffix", at: now - 4 },
+      { path: "/other/app/main.py", writer: "another project", at: now - 3 },
     ];
     expect(writerOf(t, "/w/app/main.py", now)).toBe("Codex · task 41");
     expect(writerOf(t.slice(0, 1), "/w/app/main.py", now)).toBe("Claude · chat");
+    expect(writerOf(t.slice(2, 3), "/w/app/main.py", now)).toBeNull();
     expect(writerOf(t, "/w/app/other.py", now)).toBeNull();
     expect(writerOf(t, "/w/app/main.py", now + 10 * 60_000)).toBeNull();
   });

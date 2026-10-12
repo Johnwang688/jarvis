@@ -307,8 +307,10 @@ def _served_under_checks(page, mock, check, until):
       const r = await fetch('/status');
       return [r.headers.get('x-frame-options'), r.headers.get('content-security-policy')];
     }""")
-    check("the mock HUD sends the daemon's frame headers (hud_api.frame_headers)",
-          got == ["DENY", "frame-ancestors 'none'"], str(got))
+    from jarvis.v2.hud_api import content_security_policy
+    check("the mock HUD sends the daemon's frame headers (hud_api.frame_headers): DENY and the full CSP",
+          got == ["DENY", content_security_policy()] and got[1].endswith("frame-ancestors 'none'")
+          and "script-src 'self';" in got[1], str(got))
 
 
 def _card_checks(page, mock, check, until):
@@ -341,11 +343,12 @@ def _split_checks(page, mock, check, until):
     page.locator(KEEP).check()
     until(lambda: _sandbox(page) == ON and _stored(page) == origin, timeout=3)
     page.locator('[data-testid="pane-2-split"]').click()
-    until(lambda: _ws(page)["ws"]["order"] == [1, 2, 3], timeout=3)
-    frame3 = _pane(3, '[data-testid="preview-frame"]')
+    until(lambda: len(_ws(page)["ws"]["order"]) == 3, timeout=3)
+    new = _ws(page)["ws"]["order"][2]           # right after pane 2; a free id (the stored 3 and 4 are kept)
+    frame3 = _pane(new, '[data-testid="preview-frame"]')
     until(lambda: _count(page, frame3) > 0, timeout=4)
-    keep3 = page.locator(_pane(3, '[data-testid="preview-keep-origin"]'))
-    spec3 = _ws(page)["ws"]["panes"][2]
+    keep3 = page.locator(_pane(new, '[data-testid="preview-keep-origin"]'))
+    spec3 = _ws(page)["ws"]["panes"][new - 1]
     check("G2: a Preview pane's copy loads the same URL beside it",
           page.locator(frame3).get_attribute("src") == dev and spec3.get("previewUrl") == dev, str(spec3))
     check("G2: without the source's keep-origin grant: its frame is sandboxed as any page is, the switch off",
@@ -368,7 +371,7 @@ def main():
                 headless=True,
                 args=["--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream"])
             preview_checks(browser, mock, f"http://127.0.0.1:{mock.port}", v2.check, v2.until,
-                           lambda ctx: v2.guard_live(ctx, v2.FAILURES.append), v2.FAKE_RECOGNIZER)
+                           v2.guard, v2.FAKE_RECOGNIZER)
             browser.close()
     finally:
         mock.stop()

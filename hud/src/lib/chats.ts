@@ -126,6 +126,15 @@ export function draftKey(c: ChatState, pane: PaneNo): string | null {
 }
 
 /**
+ * Where words go that belonged to a compose row no pane holds any more — a
+ * hidden one a split took back, a first send that failed after its pane was
+ * closed (review of PR #47). Any pane taking up a new compose row picks them
+ * up when its own row has nothing parked: the next new thread, wherever it
+ * opens.
+ */
+export const ORPHAN_DRAFT = "compose:*";
+
+/**
  * Whether a pane moving from `a` to `b` stays in the same conversation, so
  * its draft stays in the box: the same thread, or a compose row becoming the
  * thread it opened, or one compose row replacing another (New thread while
@@ -280,13 +289,13 @@ export function heldElsewhere(
  * takes back the pane ⊞ would bring back there (`setPreset`), as before.
  */
 export function besideTarget(
-  ws: Workspace, drawn: readonly PaneNo[], dirty: readonly PaneNo[] = [],
+  ws: Workspace, drawn: readonly PaneNo[], dirty: readonly PaneNo[] = [], holding: readonly PaneNo[] = [],
 ): { preset: Preset; pane: PaneNo; source?: PaneNo } {
   const own = orderOf(ws);
   const visible = drawn.length ? drawn : [own[0]];
   const grown = (preset: Preset, slot: number) => {
     const source = own[slot - 2];
-    const id = allocate({ order: own, kept: ws.kept }, dirty);
+    const id = allocate({ order: own, kept: ws.kept }, dirty, holding);
     if (id !== null) return { preset: LADDER[own.length + 1], pane: id, source };
     return { preset, pane: setPreset({ ...ws, order: own }, preset).order[slot - 1] };
   };

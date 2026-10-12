@@ -1959,10 +1959,12 @@ def _split_close_terminal_checks(page, mock, base, check, until, fake):
     check("G2: splitting a terminal pane opens one new terminal, in the source's folder, beside it",
           len(posts()) == n + 1 and _created(mock)[-1][1] == source_in
           and page.locator(_sel(new)).get_attribute("data-where") == "pane-2", f"{_created(mock)[-1]} vs {source_in}")
-    check("G2: the source was unreadable to Jarvis, so the copy is too, switched off before it is shown",
-          mock.sent("PATCH", f"/terminals/{new}") == [{"readable": False}] and fake._row(new)["readable"] is False
+    made = [b for (m, p, b) in mock.calls if m == "POST" and p == "/terminals"][-1]
+    check("G2: the source was unreadable to Jarvis, so the copy is too: made with the switch off, never PATCHed",
+          made.get("readable") is False and mock.sent("PATCH", f"/terminals/{new}") == []
+          and fake._row(new)["readable"] is False
           and page.locator(_sel(new, '[data-testid="term-readable"]')).get_attribute("aria-pressed") == "false",
-          str(mock.sent("PATCH", f"/terminals/{new}")))
+          f"{made} {mock.sent('PATCH', f'/terminals/{new}')}")
 
     # At the cap the copy is the picker, with the daemon's sentence, and nothing retries.
     mock.terminal_refuse = "6 terminals are open; close one first"
@@ -2288,7 +2290,7 @@ def main():
                 headless=True,
                 args=["--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream"])
             terminal_checks(browser, mock, f"http://127.0.0.1:{mock.port}", v2.check, v2.until,
-                            lambda ctx: v2.guard_live(ctx, v2.FAILURES.append), v2.FAKE_RECOGNIZER)
+                            v2.guard, v2.FAKE_RECOGNIZER)
             browser.close()
     finally:
         mock.stop()

@@ -185,6 +185,12 @@ export interface FileRead {
   eol?: string | null;
   /** ED-2 (`jarvis/v2/editor_policy.py`): text, env, gate, safety, binary or withheld. */
   kind?: string;
+  /**
+   * Whether the editor may save it: the HUD follows this, never the kind
+   * alone (an env file that is not UTF-8 is `env` and not editable). Absent
+   * reads as no.
+   */
+  editable?: boolean;
   /** The sentence beside the editor's lock (null: editable, and Jarvis may read it). */
   readonly?: string | null;
 }

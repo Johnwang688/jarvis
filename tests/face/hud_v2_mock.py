@@ -28,10 +28,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlparse
 
-# The daemon's own frame headers (WP-E), never a copy: the HUD under test is
-# always rendered under exactly what 8402 sends — `frame-ancestors 'none'` and
-# `X-Frame-Options: DENY` — and the mock workshop under the workshop's sandbox.
-from jarvis.v2.hud_api import frame_headers  # noqa: E402
+# The daemon's own headers (WP-E, ED-4), never a copy: the HUD under test is
+# always rendered under exactly what 8402 sends — the whole Content-Security-
+# Policy with `frame-ancestors 'none'`, and `X-Frame-Options: DENY` — so every
+# headless suite runs under the CSP; the mock workshop runs under the
+# workshop's sandbox.
+from jarvis.v2.hud_api import AVATAR_CSP, frame_headers  # noqa: E402
 
 _HUD_LISTENER = SimpleNamespace(server=SimpleNamespace())
 _PREVIEW_LISTENER = SimpleNamespace(server=SimpleNamespace(preview_only=True))
@@ -621,9 +623,12 @@ class MockDaemon:
             def log_message(self, *args):
                 pass
 
+            _csp = None             # a response's own directives (the avatar's)
+
             def end_headers(self):
-                for name, value in frame_headers(_HUD_LISTENER):
+                for name, value in frame_headers(_HUD_LISTENER, self._csp):
                     self.send_header(name, value)
+                self._csp = None
                 super().end_headers()
 
             # -- helpers
@@ -760,6 +765,7 @@ class MockDaemon:
                 if path == "/avatar.svg":
                     body = HOSTILE_SVG.encode()
                     self.send_response(200)
+                    self._csp = AVATAR_CSP          # as the daemon's `pickers` sends it
                     self.send_header("Content-Type", "image/svg+xml")
                     self.send_header("Content-Length", str(len(body)))
                     self.end_headers()
@@ -789,7 +795,7 @@ class MockDaemon:
                         rel = q.get("path", [""])[0]
                         abs_ = mock.abs_of(project, rel)
                         if rel in w["protected"]:
-                            return self._json({"path": rel, "abs": abs_, "kind": "withheld",
+                            return self._json({"path": rel, "abs": abs_, "kind": "withheld", "editable": False,
                                                "readonly": "a credential file: its contents are never sent to this window.",
                                                "protected": True})
                         rec = w["files"].get(rel)
@@ -797,11 +803,17 @@ class MockDaemon:
                             return self._err(404, "no such file")
                         kind = w["kinds"].get(rel, "text")
                         content = rec["content"]
+                        # The daemon's `editable` (ED-2's review, MED1): an
+                        # editable kind the editor still may not write — an
+                        # env file that is not UTF-8 — is in `uneditable`.
+                        editable = kind in ("text", "env") and rel not in w.get("uneditable", ())
                         return self._json({
                             "path": rel, "abs": abs_, "content": content, "etag": etag_of(content),
                             "mtime": rec["mtime"], "size": len(content.encode()), "protected": False,
-                            "encoding": "utf-8", "eol": eol_of(content), "kind": kind,
-                            "readonly": READONLY.get(kind)})
+                            "encoding": "utf-8" if editable or kind != "env" else None,
+                            "eol": eol_of(content), "kind": kind, "editable": editable,
+                            "readonly": (READONLY.get(kind) if editable or kind != "env"
+                                         else READONLY["env"] + " And read-only here: it holds NUL bytes.")})
 
                 # /threads/{id}/transcript|log
                 if len(parts) == 3 and parts[0] == "threads" and parts[2] == "transcript":
@@ -845,7 +857,11 @@ class MockDaemon:
                         if rel in w["protected"]:
                             files[rel] = {"kind": "withheld"}
                         elif rel in w["files"]:
-                            files[rel] = {"etag": etag_of(w["files"][rel]["content"]),
+                            # `stat_etags` (on cue): what the poll says while a
+                            # read already sees a newer write — a disk that moved
+                            # again between the stat and the read.
+                            files[rel] = {"etag": w.get("stat_etags", {}).get(rel)
+                                          or etag_of(w["files"][rel]["content"]),
                                           "kind": w["kinds"].get(rel, "text")}
                         else:
                             files[rel] = {"gone": True}
@@ -1147,7 +1163,7 @@ class MockDaemon:
                 if len(parts) == 3 and parts[0] == "projects" and parts[2] == "file":
                     rel = body.get("path", "")
                     kind = w["kinds"].get(rel, "text")
-                    if rel in w["protected"] or kind not in ("text", "env"):
+                    if rel in w["protected"] or kind not in ("text", "env") or rel in w.get("uneditable", ()):
                         return self._err(403, "read-only here")
                     rec = w["files"].get(rel)
                     if "expected_etag" in body:

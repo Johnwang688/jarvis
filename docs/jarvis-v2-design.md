@@ -2316,6 +2316,30 @@ typed in Monaco still starts push-to-talk and is lost (confirmed headless);
 the owner moved push-to-talk to Ctrl+D (2026-10-10), which its own PR
 delivers. The `monaco-vim` spike is ED-8's (E-11), not this package's.
 
+**The HUD's CSP and installed build (2026-10-11, ED-4 of the same plan;
+decision C-1; contract in `docs/hud-api.md`).** Every HUD and API response
+carries one full Content-Security-Policy (`hud_api.HUD_POLICY` with WP-E's
+`frame-ancestors 'none'`, in the one header): only bundled script, no inline
+script, no `eval`, no `blob:` worker, same-origin `connect-src` (the terminal
+socket included), loopback `frame-src`, and no `'wasm-unsafe-eval'` until
+ED-5's tree-sitter brings the first `.wasm`. A response may only narrow it
+(the avatar). The window that gates approvals is no longer served from the
+repo's agent-writable `hud/dist`: `jarvis hud install` — the owner's or the
+lead's, from their own shell; Jarvis is refused it in every spelling —
+builds `hud/` from a **clean** checkout (uncommitted `hud/` changes are
+refused unless `--allow-dirty`) and installs a read-only copy with a SHA-256
+manifest recording the commit under `~/.local/share/jarvis/hud/<build-id>/`.
+The daemon serves the newest **intact** build, checking every file's hash on
+every read, falls back past a newer build whose page fails, says on `GET /`
+whether nothing is installed or nothing passes, reports what it serves on
+`/status` (`hud_build`, `hud_git_head`, `hud_state`), and warns at start-up
+when that build's commit is not the checkout's HEAD — so a forgotten install
+shows up in the log rather than as a silently old window. An install needs a
+window reload, not a restart (an open window's lazy chunks are still served
+from the older build). Every headless HUD suite runs under the policy with a
+violation watch; `tests/face/hud_v2_csp_check.py` proves the HUD's needs work
+and an attacker's are refused.
+
 **Push-to-talk is Ctrl+D (2026-10-10).** The owner: "can we change the push
 to talk button? change it to Ctrl + D just like it is in claude." It was
 Space, which is a character in every box the owner types in: each typing
@@ -2453,6 +2477,26 @@ shell, the scrub, Claude's hook, Codex's grants) are ENV-1's, on this rule.
 `path:Lx-y` and a fence, into the selected chat's box, unsent) so the env
 rule has something to disable; ED-7 extends it.
 
+**ED-2's review round (2026-10-11, PR #49).** An env file is never demoted
+to `binary`: one that is not UTF-8 (UTF-16 from PowerShell 5.1 on `/mnt/c`,
+Latin-1) stays `env`, read-only, and every read now says `editable`, which
+the HUD follows rather than the kind. The gate's readable exemption holds
+only for a gate path that resolves to itself and is no credential by another
+rule, and only in the editor's own routes — an `@path`, a diff and the preview
+origin have none (a `models.json` symlinked to a key had made the key
+readable through all three). Withheld now also covers docker's, kube's,
+npm's and PyPI's credential stores and v2's session carriers, and **the
+preview origin refuses any dotfile path but `.well-known` and anything in
+Jarvis's own folders** — it answers every loopback client. In the window: a
+pane's × lets go of that pane's buffers only; a project going away keeps
+every pane on it that holds an edit no pane outside them holds (two panes
+sharing one edit used to let go together and orphan it); past 40 tabs only a
+clean one closes; Compare re-reads once per new conflict, never in a loop;
+one file reached through two projects at once is one model; a kind the window
+does not know is read-only and closed to Jarvis; the crash prompt can save
+every unsaved edit; a reload in place never reads as an edit; and the "changed
+on disk by …" toast names only a write tool, by absolute path.
+
 **Split and close (2026-10-11, WP-G2 of
 `docs/plans/2026-10-10-hud-split-panes-plan.md`; decisions S-2, S-6–S-8).**
 The owner asked for a × on every pane, more than once, and a VS Code split
@@ -2473,17 +2517,25 @@ default, and an id a later split reuses mounts fresh.
   diff (S-7); a preview, the same URL, judged again, never the keep-origin
   grant; a terminal, a new shell in the folder the source was opened in
   (S-6), unreadable to Jarvis if the source is — switched off before it is
-  ever shown. Split is refused at eight, when the next shape would not be
-  drawn whole in this window (at 1280×800, six cannot become seven), and
-  when the only ids left are hidden panes holding unsaved edits.
+  ever shown (`POST /terminals` takes `readable`). Split is refused at
+  eight, when the next shape would not be drawn whole in this window (at
+  1280×800, six cannot become seven), and when the only ids left are hidden
+  panes holding unsaved edits. A split takes a free id first, then an empty
+  hidden pane, then one whose compose row holds unsent words, which wait for
+  the next new thread; a stored pre-G1 workspace's panes 2–4 count as
+  hidden, so a split never writes over them.
 - **What × keeps**: a thread's turn keeps running, its sidebar dot stays,
   and the pane that next opens that thread has its Stop; words in its box and
   words a Stop handed back wait for the thread; a composing chat's unsent
   words and a File pane's unsaved edit — one no other pane holds — are asked
   about first, inline, never in a modal (for an edit: Save / Don't save /
-  Cancel, as closing the last tab on one asks); a terminal goes back to the panel, alive, attached, as the
-  selected tab. Focus goes to the pane now in that slot — or, when the
-  selected chat closes, to the chat selected before it — never the page.
+  Cancel, as closing the last tab on one asks; the question goes when it no
+  longer holds); a terminal goes back to the panel, alive, attached, as the
+  selected tab. A compose pane closed while its first message opens the
+  thread leaves that turn for the pane that opens the thread next, Stop and
+  all. Focus goes where the mic is: the selected chat while it is still
+  drawn, else the chat selected before it, else the pane now in that slot —
+  never the page, and never a chat that merely slid into the closed slot.
   One click closes one pane, even when a double-click's second click lands
   on the × that moved under the pointer.
 - **Nothing assumes pane 1**: after it is closed, the window's chat falls

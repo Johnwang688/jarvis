@@ -6,7 +6,7 @@ with Playwright's `route_web_socket`, so the socket never leaves the
 browser. This file only keeps the world's terminal rows and their tickets:
 
   - `GET /terminals` → the rows;
-  - `POST /terminals {in, cols?, rows?}` → 201 row; `in` is "home" or exactly
+  - `POST /terminals {in, cols?, rows?, readable?}` → 201 row; `in` is "home" or exactly
     one of `{"thread"|"project"|"task": id}`, any other shape 400, an unknown
     id 404, the seventh terminal 409 with the daemon's sentence;
   - `PATCH /terminals/{id} {readable}` → row, exactly that key and a bool;
@@ -84,8 +84,11 @@ def handle(h, mock, method: str, path: str, body) -> bool:
             h._json(snapshot)
             return True
         if method == "POST":
-            if not isinstance(body, dict) or set(body) - {"in", "cols", "rows"} or "in" not in body:
-                h._err(400, "expected {in, cols?, rows?}")
+            if not isinstance(body, dict) or set(body) - {"in", "cols", "rows", "readable"} or "in" not in body:
+                h._err(400, "expected {in, cols?, rows?, readable?}")
+                return True
+            if not isinstance(body.get("readable", True), bool):
+                h._err(400, "readable must be a boolean")
                 return True
             resolved, refused = _resolve(w, body["in"])
             if refused:
@@ -109,6 +112,7 @@ def handle(h, mock, method: str, path: str, body) -> bool:
             # with no integration, one whose startup file never ran).
             rec = row(f"{0xa0000000 + seq:08x}", f"bash · {label}", project_id=pid,
                       **mock.__dict__.get("terminal_defaults", {}))
+            rec["readable"] = body.get("readable", True)
             rows.append(rec)
             mock.__dict__.setdefault("terminal_created", []).append((rec["id"], body["in"]))
             h._json(rec, 201)

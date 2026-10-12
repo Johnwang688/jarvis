@@ -633,6 +633,205 @@ class EnvFiles(Daemonised):
         self.assertNotIn(FAKE_SECRET.encode(), payload if isinstance(payload, bytes) else json.dumps(payload).encode())
 
 
+# ---------------------------------------------------------------------------
+# the review of PR #49 (each failing on f869543)
+# ---------------------------------------------------------------------------
+
+class ReviewEnvNotUtf8(Daemonised):
+    """MED1: an env file that is not UTF-8 stays an env file — never `binary`,
+    which showed no lock, opened Add to chat and gave it no `dotenv`."""
+
+    def setUp(self):
+        super().setUp()
+        # PowerShell 5.1's `Out-File` writes UTF-16LE with a BOM.
+        (self.home / "app" / ".env.utf16").write_bytes(
+            "\ufeffAPI_KEY={}\r\n".format(FAKE_SECRET).encode("utf-16-le"))
+        (self.home / "app" / ".env.latin1").write_bytes(f"API_KEY={FAKE_SECRET}-caf\xe9\n".encode("latin-1"))
+
+    def test_kind_stays_env_and_it_is_read_only(self):
+        for name in ("app/.env.utf16", "app/.env.latin1"):
+            with self.subTest(name=name):
+                before = (self.home / name).read_bytes()
+                self.assertEqual(self.classify(self.home / name).kind, EP.ENV)
+                self.assertFalse(self.classify(self.home / name).editable)
+                got = self.read(name)
+                self.assertEqual((got["kind"], got["editable"], got["encoding"]), ("env", False, None))
+                self.assertIn("Jarvis can't read", got["readonly"])
+                self.assertIn("not UTF-8" if "latin1" in name else "NUL", got["readonly"])
+                self.save(name, "X=1\n", expected_etag=got["etag"], status=403)
+                self.assertEqual((self.home / name).read_bytes(), before)
+                self.assertEqual(self.stat([name])["files"][name]["kind"], "env")
+        rows = {r["name"]: r for r in self.owner("GET", f"{self.url}/tree?path=app&depth=1")["entries"]}
+        self.assertEqual(rows[".env.utf16"].get("policy"), "env")
+
+    def test_every_read_says_editable(self):
+        self.assertIs(self.read("notes.txt")["editable"], True)
+        self.assertIs(self.read("app/.env.production")["editable"], True)
+        self.assertIs(self.read("latin1.txt")["editable"], False)
+        self.assertIs(self.read(".config/jarvis/allowlist.json")["editable"], False)
+        self.assertIs(self.read(".ssh/id_test")["editable"], False)
+
+
+class ReviewGateSymlink(Daemonised):
+    """LOW2: a gate file that is a symlink never exempts where it goes."""
+
+    def test_a_symlinked_gate_file_exempts_nothing(self):
+        cj = self.home / ".config" / "jarvis"
+        (self.home / ".ssh" / "id_x").write_text("-----BEGIN FAKE KEY X-----\n")
+        (cj / "models.json").symlink_to(self.home / ".ssh" / "id_x")
+        self.assertNotIn((self.home / ".ssh" / "id_x").resolve(), EP.Policy().gate)
+        for name in (".ssh/id_x", ".config/jarvis/models.json"):
+            with self.subTest(name=name):
+                got = self.read(name)
+                self.assertEqual((got["kind"], got["protected"]), ("withheld", True))
+                self.assertNotIn("content", got)
+                status, payload = self.raw("GET", f"/p/{self.project.id}/{name}", port=self.daemon.workshop_port)
+                self.assertEqual(status, 403)
+                self.assertNotIn(b"FAKE KEY X", payload if isinstance(payload, bytes) else b"")
+                message = H.assemble_turn(self.project, dict(text=f"see @{name}"))
+                self.assertNotIn("FAKE KEY X", message.text)
+        inside = self.owner("GET", f"{self.url}/tree?path=.config/jarvis&depth=1")["entries"]
+        self.assertEqual([r["name"] for r in inside], ["allowlist.json"])
+        # A real gate file stays readable in the editor, and only there.
+        self.assertEqual(self.read(".config/jarvis/allowlist.json")["kind"], "gate")
+        self.assertIn("not attached", H.assemble_turn(self.project, dict(text="@.config/jarvis/allowlist.json")).text)
+
+    def test_a_gate_path_configured_into_a_credential_folder_is_no_gate(self):
+        (self.home / ".ssh" / "routing.json").write_text("{}\n")
+        with patch.object(config, "ROUTING_PATH", self.home / ".ssh" / "routing.json"):
+            self.assertNotIn((self.home / ".ssh" / "routing.json").resolve(), EP.Policy().gate)
+            self.assertEqual(self.read(".ssh/routing.json")["kind"], "withheld")
+
+
+class ReviewCredentialStores(Daemonised):
+    """LOW3: the preview origin serves no dotfile and nothing of Jarvis's own;
+    `@path`, a dropped file and the editor withhold the common tool stores
+    and v2's session carriers."""
+
+    STORES = {".docker/config.json": '{"auths": {"x": {"auth": "FAKESTORE"}}}',
+              ".kube/config": "users:\n- user: {token: FAKESTORE}\n",
+              ".npmrc": "//registry.npmjs.org/:_authToken=FAKESTORE\n",
+              ".pypirc": "[pypi]\npassword = FAKESTORE\n",
+              ".aws/credentials": "aws_secret_access_key = FAKESTORE\n",
+              ".gnupg/secring.gpg": "FAKESTORE",
+              ".config/gh/hosts.yml": "github.com:\n  oauth_token: FAKESTORE\n"}
+
+    def setUp(self):
+        super().setUp()
+        for name, body in self.STORES.items():
+            (self.home / name).parent.mkdir(parents=True, exist_ok=True)
+            (self.home / name).write_text(body)
+
+    def test_each_store_is_withheld_everywhere(self):
+        for name in self.STORES:
+            with self.subTest(name=name):
+                status, payload = self.raw("GET", f"/p/{self.project.id}/{name}", port=self.daemon.workshop_port)
+                self.assertEqual(status, 403)
+                message = H.assemble_turn(self.project, dict(text=f"look at @{name}"))
+                self.assertNotIn("FAKESTORE", message.text)
+                self.assertIn("not attached", message.text)
+                got = self.read(name)
+                self.assertEqual(got["kind"], "withheld")
+                self.assertNotIn("content", got)
+
+    def test_carriers_are_withheld(self):
+        data = self.home / "jdata"
+        carrier = data / "claude" / "t1" / ("mcp-" + "a" * 32 + ".json")
+        codex = data / "codex" / "t1" / "config.toml"
+        for path in (carrier, codex):
+            path.parent.mkdir(parents=True)
+            path.write_text("JARVIS_MCP_TOKEN = 'jmcp_FAKESTORE'\n")
+        with patch.object(config, "V2_DATA_DIR", data):
+            for path in (carrier, codex):
+                name = str(path.relative_to(self.home))
+                with self.subTest(name=name):
+                    self.assertEqual(self.read(name)["kind"], "withheld")
+                    message = H.assemble_turn(self.project, dict(text=f"@{name}"))
+                    self.assertNotIn("FAKESTORE", message.text)
+                    status, _ = self.raw("GET", f"/p/{self.project.id}/{name}", port=self.daemon.workshop_port)
+                    self.assertEqual(status, 403)
+            # Anything else in Jarvis's data folder is no page either.
+            (data / "threads").mkdir()
+            (data / "threads" / "log.html").write_text("<p>transcript</p>")
+            status, _ = self.raw("GET", f"/p/{self.project.id}/jdata/threads/log.html",
+                                 port=self.daemon.workshop_port)
+            self.assertEqual(status, 403)
+
+    def test_the_preview_origin_refuses_hidden_components_but_not_well_known(self):
+        (self.home / "site" / ".hidden").mkdir(parents=True)
+        (self.home / "site" / ".hidden" / "page.html").write_text("<p>x</p>")
+        (self.home / "site" / ".well-known").mkdir()
+        (self.home / "site" / ".well-known" / "security.txt").write_text("Contact: x\n")
+        (self.home / "site" / "index.html").write_text("<p>site</p>")
+        (self.home / "page-link.html").symlink_to(self.home / "site" / ".hidden" / "page.html")
+        port = self.daemon.workshop_port
+        self.assertEqual(self.raw("GET", f"/p/{self.project.id}/site/.hidden/page.html", port=port)[0], 403)
+        self.assertEqual(self.raw("GET", f"/p/{self.project.id}/page-link.html", port=port)[0], 403)
+        self.assertEqual(self.raw("GET", f"/p/{self.project.id}/site/.well-known/security.txt", port=port)[0], 200)
+        self.assertEqual(self.raw("GET", f"/p/{self.project.id}/site/", port=port)[0], 200)
+
+    def test_a_dropped_store_is_never_attached(self):
+        import base64
+        for name in (".npmrc", "C:\\Users\\o\\.pypirc", ".netrc", "home/.docker/config.json", ".kube/config",
+                     ".aws/credentials", ".git-credentials"):
+            with self.subTest(name=name):
+                dropped = H.assemble_turn(self.project, dict(text="x", attachments=[dict(
+                    name=name, mime="text/plain", data_b64=base64.b64encode(b"FAKESTORE").decode())]))
+                self.assertNotIn("FAKESTORE", dropped.text)
+        kept = H.assemble_turn(self.project, dict(text="x", attachments=[dict(
+            name="config.json", mime="text/plain", data_b64=base64.b64encode(b"ordinary").decode())]))
+        self.assertIn("ordinary", kept.text)
+
+
+class ReviewNits(Daemonised):
+    def test_an_env_temp_is_an_env_file_by_name(self):
+        """LOW4: the atomic write's temp was `..env.production.X.tmp`: no
+        credential name, and not ignored by a `.env*` line."""
+        seen = []
+        real = os.replace
+
+        def spy(src, dst, *a, **kw):
+            if Path(dst).name == ".env.production":  # the daemon's other writes are not this one
+                seen.append(Path(src).name)
+            return real(src, dst, *a, **kw)
+        got = self.read("app/.env.production")
+        with patch.object(H.os, "replace", spy):
+            self.save("app/.env.production", "K=2\n", expected_etag=got["etag"])
+        self.assertEqual(len(seen), 1)
+        self.assertTrue(seen[0].startswith(".env.production.") and seen[0].endswith(".tmp"), seen)
+        self.assertTrue(secrets.is_env_credential_name(seen[0]))
+        import fnmatch
+        self.assertTrue(fnmatch.fnmatch(seen[0], ".env*"))
+
+    def test_a_folder_named_env_is_no_env_file(self):
+        (self.home / "py" / ".env" / "bin").mkdir(parents=True)
+        (self.home / "py" / ".env.local").write_text("K=1\n")
+        rows = {r["name"]: r for r in self.owner("GET", f"{self.url}/tree?path=py&depth=1")["entries"]}
+        self.assertNotIn("policy", rows[".env"])
+        self.assertEqual(rows[".env.local"].get("policy"), "env")
+
+    def test_an_unexpected_disk_error_is_500_not_a_conflict(self):
+        got = self.read("notes.txt")
+
+        def boom(*a, **kw):
+            raise OSError(5, "Input/output error")
+
+        def denied(*a, **kw):
+            raise PermissionError(13, "Permission denied")
+        with patch.object(H, "_atomic_write", boom):
+            payload = self.save("notes.txt", "x\n", expected_etag=got["etag"], status=500)
+        self.assertNotIn("etag", payload)
+        with patch.object(H, "_atomic_write", denied):
+            self.save("notes.txt", "x\n", expected_etag=got["etag"], status=403)
+        self.assertEqual((self.home / "notes.txt").read_text(), "hello\n")
+
+    def test_editor_policy_is_self_protected(self):
+        from jarvis.tools.files import SELF_PROTECTED, _self_protected
+        self.assertIn("jarvis/v2/editor_policy.py", SELF_PROTECTED)
+        with patch.object(config, "REPO_ROOT", Path(__file__).resolve().parents[2]):
+            self.assertTrue(_self_protected(Path(__file__).resolve().parents[2] / "jarvis/v2/editor_policy.py"))
+
+
 class Page(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         data = b"<!doctype html><title>elsewhere</title>"

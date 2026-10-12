@@ -68,6 +68,17 @@ export function isLoopbackHost(host: string): boolean {
   return /^127\.\d+\.\d+\.\d+$/.test(h);
 }
 
+/**
+ * The loopback hosts the HUD's Content-Security-Policy can frame (ED-4,
+ * `frame-src` in `hud_api.HUD_POLICY`). A CSP host source cannot name an IPv6
+ * literal or a 127/8 address other than 127.0.0.1, so a frame there would
+ * only draw as blocked: the judge refuses it with a sentence instead.
+ */
+export function isFrameableHost(host: string): boolean {
+  const h = host.toLowerCase();
+  return h === "localhost" || h.endsWith(".localhost") || h === "127.0.0.1" || h === "0.0.0.0";
+}
+
 function portOf(v: unknown): number | null {
   return typeof v === "number" && Number.isInteger(v) && v > 0 && v < 65536 ? v : null;
 }
@@ -135,6 +146,14 @@ export function judgePreviewUrl(raw: string, ports: Partial<DaemonPorts> = {}): 
           "is never loaded in a frame inside itself."
         : "Refused: that is Jarvis's API listener. Jarvis's own control plane is " +
           "never loaded in a frame.",
+    };
+  }
+  if (!isFrameableHost(url.hostname)) {
+    return {
+      ok: false,
+      url: "",
+      reason: "Refused: the window frames only localhost, *.localhost, 127.0.0.1 and 0.0.0.0. " +
+        `Try http://localhost:${port}${url.pathname}${url.search} instead.`,
     };
   }
   return { ok: true, url: url.href, reason: "" };

@@ -169,7 +169,10 @@ def editor_checks(browser, mock, base, check, until, guard, init_script):
         _boot(page, mock, base, until)
         for section in (_tab_checks, _narrow_checks, _shared_checks, _reload_in_place_checks, _conflict_checks,
                         _gone_checks, _persist_checks, _env_checks, _kinds_checks, _add_to_chat_checks,
-                        _unmount_checks, _card_checks):
+                        _unmount_checks, _card_checks,
+                        # The review of PR #49, each failing on f869543.
+                        _rv49_env_not_utf8_checks, _rv49_project_gone_checks, _rv49_compare_loop_checks,
+                        _rv49_two_projects_checks, _rv49_crash_save_checks, _rv49_double_save_checks):
             _fresh(page, mock, until, keep_files=keep)
             try:
                 section(page, mock, check, until)
@@ -319,18 +322,35 @@ def _shared_checks(page, mock, check, until):
 def _reload_in_place_checks(page, mock, check, until):
     check("setup: calc.py open in pane 2", _open(page, until, 2, "calc.py"))
     before = _text(page, 2)
-    mock.emit("tool_started", {"call_id": "w1", "name": "Write", "args": {"file_path": "calc.py"}}, thread_id="t1")
+    p1 = next(p for p in mock.world["projects"] if p["id"] == "p1")
+    abs_calc = mock.abs_of(p1, "calc.py")
+    # Only a write tool names a writer, by the file's absolute path (review of
+    # PR #49): a read of it, or a relative path matched by its tail, never.
+    mock.emit("tool_started", {"call_id": "r0", "name": "Read", "args": {"file_path": abs_calc}}, thread_id="t1")
+    mock.emit("tool_started", {"call_id": "w0", "name": "write_file", "args": {"path": "calc.py"}},
+              thread_id="t-elsewhere")
+    mock.disk_write("calc.py", "def add(a, b):\n    return a + b\n\n# a first rewrite\n")
+    until(lambda: "a first rewrite" in _text(page, 2), timeout=8)
+    note = page.locator(_pane(2, '[data-testid="file-note"]'))
+    until(lambda: note.count() > 0 and "changed on disk" in note.inner_text(), timeout=2)
+    check("a read, or a relative path from no known folder, names no writer",
+          note.count() > 0 and note.inner_text().strip().endswith("changed on disk — reloaded"),
+          note.inner_text() if note.count() else "no note")
+    check("and a reload in place never pins a preview tab (it is not an edit)",
+          page.locator(_tab(2, "calc.py")).get_attribute("data-preview") == "true")
+    before = _text(page, 2)
+    mock.emit("tool_started", {"call_id": "w1", "name": "Write", "args": {"file_path": abs_calc}}, thread_id="t1")
     mock.disk_write("calc.py", "def add(a, b):\n    return a + b\n\n# an agent added this\n")
     until(lambda: "an agent added this" in _text(page, 2), timeout=8)
     check("a clean file an agent rewrote reloads in place", "an agent added this" in _text(page, 2))
-    note = page.locator(_pane(2, '[data-testid="file-note"]'))
-    until(lambda: note.count() > 0 and "changed on disk" in note.inner_text(), timeout=2)
+    until(lambda: note.count() > 0 and "by Jarvis" in note.inner_text(), timeout=2)
     check("with a toast that names the writer the activity feed saw",
           note.count() > 0 and "changed on disk by Jarvis · desk chat" in note.inner_text(),
           note.inner_text() if note.count() else "no note")
     check("and it is still clean, at the disk's etag",
           page.locator(_tab(2, "calc.py")).get_attribute("data-dirty") == "false"
           and (_buf(page, "calc.py") or {}).get("etag") == etag_of(mock.world["files"]["calc.py"]["content"]))
+    mock.emit("tool_finished", {"call_id": "r0", "name": "Read", "ok": True, "summary": ""}, thread_id="t1")
     mock.emit("tool_finished", {"call_id": "w1", "name": "Write", "ok": True, "summary": ""}, thread_id="t1")
     page.locator(_lines(2)).click()
     page.keyboard.press("Control+z")
@@ -640,6 +660,206 @@ def _card_checks(page, mock, check, until):
     check("and the edit and the bar are still there after it", "#under_a_card" in _text(page, 2) and bar.count() == 1)
 
 
+# ---------------------------------------------------------------------------
+# the review of PR #49 (each failing on f869543)
+# ---------------------------------------------------------------------------
+
+def _rv49_env_not_utf8_checks(page, mock, check, until):
+    """MED1: an env file the daemon says is not editable (one that is not
+    UTF-8) is still an env file: the lock, Add to chat closed, `dotenv` — and
+    read-only, because the HUD follows `editable`, never the kind alone."""
+    w = mock.world
+    w["files"][".env.utf16"] = {"content": "API_KEY=sk-mock-utf16-fake\n", "mtime": 1757900300}
+    w["kinds"][".env.utf16"] = "env"
+    w["uneditable"] = {".env.utf16"}
+    row = {"name": ".env.utf16", "kind": "file", "size": 30, "mtime": 1757900300, "policy": "env"}
+    w["tree"][""].append(row)
+    try:
+        _boot(page, mock, None, until, reload=True)
+        page.locator(_pane(2, '[data-testid="file-.env.utf16"]')).click()
+        host = page.locator(_pane(2, '[data-testid="editor"]'))
+        until(lambda: host.count() == 1 and host.get_attribute("data-path") == ".env.utf16"
+              and host.get_attribute("data-language") is not None, timeout=10)
+        lock = page.locator(_pane(2, '[data-testid="editor-lock"]'))
+        reason = page.locator(_pane(2, '[data-testid="editor-readonly-reason"]'))
+        check("MED1: an env file that is not editable keeps the lock, and says it is read-only",
+              lock.count() == 1 and reason.count() == 1 and "not text" in reason.inner_text(),
+              reason.inner_text() if reason.count() else "no read-only reason")
+        check("MED1: Add to chat stays closed and its language stays dotenv",
+              page.locator(_pane(2, '[data-testid="add-to-chat"]')).is_disabled()
+              and host.get_attribute("data-language") == "dotenv")
+        check("MED1: it opens read-only, Save off", host.get_attribute("data-readonly") == "true"
+              and page.locator(_pane(2, '[data-testid="file-save"]')).is_disabled())
+        before = _text(page, 2)
+        page.locator(_lines(2)).click()
+        page.keyboard.type("x")
+        time.sleep(0.2)
+        check("MED1: typing changes nothing", _text(page, 2) == before
+              and (_buf(page, ".env.utf16") or {}).get("editable") is False)
+    finally:
+        w["files"].pop(".env.utf16", None)
+        w["kinds"].pop(".env.utf16", None)
+        w.pop("uneditable", None)
+        w["tree"][""].remove(row)
+
+
+def _rv49_project_gone_checks(page, mock, check, until):
+    """H2 (and H1 behind it): two File panes pinned to one project share an
+    edit; the project is archived. Both stay pinned with the gone prompt —
+    pane by pane, each saw "another pane holds it" and both let go — and a ×
+    on any other pane never discards the edit."""
+    tabs = {"paths": ["calc.py"], "active": "calc.py", "preview": None}
+    ws = json.dumps({"preset": "cols3", "focused": 2, "panes": [
+        {"view": "chat"}, {"view": "file", "projectId": "p2", "editors": tabs},
+        {"view": "file", "projectId": "p2", "editors": tabs}, {"view": "task"}]})
+    _set_ws(page, ws)
+    _boot(page, mock, None, until, reload=True)
+    until(lambda: "return a + b" in _text(page, 2) and "return a + b" in _text(page, 3), timeout=10)
+    check("setup: calc.py of p2 in panes 2 and 3", "return a + b" in _text(page, 3))
+    check("setup: an edit in pane 2", _type(page, until, 2, "\n#shared_edit"))
+    until(lambda: "#shared_edit" in _text(page, 3), timeout=3)
+    mock.emit("project_archived", {"project_id": "p2"}, project_id="p2")
+    gone2, gone3 = page.locator('[data-testid="pane-2-gone"]'), page.locator('[data-testid="pane-3-gone"]')
+    until(lambda: gone2.count() > 0 and gone3.count() > 0, timeout=4)
+    panes = _ws(page)["ws"]["panes"]
+    buf = _buf(page, "calc.py") or {}
+    check("H2: the project archived, both panes sharing the edit stay pinned and both ask",
+          gone2.count() == 1 and gone3.count() == 1 and panes[1].get("projectId") == "p2"
+          and panes[2].get("projectId") == "p2", str(panes[1:3]))
+    check("H2: and the edit is still held by both tabs",
+          buf.get("dirty") is True and sorted(buf.get("refs") or []) == ["2|calc.py", "3|calc.py"], str(buf))
+    # × on the chat pane: a pane that held none of it discards none of it (H1).
+    page.locator('[data-testid="pane-1-close"]').click()
+    until(lambda: page.locator('[data-testid="pane-1"]').count() == 0, timeout=4)
+    buf = _buf(page, "calc.py") or {}
+    check("H1: × on another pane leaves the edit alone", buf.get("dirty") is True, str(buf))
+    # Discard in pane 2: pane 3 still holds the edit, and still asks.
+    page.locator('[data-testid="pane-2-discard"]').click()
+    until(lambda: gone2.count() == 0, timeout=4)
+    buf = _buf(page, "calc.py") or {}
+    check("discarding in one pane leaves the edit the other pane holds, which still asks",
+          buf.get("dirty") is True and buf.get("refs") == ["3|calc.py"] and gone3.count() == 1, str(buf))
+    page.locator('[data-testid="pane-3-discard"]').click()
+    until(lambda: _buf(page, "calc.py") is None or not (_buf(page, "calc.py") or {}).get("dirty"), timeout=4)
+    check("and discarding in the last one throws it away",
+          not any(b.get("dirty") for b in _buffers(page)), str(_buffers(page)))
+
+
+def _rv49_compare_loop_checks(page, mock, check, until):
+    """M2: Compare reads the disk again once per new conflict etag — never in
+    a loop while the disk it reads disagrees with what the poll said."""
+    w = mock.world
+    try:
+        check("setup: calc.py open in pane 2", _open(page, until, 2, "calc.py"))
+        check("setup: an edit", _type(page, until, 2, "\n#mine_m2"))
+        mock.disk_write("calc.py", "# disk A\n")
+        bar = page.locator(_pane(2, '[data-testid="editor-conflict"]'))
+        until(lambda: bar.count() > 0, timeout=8)
+        page.locator(_pane(2, '[data-testid="conflict-compare"]')).click()
+        cmp_ = page.locator(_pane(2, '[data-testid="editor-compare"]'))
+        until(lambda: cmp_.count() > 0 and cmp_.locator(".editor.original .view-lines").count() > 0, timeout=8)
+        # The poll will say B while every read already sees C: the disk moved
+        # again between the poll's stat and Compare's read.
+        w["stat_etags"] = {"calc.py": etag_of("# disk B\n")}
+        mock.disk_write("calc.py", "# disk C\n")
+        until(lambda: bar.get_attribute("data-again") == "true", timeout=8)
+        start = len(mock.sent("GET", "/projects/p1/file"))
+        time.sleep(1.5)
+        reads = len(mock.sent("GET", "/projects/p1/file")) - start
+        check("M2: Compare re-reads once for the new etag, never in a loop", reads <= 2, f"{reads} reads in 1.5 s")
+    finally:
+        w.pop("stat_etags", None)
+
+
+def _rv49_two_projects_checks(page, mock, check, until):
+    """L1: one file reached through two projects, restored in two panes at
+    once, is one model — never one disposed under its tab."""
+    w = mock.world
+    p1 = next(p for p in w["projects"] if p["id"] == "p1")
+    p9 = dict(p1, id="p9", name="jarvis-src", root=p1["root"].rstrip("/") + "/src", inbox=False)
+    w["projects"].append(p9)
+    w["files"]["main.py"] = dict(w["files"]["src/main.py"])
+    errors: list[str] = []
+    on_error = lambda e: errors.append(str(e))  # noqa: E731
+    page.on("pageerror", on_error)
+    try:
+        ws = json.dumps({"preset": "cols3", "focused": 2, "panes": [
+            {"view": "chat"},
+            {"view": "file", "projectId": "p1", "editors": {"paths": ["src/main.py"], "active": "src/main.py"}},
+            {"view": "file", "projectId": "p9", "editors": {"paths": ["main.py"], "active": "main.py"}},
+            {"view": "task"}]})
+        _set_ws(page, ws)
+        _boot(page, mock, None, until, reload=True)
+        until(lambda: "print" in _text(page, 2) and "print" in _text(page, 3), timeout=10)
+        bufs = [b for b in _buffers(page) if b["abs"].endswith("/src/main.py")]
+        check("L1: one file through two projects, restored at once, is one buffer held by both",
+              len(bufs) == 1 and sorted(bufs[0]["refs"]) == ["2|src/main.py", "3|main.py"], str(bufs))
+        check("L1: and no tab died on a disposed model", not any("disposed" in e.lower() for e in errors),
+              "; ".join(errors[:2]))
+        _type(page, until, 2, "\n#through_p1")
+        until(lambda: "#through_p1" in _text(page, 3), timeout=3)
+        check("L1: an edit through one project shows through the other", "#through_p1" in _text(page, 3))
+    finally:
+        page.remove_listener("pageerror", on_error)
+        w["projects"].remove(p9)
+        w["files"].pop("main.py", None)
+
+
+def _rv49_crash_save_checks(page, mock, check, until):
+    """L3: after a crash the kept edit can reach the disk — "Save N unsaved
+    files" on the crash prompt — and never under a card."""
+    check("setup: calc.py open in pane 2", _open(page, until, 2, "calc.py"))
+    check("setup: an edit", _type(page, until, 2, "\n#saved_after_the_crash"))
+    page.evaluate("window.__hudCrashProbe = 'workspace'")
+    page.evaluate("window.__hud.dispatch({type: 'patch', patch: {error: 'crash probe render'}})")
+    until(lambda: page.locator('[data-testid="hud-crashed"]').count() > 0, timeout=4)
+    page.evaluate("delete window.__hudCrashProbe")
+    save = page.locator('[data-testid="hud-crashed-save"]')
+    check("L3: the crash prompt offers to save the kept edit", save.count() == 1
+          and "Save 1 unsaved file" in save.inner_text(), save.inner_text() if save.count() else "none")
+    _approval(mock, "crashsave1")
+    until(lambda: page.locator('[data-testid="approval-card"]').count() > 0, timeout=4)
+    time.sleep(0.25)
+    puts = len(mock.sent("PUT", "/projects/p1/file"))
+    check("L3: under a card it is disabled and behind the inert veil",
+          save.is_disabled() and page.evaluate(
+              "!!document.querySelector('[data-testid=\"hud-crashed-save\"]').closest('[inert]')"))
+    page.keyboard.press("Escape")
+    until(lambda: page.locator('[data-testid="approval-card"]').count() == 0, timeout=4)
+    check("L3: nothing was saved under the card", len(mock.sent("PUT", "/projects/p1/file")) == puts)
+    save.click()
+    until(lambda: mock.world["files"]["calc.py"]["content"].endswith("#saved_after_the_crash"), timeout=4)
+    saved = page.locator('[data-testid="hud-crashed-saved"]')
+    until(lambda: saved.count() > 0, timeout=3)
+    check("L3: and it saves, against the etag it was read as",
+          mock.world["files"]["calc.py"]["content"].endswith("#saved_after_the_crash")
+          and mock.sent("PUT", "/projects/p1/file")[-1].get("expected_etag")
+          == etag_of("def add(a, b):\n    return a + b\n")
+          and saved.count() == 1 and save.count() == 0)
+
+
+def _rv49_double_save_checks(page, mock, check, until):
+    """One save at a time: a second Ctrl+S while the first is on its way sends
+    nothing (the mutation that dropped the guard survived the first round)."""
+    check("setup: calc.py open in pane 2", _open(page, until, 2, "calc.py"))
+    check("setup: an edit", _type(page, until, 2, "\n#twice"))
+    mock.world["put_delays"] = [1.0]
+    try:
+        puts = len(mock.sent("PUT", "/projects/p1/file"))
+        page.locator(_lines(2)).click()
+        page.keyboard.press("Control+s")
+        time.sleep(0.15)
+        page.keyboard.press("Control+s")
+        until(lambda: page.locator(_tab(2, "calc.py")).get_attribute("data-dirty") == "false", timeout=5)
+        time.sleep(0.5)
+        sent = mock.sent("PUT", "/projects/p1/file")[puts:]
+        check("a second Ctrl+S during a save sends no second PUT, and raises no conflict bar",
+              len(sent) == 1 and page.locator(_pane(2, '[data-testid="editor-conflict"]')).count() == 0,
+              f"{len(sent)} PUTs")
+    finally:
+        mock.world.pop("put_delays", None)
+
+
 def main():
     from playwright.sync_api import sync_playwright
     from tests.face import hud_v2_check as v2
@@ -654,7 +874,7 @@ def main():
                 headless=True,
                 args=["--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream"])
             editor_checks(browser, mock, f"http://127.0.0.1:{mock.port}", v2.check, v2.until,
-                          lambda ctx: v2.guard_live(ctx, v2.FAILURES.append), v2.FAKE_RECOGNIZER)
+                          v2.guard, v2.FAKE_RECOGNIZER)
             browser.close()
     finally:
         mock.stop()
