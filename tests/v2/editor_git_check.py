@@ -159,6 +159,42 @@ class Base(Repo):
         self.base("nope.txt", status=404)
         self.base("../outside.txt", status=403)
 
+    def test_a_deleted_file_answers_what_head_holds(self):
+        # The Diff pane's uncommitted changes: a deletion's left side.
+        head = git(self.proj, "rev-parse", "HEAD").stdout.strip()
+        (self.proj / "plain.txt").unlink()
+        got = self.base("plain.txt")
+        self.assertEqual((got["state"], got["text"], got["head"], got.get("deleted")),
+                         ("ok", "one\ntwo\nthree\n", head, True))
+        # Its whole folder gone too, and staged with `git rm`.
+        git(self.proj, "rm", "-q", "-r", "src")
+        self.assertFalse((self.proj / "src").exists())
+        got = self.base("src/main.cpp")
+        self.assertEqual((got["state"], got["text"], got.get("deleted")),
+                         ("ok", "int main() {\n  return 0;\n}\n", True))
+        (self.proj / "blob.bin").unlink()
+        got = self.base("blob.bin")
+        self.assertEqual((got["state"], got["text"], got.get("deleted")), ("binary", None, True))
+        # A file that is there says nothing of a deletion.
+        self.assertNotIn("deleted", self.base(".gitignore"))
+
+    def test_nothing_on_disk_and_nothing_in_head_is_still_404(self):
+        self.base("gone/never.txt", status=404)
+        # Something there that is not a file: a broken link is not a deletion.
+        (self.proj / "plain.txt").unlink()
+        (self.proj / "plain.txt").symlink_to(self.proj / "nowhere.txt")
+        self.base("plain.txt", status=404)
+        # No commit yet: nothing HEAD holds.
+        fresh = self.home / "fresh2"
+        fresh.mkdir()
+        git(fresh, "init", "-q")
+        url = self.project_at(fresh, "Fresh2")
+        self.base("a.txt", status=404, url=url)
+        # No repository at all.
+        (self.home / "loose2").mkdir()
+        url = self.project_at(self.home / "loose2", "Loose2")
+        self.base("a.txt", status=404, url=url)
+
     def test_a_plain_rename_reads_its_source(self):
         git(self.proj, "mv", "plain.txt", "moved.txt")
         got = self.base("moved.txt")
@@ -222,6 +258,15 @@ class Refusals(Repo):
                 self.assertEqual(calls, [], f"git ran for {path}")
         self.assertIn("env file", self.refused(".env")[0]["error"])
         self.assertIn("credential", self.refused("google_token.json")[0]["error"])
+
+    def test_a_deletion_is_judged_as_the_file_was(self):
+        # Deleted from the working tree, its HEAD text is still never served.
+        for path in (".env", ".env.production", "google_token.json"):
+            (self.proj / path).unlink()
+            with self.subTest(path=path):
+                got, calls = self.refused(path)
+                self.assertEqual(calls, [], f"git ran for a deleted {path}")
+        self.assertIn("env file", self.refused(".env")[0]["error"])
 
     def test_a_credential_folder_in_a_home_repository(self):
         h = self.home

@@ -2944,9 +2944,11 @@ is load-bearing**: `_risky_config` reads the superproject's config only, and
 a status that recurses runs `git status` inside the submodule, which obeys
 *its* config — measured: a submodule's `filter.x.clean` ran on a superproject
 status through `gitops._git` (a same-size, mtime-moved file forces the
-hash). **The same hole is open in the `git` tool** (`gitops.run(path,
-["status"])` and `["diff"]` each ran a submodule's filter, measured in-process;
-`gitops.py` is SELF_PROTECTED: reported, not fixed here). A base read inside a submodule is refused anyway
+hash). **The same hole was open in the `git` tool** (`gitops.run(path,
+["status"])` and `["diff"]` each ran a submodule's filter, measured in-process)
+until 2026-10-12 (PR #65), when `gitops` itself was kept out of submodules (see *Agents
+that cannot ask* in Safety design); the editor's own flag stays, since its
+`_risky` reads the superproject's config only. A base read inside a submodule is refused anyway
 (its config sets `core.worktree`). The owner's global config (a git-lfs
 filter) still runs on a status, as in gitops. **The window**:
 `lib/linediff.ts` is Myers in linear space (middle snake, explicit stack, never
@@ -3120,6 +3122,86 @@ round's: the clock removed (eight vitests, and in Chromium four ~10 s long
 tasks) and poison removed (three vitests). Not
 done: a buffer renamed later keeps the `.editorconfig` it opened with, and an
 edit to `.editorconfig` reaches files opened after it (3 s), not those open.
+
+**The Diff pane shows the project's uncommitted changes (2026-10-12; the
+owner: "the Diff doesn't work right now it just says to select a Task", and
+yes to VS Code's Source Control view; design §18; contract in
+`docs/hud-api.md`).** No new route: ED-9's `git/status` and `git/base` and
+ED-2's read. **The mode** is `lib/scm.ts` `diffMode`: **a Diff pane never
+shows another task than a drawn Task pane** (review of PR #67, L3) — while
+one is drawn and shows the window's task, the Diff shows that task's diff,
+over a pin and after a thread is picked, and its picker is off, saying why;
+else a task picked more
+recently than a thread (`taskFocus`, the rule Editor and Browser panes follow) shows
+the task's diff exactly as before (`DiffTab`) — **the task beats the pin**,
+because a pane's `projectId` is shared by its views (a File pane pins its
+project when it opens a file, and keeps the pin when switched to Diff; with
+the pin first, `hud_v2_csp_check`'s task click showed uncommitted changes),
+and `workspace.show("task")` relies on a drawn Diff pane following the task;
+else the pane's pinned live project (its header's `pane-N-diff-project`
+picker, E-13's shape) shows that project's uncommitted changes; else the
+chat's project's; else a sentence. **Picking a project in that picker sets
+`taskFocus` false** (as picking a thread does), so the choice shows at once;
+the picker reads Follow while a task is shown. The caption (`diff-mode`,
+`data-mode`, `data-why`) says what and why — `diff-mode-what` and
+`diff-mode-why`: the Task pane's task, the task picked last, this pane's
+project or the chat's project (`diffWhy`). **The list** (`components/ProjectDiff.tsx`, `scmRows`): ED-9's
+one status poller, subscribed only while the pane is drawn; **`ProjectDiff`
+is `memo(...)` with a comparator that reads its callbacks through a ref**
+(App hands it fresh closures every render) and its rows follow the status's
+version, never the answer object — unmemoized, a chat keystroke redrew the
+list, 17 ms at 2,000 changed files and 132 ms at the 20,000 cap (review M1;
+`ProjectDiff.test.ts` counts row renders); modified/added/
+untracked/renamed/deleted/conflict files and untracked folders, each with
+its letter (M A U R D C) in the explorer's `data-git` colours and
+`FileIcon`; `ignored` never; truncation and no repository/no changes said
+in a sentence. **The sides**: HEAD from `git/base` in a `jarvis-diff:`
+model this view makes and disposes; the right side **is the open buffer's
+own model** when one holds the file (found by project and path, by
+`root_real`, or by the read's `abs`) — borrowed, never copied, held or
+disposed here, released on the model's `onWillDispose` so a File pane that
+lets the buffer go never leaves a disposed model on screen (the view falls
+back to a read, saying "…" meanwhile — and one disposed before Monaco
+loaded is "…" too, never an empty side that reads as a deletion) — else
+ED-2's read in a `jarvis-diff:` model; a deletion's
+right side is empty; binary/too_large/not_a_file say so. **No diff
+computation outlives its models** (review L1): the editor's view model is
+the view's own (`createViewModel`) and is disposed — cancelling a diff the
+worker is still computing — before any model goes. Handed `{original,
+modified}`, Monaco 0.57 keeps a reference to the view model it makes that
+nothing releases, so its computation was never cancelled, and a row picked
+then opened and edited at once threw `no diff result available`, uncaught.
+The task `DiffEditor` and `CompareEditor` in `Editor.tsx` still pass
+`{original, modified}`; not changed here. Both sides
+read-only, side by side even in a narrow pane; ↻ reads again; the right
+side of an unopened file is re-read when the status moves. **Env files are
+listed and never diffed**: `rowShows` sends a `.env*` row (fileIcons'
+`isEnvName`) to a sentence with Open — no `git/base`, no read, no model;
+`git/base` runs before any read, so an env file by resolution is refused
+there (a 403 naming an env file shows the same sentence) and never read;
+and a live buffer of kind `env` is never put in a diff. **`git/base` now
+answers a file deleted from the working tree** (`deleted: true`; nothing at
+the path, not even a broken link; judged exactly as before, before git runs;
+not in HEAD either is still 404). **Open** is `toFilePane` → `placeFile` →
+`askFile(open)` — never over the Diff pane or a VEX view. Read-only: no
+staging, reverting, committing or discarding (SCM actions are out of
+scope). Under a card the picker, Open and ↻ are disabled and a row click
+does nothing. Free checks: `lib/scm.test.ts` (19), `components/ProjectDiff.test.ts`
+(M1's render counts), `tests/v2/editor_git_check.py`
+(deletions answered, judged and 404 when absent from HEAD),
+`hud_v2_csp_check`'s single-pane task diff and `tests/face/hud_v2_scm_check.py`
+(65, a `MockDaemon(0)` of its own after the git section of `hud_v2_check`;
+the mock's `git/base` answers deletions and `states`; L1's swap with no wait,
+L2's `link.txt` whose HEAD text is refused as an env file and is never read,
+L3's chat · Task · Diff layout). Guard removals, each shown to bite: with
+`rowShows`' env rule dropped, the headless check sees a `git/base?path=.env`
+request and the vitest fails; `memo(` dropped or callbacks compared, 63 row
+renders where 3 are right; the owned view model dropped, `no diff result
+available`; `baseOk` dropped from the read's condition, a `/file?path=link.txt`
+read; the Task pane left out of the mode, the Diff follows the chat. Not
+done: SCM actions; a file not open in the
+editor that changes on disk while the project's git states stay the same is
+re-read only on ↻ or a click; the list is flat (no staged/unstaged groups).
 
 **The effort is a slider, not pills (2026-10-10, owner's ask: "like Claude's").**
 `components/EffortSlider.tsx`, rules in `lib/effortSlider.ts`: "Effort
@@ -4811,7 +4893,40 @@ jarvis/
   gc, the `ext::` transport and implicit bare repositories off; diffs run with
   `--no-ext-diff --no-textconv`; and a repository whose *own* config names a
   program or moves where git works (`core.sshCommand`, a filter/textconv/merge
-  driver, `url.*.insteadOf`, `include.path` …) is refused outright. Output has
+  driver, `url.*.insteadOf`, `include.path` …) is refused outright. **Git is
+  kept out of submodules** (2026-10-12, PR #65): inside one it obeys *that*
+  repository's config, and on main a submodule's own filter ran through the
+  tool on `status`, `diff`, `add -A`, `commit -a` and `rm`, its textconv on
+  `log -p`/`show` under a global `diff.submodule=diff`, and a global
+  `push.recurseSubmodules` published its commits to its own remote. Every
+  `_git` call now carries recursion-off, `status.submoduleSummary=false`,
+  `diff.submodule=short` and `diff.ignoreSubmodules=dirty` pins (they travel
+  into any git that git starts, as `hooksPath` and `fsmonitor` already did) and
+  `--ignore-submodules=dirty` / `--no-recurse-submodules` on the command line
+  of the status and diff family and fetch/pull/push (a `.gitmodules` `ignore =`
+  beats the `-c`, never the flag); `judge()` refuses every `submodule` form and
+  any option that goes back in; and since `add -A`, `describe --dirty`/`--broken`, `rm`
+  and three `.gitmodules`-overridden reports still go in whatever the pins say,
+  every checked-out submodule's own config, nested ones too, is held to the
+  superproject's rule — unreadable, not resolving to its own directory, or more
+  than 64 / 4 deep fails closed (`_submodule_risk`). **`gh` gets the same
+  pins** as `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n`
+  (`_config_env`): `gh pr create` runs its own plain `git status`, which ran
+  the repository's fsmonitor and went into a submodule to run its (review of
+  #65). Judge reads option words, never a message's value, so
+  `commit -m "--submodule docs"` is a commit — only where git takes `-m`'s
+  value (commit, tag, merge, notes add/append/edit; never stash, where `stash
+  list|show -p -m --submodule=diff` is an option, measured). **The parser
+  follows git's own reading** (delta review of #65, git 2.53): a `--` after
+  an option word may be that option's value with options going on after it
+  (`commit -m -- --gpg-sign` signed with the global `gpg.program`), so every
+  reading is judged and they must agree, else refused (`_readings`); after a
+  `--`, fetch, pull, ls-remote and remote still read their words as the
+  repository (`fetch -- <url>` reached a repository no remote names); `-S` is
+  refused in merge, cherry-pick, revert, rebase, pull and am as in commit
+  (`--gpg-sign` everywhere already); and the value-letter tables hold no
+  letter git reads as a flag (rebase's `-m` hid `-x <cmd>`, fetch's `-m`
+  hid `-P`). Output has
   URL userinfo redacted. **A commit that names or carries a protected
   credential is taken back** (`reset --soft`, nothing lost) before the tool
   returns, and a push is refused if anything outgoing does. The way out — name
@@ -4839,7 +4954,9 @@ jarvis/
   tables for the verdicts, a real repository under a temp HOME for the
   properties that are about how git is *run*, each with a sanity half proving
   the trap fires under plain git. Not covered, said plainly: the owner's own
-  global git configuration and credential helpers (they run on push/fetch);
+  global git configuration and credential helpers (they run on push/fetch),
+  including a filter it defines that a submodule's attributes name, which runs
+  where git's internals still go into a submodule (`add -A`, `describe --dirty`/`--broken`, `rm` of one);
   an `include.path` / `includeIf` *already* in that global config that points
   at a file an agent can write (the agent cannot create one — writes to the
   global config and `git config` writes are both refused — but one the owner
@@ -5451,10 +5568,10 @@ jarvis/
   a recorder and `gh` a stand-in script, every config path and HOME a temp
   dir, nothing through a shell. Two layers because they fail differently.
   **`judge()` is pure, so its verdicts are tables** (placeholder names only):
-  59 reads that run in every context, 49 routine writes that run only in an
+  66 reads that run in every context, 68 routine writes that run only in an
   own worktree on an own branch (and are refused in the owner's checkout,
-  and for the branch-moving half off an own branch), 7 reviewed forms, and
-  ~200 refusals grouped by what each protects — including every abbreviation
+  and for the branch-moving half off an own branch), 8 reviewed forms, and
+  289 refusals grouped by what each protects — including every abbreviation
   of the dangerous long options, an alias that tries to be a subcommand,
   unknown remotes, credential names, and the "shape" cases (global options,
   non-lists, oversize). **The runner is exercised against real git** in a
@@ -5473,7 +5590,34 @@ jarvis/
   files stay writable. **Verified to bite** by an in-process mutation sweep
   (disable each protection, the matching check must fail) — 14 of 15 at
   first, the 15th being a mutation that did not mutate, now a structural
-  assertion. Run after touching `gitops.py`, `tools/gitctl.py`,
+  assertion. **Submodules** (2026-10-12, PR #65), against a real submodule cloned from
+  a local bare repository into a tool-made worktree, every trap a script that
+  writes one marker: `submodule_pin_checks` puts the drivers in the owner's
+  global config, named only by the submodule's attributes (so the config check
+  has nothing to refuse and only the pins are tested) — status, diff,
+  diff-files/-index and commit -a never run its filter, a `.gitmodules`
+  `ignore = none` included; log -p, show and diff A B never run its textconv
+  under `diff.submodule=diff`; fetch, switch, grep and push never recurse (the
+  push neither publishes the submodule's commit nor runs its pre-push hook);
+  its own fsmonitor never runs — each against plain git that does.
+  `submodule_config_checks`: a program in the submodule's own config, or a
+  nested repository's, refuses every subcommand (add -A, describe --dirty and
+  rm, which no pin keeps out, among them); a moved `core.worktree`, a broken
+  config, a `.git` file pointing nowhere and the limits fail closed; a clean
+  submodule and an unchecked-out gitlink are not refused. 16 of the scenarios
+  go into the submodule on main, none here (fsmonitor and the hook were
+  already held off by the propagated `-c`); dropping the pins, only the
+  command-line flags, the config read, or judge's option refusal each fails
+  its own check. `gh_git_checks` (review of #65): a stand-in `gh` that runs
+  `git status` from PATH, as gh does, runs neither the repository's nor the
+  submodule's fsmonitor through `open_pull_request`, and runs both in
+  gitops' environment without the pins; dropping `_gh`'s pins fails it.
+  The delta review's tables (a `--` that may be an option's value, signing,
+  a flag read as taking a value, a repository named after `--`, stash's
+  `-m`) and `signing_checks` (a trap `gpg.program` that plain git runs on
+  `commit -m -- --gpg-sign`); each of its five fixes, removed, fails its rows,
+  and a `judge()` differential against 5d5362b over 520,460 verdicts moved
+  27,183, every one toward REFUSE, none looser. Run after touching `gitops.py`, `tools/gitctl.py`,
   `tools/files.py`'s protection, or `run_readonly`.
 - `tests/tasks_check.py` — free checks for attended background tasks, with
   `llm.chat` scripted, `shell._run` a recorder, the broker on approval_check's
