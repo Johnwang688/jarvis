@@ -30,8 +30,10 @@ from jarvis import config, voice
 from jarvis.face import server as face_server
 from jarvis.tools import voicectl
 
-PORT = 8476
-BASE = f"http://127.0.0.1:{PORT}"
+# The face server binds port 0 and BASE is set from what the OS gave it: a
+# fixed port ("Address already in use") failed whenever another run of this
+# or a sibling suite held it.
+BASE = ""
 
 
 def _b64(data: bytes) -> str:
@@ -148,6 +150,7 @@ def _post_lines(payload=None, raw: bytes | None = None) -> list[dict]:
 
 
 def route_checks() -> None:
+    global BASE
     fake = FakeAgent()
     face_server._agent = fake
     stt_calls = []
@@ -155,7 +158,10 @@ def route_checks() -> None:
     voice.stt = lambda audio, mime=None: (stt_calls.append(mime) or "spoken words")
     was_muted = voicectl.is_muted()
     voicectl.set_muted(True)  # skip TTS entirely — nothing touches the network
-    server = face_server.create_server(PORT)
+    server = face_server.create_server(0)
+    port = server.server_address[1]
+    assert port not in (8402, 8403, 8405), "never the live ports"
+    BASE = f"http://127.0.0.1:{port}"
     try:
         time.sleep(0.1)
         # Typed-only: no STT, agent gets the text, meta.heard is non-empty.

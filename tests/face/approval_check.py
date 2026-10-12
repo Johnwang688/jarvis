@@ -36,8 +36,11 @@ from jarvis.browser import BrowserPolicy  # noqa: E402
 from jarvis.face import server as face_server  # noqa: E402
 from jarvis.face.approvals import ApprovalBroker  # noqa: E402
 
-PORT = 8471  # not the face's real port; the server under test is disposable
-BASE = f"http://127.0.0.1:{PORT}"
+# Not the face's real port: the server under test is disposable, and binds
+# port 0 (`http_checks` sets these), since a fixed port failed whenever
+# another run held it.
+PORT = 0
+BASE = ""
 
 
 class FakeWindow:
@@ -160,7 +163,11 @@ def dispatch_checks() -> None:
 
 
 def http_checks() -> None:
-    server = face_server.create_server(PORT)
+    global PORT, BASE
+    server = face_server.create_server(0)
+    PORT = server.server_address[1]
+    assert PORT not in (8402, 8403, 8405), "never the live ports"
+    BASE = f"http://127.0.0.1:{PORT}"
     broker = face_server.APPROVALS
     try:
         events = _subscribe()
