@@ -406,6 +406,18 @@ export function routeMouse(kind: "down" | "up" | "move", e: MouseLike, at: PageP
   return { kind: "forward", event: cdpMouse(kind, e, at) };
 }
 
+/**
+ * The owner's input as the pane sends it on its socket (BR-1b turns each into
+ * one CDP call): a key, a pointer or wheel event, or text — a paste, or an
+ * IME's commit — for `Input.insertText`. The socket's other messages (a frame
+ * ack, a resize, Resume, Stop) are not input; `drive.isTakeover` tells them
+ * apart.
+ */
+export type InputMsg =
+  | { t: "key"; e: CdpKeyEvent }
+  | { t: "mouse"; e: CdpMouseEvent }
+  | { t: "text"; text: string };
+
 // ---- coordinates ----------------------------------------------------------------
 
 export interface Size {
