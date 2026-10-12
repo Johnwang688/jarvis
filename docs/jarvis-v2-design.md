@@ -1753,7 +1753,9 @@ title bar.
   chat in another pane swapped the two panes' **whole specs**. A sidebar
   click goes to the pane already showing
   that kind of thing, else to the focused pane — a task click leaves a drawn
-  task or diff pane following the selection. "Read" means shown in any
+  task or diff pane following the selection (since 2026-10-12, a diff pane
+  pinned to a project shows that project's uncommitted changes and does not
+  count). "Read" means shown in any
   drawn pane. The profile select rides the chat pane's header (the focused
   pane's when no chat is drawn), so the single layout is unchanged.
 - **A File pane is one project's.** `FileTab` used to save to whatever
@@ -2832,6 +2834,30 @@ poll that sees nothing new redraws nothing, and typing never redraws the
 tree. A file in another repository than the project's — a nested robot repo,
 a file reached through the Inbox — checks its own HEAD every 10 s while the
 window is visible, so a commit there clears its marks.
+
+**The Diff pane shows the project's uncommitted changes (2026-10-12, the
+owner: "the Diff doesn't work right now it just says to select a Task", and
+yes to VS Code's Source Control view).** With no task to show, a Diff pane
+lists what changed in its project since HEAD — modified, added, untracked,
+renamed, deleted and conflicted files, and untracked folders, each with its
+letter (M, A, U, R, D, C) in the explorer's colours and the editor's file
+icon; ignored files never — headed "Uncommitted changes in <project>". A
+click shows HEAD's text on the left and, on the right, the file as the
+editor shows it: **the open buffer itself** when the file is open in a File
+pane, so an unsaved edit is there and the diff follows typing, else the file
+as read; a deleted file's right side is empty, and a binary, too-large or
+non-regular file says so. **An env file is listed and never diffed** — the
+pane says so and offers Open, and nothing about it is asked of the daemon.
+Open puts the file in the editor where every other open does (a drawn File
+pane on the project, else a split beside — never over this view or a VEX
+view). It is **read-only**: no staging, reverting or committing here. Which
+it shows: a pane pinned to a project (its header's picker, as the File
+pane's) shows that project; else a task picked more recently than a thread
+shows the task's diff, as before; else the chat's project. A pinned Diff
+pane no longer counts as following a task, so a task click then shows the
+task elsewhere. Under a card its picker, Open and ↻ are disabled. The list
+is ED-9's status poll (only while the pane is drawn); HEAD's text is ED-9's
+base route, which now also answers for a file deleted from the working tree.
 
 Remaining: WP13 (the long-bench comparison, the owner's call on cost), a
 native Windows worker, the R8 hook on Codex, and prompt tuning in
