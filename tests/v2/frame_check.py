@@ -340,6 +340,13 @@ def routes(t) -> list[tuple[str, str, object]]:
         ("DELETE", "/browser/tabs/deadbeef", None),
         ("POST", "/browser/tabs/deadbeef/navigate", {"url": "about:blank"}),
         ("POST", "/browser/profiles/p-00000000/forget", {}),
+        # BR-1b: the socket's ticket and attach, a switch, a file chooser's
+        # answer and the downloads — none of which starts Chrome either.
+        ("POST", "/browser/tabs/deadbeef/ticket", {}), ("GET", "/browser/tabs/deadbeef/attach", None),
+        ("POST", "/browser/tabs/deadbeef/activate", {}),
+        ("POST", "/browser/tabs/deadbeef/files", {"chooser": "x", "files": []}),
+        ("GET", "/browser/downloads", None), ("GET", "/browser/downloads/deadbeef", None),
+        ("DELETE", "/browser/downloads/deadbeef", None),
     ]
 
 
@@ -361,6 +368,30 @@ class FrameHeaders(Base):
         # And the Browser's routes answered without starting Chrome (BR-1a).
         self.assertFalse(self.daemon.browser.status()["running"])
         self.assertFalse((self.root / "browser").exists())
+
+    def test_a_browser_download_refuses_to_be_framed_and_runs_nothing(self):
+        # BR-1b: a saved download is served on the HUD's own origin, so its
+        # response carries the frame headers and narrows the policy to
+        # `default-src 'none'` (nothing in it can run), as an attachment.
+        from jarvis.v2.browser import routes as browser_routes
+        folder = self.root / "browser" / "downloads" / "p-00000000" / "0123abcd"
+        for path in (self.root / "browser", self.root / "browser" / "downloads", folder.parent, folder):
+            path.mkdir(mode=0o700)
+        (folder / "page.html").write_bytes(b"<script>parent.postMessage(1, '*')</script>")
+        try:
+            status, got, content = self.ask("hud", "GET", "/browser/downloads/0123abcd")
+            self.assertEqual(status, 200)
+            self.assert_hardened(got, "a download", browser_routes.DOWNLOAD_CSP)
+            headers = {n.lower(): v for n, v in got}
+            self.assertEqual(headers["content-type"], "application/octet-stream")
+            self.assertEqual(headers["x-content-type-options"], "nosniff")
+            self.assertTrue(headers["content-disposition"].startswith("attachment; "))
+            status, got, _ = self.ask("api", "GET", "/browser/downloads/0123abcd")
+            self.assertEqual(status, 403)
+            self.assert_hardened(got, "a download on the API listener")
+        finally:
+            import shutil
+            shutil.rmtree(self.root / "browser")
 
     def test_refusals_before_any_route_runs(self):
         for listener in ("hud", "api"):
