@@ -2022,8 +2022,10 @@ uncommitted changes from ED-9's two owner-only routes and the editor's read:
 - `GET /projects/{id}/file?path=` (ED-2's read, unchanged) is the right side
   when no buffer holds the file — asked only after `git/base` answered
   without a refusal, so a file that is an env file only where it resolves is
-  never read for a diff. When a buffer holds it, the right side is that
-  buffer's own Monaco model and nothing is read.
+  never read for a diff (`hud_v2_scm_check`'s `link.txt` pins the order:
+  with the read no longer waiting on HEAD's answer it is sent). When a
+  buffer holds it, the right side is that buffer's own Monaco model and
+  nothing is read.
 - **An env file by name** (`.env`, `.env.*`, never `.env.example`) is listed
   and **never asked about**: no `git/base`, no read. A `git/base` 403 naming
   an env file shows the same sentence and stops there.

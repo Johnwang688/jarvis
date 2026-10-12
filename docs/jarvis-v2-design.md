@@ -2928,15 +2928,24 @@ pane says so and offers Open, and nothing about it is asked of the daemon.
 Open puts the file in the editor where every other open does (a drawn File
 pane on the project, else a split beside — never over this view or a VEX
 view). It is **read-only**: no staging, reverting or committing here. Which
-it shows: a task picked more recently than a thread shows the task's diff,
-exactly as before (so a task click always shows in a drawn Diff pane); else
-the project the pane is pinned to (its header's picker, as the File pane's;
-a File pane that opened a file keeps its pin when it becomes a Diff pane);
-else the chat's project. Picking a project in that picker takes the window
-off the task, as picking a thread does. Under a card its picker, Open and ↻
-are disabled. The list
-is ED-9's status poll (only while the pane is drawn); HEAD's text is ED-9's
+it shows: **never another task than a drawn Task pane** — while one is drawn
+and shows a task, the Diff shows that task's diff, even after a thread is
+picked, and its picker is off; else a task picked more recently than a
+thread shows the task's diff, exactly as before (so a task click always
+shows in a drawn Diff pane); else the project the pane is pinned to (its
+header's picker, as the File pane's; a File pane that opened a file keeps its
+pin when it becomes a Diff pane); else the chat's project. The caption says
+which and why ("the Task pane's task", "the task picked last", "this pane's
+project", "the chat's project"). Picking a project in that picker takes the
+window off the task, as picking a thread does. Under a card its picker, Open
+and ↻ are disabled. The list
+is ED-9's status poll (only while the pane is drawn), and typing anywhere
+else in the window never redraws it; HEAD's text is ED-9's
 base route, which now also answers for a file deleted from the working tree.
+A file opened and edited while its diff is still being computed swaps to the
+buffer quietly (the computation is cancelled first), and a buffer that goes
+away while shown reads "…" until the file is read again, never as an empty
+side.
 
 Remaining: WP13 (the long-bench comparison, the owner's call on cost), a
 native Windows worker, the R8 hook on Codex, and prompt tuning in
