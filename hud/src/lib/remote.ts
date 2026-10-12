@@ -723,7 +723,7 @@ export const TITLE_CAP = 120;
 // line and paragraph separators — `untrusted.UNSEEN_CATEGORIES`, Cc Cf Zl Zp —
 // plus the variation selectors and the Hangul fillers, which draw nothing.
 const UNSEEN = /[\p{Cc}\p{Zl}\p{Zp}]/gu;
-const VANISH = /[\p{Cf}\u{E0000}-\u{E007F}︀-️\u{E0100}-\u{E01EF}ᅟᅠㅤﾠ]/gu;
+const VANISH = /[\p{Cf}\u{E0000}-\u{E007F}\uFE00-\uFE0F\u{E0100}-\u{E01EF}\u115F\u1160\u3164\uFFA0]/gu;
 
 /**
  * Text a page chose — a title, an address, a dialog's words, a file name —

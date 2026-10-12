@@ -49,7 +49,7 @@ describe("the daemon's {t: agent} frames", () => {
   });
 
   it("clean what the page chose to one capped line", () => {
-    const m = parseAgent(act({ target: "Sign\nin‮​ now", text: "x".repeat(500) }), T0);
+    const m = parseAgent(act({ target: "Sign\nin\u202E\u200B now", text: "x".repeat(500) }), T0);
     const a = m?.kind === "action" ? m.action : null;
     expect(a?.target).toBe("Sign in now");
     expect(a?.text.length).toBe(TEXT_CAP);
@@ -107,7 +107,7 @@ describe("the banner", () => {
     s = driveReducer(driveReducer(s, { type: "resume", blocked: false }), { type: "stop" });
     states.push(s);
     for (const st of states) {
-      for (const map of [{ th1: 3 }, {}]) {
+      for (const map of [{ th1: 3 }, {}] as Record<string, number>[]) {
         const b = bannerOf(st, T0 + 2, slots(map));
         expect(b).not.toBeNull();
         expect(b!.text).not.toMatch(/authori[sz]e|approve|deny|denied/i);

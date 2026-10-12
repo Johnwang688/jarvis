@@ -413,12 +413,12 @@ describe("FramePipe", () => {
 describe("cleanTitle", () => {
   it("is one line of text, with nothing hidden or reordered", () => {
     expect(cleanTitle("Inbox\n(3)\tunread")).toBe("Inbox (3) unread");
-    expect(cleanTitle("Pay​Pal")).toBe("PayPal");
-    expect(cleanTitle("invoice‮fdp.exe")).toBe("invoicefdp.exe");
-    expect(cleanTitle("a⁦b⁩c؜d﻿e")).toBe("abcde");
+    expect(cleanTitle("Pay\u200BPal")).toBe("PayPal");
+    expect(cleanTitle("invoice\u202Efdp.exe")).toBe("invoicefdp.exe");
+    expect(cleanTitle("a\u2066b\u2069c\u061Cd\uFEFFe")).toBe("abcde");
     expect(cleanTitle("tag\u{E0041}\u{E0042}s")).toBe("tags");
-    expect(cleanTitle("x y z\u0085w")).toBe("x y z w");
-    expect(cleanTitle("ㅤᅟ")).toBe("");
+    expect(cleanTitle("x\u2028y\u2029z\u0085w")).toBe("x y z w");
+    expect(cleanTitle("\u3164\u115F")).toBe("");
     expect(cleanTitle("  many    spaces  ")).toBe("many spaces");
   });
 
