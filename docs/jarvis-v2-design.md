@@ -3113,6 +3113,14 @@ while a card is up or the owner holds the pane) and ask about logins,
 payments, uploads and executables; a reviewer model judges the rest, and
 every failure of it asks. Not wired yet: nothing drives a pane until BR-9b.
 
+**Finding the dev servers an agent started (2026-10-12, AO-1a; amendment 2
+to the Browser plan, §B).** A pure module, not wired yet: nothing opens until
+AO-1b and AO-3. It finds new loopback listeners in `/proc/net` and refuses
+Jarvis's ports, service ports and the ephemeral range first. It attributes a
+listener to a chat or task only by the origin tag in its owning process's
+environment, read as raw bytes and never decoded or logged. It also judges
+the probe's answer and picks the one window that acts.
+
 Remaining: WP13 (the long-bench comparison, the owner's call on cost), a
 native Windows worker, the R8 hook on Codex, and prompt tuning in
 `roles.py` (§17's over-planning note). The daemon started by hand for the
