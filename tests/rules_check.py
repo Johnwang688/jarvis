@@ -2687,6 +2687,11 @@ RUNNER_DECIDE_DENY = (
     "npx tee .env.production", "uv run cp /tmp/x .env.local",
     "npm exec -c 'cp /tmp/x .env.production'",
     "uv run sudo rm -rf build", "npx sudo true",
+    # MED 2 of the review of PR #75: yarn's workspace forms and corepack.
+    "yarn workspace web exec jarvis restart", "yarnpkg exec jarvis restart",
+    "yarn workspaces foreach -A --parallel exec jarvis hud install",
+    "corepack yarn@4.1.0 exec jarvis restart", "corepack pnpm exec jarvis restart",
+    "corepack npx jarvis hud install",
 )
 # Refused once the gate-state check is folded in (`static_verdict`): a write
 # onto the allowlist behind a wrapper's option or a runner.
@@ -2724,7 +2729,18 @@ RUNNER_ASK = (
     "npm exec -c 'eslint . && rm -rf dist'", "npm exec -c '${X}y'", "bun exec 'git push'",
     "uv run pixi run rm -rf build", "npx hatch run rm -rf build",   # an unknown runner inside one
     "uv run --frobnicate x pytest",      # x or pytest: which one runs cannot be told
+    # The review of PR #75, MED 1: writers, shells and interpreters off the
+    # allow list ask for a reason of their own (ALLOW on main and 16675fb).
+    "uv run tee -a ~/.bashrc", "npx tee notes.txt", "npm exec -c 'echo x | tee -a ~/.bashrc'",
+    "uv run awk 'BEGIN{system(1)}'", "uv run sh x.sh", "uv run perl x.pl", "uv run crontab -r",
+    "uv run powershell.exe -c x", "bunx --bun bash x.sh",
+    # MED 2: yarn's workspace forms (ALLOW on main and 16675fb).
+    "yarn workspace web exec rm -rf build", "yarn workspaces foreach -A exec rm -rf build",
+    "yarn workspaces foreach --all --parallel exec rm -rf build",
 )
+# Asked on main only as an unknown program; now for what it starts (MED 2).
+RUNNER_COREPACK_ASK = ("corepack yarn exec rm -rf build", "corepack npx rm -rf build",
+                       "corepack pnpm exec rm -rf build", "corepack yarn@4.1.0 exec rm -rf build")
 # Ordinary runner use: main's verdict, kept.
 RUNNER_KEEPS = {
     "uv run pytest": "allow", "uv run python script.py": "allow", "npx vite": "allow",
@@ -2742,6 +2758,8 @@ RUNNER_KEEPS = {
     "watch -n 1 ls": "allow",
     "env -u FOO pytest": "allow",   # main read FOO as the program (review of PR #75, HIGH 3)
     "npm exec -c 'eslint .'": "allow", "bun exec 'vite build'": "allow",
+    "yarn workspace web exec vitest": "allow", "uv run cp a b": "allow",
+    "uv run python -m http.server": "allow", "npx tsx script.ts": "allow",
     "pnpm exec -c 'prettier --check . && tsc'": "allow",
 }
 
@@ -2760,7 +2778,7 @@ def runner_checks() -> None:
 
     stems = sorted(set(_GATE_STEMS) | set(_OWNER_OPS_STEMS) | {
         "npx", "npm", "pnpm", "yarn", "bun", "bunx", "uvx", "pnpx", "poetry", "pipx", "rye",
-        "chronic", "exec", "tee", "rm", "sudo", "true"})
+        "chronic", "exec", "tee", "rm", "sudo", "true", "corepack", "yarnpkg"})
     with gate_home():
         config.ALLOWLIST_PATH.write_text(json.dumps(
             [{"tool": "run_command", "prefix": stem} for stem in stems]))
@@ -2797,7 +2815,7 @@ def runner_checks() -> None:
         # Asked, where main allowed it — and not run on a no (an empty
         # allowlist: an entry for the runner's stem is a yes to what it runs).
         config.ALLOWLIST_PATH.write_text("[]")
-        for command in RUNNER_ASK:
+        for command in RUNNER_ASK + RUNNER_COREPACK_ASK:
             assert rules.decide(command).decision == rules.ASK, (command, rules.decide(command))
             assert permissions.static_verdict(command).decision == rules.ASK, command
             with recorded() as ran:
@@ -2829,6 +2847,32 @@ HAZARD_CERTAIN = (
     "grep --save-config={allow} x",
     "find ~/.config/jarvis -name allowlist.json -exec cp /tmp/x {{}} \\;",
     "find ~/.config/jarvis -name allowlist.json -execdir sh -c 'cp /tmp/x {{}}' \\;",
+    # The review of PR #75, HIGH 2: an exec-only option before a real write
+    # (each reader returned its first danger), and find's -exec program read
+    # through the table. ASK on 16675fb; DENY on main and now.
+    "find {allow} -exec cat {{}} + -delete", "find {allow} -print -exec cat {{}} + -delete",
+    "find ~/.config/jarvis -name allowlist.json -exec cat {{}} + -delete",
+    "sort --compress-program=gzip -o {allow} f.txt",
+    "sort --compress-program=gzip --output={allow} in.txt",
+    "less -k keys -o {allow} README.md", "less +q -o {allow} README.md",
+    "less --lesskey-file=k --log-file={allow} README.md", "tree -R -o {allow} .",
+    "ss -K -D {allow}", "grep --pager=less --save-config={allow} x",
+    "find ~/.config/jarvis -exec cat {{}} + -fprint {allow}",
+    "find . -ok cat {{}} \\; -fprint {allow}",
+    "find {allow} -exec sed -i s/a/b/ {{}} +", "find {allow} -exec env rm {{}} +",
+    "find {allow} -exec nohup rm {{}} +", "find {allow} -exec timeout 5 rm {{}} +",
+    "find {allow} -exec uv run rm {{}} +", "find {allow} -exec xargs rm \\;",
+    "find {allow} -exec mytool {{}} +",       # a program not known only to read may write
+    "find {allow} -exec sort -o {{}} {{}} \\;",
+    # LOW 3: `-i` and the script's `w` file together.
+    "sed -i 'w {allow}' notes.txt",
+)
+# The same shapes onto a credential env file: DENY in `rules.decide` itself.
+HAZARD_ENV_CERTAIN = (
+    "sort --compress-program=gzip -o .env.production in.txt",
+    "find .env.production -exec cat {} \\; -delete",
+    "find . -name '.env*' -exec cat {} + -delete",
+    "sed -i 'w .env.local' notes.txt",
 )
 HAZARD_UNCERTAIN = (
     "grep --pager=less x {allow}", "grep --p x {allow}", "grep --q x {allow}",
@@ -2851,11 +2895,36 @@ def hazard_certainty_checks() -> None:
 
     allow = "~/.config/jarvis/allowlist.json"
     with gate_home():
-        for line in HAZARD_CERTAIN:
-            command = line.format(allow=allow)
-            touch = S.command_touch(command)
-            assert touch is not None and touch.certain, (command, touch)
+        stems = ("grep", "less", "rg", "find", "sort", "uniq", "xxd", "sed", "ug", "bat", "tree",
+                 "ss", "env", "nohup", "timeout", "uv", "xargs", "mytool", "rm", "cat", "cp", "sh")
+        config.ALLOWLIST_PATH.write_text(json.dumps(
+            [{"tool": "run_command", "prefix": s} for s in stems]))
+        before = config.ALLOWLIST_PATH.read_text()
+        asked: list[str] = []
+        for command in [line.format(allow=allow) for line in HAZARD_CERTAIN] + list(
+                HAZARD_ENV_CERTAIN):
+            if command in HAZARD_ENV_CERTAIN:
+                assert rules.decide(command).decision == rules.DENY, (command, rules.decide(command))
+            else:
+                touch = S.command_touch(command)
+                assert touch is not None and touch.certain, (command, touch)
             assert permissions.static_verdict(command).decision == rules.DENY, command
+            # Real dispatch, an allowlist entry for every stem, modes ask and
+            # all: never run, never asked (the review of PR #75 ran these
+            # through dispatch at 16675fb: asked, and run on a yes).
+            for mode in ("ask", "all"):
+                permissions.set_mode(mode)
+                try:
+                    with recorded() as ran:
+                        asked.clear()
+                        out = tools.dispatch(
+                            "run_command", json.dumps({"command": command, "reason": "r"}),
+                            approve=permissions.gate(lambda tool, args: asked.append(1) or True))
+                finally:
+                    permissions.set_mode("ask")
+                assert "efused" in out.text, (command, out.text)
+                assert not ran and not asked, f"[{mode}] ran or asked: {command!r}"
+        assert config.ALLOWLIST_PATH.read_text() == before
         config.ALLOWLIST_PATH.write_text(json.dumps(
             [{"tool": "run_command", "prefix": s} for s in
              ("grep", "less", "rg", "find", "sort", "uniq", "xxd", "sed", "ug", "bat")]))
@@ -2872,9 +2941,167 @@ def hazard_certainty_checks() -> None:
     assert rules.reader_hazard(["ug", "x", "--", "--no-config", "f"]) is not None
     assert rules.reader_hazard(["ug", "--no-config", "x", "f"]) is None
     assert rules.reader_hazard(["ug", "--no-config", "x", "--", "f"]) is None
-    print(f"ok  hazards: {len(HAZARD_CERTAIN)} real writes onto the allowlist DENY; "
-          f"{len(HAZARD_UNCERTAIN)} exec-only or ambiguous forms ASK, never refused unasked; "
-          "ug's --no-config read only before --")
+    print(f"ok  hazards: {len(HAZARD_CERTAIN)} real writes onto the allowlist and "
+          f"{len(HAZARD_ENV_CERTAIN)} onto a credential env file DENY (never run, never asked, "
+          f"any allowlist, mode all); {len(HAZARD_UNCERTAIN)} exec-only or ambiguous forms ASK, "
+          "never refused unasked; ug's --no-config read only before --")
+
+
+# The review of PR #75, HIGH 3 (older than the PR): `rules._unwrap` dropped
+# every word that looked like an option and took what was left, so an
+# option's value became the program. `run_readonly` — ungated, held by
+# workflows and sub-agents — judged these as `ls` (or `python3`) and ran the
+# whole line, rm and all; `allows` read `env -u python3 rm …` as `python3`.
+UNWRAP_SHAPES = (
+    "env -u ls rm -rf build", "env -C ls rm -rf build", "exec -a ls rm -rf build",
+    "xargs -a ls rm -rf", "time -f ls rm -rf build", "env -a ls rm -rf build",
+    "env -f ls rm -rf build", "env --unset ls rm -rf build", "env -iu ls rm -rf build",
+)
+
+
+def unwrap_checks() -> None:
+    """HIGH 3 of the review of PR #75: `unwrap` reads wrapper options from the
+    one table. `run_readonly` refuses every shape and runs nothing; `allows`
+    does not cover `env -u python3 rm …` under a `python3` entry; a v1 gate
+    asks it and runs nothing on a no; a line whose program cannot be told is
+    neither run by `run_readonly` nor covered; ordinary wrapper use still is."""
+    from jarvis import config
+
+    for command in UNWRAP_SHAPES:
+        assert rules.unwrap(rules._tokens(command))[0] == "rm", (command, rules.unwrap(rules._tokens(command)))
+        with recorded() as ran:
+            out = shell.run_readonly(command)
+        assert out.startswith("Error") and not ran, (command, out, ran)
+    with gate_home():
+        config.ALLOWLIST_PATH.write_text(json.dumps([{"tool": "run_command", "prefix": "python3"}]))
+        command = "env -u python3 rm -rf build"
+        assert rules.command_stems(command) == ["rm"], rules.command_stems(command)
+        assert not permissions.allows("run_command", {"command": command})
+        asked: list[str] = []
+        with recorded() as ran:
+            tools.dispatch("run_command", json.dumps({"command": command, "reason": "r"}),
+                           approve=permissions.gate(lambda tool, args: asked.append(1) or False))
+        assert asked and not ran, (asked, ran)
+        # Which program runs cannot be told: not run, not covered.
+        unclear = "env --frobnicate python3 rm -rf build"
+        assert rules.unwrap_sure(rules._tokens(unclear)) is None
+        assert rules.command_targets(unclear) == []
+        assert not permissions.allows("run_command", {"command": unclear})
+        with recorded() as ran:
+            out = shell.run_readonly("env --frobnicate ls cat notes.txt")
+        assert out.startswith("Error") and not ran, out
+        # Ordinary wrapper use: still read, run, and covered as before.
+        config.ALLOWLIST_PATH.write_text(json.dumps([{"tool": "run_command", "prefix": "pytest"}]))
+        assert permissions.allows("run_command", {"command": "env -u FOO pytest -x"})
+        assert permissions.allows("run_command", {"command": "nohup timeout 30 pytest"})
+        config.ALLOWLIST_PATH.write_text("[]")
+    for command in ("env FOO=1 ls", "nohup ls -la", "timeout 5 cat notes.txt", "env -u FOO ls"):
+        with recorded() as ran:
+            out = shell.run_readonly(command)
+        assert ran, (command, out)
+    print(f"ok  unwrap: {len(UNWRAP_SHAPES)} option-value shapes refused by run_readonly (nothing "
+          "ran); `env -u python3 rm` not covered by a python3 entry, asked by a v1 gate; an "
+          "unclear program neither run nor covered; ordinary wrappers unchanged")
+
+
+@contextlib.contextmanager
+def _deadline(seconds: float):
+    """Fail a judgement that runs away rather than hang the suite (a guard
+    removed in a mutation run must fail here, not time the run out)."""
+    import signal
+
+    def expired(signum, frame):
+        raise TimeoutError(f"judged for more than {seconds} s")
+    old = signal.signal(signal.SIGALRM, expired)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, old)
+
+
+# Every runner and wrapper form in the table, nested 60 and 1,000 deep.
+COST_RUNNERS = ("npx", "npx --x", "npx --yes", "uv run", "uv run --x y", "uv tool run", "uvx",
+                "bunx", "pnpx", "npm exec", "npm x", "pnpm exec", "pnpm --x exec", "pnpm dlx",
+                "yarn exec", "yarn dlx", "yarn workspace w exec", "yarn workspaces foreach -A exec",
+                "corepack yarn exec", "bun x", "poetry run", "pipx run", "pdm run", "hatch run",
+                "rye run", "pixi run", "conda run", "env -u a", "env", "nohup", "timeout 5",
+                "nice -n 5", "xargs", "flock /tmp/l", "time -f x", "exec -a x", "stdbuf -o L",
+                "ionice -c 3", "setsid", "chronic", "systemd-run --user", "watch -x")
+COST_LIMIT = 0.1
+
+
+def cost_checks() -> None:
+    """HIGH 1 of the review of PR #75 (and L1, L2): what wrappers and runners
+    start is judged within one work budget per line. Every form in
+    `COST_RUNNERS`, nested 60 and 1,000 deep, is judged by `decide`,
+    `static_verdict`, `command_touch`, `owner_op`, `runners_unsure`, v2's
+    always-ask match and `run_readonly` in well under 100 ms each (at
+    16675fb `npx --x ` sixty deep took 52 s and 139 s; a thousand nested
+    `npx` raised RecursionError on main), never ALLOW, never an exception;
+    and a line past the budget is never covered by an allowlist entry."""
+    import time
+
+    from jarvis import config
+    from jarvis import protected_state as S
+    from jarvis.v2 import permissions as v2
+
+    slowest = (0.0, "")
+    with gate_home() as home:
+        config.ALLOWLIST_PATH.write_text(json.dumps(
+            [{"tool": "run_command", "prefix": s} for s in
+             ("npx", "uv", "uvx", "bunx", "pnpx", "npm", "pnpm", "yarn", "corepack", "bun",
+              "poetry", "pipx", "pdm", "hatch", "rye", "pixi", "conda", "env", "nohup", "timeout",
+              "nice", "xargs", "flock", "time", "exec", "stdbuf", "ionice", "setsid", "chronic",
+              "systemd-run", "watch", "rm", "jarvis")]))
+        cwd = str(home / "projects" / "app")
+        readers = (("decide", lambda line: rules.decide(line).decision),
+                   ("static", lambda line: permissions.static_verdict(line, cwd).decision),
+                   ("touch", lambda line: S.command_touch(line, cwd)),
+                   ("owner", lambda line: S.owner_op(line)),
+                   ("unsure", lambda line: rules.runners_unsure(line)),
+                   ("v2", lambda line: v2.always_ask_match("Bash", {"command": line})),
+                   ("readonly", lambda line: shell.run_readonly(line)))
+        count = 0
+        for runner in COST_RUNNERS:
+            for depth in (60, 1000):
+                line = (runner + " ") * depth + "rm -rf ~/x"
+                count += 1
+                for name, read in readers:
+                    took = None
+                    for _ in range(2):          # the faster of two: a busy machine is not a regression
+                        rules._runners_unsure_cached.cache_clear()
+                        start = time.perf_counter()
+                        with recorded() as ran, _deadline(3):
+                            value = read(line)
+                        elapsed = time.perf_counter() - start
+                        took = elapsed if took is None else min(took, elapsed)
+                        if took < COST_LIMIT:
+                            break
+                    assert not ran, (runner, depth, name)
+                    assert took < COST_LIMIT, f"{name} took {took:.3f} s on {runner!r} x{depth}"
+                    if took > slowest[0]:
+                        slowest = (took, f"{name} on {runner!r} x{depth}")
+                    if name in ("decide", "static"):
+                        assert value != rules.ALLOW, (name, runner, depth, value)
+                assert not permissions.allows("run_command", {"command": line}), (runner, depth)
+        # Past the budget: asked, and no allowlist entry covers it.
+        for line in ("npx --x " * 60 + "rm -rf ~/x", "pnpm --x exec " * 40 + "rm -rf ~/x",
+                     "uv run --x y " * 60 + "ls"):
+            assert rules.runners_unsure(line), line
+            assert rules.decide(line).decision == rules.ASK, line
+            assert v2.always_ask_match("Bash", {"command": line}) is not None or \
+                rules.runners_unsure(line), line
+        # L2: past `_peel_runner`'s hops the owner ops are too complex to
+        # judge — asked, never the ALLOW main gave `nohup` x13 + an op.
+        for line in ("nohup " * 13 + "jarvis restart", "timeout 5 " * 13 + "jarvis hud install"):
+            assert rules.decide(line).decision != rules.ALLOW, (line, rules.decide(line))
+        config.ALLOWLIST_PATH.write_text("[]")
+    print(f"ok  cost: {len(COST_RUNNERS)} runner forms nested 60 and 1,000 deep ({count} lines) "
+          f"judged by 7 readers each in under {COST_LIMIT * 1000:.0f} ms (slowest "
+          f"{slowest[0] * 1000:.0f} ms, {slowest[1]}); never ALLOW, never an exception, never "
+          "covered past the budget")
 
 
 def main() -> int:
@@ -2922,6 +3149,8 @@ def main() -> int:
     owner_op_checks()
     runner_checks()
     hazard_certainty_checks()
+    unwrap_checks()
+    cost_checks()
     print("\nall rules checks passed")
     return 0
 

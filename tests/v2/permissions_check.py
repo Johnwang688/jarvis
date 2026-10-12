@@ -1438,6 +1438,21 @@ def runner_checks():
         eq(box.decisions[-1]["layer"], "reviewer", "`uv run rm -rf build` is not layer 4's ALLOW")
         human(*bash("uv run pytest"), brief)
         eq(box.decisions[-1]["layer"], "jarvis-allow", "`uv run pytest` still is")
+        # The review of PR #75, HIGH 1: past the line's work budget what it
+        # starts is too complex to judge — asked at layer 2 in every profile,
+        # never the reviewer's call and never the allowlist's.
+        config.ALLOWLIST_PATH.write_text(json.dumps(
+            [{"tool": "run_command", "prefix": s} for s in ("npx", "pnpm", "uv", "nohup", "rm")]))
+        for line in ("npx --x " * 60 + "rm -rf ~/x", "pnpm --x exec " * 40 + "rm -rf ~/x",
+                     "nohup " * 13 + "rm -rf build"):
+            asker = Asker(Decision.DENY)
+            permit = build_permit(context(brief), asker)
+            eq(permit(*bash(line), brief), Decision.DENY, f"too complex: the owner's no holds ({line[:24]}…)")
+            eq(len(asker.seen), 1, f"too complex: asked under AUTO ({line[:24]}…)")
+            eq(box.decisions[-1]["layer"], "always-ask", f"too complex: at layer 2 ({line[:24]}…)")
+            ok("too-complex" in box.decisions[-1]["reason"] or "gate-state" in box.decisions[-1]["reason"],
+               f"too complex: said so ({box.decisions[-1]['reason'][:60]})")
+        config.ALLOWLIST_PATH.unlink()
 
 
 _UNIT_CGROUP = "/user.slice/user-1000.slice/user@1000.service/app.slice/jarvis-daemon2.service"
