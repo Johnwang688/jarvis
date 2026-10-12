@@ -1398,11 +1398,24 @@ HUD can flag one it cannot match to its own click.
   terminal that takes typed input). One at a time: the open one comes back
   with `started: false`. 409 while a download or info read runs. Closing its
   terminal frees the device.
-- `POST /vex/device/info` `{}` → `{text, exit_code}`: vexcom's device-info
-  output as plain text (escapes and control characters removed, markup left
-  as characters — draw it as text), with a 10-second timeout (409 "did not
-  answer"). **Until the setup spike records the flag from `vexcom --help`,
-  this answers 409 saying so.**
+- `POST /vex/device/info` `{read?}` → `{text, exit_code, read}`: a device
+  read, from the owner's `vexcom --help` (vexcom 1.0.2b2). `read` is
+  `"system"` (the default) — exactly `vexcom.exe --json`, "system info in
+  json format" — or `"programs"` — exactly `vexcom.exe --programs`, the
+  programs on the brain; anything else (or another key) is 400, before
+  anything is looked up. Both are the one `info` device action (`program:
+  "vex-info"`, a terminal closed when it ends; `vex_device {action: "info"}`
+  on the bus); 409 while a download runs or the brain terminal holds the
+  port, and a download, the brain terminal or another read is 409 while
+  one runs. `vexcom.exe` is hashed against `vex.json` immediately before the
+  spawn. The output comes back as plain text: escapes and control characters
+  removed, markup left as characters — draw it as text. Output that parses
+  as JSON (from its first line opening `{` or `[`, the lines before kept, up
+  to 256 KiB) is pretty-printed with a two-space indent; a JSON string's
+  control characters stay escaped (`\u001b`) and invisible characters are
+  removed. At most the last 16 KiB. A 10-second timeout (409 "did not
+  answer"). A non-zero `exit_code` (no brain connected, say) still answers
+  200 with vexcom's text.
 - `GET /vex/templates` → `[{id, language, label}]`: the extension's
   `cpp_v5_vsc_*.zip` and `py_v5_vsc_*.zip` in the configured templates
   folder, labelled from its `index.json` where it names them.

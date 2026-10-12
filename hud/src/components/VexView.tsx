@@ -338,13 +338,25 @@ function DeviceSection(props: { blocked: boolean; configured: boolean }) {
                 onClick={() => void vex.openBrain()}>
           {brain ? "Show the brain terminal" : "Open the brain terminal"}
         </button>
-        <button type="button" data-testid="vex-info-btn" disabled={off || vex.infoBusy}
-                onClick={() => void vex.readInfo()}>
-          {vex.infoBusy ? "Reading…" : "Read device info"}
+        <button type="button" data-testid="vex-info-btn" disabled={off || !!vex.infoBusy}
+                title="The brain's system info (vexcom --json)"
+                onClick={() => void vex.readInfo("system")}>
+          {vex.infoBusy === "system" ? "Reading…" : "Read device info"}
+        </button>
+        <button type="button" data-testid="vex-programs-btn" disabled={off || !!vex.infoBusy}
+                title="The programs on the brain (vexcom --programs)"
+                onClick={() => void vex.readInfo("programs")}>
+          {vex.infoBusy === "programs" ? "Reading…" : "List programs"}
         </button>
       </div>
       {vex.brainNote ? <div className="err small" data-testid="vex-brain-note">{vex.brainNote}</div> : null}
       {vex.infoNote ? <div className="err small" data-testid="vex-info-note">{vex.infoNote}</div> : null}
+      {vex.info ? (
+        <div className="small" data-testid="vex-info-what" data-read={vex.info.read}>
+          {vex.info.read === "programs" ? "Programs on the brain" : "Device info"}
+          {vex.info.exit_code ? ` (vexcom exited ${vex.info.exit_code})` : ""}
+        </div>
+      ) : null}
       {vex.info ? <pre className="vexinfo" data-testid="vex-info-text">{vex.info.text}</pre> : null}
     </section>
   );
