@@ -1,6 +1,8 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "../api";
-import { Buffers, PlainModel, refOf, type BufferDeps, type TextModel, type WriteBody } from "./buffers";
+import {
+  Buffers, PlainModel, refOf, WRITE_TIMEOUT_MS, type BufferDeps, type TextModel, type WriteBody,
+} from "./buffers";
 import type { FileRead } from "../types";
 
 /**
@@ -708,5 +710,109 @@ describe("the review of PR #49 (each failing on f869543)", () => {
     w.files.set("/w/a.py", "moved\n");
     await b.poll();
     expect(notes).toEqual(["changed on disk — reloaded"]);
+  });
+});
+
+describe("the delta review of PR #49 (each failing on 62fc44d)", () => {
+  it("MED-1 P1: Discard and reload during a slow save, Ctrl+S queued: the disk keeps A, never reverted", async () => {
+    await b.open("p1", "a.py", "1|a.py");
+    model("/w/a.py").type("A");
+    w.hold = true;                                         // a slow disk: /mnt/c
+    const first = b.save("/w/a.py");
+    model("/w/a.py").type("B");
+    const second = b.save("/w/a.py");                      // the follow-up, queued
+    expect(await b.reload("/w/a.py")).toBe(true);          // Discard and reload: reads O, the write not landed
+    expect(model("/w/a.py").getValue()).toBe("one\n");
+    w.hold = false;
+    w.release();                                           // the write lands
+    expect(await first).toBe("saved");
+    await second;
+    expect(w.writes).toHaveLength(1);                      // the follow-up wrote nothing
+    expect(w.files.get("/w/a.py")).toBe("one\nA");
+    await b.poll();                                        // and the buffer follows the disk
+    expect(model("/w/a.py").getValue()).toBe("one\nA");
+    expect(b.isDirty("/w/a.py")).toBe(false);
+  });
+
+  it("MED-1 P2: Discard and reload during a slow save, nothing queued: the poll brings the buffer to A", async () => {
+    await b.open("p1", "a.py", "1|a.py");
+    model("/w/a.py").type("A");
+    w.hold = true;
+    const first = b.save("/w/a.py");
+    expect(await b.reload("/w/a.py")).toBe(true);
+    w.hold = false;
+    w.release();
+    expect(await first).toBe("saved");
+    expect(w.files.get("/w/a.py")).toBe("one\nA");
+    await b.poll();
+    expect(model("/w/a.py").getValue()).toBe("one\nA");
+    expect(b.isDirty("/w/a.py")).toBe(false);
+    expect(b.get("/w/a.py")!.etag).toBe(tagOf("one\nA"));
+    expect(b.get("/w/a.py")!.conflict).toBeNull();
+  });
+
+  it("MED-1 P3: a follow-up queued before Discard and reload never saves what is typed after it", async () => {
+    await b.open("p1", "a.py", "1|a.py");
+    model("/w/a.py").type("A");
+    const write = w.deps.write;
+    let answer: () => void = () => {};
+    let slow = true;
+    w.deps.write = async (projectId, body, signal) => {
+      const r = await write(projectId, body, signal);      // lands on disk at once…
+      if (slow) {
+        slow = false;
+        await new Promise<void>((resolve) => (answer = resolve));  // …and the first answers late
+      }
+      return r;
+    };
+    const first = b.save("/w/a.py");
+    model("/w/a.py").type("B");
+    const second = b.save("/w/a.py");                      // the follow-up, for B
+    expect(await b.reload("/w/a.py")).toBe(true);          // Discard and reload reads A
+    expect(model("/w/a.py").getValue()).toBe("one\nA");
+    model("/w/a.py").type("C");                            // typed after it: never Ctrl+S'd
+    answer();
+    expect(await first).toBe("saved");
+    await second;
+    expect(w.writes).toHaveLength(1);
+    expect(w.files.get("/w/a.py")).toBe("one\nA");
+    expect(b.isDirty("/w/a.py")).toBe(true);
+  });
+
+  it("LOW-1: a write that never answers ends as an error after the timeout; the text kept, the poll back", async () => {
+    vi.useFakeTimers();
+    try {
+      await b.open("p1", "a.py", "1|a.py");
+      model("/w/a.py").type("x");
+      const notes: string[] = [];
+      b.onNotice((_abs, t) => notes.push(t));
+      const write = w.deps.write;
+      let signal: AbortSignal | undefined;
+      w.deps.write = (_p, _body, s) => {
+        signal = s;
+        return new Promise(() => {});                      // the PUT never answers
+      };
+      const saving = b.save("/w/a.py");
+      expect(b.get("/w/a.py")!.saving).toBe(true);
+      await vi.advanceTimersByTimeAsync(WRITE_TIMEOUT_MS - 1);
+      expect(b.get("/w/a.py")!.saving).toBe(true);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(b.get("/w/a.py")!.saving).toBe(false);
+      expect(await saving).toBe("error");
+      expect(signal?.aborted).toBe(true);
+      expect(notes).toContain("the save didn't answer; your text is still here, press Ctrl+S to try again");
+      expect(model("/w/a.py").getValue()).toBe("one\nx");
+      expect(b.isDirty("/w/a.py")).toBe(true);
+      w.files.set("/w/a.py", "theirs\n");                  // the poll is no longer held off
+      await b.poll();
+      expect(b.get("/w/a.py")!.conflict).toMatchObject({ state: "changed", etag: tagOf("theirs\n") });
+      w.deps.write = write;                                // and Ctrl+S tries again
+      w.files.set("/w/a.py", "one\n");
+      await b.poll();
+      expect(await b.save("/w/a.py")).toBe("saved");
+      expect(w.files.get("/w/a.py")).toBe("one\nx");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

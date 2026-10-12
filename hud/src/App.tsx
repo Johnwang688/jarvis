@@ -104,7 +104,7 @@ const BUFFER_POLL_MS = 2000;
 // the save path stays reachable.
 buffers.configure({
   read: (projectId, path) => api.readFile(projectId, path),
-  write: (projectId, body) => api.writeFile(projectId, body),
+  write: (projectId, body, signal) => api.writeFile(projectId, body, signal),
   stat: (projectId, paths) => api.statFiles(projectId, paths),
   makeModel: (text, abs, kind) => makeModel(text, abs, kind).catch(() => new PlainModel(text)),
   now: () => Date.now(),

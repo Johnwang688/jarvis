@@ -453,6 +453,10 @@ export function FileTab(props: {
             conflict={view.conflict}
             dirty={view.dirty}
             comparing={!!comparing}
+            // Keep mine and Save to recreate must stay disabled while a save
+            // is out: pressed then, `buffers.save` would make them the one
+            // follow-up, which saves against the buffer's etag and drops the
+            // `expected` they pass (delta review of PR #49, LOW-2).
             busy={view.saving}
             onCompare={() => void toggleCompare()}
             onKeep={() => {

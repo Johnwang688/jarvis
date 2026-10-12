@@ -921,9 +921,11 @@ def _rv49_close_both_checks(page, mock, check, until):
           and page.locator('[data-testid="pane-2-close-save"]').count() == 1, text)
     page.locator('[data-testid="pane-2-close-keep"]').click()
     until(lambda: ask.count() == 0, timeout=2)
+    words = page.evaluate("window.__hud.state().chats[2]?.input ?? null")
     check("…and Cancel keeps the pane, the edit and the words",
           page.locator(_tab(2, "calc.py")).get_attribute("data-dirty") == "true"
-          and page.evaluate("window.__hud.workspace().ws.order").count(2) == 1)
+          and page.evaluate("window.__hud.workspace().ws.order").count(2) == 1
+          and words == "words-for-a-new-thread", f"box: {words!r}")
 
 
 def main():
