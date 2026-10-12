@@ -309,8 +309,77 @@ def _setup_checks(page, mock, check, until, world):
         v["status"] = keep
 
 
+def _toolchain_checks(page, mock, check, until, world):
+    """Review MED-1: a folder VEX's tools could never build in is refused before
+    anyone is asked — the refusal shown, no path, Create off, nothing sent."""
+    _open_from_new_project(page, until)
+    page.locator(_tid("vex-new-name")).fill("toolbot")
+    for shape in ("My (1)", "a&b", "Документы"):
+        parent = world["robotics"].parent / shape
+        parent.mkdir(exist_ok=True)
+        page.locator(_tid("vex-new-location")).fill(str(parent))
+        refused = page.locator(_tid("vex-new-refusal"))
+        until(lambda: refused.count() == 1 and shape in refused.inner_text(), timeout=4)
+        text = refused.inner_text() if refused.count() else ""
+        check(f"MED-1: a folder in {shape!r} is refused in the daemon's words before anyone is asked",
+              "could never build" in text and "Windows command line" in text, text[:200])
+        check(f"MED-1: and with {shape!r} no path is shown and Create stays off",
+              page.locator(_tid("vex-new-path")).count() == 0
+              and page.locator(_tid("vex-new-create")).is_disabled())
+        check(f"MED-1: nothing is made in {shape!r}", list(parent.iterdir()) == [])
+    sent = [b for b in _posted(mock, "/vex/projects") if b.get("name") == "toolbot"]
+    check("MED-1: Create sent nothing for a folder the toolchain refuses", not sent, str(sent))
+    # Review LOW-1: a location the daemon normalises shows the very path the card names.
+    location = str(world["robotics"].parent.parent) + "//Documents/Robotics/"
+    page.locator(_tid("vex-new-name")).fill("normbot")
+    page.locator(_tid("vex-new-location")).fill(location)
+    target = str(world["robotics"] / "normbot")
+    check("LOW-1: a doubled and a trailing slash show the normalised folder",
+          bool(until(lambda: _path(page) == target and page.locator(_tid("vex-new-create")).is_enabled(),
+                     timeout=5)), _path(page))
+    page.locator(_tid("vex-new-create")).click()
+    _card(page, until)
+    card = page.locator(_tid("approval-card")).inner_text()
+    check("LOW-1: and the card names that very folder", target in card and "//" not in card, card[:300])
+    page.keyboard.press("Escape")
+    until(lambda: page.locator(_tid("approval-card")).count() == 0, timeout=4)
+    page.locator(_tid("vex-new-location")).fill(str(world["robotics"]))
+    _close(page, until)
+
+
+def _blip_checks(page, mock, check, until, world):
+    """Review LOW-3: a read of the request that fails while the card is up is a
+    blip, not an ending: approve, and the project is made, the dialog closes and
+    a new thread opens in it."""
+    _open_from_new_project(page, until)
+    _name(page, until, "blipbot", str(world["robotics"] / "blipbot"))
+    before = len(mock.calls)
+    page.locator(_tid("vex-new-create")).click()
+    _card(page, until)
+    new = mock_vex.state(mock)["new"]
+    new["state_fail"] = 2
+    note = page.locator(_tid("vex-new-poll-note"))
+    check("LOW-3: a failed read says it is still checking",
+          bool(until(lambda: note.count() == 1, timeout=6)))
+    until(lambda: new.get("state_fail", 0) == 0, timeout=8)
+    check("LOW-3: two failed reads end nothing: the dialog still waits on the card",
+          page.locator(_tid("vex-new-state")).get_attribute("data-state") == "asking")
+    page.locator(_tid("approval-allow")).click()
+    check("LOW-3: approved after the blip, the dialog closes",
+          bool(until(lambda: page.locator(_tid("vex-new")).count() == 0, timeout=10)))
+    check("LOW-3: the project appears in the sidebar", bool(until(lambda: _sidebar_has(page, "blipbot"),
+                                                                  timeout=6)))
+    pid = next((p["id"] for p in mock.world["projects"] if p["name"] == "blipbot"), None)
+    compose = lambda: (page.evaluate("window.__hud.state().compose") or {}).get("projectId")  # noqa: E731
+    check("LOW-3: and a new thread opens in it", bool(until(lambda: pid and compose() == pid, timeout=4)),
+          str(compose()))
+    reads = [p for (m, p, _b) in mock.calls[before:] if m == "GET" and p.startswith("/vex/projects/")]
+    check("LOW-3: the dialog read its request, one read at a time, backing off", 3 <= len(reads) < 25,
+          str(len(reads)))
+
+
 SECTIONS = (_list_checks, _name_checks, _deny_checks, _approve_checks, _python_checks, _empty_checks,
-            _card_checks, _setup_checks)
+            _card_checks, _setup_checks, _toolchain_checks, _blip_checks)
 
 
 def vex_new_checks(browser, mock, base, check, until, guard, init_script):

@@ -17,14 +17,13 @@
 // Rules in `lib/vexNew.ts`; the daemon's side in `jarvis/v2/vex.py`.
 
 import { useEffect, useRef, useState } from "react";
-import { api } from "../api";
+import { api, ApiError } from "../api";
 import { SETUP_COMMAND, setupNote, type Language, type VexStatus } from "../lib/vex";
 import {
-  bodyKey, createReady, newBody, pickTemplate, projectNameRefusal, requestLine, templatesOf,
-  type NewCheck, type NewRequest, type Template,
+  afterFailedRead, bodyKey, createReady, lostLine, newBody, pickTemplate, POLL_MS, projectNameRefusal,
+  requestLine, templatesOf, type NewCheck, type NewRequest, type Template,
 } from "../lib/vexNew";
 
-const POLL_MS = 400;
 const CHECK_DELAY_MS = 200;
 
 export function NewVexProject(props: {
@@ -46,6 +45,8 @@ export function NewVexProject(props: {
   const [request, setRequest] = useState<NewRequest | null>(null);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState("");
+  // Reads of the request failing for now (a blip, still checking).
+  const [pollNote, setPollNote] = useState("");
 
   const blocked = props.blocked;
   const blockedRef = useRef(blocked);
@@ -119,7 +120,11 @@ export function NewVexProject(props: {
     setError("");
   }, [key]);
 
-  // A request on its way: read how it ended (the card is the owner's).
+  // A request on its way: read how it ended (the card is the owner's). One
+  // read at a time — the next is scheduled only once this one answered, so a
+  // slow daemon never has reads piling up — and a failed read is a blip to
+  // ride out with a backoff, not an ending (review LOW-3): only the daemon's
+  // own answer, or `afterFailedRead`'s definite cases, end the tracking.
   useEffect(() => {
     if (!request) return;
     if (request.state === "created" && request.project_id) {
@@ -128,17 +133,39 @@ export function NewVexProject(props: {
     }
     if (request.state !== "asking") return;
     let live = true;
-    const timer = window.setInterval(() => {
+    let timer = 0;
+    let failingSince: number | null = null;
+    let delay = POLL_MS;
+    const read = () => {
       api.vexNewState(request.id)
-        .then((r) => live && r.state !== "asking" && setRequest(r))
+        .then((r) => {
+          if (!live) return;
+          failingSince = null;
+          delay = POLL_MS;
+          setPollNote("");
+          if (r.state !== "asking") return setRequest(r);
+          timer = window.setTimeout(read, POLL_MS);
+        })
         .catch((e) => {
           if (!live) return;
-          setRequest({ ...request, state: "failed", message: e?.message || "The request could not be read." });
+          const status = e instanceof ApiError ? e.status : null;
+          const now = Date.now();
+          failingSince ??= now;
+          const next = afterFailedRead({ status, failingForMs: now - failingSince, delayMs: delay });
+          if (next.stop) {
+            setPollNote("");
+            setRequest({ ...request, state: "failed", message: lostLine(status, e?.message || "") });
+            return;
+          }
+          delay = next.delayMs;
+          setPollNote("Can't read the request from the daemon right now; still checking…");
+          timer = window.setTimeout(read, delay);
         });
-    }, POLL_MS);
+    };
+    timer = window.setTimeout(read, POLL_MS);
     return () => {
       live = false;
-      window.clearInterval(timer);
+      window.clearTimeout(timer);
     };
   }, [request]);
 
@@ -266,6 +293,9 @@ export function NewVexProject(props: {
                    data-state={request.state} role="status">
                 {requestLine(request)}
               </div>
+            ) : null}
+            {pollNote && request?.state === "asking" ? (
+              <div className="muted small" data-testid="vex-new-poll-note">{pollNote}</div>
             ) : null}
             {error ? <div className="err" data-testid="vex-new-error">{error}</div> : null}
           </div>

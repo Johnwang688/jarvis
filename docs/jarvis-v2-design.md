@@ -2374,13 +2374,20 @@ extension's `index.json`), and the folder it goes in, defaulting to the one
 `jarvis vex setup` recorded (V-4). **It shows the exact folder it will create,
 and its Windows spelling**, as the daemon answers for exactly those inputs (a
 check that asks nothing and makes nothing); a folder the daemon refuses is
-said in its own words and Create stays off. **Create raises the
+said in its own words and Create stays off — **including a folder VEX's
+Windows tools could never build in** (a `(`, an `&`, anything outside ASCII:
+`My (1)`, `Документы`), which used to pass and be made, and then refuse every
+build. **Create raises the
 `project_folder` card** — the exact path, Approve/Deny, never Always — and the
 dialog waits on it: **Deny makes nothing** and the dialog stays open saying
 so; Approve makes the folder, unpacks the template (Jarvis's own code), writes
 the settings file in the extension's v2 shape so the project also opens in VS
 Code, and the new project appears in the sidebar and opens as a new thread. A
-Python template gives `src/main.py` and the settings file. An existing empty
+Python template gives `src/main.py` and the settings file. A template write
+that fails after the yes takes back what it wrote and says the folder is
+empty again (or what it could not remove). While the card is up the dialog
+reads its request one read at a time and rides out a failed read, so a blip
+never turns an approved project into a failed one. An existing empty
 folder is used without a card, and the dialog says so before Create. **Under
 any approval card every control of the dialog is disabled and inert, and
 Escape belongs to the card** (it denies; the dialog stays, its words kept).

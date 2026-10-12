@@ -164,6 +164,35 @@ export function createReady(o: {
   return !!o.check && o.check.key === bodyKey(newBody(o.form, o.defaultFolder));
 }
 
+/** How often the dialog asks how its request is going, and how far a failed read backs off. */
+export const POLL_MS = 400;
+export const POLL_MAX_MS = 5000;
+/** Reads failing for this long in a row stop the tracking (the card has timed out by then). */
+export const LOST_AFTER_MS = 180_000;
+
+/**
+ * What the dialog does after a read of its request failed (VX-3 review,
+ * LOW-3): a blip — the network, a 5xx, an answer it could not read — is
+ * ridden out with a backoff, so a card approved meanwhile still ends in the
+ * project and its new thread; only a definite answer ends the tracking: the
+ * daemon no longer knows the request (404, a restart) or refused the read
+ * (400), or reads have failed for `LOST_AFTER_MS` in a row.
+ */
+export function afterFailedRead(o: { status: number | null; failingForMs: number; delayMs: number }):
+  { stop: boolean; delayMs: number } {
+  if (o.status === 404 || o.status === 400) return { stop: true, delayMs: 0 };
+  if (o.failingForMs >= LOST_AFTER_MS) return { stop: true, delayMs: 0 };
+  return { stop: false, delayMs: Math.min(Math.max(o.delayMs, POLL_MS) * 2, POLL_MAX_MS) };
+}
+
+/** What the dialog says when it stops tracking a request it never heard the end of. */
+export function lostLine(status: number | null, said: string): string {
+  const why = status === 404
+    ? "the daemon no longer knows this request (it may have restarted)"
+    : status === 400 ? `the daemon refused to say (${said})` : "the daemon could not be reached for three minutes";
+  return `Lost track of the request: ${why}. If the project was made, it is in the sidebar.`;
+}
+
 /** The line under the path while a request is out, and after it. */
 export function requestLine(r: NewRequest): string {
   switch (r.state) {

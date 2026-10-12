@@ -26,7 +26,7 @@ describe("the registry", () => {
     ];
     const keys = paletteEntries(ALL, offered).map((e) => e.key);
     expect(keys).toContain("monaco:editor.action.commentLine");
-    expect(keys.filter((k) => k.startsWith("monaco:") && /download|vex|dev\.info/i.test(k))).toEqual([]);
+    expect(keys.filter((k) => k !== "hud:project.newVex" && /download|vex|dev\.info/i.test(k))).toEqual([]);
     expect(paletteEntries(ALL, offered).some((e) => /download|device|brain|vexcom/i.test(e.label))).toBe(false);
     // VX-3: the HUD's one VEX entry opens the New VEX project dialog, which
     // makes a folder only on the owner's yes and never touches a device.

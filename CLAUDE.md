@@ -1374,26 +1374,47 @@ path the `project_folder` card names; nothing asked or made; owner-only like
 every VEX route). Create is enabled only while that answer is for exactly the
 inputs on screen (`bodyKey`), the name passes the daemon's `PROJECT_NAME`
 (mirrored, `projectNameRefusal`), and no card is up. Location defaults to
-`vex.json`'s `project_folder` (`/vex/status` now reports it) and is sent only
-when changed. Create raises the card; the dialog polls `GET /vex/projects/{id}`
-and says how it ended — **Deny makes nothing and the dialog stays open saying
+`vex.json`'s `project_folder` (the HUD now reads it from `/vex/status`, which
+already reported it) and is sent only when changed. **A folder VEX's tools
+could never work in is refused before anyone is asked** (review MED-1):
+`_plan` runs the build's own `to_windows` on the folder, so `My (1)`, `a&b`
+or `Документы` are refused by the check and by Create in the same words — the
+owner used to approve a project whose every build answered 409. Create raises
+the card; the dialog polls `GET /vex/projects/{id}`, **one read at a time,
+riding out a failed read with a backoff** (`afterFailedRead`, review LOW-3:
+only the daemon's answer, a 404/400, or three minutes of failures end the
+tracking — one blip used to say `failed` while the card was still up), and
+says how it ended — **Deny makes nothing and the dialog stays open saying
 so**; on `created` it refreshes projects, closes and starts a new thread in it
 (as New project does). An existing empty folder is used with no card (O5),
 said beforehand. **Under any card every control is disabled (`blocked` from
 App) and inert, and Escape is left to the card** (the dialog's own Escape
 listener returns while a card is up, and its inputs never stop a key then).
 `GET /vex/templates` answers a templates folder that cannot be listed with a
-409 sentence, never a 500. Free checks: `lib/vexNew.test.ts`,
-`commands.test.ts`, `tests/v2/vex_check.py` (`NewProjectCheck`; the check route
-in `Routes` and `Coverage`) and `tests/face/hud_v2_vex_new_check.py` (48, a
+409 sentence, never a 500. **A template write that fails midway takes back
+what this request wrote** (VX-1 code, review LOW-2): `_write_new` records each
+folder it made and each file it created `O_EXCL`, and `_remove_written`
+unlinks those files and `rmdir`s those folders, newest first, through the
+same `O_DIRECTORY | O_NOFOLLOW` fds — never anything that was there before or
+appeared meanwhile (`rmdir` removes no folder holding anything); a project the
+store would not record takes its template back too (`remove_written`). The
+message names the folder and says it is empty again (a retry uses it without
+asking, O5), or names what could not be removed and says to empty or remove
+the folder; an `OSError` is said by its `strerror`, never the path it names.
+Free checks: `lib/vexNew.test.ts`,
+`commands.test.ts`, `tests/v2/vex_check.py` (`NewProjectCheck`, `HalfWritten`; the check
+route in `Routes` and `Coverage`) and `tests/face/hud_v2_vex_new_check.py` (66, a
 `MockDaemon(0)` of its own; `hud_v2_mock_vex.setup_new` lays a temp "Windows
 drive" with real template zips that the daemon's own `list_templates`,
 `read_template`, `unpack` and `settings_document` read and write, and the
 mock's `POST /approvals/{id}` answers the card through
 `mock_vex.approval_decided`; run by `hud_v2_check` after the VEX view
-section). Guards shown to bite when removed: the dialog's Escape hold, its
-`disabled` under a card, `createReady`'s key match, the check never asking,
-and the check behind `_owner`.
+section; the mock judges the folder with the daemon's own `to_windows` and its
+`new["state_fail"]` fails the next reads). Guards shown to bite when removed:
+the dialog's Escape hold, its `disabled` under a card, `createReady`'s key
+match, the check never asking, the check behind `_owner`, and the review
+round's four — the toolchain refusal, the normalised path, the take-back and
+the poll's tolerance.
 
 **The HUD's CSP and installed build, ED-4 (2026-10-11; editor plan §1.7,
 §2.7; decision C-1; contract in `docs/hud-api.md`).** Every HUD and API

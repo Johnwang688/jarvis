@@ -35,7 +35,10 @@ The world's `vex` section (`state(mock)`):
     `read_template`, `unpack`, `settings_document`) on it; Create raises the
     `project_folder` card, and the card's answer (`approval_decided`, from
     the mock's `POST /approvals/{id}`) makes the folder, the files and the
-    project, or nothing. Nothing outside that temp tree is ever written.
+    project, or nothing. Nothing outside that temp tree is ever written. The
+    folder is judged by the daemon's own `to_windows` on that tree;
+    `new["state_fail"]`: how many of the next `GET /vex/projects/{id}` reads
+    answer 503 (a blip the dialog must ride out).
 
 Owner-only on the real daemon: a request with an `Origin` that is not the
 mock's own is 403 here too. Bodies are held to exactly the daemon's keys, so
@@ -46,6 +49,7 @@ from __future__ import annotations
 
 import re
 import secrets
+import threading
 import time
 
 try:
@@ -190,6 +194,19 @@ def setup_new(mock, root) -> dict:
     return {"mount": mount, "templates": templates, "robotics": robotics}
 
 
+_MOUNT_LOCK = threading.Lock()
+
+
+def _to_windows(mount: str, target: str) -> str:
+    """`vex.to_windows` on the mock's temp drives (`config.VEX_MOUNT_ROOT`
+    pointed there for the one call, under a lock)."""
+    from unittest.mock import patch
+    from jarvis import config
+    from jarvis.v2 import vex
+    with _MOUNT_LOCK, patch.object(config, "VEX_MOUNT_ROOT", mount):
+        return vex.to_windows(target)
+
+
 def _cfg(new: dict):
     """A `VexConfig` naming the temp templates folder: only the template code reads it here."""
     from jarvis.v2 import vex
@@ -237,9 +254,15 @@ def _plan(mock, body) -> tuple[int, object]:
                      "exist; Jarvis makes one folder, never its parents.")
     if os.path.lexists(target) and (not os.path.isdir(target) or os.listdir(target)):
         return 409, f"{target} is not empty; a template goes into a new or empty folder"
+    # The daemon's own `to_windows`, with this temp tree as the Windows drives:
+    # a folder VEX's tools could never build in is refused before anyone is
+    # asked, in the daemon's words (VX-3 review, MED-1).
+    try:
+        windows = _to_windows(mount, target)
+    except vex.VexError as exc:
+        return 409, (f"I can't use that folder: {exc}, so VEX's tools could never build or "
+                     "download from it.")
     state_ = "empty" if os.path.isdir(target) else "missing"
-    parts = rel.split("/")
-    windows = parts[0].upper() + ":\\" + "\\".join(parts[1:])
     return 0, {"cfg": cfg, "entries": entries, "path": target, "state": state_, "windows": windows,
                "name": name, "language": language}
 
@@ -330,6 +353,10 @@ def _new_routes(h, mock, method: str, parts: list, body) -> bool:
         h._json({k: val for k, val in record.items()}, 202)
         return True
     if len(parts) == 3 and parts[:2] == ["vex", "projects"] and method == "GET":
+        if new and new.get("state_fail", 0) > 0:
+            new["state_fail"] -= 1                       # a blip: the next read answers
+            h._err(503, "the daemon is busy")
+            return True
         record = (new or {}).get("requests", {}).get(parts[2])
         if record is None:
             h._err(404, f"new project request {parts[2]} not found")

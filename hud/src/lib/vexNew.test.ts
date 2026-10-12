@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
-  bodyKey, createReady, newBody, parseNewCheck, parseNewRequest, parseTemplates, pickTemplate,
-  projectNameRefusal, requestLine, templatesOf, type NewForm,
+  afterFailedRead, bodyKey, createReady, LOST_AFTER_MS, lostLine, newBody, parseNewCheck, parseNewRequest,
+  parseTemplates, pickTemplate, POLL_MAX_MS, POLL_MS, projectNameRefusal, requestLine, templatesOf,
+  type NewForm,
 } from "./vexNew";
 import { parseStatus } from "./vex";
 
@@ -107,5 +108,34 @@ describe("the daemon's answers", () => {
   it("the status carries the new-project folder (V-4)", () => {
     expect(parseStatus({ configured: true, project_folder: ROBOTICS })!.project_folder).toBe(ROBOTICS);
     expect(parseStatus({ configured: false })!.project_folder).toBeNull();
+  });
+});
+
+describe("reading the request (review LOW-3)", () => {
+  it("rides out a blip with a backoff, capped", () => {
+    let delay = POLL_MS;
+    const seen: number[] = [];
+    for (const status of [null, 503, 500, null, 502, 503, 504]) {
+      const next = afterFailedRead({ status, failingForMs: 1000, delayMs: delay });
+      expect(next.stop).toBe(false);
+      delay = next.delayMs;
+      seen.push(delay);
+    }
+    expect(seen[0]).toBe(POLL_MS * 2);
+    expect(seen.every((d, i) => i === 0 || d >= seen[i - 1])).toBe(true);
+    expect(Math.max(...seen)).toBe(POLL_MAX_MS);
+  });
+
+  it("stops only on a definite answer, or after reads failed for the whole bound", () => {
+    expect(afterFailedRead({ status: 404, failingForMs: 0, delayMs: POLL_MS }).stop).toBe(true);
+    expect(afterFailedRead({ status: 400, failingForMs: 0, delayMs: POLL_MS }).stop).toBe(true);
+    expect(afterFailedRead({ status: 503, failingForMs: LOST_AFTER_MS - 1, delayMs: POLL_MS }).stop).toBe(false);
+    expect(afterFailedRead({ status: null, failingForMs: LOST_AFTER_MS, delayMs: POLL_MS }).stop).toBe(true);
+  });
+
+  it("says it lost track, and where the project would be", () => {
+    expect(lostLine(404, "")).toMatch(/no longer knows this request/);
+    expect(lostLine(null, "")).toMatch(/could not be reached/);
+    for (const s of [404, 400, null]) expect(lostLine(s, "x")).toMatch(/in the sidebar/);
   });
 });

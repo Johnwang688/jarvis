@@ -790,8 +790,14 @@ class Templates(Base):
         self.assertEqual(vex.detect(target)["language"], "cpp")
         py = vex.settings_document("pybot", "python", cfg)["project"]
         self.assertEqual((py["python"], py["sdkVersion"]), ({"main": "src/main.py"}, PY_SDK))
-        # Never over or through what is there: a second unpack refuses.
-        self.assertRaises(FileExistsError, vex.unpack, entries, target, settings)
+        # Never over or through what is there: a second unpack refuses, and its
+        # take-back (review LOW-2) removes nothing the first one wrote.
+        before = sorted(str(p.relative_to(target)) for p in target.rglob("*"))
+        with self.assertRaises(vex.UnpackFailed) as caught:
+            vex.unpack(entries, target, settings)
+        self.assertIn("FileExistsError", caught.exception.cause)
+        self.assertEqual(caught.exception.left, [])
+        self.assertEqual(sorted(str(p.relative_to(target)) for p in target.rglob("*")), before)
 
     def test_an_unknown_template_id_is_refused(self):
         cfg = vex.load_config()
@@ -1746,6 +1752,7 @@ class TemplateFiles(Base):
         (blocked / "src").write_text("a file where a folder would go")
         self.assert_refused(lambda: vex.unpack([("src/main.cpp", b"x")], blocked, settings),
                             "not a folder")
+        self.assertTrue((blocked / "src").is_file(), "what was there before is never taken back")
         outside = self.root / "outside"
         outside.mkdir()
         linked = self.world.robotics / "linked"
@@ -1912,6 +1919,38 @@ class NewProjectCheck(DaemonBase):
         self.stores.projects.create("taken", str(target))
         self.assertIn("already a project", self.check({**self.BODY, "name": "taken"}, status=409)["error"])
 
+    def test_a_folder_vexs_tools_refuse_is_refused_before_anyone_is_asked(self):
+        # Review MED-1: `to_windows` refused these at build time, after the owner
+        # had approved a project that could never be built.
+        for shape in ("My (1)", "a&b", "Документы"):
+            with self.subTest(shape=shape):
+                parent = self.world.user / "Documents" / shape
+                parent.mkdir(parents=True)
+                body = {**self.BODY, "location": str(parent)}
+                said = self.check(body, status=409)["error"]
+                self.assertIn("Windows command line could misread", said)
+                self.assertIn("could never build", said)
+                created = self.request("POST", "/vex/projects", body, status=409)[1]["error"]
+                self.assertEqual(created, said + " Nothing was made.", "Create refuses in the same words")
+                self.assertEqual(list(parent.iterdir()), [])
+        self.assertEqual(self.daemon.approvals.pending(), [])
+        self.assertEqual(self.daemon.vex._news, {})
+
+    def test_the_shown_path_is_normalised_as_the_card_names_it(self):
+        # Review LOW-1: a location the daemon normalises — a doubled slash, a
+        # trailing one — shows the very path the card names, never the raw join.
+        location = str(self.world.user) + "//Documents/Robotics/"
+        body = {**self.BODY, "location": location}
+        seen = self.check(body)
+        target = self.world.robotics / "checkbot"
+        self.assertEqual(seen["path"], str(target))
+        self.assertEqual(seen["windows_path"], self.world.windows(target))
+        made = self.request("POST", "/vex/projects", body, status=202)[1]
+        card = eventually(lambda: self.daemon.approvals.pending(), what="the card")[0]
+        self.assertEqual(card.args["path"], seen["path"])
+        self.assertEqual(made["path"], seen["path"])
+        self.daemon.approvals.resolve(card.req_id, Decision.DENY)
+
     def test_a_templates_folder_that_cannot_be_listed_is_a_sentence_not_a_500(self):
         def gone(_cfg):
             raise FileNotFoundError("gone between the check and the listing")
@@ -1919,6 +1958,72 @@ class NewProjectCheck(DaemonBase):
             status, body = self.request("GET", "/vex/templates")
         self.assertEqual(status, 409, body)
         self.assertIn("vex setup", body["error"])
+
+
+class HalfWritten(DaemonBase):
+    """Review LOW-2: a template write that fails midway takes back what this
+    request wrote — through the folder's fds, only the files it created and the
+    folders it made — and says so; the folder, now empty, takes a retry."""
+
+    def make(self, template, name="halfbot"):
+        made = self.request("POST", "/vex/projects", {"name": name, "language": "cpp",
+                                                      "template": template}, status=202)[1]
+        card = eventually(lambda: self.daemon.approvals.pending(), what="the card")[0]
+        self.daemon.approvals.resolve(card.req_id, Decision.ALLOW)
+        return eventually(lambda: (lambda s: s if s["state"] != "asking" else None)(
+            self.owner("GET", f"/vex/projects/{made['id']}")), what="the request")
+
+    def assert_taken_back_and_retried(self, done, target):
+        self.assertEqual(done["state"], "failed", done)
+        self.assertIn(str(target), done["message"])
+        self.assertIn("is empty again", done["message"])
+        self.assertTrue(target.is_dir())
+        self.assertEqual(sorted(p.name for p in target.iterdir()), [], "half a template was left")
+        self.assertNotIn("halfbot", [p.name for p in self.stores.projects.list()])
+        # The emptied folder takes a retry: used without asking (O5), and made.
+        again = self.request("POST", "/vex/projects", {"name": "halfbot", "language": "cpp",
+                                                       "template": "cpp_v5_vsc_empty"}, status=202)[1]
+        final = eventually(lambda: (lambda s: s if s["state"] != "asking" else None)(
+            self.owner("GET", f"/vex/projects/{again['id']}")), what="the retry")
+        self.assertEqual(final["state"], "created", final)
+        self.assertTrue((target / "src" / "main.cpp").is_file())
+
+    def test_an_entry_that_cannot_be_written_takes_back_the_rest(self):
+        self.world.zip(self.world.templates / "cpp_v5_vsc_broken.zip", {
+            "makefile": "include vex/mkenv.mk\n", "vex/mkenv.mk": "CC = clang\n",
+            "vex/mkenv.mk/x": "a file under a file"})
+        done = self.make("cpp_v5_vsc_broken")
+        self.assertIn("not a folder", done["message"])
+        self.assert_taken_back_and_retried(done, self.world.robotics / "halfbot")
+
+    def test_a_disk_error_midway_takes_back_the_rest(self):
+        real = vex._write_new
+        calls = []
+
+        def flaky(folder_fd, rel, data, made=None):
+            calls.append(rel)
+            if len(calls) == 3:
+                raise OSError(28, "No space left on device", "/somewhere/secret")
+            return real(folder_fd, rel, data, made)
+
+        with patch.object(vex, "_write_new", flaky):
+            done = self.make("cpp_v5_vsc_empty")
+        self.assertIn("OSError: No space left on device", done["message"])
+        self.assertNotIn("/somewhere/secret", done["message"])
+        self.assert_taken_back_and_retried(done, self.world.robotics / "halfbot")
+
+    def test_what_was_there_before_is_never_taken(self):
+        cfg = vex.load_config()
+        target = self.world.robotics / "keep"
+        (target / "vex").mkdir(parents=True)
+        (target / "vex" / "notes.txt").write_text("the owner's")
+        with self.assertRaises(vex.UnpackFailed) as caught:
+            vex.unpack([("makefile", b"x"), ("vex/mkenv.mk", b"y"), ("vex/mkenv.mk/z", b"z")],
+                       target, vex.settings_document("keep", "cpp", cfg))
+        self.assertEqual(caught.exception.left, [])
+        # `vex/` was the owner's: never recorded as made, so never removed.
+        self.assertEqual(sorted(p.name for p in target.iterdir()), ["vex"])
+        self.assertEqual(sorted(p.name for p in (target / "vex").iterdir()), ["notes.txt"])
 
 
 # -- leaks and reach --------------------------------------------------------------------------------------
