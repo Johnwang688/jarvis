@@ -577,6 +577,21 @@ label.iconbtn.attach:hover { background: var(--bg-3); border-color: var(--border
   display: flex; flex-direction: column; min-height: 0;
 }
 .treebody { flex: 1 1 auto; overflow: auto; min-height: 0; }
+/* The Diff pane (2026-10-12): which changes it shows above them — a task's,
+   or a project's uncommitted changes, each row with its git letter in the
+   explorer's colours (ED-9's data-git rules colour the name). */
+.diffpane { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; min-width: 0; }
+.diffhead {
+  flex: 0 0 auto; padding: 4px 10px; font-size: 11px; color: var(--text-2);
+  border-bottom: 1px solid var(--border); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.tree-row .scmletter { margin-left: auto; padding-left: 6px; font: 10px var(--mono); color: var(--text-muted); }
+.tree-row[data-git="modified"] .scmletter, .tree-row[data-git="deleted"] .scmletter { color: var(--syn-fn); }
+.tree-row[data-git="added"] .scmletter, .tree-row[data-git="renamed"] .scmletter,
+.tree-row[data-git="untracked"] .scmletter { color: var(--syn-string); }
+.tree-row[data-git="conflict"] .scmletter { color: var(--syn-const); }
+.tree-row[data-git="deleted"] .nm { text-decoration: line-through; }
+.tree-row.scmrow[aria-disabled="true"] { cursor: default; }
 .editorwrap { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; }
 /* `isolation: isolate`: Monaco's context menu, hovers, suggest list and quick
    input carry z-indexes in the thousands and render inside the editor's own

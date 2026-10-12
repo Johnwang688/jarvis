@@ -452,9 +452,10 @@ export function setView(ws: Workspace, pane: PaneNo, view: View): Workspace {
  *     else the focused pane switches to chat. Which chat pane a *thread*
  *     lands in — the one showing it, the focused chat pane, the selected chat
  *     — is lib/chats.ts `chatTarget`, which the window uses for threads;
- *   - task: a drawn task or diff pane follows the selected task by itself, so
- *     nothing moves; with none drawn the focused pane switches to task — in
- *     the single layout exactly today's behaviour;
+ *   - task: a drawn task pane, or a diff pane following the window (not
+ *     pinned to a project), follows the selected task by itself, so nothing
+ *     moves; with none drawn the focused pane switches to task — in the
+ *     single layout exactly today's behaviour;
  *   - anything else: as chat.
  *
  * `drawn` is what the window draws now (`fitWorkspace(...).panes`).
@@ -462,7 +463,10 @@ export function setView(ws: Workspace, pane: PaneNo, view: View): Workspace {
 export function show(ws: Workspace, view: View, drawn: readonly PaneNo[]): Workspace {
   const visible = drawn.length ? drawn : [orderOf(ws)[0]];
   if (view === "task") {
-    if (visible.some((n) => ws.panes[n - 1].view === "task" || ws.panes[n - 1].view === "diff")) return ws;
+    // A Diff pane pinned to a project shows that project's uncommitted
+    // changes, never the task (lib/scm `diffMode`): it does not count.
+    const follows = (p: PaneSpec) => p.view === "task" || (p.view === "diff" && !p.projectId);
+    if (visible.some((n) => follows(ws.panes[n - 1]))) return ws;
   } else {
     const showing = visible.filter((n) => ws.panes[n - 1].view === view);
     if (showing.length) return showing.includes(ws.focused) ? ws : focusPane(ws, showing[0]);
