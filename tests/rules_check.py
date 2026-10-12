@@ -1873,6 +1873,7 @@ REVIEW_48_DENY = (
     'kill `pgrep -f daemon2`',
     'kill $(pidof daemon2)',
     'pgrep -f daemon2 | xargs kill',
+    'pgrep -f daemon2 | xargs kill -9',
     'pgrep -f daemon2 | xargs -r kill -9',
     'P=$(pgrep -f daemon2); kill $P',
     'killall -r daemon2',
@@ -1912,6 +1913,8 @@ REVIEW_48_VERDICTS = {
     'coverage run -m jarvis chat': "ask",
     'pkill -f jarvis': "allow", 'pkill -f vite': "allow", "pkill -f 'npm run dev'": "allow",
     'pgrep -f daemon2': "allow", 'pkill python': "allow",
+    # The owner's examples of what the kill rule must leave alone (b60bf64's verdicts).
+    'echo pkill -f daemon2': "allow", 'pgrep -af daemon2': "allow",
 }
 
 
