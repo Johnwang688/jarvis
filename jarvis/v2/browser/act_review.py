@@ -21,23 +21,30 @@ that reads text. So everything here fails toward asking:
     sent: `act_rules.Element` has no field for one.
   - **Nothing that looks like a credential leaves.** If the look's guard
     flagged the context, or anything about to be sent holds a value from
-    `secrets.secret_values()` (or its URL or base64 forms) or a
-    `credential_patterns` shape, no model is called and the answer is ask.
-  - **The answer is JSON only**, exactly `verdict`, `category` and `reason`.
-    A raise, a timeout (one request, 8 s, and an answer that comes back
-    after 8 s of wall clock counts as late), prose, bad JSON, a missing or
-    unknown field, an unknown verdict or category, an empty answer, a cache
-    error: each is **ask**.
+    `secrets.secret_values()` or the caller's `extra_values` (or their URL
+    or base64 forms) or a `credential_patterns` shape, no model is called
+    and the answer is ask.
+  - **Never a Chinese-hosted model** (the 2026-07-30 routing rule: this is
+    logged-in page context). The review tier follows the owner's model
+    selection, so a CN-hosted choice (`titles.cn_hosted`) falls back to the
+    configured orchestrator, and if that is CN-hosted too, nothing is sent
+    and the answer is ask.
+  - **The answer is JSON only**, exactly `verdict`, `category` and `reason`,
+    each once. A raise, a timeout (one request, 8 s, and an answer that
+    comes back after 8 s of wall clock counts as late), prose, bad JSON, a
+    missing, repeated or unknown field, an unknown verdict or category, an
+    empty answer, a cache error: each is **ask**.
   - **Two belts in code, not in the prompt**: a sensitive category (anything
     but `ordinary`) is never allowed — "allow" becomes "ask"; and
     `JARVIS_BROWSER_REVIEW_AUTOALLOW=0` turns every "allow" into "ask", so
     the reviewer can still refuse but no longer consent (deny stays deny).
+    `decide` applies both again.
   - **Only "allow" is cached**, in memory, 15 minutes, at most 512 entries,
-    keyed by the profile, the page's origin and path shape (digits as `#`),
-    the action, its key, a digest of the text to type, the destination, the
-    target's fingerprint (tag, role, name, form action) and a digest of the
-    owner's words — so a yes for one message, one text or one destination is
-    never reused for another. "ask" and "deny" are never cached.
+    keyed by the profile, the owner's words and a digest of **everything the
+    model saw** (the whole fenced payload) plus every address, text and
+    element in full — so a yes is reused only for the very same question:
+    never for another element, destination, frame, query, fragment, text,
+    title, page context or owner message. "ask" and "deny" are never cached.
 
 What it can sometimes catch, and what it cannot, is §B.11: a control whose
 label lies, what page script does on a click, data leaving inside an
@@ -61,12 +68,11 @@ import os
 import re
 import threading
 import time
-from urllib.parse import urlsplit
 
 from jarvis import config, credential_patterns, untrusted
 
 from . import act_rules
-from .act_rules import CATEGORIES, SENSITIVE, ORDINARY, Facts
+from .act_rules import CATEGORIES, ORDINARY, Facts
 
 ALLOW, ASK, DENY = "allow", "ask", "deny"
 VERDICTS = (ALLOW, ASK, DENY)
@@ -97,6 +103,7 @@ R_FORM = "the reviewer did not answer in the expected form"
 R_CACHE = "the reviewer's cache failed"
 R_SWITCHED_OFF = "the reviewer may refuse but not consent (JARVIS_BROWSER_REVIEW_AUTOALLOW=0)"
 R_SENSITIVE = "a sensitive action always goes to the owner"
+R_NO_MODEL = "no reviewer model may see this page (the configured ones are Chinese-hosted)"
 
 
 @dataclass(frozen=True)
@@ -124,14 +131,23 @@ def _now() -> float:
     return time.monotonic()
 
 
-def _model() -> str:
+def _model() -> str | None:
     """The review tier, through `models.tier` as `command_review` does — or
     `browser_review` once a config defines it (BD-4: env
-    `JARVIS_BROWSER_REVIEW_MODEL`, defaulting to the review tier, Luna)."""
+    `JARVIS_BROWSER_REVIEW_MODEL`, defaulting to the review tier, Luna).
+
+    That tier follows the owner's model selection, and the page context is
+    logged-in personal data, which the routing rule keeps off Chinese-hosted
+    models: a CN-hosted model (`titles.cn_hosted`, the one list) falls back
+    to the configured orchestrator, and None means none may be asked."""
     from jarvis import models
+    from jarvis.v2.titles import cn_hosted
 
     name = "browser_review" if "browser_review" in config.TIERS else "review"
-    return models.tier(name)
+    for model in (models.tier(name), config.TIERS.get("orchestrator")):
+        if model and not cn_hosted(model):
+            return model
+    return None
 
 
 # -- what is sent ---------------------------------------------------------------------------------
@@ -164,7 +180,8 @@ def _target(facts: Facts) -> str:
         for name, value, cap in (("tag", t.tag, 30), ("type", t.type, 30), ("role", t.role, 30),
                                  ("name", t.name, 120), ("label", t.label, 120),
                                  ("placeholder", t.placeholder, 80), ("href", t.href, 200),
-                                 ("frame", t.frame_origin, 100), ("heading", t.heading, 120)):
+                                 ("src", t.src, 200), ("frame", t.frame_origin, 100),
+                                 ("heading", t.heading, 120)):
             if value:
                 parts.append(f"{name}={_quoted(value, cap)}")
         if t.submits:
@@ -252,11 +269,12 @@ def messages(facts: Facts, owner_words: str, *, nonce: str | None = None) -> lis
     return [{"role": "system", "content": SYSTEM}, {"role": "user", "content": user}]
 
 
-def _holds_credential(text: str) -> bool:
+def _holds_credential(text: str, extra_values=()) -> bool:
     from jarvis.tools import secrets
     from jarvis.v2 import terminal_guard  # its value forms: one implementation
 
-    forms = terminal_guard.value_forms(secrets.secret_values())
+    values = list(secrets.secret_values()) + [v for v in extra_values if isinstance(v, str)]
+    forms = terminal_guard.value_forms(values)
     return terminal_guard.holds_value(text, forms) or credential_patterns.holds_credential(text)
 
 
@@ -265,10 +283,24 @@ def _holds_credential(text: str) -> bool:
 _FENCE = re.compile(r"\A```(?:json)?[ \t]*\n(.*)\n```\Z", re.DOTALL)
 
 
+class _Repeated(ValueError):
+    pass
+
+
+def _no_repeats(pairs):
+    data = {}
+    for key, value in pairs:
+        if key in data:
+            raise _Repeated(key)  # `{"verdict": "deny", "verdict": "allow"}` is not an answer
+        data[key] = value
+    return data
+
+
 def parse(raw) -> ActVerdict | None:
     """The model's answer, or None if it is anything but the JSON asked for:
-    exactly `verdict`, `category` and `reason` (one ``` fence around it is
-    tolerated), each a string, verdict and category from their sets."""
+    exactly `verdict`, `category` and `reason`, each once (one ``` fence
+    around it is tolerated), each a string, verdict and category from their
+    sets."""
     if not isinstance(raw, str):
         return None
     text = raw.strip()
@@ -280,7 +312,7 @@ def parse(raw) -> ActVerdict | None:
     if not (text.startswith("{") and text.endswith("}")):
         return None
     try:
-        data = json.loads(text)
+        data = json.loads(text, object_pairs_hook=_no_repeats)
     except ValueError:
         return None
     if not isinstance(data, dict) or set(data) != {"verdict", "category", "reason"}:
@@ -297,7 +329,6 @@ def parse(raw) -> ActVerdict | None:
 
 _cache: "OrderedDict[str, tuple[float, ActVerdict]]" = OrderedDict()
 _cache_lock = threading.Lock()
-_DIGITS = re.compile(r"[0-9]")
 
 
 def clear_cache() -> None:
@@ -315,18 +346,15 @@ def _digest(text: str) -> str:
 
 
 def cache_key(facts: Facts, owner_words: str) -> str:
-    """Profile, the page's origin and path shape, the action and its key, a
-    digest of the text, the destination, the target's fingerprint and a
-    digest of the owner's words."""
-    page = urlsplit(facts.url)
-    origin = f"{page.scheme.lower()}://{(page.hostname or '').lower()}:{page.port or ''}"
-    shape = _DIGITS.sub("#", page.path)
-    t = facts.target
-    fingerprint = [t.tag, t.role, t.name, t.type] if t is not None else []
-    form_action = facts.form.action if facts.form is not None else ""
-    parts = [facts.profile, origin, _digest(shape), facts.action, facts.key, _digest(facts.text),
-             _digest(facts.nav_url), [_digest(x) for x in fingerprint], _digest(form_action),
-             _digest(owner_text(owner_words))]
+    """The profile, the owner's words, everything the model saw (the fenced
+    payload), and — because the payload is capped — the action's own parts
+    in full: its key, text, addresses, title, context, target and form. Two
+    actions share an entry only when the reviewer was asked the very same
+    question. The daemon's state facts (counters, switches) are not part of
+    the question."""
+    parts = [facts.profile, owner_text(owner_words), payload(facts), facts.action, facts.key,
+             _digest(facts.text), facts.nav_url, facts.url, facts.title, _digest(facts.context),
+             _digest(repr(facts.target)), _digest(repr(facts.form)), facts.upload_path]
     return _digest(json.dumps(parts))
 
 
@@ -357,22 +385,26 @@ def _cache_put(key: str, verdict: ActVerdict) -> None:
 # -- the judgement ---------------------------------------------------------------------------------
 
 def _belts(verdict: ActVerdict) -> ActVerdict:
-    """The two belts, in code: a sensitive category is never allowed, and
-    with the switch off nothing is."""
-    if verdict.verdict == ALLOW and verdict.category in SENSITIVE:
+    """The two belts, in code: only `ordinary` is ever allowed (a sensitive
+    category, or any other, becomes ask), and with the switch off nothing
+    is."""
+    if verdict.verdict == ALLOW and verdict.category != ORDINARY:
         return ActVerdict(ASK, verdict.category, verdict.reason or R_SENSITIVE, verdict.source)
     if verdict.verdict == ALLOW and not _autoallow():
         return ActVerdict(ASK, verdict.category, R_SWITCHED_OFF, verdict.source)
     return verdict
 
 
-def judge(facts: Facts, owner_words: str = "", *, chat=None) -> ActVerdict:
-    """One action, judged. `chat` is `llm.chat` unless a test scripts one.
+def judge(facts: Facts, owner_words: str = "", *, chat=None, extra_values=()) -> ActVerdict:
+    """One action, judged. `chat` is `llm.chat` unless a test scripts one;
+    `extra_values` are credential values beyond `secrets.secret_values()`
+    (the project's env files), as `act_rules.pre_judge` takes them.
 
     Never raises: every failure is an ask."""
     try:
         request = messages(facts, owner_words)
-        if facts.context_flagged or _holds_credential("\n".join(m["content"] for m in request)):
+        if facts.context_flagged is not False or _holds_credential(
+                "\n".join(m["content"] for m in request), tuple(extra_values)):
             return _ask(R_FLAGGED, "guard")
     except Exception:
         return _ask(R_FORM)
@@ -384,6 +416,12 @@ def judge(facts: Facts, owner_words: str = "", *, chat=None) -> ActVerdict:
     if hit is not None:
         return _belts(ActVerdict(hit.verdict, hit.category, hit.reason, "cache"))
 
+    try:
+        model = _model()
+    except Exception:
+        model = None
+    if model is None:
+        return _ask(R_NO_MODEL, "guard")
     if chat is None:
         from jarvis import llm
 
@@ -394,7 +432,7 @@ def judge(facts: Facts, owner_words: str = "", *, chat=None) -> ActVerdict:
         # would send nothing at all), and not streaming means no second,
         # non-streaming attempt after a failed stream. An answer that arrives
         # after the deadline is an ask all the same.
-        reply = chat(_model(), request, temperature=0.0, max_tokens=MAX_TOKENS,
+        reply = chat(model, request, temperature=0.0, max_tokens=MAX_TOKENS,
                      timeout=TIMEOUT_S, max_retries=1, stream=False)
         raw = reply.text
     except Exception:
@@ -415,15 +453,23 @@ def judge(facts: Facts, owner_words: str = "", *, chat=None) -> ActVerdict:
 def decide(pre: act_rules.PreVerdict, verdict: ActVerdict | None = None) -> str:
     """The gate's outcome for one action: `refuse`, `allow`, `ask` or `deny`.
 
-    The fixed rules come first. An ASK floor can be raised by the reviewer to
-    a deny, never lowered: whatever it says, a floor is at least an ask.
-    CLASSIFY is the reviewer's answer, and no answer is an ask."""
-    if pre.kind == act_rules.REFUSE:
+    The fixed rules come first, and anything that is not exactly one of their
+    four kinds is a refusal. An ASK floor can be raised by the reviewer to a
+    deny, never lowered: whatever it says, a floor is at least an ask.
+    CLASSIFY is the reviewer's answer with both belts applied again (a
+    sensitive category, the AUTOALLOW switch), so a verdict that did not come
+    through `judge` cannot consent past them; no answer, or one outside the
+    sets, is an ask."""
+    kind = getattr(pre, "kind", None) if isinstance(pre, act_rules.PreVerdict) else None
+    if kind not in act_rules.KINDS:
         return "refuse"
-    if pre.kind == act_rules.ALLOW:
+    if kind == act_rules.REFUSE:
+        return "refuse"
+    if kind == act_rules.ALLOW:
         return ALLOW
-    if pre.kind == act_rules.ASK:
-        return DENY if verdict is not None and verdict.verdict == DENY else ASK
-    if pre.kind == act_rules.CLASSIFY and verdict is not None and verdict.verdict in VERDICTS:
-        return verdict.verdict
-    return ASK
+    said = verdict.verdict if isinstance(verdict, ActVerdict) else None
+    if kind == act_rules.ASK:
+        return DENY if said == DENY else ASK
+    if said not in VERDICTS or verdict.category not in (*CATEGORIES, UNJUDGED):
+        return ASK
+    return _belts(verdict).verdict

@@ -6,31 +6,41 @@ checkout root is pointed at a temp folder, and the only `.env` read is a fake
 one made here. `llm.chat` raises for the whole run: the rules never call a
 model.
 
-What it pins (§H's table for `browser_act_rules_check.py`, plus H3–H12):
+What it pins (§H's table for `browser_act_rules_check.py`, plus H3–H12 and
+the review of PR #71):
 
   - **H1**: `type`, `select` and an editing `press` (Backspace, Delete,
     Space) are refused on `type=password`, on each `autocomplete` token
     (`current-password`, `new-password`, `one-time-code`, `webauthn`, every
     `cc-*` wherever it stands among the tokens), on the label heuristics
-    (OTP, 2FA, MFA, TOTP, verification/security code, passcode, PIN, CVV …),
-    on four or more one-character boxes and on any field in a
-    `PAYMENT_FRAME_HOSTS` frame — clicking into one is not;
-  - `press` refuses a printable character; Enter and Space are CLASSIFY;
+    (OTP, 2FA, MFA, TOTP, verification/security code, passcode, PIN, CVV,
+    their joined spellings …), on four or more one-character boxes, on any
+    field in a `PAYMENT_FRAME_HOSTS` frame and on a focused <iframe> showing
+    one — clicking into one is not;
+  - `press` refuses a printable character; Enter and Space are CLASSIFY; the
+    navigation keys are CLASSIFY on or beside a sensitive field (autofill);
+    Backspace and Delete are ALLOW only in a text field (a mail row, an
+    option, a grid cell or a button is CLASSIFY);
+  - a missing target: `type`/`select` refuse, an editing key or Enter asks;
   - **H2**: text, a navigate address, a clicked link or a submitted form's
     action that carries a value from the temp `.env` (raw, URL-encoded,
     base64) or a credential-pattern string is refused;
+  - **H7's belt**: http(s) only, Jarvis's ports in a navigate address, a link
+    or a form's action, an ambiguous host, userinfo, an address past 8 KB;
   - **H8**: every upload asks; `~/.ssh`, `~/.config/jarvis`, the gate's state,
-    a credential env file, a symlink out, `..`, a folder, more than 50 MB are
-    refused;
+    a credential env file, a hidden path (`.git`, `.GIT`, `.env.example`), a
+    hard link, a symlink out, `..`, a folder, more than 50 MB are refused;
   - **the ASK floors**: login, sign-up, two-factor and payment submits, the
-    URL shapes, Chrome's own pages and executable links ask, with the right
-    category;
+    URL shapes (path, fragment, route query), Chrome's own pages and
+    executable links ask, with the right category;
   - **the ALLOW tier** needs no model; short typing in a POST form, or in a
     form beside a password field, is not allowed;
-  - **H3–H7, H9–H12**: each state fact refuses alone, with its fixed sentence;
-    a `Facts` nobody filled in is refused;
+  - **H3–H7, H9–H12**: every state fact must be explicit — each one left
+    unset, given the wrong type, a str, a negative number, NaN or infinity,
+    refuses — and each refuses alone with its fixed sentence; an exception
+    while judging refuses;
   - refusal reasons are fixed sentences, never page text;
-  - a 1 MB label and a 100,000-character address are judged in well under
+  - a 1 MB label and a 100,000-character link are judged in well under
     100 ms.
 
 Run: PYTHONPATH=. .venv/bin/python tests/v2/browser_act_rules_check.py
@@ -73,8 +83,12 @@ ENV_VALUE = "Tr0ub4dor-staple-battery-9"
 GITHUB_TOKEN = "gh" + "p_" + "A1b2C3d4" * 5
 AWS_KEY = "AK" + "IA" + "ABCDEFGH12345678"
 
-OK = dict(at_desk=True, agents_may_drive=True, pane_can_drive=True, pane_can_see=True,
-          tab_drawn=True)
+# Every state fact, set explicitly to the value that passes.
+OK = dict(card_pending=False, paused=False, owner_has_input=True, owner_input_age_s=60.0,
+          agents_may_drive=True, pane_can_drive=True, pane_can_see=True, private=False,
+          tab_drawn=True, direct_mode=False, url_refused=False, other_driver=False,
+          judged_this_turn=0, actions_this_hour=0, strict_profile=False, at_desk=True, depth=0,
+          sub_agent=False)
 REASONS = {value for name, value in vars(R).items() if name.startswith("R_")}
 
 
@@ -111,7 +125,7 @@ class World(unittest.TestCase):
         os.chdir(self.project)
         self.addCleanup(os.chdir, here)
 
-    def judge(self, f: Facts, **kw) -> R.PreVerdict:
+    def judge(self, f, **kw) -> R.PreVerdict:
         verdict = R.pre_judge(f, **kw)
         if verdict.kind == R.REFUSE:
             self.assertIn(verdict.reason, REASONS)
@@ -147,7 +161,11 @@ LABEL_SENSITIVE = [dict(attr_name="otp"), dict(attr_id="otpCode"), dict(attr_id=
                    dict(placeholder="Expiry (MM/YY)"), dict(label="Password"),
                    dict(label="pass\u200bword"), dict(label="\uff2f\uff34\uff30"),  # ＯＴＰ
                    dict(label="Code", inputmode="numeric", maxlength=6),
-                   dict(label="Enter the code", type="tel", maxlength=8)]
+                   dict(label="Enter the code", type="tel", maxlength=8),
+                   # The joined spellings (review of PR #71, NIT).
+                   dict(attr_name="otpcode"), dict(attr_id="cardnum"), dict(attr_name="creditcard"),
+                   dict(attr_id="securitycode"), dict(attr_name="cardcvc"), dict(attr_id="expdate"),
+                   dict(attr_name="smscode"), dict(label="SMS code")]
 LABEL_ORDINARY = [dict(label="Search"), dict(label="Email address"), dict(label="Shipping address"),
                   dict(placeholder="Topic"), dict(attr_name="username"), dict(label="Spinner speed"),
                   dict(label="ZIP code", inputmode="numeric", maxlength=5),
@@ -168,13 +186,15 @@ class SensitiveFields(World):
         for key in ("Backspace", "Delete", "Space"):
             yield facts("press", key=key, target=el)
 
-    def assertNeverFilled(self, el: Element):
+    def assertNeverFilled(self, el: Element, click: str = R.CLASSIFY):
         for f in self.fills(el):
             self.assertRefused(f, "H1", R.R_SENSITIVE)
         # Clicking into it is allowed (not refused); the rules leave it to the reviewer.
-        self.assertEqual(self.judge(facts("click", target=el)).kind, R.CLASSIFY)
-        # A navigation key is not a fill.
-        self.assertEqual(self.judge(facts("press", key="Tab", target=el)).kind, R.ALLOW)
+        self.assertEqual(self.judge(facts("click", target=el)).kind, click)
+        # A navigation key is not a fill — but with autofill on it can accept
+        # a saved card, so it is the reviewer's, never ALLOW.
+        for key in ("Tab", "ArrowDown", "Escape", "End"):
+            self.assertEqual(self.judge(facts("press", key=key, target=el)).kind, R.CLASSIFY, key)
 
     def test_type_password(self):
         self.assertNeverFilled(field(type="password"))
@@ -222,6 +242,17 @@ class SensitiveFields(World):
             with self.subTest(origin=origin):
                 self.assertIsNone(R.sensitive_kind(field(label="Name", frame_origin=origin)))
 
+    def test_a_focused_payment_iframe(self):
+        frame = Element(tag="iframe", src="https://js.stripe.com/v3/elements-inner-card.html")
+        self.assertEqual(R.sensitive_kind(frame), R.CARD)
+        # Not a text field, so a click on it is the payment floor's.
+        self.assertNeverFilled(frame, click=R.ASK)
+        other = Element(tag="iframe", src="https://www.youtube.com/embed/x")
+        self.assertIsNone(R.sensitive_kind(other))
+        # Keys go into a frame whose focused field the rules cannot see.
+        self.assertKind(facts("press", key="Tab", target=other), R.CLASSIFY)
+        self.assertKind(facts("press", key="Backspace", target=other), R.CLASSIFY)
+
     def test_a_sensitive_select(self):
         select = Element(tag="select", autocomplete="cc-exp-month")
         self.assertRefused(facts("select", text="03", target=select), "H1")
@@ -247,21 +278,50 @@ class Keys(World):
         for key in ("Enter", "enter", "Return", "Space", "space"):
             with self.subTest(key=key):
                 self.assertKind(facts("press", key=key, target=field()), R.CLASSIFY)
-                self.assertKind(facts("press", key=key), R.CLASSIFY)
         self.assertNotIn("Enter", R.NAV_KEYS)
         self.assertNotIn("Space", R.NAV_KEYS)
 
-    def test_the_navigation_keys_are_allowed(self):
+    def test_the_navigation_keys_are_allowed_away_from_sensitive_fields(self):
         for key in sorted(R.NAV_KEYS) + ["esc", "up", "Shift-Tab", "PGDN"]:
             with self.subTest(key=key):
                 self.assertKind(facts("press", key=key, target=field()), R.ALLOW)
+                self.assertKind(facts("press", key=key, target=Element(tag="body")), R.ALLOW)
 
-    def test_editing_keys_in_an_ordinary_field(self):
+    def test_navigation_keys_on_or_beside_a_sensitive_field(self):
+        # With autofill on, ArrowDown and Tab in a card field accept a saved card.
+        login = Form("post", "https://x.test/s", fields=(field(attr_name="user"), field(type="password")))
+        card = Form("post", "https://x.test/o", fields=(field(attr_name="name"),),
+                    frame_origins=("https://js.stripe.com",))
+        for key in ("ArrowDown", "ArrowUp", "Tab", "Shift+Tab", "Escape", "PageDown", "Home", "End"):
+            with self.subTest(key=key):
+                self.assertKind(facts("press", key=key, target=field(autocomplete="cc-number")), R.CLASSIFY)
+                self.assertKind(facts("press", key=key, target=field(attr_name="user"), form=login),
+                                R.CLASSIFY)
+                self.assertKind(facts("press", key=key, target=field(attr_name="name"), form=card),
+                                R.CLASSIFY)
+                self.assertKind(facts("press", key=key), R.CLASSIFY)  # no target named
+
+    def test_editing_keys_only_in_a_text_field(self):
         for key in ("Backspace", "Delete", "del"):
             with self.subTest(key=key):
-                self.assertKind(facts("press", key=key, target=field(label="Search")), R.ALLOW)
-                # With no focused element known, the rules cannot say it is not sensitive.
-                self.assertKind(facts("press", key=key), R.CLASSIFY)
+                for el in (field(label="Search"), Element(tag="textarea"), Element(tag="div", editable=True),
+                           Element(tag="div", role="textbox"), field(type="email")):
+                    self.assertKind(facts("press", key=key, target=el), R.ALLOW)
+                # On a mail row, a file, a grid cell or a button, Delete deletes the selection.
+                for el in (Element(tag="tr", role="row", name="Invoice from ACME"),
+                           Element(tag="li", role="option", name="report.pdf"),
+                           Element(tag="td", role="gridcell", name="Q3 budget"),
+                           Element(tag="button", name="Archive"), Element(tag="div", role="listitem"),
+                           Element(tag="body"), field(type="checkbox")):
+                    self.assertKind(facts("press", key=key, target=el), R.CLASSIFY)
+
+    def test_with_no_target_named(self):
+        # type and select need a ref; an editing key or Enter asks.
+        self.assertRefused(facts("type", text="hi"), "action", R.R_NO_TARGET)
+        self.assertRefused(facts("select", text="Blue"), "action", R.R_NO_TARGET)
+        for key in ("Backspace", "Delete", "Space", "Enter"):
+            with self.subTest(key=key):
+                self.assertKind(facts("press", key=key), R.ASK, R.NO_TARGET)
 
 
 # -- H2 --------------------------------------------------------------------------------------------
@@ -303,6 +363,7 @@ class Credentials(World):
         form = Form("get", action=f"https://attacker.test/{GITHUB_TOKEN}")
         button = Element(tag="button", submits=True)
         self.assertRefused(facts("click", target=button, form=form), "H2")
+        self.assertRefused(facts("press", key="Space", target=button, form=form), "H2")
         self.assertRefused(facts("press", key="Enter", target=field(), form=form), "H2")
 
     def test_values_the_caller_adds(self):
@@ -330,8 +391,10 @@ class Uploads(World):
         (self.project / "photo.png").write_bytes(b"\x89PNG")
         (self.project / "docs").mkdir()
         (self.project / "docs" / "cv.pdf").write_bytes(b"%PDF")
-        (self.project / ".env.example").write_text("API_KEY=\n")
-        for name in ("photo.png", "docs/cv.pdf", str(self.project / "photo.png"), ".env.example"):
+        (self.project / ".well-known").mkdir()
+        (self.project / ".well-known" / "security.txt").write_text("x")
+        for name in ("photo.png", "docs/cv.pdf", str(self.project / "photo.png"),
+                     ".well-known/security.txt"):
             with self.subTest(name=name):
                 verdict = self.upload(name)
                 self.assertEqual((verdict.kind, verdict.category), (R.ASK, R.UPLOAD))
@@ -370,11 +433,28 @@ class Uploads(World):
         (self.project / ".env.production").write_text("X=1\n")
         (self.project / "google_token.json").write_text("{}")
         (self.project / "innocent.txt").symlink_to(self.project / ".env")
-        (self.project / ".git").mkdir()
-        (self.project / ".git" / "config").write_text("[remote]\n")
-        for name in (".env", ".env.production", "google_token.json", "innocent.txt", ".git/config"):
+        for name in (".env", ".env.production", "google_token.json", "innocent.txt"):
             with self.subTest(name=name):
                 self.assertEqual(self.upload(name).reason, R.R_UPLOAD_PROTECTED)
+
+    def test_hidden_paths(self):
+        # The preview origin's rule (`hud_api._not_a_page`), called: any hidden
+        # component but `.well-known`, in any case.
+        for folder in (".git", ".GIT", ".Git", ".github", ".docker", ".hidden"):
+            (self.project / folder).mkdir()
+            (self.project / folder / "config").write_text("[remote]\n")
+        (self.project / ".env.example").write_text("API_KEY=\n")
+        (self.project / ".bashrc").write_text("x")
+        for name in (".git/config", ".GIT/config", ".Git/config", ".github/config", ".docker/config",
+                     ".hidden/config", ".env.example", ".bashrc"):
+            with self.subTest(name=name):
+                self.assertEqual(self.upload(name).reason, R.R_UPLOAD_HIDDEN)
+
+    def test_a_hard_link(self):
+        (self.project / "a.txt").write_text("x")
+        os.link(self.project / "a.txt", self.project / "b.txt")
+        self.assertEqual(self.upload("b.txt").reason, R.R_UPLOAD_LINKED)
+        self.assertEqual(self.upload("a.txt").reason, R.R_UPLOAD_LINKED)
 
     def test_outside_the_project(self):
         outside = self.root / "elsewhere.txt"
@@ -423,14 +503,25 @@ SHOW = Element(tag="button", type="button", name="Show password")
 
 URL_FLOORS = [
     ("https://example.com/login", R.LOGIN), ("https://example.com/en/Login.php", R.LOGIN),
-    ("https://example.com/users/sign_in", R.LOGIN), ("https://example.com/signin?next=/", R.LOGIN),
+    ("https://example.com/LOGIN", R.LOGIN), ("https://example.com/users/sign_in", R.LOGIN),
+    ("https://example.com/signin?next=/", R.LOGIN),
     ("https://example.com/oauth/authorize?client_id=1", R.OAUTH),
     ("https://example.com/o/oauth2/v2/auth", R.OAUTH), ("https://example.com/consent", R.OAUTH),
+    ("https://sso.test/realms/main/protocol/openid-connect/auth?x=1", R.OAUTH),
     ("https://example.com/signup", R.SIGNUP), ("https://example.com/register", R.SIGNUP),
     ("https://shop.test/cart/checkout", R.PURCHASE), ("https://shop.test/pay", R.PAYMENT),
+    ("https://www.amazon.test/gp/buy/spc/handlers/display.html", R.PURCHASE),
     ("https://example.com/settings/billing", R.PAYMENT),
     ("https://example.com/settings/security", R.ACCOUNT_SECURITY),
     ("https://example.com/account/delete", R.DELETE),
+    ("https://blog.test/wp-login.php", R.LOGIN), ("https://blog.test/wp-login.php?action=register", R.LOGIN),
+    ("https://app.test/session/new", R.LOGIN),
+    # The route in the fragment and the query (review of PR #71).
+    ("https://app.test/#/login", R.LOGIN), ("https://app.test/#!/checkout/step1", R.PURCHASE),
+    ("https://app.test/index.html#/settings/security?tab=2", R.ACCOUNT_SECURITY),
+    ("https://shop.test/index.php?route=checkout/cart", R.PURCHASE),
+    ("https://shop.test/index.php?route=account%2Flogin", R.LOGIN),
+    ("https://shop.test/index.php?login", R.LOGIN), ("https://shop.test/?page=Register", R.SIGNUP),
     ("https://accounts.google.com/v3/signin/identifier", R.LOGIN),
     ("https://accounts.google.com/", R.LOGIN),
     ("https://login.microsoftonline.com/common/x", R.LOGIN),
@@ -439,16 +530,21 @@ URL_FLOORS = [
     ("https://checkout.stripe.com/c/pay/cs_x", R.PAYMENT),
     ("https://www.paypal.com/checkoutnow?token=1", R.PAYMENT),
     ("https://www.paypal.com/checkout/x", R.PAYMENT),
-    ("https://example.com/%6C%6F%67%69%6E", R.LOGIN),
+    ("https://example.com/%6C%6F%67%69%6E", R.LOGIN), ("https://example.com/%4C%4F%47%49%4E", R.LOGIN),
     ("chrome://settings/syncSetup", R.ACCOUNT_SECURITY),
 ]
 URL_ORDINARY = ["https://example.com/blog/how-to-login-faster", "https://example.com/loginsight",
                 "https://example.com/paypal-guide", "https://example.com/?next=/login",
+                "https://www.google.com/search?q=login", "https://example.com/docs#section-login-tips",
                 "https://example.com/docs/payment-history-explained",
                 "https://news.google.com/", "https://github.com/anthropics"]
 EXECUTABLES = ["https://dl.test/setup.exe", "https://dl.test/x/Tool.AppImage", "https://dl.test/i.sh",
                "https://dl.test/a.MSI", "https://dl.test/pkg/app.dmg", "https://dl.test/a.apk",
-               "https://dl.test/app.jar?v=1", "https://dl.test/%73etup.exe"]
+               "https://dl.test/app.jar?v=1", "https://dl.test/%73etup.exe",
+               "https://dl.test/setup.exe.", "https://dl.test/setup.exe;jsessionid=1",
+               "https://dl.test/setup.exe%20", "https://dl.test/setup.exe/",
+               "https://dl.test/a.hta", "https://dl.test/a.lnk", "https://dl.test/a.iso",
+               "https://dl.test/a.reg", "https://dl.test/a.msp", "https://dl.test/a.application"]
 
 
 class Floors(World):
@@ -463,6 +559,10 @@ class Floors(World):
                                 R.ASK, category)
                 # Any button in it, not only the submit: a script may submit.
                 self.assertKind(facts("click", target=SHOW, form=form), R.ASK, category)
+                # Anything that submits it, whatever its role.
+                odd = Element(tag="div", role="textbox", submits=True)
+                self.assertKind(facts("click", target=odd, form=form), R.ASK, category)
+                self.assertKind(facts("press", key="Space", target=odd, form=form), R.ASK, category)
                 # Clicking into a field only focuses it: the reviewer's.
                 self.assertKind(facts("click", target=field(attr_name="email"), form=form), R.CLASSIFY)
 
@@ -499,7 +599,8 @@ class Floors(World):
         for name, mime in (("setup.exe", ""), ("Tool.AppImage", ""), ("run.SH", ""),
                            ("C:\\Users\\x\\Downloads\\a.msi", ""), ("x.bin", "application/x-msdownload"),
                            ("archive", "application/vnd.android.package-archive; charset=binary"),
-                           ("setup.exe.", "")):
+                           ("setup.exe.", ""), ("setup.exe%20", ""), ("setup.exe;x=1", ""),
+                           ("page.hta", ""), ("disk.ISO", ""), ("x", "application/hta")):
             with self.subTest(name=name):
                 self.assertTrue(R.executable_download(name, mime))
         for name, mime in (("report.pdf", "application/pdf"), ("photo.png", ""), ("", "")):
@@ -550,25 +651,55 @@ class AllowTier(World):
         self.assertKind(facts("type", text="a\nb", target=search), R.CLASSIFY)
         self.assertKind(facts("type", text="hi", target=field()), R.CLASSIFY)
         self.assertKind(facts("type", text="hi", target=Element(tag="button", type="search")), R.CLASSIFY)
-        self.assertKind(facts("type", text="hi"), R.CLASSIFY)
         self.assertKind(facts("select", text="Blue", target=Element(tag="select")), R.CLASSIFY)
         self.assertKind(facts("click", target=Element(tag="a", href="https://x.test/a")), R.CLASSIFY)
         self.assertKind(facts("navigate", nav_url="https://x.test/a"), R.CLASSIFY)
 
     def test_the_turn_budget_applies_to_judged_actions_only(self):
         self.assertRefused(facts("click", target=Element(tag="a"), judged_this_turn=40), "H10")
-        self.assertRefused(facts("click", target=Element(tag="a"), judged_this_turn=float("nan")), "H10")
         self.assertKind(facts("click", target=Element(tag="a"), judged_this_turn=39), R.CLASSIFY)
         self.assertKind(facts("scroll", text="down", judged_this_turn=40), R.ALLOW)
 
 
-# -- H3–H7, H9–H12 ---------------------------------------------------------------------------------------
+# -- H3–H7, H9–H12: explicit facts -------------------------------------------------------------------------
 
 class State(World):
+    def test_the_suite_sets_every_state_fact(self):
+        self.assertEqual(set(OK), set(R.STATE_FACTS))
+        state = {name for name, f in Facts.__dataclass_fields__.items() if f.default is None}
+        self.assertEqual(state - {"target", "form"}, set(R.STATE_FACTS))
+
     def test_nothing_filled_in_is_refused(self):
         for action in sorted(R.ACTIONS):
             with self.subTest(action=action):
                 self.assertEqual(R.pre_judge(Facts(action)).kind, R.REFUSE)
+
+    def test_every_fact_left_unset_refuses(self):
+        allowed = [dict(action="scroll", text="down"),
+                   dict(action="type", text="hi", target=field(type="search"))]
+        for case in allowed:
+            self.assertEqual(self.judge(Facts(**{**OK, **case})).kind, R.ALLOW)
+            for name in R.STATE_FACTS:
+                with self.subTest(action=case["action"], unset=name):
+                    kw = {**OK, **case}
+                    del kw[name]
+                    self.assertEqual(self.judge(Facts(**kw)).kind, R.REFUSE)
+
+    def test_only_explicit_values_pass(self):
+        flags = [name for name in R.STATE_FACTS
+                 if name not in ("owner_input_age_s", "judged_this_turn", "actions_this_hour", "depth")]
+        counts = ["owner_input_age_s", "judged_this_turn", "actions_this_hour", "depth"]
+        for name in flags:
+            for wrong in ("no", "False", "True", "", 0, 1, 0.0, None, [], float("nan")):
+                with self.subTest(fact=name, value=wrong):
+                    self.assertEqual(self.judge(facts("scroll", **{name: wrong})).kind, R.REFUSE)
+            if name not in ("owner_has_input", "private"):  # both values of these may pass
+                with self.subTest(fact=name, value="flipped"):
+                    self.assertEqual(self.judge(facts("scroll", **{name: not OK[name]})).kind, R.REFUSE)
+        for name in counts:
+            for wrong in ("0", "60", -1, -0.5, float("nan"), float("inf"), True, False, None, [0]):
+                with self.subTest(fact=name, value=wrong):
+                    self.assertEqual(self.judge(facts("scroll", **{name: wrong})).kind, R.REFUSE)
 
     def test_each_fact_refuses_alone(self):
         base = dict(target=field(type="search"), text="hi")
@@ -584,10 +715,11 @@ class State(World):
                  (dict(owner_input_age_s=0.0), "H4", R.R_OWNER_BUSY),
                  (dict(owner_input_age_s=float("nan")), "H4", R.R_OWNER_BUSY),
                  (dict(owner_input_age_s=-3.0), "H4", R.R_OWNER_BUSY),
-                 (dict(actions_this_hour=float("nan")), "H10", R.R_BUDGET_HOUR),
-                 (dict(depth=float("nan")), "H12", R.R_DESK),
                  (dict(url_refused=True), "H7", R.R_URL), (dict(other_driver=True), "H9", R.R_OTHER_DRIVER),
-                 (dict(actions_this_hour=200), "H10", R.R_BUDGET_HOUR)]
+                 (dict(actions_this_hour=200), "H10", R.R_BUDGET_HOUR),
+                 (dict(actions_this_hour=float("nan")), "H10", R.R_BUDGET_HOUR),
+                 (dict(judged_this_turn=-1), "H10", R.R_BUDGET_TURN),
+                 (dict(depth=float("nan")), "H12", R.R_DESK)]
         self.assertEqual(self.judge(facts("type", **base)).kind, R.ALLOW)
         for change, rule, reason in cases:
             with self.subTest(change=change):
@@ -596,8 +728,20 @@ class State(World):
 
     def test_the_quiet_window_and_private_with_its_switch(self):
         self.assertEqual(self.judge(facts("scroll", owner_input_age_s=R.OWNER_QUIET_S)).kind, R.ALLOW)
-        self.assertEqual(self.judge(facts("scroll", owner_input_age_s=60.0)).kind, R.ALLOW)
+        self.assertEqual(self.judge(facts("scroll", owner_has_input=False, owner_input_age_s=None)).kind,
+                         R.ALLOW)
         self.assertEqual(self.judge(facts("scroll", private=True)).kind, R.ALLOW)
+
+    def test_an_exception_while_judging_refuses(self):
+        for f in (facts("type", text=None, target=field()),
+                  facts("type", text="hi", target=field(label="Code", inputmode="numeric", maxlength="6")),
+                  facts("press", key="Tab", target=field(single_char_siblings="many")),
+                  facts("click", target="not an element"), "not facts", None):
+            with self.subTest(f=repr(f)[:40]):
+                verdict = R.pre_judge(f)
+                self.assertEqual((verdict.kind, verdict.reason), (R.REFUSE, R.R_ERROR))
+        self.assertEqual(R.pre_judge(facts("type", text="hi", target=field()), extra_values=object()).kind,
+                         R.REFUSE)
 
     def test_actions_and_arguments(self):
         self.assertRefused(facts("eval", text="x"), "action", R.R_ACTION)
@@ -613,11 +757,23 @@ class State(World):
                             ("example.com", R.R_SCHEME), ("http:///example.com", R.R_MALFORMED),
                             ("http://127.0.0.1:8405\\@example.com/", R.R_MALFORMED),
                             ("http://example.com:99999/", R.R_MALFORMED),
-                            ("https://user:pw@example.com/", R.R_USERINFO)):
-            with self.subTest(url=url):
+                            ("https://user:pw@example.com/", R.R_USERINFO),
+                            ("https://example.com/" + "a" * R.MAX_NAV_URL, R.R_NAV_TOO_LONG)):
+            with self.subTest(url=url[:60]):
                 self.assertRefused(facts("navigate", nav_url=url), "H7", reason)
-        self.assertRefused(facts("click", target=Element(tag="a", href="http://localhost:8405/")), "H7",
-                           R.R_JARVIS_PORT)
+        self.assertKind(facts("navigate", nav_url="https://example.com/" + "a" * (R.MAX_NAV_URL - 20)),
+                        R.CLASSIFY)
+
+    def test_a_link_or_a_form_landing_on_jarvis(self):
+        for url in ("http://localhost:8405/", "http://127.0.0.1:8405/approvals/x", "http://[::1]:8402/"):
+            with self.subTest(url=url):
+                self.assertRefused(facts("click", target=Element(tag="a", href=url)), "H7", R.R_JARVIS_PORT)
+                form = Form("post", url, fields=(field(attr_name="q"),))
+                self.assertRefused(facts("click", target=SUBMIT, form=form), "H7", R.R_JARVIS_PORT)
+                self.assertRefused(facts("press", key="Enter", target=field(attr_name="q"), form=form),
+                                   "H7", R.R_JARVIS_PORT)
+                self.assertRefused(facts("press", key="Space", target=SUBMIT, form=form), "H7",
+                                   R.R_JARVIS_PORT)
 
     def test_reasons_never_echo_page_text(self):
         marker = "PAGE-MARKER-31337"
@@ -650,13 +806,15 @@ class Speed(World):
                       "x" * 999_999 + "!", "\u200b" * 1_000_000, "1a" * 500_000):
             with self.subTest(label=label[:8]):
                 el = field(label=label, placeholder=label[:1000])
-                seconds = self.best(facts("type", text="hi", target=el))
-                self.assertLess(seconds, 0.1, f"{seconds * 1000:.1f} ms")
+                for f in (facts("type", text="hi", target=el), facts("press", key="Tab", target=el)):
+                    seconds = self.best(f)
+                    self.assertLess(seconds, 0.1, f"{seconds * 1000:.1f} ms")
 
     def test_a_long_address(self):
         for url in ("https://example.com/" + "a/" * 50_000, "https://example.com/" + "a" * 100_000,
                     "https://example.com/?" + "%41" * 33_000, "https://example.com/" + "a/" * 49_990 + "login",
                     "https://example.com/" + "login/" * 16_000 + "x.exe",
+                    "https://example.com/?" + "route=a/b&" * 10_000, "https://example.com/#/" + "x/" * 50_000,
                     "https://" + "a." * 50_000 + "com/"):
             with self.subTest(url=url[-20:]):
                 for f in (facts("navigate", nav_url=url), facts("click", target=Element(tag="a", href=url))):
@@ -667,7 +825,7 @@ class Speed(World):
 class Tables(World):
     def test_the_tables_hold_what_the_plan_names(self):
         for ext in (".exe", ".msi", ".bat", ".cmd", ".ps1", ".sh", ".deb", ".rpm", ".appimage", ".dmg",
-                    ".pkg", ".jar", ".apk", ".scr"):
+                    ".pkg", ".jar", ".apk", ".scr", ".hta", ".lnk", ".iso", ".reg", ".msp", ".application"):
             self.assertIn(ext, R.EXECUTABLE_EXTENSIONS)
         for host in ("stripe.com", "braintreegateway.com", "adyen.com", "paypal.com", "squareup.com"):
             self.assertIn(host, R.PAYMENT_FRAME_HOSTS)

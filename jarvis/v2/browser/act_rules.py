@@ -12,36 +12,44 @@ answers first, before any model is asked:
   ASK       a fixed "always ask" floor: every upload; a submit of a login,
             two-factor or payment form; an address shaped like a login,
             OAuth, checkout, billing, security or account-deletion page; a
-            link to an executable. The classifier can raise it to a deny, never
-            lower it (`act_review.decide`).
+            link to an executable; an editing key or Enter with no known
+            target. The classifier can raise it to a deny, never lower it
+            (`act_review.decide`).
   ALLOW     runs with no model call: scrolling, back and forward, the
-            navigation keys, Backspace/Delete in an ordinary field, and up to
-            64 characters typed into a search field.
+            navigation keys away from any password, one-time-code or card
+            field, Backspace/Delete in an ordinary text field, and up to 64
+            characters typed into a search field.
   CLASSIFY  everything else: `act_review.judge` decides.
 
 **Facts** are filled by the caller (BR-9b's gate, from the look and the
 daemon's state). The state-dependent refusals — a card pending (H3), the owner
 holding the pane (H4), the switches (H5), whether a window shows the tab (H6),
 the URL judge (H7), another driver (H9), the budgets (H10), the strict profile
-(H11), the desk (H12) — arrive as plain booleans and numbers, and this module
-only reads them. Every one defaults to the value that refuses, so a `Facts`
-nobody filled in is refused. H2 and H8 call into `secrets`,
-`credential_patterns`, `protected_state`, `editor_policy` and the terminal
-guard's value forms, never copying them: two copies of a rule drift, and the
-looser one decides.
+(H11), the desk (H12) — arrive as plain facts, and this module only reads
+them. **Every state fact defaults to None, and only an explicit value
+passes**: a flag must be the bool `True` or `False` it needs to be, a number
+a finite, non-negative int or float. `None`, `"no"`, `"0"`, a negative
+count, NaN and infinity all refuse, so a `Facts` the caller forgot to fill in
+is refused, and so is one filled in wrongly. Any exception while judging is a
+refusal too. H2 and H8 call into `secrets`, `credential_patterns`,
+`protected_state`, `editor_policy`, `hud_api` and the terminal guard's value
+forms, never copying them: two copies of a rule drift, and the looser one
+decides.
 
 **Linear, always.** Labels and addresses are page- or agent-controlled and can
 be any length. No regular expression here is built from page text; the fixed
 ones never backtrack; a label is normalised with C-level passes (NFKC, a
 translate table, fixed substitutions) and looked up with `in`; an address's
-path segments go into sets. A one-megabyte label or a 100,000-character
-address is judged in a few milliseconds (`tests/v2/browser_act_rules_check.py`
-times both).
+path, fragment and route-query segments go into sets. A one-megabyte label
+or a 100,000-character link is judged in a few tens of milliseconds
+(`tests/v2/browser_act_rules_check.py` times both); a navigate address past
+8 KB is refused unread.
 
-**Not a boundary.** A field whose label lies, a payment form drawn on a canvas,
-a password field the page disguises as plain text, a homoglyph spelling of
-"password": none of these is seen here. The card, desk-only driving, the
-banner and the owner's takeover are the backstops (§B.11).
+**Not a boundary.** A field whose label lies, a label in another language, a
+payment form drawn on a canvas, a password field the page disguises as plain
+text, a homoglyph spelling of "password": none of these is seen here. The
+card, desk-only driving, the banner and the owner's takeover are the
+backstops (§B.11).
 
 Not wired yet: BR-9b calls this from `hud_browser_act`'s gate.
 """
@@ -49,10 +57,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import functools
+import math
 import os
 from pathlib import Path
 import re
 import stat
+from types import SimpleNamespace
 import unicodedata
 from urllib.parse import unquote, unquote_plus, urlsplit
 
@@ -65,6 +75,7 @@ REFUSE = "refuse"
 ASK = "ask"
 ALLOW = "allow"
 CLASSIFY = "classify"
+KINDS = (REFUSE, ASK, ALLOW, CLASSIFY)
 
 # The classifier's categories (§B.5) — one list, read by `act_review` too. Every
 # one but `ordinary` is sensitive: a sensitive category is never allowed.
@@ -84,8 +95,10 @@ ORDINARY = "ordinary"
 CATEGORIES = (LOGIN, SIGNUP, OAUTH, TWO_FACTOR, PURCHASE, PAYMENT, SEND_OR_POST, DELETE,
               ACCOUNT_SECURITY, EXECUTABLE_DOWNLOAD, UNRELATED, INJECTION, ORDINARY)
 SENSITIVE = frozenset(CATEGORIES) - {ORDINARY}
-# The upload floor's own category: an upload is asked about whatever it is.
+# The floors' own categories: an upload is asked about whatever it is, and so
+# is a key whose target the look could not name.
 UPLOAD = "upload"
+NO_TARGET = "no_target"
 
 ACTIONS = frozenset({"navigate", "back", "forward", "click", "type", "press", "scroll",
                      "select", "upload"})
@@ -98,6 +111,7 @@ MAX_ACTIONS_PER_TAB_HOUR = 200      # H10: actions on one tab in an hour
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024 # H8
 SEARCH_TYPE_MAX = 64                # the ALLOW tier's short search
 MAX_TYPE_CHARS = 10_000             # longer text to type is refused (bounds H2's scan)
+MAX_NAV_URL = 8 * 1024              # a longer navigate address is refused unread
 MAX_FORM_FIELDS = 500               # a form with more controls is judged as holding every kind
 
 # -- keys -----------------------------------------------------------------------------------
@@ -123,7 +137,8 @@ SCROLLS = frozenset({"", "up", "down", "top", "bottom"})
 
 # H1: a field in a frame from one of these hosts (or a subdomain) is a payment
 # field, whatever its own attributes say — the card fields of hosted checkouts
-# live in such frames (Stripe Elements, Braintree Hosted Fields, Adyen …).
+# live in such frames (Stripe Elements, Braintree Hosted Fields, Adyen …) —
+# and so is a focused <iframe> showing one.
 PAYMENT_FRAME_HOSTS = frozenset({
     "stripe.com", "stripe.network", "braintreegateway.com", "braintree-api.com",
     "braintreepayments.com", "adyen.com", "adyenpayments.com", "paypal.com",
@@ -136,16 +151,19 @@ PAYMENT_FRAME_HOSTS = frozenset({
 })
 
 # H1's label heuristics. A label, placeholder, aria-label, accessible name,
-# `name` or `id` is normalised to lower-case words (camelCase and letter–digit
-# edges split, everything else a space: `otp_code`, `otpCode` and `otp1` all
-# hold the word `otp`), then these are looked up as whole words or phrases.
-OTP_LABEL_WORDS = frozenset({"otp", "totp", "mfa", "2fa", "passcode", "onetime", "twofactor"})
+# `name` or `id` is normalised to lower-case words (for `name` and `id`,
+# camelCase and letter–digit edges split: `otp_code`, `otpCode` and `otp1`
+# all hold the word `otp`), then these are looked up as whole words or
+# phrases. English only: a label in another language is a stated limit.
+OTP_LABEL_WORDS = frozenset({"otp", "totp", "mfa", "2fa", "passcode", "onetime", "twofactor",
+                             "otpcode", "securitycode", "smscode", "verificationcode"})
 OTP_LABEL_PHRASES = ("one time", "2 fa", "two factor", "verification code", "security code",
-                     "pass code", "auth code", "authentication code")
+                     "pass code", "auth code", "authentication code", "sms code", "otp code")
 PASSWORD_LABEL_WORDS = frozenset({"password", "passwd", "passphrase", "pin"})
-PAYMENT_LABEL_WORDS = frozenset({"cvv", "cvc", "csc", "cardnumber", "ccnum", "ccnumber"})
+PAYMENT_LABEL_WORDS = frozenset({"cvv", "cvc", "csc", "cardnumber", "ccnum", "ccnumber", "cardnum",
+                                 "creditcard", "cardcvc", "cardcvv", "expdate"})
 PAYMENT_LABEL_PHRASES = ("card number", "card num", "cc number", "cc num", "credit card",
-                         "debit card", "card code")
+                         "debit card", "card code", "card cvc", "exp date")
 PAYMENT_LABEL_PREFIXES = ("expir",)          # expiry, expiration, expires
 # A numeric field of 4–8 digits labelled only "code" is a one-time code —
 # unless the label says what else it is.
@@ -157,19 +175,24 @@ NOT_A_SECRET_CODE = frozenset({"zip", "postal", "post", "postcode", "promo", "pr
 
 _AUTOCOMPLETE_PASSWORD = frozenset({"current-password", "new-password", "webauthn"})
 _AUTOCOMPLETE_OTP = frozenset({"one-time-code"})
+_FRAMES = frozenset({"iframe", "frame"})
 
 # §B.4: an address shaped like these is an ASK floor. (host, path, category): a
 # host matches itself and its subdomains, "" any host; a path matches when its
-# segments appear in a row anywhere in the address's path (each segment's own
+# segments appear in a row anywhere in the address's route (each segment's own
 # extension and `;` parameters ignored: `login.php` is `login`), "" any path.
+# The route is the path, the fragment's path (`#/login`, `#!/checkout`), the
+# values of `ROUTE_QUERY_KEYS` (`?route=checkout/cart`) and bare query keys
+# (`index.php?login`) — decoded and lower-cased.
 ASK_URL_SHAPES: tuple[tuple[str, str, str], ...] = (
     ("", "/oauth", OAUTH), ("", "/oauth2", OAUTH), ("", "/authorize", OAUTH),
-    ("", "/consent", OAUTH),
+    ("", "/consent", OAUTH), ("", "/openid-connect/auth", OAUTH),
     ("", "/login", LOGIN), ("", "/log-in", LOGIN), ("", "/log_in", LOGIN), ("", "/signin", LOGIN),
     ("", "/sign-in", LOGIN), ("", "/sign_in", LOGIN), ("", "/logon", LOGIN),
+    ("", "/wp-login", LOGIN), ("", "/session/new", LOGIN),
     ("", "/signup", SIGNUP), ("", "/sign-up", SIGNUP), ("", "/sign_up", SIGNUP),
     ("", "/register", SIGNUP), ("", "/registration", SIGNUP),
-    ("", "/checkout", PURCHASE), ("", "/purchase", PURCHASE),
+    ("", "/checkout", PURCHASE), ("", "/purchase", PURCHASE), ("", "/gp/buy", PURCHASE),
     ("", "/pay", PAYMENT), ("", "/payment", PAYMENT), ("", "/payments", PAYMENT),
     ("", "/payment-methods", PAYMENT), ("", "/billing", PAYMENT),
     ("", "/2fa", TWO_FACTOR), ("", "/mfa", TWO_FACTOR), ("", "/two-factor", TWO_FACTOR),
@@ -188,15 +211,24 @@ ASK_URL_SHAPES: tuple[tuple[str, str, str], ...] = (
     ("paypal.com", "/checkout", PAYMENT), ("paypal.com", "/checkoutnow", PAYMENT),
     ("paypal.com", "/webapps", PAYMENT),
 )
+# Query keys whose value is a route in the apps that use them (OpenCart's
+# `route`, Yii's `r`, Joomla's `task`/`view`, WordPress's `action` …). Any
+# other key is data: `?q=login` is a search, not a login page.
+ROUTE_QUERY_KEYS = frozenset({"route", "r", "page", "p", "path", "action", "act", "a", "do",
+                              "view", "task", "controller", "module", "mod", "cmd", "screen",
+                              "step"})
 # Chrome's own pages (sign-in, sync, settings) are an account-security action:
 # always a card, never an agent's on its own (amendment §C.2).
 ASK_SCHEMES = {"chrome": ACCOUNT_SECURITY, "chrome-untrusted": ACCOUNT_SECURITY}
 
 # §B.4: a link (or an address) whose path ends in one of these asks, as
-# `executable_download`. Matched case-insensitively (`.AppImage`).
+# `executable_download`. Matched case-insensitively (`.AppImage`), after a
+# trailing dot, space or `/`, `;params` and percent-encoding are taken off
+# (`executable_name`).
 EXECUTABLE_EXTENSIONS = (".exe", ".msi", ".bat", ".cmd", ".ps1", ".sh", ".deb", ".rpm",
                          ".appimage", ".dmg", ".pkg", ".jar", ".apk", ".scr",
-                         ".msix", ".appx", ".vbs")
+                         ".msix", ".appx", ".vbs", ".hta", ".lnk", ".iso", ".reg", ".msp",
+                         ".application")
 # A download an agent action started whose MIME type is one of these is held
 # (§B.4), as is one whose name ends in an extension above (`executable_download`).
 EXECUTABLE_MIME_TYPES = frozenset({
@@ -210,11 +242,13 @@ EXECUTABLE_MIME_TYPES = frozenset({
     "application/x-apple-diskimage", "application/x-newton-compatible-pkg",
     "application/java-archive", "application/x-java-archive",
     "application/vnd.android.package-archive", "application/x-appimage",
-    "application/vnd.ms-appx", "application/msix",
+    "application/vnd.ms-appx", "application/msix", "application/hta",
+    "application/x-iso9660-image", "application/x-ms-application",
 })
 
 # -- refusal sentences: fixed, one per rule, never page text ----------------------------------
 
+R_ERROR = "the Browser's rules could not judge this action"
 R_DESK = ("agents drive the Browser only on a turn the owner typed at the HUD, and never "
           "from a sub-agent")
 R_STRICT = "this thread runs under the strict profile, which never drives the Browser"
@@ -223,6 +257,7 @@ R_KEY = ("press takes only a named key: Enter, Space, Tab, Shift+Tab, Escape, th
          "PageUp, PageDown, Home, End, Backspace or Delete")
 R_SCROLL = "scroll takes up, down, top or bottom"
 R_TOO_LONG = "the text to type is longer than 10,000 characters"
+R_NO_TARGET = "type and select need a target from the latest look"
 R_SWITCH_GLOBAL = "the owner has turned off 'Agents may drive'"
 R_SWITCH_SEE = "the owner has turned off 'Jarvis can see' for this pane"
 R_SWITCH_PRIVATE = "this is a Private pane, and the owner has not turned on its drive switch"
@@ -236,6 +271,7 @@ R_OTHER_DRIVER = "another chat is driving this pane"
 R_BUDGET_TURN = "this turn has used its 40 judged Browser actions"
 R_BUDGET_HOUR = "this pane has used its 200 Browser actions for the hour"
 R_URL = "the Browser's address judge refuses that address"
+R_NAV_TOO_LONG = "that address is longer than 8 KB"
 R_JARVIS_PORT = "that address is one of Jarvis's own ports"
 R_SCHEME = "agents navigate only to http and https addresses"
 R_MALFORMED = "that address is malformed"
@@ -247,6 +283,9 @@ R_UPLOAD_NONE = "an upload needs a file inside this chat's project folder"
 R_UPLOAD_OUTSIDE = "the file to upload must be inside this chat's project folder"
 R_UPLOAD_PROTECTED = ("the file to upload is credential or protected state, which never leaves "
                       "this machine through the Browser")
+R_UPLOAD_HIDDEN = ("the file to upload is hidden or in a hidden folder, which never leaves this "
+                   "machine through the Browser")
+R_UPLOAD_LINKED = "the file to upload has another name on disk (a hard link)"
 R_UPLOAD_NOT_FILE = "the file to upload does not exist or is not a regular file"
 R_UPLOAD_SIZE = "the file to upload is larger than 50 MB"
 
@@ -269,6 +308,7 @@ class Element:
     maxlength: int | None = None
     editable: bool = False         # contenteditable
     href: str = ""                 # a link's resolved address
+    src: str = ""                  # an <iframe>'s resolved address
     submits: bool = False          # activating it submits its form
     heading: str = ""              # the nearest heading (the classifier's context)
     single_char_siblings: int = 0  # maxlength=1 inputs beside it, itself included
@@ -291,7 +331,11 @@ class Facts:
 
     `text` is the text to type, the option label to select or the scroll
     direction; `nav_url` is where `navigate` goes; `url` is the page's own
-    address. The state flags default to the value that refuses."""
+    address; `target` the element acted on (for `press`, the focused one).
+
+    The state facts below default to None and **only an explicit value
+    passes**: a flag the exact bool it must be, a number finite and
+    non-negative. Anything else refuses."""
     action: str
     key: str = ""
     text: str = ""
@@ -305,31 +349,40 @@ class Facts:
     upload_path: str = ""          # `upload`'s file, as the agent named it
     project_dir: str = ""          # the chat's project folder
     profile: str = ""              # the Browser profile the tab is in
-    # H3–H12, as the daemon knows them
-    card_pending: bool = False             # H3: any approval card is pending
-    paused: bool = False                   # H4: the owner took over the tab
-    owner_input_age_s: float | None = None # H4: seconds since the owner's last input, if any
-    agents_may_drive: bool = False         # H5: the global switch
-    pane_can_drive: bool = False           # H5: the pane's "Jarvis can drive"
-    pane_can_see: bool = False             # H5: the pane's "Jarvis can see"
-    private: bool = False                  # H5: a Private pane (driving off unless switched on)
-    tab_drawn: bool = False                # H6: a HUD window streams the tab
-    direct_mode: bool = False              # H6: the pane shows a local page directly
-    url_refused: bool = False              # H7: the URL judge or the gate refuses
-    other_driver: bool = False             # H9: another chat drives this tab
-    judged_this_turn: int = 0              # H10: classifier-judged actions so far this turn
-    actions_this_hour: int = 0             # H10: actions on this tab in the last hour
-    strict_profile: bool = False           # H11
-    at_desk: bool = False                  # H12: `runtime.at_desk()`
-    depth: int = 0                         # H12: `runtime.depth()`
-    sub_agent: bool = False                # H12: a Claude sub-agent (`agent_id`)
+    # H3–H12, as the daemon knows them. Passes when:
+    card_pending: bool | None = None         # H3 — False: no approval card is pending
+    paused: bool | None = None               # H4 — False: the owner has not taken over
+    owner_has_input: bool | None = None      # H4 — a bool: has the owner ever sent this tab input?
+    owner_input_age_s: float | None = None   # H4 — if so, seconds since: ≥ OWNER_QUIET_S
+    agents_may_drive: bool | None = None     # H5 — True: the global switch
+    pane_can_drive: bool | None = None       # H5 — True: the pane's "Jarvis can drive"
+    pane_can_see: bool | None = None         # H5 — True: the pane's "Jarvis can see"
+    private: bool | None = None              # H5 — a bool; True also needs pane_can_drive
+    tab_drawn: bool | None = None            # H6 — True: a HUD window streams the tab
+    direct_mode: bool | None = None          # H6 — False: not a Direct pane
+    url_refused: bool | None = None          # H7 — False: the URL judge and gate accept
+    other_driver: bool | None = None         # H9 — False: no other chat drives this tab
+    judged_this_turn: int | None = None      # H10 — a count: judged actions so far this turn
+    actions_this_hour: int | None = None     # H10 — a count: actions on this tab this hour
+    strict_profile: bool | None = None       # H11 — False
+    at_desk: bool | None = None              # H12 — True: `runtime.at_desk()`
+    depth: int | None = None                 # H12 — 0: `runtime.depth()`
+    sub_agent: bool | None = None            # H12 — False: not a Claude sub-agent (`agent_id`)
+
+
+STATE_FACTS = ("card_pending", "paused", "owner_has_input", "owner_input_age_s",
+               "agents_may_drive", "pane_can_drive", "pane_can_see", "private", "tab_drawn",
+               "direct_mode", "url_refused", "other_driver", "judged_this_turn",
+               "actions_this_hour", "strict_profile", "at_desk", "depth", "sub_agent")
 
 
 @dataclass(frozen=True)
 class PreVerdict:
     """`kind` is REFUSE, ASK, ALLOW or CLASSIFY; `rule` names what decided it
     (for logs and tests); `category` is an ASK's; `reason` a REFUSE's fixed
-    sentence; `path` an upload's resolved file — the one to upload."""
+    sentence; `path` an upload's resolved file — what was judged. It does not
+    close a swap by itself: BR-9b re-checks after the card and uploads a
+    private copy opened `O_NOFOLLOW`."""
     kind: str
     rule: str = ""
     category: str = ""
@@ -339,6 +392,23 @@ class PreVerdict:
 
 def _refuse(rule: str, reason: str) -> PreVerdict:
     return PreVerdict(REFUSE, rule, reason=reason)
+
+
+# -- explicit facts ------------------------------------------------------------------------------
+
+def _is(value, want: bool) -> bool:
+    """Exactly the bool `want`: `None`, `"no"`, `0` and `1` are not."""
+    return value is want
+
+
+def _count(value) -> float | None:
+    """A finite, non-negative int or float, else None (a bool, a str, NaN,
+    infinity and a negative number are not counts)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if not math.isfinite(value) or value < 0:
+        return None
+    return value
 
 
 # -- normalising page text, linearly ------------------------------------------------------------
@@ -406,10 +476,13 @@ PASSWORD, OTP, CARD = "password", "otp", "payment"
 def sensitive_kind(el: Element | None) -> str | None:
     """`password`, `otp` or `payment` if Jarvis must never fill this field
     (H1), else None. Read from its type, its `autocomplete` tokens, its
-    labels, split one-character boxes and the frame it sits in."""
+    labels, split one-character boxes, the frame it sits in — and, for a
+    focused <iframe>, the frame it shows."""
     if el is None:
         return None
     if _host_in(_host(el.frame_origin), PAYMENT_FRAME_HOSTS):
+        return CARD
+    if el.tag.lower() in _FRAMES and _host_in(_host(el.src), PAYMENT_FRAME_HOSTS):
         return CARD
     if el.type.strip().lower() == "password":
         return PASSWORD
@@ -563,6 +636,16 @@ def _address_refusal(url: str) -> str | None:
     return None
 
 
+def _landing_refusal(url: str) -> str | None:
+    """The belt for where a click or a submit lands (a link's or a form's
+    address, which the page chose): Jarvis's ports and an ambiguous host."""
+    if config.ambiguous_authority(url):
+        return R_MALFORMED
+    if config.is_face_origin(url):
+        return R_JARVIS_PORT
+    return None
+
+
 def _segments(path: str) -> list[str]:
     """A path's segments, decoded once, lower-case, each cut at its first `.`
     or `;` (`login.php` is `login`), empties dropped."""
@@ -572,6 +655,31 @@ def _segments(path: str) -> list[str]:
         if seg:
             out.append(seg)
     return out
+
+
+def _query_segments(query: str) -> list[str]:
+    out: list[str] = []
+    for pair in query.split("&"):
+        key, eq, value = pair.partition("=")
+        key = unquote_plus(key).strip().lower()
+        if not eq:
+            out.extend(_segments(key))                   # `index.php?login`
+        elif key in ROUTE_QUERY_KEYS:
+            out.extend(_segments(unquote_plus(value)))   # `?route=checkout/cart`
+    return out
+
+
+def route_segments(url: str) -> list[str]:
+    """The address's route, as `ASK_URL_SHAPES` reads it: the path, the
+    fragment's path and query, and the route-query values. Linear."""
+    parts = urlsplit(url)
+    segs = _segments(parts.path)
+    fragment = parts.fragment.lstrip("!")
+    frag_path, _, frag_query = fragment.partition("?")
+    segs += _segments(frag_path)
+    segs += _query_segments(parts.query)
+    segs += _query_segments(frag_query)
+    return segs
 
 
 def _shapes() -> tuple[list[tuple[str, tuple[str, ...], str]], set[int]]:
@@ -594,12 +702,12 @@ def url_shape(url: str) -> str | None:
     try:
         parts = urlsplit(url)
         host = (parts.hostname or "").rstrip(".")
+        segs = route_segments(url)
     except ValueError:
         return None
     scheme = parts.scheme.lower()
     if scheme in ASK_SCHEMES:
         return ASK_SCHEMES[scheme]
-    segs = _segments(parts.path)
     runs: dict[int, set[tuple[str, ...]]] = {}
     for n in _SHAPE_LENGTHS:
         runs[n] = set(zip(*(segs[i:] for i in range(n)))) if n > 1 else {(s,) for s in segs}
@@ -611,21 +719,28 @@ def url_shape(url: str) -> str | None:
     return None
 
 
+def executable_name(name: str) -> bool:
+    """Does a file name, or the last segment of a path, end in an executable's
+    extension? Percent-decoded, `;params` cut, a trailing dot, space or `/`
+    taken off (`setup.exe.`, `setup.exe%20`, `setup.exe;jsessionid=1`)."""
+    base = unquote(name or "").replace("\\", "/").rstrip("/ \t").rsplit("/", 1)[-1]
+    base = base.split(";", 1)[0].strip().rstrip(". \t").lower()
+    return base.endswith(EXECUTABLE_EXTENSIONS)
+
+
 def is_executable_path(url: str) -> bool:
     """Does this address's path end in an executable's extension?"""
     try:
-        path = unquote(urlsplit(url).path).lower().rstrip("/")
+        return executable_name(urlsplit(url).path)
     except ValueError:
         return False
-    return path.endswith(EXECUTABLE_EXTENSIONS)
 
 
 def executable_download(name: str, mime: str = "") -> bool:
     """For BR-9b's download hold (§B.4): is a download an agent action
     started executable, by its file name or its MIME type?"""
-    base = (name or "").replace("\\", "/").rsplit("/", 1)[-1].strip().rstrip(". ").lower()
     kind = (mime or "").split(";", 1)[0].strip().lower()
-    return base.endswith(EXECUTABLE_EXTENSIONS) or kind in EXECUTABLE_MIME_TYPES
+    return executable_name(name) or kind in EXECUTABLE_MIME_TYPES
 
 
 # -- H8: the upload's file ----------------------------------------------------------------------------
@@ -637,15 +752,19 @@ def _under(path: Path, directory: Path) -> bool:
 def upload_refusal(upload_path: str, project_dir: str) -> tuple[str | None, str]:
     """(fixed sentence, "") if this file may not be uploaded, else (None,
     resolved path). Only a regular file inside the chat's project folder (no
-    `..` out, no symlink out), at most 50 MB, that is no credential file
-    (`secrets.is_credential`: the bundles and the owner's `.env*` rule,
-    symlinks followed), not in a credential folder, a login file or a v2
-    session carrier (`editor_policy`'s withheld rule, which reads
-    `config.V2_CREDENTIAL_DIRS`), not the gate's state
-    (`protected_state.protected_paths`), not in Jarvis's own config and data
-    folders, and not inside a `.git` folder (a remote URL there can carry a
-    token)."""
-    from jarvis.v2 import editor_policy  # one classifier, called: not copied
+    `..` out, no symlink out), at most 50 MB, with one name on disk (no hard
+    link), that is no credential file (`secrets.is_credential`: the bundles
+    and the owner's `.env*` rule, symlinks followed), not in a credential
+    folder, a login file or a v2 session carrier (`editor_policy`'s withheld
+    rule, which reads `config.V2_CREDENTIAL_DIRS`), not the gate's state
+    (`protected_state.protected_paths`), and not what the preview origin
+    refuses (`hud_api._not_a_page`: any hidden path component inside the
+    project but `.well-known` — `.git`, `.ssh`, `.docker` in any case — and
+    Jarvis's own config and data folders).
+
+    The resolved path is what was judged. It is not a lock: BR-9b must judge
+    again after the card and upload a private copy it opened `O_NOFOLLOW`."""
+    from jarvis.v2 import editor_policy, hud_api  # one classifier each, called: not copied
 
     if not upload_path or not project_dir:
         return R_UPLOAD_NONE, ""
@@ -664,18 +783,23 @@ def upload_refusal(upload_path: str, project_dir: str) -> tuple[str | None, str]
                      or policy.withheld_anywhere(raw, resolved)
                      or resolved in protected_state.protected_paths()
                      or resolved in protected_state.gate_paths()
-                     or any(_under(p, d) for d in editor_policy.jarvis_dirs() for p in (raw, resolved))
-                     or ".git" in raw.parts or ".git" in resolved.parts)
+                     or any(_under(p, d) for d in editor_policy.jarvis_dirs() for p in (raw, resolved)))
+        project = SimpleNamespace(root=str(root_real), extra_dirs=())
+        page = hud_api._not_a_page(project, root_real / raw.relative_to(root), resolved)
     except Exception:  # a guard that cannot tell refuses
-        protected = True
-    if protected:
+        protected, page = True, None
+    if protected or page == hud_api.PROTECTED_PAGE:
         return R_UPLOAD_PROTECTED, ""
+    if page is not None:
+        return R_UPLOAD_HIDDEN, ""
     try:
         info = os.stat(resolved)
     except OSError:
         return R_UPLOAD_NOT_FILE, ""
     if not stat.S_ISREG(info.st_mode):
         return R_UPLOAD_NOT_FILE, ""
+    if info.st_nlink > 1:
+        return R_UPLOAD_LINKED, ""
     if info.st_size > MAX_UPLOAD_BYTES:
         return R_UPLOAD_SIZE, ""
     return None, str(resolved)
@@ -690,48 +814,59 @@ def _key_name(key: str) -> str | None:
 
 
 def _state_refusal(f: Facts) -> PreVerdict | None:
-    """H12, H11, H5, H6, H3, H4, H9 and the hourly half of H10: the daemon's
-    facts, only read here."""
-    if not f.at_desk or f.depth != 0 or f.sub_agent:
+    """H12, H11, H5, H6, H3, H4, H9, H7's fact and both halves of H10's
+    counts: the daemon's facts, only read here — and only an explicit value
+    passes."""
+    if not (_is(f.at_desk, True) and _is(f.sub_agent, False) and _count(f.depth) == 0):
         return _refuse("H12", R_DESK)
-    if f.strict_profile:
+    if not _is(f.strict_profile, False):
         return _refuse("H11", R_STRICT)
-    if not f.agents_may_drive:
+    if not _is(f.agents_may_drive, True):
         return _refuse("H5", R_SWITCH_GLOBAL)
-    if not f.pane_can_see:
+    if not _is(f.pane_can_see, True):
         return _refuse("H5", R_SWITCH_SEE)
-    if f.private and not f.pane_can_drive:
+    if not isinstance(f.private, bool) or (f.private and not _is(f.pane_can_drive, True)):
         return _refuse("H5", R_SWITCH_PRIVATE)
-    if not f.pane_can_drive:
+    if not _is(f.pane_can_drive, True):
         return _refuse("H5", R_SWITCH_DRIVE)
-    if f.direct_mode:
+    if not _is(f.direct_mode, False):
         return _refuse("H6", R_DIRECT)
-    if not f.tab_drawn:
+    if not _is(f.tab_drawn, True):
         return _refuse("H6", R_NOT_DRAWN)
-    if f.card_pending:
+    if not _is(f.card_pending, False):
         return _refuse("H3", R_CARD)
-    if f.paused:
+    if not _is(f.paused, False):
         return _refuse("H4", R_PAUSED)
-    # Numbers are compared so that one that is not a number refuses (NaN).
-    if f.owner_input_age_s is not None and not f.owner_input_age_s >= OWNER_QUIET_S:
+    if not isinstance(f.owner_has_input, bool):
         return _refuse("H4", R_OWNER_BUSY)
-    if f.other_driver:
+    if f.owner_has_input:
+        age = _count(f.owner_input_age_s)
+        if age is None or age < OWNER_QUIET_S:
+            return _refuse("H4", R_OWNER_BUSY)
+    if not _is(f.other_driver, False):
         return _refuse("H9", R_OTHER_DRIVER)
-    if not f.actions_this_hour < MAX_ACTIONS_PER_TAB_HOUR:
+    hour = _count(f.actions_this_hour)
+    if hour is None or hour >= MAX_ACTIONS_PER_TAB_HOUR:
         return _refuse("H10", R_BUDGET_HOUR)
+    if _count(f.judged_this_turn) is None:
+        return _refuse("H10", R_BUDGET_TURN)
+    if not _is(f.url_refused, False):
+        return _refuse("H7", R_URL)
     return None
 
 
 def _destinations(f: Facts, key: str | None) -> list[str]:
     """Where this action may take the page: `navigate`'s address, a clicked
-    link's, a submitted form's action."""
+    link's, a submitted form's action (a click or Space on a submitting
+    control, or Enter)."""
     out = []
     if f.action == "navigate":
         out.append(f.nav_url)
     target = f.target
     if f.action == "click" and target is not None and target.href:
         out.append(target.href)
-    submits = (f.action == "click" and target is not None and target.submits) or \
+    activated = f.action == "click" or (f.action == "press" and key == "Space")
+    submits = (activated and target is not None and target.submits) or \
               (f.action == "press" and key == "Enter")
     if submits and f.form is not None and f.form.action:
         out.append(f.form.action)
@@ -742,7 +877,17 @@ def pre_judge(f: Facts, *, extra_values=()) -> PreVerdict:
     """The fixed rules, in order: H1–H12, then the ASK floors, then the ALLOW
     tier; everything else is CLASSIFY. `extra_values` are credential values
     the caller knows beyond `secrets.secret_values()` (the project folder's
-    env files, say); they only ever add."""
+    env files, say); they only ever add. Never raises: anything that goes
+    wrong while judging is a refusal."""
+    try:
+        if not isinstance(f, Facts):
+            return _refuse("error", R_ERROR)
+        return _judge(f, tuple(extra_values))
+    except Exception:
+        return _refuse("error", R_ERROR)
+
+
+def _judge(f: Facts, extra_values: tuple) -> PreVerdict:
     refusal = _state_refusal(f)
     if refusal:
         return refusal
@@ -756,23 +901,25 @@ def pre_judge(f: Facts, *, extra_values=()) -> PreVerdict:
         return _refuse("action", R_SCROLL)
     if action == "type" and len(f.text) > MAX_TYPE_CHARS:
         return _refuse("action", R_TOO_LONG)
+    target = f.target
+    if action in ("type", "select") and target is None:
+        return _refuse("action", R_NO_TARGET)
 
-    # H7: the URL judge (a fact) and our belt under it, for an address the
-    # agent sends the page to.
-    if f.url_refused:
-        return _refuse("H7", R_URL)
+    # H7's belt under the URL judge, for an address the agent sends the page
+    # to (navigate) or that the page chose (a link, a form's action).
     if action == "navigate":
+        if len(f.nav_url) > MAX_NAV_URL:
+            return _refuse("H7", R_NAV_TOO_LONG)
         belt = _address_refusal(f.nav_url)
         if belt:
             return _refuse("H7", belt)
-    if action == "click" and f.target is not None and f.target.href:
-        if config.ambiguous_authority(f.target.href):
-            return _refuse("H7", R_MALFORMED)
-        if config.is_face_origin(f.target.href):
-            return _refuse("H7", R_JARVIS_PORT)
+    else:
+        for url in _destinations(f, key):
+            belt = _landing_refusal(url)
+            if belt:
+                return _refuse("H7", belt)
 
     # H1: filling a sensitive field (clicking into one is allowed).
-    target = f.target
     memo = _Memo()
     fills = action in ("type", "select") or (action == "press" and key in _EDITING)
     if fills and memo.kind(target):
@@ -795,10 +942,9 @@ def pre_judge(f: Facts, *, extra_values=()) -> PreVerdict:
         if why:
             return _refuse("H8", why)
 
-    # The ASK floors (§B.4).
     # The floors and CLASSIFY are judged (the reviewer is asked, §B.5), so
     # they count against the turn's budget; the ALLOW tier does not.
-    spent = not f.judged_this_turn < MAX_JUDGED_PER_TURN
+    spent = not _count(f.judged_this_turn) < MAX_JUDGED_PER_TURN
     floor = _floor(f, action, key, target, resolved, memo)
     if floor is not None:
         return _refuse("H10", R_BUDGET_TURN) if spent else floor
@@ -806,10 +952,15 @@ def pre_judge(f: Facts, *, extra_values=()) -> PreVerdict:
     # The ALLOW tier.
     if action in ("scroll", "back", "forward"):
         return PreVerdict(ALLOW, "allow:" + action)
-    if action == "press" and key in NAV_KEYS:
+    if action == "press" and key in NAV_KEYS and _quiet_target(f, target, memo):
+        # Never in or beside a sensitive field: an arrow or Tab there can
+        # accept Chrome's autofill (a saved card).
         return PreVerdict(ALLOW, "allow:nav-key")
-    if action == "press" and key in EDIT_KEYS and target is not None:
-        return PreVerdict(ALLOW, "allow:edit-key")  # a sensitive field was refused above
+    if action == "press" and key in EDIT_KEYS and _text_entry(target) and \
+            target.tag.lower() not in _FRAMES:
+        # Only in a text field (a sensitive one was refused above): on a mail
+        # row, a file or a grid cell, Delete deletes what is selected.
+        return PreVerdict(ALLOW, "allow:edit-key")
     if action == "type" and _short_search(f, memo):
         return PreVerdict(ALLOW, "allow:search")
 
@@ -818,16 +969,23 @@ def pre_judge(f: Facts, *, extra_values=()) -> PreVerdict:
     return PreVerdict(CLASSIFY, "classify")
 
 
+def _quiet_target(f: Facts, target: Element | None, memo: _Memo) -> bool:
+    """A known target that is not a frame, in no form and beside no field
+    that holds a password, one-time code or card."""
+    return (target is not None and target.tag.lower() not in _FRAMES
+            and not form_kinds(f.form, target, memo=memo))
+
+
 def _floor(f: Facts, action: str, key: str | None, target: Element | None,
            resolved: str, memo: _Memo) -> PreVerdict | None:
     if action == "upload":
         return PreVerdict(ASK, "floor:upload", UPLOAD, path=resolved)
     # A submit of a login, two-factor or payment form: a click on anything in
-    # it but a text field (clicking into a field only focuses it), Enter
-    # anywhere in it, Space on a button in it.
-    submitting = (action == "click" and target is not None and not _text_entry(target)) or \
-                 (action == "press" and key == "Enter") or \
-                 (action == "press" and key == "Space" and not _text_entry(target))
+    # it but a text field (clicking into a field only focuses it), on anything
+    # that submits it, Enter anywhere in it, Space on a button in it.
+    activates = target is not None and (target.submits or not _text_entry(target))
+    submitting = (action == "click" and activates) or (action == "press" and key == "Enter") or \
+                 (action == "press" and key == "Space" and activates)
     if submitting and (f.form is not None or target is not None):
         kinds = form_kinds(f.form, target, memo=memo)
         if kinds:
@@ -838,6 +996,10 @@ def _floor(f: Facts, action: str, key: str | None, target: Element | None,
             return PreVerdict(ASK, "floor:url", category)
         if action in ("click", "navigate") and is_executable_path(url):
             return PreVerdict(ASK, "floor:executable", EXECUTABLE_DOWNLOAD)
+    # An editing key or Enter whose target the look could not name: what it
+    # deletes, types into or submits is unknown.
+    if action == "press" and target is None and (key in _EDITING or key == "Enter"):
+        return PreVerdict(ASK, "floor:no-target", NO_TARGET)
     return None
 
 

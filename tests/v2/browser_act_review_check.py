@@ -12,19 +12,23 @@ What it pins (§H's table for `browser_act_review_check.py`):
     `untrusted.fence` with a fresh tag per call, each part capped; no form
     value can be sent (there is no field for one); the owner's words are
     outside the fence, capped at 500;
-  - **every failure path asks**: a raise, a timeout (the HTTP one and our own
-    wall clock), prose, JSON inside prose, bad JSON, a missing or unknown
-    field, an unknown verdict or category, an empty answer, no OpenRouter key,
-    a cache error;
+  - **every failure path asks**: a raise, a late answer, prose, JSON inside
+    prose, bad JSON, a missing, repeated or unknown field, an unknown verdict
+    or category, an empty answer, no OpenRouter key, a cache error;
   - a sensitive category with verdict allow becomes ask;
   - `JARVIS_BROWSER_REVIEW_AUTOALLOW=0`: allow becomes ask, deny stays deny;
-  - the cache reuses allow only, never across origins, texts, destinations
-    or owner messages, expires, and holds at most 512;
-  - a planted credential (a pattern, a `.env` value, the look's flag, the
-    owner's words): no model call, verdict ask;
-  - the call: the review tier, `temperature=0`, `max_tokens=150`,
-    `timeout=8`, `max_retries=0`, no effort;
-  - `decide`: a floor is never lowered; a refusal never reaches the reviewer.
+  - the cache reuses allow only, and only for the very same question: never
+    across another page state (context, title, query, fragment), another
+    element (href, frame, heading, `submits`), another text (even past the
+    fence's cap), destination or owner message; it expires and holds at most
+    512;
+  - a planted credential (a pattern, a `.env` value, the caller's
+    `extra_values`, the look's flag, the owner's words): no model call, ask;
+  - the call: the review tier, never a Chinese-hosted model (the configured
+    orchestrator instead, else no call), `temperature=0`, `max_tokens=150`,
+    `timeout=8`, one request (`max_retries=1`, no stream), no effort;
+  - `decide`: a floor is never lowered, the belts apply again, an unknown
+    kind refuses.
 
 Run: PYTHONPATH=. .venv/bin/python tests/v2/browser_act_review_check.py
 """
@@ -53,7 +57,7 @@ os.environ["OPENROUTER_API_KEY"] = "sk-dummy-not-a-key"
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from jarvis import llm, models  # noqa: E402
+from jarvis import config, llm, models  # noqa: E402
 from jarvis.tools import secrets  # noqa: E402
 from jarvis.v2.browser import act_review as V, act_rules as R  # noqa: E402
 from jarvis.v2.browser.act_rules import Element, Facts, Form  # noqa: E402
@@ -230,7 +234,10 @@ class Failures(World):
                 '{"verdict": ["allow"], "category": "ordinary", "reason": "x"}',
                 '{"verdict": "allow", "category": "ordinary", "reason": 7}',
                 '["allow", "ordinary", "x"]', "", "   \n", None, "{" + " " * 3000 + "}",
-                '{"verdict": "deny", "category": "nonsense", "reason": "x"}']
+                '{"verdict": "deny", "category": "nonsense", "reason": "x"}',
+                # A repeated key: which one did the model mean?
+                '{"verdict": "deny", "verdict": "allow", "category": "ordinary", "reason": "x"}',
+                '{"verdict": "allow", "category": "login", "category": "ordinary", "reason": "x"}']
 
     def test_every_failure_asks(self):
         for item in self.FAILURES:
@@ -257,6 +264,28 @@ class Failures(World):
             self.assertEqual(call[key], value, key)
         self.assertNotIn("effort", call)
         self.assertNotIn("tools", call)
+
+    def test_never_a_chinese_hosted_model(self):
+        # The review tier follows the owner's selection; page context is
+        # logged-in personal data (the 2026-07-30 routing rule).
+        orchestrator = "openai/gpt-5.6-luna"
+        with patch.object(models, "tier", lambda name: "qwen/qwen3.7-flash"), \
+                patch.dict(config.TIERS, {"orchestrator": orchestrator}):
+            _, script = self.run_one(page(), answer())
+        self.assertEqual(script.calls[0]["model"], orchestrator)
+        V.clear_cache()
+        for chosen, configured in (("deepseek/deepseek-v4-pro", "moonshotai/kimi-k3"),
+                                   ("qwen/qwen3.7-flash", "")):
+            with self.subTest(chosen=chosen, configured=configured), \
+                    patch.object(models, "tier", lambda name, c=chosen: c), \
+                    patch.dict(config.TIERS, {"orchestrator": configured}):
+                verdict, script = self.run_one(page())
+                self.assertEqual((verdict.verdict, verdict.reason, len(script.calls)),
+                                 (V.ASK, V.R_NO_MODEL, 0))
+        # The one list, called — not a copy of it.
+        source = Path(V.__file__).read_text()
+        self.assertIn("from jarvis.v2.titles import cn_hosted", source)
+        self.assertNotIn("qwen/", source)
 
     def test_a_late_answer_asks(self):
         clock = [1000.0]
@@ -376,10 +405,69 @@ class Cache(World):
         _, script = self.run_one(page(), answer(), owner="a different message")
         self.assertEqual(len(script.calls), 1)
 
-    def test_the_path_shape_ignores_digits(self):
+    def test_another_page_number_misses(self):
         self.run_one(page(), answer())
-        _, script = self.run_one(page(url="https://news.example/story/97"))
-        self.assertEqual(len(script.calls), 0)
+        _, script = self.run_one(page(url="https://news.example/story/97"), answer())
+        self.assertEqual(len(script.calls), 1)
+
+    def assertMisses(self, first: Facts, second: Facts, owner="tidy up my repositories"):
+        V.clear_cache()
+        verdict, _ = self.run_one(first, answer(), owner=owner)
+        self.assertEqual((verdict.verdict, verdict.source), (V.ALLOW, "model"))
+        self.assertEqual(self.run_one(first, owner=owner)[0].source, "cache")  # the same question hits
+        again, script = self.run_one(second, answer("ask", R.DELETE), owner=owner)
+        self.assertEqual((len(script.calls), again.verdict), (1, V.ASK))
+
+    def test_an_ok_after_saved_is_not_an_ok_under_delete(self):
+        # Review of PR #71, MED 1: same button, same page path, a new state.
+        ok = Element(tag="button", role="button", name="OK")
+        saved = Facts("click", url="https://git.example/acme/app/settings", title="Settings",
+                      target=ok, context="Your changes were saved.", profile="p-main")
+        danger = Facts("click", url="https://git.example/acme/app/settings?confirm=1#/danger",
+                       title="Delete this repository", target=ok, profile="p-main",
+                       context="Delete this repository? This cannot be undone.")
+        self.assertMisses(saved, danger)
+        for change in (dict(context="Delete this repository? This cannot be undone."),
+                       dict(title="Delete this repository"),
+                       dict(url="https://git.example/acme/app/settings?confirm=1"),
+                       dict(url="https://git.example/acme/app/settings#/danger")):
+            with self.subTest(change=change):
+                self.assertMisses(saved, Facts(**{**saved.__dict__, **change}))
+
+    def test_a_download_link_is_not_a_link_elsewhere(self):
+        link = Element(tag="a", role="link", name="Download", href="https://files.example/report.pdf")
+        moved = Element(tag="a", role="link", name="Download", href="https://evil.example/collect?d=1")
+        first = Facts("click", url="https://files.example/", target=link)
+        self.assertMisses(first, Facts("click", url="https://files.example/", target=moved))
+
+    def test_a_top_page_button_is_not_a_framed_one(self):
+        top = Element(tag="button", role="button", name="Continue")
+        framed = Element(tag="button", role="button", name="Continue", frame_origin="https://ads.example")
+        self.assertMisses(Facts("click", url="https://shop.example/cart", target=top),
+                          Facts("click", url="https://shop.example/cart", target=framed))
+        for change in (dict(heading="Danger zone"), dict(submits=True), dict(type="submit")):
+            with self.subTest(change=change):
+                self.assertMisses(Facts("click", url="https://shop.example/cart", target=top),
+                                  Facts("click", url="https://shop.example/cart",
+                                        target=Element(**{**top.__dict__, **change})))
+
+    def test_the_same_field_with_another_text(self):
+        box = Element(tag="input", type="text", role="textbox", name="Comment")
+        base = Facts("type", url="https://forum.example/t/1", target=box, text="thanks!")
+        self.assertMisses(base, Facts(**{**base.__dict__, "text": "here is my address: 1 Main St"}))
+        # Texts the fence cuts the same way (300 characters) still differ in full.
+        long = "a" * 400
+        self.assertMisses(Facts(**{**base.__dict__, "text": long + "1"}),
+                          Facts(**{**base.__dict__, "text": long + "2"}))
+
+    def test_destinations_past_the_cap(self):
+        base = "https://example.com/" + "p" * 400
+        self.assertMisses(Facts("navigate", url="https://example.com/", nav_url=base + "?q=1"),
+                          Facts("navigate", url="https://example.com/", nav_url=base + "?q=2"))
+        link = Element(tag="a", name="Next", href=base + "/1")
+        self.assertMisses(Facts("click", url="https://example.com/", target=link),
+                          Facts("click", url="https://example.com/",
+                                target=Element(tag="a", name="Next", href=base + "/2")))
 
     def test_it_is_capped_and_expires(self):
         clock = [5000.0]
@@ -424,6 +512,15 @@ class Credentials(World):
                 self.assertEqual((verdict.verdict, verdict.source, len(script.calls)), (V.ASK, "guard", 0))
                 self.assertEqual(verdict.reason, V.R_FLAGGED)
 
+    def test_the_callers_values_count_too(self):
+        extra = "project-only-Value-4242"
+        _, script = self.run_one(page(context=f"x {extra}"), answer())
+        self.assertEqual(len(script.calls), 1)
+        V.clear_cache()
+        script = Script()
+        verdict = V.judge(page(context=f"x {extra}"), "go", chat=script, extra_values=[extra])
+        self.assertEqual((verdict.verdict, verdict.source, len(script.calls)), (V.ASK, "guard", 0))
+
     def test_ordinary_context_is_sent(self):
         _, script = self.run_one(page(context="An article about tokens and keys."), answer())
         self.assertEqual(len(script.calls), 1)
@@ -450,6 +547,25 @@ class Decide(World):
         self.assertEqual(V.decide(R.PreVerdict(R.REFUSE, "H1", reason=R.R_SENSITIVE),
                                   V.ActVerdict(V.ALLOW, R.ORDINARY, "")), "refuse")
         self.assertEqual(V.decide(R.PreVerdict(R.ALLOW, "allow:scroll")), V.ALLOW)
+
+    def test_an_unknown_kind_refuses(self):
+        allow = V.ActVerdict(V.ALLOW, R.ORDINARY, "")
+        for kind in ("ALLOW", "Classify", "Ask", "allow ", "maybe", "", None, 1):
+            with self.subTest(kind=kind):
+                self.assertEqual(V.decide(R.PreVerdict(kind), allow), "refuse")
+        for pre in (None, "classify", {"kind": "classify"}):
+            self.assertEqual(V.decide(pre, allow), "refuse")
+
+    def test_the_belts_again(self):
+        # A verdict that never went through judge() still cannot consent past them.
+        classify = R.PreVerdict(R.CLASSIFY, "classify")
+        for category in sorted(R.SENSITIVE) + [V.UNJUDGED]:
+            with self.subTest(category=category):
+                self.assertEqual(V.decide(classify, V.ActVerdict(V.ALLOW, category, "")), V.ASK)
+        self.assertEqual(V.decide(classify, V.ActVerdict(V.ALLOW, "shopping", "")), V.ASK)
+        os.environ[V.AUTOALLOW_ENV] = "0"
+        self.assertEqual(V.decide(classify, V.ActVerdict(V.ALLOW, R.ORDINARY, "")), V.ASK)
+        self.assertEqual(V.decide(classify, V.ActVerdict(V.DENY, R.INJECTION, "")), V.DENY)
 
 
 if __name__ == "__main__":
