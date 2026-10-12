@@ -2273,7 +2273,7 @@ class Backend(unittest.TestCase):
         self.events_all()
 
         # Refusals first: each a 400 naming the problem, none writes anything.
-        for bad, words in (({"provider": "claude", "model": "claude-sonnet-5-5", "extra": 1}, "unknown fields: extra"),
+        for bad, words in (({"provider": "claude", "model": "claude-sonnet-5-5", "extra": 1}, "unknown fields (1)"),
                            ({"provider": "claude"}, "missing fields: model"),
                            ({"model": "claude-sonnet-5-5"}, "missing fields: provider"),
                            ({"provider": "fast", "model": "test/model"}, "Model picker"),
@@ -2541,6 +2541,34 @@ class CronChecks(unittest.TestCase):
         with patch("jarvis.v2.daemon.is_running", side_effect=[False, True]), patch("subprocess.Popen") as child:
             self.assertEqual(cmd_hud(SimpleNamespace(no_window=True)), 0)
             self.assertIn("daemon2", child.call_args.args[0])
+
+
+class OneHiddenRule(unittest.TestCase):
+    """The preview origin's hidden-path rule is `editor_policy.hidden_component`,
+    called — the Browser's uploads ask the same one (BR-9a review). A copy here
+    would let the two drift."""
+
+    def test_the_preview_origin_calls_editor_policy(self):
+        import inspect
+
+        from jarvis.v2 import editor_policy
+        calls = []
+
+        def recorder(path, root):
+            calls.append((path, root))
+            return True
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            (root / "page.html").write_text("x")
+            project = SimpleNamespace(root=str(root), extra_dirs=())
+            page = root / "page.html"
+            self.assertIsNone(H._not_a_page(project, page, page))
+            with patch.object(editor_policy, "hidden_component", recorder):
+                self.assertEqual(H._not_a_page(project, page, page), H.HIDDEN_PAGE)
+        self.assertEqual(calls, [(page, root)])
+        self.assertNotIn('startswith(".")', inspect.getsource(H._not_a_page))
+        self.assertTrue(editor_policy.hidden_component(root / ".GIT" / "config", root))
+        self.assertFalse(editor_policy.hidden_component(root / ".well-known" / "a.txt", root))
 
 
 if __name__ == "__main__":

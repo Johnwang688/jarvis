@@ -522,6 +522,41 @@ V2_CREDENTIAL_DIRS: tuple[str, ...] = (
     "~/.ssh", "~/.aws", "~/.config/gh", "~/.config/jarvis", "~/.gnupg",
 )
 
+# The HUD's built-in Browser (BR-1a; docs/plans/2026-10-10-hud-browser-plan.md
+# §3 and amendment 1 §C). One folder holds everything the daemon-owned Chrome
+# keeps: `profiles.json`, one user-data-dir per profile (`profiles/<id>/`),
+# the Private instance's run folder, downloads, and Chrome's own HOME. The
+# owner's logins live here (and, with Chrome sync on — decision BD-5 — the
+# passwords Google syncs), so it is a credential folder: `credential_dirs()`
+# lists it wherever it is configured, it is made 0700, and the engine refuses
+# to start when it is a symlink or open to anyone else (`v2/browser/host.py`).
+BROWSER_DIR = Path(
+    os.environ.get("JARVIS_BROWSER_DIR")
+    or Path.home() / ".local" / "share" / "jarvis" / "browser"
+).expanduser()
+# The Browser's settings (B-5's LAN switch, `local_servers`, BR-8a's
+# `auto_open`; later sound): changed only by the owner-only `PATCH
+# /browser/settings`, and protected state (`tools/files._protected_state`), so
+# no agent can flip one. Read and written only by `v2/browser/settings.py`,
+# and only once daemon2's `main()` attaches it: a test or embedded daemon keeps
+# its switches in memory. An empty `JARVIS_BROWSER_SETTINGS` means unset
+# (`Path("")` would be `.`, the working folder in the protected state).
+BROWSER_SETTINGS_PATH = Path(
+    os.environ.get("JARVIS_BROWSER_SETTINGS")
+    or Path.home() / ".config" / "jarvis" / "browser.json"
+).expanduser()
+# B-13: twelve tabs in all, across every profile and Private. The suites set
+# a lower number.
+BROWSER_TAB_CAP = int(os.environ.get("JARVIS_BROWSER_TAB_CAP", "12"))
+
+
+def credential_dirs() -> tuple[str, ...]:
+    """`V2_CREDENTIAL_DIRS` plus the Browser's folder (BR-1a), read at call
+    time: the folder can be moved by `JARVIS_BROWSER_DIR`, and a test that
+    repoints `BROWSER_DIR` must protect its own. What every credential-folder
+    check asks (v2 permissions, `folders`, `editor_policy`)."""
+    return (*V2_CREDENTIAL_DIRS, str(BROWSER_DIR))
+
 # Where context.py writes a tool result whole before truncating it in the
 # transcript, so the cut leaves a read_file-able pointer instead of a hole.
 # Beside sessions rather than in the repo: same character — bulk, machine-local,
@@ -565,19 +600,6 @@ DISCORD_GUILD_PATH = Path(
         "JARVIS_DISCORD_GUILD", Path.home() / ".config" / "jarvis" / "discord_guild.json"
     )
 )
-
-# The HUD Browser's switches (Browser plan §4, amendment 1 §D.2/§F;
-# `jarvis/v2/browser/settings.py`): `auto_open` — "Open dev servers
-# automatically", BR-8a — and, later, the LAN and sound switches. Changed only
-# by the owner's `PATCH /browser/settings`; gate state, in
-# `tools/files._protected_state`, so no agent may flip one. Read by daemon2's
-# `main()`, never by a test or embedded daemon (which keep theirs in memory).
-# An empty `JARVIS_BROWSER_SETTINGS` means unset: `Path("")` is `.`, which
-# would land the working folder in the gate's protected state (PR #70 review).
-BROWSER_SETTINGS_PATH = Path(
-    os.environ.get("JARVIS_BROWSER_SETTINGS")
-    or (Path.home() / ".config" / "jarvis" / "browser.json")
-).expanduser()
 
 # Where `/project new` may make or adopt a project folder (v2 B2,
 # `jarvis/v2/folders.py`; decisions O3, O4). A folder must sit strictly *below*

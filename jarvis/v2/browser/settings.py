@@ -1,34 +1,50 @@
-"""The Browser's settings: `browser.json` (BR-8a; amendment 1 §D.2 and §F,
-plan §4).
+"""The Browser's settings: `browser.json` (BR-1a, BR-8a; plan §4, amendment 1
+§D.2 and §F). **The one reader and the one writer of that file**: nothing
+else opens it (the engine, the gate, the routes, the terminals and `/status`
+all ask the daemon's `BrowserSettings`), and `devurl_check`'s
+`test_one_reader_one_writer` fails if another module names its path.
 
 One small JSON object at `config.BROWSER_SETTINGS_PATH`
 (`~/.config/jarvis/browser.json`, env `JARVIS_BROWSER_SETTINGS`). It holds the
-owner's switches for the HUD's Browser — today only **`auto_open`**, "Open dev
-servers automatically" (decisions B-2): while it is true, the daemon reads a
-HUD terminal's live output for a dev server's announcement (`devurl.py`) and
-tells the window showing that terminal. **On by default**, as the amendment
-says; a missing, unreadable or malformed file, or a value that is not a
-boolean, reads as the default. Later packages add their switches here (the LAN
-switch, sound), and a write keeps every key it does not change.
+owner's switches for the HUD's Browser, each a boolean:
+
+- **`lan`** (B-5, BR-1a): the Browser's gate admits private-network addresses.
+  **Off** by default.
+- **`local_servers`** (BR-1a): the gate admits every loopback port that is not
+  Jarvis's, not only the ones the owner opened in a pane. **Off** by default:
+  the owner's switch, never a default.
+- **`auto_open`** (BR-8a, decisions B-2): "Open dev servers automatically" —
+  the daemon reads a HUD terminal's live output for a dev server's
+  announcement (`devurl.py`) and tells the window showing that terminal. **On**
+  by default. Auto-open loads only in a Direct frame and never opens a port in
+  the Remote gate: only the owner's own navigation does (amendment 2).
+
+A missing, unreadable or malformed file, or a value that is not a boolean,
+reads as the default. Later packages add their switches here (sound), and a
+write keeps every key it does not change — one a later package added
+included.
 
 **Protected state** (`tools/files._protected_state_paths`): no agent write
 tool, v2 grant or shell command may change it — the plan's "so no agent can
 flip it". **Changed only by the owner**: `PATCH /browser/settings`
-(`route`), owner-only on the HUD listener with a strict loopback Host, like
-every terminal route; `GET` is owner-only too (a same-origin read).
+(`routes.py`, which owns every `/browser…` path), owner-only on the HUD
+listener with a strict loopback Host; `GET` is owner-only too.
 
-**Read where it is cheap.** The terminals ask `auto_open()` for every chunk of
-output, so it answers from memory and looks at the file at most once every
-`RECHECK_S` (a `stat`; read again only when it changed) — an edit by hand
-lands within a second, no restart. A file that is a symlink, not a regular
-file or larger than `FILE_CAP` is not read (it reads as the defaults), and it
-is opened without blocking, so nothing planted there can hang the output path.
-Written atomically (a temp file beside it, mode 600, then `rename`).
+**Read where it is cheap.** The gate asks `value("lan")` and
+`value("local_servers")` on every connection, and the terminals
+`auto_open()` for every chunk of output, so they answer from memory and look
+at the file at most once every `RECHECK_S` (a `stat`; read again only when it
+changed) — an edit by hand lands within a second, no restart. A file that is
+a symlink, not a regular file or larger than `FILE_CAP` is not read (it reads
+as the defaults), and it is opened without blocking, so nothing planted there
+can hang a read. Written atomically (a temp file beside it, mode 600, then
+`rename`).
 
 **Which file.** A `BrowserSettings()` made with no path keeps its values in
 memory only: that is what an embedded or test daemon has, so none reads or
 writes the owner's file. daemon2's `main()` attaches the real one before the
-daemon starts, as it loads the saved Codex catalog.
+daemon starts, as it loads the saved Codex catalog; a suite that wants the
+file attaches its own temp path.
 """
 from __future__ import annotations
 
@@ -43,7 +59,7 @@ import time
 
 LOG = logging.getLogger(__name__)
 
-DEFAULTS: dict[str, bool] = {"auto_open": True}
+DEFAULTS: dict[str, bool] = {"lan": False, "local_servers": False, "auto_open": True}
 FILE_CAP = 64 * 1024
 RECHECK_S = 1.0
 
@@ -155,14 +171,20 @@ class BrowserSettings:
         raw = _read(self._path) if stamp is not None else None
         self._values = _values(raw or {})
 
-    def auto_open(self) -> bool:
-        """"Open dev servers automatically". Cheap: memory, and a `stat` at
-        most once a `RECHECK_S`."""
+    def value(self, key: str) -> bool:
+        """One switch, as the file says it now. Cheap — memory, and a `stat`
+        at most once a `RECHECK_S` — so the gate can ask on every connection
+        and the terminals on every chunk of output. KeyError for a name that
+        is not a switch."""
         if self._path is not None and self._clock() - self._checked >= RECHECK_S:
             with self._lock:
                 if self._clock() - self._checked >= RECHECK_S:
                     self._refresh()
-        return self._values["auto_open"]
+        return self._values[key]
+
+    def auto_open(self) -> bool:
+        """"Open dev servers automatically" (BR-8a), for the terminals."""
+        return self.value("auto_open")
 
     def snapshot(self) -> dict[str, bool]:
         with self._lock:
@@ -176,9 +198,9 @@ class BrowserSettings:
         change, OSError when the file cannot be written."""
         for key, value in changes.items():
             if key not in DEFAULTS:
-                raise ValueError(f"unknown setting: {key}")
+                raise ValueError("not a Browser setting")   # never echoed (PR #69 review)
             if not isinstance(value, bool):
-                raise ValueError(f"{key} must be true or false")
+                raise ValueError(f"{key} must be a boolean")
         with self._lock:
             if self._path is None:
                 self._values.update(changes)
@@ -190,36 +212,3 @@ class BrowserSettings:
             self._stamp = _stamp(self._path)
             self._checked = self._clock()
             return dict(self._values)
-
-
-def route(handler, daemon, parts, query):
-    """`/browser/…`, or None. Owner-only (the HUD listener and the HUD's own
-    page) with a strict loopback Host, like every terminal route."""
-    if not parts or parts[0] != "browser":
-        return None
-    from ..daemon import APIError, _object
-    from ..projects import owner_only
-    owner_only(handler, daemon)
-    port = daemon.face_port
-    if handler.headers.get("Host", "") not in (f"127.0.0.1:{port}", f"localhost:{port}"):
-        raise APIError(403, "untrusted Host")
-    if parts == ["browser", "settings"]:
-        if handler.command == "GET":
-            _object(query, ())
-            return 200, daemon.browser_settings.snapshot()
-        if handler.command == "PATCH":
-            _object(query, ())
-            body = _object(handler._body(), tuple(DEFAULTS))
-            if not body:
-                raise APIError(400, "nothing to change")
-            try:
-                values = daemon.browser_settings.update(**body)
-            except ValueError as exc:
-                raise APIError(400, str(exc)) from None
-            except OSError as exc:
-                LOG.warning("browser settings not saved (%s)", type(exc).__name__)
-                raise APIError(500, "the Browser settings could not be saved") from None
-            LOG.info("browser settings changed by the owner: %s",
-                     ", ".join(f"{k} {'on' if v else 'off'}" for k, v in sorted(body.items())))
-            return 200, values
-    raise APIError(404, "route not found")

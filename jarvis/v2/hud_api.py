@@ -1325,13 +1325,13 @@ def _not_a_page(project, raw, target) -> str | None:
     transcripts), wherever the project is."""
     roots = [Path(project.root).resolve()] + [Path(p).expanduser().resolve() for p in project.extra_dirs]
     for path in (Path(raw), Path(target)):
-        rel = next((path.relative_to(r) for r in roots if path.is_relative_to(r)), None)
-        if rel is None:
+        root = next((r for r in roots if path.is_relative_to(r)), None)
+        if root is None:
             return PROTECTED_PAGE
         lexical = Path(os.path.abspath(path))
         if any(p == d or p.is_relative_to(d) for d in editor_policy.jarvis_dirs() for p in (lexical, path.resolve())):
             return PROTECTED_PAGE
-        if any(part.startswith(".") and part != ".well-known" for part in rel.parts):
+        if editor_policy.hidden_component(path, root):
             return HIDDEN_PAGE
     return None
 
@@ -1602,10 +1602,11 @@ def route(handler, daemon, parts, query):
         from . import terminals as _terminals
         return _terminals.route(handler, daemon, parts, query)
     if parts[0] == "browser":
-        # The Browser's switches (`browser.json`; BR-8a's `auto_open`):
-        # owner-only, the HUD listener only, a strict loopback Host.
-        from .browser import settings as _browser_settings
-        return _browser_settings.route(handler, daemon, parts, query)
+        # The owner's Browser (BR-1a): owner-only and a strict loopback Host
+        # on every route, checked before anything else (browser/routes.py),
+        # its settings included (BR-8a's `auto_open` beside the LAN switch).
+        from .browser import routes as _browser
+        return _browser.route(handler, daemon, parts, query)
     # The editor's git (ED-9): HEAD's text for the gutter and the explorer's
     # colours. The owner's, like every editor route (E-7), checked before
     # anything else — the project is not even looked up for anyone else.

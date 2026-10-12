@@ -185,33 +185,63 @@ def _renamed_from(toplevel: Path, rel: str) -> str | None | bool:
     return None
 
 
+def _folder_above(project, path: Path) -> Path | None:
+    """The nearest folder above `path` that is there, still in the project."""
+    for up in path.parents:
+        if up.is_dir():
+            return up if _in_project(project, up) else None
+    return None
+
+
 def base(project, name: str) -> dict:
-    """`GET /projects/{id}/git/base?path=`: what HEAD holds for this file."""
+    """`GET /projects/{id}/git/base?path=`: what HEAD holds for this file.
+
+    A file **deleted from the working tree** (nothing at all at the path, not
+    even a broken link) still answers what HEAD holds, with `deleted: true`:
+    the Diff pane's uncommitted changes show a deletion's committed text. It
+    is judged exactly as a file that is there — the same refusals, before git
+    runs — and a path HEAD does not hold either is 404, as before."""
     raw, resolved = H.scope(project, name)
     policy = editor_policy.Policy()
     gate = _gate_paths()
     why = refused(policy, Path(raw), Path(resolved), gate)
     if why:
         fail(403, why)
+    deleted = False
+    cwd = resolved.parent
     if not resolved.is_file():
-        fail(404, "file not found")
-    code, out, _ = _git(resolved.parent, ["rev-parse", "--show-toplevel"], BASE_SECONDS)
+        # A folder, a broken link, a FIFO: something is there, and it is not
+        # a file. Only a path with nothing at it is a deletion.
+        if os.path.lexists(raw) or os.path.lexists(resolved):
+            fail(404, "file not found")
+        found = _folder_above(project, resolved)
+        if found is None:
+            fail(404, "file not found")
+        deleted, cwd = True, found
+    answer = _answer
+    if deleted:
+        def answer(n, state, head=None, **extra):
+            # Nothing on disk and nothing HEAD holds: not there at all.
+            if state in ("no_repo", "no_head", "new"):
+                fail(404, "file not found")
+            return _answer(n, state, head, deleted=True, **extra)
+    code, out, _ = _git(cwd, ["rev-parse", "--show-toplevel"], BASE_SECONDS)
     if code != 0 or not out.strip():
-        return _answer(name, "no_repo")
+        return answer(name, "no_repo")
     toplevel = _resolve(Path(out.rstrip("\n")))
     try:
         rel = resolved.relative_to(toplevel).as_posix()
     except ValueError:
-        return _answer(name, "no_repo")
+        return answer(name, "no_repo")
     if not rel or ".git" in PurePosixPath(rel).parts:
-        return _answer(name, "not_a_file")
+        return answer(name, "not_a_file")
     risky = _risky(toplevel)
     if risky:
         fail(403, _risky_refusal(risky))
     code, out, _ = _git(toplevel, ["rev-parse", "-q", "--verify", "HEAD^{commit}"], BASE_SECONDS)
     head = out.strip() if code == 0 else ""
     if not head:
-        return _answer(name, "no_head")
+        return answer(name, "no_head")
     # The name in git: a staged rename serves its source's HEAD text, so the
     # source is placed and judged as the file itself is — in the project, as
     # `hud_api.scope` places a path (a source outside it, or under a
@@ -219,7 +249,7 @@ def base(project, name: str) -> dict:
     # credential, an env file or the gate's state (403).
     origin = _renamed_from(toplevel, rel)
     if origin is False:
-        return _answer(name, "unavailable", head)
+        return answer(name, "unavailable", head)
     git_path = rel
     if origin:
         parts = PurePosixPath(origin).parts
@@ -227,7 +257,7 @@ def base(project, name: str) -> dict:
             fail(403, "a rename git reports from outside the repository")
         where = toplevel.joinpath(*parts)
         if not _in_project(project, where):
-            return _answer(name, "new", head)
+            return answer(name, "new", head)
         why = refused(policy, where, _resolve(where), gate)
         if why:
             fail(403, why)
@@ -235,33 +265,36 @@ def base(project, name: str) -> dict:
     code, out, _ = _git(toplevel, ["--literal-pathspecs", "ls-tree", "-l", "-z", "--full-tree",
                                    "HEAD", "--", git_path], BASE_SECONDS)
     if code != 0:
-        return _answer(name, "unavailable", head)
+        return answer(name, "unavailable", head)
     entry = next((e for e in out.split("\0") if e), None)
     if entry is None:
-        return _answer(name, "new", head)
+        return answer(name, "new", head)
     meta, _, listed = entry.partition("\t")
     fields = meta.split()
     if listed != git_path or len(fields) != 4:
-        return _answer(name, "new", head)
+        return answer(name, "new", head)
     mode, kind, oid, size = fields
     if kind != "blob" or mode not in REGULAR_MODES:
-        return _answer(name, "not_a_file", head)
+        return answer(name, "not_a_file", head)
     try:
         nbytes = int(size)
     except ValueError:
-        return _answer(name, "unavailable", head)
+        return answer(name, "unavailable", head)
     if nbytes > BASE_CAP:
-        return _answer(name, "too_large", head, size=nbytes)
+        return answer(name, "too_large", head, size=nbytes)
     # By object id: no path, so no attribute (textconv, a filter, eol) applies.
     data = _git_blob(toplevel, oid, BASE_SECONDS)
     if data is None or len(data) > BASE_CAP:
-        return _answer(name, "unavailable", head)
+        return answer(name, "unavailable", head)
     # The editor's own rule: a NUL in the first 8 KiB, or not UTF-8 (strictly:
     # a U+FFFD the file really holds is text).
     if not editor_policy.is_text(data):
-        return _answer(name, "binary", head, size=nbytes)
-    return {"path": name, "state": "ok", "head": head, "text": data.decode("utf-8"), "size": nbytes,
-            "renamed": bool(origin)}
+        return answer(name, "binary", head, size=nbytes)
+    ok = {"path": name, "state": "ok", "head": head, "text": data.decode("utf-8"), "size": nbytes,
+          "renamed": bool(origin)}
+    if deleted:
+        ok["deleted"] = True
+    return ok
 
 
 # -- the explorer's colours --------------------------------------------------------------

@@ -158,6 +158,8 @@ class Base(unittest.TestCase):
                                 AVATAR_ENV="",
                                 DISCORD_GUILD_PATH=self.root / "guild.json",
                                 DISCORD_TOKEN_PATH=self.root / "discord_token.json",
+                                # The Browser (BR-1a): no route below starts Chrome.
+                                BROWSER_DIR=self.root / "browser",
                                 BROWSER_SETTINGS_PATH=self.root / "browser.json",
                                 TERMINAL_SHELL=str(FAKE_SHELL),
                                 # Never the owner's installed HUD (C-1, ED-4).
@@ -326,12 +328,18 @@ def routes(t) -> list[tuple[str, str, object]]:
         ("GET", "/models", None), ("GET", "/models/catalog", None), ("POST", "/model", {"bogus": 1}),
         ("POST", "/models", {"bogus": 1}), ("POST", "/mute", {"muted": "yes"}),
         ("POST", "/say", {}), ("POST", "/say", {"text": "hello"}), ("POST", "/stt", {"bogus": 1}),
-        ("GET", "/browser/settings", None), ("PATCH", "/browser/settings", {"bogus": 1}),
         ("GET", "/terminals", None), ("POST", "/terminals", {"bogus": 1}),
         ("GET", "/terminals/deadbeef/attach", None), ("DELETE", "/terminals/deadbeef", None),
         ("GET", "/vex/status", None), ("GET", "/vex/builds/deadbeef", None),
         ("POST", "/vex/brain", {"bogus": 1}), ("GET", f"/projects/{p}/vex", None),
         ("POST", f"/projects/{p}/vex/build", {"bogus": 1}),
+        # The Browser (BR-1a): every one owner-only, and none starts Chrome.
+        ("GET", "/browser", None), ("GET", "/browser/tabs", None), ("POST", "/browser/tabs", {"bogus": 1}),
+        ("POST", "/browser/tabs", {"url": "file:///etc/hostname"}),
+        ("GET", "/browser/settings", None), ("PATCH", "/browser/settings", {"bogus": 1}),
+        ("DELETE", "/browser/tabs/deadbeef", None),
+        ("POST", "/browser/tabs/deadbeef/navigate", {"url": "about:blank"}),
+        ("POST", "/browser/profiles/p-00000000/forget", {}),
     ]
 
 
@@ -350,6 +358,9 @@ class FrameHeaders(Base):
         # The walk really spans successes, refusals and errors.
         for status in (200, 201, 400, 403, 404, 409):
             self.assertIn(status, statuses, f"the walk never produced a {status}")
+        # And the Browser's routes answered without starting Chrome (BR-1a).
+        self.assertFalse(self.daemon.browser.status()["running"])
+        self.assertFalse((self.root / "browser").exists())
 
     def test_refusals_before_any_route_runs(self):
         for listener in ("hud", "api"):
@@ -647,6 +658,11 @@ class Status(Base):
                 self.assertEqual(body["workshop_port"], self.daemon.workshop_port)
                 self.assertIs(body["frame_hardened"], True)
                 self.assertFalse({body["hud_port"], body["api_port"], body["workshop_port"]} & {0})
+                # The Browser's gate refuses the HUD and the API, never this
+                # daemon's own workshop (BR-1a).
+                self.assertLessEqual({body["hud_port"], body["api_port"], 8402, 8405}, set(body["refused_ports"]))
+                self.assertNotIn(body["workshop_port"], body["refused_ports"])
+                self.assertFalse(body["browser"]["running"])
 
     def test_frame_hardened_comes_from_the_handler_that_adds_the_headers(self):
         # A daemon not started has no listener, so nothing is hardened yet;
@@ -661,7 +677,7 @@ class Status(Base):
 class Coverage(Base):
     ROUTE_FILES = ("jarvis/v2/daemon.py", "jarvis/v2/hud_api.py", "jarvis/v2/projects.py",
                    "jarvis/v2/terminals.py", "jarvis/v2/discord/routes.py", "jarvis/v2/vex.py",
-                   "jarvis/v2/browser/settings.py")
+                   "jarvis/v2/browser/routes.py")
 
     def families(self) -> set[str]:
         """Every first path segment a route module matches on."""

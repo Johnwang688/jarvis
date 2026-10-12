@@ -2261,7 +2261,10 @@ B-2).** The daemon half of "a dev server started in a HUD terminal opens in a
 Browser pane by itself"; BR-8b, the window half, opens the pane
 (`lib/devopen.ts`, BR-2). While the owner's **Open dev servers
 automatically** switch is on (`browser.json` → `auto_open`, on by default,
-protected state, changed only by the owner-only `PATCH /browser/settings`),
+protected state, changed only by the owner-only `PATCH /browser/settings`;
+one file beside BR-1a's `lan` and `local_servers`, read and written only by
+`jarvis/v2/browser/settings.py`, which the gate, the host, `/status` and the
+terminals all share),
 `Terminal._output` feeds each shell terminal's **live** output to
 `jarvis/v2/devurl.py`, under the lock it already holds. It reads only a
 command's output — from the shell's signed OSC 133 marks it skips the prompt
@@ -2288,8 +2291,10 @@ four, at most one a second and four a minute per terminal, recorded only once
 the socket has taken the frame; with no window attached it is dropped and not
 remembered, and a ring replay never sends one. **Nothing else ever carries it**: no bus record,
 log line, thread log, Discord post or file, and Jarvis never sees it (the
-"Jarvis can read" switch is unrelated: this is the owner's window). The
-sniffer holds at most a 512-byte line, a 64-byte escape carry and four
+"Jarvis can read" switch is unrelated: this is the owner's window).
+**Auto-open never opens a port in the Remote gate** (amendment 2): the
+window loads the URL only in a Direct frame, and only the owner's own
+navigation opens a loopback port there. The sniffer holds at most a 512-byte line, a 64-byte escape carry and four
 origins. Its limits: a server started with `&` in bash whose banner lands
 while the prompt is up is skipped (it sits between `B` and `C`); input typed
 ahead while a command runs is echoed inside its output and read as output;
@@ -2931,6 +2936,40 @@ tree. A file in another repository than the project's — a nested robot repo,
 a file reached through the Inbox — checks its own HEAD every 10 s while the
 window is visible, so a commit there clears its marks.
 
+**The Browser's engine (2026-10-12, BR-1a of
+`docs/plans/2026-10-10-hud-browser-plan.md`; amendment 1 and the decisions
+file win).** The daemon owns a Google Chrome (stable, from apt) for the
+HUD's coming Browser pane, headless and streamed later (BR-1b); this package
+is its engine and its fences, no HUD yet. Chrome starts at the first
+`POST /browser/tabs`, one instance per profile — **Main** at first, plus one
+**Private** instance whose panes are each an off-the-record context — and
+stops with the daemon (anything left is killed by exact PID). Every
+connection it makes, loopback included, goes through a loopback **SOCKS5
+gate** in the daemon that resolves a name once and connects to the address
+it judged: Jarvis's own ports (the control ports, the HUD and API ports,
+8403 unless it is this daemon's workshop) are refused on every address in
+every spelling, a public name that resolves to loopback is refused, the LAN
+only with the owner's switch (`browser.json`, off), and **this machine like
+the LAN**: a loopback port only once the owner opened it in a tab (the
+lead's decision on PR #69's review; a page or an agent never opens one), and
+then only by a literal or `localhost`. A name keeps the kind of address it
+was first allowed on. Chrome sends no UDP at all — no QUIC, WebRTC held to
+proxied transports and its mDNS responder off — checked by its effect, a
+packet sniffer in a private network namespace seeing nothing leave but on
+loopback. Typed URLs pass a **judge** first (http,
+https or about:blank; no user name, no `file:` and friends, which never
+touch the network), and wherever a page lands is judged again and replaced
+with an explanation when refused. Its folder (`~/.local/share/jarvis/
+browser`) is a 0700 credential folder holding the profiles, Chrome's HOME and
+the Private run folder; the launch keeps Chrome's sandbox, Safe Browsing,
+component updates and sign-in and sync (BD-5), and drops automation, the
+DevTools port, extensions and permission prompts; Chrome's environment is
+built from nothing. Every `/browser` route is owner-only on the HUD
+listener, and no URL, title or profile label reaches `/status`, the bus or
+the log. `/status` gains `browser` and `refused_ports`. The same review
+closed v1's file tools (`read_file`, `grep_files` and the write tools) to
+every credential folder, the Browser's profile included.
+
 **Editor settings, `.editorconfig` and vim (2026-10-12, ED-8 of the editor
 plan, §2.8; decisions E-9, E-11).** A File pane's ⚙, or "Editor Settings…" in
 the palette, opens one dialog for every editor in the window: font family
@@ -2977,6 +3016,50 @@ compact menu and the pane's `aria-label`; the palette's "Show Files" is
 Free checks: `workspace.test.ts` (the migration, the grant, the label table,
 a stored `"file"` pane) and `tests/face/hud_v2_browser_check.py` (was
 `hud_v2_preview_check.py`; its `_rename_checks` seed a pre-rename layout).
+
+**The Diff pane shows the project's uncommitted changes (2026-10-12, the
+owner: "the Diff doesn't work right now it just says to select a Task", and
+yes to VS Code's Source Control view).** With no task to show, a Diff pane
+lists what changed in its project since HEAD — modified, added, untracked,
+renamed, deleted and conflicted files, and untracked folders, each with its
+letter (M, A, U, R, D, C) in the explorer's colours and the editor's file
+icon; ignored files never — headed "Uncommitted changes in <project>". A
+click shows HEAD's text on the left and, on the right, the file as the
+editor shows it: **the open buffer itself** when the file is open in a File
+pane, so an unsaved edit is there and the diff follows typing, else the file
+as read; a deleted file's right side is empty, and a binary, too-large or
+non-regular file says so. **An env file is listed and never diffed** — the
+pane says so and offers Open, and nothing about it is asked of the daemon.
+Open puts the file in the editor where every other open does (a drawn File
+pane on the project, else a split beside — never over this view or a VEX
+view). It is **read-only**: no staging, reverting or committing here. Which
+it shows: **never another task than a drawn Task pane** — while one is drawn
+and shows a task, the Diff shows that task's diff, even after a thread is
+picked, and its picker is off; else a task picked more recently than a
+thread shows the task's diff, exactly as before (so a task click always
+shows in a drawn Diff pane); else the project the pane is pinned to (its
+header's picker, as the File pane's; a File pane that opened a file keeps its
+pin when it becomes a Diff pane); else the chat's project. The caption says
+which and why ("the Task pane's task", "the task picked last", "this pane's
+project", "the chat's project"). Picking a project in that picker takes the
+window off the task, as picking a thread does. Under a card its picker, Open
+and ↻ are disabled. The list
+is ED-9's status poll (only while the pane is drawn), and typing anywhere
+else in the window never redraws it; HEAD's text is ED-9's
+base route, which now also answers for a file deleted from the working tree.
+A file opened and edited while its diff is still being computed swaps to the
+buffer quietly (the computation is cancelled first), and a buffer that goes
+away while shown reads "…" until the file is read again, never as an empty
+side.
+
+**The Browser's action rules and reviewer (2026-10-12, BR-9a; amendment 1 to
+the Browser plan, §B.3–§B.5).** Before an agent's click, keystroke or
+navigation in a Browser pane runs, fixed rules refuse what no model may allow
+(typing into a password, one-time-code or card field, a credential in what it
+types or where it goes, an upload from outside the chat's project, acting
+while a card is up or the owner holds the pane) and ask about logins,
+payments, uploads and executables; a reviewer model judges the rest, and
+every failure of it asks. Not wired yet: nothing drives a pane until BR-9b.
 
 Remaining: WP13 (the long-bench comparison, the owner's call on cost), a
 native Windows worker, the R8 hook on Codex, and prompt tuning in

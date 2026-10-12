@@ -16,7 +16,7 @@ The kinds, in the order they are decided (the first that matches wins):
 |            | allowlist, models.json, routing.json …), even inside         |                      |
 |            | `~/.config/jarvis` (E-8: "gate-state files stay readable")   |                      |
 | `withheld` | a credential bundle (`secrets.PROTECTED_NAMES` other than    | no content, ever     |
-|            | the env files), anything under `config.V2_CREDENTIAL_DIRS`   |                      |
+|            | the env files), anything under `config.credential_dirs()`   |                      |
 |            | or v2's session carriers (`V2_DATA_DIR/claude`, `/codex`),   |                      |
 |            | and the login files (Claude's, Codex's, git's, `.netrc`,     |                      |
 |            | docker's, kube's, `.npmrc`, `.pypirc`)                       |                      |
@@ -203,7 +203,7 @@ def credential_name(name: str) -> bool:
 
 
 def credential_dirs() -> list[Path]:
-    return [_resolve(Path(d)) for d in config.V2_CREDENTIAL_DIRS] + carrier_dirs()
+    return [_resolve(Path(d)) for d in config.credential_dirs()] + carrier_dirs()
 
 
 def jarvis_dirs() -> list[Path]:
@@ -221,6 +221,16 @@ def jarvis_dirs() -> list[Path]:
 
 def _under(path: Path, directory: Path) -> bool:
     return path == directory or directory in path.parents
+
+
+def hidden_component(path: Path, root: Path) -> bool:
+    """Does `path` have a hidden component below `root` — a name starting
+    with `.` (`.git` and `.GIT`, `.docker/config.json`, `.npmrc`, a tool's
+    dotfolder), `.well-known` excepted? `path` must lie in `root`
+    (`ValueError` otherwise). What the preview origin (`hud_api._not_a_page`)
+    and the Browser's uploads (`act_rules.upload_refusal`) both refuse."""
+    rel = Path(path).relative_to(root)
+    return any(part.startswith(".") and part != ".well-known" for part in rel.parts)
 
 
 class Policy:

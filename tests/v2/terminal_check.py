@@ -1372,9 +1372,9 @@ class DevUrls(Base):
                 self.assertNotIn(marker.encode(), path.read_bytes(), path)
 
     def test_with_auto_open_off_the_sniffer_is_never_fed(self):
-        self.assertEqual(self.owner("GET", "/browser/settings"), {"auto_open": True})
+        self.assertTrue(self.owner("GET", "/browser/settings")["auto_open"])
         self.assertEqual(self.owner("PATCH", "/browser/settings", {"auto_open": False}),
-                         {"auto_open": False})
+                         {"lan": False, "local_servers": False, "auto_open": False})
         fed = []
         real = devurl.DevUrlSniffer.feed
 
@@ -1387,7 +1387,7 @@ class DevUrls(Base):
             client.drain(0.3)
             self.assertEqual(self.dev_urls(client), [])
             self.assertEqual(fed, [], "no byte of output reached the sniffer")
-            self.assertEqual(self.owner("GET", "/browser/settings"), {"auto_open": False})
+            self.assertFalse(self.owner("GET", "/browser/settings")["auto_open"])
             # On again: the next announcement is read.
             self.owner("PATCH", "/browser/settings", {"auto_open": True})
             self.run_line(client, "echo  Local: http://localhost:24609/")
@@ -1413,7 +1413,8 @@ class DevUrls(Base):
 
     def test_the_switch_is_the_owners(self):
         path = "/browser/settings"
-        self.assertEqual(self.owner("GET", path), {"auto_open": True})
+        defaults = {"lan": False, "local_servers": False, "auto_open": True}
+        self.assertEqual(self.owner("GET", path), defaults)
         for kw in ({"port": self.daemon.port}, {"port": self.daemon.workshop_port},
                    {"origin": f"http://127.0.0.1:{self.daemon.workshop_port}"},
                    {"origin": "http://evil.example"}, {"origin": "null"}, {"origin": None},
@@ -1429,8 +1430,30 @@ class DevUrls(Base):
         self.assertEqual(self.request("PATCH", path + "?x=1", {"auto_open": False})[0], 400)
         self.assertEqual(self.request("POST", path, {"auto_open": False})[0], 404)
         self.assertEqual(self.request("GET", "/browser/other")[0], 404)
-        self.assertEqual(self.owner("GET", path), {"auto_open": True})
+        self.assertEqual(self.owner("GET", path), defaults)
         self.assertFalse((self.root / "browser.json").exists(), "a test daemon writes no file")
+
+    def test_one_set_of_switches_for_every_reader(self):
+        # The reconciliation with BR-1a (#69): the routes, the engine, the
+        # gate's per-connection reads, `/status` and the terminals all ask the
+        # daemon's one `BrowserSettings`. No Chrome starts.
+        settings, host = self.daemon.browser_settings, self.daemon.browser
+        self.assertIs(host._settings, settings)
+        tid = self.open_terminal()["id"]
+        term = self.term(tid)
+        self.assertTrue(term._dev_on())
+        self.assertFalse(host.loopback_open(24699))
+        changed = self.owner("PATCH", "/browser/settings",
+                             {"lan": True, "local_servers": True, "auto_open": False})
+        self.assertEqual(changed, {"lan": True, "local_servers": True, "auto_open": False})
+        self.assertEqual((settings.value("lan"), settings.value("local_servers")), (True, True))
+        self.assertTrue(host.loopback_open(24699), "the gate's per-connection read")
+        self.assertFalse(term._dev_on(), "the terminals' read")
+        status = self.request("GET", "/status", port=self.daemon.port, origin=None)[1]["browser"]
+        self.assertEqual((status["lan"], status["local_servers"]), (True, True))
+        self.assertTrue(self.owner("GET", "/browser")["settings"]["lan"])
+        self.assertEqual(self.request("PATCH", "/browser/settings", {"local_servers": "yes"})[0], 400)
+        self.assertTrue(settings.value("local_servers"), "a refused PATCH changed nothing")
 
     def test_unattached_output_is_dropped_and_not_remembered(self):
         terminal = T.Terminal("0000000e", shell="/bin/sh", folder="/", project_id=None, label="~",

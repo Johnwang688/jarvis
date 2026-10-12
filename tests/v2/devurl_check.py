@@ -568,8 +568,13 @@ class Settings(unittest.TestCase):
     def test_on_by_default_and_memory_only_without_a_file(self):
         memory = S.BrowserSettings()
         self.assertIs(memory.auto_open(), True)
-        self.assertEqual(memory.update(auto_open=False), {"auto_open": False})
+        self.assertEqual(memory.snapshot(), {"lan": False, "local_servers": False, "auto_open": True})
+        self.assertEqual(memory.update(auto_open=False),
+                         {"lan": False, "local_servers": False, "auto_open": False})
         self.assertIs(memory.auto_open(), False)
+        self.assertIs(memory.value("auto_open"), False)
+        with self.assertRaises(KeyError):
+            memory.value("sound")
         self.assertIsNone(memory.path)
         self.assertIs(self.settings().auto_open(), True)              # no file yet
         self.assertFalse(self.path.exists())
@@ -578,8 +583,12 @@ class Settings(unittest.TestCase):
         self.path.parent.mkdir(parents=True)
         self.path.write_text(json.dumps({"auto_open": True, "lan": True, "sound": False}))
         settings = self.settings()
-        self.assertEqual(settings.update(auto_open=False), {"auto_open": False})
+        self.assertEqual(settings.update(auto_open=False),
+                         {"lan": True, "local_servers": False, "auto_open": False})
         self.assertEqual(json.loads(self.path.read_text()), {"auto_open": False, "lan": True, "sound": False})
+        self.assertEqual(settings.update(local_servers=True)["local_servers"], True)
+        self.assertEqual(json.loads(self.path.read_text()),
+                         {"auto_open": False, "lan": True, "local_servers": True, "sound": False})
         self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
         self.assertEqual([p.name for p in self.path.parent.iterdir()], ["browser.json"], "no temp left")
         for bad in ({"auto_open": "no"}, {"auto_open": 1}, {"other": True}):
@@ -597,6 +606,55 @@ class Settings(unittest.TestCase):
         self.path.unlink()
         self.now += S.RECHECK_S
         self.assertIs(settings.auto_open(), True, "gone: the default")
+
+    def test_the_gates_reads_recheck_within_a_second(self):
+        # BR-1a's gate asks `lan` and `local_servers` on every connection:
+        # memory between `stat`s, a hand edit within RECHECK_S, no read of
+        # the file when it has not changed.
+        settings = self.settings()
+        self.assertEqual((settings.value("lan"), settings.value("local_servers")), (False, False))
+        self.path.parent.mkdir(parents=True)
+        self.path.write_text('{"lan": true, "local_servers": true}')
+        self.assertFalse(settings.value("lan"), "not looked at again yet")
+        self.now += S.RECHECK_S
+        reads = []
+        real = S._read
+        with patch.object(S, "_read", lambda path: reads.append(path) or real(path)):
+            self.assertTrue(settings.value("lan"))
+            self.assertTrue(settings.value("local_servers"))
+            for _ in range(1000):
+                settings.value("lan")
+            self.now += S.RECHECK_S
+            settings.value("lan")
+        self.assertEqual(len(reads), 1, "read once; then only a stat a second, the file unchanged")
+
+    def test_one_reader_one_writer(self):
+        # The reconciliation with BR-1a (#69): `browser.json` is opened only by
+        # `settings.py`. Its path is defined once (a merge left two, and the
+        # later won) and named nowhere else but the attach in daemon2's
+        # `main()` and the protected-state list; no other module defines a
+        # reader or a writer of it.
+        import ast
+        repo = Path(__file__).resolve().parents[2]
+        tree = ast.parse((repo / "jarvis" / "config.py").read_text())
+        defined = [node for node in ast.walk(tree) if isinstance(node, (ast.Assign, ast.AnnAssign))
+                   and any(isinstance(t, ast.Name) and t.id == "BROWSER_SETTINGS_PATH"
+                           for t in (node.targets if isinstance(node, ast.Assign) else [node.target]))]
+        self.assertEqual(len(defined), 1, "BROWSER_SETTINGS_PATH defined once")
+        allowed = {"jarvis/config.py", "jarvis/v2/daemon.py", "jarvis/tools/files.py",
+                   "jarvis/v2/browser/settings.py"}
+        named = sorted(path.relative_to(repo).as_posix() for path in (repo / "jarvis").rglob("*.py")
+                       if "BROWSER_SETTINGS_PATH" in path.read_text(encoding="utf-8"))
+        self.assertEqual(set(named) - allowed, set(), "only these name the settings file")
+        daemon = (repo / "jarvis" / "v2" / "daemon.py").read_text()
+        self.assertEqual(daemon.count("BROWSER_SETTINGS_PATH"), 1, "the attach in main()")
+        self.assertIn("browser_settings.attach(config.BROWSER_SETTINGS_PATH)", daemon)
+        for path in (repo / "jarvis" / "v2" / "browser").glob("*.py"):
+            if path.name == "settings.py":
+                continue
+            text = path.read_text(encoding="utf-8")
+            for word in ("def load_settings", "def save_settings", "browser.json\"", "SETTINGS_DEFAULTS"):
+                self.assertNotIn(word, text, f"{path.name}: {word}")
 
     def test_what_cannot_be_read_is_the_default(self):
         self.path.parent.mkdir(parents=True)

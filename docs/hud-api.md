@@ -1900,6 +1900,12 @@ names a program for git to run, or moves where it works**
   (a symlink, a submodule, a folder in HEAD) or `unavailable` (git could not
   say). `head` is HEAD's commit id; `text` is null unless `state` is `ok`.
   404 when the file is not there; 403 for a path outside the project.
+  **Since 2026-10-12** (the Diff pane's uncommitted changes, below) a file
+  **deleted from the working tree** — nothing at all at the path, not even a
+  broken link — answers what HEAD holds, with `"deleted": true`; it is
+  judged exactly as a file that is there (every refusal above, before git
+  runs), and a path HEAD does not hold either is still 404 (so are a folder,
+  a broken link and anything else there that is not a file).
 - `GET /projects/{id}/git/status` → `{"repo", "head", "branch", "files":
   {rel: state}, "dirs": {rel: state}, "truncated", "note"?}`: the explorer's
   colours. `git status --porcelain=v2 -z --branch --untracked-files=normal
@@ -2045,21 +2051,116 @@ BR-8b, the window half, acts on the frame (`lib/devopen.ts`).
   terminal. A URL counts as sent only once the socket has taken its frame:
   one a closing or lagging socket refused is offered again at the server's
   next announcement.
-- **The switch: `GET /browser/settings`** → `{"auto_open": bool}` and
-  **`PATCH /browser/settings`** with exactly `{auto_open: bool}` →
-  `{"auto_open": bool}`. **Owner-only** (`projects.is_owner`: the HUD
-  listener and the HUD's Origin, or a same-origin GET) with a strict
-  loopback Host — 403 on the API listener, from another Origin, with no
-  Origin on a write or a rebinding Host; 400 for any other field, a
-  non-boolean, an empty body or a query; 404 for any other `/browser/…`
-  path or method. Stored in `browser.json` (`config.BROWSER_SETTINGS_PATH`,
-  `~/.config/jarvis/browser.json`, env `JARVIS_BROWSER_SETTINGS`): gate
-  state, refused to every agent write tool and v2 grant, kept mode 600,
-  every key the daemon does not know left as it was. **On by default**; a
-  missing, unreadable or malformed file reads as the default, and an edit
-  by hand lands within a second. While it is off, no byte of terminal
-  output reaches the sniffer. An embedded or test daemon keeps the switch in
-  memory and never reads or writes the owner's file.
+- **The switch: `auto_open`** in `browser.json`, beside BR-1a's `lan` and
+  `local_servers` — read and changed through BR-1a's owner-only `GET`/`PATCH
+  /browser/settings` (the table in the next section; one contract for all
+  three). **On by default**. While it is off, no byte of terminal output
+  reaches the sniffer.
+- **Auto-open never opens a port in the Remote gate** (amendment 2): the
+  window loads the URL only in a Direct frame, and a loopback port opens to
+  the Remote browser only through the owner's own navigation.
+
+## Additions 2026-10-12 (the Browser's engine — BR-1a)
+
+The owner's built-in Browser, backend only (plan
+`docs/plans/2026-10-10-hud-browser-plan.md` §2–§4, amendment 1 §C): a
+daemon-owned Google Chrome behind a SOCKS gate. The stream, input, dialogs,
+downloads and the tab strip are BR-1b's; profile management is BR-1c's.
+
+**Every `/browser` route is the owner's**: `projects.owner_only` (the HUD
+listener, and the HUD's own page — its Origin, or a same-origin GET with no
+Origin) plus a strict loopback `Host`, checked before a body is read, a tab
+is looked up or Chrome is started; anything else is **403**. No route takes
+a query string (**400**); a URL travels only in a JSON body, and no refusal
+ever contains one. Nothing starts Chrome but `POST /browser/tabs`.
+
+| Route | Body | Answer |
+|---|---|---|
+| `GET /browser` | — | `/status` → `browser` (below) plus `profiles: [{id, label, created}]` and `settings` |
+| `GET /browser/settings` | — | `{lan, local_servers, auto_open}` |
+| `PATCH /browser/settings` | `{lan?: bool, local_servers?: bool, auto_open?: bool}`, at least one, each a boolean (else **400** `<key> must be a boolean`) | `{lan, local_servers, auto_open}`; writes `browser.json` (0600, protected state), keeping keys it does not know |
+| `GET /browser/tabs` | — | `[{tab_id, profile, ctx, url, title}]` — the title cleaned to one line of 120; `[]` while nothing runs |
+| `POST /browser/tabs` | `{profile?, ctx?, url?}` | **201** `{tab_id, profile, ctx, loaded, error?}` |
+| `DELETE /browser/tabs/<id>` | — | `{tab_id, closed: true}` |
+| `POST /browser/tabs/<id>/navigate` | exactly `{url}` | `{tab_id, loaded, error?}` |
+| `POST /browser/tabs/<id>/history` | exactly `{action: "back" \| "forward" \| "reload"}` | `{tab_id, loaded, error?}` |
+| `POST /browser/profiles/<id>/forget` | `{}` | `{profile, forgotten: true}` |
+
+- **`profile`**: omitted means the first profile (**Main**, which the first
+  start creates), `"private"`, or a `p-<8 hex>` id from `GET /browser`
+  (404 if unknown, 400 if not that shape). **`ctx`** (8 hex) names a Private
+  context: `profile: "private"` with no `ctx` makes a new off-the-record
+  context and answers its id; with one, the tab opens in it (404 if gone).
+  A context closes with its last tab.
+- **The URL judge** runs first on every `url` (typed, stored, "Open in
+  Browser"): exactly `about:blank`, or an absolute `http`/`https` URL with a
+  host. Refused (**400**, one of fixed sentences): any other scheme (`file:`,
+  `chrome:`, `chrome-untrusted:`, `devtools:`, `view-source:`,
+  `chrome-extension:`, `javascript:`, `data:`, any `about:` but blank, `ftp:`,
+  `ws:` …), a user name or password, a host two parsers read differently
+  (`config.ambiguous_authority`), a control or invisible character, more than
+  16 KiB, and **one of Jarvis's own ports** (`refused_ports`) in any loopback
+  spelling (`localhost`, `*.localhost`, `127.1`, `0x7f000001`, `[::1]`,
+  `[::ffff:127.0.0.1]`, `0.0.0.0`, a trailing dot …).
+- **A URL on this machine opens its port** (review of PR #69, the lead's
+  decision): a `url` naming this machine in any loopback spelling, sent to
+  `POST /browser/tabs` or `…/navigate`, opens that port in the gate from
+  then until the Browser stops (never one of `refused_ports`). Loopback is
+  otherwise closed like the LAN: a page's own move, `…/history`, and anything
+  that is not these two owner routes never open a port. `local_servers: true`
+  in the settings opens every loopback port that is not Jarvis's.
+- **An unknown field** in any body (here and on every other route) is
+  **400** `unknown fields (N)`: the count, never the names.
+- **The settings** (`browser.json`, `config.BROWSER_SETTINGS_PATH`, env
+  `JARVIS_BROWSER_SETTINGS`): `lan` (off), `local_servers` (off) and BR-8a's
+  `auto_open` (on). A missing, unreadable or malformed file, or a value that
+  is not a boolean, reads as the default; an edit by hand lands within a
+  second (the gate asks per connection, re-`stat`ing at most once a second).
+  `jarvis/v2/browser/settings.py` is the file's one reader and one writer;
+  the routes, the engine, the gate, `/status` and the terminals all ask the
+  daemon's `BrowserSettings`. **An embedded or test daemon keeps the
+  settings in memory**: only daemon2's `main()` attaches the owner's file
+  (a suite that wants a file attaches its own temp path).
+- **`loaded: false`** with **`error`** — Chrome's `net::ERR_…` code only,
+  never its message (it names the URL) — when a load fails; a connection the
+  gate refused reads `net::ERR_SOCKS_CONNECTION_FAILED`. Navigation answers
+  once the load commits.
+- **409** sentences: Chrome is not installed, the Browser's folder is a
+  symlink, not ours or open to others (it must be 0700), `profiles.json` is
+  unreadable, Chrome could not start, the tab cap (`JARVIS_BROWSER_TAB_CAP`,
+  12) is reached, the Browser is stopping. **504** when the Browser does not
+  answer in time.
+- **forget** ("Sign out of everything", plan §3): that profile's Chrome
+  stops, its folder and downloads are removed and an empty 0700 folder made;
+  the label stays. `private` closes every Private context.
+
+**`GET /status`** gains:
+
+- **`browser`**: `{available, running, version, instances: [{profile, tabs,
+  contexts}], tabs, tab_cap, lan, local_servers, loopback_opened,
+  landing_guard, gate}` — `loopback_opened` is how many loopback ports the
+  owner opened (never which); `gate` is `{port, connections, allowed,
+  failed, open, refused: {class: count}}` while running, else null. Profile
+  ids only: **no URL, title or label**.
+- **`refused_ports`**: every port the Browser's gate refuses on this machine
+  — `config.control_ports()` (8402, 8404, 8405, 8406, configured and
+  default), this daemon's `hud_port` and `api_port`, and 8403 unless it is
+  this daemon's `workshop_port`. The HUD's Direct (Preview) judge reads it.
+
+**The gate** refuses, for every connection Chrome makes, Jarvis's ports and
+its own on every address; a name that resolves to loopback; a loopback port
+the owner has not opened (unless `local_servers`); private addresses unless
+`lan` is true; a name answering with another kind of address than the one
+it was first allowed on; a private answer for a name it has no room to pin;
+multicast, reserved and unresolvable destinations; a lookup that waited its
+whole 5 s for one of its domain's four resolver slots. It counts each refusal
+by class (`jarvis_port`, `own_port`, `name_to_loopback`, `loopback_closed`,
+`private_network`, `rebinding`, `pins_full`, `not_a_host`, `unresolvable`,
+`dns_busy`, `bad_request`, `unsupported`, `busy`) and logs nothing else about
+it.
+Chrome sends no UDP at all (no QUIC; WebRTC held to proxied transports, so
+no ICE candidate, STUN or mDNS). **Nothing about browsing goes on the bus**
+in BR-1a.
 
 ## Additions 2026-10-12 (File reads as the editor, Preview is the Browser — BR-3a)
 
@@ -2092,3 +2193,30 @@ origin**).
   `aria-label` (`Pane N: editor`) read it, and the strip's CSS capitalises
   it. The palette's "Show Files" is "Show Editor", and "No room to open …"
   says "switch one to the editor".
+
+## Additions 2026-10-12 (the Diff pane's uncommitted changes)
+
+No new route. A Diff pane with no task to show lists its project's
+uncommitted changes from ED-9's two owner-only routes and the editor's read:
+
+- `GET /projects/{id}/git/status` (unchanged) is the list, through the one
+  status poller (`state/gitStatus.ts`), watched only while the pane is
+  drawn. `ignored` entries are not listed; a folder in `dirs` reported
+  `untracked` is one row; `""` untracked (the whole project folder) is said
+  in a sentence.
+- `GET /projects/{id}/git/base?path=` is the left side, asked again when the
+  status's `head` moves. It now answers a **deleted** file too (`"deleted":
+  true`, above).
+- `GET /projects/{id}/file?path=` (ED-2's read, unchanged) is the right side
+  when no buffer holds the file — asked only after `git/base` answered
+  without a refusal, so a file that is an env file only where it resolves is
+  never read for a diff (`hud_v2_scm_check`'s `link.txt` pins the order:
+  with the read no longer waiting on HEAD's answer it is sent). When a
+  buffer holds it, the right side is that buffer's own Monaco model and
+  nothing is read.
+- **An env file by name** (`.env`, `.env.*`, never `.env.example`) is listed
+  and **never asked about**: no `git/base`, no read. A `git/base` 403 naming
+  an env file shows the same sentence and stops there.
+
+Rules in CLAUDE.md's "The Diff pane shows the project's uncommitted changes"
+paragraph.

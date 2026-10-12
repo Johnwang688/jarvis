@@ -315,6 +315,203 @@ the second round's on dfb1d7e (where v1's browser approved the card).
 the HUD's Origin to the HUD's port), the footing `/terminals` states; it
 closes the routes a v1 agent's browser and any Origin-less API client had.
 
+**The Browser's engine, gate and navigation, BR-1a (2026-10-12; plan
+`docs/plans/2026-10-10-hud-browser-plan.md` §2–§4, amendment 1 §C, the
+decisions file beside them wins; contract in `docs/hud-api.md`).** Backend
+only: the stream, input and tabs are BR-1b's, profile management BR-1c's.
+`jarvis/v2/browser/` is fully separate from v1's `jarvis.browser` (whose
+`SESSION` it never starts). Three layers keep the owner's daemon-owned
+Chrome off the control plane and his LAN:
+- **The URL judge** (`policy.judge_url`, pure): a typed or stored URL is
+  `about:blank` or absolute http(s), never userinfo, another scheme
+  (`file:`, `chrome:`, `view-source:`, typed `javascript:`/`data:`, any
+  other `about:`), an `ambiguous_authority`, a control or invisible
+  character, or Jarvis's ports in any loopback spelling (`is_face_origin`
+  plus the daemon's reported ports). Its sentences are fixed and never hold
+  the URL (the handler logs refusals). It is the only layer for `file:` and
+  friends — a browser-initiated load of those never touches the network.
+- **The SOCKS5 gate** (`gate.py`, its own thread `jarvis-browser-gate`):
+  Chrome runs with `--proxy-server=socks5://…`, `--proxy-bypass-list=
+  <-loopback>`, `MAP * ~NOTFOUND` (Chrome never resolves a name itself;
+  defense in depth, since the proxy already gets every name), no QUIC, and
+  **no UDP at all**: `--webrtc-ip-handling-policy=disable_non_proxied_udp`
+  (a SOCKS proxy carries no UDP, so WebRTC gathers no candidate and sends no
+  STUN) and WebRTC's mDNS responder off (`--disable-features=…,
+  WebRtcHideLocalIpsWithMdns`: it joined 224.0.0.251 on every interface for
+  any `RTCPeerConnection`; Chrome keeps only the last `--disable-features`).
+  **The first cut's `--force-webrtc-ip-handling-policy` does not exist**:
+  Chrome ignored it without a word, and the review measured 4 candidates, 158
+  datagrams to a loopback sink and mDNS on the LAN (PR #69's HIGH). So a
+  launch flag is held to its *effect* — `owner_browser_check`'s
+  `test_04b`, and an AF_PACKET sniffer in a private network namespace that
+  sees nothing leave on any interface but `lo` — never to its spelling.
+  **Chrome 155 sends every host as a name,
+  IP literals included** (measured), so the gate parses literals itself
+  (every spelling `inet_aton` takes, IPv6, IPv4-mapped), maps `localhost`
+  and `*.localhost` to this machine without DNS, **resolves a real name
+  exactly once and connects its own socket to the numeric address it
+  judged**. It refuses `policy.refused_ports` — the one list:
+  `control_ports()`, the daemon's reported HUD and API ports, and 8403
+  unless it is this daemon's workshop (`/status` → `refused_ports`) — and
+  its own port, **on every address, before any DNS**; a *name* that
+  resolves to loopback whatever the LAN switch (rebinding onto the owner's
+  services; only literals and `localhost` reach loopback); **this machine
+  unless the owner opened that port** (`loopback_closed`, below); private
+  space unless `browser.json` → `lan` (B-5, off); multicast, reserved and
+  the rest of 0/8; unresolvable and malformed names; anything but CONNECT
+  with no authentication; past 256 connections. A mixed DNS answer connects
+  only to its allowed addresses, and **a name keeps the address class it
+  was first allowed on** for the gate's lifetime (`rebinding`: public stays
+  public, private stays private; 8,192 names remembered, and **a pin younger
+  than 30 min is never forgotten to make room** — the delta review flushed a
+  pinned-public name with 8,193 others and it then reached a private address
+  with the LAN on; while the table is full of young pins an unpinned name may
+  not reach private space, `pins_full`). **Its DNS is bounded and waits
+  rather than fails** (PR #69's LOW and delta review): 5 s for the whole
+  lookup, 32 worker threads, connections asking for one name at once share
+  one lookup, and a domain holds at most four worker threads — counted until
+  `getaddrinfo` really returns — a lookup past that **waiting** for one
+  within its 5 s (only then `dns_busy`): refusing at once had failed 6 of 8
+  images on one CDN. The domain is `gate.domain_key`: the registrable domain
+  where a small table of two-label public suffixes can tell (`co.uk`,
+  `com.au`, `co.jp`, `github.io`, `vercel.app` … — no Public Suffix List
+  dependency; `www.bbc.co.uk` no longer shares slots with `evil.co.uk`), the
+  name's parent under a ccTLD whose second level the table does not know, the
+  last two labels anywhere else. A positive answer is reused for 5 s (1,024
+  names), judged like a fresh one, pin and LAN switch included. A
+  black-holed domain cannot starve every other lookup. It logs and counts the
+  class, never a host.
+- **Loopback is closed like the LAN** (PR #69's MED 2, the lead's decision
+  for the owner): a public page read a CORS-permissive service on this
+  machine through the gate (Local Network Access does not see behind a
+  proxy). A loopback port is reachable only after the owner opened it — a
+  URL on this machine in `POST /browser/tabs` or `…/navigate` (`owner=True`,
+  which only those owner-only routes pass) — held in the host's memory per
+  port until it stops, never one of Jarvis's ports. A page's own move,
+  history and any agent's `navigate` never open one; `browser.json` →
+  `local_servers` (default off) opens every port that is not Jarvis's.
+  **Auto-open never opens a port here** (amendment 2, decision L2): it loads
+  only in a Direct frame, and only the owner's own navigation through these
+  routes opens one. `/status` → `browser` → `loopback_opened` is a count,
+  never which.
+- **The landing guard** (`host.py`): every main-frame `framenavigated` is
+  judged again (`landed=True`, which also admits `about:blank#…`, Chrome's
+  error page and a `blob:` of an http(s) origin) and a refused one is
+  replaced with an explanation page. **A pop-up is handed over before its
+  first load with an empty URL, and that is not a landing** (PR #69's MED 1:
+  judging "" blanked every `window.open` and `target=_blank`); its first real
+  landing is judged as any other.
+
+The **host** runs Playwright's async API on `jarvis-owner-browser`, every
+call timed; nothing starts with the daemon (the first `POST /browser/tabs`
+starts the gate, Playwright and the profile's Chrome), and `Daemon.stop`
+ends it after the terminals and VEX, before the bus and listeners — final,
+with a backstop that kills, by exact PID, any process whose command line
+names the profile's folder as a whole path (Chrome's helpers rewrite their
+argv into one space-separated string, so a space is a boundary too) **and
+whose `/proc/<pid>/exe` is the launched Chrome** (`chrome` or
+`chrome_crashpad_handler` beside `CHROME_PATH`'s target; PR #69's LOW: a
+process merely naming the folder is not ours to signal). `stop()` takes
+`_start_lock`, so a stop during a start waits for it instead of leaving its
+gate, loop and driver running. **Keyed
+by profile from the start:** `profiles.json` (0600) lists `p-<8 hex>` ids,
+never a label (the first start writes **Main**; a corrupt list refuses
+rather than recreating Main over the owner's logins); one Chrome per
+persistent profile on `profiles/<id>/`; **Private** is one more Chrome on a
+throwaway `private/run-<hex>/` (removed at stop, swept with its Chrome at the
+next start — never Playwright's own temp folder in `/tmp`), each Private
+pane an off-the-record `new_context()` given the gate explicitly and closed
+with its last tab. **`config.BROWSER_DIR`** (`~/.local/share/jarvis/browser`,
+`JARVIS_BROWSER_DIR`) is 0700 throughout and refused when it or a folder in
+it is a symlink, not ours or open to anyone else; **`config.credential_dirs()`**
+is `V2_CREDENTIAL_DIRS` plus it, read at call time, and is what v2's
+permissions (`_credential_dirs`, `denied_grant`), `folders` and
+`editor_policy` ask now. **`config.BROWSER_SETTINGS_PATH`**
+(`~/.config/jarvis/browser.json`) is protected state (`files.
+_protected_state`). **A curated launch** (`launch_args`, Playwright's
+defaults replaced whole by `ignore_default_args=True`): the deb's sandbox
+kept (renderers run under seccomp), Safe Browsing, component updates,
+popup blocking and **sign-in and sync kept** (BD-5: no `--disable-sync` on a
+persistent profile; Private has it); no `--enable-automation`, no
+`--no-sandbox`, DevTools only over the private pipe, extensions off,
+permission prompts denied, the media router off (it searches the LAN around
+any proxy), `--mute-audio` (sound is BR-10's). **A clean environment** built
+from nothing — `HOME` is `BROWSER_DIR/home`, so Chrome's NSS store and font
+cache stay in the credential folder; locale variables only, no `JARVIS_*`,
+key, display, `PULSE_SERVER` or D-Bus. `TMPDIR` is left alone on purpose:
+Chrome's singleton socket lives there and a long path crashed it (measured).
+Downloads are off until BR-1b. **Routes** (`browser/routes.py`): every one
+`projects.owner_only` plus a strict loopback Host (its own copy — a module
+importing `terminals` fails `terminal_check`) and no query, checked before a
+body is read or Chrome started; a load reports a failure by its `net::ERR_…`
+code only; `/browser` paths are logged without a query. **No URL, title or
+label** reaches `/status` → `browser`, the bus or the log. **An unknown
+field in any route's body is a 400 naming the count, never the keys**
+(`daemon._object`, every route: "unknown fields (2)"; the names are the
+client's text and the message is logged). **Only the daemon and the browser
+package reach the engine**: `browser_gate_check`'s grep pin fails if any
+other module under `jarvis/` imports `browser.host`/`browser.gate`, names
+`BrowserHost`, builds a `Gate` or a `/browser` path, or calls the daemon's
+`browser.open_tab`/`navigate`/… — no tool, MCP tool or fast-path module
+(BR-2's tools will need their own row in it). Measured under the 3G cap
+(Chrome 155): launch ~0.3 s, first tab ~0.6 s, the tree's PSS ~365 MiB with
+one tab, ~490 MiB after the attack pages and ~470 MiB for Private (RSS
+summed over its 14–19 processes 1.1–1.9 GiB, shared pages counted once per
+process), stop ~0.1 s. A first tab asked for twice at once starts one Chrome
+(`_start_lock`).
+**v1's file tools refuse every credential folder** (PR #69's LOW and delta
+review): `read_file`, `write_file`, `edit_file`, `grep_files` (both
+backends; `search.refused`) and `query_sqlite` refuse anything in
+`config.credential_dirs()` — the Browser profile, `~/.ssh`, `~/.aws`,
+`~/.config/gh`, `~/.config/jarvis`, `~/.gnupg` — as written or where it
+resolves (`files._credential_folder`); the gate's own state files keep their
+rule and stay readable by their own, un-symlinked path. Before, the fast
+path's `read_file` and `query_sqlite` could read the profile's History (a
+SQLite file). **A search judges with one `search.refuser()`**
+(`files.credential_folder_judge`): the folders and the gate's paths read
+once, each directory's real path once, a file's own only when it is a
+symlink — 20k paths in ~0.25 s, where calling the single-path rule per file
+took ~3 s; `files_check` holds it under 1 s and the two backends to parity.
+Free suites: `tests/v2/browser_gate_check.py` (no Chrome: the judge, every
+refusal family against stand-in listeners whose accept counters stay 0,
+rebinding through an injected resolver asked once, a name's class pinned,
+loopback closed until opened, a black-holed domain not starving other
+lookups, the LAN switch, every ATYP, a dev port piped both ways, the grep
+pin) and `tests/v2/owner_browser_check.py` (real headless Chrome, one
+instance at a time, 3 tabs, its gate's resolver answering only `pub.test` —
+a public address its connector carries back to the fixture — and its
+connector refusing all else but loopback, so nothing reaches DNS or the
+network: the twelve ways into the HUD — typed, 302, meta refresh,
+`location=`, iframe, fetch, XHR, WebSocket, a service worker's fetch,
+`<img>`, form POST, `window.open` — from Main and from Private, each with a
+sanity half that reaches an ordinary server by all twelve once the owner
+opened its port; a "public" page and every way refused a loopback port nobody
+opened, reaching it once the owner did, and another port still refused; no
+ICE candidate and no datagram at a loopback UDP sink (STUN, TURN, a remote
+candidate, WebTransport); pop-ups landing on their own page, one sent to
+Jarvis's port on Chrome's error page, one moved past the judge replaced;
+refused schemes; owner-only; the folder; the launch, sandbox and
+environment; persistence across a restart and forget; settings; stop during
+a start; a decoy naming the folder left alone; stop). With
+`JARVIS_NETNS_SNIFF=1` inside `unshare --user --map-current-user --net
+--keep-caps` (only `lo` and a dummy interface holding the default routes),
+its sniffer sees ~15,000 packets on `lo` and none elsewhere. `files_check`'s
+`credential_folder_checks`; `frame_check` walks `/browser`. Each of the
+plan's mutations and each review fix's guard removal bites (the PR lists
+them; the two UDP ones run only in the namespace, since the old flag sends
+mDNS onto the real LAN). **Stated limits:** the Playwright driver (a node
+process) inherits the daemon's environment, as v1's does; none of this is a
+boundary against a program running as the owner, which can read the profile
+or use the gate (no new lever: it could connect directly); the gate's name
+pins live in its memory (a restart forgets them); a public answer for an
+unpinned name is allowed while the pin table is full of young pins, so such a
+name could rebind once the pins age; **a loopback port the owner opened stays
+open to every page, every profile and Private, until the daemon stops** (a
+follow-up for BR-1c: count the panes per port and close it when the last one
+leaves). No idle stop or
+instance cap yet (BR-1c), and **BD-10's memory ceiling is not set** (BR-1c's):
+one tab ~365 MiB PSS, ~490 MiB after the attack pages, Private ~470 MiB.
+
 **A message sent while a turn runs is never a dead end (2026-10-08, design
 §5.1/§11.8/§18; free suite `tests/v2/steer_check.py`).** It used to 409, and
 the HUD's catch then dropped its hold on the still-running turn (no Stop, no
@@ -696,8 +893,9 @@ ChatGPT-auth turn ignores `environments: []`, a read-only command can run
 before the turn is refused; its output is discarded. A busy lock waits in the queue (`CODEX_BUSY_TRIES` × 30
 s, others go ahead), then OpenRouter; so does any Codex failure or an
 unusable answer. **OpenRouter**: `models.tier("orchestrator")` with no tools
-and `max_tokens` 1000, **never a Chinese-hosted vendor** (`titles.cn_hosted`
-by id prefix; the configured orchestrator instead, else no title).
+and `max_tokens` 1000, **never a Chinese-hosted vendor** (`models.cn_hosted`
+by id prefix — moved from `titles` in BR-9a, one list with the Browser's
+reviewer; the configured orchestrator instead, else no title).
 `clean_title`: first non-empty line, invisible characters out, a "Title:"
 label, markdown, quotes and trailing punctuation off, more than 12 words is
 an answer and is refused. The words are `secrets.scrub`bed before they leave
@@ -1424,17 +1622,27 @@ exception's type) and never stops its output.
 URL or a byte of the text**; the "Jarvis can read" switch is unrelated.
 **`browser.json`** (`config.BROWSER_SETTINGS_PATH`, env
 `JARVIS_BROWSER_SETTINGS` — empty means unset, never `.`, which would put the
-working folder in the protected state; `jarvis/v2/browser/settings.py`, the start of
-BR-1a's package) holds `auto_open`, **on by default**; it is **gate state**
-(`files._protected_state_paths`, by path and by name beside the allowlist) and
-changes only by **owner-only `GET`/`PATCH /browser/settings`** (`is_owner`
-plus a strict loopback Host; exactly `{auto_open: bool}`); written atomically
-at 0600 keeping keys it does not know (BR-1a's LAN switch, BR-10's sound);
-read without blocking, never through a symlink, re-`stat`ed at most once a
-second so a hand edit lands without a restart. **An embedded or test daemon
-keeps it in memory** (`BrowserSettings()`); daemon2's `main()` attaches the
-owner's file, as it loads the Codex catalog. The HUD ignores the frame until
-BR-8b (`parseControl` drops unknown types). **Limits**: in bash a server
+working folder in the protected state) holds BR-1a's `lan` and
+`local_servers` (both off) and `auto_open` (**on**). **One reader and one
+writer: `jarvis/v2/browser/settings.py`** (`BrowserSettings`), the daemon's
+`browser_settings`, which the gate (`value("lan")`, per connection), the host
+(`value("local_servers")`), `/status` → `browser` and the terminals
+(`auto_open()`) all read — never a second loader; a test fails on a second
+definition of the path, a second `load_settings`/`save_settings` or another
+module naming `browser.json`. It is **gate state** (`files.
+_protected_state_paths`, by path and by name beside the allowlist) and
+changes only by **owner-only `GET`/`PATCH /browser/settings`** in
+`browser/routes.py`, which owns every `/browser*` path (`is_owner` plus a
+strict loopback Host, no query; a body of any non-empty subset of `{lan,
+local_servers, auto_open}`, each a boolean, an unknown field counted and
+never named); written atomically at 0600 keeping keys it does not know
+(BR-10's sound); read without blocking, never through a symlink, re-`stat`ed
+at most once a second so a hand edit lands without a restart. **An embedded
+or test daemon keeps it in memory** (`BrowserSettings()`); daemon2's
+`main()` attaches the owner's file, as it loads the Codex catalog. **Auto-open
+never opens a port in the Remote gate** (amendment 2): the window loads the
+URL only in a Direct frame; only the owner's own navigation opens one. The
+HUD ignores the frame until BR-8b (`parseControl` drops unknown types). **Limits**: in bash a server
 started with `&` whose banner lands while the prompt is up is skipped
 (between `B` and `C`); typed-ahead input echoed during a running command is
 read as that command's output; text that only looks like a banner (`cat` of a
@@ -2394,7 +2602,8 @@ The rules the two reviews left, in one place:
   a dropped file named like a store (`editor_policy.credential_name`) is never
   attached. **The preview origin refuses any path with a hidden component
   inside the project except `.well-known`, and anything under Jarvis's config
-  and data folders** (`hud_api._not_a_page`, `editor_policy.jarvis_dirs`): it
+  and data folders** (`hud_api._not_a_page`, which asks
+  `editor_policy.hidden_component` and `editor_policy.jarvis_dirs`): it
   answers any loopback client, `fetch_page` included.
 - The atomic write's temp is `<name>.<x>.tmp` (an env file's temp is an env
   file by name, LOW4); a save's unexpected `OSError` is 500 and a
@@ -2761,6 +2970,100 @@ boundary is still filesystem permissions. Free checks: `secrets_check`
 v2 `permissions_check` (`env_file_checks`), `claude_provider_check`
 (`env_hook_checks`, the real `build_permit` behind the hook) and
 `terminal_text_check`; all fail on 283d45c, and 17 guard removals each bite.
+
+**The Browser's action rules and reviewer, BR-9a (2026-10-12; amendment 1 to
+the Browser plan, §B.3–§B.5, decisions BD-1..BD-4). Pure, and not wired yet:
+BR-9b calls them from `hud_browser_act`'s gate.** Two modules in
+`jarvis/v2/browser/`. **`act_rules.pre_judge(Facts) → PreVerdict`** answers
+REFUSE, ASK(category), ALLOW or CLASSIFY with no model call. `Facts` (frozen)
+holds the action, key, text, `nav_url`, the page's `url`, the target
+`Element` and its `Form` — attributes only, **no field for a value** — the
+upload path and project folder. **Every state fact defaults to None and only
+an explicit value passes** (review of PR #71, MED 2): a flag must be the
+exact bool it needs, a number a finite non-negative int or float — `None`,
+`"no"`, a str number, a negative count, NaN and infinity all refuse, so a
+fact the caller forgot refuses (`STATE_FACTS` names them; the suite unsets
+each in turn) — and `pre_judge` turns any exception into a refusal. Order:
+H12 (desk, depth, sub-agent), H11, H5 (Private needs its own drive switch),
+H6, H3, H4 (paused; an `owner_input_age_s`, whenever one is given, must be
+valid and at least `OWNER_QUIET_S` = 5 s, `owner_has_input=True` needs one,
+and `owner_has_input=False` beside one is a contradiction that refuses — the
+delta review's regression), H9, H10's counts, H7's fact; a valid action
+(`press` takes named keys only, a printable character is refused; at most
+10,000 characters to type and 8 KB to select; `type`/`select` need a
+target); H7's belt (a navigate address: http(s) only, at most 8 KB,
+Jarvis's ports, an ambiguous authority, userinfo; a link or a submitted
+form's action: at most 8 KB, Jarvis's ports, an ambiguous authority); **H1** (type, select, Backspace/Delete/Space into `type=password`,
+an `autocomplete` token current-/new-password, one-time-code, webauthn or
+**any `cc-*` anywhere in the token list**, the label words and their joined
+spellings on name, id, label, placeholder, aria-label and accessible name
+(English only), a numeric 4–8 field labelled just "code", four or more
+one-character boxes, any field in a `PAYMENT_FRAME_HOSTS` frame, or a focused
+<iframe> showing one — clicking into one is not refused); **H2** (text, a
+navigate address, a clicked link or a submitted form's action holding a
+`secrets.secret_values()` or caller's value in `terminal_guard.value_forms`'
+spellings, or a `credential_patterns` shape); **H8** (`upload_refusal`: a
+regular file with one name on disk, under the project folder lexically and
+resolved, at most 50 MB, not `secrets.is_credential`, not `editor_policy`'s
+withheld, not the gate's state, not in Jarvis's own folders, and no hidden
+component but `.well-known` — `editor_policy.hidden_component`, the preview
+origin's own rule, moved there from `hud_api._not_a_page` so both call one
+function in a SELF_PROTECTED module; `PreVerdict.path` is what was judged, and **BR-9b must judge again
+after the card and upload a private copy opened `O_NOFOLLOW`**). Then the
+ASK floors (every upload; a click on anything but a text field or on
+anything that submits, Enter, or Space on such a control, in a form — or
+beside a field — holding a password, OTP or payment field;
+`ASK_URL_SHAPES` on the route of the address, link or submit's action — the
+path, the fragment (`#/login`) and route-query values (`?route=checkout/…`),
+decoded and lower-cased, a host's own shapes first; `chrome:` pages as
+account_security; links ending in an `EXECUTABLE_EXTENSIONS` name by
+`executable_name`, which `executable_download` shares; an editing key or Enter
+with no target named, as `no_target`), the turn's 40 judged actions (floors
+and CLASSIFY count, the ALLOW tier does not), the ALLOW tier (scroll, back,
+forward; **the nav keys only on a known target that is no frame and is in no
+form and beside no field holding a password, OTP or card** — with autofill
+on, ArrowDown or Tab in a card field accepts a saved card, MED 3, for BR-9b
+to confirm in real Chrome; **Backspace/Delete only in a text field** — on a
+mail row, a file, a grid cell or a button they delete the selection, the
+review's HIGH; at most 64 characters with no line break into `type=search`,
+`role=searchbox` or a GET form's field — never beside a sensitive field),
+else CLASSIFY. **Linear**: no regex is built from page text, labels are
+normalised by C-level passes (camelCase split for `name`/`id` only, which
+fail closed past 1024 characters), route segments go into sets; a 1 MB label
+is judged in a few tens of ms, and the URL matchers stay linear on 100,000
+characters though the rules refuse past 8 KB unread. Every refusal reason is
+a fixed `R_*` sentence.
+**`act_review.judge(facts, owner_words, *, extra_values) →
+ActVerdict(verdict, category, reason, source)`** is `command_review`'s shape:
+the owner's words (≤ 500) outside, everything else in one `untrusted.fence`
+with a tag per call, capped as §B.5 says; a flagged context, or a credential
+value (the caller's too) or shape anywhere in the request, means no call and
+ask (source `guard`); **never a Chinese-hosted model** (MED 4: the review
+tier follows the owner's selection, so a model `models.cn_hosted` names falls
+back to the configured orchestrator, and if that is CN-hosted too, no call
+and ask); JSON only, exactly three keys, each once; **every failure is ask**
+(category `unjudged`); only `ordinary` is ever allowed;
+`JARVIS_BROWSER_REVIEW_AUTOALLOW=0` turns allow into ask and leaves deny;
+only ordinary allows are cached (15 min, 512), **keyed by the profile, the
+owner's words and a digest of everything the model saw plus every text,
+address, element and form in full** (MED 1: a narrower key reused an "OK"
+after "saved" under "Delete this repository", a Download link for another
+href and a top-page button in an ad frame). **The call is `max_retries=1,
+stream=False`**: `llm.chat`'s `max_retries` is its attempt count, so the
+amendment's `max_retries=0` would send nothing and every action would ask.
+The model is `models.tier("browser_review")` once a config defines that tier
+(BD-4), else the review tier. `act_review.decide(pre, verdict)` is the gate's
+outcome: anything but exactly one of the four kinds refuses, a floor is never
+lowered, the belts apply again, and CLASSIFY with no answer asks. Free
+suites: `tests/v2/browser_act_rules_check.py` (62) and
+`tests/v2/browser_act_review_check.py` (34), with `llm.chat` raising
+throughout and `secrets._JARVIS_ROOT` a temp folder; 47 guard removals each
+fail their suite in a scratch copy (the PR lists them). The two moved
+functions are pinned where they are used: `hud_backend_check`'s
+`OneHiddenRule` and `titles_check`'s `OneVendorList` patch the one function
+and see the verdict move, so a copy fails them. Left for BR-9b: the
+wiring, the `browser_review` tier, SELF_PROTECTED for both modules, and the
+re-check and private copy for uploads.
 
 **The tree's unsaved-changes dot and file icons (2026-10-11, the owner's ask
 for the robotics lab: "like VS Code").** A dirty file's tree row wears a light
@@ -3218,6 +3521,86 @@ round's: the clock removed (eight vitests, and in Chromium four ~10 s long
 tasks) and poison removed (three vitests). Not
 done: a buffer renamed later keeps the `.editorconfig` it opened with, and an
 edit to `.editorconfig` reaches files opened after it (3 s), not those open.
+
+**The Diff pane shows the project's uncommitted changes (2026-10-12; the
+owner: "the Diff doesn't work right now it just says to select a Task", and
+yes to VS Code's Source Control view; design §18; contract in
+`docs/hud-api.md`).** No new route: ED-9's `git/status` and `git/base` and
+ED-2's read. **The mode** is `lib/scm.ts` `diffMode`: **a Diff pane never
+shows another task than a drawn Task pane** (review of PR #67, L3) — while
+one is drawn and shows the window's task, the Diff shows that task's diff,
+over a pin and after a thread is picked, and its picker is off, saying why;
+else a task picked more
+recently than a thread (`taskFocus`, the rule Editor and Browser panes follow) shows
+the task's diff exactly as before (`DiffTab`) — **the task beats the pin**,
+because a pane's `projectId` is shared by its views (a File pane pins its
+project when it opens a file, and keeps the pin when switched to Diff; with
+the pin first, `hud_v2_csp_check`'s task click showed uncommitted changes),
+and `workspace.show("task")` relies on a drawn Diff pane following the task;
+else the pane's pinned live project (its header's `pane-N-diff-project`
+picker, E-13's shape) shows that project's uncommitted changes; else the
+chat's project's; else a sentence. **Picking a project in that picker sets
+`taskFocus` false** (as picking a thread does), so the choice shows at once;
+the picker reads Follow while a task is shown. The caption (`diff-mode`,
+`data-mode`, `data-why`) says what and why — `diff-mode-what` and
+`diff-mode-why`: the Task pane's task, the task picked last, this pane's
+project or the chat's project (`diffWhy`). **The list** (`components/ProjectDiff.tsx`, `scmRows`): ED-9's
+one status poller, subscribed only while the pane is drawn; **`ProjectDiff`
+is `memo(...)` with a comparator that reads its callbacks through a ref**
+(App hands it fresh closures every render) and its rows follow the status's
+version, never the answer object — unmemoized, a chat keystroke redrew the
+list, 17 ms at 2,000 changed files and 132 ms at the 20,000 cap (review M1;
+`ProjectDiff.test.ts` counts row renders); modified/added/
+untracked/renamed/deleted/conflict files and untracked folders, each with
+its letter (M A U R D C) in the explorer's `data-git` colours and
+`FileIcon`; `ignored` never; truncation and no repository/no changes said
+in a sentence. **The sides**: HEAD from `git/base` in a `jarvis-diff:`
+model this view makes and disposes; the right side **is the open buffer's
+own model** when one holds the file (found by project and path, by
+`root_real`, or by the read's `abs`) — borrowed, never copied, held or
+disposed here, released on the model's `onWillDispose` so a File pane that
+lets the buffer go never leaves a disposed model on screen (the view falls
+back to a read, saying "…" meanwhile — and one disposed before Monaco
+loaded is "…" too, never an empty side that reads as a deletion) — else
+ED-2's read in a `jarvis-diff:` model; a deletion's
+right side is empty; binary/too_large/not_a_file say so. **No diff
+computation outlives its models** (review L1): the editor's view model is
+the view's own (`createViewModel`) and is disposed — cancelling a diff the
+worker is still computing — before any model goes. Handed `{original,
+modified}`, Monaco 0.57 keeps a reference to the view model it makes that
+nothing releases, so its computation was never cancelled, and a row picked
+then opened and edited at once threw `no diff result available`, uncaught.
+The task `DiffEditor` and `CompareEditor` in `Editor.tsx` still pass
+`{original, modified}`; not changed here. Both sides
+read-only, side by side even in a narrow pane; ↻ reads again; the right
+side of an unopened file is re-read when the status moves. **Env files are
+listed and never diffed**: `rowShows` sends a `.env*` row (fileIcons'
+`isEnvName`) to a sentence with Open — no `git/base`, no read, no model;
+`git/base` runs before any read, so an env file by resolution is refused
+there (a 403 naming an env file shows the same sentence) and never read;
+and a live buffer of kind `env` is never put in a diff. **`git/base` now
+answers a file deleted from the working tree** (`deleted: true`; nothing at
+the path, not even a broken link; judged exactly as before, before git runs;
+not in HEAD either is still 404). **Open** is `toFilePane` → `placeFile` →
+`askFile(open)` — never over the Diff pane or a VEX view. Read-only: no
+staging, reverting, committing or discarding (SCM actions are out of
+scope). Under a card the picker, Open and ↻ are disabled and a row click
+does nothing. Free checks: `lib/scm.test.ts` (19), `components/ProjectDiff.test.ts`
+(M1's render counts), `tests/v2/editor_git_check.py`
+(deletions answered, judged and 404 when absent from HEAD),
+`hud_v2_csp_check`'s single-pane task diff and `tests/face/hud_v2_scm_check.py`
+(65, a `MockDaemon(0)` of its own after the git section of `hud_v2_check`;
+the mock's `git/base` answers deletions and `states`; L1's swap with no wait,
+L2's `link.txt` whose HEAD text is refused as an env file and is never read,
+L3's chat · Task · Diff layout). Guard removals, each shown to bite: with
+`rowShows`' env rule dropped, the headless check sees a `git/base?path=.env`
+request and the vitest fails; `memo(` dropped or callbacks compared, 63 row
+renders where 3 are right; the owned view model dropped, `no diff result
+available`; `baseOk` dropped from the read's condition, a `/file?path=link.txt`
+read; the Task pane left out of the mode, the Diff follows the chat. Not
+done: SCM actions; a file not open in the
+editor that changes on disk while the project's git states stay the same is
+re-read only on ↻ or a click; the list is flat (no staged/unstaged groups).
 
 **The effort is a slider, not pills (2026-10-10, owner's ask: "like Claude's").**
 `components/EffortSlider.tsx`, rules in `lib/effortSlider.ts`: "Effort
@@ -5885,6 +6268,13 @@ Two findings worth keeping:
 
 ## Decisions already made — don't relitigate
 
+- **The owner's Browser keeps this machine closed like the LAN
+  (2026-10-12, the lead's call on PR #69's MED 2, recorded for the owner).**
+  The gate admits a loopback port only after the owner opened it in a tab
+  through the owner-only routes, for the host's lifetime; `local_servers` in
+  `browser.json` (off) opens them all. Pages and agents never open one.
+  Auto-open never opens one (amendment 2, L2). Details in the BR-1a
+  paragraph.
 - **A toolset is enforced at dispatch, not only by what the request offers
   (2026-10-10).** An agent's bound toolset is the set it may call; naming a
   registered tool outside it is refused, dangerous or not. A deferred tool
