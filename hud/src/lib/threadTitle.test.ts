@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { shortThreadId, threadLabel, UNTITLED_NEW, UNTITLED_OLD } from "./threadTitle";
+import { quotedName, shortThreadId, threadLabel, UNTITLED_NEW, UNTITLED_OLD } from "./threadTitle";
+
+describe("quotedName", () => {
+  it("is the title, quoted; an untitled chat's label carries its id", () => {
+    expect(quotedName({ id: "a1b2c3d4", title: "Robot Plans", turns: 2 })).toBe("“Robot Plans”");
+    expect(quotedName({ id: "a1b2c3d4", title: "", turns: 2 })).toBe("“Untitled” (a1b2c3d4)");
+  });
+});
 
 describe("threadLabel", () => {
   it("is the title when there is one, whitespace collapsed", () => {

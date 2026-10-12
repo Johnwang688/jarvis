@@ -70,6 +70,16 @@ def peer(script_path, log_path):
             if mode == "tool":
                 emit({"method": "item/started", "params": {**ident, "item": {
                     "type": "commandExecution", "id": "c", "command": "ls"}}})
+            if mode in ("text_then_tool", "text_then_output"):
+                # Agent text first, then a command's sign: nothing is used.
+                emit({"method": "item/completed", "params": {**ident, "item": {
+                    "type": "agentMessage", "id": "early", "text": "Contents Of Secret Notes"}}})
+                if mode == "text_then_tool":
+                    emit({"method": "item/completed", "params": {**ident, "item": {
+                        "type": "commandExecution", "id": "c", "command": "cat notes"}}})
+                else:
+                    emit({"method": "item/commandExecution/outputDelta",
+                          "params": {**ident, "itemId": "c", "delta": "secret notes"}})
             if mode == "ask":
                 emit({"id": "approval", "method": "item/commandExecution/requestApproval",
                       "params": {**ident, "itemId": "c", "command": "ls"}})
@@ -316,11 +326,39 @@ class NeverTheOwners(Harness):
 
     def test_auto_title_never_writes_over_any_title(self):
         thread = self.chat()
-        stored = self.stored(thread)
-        stored.title = "Migrated from v1"
-        self.stores.threads.save(stored)
+        self.stores.threads.set_title(thread.id, "Migrated from v1", "")
+        with self.d._lock:
+            self.d._sessions[thread.id].thread.title = "Migrated from v1"
         self.assertFalse(projects.auto_title(self.d, thread.id, "Other"))
         self.assertEqual(self.stored(thread).title, "Migrated from v1")
+
+    def test_the_owners_rename_beats_a_stale_copy_in_the_resume_window(self):
+        """The review of PR #62 (L1): `resume_thread` reads the thread outside
+        the lock and `_open` saves that copy later. A rename landing between
+        the two used to lose to the copy's older automatic title."""
+        thread = self.chat()
+        self.assertTrue(projects.auto_title(self.d, thread.id, "Auto Name"))
+        self.d.close_thread(thread.id)
+        real_open = self.d._open
+
+        def racing(stale, brief):
+            projects.rename_thread(self.d, stale.id, "Owner Name")
+            return real_open(stale, brief)
+        with patch.object(self.d, "_open", racing):
+            self.d.resume_thread(thread.id)
+        self.assertEqual((self.stored(thread).title, self.stored(thread).title_source),
+                         ("Owner Name", "owner"))
+
+    def test_a_save_never_writes_a_title_only_set_title_does(self):
+        thread = self.chat()
+        stale = self.stored(thread)
+        stale.title, stale.title_source = "Not Through set_title", "owner"
+        self.stores.threads.save(stale)
+        self.assertEqual((self.stored(thread).title, self.stored(thread).title_source), ("", ""))
+        self.stores.threads.set_title(thread.id, "Through set_title", "owner")
+        self.assertEqual(self.stored(thread).title, "Through set_title")
+        with self.assertRaises(Exception):
+            self.stores.threads.set_title(thread.id, "x", "agent")
 
     def test_the_live_sessions_copy_carries_the_title(self):
         """A turn running while the title lands saves its own copy of the
@@ -435,6 +473,29 @@ class Intake(Harness):
             time.sleep(0.15)
         self.assertEqual(len(self.codex.calls), titles.ATTEMPTS)
         self.assertEqual(self.stored(thread).title, "")
+
+    def test_a_write_that_fails_counts_as_a_try(self):
+        """The review of PR #62 (L3): a save that raised was not counted, so
+        every owner message asked a model again (6 messages, 6 calls)."""
+        self.t.start()
+        thread = self.chat()
+        with patch.object(projects, "auto_title", side_effect=OSError("disk full")):
+            for n in range(6):
+                self.say(thread, f"message {n}")
+                self.t.request(thread.id)
+                time.sleep(0.12)
+        self.assertEqual(len(self.codex.calls), titles.ATTEMPTS)
+
+    def test_the_words_and_the_title_are_scrubbed(self):
+        thread = self.chat()
+        secret = "sk-or-v1-" + "f" * 40
+        self.say(thread, f"why does my key {secret} fail")
+        self.codex.answers = [f"Key {secret} Failure"]
+        from jarvis.tools import secrets as secrets_mod
+        with patch.object(secrets_mod, "secret_values", return_value=[secret]):
+            self.assertTrue(self.t.title(self.job(thread)))
+        self.assertNotIn(secret, self.codex.calls[0]["text"])
+        self.assertNotIn(secret, self.stored(thread).title)
 
     def test_titles_are_unique_in_the_project(self):
         first, second = self.chat(), self.chat()
@@ -562,7 +623,9 @@ class OneShot(unittest.TestCase):
         self.assertFalse(codex._auth_lock.locked())
 
     def test_a_tool_a_question_or_a_failed_turn_is_an_error(self):
-        for mode in ("tool", "ask", "failed"):
+        # `text_then_*`: agent text came before the tool's sign, and none of
+        # it is used — the turn is an error (review of PR #62, L2).
+        for mode in ("tool", "ask", "failed", "text_then_tool", "text_then_output"):
             with self.assertRaises(RpcError, msg=mode):
                 self.shot(mode)
             self.assertFalse(codex._auth_lock.locked())

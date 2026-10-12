@@ -25,6 +25,13 @@ export function threadLabel(thread: Pick<Thread, "title" | "turns">): ThreadLabe
   return { text: (thread.turns || 0) > 0 ? UNTITLED_OLD : UNTITLED_NEW, untitled: true };
 }
 
+/** A chat named in a sentence ("Restored “…”."): its title, or for an
+ * untitled one its label with the id, so two untitled chats stay apart. */
+export function quotedName(thread: Pick<Thread, "id" | "title" | "turns">): string {
+  const label = threadLabel(thread);
+  return label.untitled ? `“${label.text}” (${thread.id})` : `“${label.text}”`;
+}
+
 /** A thread id as the ⋯ menu shows it: whole when short (the daemon's are
  * eight hex characters), else its first eight and an ellipsis. */
 export function shortThreadId(id: string): string {

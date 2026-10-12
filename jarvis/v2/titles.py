@@ -14,9 +14,10 @@ whatever the default openrouter model is."
 - **From what.** The owner's typed words in the thread's log (`typed`, never
   an inlined file's contents; a pre-PR C record, which has only `text`, is
   cut at its first fence line, where assembly inlines files), joined and cut
-  to `TEXT_CAP` characters, between delimiters and labelled data — v1's
-  lesson: a titler that is not told its input is data answers it
-  ("Acknowledged").
+  to `TEXT_CAP` characters, `secrets.scrub`bed, between delimiters and
+  labelled data — v1's lesson: a titler that is not told its input is data
+  answers it ("Acknowledged"). The title is scrubbed again before it is
+  written.
 - **Which model.** Codex `config.TITLE_CODEX_MODEL` (gpt-6-luna) at effort
   low, when the Codex provider is in the roster, its catalog lists the model
   and its health probe passes — through `CodexProvider.one_shot`, a
@@ -39,7 +40,9 @@ whatever the default openrouter model is."
   daemon lock, the thread still has no title (a rename while this ran wins),
   through rename's own write path: unique in the project, the live
   session's copy, `title_source: "auto"`, and the same `thread_updated`
-  event, so the HUD and the Discord thread follow.
+  event, so the HUD and the Discord thread follow (the Discord thread of a
+  chat archived in the HUD only when it is restored). A write that raises
+  counts as a try.
 - **Logs** say which thread was titled and how, or an error's class —
   never the title or the message.
 
@@ -57,6 +60,7 @@ import threading
 import time
 
 from jarvis import config, llm, models
+from jarvis.tools.secrets import scrub
 from jarvis.untrusted import strip_invisible
 
 from .approvals import clean_line
@@ -113,7 +117,8 @@ def clean_title(raw) -> str:
     """A model's reply as a title, or "" when nothing usable is in it."""
     if not isinstance(raw, str):
         return ""
-    text = strip_invisible(raw)
+    # Scrubbed before it is written: a model can repeat a credential value.
+    text = strip_invisible(scrub(raw))
     line = next((ln for ln in text.splitlines() if ln.strip()), "")
     line = _LABEL.sub("", line)
     line = clean_line(line, cap=10_000)
@@ -174,7 +179,9 @@ def owner_text(stores, thread_id: str) -> str:
         size += len(words) + 2
         if size >= TEXT_CAP:
             break
-    return "\n\n".join(parts)[:TEXT_CAP]
+    # Scrubbed before it leaves for Codex or OpenRouter: a credential value
+    # the owner typed or pasted is not sent to name a chat.
+    return scrub("\n\n".join(parts))[:TEXT_CAP]
 
 
 def wants_title(thread) -> bool:
@@ -320,9 +327,17 @@ class Titler:
             try:
                 self.title(job)
             except Exception as exc:  # noqa: BLE001
+                # A try that raised — a write that failed, a store that could
+                # not be read — is still a try: without counting it, every
+                # owner message asked a model again (review of PR #62, L3).
+                self._tried(job.thread_id)
                 LOG.warning("titles: thread %s failed (%s)", job.thread_id, type(exc).__name__)
             if self._stop.wait(self.gap):
                 return
+
+    def _tried(self, thread_id: str) -> None:
+        with self._cv:
+            self._attempts[thread_id] = self._attempts.get(thread_id, 0) + 1
 
     def title(self, job: _Job) -> bool:
         """One thread: generate, clean and write a title. True if written."""
@@ -342,8 +357,7 @@ class Titler:
                     self._cv.notify_all()
             return False
         if result is None:
-            with self._cv:
-                self._attempts[thread.id] = self._attempts.get(thread.id, 0) + 1
+            self._tried(thread.id)
             LOG.info("titles: no usable title for thread %s", thread.id)
             return False
         title, via = result

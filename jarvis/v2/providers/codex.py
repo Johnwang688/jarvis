@@ -87,6 +87,10 @@ METADATA_DEADLINE_S = 10.0
 ONE_SHOT_DEADLINE_S = 20.0
 # The only items a one-shot turn may produce; any other is a tool.
 _ONE_SHOT_ITEMS = frozenset({"userMessage", "agentMessage", "reasoning"})
+# `item/<this>/…` notifications a one-shot turn may carry: lifecycle, and the
+# deltas of the items above. Any other (`commandExecution`, `fileChange`,
+# `mcpToolCall`, `autoApprovalReview` …) is a tool.
+_ONE_SHOT_ITEM_METHODS = frozenset({"started", "completed"}) | _ONE_SHOT_ITEMS
 MODEL_PAGE_LIMIT = 100
 MODEL_PAGE_CAP = 20
 # Held while a session prepares and starts, and by `send` for a whole turn.
@@ -544,8 +548,13 @@ class CodexProvider:
         tools). The app-server has no "no tools at all" switch beyond that;
         so any tool item, any server request but a clock read, a model the
         reply did not honour, or a sandbox wider than read-only ends the
-        session with an error, never a title. Failures carry the error class
-        only, never the text."""
+        session with an error, never a title, and nothing from that turn is
+        used. Failures carry the error class only, never the text.
+
+        **The limit, stated** (review of PR #62, L2): `environments: []` has
+        not been verified against a live ChatGPT-auth turn. If such a turn
+        ignores it, a read-only command can run before the turn is refused;
+        its output is discarded."""
         stop = self._metadata_stop
         if stop.is_set():
             raise RpcCancelled("Codex one-shot cancelled (shutting down)")
@@ -634,6 +643,13 @@ class CodexProvider:
                 raise RpcError("Codex changed away from ChatGPT authentication")
             if params.get("threadId") not in (None, native):
                 continue
+            # Any sign of a tool ends the turn with an error and **nothing
+            # from it is used** — not even agent text that came before (the
+            # local `text` is dropped with the raise): if a ChatGPT-auth turn
+            # ignored `environments: []`, what a read-only command read can
+            # never become a title (review of PR #62, L2).
+            if method.startswith("item/") and method.split("/")[1] not in _ONE_SHOT_ITEM_METHODS:
+                raise RpcError("Codex used a tool during a one-shot turn")
             if method in ("item/started", "item/completed"):
                 item = params.get("item")
                 kind = item.get("type") if isinstance(item, dict) else None

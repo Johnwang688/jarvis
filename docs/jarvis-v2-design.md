@@ -2818,10 +2818,15 @@ itself from the owner's first message (`jarvis/v2/titles.py`): Codex
 `gpt-6-luna` at effort low when Codex is healthy and the account lists it,
 in a tool-less, read-only, one-turn app-server that never waits on the login
 lock (a busy lock is tried again over ~90 s, then OpenRouter); else the
-default OpenRouter model. Chats from before are titled by a backfill at
+default OpenRouter model. The Codex turn has no environment
+(`environments: []`), which no live run has verified: if a ChatGPT-auth turn
+ignores it, a read-only command can run before the turn is refused; its
+output is discarded, and the title comes from OpenRouter. Chats from before are titled by a backfill at
 start-up. A title is written only onto an empty one, so **a rename always
 wins**, before or during generation, and it follows to the chat's Discord
-thread like a rename. In the sidebar the title **wraps**, clamped at three
+thread like a rename — except for a chat archived in the HUD, whose Discord
+thread keeps its name (and stays archived) until the chat or its project is
+restored. The Archive view names archived chats by title as well. In the sidebar the title **wraps**, clamped at three
 lines with the whole title as its tooltip; an untitled chat reads "New
 thread" (or "Untitled" for an older one the backfill has not reached), muted
 and italic, never its id — the id is "Copy id" in the row's ⋯ menu. A split's

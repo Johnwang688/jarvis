@@ -1450,7 +1450,8 @@ class Backend(unittest.TestCase):
         self.settled(thread)
         session = self.daemon._sessions[thread.id]
         session.thread.title = "Travelling conversation"
-        self.stores.threads.save(session.thread)
+        self.stores.threads.set_title(thread.id, "Travelling conversation", "owner")
+        session.thread.title_source = "owner"
         before = to_json(self.stores.threads.get(thread.id))
         log_path = self.stores.threads.path(thread.id).with_name("log.jsonl")
         log = log_path.read_bytes()

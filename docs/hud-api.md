@@ -1918,7 +1918,13 @@ three dots but have the main display be the title". No new route.
   empty title (a rename always wins), unique in the project like a rename's.
 - **`thread_updated`** for a title, from a rename or the titler, is
   `{thread_id, title, title_source, changed: ["title"]}` (no record: the HUD
-  re-reads `/threads`). `title_source` is new on it.
+  re-reads `/threads`). `title_source` is new on it. The Discord mirror
+  renames the chat's Discord thread on it, **except while the chat or its
+  project is archived**: then the new name waits and is applied on
+  `thread_restored` / `project_restored` (a rename would unarchive the
+  Discord thread).
+- **The Archive view** names an archived chat by its title (or "Untitled"),
+  its id as the tooltip (`archived-thread-name-<id>`).
 - **The HUD** never shows a chat's id as its name: an untitled row reads
   "New thread" (`turns` 0) or "Untitled", and the id is the ⋯ menu's "Copy
   id" (`tmenu-copyid`, the id shown in `tmenu-id`). A title is text.

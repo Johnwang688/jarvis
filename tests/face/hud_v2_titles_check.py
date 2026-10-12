@@ -147,6 +147,29 @@ def _markup_checks(page, mock, check, until):
           str(got))
 
 
+def _archive_checks(page, mock, check, until):
+    """The Archive names an archived chat by its title too, the id its
+    tooltip (review of PR #62); an untitled one by its label, never the id."""
+    w = mock.world
+    titled, untitled = _thread("t24", "Old Robot Strategy", 5), _thread("t25", "", 2)
+    for t in (titled, untitled):
+        t["archived"] = "2026-10-12T00:00:00+00:00"
+    w["threads"] += [titled, untitled]
+    try:
+        page.locator('[data-testid="open-archive"]').click()
+        until(lambda: page.locator('[data-testid="archived-thread-name-t25"]').count() > 0, timeout=4)
+        a = page.locator('[data-testid="archived-thread-name-t24"]')
+        b = page.locator('[data-testid="archived-thread-name-t25"]')
+        check("the Archive shows an archived chat's title, its id as the tooltip",
+              a.inner_text() == "Old Robot Strategy" and a.get_attribute("title") == "id t24")
+        check("…and an untitled one's label, never its id",
+              b.inner_text() == "Untitled" and "t25" not in page.locator(
+                  '[data-testid="archived-thread-t25"]').inner_text())
+        page.locator('[data-testid="archive-close"]').click()
+    finally:
+        w["threads"][:] = [t for t in w["threads"] if t["id"] not in ("t24", "t25")]
+
+
 def titles_checks(browser, mock, base, check, until, guard, init_script):
     print("\nchat titles: the sidebar row, its ⋯ menu and the pane header")
     ctx = browser.new_context(viewport={"width": WIDE[0], "height": WIDE[1]},
@@ -166,7 +189,8 @@ def titles_checks(browser, mock, base, check, until, guard, init_script):
         _set_storage(page, zoom="100", layout="{}")
         _set_ws(page, SPLIT)
         _boot(page, mock, base, until, reload=True)
-        for section in (_untitled_checks, _wrap_checks, _live_checks, _copy_id_checks, _markup_checks):
+        for section in (_untitled_checks, _wrap_checks, _live_checks, _copy_id_checks, _markup_checks,
+                        _archive_checks):
             try:
                 section(page, mock, check, until)
             except Exception as e:  # a section that cannot run is a failure; the rest still run

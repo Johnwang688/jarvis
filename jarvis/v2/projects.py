@@ -560,15 +560,17 @@ def _write_title(daemon, thread, title: str, source: str) -> None:
     the record, on the live session's copy and on disk. The one write path
     for a rename and an automatic title (titles.py)."""
     stores = daemon.stores
-    thread.title = unique_name(title, thread_titles_taken(stores, thread.project_id, but=thread.id))
-    thread.title_source = source
+    title = unique_name(title, thread_titles_taken(stores, thread.project_id, but=thread.id))
+    # `ThreadStore.set_title` is the one writer: a save keeps the stored
+    # title whatever copy it holds (review of PR #62, L1).
+    stored = stores.threads.set_title(thread.id, title, source)
+    thread.title, thread.title_source = stored.title, stored.title_source
     session = daemon._sessions.get(thread.id)
     if session is not None:
-        # The live session writes its own Thread on usage and finish; a
-        # title it did not hear would be undone by the next turn.
+        # The live session's copy is what the daemon reads (and what
+        # `auto_title` checks), so it hears the title too.
         session.thread.title = thread.title
         session.thread.title_source = source
-    stores.threads.save(thread)
 
 
 def _title_changed(daemon, thread) -> None:
@@ -659,7 +661,9 @@ def restore_thread(daemon, thread_id: str) -> dict:
         if project.archived:
             raise DaemonError(f"restore project {project.name} first; this thread is archived with it")
         if thread.title:
-            thread.title = unique_name(thread.title, thread_titles_taken(stores, thread.project_id, but=thread.id))
+            renumbered = unique_name(thread.title, thread_titles_taken(stores, thread.project_id, but=thread.id))
+            if renumbered != thread.title:
+                thread.title = stores.threads.set_title(thread.id, renumbered, thread.title_source).title
         thread.archived = None
         stores.threads.save(thread)
     daemon.bus.publish({"kind": "thread_restored", "thread_id": thread.id,
