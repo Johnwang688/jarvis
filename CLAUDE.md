@@ -2283,6 +2283,78 @@ now reads spans only after the worker has answered for the file, and
 accepts `"vex.h"` as one string and `@property` as `@` + `property`.
 Not yet: ED-6's folding from `folds.scm`.
 
+**Editor settings, `.editorconfig` and vim, ED-8 (2026-10-12; plan §2.8,
+decisions E-9, E-11).** **Settings** (`lib/editorSettings.ts`, pure; the live
+copy `state/editorSettings.ts`): font family, size (8–32), tab size (1–16),
+spaces or tabs, word wrap (off) and Markdown word wrap (on), minimap (off),
+sticky scroll, whitespace, bracket-pair colours, cursor style, vim (off) —
+**auto-save and format-on-save are not settings: off, decided (E-9)**. Stored
+in localStorage `jarvis.hud.editor` behind try/catch; **every field is judged
+alone** (`FIELDS`), so garbage in one falls back to that field's default and
+never costs the others, a dialog change that is bad keeps the current value
+(`withChange`), and only the known fields are written. **The font family is a
+list of names only** (`safeFontFamily`: bare names from a letter, or quoted,
+of letters, digits, space, `_ . -`; at most 8 and 200 characters; never `;`,
+braces, parentheses, `\`, `/`, `:`, a nested quote or an invisible
+character): Monaco writes it into the window that gates approvals. The
+defaults are what the editor drew before (Monaco's font, 12px, sticky scroll,
+whitespace on selection, bracket colours, line cursor). **A change reaches
+every live editor in the call that made it** (a synchronous listener, never
+a render later; diff and Compare views take the display half,
+`displayOptions`); another window's change arrives by the `storage` event.
+The dialog (`components/EditorSettings.tsx`, `state.picker =
+"editorSettings"`) opens from the File pane's ⚙ (`editor-settings`) or the
+palette's "Editor Settings…"; it applies as you go (nothing to confirm), so
+**under a card App closes it** with quick open and the palette, the ⚙ is
+disabled, and its Escape never runs under one. **`.editorconfig`**
+(`lib/editorconfig.ts` pure, `state/editorconfig.ts`) is read **only through
+ED-2's owner-only routes**: one `files/stat` of `<dir>/.editorconfig` for the
+file's folder and each above it **to the project's root, never above**, a
+`GET /file` of each that exists, nearest first, **stopping at `root =
+true`**; a folder's answer is kept 3 s, and past 2.5 s (a slow `/mnt/c`)
+opening a file goes on without it. It sets **indent style and size** (the
+model's options; kept through a settings change, which makes Monaco
+re-detect every model — `reapplyEditorConfig`) and **the line ending new
+lines take in a file with no line break yet** — never a file's existing
+endings (LF/CRLF only; `cr` ignored). **It never rewrites on save**:
+`trim_trailing_whitespace`, `insert_final_newline` and `charset` are read and
+ignored. It is applied by `BufferDeps.prepare`, awaited in `Buffers.make`
+**before the buffer records the version it was read as**, so a new file's
+`setEOL` (which moves Monaco's version) still opens clean. Globs follow the
+spec (`*`, `**`, `**/` as zero or more folders, `?`, `[…]`/`[!…]`, nested
+`{a,b}`, `{n..m}`, `\` escapes, a slash-less glob at any depth, a slash inside
+brackets literal) and **are matched by a table over tokens × path, never a
+backtracking regex**: an `.editorconfig` is agent-writable project content,
+and `[*a*a*a*a*a*a*a*a*b]` as a regex hangs the window on a long name (brace
+alternatives ≤ 64, nesting ≤ 16, paths ≤ 1024). **Vim (E-11, yes)**:
+`monaco-vim` **0.4.4, pinned exactly**, MIT, audited (no network, storage,
+`eval` or `innerHTML`; its status line is text nodes and one input), loaded
+in a lazy chunk of its own only when the setting is on (101 KB, 31 KB gzip).
+It imports Monaco by pre-0.56 deep paths, which `vite.config.ts` aliases to
+the same modules (`monaco-editor/esm/vs/*` → `monaco-editor/*`, and its ESM
+build, not the UMD `browser` export) — **the dynamic import split Monaco's
+lazy chunk in two** (`monacoBundle` + `editor.api`, 3.65 MB together as
+before). **`:w` is that editor's own guarded save** (`adapter.save`, per
+editor; monaco-vim's global `commands.save` is never set, and never
+`addCommand`), and does nothing under a card. Each File pane draws vim's
+status line (`editor-vim-status`) below its editor. **Push-to-talk keeps
+Ctrl+D in the editor, vim or not — the owner's decision (2026-10-12)**: the
+window takes it before Monaco, so vim's half-page-down is gone; the HUD's
+other window keys (Ctrl+B, Ctrl+P, zoom) are the HUD's in vim too. Test
+hook, read-only: `window.__hud.editorSettings()` (stored, in force, each
+File editor's raw options, vim, its model's indentation and EOL — never
+text). Sizes: first paint +17 KB. Free checks: `lib/editorSettings.test.ts`,
+`lib/editorconfig.test.ts` (the parser, the spec's glob table, the
+linear-time and cap cases), `state/editorconfig.test.ts` (the walk, root, cache, refusals,
+timeout, the prepare hook leaving a buffer clean) and
+`tests/face/hud_v2_editor_settings_check.py` (a `MockDaemon(0)` of its own,
+run by `hud_v2_check` after the navigation section, or alone, `ONLY=vim`).
+Shown to bite in a scratch copy, 7 of 7: the font unchecked, EOL set on a
+file with endings, `prepare` not awaited, `:w` as one window-wide hook, vim
+keeping Ctrl+D, the dialog left up under a card, no alternatives cap. Not
+done: a buffer renamed later keeps the `.editorconfig` it opened with, and an
+edit to `.editorconfig` reaches files opened after it (3 s), not those open.
+
 **The effort is a slider, not pills (2026-10-10, owner's ask: "like Claude's").**
 `components/EffortSlider.tsx`, rules in `lib/effortSlider.ts`: "Effort
 <level> · default (?)", Faster … Smarter, a dot per stop, a tick with

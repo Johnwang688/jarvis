@@ -1777,3 +1777,33 @@ their language first opens.
 The HUD's test hooks for it are read-only and not an API:
 `window.__hudSyntax.states()`, `.probe(url)` (asks the loader's gate, never
 fetches) and `.loaded()` (the grammars compiled).
+
+
+## Additions 2026-10-12 (editor settings and `.editorconfig` — ED-8)
+
+Editor plan §2.8. **No new route.** The editor settings are the window's own
+(localStorage `jarvis.hud.editor`: `{fontFamily, fontSize, tabSize,
+insertSpaces, wordWrap, wordWrapMarkdown, minimap, stickyScroll, whitespace,
+bracketPairs, cursorStyle, vim}`, each field checked alone on load); nothing
+about them reaches the daemon.
+
+**`.editorconfig` uses ED-2's owner-only routes**, as the editor's buffer
+opens a file at `<dir>/<name>` in project `{id}`:
+- `POST /projects/{id}/files/stat {"paths": ["<dir>/.editorconfig",
+  "<parent>/.editorconfig", …, ".editorconfig"]}` — the file's folder and
+  each folder above it **up to the project's root, never above** (at most 32,
+  within the route's 100), once per folder every 3 s at most;
+- `GET /projects/{id}/file?path=<dir>/.editorconfig` for each that stat says
+  exists as `kind: "text"`, nearest first, stopping at one whose preamble says
+  `root = true`. A withheld, non-text, missing or refused answer is no
+  configuration.
+
+Neither sends any file's content. What the files say sets the buffer's
+indentation and, for a file with no line break, the line ending its new
+lines take; **a save never carries anything `.editorconfig` asked for** — no
+trimmed whitespace, final newline or converted line endings.
+
+Test hook, read-only and not an API: `window.__hud.editorSettings()` →
+`{settings, stored, editors: [{uri, fontFamily, fontSize, wordWrap, minimap,
+stickyScroll, renderWhitespace, bracketPairs, cursorStyle, vim, model:
+{insertSpaces, tabSize, indentSize, eol}}]}` — never any text.
