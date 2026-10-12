@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { activePane, compatActions, flatState, initialState, reduce, type State } from "./store";
 import { emptyChat, emptyChats, runningHere, type ChatState } from "../lib/chats";
 import type { PaneNo } from "../lib/workspace";
@@ -418,7 +418,7 @@ describe("words no pane's compose row holds any more (review of PR #47)", () => 
     expect(s.chats[8]).toEqual(emptyChat());
     expect(s.drafts["compose:*"]).toEqual({ text: "precious unsent words\nhanded back", files: [file], projects: ["p1"] });
     // The split's own new compose row in that pane takes them up.
-    s = reduce(s, { type: "chat", pane: 8, patch: { compose: { projectId: "p2" } } });
+    s = reduce(s, { type: "chat", pane: 8, patch: { compose: { projectId: "p2" }, takeOrphan: true } });
     expect([s.chats[8].input, s.chats[8].files]).toEqual(["precious unsent words\nhanded back", [file]]);
     expect(s.drafts["compose:*"]).toBeUndefined();
   });
@@ -428,13 +428,13 @@ describe("words no pane's compose row holds any more (review of PR #47)", () => 
     s = reduce(s, { type: "release_chat", pane: 4 });
     expect(s.drafts).toEqual({});
     s = withChats({}, { drafts: { "compose:*": { text: "orphan", files: [] }, "compose:3": { text: "mine", files: [] } } });
-    s = reduce(s, { type: "chat", pane: 3, patch: { compose: { projectId: "p1" } } });
+    s = reduce(s, { type: "chat", pane: 3, patch: { compose: { projectId: "p1" }, takeOrphan: true } });
     expect(s.chats[3].input).toBe("mine");
     expect(s.drafts["compose:*"]).toEqual({ text: "orphan", files: [] });
     // A thread opened is not a new thread: it never takes them.
     s = reduce(s, { type: "open_thread", pane: 5, threadId: "t1" });
     expect(s.chats[5].input).toBe("");
-    s = reduce(s, { type: "chat", pane: 6, patch: { compose: { projectId: "p1" } } });
+    s = reduce(s, { type: "chat", pane: 6, patch: { compose: { projectId: "p1" }, takeOrphan: true } });
     expect(s.chats[6].input).toBe("orphan");
   });
 
@@ -450,7 +450,7 @@ describe("words no pane's compose row holds any more (review of PR #47)", () => 
     s = reduce(s, { type: "chat", pane: 1, patch: { compose: { projectId: "p2", id: "x1" } } });
     expect(s.chats[1].input).toBe("mine");
     expect(s.drafts["compose:*"]).toBeDefined();
-    s = reduce(s, { type: "chat", pane: 1, patch: { compose: { projectId: "p1" } } });
+    s = reduce(s, { type: "chat", pane: 1, patch: { compose: { projectId: "p1" }, takeOrphan: true } });
     expect(s.chats[1].input).toBe("mine\norphaned");
     expect(s.chats[1].compose?.projectId).toBe("p1");
     expect(s.drafts["compose:*"]).toBeUndefined();
@@ -475,6 +475,57 @@ describe("words no pane's compose row holds any more (review of PR #47)", () => 
     // A × that asked (no keep) drops a compose row's words, silently.
     s = reduce(withChats({ 2: { compose: { projectId: "p1", id: "c2" }, input: "gone" } }), { type: "release_chat", pane: 2 });
     expect([s.drafts, s.error]).toEqual([{}, ""]);
+  });
+
+  it("only a new thread the owner started takes them up, never a row given to a pane nobody sees (review 3 of PR #47)", () => {
+    const projects = [{ id: "p1", name: "jarvis" }, { id: "p2", name: "schoolwork" }] as any;
+    const orphan = { "compose:*": { text: "orphan words", files: [], projects: ["p1"] } };
+    // × reset pane 1 and the window gave the closed pane a fresh row: no take-up, nothing said.
+    let s = withChats({}, { projects, drafts: { ...orphan } });
+    s = reduce(s, { type: "chat", pane: 1, patch: { compose: { projectId: "p1" } } });
+    expect([s.chats[1].input, s.drafts, s.error]).toEqual(["", orphan, ""]);
+    // A project or thread going away re-aims rows, drawn or not, with new ids: no take-up.
+    s = withChats({ 5: { compose: { projectId: "p1", id: "c5" } }, 6: { threadId: "t1" } },
+                  { projects, drafts: { ...orphan } });
+    s = reduce(s, { type: "chat", pane: 5, patch: { threadId: null, compose: { projectId: "p2" }, messages: [] } });
+    s = reduce(s, { type: "chat", pane: 6, patch: { threadId: null, compose: { projectId: "p2" }, messages: [] } });
+    expect([s.chats[5].input, s.chats[6].input, s.drafts, s.error]).toEqual(["", "", orphan, ""]);
+    // New thread in a pane already composing, said by the owner: it does.
+    s = reduce(s, { type: "chat", pane: 5, patch: { compose: { projectId: "p1" }, takeOrphan: true } });
+    expect([s.chats[5].input, s.drafts]).toEqual(["orphan words", {}]);
+    expect(s.error).toContain("are back, in this new thread's box");
+    // The flag never lands in a pane's conversation.
+    expect("takeOrphan" in s.chats[5]).toBe(false);
+  });
+
+  it("notices that arrive together share the error line; a later one replaces it (review 3 of PR #47, LOW)", () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(1_000_000);
+      const threads = [{ id: "t2", title: "second chat", project_id: "p1" }] as any;
+      let s = withChats({ 2: { threadId: "t2", input: "for t2" }, 7: { compose: { projectId: "p1", id: "c7" }, input: "kept" } },
+                        { threads, projects: [{ id: "p1", name: "jarvis" }] as any });
+      s = reduce(s, { type: "release_chat", pane: 2 });
+      s = reduce(s, { type: "release_chat", pane: 7, keep: true });
+      expect(s.error).toContain("waits with “second chat”");
+      expect(s.error).toContain("kept for the next new thread you start");
+      // The new thread that takes them, in the same breath: said too, and nothing said twice.
+      s = reduce(s, { type: "chat", pane: 7, patch: { compose: { projectId: "p1" }, takeOrphan: true } });
+      expect(s.error).toContain("waits with “second chat”");
+      expect(s.error).toContain("are back, in this new thread's box");
+      expect(s.error.split("second chat").length).toBe(2);
+      // Later, a notice replaces what is there; a plain write always does.
+      vi.setSystemTime(1_000_000 + 5_000);
+      s = reduce(withChats({ 3: { threadId: "t2", input: "again" } }, { threads, error: s.error, errorAt: s.errorAt }),
+                 { type: "release_chat", pane: 3 });
+      expect(s.error.startsWith("What you had not sent waits with")).toBe(true);
+      s = reduce(s, { type: "patch", patch: { error: "Could not send: x" } });
+      expect([s.error, s.errorAt]).toEqual(["Could not send: x", 1_005_000]);
+      s = reduce(s, { type: "patch", patch: { error: "" } });
+      expect([s.error, s.errorAt]).toEqual(["", 0]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("a turn no pane tracks is left loose, once", () => {

@@ -1974,11 +1974,17 @@ thread anywhere and says so (review of PR #47, M2); one that fails at
 2 of PR #47, LOW-2). **A park is never silent** (review 2, MED-2/NIT-3): a
 release that parks words says where — the thread, by title, or the next new
 thread with the project they were written in — and how many files past eight
-were left out. **Any new compose row takes `ORPHAN_DRAFT` up** (a new
-`Compose.id`: New thread, a split's copy), even from a pane already composing
+were left out. **Only a new thread the owner starts takes `ORPHAN_DRAFT` up**
+— New thread and a split's copy, the only patches carrying `takeOrphan:
+true` (review 3 of PR #47: any new `Compose.id` used to, so a pane × closed,
+an undrawn one or one re-aimed by a project's archive took the words and the
+window called them "back, in this new thread's box"); a pane × closed or
+never drawn gets no compose row at all until it is drawn (`inWorkspace`).
+It takes them even from a pane already composing
 — after the words it has — says so, and names the project they were written
 in when the row is in another (`Draft.projects`); the row keeps its own
-project. A compose row's unsent
+project. Notices arriving together (within `NOTICE_BREATH_MS`, one handler
+and its effects) **join** on the one error line rather than replace it. A compose row's unsent
 words are asked about (G-9) **whatever view the pane shows** — a pane
 switched to File keeps its chat, and × releases it too (review 2, MED-1) —
 and Discard drops them for good; a terminal goes back to the panel as its
