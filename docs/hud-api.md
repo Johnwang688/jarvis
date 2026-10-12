@@ -1248,8 +1248,27 @@ own server and is unaffected.
   "Keep its origin" switch on, exactly `allow-scripts allow-forms
   allow-same-origin`. Never `allow-top-navigation`, `allow-popups`,
   `allow-popups-to-escape-sandbox`, `allow-downloads` or `allow-modals`.
-  The frame is keyed by its sandbox, so a change reloads the page under the
-  new flags.
+  Every load is a fresh frame (`FrameHost`, 2026-10-12), so a change of the
+  flags reloads the page under them.
+- **No frame takes the keyboard on its own** (R-1, amendment 2 §E.8,
+  2026-10-12). The iframe (`browser-frame`, with `data-browser-frame=
+  "<pane>:<tab>"`, tab 0 until Direct tabs) is made by script and has a
+  transparent shield over it (`browser-shield`, `data-up` "true" while it
+  catches the pointer). A frame that gains focus without the owner's gesture
+  — the pointer over it, Tab or Shift+Tab within 300 ms, their own load
+  (Load, Enter, Project root, the keep-origin switch, Reload) until 2 s
+  after its `load`, or the HUD giving focus back after a card — is removed;
+  under a card or from a hidden pane always. The pane then shows
+  `browser-stolen` ("This page took the keyboard · Reload") with
+  `browser-stolen-reload`, disabled under a card; the tab's URL stays.
+  Focus goes back only to the HUD element that lost it to that theft; with
+  none (the keyboard was taken from another page), the notice's container
+  (`browser-stolen`, `tabIndex=-1`) takes it — never its Reload, never a box
+  that sends. While a HUD text control has the keyboard, the shield steps
+  aside only on a press, and the HUD focuses the page (`contentWindow.focus()`;
+  a Browser iframe's own `focus()` does the same). A Tab counts only if not
+  cancelled and only for the frame it landed in. The console gets one line
+  naming the pane slot, never the URL. No route changes.
 - **"Keep its origin"** (`browser-keep-origin`, a checkbox; `data-origin`
   names what it covers): off by default, per pane, offered only when the
   loaded URL is loopback `http(s)` on a port that is none of `hud_port`,
