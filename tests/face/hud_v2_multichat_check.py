@@ -85,7 +85,7 @@ TWO = json.dumps({"preset": "cols2", "focused": 1,
                   "panes": [{"view": "chat"}, {"view": "chat"}, {"view": "file"}, {"view": "task"}]})
 # A chat, and a File pane beside it.
 CHAT_FILE = json.dumps({"preset": "cols2", "focused": 1,
-                        "panes": [{"view": "chat"}, {"view": "file"}, {"view": "preview"}, {"view": "task"}]})
+                        "panes": [{"view": "chat"}, {"view": "file"}, {"view": "browser"}, {"view": "task"}]})
 
 
 def multichat_checks(browser, mock, base, check, until, guard, init_script):
@@ -849,9 +849,9 @@ def _dirty_file_checks(page, mock, check, until):
     check("its own chat tab is refused: the pane stays on the file, the edit kept", kept("tab"))
     check("and the pane says why", refused.count() == 1 and "unsaved" in refused.inner_text(), refused.inner_text()
           if refused.count() else "")
-    page.locator(_pane(2, '[data-testid="tab-preview"]')).click()
+    page.locator(_pane(2, '[data-testid="tab-browser"]')).click()
     time.sleep(0.2)
-    check("so is any other view", kept("preview"))
+    check("so is any other view", kept("browser"))
 
     # Open beside from pane 1 would land in pane 2.
     _focus(page, until, 1)
@@ -862,14 +862,14 @@ def _dirty_file_checks(page, mock, check, until):
           and _chat(page, 1)["threadId"] == "t1")
 
     # With no chat drawn, a sidebar thread, a task and New thread would all land in the focused pane.
-    page.locator(_pane(1, '[data-testid="tab-preview"]')).click()
-    until(lambda: _attr(page, _pane(1), "data-view") == "preview", timeout=2)
+    page.locator(_pane(1, '[data-testid="tab-browser"]')).click()
+    until(lambda: _attr(page, _pane(1), "data-view") == "browser", timeout=2)
     page.locator(_pane(2, '[data-testid="file-path"]')).click()
     until(lambda: _attr(page, _pane(2), "data-focused") == "true", timeout=2)
     page.locator('[data-testid="thread-t1"]').click()
     time.sleep(0.3)
     check("a sidebar thread landing in it is refused", kept("thread")
-          and _attr(page, _pane(1), "data-view") == "preview")
+          and _attr(page, _pane(1), "data-view") == "browser")
     page.locator('[data-testid="task-k1"]').click()
     time.sleep(0.3)
     check("so is a task", kept("task"))
@@ -1233,7 +1233,7 @@ def _rv_beside_refusal_checks(page, mock, check, until):
     def narrow_refusal(file_pane: int, order: list):
         """Two columns drawn as one (760px: one pane fits beside the sidebar, two do not even on both
         rails): Open beside aims at the dropped File pane."""
-        panes = [{"view": "chat"}, {"view": "preview"}, {"view": "file"}, {"view": "task"}, {"view": "file"}]
+        panes = [{"view": "chat"}, {"view": "browser"}, {"view": "file"}, {"view": "task"}, {"view": "file"}]
         if file_pane == 2:
             panes[1] = {"view": "file"}
         _fresh(page, mock, until, json.dumps({"preset": "cols2", "order": order, "focused": 1, "panes": panes}))
@@ -1282,7 +1282,7 @@ def _rv_beside_refusal_checks(page, mock, check, until):
 GRID_CHATS = json.dumps({"preset": "grid4", "focused": 1,
                          "panes": [{"view": "chat"}, {"view": "chat"}, {"view": "chat"}, {"view": "chat"}]})
 THREE = json.dumps({"preset": "cols3", "focused": 1,
-                    "panes": [{"view": "chat"}, {"view": "chat"}, {"view": "preview"}, {"view": "task"}]})
+                    "panes": [{"view": "chat"}, {"view": "chat"}, {"view": "browser"}, {"view": "task"}]})
 
 
 def _sel(page):
@@ -1305,8 +1305,8 @@ def _w6_grid_checks(page, mock, check, until):
           _status_lines(page) == [1, 1, 0, 1]
           and [page.locator(_pane(n, '[data-testid="dictation"]')).count() for n in (1, 2, 3, 4)] == [0, 0, 0, 0],
           str(_status_lines(page)))
-    page.locator(_pane(4, '[data-testid="tab-preview"]')).click()
-    until(lambda: _attr(page, _pane(4), "data-view") == "preview", timeout=2)
+    page.locator(_pane(4, '[data-testid="tab-browser"]')).click()
+    until(lambda: _attr(page, _pane(4), "data-view") == "browser", timeout=2)
     page.locator(_pane(4, '[data-testid="tab-file"]')).click()
     until(lambda: _attr(page, _pane(4), "data-view") == "file", timeout=2)
     page.locator(_pane(4)).click(position={"x": 40, "y": 80})
@@ -1339,7 +1339,7 @@ def _w6_fallback_checks(page, mock, check, until):
     _focus(page, until, 2)
     _focus(page, until, 1)
     # Three columns are narrow: pane 3's views are a menu, so click its URL box.
-    page.locator(_pane(3, '[data-testid="preview-url"]')).click()
+    page.locator(_pane(3, '[data-testid="browser-url"]')).click()
     until(lambda: _attr(page, _pane(3), "data-focused") == "true", timeout=2)
     check("setup: pane 1 selected last, pane 2 before it; pane 3 (Preview) focused", _sel(page) == 1)
     page.set_viewport_size({"width": 1100, "height": 900})
@@ -1357,7 +1357,7 @@ def _w6_one_and_none_checks(page, mock, check, until):
     check("W-6: with one chat open, that chat is selected",
           _sel(page) == 1 and _attr(page, _pane(1), "data-selected") == "true")
     two = json.dumps({"preset": "cols2", "focused": 1,
-                      "panes": [{"view": "preview"}, {"view": "chat"}, {"view": "file"}, {"view": "task"}]})
+                      "panes": [{"view": "browser"}, {"view": "chat"}, {"view": "file"}, {"view": "task"}]})
     _fresh(page, mock, until, two)
     check("W-6: the one chat pane on screen is selected though never clicked", _sel(page) == 2)
 
@@ -2347,7 +2347,7 @@ def _rv47b_send_held_named_checks(page, mock, check, until):
 
 # A chat and a File pane drawn; panes 5–8 hidden by ⊞, each holding a compose row.
 CHAT_FILE_KEPT = json.dumps({"preset": "cols2", "order": [1, 2], "kept": [5, 6, 7, 8], "focused": 1,
-                             "panes": [{"view": "chat"}, {"view": "file"}, {"view": "preview"}, {"view": "task"},
+                             "panes": [{"view": "chat"}, {"view": "file"}, {"view": "browser"}, {"view": "task"},
                                        {"view": "chat"}, {"view": "chat"}, {"view": "chat"}, {"view": "chat"}]})
 
 PARK = "w => window.__hud.dispatch({type: 'park', key: 'compose:*', text: w, projectId: 'p1'})"

@@ -6,7 +6,7 @@ import {
   defaultPane, defaultWorkspace, dropColumn, dropRow, setFilePath, splitPane, splitTitle, splitVerdict,
   equalSplit, fitWorkspace, focusPane, forgetTerminal, gridTemplate, loadWorkspace, maxPanelHeight, moveColEdge,
   inWorkspace, orderOf, paneAt, paneSequence, parseWorkspace, pinPane, resetWorkspace, saveWorkspace, setKeepOrigin, setPaneTerminal,
-  setEditors, setPanel, setPreset, setPreviewUrl, setSplit, setView, show, slotOf, slotWidths, unpinProject,
+  setBrowserUrl, setEditors, setPanel, setPreset, setSplit, setView, show, slotOf, slotWidths, unpinProject, VIEW_LABEL,
   type DrawnSet, type PaneNo, type Preset, type Workspace,
 } from "./workspace";
 import LEGACY_FITS from "./workspace.legacy-fits.json";
@@ -90,12 +90,12 @@ describe("parsing what was stored", () => {
 
   it("parses each pane on its own, a bad one falling back to that pane's default", () => {
     const w = parseWorkspace(JSON.stringify({
-      panes: [{ view: "file", projectId: "p2" }, { view: "nonsense" }, "junk", { view: "diff", previewUrl: 5 }],
+      panes: [{ view: "file", projectId: "p2" }, { view: "nonsense" }, "junk", { view: "diff", browserUrl: 5 }],
     }));
-    expect(w.panes.map((p) => p.view)).toEqual(["file", "preview", "file", "diff", "chat", "chat", "chat", "chat"]);
+    expect(w.panes.map((p) => p.view)).toEqual(["file", "browser", "file", "diff", "chat", "chat", "chat", "chat"]);
     expect(w.panes[0].projectId).toBe("p2");
     expect(w.panes[1].projectId).toBeNull();
-    expect(w.panes[3].previewUrl).toBeUndefined();
+    expect(w.panes[3].browserUrl).toBeUndefined();
   });
 
   it("offers the terminal view (WP-D), with the terminal a pane shows", () => {
@@ -127,10 +127,10 @@ describe("parsing what was stored", () => {
 
   it("refuses ids and URLs that are not strings, or are too long", () => {
     const w = parseWorkspace(JSON.stringify({
-      panes: [{ projectId: 7 }, { projectId: "x".repeat(500) }, { previewUrl: "u".repeat(3000) }, { terminalId: {} }],
+      panes: [{ projectId: 7 }, { projectId: "x".repeat(500) }, { browserUrl: "u".repeat(3000) }, { terminalId: {} }],
     }));
     expect(w.panes.map((p) => p.projectId).slice(0, 4)).toEqual([null, null, null, null]);
-    expect(w.panes[2].previewUrl).toBeUndefined();
+    expect(w.panes[2].browserUrl).toBeUndefined();
     expect(w.panes[3].terminalId).toBeNull();
   });
 
@@ -193,7 +193,7 @@ describe("what each pane shows", () => {
     // A hidden chat pane stays a chat pane when another pane chooses chat.
     const hidden = setView(setView(setPreset(defaultWorkspace(), "grid4"), 4, "chat"), 1, "file");
     expect(setView(setPreset(hidden, "single"), 1, "chat").panes.map((p) => p.view).slice(0, 4))
-      .toEqual(["chat", "preview", "file", "chat"]);
+      .toEqual(["chat", "browser", "file", "chat"]);
   });
 
   it("does not touch what was there before", () => {
@@ -213,9 +213,9 @@ describe("what each pane shows", () => {
 
   it("sends a thread click to the pane already showing the chat", () => {
     let w = setPreset(defaultWorkspace(), "cols2");
-    w = focusPane(w, 2); // pane 2 shows preview, pane 1 the chat
+    w = focusPane(w, 2); // pane 2 shows the Browser, pane 1 the chat
     const after = show(w, "chat", [1, 2]);
-    expect(after.panes[1].view).toBe("preview");
+    expect(after.panes[1].view).toBe("browser");
     expect(after.focused).toBe(1);
   });
 
@@ -246,15 +246,15 @@ describe("what each pane shows", () => {
   });
 
   it("switches one pane's view and keeps its own pin, URL and terminal for when it comes back", () => {
-    let w = setPreviewUrl(defaultWorkspace(), 2, "http://localhost:5173/");
+    let w = setBrowserUrl(defaultWorkspace(), 2, "http://localhost:5173/");
     w = pinPane(w, 2, "p2");
     w = { ...w, panes: w.panes.map((p, i) => (i === 1 ? { ...p, terminalId: "term-b" } : p)) as Workspace["panes"] };
     const after = setView(w, 2, "chat");
     expect(after.panes[1]).toEqual(
-      { view: "chat", projectId: "p2", terminalId: "term-b", previewUrl: "http://localhost:5173/" });
+      { view: "chat", projectId: "p2", terminalId: "term-b", browserUrl: "http://localhost:5173/" });
     expect(after.panes[0]).toBe(w.panes[0]);
     expect(after.focused).toBe(2);
-    expect(setView(after, 2, "preview").panes[1].previewUrl).toBe("http://localhost:5173/");
+    expect(setView(after, 2, "browser").panes[1].browserUrl).toBe("http://localhost:5173/");
   });
 
   it("pins and unpins a pane's project", () => {
@@ -271,23 +271,23 @@ describe("what each pane shows", () => {
     expect(unpinProject(pinPane(defaultWorkspace(), 3, "p1"), "p1", [3]).panes[2].projectId).toBe("p1");
   });
 
-  it("keeps a preview URL per pane", () => {
-    let w = setPreviewUrl(defaultWorkspace(), 2, "http://localhost:5173/");
-    w = setPreviewUrl(w, 3, "http://127.0.0.1:8403/p/p1/index.html");
-    expect(w.panes.map((p) => p.previewUrl).slice(0, 4)).toEqual(
+  it("keeps a Browser URL per pane", () => {
+    let w = setBrowserUrl(defaultWorkspace(), 2, "http://localhost:5173/");
+    w = setBrowserUrl(w, 3, "http://127.0.0.1:8403/p/p1/index.html");
+    expect(w.panes.map((p) => p.browserUrl).slice(0, 4)).toEqual(
       [undefined, "http://localhost:5173/", "http://127.0.0.1:8403/p/p1/index.html", undefined]);
-    expect(setPreviewUrl(w, 2, "").panes[1].previewUrl).toBeUndefined();
+    expect(setBrowserUrl(w, 2, "").panes[1].browserUrl).toBeUndefined();
   });
 
   it("keeps a pane's keep-origin grant only for the origin it was given for (WP-E)", () => {
-    let w = setPreviewUrl(defaultWorkspace(), 2, "http://localhost:5173/");
+    let w = setBrowserUrl(defaultWorkspace(), 2, "http://localhost:5173/");
     w = setKeepOrigin(w, 2, "http://localhost:5173");
     expect(w.panes[1].keepOrigin).toBe("http://localhost:5173");
     // Another page on the same origin keeps it.
-    expect(setPreviewUrl(w, 2, "http://localhost:5173/settings").panes[1].keepOrigin).toBe("http://localhost:5173");
+    expect(setBrowserUrl(w, 2, "http://localhost:5173/settings").panes[1].keepOrigin).toBe("http://localhost:5173");
     // Another port, host or scheme turns it off.
     for (const url of ["http://localhost:5174/", "http://127.0.0.1:5173/", "https://localhost:5173/", ""]) {
-      expect(setPreviewUrl(w, 2, url).panes[1].keepOrigin, url).toBeUndefined();
+      expect(setBrowserUrl(w, 2, url).panes[1].keepOrigin, url).toBeUndefined();
     }
     // Survives a reload, judged again by the parser.
     expect(parseWorkspace(JSON.stringify(w)).panes[1].keepOrigin).toBe("http://localhost:5173");
@@ -297,26 +297,110 @@ describe("what each pane shows", () => {
   });
 
   it("never grants keep-origin to another origin than the pane's URL, nor to a daemon port", () => {
-    const w = setPreviewUrl(defaultWorkspace(), 2, "http://localhost:5173/");
+    const w = setBrowserUrl(defaultWorkspace(), 2, "http://localhost:5173/");
     expect(setKeepOrigin(w, 2, "http://localhost:5174")).toBe(w);
     expect(setKeepOrigin(w, 3, "http://localhost:5173")).toBe(w);           // pane 3 holds no URL
-    const hud = setPreviewUrl(defaultWorkspace(), 2, "http://localhost:8402/");
+    const hud = setBrowserUrl(defaultWorkspace(), 2, "http://localhost:8402/");
     expect(setKeepOrigin(hud, 2, "http://localhost:8402")).toBe(hud);
-    const shop = setPreviewUrl(defaultWorkspace(), 2, "http://127.0.0.1:8403/p/p1/index.html");
+    const shop = setBrowserUrl(defaultWorkspace(), 2, "http://127.0.0.1:8403/p/p1/index.html");
     expect(setKeepOrigin(shop, 2, "http://127.0.0.1:8403")).toBe(shop);
   });
 
   it("drops a stored keep-origin that is not allowed when it is read back", () => {
     const stored = (pane: Record<string, unknown>) =>
-      parseWorkspace(JSON.stringify({ panes: [{}, { view: "preview", ...pane }] })).panes[1].keepOrigin;
-    expect(stored({ previewUrl: "http://localhost:5173/", keepOrigin: "http://localhost:5173" }))
+      parseWorkspace(JSON.stringify({ panes: [{}, { view: "browser", ...pane }] })).panes[1].keepOrigin;
+    expect(stored({ browserUrl: "http://localhost:5173/", keepOrigin: "http://localhost:5173" }))
       .toBe("http://localhost:5173");
-    expect(stored({ previewUrl: "http://localhost:5174/", keepOrigin: "http://localhost:5173" })).toBeUndefined();
-    expect(stored({ previewUrl: "http://localhost:8402/", keepOrigin: "http://localhost:8402" })).toBeUndefined();
-    expect(stored({ previewUrl: "http://localhost:8405/", keepOrigin: "http://localhost:8405" })).toBeUndefined();
-    expect(stored({ previewUrl: "https://example.com/", keepOrigin: "https://example.com" })).toBeUndefined();
+    expect(stored({ browserUrl: "http://localhost:5174/", keepOrigin: "http://localhost:5173" })).toBeUndefined();
+    expect(stored({ browserUrl: "http://localhost:8402/", keepOrigin: "http://localhost:8402" })).toBeUndefined();
+    expect(stored({ browserUrl: "http://localhost:8405/", keepOrigin: "http://localhost:8405" })).toBeUndefined();
+    expect(stored({ browserUrl: "https://example.com/", keepOrigin: "https://example.com" })).toBeUndefined();
     expect(stored({ keepOrigin: "http://localhost:5173" })).toBeUndefined();
-    expect(stored({ previewUrl: "http://localhost:5173/", keepOrigin: true })).toBeUndefined();
+    expect(stored({ browserUrl: "http://localhost:5173/", keepOrigin: true })).toBeUndefined();
+  });
+});
+
+describe("the rename: Preview is the Browser, File reads as the editor (BR-3a)", () => {
+  it("reads a stored Preview pane as the Browser, its URL and all", () => {
+    const w = parseWorkspace(JSON.stringify({
+      preset: "cols2", order: [1, 2], kept: [],
+      panes: [{ view: "chat" }, { view: "preview", previewUrl: "http://localhost:5173/app", projectId: "p2" }],
+    }));
+    expect(w.panes[1]).toEqual({
+      view: "browser", projectId: "p2", terminalId: null, browserUrl: "http://localhost:5173/app" });
+    expect(PANE_VIEWS as readonly string[]).not.toContain("preview");
+  });
+
+  it("migrates a WP-A value too (no order, no kept), its hidden Preview pane included", () => {
+    const old = JSON.stringify({
+      preset: "single",
+      panes: [{ view: "chat" }, { view: "preview", previewUrl: "http://localhost:5173/" }, { view: "file" }, { view: "task" }],
+    });
+    const w = parseWorkspace(old);
+    expect(w.kept).toEqual([2, 3, 4]);
+    expect(w.panes[1].view).toBe("browser");
+    expect(w.panes[1].browserUrl).toBe("http://localhost:5173/");
+  });
+
+  it("keeps an old keep-origin grant only while it matches the URL it is read with", () => {
+    const pane2 = (pane: Record<string, unknown>) =>
+      parseWorkspace(JSON.stringify({ panes: [{}, { view: "preview", ...pane }] })).panes[1];
+    expect(pane2({ previewUrl: "http://localhost:5173/x", keepOrigin: "http://localhost:5173" }).keepOrigin)
+      .toBe("http://localhost:5173");
+    // Another port, host or scheme: the grant was never for this URL.
+    for (const keepOrigin of ["http://localhost:5174", "http://127.0.0.1:5173", "https://localhost:5173"]) {
+      expect(pane2({ previewUrl: "http://localhost:5173/x", keepOrigin }).keepOrigin, keepOrigin).toBeUndefined();
+    }
+    // Both names stored: the new one is the URL, and the grant is judged against it.
+    const both = pane2({
+      browserUrl: "http://localhost:4000/", previewUrl: "http://localhost:5173/", keepOrigin: "http://localhost:5173" });
+    expect(both.browserUrl).toBe("http://localhost:4000/");
+    expect(both.keepOrigin).toBeUndefined();
+    // A new name that does not parse leaves the old one to be read.
+    expect(pane2({ browserUrl: "u".repeat(3000), previewUrl: "http://localhost:5173/" }).browserUrl)
+      .toBe("http://localhost:5173/");
+  });
+
+  it("saves only the new names", () => {
+    const mem = memory({
+      [WORKSPACE_KEY]: JSON.stringify({
+        preset: "cols2", order: [1, 2], kept: [],
+        panes: [{ view: "chat" }, { view: "preview", previewUrl: "http://localhost:5173/", keepOrigin: "http://localhost:5173" }],
+      }),
+    });
+    saveWorkspace(loadWorkspace(mem), mem);
+    const text = mem.map.get(WORKSPACE_KEY)!;
+    expect(text).not.toContain("preview");
+    const saved = JSON.parse(text);
+    expect(saved.panes[1]).toMatchObject({
+      view: "browser", browserUrl: "http://localhost:5173/", keepOrigin: "http://localhost:5173" });
+    expect(saved.panes[1].previewUrl).toBeUndefined();
+    expect(loadWorkspace(mem).panes[1].browserUrl).toBe("http://localhost:5173/");
+  });
+
+  it("leaves a stored File pane the editor, with its tabs (the view id stays \"file\")", () => {
+    const tabs = { paths: ["src/a.py", "b.md"], active: "b.md", preview: "b.md" };
+    const mem = memory({
+      [WORKSPACE_KEY]: JSON.stringify({
+        preset: "cols2", order: [1, 3], kept: [],
+        panes: [{ view: "chat" }, {}, { view: "file", projectId: "p1", editors: tabs }],
+      }),
+    });
+    const w = loadWorkspace(mem);
+    expect(w.panes[2]).toMatchObject({ view: "file", projectId: "p1", editors: tabs });
+    saveWorkspace(w, mem);
+    expect(JSON.parse(mem.map.get(WORKSPACE_KEY)!).panes[2]).toMatchObject({ view: "file", editors: tabs });
+    expect(VIEW_LABEL[w.panes[2].view]).toBe("editor");
+  });
+
+  it("names every view the owner can pick, and no view by its old name", () => {
+    expect(Object.keys(VIEW_LABEL).sort()).toEqual([...PANE_VIEWS].sort());
+    expect(VIEW_LABEL).toEqual({
+      chat: "chat", task: "task", file: "editor", diff: "diff", browser: "browser", terminal: "terminal", vex: "vex" });
+    const labels = Object.values(VIEW_LABEL);
+    expect(new Set(labels).size).toBe(labels.length);
+    expect(labels).not.toContain("file");
+    expect(labels).not.toContain("preview");
   });
 
   it("resets the layout without forgetting what each pane showed", () => {
@@ -638,7 +722,7 @@ describe("a stored WP-A or WP-B workspace: no order, no kept", () => {
       const [w, h, z] = win.match(/^(\d+)x(\d+)@(\d+)$/)!.slice(1).map(Number);
       const stored = JSON.stringify({
         preset, focused: Number(focused), panel: { open: panel === "panel", height: 260 },
-        panes: [{ view: "chat" }, { view: "preview" }, { view: "file" }, { view: "task" }],
+        panes: [{ view: "chat" }, { view: "browser" }, { view: "file" }, { view: "task" }],
         ...(custom === "custom" ? { splits: { [preset]: LEGACY_CUSTOM[preset] } } : {}),
       });
       const parsed = parseWorkspace(stored);
@@ -802,9 +886,9 @@ describe("a File pane's tabs (ED-2, PaneSpec.editors)", () => {
 describe("⊞: fewer panes hide, more panes bring them back (plan G-2)", () => {
   const eight = () => {
     let w = setPreset(defaultWorkspace(), "grid8");
-    const views = ["chat", "preview", "file", "task", "diff", "terminal", "chat", "file"] as const;
+    const views = ["chat", "browser", "file", "task", "diff", "terminal", "chat", "file"] as const;
     views.forEach((v, i) => (w = setView(w, (i + 1) as PaneNo, v)));
-    return pinPane(setPreviewUrl(w, 2, "http://localhost:5173/"), 8, "p2");
+    return pinPane(setBrowserUrl(w, 2, "http://localhost:5173/"), 8, "p2");
   };
 
   it("8 → 1 → 8 brings back every pane, in its place, with what it showed", () => {
@@ -1139,7 +1223,7 @@ describe("split and close (WP-G2, plan §3.4–§3.6)", () => {
 
   it("splits without moving focus when asked not to ({focus: false}, the browser's dev-server pane)", () => {
     const w = focusPane(setPreset(defaultWorkspace(), "cols2"), 1);
-    const quiet = splitPane(w, 2, 3, { view: "preview", projectId: null, terminalId: null }, { focus: false });
+    const quiet = splitPane(w, 2, 3, { view: "browser", projectId: null, terminalId: null }, { focus: false });
     expect(quiet.order).toEqual([1, 2, 3]);
     expect(quiet.focused).toBe(1);
     expect(splitPane(w, 2, 3, chat()).focused).toBe(3);
@@ -1180,7 +1264,7 @@ describe("split and close (WP-G2, plan §3.4–§3.6)", () => {
     w = setPreset(w, "grid6"); // 7 and 8 hidden
     w = setSplit(w, "grid6", { cols: [0.2, 0.5], row: 0.3 });
     w = setSplit(w, "grid5", { cols: [0.25, 0.5], bottom: [0.7], row: 0.4 });
-    w = setPreviewUrl(setView(w, 3, "preview"), 3, "http://localhost:5173/");
+    w = setBrowserUrl(setView(w, 3, "browser"), 3, "http://localhost:5173/");
     w = setView(w, 4, "file");
     const closed = closePane(w, 3);
     expect(closed.panes[2]).toEqual(defaultPane(3));
@@ -1208,7 +1292,7 @@ describe("split and close (WP-G2, plan §3.4–§3.6)", () => {
   });
 
   it("with nothing drawn, the fallbacks are the first pane in reading order, never id 1 (U36/U37)", () => {
-    const w = closePane(setPreset(defaultWorkspace(), "cols2"), 1); // only pane 2, which shows a preview
+    const w = closePane(setPreset(defaultWorkspace(), "cols2"), 1); // only pane 2, which shows the Browser
     expect(w.order).toEqual([2]);
     expect(show(w, "file", []).panes[1].view).toBe("file");
     expect(show(w, "file", []).panes[0].view).toBe(w.panes[0].view);
@@ -1216,14 +1300,14 @@ describe("split and close (WP-G2, plan §3.4–§3.6)", () => {
   });
 
   it("copies what a pane shows (decisions S-2, plan §3.5)", () => {
-    const base = { projectId: "p1", terminalId: "t1", previewUrl: "http://localhost:5173/x", keepOrigin: "http://localhost:5173",
+    const base = { projectId: "p1", terminalId: "t1", browserUrl: "http://localhost:5173/x", keepOrigin: "http://localhost:5173",
                    filePath: "src/a.ts" };
     // A File pane's files are its tabs (ED-2): a stray filePath is not what it copies.
     expect(copySpec({ ...base, view: "file" })).toEqual({ view: "file", projectId: "p1", terminalId: null });
     expect(copySpec({ ...base, view: "diff" })).toEqual({ view: "diff", projectId: "p1", terminalId: null, filePath: "src/a.ts" });
     // The keep-origin grant is the owner's choice for one pane: never copied (WP-E).
-    expect(copySpec({ ...base, view: "preview" })).toEqual({
-      view: "preview", projectId: "p1", terminalId: null, previewUrl: "http://localhost:5173/x" });
+    expect(copySpec({ ...base, view: "browser" })).toEqual({
+      view: "browser", projectId: "p1", terminalId: null, browserUrl: "http://localhost:5173/x" });
     // A task view's copy is that task's diff (S-7).
     expect(copySpec({ ...base, view: "task" })).toEqual({ view: "diff", projectId: null, terminalId: null });
     // A chat and a terminal start empty: the window fills them (a compose row, a new terminal).
@@ -1235,7 +1319,7 @@ describe("split and close (WP-G2, plan §3.4–§3.6)", () => {
       view: "file", projectId: "p1", terminalId: null, editors: { paths: ["a.py", "b.py"], active: "b.py", preview: null } });
     // An empty pane copies empty.
     expect(copySpec({ view: "file", projectId: null, terminalId: null })).toEqual({ view: "file", projectId: null, terminalId: null });
-    expect(copySpec({ view: "preview", projectId: null, terminalId: null })).toEqual({ view: "preview", projectId: null, terminalId: null });
+    expect(copySpec({ view: "browser", projectId: null, terminalId: null })).toEqual({ view: "browser", projectId: null, terminalId: null });
   });
 
   it("decides the split button from the count and the room (G-5)", () => {

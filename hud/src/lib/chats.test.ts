@@ -139,7 +139,7 @@ describe("the selected chat: the chat pane most recently clicked (decisions W-6)
   });
 
   it("falls back to the most recently selected chat pane still drawn", () => {
-    const w = shaped(["chat", "chat", "chat", "preview"], "grid4", 4);
+    const w = shaped(["chat", "chat", "chat", "browser"], "grid4", 4);
     // pane 3 selected last, then the window dropped it: pane 1 was selected before pane 2
     expect(selectedChatOf(w, [2, 4], [3, 2, 1])).toBe(2);
     expect(selectedChatOf(w, [1, 4], [3, 2, 1])).toBe(1);
@@ -147,7 +147,7 @@ describe("the selected chat: the chat pane most recently clicked (decisions W-6)
   });
 
   it("is the one chat pane drawn, never selected before", () => {
-    expect(selectedChatOf(shaped(["preview", "chat"], "cols2", 1), [1, 2], [])).toBe(2);
+    expect(selectedChatOf(shaped(["browser", "chat"], "cols2", 1), [1, 2], [])).toBe(2);
     expect(selectedChatOf(defaultWorkspace(), [1], [])).toBe(1);
   });
 
@@ -167,11 +167,11 @@ describe("where a thread click lands", () => {
   });
 
   it("else in a drawn chat pane, before the selected chat is known", () => {
-    expect(chatTarget(shaped(["preview", "chat"], "cols2", 1), [1, 2], 1)).toEqual({ pane: 2, switches: false });
+    expect(chatTarget(shaped(["browser", "chat"], "cols2", 1), [1, 2], 1)).toEqual({ pane: 2, switches: false });
   });
 
   it("else the focused pane switches to chat — in the single layout, today's tab switch", () => {
-    expect(chatTarget(shaped(["file", "preview"], "cols2", 2), [1, 2], 1)).toEqual({ pane: 2, switches: true });
+    expect(chatTarget(shaped(["file", "browser"], "cols2", 2), [1, 2], 1)).toEqual({ pane: 2, switches: true });
     expect(chatTarget(shaped(["task"], "single", 1), [1], 1)).toEqual({ pane: 1, switches: true });
   });
 

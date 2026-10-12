@@ -347,7 +347,7 @@ describe("where + opens a terminal", () => {
     expect(terminalSpecFor("chat", at)).toEqual({ thread: "t1" });
     expect(terminalSpecFor("chat", { ...at, thread: null, compose: "p3" })).toEqual({ project: "p3" });
     expect(terminalSpecFor("file", at)).toEqual({ project: "p2" });
-    expect(terminalSpecFor("preview", at)).toEqual({ project: "p2" });
+    expect(terminalSpecFor("browser", at)).toEqual({ project: "p2" });
     expect(terminalSpecFor("task", at)).toEqual({ task: "k1" });
     expect(terminalSpecFor("diff", at)).toEqual({ task: "k1" });
     expect(terminalSpecFor("terminal", at)).toEqual({ thread: "t1" });
