@@ -1154,7 +1154,7 @@ def env_hook_checks() -> None:
             ("NotebookRead", {"notebook_path": str(project / ".env.dev")}),
             ("Grep", {"pattern": "API_KEY", "path": prod}),
             ("Grep", {"pattern": "API_KEY", "path": str(project), "glob": ".env*"}),
-            ("Grep", {"pattern": "API_KEY", "glob": "**/*.production"}),
+            ("Grep", {"pattern": "API_KEY", "glob": "**/.e?v.*"}),
             ("Glob", {"pattern": "**/.env.*"}),
             ("Glob", {"pattern": ".env.p*", "path": str(project)}),
             ("Write", {"file_path": prod, "content": "X=1"}),
@@ -1171,6 +1171,10 @@ def env_hook_checks() -> None:
             ("Edit", {"file_path": example, "old_string": "=", "new_string": "=x"}),
             ("Glob", {"pattern": "**/*.ts"}),
             ("Grep", {"pattern": "API_KEY", "path": str(project)}),   # a folder: the stated limit
+            # ENV-1 review, MED-1: ordinary file-name globs (refused at 153920d).
+            ("Glob", {"pattern": "**/*test*"}), ("Glob", {"pattern": "**/*.bak"}),
+            ("Grep", {"pattern": "API_KEY", "glob": "*test*"}),
+            ("Grep", {"pattern": "API_KEY", "glob": "**/*.production"}),
             ("Bash", {"command": "cat .env.example"}),
         ]
         script = [Hook(n, a, f"c{i}") for i, (n, a) in enumerate(denied + allowed)]

@@ -261,16 +261,17 @@ def _placed(target: str, cwd: str | None) -> Path:
     return path
 
 
-def denied_file(target: str, cwd: str | None = None) -> str | None:
-    """The reason this path may not be written, or None."""
+def denied_file(target: str, cwd: str | None = None, *, folder: bool = False) -> str | None:
+    """The reason this path may not be written, or None. `folder`: the path
+    is a folder (a grant's), so its own name is not judged as a file's."""
     path = _placed(target, cwd)
-    if v1_secrets.is_env_credential(path):
+    if not folder and v1_secrets.is_env_credential(path):
         # The owner's `.env*` rule (ENV-1): `*.example` only, symlinks
         # followed both ways (`secrets.is_env_credential`).
         return (f"{path.name} is (or leads to) a credential env file; Jarvis never writes "
                 "one. The owner edits it in the HUD; only names ending in .example "
                 "(.env.example) are Jarvis's to write.")
-    if v1_secrets.is_protected(path):
+    if not folder and v1_secrets.is_protected(path):
         return (f"{path.name} holds live credentials; Jarvis never writes it. "
                 "Ask the owner to change it by hand.")
     resolved = _resolve(path)
@@ -295,18 +296,19 @@ def denied_file(target: str, cwd: str | None = None) -> str | None:
 def denied_read(tool: str, args: dict, cwd: str | None = None) -> str | None:
     """Why a read tool's call may not run, or None (ENV-1): a path it reads
     that is, or leads to, a credential file — a bundle or a credential env
-    file, by `secrets.is_credential` — or a file-name glob that could expand
-    onto one (`secrets.glob_reaches`, the shell layer's own rule). What a
-    search over a whole folder then reads is beyond what a pre-tool hook
-    sees: Jarvis never sees Claude's tool results, so there is no scrub on
-    that side (the plan's stated limit)."""
+    file, by `secrets.is_credential` — or a dot-led file-name glob that can
+    match a credential env name (`secrets.env_glob_reaches`, exact; ENV-1
+    review MED-1: `**/*test*` or `**/*.bak` is allowed, `**/.env*` is not).
+    What a search over a whole folder then reads is beyond what a pre-tool
+    hook sees: Jarvis never sees Claude's tool results, so there is no scrub
+    on that side (the plan's stated limit) — the class of `grep -r foo .`."""
     for key in ("file_path", "notebook_path", "path"):
         value = args.get(key)
         if isinstance(value, str) and value.strip():
             path = _placed(value, cwd)
             if v1_secrets.is_credential(path):
                 return v1_secrets.refusal(path.name)
-            if v1_secrets.glob_reaches(path.name):
+            if v1_secrets.env_glob_reaches(path.name):
                 return v1_secrets.refusal(path.name)
     for key in _GLOB_KEYS.get(tool, ()):
         value = args.get(key)
@@ -320,7 +322,8 @@ def denied_read(tool: str, args: dict, cwd: str | None = None) -> str | None:
                 return v1_secrets.refusal(value[:80])
             for variant in variants:
                 for part in variant.split("/"):
-                    if part and (v1_secrets.is_protected(part) or v1_secrets.glob_reaches(part)):
+                    if part and (v1_secrets.is_protected(part)
+                                 or v1_secrets.env_glob_reaches(part)):
                         return v1_secrets.refusal(part)
     return None
 
@@ -333,21 +336,25 @@ GRANT_SCAN_ENTRIES = 50_000
 GRANT_SCAN_SECONDS = 2.0
 
 
-def _env_file_within(path: Path, raw: Path) -> str | None:
-    """Why a grant on `path` (resolved; `raw` as given) would reach a
-    credential env file, or None: it is one (by name, or through a symlink),
-    or a folder holding one at any depth (symlinked folders inside are not
-    followed; a symlinked file is judged where it leads), or a folder too
-    large to check in time. A folder named `.env` (a virtualenv) is a folder,
-    judged by what it holds."""
+def _is_folder(path: Path) -> bool:
     try:
-        folder = path.is_dir()
+        return path.is_dir()
     except OSError:
-        folder = False
-    if not folder:
+        return False
+
+
+def _env_file_within(path: Path, raw: Path) -> tuple[str | None, str | None]:
+    """(why a grant on `path` would reach a credential env file, why it could
+    not be checked) — each None when it does not apply. `path` is resolved,
+    `raw` as given. A file is judged by name and through its symlinks; a
+    folder by what it holds at any depth (symlinked folders inside are not
+    followed; a symlinked file is judged where it leads), within
+    `GRANT_SCAN_ENTRIES` entries and `GRANT_SCAN_SECONDS`. A folder named
+    `.env` (a virtualenv) is a folder, judged by what it holds."""
+    if not _is_folder(path):
         if v1_secrets.is_env_credential(raw) or v1_secrets.is_env_credential(path):
-            return f"{raw} is a credential env file"
-        return None
+            return f"{raw} is a credential env file", None
+        return None, None
     import time as _time
     deadline = _time.monotonic() + GRANT_SCAN_SECONDS
     seen = 0
@@ -359,8 +366,9 @@ def _env_file_within(path: Path, raw: Path) -> str | None:
                 for entry in entries:
                     seen += 1
                     if seen > GRANT_SCAN_ENTRIES or _time.monotonic() > deadline:
-                        return (f"{path} is too large to check for credential env files "
-                                f"(over {GRANT_SCAN_ENTRIES} entries or {GRANT_SCAN_SECONDS:g}s)")
+                        return None, (f"could not check {path} for credential env files "
+                                      f"(over {GRANT_SCAN_ENTRIES} entries or "
+                                      f"{GRANT_SCAN_SECONDS:g}s)")
                     try:
                         is_dir = entry.is_dir(follow_symlinks=False)
                         is_link = entry.is_symlink()
@@ -370,24 +378,30 @@ def _env_file_within(path: Path, raw: Path) -> str | None:
                         stack.append(Path(entry.path))
                     elif v1_secrets.is_env_credential_name(entry.name) or (
                             is_link and v1_secrets.is_env_credential(entry.path)):
-                        return f"{path} holds {entry.path}, a credential env file"
+                        return f"{path} holds {entry.path}, a credential env file", None
         except OSError:
             continue  # a folder we cannot list: nothing in it is reachable by us either
-    return None
+    return None, None
 
 
-def denied_grant(target: str, access: str = "write") -> str | None:
+def denied_grant(target: str, access: str = "write",
+                 unchecked: list[str] | None = None) -> str | None:
     """Why a sandbox grant on `target` may not be approved by anyone, or None.
 
     A grant opens a whole subtree, so the test is ancestry, not equality:
     "write /" or "write ~/.config" covers the allowlist as surely as naming
     it. Any grant touching a credential directory (on it, inside it, or
     above it) is refused, reads included — a read is how a key leaves. So is
-    any grant that is or holds a credential env file (ENV-1; a bounded walk,
-    refused past its bound). A write grant that is or contains Jarvis's own
-    permission state (`protected_paths()`, `files._protected_state()`), a
-    SELF_PROTECTED file, or a credential bundle is refused too. Approving a
-    grant is not consent to what it lets through.
+    any grant that is or holds a credential env file (ENV-1; a bounded walk).
+    A write grant that is or contains Jarvis's own permission state
+    (`protected_paths()`, `files._protected_state()`), a SELF_PROTECTED file,
+    or a credential bundle is refused too. Approving a grant is not consent
+    to what it lets through.
+
+    A folder too large to walk in time cannot be judged for env files. With
+    `unchecked` (the permit, whose widening always reaches a human) the
+    sentence is appended there and the grant goes to the owner, as on main;
+    without it the grant is refused (ENV-1 review, NIT 2).
     """
     if not isinstance(target, str) or not target.strip():
         target = "/"
@@ -398,10 +412,14 @@ def denied_grant(target: str, access: str = "write") -> str | None:
                     "credentials; no approval can open it")
     # The owner's `.env*` rule (ENV-1): a grant that is or holds a credential
     # env file opens it — to read or to write, and Jarvis may do neither.
-    env = _env_file_within(path, Path(target).expanduser())
+    env, could_not = _env_file_within(path, Path(target).expanduser())
     if env:
         return (f"a grant on {path} would reach a credential env file ({env}); "
                 "Jarvis never reads or writes one, so no approval can open it")
+    if could_not:
+        if unchecked is None:
+            return f"a grant on {path}: {could_not}; refused"
+        unchecked.append(could_not)
     if access == "read":
         return None
     try:
@@ -422,7 +440,10 @@ def denied_grant(target: str, access: str = "write") -> str | None:
         if path == item or path in item.parents:
             return (f"a grant on {path} would cover {item}, part of Jarvis's own "
                     "permission state; only the owner edits it, by hand")
-    return denied_file(str(path))
+    # A folder is judged by what it holds (above), never by its own name: a
+    # virtualenv named `.env` is not a credential env file (ENV-1 review,
+    # NIT 1; ED-7's rule). Its git internals and the safety layer still count.
+    return denied_file(str(path), folder=_is_folder(path))
 
 
 def _command_of(args: dict) -> str:
@@ -767,13 +788,23 @@ def build_permit(ctx: PermitContext, asker) -> PermissionCallback:
             if refusal:
                 return finish(Decision.DENY, L_DENY, refusal)
         for extra in also_commands:
-            refusal = denied_command(extra) if isinstance(extra, str) and extra.strip() else None
+            # Judged where it runs, the brief's folder (ENV-1 review, NIT 5).
+            refusal = (denied_command(extra, cwd)
+                       if isinstance(extra, str) and extra.strip() else None)
             if refusal:
                 return finish(Decision.DENY, L_DENY, refusal)
+        unchecked: list[str] = []
         for access, target in grants:
-            refusal = denied_grant(target, access)
+            refusal = denied_grant(target, access, unchecked)
             if refusal:
                 return finish(Decision.DENY, L_DENY, refusal)
+        if unchecked:
+            # A grant on a folder too large to walk for env files goes to the
+            # owner, saying so — never refused unasked, as on main (ENV-1
+            # review, NIT 2). Only a widening is sure to reach a human.
+            if not widening:
+                return finish(Decision.DENY, L_DENY, "; ".join(unchecked) + "; refused")
+            widening = widening + " · " + "; ".join(unchecked)
 
         # --- sandbox widening: a human, every time ------------------------
         # A Codex approval reaches us only after its own reviewer passed it,

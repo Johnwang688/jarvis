@@ -1073,7 +1073,7 @@ def env_file_checks():
             ("Read", {"file_path": str(project / ".env.local.example")}),
             ("NotebookRead", {"notebook_path": str(project / ".env.qa")}),
             ("Grep", {"pattern": "KEY", "path": str(prod)}),
-            ("Grep", {"pattern": "KEY", "path": str(project), "glob": "*.{ts,production}"}),
+            ("Grep", {"pattern": "KEY", "path": str(project), "glob": "{*.ts,.env.*}"}),
             ("Glob", {"pattern": "**/.env*"}),
             ("Glob", {"pattern": "config/.ENV.Prod"}),
             ("read_file", {"path": str(prod)}),
@@ -1145,16 +1145,56 @@ def env_file_checks():
         for access in ("write", "read"):
             eq(denied_grant(str(clean), access), None, f"a {access} grant on a folder with none")
             eq(denied_grant(str(project / "src"), access), None, f"a {access} grant on src/")
+        # ENV-1 review, NIT 1: a virtualenv named `.env` is a folder, judged
+        # by what it holds — a write grant on it is not refused for its name.
+        for access in ("write", "read"):
+            eq(denied_grant(str(clean / "venv" / ".env"), access), None,
+               f"a {access} grant on a virtualenv folder named .env")
         saved = perms.GRANT_SCAN_ENTRIES
         perms.GRANT_SCAN_ENTRIES = 2
         try:
             why = denied_grant(str(clean), "write")
-            ok(why is not None and "too large" in why, f"past the bound a grant is refused ({why})")
+            ok(why is not None and "could not check" in why,
+               f"past the bound, a grant nobody will be asked about is refused ({why})")
+            # ENV-1 review, NIT 2: through the permit a widening reaches the
+            # owner, so a folder too large to walk is asked about, saying so.
+            before = len(asker.seen)
+            eq(permit("apply_patch", {"paths": [str(clean / "x.ts")]}, brief,
+                      widening="write grant", grants=(("write", str(clean)),)),
+               Decision.ALLOW, "past the bound a widening goes to the owner (who says yes)")
+            eq(len(asker.seen), before + 1, "it was asked")
+            headline = asker.seen[-1].headline
+            ok("could not check" in headline and "credential env files" in headline,
+               f"and the card says the folder was not checked ({headline})")
+            strict = brief_for(P.STRICT, cwd=project)
+            eq(build_permit(context(strict), asker)(
+                "apply_patch", {"paths": [str(clean / "x.ts")]}, strict,
+                widening="write grant", grants=(("write", str(clean)),)),
+               Decision.DENY, "strict still refuses the widening")
         finally:
             perms.GRANT_SCAN_ENTRIES = saved
         eq(permit("apply_patch", {"paths": [str(project / "src" / "x.ts")]}, brief,
                   widening="write grant", grants=(("write", str(project)),)),
            Decision.DENY, "a widening whose grant holds a credential env file is refused unasked")
+
+        # ENV-1 review, MED-1: Claude's Glob and Grep on ordinary file-name
+        # globs are allowed (refused at layer 1 at 153920d); a dot-led one that
+        # can match a credential env name is refused.
+        for pattern in ("**/*test*", "src/**/*.test*", "**/*template*", "**/*.bak", "**/*dev*",
+                        "**/*.{ts,tsx}", "**/.github/*.yml", "**/*.local"):
+            eq(permit("Glob", {"pattern": pattern}, brief), Decision.ALLOW, f"Glob {pattern}")
+        for value in ("*test*", "*.production", "*.bak"):
+            eq(permit("Grep", {"pattern": "x", "glob": value}, brief), Decision.ALLOW,
+               f"Grep glob {value}")
+        for pattern in ("**/.e?v.*", "**/.[e]nv.custom", "**/.*.custom", "src/{a,.env}.*",
+                        "**/.ENV*"):
+            eq(permit("Glob", {"pattern": pattern}, brief), Decision.DENY, f"Glob {pattern}")
+        eq(permit("Grep", {"pattern": "x", "glob": ".env.*"}, brief), Decision.DENY,
+           "Grep glob .env.*")
+        # NIT 5: a Codex `also_commands` line is judged in the brief's folder.
+        eq(permit("shell", {"command": "true"}, brief, widening="terminal input",
+                  also_commands=("echo x > settings.txt",)),
+           Decision.DENY, "an also-command writing through a symlink in the brief's folder")
 
 
 def installed_hud_deny_checks():

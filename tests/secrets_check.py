@@ -204,9 +204,21 @@ STAGING = "sk-staging-FAKEVALUEFORTESTSONLY-777777"
 PROD = "postgres://app:FAKEPRODPASS999@db.example/app"
 
 
+# The review's over-refused lines (MED-1): each allowed on main, refused at
+# 153920d, allowed again — a non-dot-led glob cannot expand onto a dotfile.
+ORDINARY_GLOBS = [
+    "rm -f *.orig", "rm -f *.bak", "ls *.bak", "rm *.test", "ls .git/hooks/*.sample",
+    "ls *test*", "ls *dev*", "ls *prod*", "ls *2*", "find . -name '*test*'",
+    "find src -name '*.test*'", "find . -name '*template*'", "rg -g '*test*' foo",
+    "grep -rl foo --include='*test*' .", "grep -r KEY --include=*.production .",
+    "fd -g '*test*'", "find . -iname '*.bak' -delete", "tar czf out.tgz *.log",
+]
+
+
 def env_rule_checks(root: Path) -> None:
     from jarvis.tools import search as search_mod
-    from jarvis.tools.secrets import env_credential_in_text, glob_reaches, is_credential
+    from jarvis.tools.secrets import (env_credential_in_text, env_glob_reaches, glob_reaches,
+                                      is_credential)
 
     (root / ".env.staging").write_text(f"API_KEY={STAGING}\n", encoding="utf-8")
     (root / ".env.production").write_text(f"DATABASE_URL={PROD}\nPORT=8080\n", encoding="utf-8")
@@ -242,9 +254,14 @@ def env_rule_checks(root: Path) -> None:
         "python -c \"print(open('.env.staging').read())\"", "F=.env.production; cat $F",
         "cat $(echo .env.staging)", "cat .ENV.PRODUCTION", "cat .env.p*", "cat .env.[sp]*", "cat .env.zz?",
         "head -1 ./x/../.env.staging", "node --env-file=.env.production -p 1",
-        "docker compose --env-file .env.production up", "grep -r KEY --include=*.production .",
+        "docker compose --env-file .env.production up",
         "cp .env.production notes.txt", "cat .env.sample", "cat .env.example.bak",
         "cat .e\\\nnv.production",
+        # ENV-1 review, LOW-1: dot-led globs that can match a credential env
+        # name though none is spelled out — judged structurally, exactly.
+        "cat .e?v.custom", "cat .[e]nv.custom", "cat .*.custom", "cp x .e*.custom",
+        "sh -c 'cat .e?v.custom'", "grep -r KEY --include='.env.*' .", "find . -name '.env*'",
+        "rg -g '.e?v.*' KEY", "ls -la ~/.*rc",       # `.*rc` can expand onto `.env.<x>rc`
     ]
     for command in smuggled:
         assert protected_in_command(command), command
@@ -253,14 +270,28 @@ def env_rule_checks(root: Path) -> None:
             assert out.startswith(("Error:", "Refused:")), (command, out)
             assert PROD not in out and STAGING not in out, command
     for command in ("cat .env.example", "cat .env.local.example", "cp .env.example .env.local.example",
-                    "ls *.py", "grep -r KEY --include=*.py .", "cat .envrc", "ls -la ~/.*rc",
-                    "cat .env.*.example", "cat myapp.env.production", "echo env.production"):
+                    "ls *.py", "grep -r KEY --include=*.py .", "cat .envrc", "ls .git*",
+                    "cat .env.*.example", "cat myapp.env.production", "echo env.production",
+                    "ls -d .*.example", "ls ~/.bash*"):
+        assert protected_in_command(command) is None, command
+    # ENV-1 review, MED-1: ordinary globs main allowed stay allowed — a glob
+    # that is not dot-led never expands onto a dotfile in bash, and an option
+    # value like `*test*` is the class of `grep -r foo .`.
+    for command in ORDINARY_GLOBS:
         assert protected_in_command(command) is None, command
     assert env_credential_in_text("x .env.local.example y") is None
     assert env_credential_in_text("--env-file=.env.prod") == ".env.prod"
-    assert glob_reaches(".env.zz?") and glob_reaches(".env.p*") and glob_reaches("*.production") and glob_reaches(".e??")
-    assert not glob_reaches("*.py") and not glob_reaches(".env.*.example") and not glob_reaches("*")
-    print(f"ok  shell: {len(smuggled)} spellings of a credential env file refused in both tools")
+    for pattern in (".env.zz?", ".env.p*", ".e??", ".*", ".e?v.custom", ".[e]nv.custom",
+                    ".*.custom", "[.]env.x", ".?nv.x[0-9]", ".ENV.P*", ".env.example?",
+                    "{a,.env}.x*", ".*rc"):
+        assert glob_reaches(pattern) and env_glob_reaches(pattern), pattern
+    for pattern in ("*.py", ".env.*.example", "*", "*.production", "*test*", "*.local", ".git*",
+                    ".[!e]*", ".*.example", "**", "*.{bak,orig}"):
+        assert not env_glob_reaches(pattern), pattern
+    assert glob_reaches("google_token.*") and glob_reaches("*.json")   # bundles, by name, as on main
+    assert not env_glob_reaches("*.json")
+    print(f"ok  shell: {len(smuggled)} spellings of a credential env file refused in both tools; "
+          f"{len(ORDINARY_GLOBS)} ordinary globs allowed")
 
     # 10. grep_files, both backends, every mode: .env.staging is never searched.
     real_which = search_mod.shutil.which
@@ -304,6 +335,49 @@ def env_rule_checks(root: Path) -> None:
     assert scrub("nothing secret here") == "nothing secret here"
     print("ok  scrub: values from .env.staging/.env.production redacted; a FIFO named .env.* "
           "does not hang it")
+
+    scrub_rule_checks(root)
+
+
+TOKEN40 = "Zx9Qp2Lm8Rt5Wv3Yk7Hb1Nc4Df6Gj0Ks8Lq2MxA"
+STRIPE = "sk_live_FAKE51HxYzTESTONLY"
+DB_PASS = "FAKEpw9zz"
+
+
+def scrub_rule_checks(root: Path) -> None:
+    """ENV-1 review, MED-2: from a newly covered env file only secrets are
+    withheld — a secret-named key's value, or a secret-looking value — so
+    settings (`NODE_ENV=production`, `API_URL=https://…`) no longer mangle
+    ordinary output. `.env` and `.env.local` are scrubbed whole, as before."""
+    (root / ".env.preview").write_text(
+        "NODE_ENV=production\nAPI_URL=https://api.example.com\nCOOKIE_SECURE=true\n"
+        "SESSION_DRIVER=redis\nAPP_NAME=My Great Application\n"
+        f"STRIPE_SECRET_KEY={STRIPE}\nDATABASE_URL=postgres://app:{DB_PASS}@db.internal/app\n"
+        f"BUILD_ID={TOKEN40}\n", encoding="utf-8")
+    readme = ("Deploy to production with NODE_ENV=production; the API lives at "
+              "https://api.example.com. COOKIE_SECURE=true, SESSION_DRIVER=redis, "
+              "My Great Application.\n")
+    (root / "README.md").write_text(readme, encoding="utf-8")
+    out = dispatch("read_file", '{"path": "README.md"}').text
+    assert "Deploy to production with NODE_ENV=production" in out, out
+    assert "https://api.example.com" in out and "redis" in out and "=true" in out, out
+    assert REDACTED not in out, out
+    leaky = f"key {STRIPE} url postgres://app:{DB_PASS}@db.internal/app build {TOKEN40}"
+    cleaned = scrub(leaky)
+    for value in (STRIPE, DB_PASS, TOKEN40):
+        assert value not in cleaned, (value, cleaned)
+    # `.env` and `.env.local` keep today's rule: every value of 8+ characters.
+    whole = root / "whole"
+    whole.mkdir()
+    (whole / ".env").write_text("MODE=production-ish\n", encoding="utf-8")
+    previous = Path.cwd()
+    os.chdir(whole)
+    try:
+        assert "production-ish" not in scrub("mode is production-ish"), "the .env rule moved"
+    finally:
+        os.chdir(previous)
+    print("ok  scrub: a .env.preview's settings left alone (README intact); its secret key, "
+          "DSN password and 40-char token withheld; .env still scrubbed whole")
 
 
 if __name__ == "__main__":

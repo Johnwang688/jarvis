@@ -38,7 +38,6 @@ import re
 import stat as _stat
 from fnmatch import fnmatchcase
 from pathlib import Path, PurePosixPath
-import shlex
 
 from .. import config
 
@@ -223,20 +222,189 @@ _ENV_IN_TEXT = re.compile(
     rf"(?<![{_NAME_CHAR}])(\.env(?:\.[^\s'\"`;&|<>()/\\:,=}}]*)?)(?![A-Za-z0-9_\-])",
     re.IGNORECASE)
 
-# What a glob is tried against, besides `PROTECTED_NAMES`: the env names
-# people actually keep. A glob that is not spelled from `.env.` can still
-# reach one through `find -name`, `grep --include`, `rg -g` or bash's
-# `dotglob` (`*.production` finds `.env.production` there), and those are
-# judged against this sample — never against "any `.env.<anything>`", which
-# every `*.py` would match (`.env.py`). One spelled from `.env.` is judged by
-# the rule itself (`glob_reaches`).
-ENV_SAMPLES = frozenset({
-    ".env.production", ".env.development", ".env.staging", ".env.test", ".env.prod",
-    ".env.dev", ".env.stage", ".env.qa", ".env.ci", ".env.preview", ".env.local",
-    ".env.production.local", ".env.development.local", ".env.test.local",
-    ".env.staging.local", ".env.backup", ".env.bak", ".env.old", ".env.orig",
-    ".env.save", ".env.sample", ".env.template", ".env.vault", ".env.1", ".env.2",
-})
+# --- globs onto credential files (ENV-1 review, MED-1) ---------------------------
+#
+# **A glob is judged structurally: can it match a credential env name?** Not
+# against a sample of names (the first version did, and `*.test`, `*.bak`,
+# `ls *dev*`, `find -name '*test*'` and Claude's `**/*template*` were all
+# refused, unapprovably, because `.env.test` and friends were in the sample).
+#
+# * **Only a dot-led glob can reach one.** Every credential env name starts
+#   with `.`, and bash expands a `*`, `?` or bracket at the start of a name
+#   onto no dotfile (the dot must be matched by a literal `.`; `dotglob` is
+#   off unless a script sets it — not modelled here, and stated as a limit).
+#   So `*.production` and `*test*` never expand onto `.env.production`. A
+#   leading bracket set that holds `.` is treated as dot-led anyway.
+# * **The test is exact**, not a list: the glob's language (literals, `?`,
+#   bracket sets, `*`) is intersected with the rule's — `.env`, or `.env.`
+#   then anything not ending `.example`, case-folded, plus a name Windows
+#   would trim to `.env` — by walking both at once (`_glob_meets_env`). So
+#   `.e?v.custom`, `.[e]nv.custom`, `.*.custom` and `.e*.custom` are refused
+#   (the review's LOW-1), while `.env.*.example`, `.git*` and `.bash*` are
+#   not. Brace lists are expanded first (bash's reading,
+#   `protected_state._brace_expand`), and one too large to expand is refused.
+# * **Option values that name files** (`find -name`, `rg -g`, `grep
+#   --include`, `fd`, Claude's Glob `pattern` and Grep `glob`) get the same
+#   test and nothing else: a non-dot-led `*test*` is allowed. A recursive read
+#   that happens to cover an env file is the class of `grep -r foo .` — the
+#   scrub's job and a stated limit — and refusing `--include='*test*'` while
+#   allowing `grep -r` would protect nothing.
+# * The credential *bundles* (`google_token.json` …) are not dotfiles, so a
+#   bash word that is a glob is still matched against them by name, as on
+#   main (`cat google_token.*`, `cat *.json`).
+
+_GLOB_CAP = 512                       # a longer dot-led glob is refused unjudged
+_EXAMPLE = ".example"
+# The characters the rule names, and one stand-in for every other character.
+_OTHER = "\x00"
+_RELEVANT = frozenset(".envxampl ")
+_ALPHABET = tuple(sorted(_RELEVANT)) + (_OTHER,)
+_OTHER_PROBES = "bcdfghijkoqrstuwyz0123456789_-+@~,#%"
+
+
+def _glob_elements(pattern: str) -> list[tuple[str, str]]:
+    """A (case-folded) glob as elements: ("lit", c), ("?", ""), ("*", ""),
+    ("set", "[...]"). A `[` with no closing `]` is a literal, as in bash."""
+    out: list[tuple[str, str]] = []
+    i, n = 0, len(pattern)
+    while i < n:
+        c = pattern[i]
+        if c == "*":
+            if not out or out[-1][0] != "*":
+                out.append(("*", ""))
+            i += 1
+        elif c == "?":
+            out.append(("?", ""))
+            i += 1
+        elif c == "[":
+            j = i + 1
+            if j < n and pattern[j] in "!^":
+                j += 1
+            if j < n and pattern[j] == "]":
+                j += 1
+            while j < n and pattern[j] != "]":
+                j += 1
+            if j >= n:
+                out.append(("lit", "["))
+                i += 1
+            else:
+                body = pattern[i:j + 1]
+                if body.startswith("[^"):
+                    body = "[!" + body[2:]          # bash reads `^` as `!`
+                out.append(("set", body))
+                i = j + 1
+        elif c == "\\" and i + 1 < n:
+            out.append(("lit", pattern[i + 1]))
+            i += 2
+        else:
+            out.append(("lit", c))
+            i += 1
+    return out
+
+
+def _element_chars(element: tuple[str, str]) -> tuple[str, ...]:
+    """The alphabet letters (and `_OTHER`) one element can stand for."""
+    kind, value = element
+    if kind in ("?", "*"):
+        return _ALPHABET
+    if kind == "lit":
+        return (value if value in _RELEVANT else _OTHER,)
+    chars = [c for c in sorted(_RELEVANT) if fnmatchcase(c, value)]
+    if any(fnmatchcase(c, value) for c in _OTHER_PROBES):
+        chars.append(_OTHER)
+    return tuple(chars)
+
+
+def _kmp_step(k: int, c: str) -> int:
+    """How much of `.example` is matched after `c`, from `k` matched."""
+    text = _EXAMPLE[:k] + c
+    for length in range(min(len(text), len(_EXAMPLE)), 0, -1):
+        if text.endswith(_EXAMPLE[:length]):
+            return length
+    return 0
+
+
+def _env_step(state, c: str):
+    """The credential-name automaton: `.env`, then `.` and a tail tracked by
+    how much of `.example` it ends with, or trailing spaces/dots (a name
+    Windows trims to `.env`). None is dead."""
+    prefix = ".env"
+    if isinstance(state, int):                      # read prefix[:state]
+        if state < 4:
+            return state + 1 if c == prefix[state] else None
+        if c == ".":
+            return ("tail", 1)
+        return "trim" if c == " " else None
+    if state == "trim":
+        return "trim" if c in " ." else None
+    return ("tail", _kmp_step(state[1], c))
+
+
+def _env_accepts(state) -> bool:
+    return state == 4 or state == "trim" or (
+        isinstance(state, tuple) and state[1] != len(_EXAMPLE))
+
+
+def _glob_meets_env(elements: list[tuple[str, str]]) -> bool:
+    """Is some string both matched by the glob and a credential env name?"""
+    start = (0, 0)
+    seen = {start}
+    stack = [start]
+    m = len(elements)
+    while stack:
+        i, state = stack.pop()
+        if i == m:
+            if _env_accepts(state):
+                return True
+            continue
+        kind = elements[i][0]
+        moves = []
+        if kind == "*":
+            moves.append((i + 1, state))
+        for c in _element_chars(elements[i]):
+            nxt = _env_step(state, c)
+            if nxt is not None:
+                moves.append((i if kind == "*" else i + 1, nxt))
+        for move in moves:
+            if move not in seen:
+                seen.add(move)
+                stack.append(move)
+    return False
+
+
+def _dot_led(elements: list[tuple[str, str]]) -> bool:
+    if not elements:
+        return False
+    kind, value = elements[0]
+    return (kind == "lit" and value == ".") or (kind == "set" and fnmatchcase(".", value))
+
+
+def env_glob_reaches(pattern: str) -> bool:
+    """Could this glob (one file name's worth) expand onto a credential env
+    file? Only a dot-led glob can (see above); then the test is exact."""
+    if not isinstance(pattern, str) or not pattern:
+        return False
+    if "{" in pattern:
+        from .. import protected_state
+
+        variants = protected_state._brace_expand(pattern)
+        if variants is None:
+            return True                    # too large to expand: cannot tell, refuse
+        if len(variants) > 1 or variants[0] != pattern:
+            return any(is_env_credential_name(v) or env_glob_reaches(v) for v in variants)
+    if not any(c in pattern for c in "*?["):
+        return False
+    elements = _glob_elements(pattern.casefold())
+    if not _dot_led(elements):
+        return False
+    if len(pattern) > _GLOB_CAP:
+        return True
+    return _glob_meets_env(elements)
+
+
+_BUNDLE_NAMES = frozenset(n for n in PROTECTED_NAMES if not is_env_credential_name(n))
+# Where a word splits into the pieces `protected_in_command` also judges.
+_PIECES = re.compile(r"[\s;&|<>()`'\"=:,]+")
 
 
 def env_credential_in_text(text: str) -> str | None:
@@ -250,20 +418,15 @@ def env_credential_in_text(text: str) -> str | None:
 
 
 def glob_reaches(pattern: str) -> bool:
-    """Could this glob (one file name's worth, glob characters in it) expand
-    onto a credential file? Case-folded, because the env rule is.
+    """Could this bash word (one file name's worth) expand onto a credential
+    file? A credential env file by `env_glob_reaches` (dot-led, exact), or a
+    credential bundle by name, as on main (`cat google_token.*`; only with
+    some literal substance, so a bare `grep -R foo *` stays usable).
 
-    Refused only when the pattern has some literal substance, so a bare
-    `grep -R foo *` stays usable; then: it matches a protected name or one of
-    `ENV_SAMPLES` (`.env*`, `.e??`, `google_token.*`, `*.local`,
-    `*.production`), or it is spelled from `.env.` and does not end in
-    `.example` (`.env.p*`, `.env.[sS]taging`, `.env.example*` — which reaches
-    `.env.example.bak`). `.env.*.example` can only name `.example` files and
-    is not refused.
-
-    Brace lists are expanded first, as bash and the glob tools do
-    (`*.{ts,production}` is `*.ts` and `*.production`; one too large to
-    expand is refused: a guard that cannot tell refuses)."""
+    Brace lists are expanded first, as bash does; one too large to expand is
+    refused (a guard that cannot tell refuses)."""
+    if not isinstance(pattern, str) or not pattern:
+        return False
     if "{" in pattern:
         from .. import protected_state
 
@@ -272,14 +435,73 @@ def glob_reaches(pattern: str) -> bool:
             return True
         if len(variants) > 1 or variants[0] != pattern:
             return any(is_protected(v) or glob_reaches(v) for v in variants)
+    return env_glob_reaches(pattern) or _bundle_glob(pattern)
+
+
+def _bundle_glob(pattern: str) -> bool:
+    """A glob with some literal substance that matches a credential bundle's
+    name (`google_token.*`, `*.json`) — main's rule, unchanged."""
     if not any(c in pattern for c in "*?["):
         return False
     if not re.sub(r"[*?\[\]]", "", pattern):
         return False
     folded = pattern.casefold()
-    if any(fnmatchcase(name, folded) for name in PROTECTED_NAMES | ENV_SAMPLES):
-        return True
-    return folded.startswith(".env.") and not folded.endswith(".example")
+    return any(fnmatchcase(name, folded) for name in _BUNDLE_NAMES)
+
+
+# Options whose value (the next word, or after `=`) is a file-name pattern a
+# program matches against names: find's, ripgrep's, grep's, fd's.
+_NAME_PATTERN_OPTIONS = frozenset({
+    "-name", "-iname", "-path", "-ipath", "-wholename", "-iwholename", "-lname", "-ilname",
+    "-g", "--glob", "--iglob", "--include", "--exclude", "--include-dir", "--exclude-dir",
+})
+_WORD_BREAK = frozenset(";&|<>()")
+
+
+def _shell_words(command: str) -> list[tuple[str, bool]]:
+    """The command's words as bash splits them, unquoted, each with whether a
+    glob character in it stands outside quotes (so bash expands it). Shell
+    operators split words. Approximate where bash is subtle (`$'…'`,
+    here-documents): this decides only where a glob is judged."""
+    words: list[tuple[str, bool]] = []
+    value: list[str] = []
+    expands = False
+    started = False
+    quote = ""
+    i, n = 0, len(command)
+
+    def end() -> None:
+        nonlocal value, expands, started
+        if started:
+            words.append(("".join(value), expands))
+        value, expands, started = [], False, False
+
+    while i < n:
+        c = command[i]
+        if quote:
+            if c == quote:
+                quote = ""
+            elif c == "\\" and quote == '"' and i + 1 < n:
+                i += 1
+                value.append(command[i])
+            else:
+                value.append(c)
+        elif c in "'\"":
+            quote, started = c, True
+        elif c == "\\" and i + 1 < n:
+            i += 1
+            value.append(command[i])
+            started = True
+        elif c.isspace() or c in _WORD_BREAK:
+            end()
+        else:
+            if c in "*?[{":
+                expands = True
+            value.append(c)
+            started = True
+        i += 1
+    end()
+    return words
 
 
 def protected_in_command(command: str) -> str | None:
@@ -296,24 +518,39 @@ def protected_in_command(command: str) -> str | None:
     from .. import rules
 
     command = rules.join_continuations(command)
-    try:
-        tokens = shlex.split(command)
-    except ValueError:
-        tokens = command.split()
-
-    for token in tokens:
+    words = _shell_words(command)
+    previous = ""
+    for token, expands in words:
         token = token.strip("\"'")
-        # An option's value is judged as a word of its own too:
-        # `--include=*.production` makes grep search `.env.production`.
-        words = [token, token.split("=", 1)[1]] if token.startswith("-") and "=" in token else [token]
-        for word in words:
-            name = PurePosixPath(word).name
-            if is_protected(name):
+        name = PurePosixPath(token).name
+        # A protected name as a word of its own, and a word matched against
+        # the credential bundles' names — quoted or not, as on main.
+        if is_protected(name):
+            return name
+        if _bundle_glob(name):
+            return name
+        # A credential env file's glob counts where it reaches files: a word
+        # bash expands (a glob character outside quotes: `cat .e?v.custom`),
+        # or a file-name pattern handed to a program that matches names
+        # (`find -name '.env*'`, `rg -g`, `grep --include=.env.*`). A quoted
+        # regex (`grep '.*error'`, `pkill -f '.*daemon2'`) is neither.
+        if (expands or previous in _NAME_PATTERN_OPTIONS) and env_glob_reaches(name):
+            return name
+        option, eq, value = token.partition("=")
+        if eq and option in _NAME_PATTERN_OPTIONS:
+            name = PurePosixPath(value).name
+            if is_protected(name) or env_glob_reaches(name):
                 return name
-            # A glob that could expand onto a protected file (`cat .env*`,
-            # `cat google_token.*`, `cat .env.p*`) is refused.
-            if glob_reaches(name):
-                return name
+        # The words of a string another shell runs (`sh -c 'cat .e?v.x'`),
+        # judged by the name and the credential-env glob test only, never
+        # the bundle-name match: a commit message saying `*.json` names no
+        # file.
+        if any(c.isspace() for c in token):
+            for piece in _PIECES.split(token):
+                name = PurePosixPath(piece).name if piece else ""
+                if name and (is_protected(name) or env_glob_reaches(name)):
+                    return name
+        previous = token
 
     for name, pattern in _RAW_NAMES:
         if pattern.search(command):
@@ -391,18 +628,106 @@ def _values_in(path: Path) -> tuple[str, ...]:
     text = _read_regular(path)
     if text is None:
         return ()
+    whole = path.name in _WHOLE_FILES
 
     values: set[str] = set()
     for line in text.splitlines():
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
-        value = line.partition("=")[2].strip().strip("'\"")
-        if len(value) >= MIN_SECRET_LEN:
+        key, _, value = line.partition("=")
+        value = value.strip().strip("'\"")
+        if whole:
+            if len(value) >= MIN_SECRET_LEN:
+                values.add(value)
+        elif _secret_entry(key, value):
             values.add(value)
 
     # Longest first, so a value that contains another is replaced whole.
     return tuple(sorted(values, key=len, reverse=True))
+
+
+# --- which values of an env file are secrets (ENV-1 review, MED-2) -------------
+#
+# `.env` and `.env.local` are scrubbed whole, as since 2026-07-30: every value
+# of 8 characters or more (`_WHOLE_FILES`; changing that is the owner's call).
+# Every other credential env file (`.env.production`, `.env.staging` …) holds
+# settings as much as secrets — `NODE_ENV=production`, `API_URL=https://…` —
+# and redacting those everywhere mangled ordinary output ("Deploy to
+# [redacted…]", `NODE_ENV === '[redacted…]'`, and a write round trip would
+# save the marker into the owner's code). So from those only:
+#
+# * the value of a **secret-named key** — a whole word or an `_`/`-`/`.`/
+#   camelCase part of the key: KEY, TOKEN, SECRET, PASS, PASSWORD, PWD,
+#   CREDENTIAL, PRIVATE, SALT, DSN (and their plurals) — at 4+ characters, a
+#   boolean excepted (`TOKEN_REFRESH=true` would redact every `true`);
+#   AUTH, SESSION and COOKIE name settings as often as secrets
+#   (`SESSION_DRIVER=redis`, `COOKIE_SECURE=true`), so under those alone a
+#   value counts at 4+ characters only when it is not plain (below);
+# * a **secret-looking value** under any key: a URL carrying userinfo, a
+#   query or a fragment (`DATABASE_URL=postgres://app:pw@db/app`), or 16+
+#   characters that are not plain — not words, a number, a boolean, a path,
+#   a host name or an e-mail address, nor a URL without those parts.
+_WHOLE_FILES = frozenset({".env", ".env.local"})
+_SECRET_KEY_PARTS = frozenset({
+    "key", "keys", "token", "tokens", "secret", "secrets", "pass", "passwd", "password",
+    "passwords", "pwd", "credential", "credentials", "private", "salt", "dsn",
+})
+_SETTING_KEY_PARTS = frozenset({"auth", "session", "sessions", "cookie", "cookies"})
+_BOOLEANS = frozenset({"true", "false", "yes", "no", "on", "off", "null", "none",
+                       "enabled", "disabled"})
+_KEY_PARTS = re.compile(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|\d+")
+_URL = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]*://")
+_NUMBER = re.compile(r"^[+-]?\d[\d_,]*(?:\.\d+)?$")
+_PATH = re.compile(r"^(?:~|\.{1,2})?/[\w.\-/~ ]*$|^[A-Za-z]:[\\/][\w.\-\\/ ]*$")
+_HOST = re.compile(r"^[a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z][a-z0-9-]*(?::\d+)?$")
+_EMAIL = re.compile(r"^[\w.+-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)+$", re.IGNORECASE)
+_WORD_SPLIT = re.compile(r"[ _\-.,/]+")
+
+
+def _key_parts(key: str) -> set[str]:
+    key = key.strip()
+    if key.lower().startswith("export "):
+        key = key[7:].strip()
+    return {part.casefold() for part in _KEY_PARTS.findall(key)}
+
+
+def _plain(value: str) -> bool:
+    """A value that reads as a setting, not a secret."""
+    if value.casefold() in _BOOLEANS or _NUMBER.match(value) or _PATH.match(value):
+        return True
+    if _HOST.match(value) or _EMAIL.match(value):
+        return True
+    if _URL.match(value):
+        return not _url_carries_secret(value)
+    words = [w for w in _WORD_SPLIT.split(value) if w]
+    return bool(words) and all(
+        w.isalpha() and len(w) <= 20 and (w.islower() or w.isupper() or w.istitle())
+        for w in words)
+
+
+def _url_carries_secret(value: str) -> bool:
+    from urllib.parse import urlsplit
+
+    try:
+        parts = urlsplit(value)
+    except ValueError:
+        return True
+    return "@" in parts.netloc or bool(parts.query) or bool(parts.fragment)
+
+
+def _secret_entry(key: str, value: str) -> bool:
+    """Is this value, under this key, a secret to withhold (see above)?"""
+    if not value:
+        return False
+    parts = _key_parts(key)
+    if parts & _SECRET_KEY_PARTS:
+        return len(value) >= 4 and value.casefold() not in _BOOLEANS
+    if parts & _SETTING_KEY_PARTS and len(value) >= 4 and not _plain(value):
+        return True
+    if _URL.match(value):
+        return _url_carries_secret(value)
+    return len(value) >= 16 and not _plain(value)
 
 
 _SENSITIVE_KEY = re.compile(r"token|secret|password|key", re.IGNORECASE)

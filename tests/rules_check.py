@@ -1527,13 +1527,19 @@ ENV_DENY = [
     "echo x > .e\\\nnv.production",
     "git status && echo x > .env.production",
     "echo $(cp notes.txt .env.qa)",
+    # ENV-1 review, NIT 3: writes with no writing stem, or no command at all.
+    "git checkout -- .env.x", "git restore .env.x", "git -C . checkout HEAD -- .env.prod",
+    ">.env.x", "{ echo a; } > .env.x", "X=1 >.env.x",
+    "perl -pi -e 's/a/b/' .env.x", "perl -i.bak -pe 1 .env.x",
+    "awk -i inplace '{print}' .env.x", "gawk -i inplace 1 .env.x",
 ]
 # The folder is known here (`static_verdict(command, cwd)`, run_command's
 # own check): a write whose target is a symlink to a credential env file is
 # refused though no env name is on the line. `rules.decide` judges by name.
 ENV_LINK_DENY = ["echo x > settings.txt", "cp notes.txt settings.txt", "tee -a settings.txt < notes.txt"]
 # Writes that only may land on one: asked, never covered by an allowlist entry.
-ENV_ASK = ["cp notes.txt .env.$STAGE", "rm *.production", "cp notes.txt $JARVIS_ENV1_UNSET.env"]
+ENV_ASK = ["cp notes.txt .env.$STAGE", "cp notes.txt $JARVIS_ENV1_UNSET.env",
+           "cp notes.txt .e*.custom", "mv notes.txt .e?v.prod"]   # dot-led globs (LOW-1)
 # Ordinary work around env files: the verdict main gave, unchanged.
 ENV_ORDINARY = [
     ("cp .env.example .env.local.example", rules.ALLOW),
@@ -1547,6 +1553,14 @@ ENV_ORDINARY = [
     ("cp .env.production backup.txt", rules.ALLOW),     # a read: the secrets layer refuses it
     ("node --env-file=.env.production server.js", rules.ALLOW),   # ditto, never "writes"
     ("echo .env.production >> .gitignore", rules.ASK),  # a mention, refused by the secrets layer
+    # ENV-1 review, MED-1: a non-dot-led glob never expands onto a dotfile, so
+    # it writes no credential env file (each was refused or asked at 153920d).
+    ("rm *.production", rules.ASK), ("rm -f *.orig", rules.ASK), ("rm -f *.bak", rules.ASK),
+    ("rm *.test", rules.ASK), ("ls *.bak", rules.ALLOW), ("ls .git/hooks/*.sample", rules.ALLOW),
+    ("ls *test*", rules.ALLOW), ("find . -name '*test*'", rules.ALLOW),
+    ("rg -g '*test*' foo", rules.ALLOW), ("grep -rl foo --include='*test*' .", rules.ALLOW),
+    ("git checkout main", rules.ALLOW), ("git restore src/app.py", rules.ALLOW),
+    ("perl -ne 'print' notes.txt", rules.ASK),
 ]
 
 

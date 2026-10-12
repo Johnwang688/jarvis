@@ -300,6 +300,11 @@ PRINTERS = [
     # ENV-1: the owner's `.env*` rule, one definition — only `.example` names
     # are open, so the templates WP-F kept readable are credential now (Q-1).
     "cat .env.sample", "cat .env.template", "cat .ENV.Production", "cat .env.example.bak",
+    # ENV-1 review, LOW-2: the hint prefilter and the variant hazard are
+    # case-folded, and a dot-led glob onto one is never skipped.
+    "python3 -c \"print(open('.ENV.PRODUCTION').read())\"",
+    "node -e \"console.log(require('fs').readFileSync('.ENV.LOCAL','utf8'))\"",
+    "python3 <<< \"print(open('.ENV.PROD').read())\"", "cat .e?v.custom", "cat .[e]nv.custom",
     "terraform output -raw private_key", "systemctl show-environment", "docker inspect c",
     "aws secretsmanager get-secret-value --secret-id x", "time env", "{ cat .env; }",
     "f() { cat .env; }; f",
@@ -1099,6 +1104,15 @@ class FolderValues(unittest.TestCase):
             self.assertTrue(G.protected_name(name), name)
         for name in (".env.example", ".env.local.example", ".envrc", "my.env"):
             self.assertFalse(G.protected_name(name), name)
+
+    def test_env_names_are_case_folded_everywhere(self):
+        # ENV-1 review, LOW-2: `protected_in`'s hint prefilter and the
+        # fail-closed scan's variant pattern ignored `.ENV.PROD`.
+        for text in ("cat x .ENV.PROD", "open('.Env.Local')", "f = '.ENV.STAGING'"):
+            self.assertTrue(G.protected_in(text), text)
+        self.assertIsNotNone(G._ENV_VARIANT.search("tail notes .ENV.PROD here"))
+        self.assertIsNone(G._ENV_VARIANT.search("tail notes .ENV.EXAMPLE here"))
+        self.assertGreaterEqual(G.last_hazard_end("q .ENV.PROD"), len("q .ENV.PROD"))
 
     def test_a_url_with_a_password_is_withheld(self):
         self.assertTrue(G.withhold(P("DATABASE_URL=postgres://app:", "Zx9Qp2Lm8", "@db:5432/app")))

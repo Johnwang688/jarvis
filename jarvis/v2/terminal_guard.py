@@ -185,7 +185,11 @@ def holds_value(text: str, forms) -> bool:
 # only `.example` names are open) are credential; `.env.example` stays
 # readable. `_ENV_VARIANT` only marks where a variant is named, for the
 # fail-closed scan (`_HAZARDS`); whether a name is credential is the rule's.
-_ENV_VARIANT = re.compile(r"(?<![\w.\-])\.env\.(?!example(?![\w.\-]))[\w\-][\w.\-]*")
+_ENV_VARIANT = re.compile(r"(?<![\w.\-])\.env\.(?!example(?![\w.\-]))[\w\-][\w.\-]*",
+                          re.IGNORECASE)                 # the rule is (ENV-1 review, LOW-2)
+# A dot-led glob in a word (`cat .e?v.custom`, `ls .*.x`): it can reach a
+# credential env file though no hint is spelled out, so it is never skipped.
+_DOT_GLOB = re.compile(r"(?:^|[\s'\"=:/(<>|;&])\.[^\s/'\"]*[*?\[]")
 
 CREDENTIAL_FILE = re.compile(
     r"(?:^|/)(?:id_(?:rsa|dsa|ecdsa|ed25519)(?:_sk)?|\.netrc|_netrc|\.git-credentials|\.pgpass"
@@ -234,8 +238,11 @@ _RAW_PROTECTED = re.compile(
 def protected_in(text: str) -> bool:
     """Does a command line name a credential file anywhere (a glob onto one
     included)? Regular expressions first; v1's tokenising check only for a
-    line with a glob in it."""
-    if not any(hint in text for hint in _HINTS):
+    line with a glob in it. The hints are matched case-folded, as the env
+    rule is (`.ENV.PRODUCTION`; ENV-1 review, LOW-2), and a dot-led glob is
+    never skipped."""
+    folded = text.casefold()
+    if not any(hint in folded for hint in _HINTS) and not _DOT_GLOB.search(text):
         return False
     if _RAW_PROTECTED.search(text) or v1_secrets.env_credential_in_text(text):
         return True
@@ -943,6 +950,11 @@ def _simple(tokens: list[str], depth: int, ctx: _Context) -> bool:
             return True
         if ctx.protected and (any(_dynamic(a) for a in operands) or not operands):
             return True                                    # `for f in .env; do cat "$f"`
+        # A glob operand onto a credential file (`cat .e?v.custom`): judged as
+        # the word bash expands — the operands are unquoted already, so
+        # re-quoting them for the line check would hide the glob (ENV-1 review).
+        if any(v1_secrets.glob_reaches(PurePosixPath(a).name) for a in operands):
+            return True
         return v1_secrets.protected_in_command(" ".join(shlex.quote(a) for a in args)) is not None
     if prog in INTERPRETERS or prog in _POWERSHELLS:
         return _interpreter_prints(prog, args, depth, ctx)
@@ -1233,9 +1245,13 @@ _HAZARDS = (
 def last_hazard_end(text: str) -> int:
     """Where the last thing `could_print` looks for ends in `text`, or -1."""
     last = -1
+    folded = None
     for pattern, needles in _HAZARDS:
         if needles is not None and not any(needle in text for needle in needles):
-            continue
+            # Case-folded too: `.ENV.PROD` is the env variant (LOW-2).
+            folded = text.casefold() if folded is None else folded
+            if not any(needle in folded for needle in needles):
+                continue
         for match in pattern.finditer(text):
             last = max(last, match.end())
     for match in _keyword_vars(text):
