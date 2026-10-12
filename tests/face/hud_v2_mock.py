@@ -49,6 +49,10 @@ try:  # the terminals' HTTP routes (WP-C/WP-D); the socket is the test's fake PT
     from tests.face import hud_v2_mock_terminals as mock_terminals
 except ImportError:
     import hud_v2_mock_terminals as mock_terminals  # type: ignore[no-redef]
+try:  # the VEX routes (VX-1's contract, VX-2's view); builds and downloads are terminal rows
+    from tests.face import hud_v2_mock_vex as mock_vex
+except ImportError:
+    import hud_v2_mock_vex as mock_vex  # type: ignore[no-redef]
 
 # A hostile avatar, checked for what it does rather than what it says: the art
 # is drawn in the window that gates approvals, so an `onload` in it must never
@@ -664,6 +668,8 @@ class MockDaemon:
                 path, q = url.path, parse_qs(url.query)
                 self._record("GET", path, {k: v[0] for k, v in q.items()})
                 w = mock.world
+                if mock_vex.handle(self, mock, "GET", path, {}):
+                    return
                 if mock_projects.handle(self, mock, "GET", path, {}):
                     return
                 if mock_terminals.handle(self, mock, "GET", path, {}):
@@ -896,6 +902,8 @@ class MockDaemon:
                     return self._json({"text": w["stt_text"]})
                 body = self._body()
                 self._record("POST", path, body)
+                if mock_vex.handle(self, mock, "POST", path, body):
+                    return
                 if mock_projects.handle(self, mock, "POST", path, body):
                     return
                 if mock_terminals.handle(self, mock, "POST", path, body):
@@ -1212,6 +1220,7 @@ class MockDaemon:
                 self._record("DELETE", path, {})
                 if mock_projects.handle(self, mock, "DELETE", path, {}):
                     return
+                mock_vex.terminal_closing(mock, path)
                 if mock_terminals.handle(self, mock, "DELETE", path, {}):
                     return
                 parts = [p for p in path.split("/") if p]

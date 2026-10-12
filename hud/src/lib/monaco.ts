@@ -260,14 +260,22 @@ export function monacoModels(): string[] {
 }
 
 /** Every live code editor (a diff editor's two included): read-only, focused. */
-export function monacoEditors(): { uri: string | null; readOnly: boolean; focused: boolean }[] {
+export function monacoEditors(): {
+  uri: string | null; readOnly: boolean; focused: boolean; line: number | null; column: number | null;
+}[] {
   const m = loaded;
   if (!m) return [];
-  return m.editor.getEditors().map((ed) => ({
-    uri: ed.getModel()?.uri.toString() ?? null,
-    readOnly: !!ed.getOption(m.editor.EditorOption.readOnly),
-    focused: ed.hasTextFocus(),
-  }));
+  return m.editor.getEditors().map((ed) => {
+    const at = ed.getPosition();
+    return {
+      uri: ed.getModel()?.uri.toString() ?? null,
+      readOnly: !!ed.getOption(m.editor.EditorOption.readOnly),
+      focused: ed.hasTextFocus(),
+      // Where the cursor is (VX-2's error click puts it at the error's line).
+      line: at?.lineNumber ?? null,
+      column: at?.column ?? null,
+    };
+  });
 }
 
 /** The language Monaco's registry gives a path (and first line). */
