@@ -282,10 +282,15 @@ class Failures(World):
                 verdict, script = self.run_one(page())
                 self.assertEqual((verdict.verdict, verdict.reason, len(script.calls)),
                                  (V.ASK, V.R_NO_MODEL, 0))
-        # The one list, called — not a copy of it.
-        source = Path(V.__file__).read_text()
-        self.assertIn("from jarvis.v2.titles import cn_hosted", source)
-        self.assertNotIn("qwen/", source)
+        # The one list (`models.cn_hosted`), called — not a copy of it:
+        # patching it moves the verdict.
+        V.clear_cache()
+        with patch.object(models, "tier", lambda name: "openai/gpt-5.6-luna"), \
+                patch.dict(config.TIERS, {"orchestrator": "openai/gpt-5.6-luna"}), \
+                patch.object(models, "cn_hosted", lambda model: True):
+            verdict, script = self.run_one(page())
+        self.assertEqual((verdict.reason, len(script.calls)), (V.R_NO_MODEL, 0))
+        self.assertNotIn("qwen/", Path(V.__file__).read_text())
 
     def test_a_late_answer_asks(self):
         clock = [1000.0]

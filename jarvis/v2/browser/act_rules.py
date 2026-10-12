@@ -32,18 +32,17 @@ a finite, non-negative int or float. `None`, `"no"`, `"0"`, a negative
 count, NaN and infinity all refuse, so a `Facts` the caller forgot to fill in
 is refused, and so is one filled in wrongly. Any exception while judging is a
 refusal too. H2 and H8 call into `secrets`, `credential_patterns`,
-`protected_state`, `editor_policy`, `hud_api` and the terminal guard's value
-forms, never copying them: two copies of a rule drift, and the looser one
-decides.
+`protected_state`, `editor_policy` and the terminal guard's value forms,
+never copying them: two copies of a rule drift, and the looser one decides.
 
 **Linear, always.** Labels and addresses are page- or agent-controlled and can
 be any length. No regular expression here is built from page text; the fixed
 ones never backtrack; a label is normalised with C-level passes (NFKC, a
 translate table, fixed substitutions) and looked up with `in`; an address's
 path, fragment and route-query segments go into sets. A one-megabyte label
-or a 100,000-character link is judged in a few tens of milliseconds
-(`tests/v2/browser_act_rules_check.py` times both); a navigate address past
-8 KB is refused unread.
+is judged in a few tens of milliseconds, and an address (navigate, a link, a
+form's action) or an option label past 8 KB is refused unread
+(`tests/v2/browser_act_rules_check.py` times both).
 
 **Not a boundary.** A field whose label lies, a label in another language, a
 payment form drawn on a canvas, a password field the page disguises as plain
@@ -62,7 +61,6 @@ import os
 from pathlib import Path
 import re
 import stat
-from types import SimpleNamespace
 import unicodedata
 from urllib.parse import unquote, unquote_plus, urlsplit
 
@@ -111,7 +109,8 @@ MAX_ACTIONS_PER_TAB_HOUR = 200      # H10: actions on one tab in an hour
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024 # H8
 SEARCH_TYPE_MAX = 64                # the ALLOW tier's short search
 MAX_TYPE_CHARS = 10_000             # longer text to type is refused (bounds H2's scan)
-MAX_NAV_URL = 8 * 1024              # a longer navigate address is refused unread
+MAX_NAV_URL = 8 * 1024              # a longer address (navigate, link, form action) or
+                                    # option label is refused unread
 MAX_FORM_FIELDS = 500               # a form with more controls is judged as holding every kind
 
 # -- keys -----------------------------------------------------------------------------------
@@ -156,14 +155,15 @@ PAYMENT_FRAME_HOSTS = frozenset({
 # all hold the word `otp`), then these are looked up as whole words or
 # phrases. English only: a label in another language is a stated limit.
 OTP_LABEL_WORDS = frozenset({"otp", "totp", "mfa", "2fa", "passcode", "onetime", "twofactor",
-                             "otpcode", "securitycode", "smscode", "verificationcode"})
+                             "otpcode", "securitycode", "smscode", "verificationcode", "totpcode",
+                             "mfacode"})
 OTP_LABEL_PHRASES = ("one time", "2 fa", "two factor", "verification code", "security code",
                      "pass code", "auth code", "authentication code", "sms code", "otp code")
 PASSWORD_LABEL_WORDS = frozenset({"password", "passwd", "passphrase", "pin"})
 PAYMENT_LABEL_WORDS = frozenset({"cvv", "cvc", "csc", "cardnumber", "ccnum", "ccnumber", "cardnum",
-                                 "creditcard", "cardcvc", "cardcvv", "expdate"})
+                                 "creditcard", "cardcvc", "cardcvv", "expdate", "ccexp"})
 PAYMENT_LABEL_PHRASES = ("card number", "card num", "cc number", "cc num", "credit card",
-                         "debit card", "card code", "card cvc", "exp date")
+                         "debit card", "card code", "card cvc", "exp date", "cc exp")
 PAYMENT_LABEL_PREFIXES = ("expir",)          # expiry, expiration, expires
 # A numeric field of 4–8 digits labelled only "code" is a one-time code —
 # unless the label says what else it is.
@@ -272,6 +272,7 @@ R_BUDGET_TURN = "this turn has used its 40 judged Browser actions"
 R_BUDGET_HOUR = "this pane has used its 200 Browser actions for the hour"
 R_URL = "the Browser's address judge refuses that address"
 R_NAV_TOO_LONG = "that address is longer than 8 KB"
+R_SELECT_TOO_LONG = "the option to select is longer than 8 KB"
 R_JARVIS_PORT = "that address is one of Jarvis's own ports"
 R_SCHEME = "agents navigate only to http and https addresses"
 R_MALFORMED = "that address is malformed"
@@ -353,7 +354,7 @@ class Facts:
     card_pending: bool | None = None         # H3 — False: no approval card is pending
     paused: bool | None = None               # H4 — False: the owner has not taken over
     owner_has_input: bool | None = None      # H4 — a bool: has the owner ever sent this tab input?
-    owner_input_age_s: float | None = None   # H4 — if so, seconds since: ≥ OWNER_QUIET_S
+    owner_input_age_s: float | None = None   # H4 — if so, seconds since: ≥ OWNER_QUIET_S; if not, None
     agents_may_drive: bool | None = None     # H5 — True: the global switch
     pane_can_drive: bool | None = None       # H5 — True: the pane's "Jarvis can drive"
     pane_can_see: bool | None = None         # H5 — True: the pane's "Jarvis can see"
@@ -721,11 +722,17 @@ def url_shape(url: str) -> str | None:
 
 def executable_name(name: str) -> bool:
     """Does a file name, or the last segment of a path, end in an executable's
-    extension? Percent-decoded, `;params` cut, a trailing dot, space or `/`
-    taken off (`setup.exe.`, `setup.exe%20`, `setup.exe;jsessionid=1`)."""
-    base = unquote(name or "").replace("\\", "/").rstrip("/ \t").rsplit("/", 1)[-1]
-    base = base.split(";", 1)[0].strip().rstrip(". \t").lower()
+    extension? Percent-decoded, cut at a NUL and at `;params`, trailing dots,
+    spaces, controls and `/` taken off (`setup.exe.`, `setup.exe%20`,
+    `a.exe%00`, `a.exe%00.txt`, `setup.exe;jsessionid=1`)."""
+    base = unquote(name or "").replace("\\", "/").rstrip(_TRAILING + "/").rsplit("/", 1)[-1]
+    base = base.split("\x00", 1)[0].split(";", 1)[0].rstrip(_TRAILING).lower()
     return base.endswith(EXECUTABLE_EXTENSIONS)
+
+
+# What a file system or a browser drops from the end of a name: dots, spaces
+# and control characters.
+_TRAILING = "".join(map(chr, range(33))) + "."
 
 
 def is_executable_path(url: str) -> bool:
@@ -757,14 +764,14 @@ def upload_refusal(upload_path: str, project_dir: str) -> tuple[str | None, str]
     and the owner's `.env*` rule, symlinks followed), not in a credential
     folder, a login file or a v2 session carrier (`editor_policy`'s withheld
     rule, which reads `config.V2_CREDENTIAL_DIRS`), not the gate's state
-    (`protected_state.protected_paths`), and not what the preview origin
-    refuses (`hud_api._not_a_page`: any hidden path component inside the
-    project but `.well-known` — `.git`, `.ssh`, `.docker` in any case — and
-    Jarvis's own config and data folders).
+    (`protected_state.protected_paths`), not in Jarvis's own config and data
+    folders, and with no hidden component inside the project
+    (`editor_policy.hidden_component`, the preview origin's rule: any name
+    starting with `.` but `.well-known` — `.git`, `.GIT`, `.ssh`, `.docker`).
 
     The resolved path is what was judged. It is not a lock: BR-9b must judge
     again after the card and upload a private copy it opened `O_NOFOLLOW`."""
-    from jarvis.v2 import editor_policy, hud_api  # one classifier each, called: not copied
+    from jarvis.v2 import editor_policy  # the one classifier, called: not copied
 
     if not upload_path or not project_dir:
         return R_UPLOAD_NONE, ""
@@ -784,13 +791,13 @@ def upload_refusal(upload_path: str, project_dir: str) -> tuple[str | None, str]
                      or resolved in protected_state.protected_paths()
                      or resolved in protected_state.gate_paths()
                      or any(_under(p, d) for d in editor_policy.jarvis_dirs() for p in (raw, resolved)))
-        project = SimpleNamespace(root=str(root_real), extra_dirs=())
-        page = hud_api._not_a_page(project, root_real / raw.relative_to(root), resolved)
+        hidden = (editor_policy.hidden_component(root_real / raw.relative_to(root), root_real)
+                  or editor_policy.hidden_component(resolved, root_real))
     except Exception:  # a guard that cannot tell refuses
-        protected, page = True, None
-    if protected or page == hud_api.PROTECTED_PAGE:
+        protected, hidden = True, False
+    if protected:
         return R_UPLOAD_PROTECTED, ""
-    if page is not None:
+    if hidden:
         return R_UPLOAD_HIDDEN, ""
     try:
         info = os.stat(resolved)
@@ -839,7 +846,11 @@ def _state_refusal(f: Facts) -> PreVerdict | None:
         return _refuse("H4", R_PAUSED)
     if not isinstance(f.owner_has_input, bool):
         return _refuse("H4", R_OWNER_BUSY)
-    if f.owner_has_input:
+    # An age given at all is judged, whatever the flag says: "no input yet"
+    # beside an age is a contradiction, and a contradiction refuses.
+    if f.owner_has_input is False and f.owner_input_age_s is not None:
+        return _refuse("H4", R_OWNER_BUSY)
+    if f.owner_has_input or f.owner_input_age_s is not None:
         age = _count(f.owner_input_age_s)
         if age is None or age < OWNER_QUIET_S:
             return _refuse("H4", R_OWNER_BUSY)
@@ -901,6 +912,8 @@ def _judge(f: Facts, extra_values: tuple) -> PreVerdict:
         return _refuse("action", R_SCROLL)
     if action == "type" and len(f.text) > MAX_TYPE_CHARS:
         return _refuse("action", R_TOO_LONG)
+    if action == "select" and len(f.text) > MAX_NAV_URL:
+        return _refuse("action", R_SELECT_TOO_LONG)
     target = f.target
     if action in ("type", "select") and target is None:
         return _refuse("action", R_NO_TARGET)
@@ -915,6 +928,8 @@ def _judge(f: Facts, extra_values: tuple) -> PreVerdict:
             return _refuse("H7", belt)
     else:
         for url in _destinations(f, key):
+            if len(url) > MAX_NAV_URL:
+                return _refuse("H7", R_NAV_TOO_LONG)
             belt = _landing_refusal(url)
             if belt:
                 return _refuse("H7", belt)

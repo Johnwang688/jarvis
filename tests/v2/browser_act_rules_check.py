@@ -165,7 +165,8 @@ LABEL_SENSITIVE = [dict(attr_name="otp"), dict(attr_id="otpCode"), dict(attr_id=
                    # The joined spellings (review of PR #71, NIT).
                    dict(attr_name="otpcode"), dict(attr_id="cardnum"), dict(attr_name="creditcard"),
                    dict(attr_id="securitycode"), dict(attr_name="cardcvc"), dict(attr_id="expdate"),
-                   dict(attr_name="smscode"), dict(label="SMS code")]
+                   dict(attr_name="smscode"), dict(label="SMS code"), dict(attr_id="totpcode"),
+                   dict(attr_name="mfacode"), dict(attr_id="ccexp"), dict(attr_name="cc_exp")]
 LABEL_ORDINARY = [dict(label="Search"), dict(label="Email address"), dict(label="Shipping address"),
                   dict(placeholder="Topic"), dict(attr_name="username"), dict(label="Spinner speed"),
                   dict(label="ZIP code", inputmode="numeric", maxlength=5),
@@ -438,8 +439,8 @@ class Uploads(World):
                 self.assertEqual(self.upload(name).reason, R.R_UPLOAD_PROTECTED)
 
     def test_hidden_paths(self):
-        # The preview origin's rule (`hud_api._not_a_page`), called: any hidden
-        # component but `.well-known`, in any case.
+        # The preview origin's rule (`editor_policy.hidden_component`), called:
+        # any hidden component but `.well-known`, in any case.
         for folder in (".git", ".GIT", ".Git", ".github", ".docker", ".hidden"):
             (self.project / folder).mkdir()
             (self.project / folder / "config").write_text("[remote]\n")
@@ -449,6 +450,15 @@ class Uploads(World):
                      ".hidden/config", ".env.example", ".bashrc"):
             with self.subTest(name=name):
                 self.assertEqual(self.upload(name).reason, R.R_UPLOAD_HIDDEN)
+
+    def test_the_hidden_rule_is_editor_policys(self):
+        # Called, not copied: patching the one function moves the verdict.
+        from jarvis.v2 import editor_policy
+        (self.project / "photo.png").write_bytes(b"\x89PNG")
+        self.assertEqual(self.upload("photo.png").kind, R.ASK)
+        with patch.object(editor_policy, "hidden_component", lambda path, root: True):
+            self.assertEqual(self.upload("photo.png").reason, R.R_UPLOAD_HIDDEN)
+        self.assertNotIn('startswith(".")', Path(R.__file__).read_text())
 
     def test_a_hard_link(self):
         (self.project / "a.txt").write_text("x")
@@ -544,7 +554,8 @@ EXECUTABLES = ["https://dl.test/setup.exe", "https://dl.test/x/Tool.AppImage", "
                "https://dl.test/setup.exe.", "https://dl.test/setup.exe;jsessionid=1",
                "https://dl.test/setup.exe%20", "https://dl.test/setup.exe/",
                "https://dl.test/a.hta", "https://dl.test/a.lnk", "https://dl.test/a.iso",
-               "https://dl.test/a.reg", "https://dl.test/a.msp", "https://dl.test/a.application"]
+               "https://dl.test/a.reg", "https://dl.test/a.msp", "https://dl.test/a.application",
+               "https://dl.test/a.exe%00", "https://dl.test/a.exe%00.txt", "https://dl.test/a.exe%0A"]
 
 
 class Floors(World):
@@ -600,7 +611,8 @@ class Floors(World):
                            ("C:\\Users\\x\\Downloads\\a.msi", ""), ("x.bin", "application/x-msdownload"),
                            ("archive", "application/vnd.android.package-archive; charset=binary"),
                            ("setup.exe.", ""), ("setup.exe%20", ""), ("setup.exe;x=1", ""),
-                           ("page.hta", ""), ("disk.ISO", ""), ("x", "application/hta")):
+                           ("page.hta", ""), ("disk.ISO", ""), ("x", "application/hta"),
+                           ("a.exe%00", ""), ("a.exe\x00", ""), ("a.exe\x00.txt", "")):
             with self.subTest(name=name):
                 self.assertTrue(R.executable_download(name, mime))
         for name, mime in (("report.pdf", "application/pdf"), ("photo.png", ""), ("", "")):
@@ -732,6 +744,18 @@ class State(World):
                          R.ALLOW)
         self.assertEqual(self.judge(facts("scroll", private=True)).kind, R.ALLOW)
 
+    def test_an_age_is_judged_whatever_the_flag_says(self):
+        # Delta review of PR #71: "no input" beside an age is a contradiction,
+        # and a recent or broken age must never be ignored for it.
+        for age in (0.0, 1.0, 4.99, -1, float("nan"), float("inf"), "9", 6.0, 60.0):
+            with self.subTest(age=age):
+                self.assertRefused(facts("scroll", owner_has_input=False, owner_input_age_s=age),
+                                   "H4", R.R_OWNER_BUSY)
+        for age in (0.0, 1.0, 4.99, -1, float("nan"), float("inf"), "9", None):
+            with self.subTest(age=age, has_input=True):
+                self.assertRefused(facts("scroll", owner_has_input=True, owner_input_age_s=age),
+                                   "H4", R.R_OWNER_BUSY)
+
     def test_an_exception_while_judging_refuses(self):
         for f in (facts("type", text=None, target=field()),
                   facts("type", text="hi", target=field(label="Code", inputmode="numeric", maxlength="6")),
@@ -763,6 +787,20 @@ class State(World):
                 self.assertRefused(facts("navigate", nav_url=url), "H7", reason)
         self.assertKind(facts("navigate", nav_url="https://example.com/" + "a" * (R.MAX_NAV_URL - 20)),
                         R.CLASSIFY)
+
+    def test_links_form_actions_and_options_are_capped_too(self):
+        long = "https://example.com/" + "a" * R.MAX_NAV_URL
+        fits = "https://example.com/" + "a" * (R.MAX_NAV_URL - 20)
+        self.assertRefused(facts("click", target=Element(tag="a", href=long)), "H7", R.R_NAV_TOO_LONG)
+        self.assertKind(facts("click", target=Element(tag="a", href=fits)), R.CLASSIFY)
+        form = Form("get", long, fields=(field(attr_name="q"),))
+        self.assertRefused(facts("click", target=SUBMIT, form=form), "H7", R.R_NAV_TOO_LONG)
+        self.assertRefused(facts("press", key="Enter", target=field(attr_name="q"), form=form), "H7",
+                           R.R_NAV_TOO_LONG)
+        select = Element(tag="select")
+        self.assertRefused(facts("select", text="x" * (R.MAX_NAV_URL + 1), target=select), "action",
+                           R.R_SELECT_TOO_LONG)
+        self.assertKind(facts("select", text="x" * R.MAX_NAV_URL, target=select), R.CLASSIFY)
 
     def test_a_link_or_a_form_landing_on_jarvis(self):
         for url in ("http://localhost:8405/", "http://127.0.0.1:8405/approvals/x", "http://[::1]:8402/"):
@@ -817,9 +855,16 @@ class Speed(World):
                     "https://example.com/?" + "route=a/b&" * 10_000, "https://example.com/#/" + "x/" * 50_000,
                     "https://" + "a." * 50_000 + "com/"):
             with self.subTest(url=url[-20:]):
+                # Past 8 KB the rules refuse unread; the matchers themselves
+                # are linear too, timed on the whole address.
                 for f in (facts("navigate", nav_url=url), facts("click", target=Element(tag="a", href=url))):
                     seconds = self.best(f)
                     self.assertLess(seconds, 0.1, f"{seconds * 1000:.1f} ms")
+                    self.assertEqual(R.pre_judge(f).reason, R.R_NAV_TOO_LONG)
+                for judge in (R.url_shape, R.is_executable_path):
+                    start = time.perf_counter()
+                    judge(url)
+                    self.assertLess(time.perf_counter() - start, 0.1)
 
 
 class Tables(World):

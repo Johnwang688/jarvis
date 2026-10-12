@@ -694,8 +694,9 @@ ChatGPT-auth turn ignores `environments: []`, a read-only command can run
 before the turn is refused; its output is discarded. A busy lock waits in the queue (`CODEX_BUSY_TRIES` × 30
 s, others go ahead), then OpenRouter; so does any Codex failure or an
 unusable answer. **OpenRouter**: `models.tier("orchestrator")` with no tools
-and `max_tokens` 1000, **never a Chinese-hosted vendor** (`titles.cn_hosted`
-by id prefix; the configured orchestrator instead, else no title).
+and `max_tokens` 1000, **never a Chinese-hosted vendor** (`models.cn_hosted`
+by id prefix — moved from `titles` in BR-9a, one list with the Browser's
+reviewer; the configured orchestrator instead, else no title).
 `clean_title`: first non-empty line, invisible characters out, a "Title:"
 label, markdown, quotes and trailing punctuation off, more than 12 words is
 an answer and is refused. The words are `secrets.scrub`bed before they leave
@@ -2298,7 +2299,8 @@ The rules the two reviews left, in one place:
   a dropped file named like a store (`editor_policy.credential_name`) is never
   attached. **The preview origin refuses any path with a hidden component
   inside the project except `.well-known`, and anything under Jarvis's config
-  and data folders** (`hud_api._not_a_page`, `editor_policy.jarvis_dirs`): it
+  and data folders** (`hud_api._not_a_page`, which asks
+  `editor_policy.hidden_component` and `editor_policy.jarvis_dirs`): it
   answers any loopback client, `fetch_page` included.
 - The atomic write's temp is `<name>.<x>.tmp` (an env file's temp is an env
   file by name, LOW4); a save's unexpected `OSError` is 500 and a
@@ -2680,13 +2682,15 @@ exact bool it needs, a number a finite non-negative int or float — `None`,
 fact the caller forgot refuses (`STATE_FACTS` names them; the suite unsets
 each in turn) — and `pre_judge` turns any exception into a refusal. Order:
 H12 (desk, depth, sub-agent), H11, H5 (Private needs its own drive switch),
-H6, H3, H4 (paused, or `owner_has_input` with `owner_input_age_s` under
-`OWNER_QUIET_S` = 5 s), H9, H10's counts, H7's fact; a valid action (`press`
-takes named keys only, a printable character is refused; at most 10,000
-characters to type; `type`/`select` need a target); H7's belt (a navigate
-address: http(s) only, at most 8 KB, Jarvis's ports, an ambiguous authority,
-userinfo; a link or a submitted form's action: Jarvis's ports, an ambiguous
-authority); **H1** (type, select, Backspace/Delete/Space into `type=password`,
+H6, H3, H4 (paused; an `owner_input_age_s`, whenever one is given, must be
+valid and at least `OWNER_QUIET_S` = 5 s, `owner_has_input=True` needs one,
+and `owner_has_input=False` beside one is a contradiction that refuses — the
+delta review's regression), H9, H10's counts, H7's fact; a valid action
+(`press` takes named keys only, a printable character is refused; at most
+10,000 characters to type and 8 KB to select; `type`/`select` need a
+target); H7's belt (a navigate address: http(s) only, at most 8 KB,
+Jarvis's ports, an ambiguous authority, userinfo; a link or a submitted
+form's action: at most 8 KB, Jarvis's ports, an ambiguous authority); **H1** (type, select, Backspace/Delete/Space into `type=password`,
 an `autocomplete` token current-/new-password, one-time-code, webauthn or
 **any `cc-*` anywhere in the token list**, the label words and their joined
 spellings on name, id, label, placeholder, aria-label and accessible name
@@ -2698,9 +2702,10 @@ navigate address, a clicked link or a submitted form's action holding a
 spellings, or a `credential_patterns` shape); **H8** (`upload_refusal`: a
 regular file with one name on disk, under the project folder lexically and
 resolved, at most 50 MB, not `secrets.is_credential`, not `editor_policy`'s
-withheld, not the gate's state, and nothing the preview origin refuses —
-`hud_api._not_a_page`: any hidden component but `.well-known`, Jarvis's own
-folders; `PreVerdict.path` is what was judged, and **BR-9b must judge again
+withheld, not the gate's state, not in Jarvis's own folders, and no hidden
+component but `.well-known` — `editor_policy.hidden_component`, the preview
+origin's own rule, moved there from `hud_api._not_a_page` so both call one
+function in a SELF_PROTECTED module; `PreVerdict.path` is what was judged, and **BR-9b must judge again
 after the card and upload a private copy opened `O_NOFOLLOW`**). Then the
 ASK floors (every upload; a click on anything but a text field or on
 anything that submits, Enter, or Space on such a control, in a form — or
@@ -2722,15 +2727,16 @@ review's HIGH; at most 64 characters with no line break into `type=search`,
 else CLASSIFY. **Linear**: no regex is built from page text, labels are
 normalised by C-level passes (camelCase split for `name`/`id` only, which
 fail closed past 1024 characters), route segments go into sets; a 1 MB label
-or a 100,000-character link is judged in a few tens of ms. Every refusal
-reason is a fixed `R_*` sentence.
+is judged in a few tens of ms, and the URL matchers stay linear on 100,000
+characters though the rules refuse past 8 KB unread. Every refusal reason is
+a fixed `R_*` sentence.
 **`act_review.judge(facts, owner_words, *, extra_values) →
 ActVerdict(verdict, category, reason, source)`** is `command_review`'s shape:
 the owner's words (≤ 500) outside, everything else in one `untrusted.fence`
 with a tag per call, capped as §B.5 says; a flagged context, or a credential
 value (the caller's too) or shape anywhere in the request, means no call and
 ask (source `guard`); **never a Chinese-hosted model** (MED 4: the review
-tier follows the owner's selection, so a model `titles.cn_hosted` names falls
+tier follows the owner's selection, so a model `models.cn_hosted` names falls
 back to the configured orchestrator, and if that is CN-hosted too, no call
 and ask); JSON only, exactly three keys, each once; **every failure is ask**
 (category `unjudged`); only `ordinary` is ever allowed;
@@ -2746,10 +2752,13 @@ The model is `models.tier("browser_review")` once a config defines that tier
 (BD-4), else the review tier. `act_review.decide(pre, verdict)` is the gate's
 outcome: anything but exactly one of the four kinds refuses, a floor is never
 lowered, the belts apply again, and CLASSIFY with no answer asks. Free
-suites: `tests/v2/browser_act_rules_check.py` (59) and
+suites: `tests/v2/browser_act_rules_check.py` (62) and
 `tests/v2/browser_act_review_check.py` (34), with `llm.chat` raising
-throughout and `secrets._JARVIS_ROOT` a temp folder; 40 guard removals each
-fail their suite in a scratch copy (the PR lists them). Left for BR-9b: the
+throughout and `secrets._JARVIS_ROOT` a temp folder; 47 guard removals each
+fail their suite in a scratch copy (the PR lists them). The two moved
+functions are pinned where they are used: `hud_backend_check`'s
+`OneHiddenRule` and `titles_check`'s `OneVendorList` patch the one function
+and see the verdict move, so a copy fails them. Left for BR-9b: the
 wiring, the `browser_review` tier, SELF_PROTECTED for both modules, and the
 re-check and private copy for uploads.
 

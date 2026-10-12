@@ -26,7 +26,7 @@ that reads text. So everything here fails toward asking:
     and the answer is ask.
   - **Never a Chinese-hosted model** (the 2026-07-30 routing rule: this is
     logged-in page context). The review tier follows the owner's model
-    selection, so a CN-hosted choice (`titles.cn_hosted`) falls back to the
+    selection, so a CN-hosted choice (`models.cn_hosted`) falls back to the
     configured orchestrator, and if that is CN-hosted too, nothing is sent
     and the answer is ask.
   - **The answer is JSON only**, exactly `verdict`, `category` and `reason`,
@@ -138,14 +138,13 @@ def _model() -> str | None:
 
     That tier follows the owner's model selection, and the page context is
     logged-in personal data, which the routing rule keeps off Chinese-hosted
-    models: a CN-hosted model (`titles.cn_hosted`, the one list) falls back
+    models: a CN-hosted model (`models.cn_hosted`, the one list) falls back
     to the configured orchestrator, and None means none may be asked."""
     from jarvis import models
-    from jarvis.v2.titles import cn_hosted
 
     name = "browser_review" if "browser_review" in config.TIERS else "review"
     for model in (models.tier(name), config.TIERS.get("orchestrator")):
-        if model and not cn_hosted(model):
+        if model and not models.cn_hosted(model):
             return model
     return None
 
