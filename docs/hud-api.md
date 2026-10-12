@@ -1846,11 +1846,14 @@ opens a file at `<dir>/<name>` in project `{id}`:
   each folder above it **up to the project's root, never above** (at most 32,
   within the route's 100), once per folder every 3 s at most;
 - `GET /projects/{id}/file?path=<dir>/.editorconfig` for each that stat says
-  exists as `kind: "text"`, nearest first, stopping at one whose preamble says
-  `root = true`. A withheld, non-text, missing or refused answer is no
-  configuration, and one whose stat `size` is over 64 KB is never read. A
-  file's content is read once per etag; a path's resolution is kept per
-  (path, each config's folder and etag), so restored tabs ask nothing twice.
+  exists as `kind: "text"` — once per etag, every one on the walk; they are
+  applied nearest first, stopping at one whose preamble says `root = true`. A
+  withheld, non-text, missing or refused answer is no configuration, and one
+  whose stat `size` is over 64 KB is never read. A path's resolution is kept
+  per (path, each config's folder and etag), so restored tabs ask nothing
+  twice. Judging happens in the window, one resolution per task, under a
+  5 ms clock; a config that runs it out of time twice, or is over a cap,
+  configures nothing until its etag changes.
 
 Neither sends any file's content. What the files say sets the buffer's
 indentation and, for a file with no line break, the line ending its new

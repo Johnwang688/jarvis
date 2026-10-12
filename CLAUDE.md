@@ -2491,9 +2491,9 @@ disabled, and its Escape never runs under one. **`.editorconfig`**
 (`lib/editorconfig.ts` pure, `state/editorconfig.ts`) is read **only through
 ED-2's owner-only routes**: one `files/stat` of `<dir>/.editorconfig` for the
 file's folder and each above it **to the project's root, never above**, a
-`GET /file` of each that exists, nearest first, **stopping at `root =
-true`**; a folder's answer is kept 3 s, and past 2.5 s (a slow `/mnt/c`)
-opening a file goes on without it. It sets **indent style and size** (the
+`GET /file` of each that exists (once per etag), applied nearest first,
+**stopping at `root = true`**; a folder's answer is kept 3 s, and past 2.5 s
+(a slow `/mnt/c`) opening a file goes on without it. It sets **indent style and size** (the
 model's options; kept through a settings change, which makes Monaco
 re-detect every model — `reapplyEditorConfig`) and **the line ending new
 lines take in a file with no line break yet** — never a file's existing
@@ -2506,18 +2506,36 @@ spec (`*`, `**`, `**/` as zero or more folders, `?`, `[…]`/`[!…]`, nested
 `{a,b}`, `{n..m}`, `\` escapes, a slash-less glob at any depth, a slash inside
 brackets literal) and **are matched by a table over tokens × path, never a
 backtracking regex**: an `.editorconfig` is agent-writable project content,
-and `[*a*a*a*a*a*a*a*a*b]` as a regex hangs the window on a long name. **Per
-glob is not enough** (review of PR #59, MED: 123 maximal sections took a
-689 ms long task per file open, a 1 KB path 11.6 s): **one resolution has
-one work budget** (`MATCH_BUDGET`, ~10 ms — every section's compile, read
-in one linear pass, and its tokens × path match, across every file on the
-walk, charged before it runs), and past it the file has **no configuration
-at all, never a partial one**, said once in the console by path. Caps: 64
-alternatives, 512 tokens in **each** (not the first alone, review LOW) and
-4,096 in all per glob, braces 16 deep, 128 sections per file
-(`tooMany`: none), paths ≤ 1024. Resolutions are cached by (project, path,
-each config's folder and etag), parsed files by etag, and a config the stat
-says is over 64 KB is never downloaded. **Vim (E-11, yes)**:
+and `[*a*a*a*a*a*a*a*a*b]` as a regex hangs the window on a long name.
+**The guard is structural, a clock and not a cost model** (the lead's
+decision on PR #59's third review: 123 maximal sections had been a 689 ms
+long task per open, and a work budget was out-counted three ways — failed
+compiles charged nothing, a thrashing compile cache, under-weighted number
+ranges — to a 1,517 ms task): (a) **a real clock** — parse, compile and
+match all spend through one `Deadline` (`RESOLVE_MS` 5 ms), which reads
+`performance.now()` every `CHECK_STEPS` (256) steps from inside the parser,
+the compiler and the matcher and throws `OutOfTime`; the file then has **no
+configuration at all, never a partial one**; (b) **poison** — the config
+(by folder and etag) that spent the time takes a strike, and **two strikes**
+(one GC pause must not cost a real config its effect) **or any cap** poison
+it: every later resolution touching it, for any path, is O(1) and never
+queued, until its etag changes; (c) **no batching** — resolutions run one per
+macrotask through a queue (`MessageChannel` in the window, `setTimeout` in
+Node), so restored tabs never pile into one long task; `prepare` still
+applies before the buffer records its text. Compiled globs are kept with
+their parsed file by etag (`ConfigFile.compiled`; no global map to thrash),
+caches drop their oldest entry, a path left with no configuration is said
+once in the console by path (`warned` ≤ 64), number ranges count digits
+arithmetically, and a character class remembers each character's answer.
+Caps: 64 alternatives, 512 tokens in **each** (not the first alone) and
+4,096 in all per glob, braces 16 deep, 128 sections per file, paths ≤ 1024;
+resolutions are cached by (project, path, each config's folder and etag), and
+a config the stat says is over 64 KB is never downloaded. Measured: the
+review's shapes in Node, 40 tabs at once, longest task 5.1 ms (32 heavy
+configs deep) and 5.0 ms (number ranges), 56 ms in all over 40 tasks; in
+Chromium, 32 heavy configs and 20 tabs give no long task at all (506f670's
+budget: one of 118 ms on the same shape; no clock: four of ~10 s) and the
+tabs are ready ~150 ms later than with no configs. **Vim (E-11, yes)**:
 `monaco-vim` **0.4.4, pinned exactly**, MIT, audited (no network, storage,
 `eval` or `innerHTML`; its status line is text nodes and one input), loaded
 in a lazy chunk of its own only when the setting is on (101 KB, 31 KB gzip).
@@ -2539,19 +2557,25 @@ window takes it before Monaco, so vim's half-page-down is gone; the HUD's
 other window keys (Ctrl+B, Ctrl+P, zoom) are the HUD's in vim too. Test
 hook, read-only: `window.__hud.editorSettings()` (stored, in force, each
 File editor's raw options, vim, its model's indentation and EOL — never
-text). Sizes: first paint +20 KB (685,073 → 705,426 B). Free checks: `lib/editorSettings.test.ts`,
+text). Sizes: first paint +20 KB (685,073 → 705,426 B against f1de871). Free checks: `lib/editorSettings.test.ts`,
 `lib/editorconfig.test.ts` (the parser, the spec's glob table, the
-linear-time and cap cases), `state/editorconfig.test.ts` (the walk, root, cache, refusals,
-timeout, the prepare hook leaving a buffer clean) and
+clock on the review's shapes — real and fake clocks — and the caps),
+`state/editorconfig.test.ts` (the walk, root, caches, refusals, timeout, the
+prepare hook leaving a buffer clean; 32 configs deep, 40 batched
+resolutions and the number-range shape with no job over 16 ms, poison doing
+no work and lifting on a new etag) and
 `tests/face/hud_v2_editor_settings_check.py` (a `MockDaemon(0)` of its own,
-run by `hud_v2_check` after the navigation section, or alone, `ONLY=vim`).
+run by `hud_v2_check` after the navigation section, or alone, `ONLY=vim`;
+`_long_task_checks` records long tasks with a `PerformanceObserver`).
 Shown to bite in a scratch copy, 7 of 7: the font unchecked, EOL set on a
 file with endings, `prepare` not awaited, `:w` as one window-wide hook, vim
 keeping Ctrl+D, the dialog left up under a card, no alternatives cap; and the
-review round's 8 of 8: no work budget (the 123-section file's vitest), the
+review round's 8 of 8: the work budget (since replaced by the clock), the
 token cap on the first alternative only, no section cap, no resolution cache,
 the size cap not read, `:colorscheme` reaching `setTheme`, vim's undo past
-read-only, and a settings change rewriting vim's cursor. Not
+read-only, and a settings change rewriting vim's cursor; and the third
+round's: the clock removed (eight vitests, and in Chromium four ~10 s long
+tasks) and poison removed (three vitests). Not
 done: a buffer renamed later keeps the `.editorconfig` it opened with, and an
 edit to `.editorconfig` reaches files opened after it (3 s), not those open.
 
