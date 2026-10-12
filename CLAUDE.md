@@ -5107,9 +5107,10 @@ jarvis/
   - **Time work, not the wall.** A real-clock bound measures how long the
     work held the thread: the least of its wall time and the process's CPU
     time (`held` in the `.editorconfig` vitests). The thread's own CPU clock
-    is a tick stale on Linux. A check of a guard's logic runs on a clock
-    made of the work done (`workDeadline`). Keep the tight bound, not a
-    generous one.
+    is a tick stale on Linux. A GC pause inflates both, so judge the best of
+    up to three fresh runs: a pause hits one run, and a broken guard is slow
+    in every run. A check of a guard's logic runs on a clock made of the
+    work done (`workDeadline`). Keep the tight bound, not a generous one.
   - **Count the HUD's fault, not the test's.** The terminal suite's
     fresh-ticket check still judges every socket's ticket. A fresh one for
     a terminal the test removed meanwhile is counted apart.
