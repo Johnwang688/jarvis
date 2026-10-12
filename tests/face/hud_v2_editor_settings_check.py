@@ -374,9 +374,10 @@ def _vim_checks(page, mock, check, until):
     page.keyboard.type("#v")
     page.keyboard.press("Escape")
     until(lambda: "NORMAL" in status.inner_text(), timeout=2)
+    # Monaco draws the lines a frame after the edit: wait for the drawing, not just the buffer.
     check("i and typing insert, Escape is normal mode again",
-          bool(until(lambda: (_buf(page, "calc.py") or {}).get("dirty") is True, timeout=2))
-          and _text(page, 2).startswith("#vdef add"), repr(_text(page, 2)[:40]))
+          bool(until(lambda: (_buf(page, "calc.py") or {}).get("dirty") is True
+                     and _text(page, 2).startswith("#vdef add"), timeout=3)), repr(_text(page, 2)[:40]))
     # An edit in pane 3 too: `:w` in pane 2 must not save it.
     page.locator(_lines(3)).click()
     page.keyboard.press("i")
