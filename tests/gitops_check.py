@@ -81,6 +81,9 @@ READS = [
     ["log", "--", "--output"],                 # after a `--` nothing could take, it is a pathspec
     ["log", "-p", "--", "f.txt"], ["stash", "show", "-p"], ["stash", "list", "-p"],
     ["ls-remote", "--", "origin"],
+    # `-o` takes a word, and the repository is the word after it
+    ["ls-remote", "-o", "x", "origin"], ["ls-remote", "-ox", "origin"],
+    ["ls-remote", "--server-option", "x", "origin"],
 ]
 
 # Routine writes. Each is {where it may run: kind}. In the owner's checkout (or
@@ -120,6 +123,8 @@ ROUTINE = {
         ["merge", "--no-gpg-sign", "x"], ["cherry-pick", "--no-gpg-sign", "abc123"],
         ["revert", "--no-gpg-sign", "HEAD"], ["rebase", "--no-gpg-sign", "main"],
         ["rebase", "-m", "origin/main"], ["cherry-pick", "-x", "abc123"],
+        # `--cleanup` takes a word, and the repository is the word after it
+        ["pull", "--cleanup", "scissors", "origin"], ["pull", "--cleanup=strip", "origin"],
     ],
 }
 
@@ -282,6 +287,16 @@ REFUSED = {
         ["pull", "--", "https://example.invalid/r"], ["pull", "--ff-only", "--", "evil"],
         ["ls-remote", "--", "https://example.invalid/r"], ["remote", "show", "--", "evil"],
         ["fetch", "origin", "--", "x:y"],
+    ],
+    # An option's word read as the repository (PR #65's round-3 review): git's
+    # `ls-remote -o` and pull's `--cleanup` take the next word, so a configured
+    # name there left the unnamed repository after it to be contacted.
+    "an option's word read as the repository": [
+        ["ls-remote", "-o", "origin", "https://example.invalid/r"],
+        ["ls-remote", "-oorigin", "https://example.invalid/r"],
+        ["ls-remote", "-o", "origin", "evil"],
+        ["pull", "--cleanup", "origin", "https://example.invalid/r"],
+        ["pull", "--cleanup", "scissors", "evil"],
     ],
     "the shape of the request": [
         [], [""], ["-C", "/tmp", "status"], ["-c", "core.pager=x", "status"],
@@ -1399,11 +1414,42 @@ def agent_wiring_checks() -> None:
     print("ok  wiring: workflows hold all three, every sub-agent type reads, only builder writes")
 
 
+def unnamed_repository_checks() -> None:
+    """`ls-remote -o <word> <repo>` and `pull --cleanup <mode> <repo>` reach
+    the repository after the word: plain git lists an unnamed repository's
+    refs, and the tool refuses before git runs, in the owner's checkout and in
+    an own worktree alike (PR #65's round-3 review)."""
+    with world() as w:
+        other = w.root / "unnamed.git"
+        w.sh("init", "-q", "--bare", str(other), cwd=w.root)
+        w.sh("push", "-q", str(other), "main:refs/heads/only-in-unnamed")
+        # The sanity half: plain git, given the same words, contacts it.
+        plain = w.sh("ls-remote", "-o", "origin", str(other))
+        assert "only-in-unnamed" in plain.stdout, plain.stdout
+        wt = made(gitops.create_worktree(str(w.owner), "feat"))
+        for where in (w.owner, wt):
+            for args in (["ls-remote", "-o", "origin", str(other)],
+                         ["ls-remote", "-oorigin", str(other)],
+                         ["ls-remote", "--server-option", "origin", str(other)]):
+                out = gitops.run(str(where), args)
+                assert out.startswith("Refused") and "only-in-unnamed" not in out, (args, out)
+        before = w.sh("rev-parse", "HEAD", cwd=wt).stdout
+        out = gitops.run(str(wt), ["pull", "--cleanup", "origin", str(other)])
+        assert out.startswith("Refused") and "unnamed" in out, out
+        assert w.sh("rev-parse", "HEAD", cwd=wt).stdout == before
+        # A server option to the configured remote still reads it.
+        out = gitops.run(str(w.owner), ["ls-remote", "-o", "x", "origin"])
+        assert "[exit 0]" in out and "refs/heads/main" in out, out
+    print("ok  unnamed repository: an option's word is never the repository; plain git reaches "
+          "it, the tool refuses before git runs")
+
+
 def main() -> int:
     judge_checks()
     non_list_checks()
     worktree_checks()
     runner_checks()
+    unnamed_repository_checks()
     hardening_checks()
     submodule_flag_checks()
     submodule_pin_checks()
