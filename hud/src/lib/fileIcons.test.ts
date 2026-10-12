@@ -109,6 +109,10 @@ describe("the colour rule: theme tokens only, never amber or red", () => {
     const rule = (sel: string) => new RegExp(sel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\s*\\{([^}]*)\\}").exec(text)?.[1] ?? "";
     expect(rule(".dirtydot")).toMatch(/background:\s*var\(--text-2\)/);
     expect(rule(".edtab-dot.on::before")).toMatch(/background:\s*var\(--text-2\)/);
+    // A save on its way (ED-2): the same slot, a hollow --text-2 ring.
+    const ring = rule(".edtab-dot.saving::before");
+    expect(ring).toMatch(/border:\s*[\d.]+px solid var\(--text-2\)/);
+    expect(ring).toMatch(/background:\s*transparent/);
   });
 
   it("every icon renders: an aria-hidden 16px SVG with something in it, coloured by its token", () => {
