@@ -371,11 +371,16 @@ class Daemon:
             approvals_pending = len(self.approvals.pending())
         except Exception:
             approvals_pending = 0
+        # `/status` is how `jarvis restart` checks the daemon: the Browser
+        # can never make it fail. Without the host's view, the refused ports
+        # are still every control port and the workshop's default.
         try:
             browser = self.browser.status()
+            refused_ports = sorted(self.browser.refused_ports())
         except Exception as exc:
+            from .browser.policy import refused_ports as _refused_ports
             browser = {"available": False, "running": False, "error": type(exc).__name__}
-        refused_ports = sorted(self.browser.refused_ports())
+            refused_ports = sorted(_refused_ports())
         with self._lock:
             return {"jarvis-daemon": True, "version": 2,
                     "uptime": time.monotonic() - self.started_at, "providers": providers,

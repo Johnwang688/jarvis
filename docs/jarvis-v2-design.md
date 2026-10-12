@@ -2864,6 +2864,32 @@ tree. A file in another repository than the project's — a nested robot repo,
 a file reached through the Inbox — checks its own HEAD every 10 s while the
 window is visible, so a commit there clears its marks.
 
+**The Browser's engine (2026-10-12, BR-1a of
+`docs/plans/2026-10-10-hud-browser-plan.md`; amendment 1 and the decisions
+file win).** The daemon owns a Google Chrome (stable, from apt) for the
+HUD's coming Browser pane, headless and streamed later (BR-1b); this package
+is its engine and its fences, no HUD yet. Chrome starts at the first
+`POST /browser/tabs`, one instance per profile — **Main** at first, plus one
+**Private** instance whose panes are each an off-the-record context — and
+stops with the daemon (anything left is killed by exact PID). Every
+connection it makes, loopback included, goes through a loopback **SOCKS5
+gate** in the daemon that resolves a name once and connects to the address
+it judged: Jarvis's own ports (the control ports, the HUD and API ports,
+8403 unless it is this daemon's workshop) are refused on every address in
+every spelling, a public name that resolves to loopback is refused, the LAN
+only with the owner's switch (`browser.json`, off), and only literals and
+`localhost` reach a dev server. Typed URLs pass a **judge** first (http,
+https or about:blank; no user name, no `file:` and friends, which never
+touch the network), and wherever a page lands is judged again and replaced
+with an explanation when refused. Its folder (`~/.local/share/jarvis/
+browser`) is a 0700 credential folder holding the profiles, Chrome's HOME and
+the Private run folder; the launch keeps Chrome's sandbox, Safe Browsing,
+component updates and sign-in and sync (BD-5), and drops automation, the
+DevTools port, extensions and permission prompts; Chrome's environment is
+built from nothing. Every `/browser` route is owner-only on the HUD
+listener, and no URL, title or profile label reaches `/status`, the bus or
+the log. `/status` gains `browser` and `refused_ports`.
+
 Remaining: WP13 (the long-bench comparison, the owner's call on cost), a
 native Windows worker, the R8 hook on Codex, and prompt tuning in
 `roles.py` (§17's over-planning note). The daemon started by hand for the

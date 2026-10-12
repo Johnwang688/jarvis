@@ -315,6 +315,107 @@ the second round's on dfb1d7e (where v1's browser approved the card).
 the HUD's Origin to the HUD's port), the footing `/terminals` states; it
 closes the routes a v1 agent's browser and any Origin-less API client had.
 
+**The Browser's engine, gate and navigation, BR-1a (2026-10-12; plan
+`docs/plans/2026-10-10-hud-browser-plan.md` §2–§4, amendment 1 §C, the
+decisions file beside them wins; contract in `docs/hud-api.md`).** Backend
+only: the stream, input and tabs are BR-1b's, profile management BR-1c's.
+`jarvis/v2/browser/` is fully separate from v1's `jarvis.browser` (whose
+`SESSION` it never starts). Three layers keep the owner's daemon-owned
+Chrome off the control plane and his LAN:
+- **The URL judge** (`policy.judge_url`, pure): a typed or stored URL is
+  `about:blank` or absolute http(s), never userinfo, another scheme
+  (`file:`, `chrome:`, `view-source:`, typed `javascript:`/`data:`, any
+  other `about:`), an `ambiguous_authority`, a control or invisible
+  character, or Jarvis's ports in any loopback spelling (`is_face_origin`
+  plus the daemon's reported ports). Its sentences are fixed and never hold
+  the URL (the handler logs refusals). It is the only layer for `file:` and
+  friends — a browser-initiated load of those never touches the network.
+- **The SOCKS5 gate** (`gate.py`, its own thread `jarvis-browser-gate`):
+  Chrome runs with `--proxy-server=socks5://…`, `--proxy-bypass-list=
+  <-loopback>`, `MAP * ~NOTFOUND` (Chrome never resolves a name itself), no
+  QUIC, no UDP around the proxy. **Chrome 155 sends every host as a name,
+  IP literals included** (measured), so the gate parses literals itself
+  (every spelling `inet_aton` takes, IPv6, IPv4-mapped), maps `localhost`
+  and `*.localhost` to this machine without DNS, **resolves a real name
+  exactly once and connects its own socket to the numeric address it
+  judged**. It refuses `policy.refused_ports` — the one list:
+  `control_ports()`, the daemon's reported HUD and API ports, and 8403
+  unless it is this daemon's workshop (`/status` → `refused_ports`) — and
+  its own port, **on every address, before any DNS**; a *name* that
+  resolves to loopback whatever the LAN switch (rebinding onto the owner's
+  services; only literals and `localhost` reach loopback); private space
+  unless `browser.json` → `lan` (B-5, off); multicast, reserved and the
+  rest of 0/8; unresolvable and malformed names; anything but CONNECT with
+  no authentication; past 256 connections. A mixed DNS answer connects only
+  to its allowed addresses. It logs and counts the class, never a host.
+- **The landing guard** (`host.py`): every main-frame `framenavigated` is
+  judged again (`landed=True`, which also admits `about:blank#…`, Chrome's
+  error page and a `blob:` of an http(s) origin) and a refused one is
+  replaced with an explanation page.
+
+The **host** runs Playwright's async API on `jarvis-owner-browser`, every
+call timed; nothing starts with the daemon (the first `POST /browser/tabs`
+starts the gate, Playwright and the profile's Chrome), and `Daemon.stop`
+ends it after the terminals and VEX, before the bus and listeners — final,
+with a backstop that kills, by exact PID, any process whose command line
+names the profile's folder as a whole path (Chrome's helpers rewrite their
+argv into one space-separated string, so a space is a boundary too). **Keyed
+by profile from the start:** `profiles.json` (0600) lists `p-<8 hex>` ids,
+never a label (the first start writes **Main**; a corrupt list refuses
+rather than recreating Main over the owner's logins); one Chrome per
+persistent profile on `profiles/<id>/`; **Private** is one more Chrome on a
+throwaway `private/run-<hex>/` (removed at stop, swept with its Chrome at the
+next start — never Playwright's own temp folder in `/tmp`), each Private
+pane an off-the-record `new_context()` given the gate explicitly and closed
+with its last tab. **`config.BROWSER_DIR`** (`~/.local/share/jarvis/browser`,
+`JARVIS_BROWSER_DIR`) is 0700 throughout and refused when it or a folder in
+it is a symlink, not ours or open to anyone else; **`config.credential_dirs()`**
+is `V2_CREDENTIAL_DIRS` plus it, read at call time, and is what v2's
+permissions (`_credential_dirs`, `denied_grant`), `folders` and
+`editor_policy` ask now. **`config.BROWSER_SETTINGS_PATH`**
+(`~/.config/jarvis/browser.json`) is protected state (`files.
+_protected_state`). **A curated launch** (`launch_args`, Playwright's
+defaults replaced whole by `ignore_default_args=True`): the deb's sandbox
+kept (renderers run under seccomp), Safe Browsing, component updates,
+popup blocking and **sign-in and sync kept** (BD-5: no `--disable-sync` on a
+persistent profile; Private has it); no `--enable-automation`, no
+`--no-sandbox`, DevTools only over the private pipe, extensions off,
+permission prompts denied, the media router off (it searches the LAN around
+any proxy), `--mute-audio` (sound is BR-10's). **A clean environment** built
+from nothing — `HOME` is `BROWSER_DIR/home`, so Chrome's NSS store and font
+cache stay in the credential folder; locale variables only, no `JARVIS_*`,
+key, display, `PULSE_SERVER` or D-Bus. `TMPDIR` is left alone on purpose:
+Chrome's singleton socket lives there and a long path crashed it (measured).
+Downloads are off until BR-1b. **Routes** (`browser/routes.py`): every one
+`projects.owner_only` plus a strict loopback Host (its own copy — a module
+importing `terminals` fails `terminal_check`) and no query, checked before a
+body is read or Chrome started; a load reports a failure by its `net::ERR_…`
+code only; `/browser` paths are logged without a query. **No URL, title or
+label** reaches `/status` → `browser`, the bus or the log. Measured under
+the 3G cap (Chrome 155): launch ~0.27 s, first tab ~0.55 s, the tree's PSS
+~360 MiB with one tab and ~470 MiB after the attack pages, stop ~0.1 s.
+Free suites: `tests/v2/browser_gate_check.py` (no Chrome: the judge, every
+refusal family against stand-in listeners whose accept counters stay 0,
+rebinding through an injected resolver asked once, the LAN switch, every
+ATYP, a dev port piped both ways) and `tests/v2/owner_browser_check.py`
+(real headless Chrome, one instance at a time, 3 tabs, its gate's resolver
+answering no name and its connector refusing all but loopback, so nothing
+reaches DNS or the network: the twelve ways into the HUD — typed, 302, meta
+refresh, `location=`, iframe, fetch, XHR, WebSocket, a service worker's
+fetch, `<img>`, form POST, `window.open` — from Main and from Private, each
+with a sanity half that reaches an ordinary server by all twelve; refused
+schemes; owner-only; the folder; the launch flags, sandbox and
+environment; persistence across a restart and forget; settings; stop);
+`frame_check` walks `/browser`. Each of the plan's mutations bites (the PR
+lists them). **Stated limits:** the Playwright driver (a node process)
+inherits the daemon's environment, as v1's does; v1's file tools — the fast
+path's `read_file` and `grep_files` among them — do not refuse the profile
+folder, as they do not refuse `~/.ssh` (Chrome's stores there are binary
+SQLite under its fixed "basic" key); and none of this is a boundary against
+a program running as the owner, which can read the profile or use the gate
+(no new lever: it could connect directly). No idle stop or instance cap yet
+(BR-1c), and BD-10's memory ceiling is not set.
+
 **A message sent while a turn runs is never a dead end (2026-10-08, design
 §5.1/§11.8/§18; free suite `tests/v2/steer_check.py`).** It used to 409, and
 the HUD's catch then dropped its hold on the still-running turn (no Stop, no
