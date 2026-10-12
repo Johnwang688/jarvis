@@ -2750,8 +2750,26 @@ only the runtime and the grammars built into its map, from the HUD's own
 `/assets/`, refusing any other URL before a request is made. Nothing loads
 until the first file of a covered language opens: first paint grows by 168 bytes,
 the worker is 213 KB, and the grammars (about 10 MB in all) load one by one
-as their languages first appear. Not yet: folding and sticky scroll from the
-tree (ED-6).
+as their languages first appear. Folding and sticky scroll from the tree
+followed in ED-6 (below).
+
+**Folding and sticky scroll from the tree (2026-10-12, ED-6 of the editor
+plan, §2.6).** In the same languages, folds follow the code rather than its
+indentation: nvim-treesitter's own `folds.scm` (vendored at ED-5's pin, each
+file's size and SHA-256 in a manifest) is run by the syntax worker over the
+tree it already holds, so a C++ file folds at its includes, classes,
+functions (at the signature, even with the brace on a line of its own),
+`if`s, `for`s, lambdas and block comments, a Python file at its defs,
+classes, docstrings and multi-line brackets, and a Markdown file at each
+heading's whole section and each fence. As in VS Code, a block's own closing
+`}` (or `]`, `)`, end tag) stays visible below a folded block, so `class A {`
+folds to `class A { ⋯` over its `};`. **Sticky scroll reads the same
+ranges**: deep in a function, the line held at the top is the function's
+signature. Wherever tree-sitter is not serving a file — past 1 MB, on a slow
+parse, with the worker gone, in a language it does not cover, and always for
+an env file, which never reaches the worker — Monaco folds by indentation, as
+before; and the fold query has the colour queries' 250 ms budget (twice over
+it, that file folds by indentation from then on).
 
 Remaining: WP13 (the long-bench comparison, the owner's call on cost), a
 native Windows worker, the R8 hook on Codex, and prompt tuning in
