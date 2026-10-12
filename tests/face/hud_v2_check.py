@@ -3189,6 +3189,16 @@ def main():
             finally:
                 vex_mock.stop()
 
+            # New VEX project (VX-3): a mock of its own, whose VEX world is a
+            # temp "Windows drive" with real template zips.
+            from tests.face.hud_v2_vex_new_check import vex_new_checks
+            vex_new_mock = MockDaemon(0).start()
+            try:
+                vex_new_checks(browser, vex_new_mock, f"http://127.0.0.1:{vex_new_mock.port}", check, until,
+                               guard, FAKE_RECOGNIZER)
+            finally:
+                vex_new_mock.stop()
+
             # The tree's unsaved-changes dots and file icons: a mock of their
             # own, whose world gains a nested C++ folder for the run.
             from tests.face.hud_v2_editor_marks_check import marks_checks
@@ -3198,6 +3208,16 @@ def main():
                              guard, FAKE_RECOGNIZER)
             finally:
                 marks_mock.stop()
+
+            # The git gutter and the explorer's git colours (ED-9): a mock of
+            # their own, whose world gains a repository for the run.
+            from tests.face.hud_v2_git_check import git_checks
+            git_mock = MockDaemon(0).start()
+            try:
+                git_checks(browser, git_mock, f"http://127.0.0.1:{git_mock.port}", check, until, guard,
+                           FAKE_RECOGNIZER)
+            finally:
+                git_mock.stop()
 
             ctx = browser.new_context(permissions=["microphone"])
             guard(ctx)

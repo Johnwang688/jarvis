@@ -1432,7 +1432,35 @@ HUD can flag one it cannot match to its own click.
   file written in the extension's v2 shape, and the project created —
   `project_created` arrives as usual.
 - `GET /vex/projects/{id}` → that request: `state` `"asking"`, `"created"`
-  (with `project_id`), `"declined"` or `"failed"`, and a `message`.
+  (with `project_id`), `"declined"` or `"failed"`, and a `message`. A
+  template write that fails after the yes takes back what that request wrote
+  (only files it created and folders it made, through the folder's fds, each
+  judged by its `(st_dev, st_ino)` — a renamed-in entry is never removed — and,
+  after a refusal by the store, only if the folder at that path is still the
+  one the template was written through; VX-3 review LOW-2 and its delta
+  review): `failed`'s message names the colliding file where there is one,
+  and says what the folder holds now, read through its fd — empty again
+  (Create uses it again without a card, O5), what it still holds (empty or
+  remove it), or that the path is no longer the folder written to (nothing
+  removed). The HUD reads this one read
+  at a time and rides out a failed read (5xx, the network) with a backoff;
+  only an answer, a 404/400, or three minutes of failures end its tracking.
+- `POST /vex/projects/check` `{name, language, template, location?}` (VX-3,
+  2026-10-12) → 200 `{path, windows_path, state, asks, describe}`: what
+  `POST /vex/projects` would do with the same body, **without asking or making
+  anything**. `path` is the exact folder the `project_folder` card will name,
+  `windows_path` its `C:\…` spelling, `state`
+  `"missing"` or `"empty"`, `asks` false for an existing empty folder (used
+  without a card, O5), `describe` the card's words for it. Every refusal is
+  Create's, word for word (400 for a bad name, language, template or location;
+  409 for a folder off a Windows drive, refused by `check_project_folder`,
+  **refused by `to_windows`** — a character a Windows command line could
+  misread, such as `(`, `&` or anything outside ASCII, which a build or a
+  download would refuse later (VX-3 review MED-1; Create refuses it too) — or
+  not empty), less Create's closing "Nothing was made." Owner-only like every
+  VEX route. `GET /vex/templates` answers a templates folder that cannot be
+  listed with a 409 sentence. The HUD reads `/vex/status`'s
+  `project_folder` as the dialog's default parent (V-4).
 
 **Program terminals** are listed by `GET /terminals` like any other, with two
 new row fields: `program` (`null` for a shell, else `"vex-build"`,
@@ -1791,6 +1819,75 @@ The HUD's test hooks for it are read-only and not an API:
 `window.__hudSyntax.states()`, `.probe(url)` (asks the loader's gate, never
 fetches) and `.loaded()` (the grammars compiled).
 
+## Additions 2026-10-12 (the git gutter and the explorer's git colours — ED-9)
+
+Editor plan §2.8 ("Git gutter, explorer git colours"). Both routes are
+**owner-only** (`projects.owner_only`: the HUD listener and the HUD's own
+page), checked in `hud_api.route` **before anything else** — the project is
+not even looked up for anyone else, so the API listener and a bare request
+get 403 whatever the id. `jarvis/v2/editor_git.py` holds them. Git runs only
+through `gitops._git` (an absolute system git, every `GIT_*` variable
+dropped, hooks, fsmonitor, the pager and auto-gc off, `GIT_OPTIONAL_LOCKS=0`
+so a status never rewrites the index), and **a repository whose own config
+names a program for git to run, or moves where it works**
+(`gitops._risky_config`: a filter, textconv, `core.sshCommand`,
+`core.worktree`, `include.path` …), **is refused by both routes (403)**, as
+`gitops` refuses it everywhere.
+
+- `GET /projects/{id}/git/base?path=` → `{"path", "state", "head", "text",
+  "size"?, "renamed"?}`: what HEAD holds for a project file, the gutter's
+  base. `path` is placed by `hud_api.scope` and judged **before git runs**:
+  the gate's state, anything `editor_policy` withholds (no gate exemption)
+  and every credential env file (`secrets.is_env_credential`) are **403**,
+  as written or where they resolve — **and so is a file whose name in git is
+  one of those**: a staged rename (`git diff-index --cached -M HEAD`, which
+  reports no copies — a staged copy is `new`) serves its source's HEAD text,
+  so the source is judged too (`git mv .env notes.txt` makes `notes.txt` a
+  403; its text is never sent). **The source must also be in the project**,
+  placed as `hud_api.scope` places a path (under one of its roots, no
+  `SKIP_DIRS` or `.git` component): a file moved in from outside the
+  project, or out of `node_modules`, answers `new` and nothing of its source
+  is sent. HEAD's blob is read **by object id** (`git cat-file blob <oid>`),
+  so no path-based attribute (textconv, a filter, an eol conversion) applies;
+  its size is read from `ls-tree -l` first and capped at the editor's own
+  read cap (2 MiB), and its bytes are judged by the editor's own rule
+  (`editor_policy.is_text`, a strict UTF-8 decode). `state`: `ok` (with
+  `text`, as stored — CRLF kept, a byte-order mark kept; the window compares
+  lines), `new` (HEAD does not hold it: untracked, newly added, a copy, or a
+  rename from outside the project — no gutter), `no_repo`, `no_head` (no
+  commit yet), `binary` (a NUL in the first 8 KiB or bytes that are not UTF-8
+  — no gutter; a U+FFFD the file holds is text), `too_large`, `not_a_file`
+  (a symlink, a submodule, a folder in HEAD) or `unavailable` (git could not
+  say). `head` is HEAD's commit id; `text` is null unless `state` is `ok`.
+  404 when the file is not there; 403 for a path outside the project.
+- `GET /projects/{id}/git/status` → `{"repo", "head", "branch", "files":
+  {rel: state}, "dirs": {rel: state}, "truncated", "note"?}`: the explorer's
+  colours. `git status --porcelain=v2 -z --branch --untracked-files=normal
+  --ignored=traditional --renames --ignore-submodules=all -- .` at the
+  project's root — **never into a submodule**, whose own config `_risky`
+  did not read (a status that recursed would run a filter it names). Paths
+  are relative to the project's root (a repository path outside it is
+  dropped); `dirs` are folders git reported whole (`untracked`,
+  `ignored`), `""` the project's own folder. `state` is `modified`, `added`,
+  `untracked`, `ignored`, `renamed` (a staged rename; its source is never
+  returned), `deleted` or `conflict`. **Judged before they are returned**:
+  a path under a `SKIP_DIRS` folder, withheld (a credential bundle by name,
+  in a credential folder, a login file) or the gate's state is dropped.
+  `head` is null before the first commit; `repo: false` outside a
+  repository. **Cached for 2 s per root** — or three times what the status
+  took, when that is longer (a slow `/mnt/c` repository rests between runs)
+  — a refusal too, and run once at a time per root; at most 20,000 entries (`truncated`) and 5 s (`truncated`
+  with a `note`). 403 when the project's root is itself a credential folder.
+
+The window's half (`hud/src/lib/linediff.ts`, `lib/gitMarks.ts`,
+`state/gitGutter.ts`, `state/gitStatus.ts`): the gutter diffs HEAD's text
+against the **buffer** (Myers, bounded), only for a `text` or `safety`
+buffer — never an env file — and asks for HEAD's text again when the status
+poll's `head` moves, and every 10 s while the window is visible for a file
+whose base `head` is not the project's (a nested repository, the Inbox, an
+extra folder: the poll cannot see that HEAD move); the status is polled
+every 3 s per project while a tree or a gutter shows it. Rules in CLAUDE.md's
+ED-9 paragraph.
 
 ## Additions 2026-10-12 (folding from the tree — ED-6)
 

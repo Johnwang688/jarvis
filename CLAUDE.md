@@ -1403,6 +1403,76 @@ the controls, the strip's filter) and each review fix (M1, M2's HUD half,
 L1–L7) shown to fail their checks when removed; M2's daemon half in
 `tests/v2/vex_check.py` (`Device`, the fake make's `NOOP` and `HOLD`).
 
+**New VEX project, VX-3 (2026-10-12; editor plan §2.9 "New VEX project",
+decisions V-4; design §18; contract in `docs/hud-api.md`).** A dialog
+(`components/NewVexProject.tsx`, rules in `lib/vexNew.ts`, picker
+`"newVexProject"`) reached from New project's "New VEX project from a
+template…" and the palette's **New VEX Project from a Template…**
+(`project.newVex` — the palette's one VEX entry, which opens the dialog and
+nothing else; `commands.test.ts` pins that). **The window never makes up a
+path**: the templates are `GET /vex/templates` (split by language, labelled
+from `index.json`), and **the exact folder it shows is the daemon's answer to
+the very body Create sends** — the new `POST /vex/projects/check` (VX-1's
+`_plan`, shared with `new_project`, so the same refusals word for word and the
+path the `project_folder` card names; nothing asked or made; owner-only like
+every VEX route). Create is enabled only while that answer is for exactly the
+inputs on screen (`bodyKey`), the name passes the daemon's `PROJECT_NAME`
+(mirrored, `projectNameRefusal`), and no card is up. Location defaults to
+`vex.json`'s `project_folder` (the HUD now reads it from `/vex/status`, which
+already reported it) and is sent only when changed. **A folder VEX's tools
+could never work in is refused before anyone is asked** (review MED-1):
+`_plan` runs the build's own `to_windows` on the folder, so `My (1)`, `a&b`
+or `Документы` are refused by the check and by Create in the same words — the
+owner used to approve a project whose every build answered 409. Create raises
+the card; the dialog polls `GET /vex/projects/{id}`, **one read at a time,
+riding out a failed read with a backoff** (`afterFailedRead`, review LOW-3:
+only the daemon's answer, a 404/400, or three minutes of failures end the
+tracking — one blip used to say `failed` while the card was still up), and
+says how it ended — **Deny makes nothing and the dialog stays open saying
+so**; on `created` it refreshes projects, closes and starts a new thread in it
+(as New project does). An existing empty folder is used with no card (O5),
+said beforehand. **Under any card every control is disabled (`blocked` from
+App) and inert, and Escape is left to the card** (the dialog's own Escape
+listener returns while a card is up, and its inputs never stop a key then).
+`GET /vex/templates` answers a templates folder that cannot be listed with a
+409 sentence, never a 500. **A template write that fails midway takes back
+what this request wrote** (VX-1 code, review LOW-2): `_write_new` records each
+folder it made and each file it created `O_EXCL` **with its `(st_dev,
+st_ino)`, read by `fstat` from the fd it was made through**, and
+`_remove_written` unlinks those files and `rmdir`s those folders, newest
+first, through the same `O_DIRECTORY | O_NOFOLLOW` fds — **judged by identity,
+never by name** (delta review LOW-B: `O_NOFOLLOW` stops a symlink swap, not a
+rename, and a folder renamed away with an owner folder moved into its name
+lost the owner's `mkenv.mk`): what is at the name now is `stat`ed without
+following and must be the very entry it made, else it is kept and listed as
+left. A project the store would not record takes its template back too
+(`remove_written`), **only through the very folder the template was written
+through** — reopened by path, its `(st_dev, st_ino)` must match `unpack`'s
+(LOW-A: a parent swapped for a symlink to a decoy lost the decoy's files);
+else nothing is removed, here or there. **The message is read from the
+folder** (`_listing`, through its fd; LOW-C): empty again (a retry uses it
+without asking, O5), or what it still holds and says to empty or remove it,
+or that the path is no longer the folder written to. A colliding file is named
+("src/main.cpp already exists …"), and an `OSError` is said by its
+`strerror`, never the path it names. What remains: another program swapping an
+entry in the instant between the take-back's `stat` and its `unlink`.
+Free checks: `lib/vexNew.test.ts`,
+`commands.test.ts`, `tests/v2/vex_check.py` (`NewProjectCheck`, `HalfWritten`; the check
+route in `Routes` and `Coverage`) and `tests/face/hud_v2_vex_new_check.py` (66, a
+`MockDaemon(0)` of its own; `hud_v2_mock_vex.setup_new` lays a temp "Windows
+drive" with real template zips that the daemon's own `list_templates`,
+`read_template`, `unpack` and `settings_document` read and write, and the
+mock's `POST /approvals/{id}` answers the card through
+`mock_vex.approval_decided`; run by `hud_v2_check` after the VEX view
+section; the mock judges the folder with the daemon's own `to_windows` and its
+`new["state_fail"]` fails the next reads). Guards shown to bite when removed:
+the dialog's Escape hold, its `disabled` under a card, `createReady`'s key
+match, the check never asking, the check behind `_owner`, and the review
+round's four — the toolchain refusal, the normalised path, the take-back and
+the poll's tolerance — and the delta review's identity compare (the swapped-in
+folder's `mkenv.mk` is taken without it). `HalfWritten`'s three delta-review
+tests fail on 9e1fcb6.
+
 **The HUD's CSP and installed build, ED-4 (2026-10-11; editor plan §1.7,
 §2.7; decision C-1; contract in `docs/hud-api.md`).** Every HUD and API
 response carries the **full policy** (`hud_api.HUD_POLICY`) in WP-E's one
@@ -2549,6 +2619,106 @@ past the size budget folds by indentation). With the provider unregistered,
 off-after-two guards each fail their vitest when removed. Not done: region
 markers (`// #region`) — the indentation provider honours them, tree folds
 do not.
+
+**The git gutter and the explorer's git colours, ED-9 (2026-10-12; plan §2.5,
+§2.8, the ED-9 package in §3; design §18; contract in `docs/hud-api.md`).**
+Two routes in `jarvis/v2/editor_git.py`, **owner-only before anything else**
+(`hud_api.route` calls `owner_only` before the project is even looked up, so
+a bare request or the API listener is 403 whatever the id). `GET
+…/git/base?path=` answers HEAD's text; **the path is judged before git
+runs** — the gate's state (resolved or as configured), anything
+`editor_policy` withholds (`withheld_anywhere`: no gate exemption) and every
+credential env file are 403 (`editor_git.refused`) — **and so is the name in
+git**: a staged rename's source (`diff-index --cached -M HEAD`; `-M` reports
+no copies, so a staged copy is `new`) is judged the same way, because `git mv
+.env notes.txt` would otherwise serve `.env`'s committed text as
+`notes.txt`'s, and **held to the project** (review of PR #61, LOW 1): placed
+by `hud_api.scope` (a root, no `SKIP_DIRS` or `.git`), so a file moved in
+from outside the project, or out of `node_modules`, is `new` and nothing of
+its source is sent. HEAD's blob is read **by object id** (`cat-file blob`: no
+textconv, filter or eol attribute applies), its size read first from `ls-tree
+-l` and capped at the editor's 2 MiB, **in bytes** (`_git_blob`: gitops' own
+binary, hardening and environment — `gitops._git` decodes with replacement)
+and judged by the editor's own `editor_policy.is_text`, so a U+FFFD the file
+holds is text and a NUL or non-UTF-8 blob is `binary` (no gutter); a file
+HEAD lacks is `new` (no gutter, untracked and added alike — the explorer's
+colour says which). `GET
+…/git/status` is `git status --porcelain=v2 -z … --ignored=traditional
+--renames --ignore-submodules=all -- .`, project-relative, **judged before it
+is returned** (SKIP_DIRS, withheld and the gate's state dropped, lexically: a
+status is names only, and a rename's source is never returned; the policy
+is `editor_nav._policy_for` narrowed to the root as resolved and as
+written), cached 2 s
+per root — or three times what the status took, when longer, so a slow `/mnt/c`
+repository rests between runs — refusals too, single-flight, 20,000 entries
+and 5 s at most.
+**Git only through `gitops._git`, and a repository whose own config names a
+program is refused by both** (`gitops._risky_config`). **`--ignore-submodules=all`
+is load-bearing**: `_risky_config` reads the superproject's config only, and
+a status that recurses runs `git status` inside the submodule, which obeys
+*its* config — measured: a submodule's `filter.x.clean` ran on a superproject
+status through `gitops._git` (a same-size, mtime-moved file forces the
+hash). **The same hole is open in the `git` tool** (`gitops.run(path,
+["status"])` and `["diff"]` each ran a submodule's filter, measured in-process;
+`gitops.py` is SELF_PROTECTED: reported, not fixed here). A base read inside a submodule is refused anyway
+(its config sets `core.worktree`). The owner's global config (a git-lfs
+filter) still runs on a status, as in gitops. **The window**:
+`lib/linediff.ts` is Myers in linear space (middle snake, explicit stack, never
+recursion), lines interned to ints, **bounded by a work budget**
+(`DIFF_BUDGET` 2M steps, about 1,400 changed lines exact): past it the rest of
+a run is one coarse "modified" block, still a correct diff (`exact: false`);
+two runs with no line in common are an exact replace. `gutterMarks`: inserted
+runs `added`, replaced runs `modified` over the lines standing now, removed
+runs a `deleted` wedge at the foot of the line above (the head of line 1).
+`state/gitGutter.ts`: **one gutter per buffer (`abs`)**, the diff against the
+**model's lines, never the disk**, `DEBOUNCE_MS` 150 (500 past 5,000 lines)
+after the last change — so a pause, not a keystroke, reads the lines (the
+ED-2 rule bends this far and no further) — no gutter past 100,000 lines
+(counted with `getLineCount()` before the lines are read); HEAD's text read
+again **when the status poll's `head` moves** — and, **for a file whose base
+came from another HEAD than the project's** (a nested repository, a folder of
+robot repositories, the Inbox at `~`, an extra folder: the poll can never see
+that HEAD move), **every `RECHECK_MS` (10 s) while the window is visible**
+(review of PR #61, LOW 2); a late answer for a closed gutter is dropped; a
+byte-order mark in HEAD's text is the file's, as in the buffer. `PaneEditor` draws the marks in its
+own `createDecorationsCollection` (linesDecorationsClassName `jgit-add`,
+`-mod`, `-del`, `-top`; theme.css draws a 3px bar in `--syn-string` /
+`--syn-fn` and a `--red` wedge at 60%, ED-3's "removed"; no Monaco colour
+key — `editorGutter.*` is not registered in Monaco 0.57). **FileTab asks for
+a gutter only on a `text` or `safety` buffer** — never env, withheld, gate or
+binary — through the project the buffer was read through.
+`state/gitStatus.ts` polls each watched project every 3 s while visible (and
+on focus), one request at a time, and **bumps only when the answer
+changes**; a 403/404 is kept as `error` and asked again after 30 s. The tree:
+`useGitMarks` (`components/GitMarks.tsx`) hands the memoised `Node` a
+`GitMarks` built from a string key (`lib/gitMarks.ts` `gitKey`), so #50's
+rule holds — no redraw per keystroke or per unchanged poll; a row carries
+`data-git` and a tooltip, the name modified `--syn-fn`, added/renamed/
+untracked `--syn-string`, conflict `--syn-const`, ignored at 50% opacity; a
+folder wears what git reported for it whole, else the strongest state under
+it (conflict > modified/deleted > added/renamed > untracked; ignored never
+colours a folder). The mock serves `world["git"]` (`git_route`; no key: not a
+repository). Free checks: `tests/v2/editor_git_check.py` (29; owner-only with
+no git run when refused, the states, every refusal including renames from
+`.env`, a withheld file and the gate's state, renames from outside the
+project and out of `node_modules` answering `new`, a staged copy `new`, strict
+UTF-8, a repository-config filter and a submodule's that never run, the
+status's states, judging, cache and cap),
+`linediff.test.ts` (3,000 random pairs against an O(NM) LCS reference:
+correct and minimal; budgets; a 50k-line file), `gitMarks.test.ts`,
+`gitGutter.test.ts` (debounce, one read per pause, undo to clean, refetch on
+the project's HEAD, a commit in a nested repository followed by the recheck and
+none while hidden, no recheck in the project's own repository, the BOM, a long
+file never read, the poll's bumps and back-off) and `tests/face/hud_v2_git_check.py`
+(a `MockDaemon(0)` of its own, after the marks section of `hud_v2_check`: an
+added bar on an unsaved line and clean again on undo, modified and the wedge
+in their tokens, HEAD moving, an env file asking nothing, the explorer's
+colours and a recolour on the poll, a MutationObserver seeing no tree change
+while typing). Shown to bite in a scratch copy (7 of 7): the path's refusal,
+the name in git, the status's and the base's config check, the submodule
+flag (the filter ran), the status's judging, and `owner_only`; and in the
+review round, the source's project check (both new cases) and the recheck
+(vitest).
 
 **The effort is a slider, not pills (2026-10-10, owner's ask: "like Claude's").**
 `components/EffortSlider.tsx`, rules in `lib/effortSlider.ts`: "Effort
