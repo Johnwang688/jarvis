@@ -138,15 +138,29 @@ LEFTOVER_WAIT_S = 10.0
 
 # A conversation past the model's context window (2026-10-12). The CLI answers
 # with a synthetic API error whose text starts with this, and a result with
-# `is_error`. The provider then runs the CLI's own `/compact` once and sends
-# the message again; COMPACT_TIMEOUT_S bounds the compaction (one on a 1M-token
-# conversation took 53 s live), and the owner is told in one sentence when it
-# does not help.
+# `is_error`. The provider then runs the CLI's own `/compact` once, and sends
+# the message again only when nothing of it can have run (`_context_full`);
+# COMPACT_TIMEOUT_S bounds the compaction (one on a 1M-token conversation took
+# 53 s live), polled every INTERRUPT_POLL_S so the owner's Stop ends it at
+# once. Otherwise the owner is told in one sentence what happened.
 CONTEXT_FULL_PREFIX = "prompt is too long"
 COMPACT_TIMEOUT_S = 600.0
-CONTEXT_FULL_MESSAGE = (
-    "This conversation is too long for the model's context window and "
-    "compacting it did not make room; start a New thread to go on."
+INTERRUPT_POLL_S = 0.25
+# Compacted, the message sent again, and it still did not fit.
+CONTEXT_STILL_FULL = (
+    "This conversation is still too long for the model's context window after "
+    "compacting it; start a New thread to go on."
+)
+# Compacted, but nothing re-sent: some of the turn may already have run.
+CONTEXT_COMPACTED_SEND_AGAIN = (
+    "This conversation filled the model's context window partway through, so it "
+    "was compacted; nothing was re-sent, because part of the work may already "
+    "have run — send your message again to go on."
+)
+# The compaction did not finish (no compact boundary, an error, the time limit).
+CONTEXT_NOT_COMPACTED = (
+    "This conversation is too long for the model's context window and compacting "
+    "it did not finish; send your message again to retry, or start a New thread."
 )
 
 # How much of a tool result goes into TOOL_FINISHED.summary. A surface renders
@@ -1046,9 +1060,9 @@ class ClaudeProvider:
         async def turn() -> None:
             try:
                 await session.client.query(_prompt(message, prompt_uid, later=behind))
-                held, full = await self._read(session, events, prompt_uid)
+                held, full, resend = await self._read(session, events, prompt_uid)
                 if full:
-                    held = await self._context_full(session, events, message, held)
+                    held = await self._context_full(session, events, message, held, resend)
                 if held is not None:
                     events.put(held)
             except BaseException as exc:  # noqa: BLE001 — reported, never swallowed
@@ -1139,11 +1153,13 @@ class ClaudeProvider:
 
     async def _read(
         self, session: _Session, events: queue.Queue, prompt_uid: str
-    ) -> tuple[Event | None, bool]:
+    ) -> tuple[Event | None, bool, bool]:
         """Read this message's turn off the CLI, steers included. -> the
         TURN_FINISHED this send hands back (None if the stream ended first),
-        and whether that result said the conversation is past the model's
-        context window (`_context_full`).
+        whether that result said the conversation is past the model's
+        context window (`_context_full`), and whether the message may then be
+        sent again: only if the overflowing CLI turn was the message's own and
+        used no tool and took in no steer.
 
         The CLI runs turns one after another, and with `--replay-user-messages`
         echoes, under our uuid, each stdin message as it drains: the one that
@@ -1190,13 +1206,15 @@ class ClaudeProvider:
         guessed = False          # ... taken from an unechoed CLI turn, not seen
         owner = None             # who opened the CLI turn under way (None: none is)
         held = None              # the TURN_FINISHED this send hands back
-        held_full = False        # ... and whether it said the context is full
+        held_full = False        # ... whether it said the context is full
+        held_resend = False      # ... and whether the message may be sent again
         candidate = None         # a result that was a leftover's, or this message's
         candidate_full = False
         candidate_until = None
         hold_began = hold_quiet = None
         restarted = False
         turn_full = False        # the CLI turn under way said "Prompt is too long"
+        turn_work = False        # ... or used a tool, or took in a steer
         while True:
             timeout = None
             if hold_began is not None:
@@ -1210,7 +1228,7 @@ class ClaudeProvider:
                 if hold_began is None and candidate is not None:
                     # The message's own start never showed: the CLI did not
                     # echo it, so the result taken for a leftover's was its.
-                    held, held_full = candidate, candidate_full
+                    held, held_full, held_resend = candidate, candidate_full, False
                 break
             if item is _END:
                 session.pump = None
@@ -1262,8 +1280,11 @@ class ClaudeProvider:
                                 await session.client.interrupt()
                         else:
                             await self._stop_if_interrupted(session)
+                    else:
+                        turn_work = True           # folded into the CLI turn under way
                     continue
-            if owner is None and isinstance(msg, SdkUserMessage) and _injected(msg.origin):
+            if (owner is None and isinstance(msg, SdkUserMessage)
+                    and _injected(getattr(msg, "origin", None))):
                 # The CLI replays the message that starts a turn somebody else
                 # started (a background task's notice) with its origin: that
                 # CLI turn is never this message's, whatever this CLI is known
@@ -1272,8 +1293,11 @@ class ClaudeProvider:
                 hold_began = None
                 await self._stop_if_interrupted(session)
                 continue
-            if isinstance(msg, AssistantMessage) and _context_full_message(msg):
-                turn_full = True
+            if isinstance(msg, AssistantMessage):
+                if any(isinstance(b, ToolUseBlock) for b in msg.content):
+                    turn_work = True               # a sub-agent's tools count too
+                if getattr(msg, "parent_tool_use_id", None) is None and _context_full_message(msg):
+                    turn_full = True               # never a sub-agent's
             if owner is None and isinstance(msg, (AssistantMessage, StreamEvent)):
                 owner = "unknown"                  # a turn whose start was not echoed
                 hold_began = None
@@ -1298,7 +1322,12 @@ class ClaudeProvider:
             if finished is None:
                 continue
             ended, owner = owner, None
-            full, turn_full = turn_full or _context_full_result(msg), False
+            full = _context_full_result(msg, said=turn_full)
+            with session.mutex:
+                # A steer of this turn written and not seen to drain may have
+                # been folded in silently: work of its own, as one echoed is.
+                work = turn_work or any(g == generation for g in session.steering.values())
+            turn_full = turn_work = False
             kind = _injected(getattr(msg, "origin", None))
             if ended in (None, "unknown") and kind is not None:
                 # The result says so even when nothing before it did (a
@@ -1333,7 +1362,12 @@ class ClaudeProvider:
                     candidate_full = full
                     continue
                 started = True                     # nothing else could have run
-            held, held_full = finished, full
+            # Sent again only from the message's own CLI turn, and only if it
+            # did nothing a second run would repeat (review of PR #57: a
+            # `git push` ran, then the context filled, and the push was sent
+            # again; a steer's own turn overflowed, and the answered message
+            # was sent again in its place).
+            held, held_full, held_resend = finished, full, ended == "prompt" and not work
             with session.mutex:
                 session.accepting = False
                 pending = any(g == generation for g in session.steering.values())
@@ -1347,43 +1381,60 @@ class ClaudeProvider:
                 session.steering.clear()           # nothing to recognise them by later
             elif session.interrupted:
                 session.stopped.update(u for u, g in session.steering.items() if g == generation)
-        return held, held_full and held is not None
+        full = held_full and held is not None
+        return held, full, full and held_resend
 
     async def _context_full(
-        self, session: _Session, events: queue.Queue, message: UserMessage, held: Event | None
+        self, session: _Session, events: queue.Queue, message: UserMessage,
+        held: Event | None, resend: bool,
     ) -> Event | None:
         """The message's result said the conversation no longer fits the
         model's context window ("Prompt is too long"). It is not a reply: run
-        the CLI's own `/compact` once and send the message again; if that does
-        not help, say so in one sentence and end the turn as an error. The
-        session is kept — the CLI's conversation is the same on a resume, and
-        the next message tries again. -> the TURN_FINISHED to hand back."""
+        the CLI's own `/compact` once. Send the message again only when
+        `resend` says the overflowing CLI turn was the message's own and did
+        nothing a second run would repeat (no tool, no steer); otherwise, and
+        when compacting fails or does not help, say what happened in one
+        sentence and end the turn as an error. Stop means stop: the turn ends
+        as interrupted, at once. The session is kept — the CLI's conversation
+        is the same on a resume. -> the TURN_FINISHED to hand back."""
         if session.interrupted:
-            return held                            # stop means stop: no retry
+            return _as_interrupted(held)
         LOG.info("claude %s: the conversation is past the context window; compacting once",
                  session.thread_id)
-        if await self._compact(session, events) and not session.interrupted:
+        compacted = await self._compact(session, events)
+        if session.interrupted:
+            return _as_interrupted(held)
+        if not compacted:
+            note = CONTEXT_NOT_COMPACTED
+        elif not resend:
+            LOG.info("claude %s: compacted; the message is not sent again "
+                     "(its turn may already have done work)", session.thread_id)
+            note = CONTEXT_COMPACTED_SEND_AGAIN
+        else:
             uid = str(uuid.uuid4())
             with session.mutex:
                 behind = self._leftover_possible(session, session.generation)
             await session.client.query(_prompt(message, uid, later=behind))
-            again, full = await self._read(session, events, uid)
+            again, full, _ = await self._read(session, events, uid)
             if not full:
                 return again
             held = again if again is not None else held
+            if session.interrupted:
+                return _as_interrupted(held)
             LOG.info("claude %s: still past the context window after compacting",
                      session.thread_id)
-        if session.interrupted:
-            return held
-        events.put(Event(EventKind.ERROR, session.thread_id,
-                         {"message": CONTEXT_FULL_MESSAGE, "fatal": False}))
+            note = CONTEXT_STILL_FULL
+        events.put(Event(EventKind.ERROR, session.thread_id, {"message": note, "fatal": False}))
         return held
 
     async def _compact(self, session: _Session, events: queue.Queue) -> bool:
         """Run the CLI's `/compact` (the stream-json form the Agent SDK
         documents) and read it to its result. -> whether a compact boundary
         came back. Shown as one tool call, so the wait is visible; bounded by
-        COMPACT_TIMEOUT_S, after which the compaction is interrupted."""
+        COMPACT_TIMEOUT_S, after which the compaction is interrupted; and the
+        owner's Stop is looked for every INTERRUPT_POLL_S, so it ends the wait
+        at once (`interrupt()` has already told the CLI). A read left waiting
+        stays the pump's, for the next turn."""
         uid = str(uuid.uuid4())
         call_id = f"compact-{uid[:8]}"
         events.put(Event(EventKind.TOOL_STARTED, session.thread_id,
@@ -1394,12 +1445,18 @@ class ClaudeProvider:
             loop = asyncio.get_running_loop()
             deadline = loop.time() + COMPACT_TIMEOUT_S
             while True:
-                try:
-                    item = await self._pump(session).next(max(0.0, deadline - loop.time()))
-                except asyncio.TimeoutError:
+                if session.interrupted:
+                    compacted = False
+                    break
+                left = deadline - loop.time()
+                if left <= 0:
                     with contextlib.suppress(Exception):
                         await session.client.interrupt()
                     break
+                try:
+                    item = await self._pump(session).next(min(left, INTERRUPT_POLL_S))
+                except asyncio.TimeoutError:
+                    continue
                 if item is _END:
                     session.pump = None
                     break
@@ -1408,7 +1465,8 @@ class ClaudeProvider:
                     raise item.exc
                 if isinstance(item, SystemMessage) and item.subtype == "compact_boundary":
                     compacted = True
-                if isinstance(item, ResultMessage) and _injected(item.origin) is not None:
+                if (isinstance(item, ResultMessage)
+                        and _injected(getattr(item, "origin", None)) is not None):
                     self._take(session, events, item)      # somebody else's turn
                     continue
                 if self._take(session, events, item) is not None:
@@ -1853,16 +1911,27 @@ def _context_full_message(msg: AssistantMessage) -> bool:
     window: an assistant message with `error` set (or the CLI's synthetic
     model) whose text is "Prompt is too long…". A reply of the model's that
     merely starts with those words carries neither."""
-    if msg.error is None and msg.model != "<synthetic>":
+    if getattr(msg, "error", None) is None and getattr(msg, "model", None) != "<synthetic>":
         return False
     return any(isinstance(b, TextBlock) and _too_long(b.text) for b in msg.content)
 
 
-def _context_full_result(msg: Any) -> bool:
-    """A result frame that ended on "Prompt is too long"."""
+def _context_full_result(msg: Any, *, said: bool = False) -> bool:
+    """A result frame that ended on "Prompt is too long": `is_error`, and the
+    words in the result itself or (`said`) in the CLI turn's own synthetic
+    error. A turn the CLI recovered from — the error, then a success — is
+    not full, and neither is one whose only such error was a sub-agent's."""
     if not isinstance(msg, ResultMessage) or not msg.is_error:
         return False
-    return _too_long(msg.result) or any(_too_long(e) for e in (msg.errors or []))
+    return said or _too_long(msg.result) or any(_too_long(e) for e in (msg.errors or []))
+
+
+def _as_interrupted(held: Event | None) -> Event | None:
+    """The owner's Stop landed: the turn finishes as interrupted, whatever
+    the result it holds said."""
+    if held is None:
+        return None
+    return Event(held.kind, held.thread_id, {**held.data, "stop": "interrupted"})
 
 
 def _content(message: UserMessage) -> Any:

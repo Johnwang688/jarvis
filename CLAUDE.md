@@ -379,16 +379,29 @@ message it replays and on its `ResultMessage`; `_read` now reads such a CLI
 turn (`owner = "injected"`) and never ends the message's turn on its result
 — whatever is known about echoing — unless the message's own echo came
 inside it (a message absorbed into a notice's turn is answered there; its
-result is taken, never waited past). When the message's result is "Prompt is
-too long" (the CLI's synthetic API error — `error` set or model
-`<synthetic>` — and an `is_error` result), its text is not shown;
-`_context_full` runs the CLI's own `/compact` once (a stdin user message, as
-the Agent SDK documents; shown as one `compact` tool call; bounded by
-`COMPACT_TIMEOUT_S`, then interrupted), and on a `compact_boundary` sends the
-message again. Still full, or not compacted, or stopped: one non-fatal
-`ERROR` (`CONTEXT_FULL_MESSAGE`, "start a New thread") and the turn ends as
-an error; the session is kept. Logs carry thread ids, origin kinds and
-outcomes only. **Not fixed here**: the provider passes the CLI's
+result is taken, never waited past). **"Full" is an `is_error` result
+together with the words "Prompt is too long"** — in the result, or in that
+CLI turn's own top-level synthetic error (`error` set or model
+`<synthetic>`); a sub-agent's error (`parent_tool_use_id`) and an error the
+CLI recovered from (then a success result) are not. The synthetic text is
+never shown as a reply. `_context_full` runs the CLI's own `/compact` once (a
+stdin user message, as the Agent SDK documents; shown as one `compact` tool
+call; bounded by `COMPACT_TIMEOUT_S`, then interrupted), and on a
+`compact_boundary` **sends the message again only when the overflowing CLI
+turn was the message's own and used no tool and took in no steer** (review
+of PR #57: a `git push` ran, the context filled, and the push was sent again;
+a steer's own CLI turn overflowed and the answered message was sent in its
+place). Otherwise nothing is re-sent. The owner gets one non-fatal `ERROR`
+naming what happened, and the turn ends as an error:
+- `CONTEXT_COMPACTED_SEND_AGAIN`: compacted, not re-sent, send it again;
+- `CONTEXT_NOT_COMPACTED`: no boundary, an error or the time limit;
+- `CONTEXT_STILL_FULL`: re-sent and still full, start a New thread.
+The session is kept. **Stop means stop**: it is looked for every
+`INTERRUPT_POLL_S` during a compaction, and the turn finishes as
+`interrupted` at once, never as an error and never after the 600 s bound.
+`origin`, `error` and `parent_tool_use_id` are read through `getattr`
+(the SDK is not pinned). Logs carry thread ids, origin kinds and outcomes
+only. **Not fixed here**: the provider passes the CLI's
 `total_cost_usd`, which is the session's running total, as each turn's cost,
 and the daemon adds it per turn — a Claude thread's `cost_usd` is the sum of
 running totals (a thread whose CLI total was 23.22 read 109.97).
