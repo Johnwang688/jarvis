@@ -1,0 +1,88 @@
+{
+  "runtime": {
+    "file": "node_modules/web-tree-sitter/web-tree-sitter.wasm",
+    "source": "npm:web-tree-sitter@0.27.0",
+    "bytes": 209613,
+    "sha256": "c03bccdc3b448a32848f5ae327e209c982bbb0840d43eec8bc2d5759544a1ed3"
+  },
+  "grammars": {
+    "cpp": {
+      "file": "node_modules/tree-sitter-cpp/tree-sitter-cpp.wasm",
+      "source": "npm:tree-sitter-cpp@0.23.4",
+      "bytes": 3434931,
+      "sha256": "174eb0deb75b2ec7881bcacda9f995648d8e683956e5c2267e69ab6dc503fcbf"
+    },
+    "python": {
+      "file": "node_modules/tree-sitter-python/tree-sitter-python.wasm",
+      "source": "npm:tree-sitter-python@0.25.0",
+      "bytes": 457883,
+      "sha256": "16108b50df4ee9a30168794252ab55e7c93bfc5765d7fa0aa3e335752c515f47"
+    },
+    "javascript": {
+      "file": "node_modules/tree-sitter-javascript/tree-sitter-javascript.wasm",
+      "source": "npm:tree-sitter-javascript@0.25.0",
+      "bytes": 411770,
+      "sha256": "5fb488d0cabb4775a594bab85682de5ad6ce83c0d6ac997a9f82dd084d571240"
+    },
+    "typescript": {
+      "file": "node_modules/tree-sitter-typescript/tree-sitter-typescript.wasm",
+      "source": "npm:tree-sitter-typescript@0.23.2",
+      "bytes": 1413849,
+      "sha256": "778025db5a8be0e70f8ccc3671e486dfeddd048c25d9e8a70c26de2e1bf6f97d"
+    },
+    "tsx": {
+      "file": "node_modules/tree-sitter-typescript/tree-sitter-tsx.wasm",
+      "source": "npm:tree-sitter-typescript@0.23.2",
+      "bytes": 1445638,
+      "sha256": "79e5da75ea62855a0cd67177685f0164eac87d5f630b3cbe1e0a099751ad30f8"
+    },
+    "json": {
+      "file": "node_modules/tree-sitter-json/tree-sitter-json.wasm",
+      "source": "npm:tree-sitter-json@0.24.8",
+      "bytes": 5596,
+      "sha256": "d2119fb98d5912719b13f9458574f8608d2d29dfbe45f6be1f860ea1fe2a2405"
+    },
+    "bash": {
+      "file": "node_modules/tree-sitter-bash/tree-sitter-bash.wasm",
+      "source": "npm:tree-sitter-bash@0.25.1",
+      "bytes": 1358224,
+      "sha256": "8292919c88a0f7d3fb31d0cd0253ca5a9531bc1ede82b0537f2c63dd8abe6a7a"
+    },
+    "css": {
+      "file": "node_modules/tree-sitter-css/tree-sitter-css.wasm",
+      "source": "npm:tree-sitter-css@0.25.0",
+      "bytes": 128668,
+      "sha256": "8a23977fe271357cce6f254ef88c9bebf3854602d8046605aef6a45c02135c59"
+    },
+    "html": {
+      "file": "node_modules/tree-sitter-html/tree-sitter-html.wasm",
+      "source": "npm:tree-sitter-html@0.23.2",
+      "bytes": 18385,
+      "sha256": "c48fcd82c7ea8bf943180088ba7f28c48b2bb5287874179168bf9d31e394cf85"
+    },
+    "yaml": {
+      "file": "node_modules/@tree-sitter-grammars/tree-sitter-yaml/tree-sitter-yaml.wasm",
+      "source": "npm:@tree-sitter-grammars/tree-sitter-yaml@0.7.1",
+      "bytes": 189255,
+      "sha256": "e752dc21c3591df9b45692fe417d101f45d1828c28c44d79005f4066dc7e4e91"
+    },
+    "toml": {
+      "file": "node_modules/@tree-sitter-grammars/tree-sitter-toml/tree-sitter-toml.wasm",
+      "source": "npm:@tree-sitter-grammars/tree-sitter-toml@0.7.0",
+      "bytes": 24040,
+      "sha256": "1ac6a83826c35a68857f8325e00c78f6bcbef4eb6db3931a6cf3041f76e5e09f"
+    },
+    "markdown": {
+      "file": "vendor/tree-sitter/tree-sitter-markdown.wasm",
+      "source": "release:tree-sitter-grammars/tree-sitter-markdown@v0.5.3",
+      "bytes": 421574,
+      "sha256": "dd9fc12ac2804d7c7da787e4774125b32e4fb3c244e5e7031a77cb7dd8036020"
+    },
+    "markdown_inline": {
+      "file": "vendor/tree-sitter/tree-sitter-markdown_inline.wasm",
+      "source": "release:tree-sitter-grammars/tree-sitter-markdown@v0.5.3",
+      "bytes": 426117,
+      "sha256": "d47e5c43683c39b645ced8720ab90c3b3f467e715d3426b29ef3f69984d88c15"
+    }
+  }
+}

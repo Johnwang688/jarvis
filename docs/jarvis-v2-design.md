@@ -2453,8 +2453,9 @@ decision C-1; contract in `docs/hud-api.md`).** Every HUD and API response
 carries one full Content-Security-Policy (`hud_api.HUD_POLICY` with WP-E's
 `frame-ancestors 'none'`, in the one header): only bundled script, no inline
 script, no `eval`, no `blob:` worker, same-origin `connect-src` (the terminal
-socket included), loopback `frame-src`, and no `'wasm-unsafe-eval'` until
-ED-5's tree-sitter brings the first `.wasm`. A response may only narrow it
+socket included), loopback `frame-src`, and — since ED-5's tree-sitter, below
+— `'wasm-unsafe-eval'`: WebAssembly compiles, a string never becomes
+JavaScript. A response may only narrow it
 (the avatar). The window that gates approvals is no longer served from the
 repo's agent-writable `hud/dist`: `jarvis hud install` — the owner's or the
 lead's, from their own shell; Jarvis is refused it in every spelling —
@@ -2680,6 +2681,29 @@ default, and an id a later split reuses mounts fresh.
   was shown to fail against its mutation (the PR's table). WP-G3's shared
   buffer came with ED-2's buffers (its `filesync` went with it); not built:
   WP-H's thinking line.
+
+**Syntax colour the Neovim way (2026-10-11, ED-5 of the editor plan, §2.6).**
+C/C++ (VEX's `.h` and `.c` included), Python, JavaScript, TypeScript and TSX,
+JSON, Bash, CSS, HTML, YAML, TOML and Markdown are coloured from a real parse
+tree: tree-sitter (`web-tree-sitter` 0.27.0 and each language's MIT grammar,
+pinned exactly) in a syntax worker of its own, with nvim-treesitter's own
+highlight and injection queries, vendored at a pinned commit and translated
+once by a dev-run script. Monaco asks for the visible lines, the worker
+answers with semantic tokens styled by ED-3's table, and Monarch stays
+underneath, so colour is never missing — only quieter. Edits reparse
+incrementally (tested against a fresh parse over 300 random edit sequences);
+a Markdown fence is coloured as its language, Markdown paragraphs by the
+inline grammar, HTML's `<script>` and `<style>` as JavaScript and CSS. Past a
+budget a file stays on Monarch and its editor says so in a corner: over 1 MB
+("syntax: basic (large file)"), a first parse over 1 s, or reparses cancelled
+twice running. The grammars are code the worker runs, so the HUD's policy
+gained `'wasm-unsafe-eval'` (WebAssembly only) and the worker's loader fetches
+only the runtime and the grammars built into its map, from the HUD's own
+`/assets/`, refusing any other URL before a request is made. Nothing loads
+until the first file of a covered language opens: first paint grows by 168 bytes,
+the worker is 213 KB, and the grammars (about 10 MB in all) load one by one
+as their languages first appear. Not yet: folding and sticky scroll from the
+tree (ED-6).
 
 Remaining: WP13 (the long-bench comparison, the owner's call on cost), a
 native Windows worker, the R8 hook on Codex, and prompt tuning in
