@@ -3052,6 +3052,27 @@ buffer quietly (the computation is cancelled first), and a buffer that goes
 away while shown reads "…" until the file is read again, never as an empty
 side.
 
+**The Diff pane's follow-ups (2026-10-12).** The change list draws only the
+rows in view, so the status's 20,000-file cap costs typing elsewhere in the
+window nothing (about 2 ms a character beside it, where every row drawn cost
+~100 ms). It takes keys: ↑ ↓, Page Up/Down, Home and End move the selection
+and scroll it into view, Enter reads it again; a selection scrolled out of
+view stays selected, its diff still shown, and the keys move on from it; a
+reload scrolls the pane's file into view. A held key moves the highlight at
+once and reads only the row it stops on (after 150 ms of no keys), and a
+read no longer wanted is dropped, so on a slow repository the last row's
+diff is not stuck behind every row passed. A screen reader hears each row's
+place in the whole list and the selected row as the keys move. **The Task pane's header clears its
+task** ("task <id> · clear", off under a card): the 2×2 grid draws a Task
+pane, and while it shows a task every Diff pane shows that task's diff, so
+clearing is the way back to a project's uncommitted changes — a Diff pane
+still never shows another task than the Task pane. The task diff and Compare
+cancel a diff still being computed when they close, as the uncommitted
+changes' diff already did, and never touch the buffer Compare shows; and the
+uncommitted changes' diff is drawn with the owner's editor settings (font,
+size, whitespace, bracket colours, sticky scroll), live, as the task diff and
+Compare are.
+
 **The Browser's action rules and reviewer (2026-10-12, BR-9a; amendment 1 to
 the Browser plan, §B.3–§B.5).** Before an agent's click, keystroke or
 navigation in a Browser pane runs, fixed rules refuse what no model may allow

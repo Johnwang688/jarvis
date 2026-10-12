@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
-  absUnder, baseSide, diffMode, diffWhy, readSide, rowShows, SCM_LETTER, scmRows, scmSummary, wholeUntracked,
+  absUnder, baseSide, diffMode, diffWhy, readSide, revealTop, rowShows, SCM_LETTER, SCM_OVERSCAN, SCM_ROW_PX,
+  SCM_UNMEASURED_ROWS, scmKeyStep, scmRows, scmSummary, scmWindow, wholeUntracked,
 } from "./scm";
 
 const P = ["p1", "p2"];
@@ -144,5 +145,67 @@ describe("the sides", () => {
   it("where a project path resolves", () => {
     expect(absUnder("/home/o/proj/", "src/a.c")).toBe("/home/o/proj/src/a.c");
     expect(absUnder(null, "a")).toBeNull();
+  });
+});
+
+// The Diff follow-ups (2026-10-12): the list at the status's 20,000-row cap is
+// windowed — only the rows in view, and an overscan either side, are drawn.
+describe("the change list's window", () => {
+  const R = SCM_ROW_PX;
+  it("draws only what is in view, and the overscan either side", () => {
+    // 600 px in view: 25 rows, plus one for a part-row, plus the overscan below.
+    expect(scmWindow(20000, 0, 600)).toEqual({ first: 0, last: 25 + 1 + SCM_OVERSCAN });
+    const mid = scmWindow(20000, 1000 * R, 600);
+    expect(mid).toEqual({ first: 1000 - SCM_OVERSCAN, last: 1000 + 26 + SCM_OVERSCAN });
+    expect(mid.last - mid.first).toBeLessThan(60);
+  });
+  it("reaches the last row, and never past it", () => {
+    const end = scmWindow(20000, (20000 - 25) * R, 600);
+    expect(end.last).toBe(20000);
+    // Scrolled past the end (the list shrank under it): the end is drawn, not nothing.
+    expect(scmWindow(30, 1e6, 600)).toEqual({ first: 29 - SCM_OVERSCAN, last: 30 });
+  });
+  it("draws a fixed number of rows while nothing is measured, and nothing for no rows", () => {
+    expect(scmWindow(20000, 0, 0)).toEqual({ first: 0, last: SCM_UNMEASURED_ROWS + SCM_OVERSCAN });
+    expect(scmWindow(3, 0, 0)).toEqual({ first: 0, last: 3 });
+    expect(scmWindow(0, 0, 600)).toEqual({ first: 0, last: 0 });
+    expect(scmWindow(10, Number.NaN, 600)).toEqual({ first: 0, last: 10 });
+  });
+  it("scrolls a row into view only when it is out of it", () => {
+    expect(revealTop(10, 0, 600)).toBeNull();
+    expect(revealTop(30, 0, 600)).toBe(31 * R - 600);
+    expect(revealTop(3, 500, 600)).toBe(3 * R);
+    expect(revealTop(19999, 0, 600)).toBe(20000 * R - 600);
+    expect(revealTop(5, 0, 0)).toBeNull();
+    expect(revealTop(-1, 0, 600)).toBeNull();
+  });
+});
+
+describe("the change list's keys", () => {
+  it("move the selection a row, a page, or to either end, clamped", () => {
+    expect(scmKeyStep("ArrowDown", 4, 100, 20)).toBe(5);
+    expect(scmKeyStep("ArrowUp", 4, 100, 20)).toBe(3);
+    expect(scmKeyStep("ArrowDown", 99, 100, 20)).toBe(99);
+    expect(scmKeyStep("ArrowUp", 0, 100, 20)).toBe(0);
+    expect(scmKeyStep("PageDown", 4, 100, 20)).toBe(24);
+    expect(scmKeyStep("PageDown", 90, 100, 20)).toBe(99);
+    expect(scmKeyStep("PageUp", 10, 100, 20)).toBe(0);
+    expect(scmKeyStep("Home", 50, 100, 20)).toBe(0);
+    expect(scmKeyStep("End", 50, 100, 20)).toBe(99);
+  });
+  it("with nothing selected, start at the top (End: the bottom)", () => {
+    expect(scmKeyStep("ArrowDown", -1, 100, 20)).toBe(0);
+    expect(scmKeyStep("ArrowUp", -1, 100, 20)).toBe(0);
+    expect(scmKeyStep("End", -1, 100, 20)).toBe(99);
+    expect(scmKeyStep("Enter", -1, 100, 20)).toBeNull();
+  });
+  it("Enter picks the selected row again; other keys and an empty list are not the list's", () => {
+    expect(scmKeyStep("Enter", 7, 100, 20)).toBe(7);
+    expect(scmKeyStep("a", 7, 100, 20)).toBeNull();
+    expect(scmKeyStep(" ", 7, 100, 20)).toBeNull();
+    expect(scmKeyStep("ArrowDown", 0, 0, 20)).toBeNull();
+    // A selection past a list that shrank moves from its end.
+    expect(scmKeyStep("ArrowUp", 500, 100, 20)).toBe(98);
+    expect(scmKeyStep("PageDown", 4, 100, 0)).toBe(5);
   });
 });
