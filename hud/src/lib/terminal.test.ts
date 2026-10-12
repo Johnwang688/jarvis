@@ -10,7 +10,7 @@ import {
 const row = (over: Record<string, unknown> = {}) => ({
   id: "0a1b2c3d", title: "bash · Calc", folder: "/home/o/calc", project_id: "p1", created: "2026-10-09T00:00:00",
   cols: 80, rows: 24, shown: false, exited: false, exit_code: null, readable: true, busy: false,
-  integration: "bash", integrated: false, marked: false, ...over,
+  integration: "bash", integrated: false, marked: false, program: null, input: true, ...over,
 });
 
 describe("the socket's URL", () => {

@@ -127,7 +127,7 @@ if (typeof window !== "undefined") {
 const GONE_ROW: TerminalRow = {
   id: "", title: "", folder: "", project_id: null, created: "", cols: 80, rows: 24, shown: false,
   exited: false, exit_code: null, readable: true, busy: false, integration: "none", integrated: false,
-  marked: false,
+  marked: false, program: null, input: true,
 };
 
 function kib(bytes: number): string {
@@ -1075,6 +1075,31 @@ export class TermManager {
   }
 
   /**
+   * A program terminal the daemon just started for this window's own click
+   * (VX-2: a VEX build, download or the brain terminal): listed now, held as
+   * this window's (`claim`), and shown — in the pane already showing it,
+   * else as the panel's tab, the panel opened. Never under a card.
+   */
+  async showProgram(id: string): Promise<void> {
+    if (!isTerminalId(id)) return;
+    await this.refresh();
+    if (this.blocked || !this.rows.some((r) => r.id === id)) return;
+    this.claim(id);
+    if (this.place.has(id)) {
+      this.changed();
+      return;
+    }
+    this.selectTab(id);
+    this.showPanel();
+  }
+
+  /** A program terminal (VX-1): it ends with its program, so Restart would open a shell instead. */
+  isProgram(id: string): boolean {
+    const s = this.sessions.get(id);
+    return !!(this.row(id)?.program ?? s?.lastRow?.program);
+  }
+
+  /**
    * The pane showing terminal `id` was closed (WP-G2, plan §3.6): the
    * terminal goes back to the panel as its selected tab. The shell lives on —
    * no DELETE — its session stays attached, and the panel is left open or
@@ -1728,9 +1753,11 @@ function StateStrip(props: { s: TermSession; now: number; blocked: boolean; onCh
       return (
         <div className="termstrip" data-testid="term-exited">
           <span>exited (code {s.exitCode ?? "?"})</span>
-          <button type="button" data-testid="term-restart" disabled={blocked} onClick={() => void mgr.restart(s.id)}>
-            Restart
-          </button>
+          {mgr.isProgram(s.id) ? null : (
+            <button type="button" data-testid="term-restart" disabled={blocked} onClick={() => void mgr.restart(s.id)}>
+              Restart
+            </button>
+          )}
           <button type="button" data-testid="term-exit-close" disabled={blocked} onClick={() => void mgr.close(s.id)}>
             Close
           </button>
@@ -1744,9 +1771,11 @@ function StateStrip(props: { s: TermSession; now: number; blocked: boolean; onCh
               ? "Jarvis restarted; this terminal ended."
               : "This terminal has ended (Jarvis restarted, or it was closed)."}
           </span>
-          <button type="button" data-testid="term-new-here" disabled={blocked} onClick={() => void mgr.newHere(s.id)}>
-            New terminal here
-          </button>
+          {mgr.isProgram(s.id) ? null : (
+            <button type="button" data-testid="term-new-here" disabled={blocked} onClick={() => void mgr.newHere(s.id)}>
+              New terminal here
+            </button>
+          )}
           {props.onChoose ? (
             <button type="button" className="quiet" data-testid="term-choose" disabled={blocked} onClick={props.onChoose}>
               Choose another
@@ -1888,6 +1917,7 @@ export function TerminalPanel(props: {
                   aria-selected={r.id === active && !pane}
                   data-testid={`panel-tab-${r.id}`}
                   data-place={pane ? `pane-${pane}` : "panel"}
+                  data-program={r.program ?? undefined}
                   title={pane ? `${r.title} — shown in pane ${mgr.slotOf(pane)}; click to go there` : r.title}
                   disabled={props.blocked}
                   onClick={() => (pane ? mgr.focusPane(pane as PaneNo) : mgr.selectTab(r.id))}

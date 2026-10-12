@@ -148,6 +148,13 @@ export function FileTab(props: {
   blocked?: boolean;
   /** "Add to chat": the selected chat's box gets this text, unsent. A sentence back is a refusal. */
   onAddToChat?: (text: string) => string | null;
+  /**
+   * Put the cursor at a line of a tab (VX-2: a build error clicked in the
+   * VEX view). Applied once that tab is active and its buffer is in the
+   * editor, then handed back by `n`; dropped if the tab closes first.
+   */
+  goto?: { path: string; line: number; col: number; n: number } | null;
+  onGotoDone?: (n: number) => void;
   /** The project's folder: a file read through another project is marked dirty here too. */
   root?: string | null;
 }) {
@@ -185,6 +192,7 @@ export function FileTab(props: {
   // mine saves against while it is open.
   const [comparing, setComparing] = useState<{ abs: string; disk: string; etag: string | null } | null>(null);
   const editorRef = useRef<any>(null);
+  const [, setEdTick] = useState(0);
 
   // Hold what the tabs name; let go of what they no longer do.
   const pathsKey = tabs.paths.join("\u0000");
@@ -398,6 +406,32 @@ export function FileTab(props: {
   }, [model, everEditor]);
   const mdText = useMdText(md ? view?.abs ?? null : null);
 
+  // A line to go to (VX-2's error click): once its tab is the active one and
+  // the editor holds its buffer — after PaneEditor's own layout effect has
+  // swapped the model in and restored the tab's view state, so the position
+  // set here is the one that stays.
+  const goto = props.goto ?? null;
+  const onGotoDone = useRef(props.onGotoDone);
+  onGotoDone.current = props.onGotoDone;
+  useEffect(() => {
+    if (!goto) return;
+    if (!tabsNow.current.paths.includes(goto.path) && !loading.current.has(goto.path)) {
+      onGotoDone.current?.(goto.n);          // the tab closed (not found, out of scope)
+      return;
+    }
+    if (tabsNow.current.active !== goto.path) return;
+    const abs = opened[goto.path];
+    const ed = editorRef.current;
+    const m = abs ? buffers.model(abs) : null;
+    if (!abs || !ed || !m || ed.getModel?.() !== m) return;
+    const lines = typeof (m as any).getLineCount === "function" ? (m as any).getLineCount() : goto.line;
+    const line = Math.min(Math.max(1, goto.line), Math.max(1, lines));
+    ed.setPosition({ lineNumber: line, column: Math.max(1, goto.col) });
+    ed.revealLineInCenter?.(line);
+    if (!props.blocked) ed.focus?.();
+    onGotoDone.current?.(goto.n);
+  });
+
   if (!pid) return <div className="pad muted">Pick a project.</div>;
 
   const showTree = !props.narrow || treeOpen || !active;
@@ -566,6 +600,8 @@ export function FileTab(props: {
               onSave={() => void save()}
               editorRef={(ed) => {
                 editorRef.current = ed;
+                // A pending line to go to waits for the editor.
+                setEdTick((t) => t + 1);
               }}
             />
             {md && model && !read && !comparing ? (

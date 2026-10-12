@@ -22,16 +22,19 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, use
 import { api, subscribe } from "./api";
 import {
   useStore, activeChat, activePane, compatActions, currentProjectId, currentTask, flatState,
-  type ChatPatch,
+  type ChatPatch, type State,
 } from "./state/store";
 import { Sidebar } from "./components/Sidebar";
 import { ChatTab } from "./components/ChatTab";
 import { InputBar, MAX_FILES, toAttachment } from "./components/InputBar";
 import { TaskView } from "./components/TaskView";
 import { FileTab } from "./components/FileTab";
+import { VexView } from "./components/VexView";
+import { DETECT_STALE_MS, vex } from "./state/vex";
+import { offersVex } from "./lib/vex";
 import { makeModel, monacoEditors, monacoLanguage, monacoModels, setEditorsBlocked } from "./lib/monaco";
 import { buffers, PlainModel } from "./state/buffers";
-import { writtenPaths } from "./lib/buffers";
+import { NO_TABS, openTab, writtenPaths } from "./lib/buffers";
 import { treeRoot } from "./lib/dirtyMarks";
 import { DiffTab } from "./components/DiffTab";
 import { PreviewTab, type PreviewRequest } from "./components/PreviewTab";
@@ -123,6 +126,30 @@ function writerOf(threadId: string | undefined, at: { threads: { id: string; pro
   return thread?.title ? `${who} · ${thread.title}` : who;
 }
 
+/**
+ * The project a pane is about, for the VEX view (VX-2): whether its strip
+ * offers "vex", and the project a pane switched to it is pinned to. A chat
+ * pane is its own conversation's; any other pane its pin while that project
+ * exists, else the chat the window is about (as File and Preview follow it)
+ * — **except a VEX view, which never follows the chat**: its pin, or none
+ * (review L7: a VEX pane whose project is gone says "Pick a project" rather
+ * than building or downloading another robot's program).
+ */
+function stripProject(at: State, spec: PaneSpec, pane: PaneNo): string | null {
+  if (spec.view === "chat") return chatProjectId(at.chats[pane], at.threads);
+  if (spec.projectId && at.projects.some((p) => p.id === spec.projectId)) return spec.projectId;
+  if (spec.view === "vex") return null;
+  return currentProjectId(at);
+}
+
+/** A line to go to in a File pane (VX-2: a build error clicked in the VEX view). */
+interface FileGoto {
+  path: string;
+  line: number;
+  col: number;
+  n: number;
+}
+
 export default function App() {
   const { state, dispatch } = useStore();
   // Zoom, pane widths and folded panes (§18, 2026-10-08): lib/layout.ts; the
@@ -141,6 +168,31 @@ export default function App() {
   // is up (ED-1; the card takes focus itself), said from here for the same
   // reason.
   useLayoutEffect(() => setEditorsBlocked(blocked), [blocked]);
+  // And nothing builds or downloads to a VEX brain (VX-2): every VEX action
+  // refuses while a card is up, and a download's chain a card came into is
+  // dropped (state/vex.ts) — said from here for the same reason.
+  useLayoutEffect(() => vex.setBlocked(blocked), [blocked]);
+  useSyncExternalStore(vex.subscribe, vex.getVersion);
+  // Whether each drawn pane's project is a VEX project: the strip offers the
+  // VEX view only then (lib/vex.ts `offersVex`). Asked once per project.
+  const vexWanted = Array.from(new Set(view.fit.panes
+    .map((n) => stripProject(state, view.ws.panes[n - 1], n))
+    .filter((x): x is string => !!x))).join("\u0000");
+  useEffect(() => {
+    const pids = vexWanted.split("\u0000").filter(Boolean);
+    for (const pid of pids) vex.want(pid);
+    // Asked again on the window's focus and when stale (review L4), so a
+    // project that becomes a VEX project is offered the view without a reload.
+    const fresh = () => vex.refreshDetections(pids, 0);
+    const stale = setInterval(() => {
+      if (document.visibilityState === "visible") vex.refreshDetections(pids, DETECT_STALE_MS);
+    }, DETECT_STALE_MS);
+    window.addEventListener("focus", fresh);
+    return () => {
+      clearInterval(stale);
+      window.removeEventListener("focus", fresh);
+    };
+  }, [vexWanted]);
   // A render error stopped the title bar, the shell and the orb drawing
   // (components/Boundary.tsx): the owner sees a Reload prompt and nothing
   // else, so nothing is heard or sent on their behalf from then on — no
@@ -1024,6 +1076,11 @@ export default function App() {
           // "Jarvis read 200 lines · 15:42" (components/Terminal.tsx).
           terminalRead(data);
           break;
+        case "vex_device":
+          // `{action, at}` only (VX-1): one this window did not start is said
+          // in the VEX view (state/vex.ts).
+          vex.heardDevice(data);
+          break;
         default:
           break;
       }
@@ -1134,6 +1191,10 @@ export default function App() {
    * landing in it (WP-B, review of PR #26): the switch is refused and the
    * pane says why. True when `pane` may show `next`.
    */
+  /** The project pane `pane` is about (VX-2's strip and pin): see `stripProject`. */
+  const stripProjectNow = (pane: PaneNo): string | null =>
+    stripProject(live.current, layoutNow.current.ws.panes[pane - 1], pane);
+
   const mayShow = useCallback((pane: PaneNo, next: View): boolean => {
     const { ws, fit } = layoutNow.current;
     const spec = ws.panes[pane - 1];
@@ -1152,7 +1213,15 @@ export default function App() {
   const setPaneView = useCallback((pane: PaneNo, next: View) => {
     if (!mayShow(pane, next)) return;
     const was = layoutNow.current.ws.panes[pane - 1];
+    // The VEX view stays on the project it was opened for (VX-2): a pane
+    // that followed the chat is pinned to the project it showed, so choosing
+    // another chat never moves a build or a download to another robot. Read
+    // before the switch: a VEX view itself never follows the chat (L7).
+    const vexPin = next === "vex" && was.view !== "vex"
+      && !(was.projectId && live.current.projects.some((p) => p.id === was.projectId))
+      ? stripProjectNow(pane) : null;
     view.setView(pane, next);
+    if (vexPin) view.pin(pane, vexPin);
     if (next === "terminal" && was.view !== "terminal" && !was.terminalId) {
       void terminals.ownerOpened(pane, () => {
         const now = layoutNow.current.ws.panes[pane - 1];
@@ -1456,6 +1525,58 @@ export default function App() {
   }, [releasePane, chatPatch]);
 
   /**
+   * A build error clicked in the VEX view (VX-2): its file, at its line, in
+   * the editor — ED-2's buffers, so an edit already open there is the one
+   * shown. Where: a drawn File pane on that project; else a new pane beside
+   * the VEX view (a split, so the errors list stays in sight); else the VEX
+   * pane itself becomes the File pane. Never under a card.
+   */
+  const [fileGoto, setFileGoto] = useState<Partial<Record<PaneNo, FileGoto>>>({});
+  const gotoSeq = useRef(0);
+  const openAt = useCallback((from: PaneNo, projectId: string, path: string, line: number, col: number) => {
+    if (blockedNow.current || crashedRef.current) return;
+    const lay = layoutNow.current;
+    const at = live.current;
+    const projectOf = (n: PaneNo) => stripProject(at, lay.ws.panes[n - 1], n);
+    let target: PaneNo | null = lay.fit.panes.find((n) =>
+      lay.ws.panes[n - 1].view === "file" && projectOf(n) === projectId) ?? null;
+    let tabs = target !== null && lay.ws.panes[target - 1].projectId === projectId
+      ? lay.ws.panes[target - 1].editors ?? NO_TABS : NO_TABS;
+    if (target === null) {
+      const id = splitFrom(from, { focus: false });
+      if (id !== null) {
+        view.setView(id, "file");
+        target = id;
+      }
+    }
+    if (target === null) {
+      if (!mayShow(from, "file")) return;
+      view.setView(from, "file");
+      target = from;
+      const spec = lay.ws.panes[from - 1];
+      tabs = spec.projectId === projectId ? spec.editors ?? NO_TABS : NO_TABS;
+    }
+    // Pinned, never the preview: the owner asked for this file. Past the tab
+    // cap only a clean tab closes — and every tab counts as holding an edit
+    // here, so a full pane says so in FileTab rather than losing one.
+    const next = openTab(tabs, path, { pin: true, dirty: () => true }) ?? tabs;
+    view.setEditors(target, projectId, next.paths.includes(path) ? next : tabs);
+    const n = ++gotoSeq.current;
+    const pane = target;
+    setFileGoto((g) => ({ ...g, [pane]: { path, line, col, n } }));
+    focusPaneElement(pane);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [splitFrom, mayShow]);
+  const gotoDone = useCallback((pane: PaneNo, n: number) => {
+    setFileGoto((g) => {
+      if (g[pane]?.n !== n) return g;
+      const next = { ...g };
+      delete next[pane];
+      return next;
+    });
+  }, []);
+
+  /**
    * A project went away — archived or deleted, here or in another window. Its
    * rows go, a conversation inside it closes into a new thread in the last
    * project worked in — in every pane that had one — the remembered project
@@ -1700,7 +1821,12 @@ export default function App() {
       setBooted(true);
       // The conversation is on screen: in a drawn pane that already shows
       // chat, else in the focused pane — in the single layout, today's chat tab.
-      placeChat(pane);
+      // Never over a VEX view (review L5): a window with no chat drawn is
+      // allowed (WP-B: speech waits, a press is refused with a sentence), and
+      // a lone VEX pane at the lab must come back as itself after a reload.
+      if (lay.ws.panes[pane - 1].view !== "vex" || lay.fit.panes.some((n) => lay.ws.panes[n - 1].view === "chat")) {
+        placeChat(pane);
+      }
       void refreshActivity();
       const [usage, schedules, route, approvals, discord] = await Promise.all([
         api.usage().catch(() => null),
@@ -1985,6 +2111,7 @@ export default function App() {
   const onCrash = useCallback(() => {
     crashedRef.current = true;
     terminals.abortPastes();
+    vex.crash();
     capture.abandon();
     setCrashed(true);
   }, [capture]);
@@ -2362,7 +2489,22 @@ export default function App() {
             narrow={info.narrow}
             blocked={blocked}
             onAddToChat={addToChat}
+            goto={fileGoto[n] ?? null}
+            onGotoDone={(k) => gotoDone(n, k)}
             root={pid ? treeRoot(state.projects.find((p) => p.id === pid)) : null}
+          />
+        );
+      }
+      case "vex": {
+        // Its pinned project (pinned when the pane switched to it), else the chat's.
+        const pid = stripProject(state, spec, n);
+        return (
+          <VexView
+            pane={n}
+            projectId={pid}
+            projectName={projectName(pid)}
+            blocked={blocked}
+            onOpenError={(path, line, col) => pid && openAt(n, pid, path, line, col)}
           />
         );
       }
@@ -2453,6 +2595,26 @@ export default function App() {
               <option key={p.id} value={p.id}>{p.name}</option>
             ))}
           </select>
+        ) : spec.view === "vex" ? (
+          // The VEX view's project (VX-2): its own, picked here; never the
+          // chat's by surprise — a build or a download goes to the project
+          // this says. Disabled under a card (and inert).
+          <select
+            className="panepick"
+            data-testid={`pane-${n}-vex-project`}
+            value={stripProject(state, spec, n) ?? ""}
+            // Off while a download's chain runs (review M1): the chain never
+            // goes on to a robot this pane no longer shows.
+            disabled={blocked || !!vex.chain}
+            title={vex.chain ? "A download is running: wait for it, or Cancel it, first"
+              : "The VEX project this pane builds and downloads"}
+            onChange={(e) => e.target.value && view.pin(n, e.target.value)}
+          >
+            {stripProject(state, spec, n) ? null : <option value="">Pick a project</option>}
+            {state.projects.map((p) => (
+              <option key={p.id} value={p.id}>{p.name}</option>
+            ))}
+          </select>
         ) : pinnedElsewhere(spec, n) ? (
           <span className="chip panepin" data-testid={`pane-${n}-project`} title="This pane stays in its project">
             in: {projectName(paneProject(spec, n))}
@@ -2513,6 +2675,8 @@ export default function App() {
         return task?.brief || "";
       case "file":
         return `in: ${projectName(paneProject(spec, info.pane))}`;
+      case "vex":
+        return `VEX · ${projectName(stripProject(state, spec, info.pane))}`;
       case "preview":
         return spec.previewUrl || "";
       default:
@@ -2655,6 +2819,7 @@ export default function App() {
             context={paneContext}
             selectedPane={selected}
             onView={setPaneView}
+            offersVex={(spec, info) => offersVex(vex.detection(stripProject(state, spec, info.pane)))}
             projects={state.projects}
             openPreview={openPreview}
             // Where `+` opens a terminal: the folder of what the focused pane
