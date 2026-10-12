@@ -2602,9 +2602,11 @@ is load-bearing**: `_risky_config` reads the superproject's config only, and
 a status that recurses runs `git status` inside the submodule, which obeys
 *its* config — measured: a submodule's `filter.x.clean` ran on a superproject
 status through `gitops._git` (a same-size, mtime-moved file forces the
-hash). **The same hole is open in the `git` tool** (`gitops.run(path,
-["status"])` and `["diff"]` each ran a submodule's filter, measured in-process;
-`gitops.py` is SELF_PROTECTED: reported, not fixed here). A base read inside a submodule is refused anyway
+hash). **The same hole was open in the `git` tool** (`gitops.run(path,
+["status"])` and `["diff"]` each ran a submodule's filter, measured in-process)
+until 2026-10-12, when `gitops` itself was kept out of submodules (see *Agents
+that cannot ask* in Safety design); the editor's own flag stays, since its
+`_risky` reads the superproject's config only. A base read inside a submodule is refused anyway
 (its config sets `core.worktree`). The owner's global config (a git-lfs
 filter) still runs on a status, as in gitops. **The window**:
 `lib/linediff.ts` is Myers in linear space (middle snake, explicit stack, never
@@ -4354,7 +4356,23 @@ jarvis/
   gc, the `ext::` transport and implicit bare repositories off; diffs run with
   `--no-ext-diff --no-textconv`; and a repository whose *own* config names a
   program or moves where git works (`core.sshCommand`, a filter/textconv/merge
-  driver, `url.*.insteadOf`, `include.path` …) is refused outright. Output has
+  driver, `url.*.insteadOf`, `include.path` …) is refused outright. **Git is
+  kept out of submodules** (2026-10-12): inside one it obeys *that*
+  repository's config, and on main a submodule's own filter ran through the
+  tool on `status`, `diff`, `add -A`, `commit -a` and `rm`, its textconv on
+  `log -p`/`show` under a global `diff.submodule=diff`, and a global
+  `push.recurseSubmodules` published its commits to its own remote. Every
+  `_git` call now carries recursion-off, `status.submoduleSummary=false`,
+  `diff.submodule=short` and `diff.ignoreSubmodules=dirty` pins (they travel
+  into any git that git starts, as `hooksPath` and `fsmonitor` already did) and
+  `--ignore-submodules=dirty` / `--no-recurse-submodules` on the command line
+  of the status and diff family and fetch/pull/push (a `.gitmodules` `ignore =`
+  beats the `-c`, never the flag); `judge()` refuses every `submodule` form and
+  any option that goes back in; and since `add -A`, `describe --dirty`, `rm`
+  and three `.gitmodules`-overridden reports still go in whatever the pins say,
+  every checked-out submodule's own config, nested ones too, is held to the
+  superproject's rule — unreadable, not resolving to its own directory, or more
+  than 64 / 4 deep fails closed (`_submodule_risk`). Output has
   URL userinfo redacted. **A commit that names or carries a protected
   credential is taken back** (`reset --soft`, nothing lost) before the tool
   returns, and a push is refused if anything outgoing does. The way out — name
@@ -4382,7 +4400,9 @@ jarvis/
   tables for the verdicts, a real repository under a temp HOME for the
   properties that are about how git is *run*, each with a sanity half proving
   the trap fires under plain git. Not covered, said plainly: the owner's own
-  global git configuration and credential helpers (they run on push/fetch);
+  global git configuration and credential helpers (they run on push/fetch),
+  including a filter it defines that a submodule's attributes name, which runs
+  where git's internals still go into a submodule (`add -A`, `rm` of one);
   an `include.path` / `includeIf` *already* in that global config that points
   at a file an agent can write (the agent cannot create one — writes to the
   global config and `git config` writes are both refused — but one the owner
@@ -4981,10 +5001,10 @@ jarvis/
   a recorder and `gh` a stand-in script, every config path and HOME a temp
   dir, nothing through a shell. Two layers because they fail differently.
   **`judge()` is pure, so its verdicts are tables** (placeholder names only):
-  59 reads that run in every context, 49 routine writes that run only in an
+  62 reads that run in every context, 53 routine writes that run only in an
   own worktree on an own branch (and are refused in the owner's checkout,
   and for the branch-moving half off an own branch), 7 reviewed forms, and
-  ~200 refusals grouped by what each protects — including every abbreviation
+  238 refusals grouped by what each protects — including every abbreviation
   of the dangerous long options, an alias that tries to be a subcommand,
   unknown remotes, credential names, and the "shape" cases (global options,
   non-lists, oversize). **The runner is exercised against real git** in a
@@ -5003,7 +5023,25 @@ jarvis/
   files stay writable. **Verified to bite** by an in-process mutation sweep
   (disable each protection, the matching check must fail) — 14 of 15 at
   first, the 15th being a mutation that did not mutate, now a structural
-  assertion. Run after touching `gitops.py`, `tools/gitctl.py`,
+  assertion. **Submodules** (2026-10-12), against a real submodule cloned from
+  a local bare repository into a tool-made worktree, every trap a script that
+  writes one marker: `submodule_pin_checks` puts the drivers in the owner's
+  global config, named only by the submodule's attributes (so the config check
+  has nothing to refuse and only the pins are tested) — status, diff,
+  diff-files/-index and commit -a never run its filter, a `.gitmodules`
+  `ignore = none` included; log -p, show and diff A B never run its textconv
+  under `diff.submodule=diff`; fetch, switch, grep and push never recurse (the
+  push neither publishes the submodule's commit nor runs its pre-push hook);
+  its own fsmonitor never runs — each against plain git that does.
+  `submodule_config_checks`: a program in the submodule's own config, or a
+  nested repository's, refuses every subcommand (add -A, describe --dirty and
+  rm, which no pin keeps out, among them); a moved `core.worktree`, a broken
+  config, a `.git` file pointing nowhere and the limits fail closed; a clean
+  submodule and an unchecked-out gitlink are not refused. 16 of the scenarios
+  go into the submodule on main, none here (fsmonitor and the hook were
+  already held off by the propagated `-c`); dropping the pins, only the
+  command-line flags, the config read, or judge's option refusal each fails
+  its own check. Run after touching `gitops.py`, `tools/gitctl.py`,
   `tools/files.py`'s protection, or `run_readonly`.
 - `tests/tasks_check.py` — free checks for attended background tasks, with
   `llm.chat` scripted, `shell._run` a recorder, the broker on approval_check's
