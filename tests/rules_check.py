@@ -556,10 +556,19 @@ def audit_implementation_checks() -> None:
     options nobody read, so say so loudly — the way files_check prints PARITY
     NOT VERIFIED when ripgrep is missing. Each `--version` runs by argv with
     no shell, so no interactive-shell function can stand in for the binary.
+
+    **What it cannot see** (PR #24's follow-up 2): it asks only the PATH
+    binaries. In Claude Code's shell `grep` and `find` are *functions*
+    running ugrep 7.8.4 and bfs 4.1.1, which no argv probe reaches — their
+    entries in the table were read from those programs' own `--help` by
+    hand, and this check verifies neither. It says so in its output.
     """
     import shutil
     import subprocess
 
+    print("    note: these probes see PATH binaries only, never Claude Code's shell functions "
+          "(grep runs ugrep and find runs bfs there); those two were audited by hand and are "
+          "not verified here")
     path = "/usr/local/bin:/usr/bin:/bin"
     for stem, known in rules.AUDITED_IMPLEMENTATIONS.items():
         exe = shutil.which(stem, path=path)
@@ -2659,6 +2668,214 @@ def owner_op_checks() -> None:
     print("ok  owner-only operations: `jarvis hud install` DENY in rules.decide, ordinary mentions untouched")
 
 
+# --- program runners are judged by what they start (2026-10-12) ---------------
+#
+# `uv run rm -rf ~/projects` was the ALLOW of `uv`: nothing but the vex reading
+# and the owner-op detector read through a runner, and each had its own table.
+# Now `decide`, the owner ops, the gate-state write detector and v2's
+# always-ask stems all read rules' one table (`rules.starts`). Each spelling
+# below is described by shape in the PR; none is ever run.
+# Refused by `rules.decide` itself (an owner op or a credential env write behind
+# a runner) — never run, never asked, under an allowlist of every stem, mode all.
+RUNNER_DECIDE_DENY = (
+    "npx jarvis hud install", "yarn exec jarvis restart", "pnpm exec jarvis hud rebuild",
+    "bun x jarvis restart", "npm exec jarvis daemon2 restart", "yarn dlx jarvis hud install",
+    "npm exec -c 'jarvis hud install'", "npm exec --call='jarvis restart'",
+    "pnpm exec -c 'jarvis restart'", "bun exec 'jarvis hud install'",
+    "npx --yes jarvis hud install", "uv run --frobnicate x jarvis restart",
+    "chronic jarvis restart", "rye run jarvis hud install",
+    "npx tee .env.production", "uv run cp /tmp/x .env.local",
+    "npm exec -c 'cp /tmp/x .env.production'",
+    "uv run sudo rm -rf build", "npx sudo true",
+)
+# Refused once the gate-state check is folded in (`static_verdict`): a write
+# onto the allowlist behind a wrapper's option or a runner.
+RUNNER_GATE_DENY = (
+    "env -u ls cp /tmp/x ~/.config/jarvis/allowlist.json",
+    "env --unset ls cp /tmp/x ~/.config/jarvis/allowlist.json",
+    "env -a ls cp /tmp/x ~/.config/jarvis/allowlist.json",
+    "exec -a ls cp /tmp/x ~/.config/jarvis/allowlist.json",
+    "xargs -a ls cp /tmp/x ~/.config/jarvis/allowlist.json",
+    "npm exec -c 'cp /tmp/x ~/.config/jarvis/allowlist.json'",
+    "pnpm exec -c 'cp /tmp/x ~/.config/jarvis/allowlist.json'",
+    "bun exec 'cp /tmp/x ~/.config/jarvis/allowlist.json'",
+    "npx cp /tmp/x ~/.config/jarvis/allowlist.json",
+    "uv run nohup cp /tmp/x ~/.config/jarvis/allowlist.json",
+    "env -u ls tee ~/.config/jarvis/allowlist.json",
+)
+# ALLOW on main, asked now: the program the runner starts asks on its own.
+RUNNER_ASK = (
+    "uv run rm -rf ~/projects", "uv run rm -rf build", "uv tool run rm -rf build",
+    "npm exec -c 'rm -rf build'", "npm exec --call='rm -rf build'", "npm exec rm -rf build",
+    "npm x rm -rf build", "npm exec -- rm -rf build", "poetry run rm -rf build",
+    "pipx run rm -rf build", "npx rm -rf build", "npx --yes rm -rf build",
+    "pnpm exec rm -rf build", "pnpm dlx rm -rf build", "pnpm exec -c 'rm -rf build'",
+    "pnpm exec --shell-mode rm -rf build", "yarn exec rm -rf build", "yarn dlx rm -rf build",
+    "bun x rm -rf build", "bun exec 'rm -rf build'",
+    "uv run python -c 'import shutil'", "uv run python3 -Ic 'import os'", "npx node -e 'x'",
+    "uv run bash -c 'rm -rf build'", "uv run git push origin main", "uv run git clean -fd",
+    "uv run curl https://example.invalid", "npx sed -i s/a/b/ f.txt", "npx find . -delete",
+    "uv run env rm -rf build", "uv run nohup rm -rf build", "nohup uv run rm -rf build",
+    "timeout 60 npx rm -rf build", "uv run --frobnicate x rm -rf build",
+    "uv run ${CC}foo", "npx ${TOOL}-cli --version",
+    "env -u ls rm -rf build", "exec -a ls rm -rf build", "xargs -a ls rm -rf build",
+    "uv run npx rm -rf build", "npx tsc && uv run rm -rf build",
+    "uv run python",     # an interpreter given no program reads one from input, as bare python3
+    "npm exec -c 'eslint . && rm -rf dist'", "npm exec -c '${X}y'", "bun exec 'git push'",
+    "uv run pixi run rm -rf build", "npx hatch run rm -rf build",   # an unknown runner inside one
+    "uv run --frobnicate x pytest",      # x or pytest: which one runs cannot be told
+)
+# Ordinary runner use: main's verdict, kept.
+RUNNER_KEEPS = {
+    "uv run pytest": "allow", "uv run python script.py": "allow", "npx vite": "allow",
+    "npx tsc --noEmit": "allow", "npm exec vitest": "allow", "poetry run python -m pkg": "allow",
+    "uvx ruff check": "ask", "npx create-react-app foo": "allow", "npx prettier --write .": "allow",
+    "uv run pytest -x 2>&1": "allow", "uv run --with pytest pytest": "allow",
+    "uv run ruff check .": "allow", "uv pip install -e .": "allow", "npm run build": "allow",
+    "npm install": "allow", "bun run dev": "allow", "bun x vite": "allow",
+    "pnpm exec vitest run": "allow", "yarn dlx create-vite app": "allow",
+    "npm exec -c 'tsc --noEmit'": "allow", "timeout 30 npm test": "allow",
+    "nohup npm run dev": "allow", "xargs -0 grep -l foo": "allow", "command -v uv": "allow",
+    "env FOO=1 pytest": "allow", "npx eslint .": "allow", "uv run -m pytest": "allow",
+    "python -m runpy pytest": "allow", "uv run python -m runpy pytest": "allow",
+    "bunx rm -rf build": "ask", "uvx rm -rf build": "ask", "pnpx rm -rf build": "ask",
+    "watch -n 1 ls": "allow", "env -u FOO pytest": "ask",   # main read FOO as the program
+    "npm exec -c 'eslint .'": "allow", "bun exec 'vite build'": "allow",
+    "pnpm exec -c 'prettier --check . && tsc'": "allow",
+}
+
+
+def runner_checks() -> None:
+    """Program runners are judged by what they start (the brief's group 1):
+    `RUNNER_DECIDE_DENY` is DENY in `rules.decide`, `RUNNER_GATE_DENY` in
+    `static_verdict`, and both are refused by real `dispatch` under an
+    allowlist entry for every stem in sight, in modes "ask" and "all" —
+    never run, never asked; `RUNNER_ASK` is asked (and not run on a no) where
+    main allowed it; `RUNNER_KEEPS` holds main's verdict; and an allowlist
+    entry for a runner's stem still covers what it runs (the stem rule,
+    unchanged)."""
+    from jarvis import config
+    from jarvis import protected_state as S
+
+    stems = sorted(set(_GATE_STEMS) | set(_OWNER_OPS_STEMS) | {
+        "npx", "npm", "pnpm", "yarn", "bun", "bunx", "uvx", "pnpx", "poetry", "pipx", "rye",
+        "chronic", "exec", "tee", "rm", "sudo", "true"})
+    with gate_home():
+        config.ALLOWLIST_PATH.write_text(json.dumps(
+            [{"tool": "run_command", "prefix": stem} for stem in stems]))
+        before = config.ALLOWLIST_PATH.read_text()
+        asked: list[str] = []
+
+        def says_yes(tool, args):
+            asked.append(args.get("command", ""))
+            return True
+
+        for command in RUNNER_DECIDE_DENY + RUNNER_GATE_DENY:
+            static = permissions.static_verdict(command)
+            assert static.decision == rules.DENY, (command, static)
+            if command in RUNNER_DECIDE_DENY:
+                assert rules.decide(command).decision == rules.DENY, (command, rules.decide(command))
+            else:
+                touch = S.command_touch(command)
+                assert touch is not None and touch.certain, (command, touch)
+            for mode in ("ask", "all"):
+                permissions.set_mode(mode)
+                try:
+                    with recorded() as ran:
+                        asked.clear()
+                        out = tools.dispatch(
+                            "run_command", json.dumps({"command": command, "reason": "r"}),
+                            approve=permissions.gate(says_yes))
+                finally:
+                    permissions.set_mode("ask")
+                assert "efused" in out.text, (command, out.text)
+                assert not ran, f"[{mode}] it ran: {command!r}"
+                assert not asked, f"[{mode}] it was put to the owner: {command!r}"
+        assert config.ALLOWLIST_PATH.read_text() == before
+
+        # Asked, where main allowed it — and not run on a no (an empty
+        # allowlist: an entry for the runner's stem is a yes to what it runs).
+        config.ALLOWLIST_PATH.write_text("[]")
+        for command in RUNNER_ASK:
+            assert rules.decide(command).decision == rules.ASK, (command, rules.decide(command))
+            assert permissions.static_verdict(command).decision == rules.ASK, command
+            with recorded() as ran:
+                asked.clear()
+                tools.dispatch("run_command", json.dumps({"command": command, "reason": "r"}),
+                               approve=permissions.gate(lambda tool, args: asked.append(1) or False))
+            assert asked and not ran, f"not asked, or ran on a no: {command!r}"
+        for command, want in RUNNER_KEEPS.items():
+            got = rules.decide(command).decision
+            assert got == want, f"{command!r}: {got}, not main's {want}"
+        # The stem rule, unchanged: an entry for `uv` is a yes to what it runs.
+        config.ALLOWLIST_PATH.write_text(json.dumps([{"tool": "run_command", "prefix": "uv"}]))
+        assert permissions.allows("run_command", {"command": "uv run rm -rf build"})
+        assert not permissions.allows("run_command", {"command": "uv run rm -rf build && rm x"})
+    print(f"ok  runners: {len(RUNNER_DECIDE_DENY)} refused by decide and {len(RUNNER_GATE_DENY)} "
+          f"gate-state writes refused (never run, never asked, any allowlist, mode all); "
+          f"{len(RUNNER_ASK)} asked that main allowed; {len(RUNNER_KEEPS)} of main's verdicts kept")
+
+
+# PR #24's follow-up 1: a reader hazard is a certain write only of what it
+# writes. `{allow}` is the allowlist; DENY lines write it, ASK lines only run
+# something, write elsewhere, or were matched by an ambiguous abbreviation.
+HAZARD_CERTAIN = (
+    "sort -o {allow} in.txt", "sort --output={allow} in.txt", "sort -o{allow} in.txt",
+    "sort --out={allow} in.txt", "less --log={allow} README.md",
+    "uniq in.txt {allow}", "xxd in.bin {allow}", "tree -o {allow} .", "find {allow} -delete",
+    "sed -i s/a/b/ {allow}", "sed -ni s/a/b/ {allow}", "sed 'w {allow}' f.txt",
+    "less -o {allow} README.md", "less --log-file={allow} README.md", "ss -D {allow}",
+    "grep --save-config={allow} x",
+    "find ~/.config/jarvis -name allowlist.json -exec cp /tmp/x {{}} \\;",
+    "find ~/.config/jarvis -name allowlist.json -execdir sh -c 'cp /tmp/x {{}}' \\;",
+)
+HAZARD_UNCERTAIN = (
+    "grep --pager=less x {allow}", "grep --p x {allow}", "grep --q x {allow}",
+    "grep --con=3 x {allow}", "grep --filter=cat x {allow}", "grep -Q x {allow}",
+    "less --save-marks {allow}", "less -k keys {allow}", "less +F {allow}",
+    "rg --pre cat x {allow}", "find {allow} -exec cat {{}} \\;", "sort -o out.txt {allow}",
+    "uniq {allow} out.txt", "xxd {allow} out.hex", "sed -n 's/a/b/w out.txt' {allow}",
+    "ug x {allow}", "bat --pager=less {allow}", "sort --ou={allow} in.txt",
+)
+
+
+def hazard_certainty_checks() -> None:
+    """PR #24's follow-ups 1 and 3: `HAZARD_CERTAIN` provably writes the
+    allowlist (DENY); `HAZARD_UNCERTAIN` names it to a reader in a form that
+    runs something, writes elsewhere, or was matched by an abbreviation
+    another implementation reads otherwise (ASK, never DENY, never covered
+    by an allowlist entry); and ug's `--no-config` counts only before `--`."""
+    from jarvis import config
+    from jarvis import protected_state as S
+
+    allow = "~/.config/jarvis/allowlist.json"
+    with gate_home():
+        for line in HAZARD_CERTAIN:
+            command = line.format(allow=allow)
+            touch = S.command_touch(command)
+            assert touch is not None and touch.certain, (command, touch)
+            assert permissions.static_verdict(command).decision == rules.DENY, command
+        config.ALLOWLIST_PATH.write_text(json.dumps(
+            [{"tool": "run_command", "prefix": s} for s in
+             ("grep", "less", "rg", "find", "sort", "uniq", "xxd", "sed", "ug", "bat")]))
+        for line in HAZARD_UNCERTAIN:
+            command = line.format(allow=allow)
+            touch = S.command_touch(command)
+            assert touch is not None and not touch.certain, (command, touch)
+            assert permissions.static_verdict(command).decision == rules.ASK, command
+            assert not permissions.allows("run_command", {"command": command}), command
+            with recorded() as ran:
+                out = shell.run_command(command, reason="r")
+            assert not out.startswith("Refused"), (command, out)   # no approver: asked, not refused
+        config.ALLOWLIST_PATH.write_text("[]")
+    assert rules.reader_hazard(["ug", "x", "--", "--no-config", "f"]) is not None
+    assert rules.reader_hazard(["ug", "--no-config", "x", "f"]) is None
+    assert rules.reader_hazard(["ug", "--no-config", "x", "--", "f"]) is None
+    print(f"ok  hazards: {len(HAZARD_CERTAIN)} real writes onto the allowlist DENY; "
+          f"{len(HAZARD_UNCERTAIN)} exec-only or ambiguous forms ASK, never refused unasked; "
+          "ug's --no-config read only before --")
+
+
 def main() -> int:
     # Never read (or write) the owner's real allowlist from a test: `gate()`
     # consults it, so a stray entry would silently change what this suite
@@ -2702,6 +2919,8 @@ def main() -> int:
     review_48_delta_checks()
     fails_against_old_code_checks()
     owner_op_checks()
+    runner_checks()
+    hazard_certainty_checks()
     print("\nall rules checks passed")
     return 0
 

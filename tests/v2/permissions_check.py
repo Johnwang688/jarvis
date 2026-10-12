@@ -1380,6 +1380,66 @@ def review_48_checks():
             ok(permit(*bash(line), brief) != Decision.DENY, f"{line!r} is not refused")
 
 
+# Program runners judged by what they start (2026-10-12): each layer-1 line was
+# allowed under AUTO on main, and each always-ask line went to the reviewer.
+RUNNER_V2_DENY = (
+    "npx jarvis hud install", "yarn exec jarvis restart", "npm exec -c 'jarvis hud install'",
+    "bun x jarvis restart", "pnpm exec -c 'jarvis restart'",
+    "env -u ls cp /tmp/x ~/.config/jarvis/allowlist.json",
+    "exec -a ls cp /tmp/x ~/.config/jarvis/allowlist.json",
+    "npm exec -c 'cp /tmp/x ~/.config/jarvis/allowlist.json'",
+    "bun exec 'cp /tmp/x ~/.config/jarvis/allowlist.json'",
+    "npm exec -c 'cp /tmp/x .env.production'",
+)
+RUNNER_V2_ALWAYS_ASK = (
+    ("npx vercel --prod", "vercel-prod"), ("npx vercel deploy --prod", "vercel-prod"),
+    ("pnpm dlx vercel --prod", "vercel-prod"), ("npm exec -c 'vercel --prod'", "vercel-prod"),
+    ("uv run git push --force origin topic", "git-push-force"),
+    ("env -u X git push origin main", "git-push-protected"),
+    ("npx stripe charges create --amount 5", "payments-stripe"),
+    ("bun x gh release create v1", "gh-release"),
+)
+RUNNER_V2_ORDINARY = ("npx vercel", "npx vercel ls", "uv run pytest", "npx vite", "npm exec vitest",
+                      "uv run git push origin topic")
+
+
+def runner_checks():
+    """What a wrapper or runner starts, at each layer: refused at layer 1 under
+    AUTO and STRICT and never asked; an always-ask rule matched through it;
+    and no longer auto-allowed at layer 4 when the program asks on its own."""
+    from jarvis.v2.model import PermissionProfile as P
+    from jarvis.v2.permissions import always_ask_match, build_permit
+    from jarvis.v2.provider import Decision
+
+    with Sandbox() as box:
+        for profile in (P.AUTO, P.STRICT):
+            brief = brief_for(profile)
+            asker = Asker(Decision.ALLOW)
+            permit = build_permit(context(brief), asker)
+            for line in RUNNER_V2_DENY:
+                before = len(asker.seen)
+                eq(permit(*bash(line), brief), Decision.DENY, f"[{profile.value}] Bash {line!r} is refused")
+                eq(len(asker.seen), before, f"[{profile.value}] {line!r} is never put to the owner")
+        brief = brief_for(P.AUTO)
+        for line, rule in RUNNER_V2_ALWAYS_ASK:
+            match = always_ask_match("Bash", {"command": line}, brief)
+            eq(match[0] if match else None, rule, f"{line!r} matches always-ask rule {rule}")
+            asker = Asker(Decision.DENY)
+            permit = build_permit(context(brief), asker)
+            eq(permit(*bash(line), brief), Decision.DENY, f"{line!r}: the owner's no holds")
+            eq(len(asker.seen), 1, f"{line!r} is put to the owner under AUTO")
+            eq(box.decisions[-1]["layer"], "always-ask", f"{line!r} at layer 2")
+        for line in RUNNER_V2_ORDINARY:
+            eq(always_ask_match("Bash", {"command": line}, brief), None, f"{line!r} asks nothing new")
+        # Layer 4: a human-backed asker no longer waves through what a runner
+        # starts when that program asks on its own; ordinary runs still pass.
+        human = build_permit(context(brief), Asker(Decision.ALLOW))
+        human(*bash("uv run rm -rf build"), brief)
+        eq(box.decisions[-1]["layer"], "reviewer", "`uv run rm -rf build` is not layer 4's ALLOW")
+        human(*bash("uv run pytest"), brief)
+        eq(box.decisions[-1]["layer"], "jarvis-allow", "`uv run pytest` still is")
+
+
 _UNIT_CGROUP = "/user.slice/user-1000.slice/user@1000.service/app.slice/jarvis-daemon2.service"
 # Review 2 of PR #48 at layer 1 (each allowed under AUTO on 819e58a, or — the
 # first — a permit that never returned).
@@ -1856,7 +1916,8 @@ def main():
                     human_backed_checks, log_checks, approvals_checks, hud_build_deny_checks,
                     env_file_checks,
                     installed_hud_deny_checks, daemon_and_rebuild_ops_checks, review_48_checks,
-                    review_48_round2_checks, review_48_delta_checks, daemon_checks, auto_quiet_checks, hatch_checks, discord_checks):
+                    review_48_round2_checks, review_48_delta_checks, runner_checks, daemon_checks,
+                    auto_quiet_checks, hatch_checks, discord_checks):
         print(f"-- {section.__name__}")
         section()
     print()

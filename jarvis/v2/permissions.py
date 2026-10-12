@@ -739,6 +739,11 @@ def always_ask_match(tool: str, args: dict, brief: Brief | None = None,
         stems = [s for s, _ in rules.command_targets(segment)] or (
             [tokens[0].rsplit("/", 1)[-1]] if tokens else [])
         segments.append((segment, tokens, stems))
+        # What a wrapper or runner in front starts is judged too, from rules'
+        # one table: `npx vercel --prod` is a production deploy, and `uv run
+        # git push --force origin main` a force push (2026-10-12).
+        for inner in rules.started_commands(segment):
+            segments.append((segment, inner, [inner[0].rsplit("/", 1)[-1].lower()]))
     targets = file_targets(tool, args) if tool in FILE_TOOLS else []
     for rule in always_ask_for(brief, project):
         matched, rule_id, reason = _rule_matches(rule, tool, segments, targets)
