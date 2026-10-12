@@ -11,11 +11,18 @@
 // panes (WP-G1): a pane is known by its id (`pane-<id>`, its React key) and
 // carries its slot, the number the owner reads, as `data-slot`.
 //
-// In the single layout — the default — pane 1 is the only pane mounted and
-// its header is the old tab row exactly: the five view buttons and, on the
-// right, the profile select. The split-only chrome (the focus line, the
-// context, the compact view menu) is drawn only when there is more than one
-// pane, so the default window renders as it did.
+// In the single layout — the default — one pane is mounted and its header is
+// the old tab row: the view buttons, the split button (WP-G2: that is how one
+// pane becomes two) and, on the right, the profile select. The split-only
+// chrome (the focus line, the context, the compact view menu, the ×) is drawn
+// only when there is more than one pane.
+//
+// Split and × (WP-G2): the split button adds a copy of the pane after it (App
+// decides what the copy shows and whether one fits); × closes exactly that
+// pane, asking first in an inline strip when App says it holds something that
+// cannot wait (an unsaved edit, a compose row's unsent words). A × clicked
+// within CLOSE_GUARD_MS of a close, or as a double-click's second click,
+// closes nothing. A pane neither drawn nor hidden by ⊞ is unmounted.
 //
 // Several chats (WP-B): any pane may show chat, each its own conversation.
 // The selected chat's pane (decisions W-6: the chat pane most recently
@@ -23,7 +30,7 @@
 // split, an accent down its header's edge and a mic mark. A view switch goes through the caller (`onView`), which refuses
 // to switch a File pane holding an unsaved edit away.
 
-import { useEffect, useRef, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { keyStep } from "../lib/layout";
 import {
   PANEL, PANE_MIN_H, PANE_MIN_W, PANE_NOS, PANE_VIEWS, gridTemplate, maxPanelHeight, moveColEdge, rowCount,
@@ -31,7 +38,7 @@ import {
 } from "../lib/workspace";
 import { placeTerminals, type InSpec } from "../lib/terminal";
 import type { Project } from "../types";
-import { Separator, type LayoutControl } from "./Layout";
+import { AreaIcon, Separator, type LayoutControl } from "./Layout";
 import { Panel } from "./Panel";
 import { TerminalLinkMenu, TerminalPane, TerminalToasts, terminals, useTerminals } from "./Terminal";
 
@@ -74,6 +81,9 @@ function useTerminalBridge(v: LayoutControl, place: Map<string, number>, termina
   useEffect(() => terminals.setSlots(slots ?? new Map()), [slotKey]);
 }
 
+/** A click on × this soon after a close closes nothing: the second click of a double-click lands on whatever × moved under the pointer. */
+export const CLOSE_GUARD_MS = 400;
+
 /** Under this, a split pane's File and Diff views hide their tree behind a toggle. */
 export const NARROW_W = 560;
 /** Under this, a split pane's view strip becomes a `view ▾` menu. */
@@ -115,6 +125,16 @@ export function Workspace(props: {
   openPreview?: (url: string) => boolean;
   /** `+ ▾`'s choices besides Home. */
   projects?: Project[];
+  /**
+   * The split button (WP-G2): whether pane `pane` can be split now, and its
+   * title — what it does, or why not (lib/workspace `splitTitle`). Without
+   * it there is no button.
+   */
+  splitFor?: (pane: PaneNo) => { ok: boolean; title: string };
+  onSplit?: (pane: PaneNo) => void;
+  /** × first asks this (an unsaved edit, unsent words): the question, or null to close at once. */
+  closeQuestion?: (pane: PaneNo) => string | null;
+  onClose?: (pane: PaneNo) => void;
 }) {
   const v = props.view;
   const { fit, ws } = v;
@@ -131,9 +151,53 @@ export function Workspace(props: {
     if (!id) return "terminal";
     return mgr.sessions.get(id)?.title || mgr.row(id)?.title || `terminal ${id}`;
   };
-  // Every pane any render has drawn stays mounted (hidden when not drawn).
-  const ever = useRef<Set<PaneNo>>(new Set<PaneNo>([1]));
+  // Every pane any render has drawn stays mounted (hidden when not drawn),
+  // until it is closed: a pane neither drawn nor hidden by ⊞ is unmounted, and
+  // a split that reuses its id later mounts it fresh (its incarnation).
+  const ever = useRef<Set<PaneNo>>(new Set<PaneNo>());
   for (const n of fit.panes) ever.current.add(n);
+  for (const n of Array.from(ever.current)) {
+    if (!ws.order.includes(n) && !ws.kept.includes(n) && !fit.panes.includes(n)) ever.current.delete(n);
+  }
+  // × that asks first (an unsaved edit, unsent words): which pane, and what it asks.
+  const [asking, setAsking] = useState<{ pane: PaneNo; question: string } | null>(null);
+  // The last close: a click on × this soon after one (a double-click, the
+  // second click landing on the × that moved under the pointer) closes nothing.
+  const lastClose = useRef(0);
+  const closeNow = (n: PaneNo) => {
+    lastClose.current = Date.now();
+    setAsking(null);
+    props.onClose?.(n);
+  };
+  const onCloseClick = (n: PaneNo, e: React.MouseEvent) => {
+    if (props.blocked || e.detail > 1 || Date.now() - lastClose.current < CLOSE_GUARD_MS) return;
+    const question = props.closeQuestion?.(n) ?? null;
+    if (question) {
+      setAsking({ pane: n, question });
+      return;
+    }
+    closeNow(n);
+  };
+  // The question takes focus on Keep: Enter there never discards anything.
+  useEffect(() => {
+    if (!asking) return;
+    document.querySelector<HTMLElement>(`[data-testid="pane-${asking.pane}-close-keep"]`)?.focus({ preventScroll: true });
+  }, [asking]);
+  // A question about what the pane no longer holds is not left standing
+  // (review of PR #47): the pane switched to a File with an edit, the words
+  // were sent — "Discard and close" must never answer a question nobody asked.
+  const question = asking ? props.closeQuestion?.(asking.pane) ?? null : null;
+  useEffect(() => {
+    if (asking && question !== asking.question) setAsking(null);
+  }, [asking, question]);
+  /** Split and × are buttons: Space and Enter press them and go no further; a held Enter presses once. */
+  const buttonKeys = {
+    onKeyDown: (e: React.KeyboardEvent) => {
+      e.stopPropagation();
+      if (e.repeat) e.preventDefault();
+    },
+    onKeyUp: (e: React.KeyboardEvent) => e.stopPropagation(),
+  };
 
   const split = fit.panes.length > 1;
   const tpl = gridTemplate(fit.drawn, fit);
@@ -215,7 +279,7 @@ export function Workspace(props: {
               onPointerDownCapture={() => v.focus(n)}
               onFocusCapture={() => v.focus(n)}
             >
-              <div className="tabs" id={n === 1 ? "tabs" : undefined}>
+              <div className="tabs" id={at.drawn && at.slot === 1 ? "tabs" : undefined}>
                 <div className="viewstrip" data-testid={`pane-${n}-view`}>
                   {at.compact ? (
                     <select
@@ -244,6 +308,25 @@ export function Workspace(props: {
                     ))
                   )}
                 </div>
+                {props.splitFor ? (() => {
+                  const sp = props.splitFor(n);
+                  return (
+                    <button
+                      type="button"
+                      className="tb-icon panesplit"
+                      data-testid={`pane-${n}-split`}
+                      aria-label="Split pane"
+                      title={sp.title}
+                      disabled={props.blocked || !sp.ok}
+                      onClick={() => {
+                        if (!props.blocked && sp.ok) props.onSplit?.(n);
+                      }}
+                      {...buttonKeys}
+                    >
+                      <AreaIcon area="split" open={false} />
+                    </button>
+                  );
+                })() : null}
                 {at.split && spec.view === "chat" && n === props.selectedPane ? (
                   <span className="micmark" data-testid={`pane-${n}-mic`} role="img" aria-label="Selected chat"
                         title="The selected chat: what you say, the orb, and files dropped outside a chat go here">
@@ -256,7 +339,43 @@ export function Workspace(props: {
                 ) : null}
                 {ctx ? <span className="panectx" title={ctx}>{ctx}</span> : null}
                 <div className="paneextras">{props.extras(spec, at)}</div>
+                {split && at.drawn && props.onClose ? (
+                  <button
+                    type="button"
+                    className="tb-icon paneclose"
+                    data-testid={`pane-${n}-close`}
+                    aria-label={`Close pane ${at.slot}`}
+                    title={spec.view === "chat"
+                      ? "Close this pane. The thread keeps running and stays in the sidebar"
+                      : "Close this pane"}
+                    disabled={props.blocked}
+                    onClick={(e) => onCloseClick(n, e)}
+                    {...buttonKeys}
+                  >
+                    ×
+                  </button>
+                ) : null}
               </div>
+              {asking && asking.pane === n ? (
+                <div className="closeask" data-testid={`pane-${n}-close-ask`} role="group" aria-label="Close this pane?">
+                  <span>{asking.question}</span>
+                  <button type="button" data-testid={`pane-${n}-close-discard`} disabled={props.blocked}
+                          onClick={() => {
+                            // Asked again at the click: only the question shown is answered.
+                            if (props.blocked || (props.closeQuestion?.(n) ?? null) !== asking.question) return;
+                            closeNow(n);
+                          }}
+                          {...buttonKeys}>
+                    Discard and close
+                  </button>
+                  {/* Not disabled under a card (the veil makes it inert): a disabled button drops
+                      focus to the page before the card can record it, so focus could not come back. */}
+                  <button type="button" data-testid={`pane-${n}-close-keep`}
+                          onClick={() => setAsking(null)} {...buttonKeys}>
+                    Keep
+                  </button>
+                </div>
+              ) : null}
               {spec.view === "terminal" ? (
                 <TerminalPane pane={n} terminalId={spec.terminalId} drawn={at.drawn} />
               ) : (
