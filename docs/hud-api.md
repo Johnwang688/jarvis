@@ -1363,10 +1363,16 @@ HUD can flag one it cannot match to its own click.
   size, mtime}` when this build wrote one. The last 32 are kept.
 - `POST /projects/{id}/vex/download` `{slot, name}` → 202 `{terminal_id}`.
   `slot` an integer 1–8 (not a string, not a bool); `name`
-  `^[A-Za-z0-9_][A-Za-z0-9_-]{0,19}$` — both 400 otherwise. 409 when there
-  is no `build/<name>.bin` or it is older than the sources ("Build first";
-  the settings file's name must pass the `P=` rule before it names a file;
-  VX-2 chains Build then Download on the one click), while another device
+  `^[A-Za-z0-9_][A-Za-z0-9_-]{0,19}$` — both 400 otherwise. 409 `{error,
+  code: "build_first"}` when there is no `build/<name>.bin`, or it is older
+  than the sources **and** the project's last build did not succeed with
+  every source no newer than when it started and leave exactly this binary
+  (its mtime and size; kept in memory, so a daemon restart asks for one build
+  again) — a make with nothing to do makes the binary current (VX-2 review,
+  M2); a clean, a failed or timed-out build forgets it. The settings file's
+  name must pass the `P=` rule before it names a file; VX-2 chains Build then
+  Download on the one click, on the `code`, never the sentence. Every other
+  409 here has no `code`. Also 409 while another device
   action runs, while the brain terminal holds the port, while a build of the
   project runs, and for a Python project (its download flag is a spike
   item). Runs `vexcom.exe --name <name> --slot <n> --write <bin as C:\…>
@@ -1411,12 +1417,14 @@ still goes through). Program terminals count apart from shells: six of each.
 
 ### The VEX view (VX-2, 2026-10-11)
 
-No route changed; the HUD's side of the routes above (`hud/src/api.ts`,
-`lib/vex.ts`, `state/vex.ts`, `components/VexView.tsx`):
+The download's 409 gained `code: "build_first"` (review round, above); the
+HUD's side of the routes above (`hud/src/api.ts`, `lib/vex.ts`,
+`state/vex.ts`, `components/VexView.tsx`):
 
-- `GET /projects/{id}/vex` is read once per project a drawn pane is about (and
-  again when the VEX view shows or the window gets focus): the strip offers the
-  `vex` view only for `vex: true`, `malformed: true` or `pros: true`.
+- `GET /projects/{id}/vex` is read once per project a drawn pane is about, and
+  again when the VEX view shows, when the window gets focus, and every 30 s
+  for one older than that: the strip offers the `vex` view only for `vex:
+  true`, `malformed: true` or `pros: true`.
 - The terminal row's `program` and `input` are read (`lib/terminal.ts`
   `TerminalRow`): a program terminal's panel tab carries `data-program`, and one
   that ended offers Close, never Restart or "New terminal here" (they open a
@@ -1427,16 +1435,22 @@ No route changed; the HUD's side of the routes above (`hud/src/api.ts`,
   (`jarvis.hud.vex.builds`, ids only) so the errors list comes back after a
   reload.
 - Download: `POST …/vex/download {slot, name}` **only from the Download
-  button, on a trusted pointer click**. A 409 whose sentence says "Build
-  first" starts a build and, when it succeeds and no approval card has come
-  up since the click, sends the download again; while the brain terminal holds
+  button, on a trusted pointer click whose `detail` is exactly 1** (a double
+  click is one download). **One chain per window**: no second download, for
+  any project, while one runs. A 409 with `code: "build_first"` starts a
+  build and, when it succeeds and no approval card has come up since the
+  click (nor while the 409 was on its way), sends the download again; if that
+  is `build_first` again the view says Rebuild. While the brain terminal holds
   the port it is closed first (`DELETE /terminals/{id}`) and opened again
-  afterwards (`POST /vex/brain`). The download's end is read from the
-  terminal listing (`exited`, `exit_code`).
+  afterwards (`POST /vex/brain`) — never after a chain a card, a crash or the
+  owner's Cancel dropped. **Cancel** (until the download is sent) closes the
+  build's program terminal (`DELETE /terminals/{id}`, which ends the build)
+  and sends nothing. The download's end is read from the terminal listing
+  (`exited`, `exit_code`).
 - SSE `vex_device`: matched against the device actions this window started
   (recorded before each request; 30 s); one it did not start is said in the
   VEX view.
-- Test hooks (read-only): `window.__hudVex` (`blocked`, `cards`, `run(id)`),
+- Test hooks (read-only): `window.__hudVex` (`blocked`, `cards`, `chain()`, `run(id)`),
   and `__hud.monacoEditors()` rows gain `line` and `column` (where the cursor
   is).
 

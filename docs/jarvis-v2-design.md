@@ -2329,14 +2329,21 @@ error outside the project (an SDK header) is text only. **Download is only a
 click on the labelled button** — "Download to slot 3: replaces whatever is in
 slot 3 on the brain" — and the button counts only a trusted pointer click
 (`lib/vex.ts` `isExplicitClick`: Enter or Space on it and a script's
-`.click()` make clicks with `detail` 0), takes no focus from a press and is
+`.click()` make clicks with `detail` 0, and a double click's second click
+`detail` 2; only `detail` 1 counts), takes no focus from a press and is
 out of the Tab order; there is no key and no palette entry. One click is one
 chain (`state/vex.ts`): the brain terminal paused when it holds the port, a
-build first when the daemon answers "Build first", the download, then the
-brain terminal again. **Under an approval card every VEX control is disabled
-and inert, and the store refuses; a card that comes up between the click and
-a step drops the rest of the chain** — nothing is built or sent behind it —
-and the view says so. With no `vex.json` the view says the one command to
+build first when the daemon's 409 carries `code: "build_first"`, the
+download, then the brain terminal again. **One chain per window**: while it
+runs no other download starts, for any project; every VEX view shows it with
+a Cancel that stops its build and sends nothing; the VEX pickers are off.
+**Under an approval card every VEX control is disabled and inert, and the
+store refuses; a card that comes up between the click and a step drops the
+rest of the chain** — nothing is built or sent behind it, the brain terminal
+is not reopened — and the view says so. The daemon counts a binary current
+when the project's last build succeeded with no source newer than when it
+started and left exactly that binary, so a make with nothing to do never
+loops "Build first" (review round, M2). With no `vex.json` the view says the one command to
 run, `jarvis vex setup`, and checks again every few seconds and on focus. Device
 info and every error message are drawn as text. A `vex_device` record this
 window cannot match to its own click is said in the view. Not yet: a Python

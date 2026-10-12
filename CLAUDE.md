@@ -1286,27 +1286,47 @@ PaneEditor's own model swap; an error outside the project is text). The
 build, a download and the brain terminal are VX-1's **program terminals in
 the WP-D panel** (`terminals.showProgram`; one that ended has no Restart or
 "New terminal here" — those open a shell). **Download is only a click on
-the labelled button**: `isExplicitClick` (trusted, `detail` ≥ 1, primary
-button — Enter/Space on a focused button and `el.click()` have `detail` 0),
+the labelled button**: `isExplicitClick` (trusted, `detail` exactly 1 — a
+double or triple click's later clicks never count — primary button;
+Enter/Space on a focused button and `el.click()` have `detail` 0),
 `tabIndex=-1`, no focus from a press; **no key and no palette entry
 downloads, and nothing else calls `vex.download`**. One click is one chain:
-pause the brain terminal if it holds the port, build first on the daemon's
-"Build first", download, reopen the brain terminal. **Under a card every VEX
+pause the brain terminal if it holds the port, build first on VX-1's 409
+`code: "build_first"` (never its wording; a build-first that still ends
+stale says Rebuild), download, reopen the brain terminal. **One chain per
+window** (review M1): no other download, for any project, while one runs;
+every VEX view shows it ("Building override, then downloading to slot 1")
+with a **Cancel** that closes the build's program terminal and never sends
+the download (none once the download is sent); the VEX panes' project
+pickers, the brain terminal and device info are off meanwhile. **Under a card every VEX
 control is disabled (and inert), `vex.setBlocked` (App, above the boundary,
 beside the terminals' hold) makes the store refuse, and a card that comes up
 between the click and any step drops the rest of the chain** (a card count,
-as `ownerOpened`) — nothing builds or downloads behind it; a crash
-(`vex.crash()`) stops it too. No `vex.json`: the view names `jarvis vex
-setup` and checks again every 4 s and on focus. `vex_device` records this window
-did not start are said in the view. **Known**: on a reload, a window with no
-chat drawn puts the conversation in the focused pane (WP-B's boot rule), so a
-lone VEX pane comes back as chat — keep the VEX view beside a chat. Free
+as `ownerOpened`: one that came and went counts, and so does one that came up
+while the daemon was answering) — nothing builds or downloads behind it; a
+crash (`vex.crash()`) stops it too; **a dropped chain never reopens the brain
+terminal**, and says so. No `vex.json`: the view names `jarvis vex setup`
+and checks again every 4 s and on focus. Detection is asked again on focus
+and every 30 s, so a project that becomes a VEX project is offered the view
+without a reload. **A VEX view never follows the chat**: a pane whose pinned
+project is gone says "Pick a project". **A lone VEX pane survives a reload**
+(the boot never puts the chat over a VEX view; a window with no chat drawn is
+WP-B's refused-with-a-sentence case). `vex_device` records this window did
+not start are said in the view. **The daemon's freshness rule** (`vex.py`,
+review M2): a download is fresh when `build/<name>.bin` is newer than the
+sources, **or** the project's last build succeeded with no source newer than
+when it started and left exactly this binary (mtime and size) — a make with
+nothing to do (a newer `.hpp` it never compiles, a notes file) no longer
+loops "Build first"; a clean, a failure or a timeout forgets it, and so does
+a daemon restart (one more build). Its 409 is `BuildFirst`, `{error, code:
+"build_first"}`. Build errors' `./` is dropped so they stay clickable. Free
 checks: `lib/vex.test.ts`, `tests/face/hud_v2_vex_check.py` (its own
 `MockDaemon(0)`; VX-1's routes in `hud_v2_mock_vex.py`, builds and downloads
 as terminal rows, their sockets played by the terminal suite's `FakePty`);
 the four safety guards (explicit click, the chain's card check, `blocked` on
-the controls, the strip's filter) each shown to fail their checks when
-removed.
+the controls, the strip's filter) and each review fix (M1, M2's HUD half,
+L1–L7) shown to fail their checks when removed; M2's daemon half in
+`tests/v2/vex_check.py` (`Device`, the fake make's `NOOP` and `HOLD`).
 
 **The HUD's CSP and installed build, ED-4 (2026-10-11; editor plan §1.7,
 §2.7; decision C-1; contract in `docs/hud-api.md`).** Every HUD and API
