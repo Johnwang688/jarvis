@@ -1216,6 +1216,112 @@ Decisions W-2 in `docs/plans/2026-10-09-hud-workspace-decisions.md`.
   refused: their error messages can echo part of a value. The "Jarvis can read"
   switch and the note are the backstops.
 
+## Additions 2026-10-11 (the VEX backend — VX-1)
+
+VEX V5 in the HUD (editor plan §2.9; decisions V-1 to V-5; code in
+`jarvis/v2/vex.py`). The backend only: the VEX view and its panel tabs are
+VX-2, the new-project dialog VX-3. **Every route is owner-only** on the HUD
+listener with a strict Host: the API listener (8405) is 403, the preview
+listener (8403) 404, a missing or foreign Origin (the workshop's, `null`)
+403, a rebound Host 403. The rule is the shared one, `projects.is_owner`
+(PR #41): **a same-origin `GET` carries no Origin in Chromium** (measured
+2026-10-10), so a `GET` with no Origin is accepted only when the browser's
+own `Sec-Fetch-Site: same-origin` says the HUD sent it (`none`, `same-site`
+and `cross-site` are 403); every other method needs the HUD's Origin. **No request names an executable, a path to run or an argument**:
+the programs and their argv come from `vex.json` and `vex.py`'s tables, the
+project folder from the project's id, and a body with any field not listed
+(`path`, `args`, `program`) is 400. Every 409 is a sentence. Output lives in
+the program terminal's ring and the window only, as WP-C's terminals do —
+never on the bus or in the log. **Every action that spawns a VEX tool first
+hashes it** (and, for a build, the five tools `make.exe` runs) against the
+SHA-256 `jarvis vex setup` recorded, and is 409 "the VEX tools changed since
+`jarvis vex setup` (<tool>); run it again" on a mismatch.
+
+**SSE `vex_device`** `{action: "download"|"brain"|"info", at}` — one per
+device action, when it starts; nothing else (no slot, name, path or output),
+as `terminal_attached`. A device action the window did not cause (a
+program running as the owner POSTing with a forged Origin) shows up here; the
+HUD can flag one it cannot match to its own click.
+
+- `GET /vex/status` → `{configured, hint, vexcom_version, toolchain,
+  sdks: {cpp, python}, extension_version, templates, project_folder, device,
+  brain}`. `configured` false with `hint` (a sentence ending "run `jarvis
+  vex setup` again") when `vex.json` is missing, malformed, or names a path
+  that fails the use-time check. `device` is the device action running
+  (`"download"`, `"info"`, `"brain"` or null); `brain` the brain terminal's
+  id.
+- `GET /projects/{id}/vex` → detection: `{project_id, vex: true, name,
+  language: "cpp"|"python", slot, sdk_version, printf_float, python_main,
+  on_windows_drive, builds}` or `{project_id, vex: false, reason}`, plus
+  `malformed: true` for a settings file that is not the extension's v2 shape
+  (platform V5, language cpp/python, slot 1–8, `extension.json` 2; read
+  within 64 KB, never through a symlink) and `pros: true` for a PROS project.
+- `POST /projects/{id}/vex/build` `{action: "build"|"rebuild"|"clean"}` →
+  202 `{build_id, terminal_id}`. C++ only, the project on a Windows drive,
+  one build per project at a time (a lock file `vexbuild` shares: 409 "a
+  build of this project is already running"), and refused (409, with the
+  reason) when the project's make files name `vexcom` — or cannot all be read
+  (more than 32, one past 256 KB, a symlink or FIFO among them, a symlinked
+  `vex/`, an `include` named by a variable or outside the project). Runs `make.exe P=<name> T=<SDK>
+  CC=… CXX=… OBJCOPY=… SIZE=… LINK=… ARCH=… [PRINTF_FLOAT=1]`, plus `-B` for
+  rebuild and `clean` for clean, every path converted to `C:\…`, in the
+  project folder, as a program terminal (`program: "vex-build"`); it replaces
+  the project's previous ended build terminal. 5-minute timeout.
+- `GET /vex/builds/{id}` → `{id, project_id, action, state:
+  "running"|"succeeded"|"failed"|"timed_out", terminal_id, exit_code, errors,
+  bin, started, ended}`. `errors` are `{file, line, col, severity:
+  "error"|"warning", message, in_project}` parsed from the build's own
+  `file:line:col: error|warning:` lines (notes skipped; a file under the
+  project comes back relative, with `/`); `bin` is `{path: "build/<name>.bin",
+  size, mtime}` when this build wrote one. The last 32 are kept.
+- `POST /projects/{id}/vex/download` `{slot, name}` → 202 `{terminal_id}`.
+  `slot` an integer 1–8 (not a string, not a bool); `name`
+  `^[A-Za-z0-9_][A-Za-z0-9_-]{0,19}$` — both 400 otherwise. 409 when there
+  is no `build/<name>.bin` or it is older than the sources ("Build first";
+  the settings file's name must pass the `P=` rule before it names a file;
+  VX-2 chains Build then Download on the one click), while another device
+  action runs, while the brain terminal holds the port, while a build of the
+  project runs, and for a Python project (its download flag is a spike
+  item). Runs `vexcom.exe --name <name> --slot <n> --write <bin as C:\…>
+  --progress` (DishPy's flags) in the project folder (`program:
+  "vex-download"`); 3-minute timeout. **No "run after download"** (V-3), and
+  no other route, CLI or tool downloads.
+- `POST /vex/brain` `{}` → `{terminal_id, started}`: the brain's user port,
+  `vexcom.exe --user`, both ways (`program: "vex-brain"`, the only program
+  terminal that takes typed input). One at a time: the open one comes back
+  with `started: false`. 409 while a download or info read runs. Closing its
+  terminal frees the device.
+- `POST /vex/device/info` `{}` → `{text, exit_code}`: vexcom's device-info
+  output as plain text (escapes and control characters removed, markup left
+  as characters — draw it as text), with a 10-second timeout (409 "did not
+  answer"). **Until the setup spike records the flag from `vexcom --help`,
+  this answers 409 saying so.**
+- `GET /vex/templates` → `[{id, language, label}]`: the extension's
+  `cpp_v5_vsc_*.zip` and `py_v5_vsc_*.zip` in the configured templates
+  folder, labelled from its `index.json` where it names them.
+- `POST /vex/projects` `{name, language, template, location?}` → 202 `{id,
+  name, path, state: "asking", project_id: null, message}`. `name`
+  `^[A-Za-z0-9_][A-Za-z0-9_-]{0,63}$`, `template` an id of that language,
+  `location` the parent folder (default `vex.json`'s `project_folder`, V-4);
+  the target is `<location>/<name>`, which must be on a Windows drive and pass
+  `folders.check_project_folder` (409 with its sentence; a folder with
+  something in it is 409 too). The template is checked whole before anyone is
+  asked. Then the **`project_folder` card** (exact path, Approve/Deny, never
+  Always, a timeout denies) unless the folder exists and is empty (O5); on a
+  yes one `mkdir`, the template unpacked by Jarvis's own code, the settings
+  file written in the extension's v2 shape, and the project created —
+  `project_created` arrives as usual.
+- `GET /vex/projects/{id}` → that request: `state` `"asking"`, `"created"`
+  (with `project_id`), `"declined"` or `"failed"`, and a `message`.
+
+**Program terminals** are listed by `GET /terminals` like any other, with two
+new row fields: `program` (`null` for a shell, else `"vex-build"`,
+`"vex-download"`, `"vex-info"` or `"vex-brain"`) and `input` (whether typed
+input reaches it). Attach, ticket, PATCH `readable` and DELETE work on them
+unchanged; DELETE stops the program. A frame to a terminal with `input`
+false is answered `{"type": "input_refused", bytes, reason}` (a lone Ctrl-C
+still goes through). Program terminals count apart from shells: six of each.
+
 ## Additions 2026-10-11 (BR-0 — only the HUD window approves)
 
 - **`POST /approvals/{id}` `{decision, always?}` is owner-only**

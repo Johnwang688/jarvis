@@ -1254,7 +1254,10 @@ class NoTool(Base):
 
     NEEDLES = re.compile(r"""['"]/terminals|\.terminals\b|import\s+terminals\b|\bterminals\s+import|"""
                          r"""jarvis\.v2\.terminals|\bTerminals\(|\bterminals\.(route|serve|create)""")
-    ALLOWED = {"jarvis/v2/daemon.py", "jarvis/v2/hud_api.py", "jarvis/v2/terminals.py"}
+    # vex.py (VX-1) creates program terminals, from its own argv tables, behind
+    # owner-only routes; tests/v2/vex_check.py holds it to that.
+    ALLOWED = {"jarvis/v2/daemon.py", "jarvis/v2/hud_api.py", "jarvis/v2/terminals.py",
+               "jarvis/v2/vex.py"}
     # The one reader, and the one line it may hold.
     READER = "jarvis/v2/tools/terminal_read.py"
     READER_IMPORT = "from ..terminals import read_for_tool\n"

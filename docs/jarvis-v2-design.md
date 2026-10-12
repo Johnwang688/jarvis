@@ -2224,6 +2224,92 @@ route modules' source), `preview.test.ts`, `hud_v2_preview_check.py` and
 the terminal suite's link section. Not yet: a "dev servers in your
 terminals" list (§2.5 item 5).
 
+**The VEX backend (2026-10-11, VX-1 of
+`docs/plans/2026-10-09-hud-editor-plan.md`; decisions V-1 to V-5).** The HUD
+can build a VEX V5 C++ project, download it to a slot on the brain, open the
+brain's user port as a terminal and make a new project from VEX's own
+templates — with the Windows `vexcom.exe` and toolchain the owner's VS Code
+VEX extension already downloaded, **run in place through WSL interop**:
+nothing copied, bundled or committed (VEX's licence forbids redistribution
+and decompiling, so the only `vexcom` flags used are DishPy's: `--name
+--slot --write --progress` and `--user`). **Which files those are is
+`vex.json`**, written only by the human-run `jarvis vex setup` (it looks in
+the extension's own folders for VS Code and Cursor, prints what it found,
+checks it by the daemon's own rule, asks y/N, writes mode 600) and refused to
+every agent write tool, v1 and v2, as gate state; **every path in it is
+re-checked at each use** — absolute, no symlink anywhere in it, a regular
+executable (or folder), inside the extension's downloads or a
+`vexrobotics.vexcode-*` install — or the action is refused with "run `jarvis
+vex setup` again". Because those folders are under AppData, which an agent can
+write, setup also records each tool's SHA-256 and every spawn hashes the tools
+it is about to run first (review round 1); a swap between the final check and
+`exec`, the tools `make.exe` opens later, and a DLL planted beside a tool in
+its AppData folder (Windows loads a program's DLLs from its own folder first;
+the fingerprint covers the executable only) remain. This is the narrow, deliberate exception to "nothing under
+`/mnt/` ever runs" (which is about resolving the Claude and Codex CLIs). A
+request never names an executable, a path or an argument (the `DESKTOP_APPS`
+pattern): the argv tables live in `vex.py`, a project comes from its id, a
+build takes `{action}` and a download `{slot, name}`, validated first; Windows
+paths come from one function that refuses a character a command line or
+make's `cmd.exe` recipes could misread, and anything outside ASCII (Windows'
+"best fit" maps fullwidth quotes and slashes to syntax). Programs run as **program terminals**
+(`terminals.create_program`, called from `vex.py` alone): the same PTY, ring,
+attach and close as the owner's shells, with an environment that empties
+`WSLENV` so nothing of the daemon's crosses into Windows, no typed input but
+Ctrl-C except the brain's, and an exit hook that parses `file:line:col:
+error|warning:` into an errors list. One build per project (a lock file shared
+with `vexbuild`), one device action at a time (download, info, the brain
+port; a reservation released only by its holder), a 5-minute build timeout,
+and a build refuses a project whose make files name `vexcom`, failing closed
+wherever it cannot read them all (a glob too complex to check, an `include`
+continued onto the next line read as make reads it, one that does not resolve
+in the project refused rather than skipped) — a makefile is project content
+`make` runs, and one that downloaded would make a build a download. **Download is only the owner's
+click** (V-2, V-3): no tool, MCP tool, CLI or Discord verb reaches it, no "run
+after download", and **any agent command line that names `vexcom` is DENY in
+`rules.decide`** — so in v1's dispatch and v2's layer 1 alike, under an
+allowlist entry or `--dangerously-skip-permissions`, never put to the owner —
+in every spelling the rule lists: a path (the `/mnt/c` interop path, the Linux
+binary, `C:\…`), a wrapper, a `sh -c`/`cmd /c`/`powershell -c` string, quote
+and escape splits (bash, cmd's `^` and `%X%`, PowerShell's backtick), `$'…'`,
+empty and default-value expansions, brace expansion, a glob argument that keeps
+at least four of its letters, and a
+PowerShell `-EncodedCommand` that decodes to it — **and any line that runs
+something that could be it** (review round 2): a glob or an expansion in
+program position, past wrappers, as the program a runner starts (options
+parsed), in `sh -c` or `$(…)`, with no letter threshold; a program that cannot
+be told and could be vexcom is asked whatever stands, never allowlist-covered,
+always-ask in v2; a glob past the caps is too complex to judge, asked the same
+way. A here-document's body is data, read as commands only where a shell is
+fed it (review round 3: a `* item` in a commit message or a C doc comment
+written through `cat > f <<'EOF'` had made the whole line DENY). An allowlist
+entry for `uv` or `npx` still covers `uv run vexbuild` (the general stem-entry
+rule), and `terminal_read` can read the brain terminal, the owner's echoed
+typing included, while its "Jarvis can read" switch is on. Like every DENY it is an
+accident guard, not a boundary — and the button is not one either: an agent
+running as the owner can still reach a plugged-in brain through a script, a
+shell fed through a pipe, cmd's or PowerShell's own wildcards, `make -f`, a
+DLL beside the tool, or a forged-Origin POST to the route. Each device action therefore
+publishes an id-only `vex_device {action, at}` record, so one nobody clicked
+is visible. **Agents build through `vexbuild`** (`python -I -m jarvis.v2.vex
+build [--rebuild|--clean]`, isolated so a package planted in the project folder
+never runs, the same argv table and lock, no other subcommand), which asks like
+any command unless the owner allowlists exactly it, as does running it or its
+module through `python -m`, `uv run` or `npx`. A new project goes through the
+same `project_folder` card Discord's `/project new` raises —
+`projects.confirm_folder` is now the one confirmation handler both call — and
+the template is checked whole (no absolute paths, `..`, drive letters,
+symlinks or `.git`; at most 200 entries, 1 MB each, 10 MB in all, read with a
+cap) before anyone is asked, then written by Jarvis's code with `O_EXCL |
+O_NOFOLLOW`, then the settings file in the extension's v2 shape. Not yet, and
+said so by the routes: device info (the flag waits on the owner's `vexcom
+--help`) and Python download (its flag is a spike item). Spike items, the
+owner's: the build against VS Code's own build log, and whether stopping the
+Linux side of an interop process ends `make.exe` on Windows. Agents' task
+worktrees live on the Linux filesystem, so `vexbuild` builds only in a chat's
+own project folder; Codex workers may not reach interop from their sandbox.
+Contract: `docs/hud-api.md`; free suite `tests/v2/vex_check.py`.
+
 **Up to eight panes (2026-10-10, WP-G1 of
 `docs/plans/2026-10-10-hud-split-panes-plan.md`; decisions beside it).** The
 owner asked for 6- and 8-pane layouts ("I'm not seeing the 6 and 8 panel
