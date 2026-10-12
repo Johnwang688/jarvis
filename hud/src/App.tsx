@@ -45,7 +45,7 @@ import { Orb } from "./components/Orb";
 import { Capture } from "./lib/capture";
 import { isMuted, loadMode, orbLine, outcomeFor, saveMode, type DictationMode } from "./lib/dictation";
 import { WakeGate, compileWake, matchesWake, WAKE_PATTERNS } from "./lib/wake";
-import type { Attachment, AvatarDesc, ChatMessage, Schedule, VoiceEntry } from "./types";
+import type { Attachment, AvatarDesc, ChatMessage, Schedule, Thread, VoiceEntry } from "./types";
 import type { RosterView } from "./lib/roster";
 import { moveThreadTo } from "./lib/threads";
 import { lastProject, loadLastProject, saveLastProject } from "./lib/compose";
@@ -280,7 +280,7 @@ export default function App() {
    */
   const giveBack = useCallback(
     (threadId: string | null, text: string, files: Attachment[], from: PaneNo | null = null,
-     parkKey: string | null = null): "box" | "held" | "parked" | "lost" => {
+     parkKey: string | null = null, projectId: string | null = null): "box" | "held" | "parked" | "lost" => {
       const at = live.current;
       const onScreen = chatsOnScreen();
       // A compose row under that key already on screen (New thread pressed
@@ -297,7 +297,7 @@ export default function App() {
         return "held";
       }
       if (parkKey) {
-        dispatch({ type: "park", key: parkKey, text, files });
+        dispatch({ type: "park", key: parkKey, text, files, projectId });
         return "parked";
       }
       dispatch({ type: "patch", patch: { error: "Words that were not sent had no chat to go back to: open a chat." } });
@@ -514,6 +514,8 @@ export default function App() {
         const n = which();
         if (n !== null) chatPatch(n, p);
       };
+      // The thread this send opened, if it opened one.
+      let opened: Thread | null = null;
       try {
         let projectId = threadId ? at.threads.find((t) => t.id === threadId)?.project_id ?? null : null;
         if (!threadId) {
@@ -531,6 +533,7 @@ export default function App() {
             });
             const n = conversation();
             threadId = t.id;
+            opened = t;
             // Remembered, so a retry after a failed send reuses this thread.
             // The whole compose row is kept, provider, model and effort with
             // it, so a failed first send retries on the same choice.
@@ -634,12 +637,26 @@ export default function App() {
         const { ws } = layoutNow.current;
         const closed = !ws.order.includes(pane) && !ws.kept.includes(pane);
         const parkKey = !threadId && back === null ? (closed ? ORPHAN_DRAFT : `compose:${pane}`) : null;
-        const went = giveBack(threadId, text, attachments, back, parkKey);
+        const went = giveBack(threadId, text, attachments, back, parkKey, compose?.projectId ?? null);
+        // Held for a thread no drawn pane shows (a first send that failed at
+        // `/send` after its pane closed): said, naming the thread, so the
+        // words are found again (review 2 of PR #47).
+        const named = (id: string) => {
+          const title = live.current.threads.find((t) => t.id === id)?.title || (id === opened?.id ? opened.title : "");
+          if (title) return `“${title}”`;
+          const pid = compose?.projectId;
+          const project = pid ? live.current.projects.find((p) => p.id === pid)?.name : null;
+          return project ? `the new thread in ${project}` : "the new thread";
+        };
         const error = `Could not send: ${e.message}`
           + (went === "parked"
             ? (closed ? " — what you wrote is kept for the next new thread you start."
               : " — what you wrote is kept for the next new thread in this pane.")
-            : "");
+            : went === "held" && threadId
+              ? ` — what you wrote waits with ${named(threadId)}: it is back in the box when you open that thread.`
+              : "");
+        // A thread this send opened is listed, so the sidebar has it to open.
+        if (opened && went === "held") void refreshThreads();
         if (steering) {
           // A refused steer leaves the running turn as it was: still tracked,
           // still stoppable.
@@ -1343,18 +1360,24 @@ export default function App() {
    * holds (ED-2: a file another pane also has open loses nothing), and a
    * compose row's unsent words — they belong to no thread, so they cannot be
    * parked. Words in a thread's box are parked, so that × does not ask.
+   * The pane's conversation is judged **whatever it shows** (review 2 of
+   * PR #47): switching a pane to File keeps its chat, words and all, and ×
+   * releases that chat too — so the question, and the strip asking it, stay
+   * while the words are there.
    */
   const closeQuestion = useCallback((n: PaneNo): string | null => {
     const spec = layoutNow.current.ws.panes[n - 1];
     const losing = spec.view === "file" ? buffers.paneLosing(n) : [];
+    const chat = live.current.chats[n];
+    const unsent = !shownThread(chat, pendingThread.current[n])
+      && (!!chat.input.trim() || chat.files.length > 0 || chat.restore.length > 0);
     if (losing.length) {
       const names = losing.map((b) => b.path).join(", ");
-      return `${names} ${losing.length === 1 ? "has an" : "have"} unsaved edit${losing.length === 1 ? "" : "s"}. Save before closing?`;
+      const edits = `${names} ${losing.length === 1 ? "has an" : "have"} unsaved edit${losing.length === 1 ? "" : "s"}`;
+      // Save keeps the edits; the words go with the pane either way, and say so.
+      if (unsent) return `${edits}, and this pane's new thread an unsent message, which closing loses. Save before closing?`;
+      return `${edits}. Save before closing?`;
     }
-    if (spec.view !== "chat") return null;
-    const chat = live.current.chats[n];
-    if (shownThread(chat, pendingThread.current[n])) return null;
-    const unsent = !!chat.input.trim() || chat.files.length > 0 || chat.restore.length > 0;
     return unsent ? "Discard the unsent message?" : null;
   }, []);
 
@@ -1418,7 +1441,7 @@ export default function App() {
       const from = spec.terminalId;
       // Readable only when the source is known to be (a copy never widens
       // what Jarvis can read; an unknown source fails closed).
-      const readable = terminals.row(from)?.readable === true;
+      const readable = terminals.readableOf(from);
       void terminals.create(terminals.specOf(from), id, undefined, { readable });
     }
     if (opts.focus !== false) focusPaneElement(id);
