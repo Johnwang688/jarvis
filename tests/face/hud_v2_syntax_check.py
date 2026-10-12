@@ -27,7 +27,16 @@ read-only test hooks). The checks, each written to bite:
     policy, the worker reports every grammar compiled, and no
     `securitypolicyviolation` is raised anywhere;
   - the loader refuses a URL outside its map (another origin, another path on
-    this one, `data:`, `blob:`), and passes one it ships.
+    this one, `data:`, `blob:`), and passes one it ships;
+  - **folding from the tree (ED-6)**, read off the margin's fold controls as
+    Monaco draws them: a C++ file folds at its includes, its class, its
+    method, its `if` and its function's signature — and not at `public:` or
+    a brace on its own line, where indentation would; folding the class
+    keeps its `};` in view; deep in the function, **sticky scroll holds the
+    function's signature** (the tree's fold start; indentation's would be the
+    `{`); a Markdown section folds at its heading; and a file past the size
+    budget folds by indentation (its unindented top-level list, which folds
+    from the tree in a small file, does not).
 
 Run alone (after `cd hud && npm ci && npm run build`):
     PYTHONPATH=. .venv/bin/python tests/face/hud_v2_syntax_check.py
@@ -89,10 +98,23 @@ FENCES = "# Every grammar\n\nSome *inline* text.\n\n" + "".join(
         ("toml", 'k = "in-toml"'),
     ))
 
-# Past `BUDGETS.maxChars` (1 MiB of UTF-16), under the editor's 2 MB cap.
-BIG = "".join(f"value_{i:06d} = {i}  # a line of a large generated table\n" for i in range(26_000))
+# ED-6: a list at the top level folds from the tree (lines 1-3) but not by
+# indentation (its items are not indented); a def folds either way.
+TABLE = "TABLE = [\n1,\n2,\n]\n\ndef first():\n    return 1\n\n"
 
-FILES = {"spin.cpp": CPP, "notes.md": NOTES, "fences.md": FENCES, "big.py": BIG}
+# Past `BUDGETS.maxChars` (1 MiB of UTF-16), under the editor's 2 MB cap.
+BIG = TABLE + "".join(f"value_{i:06d} = {i}  # a line of a large generated table\n" for i in range(26_000))
+
+# ED-6: where tree-sitter's folds start and indentation's would not. Tree:
+# 1 (the includes), 4 (the class), 6, 7, 13 (the function, at its signature).
+# Indentation: 5 (`public:`), 6, 7, 13 (to line 14 only), 15 (the `{`).
+ROBOT = ("#include \"vex.h\"\n#include <cmath>\n\nclass Robot {\npublic:\n  void drive(int speed) {\n"
+         "    if (speed > 0) {\n      go(speed);\n    }\n  }\n};\n\nvoid autonomousRoutine(int side,\n"
+         "                       int delay)\n{\n"
+         + "".join(f"  step({i}, side, delay);\n" for i in range(150)) + "}\n")
+
+FILES = {"spin.cpp": CPP, "notes.md": NOTES, "fences.md": FENCES, "big.py": BIG, "robot.cpp": ROBOT,
+         "table.py": TABLE}
 
 
 def syntax_checks(browser, mock, base, check, until, guard_live, init_script):
@@ -136,7 +158,8 @@ def syntax_checks(browser, mock, base, check, until, guard_live, init_script):
     page.set_default_timeout(5000)
     try:
         _boot(page, mock, base, until)
-        for section in (_every_grammar_checks, _cpp_checks, _fence_checks, _large_checks, _loader_checks):
+        for section in (_every_grammar_checks, _cpp_checks, _fence_checks, _large_checks, _loader_checks,
+                        _fold_checks):
             try:
                 section(page, mock, base, check, until, wasm=wasm, workers=workers)
             except Exception as e:  # a section that cannot run is a failure; the rest still run
@@ -367,6 +390,135 @@ def _loader_checks(page, mock, base, check, until, wasm, **_):
         cpp = [f"{base}/assets/{p.name}" for p in sorted((DIST / "assets").glob("tree-sitter-cpp-*.wasm"))]
     r = page.evaluate("u => window.__hudSyntax.probe(u)", cpp[0]) if cpp else {}
     check("and passes a grammar it ships (the C++ grammar's own URL)", bool(r.get("ok")), f"{cpp[:1]}: {r}")
+
+
+# ---------------------------------------------------------------------------
+# ED-6: folding and sticky scroll from the tree
+
+# The lines the pane's editor draws a fold control on, by line number (the
+# margin's rows: each holds its line number and, at a fold's start, the
+# control — hidden until the margin is hovered, but drawn).
+FOLD_LINES = """(pane) => {
+  const root = document.querySelector(`[data-testid="pane-${pane}"] [data-testid="editor"]`);
+  if (!root) return null;
+  const out = [];
+  for (const row of root.querySelectorAll('.margin-view-overlays > div')) {
+    const num = row.querySelector('.line-numbers');
+    if (num && row.querySelector('.codicon-folding-expanded, .codicon-folding-collapsed'))
+      out.push(parseInt(num.textContent, 10));
+  }
+  return out.sort((a, b) => a - b);
+}"""
+
+# The text of each line the pane's editor shows, top to bottom.
+VIEW_TEXT = """(pane) => [...document.querySelectorAll(
+    `[data-testid="pane-${pane}"] [data-testid="editor"] .view-lines .view-line`)]
+  .sort((a, b) => parseFloat(a.style.top) - parseFloat(b.style.top))
+  .map(l => l.textContent.replace(/\\u00a0/g, ' '))"""
+
+# The sticky scroll's lines, top to bottom.
+STICKY = """(pane) => [...document.querySelectorAll(
+    `[data-testid="pane-${pane}"] [data-testid="editor"] .sticky-widget .sticky-line-content`)]
+  .map(l => l.textContent.replace(/\\u00a0/g, ' ').trim())"""
+
+
+def _folded_by(page, until, want: set, timeout=10) -> list:
+    """The fold-control lines once every line in `want` has one (or the last read)."""
+    last: list = []
+
+    def ready():
+        nonlocal last
+        last = page.evaluate(FOLD_LINES, 2) or []
+        return want <= set(last)
+
+    until(ready, timeout=timeout)
+    return last
+
+
+def _fold_checks(page, mock, base, check, until, **_):
+    """Folds and sticky scroll follow nvim's folds.scm (ED-6); indentation when
+    tree-sitter is not serving the model."""
+    print("  folding from the tree (ED-6)")
+    if not _open(page, mock, until, "robot.cpp"):
+        check("folds setup: robot.cpp opens in Monaco", False)
+        return
+    s = _answered(page, until, "robot.cpp")
+    check("robot.cpp is coloured by tree-sitter (folds come from the same worker)",
+          bool(s) and s["state"] == "ready" and s["grammar"] == "cpp", str(s))
+    lines = _folded_by(page, until, {1, 4, 6, 7, 13})
+    s = _state(page, "robot.cpp")
+    check("Monaco took its folds from the tree (fold answers served)", bool(s) and s.get("folds", 0) > 0, str(s))
+    check("C++: folds start at the includes, the class, the method, the if and the function's signature",
+          {1, 4, 6, 7, 13} <= set(lines), str(lines))
+    check("C++: and not where indentation would put them (`public:`, a brace on its own line)",
+          bool(lines) and not ({5, 15} & set(lines)), str(lines))
+
+    # Fold the class: its body goes, its `};` stays in view.
+    row = page.locator('[data-testid="pane-2"] [data-testid="editor"] .margin-view-overlays > div',
+                       has=page.locator('.line-numbers', has_text=re.compile(r"^\s*4\s*$")))
+    glyph = row.locator(".codicon-folding-expanded")
+    if glyph.count():
+        page.locator('[data-testid="pane-2"] [data-testid="editor"] .margin-view-overlays').hover()
+        glyph.first.click()
+    text: list = []
+
+    def folded():
+        nonlocal text
+        text = page.evaluate(VIEW_TEXT, 2)
+        return len(text) > 4 and text[3].startswith("class Robot {") and text[4].startswith("};")
+    until(folded, timeout=4)
+    check("folding the class hides lines 5-10 and keeps its `};` right below it", folded(), str(text[:6]))
+    # Unfold again (the control is the folded one now).
+    collapsed = row.locator(".codicon-folding-collapsed")
+    if collapsed.count():
+        collapsed.first.click()
+    until(lambda: len(page.evaluate(VIEW_TEXT, 2)) > 6 and page.evaluate(VIEW_TEXT, 2)[4].startswith("public:"),
+          timeout=4)
+
+    # Sticky scroll: deep inside autonomousRoutine, the line held at the top
+    # is the function's signature (the fold's start), not the `{` the
+    # indentation model would hold.
+    sticky: list = []
+    first = page.locator('[data-testid="pane-2"] [data-testid="editor"] .view-lines .view-line').first
+    if first.count():
+        first.click()  # the cursor into the editor, then to the end of the file: line 166 is shown, 13 is far above
+        page.keyboard.press("Control+End")
+
+        def stuck():
+            nonlocal sticky
+            sticky = page.evaluate(STICKY, 2)
+            top = page.evaluate(VIEW_TEXT, 2)
+            return bool(sticky) and bool(top) and "step(" in top[0]
+        until(stuck, timeout=5)
+    check("sticky scroll shows the enclosing function's signature, from the tree's fold",
+          bool(sticky) and sticky[0].startswith("void autonomousRoutine(int side,"), str(sticky))
+    check("and only that line (the class above has ended; no `{` from indentation)",
+          len(sticky) == 1, str(sticky))
+
+    # Markdown: a section folds from its heading (indentation folds nothing at column 0).
+    if _open(page, mock, until, "notes.md") and _answered(page, until, "notes.md"):
+        lines = _folded_by(page, until, {1})
+        check("Markdown: the section folds from its heading (#trim! read in the worker)", 1 in lines, str(lines))
+    else:
+        check("Markdown fold setup: notes.md opens", False)
+
+    # The fallback. A top-level list folds from the tree (table.py) — and by
+    # indentation not at all, which is what a file past the size budget shows
+    # (big.py starts with the same lines): its def folds, its list does not.
+    if _open(page, mock, until, "table.py") and _answered(page, until, "table.py"):
+        lines = _folded_by(page, until, {1, 6})
+        check("Python: a top-level list folds from the tree", {1, 6} <= set(lines), str(lines))
+    else:
+        check("table.py setup: it opens", False)
+    if _open(page, mock, until, "big.py"):
+        lines = _folded_by(page, until, {6})
+        s = _state(page, "big.py")
+        check("a file past the size budget folds by indentation: its def folds, its unindented list does not",
+              6 in lines and 1 not in lines, str(lines[:6]))
+        check("and nothing of it went to the worker for folds", bool(s) and s.get("folds") == 0
+              and s.get("opens") == 0, str(s))
+    else:
+        check("big.py fold setup: it opens", False)
 
 
 def main():
