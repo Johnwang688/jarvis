@@ -98,7 +98,9 @@ export interface State {
     | "editProject" | "archiveProject" | "archive"
     // ED-7: quick open and the command palette. Pickers like the rest:
     // push-to-talk refuses and the mic claims nothing while one is open.
-    | "quickOpen" | "palette";
+    | "quickOpen" | "palette"
+    // ED-8: the editor settings.
+    | "editorSettings";
   /** Archived projects' names, from `/archive`: `/projects` hides them, but
    * the backend still counts them when it numbers a name (decisions B4). */
   archivedNames: string[];

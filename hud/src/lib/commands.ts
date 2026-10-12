@@ -14,7 +14,8 @@ export type CommandId =
   | "file.save" | "file.saveAll" | "file.reload" | "file.closeTab" | "file.nextTab" | "file.prevTab"
   | "file.copyPath" | "chat.addSelection" | "chat.newThread"
   | "view.files" | "view.toggleSidebar" | "view.toggleRight" | "view.togglePanel"
-  | "view.zoomIn" | "view.zoomOut" | "view.zoomReset";
+  | "view.zoomIn" | "view.zoomOut" | "view.zoomReset"
+  | "view.editorSettings";
 
 export interface CommandContext {
   /** A File pane is the target (focused, else drawn): file commands apply. */
@@ -56,6 +57,8 @@ export const COMMANDS: readonly Command[] = Object.freeze([
   { id: "view.zoomIn", label: "Zoom In", keys: "Ctrl+=" },
   { id: "view.zoomOut", label: "Zoom Out", keys: "Ctrl+-" },
   { id: "view.zoomReset", label: "Reset Zoom", keys: "Ctrl+0" },
+  // ED-8: font, tabs, wrap, minimap, whitespace, cursor, vim.
+  { id: "view.editorSettings", label: "Editor Settings…" },
 ] as Command[]);
 
 /** Never in the palette: a download, a VEX device, the brain, `vexcom`. */

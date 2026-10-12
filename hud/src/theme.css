@@ -1377,3 +1377,24 @@ button.vexerr:hover:not(:disabled) { background: var(--hover); border-color: var
 .vexchain { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; background: var(--bg-2); border: 1px solid var(--accent-line); border-radius: var(--radius); padding: 6px 10px; color: var(--text); }
 .vexinfo { font: 12px var(--mono); background: var(--bg-inset); padding: 6px 8px; border-radius: 4px; white-space: pre-wrap; margin: 0; max-height: calc(30vh / var(--ui-zoom, 1)); overflow: auto; }
 .small.ok { color: var(--green); }
+
+/* ED-8: the editor settings — the File pane's ⚙, its dialog, and vim's status
+   line (its mode and the `:` command line, which monaco-vim draws as text and
+   one input). HUD chrome: no colour of its own. */
+.toolbar .edsettings { padding: 2px 7px; color: var(--text-muted); flex: 0 0 auto; }
+.toolbar .edsettings:hover:not(:disabled) { color: var(--text); }
+.picker.essettings { width: 520px; }
+.essettings .esrow {
+  display: flex; align-items: center; gap: 12px; padding: 6px 12px; border-bottom: 1px solid var(--border);
+}
+.essettings .eslabel { flex: 1 1 auto; min-width: 0; color: var(--text-2); }
+.essettings .escontrol { flex: 0 0 auto; display: flex; align-items: center; }
+.essettings .escontrol input:not([type]) { width: 230px; font: 12px var(--mono); padding: 3px 6px; }
+.essettings .escontrol input[aria-invalid="true"] { border-color: var(--red); }
+.essettings .escontrol select { padding: 2px 6px; }
+.vimstatus {
+  flex: 0 0 auto; min-height: 18px; padding: 1px 10px; border-top: 1px solid var(--border);
+  font: 11px var(--mono); color: var(--text-2); background: var(--bg-2);
+}
+.vimstatus input { font: 11px var(--mono); background: transparent; border: none; outline: none; color: var(--text); padding: 0; width: 60%; }
+.vimstatus .vim-notification { color: var(--text-muted); margin-left: 12px; }

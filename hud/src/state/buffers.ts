@@ -113,6 +113,12 @@ export interface BufferDeps {
   now(): number;
   /** A renamed buffer's model takes the language of its new name (ED-7). */
   relanguage?(model: TextModel, abs: string, kind: Kind): void;
+  /**
+   * A new model, before the registry records the version it was read as
+   * (ED-8: `.editorconfig`'s indentation and new-line ending). Never changes
+   * the text; whatever it does, the buffer opens clean.
+   */
+  prepare?(model: TextModel, projectId: string, path: string, kind: Kind): Promise<unknown>;
 }
 
 interface Buf {
@@ -430,6 +436,13 @@ export class Buffers {
     const deps = this.need();
     const kind = r.protected ? "withheld" : parseKind(r.kind);
     const model = kind === "withheld" ? null : await deps.makeModel(unBOM(r.content ?? ""), abs, kind);
+    if (model && deps.prepare) {
+      try {
+        await deps.prepare(model, projectId, r.path || path, kind);
+      } catch {
+        /* a buffer opens without it */
+      }
+    }
     const raced = this.bufs.get(abs);
     if (raced) {
       // Cannot happen while `making` dedupes by abs; if it ever does, the

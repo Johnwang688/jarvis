@@ -41,6 +41,7 @@ import {
   NO_TABS, TABS_MAX, chatExcerpt, closeTab, jarvisMayRead, openTab, pinTab, sameTabs, type Tabs,
 } from "../lib/buffers";
 import { buffers, refOf, type BufferView } from "../state/buffers";
+import { useEditorSettings } from "../state/editorSettings";
 
 function join(dir: string, name: string) {
   return dir ? `${dir}/${name}` : name;
@@ -213,6 +214,8 @@ export function FileTab(props: {
   onGotoDone?: (n: number) => void;
   /** The project's folder: a file read through another project is marked dirty here too. */
   root?: string | null;
+  /** The editor settings dialog (ED-8): the toolbar's ⚙. */
+  onEditorSettings?: () => void;
 }) {
   // Read once, at mount: App keys this component by its project.
   const [pid] = useState(props.projectId);
@@ -263,6 +266,9 @@ export function FileTab(props: {
   // `:line`, a search hit.
   const reveal = useRef<{ path: string; line: number; col: number } | null>(null);
   const [, setEdTick] = useState(0);
+  // Vim's status line (ED-8): drawn while the setting is on, handed to the editor.
+  const vimOn = useEditorSettings().vim;
+  const [vimNode, setVimNode] = useState<HTMLDivElement | null>(null);
 
   // Hold what the tabs name; let go of what they no longer do.
   const pathsKey = tabs.paths.join("\u0000");
@@ -852,6 +858,13 @@ export function FileTab(props: {
             Save
           </button>
           {note ? <span className="err" data-testid="file-note">{note}</span> : null}
+          {props.onEditorSettings ? (
+            <button type="button" className="edsettings" data-testid="editor-settings"
+                    title="Editor settings: font, tabs, wrap, minimap, whitespace, cursor, vim"
+                    aria-label="Editor settings" disabled={props.blocked} onClick={props.onEditorSettings}>
+              ⚙
+            </button>
+          ) : null}
         </div>
         {view?.conflict && active ? (
           <ConflictBar
@@ -954,6 +967,7 @@ export function FileTab(props: {
               }}
               mayAddToChat={!!view && jarvisMayRead(view.kind) && !!props.onAddToChat}
               onAddToChat={addToChat}
+              vimStatus={vimNode}
             />
             {md && model && !read && !comparing ? (
               <div className="mdrender" data-testid="md-preview">
@@ -972,6 +986,14 @@ export function FileTab(props: {
           </div>
         ) : active && view && view.kind !== "withheld" ? (
           <div className="pad muted">…</div>
+        ) : null}
+        {/* Vim's status line (ED-8): its mode and the `:` command line. */}
+        {vimOn && everEditor ? (
+          // monaco-vim sets its node's own display: the box around it is ours.
+          <div className="vimstatus" data-testid="editor-vim-status"
+               style={!model || read || comparing ? { display: "none" } : undefined}>
+            <div ref={setVimNode} />
+          </div>
         ) : null}
         {view && view.kind !== "withheld" ? <EditorStatus view={view} editor={ed} /> : null}
       </div>
