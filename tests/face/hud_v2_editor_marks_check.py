@@ -13,11 +13,15 @@ What it pins:
     `.md`, `.env` each its own; a folder row is its chevron and no icon;
   - **the dot**: typing marks the file's tree row and its tab (the dot stands
     where × is; hovering or focusing the tab brings × back), with the name
-    "unsaved changes" and a tooltip, in `--text-2`; saving clears both;
+    "unsaved changes" and a tooltip, in `--text-2`; while a slow save is
+    out (ED-2) the tab's slot holds a hollow ring, named "saving", and the
+    tree's dot stays; the answer clears both;
   - **folders**: a collapsed folder holding a dirty file at any depth wears
     the dot, an open one does not — its dirty child does;
   - **every pane**: dirty is the buffer's, so another pane's tree on the same
-    project marks it without opening it, and its tab too once it does;
+    project marks it without opening it, and its tab too once it does — and
+    so does a project whose root is a symlink onto the same folder (found
+    under `root_real`, where its root resolves);
   - **under a card**: the marks add nothing focusable — none of them takes
     focus, all sit behind the inert veil, Tab stays on the card, and Escape
     denies.
@@ -26,6 +30,7 @@ Run: PYTHONPATH=. .venv/bin/python tests/face/hud_v2_editor_marks_check.py
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import sys
@@ -121,7 +126,13 @@ def marks_checks(browser, mock, base, check, until, guard, init_script):
     w = mock.world
     keep_files = {k: dict(v) for k, v in w["files"].items()}
     keep_tree = {k: [dict(e) for e in v] for k, v in w["tree"].items()}
+    keep_projects = [dict(p) for p in w["projects"]]
     try:
+        # A project whose root is a symlink onto p1's folder (`root_real`):
+        # the mock serves one tree, so its pane shows p1's files.
+        p1 = next(p for p in w["projects"] if p["id"] == "p1")
+        w["projects"].append({**p1, "id": "p3", "name": "lab-link", "root": "/home/johnw/lab-link",
+                              "root_real": p1["root"], "inbox": False})
         w["files"].update({k: dict(v) for k, v in FILES.items()})
         w["tree"][""].append({"name": "config.json", "kind": "file", "size": 18, "mtime": 1757900032})
         w["tree"]["src"].insert(0, {"name": "robot", "kind": "dir", "size": 0, "mtime": 1757900029})
@@ -131,8 +142,9 @@ def marks_checks(browser, mock, base, check, until, guard, init_script):
         ]
         keep = {k: dict(v) for k, v in w["files"].items()}
         _boot(page, mock, base, until)
-        for section in (_icon_checks, _dirty_checks, _two_pane_checks, _card_checks):
-            _fresh(page, mock, until, ws=TWO, keep_files=keep)
+        for section, ws in ((_icon_checks, TWO), (_dirty_checks, TWO), (_two_pane_checks, TWO),
+                            (_linked_root_checks, LINKED), (_card_checks, TWO)):
+            _fresh(page, mock, until, ws=ws, keep_files=keep)
             try:
                 section(page, mock, check, until)
             except Exception as e:  # a section that cannot run is a failure; the rest still run
@@ -148,6 +160,7 @@ def marks_checks(browser, mock, base, check, until, guard, init_script):
         w["files"].update(keep_files)
         w["tree"].clear()
         w["tree"].update(keep_tree)
+        w["projects"][:] = keep_projects
 
 
 # ---------------------------------------------------------------------------
@@ -251,13 +264,35 @@ def _dirty_checks(page, mock, check, until):
     check("expanding them gives it back to the file",
           _count(page, _dot(2, CPP)) == 1 and _count(page, _pane(2, ".dirtydot")) == 1)
 
+    # A slow write (ED-2; the owner's VEX projects live on /mnt/c): until it
+    # answers, the tab's slot holds a hollow ring in the dot's place.
     page.locator(_lines(2)).click()
-    page.keyboard.press("Control+s")
-    until(lambda: page.locator(tab).get_attribute("data-dirty") == "false", timeout=5)
+    mock.world["put_delays"] = [1.5]
+    try:
+        page.keyboard.press("Control+s")
+        ring = page.locator(tab + " .edtab-dot.saving")
+        until(lambda: ring.count() == 1, timeout=1.5)
+        page.locator(_lines(2)).hover()
+        r = page.locator(tab).evaluate(
+            "e => { const d = e.querySelector('.edtab-dot'), b = getComputedStyle(d, '::before'),"
+            " x = e.querySelector('.edtab-x'); return { dot: b.display, bg: b.backgroundColor,"
+            " border: b.borderTopColor, bw: parseFloat(b.borderTopWidth), x: getComputedStyle(x).opacity }; }")
+        check("a save on its way: the slot holds a hollow --text-2 ring where × is, named \"saving\"",
+              ring.count() == 1 and ring.get_attribute("aria-label") == "saving"
+              and page.locator(tab).get_attribute("data-saving") == "true"
+              and r["dot"] != "none" and _rgb(r["border"]) == text2 and r["bw"] > 0
+              and r["bg"] in ("transparent", "rgba(0, 0, 0, 0)") and r["x"] == "0", str(r))
+        check("…while the tree's dot stays: the file is still unsaved until the write answers",
+              _count(page, _dot(2, CPP)) == 1)
+        until(lambda: page.locator(tab).get_attribute("data-dirty") == "false"
+              and page.locator(tab).get_attribute("data-saving") == "false", timeout=5)
+    finally:
+        mock.world.pop("put_delays", None)
     until(lambda: _count(page, _pane(2, ".dirtydot")) == 0, timeout=3)
-    check("saving clears the tree's dot and the tab's",
+    check("saving clears the tree's dot and the tab's (no ring left either)",
           "tuned at the lab" in mock.world["files"][CPP]["content"]
-          and _count(page, _pane(2, ".dirtydot")) == 0 and page.locator(tab + " .edtab-dot.on").count() == 0)
+          and _count(page, _pane(2, ".dirtydot")) == 0 and page.locator(tab + " .edtab-dot.on").count() == 0
+          and page.locator(tab + " .edtab-dot.saving").count() == 0)
 
 
 def _two_pane_checks(page, mock, check, until):
@@ -278,6 +313,26 @@ def _two_pane_checks(page, mock, check, until):
     until(lambda: _count(page, '.dirtydot') == 0, timeout=5)
     check("one save from pane 3 clears both trees and both tabs",
           _count(page, ".dirtydot") == 0 and _count(page, ".edtab-dot.on") == 0)
+
+
+# Pane 3 pinned to a project whose root is a symlink onto p1's folder: the
+# same files, another root as written (#50's review, LOW).
+LINKED = json.dumps({"preset": "cols3", "focused": 2,
+                     "panes": [{"view": "chat"}, {"view": "file"}, {"view": "file", "projectId": "p3"},
+                               {"view": "task"}]})
+
+
+def _linked_root_checks(page, mock, check, until):
+    _expand(page, until, 2, "src", "src/robot")
+    check("setup: drive.cpp opens in pane 2 (through p1)", _open(page, until, 2, CPP))
+    check("setup: pane 3 is on the linked project",
+          page.locator(_pane(3, '[data-testid="file-config.json"]')).count() == 1)
+    check("setup: an edit", _type(page, until, 2, "\n// through a link"))
+    until(lambda: _count(page, _dot(3, "src")) == 1, timeout=3)
+    check("a project whose root is a symlink marks the file too, by where its root resolves (root_real)",
+          _count(page, _dot(3, "src")) == 1)
+    _expand(page, until, 3, "src", "src/robot")
+    check("…on the file once expanded", _count(page, _dot(3, CPP)) == 1 and _count(page, _dot(3, "src")) == 0)
 
 
 FOCUSABLE = ("a[href], button, input, select, textarea, [tabindex]:not([tabindex='-1']), [contenteditable='true']")

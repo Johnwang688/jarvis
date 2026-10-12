@@ -24,6 +24,18 @@ export interface DirtyBuffer {
 const trimSlashes = (p: string) => p.replace(/^\/+|\/+$/g, "");
 
 /**
+ * The folder a project's tree finds other projects' buffers under: where its
+ * root resolves (`root_real`, the daemon's), since a buffer's `abs` is the
+ * resolved path — a root reached through a symlink would match nothing as
+ * written. The root as written when the daemon did not say (an older one, or
+ * a root it could not resolve).
+ */
+export function treeRoot(project: { root: string; root_real?: string | null } | null | undefined): string | null {
+  if (!project) return null;
+  return project.root_real || project.root || null;
+}
+
+/**
  * The tree paths — relative to project `projectId`'s root — of every dirty
  * buffer that project's tree shows. `root` is the project's folder: a file
  * opened through another project is found by its absolute path under it.

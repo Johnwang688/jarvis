@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { dirtyKey, dirtyPathsIn, marksOf, marksOfKey, rowDot, visibleDots, type DirtyBuffer } from "./dirtyMarks";
+import { dirtyKey, dirtyPathsIn, marksOf, marksOfKey, rowDot, treeRoot, visibleDots, type DirtyBuffer } from "./dirtyMarks";
 
 const buf = (abs: string, projectId: string, path: string, dirty = true): DirtyBuffer => ({ abs, projectId, path, dirty });
 
@@ -21,6 +21,20 @@ describe("which files a project's tree marks dirty", () => {
     expect(dirtyPathsIn(bufs, "p1", null)).toEqual([]);
     // A root of "/" holds every absolute path.
     expect(dirtyPathsIn([buf("/w/a.py", "p1", "a.py")], "inbox", "/")).toEqual(["w/a.py"]);
+  });
+
+  it("a root through a symlink: the tree looks under where it resolves (root_real)", () => {
+    // ~/lab -> /mnt/c/vex/lab: a buffer's `abs` is the resolved path.
+    const lab = { root: "/home/o/lab", root_real: "/mnt/c/vex/lab" };
+    const bufs = [buf("/mnt/c/vex/lab/src/main.cpp", "inbox", "lab/src/main.cpp")];
+    expect(treeRoot(lab)).toBe("/mnt/c/vex/lab");
+    expect(dirtyPathsIn(bufs, "p1", treeRoot(lab))).toEqual(["src/main.cpp"]);
+    // The root as written would match nothing.
+    expect(dirtyPathsIn(bufs, "p1", lab.root)).toEqual([]);
+    // A daemon that did not say (older, or could not resolve): the root as written.
+    expect(treeRoot({ root: "/w" })).toBe("/w");
+    expect(treeRoot({ root: "/w", root_real: null })).toBe("/w");
+    expect(treeRoot(undefined)).toBeNull();
   });
 
   it("a sibling folder that shares the root's prefix is not under it", () => {
