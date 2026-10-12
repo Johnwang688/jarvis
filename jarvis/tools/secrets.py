@@ -219,8 +219,10 @@ _RAW_NAMES = [
 # not env files (their names do not start `.env`), and the empty-tail case
 # keeps `.envrc` and `.env-cmdrc` out.
 _ENV_IN_TEXT = re.compile(
-    rf"(?<![{_NAME_CHAR}])(\.env(?:\.[^\s'\"`;&|<>()/\\:,=}}]*)?)(?![A-Za-z0-9_\-])",
+    rf"(?<![{_NAME_CHAR}*?\]])(\.env(?:\.[^\s'\"`;&|<>()/\\:,=}}]*)?)(?![A-Za-z0-9_\-])",
     re.IGNORECASE)
+# (A glob character just before `.env` makes it the tail of a pattern, not a
+# name: `find -name '*.env.ts'` is a non-dot-led glob, judged as one.)
 
 # --- globs onto credential files (ENV-1 review, MED-1) ---------------------------
 #
@@ -456,6 +458,9 @@ _NAME_PATTERN_OPTIONS = frozenset({
     "-g", "--glob", "--iglob", "--include", "--exclude", "--include-dir", "--exclude-dir",
 })
 _WORD_BREAK = frozenset(";&|<>()")
+# `-c` alone or in a short-option cluster (`-lc`, `-ec`): a shell's (or an
+# interpreter's) inline program follows.
+_INLINE_FLAG = re.compile(r"-[A-Za-z]*c[A-Za-z]*")
 
 
 def _shell_words(command: str) -> list[tuple[str, bool]]:
@@ -541,11 +546,12 @@ def protected_in_command(command: str) -> str | None:
             name = PurePosixPath(value).name
             if is_protected(name) or env_glob_reaches(name):
                 return name
-        # The words of a string another shell runs (`sh -c 'cat .e?v.x'`),
-        # judged by the name and the credential-env glob test only, never
-        # the bundle-name match: a commit message saying `*.json` names no
-        # file.
-        if any(c.isspace() for c in token):
+        # The words of a string another shell runs (`sh -c 'cat .e?v.x'`,
+        # `eval '…'`), judged by the name and the credential-env glob test
+        # only. Not every quoted string: a jq filter or a commit message
+        # holding `.*env.*` is text, not words a shell expands.
+        if any(c.isspace() for c in token) and (
+                previous == "eval" or _INLINE_FLAG.fullmatch(previous)):
             for piece in _PIECES.split(token):
                 name = PurePosixPath(piece).name if piece else ""
                 if name and (is_protected(name) or env_glob_reaches(name)):

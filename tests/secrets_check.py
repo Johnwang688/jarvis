@@ -353,7 +353,8 @@ def scrub_rule_checks(root: Path) -> None:
         "NODE_ENV=production\nAPI_URL=https://api.example.com\nCOOKIE_SECURE=true\n"
         "SESSION_DRIVER=redis\nAPP_NAME=My Great Application\n"
         f"STRIPE_SECRET_KEY={STRIPE}\nDATABASE_URL=postgres://app:{DB_PASS}@db.internal/app\n"
-        f"BUILD_ID={TOKEN40}\n", encoding="utf-8")
+        f"BUILD_ID={TOKEN40}\nDB_PASS=correcthorse\nexport ADMIN_PASSWORD=sunshine99\n"
+        "SESSION_LIFETIME=120\n", encoding="utf-8")
     readme = ("Deploy to production with NODE_ENV=production; the API lives at "
               "https://api.example.com. COOKIE_SECURE=true, SESSION_DRIVER=redis, "
               "My Great Application.\n")
@@ -362,10 +363,14 @@ def scrub_rule_checks(root: Path) -> None:
     assert "Deploy to production with NODE_ENV=production" in out, out
     assert "https://api.example.com" in out and "redis" in out and "=true" in out, out
     assert REDACTED not in out, out
-    leaky = f"key {STRIPE} url postgres://app:{DB_PASS}@db.internal/app build {TOKEN40}"
+    leaky = (f"key {STRIPE} url postgres://app:{DB_PASS}@db.internal/app build {TOKEN40} "
+             "pass correcthorse admin sunshine99 lifetime 120")
     cleaned = scrub(leaky)
-    for value in (STRIPE, DB_PASS, TOKEN40):
+    # A secret-named key's value is withheld even when it reads as a word
+    # (`DB_PASS=correcthorse`) — only the key rule catches that one.
+    for value in (STRIPE, DB_PASS, TOKEN40, "correcthorse", "sunshine99"):
         assert value not in cleaned, (value, cleaned)
+    assert "lifetime 120" in cleaned, cleaned
     # `.env` and `.env.local` keep today's rule: every value of 8+ characters.
     whole = root / "whole"
     whole.mkdir()
