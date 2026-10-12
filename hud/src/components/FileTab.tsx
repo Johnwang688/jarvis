@@ -23,7 +23,7 @@
 // this file" — nothing here sends its text anywhere but its own save, and
 // "Add to chat" is disabled for it.
 
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
 import { api } from "../api";
 import type { FsResult, Tree, TreeEntry } from "../types";
 import { EditorStatus } from "./EditorStatus";
@@ -32,6 +32,9 @@ import { forgetListing } from "./QuickOpen";
 import { CompareEditor, PaneEditor } from "./Editor";
 import { ConflictBar } from "./ConflictBar";
 import { EditorTabs, type TabInfo } from "./EditorTabs";
+import { Chevron, FileIcon } from "./FileIcon";
+import { DirtyDot, useDirtyMarks } from "./DirtyMark";
+import { NO_MARKS, rowDot, type Marks } from "../lib/dirtyMarks";
 import { Markdown } from "./Markdown";
 import { isMarkdown } from "../lib/monaco";
 import {
@@ -50,7 +53,11 @@ export interface MenuTarget {
   policy?: "withheld" | "env";
 }
 
-function Node(props: {
+// Memoized, with props that hold still (a stable `onOpen`, `marks` changing
+// only when the dirty set does, a stable `onMenu`, `version` bumped only by an
+// explorer operation): the tree redraws when a buffer goes clean or dirty, the
+// selection moves or a file operation lands — never per keystroke.
+const Node = memo(function Node(props: {
   projectId: string;
   dir: string;
   depth: number;
@@ -59,9 +66,10 @@ function Node(props: {
   /** Bumped after an explorer operation: every open folder reads itself again. */
   version: number;
   onMenu: (e: React.MouseEvent, target: MenuTarget) => void;
-  /** The project folder's resolved path, from the top folder's read (ED-7). */
-  onRoot?: (root: string) => void;
+  /** Which rows wear the unsaved-changes dot (lib/dirtyMarks.ts). */
+  marks?: Marks;
 }) {
+  const marks = props.marks ?? NO_MARKS;
   const [tree, setTree] = useState<Tree | null>(null);
   const [open, setOpen] = useState<Record<string, boolean>>({});
   const [err, setErr] = useState("");
@@ -71,7 +79,6 @@ function Node(props: {
       .tree(props.projectId, props.dir, 1)
       .then((t) => {
         setTree(t);
-        if (typeof t.root === "string" && t.root) props.onRoot?.(t.root);
         setErr("");
       })
       .catch((e) => setErr(e.message));
@@ -98,9 +105,10 @@ function Node(props: {
                 onClick={() => !withheld && setOpen({ ...open, [path]: !isOpen })}
                 onContextMenu={(ev) => props.onMenu(ev, { path, dir: true, policy: e.policy })}
               >
-                <span className="tw">{withheld ? "·" : isOpen ? "▾" : "▸"}</span>
+                <span className="tw">{withheld ? "·" : <Chevron open={isOpen} />}</span>
                 <span className="nm">{e.name}</span>
                 {withheld ? <span className="treemark">withheld</span> : null}
+                {!withheld && rowDot(marks, path, "dir", isOpen) ? <DirtyDot folder testid={`dirty-${path}`} /> : null}
               </div>
               {isOpen ? (
                 <Node
@@ -111,6 +119,7 @@ function Node(props: {
                   selected={props.selected}
                   version={props.version}
                   onMenu={props.onMenu}
+                  marks={props.marks}
                 />
               ) : null}
             </div>
@@ -127,14 +136,16 @@ function Node(props: {
             onDoubleClick={() => props.onOpen(path, true)}
             onContextMenu={(ev) => props.onMenu(ev, { path, dir: false, policy: e.policy })}
           >
-            <span className="tw">{e.policy === "env" ? "🔒" : "·"}</span>
+            <span className="tw" />
+            <FileIcon name={e.name} policy={e.policy} />
             <span className="nm">{e.name}</span>
+            {marks.file(path) ? <DirtyDot testid={`dirty-${path}`} /> : null}
           </div>
         );
       })}
     </>
   );
-}
+});
 
 /**
  * What App asks of a File pane (ED-7): open a file (at a line), go to a line,
@@ -192,11 +203,15 @@ export function FileTab(props: {
    * `moves` (the registry's holds) any other project reaching the same file.
    */
   onRenamed?: (projectId: string, from: string, to: string, moves: { pane: string; from: string; to: string }[]) => void;
+  /** The project's folder: a file read through another project is marked dirty here too. */
+  root?: string | null;
 }) {
   // Read once, at mount: App keys this component by its project.
   const [pid] = useState(props.projectId);
   const pane = props.pane;
   useSyncExternalStore(buffers.subscribe, buffers.version);
+  // The tree's unsaved-changes dots: redrawn when a buffer goes clean or dirty, never per keystroke.
+  const marks = useDirtyMarks(pid, props.root);
   const tabs = props.tabs ?? NO_TABS;
   // The latest tabs, written ahead of the render that brings them back: two
   // gestures between renders must not undo each other.
@@ -236,8 +251,6 @@ export function FileTab(props: {
   const [fsAsk, setFsAsk] = useState<FsAsk | null>(null);
   const [fsBusy, setFsBusy] = useState(false);
   const [fsErr, setFsErr] = useState("");
-  // Where the project folder resolves (the tree's read says): buffers are keyed by that.
-  const [rootAbs, setRootAbs] = useState<string | null>(null);
   // A place to put the cursor once the buffer is in the editor: quick open's
   // `:line`, a search hit.
   const reveal = useRef<{ path: string; line: number; col: number } | null>(null);
@@ -358,6 +371,12 @@ export function FileTab(props: {
     setTabs(next);
   };
 
+  // The tree's handle on `open`: one function for the pane's life, so the
+  // memoized tree is not redrawn by a new closure every render.
+  const openLatest = useRef(open);
+  openLatest.current = open;
+  const onTreeOpen = useCallback((path: string, pin: boolean) => openLatest.current(path, pin), []);
+
   const close = (path: string, discard = false) => {
     setAsk(null);
     if (discard) discarding.current.add(path);
@@ -470,14 +489,16 @@ export function FileTab(props: {
     if (pid) forgetListing(pid);
   };
 
-  /** The explorer's menu, at the pointer (in the pixels the zoomed window is drawn in). */
-  const openMenu = (e: React.MouseEvent, target: MenuTarget) => {
+  /** The explorer's menu, at the pointer (in the pixels the zoomed window is drawn in). Stable: the memoized tree holds it. */
+  const blockedNow = useRef(props.blocked);
+  blockedNow.current = props.blocked;
+  const openMenu = useCallback((e: React.MouseEvent, target: MenuTarget) => {
     e.preventDefault();
     e.stopPropagation();
-    if (props.blocked) return;
+    if (blockedNow.current) return;
     const z = zoomNow();
     setMenu({ ...target, x: e.clientX / z, y: e.clientY / z });
-  };
+  }, []);
 
   // The menu closes on a click elsewhere, Escape, a scroll or a card.
   useEffect(() => {
@@ -568,10 +589,11 @@ export function FileTab(props: {
   /**
    * The unsaved edits open on `path` or under it, **from any project**: a
    * buffer is keyed by where its file resolves, so it is matched by that
-   * (`rootAbs`, the project folder's resolved path, from the tree's read),
+   * (`rootAbs`, the project folder's resolved path: `root_real`, #50),
    * else — before the tree has said — by this project's relative path. Shown
    * by their place in this project, else by their full path.
    */
+  const rootAbs = props.root ? props.root.replace(/\/+$/, "") : null;
   const dirtyUnder = (path: string): string[] => {
     const target = rootAbs ? `${rootAbs}/${path}` : null;
     return buffers.snapshot().filter((b) => b.dirty && (target
@@ -710,7 +732,7 @@ export function FileTab(props: {
         ) : null}
         <div className="treebody" style={side === "files" ? undefined : { display: "none" }}
              onContextMenu={(e) => openMenu(e, { path: "", dir: true })}>
-          <Node projectId={pid} dir="" depth={0} onOpen={open} selected={active || ""} onRoot={setRootAbs}
+          <Node projectId={pid} dir="" depth={0} onOpen={onTreeOpen} selected={active || ""} marks={marks}
                 version={treeVersion} onMenu={openMenu} />
         </div>
         <SearchView projectId={pid} ask={searchAsk} visible={side === "search"} blocked={props.blocked}

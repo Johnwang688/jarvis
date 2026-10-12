@@ -18,9 +18,11 @@ every response. Two halves, and the second is the one that matters:
 2. **What an attacker would need does not run**: an inline `<script>`, a
    script from another origin or a `data:` URL, an inline event handler, a
    `javascript:` URL, `eval`/`new Function`/a string `setTimeout`, a `blob:`
-   worker, WebAssembly (none until ED-5's tree-sitter), a `fetch` or an image
-   from another origin, `<object>`, `<base>`, a form posted elsewhere, and a
-   frame that is not loopback. Each is shown not to have run *and* to have
+   worker, a `fetch` or an image from another origin, `<object>`, `<base>`,
+   a form posted elsewhere, and a frame that is not loopback. WebAssembly
+   *does* compile since ED-5 (`'wasm-unsafe-eval'`, tree-sitter's grammars)
+   while `eval` and `new Function` stay refused — the one thing the policy
+   gained is shown not to bring JavaScript-from-strings with it. Each is shown not to have run *and* to have
    raised a violation naming the directive that stopped it — which is also
    the proof that the watch in (1) bites. The "evil" origin is a server of
    this suite's own on another ephemeral port; it must see no request.
@@ -119,9 +121,10 @@ def csp_checks(browser, mock, base, check, until, guard_live, init_script):
                 bad.append(f"{url}: {csp}")
         check("the page and every asset it loaded carry the one full policy",
               own and not bad, "; ".join(bad[:3]) or "no responses seen")
-        check("the policy forbids inline and remote script, eval and plugins",
-              "script-src 'self';" in want and "'unsafe-inline'" not in want.split("script-src")[1].split(";")[0]
-              and "'unsafe-eval'" not in want and "object-src 'none'" in want and "default-src 'none'" in want)
+        check("the policy forbids inline and remote script, eval and plugins (WebAssembly only, ED-5)",
+              "script-src 'self' 'wasm-unsafe-eval';" in want
+              and "'unsafe-inline'" not in want.split("script-src")[1].split(";")[0]
+              and " 'unsafe-eval'" not in want and "object-src 'none'" in want and "default-src 'none'" in want)
         check("no <meta> policy: the header is the only one",
               page.evaluate("document.querySelectorAll('meta[http-equiv]').length") == 0)
 
@@ -275,9 +278,14 @@ def csp_checks(browser, mock, base, check, until, guard_live, init_script):
                          " setTimeout(() => done('silent'), 2000) } catch (e) { done(e.name) } })",
                          "", "worker-src")
         check("a blob: worker never runs", thrown in ("error", "SecurityError"), repr(thrown))
-        wasm = page.evaluate(f"""() => WebAssembly.compile(new Uint8Array({WASM}))
-            .then(() => 'compiled', e => e.name)""")
-        check("WebAssembly does not compile (no 'wasm-unsafe-eval' until ED-5)", wasm == "CompileError", wasm)
+        # WebAssembly compiles since ED-5 ('wasm-unsafe-eval'): from a timer,
+        # like eval above, so it is the page's own code that compiles it.
+        before = len(violations)
+        wasm = page.evaluate(f"""() => new Promise(done => setTimeout(() =>
+            WebAssembly.compile(new Uint8Array({WASM})).then(m => WebAssembly.instantiate(m))
+              .then(() => done('compiled'), e => done(e.name)), 0))""")
+        check("WebAssembly compiles and instantiates under 'wasm-unsafe-eval' (ED-5), with no violation",
+              wasm == "compiled" and len(violations) == before, f"{wasm}; {violations[before:][:2]}")
         fetched = blocked("a fetch to another origin",
                           "u => fetch(u).then(() => 'fetched', e => e.name)", "", "connect-src",
                           f"http://127.0.0.1:{evil.port}/exfiltrate")

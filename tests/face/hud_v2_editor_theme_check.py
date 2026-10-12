@@ -198,12 +198,30 @@ def _open(page, mock, until, name: str) -> list:
     until(lambda: page.evaluate("""() => new Set([...document.querySelectorAll(
         '[data-testid="pane-2"] [data-testid="editor"] .view-line span[class*="mtk"]')]
         .map(s => (s.className.match(/mtk\\d+/) || [''])[0])).size""") > 3, timeout=6)
-    time.sleep(0.4)
-    return page.evaluate(SPANS, 2)
+    # Then tree-sitter's colour (ED-5), for a language it covers: it arrives
+    # after Monarch's, and can split or join spans (a C string's quotes), so
+    # the spans are read only once the syntax worker has answered for this
+    # file (or sent it back to Monarch) and the drawing has stopped changing.
+    until(lambda: page.evaluate("""(name) => {
+        const h = window.__hudSyntax;
+        if (!h) return false;
+        const s = h.states().filter(s => s.uri.split('?')[0].endsWith('/' + name)).pop();
+        return !s || s.served > 0 || s.state === 'basic';
+      }""", name), timeout=10)
+    last = None
+    for _ in range(20):
+        time.sleep(0.2)
+        now = page.evaluate(SPANS, 2)
+        if now == last:
+            break
+        last = now
+    return last
 
 
 def _find(lines: list, text: str, nth: int = 0) -> dict | None:
-    hits = [s for line in lines for s in line if s["text"].strip() == text]
+    # A string's quotes may be spans of their own (Monarch) or part of the
+    # string (tree-sitter's `string`, ED-5): `vex.h` matches `"vex.h"` too.
+    hits = [s for line in lines for s in line if s["text"].strip() in (text, f'"{text}"')]
     return hits[nth] if len(hits) > nth else None
 
 
@@ -214,6 +232,29 @@ def _expect(check, tokens: dict, lines: list, label: str, text: str, token: str,
     style = ("bold " if bold else "") + ("italic " if italic else "")
     check(f"{label}: `{text}` is {style}{token}", ok,
           f"drawn {s and (s['color'], s['weight'], s['style'])}, {token} is {tokens[token]!r}")
+
+
+def _expect_run(check, tokens: dict, lines: list, label: str, text: str, token: str):
+    """`text` drawn in `token` whether it is one span (Monarch's `@property`)
+    or a run of adjacent ones (tree-sitter's `@` and `property`, ED-5)."""
+    run = None
+    for line in lines:
+        for i in range(len(line)):
+            joined = ""
+            for j in range(i, len(line)):
+                joined += line[j]["text"]
+                if joined.strip() == text:
+                    run = line[i:j + 1]
+                    break
+                if len(joined) >= len(text) + 2:
+                    break
+            if run:
+                break
+        if run:
+            break
+    ok = bool(run) and all(_same(s["color"], tokens[token]) for s in run if s["text"].strip())
+    check(f"{label}: `{text}` is {token}", ok,
+          f"drawn {run and [(s['text'], s['color']) for s in run]}, {token} is {tokens[token]!r}")
 
 
 def _no_warm_rendered(check, lines: list, label: str):
@@ -257,7 +298,7 @@ def _python_checks(page, mock, check, until):
     _expect(check, t, lines, "Python number", "90.0", "--syn-const")
     _expect(check, t, lines, "Python constant", "None", "--syn-const")
     _expect(check, t, lines, "Python comment", "# move the arm", "--text-muted", italic=True)
-    _expect(check, t, lines, "Python decorator", "@property", "--syn-type")
+    _expect_run(check, t, lines, "Python decorator", "@property", "--syn-type")
     _expect(check, t, lines, "Python self", "self", "--text", italic=True)
     _no_warm_rendered(check, lines, "Python")
 

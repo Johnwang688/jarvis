@@ -87,7 +87,11 @@ export interface State {
   dictation: DictationMode;
   level: number;
   orb: OrbState;
+  /** The window's one error line: a failure, or where unsent words went. */
   error: string;
+  /** When `error` was last written (ms; 0 when empty): a notice arriving
+   * within `NOTICE_BREATH_MS` of that joins the line rather than replacing it. */
+  errorAt: number;
   /** A refused thread move, shown beside the tree it was reverted in. */
   moveError: string;
   picker: null | "model" | "voice" | "avatar" | "route" | "settings" | "newProject" | "newTask" | "schedule"
@@ -106,12 +110,20 @@ export const initialState: State = {
   drafts: {}, composeSeq: 0, taskId: null, taskFocus: false,
   approvals: [], usage: null, discord: null, schedules: [],
   route: null, avatar: null, wakePatterns: [], dictation: DEFAULT_MODE,
-  level: 0, orb: "idle", error: "", moveError: "", picker: null, archivedNames: [],
+  level: 0, orb: "idle", error: "", errorAt: 0, moveError: "", picker: null, archivedNames: [],
 };
 
-/** What a pane's patch may carry besides its own fields: the orb (applied only
- * for the selected chat's pane) and the window's error line. */
-export type ChatPatch = Partial<ChatState> & { orb?: OrbState; error?: string };
+/**
+ * What a pane's patch may carry besides its own fields: the orb (applied only
+ * for the selected chat's pane) and the window's error line. `takeOrphan`:
+ * this is a new thread the owner started — New thread, or a split's copy —
+ * so a new compose row takes up the words parked under `ORPHAN_DRAFT`. Only
+ * those two say so: any other new compose row (a pane shown for the first
+ * time, a re-aim after a project or thread went away, a pane nobody can see)
+ * leaves them parked, since "back, in this new thread's box" must be true
+ * (review 3 of PR #47).
+ */
+export type ChatPatch = Partial<ChatState> & { orb?: OrbState; error?: string; takeOrphan?: boolean };
 
 export type Action =
   | { type: "patch"; patch: Partial<State> }
@@ -185,30 +197,32 @@ function withChat(s: State, pane: PaneNo, next: ChatState): State {
  * `pane` moves from conversation `was` to `next`: when that is another
  * conversation, the box's unsent words and files are parked under the old
  * one's key and the new one's parked draft (if any) comes back — a draft is
- * never left in a box that now shows another thread.
+ * never left in a box that now shows another thread. `takeOrphan` (the
+ * owner started this new thread: `ChatPatch.takeOrphan`) lets it take up the
+ * words parked under `ORPHAN_DRAFT`; nothing else does.
  */
 function reconverse(
-  s: State, pane: PaneNo, was: ChatState, next: ChatState,
+  s: State, pane: PaneNo, was: ChatState, next: ChatState, takeOrphan = false,
 ): { next: ChatState; drafts: State["drafts"]; notice?: string } {
-  // A new thread being started: a compose row that has opened nothing yet.
-  const fresh = !next.threadId && !!next.compose && !next.compose.openedId;
+  // A new thread the owner is starting: a compose row that has opened nothing yet.
+  const fresh = takeOrphan && !next.threadId && !!next.compose && !next.compose.openedId;
   if (sameConversation(was, next, pane)) {
     // New thread while composing keeps the words, as it always did — and, a
     // new row (a new compose id), it also takes up words no pane's row holds
     // any more, added to what the box has (review 2 of PR #47: it returned
     // here, so they waited for a new thread that never came).
     const renewed = fresh && !was.threadId && !!was.compose && next.compose!.id !== was.compose.id;
-    if (renewed && s.drafts[ORPHAN_DRAFT]) return takeOrphan(s, next, { ...s.drafts });
+    if (renewed && s.drafts[ORPHAN_DRAFT]) return orphanTaken(s, next, { ...s.drafts });
     return { next, drafts: s.drafts };
   }
   const drafts = { ...s.drafts };
   const out = draftKey(was, pane);
   if (out && (was.input || was.files.length)) drafts[out] = { text: was.input, files: was.files };
   const into = draftKey(next, pane);
-  // A new compose row with nothing of its own parked takes up words no pane's
-  // row holds any more (review of PR #47): the next new thread, wherever.
+  // A new thread with nothing of its own parked takes up words no pane's row
+  // holds any more (review of PR #47): the next new thread, wherever.
   if (into && !drafts[into] && fresh && drafts[ORPHAN_DRAFT]) {
-    return takeOrphan(s, { ...next, input: "", files: [] }, drafts);
+    return orphanTaken(s, { ...next, input: "", files: [] }, drafts);
   }
   const parked = into ? drafts[into] : undefined;
   if (into && parked) delete drafts[into];
@@ -240,7 +254,7 @@ function filesLeftOut(n: number): string {
  * the project chip is one click away. Files past `MAX_FILES` are left out,
  * and said to be.
  */
-function takeOrphan(
+function orphanTaken(
   s: State, next: ChatState, drafts: State["drafts"],
 ): { next: ChatState; drafts: State["drafts"]; notice: string } {
   const o = drafts[ORPHAN_DRAFT];
@@ -258,6 +272,31 @@ function takeOrphan(
   return { next: { ...next, input: text, files }, drafts, notice };
 }
 
+/**
+ * How close together writes to the error line must come for a notice to join
+ * it rather than replace it: the dispatches of one handler, and the effects
+ * its render runs, land well inside this; two things the owner did apart do not.
+ */
+export const NOTICE_BREATH_MS = 1000;
+
+/** A plain write to the error line (a failure, or clearing it): it replaces what was there. */
+function wrote(s: State, error: string): State {
+  return { ...s, error, errorAt: error ? Date.now() : 0 };
+}
+
+/**
+ * A notice of where unsent words went. There is one error line, so a notice
+ * arriving in the same breath as what is already on it is added to it, never
+ * written over it (review 3 of PR #47, LOW): a split that reuses a hidden pane
+ * says both that its words were kept and that the new thread took them.
+ */
+function noticed(s: State, notice: string): State {
+  const now = Date.now();
+  const together = !!s.error && now - s.errorAt < NOTICE_BREATH_MS;
+  const error = !together ? notice : s.error.includes(notice) ? s.error : `${s.error} ${notice}`;
+  return { ...s, error, errorAt: now };
+}
+
 /** The orb for a pane's turn, as the reducers below leave it. */
 function turnOrb(s: State, c: ChatState): OrbState {
   if (s.approvals.length) return "approval";
@@ -267,11 +306,13 @@ function turnOrb(s: State, c: ChatState): OrbState {
 
 export function reduce(s: State, a: Action): State {
   switch (a.type) {
-    case "patch":
-      return { ...s, ...a.patch };
+    case "patch": {
+      const next = { ...s, ...a.patch };
+      return a.patch.error !== undefined && a.patch.errorAt === undefined ? wrote(next, a.patch.error) : next;
+    }
 
     case "chat": {
-      const { orb, error, ...fields } = a.patch;
+      const { orb, error, takeOrphan, ...fields } = a.patch;
       // A compose row arriving without an identity is a new row: it gets one.
       let composeSeq = s.composeSeq ?? 0;
       if (fields.compose && !fields.compose.id) {
@@ -279,12 +320,12 @@ export function reduce(s: State, a: Action): State {
         fields.compose = { ...fields.compose, id: `c${composeSeq}` };
       }
       const was = s.chats[a.pane];
-      const moved = reconverse(s, a.pane, was, { ...was, ...fields });
+      const moved = reconverse(s, a.pane, was, { ...was, ...fields }, !!takeOrphan);
       let next = { ...withChat(s, a.pane, moved.next), drafts: moved.drafts, composeSeq };
       if (orb !== undefined && a.pane === s.selectedChat) next = { ...next, orb };
-      if (error !== undefined) next = { ...next, error };
+      if (error !== undefined) next = wrote(next, error);
       // Words taken up from a pane that let them go are never back unsaid.
-      if (moved.notice) next = { ...next, error: moved.notice };
+      if (moved.notice) next = noticed(next, moved.notice);
       return next;
     }
 
@@ -519,11 +560,12 @@ export function reduce(s: State, a: Action): State {
       // yet) is no thread: nothing can open it.
       if (c.busy && c.turnThreadId && !c.turnThreadId.startsWith("local-")) loose[c.turnThreadId] = c.status;
       const keep = a.pane === s.selectedChat && CAPTURE_STATUSES.has(c.status) ? c.status : "";
-      return {
-        ...s, drafts, loose, ...(notice ? { error: notice } : {}),
+      const next: State = {
+        ...s, drafts, loose,
         chats: { ...s.chats, [a.pane]: { ...emptyChat(), status: keep } },
         selectedOrder: s.selectedOrder.filter((n) => n !== a.pane),
       };
+      return notice ? noticed(next, notice) : next;
     }
 
     case "loose":

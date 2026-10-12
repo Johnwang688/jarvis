@@ -66,6 +66,15 @@ since the v1 face and the v2 daemon are separate processes.
 - `GET /projects/{id}/platform` → `{"platform": "wsl"|"windows", "note":
   str|null}` — `windows` when the root is under `/mnt/<drive>/`, with the
   9p caution as the note.
+- Every project the routes answer with (`GET /projects`, `GET`/`PATCH
+  /projects/{id}`, `POST /projects`) carries **`root_real`** beside `root`
+  (#50, 2026-10-11): where the root resolves (`projects.resolved_root`, the
+  root the file routes read under), or `null` when it cannot be resolved.
+  A file's `abs` sits under it even when `root` goes through a symlink, so
+  a File pane's tree finds a buffer read through another project
+  (`lib/dirtyMarks.ts` `treeRoot`, falling back to `root`). Display data
+  only: never stored, never on the bus, and 400 if sent back on a POST or
+  PATCH.
 
 ## Files (scoped: project root + `extra_dirs`; anything else 403)
 
@@ -1459,7 +1468,7 @@ decision C-1 (the decisions file wins).
 `Content-Security-Policy` header WP-E's frame rule rides in
 (`hud_api.content_security_policy`, `hud_api.HUD_POLICY`):
 
-    default-src 'none'; script-src 'self'; worker-src 'self';
+    default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self';
     connect-src 'self'; style-src 'self' 'unsafe-inline';
     img-src 'self' data:; font-src 'self' data:; media-src 'self';
     frame-src http://localhost:* http://*.localhost:* http://127.0.0.1:* http://0.0.0.0:*;
@@ -1469,9 +1478,9 @@ decision C-1 (the decisions file wins).
 — the page, every `/assets/*` file (a worker takes its policy from its own
 script's response), JSON, SSE, errors and the terminal's `101`. No inline
 script, no script from another origin, no `eval`, no `blob:` worker, no
-plugin, no `<base>`, no form posted anywhere. **No `'wasm-unsafe-eval'`
-yet**: nothing in the HUD compiles WebAssembly; ED-5 adds it together with
-the test that loads every grammar under the policy. `connect-src 'self'`
+plugin, no `<base>`, no form posted anywhere. `'wasm-unsafe-eval'` came
+with ED-5 (below): WebAssembly compiles, JavaScript from a string still does
+not. `connect-src 'self'`
 covers the same-origin `ws://` terminal socket in Chromium (CSP3). A CSP host
 source cannot name an IPv6 literal or a 127/8 address other than 127.0.0.1,
 so the Preview judge refuses `[::1]` and `127.0.0.2` with a sentence naming
@@ -1641,10 +1650,35 @@ comes from ripgrep (`--json`); the daemon never runs the pattern itself, so
 (extra folders included, archived projects too) or an ancestor of one; it acts
 through directory fds opened without following links (a link on the way is a
 403) and renames without replacing; a deleted file keeps its own name in the
-trash (a second one goes into a `jarvis-deleted.<n>` folder). `GET …/tree`
-answers `root` too: where the project folder resolves.
+trash. The window matches an open buffer to a row by the project's
+`root_real` (#50).
 
 The window's half (`hud/src/components/QuickOpen.tsx`, `SearchView.tsx`,
 `EditorStatus.tsx`, `FileTab.tsx`'s explorer): keys and rules in CLAUDE.md's
 ED-7 paragraph. Find in files sends the query, the flags and the glob to the
 search route and nothing else; quick open lists once per project for 15 s.
+
+## Additions 2026-10-11 (tree-sitter colour — ED-5)
+
+Editor plan `docs/plans/2026-10-09-hud-editor-plan.md` §2.6. No new route;
+two things change on the wire.
+
+**The policy's `script-src` is `'self' 'wasm-unsafe-eval'`** (one header,
+`hud_api.content_security_policy`, as ED-4 set out): WebAssembly may compile
+in the page and in a worker — a worker takes its policy from its own
+script's `/assets/*` response — and nothing else is widened: `eval`, `new
+Function` and a string `setTimeout` are still refused, and a response may
+narrow it away (`script-src 'self'`). The syntax worker is the only code
+that compiles WebAssembly, and only the runtime and the grammars its loader's
+map names (`hud/src/lib/syntax/assets.ts`), fetched from `/assets/` on the
+HUD's origin; any other URL is refused before a request is made.
+
+**`/assets/*.wasm`** — the tree-sitter runtime and thirteen grammars, under
+their Vite content-hashed names — are served like every other installed
+asset (hash-checked on every read, `jarvis hud install`), as
+`application/wasm` with the full policy. They are fetched only when a file of
+their language first opens.
+
+The HUD's test hooks for it are read-only and not an API:
+`window.__hudSyntax.states()`, `.probe(url)` (asks the loader's gate, never
+fetches) and `.loaded()` (the grammars compiled).

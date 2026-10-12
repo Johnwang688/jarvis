@@ -249,14 +249,7 @@ def tree(project, name, depth):
         if not top:
             fail(403, "a credential folder: its contents are never listed")
     walk(directory, depth, {directory}, top)
-    # `root`: where the project's folder resolves, so the window can tell an
-    # open buffer (keyed by where it resolves) under a row it is about to
-    # delete, from any project (ED-7).
-    try:
-        root = str(Path(project.root).expanduser().resolve())
-    except (OSError, RuntimeError):
-        root = None
-    return {"path": name, "entries": entries, "root": root}
+    return {"path": name, "entries": entries}
 
 
 # -- the editor's files (ED-2, editor plan §2.4) ---------------------------------
@@ -1034,13 +1027,18 @@ _RESERVED = ("frame-ancestors", "sandbox", "report-uri", "report-to")
 # time runs in the window that gates approvals: no inline script, no script
 # from another origin, no `eval`, no plugin, no `<base>`, no form posting
 # anywhere. Why each line:
-#   - `script-src 'self'`: the bundle only. **No `'unsafe-eval'`, and no
-#     `'wasm-unsafe-eval'` yet**: nothing in the HUD compiles WebAssembly
-#     today (Monaco 0.57, xterm 6 and the HUD's own code have none), so it is
-#     left out until ED-5's tree-sitter brings the first `.wasm` and the test
-#     that loads every grammar under this policy (decided: ED-5, not here).
-#   - `worker-src 'self'`: Monaco's one `editor.worker`, a module worker
-#     Vite emits under `/assets/` (no `blob:` worker).
+#   - `script-src 'self' 'wasm-unsafe-eval'`: the bundle only. **No
+#     `'unsafe-eval'`**: no string becomes JavaScript (`eval`, `new
+#     Function` and a string `setTimeout` stay refused).
+#     `'wasm-unsafe-eval'` (ED-5) lets WebAssembly compile, and nothing else:
+#     tree-sitter's runtime and grammars, which the syntax worker fetches
+#     only from the map built into it (`hud/src/lib/syntax/assets.ts` refuses
+#     any other URL before a request is made) and compiles from bytes. A
+#     worker takes its policy from its own script's response, so the worker
+#     needs it on `/assets/*` — and every response carries this one policy.
+#     tests/face/hud_v2_syntax_check.py loads every grammar under it.
+#   - `worker-src 'self'`: Monaco's `editor.worker` and the syntax worker
+#     (ED-5), module workers Vite emits under `/assets/` (no `blob:` worker).
 #   - `connect-src 'self'`: `fetch`, the `/events` stream, the `/stt` upload
 #     and — CSP3, as Chromium implements it — same-origin `ws://` for the
 #     terminal socket (proved headless by tests/face/hud_v2_csp_check.py).
@@ -1062,7 +1060,7 @@ _RESERVED = ("frame-ancestors", "sandbox", "report-uri", "report-to")
 #   - `base-uri`, `form-action`, `object-src 'none'`: nothing to allow.
 HUD_POLICY: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("default-src", ("'none'",)),
-    ("script-src", ("'self'",)),
+    ("script-src", ("'self'", "'wasm-unsafe-eval'")),
     ("worker-src", ("'self'",)),
     ("connect-src", ("'self'",)),
     ("style-src", ("'self'", "'unsafe-inline'")),

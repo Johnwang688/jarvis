@@ -26,7 +26,11 @@ The safety checks are the ones to keep, and each is written to bite:
   - (ED-3) no token the editor draws, and no colour Monaco publishes, is
     amber or red except `--red` where it means an error or "removed", and a
     C++ and a Python file show each class of token in its row's HUD token
-    (tests/face/hud_v2_editor_theme_check.py).
+    (tests/face/hud_v2_editor_theme_check.py);
+  - (ED-5) tree-sitter colour: a C++ call in `--syn-fn`, a Python fence in
+    Markdown coloured as Python, a 1.2 MB file on Monarch saying "syntax:
+    basic", every grammar compiled under the CSP with no violation, and the
+    loader refusing a URL outside its map (tests/face/hud_v2_syntax_check.py).
 
 Build first:  cd hud && npm ci && npm run build
 Run:          PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. .venv/bin/python \\
@@ -3131,6 +3135,10 @@ def main():
             finally:
                 theme_mock.stop()
 
+            # Tree-sitter colour (ED-5): a context and a MockDaemon(0) of its own.
+            from tests.face.hud_v2_syntax_check import syntax_section
+            syntax_section(browser, check, until, lambda ctx: guard_live(ctx, FAILURES.append), FAKE_RECOGNIZER)
+
             # Push-to-talk's key, Ctrl+D (2026-10-10): a context and a mock of
             # their own, for the same reasons.
             from tests.face.hud_v2_ptt_check import ptt_checks
@@ -3169,6 +3177,16 @@ def main():
                 nav_checks(browser, nav_mock, f"http://127.0.0.1:{nav_mock.port}", check, until, guard, FAKE_RECOGNIZER)
             finally:
                 nav_mock.stop()
+
+            # The tree's unsaved-changes dots and file icons: a mock of their
+            # own, whose world gains a nested C++ folder for the run.
+            from tests.face.hud_v2_editor_marks_check import marks_checks
+            marks_mock = MockDaemon(0).start()
+            try:
+                marks_checks(browser, marks_mock, f"http://127.0.0.1:{marks_mock.port}", check, until,
+                             guard, FAKE_RECOGNIZER)
+            finally:
+                marks_mock.stop()
 
             ctx = browser.new_context(permissions=["microphone"])
             guard(ctx)

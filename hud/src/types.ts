@@ -31,6 +31,11 @@ export interface Project {
   inbox: boolean;
   /** When the owner archived it; such a project is only in `/archive`. */
   archived?: string | null;
+  /**
+   * Where `root` resolves (the daemon's `projects.resolved_root`): the folder
+   * a file's `abs` sits under. Display data only — never sent back on a PATCH.
+   */
+  root_real?: string | null;
 }
 
 export interface Platform {
@@ -169,8 +174,6 @@ export interface TreeEntry {
 export interface Tree {
   path: string;
   entries: TreeEntry[];
-  /** ED-7: where the project folder resolves (buffers are keyed by where a file resolves). */
-  root?: string | null;
 }
 
 /** `GET /projects/{id}/files` (ED-7): quick open's list. */

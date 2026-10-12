@@ -128,9 +128,12 @@ export function draftKey(c: ChatState, pane: PaneNo): string | null {
 /**
  * Where words go that belonged to a compose row no pane holds any more — a
  * hidden one a split took back, a first send that failed after its pane was
- * closed (review of PR #47). Any pane taking up a new compose row picks them
- * up when its own row has nothing parked: the next new thread, wherever it
- * opens.
+ * closed (review of PR #47). The next new thread the owner starts — New
+ * thread, or a split's copy (`ChatPatch.takeOrphan`) — picks them up when its
+ * own row has nothing parked, wherever it opens. No other new compose row
+ * does (review 3 of PR #47): a pane shown for the first time, one re-aimed
+ * after its project or thread went away, or one nobody can see would be told
+ * "back, in this new thread's box" untruly.
  */
 export const ORPHAN_DRAFT = "compose:*";
 

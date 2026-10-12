@@ -1274,13 +1274,14 @@ and `vex_setup.py` join SELF_PROTECTED (the owner declined widening it for
 **The HUD's CSP and installed build, ED-4 (2026-10-11; editor plan §1.7,
 §2.7; decision C-1; contract in `docs/hud-api.md`).** Every HUD and API
 response carries the **full policy** (`hud_api.HUD_POLICY`) in WP-E's one
-header: `default-src 'none'`, `script-src 'self'` (no inline, no eval),
+header: `default-src 'none'`, `script-src 'self' 'wasm-unsafe-eval'` (no
+inline, no eval; WebAssembly since ED-5),
 `worker-src`/`connect-src 'self'` (the same-origin `ws://` terminal socket
 included, CSP3), `style-src 'self' 'unsafe-inline'`, `img-src`/`font-src
 'self' data:`, `media-src 'self'`, `frame-src` on the loopback names a CSP can
 express (so the Preview judge refuses `[::1]` and `127.0.0.2` with a
-sentence), and `base-uri`/`form-action`/`object-src 'none'`. **No
-`'wasm-unsafe-eval'` yet — ED-5 adds it** with its first `.wasm` and the test
+sentence), and `base-uri`/`form-action`/`object-src 'none'`.
+`'wasm-unsafe-eval'` came with ED-5's tree-sitter (below), with the test
 that loads every grammar under the policy. A response's own directives may
 only **narrow** it (`_narrowed`: restate a directive the policy sets with a
 subset of its sources; a `default-src 'none'` drops the fetch directives it
@@ -1719,8 +1720,8 @@ shown only under the `jarvisMayAddToChat` context key, i.e. `jarvisMayRead`).
   9p); a delete re-checks the inode through that fd, then `Trash.put_keeping_name`
   (a second `.env` goes into `jarvis-deleted.<n>/.env`, never `.env.2`; `put`
   and its other callers unchanged). A folder named `.env` is a folder; the
-  delete warning names unsaved buffers from any project (`tree` now says the
-  folder's resolved `root`).
+  delete warning names unsaved buffers from any project (matched by the
+  project's `root_real`, #50's).
 Free checks: `tests/v2/editor_nav_check.py` (31: parity on both
 backends, listing, search bounds/gitignore/never-withheld, fs refusals,
 trash, owner-only), `fuzzy.test.ts`, `commands.test.ts` (no download or
@@ -1735,6 +1736,43 @@ card close, the key guards (both), FileTab's blocked effect.
 Not done: replace in files (cut), a "dev servers" list, symbol search (cut),
 Ctrl+PageUp/Down as keys (palette only), and a tab on the same file through
 *another* project's pane that never mounted keeps its old path.
+
+**The tree's unsaved-changes dot and file icons (2026-10-11, the owner's ask
+for the robotics lab: "like VS Code").** A dirty file's tree row wears a light
+dot (`--text-2`, `DirtyDot`, "unsaved changes" with a tooltip), and so does a
+collapsed folder holding one at any depth — an open folder never does, its
+child does (`lib/dirtyMarks.ts`, `rowDot`). **Dirty is the buffer's**, so
+every pane's tree on that project marks it, opened there or not, and a file
+read through another project is found under this one's root by its `abs` —
+**the root as it resolves**: every project the daemon answers with carries
+`root_real` (`projects.resolved_root`, display only, refused if sent back),
+and the tree looks under it (`treeRoot`), so a root reached through a
+symlink still matches. On
+a tab the dot stands where × is and hover or focus brings × back (theme.css;
+× only goes transparent, so it never moves and stays clickable); **while a
+save is out (ED-2) the same slot holds a hollow ring**, dirty or not, named
+"saving", and hover still brings × back. **The tree
+never redraws per keystroke**: `useDirtyMarks` subscribes with a string key
+of the dirty paths (the registry speaks on clean↔dirty and on a save's
+saving/queued changes, and the key ignores the latter), and
+the tree's `Node` is memoized with a stable `onOpen`, so a chat box's typing
+no longer redraws it either — `FileTab.test.ts` counts the tree's row renders
+through twenty window redraws, twenty keystrokes and a held save (dropping
+`memo(` or the stable `onOpen` fails it). Each file row has a 16px inline-SVG icon after
+the twistie's room (`components/FileIcon.tsx`; the rule is
+`lib/fileIcons.ts`: whole name, then the longest extension, case-insensitive;
+`.env*` or `policy: "env"` the lock); a folder is its chevron alone. **Icons
+are drawn in currentColor from six theme tokens** (`ICON_TOKENS`: the four
+`--syn-*`, `--text-2`, `--text-muted`) — never a hex and never amber or red,
+so VS Code's yellow `{}` and orange HTML are deliberately not copied. Free
+checks: `fileIcons.test.ts` (mapping, the colour rule from theme.css's own
+text, every icon rendering aria-hidden with no `<text>`), `dirtyMarks.test.ts`,
+`DirtyMark.test.ts` (one redraw per transition, none per keystroke or for
+another project's file), `FileTab.test.ts` (the memo), `hud_backend_check`'s
+`test_projects_say_where_their_root_resolves` and
+`tests/face/hud_v2_editor_marks_check.py` (a `MockDaemon(0)` of its own, after
+the editor section of `hud_v2_check`; the saving ring, and a linked project
+whose mock `root_real` is p1's folder — it fails with `treeRoot` ignoring it).
 
 **The Graphite editor scheme, ED-3 (2026-10-11; plan §2.5, decisions E-4).**
 One scheme, no picker, **no syntax colour amber or red**. `lib/editorTheme.ts`
@@ -1796,6 +1834,94 @@ computed colours unchanged once Monaco has loaded). 30 of its first 44 checks
 fail on b04d6e8, and the control-character pair without the theme.css rule;
 the rest are setup or guards (find was already pinned by ED-1), each shown to
 bite in a scratch copy.
+
+**Tree-sitter colour, ED-5 (2026-10-11; plan §2.6, the ED-5 package in §3).**
+C/C++ (`.c` and VEX's `.h` on the C++ grammar), Python, JavaScript,
+TypeScript, TSX, JSON, Bash, CSS, HTML, YAML, TOML and Markdown (block and
+inline) are coloured from a parse tree; everything else keeps Monarch.
+**`web-tree-sitter` 0.27.0 and every grammar package are pinned exactly**;
+Markdown's npm package ships no `.wasm`, so its v0.5.3 release files are
+vendored in `hud/vendor/tree-sitter/` and **every shipped `.wasm` has its
+SHA-256 in `manifest.json`** (vitest fails on a difference).
+**nvim-treesitter's queries are vendored raw at f603a2f4** under
+`hud/vendor/nvim-treesitter/` (Apache-2.0 `LICENSE`, `NOTICE`) and translated
+into `hud/src/syntax/queries/` by `hud/scripts/vendor-queries.mjs` (dev-run:
+`; inherits:` concatenated, `#lua-match?` to `#match?`, `#set! priority` a
+sort key, untranslatable patterns dropped and listed in `dropped.json` —
+only html's `#gsub!` today); **every bundled query is compiled against its
+bundled grammar in vitest**, so grammar/query drift fails the build. The
+code is `lib/syntax/`: `grammars` (pure data: Monaco language → grammar,
+fence aliases), `assets` (the loader gate), `worker` + `engine` (parse,
+incremental reparse, injections, budgets, tokens), `client` (the provider,
+in the lazy Monaco chunk), `positions`, `flatten`, `legend`, `translate`,
+`budgets`. **One syntax worker, made only through Monaco's `getWorker` by
+its own label** (`SYNTAX_WORKER`; every language-service label is still
+refused, E-1); Vite builds workers as ES modules now (`worker.format: "es"`).
+Monaco gets a `DocumentRangeSemanticTokensProvider` per covered language and
+`semanticHighlighting.enabled` on every editor; **Monarch stays underneath**,
+so colour is never missing, only quieter. Tokens are ED-3's capture names
+with the language as the last modifier (`keyword.import.cpp`), styled by the
+same table. **web-tree-sitter 0.27's query ranges are in UTF-16 bytes**
+(twice the code units): `positions.queryRange` converts, a test pins it.
+Edits go to the worker as `{offset, length, text}` with the version,
+coalesce for 30 ms and reparse incrementally — **300 random edit sequences
+(astral characters, CRLF, tabs) colour exactly as a fresh parse**.
+Injections are one level deep (a fence by its info string, Markdown inline,
+HTML `<script>`/`<style>`), capped at 256 KB of injected text per document.
+**Budgets fall back to Monarch, never to a broken file**: over 1 MiB of
+text ("syntax: basic (large file)", never sent to the worker), a first parse
+over 1 s ("slow parse"), two reparses cancelled at 250 ms running ("slow
+edits"), a grammar that fails to load ("grammar failed"), **a worker that
+errors or leaves a token request unanswered for 10 s** (`REPLY_TIMEOUT_MS`:
+it is dead — terminated, every model on Monarch, "no worker", and the
+provider answers empty rather than null, which would leave tree-sitter's
+stale tokens drawn); each editor shows the reason in a bottom-right corner
+(`data-testid="syntax-status"`) only while a covered file is on Monarch.
+**Every `Query.matches` run is budgeted** (`matchMs`, 250 ms, through its
+`progressCallback`; a cancelled run's partial matches are never colour): a
+viewport chunk stops the answer at the lines before it, the whole-document
+injections query leaves fences their host's colour (twice running, off for
+that document), an injected range keeps its host's colour. **A fence's info
+string is a lookup key, so lookups read own keys only** (`Object.hasOwn`):
+` ```constructor ` or ` ```__proto__ ` loaded Object.prototype's names (review
+of PR #54). **A grammar is code the worker runs, so
+the HUD's policy gained `'wasm-unsafe-eval'`** — in `hud_api.HUD_POLICY`'s
+`script-src`, the one header, WebAssembly only (`eval`, `new Function` and a
+string `setTimeout` stay refused, and a response may narrow it away) — **and
+the loader fetches only its map**: `assets.fetchShipped` is the one `fetch`
+in `lib/syntax/`, it resolves the URL against the worker's origin and
+refuses anything but the runtime's and the 13 grammars' Vite `?url`s —
+another origin, another path, `data:`, `blob:` — before a request is made;
+`Language.load` takes only its bytes; and Emscripten's `locateFile`
+answers its own runtime's name with the gate's URL (it is never fetched:
+`wasmBinary` holds the bytes) and **throws for any other name** (it used to
+throw for every name, which Emscripten calls even when handed the bytes, so
+the worker never started in a real browser — vitest could not see it).
+Test hooks, read-only: `window.__hudSyntax.states()` (each model's grammar,
+state, reason, `served` count and `opens` — times its text was sent to the
+worker, 0 past the size budget: the worker's own size check would hide the
+client's), `.probe(url)` (asks the gate about a URL,
+never fetches) and `.loaded()` (grammars compiled), each answering within
+10 s even with a dead worker. Sizes: first paint 613,246 B (+168),
+`monacoBundle` 3,648,370 B (+5 KB), the worker 213 KB, ~9.9 MB of `.wasm`
+loaded per language on first sight. ED-3's "bold on `void`" note stands:
+`void` is `type.builtin`, `--syn-type`, not bold. Free checks: `lib/syntax/
+*.test.ts` (167; Node, the pinned runtime and real grammars; `client.test.ts`
+on a stand-in Monaco and a silent worker) and
+`tests/face/hud_v2_syntax_check.py` (a `MockDaemon(0)` of its own, run by
+`hud_v2_check` after the editor-scheme section, or alone: a C++ call in
+`--syn-fn`, `void` `--syn-type`, a type name Monarch leaves plain drawn
+`--syn-type`; a Python fence in Markdown coloured as Python; a 1.2 MB file
+on Monarch with its corner; all 13 grammars compiled under the CSP, each
+`.wasm` from `/assets` as `application/wasm` under the one policy; the
+loader refusing URLs outside its map). **A CSP violation inside a worker
+never reaches `watch_csp`'s document listener** — the suite also reads the
+page's and the worker's console for one. Shown to bite in a scratch copy:
+the policy without `'wasm-unsafe-eval'` (12 of 39 fail), the gate returning
+any URL (5), and the size budget dropped (2). `hud_v2_editor_theme_check`
+now reads spans only after the worker has answered for the file, and
+accepts `"vex.h"` as one string and `@property` as `@` + `property`.
+Not yet: ED-6's folding from `folds.scm`.
 
 **The effort is a slider, not pills (2026-10-10, owner's ask: "like Claude's").**
 `components/EffortSlider.tsx`, rules in `lib/effortSlider.ts`: "Effort
@@ -2035,11 +2161,17 @@ thread anywhere and says so (review of PR #47, M2); one that fails at
 2 of PR #47, LOW-2). **A park is never silent** (review 2, MED-2/NIT-3): a
 release that parks words says where — the thread, by title, or the next new
 thread with the project they were written in — and how many files past eight
-were left out. **Any new compose row takes `ORPHAN_DRAFT` up** (a new
-`Compose.id`: New thread, a split's copy), even from a pane already composing
+were left out. **Only a new thread the owner starts takes `ORPHAN_DRAFT` up**
+— New thread and a split's copy, the only patches carrying `takeOrphan:
+true` (review 3 of PR #47: any new `Compose.id` used to, so a pane × closed,
+an undrawn one or one re-aimed by a project's archive took the words and the
+window called them "back, in this new thread's box"); a pane × closed or
+never drawn gets no compose row at all until it is drawn (`inWorkspace`).
+It takes them even from a pane already composing
 — after the words it has — says so, and names the project they were written
 in when the row is in another (`Draft.projects`); the row keeps its own
-project. A compose row's unsent
+project. Notices arriving together (within `NOTICE_BREATH_MS`, one handler
+and its effects) **join** on the one error line rather than replace it. A compose row's unsent
 words are asked about (G-9) **whatever view the pane shows** — a pane
 switched to File keeps its chat, and × releases it too (review 2, MED-1) —
 and Discard drops them for good; a terminal goes back to the panel as its
