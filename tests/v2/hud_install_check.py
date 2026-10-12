@@ -23,7 +23,8 @@ What they pin:
     refusal and returns 1 on a symlinked target, and `jarvis hud` dispatches
     it; `config.HUD_DIST` is the install root unless JARVIS_HUD_DEV=1;
   - no tool, MCP tool or fast-path tool can reach the installer: only the
-    CLI and the daemon's read side import it.
+    CLI (`__main__`, and `owner_ops` for `jarvis hud rebuild`) and the
+    daemon's read side import it.
 
 Run:
     PYTHONPATH=. .venv/bin/python tests/v2/hud_install_check.py
@@ -481,7 +482,7 @@ class Cli(Base):
         self.assertIn("install", out.stdout)
         self.assertIn("--allow-dirty", out.stdout)
         source = (REPO / "jarvis" / "__main__.py").read_text()
-        self.assertRegex(source, r'choices=\["open", "install"\]')
+        self.assertRegex(source, r'choices=\["open", "install", "rebuild"\]')
 
     def test_hud_dist_is_the_install_root_unless_dev(self):
         code = ("import json; from jarvis import config; print(json.dumps([str(config.HUD_DIST), "
@@ -690,8 +691,10 @@ class NoLever(unittest.TestCase):
             if re.search(r"import\s+hud_install\b|\bhud_install\s+import\b|import\s+[\w.]*\.hud_install\b",
                          path.read_text()):
                 importers.append(path.relative_to(REPO).as_posix())
-        self.assertEqual(importers, ["jarvis/__main__.py", "jarvis/v2/daemon.py", "jarvis/v2/hud_api.py"],
-                         importers)
+        # owner_ops is `jarvis hud rebuild`, the CLI's too (2026-10-11): only
+        # `__main__` imports it (tests/v2/owner_ops_check.py pins that).
+        self.assertEqual(importers, ["jarvis/__main__.py", "jarvis/v2/daemon.py", "jarvis/v2/hud_api.py",
+                                     "jarvis/v2/owner_ops.py"], importers)
         for name in ("hud_api.py", "daemon.py"):
             text = (REPO / "jarvis" / "v2" / name).read_text()
             for writer in ("install(", "prune(", "main(", "npm_build("):

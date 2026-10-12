@@ -454,18 +454,36 @@ def find(root, rel: str) -> bytes | None:
 # -- the CLI -------------------------------------------------------------------------
 
 
+def config_risk(repo) -> str:
+    """Why git must not run in `repo`, or "": its own config names a program
+    git would run (`gitops._risky_config`), or — failing closed (review of PR
+    #48) — git cannot list that config at all (`_risky_config` reads that as
+    "nothing risky")."""
+    from jarvis import gitops
+    repo = Path(repo)
+    try:
+        code, _, err = gitops._git(repo, ["config", "--list", "--name-only", "--show-scope"],
+                                   timeout=60)
+        if code != 0:
+            first = next((line.strip() for line in (err or "").splitlines() if line.strip()), "")
+            return f"its git config could not be read ({first[:200] or f'exit {code}'})"
+        return gitops._risky_config(repo)
+    except Exception as exc:     # noqa: BLE001 — not knowing is a refusal here
+        return f"its git config could not be read ({type(exc).__name__})"
+
+
 def _git(*args: str) -> tuple[int, str] | None:
     """git in the checkout, run the way `gitops` runs it (review of PR #44 at
     62db94f): an absolute git, every inherited `GIT_*` dropped, the pager and
     editors pinned, hooks and fsmonitor off, never a shell — `git status`
     used to inherit the environment and the repository's own config, and a
     repository's `core.fsmonitor` program ran. A checkout whose own config
-    names a program git would run (a filter, a textconv …) is not read at
-    all: None, as if git could not say."""
+    names a program git would run (a filter, a textconv …), or whose config
+    cannot be read, is not read at all: None, as if git could not say."""
     from jarvis import gitops
     repo = Path(config.REPO_ROOT)
     try:
-        if gitops._risky_config(repo):
+        if config_risk(repo):
             return None
         code, stdout, _ = gitops._git(repo, list(args), timeout=60)
     except Exception:     # noqa: BLE001 — no git means "cannot say"
@@ -480,13 +498,30 @@ def git_head() -> str | None:
     return head if out is not None and out[0] == 0 and re.fullmatch(r"[0-9a-f]{40,64}", head) else None
 
 
+# Files npm reads from `hud/` itself that git may never show — an ignored
+# `.npmrc` sets `script-shell`, `node-options` or a registry, and both `npm
+# ci` and `npm run build` honour it (review of PR #48, M3).
+NPM_FILES = (".npmrc", "npm-shrinkwrap.json")
+
+
 def hud_dirty() -> bool | None:
     """Whether `hud/` has uncommitted changes (`git status --porcelain -- hud`,
-    untracked files included), or None when git cannot say."""
+    untracked files included), or None when git cannot say. An npm file at
+    `hud/` that git does not track (`NPM_FILES`) counts, ignored or not."""
     out = _git("status", "--porcelain", "--untracked-files=normal", "--", "hud")
     if out is None or out[0] != 0:
         return None
-    return bool(out[1].strip())
+    if out[1].strip():
+        return True
+    hud = Path(config.REPO_ROOT) / "hud"
+    present = [name for name in NPM_FILES if os.path.lexists(hud / name)]
+    if present:
+        tracked = _git("ls-files", "--", *(f"hud/{name}" for name in present))
+        if tracked is None or tracked[0] != 0:
+            return None
+        if set(tracked[1].split()) != {f"hud/{name}" for name in present}:
+            return True
+    return False
 
 
 def hud_changed_since(commit: str | None) -> bool | None:
@@ -500,15 +535,31 @@ def hud_changed_since(commit: str | None) -> bool | None:
     return out[0] == 1
 
 
-def npm_build() -> None:
-    """`npm run build` in the repo's `hud/` (type check, then Vite)."""
-    hud = Path(config.REPO_ROOT) / "hud"
-    if not (hud / "node_modules").is_dir():
-        raise InstallRefused(f"{hud}/node_modules is missing; run `npm ci` in {hud} first")
+NPM_BUILD_TIMEOUT = 15 * 60                # seconds; a type check and Vite take about one
+
+
+def npm_path() -> str:
+    """The npm to run: the first on PATH, never a Windows one under /mnt/.
+    One resolver for `npm run build` here and `jarvis hud rebuild`'s `npm ci`."""
     npm = shutil.which("npm")
     if not npm or npm.startswith("/mnt/"):
         raise InstallRefused("npm is not on PATH (a Windows npm under /mnt/ is never used)")
-    result = subprocess.run([npm, "run", "build"], cwd=hud, stdin=subprocess.DEVNULL)
+    return npm
+
+
+def npm_build(timeout: float = NPM_BUILD_TIMEOUT) -> None:
+    """`npm run build` in the repo's `hud/` (type check, then Vite)."""
+    hud = Path(config.REPO_ROOT) / "hud"
+    if not (hud / "node_modules").is_dir():
+        raise InstallRefused(f"{hud}/node_modules is missing; run `npm ci` in {hud} first "
+                             "(or `jarvis hud rebuild`, which does)")
+    npm = npm_path()
+    try:
+        result = subprocess.run([npm, "run", "build"], cwd=hud, stdin=subprocess.DEVNULL,
+                                timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise InstallRefused(f"`npm run build` did not finish within {timeout:g} s; "
+                             "nothing was installed") from None
     if result.returncode != 0:
         raise InstallRefused(f"`npm run build` failed (exit {result.returncode}); nothing was installed")
 
@@ -519,12 +570,16 @@ def _clean_enough(dirty: bool | None, allow_dirty: bool) -> None:
                              "checkout, or its own config names a program git would run); "
                              "pass --allow-dirty to install anyway")
     if dirty and not allow_dirty:
-        raise InstallRefused("hud/ has uncommitted changes (`git status -- hud`); commit or "
-                             "stash them, or pass --allow-dirty to install them anyway")
+        raise InstallRefused("hud/ has uncommitted changes (`git status -- hud`, or an "
+                             f"untracked {' or '.join(NPM_FILES)} there, which npm would obey); "
+                             "commit or stash them, or pass --allow-dirty to install them anyway")
 
 
-def main(*, build=npm_build, out=print, allow_dirty: bool = False) -> int:
-    """`jarvis hud install`: build the HUD and install it for the daemon to serve.
+def install_checkout(*, build=npm_build, allow_dirty: bool = False) -> Build:
+    """Build the checkout's `hud/` and install it; raises `InstallRefused`.
+
+    The one install path: `jarvis hud install` (`main`) prints around it and
+    `jarvis hud rebuild` (`owner_ops.rebuild`) runs it after `npm ci`.
 
     Refuses uncommitted changes under `hud/` unless `allow_dirty` (review of
     PR #44, L5): Jarvis's own chats leave edits in the main checkout, and an
@@ -532,29 +587,39 @@ def main(*, build=npm_build, out=print, allow_dirty: bool = False) -> int:
     it installs what is committed, and says so in the manifest (`git_head`,
     `dirty`)."""
     root = Path(config.HUD_DIR)
+    why = root_refusal(root)
+    if why:
+        raise InstallRefused(why)
+    head, dirty = git_head(), hud_dirty()
+    _clean_enough(dirty, allow_dirty)
+    build()
+    # Looked at again once the build is done: an edit that landed while
+    # it ran, or a checkout that moved, is never recorded as the clean
+    # commit it was not (review of PR #44 at 62db94f).
+    after_head, after = git_head(), hud_dirty()
+    _clean_enough(after, allow_dirty)
+    if after_head != head and not allow_dirty:
+        raise InstallRefused(f"the checkout moved while it built ({head} → {after_head}); "
+                             "nothing was installed — run it again")
+    dirty = True if (dirty or after) else (None if dirty is None or after is None else False)
+    return install(config.HUD_BUILD, root, note={"git_head": after_head, "dirty": dirty})
+
+
+def describe(installed: Build) -> str:
+    """The one line that says what was installed."""
+    return (f"Installed HUD build {installed.id} ({len(installed.files)} files) in {installed.path}"
+            + (f", from {installed.git_head[:12]}" if installed.git_head else "")
+            + (" with uncommitted changes in hud/" if installed.dirty else "") + ".")
+
+
+def main(*, build=npm_build, out=print, allow_dirty: bool = False) -> int:
+    """`jarvis hud install`: build the HUD and install it for the daemon to serve."""
     try:
-        why = root_refusal(root)
-        if why:
-            raise InstallRefused(why)
-        head, dirty = git_head(), hud_dirty()
-        _clean_enough(dirty, allow_dirty)
-        build()
-        # Looked at again once the build is done: an edit that landed while
-        # it ran, or a checkout that moved, is never recorded as the clean
-        # commit it was not (review of PR #44 at 62db94f).
-        after_head, after = git_head(), hud_dirty()
-        _clean_enough(after, allow_dirty)
-        if after_head != head and not allow_dirty:
-            raise InstallRefused(f"the checkout moved while it built ({head} → {after_head}); "
-                                 "nothing was installed — run it again")
-        dirty = True if (dirty or after) else (None if dirty is None or after is None else False)
-        installed = install(config.HUD_BUILD, root, note={"git_head": after_head, "dirty": dirty})
+        installed = install_checkout(build=build, allow_dirty=allow_dirty)
     except InstallRefused as exc:
         out(f"jarvis hud install: refused: {exc}")
         return 1
-    out(f"Installed HUD build {installed.id} ({len(installed.files)} files) in {installed.path}"
-        + (f", from {installed.git_head[:12]}" if installed.git_head else "")
-        + (" with uncommitted changes in hud/" if installed.dirty else "") + ".")
+    out(describe(installed))
     if config.HUD_DEV:
         out("Note: JARVIS_HUD_DEV=1 is set here, so a daemon started from this shell would "
             "serve hud/dist, not this install.")

@@ -3322,6 +3322,13 @@ def _judge_segment(segment: str) -> Verdict:
 
     if stem == "systemctl" and "--user" not in tokens:
         return Verdict(ASK, "system-wide systemctl affects the whole machine")
+    if stem == "systemctl":
+        # `--user set-environment` and its kin change what the v2 daemon
+        # starts with next time: asked, never auto-approved (review of PR
+        # #48). What changes the daemon's unit itself is DENY, above.
+        why = protected_state.systemctl_asks(tokens)
+        if why:
+            return Verdict(ASK, why)
 
     if stem in _NEVER_AUTO_STEMS:
         return Verdict(ASK)
@@ -3378,7 +3385,7 @@ def _general_verdict(command: str) -> Verdict:
     # owner-only command goes), so v1's gate and v2's layer 1 — both of which
     # start from `decide` — refuse every spelling it sees.
     from . import protected_state
-    why = protected_state.owner_op(command)
+    why, unsure = protected_state.owner_reading(command)
     if why:
         return Verdict(DENY, why)
 
@@ -3388,6 +3395,11 @@ def _general_verdict(command: str) -> Verdict:
         inner = Verdict(ASK, "contains command substitution, which cannot be judged here")
     else:
         inner = Verdict(ALLOW)
+    # A kill whose pattern is too costly to judge against the v2 daemon is
+    # asked, never refused and never covered by an allowlist entry
+    # (`protected_state.kill_unsure`; the delta review of PR #48).
+    if unsure:
+        inner = Verdict(ASK, unsure)
 
     worst = inner
     for segment in segments(command):
