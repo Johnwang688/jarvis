@@ -3156,10 +3156,13 @@ match all spend through one `Deadline` (`RESOLVE_MS` 5 ms), which reads
 `performance.now()` every `CHECK_STEPS` (256) steps from inside the parser,
 the compiler and the matcher and throws `OutOfTime`; the file then has **no
 configuration at all, never a partial one**; (b) **poison** — the config
-(by folder and etag) that spent the time takes a strike, and **two strikes**
-(one GC pause must not cost a real config its effect) **or any cap** poison
-it: every later resolution touching it, for any path, is O(1) and never
-queued, until its etag changes; (c) **no batching** — resolutions run one per
+(by folder and etag) that spent the time takes a strike, and **two strikes
+in a row** (one GC pause must not cost a real config its effect) **or any
+cap** poison it: every later resolution touching it, for any path, is O(1)
+and never queued, until its etag changes. **A resolution that judges a config
+in time resets its strikes** (PR #72, LOW 3): with no reset, two time-outs
+any distance apart poisoned the owner's real config, and on a loaded core
+the real-world config timed out in 2.4% of 3,000 resolutions; (c) **no batching** — resolutions run one per
 macrotask through a queue (`MessageChannel` in the window, `setTimeout` in
 Node), so restored tabs never pile into one long task; `prepare` still
 applies before the buffer records its text. Compiled globs are kept with
@@ -5204,12 +5207,20 @@ jarvis/
     work held the thread: the least of its wall time and the process's CPU
     time (`held` in the `.editorconfig` vitests). The thread's own CPU clock
     is a tick stale on Linux. A GC pause inflates both, so judge the best of
-    up to three fresh runs: a pause hits one run, and a broken guard is slow
-    in every run. A check of a guard's logic runs on a clock made of the
-    work done (`workDeadline`). Keep the tight bound, not a generous one.
+    up to three fresh runs: a pause hits one run, and a break that costs
+    CPU is slow in every run. A check of a guard's logic runs on a clock
+    made of the work done (`workDeadline`). Keep the tight bound, not a
+    generous one.
+  - **Pin the constants that set a guard's strength.** A held-time bound
+    under load cannot tell a 5 ms deadline from a 20 ms one, and the work
+    clock scales with the deadline. So `RESOLVE_MS`, `CHECK_STEPS`,
+    `STRIKES`, and the real-clock default of `deadline()` are asserted
+    directly (PR #72, LOW 1).
   - **Count the HUD's fault, not the test's.** The terminal suite's
-    fresh-ticket check still judges every socket's ticket. A fresh one for
-    a terminal the test removed meanwhile is counted apart.
+    fresh-ticket check still judges every socket's ticket. Only a fresh
+    ticket for a terminal the test itself removed (`_reset`, `end`; held in
+    `fake.removed`) is counted apart. A socket for a terminal the HUD closed
+    itself counts against it.
   To reproduce, widen the window: `taskset` with busy loops, Chromium's
   `Emulation.setCPUThrottlingRate`, late animation frames, or a sleep where
   the race is. "Passes alone" proves nothing.
