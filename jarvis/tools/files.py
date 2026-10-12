@@ -153,12 +153,15 @@ _NUMBER_FIELD = 6
 def _protected_state_paths() -> set[Path]:
     """The gate's state files as configured, unresolved: the editor's read
     path (`v2/editor_policy.py`) needs to know which of them is a symlink."""
+    # `vex.json` (VX-1, 2026-10-10) names the executables the HUD's VEX
+    # Build, Download and brain terminal run when the owner clicks: an agent
+    # that could repoint it could choose what runs on that click.
     names = ("allowlist.json", "models.json", "routing.json", "discord_guild.json",
-             "provider_defaults.json")
+             "provider_defaults.json", "vex.json")
     allow = config.ALLOWLIST_PATH.expanduser()
     paths = {allow, config.MODELS_PATH.expanduser(), config.PROVIDER_DEFAULTS_PATH.expanduser(),
              config.DISCORD_GUILD_PATH.expanduser(), config.ROUTING_PATH.expanduser(),
-             config.CODEX_CATALOG_PATH.expanduser()}
+             config.CODEX_CATALOG_PATH.expanduser(), config.VEX_PATH.expanduser()}
     paths |= {allow.parent / name for name in names}
     return paths
 

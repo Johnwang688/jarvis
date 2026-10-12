@@ -1173,6 +1173,104 @@ on ephemeral ports (`api_port`, `dev_port`) and asserts the API one is never
 hit; the mock HUD, API and workshop send the real `hud_api.frame_headers()`,
 so the HUD under test is always rendered under them. Not yet: §2.5 item 5, a "dev servers in your terminals" list.
 
+**VEX backend, VX-1 (2026-10-11; editor plan
+`docs/plans/2026-10-09-hud-editor-plan.md` §2.9/§3, decisions file beside it
+wins: V-1..V-5; design §18; contract in `docs/hud-api.md`).**
+`jarvis/v2/vex.py` builds, downloads, opens the brain's user port and makes
+new projects with the Windows `vexcom.exe` and toolchain the owner's VS Code
+VEX extension downloaded, **run in place through WSL interop — nothing
+copied, bundled or committed**, and **never decompiled**: the only `vexcom`
+flags are DishPy's (`--name --slot --write --progress`, `--user`). **Tests
+never run a real VEX tool or touch a device** — `tests/v2/vex_fake/` holds
+a fake `make.exe` and `vexcom.exe`. Which executables run is
+**`config.VEX_PATH` (`~/.config/jarvis/vex.json`)**, written only by the
+human-run `jarvis vex setup` (`vex_setup.py`: looks only in
+`config.VEX_STORAGE_ROOTS`/`VEX_EXTENSION_ROOTS`, checks by the daemon's own
+rule, y/N, mode 600, needs a TTY; it also offers `~/.local/bin/vexbuild`),
+and it is **gate state** (`files._protected_state`, by path and by name beside
+the allowlist). **Every path is re-checked at each use** (`load_config`:
+absolute, `realpath == path` so no symlink anywhere, a regular executable or a
+folder, inside the extension's folders; the file itself `O_NOFOLLOW |
+O_NONBLOCK`, capped). **Those folders are under AppData, which agents can
+write** (`cp payload.exe …/make.exe` is an ALLOW), so setup records **each
+tool's SHA-256** in `vex.json` (required) and **`verify_tools` hashes them
+again immediately before every spawn** — `make.exe` and the five tools it
+runs before a build, `vexcom.exe` before a download, brain or info — through
+one `O_NOFOLLOW | O_NONBLOCK` fd, then re-stats the spawned path against that
+fd (device, inode, size, mtime, ctime): a mismatch refuses with "the VEX
+tools changed since `jarvis vex setup`". **What remains, stated**: a swap in
+the instant between that stat and `exec`, the five tools `make.exe` opens
+later on the Windows side, during the build, and **a DLL planted beside a tool
+in its AppData folder** — Windows loads a program's DLLs from its own folder
+first, and the fingerprint covers the executable only. **No request names an
+executable, a path or an argument**: argv tables in `vex.py`, the project from
+its id, `{action}` / `{slot, name}` validated first (slot an int 1–8; name
+`^[A-Za-z0-9_][A-Za-z0-9_-]{0,19}$`; the settings file's own name is held to
+the `P=` rule before it names `build/<name>.bin`), Windows paths through one
+`to_windows` that refuses `"<>|?*%^&!();,=\:`, invisible characters, a
+trailing dot or space, reserved names (`NUL`, `con.txt`) and **anything outside
+ASCII** (review round 2: Windows' "best fit" for an ANSI program maps U+FF02 to
+`"`, U+FF3C to `\` and U+2215 to `/`). Programs run as
+**program terminals** — `terminals.create_program`, called from `vex.py`
+alone (grep-tested; `terminal_check`'s allowed set now includes `vex.py`):
+same ring and routes as a shell, `WSLENV` emptied, typed input refused but
+Ctrl-C except the brain's, an `on_exit` hook after EOF, six apart from the
+shells' six. One build per project (a `flock` under `V2_DATA_DIR/vex/`,
+shared with `vexbuild`), one device action at a time (download, info, brain;
+the device is reserved before the build lock, and **a reservation is released
+only by its holder, at most once** — a token, never a wildcard), 5-minute
+build timeout (SIGTERM then SIGKILL, output kept), and **a build refuses a
+project whose make files name `vexcom` and fails closed** where it cannot
+read them all: more than 32, one past 256 KB, a symlink or FIFO among them, a
+symlinked `vex/`, a glob too complex to check, an `include` named by a
+variable, holding a backslash, outside the project, or **not in the project at
+all** (make would search other folders for it; `-include` too) — and it reads
+includes as make does, a backslash-newline joining the next line on (CRLF
+too), so `include a.mk \` + `src/notes.txt` includes the second file.
+**Download is meant to be only the owner's click** (V-2/V-3): no tool, MCP
+tool, CLI or Discord verb, no "run after download", and **any agent command
+naming `vexcom`, or running something that could be it, is DENY in
+`rules.decide`** (see *Command rules*). **That is
+not a boundary, and neither is the button — the residual gap, stated**: an
+agent runs as the owner, so it can still reach a plugged-in brain through a
+script it writes and runs, a shell fed its commands through a pipe, cmd.exe's
+or PowerShell's own wildcard forms, a launcher `rules.py` does not model,
+`make -f` on a makefile of its own, a DLL beside the tool, or a POST to
+the download route with a forged Origin. What makes such a download visible
+is **one id-only bus record per device action, `vex_device {action, at}`**
+(as `terminal_attached`); closing the gap needs the device to belong to a
+user the agent is not. Agents build through **`vexbuild`** (`python -I -m
+jarvis.v2.vex build [--rebuild|--clean]`, nothing else — **isolated**, because
+a plain `-m` puts the agent-writable project folder first on `sys.path`, so a
+planted `jarvis/v2/vex.py` would have run), which asks like any command unless
+allowlisted; running it or its module through a wrapper or a runner (`python
+-Im`, `uv run --no-project`, `npx --yes`, `python -m runpy`, `uv run
+--module`; review round 2 parses each runner's options) asks too, naming it as
+an argument (`cp …/vexbuild`) does not; `vexbuild build` and plain `vexbuild`
+both build. **`terminal_read` (#33) can read a program terminal** as it reads
+a shell, under the same "Jarvis can read" switch and guard — for the brain
+terminal that includes the owner's typed input, which the PTY echoes back.
+**Every route is owner-only by the shared rule**,
+`projects.is_owner` (PR #41: the HUD's Origin, or on a plain GET, which
+Chromium sends with no Origin, `Sec-Fetch-Site: same-origin`), plus a strict
+loopback Host. New projects reuse the `project_folder` card:
+**`projects.confirm_folder` is now the one confirmation handler** (moved out
+of `discord/project_commands.py`; still the single caller of
+`make_project_folder`), templates are opened as regular files only, checked
+whole before anyone is asked, and written through directory fds (each folder
+opened `O_DIRECTORY | O_NOFOLLOW` relative to the last, the file `O_EXCL |
+O_NOFOLLOW` relative to its folder; what remains is the new folder's own path,
+resolved once after the yes). The log gets lifecycle lines only. Not yet, said
+by the routes: device info (flag from the owner's `vexcom --help`) and Python
+download (spike). Agents' task worktrees are on the Linux filesystem, so
+`vexbuild` builds only in a chat's own project folder. Tests point every
+`config.VEX_*` path, `VEX_MOUNT_ROOT` and `VEXBUILD_PATH` at a temp tree, with a
+non-empty `WSLENV`. `tests/v2/vex_check.py` (111 checks); 69 guards of round 1
+and the guards of rounds 2–4 each shown to fail their check when removed in a
+scratch copy (the PR lists them). Open question, not done: whether `vex.py`
+and `vex_setup.py` join SELF_PROTECTED (the owner declined widening it for
+`runtime.py`).
+
 **The HUD's CSP and installed build, ED-4 (2026-10-11; editor plan §1.7,
 §2.7; decision C-1; contract in `docs/hud-api.md`).** Every HUD and API
 response carries the **full policy** (`hud_api.HUD_POLICY`) in WP-E's one
@@ -2646,6 +2744,102 @@ jarvis/
   git writes **except push** (it reaches production directly) and **except
   reset --hard / clean** (they destroy uncommitted work); **never `rm`**
   (asked, not denied); auth commands deliberately **not** denied.
+
+  **A line that names `vexcom` is DENY** (2026-10-11, VX-1, decision V-2:
+  sending code to a robot is a physical act, meant to be only the owner's click in
+  the HUD). `rules.names_vexcom` reads the whole line before segmentation,
+  case-folded, in every variant a shell or Windows would collapse to the
+  word: quotes and backslashes removed (bash), `^` (cmd) and backticks
+  (PowerShell), `$'…'` decoded, empty expansions (`${X}`, `$X`, `$()`,
+  `%X%`, a backtick substitution) dropped, braces and brackets dropped, NFKC;
+  and a PowerShell `-EncodedCommand`/`-enc`/`-e`
+  payload decoded from base64 UTF-16LE (any unique prefix, `-`/`/`/a dash
+  character, `-enc VALUE` or `-enc:VALUE`), `${A:-vex}` default values read as
+  their words, and a glob only when it keeps at least four of the letters
+  (`vexc*`, `ve?com` — never `*vex*`, `v*`, `*.exe`: those DENYed ordinary VEX
+  work until review round 1). **That threshold is for arguments only** (review
+  round 2, which found `uv run /mnt/c/…/tools/v*/*/*/v*.exe --user` ALLOW and
+  run unasked): `rules._vex_line` finds every word the line will *run* —
+  command position, past each wrapper, the program a runner starts (`uv run`,
+  `poetry run`, `pipx run`, `npx`, `npm exec`, `bun x`…, each one's options
+  parsed from a table, and an option the table does not know followed both
+  ways), `sh -c` strings, `eval`, `watch`, `find -exec`, `xargs`, `$(…)`,
+  backticks, `<(…)`, a here-string to a shell — read with bash's quoting
+  (`'*'` is a file called `*`; a brace expansion runs its first word; **a
+  here-document's body is data**, moved into its operator as a here-string
+  by `_inline_heredocs` and read as commands only where a shell is fed it —
+  review round 3 found every `git commit -m "$(cat <<'EOF'` with a `* item`
+  line, every C doc comment written with `cat > f.h <<'EOF'` and every
+  crontab line DENY), and a
+  glob or an expansion there that could be `vexcom`/`vexcom.exe` by its file
+  name is DENY with no threshold (`…/*/*/win32/*.exe`, `${X}com.exe`,
+  `$(printf vex)com`). A program that **cannot be told** and could be vexcom —
+  only an expansion (`$X`, `"$@"`, `${A}.${B}`), read from input (`xargs env`,
+  `find -exec {}`), or a candidate an unknown option may have moved — is
+  asked whatever stands: ASK, never covered by an allowlist entry
+  (`permissions.allows` asks `rules.vex_uncoverable`), and always-ask at v2's
+  layer 2 under every profile. A glob past the caps (256 characters, 64 of
+  `*?[`, 512 glob words a line) is **too complex to judge** the same way, and
+  the whole reading is linear (`ls [[[[…` took 3.4 s at 20,000 before). Not
+  general runner unwrapping: `uv run rm -rf ~` is judged as before — and an
+  allowlist entry for `uv` or `npx` covers `uv run vexbuild`, by the general
+  stem-entry rule (an entry is a yes to everything the stem runs). The
+  here-document lexer recognises an operator only where bash does — never in
+  quotes, a comment, `${…}` or arithmetic (`$((1<<2))`, `((x<<=1))`,
+  `$[…]`), and a backtick's own here-document ends at its backtick —
+  because one recognised where bash would not hides the lines after it.
+  Round 3b: the delimiter is formed as bash forms it (`"E\"F"` is `E"F`,
+  `$"EOF"` and `$'EOF'` are `EOF`, `<<''` ends at an empty line; each checked
+  with `bash -n` on bash 5.3, which names the delimiter it wanted), and where
+  bash's reading is unsure the line is **too complex to judge**: `$(`/`${`/a
+  backtick or an unbalanced quote in the word, an unquoted backslash-newline,
+  an extglob, an ANSI-C escape it does not decode exactly, more than 64 open on
+  a line, and two `$(…)` shapes that differ between bash versions — a
+  here-document whose `$(…)` closes before its body, and a body line inside
+  `$(…)` that starts with the delimiter and holds a `)` (bash 5.3 ends the body
+  there and runs the rest of the line, `EOF)` included). Round 4: an
+  **unquoted** body is read in logical lines, as bash 5.3 reads it — a
+  backslash-newline (an odd run of backslashes only) is removed before the line
+  is compared, so `EO\` then `F` ends the body under `<<EOF` (the review's HIGH:
+  the lines after it ran as code while the lexer read them as data); `<<-`
+  compares a line before and after its tabs are stripped; `<(…)` and `>(…)`
+  are read as `$(…)` (checked with `bash -n`); and backticks join the `)` rule,
+  while a backslash in a backtick here-document, backticks that close before
+  their body, or a NUL make the line too complex (`bash -n` cannot parse
+  backticks). **The body backstop** bounds what any future misreading costs:
+  every line of every body (any here-document, any quoting, as written and with
+  its continuations joined), read alone as a command, that would be DENY makes
+  the line asked — never covered by an allowlist entry, always-ask in v2 —
+  and never DENY, because a `* bullet` or a C comment is a mention and must
+  stay approvable. A misread body end can then at worst turn a DENY into an
+  ask. Only DENY readings count, not unsure ones: a Markdown code span read
+  alone is a program that is only an expansion, and 45 of the repository's 49
+  PR bodies hold one. **Except** an unsure line the general rules alone would
+  ALLOW (`_general_verdict`: an ALLOW-stem runner given an option its table
+  does not know, `npx --frob $X x`, or a glob past the caps), which nothing
+  else would ask, so it counts too (round 4 delta review); a code-span line
+  holds a substitution, is general ASK, and still counts for nothing, so the
+  measured cost is unchanged. The cost, measured: a here-document with a `*`- or
+  `/*`-led line or a `**\`code\`**` line asks in v2 under AUTO — 0 of the
+  repository's 546 commit messages, 14 of its 49 PR bodies. It runs in `decide`, so v1's
+  `command_verdict` (before any approver, so neither an allowlist entry nor
+  mode "all" reaches it) and v2's layer 1 (no card) refuse alike. **The
+  accepted cost**: a grep or a commit message that only mentions the word is
+  refused too — the `.env` trade. An accident guard, not a boundary (a
+  renamed copy, a script, `make -f` and a forged-Origin POST all remain; see
+  the VX-1 paragraph). `vexbuild` itself is ordinary (ASK), and so is running
+  it or `jarvis.v2.vex` through `python -m`, `uv run` or `npx` — they would
+  otherwise ride an ALLOW stem past the ask. Evidence (review round 1): a
+  differential sweep of 25,379 command strings against origin/main moved 62
+  verdicts — 39 lines naming vexcom, 15 non-literal spellings pinned in
+  `vex_check`, 8 that run vexbuild or its module — and nothing else. Round 2's
+  sweep (122,447 strings, `decide` and `static_verdict`) moved only vex shapes,
+  globs in command position (bare `*.exe`, `/mcp/*`, markdown bullets read as
+  commands) and runners handed an expansion as their program (`uv run $CC`);
+  round 3 added 38,199 real multi-line here-document commands (commit
+  messages, PR bodies, files written with `cat > f <<'EOF'`, `<<-`, Python on
+  stdin), of which none moves but for a body that names vexcom (round 1's
+  accepted cost) or a body fed to a shell; the PR has the tables.
 
   **`2>&1` is not a redirect to a file** (narrowed 2026-08-17, one round after
   the fixes above). The redirect check had become a raw scan for any unquoted
