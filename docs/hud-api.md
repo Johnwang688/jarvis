@@ -1432,7 +1432,35 @@ HUD can flag one it cannot match to its own click.
   file written in the extension's v2 shape, and the project created —
   `project_created` arrives as usual.
 - `GET /vex/projects/{id}` → that request: `state` `"asking"`, `"created"`
-  (with `project_id`), `"declined"` or `"failed"`, and a `message`.
+  (with `project_id`), `"declined"` or `"failed"`, and a `message`. A
+  template write that fails after the yes takes back what that request wrote
+  (only files it created and folders it made, through the folder's fds, each
+  judged by its `(st_dev, st_ino)` — a renamed-in entry is never removed — and,
+  after a refusal by the store, only if the folder at that path is still the
+  one the template was written through; VX-3 review LOW-2 and its delta
+  review): `failed`'s message names the colliding file where there is one,
+  and says what the folder holds now, read through its fd — empty again
+  (Create uses it again without a card, O5), what it still holds (empty or
+  remove it), or that the path is no longer the folder written to (nothing
+  removed). The HUD reads this one read
+  at a time and rides out a failed read (5xx, the network) with a backoff;
+  only an answer, a 404/400, or three minutes of failures end its tracking.
+- `POST /vex/projects/check` `{name, language, template, location?}` (VX-3,
+  2026-10-12) → 200 `{path, windows_path, state, asks, describe}`: what
+  `POST /vex/projects` would do with the same body, **without asking or making
+  anything**. `path` is the exact folder the `project_folder` card will name,
+  `windows_path` its `C:\…` spelling, `state`
+  `"missing"` or `"empty"`, `asks` false for an existing empty folder (used
+  without a card, O5), `describe` the card's words for it. Every refusal is
+  Create's, word for word (400 for a bad name, language, template or location;
+  409 for a folder off a Windows drive, refused by `check_project_folder`,
+  **refused by `to_windows`** — a character a Windows command line could
+  misread, such as `(`, `&` or anything outside ASCII, which a build or a
+  download would refuse later (VX-3 review MED-1; Create refuses it too) — or
+  not empty), less Create's closing "Nothing was made." Owner-only like every
+  VEX route. `GET /vex/templates` answers a templates folder that cannot be
+  listed with a 409 sentence. The HUD reads `/vex/status`'s
+  `project_folder` as the dialog's default parent (V-4).
 
 **Program terminals** are listed by `GET /terminals` like any other, with two
 new row fields: `program` (`null` for a shell, else `"vex-build"`,

@@ -15,7 +15,9 @@ export type CommandId =
   | "file.copyPath" | "chat.addSelection" | "chat.newThread"
   | "view.files" | "view.toggleSidebar" | "view.toggleRight" | "view.togglePanel"
   | "view.zoomIn" | "view.zoomOut" | "view.zoomReset"
-  | "view.editorSettings";
+  | "view.editorSettings"
+  // VX-3: opens the dialog; it makes nothing until the owner approves its card.
+  | "project.newVex";
 
 export interface CommandContext {
   /** A File pane is the target (focused, else drawn): file commands apply. */
@@ -59,6 +61,7 @@ export const COMMANDS: readonly Command[] = Object.freeze([
   { id: "view.zoomReset", label: "Reset Zoom", keys: "Ctrl+0" },
   // ED-8: font, tabs, wrap, minimap, whitespace, cursor, vim.
   { id: "view.editorSettings", label: "Editor Settings…" },
+  { id: "project.newVex", label: "New VEX Project from a Template…" },
 ] as Command[]);
 
 /** Never in the palette: a download, a VEX device, the brain, `vexcom`. */

@@ -1099,19 +1099,54 @@ def unpack_plan(blob: bytes) -> list[tuple[str, bytes]]:
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 
 
-def _write_new(folder_fd: int, rel: str, data: bytes) -> None:
+def _dev_ino(info: os.stat_result) -> tuple[int, int]:
+    return (info.st_dev, info.st_ino)
+
+
+@dataclass(frozen=True)
+class Made:
+    """One thing a template write made: its path inside the folder, whether it
+    is a folder, and its (st_dev, st_ino) read from the fd it was made through."""
+    rel: str
+    folder: bool
+    ident: tuple[int, int]
+
+
+@dataclass
+class Written:
+    """What one `unpack` wrote: the identity of the folder it wrote through,
+    and what it made there, in order."""
+    folder: tuple[int, int]
+    made: list
+
+
+@dataclass
+class TakenBack:
+    """What a take-back did: what it made but did not remove (`left`), and
+    what the folder holds now (`remaining`; None when the folder at that path
+    is no longer the one the template was written through)."""
+    left: list[str]
+    remaining: list[str] | None
+
+
+def _write_new(folder_fd: int, rel: str, data: bytes, made: list | None = None) -> None:
     """One file, created (never replaced) inside the folder `folder_fd` holds
     open: each folder on the way is made, then opened `O_DIRECTORY |
     O_NOFOLLOW` relative to the one before it (openat-style), and the file is
     created `O_EXCL | O_NOFOLLOW` relative to the last — so nothing that
-    appears meanwhile, a symlink included, is written through or over."""
+    appears meanwhile, a symlink included, is written through or over.
+    `made` collects a `Made` for every folder this call made and for the file
+    once it exists, each with the identity of what was opened (fstat), so a
+    failure takes back exactly what this request wrote (`_remove_written`)."""
     parts = rel.split("/")
     held: list[int] = []
     current = folder_fd
     try:
-        for part in parts[:-1]:
+        for i, part in enumerate(parts[:-1]):
+            mine = False
             try:
                 os.mkdir(part, 0o755, dir_fd=current)
+                mine = True
             except FileExistsError:
                 pass
             try:
@@ -1120,13 +1155,123 @@ def _write_new(folder_fd: int, rel: str, data: bytes) -> None:
                 raise VexError(f"{rel} would be written through something that is not a "
                                "folder") from None
             held.append(current)
-        fd = os.open(parts[-1], os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
-                     | os.O_CLOEXEC, 0o644, dir_fd=current)
+            if mine and made is not None:
+                made.append(Made("/".join(parts[:i + 1]), True, _dev_ino(os.fstat(current))))
+        try:
+            fd = os.open(parts[-1], os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+                         | os.O_CLOEXEC, 0o644, dir_fd=current)
+        except FileExistsError:
+            raise VexError(f"{rel} already exists, and a template never writes over a file") from None
         with os.fdopen(fd, "wb") as handle:
+            if made is not None:
+                made.append(Made(rel, False, _dev_ino(os.fstat(fd))))   # O_EXCL: this request made it
             handle.write(data)
     finally:
         for fd in held:
             os.close(fd)
+
+
+def _remove_written(folder_fd: int, made: list) -> list[str]:
+    """Take back what one request wrote (VX-3 review, LOW-2), newest first and
+    only through `folder_fd`: each file it created `O_EXCL` is unlinked, and
+    each folder it made is removed with `rmdir` (which never removes a folder
+    that holds anything). **Judged by identity, never by name** (the delta
+    review's LOW-B): what is at that name now is `stat`ed (not followed) and
+    must be the very `(st_dev, st_ino)` this request made — a folder renamed
+    away and another moved into its name is not ours, and is kept. Every folder
+    on the way is opened `O_DIRECTORY | O_NOFOLLOW` relative to the last. What
+    remains: another program swapping an entry in the instant between that
+    `stat` and the `unlink`. -> what it made but did not remove."""
+    left: list[str] = []
+    for entry in reversed(made):
+        parts = entry.rel.split("/")
+        held: list[int] = []
+        current = folder_fd
+        try:
+            for part in parts[:-1]:
+                current = os.open(part, _DIR_FLAGS, dir_fd=current)
+                held.append(current)
+            now = os.stat(parts[-1], dir_fd=current, follow_symlinks=False)
+            if _dev_ino(now) != entry.ident:
+                left.append(entry.rel)                 # not what this request made: kept
+                continue
+            if entry.folder:
+                os.rmdir(parts[-1], dir_fd=current)
+            else:
+                os.unlink(parts[-1], dir_fd=current)
+        except OSError:
+            left.append(entry.rel)
+        finally:
+            for fd in held:
+                os.close(fd)
+    return left
+
+
+def _listing(folder_fd: int) -> list[str] | None:
+    """What the folder holds now, read through its fd (never its path)."""
+    try:
+        return sorted(os.listdir(folder_fd))
+    except OSError:
+        return None
+
+
+def remove_written(folder, written: Written) -> TakenBack:
+    """Take back a template whose project the store would not record. The
+    folder is opened again by path, so it must be **the very folder the
+    template was written through** (its `(st_dev, st_ino)`, the delta review's
+    LOW-A): a parent swapped for a symlink to a decoy meanwhile resolves
+    elsewhere, and then nothing is removed — here or there."""
+    everything = [entry.rel for entry in written.made]
+    try:
+        folder_fd = os.open(folder, _DIR_FLAGS)
+    except OSError:
+        return TakenBack(everything, None)
+    try:
+        if _dev_ino(os.fstat(folder_fd)) != written.folder:
+            return TakenBack(everything, None)
+        return TakenBack(_remove_written(folder_fd, written.made), _listing(folder_fd))
+    finally:
+        os.close(folder_fd)
+
+
+class UnpackFailed(VexError):
+    """A template write that failed midway, after taking back what it wrote:
+    `cause` says why, `left` names what it made but did not remove, and
+    `remaining` what the folder holds now (read through its fd)."""
+
+    def __init__(self, cause: str, left: list[str], remaining: list[str] | None = None):
+        super().__init__(cause)
+        self.cause, self.left, self.remaining = cause, left, remaining
+
+
+def _cause(exc: BaseException) -> str:
+    if isinstance(exc, VexError):
+        return str(exc)
+    if isinstance(exc, OSError) and exc.strerror:
+        return f"{type(exc).__name__}: {exc.strerror}"      # never the path it names
+    return type(exc).__name__
+
+
+def _shown(names: list[str]) -> str:
+    return ", ".join(names[:4]) + (f" and {len(names) - 4} more" if len(names) > 4 else "")
+
+
+def unmade_message(path, cause: str, left: list[str], remaining: list[str] | None) -> str:
+    """What the dialog says when the template write, or the project's record,
+    failed after the owner's yes: why, and what is on disk now — read from
+    the folder itself (`remaining`, listed through its fd), never assumed from
+    what the take-back did (the delta review's LOW-C: a folder the owner
+    filled while the card was up was called "empty again")."""
+    head = f"The project was not made: {cause}."
+    if remaining is None:
+        return (f"{head} {path} is no longer the folder the template was written to, so nothing "
+                "was removed; look at both before trying again.")
+    if not remaining:
+        return (f"{head} What it had written was removed, so {path} is empty again; Create uses "
+                "it again without asking.")
+    kept = f" (of what it wrote, it left {_shown(left)})" if left else ""
+    return (f"{head} {path} still holds {_shown(remaining)}{kept}; empty or remove that folder "
+            "before trying again.")
 
 
 def _creation_date(now: datetime.datetime) -> str:
@@ -1151,9 +1296,11 @@ def settings_document(name: str, language: str, cfg: VexConfig, now=None) -> dic
     return {"extension": {"version": cfg.extension_version or "", "json": 2}, "project": project}
 
 
-def unpack(entries: list[tuple[str, bytes]], folder, settings: dict) -> None:
+def unpack(entries: list[tuple[str, bytes]], folder, settings: dict) -> Written:
     """Write a checked template, then its settings, into a new or empty
-    folder. Jarvis's own code does this — never a tool."""
+    folder. Jarvis's own code does this — never a tool. -> what it wrote (for
+    `remove_written`); a failure midway takes back what it wrote and raises
+    `UnpackFailed`."""
     folder = Path(folder)
     if os.path.islink(folder) or not folder.is_dir():
         raise VexError(f"{folder} is not a folder")
@@ -1165,13 +1312,20 @@ def unpack(entries: list[tuple[str, bytes]], folder, settings: dict) -> None:
         folder_fd = os.open(folder, _DIR_FLAGS)
     except OSError:
         raise VexError(f"{folder} is not a folder") from None
+    made: list = []
     try:
-        for rel, data in entries:
-            _write_new(folder_fd, rel, data)
-        _write_new(folder_fd, "/".join(SETTINGS_REL),
-                   (json.dumps(settings, indent="\t") + "\n").encode("utf-8"))
+        folder_ident = _dev_ino(os.fstat(folder_fd))
+        try:
+            for rel, data in entries:
+                _write_new(folder_fd, rel, data, made)
+            _write_new(folder_fd, "/".join(SETTINGS_REL),
+                       (json.dumps(settings, indent="\t") + "\n").encode("utf-8"), made)
+        except Exception as exc:  # noqa: BLE001 — taken back, then said
+            left = _remove_written(folder_fd, made)
+            raise UnpackFailed(_cause(exc), left, _listing(folder_fd)) from None
     finally:
         os.close(folder_fd)
+    return Written(folder_ident, made)
 
 
 # -- records ------------------------------------------------------------------------------------
@@ -1729,9 +1883,16 @@ class Vex:
     # -- new project (the backend VX-3's dialog uses) ------------------------------------
 
     def templates(self) -> list[dict]:
-        return list_templates(load_config())
+        try:
+            return list_templates(load_config())
+        except OSError:
+            raise VexError(f"the templates folder cannot be listed; {SETUP_HINT}") from None
 
-    def new_project(self, name, language, template, location=None) -> dict:
+    def _plan(self, name, language, template, location, *, made: str):
+        """Everything `new_project` decides before anyone is asked, shared with
+        `check_new_project` so the dialog shows exactly the path the card
+        will: -> (cfg, entries, check, windows), or the refusal. `made` ends a
+        folder refusal ("Nothing was made." once a request was sent)."""
         from . import folders
         if not isinstance(name, str) or not PROJECT_NAME.fullmatch(name):
             raise _api(400, "name must be 1-64 letters, digits, _ or - (VEX's make refuses spaces)")
@@ -1755,9 +1916,34 @@ class Vex:
         try:
             check = folders.check_project_folder(target, taken_roots=self._taken_roots())
         except folders.FolderRefused as exc:
-            raise VexError(f"I can't use that folder: {exc}. Nothing was made.") from None
+            raise VexError(f"I can't use that folder: {exc}.{made}") from None
+        # The folder must be one VEX's Windows tools can work in: a build and a
+        # download hand its Windows path to make and vexcom through
+        # `to_windows`, which refuses what a Windows command line could misread
+        # (`My (1)`, `a&b`, anything outside ASCII). Asked here, before anyone
+        # is asked, rather than after the owner approved a project that could
+        # never be built (VX-3 review, MED-1).
+        try:
+            windows = to_windows(str(check.path))
+        except VexError as exc:
+            raise VexError(f"I can't use that folder: {exc}, so VEX's tools could never build "
+                           f"or download from it.{made}") from None
         if check.state == "nonempty":
             raise VexError(f"{check.path} is not empty; a template goes into a new or empty folder")
+        return cfg, entries, check, windows
+
+    def check_new_project(self, name, language, template, location=None) -> dict:
+        """What Create would do, without asking or making anything (VX-3's
+        dialog): the exact folder the card will name, its Windows spelling,
+        and whether the card comes up at all (an existing empty folder is used
+        without asking, O5). Every refusal is `new_project`'s, word for word."""
+        _cfg, _entries, check, windows = self._plan(name, language, template, location, made="")
+        return {"path": str(check.path), "windows_path": windows, "state": check.state,
+                "asks": check.needs_confirmation, "describe": check.describe()}
+
+    def new_project(self, name, language, template, location=None) -> dict:
+        cfg, entries, check, _windows = self._plan(name, language, template, location,
+                                                   made=" Nothing was made.")
         settings = settings_document(name, language, cfg)
         record = NewProject(id="", name=name, path=str(check.path))
         with self._lock:
@@ -1778,8 +1964,24 @@ class Vex:
                 record.state, record.message = "declined", said[-1] if said else "Not approved."
                 LOG.info("vex new project %s: not made", record.name)
                 return
-            unpack(entries, path, settings)
-            created = create_project(self.daemon, record.name, str(path))
+            try:
+                written = unpack(entries, path, settings)
+            except UnpackFailed as exc:
+                record.state = "failed"
+                record.message = unmade_message(path, exc.cause, exc.left, exc.remaining)
+                LOG.warning("vex new project %s: the template write failed", record.name)
+                return
+            try:
+                created = create_project(self.daemon, record.name, str(path))
+            except Exception as exc:  # noqa: BLE001 — the template goes with the project
+                from .daemon import DaemonError
+                cause = str(exc) if isinstance(exc, (VexError, DaemonError)) else type(exc).__name__
+                record.state = "failed"
+                back = remove_written(path, written)
+                record.message = unmade_message(path, cause, back.left, back.remaining)
+                LOG.warning("vex new project %s: not recorded (%s)", record.name,
+                            type(exc).__name__)
+                return
             record.project_id, record.state = created.id, "created"
             record.message = f"Made project {created.name} at {path}."
             LOG.info("vex new project %s: created", created.name)
@@ -1882,6 +2084,16 @@ def route(handler, daemon, parts, query):
             try:
                 return 202, vex.new_project(body["name"], body["language"], body["template"],
                                             body.get("location"))
+            except ValueError as exc:
+                raise _api(400, str(exc)) from None
+        if parts == ["vex", "projects", "check"] and method == "POST":
+            # VX-3: the same body, the same refusals, nothing asked or made.
+            _object(query, ())
+            body = _object(handler._body(), ("name", "language", "template", "location"),
+                           ("name", "language", "template"))
+            try:
+                return 200, vex.check_new_project(body["name"], body["language"], body["template"],
+                                                  body.get("location"))
             except ValueError as exc:
                 raise _api(400, str(exc)) from None
         if len(parts) == 3 and parts[1] == "projects" and method == "GET":
