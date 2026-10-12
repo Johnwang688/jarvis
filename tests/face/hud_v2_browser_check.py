@@ -35,11 +35,24 @@ The checks worth keeping, each written to bite:
     whose default is chat, opens as the Browser with its URL and its grant,
     and is saved back under the new names only; an old grant for another
     origin is not carried over; a stored `"file"` pane still opens as the
-    editor with its tabs; the strip says Editor and Browser.
+    editor with its tabs; the strip says Editor and Browser;
+  - **no frame takes the keyboard on its own** (R-1; amendment 2 §E.8, §H
+    AO-2): a page that focuses itself — on mount while the owner types, on a
+    timer while they type in the chat and then in a `.env` buffer, from a pane
+    ⊞ hid, under a card with the pointer over it, from another page the owner
+    clicked into, under a pointer parked over it while the owner types, or
+    after a load the owner has moved on from — is removed, the pane says so,
+    every key lands where it was typed, focus comes back, and the page's
+    server receives no key (`mock.dev_keys`); the owner's gestures still
+    work (a click, the pointer over a page, Tab from the URL box, Enter,
+    Reload, a card's give-back); a removal leaves no React error, and one
+    console line names the pane slot, never the URL. `BROWSER_ONLY=guard`
+    runs only these sections.
 """
 from __future__ import annotations
 
 import json
+import os
 import socket
 import sys
 from pathlib import Path
@@ -79,6 +92,9 @@ def browser_checks(browser, mock, base, check, until, guard, init_script):
                         _guard_mount_checks, _guard_timer_checks, _guard_hidden_checks, _guard_card_checks,
                         _guard_frame_to_frame_checks, _guard_parked_pointer_checks, _guard_gesture_checks,
                         _guard_reload_checks):
+            # `BROWSER_ONLY=guard` runs just the sections whose name holds it.
+            if os.environ.get("BROWSER_ONLY") and os.environ["BROWSER_ONLY"] not in section.__name__:
+                continue
             try:
                 section(page, mock, check, until)
             except Exception as e:  # a section that cannot run is a failure; the rest still run
@@ -742,6 +758,19 @@ def _guard_gesture_checks(page, mock, check, until):
     check("gesture: clicking into a page gives it the keyboard, and keys reach it",
           _active_frame(page) == "2:0" and _count(page, FRAME) == 1 and _count(page, STOLEN) == 0
           and len(mock.dev_keys) - keys == 3, f"{_active_frame(page)} keys={len(mock.dev_keys) - keys}")
+
+    # A card comes up while the keyboard is in the page: the card takes it;
+    # answered, it goes back to the page (WP-A's restore), which keeps it.
+    _approval(mock, "guard2")
+    until(lambda: page.locator('[data-testid="approval-card"]').count() > 0, timeout=4)
+    page.wait_for_timeout(150)
+    took = _active_testid(page)
+    page.keyboard.press("Escape")
+    until(lambda: page.locator('[data-testid="approval-card"]').count() == 0, timeout=4)
+    page.wait_for_timeout(300)
+    check("gesture: a card takes the keyboard from a page the owner clicked into, and gives it back after",
+          took == "approval-card" and _active_frame(page) == "2:0" and _count(page, FRAME) == 1
+          and _count(page, STOLEN) == 0, f"card={took} after={_active_frame(page)} stolen={_count(page, STOLEN)}")
 
     # (Playwright's own `locator(frame).click()` checks the hit target before
     # it moves the mouse, so the shield reads as covering the frame: suites
