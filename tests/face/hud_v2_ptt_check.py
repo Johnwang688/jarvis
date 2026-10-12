@@ -6,7 +6,7 @@ stays the shell's (end of input); in Monaco it is push-to-talk and Monaco's own
 Ctrl+D ("add selection to next find match") moves to Ctrl+Shift+D; hold to
 talk, let go to send; and Space is no longer push-to-talk anywhere.
 
-Called from `hud_v2_check.main()` after the terminal and preview sections, in a browser
+Called from `hud_v2_check.main()` after the terminal and browser sections, in a browser
 context of its own and against **a `MockDaemon` of its own** on an ephemeral
 port, as the other sections are. It also runs on its own:
 `python tests/face/hud_v2_ptt_check.py`. The terminal half (Ctrl+D reaching the
@@ -59,10 +59,10 @@ from tests.face.hud_v2_layout_check import (  # noqa: E402
 )
 
 SINGLE = json.dumps({"preset": "single", "focused": 1,
-                     "panes": [{"view": "chat"}, {"view": "file"}, {"view": "preview"}, {"view": "task"}]})
+                     "panes": [{"view": "chat"}, {"view": "file"}, {"view": "browser"}, {"view": "task"}]})
 # A chat, and a File pane beside it: push-to-talk needs a chat on screen (W-6).
 CHAT_FILE = json.dumps({"preset": "cols2", "focused": 1,
-                        "panes": [{"view": "chat"}, {"view": "file"}, {"view": "preview"}, {"view": "task"}]})
+                        "panes": [{"view": "chat"}, {"view": "file"}, {"view": "browser"}, {"view": "task"}]})
 
 
 def ptt_checks(browser, mock, base, check, until, guard, init_script):
