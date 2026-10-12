@@ -166,6 +166,17 @@ export const api = {
     req<{ files: Record<string, import("./lib/buffers").StatRow> }>(
       `/projects/${projectId}/files/stat`, json({ paths })),
 
+  // --- the editor's navigation (ED-7): owner-only, like every file route ---
+  /** Every file quick open may offer, relative to the project. */
+  listFiles: (projectId: string) =>
+    req<import("./types").FileList>(`/projects/${projectId}/files`),
+  /** Find in files: at most 2,000 matches and 10 s. Refused on the Inbox. */
+  searchFiles: (projectId: string, body: import("./types").SearchQuery) =>
+    req<import("./types").SearchResult>(`/projects/${projectId}/search`, json(body)),
+  /** New file, new folder, rename (never onto anything) or delete (to the trash). */
+  fileOp: (projectId: string, body: { op: "new_file" | "new_folder" | "rename" | "delete"; path: string; to?: string }) =>
+    req<import("./types").FsResult>(`/projects/${projectId}/fs`, json(body)),
+
   // --- diff ---------------------------------------------------------------
   diff: (taskId: string) => req<Diff>(`/tasks/${taskId}/diff`),
   diffFile: (taskId: string, path: string) =>

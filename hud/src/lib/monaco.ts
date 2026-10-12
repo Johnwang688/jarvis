@@ -211,6 +211,19 @@ export async function makeModel(text: string, abs: string, kind: string) {
   return monaco.editor.createModel(text, kind === "env" ? ENV_LANGUAGE : undefined, uri);
 }
 
+/**
+ * A renamed buffer's model takes its new name's language (ED-7): the model
+ * keeps its URI (and its text, edit and undo stack), so the registry is asked
+ * what a file of that name would be. An env file stays `dotenv`.
+ */
+export function relanguage(model: any, abs: string, kind: string) {
+  const m = loaded;
+  if (!m || !model || typeof model.getLanguageId !== "function" || model.isDisposed?.()) return;
+  const name = abs.slice(abs.lastIndexOf("/") + 1) || abs;
+  const id = kind === "env" ? ENV_LANGUAGE : monacoLanguage(name, model.getLineCount?.() ? model.getLineContent(1) : "");
+  if (id && id !== model.getLanguageId()) m.editor.setModelLanguage(model, id);
+}
+
 /** A diff side's model URI. Its own scheme, so a leak is countable. */
 export function diffUri(monaco: Monaco, path: string, side: "original" | "modified") {
   return monaco.Uri.from({ scheme: "jarvis-diff", path: `/${path}`, query: `${side}=${++serial}` });

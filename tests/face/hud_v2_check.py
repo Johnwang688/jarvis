@@ -3169,6 +3169,15 @@ def main():
             finally:
                 editor_mock.stop()
 
+            # The editor's navigation (ED-7): quick open, the palette, find in
+            # files, the explorer's operations — a context and a mock of their own.
+            from tests.face.hud_v2_editor_nav_check import nav_checks
+            nav_mock = MockDaemon(0).start()
+            try:
+                nav_checks(browser, nav_mock, f"http://127.0.0.1:{nav_mock.port}", check, until, guard, FAKE_RECOGNIZER)
+            finally:
+                nav_mock.stop()
+
             # The VEX view (VX-2): a context and a mock of their own — its
             # world gains VEX projects, builds and downloads are terminal rows
             # there, and their sockets are played in the browser.

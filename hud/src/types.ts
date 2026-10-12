@@ -176,6 +176,60 @@ export interface Tree {
   entries: TreeEntry[];
 }
 
+/** `GET /projects/{id}/files` (ED-7): quick open's list. */
+export interface FileList {
+  files: string[];
+  /** The credential env files among them (a lock; Jarvis never reads them). */
+  env: string[];
+  truncated: boolean;
+  source: "git" | "walk";
+}
+
+export interface SearchQuery {
+  query: string;
+  /** The searching view: its newer search cancels its older one on the daemon. */
+  key?: string;
+  regex?: boolean;
+  /** Case-sensitive. */
+  case?: boolean;
+  word?: boolean;
+  glob?: string;
+  /** Respect `.gitignore` (the default). */
+  ignore?: boolean;
+}
+
+export interface SearchMatch {
+  path: string;
+  line: number;
+  text: string;
+  /** Match spans in `text`, UTF-16 offsets. */
+  ranges: [number, number][];
+}
+
+export interface SearchResult {
+  matches: SearchMatch[];
+  files: number;
+  truncated: boolean;
+  timed_out: boolean;
+  /** A newer search from the same view took over: drop this one. */
+  cancelled?: boolean;
+  /** ripgrep could not read some files: what came back is a partial answer. */
+  partial?: boolean;
+  limit: number;
+}
+
+export interface FsResult {
+  ok: true;
+  op: string;
+  path: string;
+  abs: string;
+  from?: string;
+  from_abs?: string;
+  dir?: boolean;
+  kind?: string;
+  trash?: { where: string; location: string };
+}
+
 export interface FileRead {
   path: string;
   content?: string;

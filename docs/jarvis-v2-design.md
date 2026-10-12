@@ -2655,6 +2655,29 @@ does not know is read-only and closed to Jarvis; the crash prompt can save
 every unsaved edit; a reload in place never reads as an edit; and the "changed
 on disk by …" toast names only a write tool, by absolute path.
 
+**The editor's navigation (2026-10-11, ED-7 of the editor plan, §2.8 and
+§2.10).** What made the HUD's editor a replacement for VS Code at the robotics
+lab: **quick open** (Ctrl+P: a fuzzy list of the project's files —
+`git ls-files` in a repository, gitignored output left out, dotfiles in;
+`file:line` jumps), **find in files** (Ctrl+Shift+F: the File pane's tree
+column turns to a search with case, word, regex and a `.gitignore` toggle and
+a file filter; a hit opens at its line; at most 2,000 matches and 10 s; never
+on the Inbox), **the command palette** (Ctrl+Shift+P or F1: the HUD's commands
+plus Monaco's own actions when an editor had focus; never a download or a VEX
+device), **the explorer's** new file, new folder, rename and delete (a
+right-click menu; a delete moves to the trash after asking), **the status
+bar** (Ln/Col and selection, language, indentation, encoding, line endings,
+saved/unsaved/saving), and **Add selection to chat** extended to every
+selection and to the palette and Monaco's context menu. Three owner-only
+routes carry it (`docs/hud-api.md`); find in files runs on `grep_files`'
+own core, so the two refuse exactly the same credential files, and the
+explorer refuses through `editor_policy`, `scope` and the trash — never a
+copy of a rule. A rename moves the open buffer with it (its unsaved edit and
+undo stack included) and every pane's tab follows; a delete leaves an
+unsaved edit in its tab, where Save puts the file back. Under an approval
+card quick open, the palette and the explorer's menu close, their keys do
+nothing, and the search is inert with the rest of the window.
+
 **Split and close (2026-10-11, WP-G2 of
 `docs/plans/2026-10-10-hud-split-panes-plan.md`; decisions S-2, S-6–S-8).**
 The owner asked for a × on every pane, more than once, and a VS Code split

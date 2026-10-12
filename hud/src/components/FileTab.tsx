@@ -23,9 +23,12 @@
 // this file" — nothing here sends its text anywhere but its own save, and
 // "Add to chat" is disabled for it.
 
-import { memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
 import { api } from "../api";
-import type { Tree, TreeEntry } from "../types";
+import type { FsResult, Tree, TreeEntry } from "../types";
+import { EditorStatus } from "./EditorStatus";
+import { SearchView, type SearchAsk } from "./SearchView";
+import { forgetListing } from "./QuickOpen";
 import { CompareEditor, PaneEditor } from "./Editor";
 import { ConflictBar } from "./ConflictBar";
 import { EditorTabs, type TabInfo } from "./EditorTabs";
@@ -43,16 +46,26 @@ function join(dir: string, name: string) {
   return dir ? `${dir}/${name}` : name;
 }
 
+/** A tree row the explorer's menu was opened on ("" and dir: the project itself). */
+export interface MenuTarget {
+  path: string;
+  dir: boolean;
+  policy?: "withheld" | "env";
+}
+
 // Memoized, with props that hold still (a stable `onOpen`, `marks` changing
-// only when the dirty set does): the tree redraws when a buffer goes clean or
-// dirty or the selection moves — never per keystroke, and never because the
-// window redrew around it (typing in a chat box redraws App).
+// only when the dirty set does, a stable `onMenu`, `version` bumped only by an
+// explorer operation): the tree redraws when a buffer goes clean or dirty, the
+// selection moves or a file operation lands — never per keystroke.
 const Node = memo(function Node(props: {
   projectId: string;
   dir: string;
   depth: number;
   onOpen: (path: string, pin: boolean) => void;
   selected: string;
+  /** Bumped after an explorer operation: every open folder reads itself again. */
+  version: number;
+  onMenu: (e: React.MouseEvent, target: MenuTarget) => void;
   /** Which rows wear the unsaved-changes dot (lib/dirtyMarks.ts). */
   marks?: Marks;
 }) {
@@ -64,9 +77,12 @@ const Node = memo(function Node(props: {
   useEffect(() => {
     api
       .tree(props.projectId, props.dir, 1)
-      .then(setTree)
+      .then((t) => {
+        setTree(t);
+        setErr("");
+      })
       .catch((e) => setErr(e.message));
-  }, [props.projectId, props.dir]);
+  }, [props.projectId, props.dir, props.version]);
 
   if (err) return <div className="err pad">{err}</div>;
   if (!tree) return <div className="muted pad small">…</div>;
@@ -87,6 +103,7 @@ const Node = memo(function Node(props: {
                 data-policy={e.policy}
                 title={withheld ? "A credential folder: its contents are never listed here" : undefined}
                 onClick={() => !withheld && setOpen({ ...open, [path]: !isOpen })}
+                onContextMenu={(ev) => props.onMenu(ev, { path, dir: true, policy: e.policy })}
               >
                 <span className="tw">{withheld ? "·" : <Chevron open={isOpen} />}</span>
                 <span className="nm">{e.name}</span>
@@ -100,6 +117,8 @@ const Node = memo(function Node(props: {
                   depth={props.depth + 1}
                   onOpen={props.onOpen}
                   selected={props.selected}
+                  version={props.version}
+                  onMenu={props.onMenu}
                   marks={props.marks}
                 />
               ) : null}
@@ -115,6 +134,7 @@ const Node = memo(function Node(props: {
             title={e.policy === "env" ? "Jarvis can't read this file" : withheld ? "withheld" : undefined}
             onClick={() => props.onOpen(path, false)}
             onDoubleClick={() => props.onOpen(path, true)}
+            onContextMenu={(ev) => props.onMenu(ev, { path, dir: false, policy: e.policy })}
           >
             <span className="tw" />
             <FileIcon name={e.name} policy={e.policy} />
@@ -126,6 +146,33 @@ const Node = memo(function Node(props: {
     </>
   );
 });
+
+/**
+ * What App asks of a File pane (ED-7): open a file (at a line), go to a line,
+ * show the search, or one of the palette's file commands. Each ask is acted on
+ * once, by its nonce.
+ */
+export type FileAsk = { nonce: number } & (
+  | { kind: "open"; path: string; line?: number | null; col?: number | null }
+  | { kind: "line"; line: number; col?: number | null }
+  | { kind: "search"; query?: string }
+  | { kind: "newFile" | "newFolder" | "save" | "reload" | "closeTab" | "nextTab" | "prevTab" | "copyPath" | "addToChat" }
+);
+
+/** The explorer's question in the tree column: a name to type, or a delete to confirm. */
+type FsAsk =
+  | { kind: "new_file"; dir: string; value: string }
+  | { kind: "new_folder"; dir: string; value: string }
+  | { kind: "rename"; path: string; dir: boolean; value: string }
+  | { kind: "delete"; path: string; dir: boolean };
+
+const parentOf = (path: string) => (path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "");
+
+/** The zoom the window is drawn at (CSS `zoom` on #root): a fixed menu is placed in its pixels. */
+function zoomNow(): number {
+  const z = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--ui-zoom"));
+  return Number.isFinite(z) && z > 0 ? z : 1;
+}
 
 const READONLY_LABEL: Record<string, string> = {
   gate: "read-only: permission state",
@@ -148,6 +195,15 @@ export function FileTab(props: {
   blocked?: boolean;
   /** "Add to chat": the selected chat's box gets this text, unsent. A sentence back is a refusal. */
   onAddToChat?: (text: string) => string | null;
+  /** What App asks of this pane (ED-7): open at a line, the search, a palette command. */
+  ask?: FileAsk | null;
+  /**
+   * The explorer renamed `from` to `to` in this pane's project (a file or a
+   * folder): every pane's tabs follow — this project's by path, and through
+   * `moves` (the registry's holds) any other project reaching the same file.
+   */
+  onRenamed?: (projectId: string, from: string, to: string, moves: { pane: string; from: string; to: string }[],
+               kept: { pane: string; path: string }[]) => void;
   /**
    * Put the cursor at a line of a tab (VX-2: a build error clicked in the
    * VEX view). Applied once that tab is active and its buffer is in the
@@ -192,6 +248,20 @@ export function FileTab(props: {
   // mine saves against while it is open.
   const [comparing, setComparing] = useState<{ abs: string; disk: string; etag: string | null } | null>(null);
   const editorRef = useRef<any>(null);
+  // The live editor, as state as well: the status bar follows its cursor, and
+  // a reveal waits for it to show the buffer.
+  const [ed, setEd] = useState<any>(null);
+  // The tree column shows the files or the search (ED-7).
+  const [side, setSide] = useState<"files" | "search">("files");
+  const [searchAsk, setSearchAsk] = useState<SearchAsk | null>(null);
+  const [treeVersion, setTreeVersion] = useState(0);
+  const [menu, setMenu] = useState<(MenuTarget & { x: number; y: number }) | null>(null);
+  const [fsAsk, setFsAsk] = useState<FsAsk | null>(null);
+  const [fsBusy, setFsBusy] = useState(false);
+  const [fsErr, setFsErr] = useState("");
+  // A place to put the cursor once the buffer is in the editor: quick open's
+  // `:line`, a search hit.
+  const reveal = useRef<{ path: string; line: number; col: number } | null>(null);
   const [, setEdTick] = useState(0);
 
   // Hold what the tabs name; let go of what they no longer do.
@@ -346,30 +416,46 @@ export function FileTab(props: {
     else void buffers.reload(view.abs);
   };
 
+  /**
+   * "Add selection to chat" (ED-2's minimal one, extended in ED-7): each
+   * selection — or the cursor's line, with none — goes into the selected
+   * chat's box as `path:Lx-y` and a fenced excerpt, **unsent** (decisions
+   * W-6). Several cursors give several excerpts, top to bottom. An env file,
+   * a withheld one or one of an unknown kind never gets here
+   * (`jarvisMayRead`): its text goes in no request but its own save.
+   */
   const addToChat = () => {
     if (!view || !active || !jarvisMayRead(view.kind) || !props.onAddToChat) return;
-    const ed = editorRef.current;
-    const model = buffers.model(view.abs);
+    const model = buffers.model(view.abs) as any;
     if (!model) return;
-    let from = 1;
-    let to = 1;
-    let text = "";
-    const sel = ed?.getSelection?.();
-    if (sel && ed.getModel?.() === model) {
-      if (sel.isEmpty()) {
-        from = to = sel.startLineNumber;
-        text = (model as any).getLineContent(from);
-      } else {
-        from = sel.startLineNumber;
-        to = sel.endColumn === 1 && sel.endLineNumber > from ? sel.endLineNumber - 1 : sel.endLineNumber;
-        text = (model as any).getValueInRange(sel);
+    const editor = editorRef.current;
+    const sels: any[] = editor && editor.getModel?.() === model ? [...(editor.getSelections?.() ?? [])] : [];
+    sels.sort((a, b) => a.startLineNumber - b.startLineNumber || a.startColumn - b.startColumn);
+    const parts: string[] = [];
+    const seen = new Set<string>();
+    const push = (text: string, from: number, to: number) => {
+      const part = chatExcerpt(active, text, from, to);
+      if (!seen.has(part)) {
+        seen.add(part);
+        parts.push(part);
       }
-    } else {
-      text = model.getValue();
-      to = Math.max(1, text.split("\n").length);
+    };
+    if (!sels.length) {
+      const text = model.getValue();
+      push(text, 1, Math.max(1, text.split("\n").length));
     }
-    const refused = props.onAddToChat(chatExcerpt(active, text, from, to));
-    setNote(refused || "added to the chat's box — not sent");
+    for (const sel of sels) {
+      if (sel.isEmpty()) {
+        push(model.getLineContent(sel.startLineNumber), sel.startLineNumber, sel.startLineNumber);
+      } else {
+        const from = sel.startLineNumber;
+        const to = sel.endColumn === 1 && sel.endLineNumber > from ? sel.endLineNumber - 1 : sel.endLineNumber;
+        push(model.getValueInRange(sel), from, to);
+      }
+    }
+    const refused = props.onAddToChat(parts.join("\n"));
+    setNote(refused || (parts.length > 1 ? `${parts.length} excerpts added to the chat's box — not sent`
+      : "added to the chat's box — not sent"));
   };
 
   const toggleCompare = async () => {
@@ -380,6 +466,205 @@ export function FileTab(props: {
     const disk = await buffers.readDisk(view.abs);
     if (disk !== null && alive.current) setComparing({ abs: view.abs, disk: disk.text, etag: disk.etag });
   };
+
+  // ---- navigation (ED-7) ---------------------------------------------------------
+
+  /** Open `path` pinned, and put the cursor at `line` (and `col`) once it shows. */
+  const openAt = (path: string, line?: number | null, col?: number | null) => {
+    if (line) {
+      reveal.current = { path, line, col: col ?? 1 };
+      // A markdown file opens rendered; a place in it is a place in its text.
+      if (isMarkdown(path)) setMdRead((m) => ({ ...m, [path]: false }));
+    }
+    open(path, true);
+  };
+
+  // The cursor goes where it was asked once the editor shows that buffer
+  // (Monaco loads late the first time; a tab's buffer is read first).
+  useEffect(() => {
+    const r = reveal.current;
+    if (!r || !ed || active !== r.path || !view || view.kind === "withheld") return;
+    const m = buffers.model(view.abs) as any;
+    if (!m || ed.getModel?.() !== m) return;
+    reveal.current = null;
+    const line = Math.max(1, Math.min(r.line, m.getLineCount?.() ?? r.line));
+    ed.setPosition?.({ lineNumber: line, column: Math.max(1, r.col) });
+    ed.revealLineInCenter?.(line);
+    if (!props.blocked) ed.focus?.();
+  });
+
+  const bump = () => {
+    setTreeVersion((v) => v + 1);
+    if (pid) forgetListing(pid);
+  };
+
+  /** The explorer's menu, at the pointer (in the pixels the zoomed window is drawn in). Stable: the memoized tree holds it. */
+  const blockedNow = useRef(props.blocked);
+  blockedNow.current = props.blocked;
+  const openMenu = useCallback((e: React.MouseEvent, target: MenuTarget) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (blockedNow.current) return;
+    const z = zoomNow();
+    setMenu({ ...target, x: e.clientX / z, y: e.clientY / z });
+  }, []);
+
+  // The menu closes on a click elsewhere, Escape, a scroll or a card.
+  useEffect(() => {
+    if (!menu) return;
+    const close = (ev: Event) => {
+      if (ev instanceof KeyboardEvent && ev.key !== "Escape") return;
+      if (ev.type === "mousedown" && (ev.target as HTMLElement | null)?.closest?.("[data-testid='explorer-menu']")) return;
+      setMenu(null);
+    };
+    document.addEventListener("mousedown", close, true);
+    document.addEventListener("keydown", close, true);
+    window.addEventListener("blur", close);
+    return () => {
+      document.removeEventListener("mousedown", close, true);
+      document.removeEventListener("keydown", close, true);
+      window.removeEventListener("blur", close);
+    };
+  }, [menu]);
+  // Under a card nothing of the explorer's stays open.
+  useLayoutEffect(() => {
+    if (!props.blocked) return;
+    setMenu(null);
+    setFsAsk(null);
+  }, [props.blocked]);
+
+  const askFs = (next: FsAsk) => {
+    setMenu(null);
+    setFsErr("");
+    setFsAsk(next);
+    if (props.narrow) setTreeOpen(true);
+    setSide("files");
+  };
+
+  /** Run what the prompt asked: through the daemon's `fs` route only (owner-only). */
+  const runFs = async (a: FsAsk) => {
+    if (!pid || fsBusy || props.blocked) return;
+    const clean = (v: string) => v.trim().replace(/^\/+|\/+$/g, "");
+    setFsErr("");
+    setFsBusy(true);
+    try {
+      if (a.kind === "new_file" || a.kind === "new_folder") {
+        const name = clean(a.value);
+        if (!name) throw new Error("type a name");
+        const path = a.dir ? `${a.dir}/${name}` : name;
+        const res = await api.fileOp(pid, { op: a.kind, path });
+        setFsAsk(null);
+        bump();
+        if (a.kind === "new_file") openAt(res.path);
+        else setNote(`made ${res.path}/`);
+      } else if (a.kind === "rename") {
+        const to = clean(a.value);
+        if (!to || to === a.path) {
+          setFsAsk(null);
+          return;
+        }
+        // An unsaved edit open at the new name (a file deleted with its edit
+        // kept, say) would be taken over by the renamed file: refused here,
+        // before the disk changes (review of PR #53, MED 2). The registry
+        // never overwrites it either.
+        const clash = dirtyUnder(to);
+        if (clash.length) throw new Error(`${clash[0]} has an unsaved edit open; save or close it first`);
+        const res: FsResult = await api.fileOp(pid, { op: "rename", path: a.path, to });
+        setFsAsk(null);
+        bump();
+        // The buffers follow first (the edit, the undo stack, every hold),
+        // then every pane's tabs (App): a tab on the old name finds the same
+        // buffer under the new one.
+        const moved = res.from_abs ? buffers.renamed(res.from_abs, res.abs, res.dir ? null : res.kind)
+          : { moves: [], kept: [] };
+        props.onRenamed?.(pid, a.path, res.path, moved.moves, moved.kept);
+        setNote(`renamed to ${res.path}`);
+      } else {
+        const res = await api.fileOp(pid, { op: "delete", path: a.path });
+        setFsAsk(null);
+        bump();
+        // An open tab on it says "deleted on disk" at once; an unsaved edit
+        // stays in its buffer, and Save puts the file back.
+        void buffers.poll();
+        setNote(`moved ${a.path} to the trash${res.trash?.location ? ` (${res.trash.location})` : ""}`);
+      }
+    } catch (e: any) {
+      setFsErr(e?.message || "that did not work");
+    } finally {
+      setFsBusy(false);
+    }
+  };
+
+  /** Open buffers on `path` or under it that hold an unsaved edit: what a delete must warn about. */
+  /**
+   * The unsaved edits open on `path` or under it, **from any project**: a
+   * buffer is keyed by where its file resolves, so it is matched by that
+   * (`rootAbs`, the project folder's resolved path: `root_real`, #50),
+   * else — before the tree has said — by this project's relative path. Shown
+   * by their place in this project, else by their full path.
+   */
+  const rootAbs = props.root ? props.root.replace(/\/+$/, "") : null;
+  const dirtyUnder = (path: string): string[] => {
+    const target = rootAbs ? `${rootAbs}/${path}` : null;
+    return buffers.snapshot().filter((b) => b.dirty && (target
+      ? b.abs === target || b.abs.startsWith(`${target}/`)
+      : b.projectId === pid && (b.path === path || b.path.startsWith(`${path}/`))))
+      .map((b) => (rootAbs && b.abs.startsWith(`${rootAbs}/`) ? b.abs.slice(rootAbs.length + 1) : b.abs));
+  };
+
+  // What App asks (quick open, a search hit elsewhere, the palette), once each.
+  const doneAsk = useRef(0);
+  const appAsk = props.ask;
+  useEffect(() => {
+    const ask = appAsk;
+    if (!ask || ask.nonce === doneAsk.current || !pid) return;
+    doneAsk.current = ask.nonce;
+    switch (ask.kind) {
+      case "open":
+        openAt(ask.path, ask.line, ask.col);
+        return;
+      case "line":
+        if (active) openAt(active, ask.line, ask.col);
+        return;
+      case "search":
+        setSide("search");
+        if (props.narrow) setTreeOpen(true);
+        setSearchAsk({ nonce: ask.nonce, query: ask.query });
+        return;
+      case "newFile":
+      case "newFolder":
+        askFs({ kind: ask.kind === "newFile" ? "new_file" : "new_folder", dir: active ? parentOf(active) : "", value: "" });
+        return;
+      case "save":
+        void save();
+        return;
+      case "reload":
+        reload();
+        return;
+      case "closeTab":
+        if (active) requestClose(active);
+        return;
+      case "nextTab":
+      case "prevTab": {
+        const t = tabsNow.current;
+        if (!t.active || t.paths.length < 2) return;
+        const i = t.paths.indexOf(t.active);
+        const j = (i + (ask.kind === "nextTab" ? 1 : t.paths.length - 1)) % t.paths.length;
+        setTabs({ ...t, active: t.paths[j] });
+        return;
+      }
+      case "copyPath":
+        if (active) {
+          void navigator.clipboard?.writeText(active).then(
+            () => setNote(`copied ${active}`), () => setNote("the clipboard refused"));
+        }
+        return;
+      case "addToChat":
+        if (!props.blocked) addToChat();
+        return;
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [appAsk?.nonce, pid]);
 
   // ---- drawing ------------------------------------------------------------------
 
@@ -439,7 +724,70 @@ export function FileTab(props: {
   return (
     <div className="split">
       <div className="filetree" data-testid="filetree" style={showTree ? undefined : { display: "none" }}>
-        <Node projectId={pid} dir="" depth={0} onOpen={onTreeOpen} selected={active || ""} marks={marks} />
+        <div className="sidetabs" role="tablist">
+          <button type="button" role="tab" data-testid="side-files" aria-selected={side === "files"}
+                  className={side === "files" ? "on" : undefined} onClick={() => setSide("files")}>
+            Files
+          </button>
+          <button type="button" role="tab" data-testid="side-search" aria-selected={side === "search"}
+                  className={side === "search" ? "on" : undefined} title="Find in files (Ctrl+Shift+F)"
+                  onClick={() => {
+                    setSide("search");
+                    setSearchAsk({ nonce: Date.now() });
+                  }}>
+            Search
+          </button>
+          {side === "files" ? (
+            <>
+              <button type="button" className="sideact" data-testid="explorer-new-file" title="New file"
+                      disabled={props.blocked}
+                      onClick={() => askFs({ kind: "new_file", dir: active ? parentOf(active) : "", value: "" })}>
+                +
+              </button>
+              <button type="button" className="sideact" data-testid="explorer-new-folder" title="New folder"
+                      disabled={props.blocked}
+                      onClick={() => askFs({ kind: "new_folder", dir: active ? parentOf(active) : "", value: "" })}>
+                +▸
+              </button>
+            </>
+          ) : null}
+        </div>
+        {fsAsk && side === "files" ? (
+          <FsPrompt
+            ask={fsAsk}
+            busy={fsBusy}
+            err={fsErr}
+            dirty={fsAsk.kind === "delete" ? dirtyUnder(fsAsk.path) : []}
+            onChange={(value) => setFsAsk((a) => (a && a.kind !== "delete" ? { ...a, value } : a))}
+            onOk={() => void runFs(fsAsk)}
+            onCancel={() => {
+              setFsAsk(null);
+              setFsErr("");
+            }}
+          />
+        ) : null}
+        <div className="treebody" style={side === "files" ? undefined : { display: "none" }}
+             onContextMenu={(e) => openMenu(e, { path: "", dir: true })}>
+          <Node projectId={pid} dir="" depth={0} onOpen={onTreeOpen} selected={active || ""} marks={marks}
+                version={treeVersion} onMenu={openMenu} />
+        </div>
+        <SearchView projectId={pid} ask={searchAsk} visible={side === "search"} blocked={props.blocked}
+                    onOpen={(path, line, col) => openAt(path, line, col)} />
+        {menu ? (
+          <ExplorerMenu
+            target={menu}
+            onClose={() => setMenu(null)}
+            onNewFile={() => askFs({ kind: "new_file", dir: menu.dir ? menu.path : parentOf(menu.path), value: "" })}
+            onNewFolder={() => askFs({ kind: "new_folder", dir: menu.dir ? menu.path : parentOf(menu.path), value: "" })}
+            onRename={() => askFs({ kind: "rename", path: menu.path, dir: menu.dir, value: menu.path })}
+            onDelete={() => askFs({ kind: "delete", path: menu.path, dir: menu.dir })}
+            onCopy={() => {
+              const path = menu.path;
+              setMenu(null);
+              void navigator.clipboard?.writeText(path).then(() => setNote(`copied ${path}`), () => setNote("the clipboard refused"));
+            }}
+          />
+        ) : null}
       </div>
       <div className="editorwrap">
         <EditorTabs
@@ -598,11 +946,14 @@ export function FileTab(props: {
               readOnly={!editable}
               hidden={read || !!comparing || !model}
               onSave={() => void save()}
-              editorRef={(ed) => {
-                editorRef.current = ed;
-                // A pending line to go to waits for the editor.
+              editorRef={(editor) => {
+                editorRef.current = editor;
+                setEd(editor);
+                // A pending line to go to (VX-2) waits for the editor.
                 setEdTick((t) => t + 1);
               }}
+              mayAddToChat={!!view && jarvisMayRead(view.kind) && !!props.onAddToChat}
+              onAddToChat={addToChat}
             />
             {md && model && !read && !comparing ? (
               <div className="mdrender" data-testid="md-preview">
@@ -622,7 +973,7 @@ export function FileTab(props: {
         ) : active && view && view.kind !== "withheld" ? (
           <div className="pad muted">…</div>
         ) : null}
-        {view && view.kind !== "withheld" ? <StatusBar view={view} /> : null}
+        {view && view.kind !== "withheld" ? <EditorStatus view={view} editor={ed} /> : null}
       </div>
     </div>
   );
@@ -650,18 +1001,125 @@ function useMdText(abs: string | null): string {
   return seen.model === model ? seen.text : model.getValue();
 }
 
-/** Encoding and line endings, and what a save does to mixed ones. */
-function StatusBar(props: { view: BufferView }) {
-  const v = props.view;
-  const writes = v.modelEol || "LF";
-  const eol = useMemo(() => (v.eol === "mixed" ? `mixed (saving writes ${writes} throughout)` : v.eol || writes), [v.eol, writes]);
+/** The explorer's question: a name for a new file or folder, a new name, or a delete to confirm. */
+function FsPrompt(props: {
+  ask: FsAsk;
+  busy: boolean;
+  err: string;
+  /** Unsaved edits on or under a path about to be deleted. */
+  dirty: string[];
+  onChange: (value: string) => void;
+  onOk: () => void;
+  onCancel: () => void;
+}) {
+  const a = props.ask;
+  const input = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    const el = input.current;
+    if (!el) return;
+    el.focus();
+    if (a.kind === "rename") {
+      // The name without its extension selected, as VS Code does.
+      const slash = a.value.lastIndexOf("/") + 1;
+      const dot = a.value.lastIndexOf(".");
+      el.setSelectionRange(slash, dot > slash ? dot : a.value.length);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [a.kind, "path" in a ? a.path : a.dir]);
+  const label = a.kind === "new_file" ? `New file in ${a.dir || "the project"}/`
+    : a.kind === "new_folder" ? `New folder in ${a.dir || "the project"}/`
+    : a.kind === "rename" ? `Rename or move ${a.path}${a.dir ? "/" : ""} to`
+    : `Move ${a.path}${a.dir ? "/" : ""} to the trash?`;
   return (
-    <div className="edstatus" data-testid="editor-status" data-eol={v.eol ?? ""}>
-      <span>{v.encoding === "utf-8-bom" ? "UTF-8 with BOM" : v.encoding ? "UTF-8" : "not text"}</span>
-      <span data-testid="editor-eol" className={v.eol === "mixed" ? "warnish" : undefined}>{eol}</span>
-      {v.kind === "env" ? <span>env file · only you can read it</span> : null}
-      {/* A write on its way (a slow disk: /mnt/c), or a second Ctrl+S waiting for it. */}
-      {v.saving ? <span data-testid="editor-saving" role="status">saving…</span> : null}
+    <div className="fsprompt" data-testid="fs-prompt" data-kind={a.kind}
+         onKeyDown={(e) => {
+           if (e.key === "Escape") {
+             e.preventDefault();
+             e.stopPropagation();
+             props.onCancel();
+           }
+         }}>
+      <div className="small">{label}</div>
+      {a.kind !== "delete" ? (
+        <input
+          ref={input}
+          data-testid="fs-input"
+          value={a.value}
+          spellCheck={false}
+          autoComplete="off"
+          // Read-only while it runs, never disabled: a disabled box drops
+          // focus, and Escape would then have nowhere to land.
+          readOnly={props.busy}
+          onChange={(e) => props.onChange(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !e.nativeEvent.isComposing) {
+              e.preventDefault();
+              props.onOk();
+            }
+          }}
+        />
+      ) : props.dirty.length ? (
+        <div className="small warnish" data-testid="fs-dirty">
+          {props.dirty.length === 1 ? `${props.dirty[0]} has` : `${props.dirty.length} open files have`} an unsaved
+          edit. It stays in its tab, and Save puts the file back.
+        </div>
+      ) : null}
+      <div className="fsbuttons">
+        <button type="button" data-testid="fs-ok" disabled={props.busy} onClick={props.onOk}>
+          {a.kind === "delete" ? "Move to trash" : a.kind === "rename" ? "Rename" : "Create"}
+        </button>
+        <button type="button" data-testid="fs-cancel" onClick={props.onCancel}>Cancel</button>
+      </div>
+      {props.err ? <div className="err small" data-testid="fs-error">{props.err}</div> : null}
+    </div>
+  );
+}
+
+/** The explorer's right-click menu. A withheld row offers nothing but its path. */
+function ExplorerMenu(props: {
+  target: MenuTarget & { x: number; y: number };
+  onClose: () => void;
+  onNewFile: () => void;
+  onNewFolder: () => void;
+  onRename: () => void;
+  onDelete: () => void;
+  onCopy: () => void;
+}) {
+  const t = props.target;
+  const box = useRef<HTMLDivElement>(null);
+  const [at, setAt] = useState({ left: t.x, top: t.y });
+  useLayoutEffect(() => {
+    const el = box.current;
+    if (!el) return;
+    const z = zoomNow();
+    const w = window.innerWidth / z;
+    const h = window.innerHeight / z;
+    setAt({
+      left: Math.max(0, Math.min(t.x, w - el.offsetWidth - 4)),
+      top: t.y + el.offsetHeight > h ? Math.max(0, t.y - el.offsetHeight) : t.y,
+    });
+  }, [t.x, t.y]);
+  const root = t.path === "";
+  const withheld = t.policy === "withheld";
+  const item = (testid: string, label: string, run: () => void) => (
+    <button type="button" role="menuitem" data-testid={testid} onClick={run}>{label}</button>
+  );
+  return (
+    <div ref={box} className="explorermenu" role="menu" data-testid="explorer-menu"
+         style={{ left: at.left, top: at.top }}>
+      {!withheld && (t.dir || !root) ? (
+        <>
+          {item("menu-new-file", "New File…", props.onNewFile)}
+          {item("menu-new-folder", "New Folder…", props.onNewFolder)}
+        </>
+      ) : null}
+      {!root && !withheld ? (
+        <>
+          {item("menu-rename", "Rename…", props.onRename)}
+          {item("menu-delete", "Delete", props.onDelete)}
+        </>
+      ) : null}
+      {!root ? item("menu-copy-path", "Copy Relative Path", props.onCopy) : null}
     </div>
   );
 }

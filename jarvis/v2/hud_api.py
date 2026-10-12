@@ -1682,6 +1682,21 @@ def route(handler, daemon, parts, query):
             owner_only(handler, daemon)
             _object(query, ())
             return save_for_editor(daemon, project, handler._body())
+    # The editor's navigation (ED-7): quick open's list, find in files and the
+    # explorer's file operations — the owner's, like every editor file route
+    # (E-7), checked before the body is read (`editor_nav`).
+    if (len(parts) == 3 and parts[0] == "projects"
+            and (parts[2], method) in (("files", "GET"), ("search", "POST"), ("fs", "POST"))):
+        project = daemon.require(stores.projects, parts[1])
+        from .projects import owner_only
+        owner_only(handler, daemon)
+        _object(query, ())
+        from . import editor_nav
+        if parts[2] == "files":
+            return 200, editor_nav.list_files(project)
+        if parts[2] == "search":
+            return 200, editor_nav.search(project, handler._body())
+        return editor_nav.fs(daemon, project, handler._body())
     if (len(parts) == 4 and parts[0] == "projects" and parts[2:] == ["files", "stat"]
             and method == "POST"):
         project = daemon.require(stores.projects, parts[1])

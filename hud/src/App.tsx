@@ -28,13 +28,17 @@ import { Sidebar } from "./components/Sidebar";
 import { ChatTab } from "./components/ChatTab";
 import { InputBar, MAX_FILES, toAttachment } from "./components/InputBar";
 import { TaskView } from "./components/TaskView";
-import { FileTab } from "./components/FileTab";
+import { FileTab, type FileAsk } from "./components/FileTab";
 import { VexView } from "./components/VexView";
 import { DETECT_STALE_MS, vex } from "./state/vex";
 import { offersVex } from "./lib/vex";
-import { makeModel, monacoEditors, monacoLanguage, monacoModels, setEditorsBlocked } from "./lib/monaco";
+import { ENV_LANGUAGE, makeModel, monacoEditors, monacoLanguage, monacoModels, relanguage, setEditorsBlocked } from "./lib/monaco";
 import { buffers, PlainModel } from "./state/buffers";
-import { NO_TABS, openTab, writtenPaths } from "./lib/buffers";
+import { NO_TABS, openTab, renameTabs, sameTabs, writtenPaths } from "./lib/buffers";
+import { Palette, QuickOpen } from "./components/QuickOpen";
+import { focusedEditor } from "./components/Editor";
+import { commandOf, paletteEntries, type CommandContext, type CommandId, type EditorAction, type Entry } from "./lib/commands";
+import type { EditorShortcut } from "./lib/layout";
 import { treeRoot } from "./lib/dirtyMarks";
 import { DiffTab } from "./components/DiffTab";
 import { PreviewTab, type PreviewRequest } from "./components/PreviewTab";
@@ -112,7 +116,28 @@ buffers.configure({
   stat: (projectId, paths) => api.statFiles(projectId, paths),
   makeModel: (text, abs, kind) => makeModel(text, abs, kind).catch(() => new PlainModel(text)),
   now: () => Date.now(),
+  // A renamed file's model takes its new name's language (ED-7).
+  relanguage: (model, abs, kind) => relanguage(model, abs, kind),
 });
+
+type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
+type FileAskBody = DistributiveOmit<FileAsk, "nonce">;
+
+/** What quick open and the palette act on, taken the moment they open (ED-7). */
+interface NavContext {
+  /** The File pane they act in (or the pane that becomes one). */
+  pane: PaneNo;
+  projectId: string | null;
+  /** The pane is not a File pane yet: it switches when something is opened. */
+  switchTo: boolean;
+  activePath: string | null;
+  /** The editor that had focus, for Monaco's actions in the palette. */
+  editor: any | null;
+  ctx: CommandContext;
+  actions: EditorAction[];
+  /** Where focus goes back to when the box closes with nothing done. */
+  returnTo: HTMLElement | null;
+}
 
 const PROVIDER_LABEL: Record<string, string> = { fast: "Jarvis", claude: "Claude", codex: "Codex" };
 
@@ -157,7 +182,11 @@ export default function App() {
   // lib/workspace.ts. Every layout key is inert while an authorization card
   // is up (as PTT is), and every layout button is disabled.
   const blocked = state.approvals.length > 0;
-  const view = useLayout(blocked);
+  // ED-7's keys (Ctrl+P, Ctrl+Shift+P / F1, Ctrl+Shift+F) are taken by
+  // `useLayout`'s capture handler — the one interception place — and acted on
+  // here with the latest render (`editorKeyRef`, set below).
+  const editorKeyRef = useRef<(what: EditorShortcut) => void>(() => {});
+  const view = useLayout(blocked, (what) => editorKeyRef.current(what));
   // Under a card nothing reaches a shell (WP-D). Said from here, above the
   // workspace's error boundary: a render error unmounts the workspace, but
   // the terminals' sockets and paste pumps live on, and a hold driven from in
@@ -1255,6 +1284,56 @@ export default function App() {
    */
   const [previewAsk, setPreviewAsk] = useState<Partial<Record<PaneNo, PreviewRequest>>>({});
   const previewSeq = useRef(0);
+
+  // ---- the editor's navigation (ED-7) ------------------------------------------
+
+  // What App asks of a File pane (open at a line, the search, a palette
+  // command), acted on once by its nonce and cleared after the commit that
+  // carried it, so a pane that mounts again later never acts on it twice.
+  const [fileAsk, setFileAsk] = useState<Partial<Record<PaneNo, FileAsk>>>({});
+  const fileSeq = useRef(0);
+  const askFile = useCallback((n: PaneNo, ask: FileAskBody) => {
+    const nonce = ++fileSeq.current;
+    setFileAsk((a) => ({ ...a, [n]: { ...ask, nonce } as FileAsk }));
+  }, []);
+  useEffect(() => {
+    if (Object.keys(fileAsk).length) setFileAsk({});
+  }, [fileAsk]);
+  const [nav, setNav] = useState<NavContext | null>(null);
+  // Under a card quick open and the palette close (editor plan §2.10); their
+  // keys are already inert there (`useLayout`). Before paint, so the card is
+  // the first thing drawn without them.
+  useLayoutEffect(() => {
+    if (blocked && (state.picker === "quickOpen" || state.picker === "palette")) {
+      dispatch({ type: "patch", patch: { picker: null } });
+      setNav(null);
+    }
+  }, [blocked, state.picker, dispatch]);
+
+  /**
+   * The explorer renamed `from` to `to` in `projectId` (FileTab; the buffers
+   * have followed already): every pane's tabs follow — the project's own by
+   * path, any other project reaching the same file through the registry's
+   * holds — so an open tab keeps its edit under the new name.
+   */
+  const onRenamed = useCallback((projectId: string, from: string, to: string,
+                                 moves: { pane: string; from: string; to: string }[],
+                                 kept: { pane: string; path: string }[] = []) => {
+    const { ws } = layoutNow.current;
+    for (const n of PANE_NOS) {
+      const spec = ws.panes[n - 1];
+      const tabs = spec.editors;
+      if (!tabs || !spec.projectId) continue;
+      let next = tabs;
+      // A tab whose buffer the registry kept in place (an unsaved edit
+      // already at the new name) keeps its path.
+      const keep = new Set(kept.filter((k) => k.pane === String(n)).map((k) => k.path));
+      if (spec.projectId === projectId) next = renameTabs(next, from, to, keep);
+      else for (const m of moves) if (m.pane === String(n)) next = renameTabs(next, m.from, m.to);
+      if (!sameTabs(next, tabs)) view.setEditors(n, spec.projectId, next);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const openPreview = useCallback((url: string): boolean => {
     const { status, ports } = daemonPortsNow();
     if (status === "pending") return false;
@@ -1533,29 +1612,54 @@ export default function App() {
    */
   const [fileGoto, setFileGoto] = useState<Partial<Record<PaneNo, FileGoto>>>({});
   const gotoSeq = useRef(0);
-  const openAt = useCallback((from: PaneNo, projectId: string, path: string, line: number, col: number) => {
-    if (blockedNow.current || crashedRef.current) return;
+
+  /**
+   * **Where a file opens**, the one rule for every way one is opened — ED-7's
+   * quick open, find in files and palette, VX-2's build-error click: a drawn
+   * File pane on that project (`from` itself first, when it is one); else a
+   * new pane beside `from` (a split: what `from` shows stays — a VEX view is
+   * never replaced, nor a terminal, a task or a preview); else `from` itself,
+   * **only when it is a File or chat pane** (and `mayShow` lets it go). Null
+   * when there is nowhere: the caller says so. The pane is pinned to
+   * `projectId`; never under a card.
+   */
+  const placeFile = useCallback((from: PaneNo, projectId: string): PaneNo | null => {
+    if (blockedNow.current || crashedRef.current) return null;
     const lay = layoutNow.current;
     const at = live.current;
     const projectOf = (n: PaneNo) => stripProject(at, lay.ws.panes[n - 1], n);
-    let target: PaneNo | null = lay.fit.panes.find((n) =>
-      lay.ws.panes[n - 1].view === "file" && projectOf(n) === projectId) ?? null;
-    let tabs = target !== null && lay.ws.panes[target - 1].projectId === projectId
-      ? lay.ws.panes[target - 1].editors ?? NO_TABS : NO_TABS;
-    if (target === null) {
-      const id = splitFrom(from, { focus: false });
-      if (id !== null) {
-        view.setView(id, "file");
-        target = id;
-      }
+    const fileOn = (n: PaneNo) => lay.ws.panes[n - 1].view === "file" && projectOf(n) === projectId;
+    if (lay.fit.panes.includes(from) && fileOn(from)) return from;
+    const drawn = lay.fit.panes.find(fileOn);
+    if (drawn !== undefined) return drawn;
+    const id = splitFrom(from, { focus: false });
+    if (id !== null) {
+      view.setEditors(id, projectId, null);
+      view.setView(id, "file");
+      return id;
     }
-    if (target === null) {
-      if (!mayShow(from, "file")) return;
+    const v = lay.ws.panes[from - 1].view;
+    if ((v === "file" || v === "chat") && mayShow(from, "file")) {
+      if (lay.ws.panes[from - 1].projectId !== projectId) view.pin(from, projectId);
       view.setView(from, "file");
-      target = from;
-      const spec = lay.ws.panes[from - 1];
-      tabs = spec.projectId === projectId ? spec.editors ?? NO_TABS : NO_TABS;
+      return from;
     }
+    return null;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [splitFrom, mayShow]);
+
+  const openAt = useCallback((from: PaneNo, projectId: string, path: string, line: number, col: number) => {
+    if (blockedNow.current || crashedRef.current) return;
+    const lay = layoutNow.current;
+    const target = placeFile(from, projectId);
+    if (target === null) {
+      dispatch({ type: "patch", patch: { error: `No room to open ${path} beside this view: close a pane, or switch one to Files.` } });
+      return;
+    }
+    const spec = lay.ws.panes[target - 1];
+    // A pane just made by the split has no tabs yet; one already showing the
+    // project keeps its own.
+    const tabs = spec.view === "file" && spec.projectId === projectId ? spec.editors ?? NO_TABS : NO_TABS;
     // Pinned, never the preview: the owner asked for this file. Past the tab
     // cap only a clean tab closes — and every tab counts as holding an edit
     // here, so a full pane says so in FileTab rather than losing one.
@@ -1566,7 +1670,7 @@ export default function App() {
     setFileGoto((g) => ({ ...g, [pane]: { path, line, col, n } }));
     focusPaneElement(pane);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [splitFrom, mayShow]);
+  }, [placeFile]);
   const gotoDone = useCallback((pane: PaneNo, n: number) => {
     setFileGoto((g) => {
       if (g[pane]?.n !== n) return g;
@@ -2395,6 +2499,177 @@ export default function App() {
   const pinnedElsewhere = (spec: PaneSpec, pane: PaneNo) =>
     (spec.view === "file" || spec.view === "preview") && paneProject(spec, pane) !== activeProjectId;
 
+  // ---- quick open, the palette, find in files (ED-7) ----------------------------
+
+  /**
+   * What the editor's navigation is about: the focused pane when it is a File
+   * pane (its project); else the focused pane's own project (a chat's
+   * conversation's, a VEX view's pin) and a drawn File pane on it, if there
+   * is one; else nothing is decided until something is opened — then
+   * `placeFile` decides (a split beside the focused pane, which is never
+   * replaced unless it is a File or chat pane).
+   */
+  const fileTarget = (): { pane: PaneNo; projectId: string | null; switchTo: boolean } => {
+    const f = focusedDrawn;
+    const spec = ws.panes[f - 1];
+    if (spec.view === "file") return { pane: f, projectId: paneProject(spec, f), switchTo: false };
+    const projectId = stripProjectNow(f) ?? (spec.view === "vex" ? null : activeProjectId);
+    const drawn = fit.panes.find((n) => ws.panes[n - 1].view === "file" && paneProject(ws.panes[n - 1], n) === projectId);
+    if (drawn !== undefined && projectId) return { pane: drawn, projectId, switchTo: false };
+    return { pane: f, projectId, switchTo: true };
+  };
+  const activePathOf = (n: PaneNo): string | null => {
+    const spec = ws.panes[n - 1];
+    return spec.view === "file" ? spec.editors?.active ?? null : null;
+  };
+  /** The File pane to act in, placed by the one rule (`placeFile`), focused; null when there is none. */
+  const toFilePane = (t: { pane: PaneNo; projectId: string | null; switchTo: boolean }): PaneNo | null => {
+    if (!t.projectId) {
+      patch({ error: "Pick a project first: the editor works in a project." });
+      return null;
+    }
+    const n = t.switchTo ? placeFile(t.pane, t.projectId) : t.pane;
+    if (n === null) {
+      patch({ error: "No room to open a file beside this view: close a pane, or switch one to Files." });
+      return null;
+    }
+    view.focus(n);
+    return n;
+  };
+  /** Another dialog is open, or the window crashed: ED-7's keys do nothing. */
+  const navBusy = () => !!live.current.picker || threadModel.overlayOpen || crashedRef.current
+    || live.current.approvals.length > 0;
+  const openNav = (kind: "quickOpen" | "palette") => {
+    if (navBusy()) return;
+    const t = fileTarget();
+    if (kind === "quickOpen" && !t.projectId) {
+      patch({ error: "Pick a project first: quick open lists a project's files." });
+      return;
+    }
+    const editor = focusedEditor();
+    const focused = !!editor && !!editor.hasTextFocus?.();
+    let actions: EditorAction[] = [];
+    if (kind === "palette" && focused) {
+      try {
+        actions = (editor.getSupportedActions?.() ?? [])
+          .filter((a: any) => a.isSupported?.() !== false)
+          .map((a: any) => ({ id: String(a.id), label: String(a.label || "") }));
+      } catch {
+        actions = [];
+      }
+    }
+    const activePath = t.switchTo ? null : activePathOf(t.pane);
+    setNav({
+      ...t, activePath, editor: focused ? editor : null, actions,
+      ctx: { filePane: !t.switchTo, activeFile: !!activePath, editor: focused },
+      returnTo: document.activeElement instanceof HTMLElement ? document.activeElement : null,
+    });
+    patch({ picker: kind });
+  };
+  const closeNav = (refocus: boolean) => {
+    const back = nav?.returnTo;
+    patch({ picker: null });
+    setNav(null);
+    if (refocus && back && back.isConnected && !live.current.approvals.length) requestAnimationFrame(() => back.focus());
+  };
+  const openFindInFiles = () => {
+    if (navBusy()) return;
+    const t = fileTarget();
+    // The selection, when it is one short line of a file Jarvis may read: an
+    // env file's text goes in no request but its own save.
+    let query: string | undefined;
+    const editor = focusedEditor();
+    if (editor?.hasTextFocus?.()) {
+      const model = editor.getModel?.();
+      const sel = editor.getSelection?.();
+      if (model && sel && !sel.isEmpty() && sel.startLineNumber === sel.endLineNumber
+          && model.getLanguageId?.() !== ENV_LANGUAGE) {
+        const text = model.getValueInRange(sel);
+        if (text.length <= 200) query = text;
+      }
+    }
+    const pane = toFilePane(t);
+    if (pane === null) return;
+    askFile(pane, { kind: "search", query });
+  };
+  editorKeyRef.current = (what) => {
+    if (what === "findInFiles") openFindInFiles();
+    else openNav(what);
+  };
+  /** A palette entry: a HUD command, or one of Monaco's actions in the editor it was opened from. */
+  const runEntry = (key: string) => {
+    const at = nav;
+    closeNav(false);
+    if (!at || live.current.approvals.length) return;
+    if (key.startsWith("monaco:")) {
+      const ed = at.editor;
+      const id = key.slice("monaco:".length);
+      if (!ed) return;
+      requestAnimationFrame(() => {
+        if (live.current.approvals.length) return;
+        ed.focus?.();
+        void ed.getAction?.(id)?.run?.();
+      });
+      return;
+    }
+    const id: CommandId | null = commandOf(key);
+    if (!id) return;
+    const later = (f: () => void) => requestAnimationFrame(() => {
+      if (!live.current.approvals.length) f();
+    });
+    const toPane = (kind: FileAskBody["kind"]) => {
+      if (!at.ctx.filePane) return;
+      view.focus(at.pane);
+      askFile(at.pane, { kind } as FileAskBody);
+    };
+    switch (id) {
+      case "file.quickOpen":
+        return later(() => editorKeyRef.current("quickOpen"));
+      case "search.findInFiles":
+        return later(() => editorKeyRef.current("findInFiles"));
+      case "file.newFile":
+        return toPane("newFile");
+      case "file.newFolder":
+        return toPane("newFolder");
+      case "file.save":
+        return toPane("save");
+      case "file.reload":
+        return toPane("reload");
+      case "file.closeTab":
+        return toPane("closeTab");
+      case "file.nextTab":
+        return toPane("nextTab");
+      case "file.prevTab":
+        return toPane("prevTab");
+      case "file.copyPath":
+        return toPane("copyPath");
+      case "chat.addSelection":
+        return toPane("addToChat");
+      case "file.saveAll":
+        void buffers.saveAll();
+        return;
+      case "chat.newThread":
+        newThread();
+        return;
+      case "view.files":
+        toFilePane(fileTarget());
+        return;
+      case "view.toggleSidebar":
+        return view.toggle("left");
+      case "view.toggleRight":
+        return view.toggle("right");
+      case "view.togglePanel":
+        return view.ownerTogglePanel();
+      case "view.zoomIn":
+        return view.zoomBy(1);
+      case "view.zoomOut":
+        return view.zoomBy(-1);
+      case "view.zoomReset":
+        return view.setZoom(100);
+    }
+  };
+  const paletteList: Entry[] = nav && state.picker === "palette" ? paletteEntries(nav.ctx, nav.actions) : [];
+
   /** One chat pane: its conversation, its box, its chips, its Send/Steer and Stop. */
   const renderChat = (n: PaneNo) => {
     const chat = state.chats[n];
@@ -2489,6 +2764,8 @@ export default function App() {
             narrow={info.narrow}
             blocked={blocked}
             onAddToChat={addToChat}
+            ask={fileAsk[n] ?? null}
+            onRenamed={onRenamed}
             goto={fileGoto[n] ?? null}
             onGotoDone={(k) => gotoDone(n, k)}
             root={pid ? treeRoot(state.projects.find((p) => p.id === pid)) : null}
@@ -2939,6 +3216,24 @@ export default function App() {
         }}
       >
       <CrashProbe where="dialog" />
+      {state.picker === "quickOpen" && nav?.projectId ? (
+        <QuickOpen
+          projectId={nav.projectId}
+          projectName={projectName(nav.projectId)}
+          activePath={nav.activePath}
+          onOpen={(path, line, col) => {
+            const at = nav;
+            closeNav(false);
+            const pane = at ? toFilePane(at) : null;
+            if (pane !== null) askFile(pane, { kind: "open", path, line, col });
+          }}
+          onClose={() => closeNav(true)}
+          onLeave={() => closeNav(false)}
+        />
+      ) : null}
+      {state.picker === "palette" && nav ? (
+        <Palette entries={paletteList} onRun={runEntry} onClose={() => closeNav(true)} onLeave={() => closeNav(false)} />
+      ) : null}
       {state.picker === "model" ? (
         <ModelPicker
           view={roster}

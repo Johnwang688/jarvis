@@ -50,6 +50,7 @@ Run (after `cd hud && npm ci && npm run build`):
 from __future__ import annotations
 
 import json
+import re
 import sys
 import time
 from pathlib import Path
@@ -729,11 +730,46 @@ def _gone_project_checks(page, mock, check, until, fake):
           bool(until(lambda: page.locator(_view(2, _tid("vex-card"))).count() > 0, timeout=5)))
 
 
+def _ed7_beside_checks(page, mock, check, until, fake):
+    """ED-7 with a VEX view focused (the lead merge of #51 and #53): quick
+    open opens the file beside the view and never in its place, and neither
+    quick open nor the palette offers a download."""
+    _reset(page, mock, until)
+    check("setup: the view draws", _ready(page, until))
+    page.locator(_view(V, _tid("vex-name-input"))).focus()
+    page.keyboard.press("Control+p")
+    qo = page.locator(_tid("quickopen"))
+    check("ED-7: Ctrl+P with the VEX view focused opens quick open", bool(until(lambda: qo.count() == 1, timeout=3)))
+    page.keyboard.type("main.cpp")
+    rows = lambda: page.locator(_tid("quickopen-row")).evaluate_all("els => els.map(e => e.dataset.key)")  # noqa: E731
+    until(lambda: (rows() or [""])[0] == "src/main.cpp", timeout=3)
+    check("ED-7: quick open offers files, never a download",
+          not [r for r in rows() if re.search(r"download|vexcom|brain|device", r, re.I)], str(rows()))
+    page.keyboard.press("Enter")
+    check("ED-7: the file opens in a File pane beside the VEX view, which stays",
+          bool(until(lambda: page.locator(_pane(3)).get_attribute("data-view") == "file", timeout=5))
+          and page.locator(_pane(V)).get_attribute("data-view") == "vex"
+          and page.locator(_view(V, _tid("vex-card"))).count() == 1)
+    path = page.locator(_pane(3, _tid("file-path")))
+    check("ED-7: at that file", bool(until(lambda: path.count() and path.inner_text() == "src/main.cpp", timeout=5)))
+    page.locator(_view(V, _tid("vex-name-input"))).focus()
+    page.keyboard.press("Control+Shift+P")
+    pal = page.locator(_tid("palette"))
+    until(lambda: pal.count() == 1, timeout=3)
+    labels = page.locator(_tid("palette-row")).evaluate_all("els => els.map(e => e.innerText)")
+    check("ED-7: the palette offers no download or VEX device command",
+          bool(labels) and not [x for x in labels if re.search(r"download|vexcom|brain|device|robot", x, re.I)],
+          str([x for x in labels if re.search(r"download|vex", x, re.I)]))
+    page.locator(_view(V, _tid("vex-name-input"))).focus()
+    check("ED-7: the palette closes when focus goes back to the view", bool(until(lambda: pal.count() == 0, timeout=2)))
+    check("ED-7: and the download button is reachable", page.locator(_view(V, _tid("vex-download-btn"))).is_visible())
+
+
 SECTIONS = (_offer_checks, _setup_checks, _build_checks, _explicit_click_checks, _chain_checks, _card_checks,
             _brain_checks, _info_checks, _notice_checks, _one_chain_checks, _header_rebuild_checks,
             _still_stale_checks,
             _answer_card_checks, _passing_card_checks, _first_click_checks, _detect_again_checks,
-            _lone_pane_checks, _gone_project_checks)
+            _lone_pane_checks, _gone_project_checks, _ed7_beside_checks)
 
 
 def vex_checks(browser, mock, base, check, until, guard, init_script):

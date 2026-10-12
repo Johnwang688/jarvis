@@ -713,6 +713,64 @@ describe("the review of PR #49 (each failing on f869543)", () => {
   });
 });
 
+describe("ED-7: a rename from the explorer", () => {
+  it("the buffer follows with its edit, its undo stack and every hold", async () => {
+    await b.open("p1", "a.py", refOf(2, "a.py"));
+    await b.open("inbox", "w/a.py", refOf(4, "w/a.py"));
+    const m = model("/w/a.py");
+    m.type("edit");
+    expect(b.isDirty("/w/a.py")).toBe(true);
+    // The disk moves; then the registry is told.
+    w.files.set("/w/c.py", w.files.get("/w/a.py")!);
+    w.files.delete("/w/a.py");
+    const { moves } = b.renamed("/w/a.py", "/w/c.py", "text");
+    expect(moves.sort((x, y) => x.pane.localeCompare(y.pane))).toEqual([
+      { pane: "2", from: "a.py", to: "c.py" }, { pane: "4", from: "w/a.py", to: "w/c.py" }]);
+    expect(b.get("/w/a.py")).toBeNull();
+    const v = b.get("/w/c.py")!;
+    expect(v.dirty).toBe(true);
+    expect(v.path).toBe("c.py");
+    expect(v.refs.sort()).toEqual(["2|c.py", "4|w/c.py"]);
+    expect(b.model("/w/c.py")).toBe(m);
+    // A tab on the new name finds the same buffer, with no read.
+    const reads = w.reads.length;
+    const again = await b.open("p1", "c.py", refOf(2, "c.py"));
+    expect(again.abs).toBe("/w/c.py");
+    expect(w.reads.length).toBe(reads);
+    // Its save writes the new name, against the etag it was read as.
+    expect(await b.save("/w/c.py")).toBe("saved");
+    expect(w.files.get("/w/c.py")).toBe("one\nedit");
+    expect(w.files.has("/w/a.py")).toBe(false);
+    // The old name's release is nobody's.
+    b.release("/w/a.py", refOf(2, "a.py"));
+    expect(b.get("/w/c.py")!.refs.length).toBe(2);
+  });
+
+  it("a folder's buffers all follow; others stay", async () => {
+    w.files.set("/w/src/x.cpp", "x\n");
+    w.files.set("/w/src/deep/y.cpp", "y\n");
+    await b.open("p1", "src/x.cpp", refOf(1, "src/x.cpp"));
+    await b.open("p1", "src/deep/y.cpp", refOf(1, "src/deep/y.cpp"));
+    await b.open("p1", "a.py", refOf(1, "a.py"));
+    model("/w/src/deep/y.cpp").type("!");
+    const { moves } = b.renamed("/w/src", "/w/lib");
+    expect(moves.map((x) => x.to).sort()).toEqual(["lib/deep/y.cpp", "lib/x.cpp"]);
+    expect(b.get("/w/lib/deep/y.cpp")!.dirty).toBe(true);
+    expect(b.get("/w/a.py")!.path).toBe("a.py");
+    expect(b.renamed("/w/srcx", "/w/q")).toEqual({ moves: [], kept: [] });
+  });
+
+  it("a file renamed to an env name becomes an env file", async () => {
+    await b.open("p1", "a.py", refOf(1, "a.py"));
+    b.renamed("/w/a.py", "/w/.env.local", "env");
+    expect(b.get("/w/.env.local")!.kind).toBe("env");
+    // A kind it cannot turn into is never taken.
+    await b.open("p1", "b.py", refOf(1, "b.py"));
+    b.renamed("/w/b.py", "/w/b2.py", "gate");
+    expect(b.get("/w/b2.py")!.kind).toBe("text");
+  });
+});
+
 describe("the delta review of PR #49 (each failing on 62fc44d)", () => {
   it("MED-1 P1: Discard and reload during a slow save, Ctrl+S queued: the disk keeps A, never reverted", async () => {
     await b.open("p1", "a.py", "1|a.py");
@@ -814,5 +872,61 @@ describe("the delta review of PR #49 (each failing on 62fc44d)", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("ED-7: the status bar reads the registry's save state", () => {
+  it("saving while a write is out; queued while a second Ctrl+S waits for it", async () => {
+    await b.open("p1", "a.py", "1|a.py");
+    model("/w/a.py").type("A");
+    w.hold = true;
+    const first = b.save("/w/a.py");
+    expect(b.get("/w/a.py")!.saving).toBe(true);
+    expect(b.get("/w/a.py")!.queued).toBe(false);
+    model("/w/a.py").type("B");
+    const second = b.save("/w/a.py");
+    expect(b.get("/w/a.py")!.queued).toBe(true);
+    w.hold = false;
+    w.release();
+    await first;
+    w.release();
+    await second;
+    expect(b.get("/w/a.py")!.saving).toBe(false);
+    expect(b.get("/w/a.py")!.queued).toBe(false);
+  });
+});
+
+describe("review of PR #53, MED 2: a rename never takes a buffer's place", () => {
+  it("an unsaved edit at the new name survives; the renamed buffer stays put", async () => {
+    w.files.set("/w/notes.txt", "notes\n");
+    w.files.set("/w/draft.txt", "draft\n");
+    await b.open("p1", "notes.txt", refOf(1, "notes.txt"));
+    await b.open("p1", "draft.txt", refOf(1, "draft.txt"));
+    model("/w/notes.txt").type("EDIT");
+    // notes.txt deleted on disk (its edit stays), draft.txt renamed onto its name
+    w.files.delete("/w/notes.txt");
+    w.files.set("/w/notes.txt", w.files.get("/w/draft.txt")!);
+    w.files.delete("/w/draft.txt");
+    const got = b.renamed("/w/draft.txt", "/w/notes.txt", "text");
+    expect(got.moves).toEqual([]);
+    // Its tab stays on draft.txt (the delta review's NIT): App renames nothing it holds.
+    expect(got.kept).toEqual([{ pane: "1", path: "draft.txt" }]);
+    expect(b.isDirty("/w/notes.txt")).toBe(true);
+    expect(b.text("/w/notes.txt")).toBe("notes\nEDIT");
+    expect(b.anyDirty()).toBe(true);
+    expect(b.get("/w/draft.txt")).not.toBeNull();
+  });
+
+  it("a clean buffer at the new name gives way, its tabs kept on the renamed file", async () => {
+    w.files.set("/w/notes.txt", "notes\n");
+    w.files.set("/w/draft.txt", "draft\n");
+    await b.open("p1", "notes.txt", refOf(2, "notes.txt"));
+    await b.open("p1", "draft.txt", refOf(1, "draft.txt"));
+    const old = model("/w/notes.txt");
+    b.renamed("/w/draft.txt", "/w/notes.txt", "text");
+    expect(old.isDisposed()).toBe(true);
+    expect(b.text("/w/notes.txt")).toBe("draft\n");
+    expect(b.get("/w/notes.txt")!.refs.sort()).toEqual(["1|notes.txt", "2|notes.txt"]);
+    expect(b.snapshot()).toHaveLength(1);
   });
 });

@@ -298,7 +298,14 @@ export function keyStep(
 
 export type Shortcut =
   | "zoomIn" | "zoomOut" | "zoomReset" | "toggleLeft" | "toggleRight" | "togglePanel"
-  | "focus1" | "focus2" | "focus3" | "focus4" | "focus5" | "focus6" | "focus7" | "focus8";
+  | "focus1" | "focus2" | "focus3" | "focus4" | "focus5" | "focus6" | "focus7" | "focus8"
+  | EditorShortcut;
+
+/** The editor's navigation keys (ED-7, editor plan §2.10): App acts on them. */
+export type EditorShortcut = "quickOpen" | "palette" | "findInFiles";
+
+export const isEditorShortcut = (s: Shortcut | null): s is EditorShortcut =>
+  s === "quickOpen" || s === "palette" || s === "findInFiles";
 
 /**
  * Ctrl+= / Ctrl+- / Ctrl+0 zoom (with the numpad and shifted spellings), Ctrl+B
@@ -316,12 +323,23 @@ export type Shortcut =
  * never fires mid-word. There is no cycle key, because every bracket is a
  * character on some AltGr layout, and no key for split or close: Ctrl+W and
  * Ctrl+F4 are Chrome's, and Ctrl+\ is SIGQUIT in a terminal.
+ *
+ * ED-7 (editor plan §2.10): Ctrl+P quick open, Ctrl+Shift+P and F1 the
+ * palette, Ctrl+Shift+F find in files. In a terminal Ctrl+P is the shell's
+ * (readline's previous line; `terminalTakesKey`).
  */
 export function shortcutFor(e: {
   key: string; code?: string; ctrlKey: boolean; metaKey?: boolean; altKey: boolean; shiftKey?: boolean;
 }): Shortcut | null {
+  // F1 alone: the palette (VS Code's key, and Monaco's own quick command,
+  // which ours replaces — it offers Monaco's actions too).
+  if (e.key === "F1" && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) return "palette";
   if (!(e.ctrlKey || e.metaKey)) return null;
   const k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+  // Ctrl+P quick open (never Chrome's print dialog), Ctrl+Shift+P the
+  // palette, Ctrl+Shift+F find in files (ED-7). No Alt: AltGr is Ctrl+Alt.
+  if (!e.altKey && k === "p") return e.shiftKey ? "palette" : "quickOpen";
+  if (!e.altKey && e.shiftKey && k === "f") return "findInFiles";
   if (k === "b") {
     if (e.shiftKey) return null;
     return e.altKey ? "toggleRight" : "toggleLeft";

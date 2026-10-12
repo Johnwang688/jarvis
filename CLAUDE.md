@@ -1280,8 +1280,9 @@ settings parse, or are malformed/PROS so the view can say why; App's
 pin, else the active chat's), and switching a pane to it **pins** it, so a
 build or download never follows the chat to another robot. Build / Rebuild
 / Clean show ✓ or the errors list; **an error click opens the file at its
-line** (`openAt`: a drawn File pane on that project, else a split beside the
-view, else the VEX pane itself; FileTab's `goto` sets the cursor after
+line** (`openAt`, through ED-7's `placeFile`: a drawn File pane on that
+project, else a split beside the view, else a sentence — since the ED-7
+merge never the VEX pane itself; FileTab's `goto` sets the cursor after
 PaneEditor's own model swap; an error outside the project is text). The
 build, a download and the brain terminal are VX-1's **program terminals in
 the WP-D panel** (`terminals.showProgram`; one that ended has no Restart or
@@ -1975,6 +1976,126 @@ Checks: `editor_files_check`'s `Review*` classes, the `review of PR #49`
 blocks in `state/buffers.test.ts` and `lib/buffers.test.ts`, and the
 `_rv49_*` sections of `hud_v2_editor_check` (the mock serves `editable`,
 `uneditable` and on-cue `stat_etags`).
+
+**The editor's navigation, ED-7 (2026-10-11; plan §2.8, §2.10; contract in
+`docs/hud-api.md`).** The owner replaces VS Code with this at the lab, so:
+**quick open** (Ctrl+P), **the palette** (Ctrl+Shift+P, F1), **find in
+files** (Ctrl+Shift+F), **explorer ops** (right-click: new file, new folder,
+rename, delete; `+`/`+▸` in the tree column's head), **the status bar**
+(`EditorStatus`: Ln/Col and selections, language, indentation, encoding, EOL,
+saved/unsaved, and ED-2's `saving…` — `data-queued` when a second Ctrl+S waits:
+`BufferView.queued`) and **Add selection to chat** extended (every selection,
+from the palette and Monaco's context menu — `jarvis.addSelectionToChat`,
+shown only under the `jarvisMayAddToChat` context key, i.e. `jarvisMayRead`).
+- **Backend** (`jarvis/v2/editor_nav.py`, three routes in `hud_api.route`,
+  **`owner_only` before the body is read**): `GET …/files` (`git ls-files`
+  through `gitops._git`, else a walk; dotfiles in; never a credential folder,
+  the gate's state, a withheld file, `SKIP_DIRS`, a symlinked folder or a
+  symlink out; 50k/20 deep/5 s), `POST …/search` (refused on the Inbox; 2,000
+  matches, 10 s; `.gitignore` respected unless `ignore: false`; hidden files
+  searched) and `POST …/fs`. **No copy of any rule**: `editor_policy` judges,
+  `hud_api.scope` places, `folders` names Windows names, `trash.Trash.put`
+  deletes (a project-owned `Trash`, so Jarvis's retention purge never empties
+  the owner's deletes). `_policy_for(root)` narrows the policy's credential
+  folders to the ones that can matter under the root — a speed-up, not a
+  second rule. A folder is renamed or deleted only if it holds nothing the
+  editor refuses: absolute anchors (gate files, credential folders, login
+  files, the HUD roots, Jarvis's SELF_PROTECTED) **and** a walk of ≤20,000
+  entries that never follows a symlink or enters `SKIP_DIRS`. A rename never
+  replaces; **an env file keeps an env name** (403 otherwise); a new env file
+  is 0600. One fs op at a time on its own lock, not the daemon's (a Recycle
+  Bin move takes PowerShell a while).
+- **Find in files and `grep_files` share one core and one filter**
+  (`tools/search.py`: `refused()`, `Hit`, `_rg_record`, `_python_hits`,
+  `search_bounded`). `refused` = `is_protected` **or `is_env_credential`** —
+  so `grep_files` now refuses `.env.production` and the rest on both backends
+  (ENV-1's grep half). The route adds `editor_policy`'s withheld/gate/env on
+  top (two layers: dropping either alone keeps parity; dropping both breaks
+  it, and `editor_nav_check`'s parity test says so). `_rg_args`' new options
+  are keyword-only with defaults that leave `grep_files`' argv unchanged
+  (files_check asserts it).
+- **Keys**: `shortcutFor` returns `quickOpen`/`palette`/`findInFiles`;
+  `useLayout(blocked, onEditorKey)` takes them in **the one capture handler**,
+  prevents the default (no print dialog) and **stops propagation** (Monaco's
+  F1 never opens its own quick command); a Ctrl+K chord's second key stays
+  Monaco's; in a terminal **Ctrl+P is readline's** (`terminalTakesKey`); under
+  a card they are swallowed, and `navBusy` refuses too. Quick open and the
+  palette are **`state.picker`** values, so push-to-talk refuses and the mic
+  claims nothing while one is open; Space types a space; a layout effect
+  closes both when a card arrives; FileTab closes its menu and prompt on
+  `blocked`. Targets: the focused File pane, else a drawn File pane on the
+  focused pane's project, else **`placeFile`** — VX-2's `openAt` rule, one
+  function for both since the lead merge: a split beside the focused pane
+  (focus stays put), else the focused pane only when it shows File or chat
+  (`mayShow`), else a sentence ("No room to open …"). **A file never replaces
+  a VEX view** (nor a terminal, Preview or Diff): with a VEX view focused,
+  Ctrl+P opens the file beside it. Quick open and the palette **close when
+  focus leaves them** (VS Code's way; `PickList`'s `onLeave`) — left open,
+  the palette's veil covered the VEX view's Download button. Neither ever
+  offers a download or a device entry (`hud_v2_vex_check`'s
+  `_ed7_beside_checks`). App talks to a File pane by
+  **`fileAsk`** (open at a line, search, palette file commands), acted on once
+  per nonce and cleared after the commit.
+- **Rename keeps the edit**: `Buffers.renamed(fromAbs, toAbs, kind)` moves the
+  buffer (same model: text, dirty, undo), rewrites every hold's path relative
+  to its own project and returns the moves; App's `onRenamed` renames the tabs
+  of every pane on the project (`renameTabs`, prefix-aware for folders) and of
+  any other pane the moves name; the model's language follows
+  (`monaco.relanguage`). A delete leaves an unsaved edit in its tab (the poll
+  says gone; Save recreates); the prompt says so first.
+- **Find in files never prefills from an env buffer** (`dotenv` model) — its
+  text goes in no request but its own save.
+- **The review of PR #53**, the rules it left. **The owner's search pattern
+  is never run by Python in the daemon** (HIGH 1: `(\w+\s?)+:` on one line
+  held the GIL 27.8 s): `search_bounded` takes every match and highlight span
+  from ripgrep's `--json` (byte offsets turned into UTF-16 columns), ripgrep
+  validates the pattern (`\p{L}` works), no ripgrep means a regex is refused
+  with a sentence and a literal is escaped text; a view's `key` makes its newer
+  search cancel its older one, and at most `MAX_SEARCHES` (4) run at once
+  (429). ripgrep's exit 2 with matches or a silent stderr is **`partial`**,
+  never a 500 (MED 3); `grep_files` keeps its own behaviour, its argv and its
+  fallback's walk order. **`Buffers.renamed` never takes a buffer's place**
+  (MED 2): a dirty one at the new name stays and the renamed buffer stays put;
+  a clean one gives way with its tabs; the explorer refuses first ("… has an
+  unsaved edit open"). The fs route uses the **whole** classifier (a project's
+  extra folders are roots; `_policy_for`'s narrowing is quick open's walk
+  only), refuses `~` names, anything in `editor_policy.jarvis_dirs()`, and a
+  rename or delete of any project's folder or an ancestor of one; Windows
+  names are judged where the path resolves. **Every change is made through
+  fds** (delta review): the project folder is opened (each component
+  `O_NOFOLLOW`, `editor_nav._Root`) **before** anything is judged, and the
+  folder `scope` judged must still be that fd's (device and inode) or 409 — a
+  project folder swapped for a link between the check and the act changes
+  nothing; below it each folder is opened `O_DIRECTORY | O_NOFOLLOW`,
+  existence and kind are read through the fds, a rename is
+  `trash.rename_noreplace` (`renameat2(RENAME_NOREPLACE)`, check-then-rename
+  where the filesystem cannot, 9p), and a delete is **`Trash.put_from`**: the
+  entry moved by (folder fd, name) into a trash whose every component is
+  opened `O_NOFOLLOW` (a trash folder that is a link refuses, nothing moves),
+  its `.trashinfo` written through the `info` fd. A second item under a
+  protected or env name goes into `jarvis-deleted[.<n>]/<name>` (never `.env.2`);
+  anything else is numbered as the spec does (`notes.txt.2`). `put` and its
+  other callers are unchanged. What is left: a delete on a Windows drive goes to
+  the Recycle Bin by path (PowerShell takes no fd), after the inode re-check.
+  Hits keep at most `search.LINE_CAP` (1,000) characters of their line, cut in
+  the core with their spans. `_project_roots` reads the safe list. A folder
+  named `.env` is a folder; the delete warning names unsaved buffers from any
+  project (matched by the project's `root_real`, #50's); a buffer the registry
+  kept in place keeps its tabs' paths (`Renamed.kept`).
+Free checks: `tests/v2/editor_nav_check.py` (39: parity on both
+backends, listing, search bounds/gitignore/never-withheld, fs refusals,
+trash, owner-only), `fuzzy.test.ts`, `commands.test.ts` (no download or
+device entry, keys), the ED-7 blocks in `state/buffers.test.ts` and
+`lib/buffers.test.ts`, and `tests/face/hud_v2_editor_nav_check.py` (82, a
+`MockDaemon(0)` of its own; `ONLY=card` runs one section; run by
+`hud_v2_check` after the editor section). Guard removals that bite: owner_only,
+the classifier refusal, the folder walk, the anchors (an install root under
+`node_modules`), rename-replaces, the env rename, unlink-for-trash, the
+listing's filter, the route's two search filters together, and in the HUD the
+card close, the key guards (both), FileTab's blocked effect.
+Not done: replace in files (cut), a "dev servers" list, symbol search (cut),
+Ctrl+PageUp/Down as keys (palette only), and a tab on the same file through
+*another* project's pane that never mounted keeps its old path.
 
 **The tree's unsaved-changes dot and file icons (2026-10-11, the owner's ask
 for the robotics lab: "like VS Code").** A dirty file's tree row wears a light
