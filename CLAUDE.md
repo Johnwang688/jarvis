@@ -1271,6 +1271,43 @@ scratch copy (the PR lists them). Open question, not done: whether `vex.py`
 and `vex_setup.py` join SELF_PROTECTED (the owner declined widening it for
 `runtime.py`).
 
+**The VEX view, VX-2 (2026-10-11; editor plan §2.9/§3; design §18; contract
+in `docs/hud-api.md`).** `View` gains `"vex"` (`components/VexView.tsx`,
+rules in `lib/vex.ts`, state outside React in `state/vex.ts`). **The strip
+offers it only when the pane's project is a VEX project** (`offersVex`: the
+settings parse, or are malformed/PROS so the view can say why; App's
+`stripProject` names the project — a chat pane's conversation's, else the
+pin, else the active chat's), and switching a pane to it **pins** it, so a
+build or download never follows the chat to another robot. Build / Rebuild
+/ Clean show ✓ or the errors list; **an error click opens the file at its
+line** (`openAt`: a drawn File pane on that project, else a split beside the
+view, else the VEX pane itself; FileTab's `goto` sets the cursor after
+PaneEditor's own model swap; an error outside the project is text). The
+build, a download and the brain terminal are VX-1's **program terminals in
+the WP-D panel** (`terminals.showProgram`; one that ended has no Restart or
+"New terminal here" — those open a shell). **Download is only a click on
+the labelled button**: `isExplicitClick` (trusted, `detail` ≥ 1, primary
+button — Enter/Space on a focused button and `el.click()` have `detail` 0),
+`tabIndex=-1`, no focus from a press; **no key and no palette entry
+downloads, and nothing else calls `vex.download`**. One click is one chain:
+pause the brain terminal if it holds the port, build first on the daemon's
+"Build first", download, reopen the brain terminal. **Under a card every VEX
+control is disabled (and inert), `vex.setBlocked` (App, above the boundary,
+beside the terminals' hold) makes the store refuse, and a card that comes up
+between the click and any step drops the rest of the chain** (a card count,
+as `ownerOpened`) — nothing builds or downloads behind it; a crash
+(`vex.crash()`) stops it too. No `vex.json`: the view names `jarvis vex
+setup` and checks again on window focus. `vex_device` records this window
+did not start are said in the view. **Known**: on a reload, a window with no
+chat drawn puts the conversation in the focused pane (WP-B's boot rule), so a
+lone VEX pane comes back as chat — keep the VEX view beside a chat. Free
+checks: `lib/vex.test.ts`, `tests/face/hud_v2_vex_check.py` (its own
+`MockDaemon(0)`; VX-1's routes in `hud_v2_mock_vex.py`, builds and downloads
+as terminal rows, their sockets played by the terminal suite's `FakePty`);
+the four safety guards (explicit click, the chain's card check, `blocked` on
+the controls, the strip's filter) each shown to fail their checks when
+removed.
+
 **The HUD's CSP and installed build, ED-4 (2026-10-11; editor plan §1.7,
 §2.7; decision C-1; contract in `docs/hud-api.md`).** Every HUD and API
 response carries the **full policy** (`hud_api.HUD_POLICY`) in WP-E's one

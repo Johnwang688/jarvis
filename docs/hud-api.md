@@ -1407,6 +1407,37 @@ unchanged; DELETE stops the program. A frame to a terminal with `input`
 false is answered `{"type": "input_refused", bytes, reason}` (a lone Ctrl-C
 still goes through). Program terminals count apart from shells: six of each.
 
+### The VEX view (VX-2, 2026-10-11)
+
+No route changed; the HUD's side of the routes above (`hud/src/api.ts`,
+`lib/vex.ts`, `state/vex.ts`, `components/VexView.tsx`):
+
+- `GET /projects/{id}/vex` is read once per project a drawn pane is about (and
+  again when the VEX view shows or the window gets focus): the strip offers the
+  `vex` view only for `vex: true`, `malformed: true` or `pros: true`.
+- The terminal row's `program` and `input` are read (`lib/terminal.ts`
+  `TerminalRow`): a program terminal's panel tab carries `data-program`, and one
+  that ended offers Close, never Restart or "New terminal here" (they open a
+  shell). A program terminal the window's own click started is listed, claimed
+  as this window's and shown as the panel's tab (`terminals.showProgram`).
+- Build: `POST …/vex/build {action}`, then `GET /vex/builds/{id}` every 0.6 s
+  to its end. The last build id per project is kept in `localStorage`
+  (`jarvis.hud.vex.builds`, ids only) so the errors list comes back after a
+  reload.
+- Download: `POST …/vex/download {slot, name}` **only from the Download
+  button, on a trusted pointer click**. A 409 whose sentence says "Build
+  first" starts a build and, when it succeeds and no approval card has come
+  up since the click, sends the download again; while the brain terminal holds
+  the port it is closed first (`DELETE /terminals/{id}`) and opened again
+  afterwards (`POST /vex/brain`). The download's end is read from the
+  terminal listing (`exited`, `exit_code`).
+- SSE `vex_device`: matched against the device actions this window started
+  (recorded before each request; 30 s); one it did not start is said in the
+  VEX view.
+- Test hooks (read-only): `window.__hudVex` (`blocked`, `cards`, `run(id)`),
+  and `__hud.monacoEditors()` rows gain `line` and `column` (where the cursor
+  is).
+
 ## Additions 2026-10-11 (BR-0 — only the HUD window approves)
 
 - **`POST /approvals/{id}` `{decision, always?}` is owner-only**

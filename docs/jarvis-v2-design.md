@@ -2310,6 +2310,41 @@ worktrees live on the Linux filesystem, so `vexbuild` builds only in a chat's
 own project folder; Codex workers may not reach interop from their sandbox.
 Contract: `docs/hud-api.md`; free suite `tests/v2/vex_check.py`.
 
+**The VEX view (2026-10-11, VX-2 of the same plan).** A pane view, `vex`,
+that the view strip offers **only when the pane's project is a VEX project**
+(its settings file parses — or is there and cannot be used, so the view can
+say why). Switching a pane to it pins the pane to that project, so choosing
+another chat never moves a build or a download to another robot; its header
+has a project picker. It shows the project's card (name, language, slot,
+SDK), Build / Rebuild / Clean with **✓ or the errors list**, Download (a slot
+picker 1–8 defaulting to the project's, a name box defaulting to the
+project's name and held to the daemon's rule), the brain terminal and device
+info. The build's output, a download's progress and the brain's user port
+are VX-1's **program terminals in the WP-D panel** (opened there for the
+click that started them; no Restart on one that ended — it would open a
+shell). **An error click opens the file at its line** through ED-2's
+buffers: a drawn File pane on that project, else a new pane beside the VEX
+view (a split, so the list stays in sight), else the VEX pane itself; an
+error outside the project (an SDK header) is text only. **Download is only a
+click on the labelled button** — "Download to slot 3: replaces whatever is in
+slot 3 on the brain" — and the button counts only a trusted pointer click
+(`lib/vex.ts` `isExplicitClick`: Enter or Space on it and a script's
+`.click()` make clicks with `detail` 0), takes no focus from a press and is
+out of the Tab order; there is no key and no palette entry. One click is one
+chain (`state/vex.ts`): the brain terminal paused when it holds the port, a
+build first when the daemon answers "Build first", the download, then the
+brain terminal again. **Under an approval card every VEX control is disabled
+and inert, and the store refuses; a card that comes up between the click and
+a step drops the rest of the chain** — nothing is built or sent behind it —
+and the view says so. With no `vex.json` the view says the one command to
+run, `jarvis vex setup`, and checks again when the window gets focus. Device
+info and every error message are drawn as text. A `vex_device` record this
+window cannot match to its own click is said in the view. Not yet: a Python
+project's download (VX-1's spike), device info until the owner records the
+flag, a "dev servers" style list of past builds (only the last build per
+project is kept, across a reload by id). Free checks: `lib/vex.test.ts`,
+`tests/face/hud_v2_vex_check.py`.
+
 **Up to eight panes (2026-10-10, WP-G1 of
 `docs/plans/2026-10-10-hud-split-panes-plan.md`; decisions beside it).** The
 owner asked for 6- and 8-pane layouts ("I'm not seeing the 6 and 8 panel
