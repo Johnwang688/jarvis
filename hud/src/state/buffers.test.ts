@@ -723,7 +723,7 @@ describe("ED-7: a rename from the explorer", () => {
     // The disk moves; then the registry is told.
     w.files.set("/w/c.py", w.files.get("/w/a.py")!);
     w.files.delete("/w/a.py");
-    const moves = b.renamed("/w/a.py", "/w/c.py", "text");
+    const { moves } = b.renamed("/w/a.py", "/w/c.py", "text");
     expect(moves.sort((x, y) => x.pane.localeCompare(y.pane))).toEqual([
       { pane: "2", from: "a.py", to: "c.py" }, { pane: "4", from: "w/a.py", to: "w/c.py" }]);
     expect(b.get("/w/a.py")).toBeNull();
@@ -753,11 +753,11 @@ describe("ED-7: a rename from the explorer", () => {
     await b.open("p1", "src/deep/y.cpp", refOf(1, "src/deep/y.cpp"));
     await b.open("p1", "a.py", refOf(1, "a.py"));
     model("/w/src/deep/y.cpp").type("!");
-    const moves = b.renamed("/w/src", "/w/lib");
+    const { moves } = b.renamed("/w/src", "/w/lib");
     expect(moves.map((x) => x.to).sort()).toEqual(["lib/deep/y.cpp", "lib/x.cpp"]);
     expect(b.get("/w/lib/deep/y.cpp")!.dirty).toBe(true);
     expect(b.get("/w/a.py")!.path).toBe("a.py");
-    expect(b.renamed("/w/srcx", "/w/q")).toEqual([]);
+    expect(b.renamed("/w/srcx", "/w/q")).toEqual({ moves: [], kept: [] });
   });
 
   it("a file renamed to an env name becomes an env file", async () => {
@@ -907,8 +907,10 @@ describe("review of PR #53, MED 2: a rename never takes a buffer's place", () =>
     w.files.delete("/w/notes.txt");
     w.files.set("/w/notes.txt", w.files.get("/w/draft.txt")!);
     w.files.delete("/w/draft.txt");
-    const moves = b.renamed("/w/draft.txt", "/w/notes.txt", "text");
-    expect(moves).toEqual([]);
+    const got = b.renamed("/w/draft.txt", "/w/notes.txt", "text");
+    expect(got.moves).toEqual([]);
+    // Its tab stays on draft.txt (the delta review's NIT): App renames nothing it holds.
+    expect(got.kept).toEqual([{ pane: "1", path: "draft.txt" }]);
     expect(b.isDirty("/w/notes.txt")).toBe(true);
     expect(b.text("/w/notes.txt")).toBe("notes\nEDIT");
     expect(b.anyDirty()).toBe(true);

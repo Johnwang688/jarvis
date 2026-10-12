@@ -240,3 +240,12 @@ describe("ED-7: renameTabs", () => {
     expect(renamedPath("srcx", "src", "lib")).toBeNull();
   });
 });
+
+describe("delta review of PR #53: a kept tab is never renamed", () => {
+  it("renameTabs leaves the paths it is told to keep", async () => {
+    const { renameTabs } = await import("./buffers");
+    const t = { paths: ["draft.txt", "x.txt"], active: "draft.txt", preview: null };
+    expect(renameTabs(t, "draft.txt", "notes.txt", new Set(["draft.txt"]))).toEqual(t);
+    expect(renameTabs(t, "draft.txt", "notes.txt").paths[0]).toBe("notes.txt");
+  });
+});

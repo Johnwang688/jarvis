@@ -202,7 +202,8 @@ export function FileTab(props: {
    * folder): every pane's tabs follow — this project's by path, and through
    * `moves` (the registry's holds) any other project reaching the same file.
    */
-  onRenamed?: (projectId: string, from: string, to: string, moves: { pane: string; from: string; to: string }[]) => void;
+  onRenamed?: (projectId: string, from: string, to: string, moves: { pane: string; from: string; to: string }[],
+               kept: { pane: string; path: string }[]) => void;
   /** The project's folder: a file read through another project is marked dirty here too. */
   root?: string | null;
 }) {
@@ -566,8 +567,9 @@ export function FileTab(props: {
         // The buffers follow first (the edit, the undo stack, every hold),
         // then every pane's tabs (App): a tab on the old name finds the same
         // buffer under the new one.
-        const moves = res.from_abs ? buffers.renamed(res.from_abs, res.abs, res.dir ? null : res.kind) : [];
-        props.onRenamed?.(pid, a.path, res.path, moves);
+        const moved = res.from_abs ? buffers.renamed(res.from_abs, res.abs, res.dir ? null : res.kind)
+          : { moves: [], kept: [] };
+        props.onRenamed?.(pid, a.path, res.path, moved.moves, moved.kept);
         setNote(`renamed to ${res.path}`);
       } else {
         const res = await api.fileOp(pid, { op: "delete", path: a.path });

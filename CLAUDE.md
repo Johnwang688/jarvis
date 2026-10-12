@@ -1714,15 +1714,28 @@ shown only under the `jarvisMayAddToChat` context key, i.e. `jarvisMayRead`).
   extra folders are roots; `_policy_for`'s narrowing is quick open's walk
   only), refuses `~` names, anything in `editor_policy.jarvis_dirs()`, and a
   rename or delete of any project's folder or an ancestor of one; Windows
-  names are judged where the path resolves; every change is made through
-  directory fds opened `O_NOFOLLOW` from the real root, a rename with
-  `renameat2(RENAME_NOREPLACE)` (check-then-rename where the filesystem cannot,
-  9p); a delete re-checks the inode through that fd, then `Trash.put_keeping_name`
-  (a second `.env` goes into `jarvis-deleted.<n>/.env`, never `.env.2`; `put`
-  and its other callers unchanged). A folder named `.env` is a folder; the
-  delete warning names unsaved buffers from any project (matched by the
-  project's `root_real`, #50's).
-Free checks: `tests/v2/editor_nav_check.py` (31: parity on both
+  names are judged where the path resolves. **Every change is made through
+  fds** (delta review): the project folder is opened (each component
+  `O_NOFOLLOW`, `editor_nav._Root`) **before** anything is judged, and the
+  folder `scope` judged must still be that fd's (device and inode) or 409 — a
+  project folder swapped for a link between the check and the act changes
+  nothing; below it each folder is opened `O_DIRECTORY | O_NOFOLLOW`,
+  existence and kind are read through the fds, a rename is
+  `trash.rename_noreplace` (`renameat2(RENAME_NOREPLACE)`, check-then-rename
+  where the filesystem cannot, 9p), and a delete is **`Trash.put_from`**: the
+  entry moved by (folder fd, name) into a trash whose every component is
+  opened `O_NOFOLLOW` (a trash folder that is a link refuses, nothing moves),
+  its `.trashinfo` written through the `info` fd. A second item under a
+  protected or env name goes into `jarvis-deleted[.<n>]/<name>` (never `.env.2`);
+  anything else is numbered as the spec does (`notes.txt.2`). `put` and its
+  other callers are unchanged. What is left: a delete on a Windows drive goes to
+  the Recycle Bin by path (PowerShell takes no fd), after the inode re-check.
+  Hits keep at most `search.LINE_CAP` (1,000) characters of their line, cut in
+  the core with their spans. `_project_roots` reads the safe list. A folder
+  named `.env` is a folder; the delete warning names unsaved buffers from any
+  project (matched by the project's `root_real`, #50's); a buffer the registry
+  kept in place keeps its tabs' paths (`Renamed.kept`).
+Free checks: `tests/v2/editor_nav_check.py` (39: parity on both
 backends, listing, search bounds/gitignore/never-withheld, fs refusals,
 trash, owner-only), `fuzzy.test.ts`, `commands.test.ts` (no download or
 device entry, keys), the ED-7 blocks in `state/buffers.test.ts` and

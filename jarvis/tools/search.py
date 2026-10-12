@@ -320,6 +320,9 @@ def _python_search(
 # its own syntax (`\p{L}`) works.
 
 RANGES_CAP = 20
+# A hit keeps at most this much of its line (a minified file's line is
+# megabytes; 2,000 such hits must not be held whole — review of PR #53).
+LINE_CAP = 1_000
 _POLL_S = 0.05
 
 
@@ -387,6 +390,12 @@ def _rg_json_hit(raw: bytes, verdicts: dict[str, bool]) -> Hit | None:
         line_bytes = line_bytes[:-1]
     if line_bytes.endswith(b"\r"):
         line_bytes = line_bytes[:-1]
+    # Cut to LINE_CAP characters: the bytes first (four per character at
+    # most, so nothing kept is lost), then the text; a span is kept only
+    # when it ends inside what is kept.
+    line_bytes = line_bytes[:4 * LINE_CAP]
+    text = line_bytes.decode("utf-8", errors="replace")[:LINE_CAP]
+    width = _utf16(text)
     spans = []
     for sub in (data.get("submatches") or [])[:RANGES_CAP]:
         start, end = (sub or {}).get("start"), (sub or {}).get("end")
@@ -394,8 +403,9 @@ def _rg_json_hit(raw: bytes, verdicts: dict[str, bool]) -> Hit | None:
             continue
         a = _utf16(line_bytes[:start].decode("utf-8", errors="replace"))
         z = a + _utf16(line_bytes[start:end].decode("utf-8", errors="replace"))
-        spans.append((a, z))
-    return Hit(path, line=number, text=line_bytes.decode("utf-8", errors="replace"), ranges=spans)
+        if z <= width:
+            spans.append((a, z))
+    return Hit(path, line=number, text=text, ranges=spans)
 
 
 @dataclass
@@ -407,7 +417,7 @@ class Found:
     cancelled: bool = False      # a newer search from the same window took over
     partial: bool = False        # ripgrep could not read some files (exit 2 with an answer)
     error: str | None = None
-    error_kind: str | None = None  # "regex" (the pattern) or "no_regex" (no ripgrep) or "other"
+    error_kind: str | None = None  # "regex" (the pattern), "glob" (the file filter), "no_regex" (no ripgrep), "other"
     backend: str = "rg"
 
 
@@ -500,7 +510,8 @@ def search_bounded(
         found.partial = True
         return found
     found.error = text[:300] or f"search failed (exit {proc.returncode})"
-    found.error_kind = "regex" if "regex parse error" in text or "error parsing" in text else "other"
+    found.error_kind = ("glob" if "error parsing glob" in text
+                        else "regex" if "regex parse error" in text or "error parsing" in text else "other")
     return found
 
 

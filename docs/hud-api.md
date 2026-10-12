@@ -1648,10 +1648,15 @@ comes from ripgrep (`--json`); the daemon never runs the pattern itself, so
 `POST …/fs` refuses (403) a `~` path, anything in Jarvis's own folders
 (`editor_policy.jarvis_dirs()`), and a rename or delete of any project's folder
 (extra folders included, archived projects too) or an ancestor of one; it acts
-through directory fds opened without following links (a link on the way is a
-403) and renames without replacing; a deleted file keeps its own name in the
-trash. The window matches an open buffer to a row by the project's
-`root_real` (#50).
+through directory fds opened without following links, from a project folder
+opened before anything is judged (a link on the way is a 403; a project folder
+that moved while it was checked is a 409), renames without replacing, and moves
+a deleted item into the trash through fds too (a trash folder reached through a
+link is a 409, and nothing moves; a path on a Windows drive goes to the Recycle
+Bin by path). A second deleted item under a protected or env name keeps its
+name in a `jarvis-deleted[.<n>]` folder; anything else is numbered
+(`notes.txt.2`). A bad file filter is a 400 that says so. The window matches an
+open buffer to a row by the project's `root_real` (#50).
 
 The window's half (`hud/src/components/QuickOpen.tsx`, `SearchView.tsx`,
 `EditorStatus.tsx`, `FileTab.tsx`'s explorer): keys and rules in CLAUDE.md's

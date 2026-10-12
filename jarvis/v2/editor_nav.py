@@ -52,7 +52,7 @@ import time
 from jarvis import config
 from jarvis.tools import files as v1_files
 from jarvis.tools.search import refused as search_refused, search_bounded
-from jarvis.tools.secrets import is_env_credential, is_env_credential_name
+from jarvis.tools.secrets import is_env_credential, is_env_credential_name, is_protected
 from . import editor_policy, folders, hud_api as H
 
 LOG = logging.getLogger(__name__)
@@ -245,15 +245,17 @@ _KEY = re.compile(r"[A-Za-z0-9_-]{1,64}")
 
 
 def _search_slot(key: str | None) -> tuple[str, threading.Event]:
-    """Register a search; a running one from the same window is cancelled."""
+    """Register a search; a running one from the same window is cancelled —
+    but only once this one is admitted (a 429 cancels nothing)."""
     ev = threading.Event()
     with _SEARCH_LOCK:
-        if key and key in _SEARCHES:
-            _SEARCHES[key].set()
-            del _SEARCHES[key]
-        running = sum(1 for e in _SEARCHES.values() if not e.is_set())
+        older = _SEARCHES.get(key) if key else None
+        running = sum(1 for k, e in _SEARCHES.items() if not e.is_set() and e is not older)
         if running >= MAX_SEARCHES:
             fail(429, "too many searches are running at once: wait for one to finish")
+        if older is not None:
+            older.set()
+            del _SEARCHES[key]
         slot = key or f"anon-{id(ev)}"
         _SEARCHES[slot] = ev
     return slot, ev
@@ -326,6 +328,8 @@ def search(project, body) -> dict:
     if found.error:
         if found.error_kind == "no_regex":
             fail(400, found.error)
+        if found.error_kind == "glob":
+            fail(400, "the file filter is not a pattern ripgrep accepts: " + found.error.splitlines()[-1][:200])
         if found.error_kind == "regex":
             fail(400, "not a regular expression ripgrep accepts: " + found.error.splitlines()[-1][:200])
         fail(500, found.error)
@@ -376,8 +380,11 @@ def _check_windows(name: str, resolved: Path) -> None:
 
 def _project_roots(daemon) -> list[Path]:
     """Every project's folders (archived ones included), resolved."""
+    from .daemon import safe_list
     out = []
-    for project in daemon.stores.projects.list():
+    # The safe list `GET /projects` uses: one corrupt record must not turn
+    # every rename and delete into a 500.
+    for project in safe_list(daemon.stores.projects):
         for root in [project.root, *getattr(project, "extra_dirs", [])]:
             try:
                 out.append(Path(root).expanduser().resolve())
@@ -467,63 +474,76 @@ def _same_but_case(a: Path, b: Path) -> bool:
 
 # -- acting through directory fds ------------------------------------------------------
 #
-# Every change is made relative to a folder opened component by component from
-# the project's real root, each `O_DIRECTORY | O_NOFOLLOW` — so a folder on
-# the way swapped for a link after the checks above cannot carry the change
-# elsewhere — and a rename never replaces (`renameat2` with RENAME_NOREPLACE;
-# where the filesystem cannot, a check just before). What remains: a delete
-# goes to `trash.Trash.put`, which moves by path, after a re-check that the
-# entry under that folder fd is the one judged (same device and inode).
+# Every change is made relative to the project folder **opened before anything
+# is judged**, and the judgement is held to it: the folder `scope` judged
+# (`Path(project.root).resolve()` at that moment) must be that fd's folder
+# (device and inode), else 409 — a project folder swapped for a link between
+# the check and the act cannot carry the act elsewhere (review of PR #53,
+# delta). Below it, each folder is opened `O_DIRECTORY | O_NOFOLLOW` from that
+# fd, existence and kind are read through the fds, a rename never replaces
+# (`trash.rename_noreplace`), and a delete moves the entry through its folder
+# fd into a trash opened component by component without following links
+# (`Trash.put_from`). What is left: a path on a Windows drive goes to the
+# Recycle Bin by path (PowerShell takes no fd), after the same inode re-check.
 
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
-_RENAME_NOREPLACE = 1
 
 
-def _open_parent(project, name: str, *, make: bool = False) -> tuple[int, str]:
-    """An fd on the folder holding `name`, and its last component. `make`
-    creates missing folders on the way (0755)."""
-    fd = os.open(os.path.realpath(Path(project.root).expanduser()), os.O_RDONLY | os.O_DIRECTORY)
-    parts = name.split("/")
-    try:
-        for part in parts[:-1]:
-            try:
-                nxt = os.open(part, _DIR_FLAGS, dir_fd=fd)
-            except FileNotFoundError:
-                if not make:
-                    raise
-                os.mkdir(part, 0o755, dir_fd=fd)
-                nxt = os.open(part, _DIR_FLAGS, dir_fd=fd)
+class _Root:
+    """The project's folder, opened once, before the judging."""
+
+    def __init__(self, project):
+        self.real = Path(os.path.realpath(Path(project.root).expanduser()))
+        try:
+            from .trash import open_dir_nofollow
+            self.fd = open_dir_nofollow(self.real)
+        except OSError:
+            fail(409, "the project folder cannot be opened")
+        st = os.fstat(self.fd)
+        self.key = (st.st_dev, st.st_ino)
+
+    def held_to(self, project) -> None:
+        """The folder judged is the folder held, still."""
+        judged = Path(project.root).expanduser().resolve()
+        try:
+            st = os.stat(judged)
+        except OSError:
+            fail(409, "the project folder moved while it was being checked: try again")
+        if judged != self.real or (st.st_dev, st.st_ino) != self.key:
+            fail(409, "the project folder moved while it was being checked: try again")
+
+    def parent(self, name: str, *, make: bool = False) -> tuple[int, str]:
+        """An fd on the folder holding `name` (relative to the project), and
+        its last component; `make` creates missing folders (0755)."""
+        fd = os.dup(self.fd)
+        parts = name.split("/")
+        try:
+            for part in parts[:-1]:
+                try:
+                    nxt = os.open(part, _DIR_FLAGS, dir_fd=fd)
+                except FileNotFoundError:
+                    if not make:
+                        raise
+                    os.mkdir(part, 0o755, dir_fd=fd)
+                    nxt = os.open(part, _DIR_FLAGS, dir_fd=fd)
+                os.close(fd)
+                fd = nxt
+        except OSError as exc:
             os.close(fd)
-            fd = nxt
-    except OSError as exc:
-        os.close(fd)
-        if exc.errno in (errno.ELOOP, errno.ENOTDIR):
-            fail(403, "refused: a folder on the way is a link or not a folder")
-        raise
-    return fd, parts[-1]
+            if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+                fail(403, "refused: a folder on the way is a link or not a folder")
+            raise
+        return fd, parts[-1]
+
+    def close(self):
+        os.close(self.fd)
 
 
-def _rename_noreplace(src_fd: int, src: str, dst_fd: int, dst: str) -> None:
-    import ctypes
+def _lstat_at(dir_fd: int, name: str):
     try:
-        libc = ctypes.CDLL(None, use_errno=True)
-        fn = libc.renameat2
-    except (OSError, AttributeError):
-        fn = None
-    if fn is not None:
-        rc = fn(src_fd, os.fsencode(src), dst_fd, os.fsencode(dst), _RENAME_NOREPLACE)
-        if rc == 0:
-            return
-        err = ctypes.get_errno()
-        if err not in (errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP):
-            raise OSError(err, os.strerror(err))
-    # The filesystem cannot refuse to replace (9p on /mnt/c): check, then act.
-    try:
-        os.stat(dst, dir_fd=dst_fd, follow_symlinks=False)
+        return os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
     except FileNotFoundError:
-        os.rename(src, dst, src_dir_fd=src_fd, dst_dir_fd=dst_fd)
-        return
-    raise FileExistsError(errno.EEXIST, "exists")
+        return None
 
 
 def fs(daemon, project, body):
@@ -544,7 +564,11 @@ def fs(daemon, project, body):
     daemon._active()
     try:
         with _FS_LOCK:
-            result = _fs_locked(daemon, project, policy, op, name, body.get("to"))
+            root = _Root(project)
+            try:
+                result = _fs_locked(daemon, project, root, policy, op, name, body.get("to"))
+            finally:
+                root.close()
     except PermissionError as exc:
         fail(403, f"the filesystem refused it ({type(exc).__name__})")
     except OSError as exc:
@@ -552,6 +576,8 @@ def fs(daemon, project, body):
             fail(409, "something is already there")
         if exc.errno == errno.ENOENT:
             fail(404, "nothing is there")
+        if exc.errno in (errno.ELOOP,):
+            fail(403, "refused: a link where a file or folder was checked")
         if exc.errno in (errno.EINVAL, errno.EXDEV, errno.ENOTDIR, errno.EISDIR):
             fail(400, f"that cannot be done here ({errno.errorcode.get(exc.errno, 'error')})")
         fail(500, f"the filesystem said no ({type(exc).__name__})")
@@ -559,17 +585,22 @@ def fs(daemon, project, body):
     return 200, result
 
 
-def _fs_locked(daemon, project, policy, op, name, to):
+def _fs_locked(daemon, project, root, policy, op, name, to):
     moves = op in ("rename", "delete")
     raw, resolved, verdict = _judge(daemon, project, policy, name, moves=moves)
+    to_raw = to_resolved = to_verdict = None
+    if op == "rename":
+        to_raw, to_resolved, to_verdict = _judge(daemon, project, policy, to, moves=True)
+    root.held_to(project)
+
     if op in ("new_file", "new_folder"):
-        if os.path.lexists(raw):
-            fail(409, "something is already there")
-        pfd, last = _open_parent(project, name, make=True)
+        pfd, last = root.parent(name, make=True)
         try:
+            if _lstat_at(pfd, last) is not None:
+                fail(409, "something is already there")
             if op == "new_folder":
                 os.mkdir(last, 0o755, dir_fd=pfd)
-                return {"ok": True, "op": op, "path": name, "abs": str(raw.resolve())}
+                return {"ok": True, "op": op, "path": name, "abs": str(resolved)}
             mode = 0o600 if verdict.kind == editor_policy.ENV else 0o644
             fd = os.open(last, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode, dir_fd=pfd)
             try:
@@ -578,64 +609,72 @@ def _fs_locked(daemon, project, policy, op, name, to):
                 os.close(fd)
         finally:
             os.close(pfd)
-        made = editor_policy.Policy().classify(raw, raw.resolve())
-        return {"ok": True, "op": op, "path": name, "abs": str(raw.resolve()), "kind": made.kind}
+        made = editor_policy.Policy().classify(raw, resolved)
+        return {"ok": True, "op": op, "path": name, "abs": str(resolved), "kind": made.kind}
 
-    if not os.path.lexists(raw):
-        fail(404, "nothing is there")
-    is_dir = raw.is_dir() and not raw.is_symlink()
-    # A folder named like an env file (a virtualenv's `.env`) is a folder:
-    # the env kind is for files only (ED-2's rule).
-    env_file = verdict.kind == editor_policy.ENV and not is_dir
-    if is_dir:
-        why = _holds_protected(daemon, raw, resolved, policy)
-        if why:
-            fail(403, "refused: " + why)
-
-    if op == "delete":
-        from . import trash as _trash
-        pfd, last = _open_parent(project, name)
-        try:
-            judged = os.lstat(raw)
-            now = os.stat(last, dir_fd=pfd, follow_symlinks=False)
-        finally:
-            os.close(pfd)
-        if (judged.st_dev, judged.st_ino) != (now.st_dev, now.st_ino):
-            fail(409, "it changed while it was being checked: try again")
-        bin_ = _trash.Trash(Path(project.root), recycle=daemon.trash.recycle, is_windows=daemon.trash.is_windows)
-        try:
-            where = bin_.put_keeping_name(Path(os.path.abspath(raw)))
-        except _trash.TrashError as exc:
-            fail(409, f"not moved to the trash: {exc}")
-        return {"ok": True, "op": op, "path": name, "abs": str(resolved), "dir": is_dir,
-                "trash": {"where": where.get("where"), "location": where.get("location")}}
-
-    # rename (or move)
-    to_raw, to_resolved, to_verdict = _judge(daemon, project, policy, to, moves=True)
-    if os.path.lexists(to_raw) and not _same_but_case(raw, to_raw):
-        fail(409, f"{to} already exists: a rename never replaces anything")
-    if not to_raw.parent.is_dir():
-        fail(400, "the folder it would go into is not there")
-    if _under(to_resolved, resolved):
-        fail(400, "a folder cannot go inside itself")
-    if env_file and to_verdict.kind != editor_policy.ENV:
-        fail(403, "an env file keeps an env name here: renamed to one Jarvis can read, its "
-                  "credentials would be his to read. Rename it in your own shell if you mean that.")
-    sfd, slast = _open_parent(project, name)
+    pfd, last = root.parent(name)
     try:
-        dfd, dlast = _open_parent(project, to)
+        st = _lstat_at(pfd, last)
+        if st is None:
+            fail(404, "nothing is there")
+        is_dir = _stat.S_ISDIR(st.st_mode)
+        # A folder named like an env file (a virtualenv's `.env`) is a folder:
+        # the env kind is for files only (ED-2's rule).
+        env_file = verdict.kind == editor_policy.ENV and not is_dir
+        if is_dir:
+            why = _holds_protected(daemon, raw, resolved, policy)
+            if why:
+                fail(403, "refused: " + why)
+        # The entry under the held folder is the one the path judged.
+        judged = os.lstat(raw)
+        if (judged.st_dev, judged.st_ino) != (st.st_dev, st.st_ino):
+            fail(409, "it changed while it was being checked: try again")
+
+        if op == "delete":
+            from . import trash as _trash
+            bin_ = _trash.Trash(Path(project.root), recycle=daemon.trash.recycle,
+                                is_windows=daemon.trash.is_windows)
+            original = Path(os.path.abspath(raw))
+            try:
+                if bin_.is_windows(original):
+                    where = bin_.put(original)  # the Recycle Bin takes a path (see the section note)
+                else:
+                    # A second item under a protected name keeps its name in a
+                    # folder of its own; anything else is numbered as the spec does.
+                    wrap = is_env_credential_name(last) or is_protected(last)
+                    where = bin_.put_from(pfd, last, original, wrap=wrap)
+            except _trash.TrashError as exc:
+                fail(409, f"not moved to the trash: {exc}")
+            return {"ok": True, "op": op, "path": name, "abs": str(resolved), "dir": is_dir,
+                    "trash": {"where": where.get("where"), "location": where.get("location")}}
+
+        # rename (or move)
+        if _under(to_resolved, resolved):
+            fail(400, "a folder cannot go inside itself")
+        if env_file and to_verdict.kind != editor_policy.ENV:
+            fail(403, "an env file keeps an env name here: renamed to one Jarvis can read, its "
+                      "credentials would be his to read. Rename it in your own shell if you mean that.")
         try:
-            if _same_but_case(raw, to_raw):
-                os.rename(slast, dlast, src_dir_fd=sfd, dst_dir_fd=dfd)
+            dfd, dlast = root.parent(to)
+        except FileNotFoundError:
+            fail(400, "the folder it would go into is not there")
+        try:
+            there = _lstat_at(dfd, dlast)
+            same = there is not None and (there.st_dev, there.st_ino) == (st.st_dev, st.st_ino)
+            if there is not None and not (same and _same_but_case(raw, to_raw)):
+                fail(409, f"{to} already exists: a rename never replaces anything")
+            if same:
+                os.rename(last, dlast, src_dir_fd=pfd, dst_dir_fd=dfd)  # case only, a Windows drive
             else:
-                _rename_noreplace(sfd, slast, dfd, dlast)
+                from .trash import rename_noreplace
+                rename_noreplace(pfd, last, dfd, dlast)
         finally:
             os.close(dfd)
     finally:
-        os.close(sfd)
-    after = editor_policy.Policy().classify(to_raw, to_raw.resolve())
+        os.close(pfd)
+    after = editor_policy.Policy().classify(to_raw, to_resolved)
     kind = after.kind if not is_dir or after.kind != editor_policy.ENV else editor_policy.TEXT
-    return {"ok": True, "op": op, "path": to, "from": name, "abs": str(to_raw.resolve()),
+    return {"ok": True, "op": op, "path": to, "from": name, "abs": str(to_resolved),
             "from_abs": str(resolved), "dir": is_dir, "kind": kind}
 
 

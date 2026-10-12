@@ -170,6 +170,16 @@ export interface BufferView {
 export type SaveOutcome = "saved" | "conflict" | "error" | "skipped";
 
 /**
+ * What a rename did to the holds (`Buffers.renamed`): each tab's path that
+ * moved, and the tabs of a buffer that stayed where it was (an unsaved edit
+ * already at the new name) — those tabs must not be renamed.
+ */
+export interface Renamed {
+  moves: { pane: string; from: string; to: string }[];
+  kept: { pane: string; path: string }[];
+}
+
+/**
  * A UTF-8 byte-order mark is the file's, not the text's: it is kept off the
  * model (Monaco would drop it from `getValue()` and a reload would type it in
  * as a character) and put back on save when the file had one.
@@ -510,9 +520,10 @@ export class Buffers {
    * relative paths). `kind` is the renamed file's new kind (a file renamed to
    * `.env.local` becomes an env file: the lock, Add to chat closed).
    */
-  renamed(fromAbs: string, toAbs: string, kind?: string | null): { pane: string; from: string; to: string }[] {
+  renamed(fromAbs: string, toAbs: string, kind?: string | null): Renamed {
     const moves: { pane: string; from: string; to: string }[] = [];
-    if (!fromAbs || !toAbs || fromAbs === toAbs) return moves;
+    const kept: { pane: string; path: string }[] = [];
+    if (!fromAbs || !toAbs || fromAbs === toAbs) return { moves, kept };
     const follow = (abs: string, rel: string, newAbs: string): string => {
       // `rel` is relative to a root that `abs` ends in; the same root, after.
       if (!abs.endsWith(`/${rel}`)) return rel;
@@ -534,7 +545,11 @@ export class Buffers {
       const there = this.bufs.get(newAbs);
       let inherited: string[] = [];
       if (there && there !== buf) {
-        if (this.dirtyOf(there)) continue;
+        if (this.dirtyOf(there)) {
+          // This buffer stays where it was, and so do its tabs (App reads `kept`).
+          for (const r of buf.refs) kept.push({ pane: paneOfRef(r), path: r.slice(paneOfRef(r).length + 1) });
+          continue;
+        }
         inherited = [...there.refs];
         this.drop(there);
       }
@@ -561,7 +576,7 @@ export class Buffers {
       if (buf.model) this.deps?.relanguage?.(buf.model, newAbs, buf.kind);
     }
     if (moves.length || this.bufs.has(toAbs)) this.emit();
-    return moves;
+    return { moves, kept };
   }
 
   // ---- saving ----------------------------------------------------------------

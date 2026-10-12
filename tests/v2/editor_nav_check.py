@@ -506,10 +506,60 @@ class ReviewSearch(Nav):
         finally:
             for s_, e_ in held:
                 N._search_done(s_, e_)
+
+    def test_low5_a_cancelled_search_stops_at_once(self):
+        """ripgrep blocked on a FIFO no one writes: only the cancel ends it
+        before the deadline (delta review of PR #53: the old check could not
+        fail)."""
+        if not shutil.which("rg"):
+            self.skipTest("ripgrep is not installed")
+        fifo = self.proj / "pipe"
+        os.mkfifo(fifo)
         cancel = threading.Event()
-        cancel.set()
-        found = S.search_bounded("x", self.proj, cancel=cancel)
-        self.assertTrue(found.cancelled or not found.hits)
+        threading.Timer(0.3, cancel.set).start()
+        start = time.monotonic()
+        found = S.search_bounded("x", fifo, cancel=cancel, timeout=8.0)
+        elapsed = time.monotonic() - start
+        self.assertTrue(found.cancelled, found)
+        self.assertFalse(found.timed_out)
+        self.assertLess(elapsed, 2.0)
+
+    def test_nit_a_429_cancels_nothing(self):
+        held = [N._search_slot(f"k{i}") for i in range(N.MAX_SEARCHES)]
+        try:
+            with self.assertRaises(Exception) as caught:
+                N._search_slot("k0x")
+            self.assertEqual(getattr(caught.exception, "status", None), 429)
+            # the same window's newer search replaces its older one, at the cap too
+            slot, ev = N._search_slot("k0")
+            self.assertTrue(held[0][1].is_set())
+            held[0] = (slot, ev)
+            # a refused one cancels nothing
+            refused_older = held[1][1]
+            with self.assertRaises(Exception):
+                N._search_slot("other-window")
+            self.assertFalse(refused_older.is_set())
+        finally:
+            for s_, e_ in held:
+                N._search_done(s_, e_)
+
+    def test_low6_a_hit_keeps_a_bounded_line(self):
+        if not shutil.which("rg"):
+            self.skipTest("ripgrep is not installed")
+        (self.proj / "min.js").write_text("é" * 3000 + "needle" + "x" * 500_000 + "\n", encoding="utf-8")
+        (self.proj / "short.js").write_text("ab needle\n")
+        found = S.search_bounded("needle", self.proj)
+        by = {Path(h.path).name: h for h in found.hits}
+        self.assertLessEqual(len(by["min.js"].text), S.LINE_CAP)
+        self.assertEqual(by["min.js"].ranges, [])           # its match lies past the cut
+        self.assertEqual(by["short.js"].ranges, [(3, 9)])
+
+    def test_nit_a_bad_file_filter_is_said(self):
+        if not shutil.which("rg"):
+            self.skipTest("ripgrep is not installed")
+        (self.proj / "a.txt").write_text("x\n")
+        got = self.search(url=self.url2, query="x", glob="[", status=400)
+        self.assertIn("file filter", json.dumps(got))
 
     def test_med3_an_unreadable_file_is_a_partial_result(self):
         if not shutil.which("rg") or os.geteuid() == 0:
@@ -582,13 +632,87 @@ class ReviewFs(Nav):
         for n in (1, 2):
             (self.home / "app" / ".env.local").write_text(f"K=fake-{n}\n")
             self.fs("delete", "app/.env.local")
+            (self.home / "app" / "notes.txt").write_text(f"n{n}\n")
+            self.fs("delete", "app/notes.txt")
         names = sorted(p.relative_to(trash / "files").as_posix() for p in (trash / "files").rglob("*") if p.is_file())
-        self.assertEqual(names, [".env.local", "jarvis-deleted/.env.local"])
-        self.assertFalse(any(".env.local." in n for n in names))
+        # a protected name keeps it in a folder of its own; anything else is numbered (delta review, LOW 4)
+        self.assertEqual(names, [".env.local", "jarvis-deleted/.env.local", "notes.txt", "notes.txt.2"])
         info = (trash / "info" / "jarvis-deleted.trashinfo").read_text()
         self.assertIn("Path=" + str(self.home / "app" / ".env.local"), info)
+        self.assertIn("Path=" + str(self.home / "app" / "notes.txt"),
+                      (trash / "info" / "notes.txt.2.trashinfo").read_text())
+
+    def _swap_after_judge(self, project_dir: Path, target: Path, calls: int):
+        """Swap `project_dir` for a link to `target` right after the `calls`-th
+        judgement: the race between the check and the act."""
+        real = N._judge
+        seen = {"n": 0}
+
+        def judge(*a, **kw):
+            out = real(*a, **kw)
+            seen["n"] += 1
+            if seen["n"] == calls:
+                project_dir.rename(project_dir.with_name(project_dir.name + ".real"))
+                project_dir.symlink_to(target)
+            return out
+        return patch.object(N, "_judge", judge)
+
+    def test_low1_a_project_folder_swapped_after_the_check(self):
+        ssh = self.home / ".ssh"
+        for op, path, to, calls in (("rename", "id_test", "moved.txt", 2), ("delete", "id_test", None, 1),
+                                    ("new_file", "planted.txt", None, 1)):
+            with self.subTest(op=op):
+                proj = self.home / f"swap-{op}"
+                proj.mkdir()
+                (proj / "id_test").write_text("project's own\n")
+                url = self.project_at(proj, f"Swap {op}")
+                with self._swap_after_judge(proj, ssh, calls):
+                    self.fs(op, path, to, status=409, url=url)
+                self.assertTrue((ssh / "id_test").exists())
+                self.assertFalse((ssh / "moved.txt").exists() or (ssh / "planted.txt").exists())
+
+    def test_low2_the_move_to_the_trash_goes_through_the_judged_folder(self):
+        ssh = self.home / ".ssh"
+        proj = self.home / "swap-trash"
+        proj.mkdir()
+        (proj / "id_test").write_text("project's own\n")
+        url = self.project_at(proj, "Swap trash")
+        from jarvis.v2 import trash as T
+        originals = {name: getattr(T.Trash, name) for name in ("put_from", "put_keeping_name", "put")
+                     if hasattr(T.Trash, name)}
+
+        def swapping(name):
+            def run(self_, *a, **kw):
+                if not (proj.is_symlink()):
+                    proj.rename(proj.with_name("swap-trash.real"))
+                    proj.symlink_to(ssh)
+                return originals[name](self_, *a, **kw)
+            return run
+        with patch.multiple(T.Trash, **{n: swapping(n) for n in originals}):
+            self.fs("delete", "id_test", url=url)
+        self.assertTrue((ssh / "id_test").exists(), "the decoy was moved to the trash")
+        self.assertFalse((self.home / "swap-trash.real" / "id_test").exists())
+
+    def test_low3_a_trash_folder_that_is_a_link(self):
+        trash = self.root / "xdg" / "Trash"
+        trash.mkdir(parents=True)
+        cj = self.home / ".config" / "jarvis"
+        (trash / "files").symlink_to(cj)
+        (self.home / "app" / "provider_defaults.json").write_text('{"planted": true}')
+        self.fs("delete", "app/provider_defaults.json", status=409)
+        self.assertFalse((cj / "provider_defaults.json").exists())
+        self.assertTrue((self.home / "app" / "provider_defaults.json").exists())
+
+    def test_nit_a_corrupt_project_record_breaks_nothing(self):
+        (Path(self.daemon.stores.projects.root) / "deadbeef.json").write_text("{not json")
+        with self.assertRaises(Exception):
+            self.daemon.stores.projects.list()  # the strict list does trip on it
+        (self.home / "app" / "ok.txt").write_text("ok\n")
+        self.fs("rename", "app/ok.txt", "app/ok2.txt")
+        self.fs("delete", "app/ok2.txt")
 
     def test_low5_a_folder_on_the_way_is_never_followed(self):
+        from jarvis.v2 import trash as T
         (self.home / "inner").symlink_to(self.home / "app")
         self.fs("rename", "inner/main.py", "app/moved.py", status=403)
         self.fs("new_file", "inner/x.py", status=403)
@@ -599,7 +723,7 @@ class ReviewFs(Nav):
             (self.home / "app" / "one").write_text("1")
             (self.home / "app" / "two").write_text("2")
             with self.assertRaises(FileExistsError):
-                N._rename_noreplace(a, "one", a, "two")
+                T.rename_noreplace(a, "one", a, "two")
         finally:
             os.close(a)
         self.assertEqual((self.home / "app" / "two").read_text(), "2")

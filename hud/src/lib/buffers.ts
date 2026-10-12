@@ -130,8 +130,9 @@ export function renamedPath(path: string, from: string, to: string): string | nu
  * A pane's tabs after the explorer renamed or moved `from` to `to` (a file or
  * a folder): each tab on it follows, in place, still active or preview.
  */
-export function renameTabs(t: Tabs, from: string, to: string): Tabs {
-  const map = (p: string | null) => (p === null ? null : renamedPath(p, from, to) ?? p);
+export function renameTabs(t: Tabs, from: string, to: string, keep?: ReadonlySet<string>): Tabs {
+  // `keep`: tabs whose buffer did not move (the registry kept it): never renamed.
+  const map = (p: string | null) => (p === null || keep?.has(p) ? p : renamedPath(p, from, to) ?? p);
   const paths = t.paths.map((p) => map(p)!);
   // Two tabs on one path after a rename cannot happen (a rename never lands
   // on something that exists); should one, the first is kept.

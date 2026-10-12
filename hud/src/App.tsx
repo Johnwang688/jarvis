@@ -1248,14 +1248,18 @@ export default function App() {
    * holds — so an open tab keeps its edit under the new name.
    */
   const onRenamed = useCallback((projectId: string, from: string, to: string,
-                                 moves: { pane: string; from: string; to: string }[]) => {
+                                 moves: { pane: string; from: string; to: string }[],
+                                 kept: { pane: string; path: string }[] = []) => {
     const { ws } = layoutNow.current;
     for (const n of PANE_NOS) {
       const spec = ws.panes[n - 1];
       const tabs = spec.editors;
       if (!tabs || !spec.projectId) continue;
       let next = tabs;
-      if (spec.projectId === projectId) next = renameTabs(next, from, to);
+      // A tab whose buffer the registry kept in place (an unsaved edit
+      // already at the new name) keeps its path.
+      const keep = new Set(kept.filter((k) => k.pane === String(n)).map((k) => k.path));
+      if (spec.projectId === projectId) next = renameTabs(next, from, to, keep);
       else for (const m of moves) if (m.pane === String(n)) next = renameTabs(next, m.from, m.to);
       if (!sameTabs(next, tabs)) view.setEditors(n, spec.projectId, next);
     }
