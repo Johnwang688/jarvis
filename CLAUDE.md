@@ -2283,6 +2283,84 @@ now reads spans only after the worker has answered for the file, and
 accepts `"vex.h"` as one string and `@property` as `@` + `property`.
 Not yet: ED-6's folding from `folds.scm`.
 
+**The git gutter and the explorer's git colours, ED-9 (2026-10-12; plan §2.5,
+§2.8, the ED-9 package in §3; design §18; contract in `docs/hud-api.md`).**
+Two routes in `jarvis/v2/editor_git.py`, **owner-only before anything else**
+(`hud_api.route` calls `owner_only` before the project is even looked up, so
+a bare request or the API listener is 403 whatever the id). `GET
+…/git/base?path=` answers HEAD's text; **the path is judged before git
+runs** — the gate's state (resolved or as configured), anything
+`editor_policy` withholds (`withheld_anywhere`: no gate exemption) and every
+credential env file are 403 (`editor_git.refused`) — **and so is the name in
+git**: a staged rename or copy's source (`diff-index --cached -M HEAD`) is
+judged the same way, because `git mv .env notes.txt` would otherwise serve
+`.env`'s committed text as `notes.txt`'s. HEAD's blob is read **by object
+id** (`cat-file blob`: no textconv, filter or eol attribute applies), its size
+read first from `ls-tree -l` and capped at the editor's 2 MiB; a NUL or
+non-UTF-8 blob is `binary` (no gutter); a file HEAD lacks is `new` (no
+gutter, untracked and added alike — the explorer's colour says which). `GET
+…/git/status` is `git status --porcelain=v2 -z … --ignored=traditional
+--renames --ignore-submodules=all -- .`, project-relative, **judged before it
+is returned** (SKIP_DIRS, withheld and the gate's state dropped, lexically: a
+status is names only, and a rename's source is never returned), cached 2 s
+per root (refusals too), single-flight, 20,000 entries and 5 s at most.
+**Git only through `gitops._git`, and a repository whose own config names a
+program is refused by both** (`gitops._risky_config`). **`--ignore-submodules=all`
+is load-bearing**: `_risky_config` reads the superproject's config only, and
+a status that recurses runs `git status` inside the submodule, which obeys
+*its* config — measured: a submodule's `filter.x.clean` ran on a superproject
+status through `gitops._git` (a same-size, mtime-moved file forces the
+hash). **The same hole is open in the `git` tool** (`gitops.run(path,
+["status"])` and `["diff"]` each ran a submodule's filter, measured in-process;
+`gitops.py` is SELF_PROTECTED: reported, not fixed here). A base read inside a submodule is refused anyway
+(its config sets `core.worktree`). The owner's global config (a git-lfs
+filter) still runs on a status, as in gitops. **The window**:
+`lib/linediff.ts` is Myers in linear space (middle snake, explicit stack, never
+recursion), lines interned to ints, **bounded by a work budget**
+(`DIFF_BUDGET` 2M steps, about 1,400 changed lines exact): past it the rest of
+a run is one coarse "modified" block, still a correct diff (`exact: false`);
+two runs with no line in common are an exact replace. `gutterMarks`: inserted
+runs `added`, replaced runs `modified` over the lines standing now, removed
+runs a `deleted` wedge at the foot of the line above (the head of line 1).
+`state/gitGutter.ts`: **one gutter per buffer (`abs`)**, the diff against the
+**model's lines, never the disk**, `DEBOUNCE_MS` 150 (500 past 5,000 lines)
+after the last change — so a pause, not a keystroke, reads the lines (the
+ED-2 rule bends this far and no further) — no gutter past 100,000 lines;
+HEAD's text read again **only when the status poll's `head` moves**; a late
+answer for a closed gutter is dropped. `PaneEditor` draws the marks in its
+own `createDecorationsCollection` (linesDecorationsClassName `jgit-add`,
+`-mod`, `-del`, `-top`; theme.css draws a 3px bar in `--syn-string` /
+`--syn-fn` and a `--red` wedge at 60%, ED-3's "removed"; no Monaco colour
+key — `editorGutter.*` is not registered in Monaco 0.57). **FileTab asks for
+a gutter only on a `text` or `safety` buffer** — never env, withheld, gate or
+binary — through the project the buffer was read through.
+`state/gitStatus.ts` polls each watched project every 3 s while visible (and
+on focus), one request at a time, and **bumps only when the answer
+changes**; a 403/404 is kept as `error` and asked again after 30 s. The tree:
+`useGitMarks` (`components/GitMarks.tsx`) hands the memoised `Node` a
+`GitMarks` built from a string key (`lib/gitMarks.ts` `gitKey`), so #50's
+rule holds — no redraw per keystroke or per unchanged poll; a row carries
+`data-git` and a tooltip, the name modified `--syn-fn`, added/renamed/
+untracked `--syn-string`, conflict `--syn-const`, ignored at 50% opacity; a
+folder wears what git reported for it whole, else the strongest state under
+it (conflict > modified/deleted > added/renamed > untracked; ignored never
+colours a folder). The mock serves `world["git"]` (`git_route`; no key: not a
+repository). Free checks: `tests/v2/editor_git_check.py` (25; owner-only with
+no git run when refused, the states, every refusal including renames from
+`.env`, a withheld file and the gate's state, a repository-config filter and a
+submodule's that never run, the status's states, judging, cache and cap),
+`linediff.test.ts` (3,000 random pairs against an O(NM) LCS reference:
+correct and minimal; budgets; a 50k-line file), `gitMarks.test.ts`,
+`gitGutter.test.ts` (debounce, one read per pause, undo to clean, refetch on
+HEAD only, the poll's bumps and back-off) and `tests/face/hud_v2_git_check.py`
+(a `MockDaemon(0)` of its own, after the marks section of `hud_v2_check`: an
+added bar on an unsaved line and clean again on undo, modified and the wedge
+in their tokens, HEAD moving, an env file asking nothing, the explorer's
+colours and a recolour on the poll, a MutationObserver seeing no tree change
+while typing). Shown to bite in a scratch copy (7 of 7): the path's refusal,
+the name in git, the status's and the base's config check, the submodule
+flag (the filter ran), the status's judging, and `owner_only`.
+
 **The effort is a slider, not pills (2026-10-10, owner's ask: "like Claude's").**
 `components/EffortSlider.tsx`, rules in `lib/effortSlider.ts`: "Effort
 <level> · default (?)", Faster … Smarter, a dot per stop, a tick with
