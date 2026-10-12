@@ -1665,7 +1665,13 @@ fail all nine of theirs: the prefilter removed (another host's URLs spend the
 budget, so an announcement among them is missed), the prefilter and the
 budget removed (both speed checks), a prefilter too strict (no bracketed
 hosts; no `token=`: the differential), recorded before the send, the host
-sent as printed, and the empty setting read as `.`.
+sent as printed, and the empty setting read as `.`. The reconciliation with
+BR-1a's six fail theirs (`devurl_check`'s `test_one_reader_one_writer` and
+`terminal_check`'s `test_one_set_of_switches_for_every_reader`): a second
+definition of the path in `config.py`, a second reader in `host.py` (the
+gate's `local_servers` from the file), a second writer in `routes.py`, a host
+keeping a `BrowserSettings` of its own, the daemon's constructor reading the
+owner's file, and the empty setting read as `.` on the merged definition.
 
 **The Browser's pure HUD modules, BR-2 (2026-10-12; browser plan
 `docs/plans/2026-10-10-hud-browser-plan.md` §2, §5, §8, §9, §11; amendment 1
