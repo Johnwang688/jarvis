@@ -10,8 +10,8 @@ string; URLs travel only in JSON bodies, and nothing a route answers with a
 refusal ever contains one.
 
     GET    /browser                          state: running, profiles, tabs, settings
-    GET    /browser/settings                 {lan, local_servers}
-    PATCH  /browser/settings                 {lan?, local_servers?}  (browser.json, protected)
+    GET    /browser/settings                 {lan, local_servers, auto_open}
+    PATCH  /browser/settings                 {lan?, local_servers?, auto_open?}  (browser.json, protected)
     GET    /browser/tabs                     [{tab_id, profile, ctx, url, title}]
     POST   /browser/tabs                     {profile?, ctx?, url?} -> 201 {tab_id, ...}
     DELETE /browser/tabs/<id>
@@ -27,14 +27,23 @@ neither does auto-open (amendment 2, L2): it loads only in a Direct frame, and
 a loopback port opens to the Remote browser only through the owner's own
 navigation.
 
+The settings are the daemon's `BrowserSettings` (`settings.py`, the one
+reader and writer of `browser.json`): any non-empty subset of the switches,
+each a boolean; an unknown field is counted, never echoed.
+
 The stream, input, dialogs, downloads and the tab strip are BR-1b's; profile
 management is BR-1c's.
 """
 
 from __future__ import annotations
 
-from .host import BrowserRefused, load_settings, save_settings
+import logging
+
+from .host import BrowserRefused
 from .policy import URLRefused
+from .settings import DEFAULTS as SETTINGS
+
+LOG = logging.getLogger(__name__)
 
 
 def _fail(status: int, text: str):
@@ -60,18 +69,28 @@ def route(handler, daemon, parts, query):
     _strict_host(handler, daemon)
     _object(query, ())
     host = daemon.browser
+    settings = daemon.browser_settings
     method = handler.command
     try:
         if parts == ["browser"] and method == "GET":
-            return 200, {**host.status(), "profiles": host.profiles(), "settings": load_settings()}
+            return 200, {**host.status(), "profiles": host.profiles(), "settings": settings.snapshot()}
         if parts == ["browser", "settings"]:
             if method == "GET":
-                return 200, load_settings()
+                return 200, settings.snapshot()
             if method == "PATCH":
-                body = _object(handler._body(), ("lan", "local_servers"))
+                body = _object(handler._body(), tuple(SETTINGS))
                 if not body:
-                    _fail(400, "missing fields: lan or local_servers")
-                return 200, save_settings(body)
+                    _fail(400, "missing fields: " + " or ".join(SETTINGS))
+                try:
+                    values = settings.update(**body)
+                except ValueError as refusal:
+                    _fail(400, str(refusal))
+                except OSError as exc:
+                    LOG.warning("browser settings not saved (%s)", type(exc).__name__)
+                    _fail(500, "the Browser settings could not be saved")
+                LOG.info("browser settings changed by the owner: %s",
+                         ", ".join(f"{k} {'on' if v else 'off'}" for k, v in sorted(body.items())))
+                return 200, values
         # `owner=True` below is the owner's own navigation (this route is the
         # owner's only): it opens the URL's loopback port in the gate, as
         # nothing a page or an agent does ever can (MED 2 of PR #69's review).
