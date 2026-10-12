@@ -31,6 +31,7 @@ use-but-never-see credential bundles — `google_token.json` (Gmail),
 from __future__ import annotations
 
 import json
+import os
 import re
 from fnmatch import fnmatch
 from pathlib import Path, PurePosixPath
@@ -71,6 +72,79 @@ def refusal(name: str) -> str:
 def is_protected(path: str | Path) -> bool:
     """True if `path` points at a `.env` or `.env.local`, at any depth."""
     return PurePosixPath(str(path)).name in PROTECTED_NAMES
+
+
+# --- credential env files (2026-10-11) ---------------------------------------
+#
+# The owner: "I need to be able to edit .env* files in the hud but Jarvis
+# should never be able to read them", and Jarvis may write only the ones whose
+# name ends in `.example` (docs/plans/2026-10-11-env-files.md). So a
+# **credential env file** is any file named `.env` or `.env.<anything>`, at any
+# depth, except a name ending in `.example`: `.env`, `.env.local`,
+# `.env.production`, `.env.development.local` and `.env.prod.bak` are
+# credential; `.env.example` and `.env.local.example` are not; nor are
+# `.envrc` or `myapp.env`, which are not `.env` or `.env.<anything>`.
+#
+# **This is the one definition.** The HUD's editor (owner-editable, owner-only
+# routes) and every refusal on Jarvis's side ask it; nothing keeps a copy,
+# because two copies of a rule drift and the looser one decides.
+#
+# Case-insensitive, because Windows drives are (`/mnt/c/…/.ENV.Production` is
+# the same file as `.env.production` there), and stricter that way everywhere
+# else. A name Windows would trim (trailing dots or spaces: `.env ` is `.env`
+# on NTFS) is judged both as written and as trimmed, and is credential if
+# either is.
+_ENV_NAME = re.compile(r"\.env(?:\..*)?", re.IGNORECASE | re.DOTALL)
+
+
+def is_env_credential_name(name: str) -> bool:
+    """The name rule alone, on one file name: no directory, no filesystem.
+
+    For names that are not paths on this machine (an attachment's name).
+    `is_env_credential` is the one to ask about a path."""
+    if not isinstance(name, str) or not name:
+        return False
+    for candidate in {name, name.rstrip(" .")}:
+        folded = candidate.casefold()
+        if _ENV_NAME.fullmatch(folded) and not folded.endswith(".example"):
+            return True
+    return False
+
+
+_SYMLINK_HOPS = 40
+
+
+def is_env_credential(path: str | Path) -> bool:
+    """True if `path` is a credential env file (see above), by its own name,
+    the name of every symlink its last component passes through, or the name
+    of the file it finally resolves to.
+
+    Symlinks are resolved both ways: a symlink named `.env.example` that
+    points at `.env` is credential (the bytes it reaches are), and a symlink
+    named `.env` is credential whatever it points at (it is read as `.env`).
+    A path that does not exist is judged by its name. A symlink that cannot
+    be followed (unreadable, a loop past 40 hops) is credential: a guard that
+    cannot tell refuses."""
+    try:
+        raw = Path(os.fspath(path))
+    except TypeError:
+        return False
+    if is_env_credential_name(raw.name):
+        return True
+    try:
+        current = Path(os.path.abspath(raw))
+        for _ in range(_SYMLINK_HOPS):
+            if not current.is_symlink():
+                break
+            target = Path(os.readlink(current))
+            current = target if target.is_absolute() else current.parent / target
+            if is_env_credential_name(current.name):
+                return True
+        else:
+            return True  # still a symlink after 40 hops: cannot tell
+        return is_env_credential_name(Path(os.path.realpath(raw)).name)
+    except (OSError, RuntimeError, ValueError):
+        return True
 
 
 # Each protected name as it appears in a raw command line, bounded so it is a

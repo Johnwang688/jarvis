@@ -48,7 +48,12 @@ def listening() -> bool:
 
 
 def get(path: str):
-    with urllib.request.urlopen(BASE + path, timeout=5) as r:
+    # The editor's file routes are the owner's (E-7, ED-2): the HUD listener
+    # with the HUD's own Origin. Sent on every read, as the window's page does
+    # for a write (a plain GET with no Origin needs fetch metadata, which only
+    # a real browser sends).
+    req = urllib.request.Request(BASE + path, headers={"Origin": BASE})
+    with urllib.request.urlopen(req, timeout=5) as r:
         return r.status, json.loads(r.read() or b"null")
 
 

@@ -69,17 +69,81 @@ since the v1 face and the v2 daemon are separate processes.
 
 ## Files (scoped: project root + `extra_dirs`; anything else 403)
 
+**Every editor file route is owner-only, reads included** (ED-2, decisions
+E-7): `projects.owner_only` — the HUD's listener and the HUD's own page (its
+`Origin`, or a same-origin GET's `Sec-Fetch-Site`), else **403**. The API
+listener every tool's HTTP client uses never reaches them. What the editor
+may do with a file is one classifier, `jarvis/v2/editor_policy.py`, which
+every one of these routes asks (`kind`):
+
+| `kind` | What | The editor |
+|---|---|---|
+| `text` | everything else | editable |
+| `env` | a credential env file: `.env` or `.env.<anything>`, any depth, not ending `.example`, case-insensitive, symlinks resolved both ways (`secrets.is_env_credential`, the owner's `.env*` rule). **Never demoted**: one whose bytes are not UTF-8 text (UTF-16 from PowerShell 5.1, Latin-1) stays `env`, with `editable: false` | **the owner's** to edit: "Jarvis can't read this file"; read-only when `editable` is false |
+| `gate` | the gate's own state (`protected_paths()`: the allowlist, models.json, routing.json …), even inside `~/.config/jarvis` — only a path that **resolves to itself** (no symlink on its way) and is no credential by another rule; this exemption is the editor's routes' alone | readable, read-only |
+| `safety` | SELF_PROTECTED, git's internals and global config, the served HUD build (`files._self_protected`) | readable, read-only |
+| `binary` | not UTF-8, or a NUL in the first 8 KiB (not an env file) | readable (lossy), read-only; a PUT never overwrites it |
+| `withheld` | a credential bundle by name, anything under `V2_CREDENTIAL_DIRS` (`~/.ssh`, `~/.aws`, `~/.config/gh`, `~/.config/jarvis`, `~/.gnupg`) or v2's session carriers (`V2_DATA_DIR/claude`, `V2_DATA_DIR/codex`), Claude's and Codex's login files, git's credential store, `.netrc`, `~/.docker/config.json`, `~/.kube/config` (and `$KUBECONFIG`), `~/.npmrc`, `~/.pypirc` | **no content, ever** |
+
 - `GET /projects/{id}/tree?path=<rel>&depth=2` →
-  `{"path", "entries": [{"name", "kind": "file"|"dir", "size", "mtime"}]}`
-  (`.git`, `.jarvis`, `node_modules`, `.venv` omitted; a `SKIP_DIRS` in the
-  backend, the v1 grep list).
-- `GET /projects/{id}/file?path=<rel>` → `{"path", "content", "mtime",
-  "size", "protected": bool}`; protected credential names (v1 secrets
-  layer) return `{"protected": true}` with **no content**, 200.
-- `PUT /projects/{id}/file` `{"path", "content", "expected_mtime"}` →
-  `{"mtime"}`; 409 on mtime mismatch (someone else wrote it); 403 on a
-  protected name or a SELF_PROTECTED / allowlist path; 413 over 2 MB.
-  Atomic write.
+  `{"path", "entries": [{"name", "kind": "file"|"dir", "size", "mtime",
+  "policy"?}]}` (`.git`, `.jarvis`, `node_modules`, `.venv` omitted; a
+  `SKIP_DIRS` in the backend, the v1 grep list). `policy` is present only on
+  a row the editor treats specially: `"withheld"` (never opened; a withheld
+  folder is never walked, and listing one is 403) or `"env"` (a file only: a
+  virtualenv folder named `.env` is a folder). Inside a
+  withheld folder only the gate's own state files — and the folders on the
+  way to them — are listed (`~/.config/jarvis/allowlist.json` stays
+  reachable from the Inbox).
+- `GET /projects/{id}/file?path=<rel>` → `{"path", "abs", "content",
+  "etag", "mtime", "mtime_ns", "size", "encoding": "utf-8"|"utf-8-bom"|null,
+  "eol": "LF"|"CRLF"|"CR"|"mixed"|null, "kind", "editable": bool,
+  "readonly": str|null, "protected": false}`. `abs` is where the file
+  resolves (one editor buffer per file on disk, however many projects reach
+  it); `etag` is the first 128 bits of the bytes' SHA-256, as hex;
+  **`editable`** is whether the editor may save it — the HUD follows it,
+  never the kind alone (an env file that is not UTF-8 is `kind: "env"`,
+  `editable: false`, `encoding: null`), and a read without it is read-only;
+  `readonly` is the sentence beside the editor's lock (null for an editable
+  file Jarvis may read). A withheld file is `{"path", "abs", "kind":
+  "withheld", "editable": false, "readonly", "protected": true}` — **no
+  content and no etag**, 200. A `binary` (or non-UTF-8 env) file's content is
+  decoded with replacement characters, for reading only. An unknown `kind`
+  opens read-only and closed to Jarvis in the HUD.
+- `PUT /projects/{id}/file` `{"path", "content", "expected_etag"}` →
+  `{"etag", "abs", "mtime", "mtime_ns", "size"}`. `expected_etag` is the
+  etag the edit was made against, or `null` for "the file must not exist"
+  (create; also Save to recreate). Under the daemon's lock the bytes on disk
+  are hashed again: a mismatch is **409 `{"error", "etag"}`** with the
+  current etag (`null`: the file is gone), and the file is left
+  byte-identical. A rewrite that restored the old mtime is still a 409; a
+  `touch` alone is not one. 403 for every file that is not `editable` (every
+  kind but `text` and `env`, and bytes on disk that are not text) and when
+  the filesystem refuses the write; **500** for any other unexpected disk
+  error (never a 409, which is the conflict bar); 413 over 2 MB; 400 for a
+  malformed etag, for both or neither precondition, or any other key. Atomic
+  (a temp file beside it, named `<name>.<random>.tmp` — so an env file's temp
+  is an env file by name — 0600 from its first byte, renamed over), the
+  file's mode kept;
+  a new file is 0644, a new env file 0600. **`expected_mtime` is still
+  accepted for one release** (exactly one of the two), then goes.
+- `POST /projects/{id}/files/stat` `{"paths": [rel, …]}` (at most 100, else
+  413) → `{"files": {rel: row}}`, each row `{"etag", "mtime_ns", "size",
+  "kind"}`, `{"gone": true}`, `{"kind": "withheld"}`, or `{"error": status}`
+  for a path the project cannot reach; `etag` is null over 2 MB. A file is
+  hashed again only when its stat (device, inode, size, mtime_ns, ctime_ns)
+  moved. The HUD asks every 2 s while it is visible, and on focus — inotify
+  cannot see a write made from Windows on the 9p `/mnt/c` mount.
+- **An env file's content travels only between the disk and the owner's
+  editor**: never the bus, a log line, `log.jsonl`, Discord, an `@path`
+  attachment, a dropped file, a diff, the preview origin or any tool result
+  (each refuses it: `hud_api.protected` asks `is_env_credential`, and
+  withheld files too — with **no gate exemption**: the gate's readable state
+  is the editor's routes' alone, so `@.config/jarvis/allowlist.json` is not
+  attached; a dropped file named like a credential store, `.npmrc` or
+  `.docker/config.json` among them, is not either). The HUD keeps it out of localStorage and
+  add-to-chat, and gives its model a language of its own (`dotenv`) so its
+  words are never offered as suggestions in another file.
 - `GET /tasks/{id}/diff` → `{"base", "head", "files": [{"path", "status":
   "A"|"M"|"D"|"R", "additions", "deletions"}], "patch": str}` from the
   worktree (`git diff <base>...HEAD` plus the working tree), capped at 1 MB
@@ -95,6 +159,17 @@ since the v1 face and the v2 daemon are separate processes.
   iframes that, or any `http://localhost:<port>/…` URL the owner types.
   Never the HUD origin: the backend refuses to proxy it, the frontend
   refuses to load it.
+- **What it refuses (403)**: a credential file (`hud_api.protected`: env
+  files, withheld files, credential bundles), **any path with a hidden
+  component inside the project** (a name starting with `.`) **except
+  `.well-known`** — as written and where it resolves; its 403 says "hidden
+  path: not served on the preview origin", every other one "protected file" —
+  and **anything under
+  Jarvis's own config and data folders** (`~/.config/jarvis`,
+  `~/.local/share/jarvis`, `V2_DATA_DIR`, the sessions, spill, goals and
+  voices folders; `editor_policy.jarvis_dirs`). It has no owner check by
+  design and answers any loopback client — v1's `fetch_page` included — while
+  the Inbox is rooted at `~` (review of PR #49, LOW3).
 - The port is read from `GET /status` → `workshop_port` (2026-10-08), never
   assumed: a hard-coded 8403 made the HUD suite's mock-served window load the
   owner's **live** daemon's preview for fixture project `p1`

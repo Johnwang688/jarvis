@@ -1967,15 +1967,16 @@ def _open_file(page, until, pane: int, name: str) -> bool:
     row = page.locator(_pane(pane, f'[data-testid="file-{name}"]'))
     picker = page.locator(f'[data-testid="pane-{pane}-folder"]')
     path = page.locator(_pane(pane, '[data-testid="file-path"]'))
-    # A File pane reopens the file it had when it mounts again (WP-G2), and a
-    # narrow one then hides its tree behind "Files": already open is open.
+    # A File pane gets its tabs back when it mounts again (ED-2; WP-G2 before
+    # it), and a narrow one hides its tree behind "Files": already open is open.
     if not (path.count() and path.inner_text() == name):
         if not until(lambda: row.count() > 0, timeout=2) and picker.count():
             picker.select_option("p1")  # no chat to follow: the pane picks its project (E-13)
         until(lambda: row.count() > 0, timeout=4)
         toggle = page.locator(_pane(pane, '[data-testid="tree-toggle"]'))
-        if not row.first.is_visible() and toggle.count():
+        if row.count() and not row.first.is_visible() and toggle.count():
             toggle.click()
+            until(lambda: row.first.is_visible(), timeout=2)
         row.click()
     until(lambda: path.inner_text() == name, timeout=4)
     if name.endswith(".md"):
@@ -2137,7 +2138,7 @@ def _late_save_checks(page, mock, check, until):
         until(lambda: len(_puts(mock)) > before, timeout=3)
         time.sleep(0.3)
         sent = _puts(mock)[before:]
-        check("and the next save is that file's own, sent with its own mtime (no conflict)",
+        check("and the next save is that file's own, sent against its own etag (no conflict)",
               len(sent) == 1 and sent[0].get("path") == "README.md" and files["README.md"]["content"].endswith("#mine")
               and save.is_disabled(), str(sent))
     finally:
@@ -3020,11 +3021,13 @@ def _file_text(page, n: int) -> str:
 
 
 def _split_file_checks(page, mock, check, until):
-    """A File pane's copy opens the same file; a dirty one cannot be split
-    (decisions S-8); a save in one reloads the other clean pane and only warns
-    a dirty one; × on a dirty pane asks; and an id a split takes back mounts
-    fresh, never the old FileTab. (A chat in pane 1: the window puts its chat
-    on screen at boot, so a lone File pane would boot as chat.)"""
+    """A File pane's copy holds the same tabs on the same buffers (ED-2, which
+    lifted decisions S-8's "save first"): an edit in one shows in the other at
+    once, and one save cleans both. × asks only for an edit no other pane
+    holds — Save / Don't save / Cancel, as closing the last tab on one does —
+    and an id a split takes back mounts fresh, never the old FileTab. (A chat
+    in pane 1: the window puts its chat on screen at boot, so a lone File pane
+    would boot as chat.)"""
     page.set_viewport_size({"width": 1920, "height": 1080})
     _set_storage(page, zoom="100", layout="{}")
     _set_ws(page, json.dumps({"preset": "cols2", "focused": 2, "panes": [{"view": "chat"}, {"view": "file"}]}))
@@ -3034,35 +3037,52 @@ def _split_file_checks(page, mock, check, until):
     page.locator('[data-testid="pane-2-split"]').click()
     path3 = page.locator(_pane(3, '[data-testid="file-path"]'))
     until(lambda: path3.count() > 0 and path3.inner_text() == "calc.py", timeout=4)
-    check("a clean File pane's copy opens the same file, right after it",
-          _order(page) == [1, 2, 3] and path3.inner_text() == "calc.py"
-          and _ws(page)["ws"]["panes"][2].get("filePath") == "calc.py", str(_order(page)))
+    tabs3 = (_ws(page)["ws"]["panes"][2].get("editors") or {})
+    check("a File pane's copy opens the same tabs, right after it",
+          _order(page) == [1, 2, 3] and path3.inner_text() == "calc.py" and tabs3.get("paths") == ["calc.py"],
+          f"{_order(page)} {tabs3}")
+    until(lambda: len(page.evaluate("window.__hud.buffers()")) == 1
+          and len(page.evaluate("window.__hud.buffers()")[0]["refs"]) == 2, timeout=6)
+    bufs = page.evaluate("window.__hud.buffers()")
+    check("on the same buffer: one model for the file, held by both panes",
+          len(bufs) == 1 and sorted(bufs[0]["refs"]) == ["2|calc.py", "3|calc.py"], str(bufs))
 
     assert _edit(page, until, 2, "\n# edited in two")
     s2 = page.locator('[data-testid="pane-2-split"]')
-    until(lambda: s2.is_disabled(), timeout=2)
-    check("a File pane holding an unsaved edit cannot be split, and says to save first",
-          s2.is_disabled() and s2.get_attribute("title") == "Save or reload first to split this file"
-          and not page.locator('[data-testid="pane-3-split"]').is_disabled(), str(s2.get_attribute("title")))
+    until(lambda: "editedintwo" in _file_text(page, 3), timeout=3)
+    check("an edit in one shows in the copy at once, and a pane holding one still splits (the same buffers)",
+          "editedintwo" in _file_text(page, 3) and not s2.is_disabled(), str(s2.get_attribute("title")))
     page.locator(_pane(2, '[data-testid="file-save"]')).click()
-    until(lambda: "editedintwo" in _file_text(page, 3), timeout=4)
-    check("a save in one pane reloads the clean copy of that file", "editedintwo" in _file_text(page, 3))
+    save3 = page.locator(_pane(3, '[data-testid="file-save"]'))
+    until(lambda: save3.is_disabled(), timeout=4)
+    check("one save cleans both", save3.is_disabled() and page.locator(_pane(2, '[data-testid="file-save"]')).is_disabled())
 
+    # A shared unsaved edit: × on one pane loses nothing, so it does not ask.
+    assert _edit(page, until, 3, "\n# shared")
+    page.locator('[data-testid="pane-3-close"]').click()
+    until(lambda: 3 not in _order(page), timeout=2)
+    check("× on a pane whose unsaved edit another pane also holds closes at once, the edit kept there",
+          _order(page) == [1, 2] and "shared" in _file_text(page, 2)
+          and not page.locator(_pane(2, '[data-testid="file-save"]')).is_disabled())
+    page.locator(_pane(2, '[data-testid="file-save"]')).click()
+    until(lambda: page.locator(_pane(2, '[data-testid="file-save"]')).is_disabled(), timeout=4)
+
+    # An edit only this pane holds: × asks Save / Don't save / Cancel.
+    page.locator('[data-testid="pane-2-split"]').click()
+    until(lambda: path3.count() > 0 and path3.inner_text() == "calc.py", timeout=4)
+    time.sleep(0.5)  # past the one-click-one-close guard
+    _open_file(page, until, 3, "README.md")
     assert _edit(page, until, 3, "\n# dirty in three")
-    assert _edit(page, until, 2, "\n# again in two")
-    page.locator(_pane(2, '[data-testid="file-save"]')).click()
-    note = page.locator(_pane(3, '[data-testid="file-note"]'))
-    until(lambda: note.count() > 0 and "changed on disk" in note.inner_text(), timeout=4)
-    check("a dirty copy is never reloaded under its edit: it says the file changed on disk",
-          "changed on disk" in note.inner_text() and "dirtyinthree" in _file_text(page, 3)
-          and "againintwo" not in _file_text(page, 3))
-
+    readme = mock.world["files"]["README.md"]["content"]
     page.locator('[data-testid="pane-3-close"]').click()
     ask = page.locator('[data-testid="pane-3-close-ask"]')
     until(lambda: ask.count() > 0, timeout=2)
-    check("× on a pane holding an unsaved edit asks first, inline, focus on Keep",
-          ask.is_visible() and _order(page) == [1, 2, 3] and _active_testid(page) == "pane-3-close-keep",
-          str(_active_testid(page)))
+    check("× on a pane holding an edit no other pane holds asks Save / Don't save / Cancel, inline, focus on Cancel",
+          ask.is_visible() and _order(page) == [1, 2, 3] and _active_testid(page) == "pane-3-close-keep"
+          and page.locator('[data-testid="pane-3-close-save"]').inner_text() == "Save"
+          and page.locator('[data-testid="pane-3-close-discard"]').inner_text() == "Don't save"
+          and page.locator('[data-testid="pane-3-close-keep"]').inner_text() == "Cancel"
+          and "README.md" in ask.inner_text(), str(_active_testid(page)))
     # A card arriving while it asks: nothing in the question can be pressed.
     _approval(mock, "close-ask-card")
     until(lambda: page.locator('[data-testid="approval-card"]').count() > 0, timeout=4)
@@ -3072,6 +3092,7 @@ def _split_file_checks(page, mock, check, until):
     check("under a card Discard is disabled, Keep cannot be reached, and the card has the focus",
           page.locator('[data-testid="pane-3-close-discard"]').is_disabled()
           and page.evaluate("!!document.querySelector('[data-testid=\"pane-3-close-keep\"]').closest('[inert]')")
+          and page.locator('[data-testid="pane-3-close-save"]').is_disabled()
           and _active_testid(page) == "approval-card", str(_active_testid(page)))
     page.keyboard.press("Enter")
     time.sleep(0.3)
@@ -3082,13 +3103,32 @@ def _split_file_checks(page, mock, check, until):
           bool(until(lambda: _active_testid(page) == "pane-3-close-keep", timeout=2)), str(_active_testid(page)))
     page.locator('[data-testid="pane-3-close-keep"]').click()
     until(lambda: ask.count() == 0, timeout=2)
-    check("Keep keeps the pane and its edit", _order(page) == [1, 2, 3] and "dirtyinthree" in _file_text(page, 3))
+    check("Cancel keeps the pane and its edit", _order(page) == [1, 2, 3] and "dirtyinthree" in _file_text(page, 3))
     time.sleep(0.5)
+    page.locator('[data-testid="pane-3-close"]').click()
+    until(lambda: ask.count() > 0, timeout=2)
+    puts = len(_puts(mock))
+    page.locator('[data-testid="pane-3-close-save"]').click()
+    until(lambda: 3 not in _order(page), timeout=4)
+    sent = _puts(mock)[puts:]
+    check("Save saves the edit, then closes the pane",
+          _order(page) == [1, 2] and len(sent) == 1 and sent[0].get("path") == "README.md"
+          and "dirtyinthree" in "".join(mock.world["files"]["README.md"]["content"].split()), str(sent))
+    mock.world["files"]["README.md"]["content"] = readme
+    # And Don't save: the edit goes, the file untouched.
+    page.locator('[data-testid="pane-2-split"]').click()
+    until(lambda: path3.count() > 0 and path3.inner_text() == "calc.py", timeout=4)
+    time.sleep(0.5)
+    _open_file(page, until, 3, "README.md")
+    assert _edit(page, until, 3, "\n# thrown away")
     page.locator('[data-testid="pane-3-close"]').click()
     until(lambda: ask.count() > 0, timeout=2)
     page.locator('[data-testid="pane-3-close-discard"]').click()
     until(lambda: 3 not in _order(page), timeout=2)
-    check("Discard and close closes it", _order(page) == [1, 2] and page.locator(_pane(3)).count() == 0
+    check("Don't save closes it, the file untouched and no edit left anywhere",
+          _order(page) == [1, 2] and page.locator(_pane(3)).count() == 0
+          and mock.world["files"]["README.md"]["content"] == readme
+          and not any(b["dirty"] for b in page.evaluate("window.__hud.buffers()"))
           and page.evaluate("window.__hud.workspace().ws.preset") == "cols2")
     # Where the mic is (review of PR #47, M1): the selected chat, pane 1 —
     # not the File pane in the slot before, and never the page.
