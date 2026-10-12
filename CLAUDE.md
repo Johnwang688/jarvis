@@ -3171,8 +3171,8 @@ worker is still computing — before any model goes. Handed `{original,
 modified}`, Monaco 0.57 keeps a reference to the view model it makes that
 nothing releases, so its computation was never cancelled, and a row picked
 then opened and edited at once threw `no diff result available`, uncaught.
-The task `DiffEditor` and `CompareEditor` in `Editor.tsx` still pass
-`{original, modified}`; not changed here. Both sides
+The task `DiffEditor` and `CompareEditor` in `Editor.tsx` own theirs too
+since the follow-ups (below). Both sides
 read-only, side by side even in a narrow pane; ↻ reads again; the right
 side of an unopened file is re-read when the status moves. **Env files are
 listed and never diffed**: `rowShows` sends a `.env*` row (fileIcons'
@@ -3202,6 +3202,62 @@ read; the Task pane left out of the mode, the Diff follows the chat. Not
 done: SCM actions; a file not open in the
 editor that changes on disk while the project's git states stay the same is
 re-read only on ↻ or a click; the list is flat (no staged/unstaged groups).
+
+**The Diff pane's follow-ups (2026-10-12; PR #67's reviews; design §18).**
+**The change list is windowed** (`ProjectDiff.tsx` `ScmList`; the arithmetic
+is `lib/scm.ts` `scmWindow`/`revealTop`): only the rows in view, and
+`SCM_OVERSCAN` (12) either side, are in the DOM, in a spacer as tall as every
+row; **every row is `SCM_ROW_PX` (24) CSS px, pinned inline**, so where a row
+is needs no measuring, and `scrollTop`/`clientHeight` are the list's own CSS
+px (the HUD's zoom does not change them; checked at 160%). The window is
+computed each render from where the list is scrolled, kept in whole rows (a
+scroll redraws the list only when it crosses a row, and only the list: it is
+`memo`'d, with a stable pick). At git/status's 20,000 cap a DOM of every row
+made each chat keystroke beside it cost ~100 ms (the reviewer's measure;
+74–103 ms here), and drawing took 0.2–0.4 s; windowed it is ~2 ms, the same
+as no Diff pane. **Keys** (the list is a focusable `listbox`, focused by a
+row click or Tab): ↑ ↓, Page Up/Down, Home, End (`scmKeyStep`) move the
+selection and scroll it into view; Enter reads the selected row again. **The
+selection is a path, never a drawn row**: scrolled out of the window it
+stays selected, its diff stays shown, and the keys move from it. A file the
+pane had (a reload) is scrolled into view once, when the rows first arrive —
+or, in a narrow pane where a picked file folds the list, once the list is
+shown again (ResizeObserver) — and never on a poll, which would pull the list
+back from where the owner scrolled it. **The way out of a Task pane's hold:
+the Task pane's header clears its task** (`pane-N-task` chip, `pane-N-task-clear`;
+`taskId: null`, `taskFocus: false`), disabled under a card. The default 2×2
+grid draws a Task pane (`DEFAULT_VIEWS` slot 4), and while it shows a task
+every Diff pane shows that task's diff (L3) with its picker off — nothing took
+the window off a task once one was picked. Of the brief's two ways out this
+is the simpler: `diffMode` is unchanged, and a Diff pane still never shows
+another task than a drawn Task pane (there is none to show). The held
+picker's title names it. **Every diff view owns its view model**: the task
+`DiffEditor` and `CompareEditor` (`Editor.tsx`) now do as `ScmDiffEditor`
+does since L1 — `createViewModel`, set on the editor, disposed first (which
+cancels a diff still waiting on the worker) and once on every path (`vm` is
+cleared as it goes), then `setModel(null)`, then the editor, then the
+models it made; Compare's right side is the buffer's model, which it never
+disposes, and it lets go of it on the model's `onWillDispose`. Its text,
+undo stack and dirty state are untouched (checked: edit kept, still dirty,
+Ctrl+Z still undoes it). **`ScmDiffEditor` draws with ED-8's
+`displayOptions`**, live on a settings change (`onEditorSettings`, then
+`reapplyEditorConfig()`, as the other two) — it had a fixed `fontSize: 12`.
+Free checks: `lib/scm.test.ts` (26), `components/ProjectDiff.test.ts` (3: the
+20,000-row window in jsdom and the keys past it, nothing moved under a card)
+and `tests/face/hud_v2_scm_check.py` (now 104; `ONLY=<section>` runs one):
+`_scale_checks` (20,000 rows, a window drawn, chat typing under 15 ms a
+character, the last row reached, the keys, a selection held and moved out of
+the window, a reload's file revealed at 160%), `_clear_task_checks` (the 2×2
+grid with a Task pane), `_settings_checks` and `_midcompute_checks` (a
+40,000-line task-diff file keeps Monaco's one editor worker busy for its 5 s
+diff limit; a task diff, then Compare, is opened and closed while its own
+diff waits behind it — main's code threw `no diff result available` each
+time). Shown to bite in a scratch copy: every row drawn (the window and
+out-of-window checks fail; main's build also fails the typing check at
+74 ms); `clear` keeping the task id (three checks); the task diff or Compare
+back to `{original, modified}`, or the task diff's view model never
+disposed (`no diff result available`); the settings not live, or not used at
+all (12px where 16px was chosen); keys that never scroll (five checks).
 
 **The effort is a slider, not pills (2026-10-10, owner's ask: "like Claude's").**
 `components/EffortSlider.tsx`, rules in `lib/effortSlider.ts`: "Effort

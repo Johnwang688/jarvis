@@ -2067,3 +2067,10 @@ uncommitted changes from ED-9's two owner-only routes and the editor's read:
 
 Rules in CLAUDE.md's "The Diff pane shows the project's uncommitted changes"
 paragraph.
+
+The follow-ups (2026-10-12; CLAUDE.md "The Diff pane's follow-ups") change no
+route and no request: the windowed list draws from the same `git/status`
+answer, the keys pick rows exactly as clicks do (each pick is one
+`git/base`, then a read if allowed), the Task pane's "clear" is window state
+only (`taskId`, `taskFocus`), and the diff views' settings and view models
+are Monaco's.

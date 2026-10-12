@@ -530,7 +530,7 @@ def _scale_checks(page, mock, check, until, requests):
         drawn = page.locator(_pane(L, ".scmrow")).count()
         check(f"{SCALE_N:,} changed files: the list says so, and draws only a window of rows",
               summary.inner_text().startswith(f"{SCALE_N} uncommitted changes")
-              and rows.get_attribute("data-count") == str(SCALE_N) and 0 < drawn <= 100,
+              and rows.count() == 1 and rows.get_attribute("data-count") == str(SCALE_N) and 0 < drawn <= 100,
               f"{drawn} rows drawn; {summary.inner_text()!r}")
 
         box = page.locator(_pane(1, _tid("input")))
