@@ -16,6 +16,7 @@ import type { ArchiveView, DeleteResult, ProjectImpact } from "./types";
 import { parseActivity, type ActivityView } from "./lib/activity";
 import { parseRow, parseRows, type InSpec } from "./lib/terminal";
 import { parseBuild, parseDetection, parseStatus as parseVexStatus } from "./lib/vex";
+import { parseNewCheck, parseNewRequest, parseTemplates, type NewBody } from "./lib/vexNew";
 
 export class ApiError extends Error {
   status: number;
@@ -278,6 +279,27 @@ export const api = {
     req<{ terminal_id: string }>(`/projects/${encodeURIComponent(projectId)}/vex/download`, json(body)),
   vexBrain: () => req<{ terminal_id: string; started: boolean }>("/vex/brain", json({})),
   vexInfo: () => req<{ text: string; exit_code: number | null }>("/vex/device/info", json({})),
+  // A new VEX project (VX-3): the template list is the daemon's, and the
+  // folder shown is the daemon's answer to the body Create sends.
+  vexTemplates: () => req<unknown>("/vex/templates").then(parseTemplates),
+  vexCheckNew: (body: NewBody) =>
+    req<unknown>("/vex/projects/check", json(body)).then((r) => {
+      const c = parseNewCheck(r);
+      if (!c) throw new ApiError(500, "the daemon's answer was not a folder");
+      return c;
+    }),
+  vexNewProject: (body: NewBody) =>
+    req<unknown>("/vex/projects", json(body)).then((r) => {
+      const n = parseNewRequest(r);
+      if (!n) throw new ApiError(500, "the daemon answered without a request");
+      return n;
+    }),
+  vexNewState: (id: string) =>
+    req<unknown>(`/vex/projects/${encodeURIComponent(id)}`).then((r) => {
+      const n = parseNewRequest(r);
+      if (!n) throw new ApiError(500, "the daemon answered without a request");
+      return n;
+    }),
 
   // --- speech -------------------------------------------------------------
   async stt(blob: Blob): Promise<string> {

@@ -806,6 +806,8 @@ class Routes(DaemonBase):
                 ("GET", "/vex/templates", None),
                 ("POST", "/vex/projects", {"name": "x", "language": "cpp",
                                            "template": "cpp_v5_vsc_empty"}),
+                ("POST", "/vex/projects/check", {"name": "x", "language": "cpp",
+                                                 "template": "cpp_v5_vsc_empty"}),
                 ("GET", "/vex/projects/deadbeef", None)]
 
     def test_every_route_refuses_every_client_but_the_hud(self):
@@ -1699,11 +1701,93 @@ class Coverage(DaemonBase):
                            (f"/projects/{p}/vex/download", {"slot": 1, "name": "a"}),
                            ("/vex/brain", {}), ("/vex/device/info", {}),
                            ("/vex/projects", {"name": "x", "language": "cpp",
-                                              "template": "cpp_v5_vsc_empty"})):
+                                              "template": "cpp_v5_vsc_empty"}),
+                           ("/vex/projects/check", {"name": "x", "language": "cpp",
+                                                    "template": "cpp_v5_vsc_empty"})):
             with self.subTest(path=path):
                 self.request("POST", path, body, origin=None,
                              headers={"Sec-Fetch-Site": "same-origin"}, status=403)
         self.assertEqual(self.world.calls("make") + self.world.calls("vexcom"), [])
+
+
+# -- VX-3: the new-project dialog's check ---------------------------------------------------------------
+
+class NewProjectCheck(DaemonBase):
+    """`POST /vex/projects/check`: what Create would do, nothing asked or made.
+    The dialog shows its `path` as the exact folder, so it must be the very
+    path the card names, and every refusal must be Create's own."""
+
+    BODY = {"name": "checkbot", "language": "cpp", "template": "cpp_v5_vsc_empty"}
+
+    def check(self, body, status=200):
+        return self.request("POST", "/vex/projects/check", body, status=status)[1]
+
+    def test_the_path_is_the_cards_path_and_nothing_is_asked_or_made(self):
+        seen = self.check(self.BODY)
+        target = self.world.robotics / "checkbot"
+        self.assertEqual(seen["path"], str(target))
+        self.assertEqual(seen["windows_path"], self.world.windows(target))
+        self.assertEqual((seen["state"], seen["asks"]), ("missing", True))
+        self.assertEqual(seen["describe"], "a new, empty folder")
+        time.sleep(0.2)
+        self.assertEqual(self.daemon.approvals.pending(), [], "a check never raises the card")
+        self.assertFalse(target.exists(), "a check makes nothing")
+        self.assertEqual(self.daemon.vex._news, {}, "a check is not a request")
+        # Create then names exactly that path, on the response and on the card.
+        made = self.request("POST", "/vex/projects", self.BODY, status=202)[1]
+        self.assertEqual(made["path"], seen["path"])
+        card = eventually(lambda: self.daemon.approvals.pending(), what="the card")[0]
+        self.assertEqual(card.args["path"], seen["path"])
+        self.daemon.approvals.resolve(card.req_id, Decision.DENY)
+
+    def test_an_empty_folder_is_used_without_a_card(self):
+        (self.world.robotics / "checkbot").mkdir()
+        seen = self.check(self.BODY)
+        self.assertEqual((seen["state"], seen["asks"]), ("empty", False))
+        self.assertEqual(seen["describe"], "an existing empty folder")
+
+    def test_a_python_template_and_a_location(self):
+        other = self.world.user / "OneDrive" / "Desktop"
+        other.mkdir(parents=True)
+        seen = self.check({"name": "pybot", "language": "python", "template": "py_v5_vsc_empty",
+                           "location": str(other) + "/"})
+        self.assertEqual(seen["path"], str(other / "pybot"))
+
+    def test_every_refusal_is_creates_own(self):
+        full = self.world.robotics / "fullbot"
+        full.mkdir()
+        (full / "x").write_text("")
+        cases = [({**self.BODY, "name": "a b"}, 400), ({**self.BODY, "name": "-x"}, 400),
+                 ({**self.BODY, "language": "blocks"}, 400),
+                 ({**self.BODY, "language": "python"}, 400),
+                 ({**self.BODY, "template": "../x"}, 400),
+                 ({**self.BODY, "location": ""}, 400),
+                 ({**self.BODY, "name": "fullbot"}, 409),
+                 ({**self.BODY, "location": str(self.root / "linux")}, 409),
+                 ({**self.BODY, "location": str(self.world.user / "nowhere")}, 409),
+                 ({**self.BODY, "path": "/x"}, 400), ({"name": "x"}, 400)]
+        for body, status in cases:
+            with self.subTest(body=body):
+                said = self.check(body, status=status)["error"]
+                if status == 409 and "path" not in body:
+                    created = self.request("POST", "/vex/projects", body, status=409)[1]["error"]
+                    self.assertEqual(created.removesuffix(" Nothing was made."), said)
+        self.assertEqual(self.daemon.approvals.pending(), [])
+        self.assertEqual(self.daemon.vex._news, {})
+
+    def test_a_folder_now_a_project_is_refused(self):
+        target = self.world.robotics / "taken"
+        target.mkdir()
+        self.stores.projects.create("taken", str(target))
+        self.assertIn("already a project", self.check({**self.BODY, "name": "taken"}, status=409)["error"])
+
+    def test_a_templates_folder_that_cannot_be_listed_is_a_sentence_not_a_500(self):
+        def gone(_cfg):
+            raise FileNotFoundError("gone between the check and the listing")
+        with patch.object(vex, "list_templates", gone):
+            status, body = self.request("GET", "/vex/templates")
+        self.assertEqual(status, 409, body)
+        self.assertIn("vex setup", body["error"])
 
 
 # -- leaks and reach --------------------------------------------------------------------------------------

@@ -1693,9 +1693,16 @@ class Vex:
     # -- new project (the backend VX-3's dialog uses) ------------------------------------
 
     def templates(self) -> list[dict]:
-        return list_templates(load_config())
+        try:
+            return list_templates(load_config())
+        except OSError:
+            raise VexError(f"the templates folder cannot be listed; {SETUP_HINT}") from None
 
-    def new_project(self, name, language, template, location=None) -> dict:
+    def _plan(self, name, language, template, location, *, made: str):
+        """Everything `new_project` decides before anyone is asked, shared with
+        `check_new_project` so the dialog shows exactly the path the card
+        will: -> (cfg, entries, check), or the refusal. `made` ends a folder
+        refusal ("Nothing was made." once a request was sent)."""
         from . import folders
         if not isinstance(name, str) or not PROJECT_NAME.fullmatch(name):
             raise _api(400, "name must be 1-64 letters, digits, _ or - (VEX's make refuses spaces)")
@@ -1719,9 +1726,27 @@ class Vex:
         try:
             check = folders.check_project_folder(target, taken_roots=self._taken_roots())
         except folders.FolderRefused as exc:
-            raise VexError(f"I can't use that folder: {exc}. Nothing was made.") from None
+            raise VexError(f"I can't use that folder: {exc}.{made}") from None
         if check.state == "nonempty":
             raise VexError(f"{check.path} is not empty; a template goes into a new or empty folder")
+        return cfg, entries, check
+
+    def check_new_project(self, name, language, template, location=None) -> dict:
+        """What Create would do, without asking or making anything (VX-3's
+        dialog): the exact folder the card will name, its Windows spelling,
+        and whether the card comes up at all (an existing empty folder is used
+        without asking, O5). Every refusal is `new_project`'s, word for word."""
+        _cfg, _entries, check = self._plan(name, language, template, location, made="")
+        try:
+            windows = to_windows(str(check.path))
+        except VexError:
+            windows = None
+        return {"path": str(check.path), "windows_path": windows, "state": check.state,
+                "asks": check.needs_confirmation, "describe": check.describe()}
+
+    def new_project(self, name, language, template, location=None) -> dict:
+        cfg, entries, check = self._plan(name, language, template, location,
+                                         made=" Nothing was made.")
         settings = settings_document(name, language, cfg)
         record = NewProject(id="", name=name, path=str(check.path))
         with self._lock:
@@ -1843,6 +1868,16 @@ def route(handler, daemon, parts, query):
             try:
                 return 202, vex.new_project(body["name"], body["language"], body["template"],
                                             body.get("location"))
+            except ValueError as exc:
+                raise _api(400, str(exc)) from None
+        if parts == ["vex", "projects", "check"] and method == "POST":
+            # VX-3: the same body, the same refusals, nothing asked or made.
+            _object(query, ())
+            body = _object(handler._body(), ("name", "language", "template", "location"),
+                           ("name", "language", "template"))
+            try:
+                return 200, vex.check_new_project(body["name"], body["language"], body["template"],
+                                                  body.get("location"))
             except ValueError as exc:
                 raise _api(400, str(exc)) from None
         if len(parts) == 3 and parts[1] == "projects" and method == "GET":

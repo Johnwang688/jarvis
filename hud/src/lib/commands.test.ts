@@ -26,8 +26,16 @@ describe("the registry", () => {
     ];
     const keys = paletteEntries(ALL, offered).map((e) => e.key);
     expect(keys).toContain("monaco:editor.action.commentLine");
-    expect(keys.filter((k) => /download|vex|dev\.info/i.test(k))).toEqual([]);
+    expect(keys.filter((k) => k.startsWith("monaco:") && /download|vex|dev\.info/i.test(k))).toEqual([]);
     expect(paletteEntries(ALL, offered).some((e) => /download|device|brain|vexcom/i.test(e.label))).toBe(false);
+    // VX-3: the HUD's one VEX entry opens the New VEX project dialog, which
+    // makes a folder only on the owner's yes and never touches a device.
+    expect(keys.filter((k) => /vex/i.test(k))).toEqual(["hud:project.newVex"]);
+  });
+
+  it("offers New VEX Project everywhere (VX-3)", () => {
+    expect(paletteEntries(NONE).some((e) => e.key === "hud:project.newVex")).toBe(true);
+    expect(commandOf("hud:project.newVex")).toBe("project.newVex");
   });
 
   it("offers file commands only with a File pane, Monaco's only with an editor", () => {

@@ -24,7 +24,15 @@ The world's `vex` section (`state(mock)`):
   - `download_refuse`: sentences the next downloads answer 409 with, in order
     (no `code`); `download_exit`: the download program's exit code;
     `download_delay`: seconds each download waits before it answers;
-  - `info` / `info_refuse`: what device info answers.
+  - `info` / `info_refuse`: what device info answers;
+  - `new`: VX-3's new-project world, set by `setup_new(mock, root)` — a
+    temp "Windows drive" holding the extension's templates folder (real zips)
+    and the Robotics folder new projects go in. `GET /vex/templates`, the
+    check and Create run the daemon's own template code (`vex.list_templates`,
+    `read_template`, `unpack`, `settings_document`) on it; Create raises the
+    `project_folder` card, and the card's answer (`approval_decided`, from
+    the mock's `POST /approvals/{id}`) makes the folder, the files and the
+    project, or nothing. Nothing outside that temp tree is ever written.
 
 Owner-only on the real daemon: a request with an `Origin` that is not the
 mock's own is 403 here too. Bodies are held to exactly the daemon's keys, so
@@ -135,6 +143,198 @@ def terminal_closing(mock, path: str) -> None:
     mock.__dict__.setdefault("closed_terminals", []).append(parts[1])
 
 
+# -- VX-3: a new project from the extension's templates ------------------------------------------
+
+EXT = "vexrobotics.vexcode-0.8.2026020401"
+CPP_TEMPLATE = {"makefile": "include vex/mkenv.mk\n", "vex/mkenv.mk": "CC = clang\n",
+                "vex/mkrules.mk": "clean:\n\t@echo clean\n", "include/vex.h": "#pragma once\n",
+                "src/main.cpp": "#include \"vex.h\"\nint main() { return 0; }\n", "x.v5code": "skipped"}
+PY_TEMPLATE = {"src/main.py": "# VEX V5 Python Project\nimport vex\n"}
+NO_TEMPLATES = "vex.json names no templates folder; run `jarvis vex setup` again"
+
+
+def setup_new(mock, root) -> dict:
+    """The new-project world under `root` (a temp folder): `root/mnt` stands
+    for the Windows drives, with the extension's templates folder (two C++
+    templates, one Python, an `index.json` naming one, and an example zip
+    that is no VS Code template) and the empty Robotics folder `vex.json`
+    names (V-4)."""
+    import json as _json
+    import zipfile
+    from pathlib import Path
+    root = Path(root)
+    mount = root / "mnt"
+    user = mount / "c" / "Users" / "johnw"
+    templates = user / ".vscode" / "extensions" / EXT / "resources" / "templates" / "projects" / "V5"
+    robotics = user / "Documents" / "Robotics"
+    for folder in (templates, robotics):
+        folder.mkdir(parents=True, exist_ok=True)
+    for name, entries in (("cpp_v5_vsc_empty.zip", CPP_TEMPLATE),
+                          ("cpp_v5_vsc_competition_template.zip", CPP_TEMPLATE),
+                          ("py_v5_vsc_empty.zip", PY_TEMPLATE)):
+        with zipfile.ZipFile(templates / name, "w") as archive:
+            for rel, text in entries.items():
+                archive.writestr(rel, text)
+    (templates / "index.json").write_text(_json.dumps({"version": "1", "examples": [
+        {"category": "Templates", "samples": [
+            {"name": "Competition Template", "files": [{"name": "cpp_v5_vsc_competition_template.zip"}]},
+            {"name": "Empty Project", "files": [{"name": "py_v5_vsc_empty.zip"}]}]}]}))
+    (templates / "Clawbot_Competition.zip").write_bytes(b"an example, not a VS Code template")
+    v = state(mock)
+    v["new"] = {"mount": str(mount), "templates": str(templates), "requests": {}, "by_card": {}}
+    v["status"]["project_folder"] = str(robotics)
+    return {"mount": mount, "templates": templates, "robotics": robotics}
+
+
+def _cfg(new: dict):
+    """A `VexConfig` naming the temp templates folder: only the template code reads it here."""
+    from jarvis.v2 import vex
+    return vex.VexConfig(vexcom="", clang="", ar="", ld="", objcopy="", size="", make="",
+                         cpp_sdk="/sdk/cpp/V5/V5_20240802_15_00_00",
+                         python_sdk="/sdk/python/V5/V5_1_0_1_25", templates=new["templates"],
+                         extension_version="0.8.2026020401")
+
+
+def _plan(mock, body) -> tuple[int, object]:
+    """The daemon's `_plan`, against the temp tree: (status, sentence) or (0, plan)."""
+    import os
+    from jarvis.v2 import vex
+    v = state(mock)
+    new = v.get("new")
+    name, language, template = body.get("name"), body.get("language"), body.get("template")
+    if not isinstance(name, str) or not vex.PROJECT_NAME.fullmatch(name):
+        return 400, "name must be 1-64 letters, digits, _ or - (VEX's make refuses spaces)"
+    if language not in ("cpp", "python"):
+        return 400, "language must be cpp or python"
+    if not new:
+        return 409, NO_TEMPLATES
+    cfg = _cfg(new)
+    listed = vex.list_templates(cfg)
+    chosen = next((t for t in listed if t["id"] == template), None)
+    if chosen is None or chosen["language"] != language:
+        return 400, f"template must be a {language} id from GET /vex/templates"
+    try:
+        entries = vex.read_template(cfg, template)
+    except (ValueError, vex.VexError) as exc:
+        return 409, str(exc)
+    parent = v["status"].get("project_folder") if "location" not in body else body["location"]
+    if not isinstance(parent, str) or not parent.strip():
+        return 400, "location must be a folder path"
+    target = os.path.normpath(parent.rstrip("/") + "/" + name)
+    mount = new["mount"]
+    rel = os.path.relpath(target, mount)
+    if rel.startswith("..") or not re.fullmatch(r"[a-z]", rel.split("/")[0]):
+        # Never a path outside the temp drive: the mock writes nowhere else.
+        return 409, f"{target} is not on a Windows drive: VEX's toolchain builds only there (V-4)"
+    if any(p["root"] == target for p in mock.world["projects"]):
+        return 409, f"I can't use that folder: {target} is already a project's folder."
+    if not os.path.isdir(os.path.dirname(target)):
+        return 409, (f"I can't use that folder: the parent folder {os.path.dirname(target)} does not "
+                     "exist; Jarvis makes one folder, never its parents.")
+    if os.path.lexists(target) and (not os.path.isdir(target) or os.listdir(target)):
+        return 409, f"{target} is not empty; a template goes into a new or empty folder"
+    state_ = "empty" if os.path.isdir(target) else "missing"
+    parts = rel.split("/")
+    windows = parts[0].upper() + ":\\" + "\\".join(parts[1:])
+    return 0, {"cfg": cfg, "entries": entries, "path": target, "state": state_, "windows": windows,
+               "name": name, "language": language}
+
+
+def _make(mock, record: dict, plan: dict) -> None:
+    """The yes: one folder, the template, the settings file, and the project."""
+    import os
+    from jarvis.v2 import vex
+    if plan["state"] == "missing":
+        os.mkdir(plan["path"], 0o755)
+    vex.unpack(plan["entries"], plan["path"], vex.settings_document(plan["name"], plan["language"],
+                                                                     plan["cfg"]))
+    pid = f"pv{secrets.token_hex(3)}"
+    mock.world["projects"].append({
+        "id": pid, "name": plan["name"], "root": plan["path"], "created": "2026-10-12T00:00:00+00:00",
+        "profile": "auto", "routing": {"chains": {}, "models": {}, "no_new_work": None},
+        "discord_channel_id": None, "extra_dirs": [], "always_ask": [], "inbox": False})
+    record.update(state="created", project_id=pid, message=f"Made project {plan['name']} at {plan['path']}.")
+    mock.emit("project_created", {"project_id": pid}, project_id=pid)
+
+
+def approval_decided(mock, req_id: str, body) -> None:
+    """The mock's `POST /approvals/{id}`: a VX-3 card's answer ends its request."""
+    new = mock.world.get("vex", {}).get("new")
+    if not new or req_id not in new["by_card"]:
+        return
+    rid, plan = new["by_card"].pop(req_id)
+    record = new["requests"][rid]
+    allow = isinstance(body, dict) and body.get("decision") == "allow"
+    mock.emit("approval_resolved", {"req_id": req_id, "code": req_id[-4:].upper(), "tool": "project_folder",
+                                    "decision": "allow" if allow else "deny", "resolution": "hud"})
+    if not allow:
+        record.update(state="declined", message=f"Not approved, so nothing was made (`{record['path']}`).")
+        return
+    _make(mock, record, plan)
+
+
+def _new_routes(h, mock, method: str, parts: list, body) -> bool:
+    new = state(mock).get("new")
+
+    def exactly() -> bool:
+        keys = {"name", "language", "template", "location"}
+        if not isinstance(body, dict) or set(body) - keys or {"name", "language", "template"} - set(body):
+            h._err(400, f"expected exactly {sorted(keys)}")
+            return False
+        return True
+
+    if parts == ["vex", "templates"] and method == "GET":
+        if not new:
+            h._err(409, NO_TEMPLATES)
+            return True
+        from jarvis.v2 import vex
+        h._json(vex.list_templates(_cfg(new)))
+        return True
+    if parts == ["vex", "projects", "check"] and method == "POST":
+        if not exactly():
+            return True
+        status, plan = _plan(mock, body)
+        if status:
+            h._err(status, plan)
+            return True
+        h._json({"path": plan["path"], "windows_path": plan["windows"], "state": plan["state"],
+                 "asks": plan["state"] != "empty",
+                 "describe": "a new, empty folder" if plan["state"] == "missing" else "an existing empty folder"})
+        return True
+    if parts == ["vex", "projects"] and method == "POST":
+        if not exactly():
+            return True
+        status, plan = _plan(mock, body)
+        if status:
+            h._err(status, plan + (" Nothing was made." if plan.startswith("I can't use") else ""))
+            return True
+        rid = secrets.token_hex(4)
+        record = {"id": rid, "name": plan["name"], "path": plan["path"], "state": "asking",
+                  "project_id": None, "message": ""}
+        new["requests"][rid] = record
+        if plan["state"] == "empty":
+            _make(mock, record, plan)                        # O5: used without asking
+        else:
+            req = f"vexnew{rid}"
+            new["by_card"][req] = (rid, plan)
+            card = {"req_id": req, "code": rid[-4:].upper(), "tool": "project_folder",
+                    "args": {"action": "create", "path": plan["path"], "name": plan["name"]},
+                    "command": None, "reason": f"Create {plan['path']} as the folder of project {plan['name']}",
+                    "layer": "", "origin": "HUD: new VEX project", "allowlistable": False, "timeout_s": 120}
+            mock.world["approvals"].append(card)
+            mock.emit("approval_requested", card)
+        h._json({k: val for k, val in record.items()}, 202)
+        return True
+    if len(parts) == 3 and parts[:2] == ["vex", "projects"] and method == "GET":
+        record = (new or {}).get("requests", {}).get(parts[2])
+        if record is None:
+            h._err(404, f"new project request {parts[2]} not found")
+            return True
+        h._json(dict(record))
+        return True
+    return False
+
+
 def handle(h, mock, method: str, path: str, body) -> bool:
     parts = [p for p in path.split("/") if p]
     is_vex = bool(parts) and parts[0] == "vex"
@@ -147,6 +347,8 @@ def handle(h, mock, method: str, path: str, body) -> bool:
         return True
     v = state(mock)
     body = body if body is not None else {}
+    if is_vex and _new_routes(h, mock, method, parts, body):
+        return True
 
     def exactly(keys: set[str], required: set[str]) -> bool:
         if not isinstance(body, dict) or set(body) - keys or required - set(body):

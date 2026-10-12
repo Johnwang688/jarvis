@@ -98,7 +98,9 @@ export interface State {
     | "editProject" | "archiveProject" | "archive"
     // ED-7: quick open and the command palette. Pickers like the rest:
     // push-to-talk refuses and the mic claims nothing while one is open.
-    | "quickOpen" | "palette";
+    | "quickOpen" | "palette"
+    // VX-3: a new VEX project from the extension's templates.
+    | "newVexProject";
   /** Archived projects' names, from `/archive`: `/projects` hides them, but
    * the backend still counts them when it numbers a name (decisions B4). */
   archivedNames: string[];
