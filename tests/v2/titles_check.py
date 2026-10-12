@@ -656,5 +656,26 @@ class OneShot(unittest.TestCase):
             self.shot()
 
 
+class OneVendorList(unittest.TestCase):
+    """The Chinese-hosted vendor list is `models.cn_hosted`, called — the
+    Browser's reviewer asks the same one (BR-9a review). A copy here would let
+    the two drift."""
+
+    def test_titles_ask_models_cn_hosted(self):
+        self.assertFalse(hasattr(titles, "_CN_VENDORS"))
+        seen = []
+
+        def recorder(model):
+            seen.append(model)
+            return True
+        with patch.object(models, "tier", lambda name: "openai/gpt-5.6-luna"), \
+                patch.dict(config.TIERS, {"orchestrator": "openai/gpt-5.6-luna"}), \
+                patch.object(models, "cn_hosted", recorder):
+            self.assertIsNone(titles.openrouter_model())
+        self.assertEqual(seen, ["openai/gpt-5.6-luna", "openai/gpt-5.6-luna"])
+        self.assertTrue(models.cn_hosted(" Qwen/qwen3.7-flash"))
+        self.assertFalse(models.cn_hosted("openai/gpt-5.6-luna"))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

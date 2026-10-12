@@ -92,11 +92,8 @@ OPENROUTER_MAX_TOKENS = 1000
 OPENROUTER_TIMEOUT_S = 60.0
 OWNER_VIAS = ("hud", "discord", "dm")
 # The routing policy (CLAUDE.md, 2026-07-30): no personal data to models from
-# these vendors. A conversation's words are personal data.
-_CN_VENDORS = ("qwen/", "deepseek/", "moonshotai/", "z-ai/", "zhipuai/", "thudm/", "baidu/",
-               "minimax/", "inclusionai/", "bytedance/", "bytedance-seed/", "tencent/",
-               "stepfun/", "stepfun-ai/", "01-ai/", "xiaomi/", "meituan/", "baichuan/",
-               "alibaba/", "kwaipilot/")
+# Chinese-hosted vendors (`models.cn_hosted`, the one list). A conversation's
+# words are personal data.
 _LABEL = re.compile(r"^\s*(?:\*\*|__)?\s*(?:chat\s+|conversation\s+)?title\s*(?:\*\*|__)?\s*[:\-–—]\s*",
                     re.IGNORECASE)
 _QUOTES = "\"'“”‘’«»「」『』`"
@@ -133,10 +130,6 @@ def clean_title(raw) -> str:
     if not any(ch.isalnum() for ch in line):
         return ""
     return line[:projects.TITLE_CAP].rstrip()
-
-
-def cn_hosted(model: str) -> bool:
-    return (model or "").strip().lower().startswith(_CN_VENDORS)
 
 
 def _typed(data: dict) -> str:
@@ -193,7 +186,7 @@ def openrouter_model() -> str | None:
     """The default OpenRouter model, unless it is Chinese-hosted; then the
     configured orchestrator; else none."""
     for model in (models.tier("orchestrator"), config.TIERS.get("orchestrator")):
-        if model and not cn_hosted(model):
+        if model and not models.cn_hosted(model):
             return model
     return None
 
