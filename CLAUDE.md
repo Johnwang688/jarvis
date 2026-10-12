@@ -392,8 +392,11 @@ importing `terminals` fails `terminal_check`) and no query, checked before a
 body is read or Chrome started; a load reports a failure by its `net::ERR_…`
 code only; `/browser` paths are logged without a query. **No URL, title or
 label** reaches `/status` → `browser`, the bus or the log. Measured under
-the 3G cap (Chrome 155): launch ~0.27 s, first tab ~0.55 s, the tree's PSS
-~360 MiB with one tab and ~470 MiB after the attack pages, stop ~0.1 s.
+the 3G cap (Chrome 155): launch ~0.3 s, first tab ~0.6 s, the tree's PSS
+~365 MiB with one tab and ~470 MiB after the attack pages (RSS summed over
+its 14–18 processes 1.1–1.7 GiB, shared pages counted once per process),
+stop ~0.1 s. A first tab asked for twice at once starts one Chrome
+(`_start_lock`).
 Free suites: `tests/v2/browser_gate_check.py` (no Chrome: the judge, every
 refusal family against stand-in listeners whose accept counters stay 0,
 rebinding through an injected resolver asked once, the LAN switch, every

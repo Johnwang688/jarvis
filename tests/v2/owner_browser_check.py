@@ -238,6 +238,19 @@ def pss_bytes(pids) -> int:
     return total
 
 
+def rss_bytes(pids) -> int:
+    total = 0
+    for pid in pids:
+        try:
+            with open(f"/proc/{pid}/status") as handle:
+                for line in handle:
+                    if line.startswith("VmRSS:"):
+                        total += int(line.split()[1]) * 1024
+        except OSError:
+            pass
+    return total
+
+
 def deny_every_name(name, port):
     raise socket.gaierror(socket.EAI_NONAME, "the suite resolves nothing")
 
@@ -410,8 +423,13 @@ class OwnerBrowser(unittest.TestCase):
             time.sleep(1.0)
 
     def measure(self, name):
-        pss = pss_bytes(chrome_tree(config.BROWSER_DIR))
+        pids = chrome_tree(config.BROWSER_DIR)
+        pss = pss_bytes(pids)
         self.measured[f"pss_mb_{name}"] = round(pss / 2 ** 20, 1)
+        # RSS summed over the tree counts shared pages once per process: an
+        # upper bound, reported beside the proportional figure.
+        self.measured[f"rss_sum_mb_{name}"] = round(rss_bytes(pids) / 2 ** 20, 1)
+        self.measured[f"processes_{name}"] = len(pids)
         self.assertLess(pss, PSS_LIMIT, f"the Chrome tree uses {pss / 2 ** 20:.0f} MiB")
 
     # -- 1: start, the folder, the launch ----------------------------------------------
@@ -429,10 +447,33 @@ class OwnerBrowser(unittest.TestCase):
         self.assertFalse(config.BROWSER_DIR.exists(), "a read started nothing")
 
     def test_02_first_tab_starts_main(self):
+        # Two first tabs at once: one start, one Chrome, both tabs.
+        rows, errors = [], []
+
+        def first(path):
+            try:
+                rows.append(self.owner("POST", "/browser/tabs",
+                                       {"url": f"http://127.0.0.1:{self.fx}/{MARK}/{path}"}))
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
         started = time.monotonic()
-        row = self.owner("POST", "/browser/tabs", {"url": f"http://127.0.0.1:{self.fx}/{MARK}/page"})
+        racers = [threading.Thread(target=first, args=(p,)) for p in ("page", "other")]
+        for racer in racers:
+            racer.start()
+        for racer in racers:
+            racer.join(60)
         self.measured["first_tab_s"] = round(time.monotonic() - started, 2)
         self.measured["chrome_launch_s"] = self.host.timings.get("launch_s")
+        self.assertEqual(errors, [])
+        self.assertEqual(len({r["profile"] for r in rows}), 1)
+        browsers = [pid for pid in chrome_tree(config.BROWSER_DIR)
+                    if "--remote-debugging-pipe" in proc_argv(pid)]
+        self.assertEqual(len(browsers), 1, "one Chrome for one profile")
+        names = [t.name for t in threading.enumerate()]
+        self.assertEqual(names.count("jarvis-owner-browser"), 1, "one Browser thread")
+        self.assertEqual(names.count("jarvis-browser-gate"), 1, "one gate")
+        row = next(r for r in rows if self.page(r["tab_id"]).url.endswith("/page"))
+        self.owner("DELETE", f"/browser/tabs/{next(r for r in rows if r is not row)['tab_id']}")
         type(self).main_tab = row["tab_id"]
         self.assertTrue(row["loaded"], row)
         self.assertRegex(row["profile"], r"^p-[0-9a-f]{8}$")

@@ -409,6 +409,7 @@ class BrowserHost:
         self._resolver = resolver
         self._connector = connector
         self._lock = threading.Lock()
+        self._start_lock = threading.Lock()
         self._started = False
         self._stopped = False
         self._thread: threading.Thread | None = None
@@ -439,11 +440,14 @@ class BrowserHost:
     # -- lifecycle ------------------------------------------------------------------
 
     def _ensure_started(self) -> None:
-        with self._lock:
-            if self._stopped:
-                raise BrowserRefused(409, "the Browser is stopping")
-            if self._started:
-                return
+        """The folder checked, the gate listening and Playwright running —
+        once. A second caller waits on `_start_lock` until it is all there."""
+        with self._start_lock:
+            with self._lock:
+                if self._stopped:
+                    raise BrowserRefused(409, "the Browser is stopping")
+                if self._started:
+                    return
             if not CHROME_PATH.exists():
                 raise BrowserRefused(409, "Google Chrome is not installed "
                                           "(sudo apt install google-chrome-stable)")
@@ -471,12 +475,15 @@ class BrowserHost:
             self._thread = threading.Thread(target=run, name="jarvis-owner-browser", daemon=True)
             self._thread.start()
             ready.wait(5)
-            self._started = True
-        try:
-            self._call(self._start_playwright(), LAUNCH_TIMEOUT_S)
-        except Exception:
-            self.stop()
-            raise
+            try:
+                self._call(self._start_playwright(), LAUNCH_TIMEOUT_S)
+            except Exception:
+                self.stop()
+                raise
+            with self._lock:
+                if self._stopped:
+                    raise BrowserRefused(409, "the Browser is stopping")
+                self._started = True
 
     async def _start_playwright(self) -> None:
         from playwright.async_api import async_playwright
@@ -691,6 +698,8 @@ class BrowserHost:
         self._tabs[tab.id] = tab
         page.on("framenavigated", lambda frame: self._landed(tab, frame))
         page.on("close", lambda _page: self._dropped(tab))
+        # A pop-up may have navigated before it was handed to us.
+        self._landed(tab, page.main_frame)
         self._publish_snapshot()
         return tab
 
@@ -882,15 +891,28 @@ class BrowserHost:
         if profile not in {r["id"] for r in self.profiles()}:
             raise BrowserRefused(404, "no such profile")
         root = secure_dir(config.BROWSER_DIR, create=False)
-        if self._running():
-            self._call(self._close_instance(profile), CLOSE_TIMEOUT_S + 10)
         folder, downloads = root / "profiles" / profile, root / "downloads" / profile
-        stop_pids(folder)
-        _remove_tree(folder)
-        _remove_tree(downloads)
-        secure_dir(folder)
+
+        def wipe():
+            stop_pids(folder)
+            _remove_tree(folder)
+            _remove_tree(downloads)
+            secure_dir(folder)
+
+        if self._running():
+            # Under the profile's launch lock, so no tab can start its Chrome
+            # on the folder while it is being removed.
+            self._call(self._forget(profile, wipe), CLOSE_TIMEOUT_S + 20)
+        else:
+            wipe()
         LOG.info("Browser forgot a profile")
         return {"profile": profile, "forgotten": True}
+
+    async def _forget(self, profile: str, wipe) -> None:
+        lock = self._launching.setdefault(profile, asyncio.Lock())
+        async with lock:
+            await self._close_instance(profile)
+            await asyncio.get_running_loop().run_in_executor(None, wipe)
 
     # -- status -------------------------------------------------------------------------
 
