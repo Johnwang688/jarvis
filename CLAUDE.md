@@ -1560,17 +1560,67 @@ move through another first. The mock serves an API listener and a dev server
 on ephemeral ports (`api_port`, `dev_port`) and asserts the API one is never
 hit; the mock HUD, API and workshop send the real `hud_api.frame_headers()`,
 so the HUD under test is always rendered under them. Not yet: §2.5 item 5, a "dev servers in your terminals" list.
-**Known gap, open (2026-10-12, review of PR #74; reproduced in Chrome 155):**
-a framed page can take the keyboard with no user activation.
-`el.focus()`/`window.focus()` inside the `allow-scripts allow-forms` frame
-moves focus out of the HUD's box, and later keys go to the page, which can
-send them to its own server: chat words, an editor's `.env` value, a
-password typed in a terminal. `inert`, `display: none`, re-focusing the box
-and `contentWindow.blur()` do not stop it, even from a hidden frame. Only
-removing the iframe in the parent's `blur` handler does. AO-2
-(`docs/plans/2026-10-12-hud-browser-plan-amendment-2.md` §E.8) adds that
-guard for every Browser frame: a frame that gains focus without the owner's
-gesture is unmounted ("This page took the keyboard · Reload").
+
+**A framed page never takes the keyboard on its own (2026-10-12, R-1, AO-2's
+first half, shipped alone; `docs/plans/2026-10-12-hud-browser-plan-amendment-2.md`
+§E.8, §H AO-2; contract in `docs/hud-api.md`).** The gap PR #74's review
+found (Chrome 155): `el.focus()` or `window.focus()` in a Browser frame,
+with no user activation, moves focus out of the HUD, and every later key —
+chat words, an editor's `.env` value, a terminal password — goes to the
+page, which can send it home. `inert`, `display: none`, `visibility:
+hidden`, re-focusing the box and `contentWindow.blur()` do not stop it, a
+`display: none` frame included; **removing the iframe does.** So each
+Browser iframe is made by script in **`FrameHost`** (`useLayoutEffect`,
+never JSX, so a removal never trips React; `data-browser-frame="<pane>:<tab>"`,
+tab 0 until Direct tabs; a fresh frame per load), the decision is pure in
+**`lib/frameguard.ts`**, and **`state/frameguard.ts`** (installed once by
+App, a layout effect) removes a frame that gains focus without the owner's
+gesture, puts focus back on the HUD element that last had it (its text
+selection kept), else the selected chat's box, or under a card the card,
+tells the pane — `browser-stolen`, "This page took the keyboard · Reload"
+(`browser-stolen-reload`, React text, plain chrome, disabled and inert under
+a card; the tab's URL stays; memory only) — and writes one console line
+naming the pane slot, never the URL. **Measured in Chromium 149, headless
+and headed under WSLg:** a script steal fires `blur` on the HUD element,
+`focusout`, then the window's own `blur` with `activeElement` already the
+iframe, all before any key reaches the page; no `focus`/`focusin` fires on
+the iframe element. The guard decides in that `blur`, synchronously. **A
+steal from one frame into another fires nothing at all** (contrary to
+§E.8's `focusin` claim): `focusin` is listened for anyway, and what catches
+it is a per-animation-frame check while the keyboard is in a frame, with the
+250 ms `activeElement` belt behind it. **Headed, the HUD sees no pointer
+event over a frame and the iframe never matches `:hover`** (it runs in a
+process of its own; headless it does see `pointerover`), so "the pointer is
+over it" is read from a **transparent shield** over every frame
+(`browser-shield`): a `pointermove`, `pointerdown` or `wheel` on it means
+the owner's pointer is there, and it steps aside; a pointer event anywhere
+else in the HUD brings it back, and so does **any key typed in the HUD**
+(decision: a pointer parked over a page stops counting at the owner's first
+key, narrower than §F's stated limit). The gestures: the pointer over it;
+Tab or Shift+Tab as the latest key within `TAB_MS` 300; the owner's own
+load — Load, Enter in the URL box, Project root, the keep-origin switch,
+Reload — claimed by the first frame made after it, live until 2 s after
+that frame's `load` (20 s if it never loads) and **revoked by any key in the
+HUD or a focus outside that pane** (decision); and the HUD's own give-back
+after a card (`allowRestore`, ApprovalVeil, once, 300 ms — otherwise every
+card would unmount the page the owner was typing in). A stored URL restored
+at mount and a terminal's "Open in Browser" are no gesture. **Never**,
+whatever the pointer says: a card up (read from the DOM, `#authveil`), or a
+frame not the active tab of a drawn pane (or with no box on screen); a held
+frame under a card goes; a held frame that stops being drawn gives the
+keyboard back without being removed. **Playwright's `locator(frame).click()`
+hit-tests before it moves the mouse and reads the shield as covering the
+frame**: suites click frames with `page.mouse` (the layout suite's
+card-focus check changed so). Free checks: `lib/frameguard.test.ts`,
+`state/frameguard.test.ts` (jsdom), and `hud_v2_browser_check`'s `_guard_*`
+sections (`BROWSER_ONLY=guard`), against the mock dev server's
+`/focus-mount`, `/focus-timer`, `/focus-load`, `/focus-none` pages and their
+key log (`mock.dev_keys`). **Limits**: a key in flight as focus moved can be
+lost, IME composition in the box may be cut, a frame-to-frame steal is
+caught within an animation frame (a key typed in that gap reaches the page),
+a pointer resting over a page before the owner's first key still counts, the
+owner's first click or wheel there after typing can be eaten by the
+re-raised shield, and none of it binds a same-uid program.
 
 **The Browser's pure HUD modules, BR-2 (2026-10-12; browser plan
 `docs/plans/2026-10-10-hud-browser-plan.md` §2, §5, §8, §9, §11; amendment 1
@@ -6181,6 +6231,11 @@ Two findings worth keeping:
   through the owner-only routes, for the host's lifetime; `local_servers` in
   `browser.json` (off) opens them all. Pages and agents never open one.
   Auto-open never opens one (amendment 2, L2). Details in the BR-1a
+  paragraph.
+- **No Browser frame takes the keyboard without the owner's gesture
+  (2026-10-12, R-1).** One that gains focus otherwise is removed at once
+  (removal is the only thing that works); never under a card or from a
+  hidden pane. Details in the "A framed page never takes the keyboard"
   paragraph.
 - **A toolset is enforced at dispatch, not only by what the request offers
   (2026-10-10).** An agent's bound toolset is the set it may call; naming a
