@@ -19,6 +19,20 @@ refusal ever contains one.
     POST   /browser/tabs/<id>/history        {action: back | forward | reload}
     POST   /browser/profiles/<id>/forget     {}  ("Sign out of everything")
 
+BR-1b's (stream.py, files.py):
+
+    POST   /browser/tabs/<id>/ticket         {} -> {ticket, expires_in}  (single use, 30 s)
+    GET    /browser/tabs/<id>/attach?ticket= the tab's socket (101); the only query
+    POST   /browser/tabs/<id>/activate       {}  (switch: brought to the front)
+    POST   /browser/tabs/<id>/files          {chooser, files: [{project, path}]}
+    GET    /browser/downloads                {downloads: [...], in_progress}
+    GET    /browser/downloads/<id>           the file, as an attachment
+    DELETE /browser/downloads/<id>
+
+While any approval card is waiting, nothing reaches a page: `navigate`,
+`history`, a new tab with a URL and `files` answer 409, and the socket holds
+every input (stream.py).
+
 A URL the owner opens on this machine (`localhost`, `127.0.0.1` …) with
 `POST /browser/tabs` or `…/navigate` opens that loopback port in the gate for
 this host's lifetime: loopback is closed like the LAN until then (review of
@@ -31,19 +45,30 @@ The settings are the daemon's `BrowserSettings` (`settings.py`, the one
 reader and writer of `browser.json`): any non-empty subset of the switches,
 each a boolean; an unknown field is counted, never echoed.
 
-The stream, input, dialogs, downloads and the tab strip are BR-1b's; profile
-management is BR-1c's.
+Profile management is BR-1c's.
 """
 
 from __future__ import annotations
 
 import logging
+import os
+from urllib.parse import quote
 
+from . import files as _files
+from .files import FileRefused
 from .host import BrowserRefused
 from .policy import URLRefused
 from .settings import DEFAULTS as SETTINGS
+from .stream import SOCKET_PENDING
 
 LOG = logging.getLogger(__name__)
+
+# A download runs nothing, whatever it is (narrowing the HUD's one policy).
+DOWNLOAD_CSP = "default-src 'none'"
+# A download is fetched or opened as a document, never embedded: a script,
+# style, worker, frame or image request for one is refused.
+DOWNLOAD_DESTS = ("", "document", "empty")
+DOWNLOAD_CHUNK = 1024 * 1024
 
 
 def _fail(status: int, text: str):
@@ -59,6 +84,46 @@ def _strict_host(handler, daemon) -> None:
         _fail(403, "untrusted Host")
 
 
+def _disposition(name: str) -> str:
+    """`attachment`, with an ASCII fallback and the UTF-8 name (RFC 6266);
+    `name` is already cleaned (no control, quote or path character)."""
+    ascii_name = "".join(c if c.isascii() and c.isprintable() and c not in '"\\%;' else "_"
+                         for c in name) or "download"
+    return f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(name, safe='')}"
+
+
+def _serve_download(handler, download_id):
+    """A saved download, to the owner's window only, as an attachment that
+    runs nothing (files.py)."""
+    dest = handler.headers.get("Sec-Fetch-Dest", "")
+    if dest not in DOWNLOAD_DESTS:
+        _fail(403, "a download is opened or fetched, never embedded")
+    fd, name, size = _files.open_download(download_id)
+    try:
+        from ..hud_api import frame_headers
+        frame_headers(handler, DOWNLOAD_CSP)        # checked before a byte is written
+        handler.send_response(200)
+        handler.send_header("Content-Type", "application/octet-stream")
+        handler.send_header("Content-Length", str(size))
+        handler.send_header("Content-Disposition", _disposition(name))
+        handler.send_header("Cache-Control", "no-store")
+        handler.send_header("X-Content-Type-Options", "nosniff")
+        handler._csp = DOWNLOAD_CSP
+        handler.end_headers()
+        handler._streaming = True
+        handler.connection.settimeout(30)
+        sent = 0
+        while sent < size:
+            chunk = os.read(fd, min(DOWNLOAD_CHUNK, size - sent))
+            if not chunk:
+                break
+            handler.wfile.write(chunk)
+            sent += len(chunk)
+    finally:
+        os.close(fd)
+    return 200, None
+
+
 def route(handler, daemon, parts, query):
     """`/browser…`, or None."""
     if not parts or parts[0] != "browser":
@@ -67,11 +132,36 @@ def route(handler, daemon, parts, query):
     from ..projects import owner_only
     owner_only(handler, daemon)
     _strict_host(handler, daemon)
-    _object(query, ())
+    method = handler.command
+    attach = len(parts) == 4 and parts[1] == "tabs" and parts[3] == "attach" and method == "GET"
+    # The socket's ticket is the one query any route takes (it is never logged:
+    # `/browser` paths are logged without their query).
+    _object(query, ("ticket",) if attach else ())
     host = daemon.browser
     settings = daemon.browser_settings
-    method = handler.command
     try:
+        if attach:
+            from .. import ws
+            from ..hud_api import frame_headers
+            try:
+                key = ws.handshake_key(handler.headers)
+            except ws.HandshakeError as exc:
+                _fail(400, str(exc))
+            tab = host.require_tab(parts[2])
+            if not host.tickets.redeem(query.get("ticket"), tab.id):
+                _fail(403, "a fresh ticket for this tab is required")
+            # The 101 is written by hand, past `end_headers`: it carries the
+            # listener's frame headers explicitly (WP-E), as the terminal's does.
+            sock = ws.upgrade(handler, key, headers=frame_headers(handler), max_pending=SOCKET_PENDING)
+            host.serve_socket(tab.id, sock)
+            return 200, None
+        if parts == ["browser", "downloads"] and method == "GET":
+            return 200, host.downloads()
+        if len(parts) == 3 and parts[1] == "downloads":
+            if method == "GET":
+                return _serve_download(handler, parts[2])
+            if method == "DELETE":
+                return 200, _files.delete(parts[2])
         if parts == ["browser"] and method == "GET":
             return 200, {**host.status(), "profiles": host.profiles(), "settings": settings.snapshot()}
         if parts == ["browser", "settings"]:
@@ -110,12 +200,28 @@ def route(handler, daemon, parts, query):
             if parts[3] == "history":
                 body = _object(handler._body(), ("action",), ("action",))
                 return 200, host.history(parts[2], body["action"])
+            if parts[3] == "ticket":
+                _object(handler._body(), ())
+                return 200, host.ticket(parts[2])
+            if parts[3] == "activate":
+                _object(handler._body(), ())
+                return 200, host.activate(parts[2])
+            if parts[3] == "files":
+                # The owner's answer to a page's file chooser: files the owner
+                # chose, by project and path, judged by H8 (files.py).
+                body = _object(handler._body(), ("chooser", "files"), ("chooser", "files"))
+                host.require_tab(parts[2])
+                if host.input_held():
+                    _fail(409, "an approval card is waiting for you; nothing reaches the Browser "
+                               "until it is answered")
+                payloads = _files.upload_payloads(daemon, body["files"])
+                return 200, host.set_files(parts[2], body["chooser"], payloads)
         if (len(parts) == 4 and parts[1] == "profiles" and parts[3] == "forget"
                 and method == "POST"):
             _object(handler._body(), ())
             return 200, host.forget(parts[2])
     except URLRefused as refusal:
         _fail(400, str(refusal))
-    except BrowserRefused as refusal:
+    except (BrowserRefused, FileRefused) as refusal:
         _fail(refusal.status, str(refusal))
     _fail(404, "route not found")
