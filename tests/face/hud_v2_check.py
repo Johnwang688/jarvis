@@ -3178,6 +3178,16 @@ def main():
             finally:
                 nav_mock.stop()
 
+            # The editor settings, .editorconfig and vim (ED-8): a context and
+            # a mock of their own — its world gains an .editorconfig.
+            from tests.face.hud_v2_editor_settings_check import settings_checks
+            settings_mock = MockDaemon(0).start()
+            try:
+                settings_checks(browser, settings_mock, f"http://127.0.0.1:{settings_mock.port}", check, until,
+                                guard, FAKE_RECOGNIZER)
+            finally:
+                settings_mock.stop()
+
             # The VEX view (VX-2): a context and a mock of their own — its
             # world gains VEX projects, builds and downloads are terminal rows
             # there, and their sockets are played in the browser.

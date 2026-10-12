@@ -37,6 +37,9 @@ import { buffers, PlainModel } from "./state/buffers";
 import { NO_TABS, openTab, renameTabs, sameTabs, writtenPaths } from "./lib/buffers";
 import { Palette, QuickOpen } from "./components/QuickOpen";
 import { focusedEditor } from "./components/Editor";
+import { EditorSettingsDialog } from "./components/EditorSettings";
+import { applyEditorConfig } from "./state/editorconfig";
+import { editorSettingsProbe } from "./state/editorSettings";
 import { commandOf, paletteEntries, type CommandContext, type CommandId, type EditorAction, type Entry } from "./lib/commands";
 import type { EditorShortcut } from "./lib/layout";
 import { treeRoot } from "./lib/dirtyMarks";
@@ -122,6 +125,10 @@ buffers.configure({
   now: () => Date.now(),
   // A renamed file's model takes its new name's language (ED-7).
   relanguage: (model, abs, kind) => relanguage(model, abs, kind),
+  // `.editorconfig` (ED-8), read through the same owner-only routes.
+  prepare: (model, projectId, path) => applyEditorConfig(
+    { stat: (id, paths) => api.statFiles(id, paths), read: (id, p) => api.readFile(id, p) },
+    model as any, projectId, path),
 });
 
 type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
@@ -1304,11 +1311,11 @@ export default function App() {
     if (Object.keys(fileAsk).length) setFileAsk({});
   }, [fileAsk]);
   const [nav, setNav] = useState<NavContext | null>(null);
-  // Under a card quick open and the palette close (editor plan §2.10); their
-  // keys are already inert there (`useLayout`). Before paint, so the card is
-  // the first thing drawn without them.
+  // Under a card quick open, the palette and the editor settings (ED-8) close
+  // (editor plan §2.10); their keys are already inert there (`useLayout`).
+  // Before paint, so the card is the first thing drawn without them.
   useLayoutEffect(() => {
-    if (blocked && (state.picker === "quickOpen" || state.picker === "palette")) {
+    if (blocked && (state.picker === "quickOpen" || state.picker === "palette" || state.picker === "editorSettings")) {
       dispatch({ type: "patch", patch: { picker: null } });
       setNav(null);
     }
@@ -2417,6 +2424,8 @@ export default function App() {
       monacoLanguage,
       // The editor's buffers (ED-2), read-only: never any text.
       buffers: () => buffers.snapshot(),
+      // The editor settings (ED-8), read-only: stored, in force, and each File editor's own.
+      editorSettings: () => editorSettingsProbe(),
     };
   }, [capture, dispatch, onWakeHit, reconcileBusy, splitFrom]);
 
@@ -2589,6 +2598,19 @@ export default function App() {
     });
     patch({ picker: kind });
   };
+  /** The editor settings (ED-8), from a File pane's ⚙ or the palette: never over another dialog or a card. */
+  const settingsReturn = useRef<HTMLElement | null>(null);
+  const openEditorSettings = () => {
+    if (navBusy()) return;
+    settingsReturn.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    patch({ picker: "editorSettings" });
+  };
+  const closeEditorSettings = () => {
+    const back = settingsReturn.current;
+    settingsReturn.current = null;
+    patch({ picker: null });
+    if (back && back.isConnected && !live.current.approvals.length) requestAnimationFrame(() => back.focus());
+  };
   const closeNav = (refocus: boolean) => {
     const back = nav?.returnTo;
     patch({ picker: null });
@@ -2689,6 +2711,8 @@ export default function App() {
         return view.zoomBy(-1);
       case "view.zoomReset":
         return view.setZoom(100);
+      case "view.editorSettings":
+        return later(openEditorSettings);
       case "project.newVex":
         // VX-3: the dialog only; nothing is made until the owner approves its card.
         return later(() => {
@@ -2796,6 +2820,7 @@ export default function App() {
             onRenamed={onRenamed}
             goto={fileGoto[n] ?? null}
             onGotoDone={(k) => gotoDone(n, k)}
+            onEditorSettings={openEditorSettings}
             root={pid ? treeRoot(state.projects.find((p) => p.id === pid)) : null}
           />
         );
@@ -3320,6 +3345,7 @@ export default function App() {
       {state.picker === "palette" && nav ? (
         <Palette entries={paletteList} onRun={runEntry} onClose={() => closeNav(true)} onLeave={() => closeNav(false)} />
       ) : null}
+      {state.picker === "editorSettings" && !blocked ? <EditorSettingsDialog onClose={closeEditorSettings} /> : null}
       {state.picker === "model" ? (
         <ModelPicker
           view={roster}
