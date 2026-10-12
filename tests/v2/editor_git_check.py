@@ -32,6 +32,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 from urllib.parse import urlencode
@@ -349,16 +350,36 @@ class Status(Repo):
         self.assertEqual((got["files"], got["dirs"]), ({}, {"": "untracked"}))
 
     def test_cached_for_two_seconds(self):
+        clock = [100.0]
         calls = []
         real = G._git
-        with patch.object(G, "_git", lambda *a, **k: calls.append(a) or real(*a, **k)):
+        fake_time = SimpleNamespace(monotonic=lambda: clock[0])
+        with patch.object(G, "_git", lambda *a, **k: calls.append(a) or real(*a, **k)), \
+                patch.object(G, "time", fake_time):
             self.status()
             n = len(calls)
             (self.proj / "plain.txt").write_text("changed\n")
+            clock[0] += 1.9
             self.assertEqual(self.status()["files"], {})
             self.assertEqual(len(calls), n, "a second read inside the TTL ran git again")
-            with patch.object(G, "STATUS_TTL", 0):
-                self.assertEqual(self.status()["files"], {"plain.txt": "modified"})
+            clock[0] += 0.2
+            self.assertEqual(self.status()["files"], {"plain.txt": "modified"})
+
+    def test_a_slow_status_rests_three_times_as_long(self):
+        clock = [100.0]
+        real = G._status_now
+
+        def slow(*a, **k):
+            clock[0] += 1.5  # the status took 1.5 s: cached for 4.5
+            return real(*a, **k)
+        with patch.object(G, "_status_now", slow), \
+                patch.object(G, "time", SimpleNamespace(monotonic=lambda: clock[0])):
+            self.status()
+            (self.proj / "plain.txt").write_text("changed\n")
+            clock[0] += 4.4
+            self.assertEqual(self.status()["files"], {})
+            clock[0] += 0.2
+            self.assertEqual(self.status()["files"], {"plain.txt": "modified"})
 
     def test_capped(self):
         for i in range(5):

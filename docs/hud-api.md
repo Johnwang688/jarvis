@@ -1839,8 +1839,9 @@ names a program for git to run, or moves where it works**
   a path under a `SKIP_DIRS` folder, withheld (a credential bundle by name,
   in a credential folder, a login file) or the gate's state is dropped.
   `head` is null before the first commit; `repo: false` outside a
-  repository. **Cached for 2 s per root** (a refusal too) and run once at a
-  time per root; at most 20,000 entries (`truncated`) and 5 s (`truncated`
+  repository. **Cached for 2 s per root** — or three times what the status
+  took, when that is longer (a slow `/mnt/c` repository rests between runs)
+  — a refusal too, and run once at a time per root; at most 20,000 entries (`truncated`) and 5 s (`truncated`
   with a `note`). 403 when the project's root is itself a credential folder.
 
 The window's half (`hud/src/lib/linediff.ts`, `lib/gitMarks.ts`,

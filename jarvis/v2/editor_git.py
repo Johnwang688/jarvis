@@ -21,8 +21,9 @@ HTTP client uses. No tool, MCP tool or fast-path tool reaches this module.
   is not text answers `binary`: no gutter. A file HEAD does not hold
   (untracked or newly added) answers `new`: no gutter either.
 - `GET /projects/{id}/git/status`: `git status --porcelain=v2 -z` at the
-  project's root, cached for `STATUS_TTL` (2 s) per root and run once at a
-  time per root, at most `STATUS_SECONDS` and `STATUS_CAP` entries. Paths
+  project's root, cached for `STATUS_TTL` (2 s, or three times what the
+  status took when that is longer) per root and run once at a time per
+  root, at most `STATUS_SECONDS` and `STATUS_CAP` entries. Paths
   are made project-relative, and a path outside the root, under a
   `SKIP_DIRS` folder, withheld (`editor_policy`) or the gate's state is
   dropped before anything is returned.
@@ -223,6 +224,7 @@ def base(project, name: str) -> dict:
 
 # -- the explorer's colours --------------------------------------------------------------
 
+# root -> (when it goes stale, the answer or a refusal's (status, text)).
 _CACHE: dict[str, tuple[float, object]] = {}
 _CACHE_GUARD = threading.Lock()
 _LOCKS: dict[str, threading.Lock] = {}
@@ -265,19 +267,24 @@ def status(project) -> dict:
     with _lock_for(key):
         with _CACHE_GUARD:
             hit = _CACHE.get(key)
-        if hit and time.monotonic() - hit[0] < STATUS_TTL:
+        if hit and time.monotonic() < hit[0]:
             if isinstance(hit[1], tuple):
                 fail(*hit[1])
             return hit[1]  # type: ignore[return-value]
         from .daemon import APIError
+        began = time.monotonic()
         try:
             result: object = _status_now(root, raw_root, policy)
         except APIError as exc:
             result = (exc.status, str(exc))
+        done = time.monotonic()
+        # 2 s, or three times what the status took: a slow repository (the
+        # 9p `/mnt/c` mount) is never asked again before it has rested.
+        ttl = max(STATUS_TTL, 3 * (done - began))
         with _CACHE_GUARD:
             if len(_CACHE) >= _CACHE_MAX:
                 _CACHE.clear()
-            _CACHE[key] = (time.monotonic(), result)
+            _CACHE[key] = (done + ttl, result)
     if isinstance(result, tuple):
         fail(*result)
     return result  # type: ignore[return-value]

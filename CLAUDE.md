@@ -2317,7 +2317,9 @@ gutter, untracked and added alike — the explorer's colour says which). `GET
 --renames --ignore-submodules=all -- .`, project-relative, **judged before it
 is returned** (SKIP_DIRS, withheld and the gate's state dropped, lexically: a
 status is names only, and a rename's source is never returned), cached 2 s
-per root (refusals too), single-flight, 20,000 entries and 5 s at most.
+per root — or three times what the status took, when longer, so a slow `/mnt/c`
+repository rests between runs — refusals too, single-flight, 20,000 entries
+and 5 s at most.
 **Git only through `gitops._git`, and a repository whose own config names a
 program is refused by both** (`gitops._risky_config`). **`--ignore-submodules=all`
 is load-bearing**: `_risky_config` reads the superproject's config only, and
@@ -2359,7 +2361,7 @@ untracked `--syn-string`, conflict `--syn-const`, ignored at 50% opacity; a
 folder wears what git reported for it whole, else the strongest state under
 it (conflict > modified/deleted > added/renamed > untracked; ignored never
 colours a folder). The mock serves `world["git"]` (`git_route`; no key: not a
-repository). Free checks: `tests/v2/editor_git_check.py` (25; owner-only with
+repository). Free checks: `tests/v2/editor_git_check.py` (26; owner-only with
 no git run when refused, the states, every refusal including renames from
 `.env`, a withheld file and the gate's state, a repository-config filter and a
 submodule's that never run, the status's states, judging, cache and cap),
