@@ -2985,6 +2985,15 @@ uncommitted changes' diff is drawn with the owner's editor settings (font,
 size, whitespace, bracket colours, sticky scroll), live, as the task diff and
 Compare are.
 
+**The Browser's action rules and reviewer (2026-10-12, BR-9a; amendment 1 to
+the Browser plan, §B.3–§B.5).** Before an agent's click, keystroke or
+navigation in a Browser pane runs, fixed rules refuse what no model may allow
+(typing into a password, one-time-code or card field, a credential in what it
+types or where it goes, an upload from outside the chat's project, acting
+while a card is up or the owner holds the pane) and ask about logins,
+payments, uploads and executables; a reviewer model judges the rest, and
+every failure of it asks. Not wired yet: nothing drives a pane until BR-9b.
+
 Remaining: WP13 (the long-bench comparison, the owner's call on cost), a
 native Windows worker, the R8 hook on Codex, and prompt tuning in
 `roles.py` (§17's over-planning note). The daemon started by hand for the
