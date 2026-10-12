@@ -597,6 +597,14 @@ class OwnerBrowser(unittest.TestCase):
     def page(self, tab_id):
         return self.host._tabs[tab_id].page
 
+    def settled(self, page, expression):
+        """`expression` in the page, or None while it is still navigating
+        (the routes return at commit, so a context may be torn down under us)."""
+        try:
+            return self.run_on(page.evaluate(expression))
+        except H.BrowserRefused:
+            return None
+
     def stand_in_accepts(self):
         return {name: l.accepts for name, l in self.stand_ins.items() if l.accepts}
 
@@ -621,7 +629,7 @@ class OwnerBrowser(unittest.TestCase):
         self.owner("POST", f"/browser/tabs/{tab_id}/navigate",
                    {"url": f"http://127.0.0.1:{self.fx}/multi?n={self.sw}&t={target}"})
         page = self.page(tab_id)
-        self.assertTrue(self.wait(lambda: self.run_on(page.evaluate("window.__done === true")), 10))
+        self.assertTrue(self.wait(lambda: self.settled(page, "window.__done === true"), 10))
         self.run_on(page.click("#open"))           # a user gesture, so no pop-up blocker
         time.sleep(2.0)
         self.close_others(tab_id)
@@ -761,7 +769,7 @@ class OwnerBrowser(unittest.TestCase):
         self.owner("POST", f"/browser/tabs/{tab}/navigate", {
             "url": f"http://127.0.0.1:{self.fx}/rtc?u={self.udp.port}&s={stand_in}&c={self.closed.port}"})
         page = self.page(tab)
-        self.assertTrue(self.wait(lambda: self.run_on(page.evaluate("window.__r && window.__r.done")), 20))
+        self.assertTrue(self.wait(lambda: self.settled(page, "window.__r && window.__r.done"), 20))
         result = json.loads(self.run_on(page.evaluate("JSON.stringify(window.__r)")))
         time.sleep(1.0)
         self.measured["webrtc_candidates"] = len(result["cands"])
@@ -845,7 +853,7 @@ class OwnerBrowser(unittest.TestCase):
         self.owner("POST", f"/browser/tabs/{tab_id}/navigate",
                    {"url": f"http://pub.test:{self.fx}/lna?t={target}"})
         page = self.page(tab_id)
-        self.assertTrue(self.wait(lambda: self.run_on(page.evaluate("window.__r && window.__r.done")), 10))
+        self.assertTrue(self.wait(lambda: self.settled(page, "window.__r && window.__r.done"), 10))
         return json.loads(self.run_on(page.evaluate("JSON.stringify(window.__r)")))
 
     def test_08_loopback_is_closed_until_the_owner_opens_it(self):
@@ -877,7 +885,9 @@ class OwnerBrowser(unittest.TestCase):
         # The owner opens it in a tab: that port works, from a public page too.
         self.owner("POST", f"/browser/tabs/{tab}/navigate", {"url": f"http://localhost:{self.sanity.port}/"})
         self.assertGreaterEqual(self.sanity.accepts, 1)
-        self.assertEqual(self.run_on(self.page(tab).evaluate("document.body.innerText")), "ok")
+
+        body = "document.body ? document.body.innerText : ''"
+        self.assertTrue(self.wait(lambda: self.settled(self.page(tab), body) == "ok", 10))
         self.assertEqual(self.host.status()["loopback_opened"], 2)
         self.assertEqual(self.lna(tab, f"127.0.0.1:{self.sanity.port}"),
                          {"cors": "read:ok", "post": "sent", "done": True})
