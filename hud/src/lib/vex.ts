@@ -24,6 +24,8 @@ export const SLOTS: readonly number[] = [1, 2, 3, 4, 5, 6, 7, 8];
 
 export type Language = "cpp" | "python";
 export type DeviceAction = "download" | "info" | "brain";
+/** The daemon's `DEVICE_READS`: `vexcom --json` (system info) or `vexcom --programs`. Both are the `info` action. */
+export type DeviceRead = "system" | "programs";
 
 export interface VexStatus {
   configured: boolean;

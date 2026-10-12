@@ -24,7 +24,10 @@ The world's `vex` section (`state(mock)`):
   - `download_refuse`: sentences the next downloads answer 409 with, in order
     (no `code`); `download_exit`: the download program's exit code;
     `download_delay`: seconds each download waits before it answers;
-  - `info` / `info_refuse`: what device info answers.
+  - `info` / `info_refuse`: what a device read answers (`text` and
+    `exit_code`; the answer carries the `read` asked for); `info_reads`
+    records each read asked (`system` or `programs`), as the daemon's
+    `{read}` body names it.
 
 Owner-only on the real daemon: a request with an `Origin` that is not the
 mock's own is 403 here too. Bodies are held to exactly the daemon's keys, so
@@ -66,6 +69,7 @@ def state(mock) -> dict:
         "downloads": [],
         "info": {"text": "", "exit_code": 0},
         "info_refuse": None,
+        "info_reads": [],
         "brain": None,
     })
 
@@ -260,13 +264,18 @@ def handle(h, mock, method: str, path: str, body) -> bool:
         h._json({"terminal_id": row["id"], "started": True})
         return True
     if parts == ["vex", "device", "info"] and method == "POST":
-        if not exactly(set(), set()):
+        if not exactly({"read"}, set()):
             return True
+        read = body.get("read", "system")
+        if read not in ("system", "programs"):     # the daemon's DEVICE_READS
+            h._err(400, "read must be one of system, programs")
+            return True
+        v["info_reads"].append(read)
         if v["info_refuse"]:
             h._err(409, v["info_refuse"])
             return True
         mock.emit("vex_device", {"action": "info", "at": "2026-10-11T12:00:12+00:00"})
-        h._json(dict(v["info"]))
+        h._json({**v["info"], "read": read})
         return True
     h._err(404, "route not found")
     return True

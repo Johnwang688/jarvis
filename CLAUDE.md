@@ -1210,7 +1210,8 @@ wins: V-1..V-5; design §18; contract in `docs/hud-api.md`).**
 new projects with the Windows `vexcom.exe` and toolchain the owner's VS Code
 VEX extension downloaded, **run in place through WSL interop — nothing
 copied, bundled or committed**, and **never decompiled**: the only `vexcom`
-flags are DishPy's (`--name --slot --write --progress`, `--user`). **Tests
+flags are DishPy's (`--name --slot --write --progress`, `--user`) and the
+two reads the owner's `vexcom --help` lists (`--json`, `--programs`). **Tests
 never run a real VEX tool or touch a device** — `tests/v2/vex_fake/` holds
 a fake `make.exe` and `vexcom.exe`. Which executables run is
 **`config.VEX_PATH` (`~/.config/jarvis/vex.json`)**, written only by the
@@ -1290,9 +1291,18 @@ of `discord/project_commands.py`; still the single caller of
 whole before anyone is asked, and written through directory fds (each folder
 opened `O_DIRECTORY | O_NOFOLLOW` relative to the last, the file `O_EXCL |
 O_NOFOLLOW` relative to its folder; what remains is the new folder's own path,
-resolved once after the yes). The log gets lifecycle lines only. Not yet, said
-by the routes: device info (flag from the owner's `vexcom --help`) and Python
-download (spike). Agents' task worktrees are on the Linux filesystem, so
+resolved once after the yes). The log gets lifecycle lines only. **Device
+reads** (2026-10-12, from the owner's own `vexcom --help`, vexcom 1.0.2b2):
+`POST /vex/device/info {read?}` runs exactly `vexcom --json` ("system info in
+json format", the default `system`) or `vexcom --programs` (`programs`) —
+`vex.DEVICE_READS`, the only two; every other option it lists writes, runs,
+erases or updates firmware — through the same `verify_tools`, the one-device
+reservation (both are the `info` action) and the 10 s timeout; any other
+`read` is a 400 before anything is looked up. JSON output is pretty-printed
+as text (a JSON string's control characters stay escaped, invisibles are
+removed). The output shapes in `tests/v2/vex_fake/` are guesses: only a
+real brain shows vexcom's. Not yet, said by the routes: Python download
+(spike). Agents' task worktrees are on the Linux filesystem, so
 `vexbuild` builds only in a chat's own project folder. Tests point every
 `config.VEX_*` path, `VEX_MOUNT_ROOT` and `VEXBUILD_PATH` at a temp tree, with a
 non-empty `WSLENV`. `tests/v2/vex_check.py` (111 checks); 69 guards of round 1
@@ -1345,7 +1355,11 @@ without a reload. **A VEX view never follows the chat**: a pane whose pinned
 project is gone says "Pick a project". **A lone VEX pane survives a reload**
 (the boot never puts the chat over a VEX view; a window with no chat drawn is
 WP-B's refused-with-a-sentence case). `vex_device` records this window did
-not start are said in the view. **The daemon's freshness rule** (`vex.py`
+not start are said in the view. **Read device info** (`vexcom --json`) and
+**List programs** (`vexcom --programs`) are one device read at a time, off
+under a card and during a chain; the answer is drawn as text in a `<pre>`
+(markup in it is characters), headed by which read it was and a non-zero
+exit. **The daemon's freshness rule** (`vex.py`
 `Vex._fresh`, review M2 and its delta review): **sources** are only what a
 build compiles or obeys (`SOURCE_SUFFIXES`: C/C++ sources and headers,
 assembly, make files — a notes file or an editor backup never counts, which
