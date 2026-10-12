@@ -134,6 +134,8 @@ class FakePty:
         self.waiting: dict[str, dict] = {}
         self.takeover_answers: list[dict] = []
         self.refused_tickets = 0
+        self.gone_after_ticket = 0
+        self.removed: set[str] = set()  # terminals the test took out of the world itself
         self.closing: list[tuple[dict, int, str]] = []
         ctx.route_web_socket(re.compile(rf"^ws://127\.0\.0\.1:{mock.port}/terminals/"), self._attach)
 
@@ -163,8 +165,17 @@ class FakePty:
         sock = {"tid": tid, "ws": ws, "url": ws.url, "frames": [], "latched": False, "open": True,
                 "n": len(self.sockets), "replayed_at": None, "at": time.monotonic()}
         self.sockets.append(sock)
-        if not ticket or tickets.pop(ticket, None) != tid or self._row(tid) is None:
-            self.refused_tickets += 1
+        fresh = bool(ticket) and tickets.pop(ticket, None) == tid
+        if not fresh or self._row(tid) is None:
+            # Counted apart only: a fresh ticket for a terminal the *test*
+            # removed (`_reset` emptying the world, or `end`) while the HUD was
+            # still attaching — the test's race, not the HUD's. Anything else —
+            # a stale or missing ticket, or a socket for a terminal the HUD
+            # closed itself — counts against the HUD.
+            if fresh and tid in self.removed:
+                self.gone_after_ticket += 1
+            else:
+                self.refused_tickets += 1
             self._close(sock, 1008, "a fresh ticket for this terminal is required")
             return
         ws.on_message(lambda m, s=sock: self._message(s, m))
@@ -279,6 +290,7 @@ class FakePty:
         row = self._row(tid)
         if row in rows:
             rows.remove(row)
+            self.removed.add(tid)
         sock = self.holders.pop(tid, None)
         if sock and sock["open"]:
             self._send(sock, {"type": "exit", "code": None, "reason": "ended"})
@@ -429,6 +441,7 @@ def _posts(mock) -> int:
 
 def _reset(page, mock, base, until, fake, size=(1280, 800)):
     """A clean window: no terminals in the world, default layout, panel shut."""
+    fake.removed |= {r["id"] for r in mock.world.get("terminals", [])}
     mock.world["terminals"] = []
     page.set_viewport_size({"width": size[0], "height": size[1]})
     _store(page, zoom="100", ws=None, prefs=None, layout="{}")
@@ -525,7 +538,8 @@ def terminal_checks(browser, mock, base, check, until, guard, init_script):
         for section in (_open_checks, _autoopen_reload_checks, _autoopen_pane_checks, _autoopen_menu_checks,
                         _autoopen_click_checks, _autoopen_card_checks, _autoopen_refusal_checks,
                         _typing_checks, _card_checks, _paste_checks, _reload_checks,
-                        _takeover_checks, _elsewhere_checks, _exit_checks, _busy_checks, _readable_checks,
+                        _takeover_checks, _elsewhere_checks, _exit_checks, _busy_checks,
+                        _closed_while_ticketing_checks, _readable_checks,
                         _hold_checks,
                         _read_note_checks, _integration_checks, _osc_link_checks, _browser_link_checks,
                         _menu_edge_checks, _pane_checks, _zoom_checks, _ended_checks,
@@ -544,8 +558,13 @@ def terminal_checks(browser, mock, base, check, until, guard, init_script):
                 except Exception:
                     pass
         check("no page errors in the terminal section", not errors, "; ".join(errors[:3]))
+        # Strict for every socket: a spent, missing or another terminal's
+        # ticket fails it, and so does a socket for a terminal the HUD itself
+        # closed. Only a fresh ticket for a terminal the test removed while
+        # the HUD was attaching is not the HUD's doing (see _attach).
         check("every socket the HUD opened presented a fresh ticket", fake.refused_tickets == 0,
-              f"{fake.refused_tickets} refused")
+              f"{fake.refused_tickets} refused against the HUD; {fake.gone_after_ticket} apart "
+              "(a fresh ticket for a terminal the test removed)")
     finally:
         ctx.close()
     _guard_selftest(browser, mock, base, check, until, init_script)
@@ -1427,6 +1446,32 @@ def _exit_checks(page, mock, base, check, until, fake):
     until(lambda: _visible(page, '[data-testid="panel"]'), timeout=2)
     check("opening the panel shows it, and the dot goes",
           page.locator('[data-testid="toggle-panel-dot"]').count() == 0 and _state(page, tid) == "exited")
+
+
+def _closed_while_ticketing_checks(page, mock, base, check, until, fake):
+    """A terminal the owner closes while its ticket is on its way is never
+    attached: the HUD looks again once the ticket lands (review of PR #72,
+    LOW 2). Such a socket would count against the HUD in the fresh-ticket
+    check, never in the bucket kept for terminals the test removed."""
+    tid = _fresh(page, mock, base, until, fake)
+
+    def asked():
+        return [p for (m, p, _) in mock.calls if m == "POST" and p == f"/terminals/{tid}/ticket"]
+
+    def socks():
+        return [s for s in fake.sockets if s["tid"] == tid]
+    n_asked, n_socks, refused = len(asked()), len(socks()), fake.refused_tickets
+    mock.terminal_ticket_delay = 1.5      # the next ticket is minted at once, answered 1.5 s late
+    fake._close(fake.holders[tid], 1011, "the daemon went away")
+    fake.flush()                          # the HUD reconnects: a new ticket first
+    until(lambda: len(asked()) > n_asked, timeout=4)
+    page.locator(f'[data-testid="panel-close-{tid}"]').click()
+    until(lambda: any(m == "DELETE" and p == f"/terminals/{tid}" for (m, p, _) in mock.calls), timeout=3)
+    page.wait_for_timeout(2500)           # the late ticket lands meanwhile
+    fake.flush()
+    check("a terminal closed while its ticket was on its way is never attached",
+          len(socks()) == n_socks and fake.refused_tickets == refused and tid not in fake.removed,
+          f"{len(socks()) - n_socks} socket(s) after the close, {fake.refused_tickets - refused} refused")
 
 
 def _busy_checks(page, mock, base, check, until, fake):

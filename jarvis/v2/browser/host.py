@@ -100,6 +100,7 @@ from jarvis import config
 from . import files as _files
 from . import policy
 from .gate import Gate
+from .settings import BrowserSettings
 from .stream import TICKET_TTL_S, TabStream, Tickets, serve as _serve_stream
 
 LOG = logging.getLogger("jarvis.v2.browser")
@@ -116,7 +117,6 @@ NAV_TIMEOUT_S = 20.0
 CLOSE_TIMEOUT_S = 5.0
 STOP_TIMEOUT_S = 10.0
 PROFILES_CAP = 64 * 1024
-SETTINGS_CAP = 64 * 1024
 TITLE_CAP = 120
 URL_CAP = 2048
 # BR-1b: the stream, dialogs, file choosers and the hold.
@@ -154,12 +154,6 @@ EXPLANATION = (
     "<body style='font:15px system-ui,sans-serif;margin:3em;color:#c9c9c9;background:#141414'>"
     "<p>Jarvis's Browser does not open this kind of address.</p>"
     "<p>Only http, https and about:blank pages open here, and never Jarvis's own ports.</p>")
-
-# The settings `browser.json` holds and their defaults (B-5: the LAN off).
-# `local_servers` is off too: on, it opens every loopback port that is not
-# Jarvis's, not only the ones the owner opened in a pane — the owner's
-# switch, never a default.
-SETTINGS_DEFAULTS = {"lan": False, "local_servers": False}
 
 
 class BrowserRefused(Exception):
@@ -313,65 +307,6 @@ def _read_capped(path: Path, cap: int) -> bytes | None:
     return data
 
 
-# -- browser.json -----------------------------------------------------------------------
-
-_settings_cache: tuple[tuple, dict] | None = None
-_settings_lock = threading.Lock()
-
-
-def load_settings() -> dict:
-    """`browser.json` with defaults; a missing, unreadable or malformed file is
-    the defaults (the LAN stays off). Cached by (path, mtime, size): the gate
-    asks on every connection."""
-    global _settings_cache
-    path = config.BROWSER_SETTINGS_PATH
-    try:
-        st = os.stat(path)
-        key = (str(path), st.st_mtime_ns, st.st_size, st.st_ino)
-    except OSError:
-        return dict(SETTINGS_DEFAULTS)
-    with _settings_lock:
-        if _settings_cache is not None and _settings_cache[0] == key:
-            return dict(_settings_cache[1])
-    out = dict(SETTINGS_DEFAULTS)
-    try:
-        data = json.loads((_read_capped(path, SETTINGS_CAP) or b"{}").decode("utf-8"))
-        if isinstance(data, dict):
-            for name, default in SETTINGS_DEFAULTS.items():
-                if isinstance(data.get(name), type(default)):
-                    out[name] = data[name]
-    except (OSError, ValueError, UnicodeDecodeError):
-        LOG.warning("browser.json is unreadable; the Browser uses its defaults")
-    with _settings_lock:
-        _settings_cache = (key, out)
-    return dict(out)
-
-
-def save_settings(changes: dict) -> dict:
-    """Merge `changes` (known keys, right types) into `browser.json`, keeping
-    any key a later package added, and return the settings."""
-    global _settings_cache
-    for name, value in changes.items():
-        if name not in SETTINGS_DEFAULTS or type(value) is not type(SETTINGS_DEFAULTS[name]):
-            raise BrowserRefused(400, f"{name} must be a boolean")
-    path = config.BROWSER_SETTINGS_PATH
-    current: dict = {}
-    try:
-        raw = _read_capped(path, SETTINGS_CAP)
-        if raw:
-            loaded = json.loads(raw.decode("utf-8"))
-            if isinstance(loaded, dict):
-                current = loaded
-    except (OSError, ValueError, UnicodeDecodeError):
-        current = {}
-    current.update(changes)
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    _write_private(path, (json.dumps(current, indent=2, sort_keys=True) + "\n").encode())
-    with _settings_lock:
-        _settings_cache = None
-    return load_settings()
-
-
 # -- Chrome processes ---------------------------------------------------------------------
 
 def _names_dir(arg: str, folder: str) -> bool:
@@ -509,10 +444,16 @@ class BrowserHost:
     work on `jarvis-owner-browser`. `resolver` and `connector` are the gate's
     test seams (gate.py)."""
 
-    def __init__(self, daemon=None, *, resolver=None, connector=None):
+    def __init__(self, daemon=None, *, resolver=None, connector=None, settings=None):
         self._daemon = daemon
         self._resolver = resolver
         self._connector = connector
+        # The owner's switches (`lan`, `local_servers`): the daemon's
+        # `BrowserSettings`, the one reader of `browser.json`
+        # (`settings.py`). A host made without a daemon keeps its own in
+        # memory, at the defaults (both off).
+        self._settings = (settings or getattr(daemon, "browser_settings", None)
+                          or BrowserSettings())
         self._lock = threading.Lock()
         # Held for the whole of a start, and by `stop()`, so a stop can never
         # land between the gate and the loop thread and leave one running
@@ -568,7 +509,7 @@ class BrowserHost:
         with self._lock:
             if port in self._opened_ports:
                 return True
-        return bool(load_settings().get("local_servers"))
+        return self._settings.value("local_servers")
 
     def _open_loopback(self, url: str | None) -> None:
         """The owner asked for `url` in a pane: if it is on this machine, its
@@ -599,7 +540,7 @@ class BrowserHost:
                 secure_dir(root / name)
             self._sweep_private(root / "private")
             self._ensure_main()
-            gate = Gate(refused=self._gate_refused, lan=lambda: load_settings()["lan"],
+            gate = Gate(refused=self._gate_refused, lan=lambda: self._settings.value("lan"),
                         loopback=self.loopback_open,
                         resolver=self._resolver, connector=self._connector)
             gate.start()
@@ -1685,7 +1626,7 @@ class BrowserHost:
             downloading = self._downloading
             popups_refused = self._popups_refused
         gate = self._gate.stats() if self._gate is not None and running else None
-        settings = load_settings()
+        settings = self._settings.snapshot()
         streams = sum(1 for t in list(self._tabs.values())
                       if t.stream is not None and t.stream.attached() is not None)
         return {"available": CHROME_PATH.exists(), "running": running,

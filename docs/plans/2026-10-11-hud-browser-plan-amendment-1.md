@@ -7,6 +7,8 @@
 
 **Precedence:** this amends `docs/plans/2026-10-10-hud-browser-plan.md`, and the decisions file (`2026-10-10-hud-browser-decisions.md`) still wins over both. The amendment applies the owner's answers to B-2, B-4, B-7, B-9, B-12 and B-14, following "Lead's reading of B-9".
 
+**Amended in turn (2026-10-12):** `2026-10-12-hud-browser-plan-amendment-2.md` replaces BR-8b. It covers servers an agent starts, places a server by a new rule (a pane, else a tab, else a prompt), adds tabs to Browser panes, and keeps auto-open Direct only, never opening a port in the gate. Where it and §D.2, BD-7 or the BR-8b rows below differ, amendment 2 wins.
+
 **Builds on:**
 - main at 497768d;
 - PR #33 (`feat/terminal-read`, 3393daf);
@@ -489,6 +491,11 @@ That is about **250–350 MB before any tab**, then 50–300 MB per tab. The wor
 
 ### D.2 HUD side (`hud/src/lib/devopen.ts`, pure, plus `App.tsx` and `Terminal.tsx`)
 
+> **Superseded where it differs by amendment 2 (2026-10-12), §E.**
+> - With no room to split, auto-open no longer switches the focused pane or offers a chip. It opens a tab in a drawn Browser pane, else asks with a non-blocking prompt.
+> - Under a card it waits until the card goes, not 30 s.
+> - **It never opens Remote, and never opens a port in the Browser's gate** (decision L2).
+
 `autoOpenPlan(...) → split(source) | focused(pane) | offer | skip(why)`.
 
 **It skips when:**
@@ -580,7 +587,7 @@ Sound and video still have no sync, as §9 says.
 | BR-1c | profiles, Private, sign-in and sync off, per-profile forget | M, medium-high | after BR-1a, parallel with BR-1b | no |
 | BR-3a | rename and migration | S–M | **right after G1 merges** | yes |
 | BR-3b | Remote mode, profile chip, Private, see and drive switches | L, high | after BR-1b, BR-1c, BR-2, BR-3a | yes |
-| BR-8b | auto-open in the HUD (Direct mode only, so BR-3b is not needed) | M, medium | after G2 and BR-8a; G2 or BR-8b adds `splitPane(..., {focus:false})` | yes (`App.tsx`, `workspace.ts`) |
+| BR-8b | auto-open in the HUD (Direct mode only, so BR-3b is not needed). **Replaced by amendment 2's AO-1a, AO-1b-i, AO-1b-ii, AO-2 and AO-3** | M, medium | after G2 and BR-8a; G2 or BR-8b adds `splitPane(..., {focus:false})` | yes (`App.tsx`, `workspace.ts`) |
 | BR-4 | annotate and Send to chat | M | after BR-3b | some |
 | BR-5 | `hud_browser_view` with refs, pane numbers, default on | M, medium-high | after #33, #34, BR-1b; the HUD half after BR-3b | backend |
 | BR-9b | driving backend on the fast path, **shipped with "Agents may drive" off** | L, high | after BR-5, BR-9a, MCP WP-1 | no |
@@ -708,6 +715,8 @@ None of these touches `workspace.ts`, `Workspace.tsx`, `Layout.tsx`, `ChatTab`, 
 
 ### BR-8b: in `tests/face/hud_v2_terminal_check.py` (`FakePty` prints a Vite line pointing at the mock's `dev_port`)
 
+> Replaced by amendment 2 §H (AO-3's `hud_v2_autoopen_check.py`). The "at 8 panes the focused pane switches" row no longer holds.
+
 | Check | Mutation it must catch |
 |---|---|
 | single becomes cols2, with a Direct Browser pane on `dev_port` | — |
@@ -761,7 +770,7 @@ None of these touches `workspace.ts`, `Workspace.tsx`, `Layout.tsx`, `ChatTab`, 
 | BD-4 | Classifier model and inputs | A new `browser_review` tier on **Luna**. Include your turn message (outside the fence) so it can ask about unrelated actions. Any failure asks |
 | BD-5 | Chrome sign-in and sync | **Owner, 2026-10-11: ON**, with sign-in and autofill. The planner had recommended off. H1 and the ASK floors still apply; §C states the password-store cost |
 | BD-6 | Uploads | **Always ask.** Files from the chat's project folder only, at most 50 MB |
-| BD-7 | Auto-open with no room to split | The focused pane, unless it is busy (a chat with words or a running turn, a File pane with an unsaved edit, or the source terminal); then a one-click offer |
+| BD-7 | Auto-open with no room to split | The focused pane, unless it is busy (a chat with words or a running turn, a File pane with an unsaved edit, or the source terminal); then a one-click offer. **Superseded (2026-10-12, decision L3):** a tab in a drawn Browser pane, else a non-blocking prompt naming the panes |
 | BD-8 | Sound if headless Chrome cannot play (M3.1 fails) | Headed Chrome under Xvfb with `-nolisten tcp` and an auth cookie inside the 0700 browser folder. That is no weaker than the cookies already on disk. Ask again at that point |
 | BD-9 | Strict-profile threads | **No driving** |
 | BD-10 | A production memory ceiling | Add `MemoryHigh=5G`, `MemoryMax=6G` and **`OOMPolicy=continue`** to `jarvis-daemon2.service`, so a runaway tab dies inside the unit and the daemon survives. Chrome renderers are killed first |
