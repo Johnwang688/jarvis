@@ -1528,6 +1528,31 @@ blocks in `state/buffers.test.ts` and `lib/buffers.test.ts`, and the
 `_rv49_*` sections of `hud_v2_editor_check` (the mock serves `editable`,
 `uneditable` and on-cue `stat_etags`).
 
+**The tree's unsaved-changes dot and file icons (2026-10-11, the owner's ask
+for the robotics lab: "like VS Code").** A dirty file's tree row wears a light
+dot (`--text-2`, `DirtyDot`, "unsaved changes" with a tooltip), and so does a
+collapsed folder holding one at any depth — an open folder never does, its
+child does (`lib/dirtyMarks.ts`, `rowDot`). **Dirty is the buffer's**, so
+every pane's tree on that project marks it, opened there or not, and a file
+read through another project is found under this one's root by its `abs`. On
+a tab the dot stands where × is and hover or focus brings × back (theme.css;
+× only goes transparent, so it never moves and stays clickable). **The tree
+never redraws per keystroke**: `useDirtyMarks` subscribes with a string key
+of the dirty paths (the registry already speaks only on clean↔dirty), and
+the tree's `Node` is memoized with a stable `onOpen`, so a chat box's typing
+no longer redraws it either. Each file row has a 16px inline-SVG icon after
+the twistie's room (`components/FileIcon.tsx`; the rule is
+`lib/fileIcons.ts`: whole name, then the longest extension, case-insensitive;
+`.env*` or `policy: "env"` the lock); a folder is its chevron alone. **Icons
+are drawn in currentColor from six theme tokens** (`ICON_TOKENS`: the four
+`--syn-*`, `--text-2`, `--text-muted`) — never a hex and never amber or red,
+so VS Code's yellow `{}` and orange HTML are deliberately not copied. Free
+checks: `fileIcons.test.ts` (mapping, the colour rule from theme.css's own
+text, every icon rendering aria-hidden with no `<text>`), `dirtyMarks.test.ts`,
+`DirtyMark.test.ts` (one redraw per transition, none per keystroke or for
+another project's file) and `tests/face/hud_v2_editor_marks_check.py` (a
+`MockDaemon(0)` of its own, after the editor section of `hud_v2_check`).
+
 **The Graphite editor scheme, ED-3 (2026-10-11; plan §2.5, decisions E-4).**
 One scheme, no picker, **no syntax colour amber or red**. `lib/editorTheme.ts`
 is the table: rows keyed by **nvim-treesitter capture names** (`LEGEND` —
