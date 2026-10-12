@@ -1573,9 +1573,9 @@ no-over-refusal half). Three mutations in scratch copies bite: the bound off
 (`redos_checks` fails on `.?` sixteen times, 65 ms), sources judged without a
 kill (`pgrep` alone is matched) and no `systemctl show` source (the detector
 misses `systemctl --user show -p MainPID --value jarvis-daemon2 | xargs
-kill`). The differential against fb549c3 over NCORPUS strings (the usual
+kill`). The differential against fb549c3 over 25,657 strings (the usual
 corpus, from both trees; `rules.decide` and `static_verdict` agree on every
-one): NMOVED moved, all stricter (NAA ALLOW→ASK, NAD ALLOW→DENY, NKD
+one): 185 moved, all stricter (4 ALLOW→ASK, 78 ALLOW→DENY, 103
 ASK→DENY), nothing looser; 33 are review 2's, each a spelling from its new
 tests, and the rest are round 1's (already so on 819e58a). Against 819e58a
 the only lines that loosened are the five over-refusals the NITs named —

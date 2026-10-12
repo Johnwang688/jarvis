@@ -2444,7 +2444,11 @@ daemon's checkout. Both are the owner's and DENY for every agent
 `systemctl` or D-Bus, and — the owner's choice the same day — killing it by a
 `pkill -f`/`killall -r`/`pgrep -f`-fed `kill` pattern that matches its command
 line at `daemon2` (`pkill -f jarvis` stays ALLOW; a literal `kill <pid>` and
-kills by process name are not seen).
+kills by process name are not seen) or, since the re-review, by a `kill` fed
+its PID from its unit, cgroup or ports. A kill pattern whose matching cost
+cannot be bounded is refused unmatched, since `re` holds the GIL; `/status`
+reports the daemon's `pid`, and `jarvis restart` trusts a `/status` only from
+systemd's MainPID.
 
 **Push-to-talk is Ctrl+D (2026-10-10).** The owner: "can we change the push
 to talk button? change it to Ctrl + D just like it is in claude." It was
