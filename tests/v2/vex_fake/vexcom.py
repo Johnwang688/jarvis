@@ -7,9 +7,13 @@ environment *names* to `calls.jsonl` beside itself, then:
   until its input ends or it is killed;
 * `--write`: a download — prints progress, waits while `HOLD` exists beside
   it (so a test can hold a download open), prints `Finished`;
-* `--test-info`: the device-info read the tests patch in (the real flag is a
-  spike item) — prints text with markup and an escape in it, and hangs while
-  `HOLD_INFO` exists beside it.
+* `--json` (exactly; vexcom's "system info in json format"): one line of
+  JSON with markup in a string and an escape written as `\\u001b`;
+* `--programs` (exactly; "shows programs"): a text list with markup and a raw
+  escape in it.
+
+Both reads hang while `HOLD_INFO` exists beside it. The output shapes are
+plausible guesses, not vexcom's: the real ones are only seen on a real brain.
 """
 import json
 import os
@@ -34,11 +38,18 @@ if "--write" in args:
         time.sleep(0.05)
     print("Finished", flush=True)
     sys.exit(0)
-if "--test-info" in args:
+if args in (["--json"], ["--programs"]):
     while (HERE / "HOLD_INFO").exists():
         time.sleep(0.05)
-    print("Brain name: <b onmouseover=x>BLUE-1</b>\x1b[31m red\x1b[0m", flush=True)
-    print("VEXos 1.1.5", flush=True)
+    if args == ["--json"]:
+        print(json.dumps({"vexcom": "1.0.2b2", "devices": [{
+            "type": "V5 Brain", "port": "COM5", "name": "<b onmouseover=x>BLUE-1</b>",
+            "team": "1234A\u001b[31m red", "vexos": "1.1.5", "battery": 87,
+            "slots_used": [1, 3]}]}), flush=True)
+    else:
+        print("slot  name        language", flush=True)
+        print("1     override    cpp", flush=True)
+        print("3     <img src=x onerror=y>skills\x1b[31m  python", flush=True)
     sys.exit(0)
 print("vexcom fake: unknown arguments", flush=True)
 sys.exit(64)
