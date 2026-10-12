@@ -1688,9 +1688,13 @@ never JSX, so a removal never trips React; `data-browser-frame="<pane>:<tab>"`,
 tab 0 until Direct tabs; a fresh frame per load), the decision is pure in
 **`lib/frameguard.ts`**, and **`state/frameguard.ts`** (installed once by
 App, a layout effect) removes a frame that gains focus without the owner's
-gesture, puts focus back on the HUD element that last had it (its text
-selection kept), else the selected chat's box, or under a card the card,
-tells the pane — `browser-stolen`, "This page took the keyboard · Reload"
+gesture, puts focus back **only on the HUD element that lost it to this
+theft** (caught in its own `focusout`, its text selection kept) — never on one
+that had it earlier, so a page that grabs from another page the owner was
+typing a password in can never hand the next keys to the chat box, where an
+Enter sends them (review of PR #78, H1); with no such element focus goes to
+nothing that types or sends (the notice's container, `tabIndex=-1`, never its
+Reload), or under a card the card — tells the pane — `browser-stolen`, "This page took the keyboard · Reload"
 (`browser-stolen-reload`, React text, plain chrome, disabled and inert under
 a card; the tab's URL stays; memory only) — and writes one console line
 naming the pane slot, never the URL. **Measured in Chromium 149, headless
@@ -1711,8 +1715,20 @@ else in the HUD brings it back, and so does **any key typed in the HUD**
 (decision: a pointer parked over a page stops counting at the owner's first
 key, narrower than §F's stated limit), and so does the window losing focus
 to another program or being hidden (the HUD never hears the pointer leave a
-frame, so one that left the window from inside a page would else count on). The gestures: the pointer over it;
-Tab or Shift+Tab as the latest key within `TAB_MS` 300; the owner's own
+frame, so one that left the window from inside a page would else count on).
+**While a HUD text control has the keyboard** (an input, a textarea, Monaco,
+a terminal, contenteditable; `isTypingTarget`) **the shield steps aside only
+on a press**, never a move or a wheel, and the HUD then puts the keyboard in
+the page with `contentWindow.focus()` (the lead's option (a) on review M2): a
+pointer crossing a page mid-typing is never "over" it. The cost, accepted:
+the first click after typing in the HUD only focuses the page, and a wheel
+there scrolls nothing until a click. **A Browser iframe is never
+`.focus()`ed** (H2): FrameHost replaces each frame's `focus` with its
+window's, since an element focus left `activeElement` on that frame after
+another frame took the keyboard, blinding the guard. The gestures: the pointer over it;
+Tab or Shift+Tab within `TAB_MS` 300 — **not cancelled** (Monaco's indent is
+not one) **and only for the frame it landed in**, the first place focus went
+after it (M1); the owner's own
 load — Load, Enter in the URL box, Project root, the keep-origin switch,
 Reload — claimed by the first frame made after it, live until 2 s after
 that frame's `load` (20 s if it never loads) and **revoked by any key in the
@@ -1722,20 +1738,23 @@ card would unmount the page the owner was typing in). A stored URL restored
 at mount and a terminal's "Open in Browser" are no gesture. **Never**,
 whatever the pointer says: a card up (read from the DOM, `#authveil`), or a
 frame not the active tab of a drawn pane (or with no box on screen); a held
-frame under a card goes; a held frame that stops being drawn gives the
-keyboard back without being removed. **Playwright's `locator(frame).click()`
+frame under a card goes; a held frame that stops being drawn loses the
+keyboard to nothing that types, without being removed. **Playwright's `locator(frame).click()`
 hit-tests before it moves the mouse and reads the shield as covering the
 frame**: suites click frames with `page.mouse` (the layout suite's
 card-focus check changed so). Free checks: `lib/frameguard.test.ts`,
 `state/frameguard.test.ts` (jsdom), and `hud_v2_browser_check`'s `_guard_*`
 sections (`BROWSER_ONLY=guard`), against the mock dev server's
-`/focus-mount`, `/focus-timer`, `/focus-load`, `/focus-none` pages and their
-key log (`mock.dev_keys`). **Limits**: a key in flight as focus moved can be
-lost, IME composition in the box may be cut, a frame-to-frame steal is
-caught within an animation frame (a key typed in that gap reaches the page),
-a pointer resting over a page before the owner's first key still counts, the
-owner's first click or wheel there after typing can be eaten by the
-re-raised shield, and none of it binds a same-uid program.
+`/focus-mount`, `/focus-timer`, `/focus-load`, `/focus-none`,
+`/focus-pointer` and `/focus-reload` pages and their key log
+(`mock.dev_keys`); the review round's checks (H1's exact scenario — no POST,
+the draft unchanged — H2's give-back, M1's three Tabs, M2's crossing and
+click-then-type, and the two surviving mutants) each fail with their guard
+removed. **Limits**: a key in flight as focus moved can be lost, IME
+composition in the box may be cut, a frame-to-frame steal is caught within
+an animation frame (a key typed in that gap reaches the page), a pointer
+resting over a page while no text control has the keyboard counts until the
+owner's first key, and none of it binds a same-uid program.
 
 **Dev servers announced in a terminal, BR-8a (2026-10-12; Browser plan
 `docs/plans/2026-10-10-hud-browser-plan.md`, amendment 1 §D.1/§G/§H, the
