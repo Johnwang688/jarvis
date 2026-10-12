@@ -2274,12 +2274,33 @@ def _continue_checks(page, mock, base, check, until, fake):
     check("Continue here, double-clicked, is one new shell — and nothing of the refused try was kept to send",
           len(posts()) == n + 1 and fake.sent(nxt3) == b"", f"{len(posts()) - n} posts, sent {fake.sent(nxt3)!r}")
 
-    # Auto-repeat is one continuation; what repeats joins what is held.
+    # A card raised while the new shell starts: what was typed before it never goes, and that is said.
     fake.end(nxt3)
     until(lambda: _state(page, nxt3) == "ended", timeout=4)
+    held = _next_id(mock)
+    fake.hold.add(held)
+    _focus_term(page, nxt3)
+    page.keyboard.type("ls")
+    until(lambda: _state(page, held) == "waiting", timeout=4)
+    _approval(mock, "tcn2")
+    until(lambda: page.locator('[data-testid="approval-card"]').count() > 0, timeout=4)
+    page.wait_for_timeout(150)
+    page.keyboard.press("Escape")
+    until(lambda: page.locator('[data-testid="approval-card"]').count() == 0, timeout=4)
+    fake.finish_waiting(held, allow=True)
+    until(lambda: _state(page, held) == "attached", timeout=5)
+    page.wait_for_timeout(600)
+    note = page.locator(_sel(held, '[data-testid="term-paste-notice"]'))
+    check("a card raised while the new shell starts: what was typed before it is never sent, and that is said",
+          fake.sent(held) == b"" and note.count() == 1 and note.get_attribute("data-kind") == "unsent",
+          f"{fake.sent(held)!r} {note.inner_text()[:120] if note.count() else 'no notice'}")
+
+    # Auto-repeat is one continuation; what repeats joins what is held.
+    fake.end(held)
+    until(lambda: _state(page, held) == "ended", timeout=4)
     n = len(posts())
     nxt4 = _next_id(mock)
-    _focus_term(page, nxt3)
+    _focus_term(page, held)
     for _ in range(3):
         page.keyboard.down("q")
     page.keyboard.up("q")
