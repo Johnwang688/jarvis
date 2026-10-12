@@ -1560,7 +1560,8 @@ _PATTERN_CAP = 256
 # whole daemon, every turn and the approval broker with it — `.?` thirty times
 # took days. The per-pattern budget fits two unbounded quantifiers on the
 # owner's checkout (`node.*vite.*dev`), and the worst pattern under it matches
-# in about 20 ms (`ReDoS` in tests/rules_check.py holds it under 50 ms).
+# in about 10 ms (`redos_checks` in tests/rules_check.py holds every one under
+# 50 ms). Parsing costs too: a line's patterns share `_LINE_PATTERN_CHARS`.
 _REGEX_BUDGET = 1 << 19
 _LINE_REGEX_BUDGET = 1 << 20
 _LINE_PATTERN_CHARS = 4096

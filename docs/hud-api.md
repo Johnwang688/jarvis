@@ -1551,7 +1551,13 @@ reads, `reset-failed` and `daemon-reload` stay untouched, and `systemctl
 --user set-/unset-/import-environment` are asked — and, the owner's choice the
 same day, a `pkill -f`, `killall -r` or `pgrep -f`/`pidof`-fed `kill` whose
 pattern matches the daemon's command line at `daemon2` (`pkill -f jarvis`
-stays ALLOW; a literal `kill <pid>` and kills by process name are not seen).
+stays ALLOW; a literal `kill <pid>` and kills by process name are not seen);
+since review 2 also a `kill` fed the daemon's PID by `systemctl show|status`
+of its unit, a D-Bus read of it, its cgroup's `cgroup.procs`, `lsof`/`fuser`
+on its ports or `ps | grep`, plus `fuser -k` on its ports and `pkill
+--cgroup|--pidfile` naming its unit. A source is judged only when a fed
+`kill` is on the line, and a kill pattern whose matching cost cannot be
+bounded fails closed rather than freezing the daemon (`re` holds the GIL).
 A shell write **into** the install root (`cp`, `rsync`, a
 redirect) is asked, never auto-approved or covered by an allowlist entry. A
 shell can still write there in a form nobody sees — the accepted shell gap.

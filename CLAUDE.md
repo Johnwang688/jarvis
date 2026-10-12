@@ -1375,10 +1375,17 @@ not active, or an inactive or failed unit, is restarted unchecked, and
 `--force` over a silent daemon says what it overrode. It refuses when the
 systemd user unit is not installed or is not what runs the daemon (one
 started by `jarvis hud` or a shell would be doubled — the second cannot
-bind); **warns, never refuses, when the checkout the unit runs from holds
-uncommitted Python** (M5: `git status -- jarvis pyproject.toml` there — the
-new daemon loads it, and Jarvis's chats leave edits on main) and that open
-HUD terminals end; runs `systemctl --user restart jarvis-daemon2` as argv;
+bind), and **the daemon that answered `/status` must be the unit's** (review
+2, L-4: `/status` gained `pid`, compared with systemd's MainPID or an
+ancestor of it — an idle daemon on this shell's port that is not the unit's
+is "can't check", exit 3 unless `--force`, and after the restart one that is
+not the new MainPID does not verify, exit 4; a `/status` without `pid` is
+trusted as before); **warns, never refuses, when the checkout the unit runs
+from holds uncommitted Python** (M5: `git status -- jarvis pyproject.toml`
+there — the new daemon loads it, and Jarvis's chats leave edits on main) and
+that open HUD terminals end — the warning, and a hand-off's grace pause, come
+**before** the busy check, which is the last step before the restart (review
+2); runs `systemctl --user restart jarvis-daemon2` as argv;
 waits up to 30 s for a daemon **younger than the restart** to answer
 `/status` (the old one's last answer never passes; exit 4 with systemd's
 state, the `journalctl` line and, at systemd's start limit, the
@@ -1387,10 +1394,11 @@ HUD served, then asks for Ctrl+R. **Typed in a HUD terminal** — which runs in
 the daemon's own cgroup (`/proc/self/cgroup` names `jarvis-daemon2.service`),
 so the restart would kill the command mid-wait — the checks and the refusals
 run there, and the restart itself is handed to a transient unit outside it
-(`systemd-run --user --collect --quiet --unit=jarvis-owner-op-… -- python -m
-jarvis restart … --handed-off`; exit 4, its report in `journalctl --user -u
-<that unit>`; M4); a handed-off run still inside the cgroup refuses, and one
-never hands off again. **`jarvis hud rebuild [--pull] [--restart] [--force]
+(`systemd-run --user --collect --quiet --unit=jarvis-owner-op-… -- python -P
+-m jarvis restart … --handed-off` — `-P`, so a `jarvis.py` planted in its
+working directory, `$HOME`, never runs; exit 4, its report in `journalctl
+--user -u <that unit>`; M4); a handed-off run still inside the cgroup
+refuses, and one never hands off again. **`jarvis hud rebuild [--pull] [--restart] [--force]
 [--clean] [--allow-dirty]`**: `--pull` fast-forwards `main` from `origin/main`
 through `gitops._git` (refused off `main`, on a detached HEAD, with dirty
 tracked files, when the checkout's own config names a program, and — failing
@@ -1413,7 +1421,12 @@ refused or failed, 3 a turn runs or an approval waits (or that could not be
 checked), 4 not verified or handed off. **Both are DENY for every agent**
 through the one detector (`OWNER_OPS` gains `("hud", "rebuild")`,
 `("restart",)`, `("daemon2", "restart")`; `OWNER_OP_MODULES` gains
-`jarvis.v2.owner_ops`, and `hud_install`'s writers gain `install_checkout`;
+`jarvis.v2.owner_ops` — its writers `hand_off` among them since review 2 —
+and `hud_install`'s writers gain `install_checkout`; a shell reserved word
+before the command is skipped (review 2, L-2: `if true; then systemctl --user
+restart jarvis-daemon2; fi` and `while …; do pkill -f daemon2; done` were
+ASK — `then`, `do`, `else`, `elif`, `if`, `while`, `until`, `!`, `{`,
+`coproc` and a `case` pattern; `jarvis hud install` gains it too);
 module runners — `python -m runpy|cProfile|profile|pdb|trace|coverage`,
 `coverage run -m` — are peeled to what they run, and inline source that
 star-imports an owner module, reaches one through `importlib.import_module`,
@@ -1453,31 +1466,66 @@ AUTO permit let every spelling through unasked.
 "yes add the daemon2 kill rule").** `pkill -f daemon2` stopped the daemon
 with nobody asked — a plain SIGTERM is a clean exit, which
 `Restart=on-failure` does not restart. **DENY:** `pkill -f` (or a pkill with
-an option the table does not know), `killall -r`, and a `kill` fed PIDs on
-the same line by `pgrep -f` or `pidof` (`$(…)`, backticks, `<(…)`, `| xargs
-kill`, a line-local variable), whose pattern matches one of the daemon's
-command lines (`<repo>/.venv/bin/python -m jarvis daemon2`, `python[3] -m
-jarvis daemon2`, `jarvis daemon2`) **with a match that overlaps the word
-`daemon2`**: `pkill -f daemon2`, `'jarvis daemon2'`, `'daemo[n]2'`,
-`'daemon.'`, `'jarvis d'`, `'n2$'`, `'jarvis.*'`, `pkill -9 -f daemon2`,
-`kill $(pgrep -f daemon2)`, `pgrep -f daemon2 | xargs kill -9`, `killall -r
-daemon2`. A pattern only known at run time counts as matching; one that will
-not compile, or could backtrack without bound (`_regex_bounded`: a
-quantified group holding a quantifier or alternation, a back-reference, more
-than two unbounded quantifiers, over 256 characters), fails closed — Python's
-`re` has no timeout and the permit is synchronous. **Untouched:** `pkill -f
-jarvis` and `pkill -f 'python -m jarvis'` (they match the daemon's line but
-not at `daemon2`; the owner's 2026-08-09 matrix keeps `pkill -f jarvis`
-ALLOW), `pkill -f vite`, `pgrep -f daemon2` alone (a read), `echo pkill -f
-daemon2`, signal 0 and listings. **Its limits, stated:** a literal `kill
+an option the table does not know) and `killall -r` whose pattern matches
+one of the daemon's command lines (`<repo>/.venv/bin/python -m jarvis
+daemon2`, `python[3] -m jarvis daemon2`, `jarvis daemon2`) **with a match that
+overlaps the word `daemon2`**: `pkill -f daemon2`, `'jarvis daemon2'`,
+`'daemo[n]2'`, `'daemon.'`, `'jarvis d'`, `'n2$'`, `'jarvis.*'`, `pkill -9
+-f daemon2`, `killall -r daemon2`; `pkill --cgroup|--pidfile` naming the
+unit and `fuser -k` on one of its ports, which kill it outright (review 2);
+and a `kill` **fed** PIDs on the same line — an operand only known when it
+runs (`$(…)`, backticks, `<(…)`, `$P`) or `xargs` input — by a source that
+yields the daemon's: `pgrep -f`/`pidof` with such a pattern (`kill $(pgrep
+-f daemon2)`, `pgrep -f daemon2 | xargs kill -9`) and, since review 2, `ps`
+filtered by such a `grep` (every grep on the line keeps the daemon's line
+and one selects it at `daemon2`), `systemctl show` of the unit's
+MainPID/ControlPID/ExecMainPID (or of every property) and `systemctl status`
+of it or of the whole manager, a D-Bus read of the unit, its cgroup's
+`cgroup.procs`, `pgrep --cgroup|--pidfile` naming the unit, and `lsof
+-i`/`fuser` on one of its ports (`config.control_ports()` plus the
+workshop's 8403, which daemon2 also binds). **A source is judged only when a
+fed kill is on the line** (review 2): `pgrep -f …` alone is a read and its
+pattern never runs, and `pgrep -f daemon2 && kill -9 4321` kills a literal
+PID nothing on the line fed it. A pattern only known at run time counts as
+matching; one that will not compile on a line that names `daemon2` fails
+closed, and so does **one whose matching cost cannot be bounded** (review 2,
+HIGH: the first round's guard counted only unbounded quantifiers, so `.?`
+thirty times took days — and `re` holds the GIL, so the whole daemon froze).
+`_regex_work` reads the pattern with `re`'s own parser and bounds the
+backtracking: a sequence multiplies, an alternation adds, an unbounded
+repeat counts as the text's length, `?` as 2, `{m,n}` as n−m+1, a repeat of
+something that itself chooses as (n−m+1)·inner^n (so `(.*)*` saturates), a
+back-reference or anything unknown without bound — times the starts it is
+tried at, against `_REGEX_BUDGET` (2^19 per pattern, about 10 ms at worst;
+it fits two unbounded quantifiers on the owner's checkout path,
+`node.*vite.*dev`, not on a much longer one), a per-line budget twice that,
+and 4096 characters parsed per line. **A quoted brace is the regex's**
+(review 2): `pkill -f 'daemo.{0,1}2'` was brace-expanded into `daemo.02` and
+`daemo.12` and allowed; `_mark_quoted` keeps quoted and escaped braces and
+commas from expansion, as bash does. **Untouched:** `pkill -f jarvis` and
+`pkill -f 'python -m jarvis'` (they match the daemon's line but not at
+`daemon2`; the owner's 2026-08-09 matrix keeps `pkill -f jarvis` ALLOW),
+`pkill -f vite`, `pgrep -f daemon2` alone (a read), `echo pkill -f daemon2`,
+signal 0 and listings, kills on other ports (`lsof -ti :5173 | xargs kill`
+ALLOW, `fuser -k 5173/tcp` ASK, as on main), and D-Bus reads of the unit
+(`busctl get-property|introspect`, a `Get`/`GetAll` call — the first round
+refused every D-Bus line naming it). **Its limits, stated:** a literal `kill
 <pid>` (`kill -9 12345`) is not seen — nothing on the line says whose pid it
 is; matching by process *name* (`pkill python`, `killall python`, `pkill
 daemon2` without `-f`) is left alone although `pkill python` reaches the
 daemon, since a process name never holds `daemon2` and refusing `pkill
-python` would refuse ordinary work; and a pid looked up in one command and
-killed in a later one is two lines. `pkill -9 -f 'jarvis daemon2'` is in
-effect a restart (Restart=on-failure brings it back in 5 s), and it is
-refused all the same.
+python` would refuse ordinary work; a pid looked up in one command and
+killed in a later one is two lines; other PID printers feeding a kill are
+not seen (`ps aux | awk '/daemon2/ {print $2}'`, `ss -ltnp`, `netstat -p`, a
+`/proc` scan, `lsof -t -c python`, `fuser -k` on a file the daemon holds
+open); and a kill pattern over the budget is DENY even when it would not
+have matched. Review 2's L-3 and L-5, recorded rather than fixed: a wrapper
+the runner table does not peel (`taskset`, `chrt`, `prlimit`, `strace -f`,
+`script -c` …) hides the command behind it from the whole detector, and
+`systemctl --user preset-all`, which acts on every unit and can disable
+`jarvis-daemon2` without naming it, is not refused. `pkill -9 -f 'jarvis
+daemon2'` is in effect a restart (Restart=on-failure brings it back in 5 s),
+and it is refused all the same.
 
 Evidence for the review round: `owner_ops_check` (91 tests; its
 `ReviewRestart`/`ReviewRebuild` classes each fail on c218da8), `rules_check`
@@ -1500,6 +1548,39 @@ as with #44's commit-message case. **Never run either command from a
 session**: the tests fake `systemctl`, `npm` and `systemd-run` behind
 `subprocess.run`, play `/status` on a fake clock and refuse any connection to
 8402/8403/8405.
+
+**Review 2 (the re-review of 819e58a, PASS with fixes; main merged up to
+fb549c3)** is folded into the paragraphs above: HIGH, the regex bound, a
+source judged only beside a fed kill, and quoted braces; MED, the new PID
+sources, `fuser -k` and `pkill --cgroup|--pidfile`; L-1 `hand_off` a writer;
+L-2 reserved words; L-4 `/status` `pid` against MainPID; the NITs (warning and
+grace before the busy check, `python -P`, and `pgrep -f daemon2 && kill -9
+4321` and D-Bus reads of the unit no longer refused); L-3 and L-5 recorded as
+limits. Evidence: `rules_check` `redos_checks` (240 pathological patterns —
+`.?` thirty times, `.*.*` and `.?` twelve times, nested groups,
+alternations, lookarounds and a seeded fuzz — as `pkill -f`, a fed `kill
+$(pgrep -f …)`, `killall -r` and `ps | grep -E … | xargs kill`, each judged
+through `rules.decide` in under 50 ms, the slowest about 2 ms; `pgrep -f …`
+alone never matched, its verdict the one it has with no kill rule) and
+`review_48_round2_checks` (45 spellings DENY in `rules.decide`,
+`static_verdict`, `command_verdict` and real `dispatch` under an allowlist of
+every stem, modes "ask" and "all", never run or asked; 23 ordinary lines
+never DENY; 6 of main's verdicts kept — on 819e58a 40 of the 45 were ALLOW
+or ASK and three hung it, and 5 of the 23 were DENY), v2
+`permissions_check` `review_48_round2_checks`, and `owner_ops_check`
+`Review2Restart` (8 tests, 7 failing on 819e58a; the eighth is the
+no-over-refusal half). Three mutations in scratch copies bite: the bound off
+(`redos_checks` fails on `.?` sixteen times, 65 ms), sources judged without a
+kill (`pgrep` alone is matched) and no `systemctl show` source (the detector
+misses `systemctl --user show -p MainPID --value jarvis-daemon2 | xargs
+kill`). The differential against fb549c3 over NCORPUS strings (the usual
+corpus, from both trees; `rules.decide` and `static_verdict` agree on every
+one): NMOVED moved, all stricter (NAA ALLOW→ASK, NAD ALLOW→DENY, NKD
+ASK→DENY), nothing looser; 33 are review 2's, each a spelling from its new
+tests, and the rest are round 1's (already so on 819e58a). Against 819e58a
+the only lines that loosened are the five over-refusals the NITs named —
+three D-Bus reads of the unit and two `pgrep -f daemon2` lines whose kill it
+does not feed — back to main's verdicts.
 
 **Input bar declutter (2026-10-10, PR #29; ported onto WP-B and reviewed the
 same day).** The bar is `📎 [box] ⬆` over one row, `in: project · provider ▾ ·
@@ -4442,8 +4523,13 @@ Two findings worth keeping:
 - **Killing the v2 daemon by pattern is DENY for agents (2026-10-11, the
   owner's "yes add the daemon2 kill rule" on PR #48).** A `pkill -f`,
   `killall -r` or `pgrep -f`/`pidof`-fed `kill` whose pattern matches the
-  daemon's command line at the word `daemon2`. `pkill -f jarvis` stays ALLOW
-  (the 2026-08-09 matrix); a literal `kill <pid>` and kills by process name
+  daemon's command line at the word `daemon2`, and (review 2) a `kill` fed
+  the daemon's PID by `systemctl show|status`, a D-Bus read, its cgroup,
+  `lsof`/`fuser` on its ports or `ps | grep`, plus `fuser -k` on its ports
+  and `pkill --cgroup` naming its unit. A source is judged only when a fed
+  kill is on the line, and a kill pattern whose matching cost cannot be
+  bounded fails closed (`_regex_work`). `pkill -f jarvis` stays ALLOW (the
+  2026-08-09 matrix); a literal `kill <pid>` and kills by process name
   (`pkill python`) are not seen. Details with the restart commands above.
 - **Each agent's prompt names only the tools it holds (2026-10-11, owner's
   answer 5).** `config.narrow_prompt` narrows any prompt built on

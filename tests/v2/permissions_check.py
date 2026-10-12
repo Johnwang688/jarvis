@@ -1209,6 +1209,59 @@ def review_48_checks():
             ok(permit(*bash(line), brief) != Decision.DENY, f"{line!r} is not refused")
 
 
+_UNIT_CGROUP = "/user.slice/user-1000.slice/user@1000.service/app.slice/jarvis-daemon2.service"
+# Review 2 of PR #48 at layer 1 (each allowed under AUTO on 819e58a, or — the
+# first — a permit that never returned).
+REVIEW_48_2_V2_DENY = (
+    "pkill -f '" + ".?" * 30 + "Z'", "kill $(pgrep -f '" + ".?" * 30 + "Z')", "pkill -f 'daemo.{0,1}2'",
+    "systemctl --user show -p MainPID --value jarvis-daemon2 | xargs kill",
+    "kill -9 $(systemctl --user show -P MainPID jarvis-daemon2)",
+    f"pkill --cgroup {_UNIT_CGROUP}", f"pgrep --cgroup {_UNIT_CGROUP} | xargs kill",
+    f"cat /sys/fs/cgroup{_UNIT_CGROUP}/cgroup.procs | xargs kill",
+    "lsof -ti :8405 | xargs kill", "fuser -k 8405/tcp", "kill $(fuser 8405/tcp 2>/dev/null)",
+    "ps aux | grep daemon2 | awk '{print $2}' | xargs kill",
+    "python3 -c \"from jarvis.v2 import owner_ops; owner_ops.hand_off(['restart'], print)\"",
+    "if true; then systemctl --user restart jarvis-daemon2; fi", "while true; do pkill -f daemon2; done",
+    "if true; then jarvis hud install; fi", "case x in x) jarvis restart;; esac",
+)
+REVIEW_48_2_V2_ORDINARY = (
+    "pgrep -f daemon2 && kill -9 4321", "lsof -ti :5173 | xargs kill", "fuser -k 5173/tcp",
+    "systemctl --user show -p MainPID --value jarvis-daemon2", "pgrep -f '" + ".?" * 30 + "Z'",
+    "busctl --user get-property org.freedesktop.systemd1 /org/freedesktop/systemd1/unit/"
+    "jarvis_2ddaemon2_2eservice org.freedesktop.systemd1.Service ActiveState",
+    "if true; then systemctl --user restart pipewire; fi",
+)
+
+
+def review_48_round2_checks():
+    """Review 2 of PR #48 at layer 1: the new spellings are DENY under AUTO
+    and STRICT and never put to the owner, each judged quickly (a kill
+    pattern that cannot be bounded fails closed instead of freezing the
+    permit); the must-stay lines are not refused."""
+    from jarvis.v2.model import PermissionProfile as P
+    from jarvis.v2.permissions import build_permit
+    from jarvis.v2.provider import Decision
+
+    with Sandbox():
+        for profile in (P.AUTO, P.STRICT):
+            brief = brief_for(profile)
+            asker = Asker(Decision.ALLOW)
+            permit = build_permit(context(brief), asker)
+            for line in REVIEW_48_2_V2_DENY:
+                before = len(asker.seen)
+                start = time.perf_counter()
+                eq(permit(*bash(line), brief), Decision.DENY, f"[{profile.value}] Bash {line!r} is refused")
+                ok(time.perf_counter() - start < 0.5, f"[{profile.value}] {line!r} is judged quickly")
+                eq(len(asker.seen), before, f"[{profile.value}] {line!r} is never put to the owner")
+        brief = brief_for(P.AUTO)
+        asker = Asker(Decision.ALLOW)
+        permit = build_permit(context(brief), asker)
+        for line in REVIEW_48_2_V2_ORDINARY:
+            start = time.perf_counter()
+            ok(permit(*bash(line), brief) != Decision.DENY, f"{line!r} is not refused")
+            ok(time.perf_counter() - start < 0.5, f"{line!r} is judged quickly")
+
+
 def daemon_checks():
     from jarvis.v2 import daemon as daemon_mod
     from jarvis.v2.model import PermissionProfile as P, ProviderName, Role
@@ -1577,7 +1630,7 @@ def main():
     for section in (matrix_checks, always_ask_checks, file_deny_checks,
                     human_backed_checks, log_checks, approvals_checks, hud_build_deny_checks,
                     installed_hud_deny_checks, daemon_and_rebuild_ops_checks, review_48_checks,
-                    daemon_checks, auto_quiet_checks, hatch_checks, discord_checks):
+                    review_48_round2_checks, daemon_checks, auto_quiet_checks, hatch_checks, discord_checks):
         print(f"-- {section.__name__}")
         section()
     print()

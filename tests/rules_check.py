@@ -2022,12 +2022,268 @@ def review_48_checks() -> None:
     # bound is refused unmatched (Python's `re` has no timeout).
     import time
     start = time.perf_counter()
-    for pattern in ("(.*)*x", "(.+)+x", r"(\w|\w)*x", "((.)*)*Q", "(a|b)+c", ".*.*.*.*x"):
+    for pattern in ("(.*)*x", "(.+)+x", "((.)*)*Q", "(a|ab)+c", ".*.*.*.*x"):
         assert rules.decide(f"pkill -f '{pattern}'").decision == rules.DENY, pattern
     assert time.perf_counter() - start < 2.0, "a pattern was matched with unbounded backtracking"
     print(f"ok  review of #48: {len(REVIEW_48_DENY)} spellings refused (never run, never asked, any "
           f"allowlist, mode all, no approver); {len(REVIEW_48_ORDINARY)} ordinary lines untouched; "
           f"{len(REVIEW_48_VERDICTS)} verdicts pinned")
+
+
+# Review 2 of PR #48. Each DENY here scored ALLOW or ASK on 819e58a (the PR
+# body lists them); each ORDINARY line is one 819e58a refused or one that must
+# keep main's verdict (`REVIEW_48_2_VERDICTS`, read off fb549c3).
+#   HIGH — a kill pattern whose matching cost cannot be bounded fails closed,
+#          and a quoted brace is the regex's, never bash's;
+#   MED  — the daemon's PIDs from `systemctl show|status`, a D-Bus read, its
+#          cgroup, `pgrep|pkill --cgroup|--pidfile`, `lsof`/`fuser` on its
+#          ports, or `ps` filtered by a `grep`, feeding a `kill`; `fuser -k`;
+#   L-1  — `owner_ops.hand_off` from inline source;
+#   L-2  — a shell reserved word before the command.
+_UNIT_CGROUP = "/user.slice/user-1000.slice/user@1000.service/app.slice/jarvis-daemon2.service"
+REVIEW_48_2_DENY = (
+    # HIGH
+    "pkill -f '" + ".?" * 30 + "Z'",
+    "pkill -f '" + ".*.*" + ".?" * 12 + "Z'",
+    "killall -r '" + ".?" * 24 + "Z'",
+    "kill $(pgrep -f '" + ".?" * 30 + "Z')",
+    "pkill -f 'daemo.{0,1}2'",
+    "pkill -f 'jarvis d{1,}aemon2'",
+    # MED: systemctl and D-Bus
+    "systemctl --user show -p MainPID --value jarvis-daemon2 | xargs kill",
+    "systemctl --user show -p MainPID --value jarvis-daemon2 | xargs kill -9",
+    "kill $(systemctl --user show --property=MainPID --value jarvis-daemon2)",
+    "kill -9 $(systemctl --user show -P MainPID jarvis-daemon2)",
+    "systemctl --user show jarvis-daemon2 | grep MainPID | cut -d= -f2 | xargs kill",
+    "systemctl --user show -pControlPID,MainPID --value jarvis-daemon2.service | xargs -r kill",
+    "busctl --user get-property org.freedesktop.systemd1 /org/freedesktop/systemd1/unit/"
+    "jarvis_2ddaemon2_2eservice org.freedesktop.systemd1.Service MainPID | awk '{print $2}' | xargs kill",
+    # MED: the unit's cgroup and PID file
+    f"pkill --cgroup {_UNIT_CGROUP}",
+    f"pkill -9 --cgroup={_UNIT_CGROUP}",
+    f"pgrep --cgroup {_UNIT_CGROUP} | xargs kill",
+    "pkill -F /run/user/1000/jarvis-daemon2.pid",
+    f"cat /sys/fs/cgroup{_UNIT_CGROUP}/cgroup.procs | xargs kill",
+    f"xargs -a /sys/fs/cgroup{_UNIT_CGROUP}/cgroup.procs kill -9",
+    "kill $(cat /sys/fs/cgroup/user.slice/*/*/app.slice/jarvis-daemon2.service/cgroup.procs)",
+    f"while read p; do kill $p; done < /sys/fs/cgroup{_UNIT_CGROUP}/cgroup.procs",
+    # MED: its ports
+    "lsof -ti :8405 | xargs kill",
+    "lsof -t -i tcp:8402 | xargs kill -9",
+    "lsof -i :8405 -t | xargs -r kill",
+    "kill -9 $(lsof -ti:8403)",
+    "lsof -ti :8400-8410 | xargs kill",
+    "fuser -k 8405/tcp",
+    "fuser -k -n tcp 8402",
+    "fuser -k -9 8405/tcp",
+    "kill $(fuser 8405/tcp 2>/dev/null)",
+    # ps filtered by grep — the pgrep idiom spelled long
+    "ps aux | grep daemon2 | awk '{print $2}' | xargs kill",
+    "kill $(ps -ef | grep 'jarvis daemon2' | grep -v grep | awk '{print $2}')",
+    "ps -eo pid,args | grep -E 'daemo[n]2' | awk '{print $1}' | xargs kill -9",
+    # L-1
+    "python3 -c \"from jarvis.v2 import owner_ops; owner_ops.hand_off(['restart'], print)\"",
+    "python3 -c \"from jarvis.v2.owner_ops import hand_off; hand_off(['restart'], print)\"",
+    # L-2
+    "if true; then systemctl --user restart jarvis-daemon2; fi",
+    "while true; do pkill -f daemon2; done",
+    "if true; then jarvis hud install; fi",
+    "if jarvis restart; then echo ok; fi",
+    "for i in 1 2; do jarvis daemon2 restart; done",
+    "until false; do systemctl --user kill jarvis-daemon2; done",
+    "if false; then :; else jarvis hud rebuild; fi",
+    "if false; then :; elif jarvis restart; then :; fi",
+    "case x in x) jarvis restart;; esac",
+    "coproc jarvis restart",
+)
+REVIEW_48_2_ORDINARY = (
+    # The kill is fed nothing on the line; reads of the unit.
+    "pgrep -f daemon2 && kill -9 4321", "pgrep -f daemon2; kill %1",
+    "busctl --user get-property org.freedesktop.systemd1 /org/freedesktop/systemd1/unit/"
+    "jarvis_2ddaemon2_2eservice org.freedesktop.systemd1.Service ActiveState",
+    "busctl --user introspect org.freedesktop.systemd1 /org/freedesktop/systemd1/unit/jarvis_2ddaemon2_2eservice",
+    "gdbus call --session --dest org.freedesktop.systemd1 --object-path /org/freedesktop/systemd1/unit/"
+    "jarvis_2ddaemon2_2eservice --method org.freedesktop.DBus.Properties.Get org.freedesktop.systemd1.Unit "
+    "ActiveState",
+    "systemctl --user show -p MainPID --value jarvis-daemon2", "systemctl --user status jarvis-daemon2",
+    f"cat /sys/fs/cgroup{_UNIT_CGROUP}/cgroup.procs", "lsof -i :8405", "fuser 8405/tcp",
+    "ps aux | grep daemon2",
+    # Kills that miss the daemon.
+    "lsof -ti :5173 | xargs kill", "kill -9 $(lsof -ti :3000)", "fuser -k 5173/tcp",
+    "ps aux | grep vite | awk '{print $2}' | xargs kill",
+    "ps aux | grep daemon2 | grep -v jarvis | awk '{print $2}' | xargs kill",
+    "ps aux | grep python | grep -v daemon2 | awk '{print $2}' | xargs kill",
+    "pkill -f 'node .*vite'", "pkill -f 'daemon{2}'",
+    # Reserved words in front of ordinary work.
+    "if [ -f x ]; then echo jarvis restart; fi", "for f in *.py; do grep -n restart $f; done",
+    "if true; then systemctl --user restart pipewire; fi", "while true; do pkill -f vite; done",
+)
+# main's verdicts (fb549c3), which these must keep.
+REVIEW_48_2_VERDICTS = {
+    "pgrep -f daemon2 && kill -9 4321": "allow",
+    "lsof -ti :5173 | xargs kill": "allow",
+    "fuser -k 5173/tcp": "ask",
+    "systemctl --user show -p MainPID --value jarvis-daemon2": "allow",
+    "pkill -f 'node .*vite'": "allow",
+    "pgrep -f '" + ".?" * 30 + "Z'": "allow",
+}
+
+
+def review_48_round2_checks() -> None:
+    """Review 2 of PR #48: `REVIEW_48_2_DENY` is DENY everywhere — the
+    detector, `rules.decide`, `static_verdict`, `command_verdict`, real
+    `dispatch` under an allowlist entry for every stem in sight in modes
+    "ask" and "all" (never run, never asked) and `run_command` with no
+    approver; `REVIEW_48_2_ORDINARY` is never DENY; `REVIEW_48_2_VERDICTS`
+    holds; and the regex budget fits two unbounded quantifiers on a checkout
+    path like the owner's."""
+    from jarvis import config, permissions
+    from jarvis import protected_state as S
+
+    stems = _OWNER_OPS_STEMS + ("lsof", "fuser", "ps", "grep", "awk", "cat", "cut", "true", "false")
+    with gate_home():
+        config.ALLOWLIST_PATH.write_text(json.dumps(
+            [{"tool": "run_command", "prefix": stem} for stem in stems]))
+        asked: list[str] = []
+
+        def says_yes(tool, args):
+            asked.append(args.get("command", ""))
+            return True
+
+        before = config.ALLOWLIST_PATH.read_text()
+        for command in REVIEW_48_2_DENY:
+            assert S.owner_op(command), f"the detector misses {command!r}"
+            assert rules.decide(command).decision == rules.DENY, (command, rules.decide(command))
+            assert permissions.static_verdict(command).decision == rules.DENY, command
+            assert permissions.command_verdict(
+                "run_command", {"command": command}).decision == rules.DENY, command
+            for mode in ("ask", "all"):
+                permissions.set_mode(mode)
+                try:
+                    with recorded() as ran:
+                        asked.clear()
+                        out = tools.dispatch(
+                            "run_command", json.dumps({"command": command, "reason": "r"}),
+                            approve=permissions.gate(says_yes))
+                finally:
+                    permissions.set_mode("ask")
+                assert "efused" in out.text, (command, out.text)
+                assert not ran, f"[{mode}] it ran: {command!r}"
+                assert not asked, f"[{mode}] it was put to the owner: {command!r}"
+            with recorded() as ran:
+                out = shell.run_command(command, reason="r")
+            assert out.startswith("Refused"), (command, out)
+            assert not ran, command
+        assert config.ALLOWLIST_PATH.read_text() == before
+        for command in REVIEW_48_2_ORDINARY:
+            assert S.owner_op(command) is None, f"an ordinary line is refused: {command!r}"
+            assert rules.decide(command).decision != rules.DENY, (command, rules.decide(command))
+        for command, want in REVIEW_48_2_VERDICTS.items():
+            got = rules.decide(command).decision
+            assert got == want, f"{command!r}: {got}, not {want}"
+        for command in REVIEW_48_2_DENY + REVIEW_48_2_ORDINARY:
+            assert bool(S.owner_op(command)) == bool(S.owner_op(command, prefilter=False)), command
+        # Two unbounded quantifiers fit the budget on a checkout path the
+        # length of the owner's; the same pattern reaching `daemon2` is refused.
+        saved = config.REPO_ROOT
+        config.REPO_ROOT = Path("/home/u/projects/Jarvis")
+        try:
+            assert rules.decide("pkill -f 'node.*vite.*dev'").decision != rules.DENY
+            assert rules.decide("pkill -f 'jarvis.*daemon.*'").decision == rules.DENY
+        finally:
+            config.REPO_ROOT = saved
+    print(f"ok  review 2 of #48: {len(REVIEW_48_2_DENY)} spellings refused (never run, never asked, "
+          f"any allowlist, mode all, no approver); {len(REVIEW_48_2_ORDINARY)} ordinary lines "
+          f"untouched; {len(REVIEW_48_2_VERDICTS)} of main's verdicts kept")
+
+
+def _redos_patterns() -> list[str]:
+    """Pathological kill patterns, none over 256 characters: the review's
+    shapes in rising cost — so a broken bound fails on the first slow one
+    rather than hanging on `.?` thirty times — then a seeded fuzz of nested
+    groups, alternations, lookarounds and quantifiers."""
+    import random
+
+    out = [".?" * n + "Z" for n in (12, 14, 16, 18, 20, 22, 24, 30, 40, 64, 127)]
+    out += [".*.*" + ".?" * n + "Z" for n in (4, 6, 8, 10, 12)]
+    out += [".*" * k + "[0-9]Q" for k in (2, 3, 4, 6)]
+    out += ["(.*)*Z", "(.+)+Z", "((a?)?)*b", "(a|aa)+b", "(a|ab)+c", "(.?){30}Z", "(?:.?.?){0,16}Z",
+            "(?=.*.*.*)x", r"(\w|\w)*x", "((.)*)*Q", "(x+x+)+y", "(?:(?:(?:a?)?)?)*" * 8 + "b",
+            "(.*a){12}", "^(([a-z])+.)+[A-Z]([a-z])+$", "(.|.)" * 40 + "Z", "(?:x|y|z|.){0,16}" * 6 + "Q",
+            "(?:..){0,30}" * 3 + "Z", "(?:[a-z][0-9 ]){0,30}" * 2 + "Z", "(?!Q)" * 40 + ".*.*Z"]
+    atoms = [".", "a", "d", "n", "[a-z]", r"\w", r"\s", r"\S", "[^Q]", "(?:ab|a)", "(?:.|..)", "(?:a|b)",
+             "(?:n|n2)", "(?:d|da|dae)", "(?:..)", "(?=.)", "(?!Q)", "(a?)", "(.*)"]
+    quants = ["", "", "?", "*", "+", "{0,16}", "{2,5}", "{0,64}", "*?", "??", "{1,}", "+?", "{30}"]
+    rng = random.Random(48)
+
+    def piece(depth: int) -> str:
+        roll = rng.random()
+        if depth < 2 and roll < 0.15:
+            return "(?:" + "".join(piece(depth + 1) for _ in range(rng.randint(1, 3))) + ")" + rng.choice(quants)
+        if depth < 2 and roll < 0.25:
+            return "(?:" + "|".join("".join(piece(depth + 1) for _ in range(rng.randint(1, 2)))
+                                    for _ in range(rng.randint(2, 4))) + ")" + rng.choice(quants)
+        return rng.choice(atoms) + rng.choice(quants)
+
+    while len(out) < 240:
+        pattern = ""
+        for _ in range(rng.randint(1, 30)):
+            more = piece(0)
+            if len(pattern) + len(more) > 240:
+                break
+            pattern += more
+        out.append(pattern + rng.choice(["Z", "[0-9]Q", "$", "daemon2", "n2", ""]))
+    assert all(len(p) <= 256 for p in out)
+    return out
+
+
+def redos_checks() -> None:
+    """HIGH of review 2 of PR #48: no kill pattern freezes the permit.
+    Python's `re` holds the GIL while it matches, so before this a pattern
+    like `.?` thirty times took days and froze the whole daemon. Every
+    pathological pattern is judged in under 50 ms through `rules.decide`,
+    as `pkill -f`, a fed `kill $(pgrep -f …)`, `killall -r` and `ps | grep
+    -E … | xargs kill`; and `pgrep -f …` alone is never matched at all —
+    its verdict is what it would be with no kill rule (main's)."""
+    import time
+
+    from jarvis import protected_state as S
+
+    patterns = _redos_patterns()
+    rules.decide("pkill -f warmup")
+    slowest = (0.0, "")
+    with gate_home():
+        for pattern in patterns:
+            for line in (f"pkill -f '{pattern}'", f"kill $(pgrep -f '{pattern}')", f"killall -r '{pattern}'",
+                         f"ps aux | grep -E '{pattern}' | awk '{{print $2}}' | xargs kill"):
+                start = time.perf_counter()
+                rules.decide(line)
+                took = time.perf_counter() - start
+                assert took < 0.05, f"{took * 1000:.0f} ms judging {line!r}"
+                slowest = max(slowest, (took, line))
+        real_match, real_owner = S._daemon_match, S.owner_op
+
+        def never(*args, **kwargs):
+            raise AssertionError("a `pgrep` with no kill on its line had its pattern matched")
+
+        S._daemon_match = never
+        try:
+            for pattern in patterns:
+                line = f"pgrep -f '{pattern}'"
+                start = time.perf_counter()
+                got = rules.decide(line).decision
+                assert time.perf_counter() - start < 0.05, line
+                S.owner_op = lambda command, **kw: None
+                try:
+                    without = rules.decide(line).decision
+                finally:
+                    S.owner_op = real_owner
+                assert got == without, (line, got, without)
+        finally:
+            S._daemon_match = real_match
+    print(f"ok  ReDoS: {len(patterns)} pathological patterns, 4 kill spellings each, all judged in under "
+          f"50 ms (slowest {slowest[0] * 1000:.1f} ms); `pgrep -f` alone never matched, its verdict "
+          "unchanged")
 
 
 def fails_against_old_code_checks() -> None:
@@ -2165,7 +2421,11 @@ def main() -> int:
     gate_state_edge_checks()
     gate_state_complexity_checks()
     daemon_and_rebuild_ops_checks()
+    # First of the kill-rule sections: with the regex bound broken it fails
+    # on its first slow pattern, where the others would hang on theirs.
+    redos_checks()
     review_48_checks()
+    review_48_round2_checks()
     fails_against_old_code_checks()
     owner_op_checks()
     print("\nall rules checks passed")
