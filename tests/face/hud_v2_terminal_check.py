@@ -135,6 +135,7 @@ class FakePty:
         self.takeover_answers: list[dict] = []
         self.refused_tickets = 0
         self.gone_after_ticket = 0
+        self.removed: set[str] = set()  # terminals the test took out of the world itself
         self.closing: list[tuple[dict, int, str]] = []
         ctx.route_web_socket(re.compile(rf"^ws://127\.0\.0\.1:{mock.port}/terminals/"), self._attach)
 
@@ -166,11 +167,12 @@ class FakePty:
         self.sockets.append(sock)
         fresh = bool(ticket) and tickets.pop(ticket, None) == tid
         if not fresh or self._row(tid) is None:
-            # Only a stale or missing ticket counts against the HUD. A fresh one
-            # for a terminal the test has since removed (a section's reset
-            # emptying the world while the HUD was still attaching) is the
-            # test's race, not the HUD's: refused all the same, counted apart.
-            if fresh:
+            # Counted apart only: a fresh ticket for a terminal the *test*
+            # removed (`_reset` emptying the world, or `end`) while the HUD was
+            # still attaching — the test's race, not the HUD's. Anything else —
+            # a stale or missing ticket, or a socket for a terminal the HUD
+            # closed itself — counts against the HUD.
+            if fresh and tid in self.removed:
                 self.gone_after_ticket += 1
             else:
                 self.refused_tickets += 1
@@ -288,6 +290,7 @@ class FakePty:
         row = self._row(tid)
         if row in rows:
             rows.remove(row)
+            self.removed.add(tid)
         sock = self.holders.pop(tid, None)
         if sock and sock["open"]:
             self._send(sock, {"type": "exit", "code": None, "reason": "ended"})
@@ -438,6 +441,7 @@ def _posts(mock) -> int:
 
 def _reset(page, mock, base, until, fake, size=(1280, 800)):
     """A clean window: no terminals in the world, default layout, panel shut."""
+    fake.removed |= {r["id"] for r in mock.world.get("terminals", [])}
     mock.world["terminals"] = []
     page.set_viewport_size({"width": size[0], "height": size[1]})
     _store(page, zoom="100", ws=None, prefs=None, layout="{}")
@@ -553,11 +557,13 @@ def terminal_checks(browser, mock, base, check, until, guard, init_script):
                 except Exception:
                     pass
         check("no page errors in the terminal section", not errors, "; ".join(errors[:3]))
-        # Strict for every socket, the terminal there or not: a socket with a
-        # spent, missing or another terminal's ticket fails it. A fresh ticket
-        # for a terminal removed meanwhile is not the HUD's doing (see _attach).
+        # Strict for every socket: a spent, missing or another terminal's
+        # ticket fails it, and so does a socket for a terminal the HUD itself
+        # closed. Only a fresh ticket for a terminal the test removed while
+        # the HUD was attaching is not the HUD's doing (see _attach).
         check("every socket the HUD opened presented a fresh ticket", fake.refused_tickets == 0,
-              f"{fake.refused_tickets} refused ({fake.gone_after_ticket} fresh, for a terminal the test removed)")
+              f"{fake.refused_tickets} refused against the HUD; {fake.gone_after_ticket} apart "
+              "(a fresh ticket for a terminal the test removed)")
     finally:
         ctx.close()
     _guard_selftest(browser, mock, base, check, until, init_script)
