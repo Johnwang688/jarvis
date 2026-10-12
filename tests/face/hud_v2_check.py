@@ -10,7 +10,7 @@ The safety checks are the ones to keep, and each is written to bite:
   - a reply carrying markup renders as **text**, and a `javascript:` link
     renders as text — this window draws authorization cards, so a reply that
     could inject markup into it could draw its own AUTHORIZE button;
-  - the preview pane refuses the HUD's own origin (an iframe that could reach
+  - the Browser pane refuses the HUD's own origin (an iframe that could reach
     `/approvals` would let an agent approve itself);
   - a hostile avatar SVG's `onload` never runs — the face is an `<img>`;
   - the approval card ignores Enter: deny is cheap, authorize is deliberate,
@@ -1234,33 +1234,33 @@ def diff_checks(page, mock):
     check("and none is in the build", not built, str(built))
 
 
-def preview_checks(page, mock):
-    print("\npreview tab")
-    page.locator('[data-testid="tab-preview"]').click()
-    page.wait_for_selector('[data-testid="preview-url"]')
+def browser_checks(page, mock):
+    print("\nbrowser tab")
+    page.locator('[data-testid="tab-browser"]').click()
+    page.wait_for_selector('[data-testid="browser-url"]')
     # The HUD is the approval surface: an iframe that could reach /approvals
     # would let an agent approve itself.
     for bad in (f"http://127.0.0.1:{8402}/", "http://localhost:8402/index.html"):
-        page.locator('[data-testid="preview-url"]').fill(bad)
-        page.locator('[data-testid="preview-go"]').click()
-        until(lambda: page.locator('[data-testid="preview-refused"]').count() > 0)
-        check(f"the preview refuses the HUD origin ({bad})",
-              page.locator('[data-testid="preview-refused"]').count() == 1
-              and page.locator('[data-testid="preview-frame"]').count() == 0)
+        page.locator('[data-testid="browser-url"]').fill(bad)
+        page.locator('[data-testid="browser-go"]').click()
+        until(lambda: page.locator('[data-testid="browser-refused"]').count() > 0)
+        check(f"the Browser refuses the HUD origin ({bad})",
+              page.locator('[data-testid="browser-refused"]').count() == 1
+              and page.locator('[data-testid="browser-frame"]').count() == 0)
 
-    page.locator('[data-testid="preview-url"]').fill("https://example.com/")
-    page.locator('[data-testid="preview-go"]').click()
-    until(lambda: page.locator('[data-testid="preview-refused"]').count() > 0)
+    page.locator('[data-testid="browser-url"]').fill("https://example.com/")
+    page.locator('[data-testid="browser-go"]').click()
+    until(lambda: page.locator('[data-testid="browser-refused"]').count() > 0)
     check("and anything that is not a local server",
-          page.locator('[data-testid="preview-frame"]').count() == 0)
+          page.locator('[data-testid="browser-frame"]').count() == 0)
 
-    page.locator('[data-testid="preview-project"]').click()
-    until(lambda: page.locator('[data-testid="preview-frame"]').count() > 0)
-    frame = page.locator('[data-testid="preview-frame"]')
+    page.locator('[data-testid="browser-project"]').click()
+    until(lambda: page.locator('[data-testid="browser-frame"]').count() > 0)
+    frame = page.locator('[data-testid="browser-frame"]')
     src = frame.get_attribute("src") or ""
     # The serving daemon's workshop origin, from /status — never a constant
     # 8403, which is the owner's live daemon (`GET /p/p1/index.html -> 400`).
-    check("the project preview loads from the workshop origin the daemon reported",
+    check("the project root loads from the workshop origin the daemon reported",
           src == f"http://127.0.0.1:{mock.workshop_port}/p/p1/index.html", src)
     until(lambda: mock.workshop_hits or None)
     check("and the mock's own workshop served it", mock.workshop_hits == ["/p/p1/index.html"],
@@ -1272,15 +1272,15 @@ def preview_checks(page, mock):
     check("and exactly allow-scripts allow-forms: never allow-same-origin, top navigation or popups",
           sandbox == "allow-scripts allow-forms", sandbox)
     check("the workshop is never offered 'keep its origin'",
-          page.locator('[data-testid="preview-keep-origin"]').count() == 0)
+          page.locator('[data-testid="browser-keep-origin"]').count() == 0)
     # The daemon's API listener (WP-E): reported on /status, never framed.
     for bad in (f"http://127.0.0.1:{mock.api_port}/", "http://127.0.0.1:8405/"):
-        page.locator('[data-testid="preview-url"]').fill(bad)
-        page.locator('[data-testid="preview-go"]').click()
-        until(lambda: page.locator('[data-testid="preview-refused"]').count() > 0)
-        check(f"the preview refuses the API listener ({bad})",
-              "API" in page.locator('[data-testid="preview-refused"]').inner_text()
-              and page.locator('[data-testid="preview-frame"]').count() == 0)
+        page.locator('[data-testid="browser-url"]').fill(bad)
+        page.locator('[data-testid="browser-go"]').click()
+        until(lambda: page.locator('[data-testid="browser-refused"]').count() > 0)
+        check(f"the Browser refuses the API listener ({bad})",
+              "API" in page.locator('[data-testid="browser-refused"]').inner_text()
+              and page.locator('[data-testid="browser-frame"]').count() == 0)
     check("and nothing reached the API listener", mock.api_hits == [], str(mock.api_hits))
 
 
@@ -3101,16 +3101,16 @@ def main():
             finally:
                 terminal_mock.stop()
 
-            # The Preview pane's ports and "keep its own origin" (WP-E): a
+            # The Browser pane's ports and "keep its own origin" (WP-E), and the rename (BR-3a): a
             # context and a mock of their own, the dev server and the API
             # listener on ephemeral ports of the mock's.
-            from tests.face.hud_v2_preview_check import preview_checks as preview_origin_checks
-            preview_mock = MockDaemon(0).start()
+            from tests.face.hud_v2_browser_check import browser_checks as browser_origin_checks
+            browser_mock = MockDaemon(0).start()
             try:
-                preview_origin_checks(browser, preview_mock, f"http://127.0.0.1:{preview_mock.port}", check, until,
+                browser_origin_checks(browser, browser_mock, f"http://127.0.0.1:{browser_mock.port}", check, until,
                                       guard, FAKE_RECOGNIZER)
             finally:
-                preview_mock.stop()
+                browser_mock.stop()
 
             # The CSP (ED-4): what the HUD needs runs with no violation, and
             # what an attacker needs is refused — on a mock of its own, in a
@@ -3264,7 +3264,7 @@ def main():
             task_checks(page, mock)
             file_checks(page, mock)
             diff_checks(page, mock)
-            preview_checks(page, mock)
+            browser_checks(page, mock)
             panels_checks(page, mock)
             picker_checks(page, mock)
             # WP12c last: these add a project and re-parent a thread, so they

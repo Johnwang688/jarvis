@@ -1,9 +1,9 @@
-// The preview pane: an iframe onto the workshop origin (8403) or onto a
-// localhost dev server the owner names — never onto the HUD's own origin, and
-// never onto the daemon's API listener (WP-E).
+// The Browser pane (called Preview until BR-3a): an iframe onto the workshop
+// origin (8403) or onto a localhost dev server the owner names — never onto
+// the HUD's own origin, and never onto the daemon's API listener (WP-E).
 //
 // Two mechanical confinements, both deliberate. The URL is judged by
-// `judgePreviewUrl` before it is loaded at all, so the HUD origin is refused
+// `judgeBrowserUrl` before it is loaded at all, so the HUD origin is refused
 // with a message rather than framed. And the frame's sandbox is
 // `allow-scripts allow-forms` **without** `allow-same-origin`: the two
 // together are no sandbox at all when the framed page is the HUD's origin,
@@ -17,7 +17,7 @@
 // and only while `/status` says every HUD and API response refuses to be
 // framed (`frame_hardened`). It is stored as the origin it was given for, so
 // another port, host or scheme turns it off, and a stored one is judged again
-// on every load and dropped when it no longer passes (lib/preview.ts). The
+// on every load and dropped when it no longer passes (lib/browser.ts). The
 // frame never gets top navigation, popups or downloads, either way.
 //
 // **The URL is the pane's** (2026-10-09): what was last loaded is stored with
@@ -25,27 +25,27 @@
 // back — and it is **judged again** before it is loaded again, never trusted
 // because it was once allowed. Loading the project root pins the pane to that
 // project (`onProjectRoot`), as opening a file pins a File pane. A terminal's
-// "Open in Preview" arrives as a `request` (WP-E), judged like a typed URL.
+// "Open in Browser" arrives as a `request` (WP-E), judged like a typed URL.
 
 import { useEffect, useRef, useState } from "react";
-import { judgeKeepOrigin, judgePreviewUrl, keptOrigin, originOf, sandboxFor, workshopUrl } from "../lib/preview";
+import { judgeBrowserUrl, judgeKeepOrigin, keptOrigin, originOf, sandboxFor, workshopUrl } from "../lib/browser";
 import { noPointerFocus } from "../lib/talkkey";
 import { useDaemonPorts } from "../state/daemonPorts";
 
-/** "Open in Preview" from a terminal link: a URL, and a number so the same URL twice loads twice. */
-export interface PreviewRequest {
+/** "Open in Browser" from a terminal link: a URL, and a number so the same URL twice loads twice. */
+export interface BrowserRequest {
   url: string;
   n: number;
 }
 
-export function PreviewTab(props: {
+export function BrowserTab(props: {
   projectId: string | null;
   /** The URL this pane last loaded (stored), loaded again at mount if it still passes. */
   url?: string;
   /** The origin this pane lets its page keep (stored), applied only while it still passes. */
   keepOrigin?: string;
-  /** A URL to load now (a terminal's "Open in Preview"). */
-  request?: PreviewRequest | null;
+  /** A URL to load now (a terminal's "Open in Browser"). */
+  request?: BrowserRequest | null;
   /** An authorization card is up: the switch is disabled (and, behind the veil, unreachable). */
   blocked?: boolean;
   onLoaded?: (url: string) => void;
@@ -69,7 +69,7 @@ export function PreviewTab(props: {
 
   const go = (raw: string) => {
     const p = latest.current;
-    const v = judgePreviewUrl(raw, ports);
+    const v = judgeBrowserUrl(raw, ports);
     if (!v.ok) {
       setSrc("");
       setReason(v.reason);
@@ -120,21 +120,21 @@ export function PreviewTab(props: {
     <div className="tabbody">
       <div className="toolbar">
         <input
-          data-testid="preview-url"
+          data-testid="browser-url"
           value={typed}
-          placeholder="http://localhost:5173/ or the project preview path"
+          placeholder="http://localhost:5173/ or the project's workshop path"
           onChange={(e) => setTyped(e.target.value)}
           onKeyDown={(e) => {
             e.stopPropagation();
             if (e.key === "Enter" && known) go(typed);
           }}
         />
-        <button type="button" data-testid="preview-go" disabled={!known} onClick={() => go(typed)}>
+        <button type="button" data-testid="browser-go" disabled={!known} onClick={() => go(typed)}>
           Load
         </button>
         <button
           type="button"
-          data-testid="preview-project"
+          data-testid="browser-project"
           disabled={!props.projectId || workshopPort === null}
           onClick={() => {
             if (!props.projectId || workshopPort === null) return;
@@ -159,7 +159,7 @@ export function PreviewTab(props: {
           >
             <input
               type="checkbox"
-              data-testid="preview-keep-origin"
+              data-testid="browser-keep-origin"
               data-origin={offer.origin}
               checked={!!grant}
               disabled={!!props.blocked}
@@ -172,7 +172,7 @@ export function PreviewTab(props: {
         ) : null}
       </div>
       {reason ? (
-        <div className="pad err" data-testid="preview-refused">
+        <div className="pad err" data-testid="browser-refused">
           {reason}
         </div>
       ) : null}
@@ -181,10 +181,10 @@ export function PreviewTab(props: {
         // change reloads the page under the new ones.
         <iframe
           key={grant ? "keep" : "opaque"}
-          className="previewframe"
-          data-testid="preview-frame"
+          className="browserframe"
+          data-testid="browser-frame"
           data-keep-origin={grant ? "true" : "false"}
-          title="preview"
+          title="Browser"
           src={src}
           sandbox={sandboxFor(!!grant)}
         />

@@ -1,6 +1,8 @@
-"""Headless checks for the Preview pane's port rules and its "keep its own
+"""Headless checks for the Browser pane's port rules and its "keep its own
 origin" switch (WP-E; plan docs/plans/2026-10-09-hud-workspace-plan.md §2.5,
-decisions W-4; contract in docs/hud-api.md).
+decisions W-4; contract in docs/hud-api.md), and for the rename that made the
+Preview pane the Browser (BR-3a; docs/plans/2026-10-10-hud-browser-plan.md §7).
+This suite was `hud_v2_preview_check.py`.
 
 Free and hermetic. The section runs against a `MockDaemon(0)` of its own and a
 browser context of its own. The mock is the HUD listener; its API listener,
@@ -9,7 +11,7 @@ all reported on `/status` — and every request to 8402/8403/8405, the owner's
 live daemon, is refused and counted as a failure (`hud_v2_check.guard_live`).
 
 The checks worth keeping, each written to bite:
-  - the Preview pane refuses the API listener `/status` reports (and 8405),
+  - the Browser pane refuses the API listener `/status` reports (and 8405),
     the HUD's own port, and anything not local; nothing ever reaches the
     mock's API listener;
   - the frame's `sandbox` is exactly `allow-scripts allow-forms`, and exactly
@@ -28,7 +30,12 @@ The checks worth keeping, each written to bite:
     opaque — the workshop sandboxes every document it serves (PR #31
     review: it used to run with the real workshop origin);
   - the HUD under test is served under the daemon's own frame headers (the
-    mock sends `hud_api.frame_headers()`, never a copy).
+    mock sends `hud_api.frame_headers()`, never a copy);
+  - the rename (BR-3a): a layout stored before it, its Preview pane in a slot
+    whose default is chat, opens as the Browser with its URL and its grant,
+    and is saved back under the new names only; an old grant for another
+    origin is not carried over; a stored `"file"` pane still opens as the
+    editor with its tabs; the strip says Editor and Browser.
 """
 from __future__ import annotations
 
@@ -47,13 +54,13 @@ from tests.face.hud_v2_layout_check import (  # noqa: E402
 
 OFF = "allow-scripts allow-forms"
 ON = "allow-scripts allow-forms allow-same-origin"
-FRAME = _pane(2, '[data-testid="preview-frame"]')
-KEEP = _pane(2, '[data-testid="preview-keep-origin"]')
-REFUSED = _pane(2, '[data-testid="preview-refused"]')
+FRAME = _pane(2, '[data-testid="browser-frame"]')
+KEEP = _pane(2, '[data-testid="browser-keep-origin"]')
+REFUSED = _pane(2, '[data-testid="browser-refused"]')
 
 
-def preview_checks(browser, mock, base, check, until, guard, init_script):
-    print("\npreview: the daemon's ports, keep its own origin (WP-E)")
+def browser_checks(browser, mock, base, check, until, guard, init_script):
+    print("\nbrowser: the daemon's ports, keep its own origin (WP-E), the rename (BR-3a)")
     ctx = browser.new_context(viewport={"width": 1600, "height": 900}, permissions=["microphone"])
     guard(ctx)
     ctx.add_init_script(init_script)
@@ -64,7 +71,7 @@ def preview_checks(browser, mock, base, check, until, guard, init_script):
     try:
         _boot(page, mock, base, until)
         for section in (_port_checks, _keep_checks, _stored_checks, _hardened_checks, _card_checks,
-                        _workshop_hijack_checks, _served_under_checks, _split_checks):
+                        _workshop_hijack_checks, _served_under_checks, _split_checks, _rename_checks):
             try:
                 section(page, mock, check, until)
             except Exception as e:  # a section that cannot run is a failure; the rest still run
@@ -75,7 +82,7 @@ def preview_checks(browser, mock, base, check, until, guard, init_script):
                     _setup(page, mock, until)
                 except Exception:
                     pass
-        check("no page errors in the preview section", not errors, "; ".join(errors[:3]))
+        check("no page errors in the browser section", not errors, "; ".join(errors[:3]))
         check("nothing ever loaded the daemon's API listener", mock.api_hits == [], str(mock.api_hits[:3]))
     finally:
         mock.frame_hardened = True
@@ -85,20 +92,20 @@ def preview_checks(browser, mock, base, check, until, guard, init_script):
 # ---------------------------------------------------------------------------
 
 def _setup(page, mock, until, pane2: dict | None = None):
-    """Two columns: a chat, and a Preview pane (focused) with `pane2`'s stored fields."""
+    """Two columns: a chat, and a Browser pane (focused) with `pane2`'s stored fields."""
     raw = json.dumps({"preset": "cols2", "focused": 2,
-                      "panes": [{"view": "chat"}, {"view": "preview", **(pane2 or {})},
+                      "panes": [{"view": "chat"}, {"view": "browser", **(pane2 or {})},
                                 {"view": "file"}, {"view": "task"}]})
     page.set_viewport_size({"width": 1600, "height": 900})
     _set_storage(page, zoom="100", layout="{}")
     _set_ws(page, raw)
     _boot(page, mock, None, until, reload=True)
-    until(lambda: _visible(page, _pane(2, '[data-testid="preview-url"]')), timeout=3)
+    until(lambda: _visible(page, _pane(2, '[data-testid="browser-url"]')), timeout=3)
 
 
 def _load(page, url: str):
-    page.locator(_pane(2, '[data-testid="preview-url"]')).fill(url)
-    page.locator(_pane(2, '[data-testid="preview-go"]')).click()
+    page.locator(_pane(2, '[data-testid="browser-url"]')).fill(url)
+    page.locator(_pane(2, '[data-testid="browser-go"]')).click()
     page.wait_for_timeout(150)
 
 
@@ -126,7 +133,7 @@ def _stored(page):
 
 
 def _inside(page, sel: str) -> str:
-    """Text inside the preview frame (Playwright reads any origin's frame)."""
+    """Text inside the Browser frame (Playwright reads any origin's frame)."""
     try:
         return page.frame_locator(FRAME).locator(sel).inner_text(timeout=1000)
     except Exception:
@@ -149,11 +156,11 @@ def _port_checks(page, mock, check, until):
         _load(page, url)
         until(lambda: _count(page, REFUSED) > 0, timeout=3)
         text = page.locator(REFUSED).inner_text() if _count(page, REFUSED) else ""
-        check(f"Preview refuses {what}, and says why",
+        check(f"the Browser refuses {what}, and says why",
               word in text and _count(page, FRAME) == 0 and _count(page, KEEP) == 0, text)
     check("and nothing reached the API listener", mock.api_hits == [], str(mock.api_hits))
 
-    page.locator(_pane(2, '[data-testid="preview-project"]')).click()
+    page.locator(_pane(2, '[data-testid="browser-project"]')).click()
     until(lambda: _count(page, FRAME) > 0, timeout=4)
     check("the workshop loads, its sandbox exactly allow-scripts allow-forms", _sandbox(page) == OFF,
           str(_sandbox(page)))
@@ -239,7 +246,7 @@ def _keep_checks(page, mock, check, until):
     page.keyboard.up("Space")
     page.wait_for_timeout(300)
     check("review #40: a click leaves no focus on 'Keep its origin', so a Space after it flips nothing",
-          focused != "preview-keep-origin" and _keep_checked(page) and _sandbox(page) == ON,
+          focused != "browser-keep-origin" and _keep_checked(page) and _sandbox(page) == ON,
           f"focus={focused} checked={_keep_checked(page)} sandbox={_sandbox(page)}")
     page.locator(KEEP).uncheck()
     until(lambda: _sandbox(page) == OFF, timeout=3)
@@ -248,7 +255,7 @@ def _keep_checks(page, mock, check, until):
 def _stored_checks(page, mock, check, until):
     for what, port, word in (("the API listener", mock.api_port, "API"), ("the HUD", mock.port, "HUD")):
         origin = f"http://127.0.0.1:{port}"
-        _setup(page, mock, until, {"previewUrl": origin + "/", "keepOrigin": origin})
+        _setup(page, mock, until, {"browserUrl": origin + "/", "keepOrigin": origin})
         until(lambda: _count(page, REFUSED) > 0, timeout=4)
         text = page.locator(REFUSED).inner_text() if _count(page, REFUSED) else ""
         check(f"a stored URL on {what}'s port is refused when it is loaded again",
@@ -263,7 +270,7 @@ def _hardened_checks(page, mock, check, until):
     origin = f"http://127.0.0.1:{mock.dev_port}"
     mock.frame_hardened = False
     try:
-        _setup(page, mock, until, {"previewUrl": dev, "keepOrigin": origin})
+        _setup(page, mock, until, {"browserUrl": dev, "keepOrigin": origin})
         until(lambda: _count(page, FRAME) > 0, timeout=4)
         page.wait_for_timeout(300)
         check("a daemon whose /status lacks frame_hardened: the frame never gets allow-same-origin",
@@ -275,7 +282,7 @@ def _hardened_checks(page, mock, check, until):
         check("so the page's storage throws", _inside(page, "#storage") == "blocked")
     finally:
         mock.frame_hardened = True
-    _setup(page, mock, until, {"previewUrl": dev})
+    _setup(page, mock, until, {"browserUrl": dev})
     until(lambda: _count(page, KEEP) > 0, timeout=4)
     check("the same daemon saying it again offers the switch again", _visible(page, KEEP) and not _keep_checked(page))
 
@@ -288,7 +295,7 @@ def _workshop_hijack_checks(page, mock, check, until):
     project's served files (PR #31 review, shown in Chromium)."""
     dev = f"http://127.0.0.1:{mock.dev_port}"
     hits = len(mock.workshop_hits)
-    _setup(page, mock, until, {"previewUrl": dev + "/to-workshop", "keepOrigin": dev})
+    _setup(page, mock, until, {"browserUrl": dev + "/to-workshop", "keepOrigin": dev})
     until(lambda: _sandbox(page) == ON, timeout=4)
     check("setup: the dev page's frame was let keep its origin", _sandbox(page) == ON, str(_sandbox(page)))
     until(lambda: "/p/p1/probe.html" in mock.workshop_hits[hits:], timeout=4)
@@ -314,7 +321,7 @@ def _served_under_checks(page, mock, check, until):
 
 
 def _card_checks(page, mock, check, until):
-    _setup(page, mock, until, {"previewUrl": f"http://127.0.0.1:{mock.dev_port}/"})
+    _setup(page, mock, until, {"browserUrl": f"http://127.0.0.1:{mock.dev_port}/"})
     until(lambda: _count(page, KEEP) > 0, timeout=4)
     _approval(mock, "keep1")
     until(lambda: page.locator('[data-testid="approval-card"]').count() > 0, timeout=4)
@@ -332,7 +339,7 @@ def _card_checks(page, mock, check, until):
 
 
 def _split_checks(page, mock, check, until):
-    """WP-G2 (plan §3.5): a Preview pane's copy loads the same URL, judged
+    """WP-G2 (plan §3.5): a Browser pane's copy loads the same URL, judged
     again, and never inherits the keep-origin grant — that is the owner's
     choice for one pane."""
     _setup(page, mock, until)
@@ -345,16 +352,105 @@ def _split_checks(page, mock, check, until):
     page.locator('[data-testid="pane-2-split"]').click()
     until(lambda: len(_ws(page)["ws"]["order"]) == 3, timeout=3)
     new = _ws(page)["ws"]["order"][2]           # right after pane 2; a free id (the stored 3 and 4 are kept)
-    frame3 = _pane(new, '[data-testid="preview-frame"]')
+    frame3 = _pane(new, '[data-testid="browser-frame"]')
     until(lambda: _count(page, frame3) > 0, timeout=4)
-    keep3 = page.locator(_pane(new, '[data-testid="preview-keep-origin"]'))
+    keep3 = page.locator(_pane(new, '[data-testid="browser-keep-origin"]'))
     spec3 = _ws(page)["ws"]["panes"][new - 1]
-    check("G2: a Preview pane's copy loads the same URL beside it",
-          page.locator(frame3).get_attribute("src") == dev and spec3.get("previewUrl") == dev, str(spec3))
+    check("G2: a Browser pane's copy loads the same URL beside it",
+          page.locator(frame3).get_attribute("src") == dev and spec3.get("browserUrl") == dev, str(spec3))
     check("G2: without the source's keep-origin grant: its frame is sandboxed as any page is, the switch off",
           page.locator(frame3).get_attribute("sandbox") == OFF and "keepOrigin" not in spec3
           and keep3.count() == 1 and not keep3.is_checked(), str(page.locator(frame3).get_attribute("sandbox")))
     check("G2: and the source keeps its own", _sandbox(page) == ON and _stored(page) == origin)
+
+
+def _raw_ws(page) -> str:
+    return page.evaluate("localStorage.getItem('jarvis.hud.workspace') || ''")
+
+
+def _rename_checks(page, mock, check, until):
+    """BR-3a: Preview became the Browser in name and id, under the same
+    storage key. A layout stored before the rename puts its Preview pane in
+    pane 1, whose default is chat, so a dropped view migration shows a chat
+    there rather than passing on pane 2's default."""
+    dev = f"http://127.0.0.1:{mock.dev_port}/"
+    origin = f"http://127.0.0.1:{mock.dev_port}"
+    frame1 = _pane(1, '[data-testid="browser-frame"]')
+
+    def boot_with(pane1: dict):
+        raw = json.dumps({"preset": "cols2", "focused": 1,
+                          "panes": [{"view": "preview", **pane1}, {"view": "chat"},
+                                    {"view": "file"}, {"view": "task"}]})
+        page.set_viewport_size({"width": 1600, "height": 900})
+        _set_storage(page, zoom="100", layout="{}")
+        _set_ws(page, raw)
+        _boot(page, mock, None, until, reload=True)
+
+    def sandbox1():
+        loc = page.locator(frame1)
+        return loc.first.get_attribute("sandbox") if loc.count() else None
+
+    boot_with({"previewUrl": dev, "keepOrigin": origin})
+    until(lambda: page.locator(frame1).count() > 0, timeout=4)
+    until(lambda: sandbox1() == ON, timeout=4)
+    spec = _ws(page)["ws"]["panes"][0]
+    check("BR-3a: a stored Preview pane opens as the Browser",
+          page.locator(_pane(1)).get_attribute("data-view") == "browser"
+          and "on" in (page.locator(_pane(1, '[data-testid="tab-browser"]')).get_attribute("class") or ""),
+          str(page.locator(_pane(1)).get_attribute("data-view")))
+    check("BR-3a: with its old URL loaded, judged again",
+          page.locator(frame1).first.get_attribute("src") == dev and spec.get("browserUrl") == dev, str(spec))
+    check("BR-3a: and its keep-origin grant, which matches that URL", sandbox1() == ON
+          and spec.get("keepOrigin") == origin, f"{sandbox1()} {spec}")
+    until(lambda: '"browserUrl"' in _raw_ws(page), timeout=3)
+    raw = _raw_ws(page)
+    saved = json.loads(raw)["panes"][0] if raw else {}
+    check("BR-3a: the window saves it under the new names only",
+          "preview" not in raw and saved.get("view") == "browser" and saved.get("browserUrl") == dev, raw[:300])
+
+    other = f"http://127.0.0.1:{_free_port()}"
+    boot_with({"previewUrl": dev, "keepOrigin": other})
+    until(lambda: page.locator(frame1).count() > 0, timeout=4)
+    page.wait_for_timeout(300)
+    spec = _ws(page)["ws"]["panes"][0]
+    check("BR-3a: an old grant for another origin is not carried over",
+          sandbox1() == OFF and "keepOrigin" not in spec and '"keepOrigin"' not in _raw_ws(page),
+          f"{sandbox1()} {spec}")
+
+    strip = page.locator(_pane(1, '[data-testid="tab-browser"]')).inner_text().strip()
+    editor = page.locator(_pane(1, '[data-testid="tab-file"]')).inner_text().strip()
+    check("the strip says Browser and Editor (the editor's id stays file)",
+          strip == "Browser" and editor == "Editor", f"{strip!r} {editor!r}")
+    check("and no view is called Preview or File any more",
+          not any(t.strip() in ("Preview", "File")
+                  for t in page.locator(_pane(1, '[data-testid="pane-1-view"] button')).all_inner_texts()),
+          str(page.locator(_pane(1, '[data-testid="pane-1-view"] button')).all_inner_texts()))
+    check("the pane's label says Browser", page.locator(_pane(1)).get_attribute("aria-label") == "Pane 1: browser",
+          str(page.locator(_pane(1)).get_attribute("aria-label")))
+
+    # The guard: a stored "file" pane, as every layout before this one stored
+    # it, still opens as the editor with its tabs.
+    tabs = {"paths": ["calc.py", "README.md"], "active": "calc.py", "preview": None}
+    raw = json.dumps({"preset": "cols2", "focused": 2,
+                      "panes": [{"view": "chat"}, {"view": "file", "projectId": "p1", "editors": tabs},
+                                {"view": "file"}, {"view": "task"}]})
+    _set_ws(page, raw)
+    _boot(page, mock, None, until, reload=True)
+    tab = lambda path: page.locator(_pane(2, f'[data-testid="editor-tab-{path}"]'))  # noqa: E731
+    until(lambda: tab("calc.py").count() == 1 and tab("README.md").count() == 1, timeout=5)
+    until(lambda: page.locator(_pane(2, '[data-testid="editor"][data-language]')).count() > 0, timeout=8)
+    check("a stored \"file\" pane still opens as the editor, with its tabs",
+          page.locator(_pane(2)).get_attribute("data-view") == "file"
+          and tab("README.md").count() == 1 and tab("calc.py").get_attribute("data-active") == "true"
+          and page.locator(_pane(2, '[data-testid="editor"][data-language]')).count() > 0,
+          str(page.locator(_pane(2)).get_attribute("data-view")))
+    check("and reads as the editor", page.locator(_pane(2)).get_attribute("aria-label") == "Pane 2: editor"
+          and page.locator(_pane(2, '[data-testid="tab-file"]')).inner_text().strip() == "Editor",
+          str(page.locator(_pane(2)).get_attribute("aria-label")))
+    saved = json.loads(_raw_ws(page))["panes"][1]
+    check("and is saved back as \"file\", tabs and all",
+          saved.get("view") == "file" and saved.get("editors", {}).get("paths") == ["calc.py", "README.md"],
+          str(saved))
 
 
 def main():
@@ -370,7 +466,7 @@ def main():
             browser = pw.chromium.launch(
                 headless=True,
                 args=["--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream"])
-            preview_checks(browser, mock, f"http://127.0.0.1:{mock.port}", v2.check, v2.until,
+            browser_checks(browser, mock, f"http://127.0.0.1:{mock.port}", v2.check, v2.until,
                            v2.guard, v2.FAKE_RECOGNIZER)
             browser.close()
     finally:
@@ -381,7 +477,7 @@ def main():
         for f in v2.FAILURES:
             print(f"  - {f}")
         return 1
-    print(f"all {v2.CHECKS} preview checks passed")
+    print(f"all {v2.CHECKS} browser checks passed")
     return 0
 
 

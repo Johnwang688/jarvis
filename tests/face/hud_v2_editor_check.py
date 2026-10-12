@@ -274,13 +274,13 @@ def _shared_checks(page, mock, check, until):
           and page.locator(_tab(3, "calc.py")).get_attribute("data-dirty") == "true")
     # Letting go of a view another pane still shows loses nothing (plan G-3):
     # pane 3 may switch away; pane 2, the edit's last view then, may not.
-    _show(page, until, 3, "preview")
+    _show(page, until, 3, "browser")
     check("a pane whose unsaved edit another pane also shows may switch away",
-          page.locator(_pane(3)).get_attribute("data-view") == "preview"
+          page.locator(_pane(3)).get_attribute("data-view") == "browser"
           and page.locator(_tab(2, "calc.py")).get_attribute("data-dirty") == "true")
     refused = page.locator('[data-testid="pane-2-refused"]')
     try:
-        _show(page, until, 2, "preview")
+        _show(page, until, 2, "browser")
     except Exception:
         pass
     until(lambda: refused.count() > 0, timeout=2)
@@ -308,7 +308,7 @@ def _shared_checks(page, mock, check, until):
     check("one save cleans both panes", len(mock.sent("PUT", "/projects/p1/file")) == puts + 1
           and page.locator(_tab(2, "calc.py")).get_attribute("data-dirty") == "false")
     # A pane switched away and back has its tabs again.
-    _show(page, until, 3, "preview")
+    _show(page, until, 3, "browser")
     until(lambda: page.locator(_tab(3, "calc.py")).count() == 0, timeout=3)
     bufs = [b for b in _buffers(page) if b["path"] == "calc.py"]
     check("a pane switched away lets go of its tab; the other pane still holds the buffer",

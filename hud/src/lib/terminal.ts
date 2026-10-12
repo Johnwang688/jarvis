@@ -843,7 +843,7 @@ function isLoopbackHost(host: string): boolean {
 export interface LinkVerdict {
   ok: boolean;
   url: string;
-  /** A server on this machine (a dev server): WP-E offers it to Preview. */
+  /** A server on this machine (a dev server): WP-E offers it to the Browser. */
   loopback: boolean;
 }
 
@@ -1068,7 +1068,7 @@ export class AttachLedger {
 /**
  * Where `+` opens a terminal (plan §2.4): the folder of what the focused
  * pane shows — a chat's own folder (its thread; a compose row's project), a
- * File or Preview pane's project, a task's worktree — else home. Always as an
+ * File or Browser pane's project, a task's worktree — else home. Always as an
  * id the daemon resolves, never a path. A terminal pane defers to the chat.
  */
 export function terminalSpecFor(view: string, at: {
@@ -1078,7 +1078,7 @@ export function terminalSpecFor(view: string, at: {
     at.thread ? { thread: at.thread } : at.compose ? { project: at.compose } : "home";
   switch (view) {
     case "file":
-    case "preview":
+    case "browser":
     case "vex":
       return at.project ? { project: at.project } : chat();
     case "task":
