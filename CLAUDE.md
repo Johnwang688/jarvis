@@ -490,7 +490,9 @@ daemon, `hud_api` and the module itself. **Terminal output stays in memory
 unless Jarvis reads it**: on the bus lifecycle records only
 (`terminal_attached`, and WP-F's `terminal_read` — ids, a count, a time), no
 log line (lifecycle only, and `/terminals` paths are logged without their
-query — the ticket rides in it), no thread log, Discord or disk. The
+query — the ticket rides in it), no thread log, Discord or disk (BR-8a's
+`dev_url` frame, below, goes to that terminal's own socket and nowhere
+else). The
 exception, since WP-F (corrected 2026-10-10): what `terminal_read` returns goes where any tool result goes — the fast-path transcript (and so OpenRouter, with every later request), that conversation's v1 session `messages.json`, `config.SPILL_DIR` if context truncation cuts it later, and anything the model's reply repeats (a reply is mirrored to the chat's Discord thread and spoken); its ticker
 summary is fixed ("read N lines"), so the tool's own `tool_finished` record
 carries none of it onto the bus or into the thread's `log.jsonl` — **but the
@@ -1316,6 +1318,69 @@ move through another first. The mock serves an API listener and a dev server
 on ephemeral ports (`api_port`, `dev_port`) and asserts the API one is never
 hit; the mock HUD, API and workshop send the real `hud_api.frame_headers()`,
 so the HUD under test is always rendered under them. Not yet: §2.5 item 5, a "dev servers in your terminals" list.
+
+**Dev servers announced in a terminal, BR-8a (2026-10-12; Browser plan
+`docs/plans/2026-10-10-hud-browser-plan.md`, amendment 1 §D.1/§G/§H, the
+decisions file wins: B-2; design §18; contract in `docs/hud-api.md`).** The
+daemon half of "a dev server opens in a Browser pane by itself"; BR-8b opens
+the pane. `jarvis/v2/devurl.py` (pure) is fed a **shell** terminal's **live**
+output by `Terminal._sniff`, from `_output` under the lock it already holds,
+**only while `browser.json` → `auto_open` is on** — off, the sniffer is told
+the marks' letters and never fed a byte. It reads **only a command's
+output**: `Marks.events` hands it the letters of *signed* OSC 133 marks, and
+it skips `A`/`B` to `C` once the shell has marked a command (bash), else
+`B` to that line's line feed (the POSIX startup file marks no command), so a
+typed `curl http://localhost:3000` opens nothing; never the alternate screen.
+Escapes are stripped by **`terminal_text`'s own compiled patterns** (imported,
+not copied) — colour draws nothing (a whole SGR is skipped in the run, which
+keeps a flood of colour at ~37 MB/s), cursor forward is a space, cursor back,
+BS or a deleted character spoils the line, any other move, CR and the line
+feeds end it. A finished line is matched against `devurl.SHAPES` (Vite,
+Next, CRA, Angular, webpack-dev-server, `http.server`, Flask, uvicorn,
+Django, Puma, Hugo, Jekyll, Streamlit, Gradio, `php -S`, `serve`, Expo,
+Jupyter, Astro, Storybook, Parcel, MkDocs, Eleventy) and `devurl.clean` keeps
+only **loopback http(s) with an explicit port** (`localhost`, `127/8`,
+`[::1]`; `0.0.0.0`/`[::]` → `localhost`), no userinfo, **never Jarvis's
+ports** (`devurl.jarvis_ports()` = `config.control_ports()` ∪ 8403 ∪ the
+configured workshop, plus the daemon's listeners as bound, `own_ports`), the
+query and fragment dropped (a Jupyter `?token=` never travels). **Memory: a
+512-byte line (dropped whole past it), a 64-byte escape carry, the last four
+origins and four send times** — nothing else, whatever it is fed. **One
+`{"type": "dev_url", "url"}` frame on that terminal's attached socket**,
+after the bytes that carried it; `admit` de-duplicates by (scheme, port) —
+loopback hosts folded, so Puma's `127.0.0.1` and `[::1]` lines are one — and
+rate-limits (one a second, four a minute per terminal); **no window attached:
+dropped and not admitted**, so not remembered; a replay never reaches it.
+**Nothing on the bus, in a log line, a thread log, Discord or a file carries a
+URL or a byte of the text**; the "Jarvis can read" switch is unrelated.
+**`browser.json`** (`config.BROWSER_SETTINGS_PATH`, env
+`JARVIS_BROWSER_SETTINGS`; `jarvis/v2/browser/settings.py`, the start of
+BR-1a's package) holds `auto_open`, **on by default**; it is **gate state**
+(`files._protected_state_paths`, by path and by name beside the allowlist) and
+changes only by **owner-only `GET`/`PATCH /browser/settings`** (`is_owner`
+plus a strict loopback Host; exactly `{auto_open: bool}`); written atomically
+at 0600 keeping keys it does not know (BR-1a's LAN switch, BR-10's sound);
+read without blocking, never through a symlink, re-`stat`ed at most once a
+second so a hand edit lands without a restart. **An embedded or test daemon
+keeps it in memory** (`BrowserSettings()`); daemon2's `main()` attaches the
+owner's file, as it loads the Codex catalog. The HUD ignores the frame until
+BR-8b (`parseControl` drops unknown types). **Limits**: in bash a server
+started with `&` whose banner lands while the prompt is up is skipped
+(between `B` and `C`); typed-ahead input echoed during a running command is
+read as that command's output; text that only looks like a banner (`cat` of a
+log) is read as one — the window judges the URL again. Free suites:
+`tests/v2/devurl_check.py` (every `SHAPES` row from real banner text, whole,
+split at every byte and at random cuts, with escapes in every form; the
+refusals; the marks; 10 MB leaving at most a line; the rate limit and
+de-dup; the settings file and its gate-state refusal) and `terminal_check`'s
+`DevUrls` (one window hears it, another does not; the typed line never read;
+Jarvis's ports never sent; bus, log and disk clean; off feeds nothing; a
+replay or a second announcement sends nothing; the switch is the owner's;
+an unattached URL not remembered; a forged mark moves nothing); `frame_check`
+walks `/browser`. Seven guard removals, each in a scratch copy, fail all nine
+of their checks (a control port passed — both suites, a URL on the bus, marks
+ignored — both suites, escapes kept, the query kept, `auto_open` ignored,
+whole lines kept); an unmutated copy passes them.
 
 **VEX backend, VX-1 (2026-10-11; editor plan
 `docs/plans/2026-10-09-hud-editor-plan.md` §2.9/§3, decisions file beside it

@@ -91,6 +91,14 @@ spoken like any other. The tool's ticker summary is fixed ("read N lines",
 text onto the bus or into the thread's `log.jsonl`; the model's reply is not
 filtered, and reaches both (and Discord, and speech) like any reply.
 
+**Dev servers (BR-8a, `devurl.py`).** While the owner's "open dev servers
+automatically" switch is on (`browser.json` → `auto_open`), a shell
+terminal's live output — a command's own, by the signed marks — is read for a
+dev server's loopback URL, in memory under `_lock`, and one `{"type":
+"dev_url", "url"}` frame goes to **that terminal's attached socket and
+nowhere else**: no bus record, no log line, no file, and nothing Jarvis can
+read. No window attached, it is dropped. Off, no byte reaches the sniffer.
+
 **Shell integration (W-2, item 3).** bash reads `terminal_rc.bash` as its
 --rcfile; a POSIX `sh`-family shell (sh, dash, ash, ksh, mksh, …) reads
 `terminal_rc.sh` as `$ENV`; any other shell (zsh, fish, …) runs as a plain

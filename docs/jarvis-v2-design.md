@@ -2233,6 +2233,45 @@ route modules' source), `preview.test.ts`, `hud_v2_preview_check.py` and
 the terminal suite's link section. Not yet: a "dev servers in your
 terminals" list (§2.5 item 5).
 
+**Dev servers announced in a terminal (2026-10-12, BR-8a of
+`docs/plans/2026-10-10-hud-browser-plan.md`, amendment 1 §D.1; decisions
+B-2).** The daemon half of "a dev server started in a HUD terminal opens in a
+Browser pane by itself"; BR-8b, the window half, opens the pane
+(`lib/devopen.ts`, BR-2). While the owner's **Open dev servers
+automatically** switch is on (`browser.json` → `auto_open`, on by default,
+protected state, changed only by the owner-only `PATCH /browser/settings`),
+`Terminal._output` feeds each shell terminal's **live** output to
+`jarvis/v2/devurl.py`, under the lock it already holds. It reads only a
+command's output — from the shell's signed OSC 133 marks it skips the prompt
+and the typed line (bash: `B` to `C`; a shell that marks no command, like the
+POSIX startup file: `B` to the end of that line), so typing `curl
+http://localhost:3000` opens nothing — never the alternate screen, and it
+strips escapes by `terminal_text`'s own grammar. A line that announces a
+server in one of the known shapes (Vite, Next, Create React App, Angular,
+webpack-dev-server, `python -m http.server`, Flask, uvicorn, Django, Puma,
+Hugo, Jekyll, Streamlit, Gradio, `php -S`, `serve`, Expo, Jupyter, Astro,
+Storybook …) gives its URL, kept only if it is loopback http(s) with an
+explicit port (`0.0.0.0` and `[::]` read as `localhost`), no user name, and
+none of Jarvis's ports (`config.control_ports()`, the workshop's, and the
+daemon's listeners as bound), with the query and fragment dropped. It is sent
+as one `{"type": "dev_url", "url"}` frame **on that terminal's own attached
+socket**, after the bytes that carried it — once per origin (loopback hosts
+folded) among the last four, at most one a second and four a minute per
+terminal; with no window attached it is dropped and not remembered, and a
+ring replay never sends one. **Nothing else ever carries it**: no bus record,
+log line, thread log, Discord post or file, and Jarvis never sees it (the
+"Jarvis can read" switch is unrelated: this is the owner's window). The
+sniffer holds at most a 512-byte line, a 64-byte escape carry and four
+origins. Its limits: a server started with `&` in bash whose banner lands
+while the prompt is up is skipped (it sits between `B` and `C`); input typed
+ahead while a command runs is echoed inside its output and read as output;
+text that only looks like a banner (`cat` of a log) is read as one, and the
+window judges every URL again. Free suites: `tests/v2/devurl_check.py` (every
+shape split anywhere with escapes, the refusals, the marks, the bounds, the
+rate limit, the settings file) and `terminal_check`'s `DevUrls` (the frame
+on that socket alone; nothing on the bus, in a log or a file; the switch
+off feeds the sniffer nothing; the switch is the owner's).
+
 **The VEX backend (2026-10-11, VX-1 of
 `docs/plans/2026-10-09-hud-editor-plan.md`; decisions V-1 to V-5).** The HUD
 can build a VEX V5 C++ project, download it to a slot on the brain, open the

@@ -975,7 +975,8 @@ that is why every attach is announced (`terminal_attached`, below).
     then a close when the terminal is closed; `{"type": "exit", "code",
     "reason": "ended"}` then close 1001 when Jarvis stops (terminals do not
     survive a restart, W-3); `input_dropped`, `input_resumed` and
-    `input_resume_refused` (above).
+    `input_resume_refused` (above); `{"type": "dev_url", "url"}` when a dev
+    server announces itself in the live output (BR-8a, below).
   - Window → server: `{"type": "resize", "cols", "rows"}` (same ranges;
     anything else is ignored), `{"type": "input_resume"}` (above) and the
     takeover answer below. Unknown messages are ignored.
@@ -1963,3 +1964,56 @@ three dots but have the main display be the title". No new route.
 - **The HUD** never shows a chat's id as its name: an untitled row reads
   "New thread" (`turns` 0) or "Untitled", and the id is the ⋯ menu's "Copy
   id" (`tmenu-copyid`, the id shown in `tmenu-id`). A title is text.
+
+## Additions 2026-10-12 (dev servers in HUD terminals — BR-8a)
+
+The daemon half of "a dev server started in a HUD terminal opens in a
+Browser pane by itself" (Browser plan amendment 1 §D.1; decisions B-2).
+BR-8b, the window half, acts on the frame (`lib/devopen.ts`).
+
+- **`{"type": "dev_url", "url": "http://localhost:5173/"}`**, a text frame on
+  a terminal's attach socket, **that terminal's socket only**, after the
+  binary output that carried the announcement. The window that holds the
+  terminal hears it; another window, the bus, `/events`, the listing, a log
+  line, Discord and the disk never do, and the "Jarvis can read" switch is
+  unrelated (Jarvis never sees it). Sent only for **live** output: a
+  reattach's replay never sends one, and an announcement made while no
+  window is attached is dropped (and not remembered, so the server's next
+  announcement — a restart — is sent to whichever window holds it then).
+- **What is read**: a shell terminal's output (never a program terminal's),
+  only a command's own — the prompt and the typed command line are skipped
+  by the shell's signed OSC 133 marks (`B` to `C` in bash; `B` to the end of
+  that line in a shell that marks no command) — never the alternate screen,
+  with escape sequences stripped by `terminal_text`'s grammar, one line of
+  at most 512 bytes at a time (a longer one is dropped whole).
+- **What `url` is**: from one of the known announcement shapes
+  (`devurl.SHAPES`: `Local:`, `Loopback:`, `Running on`, `Listening on`,
+  `Serving HTTP on … (…)`, `Starting development server at`, `open your
+  browser on`, `available at`, `Server address:`, `Development Server (…)`,
+  `waiting on`, Jupyter's URL line, and the like), **loopback** `http`/`https`
+  with an **explicit port**: `localhost`, `127.0.0.0/8` or `[::1]`, with
+  `0.0.0.0` and `[::]` written as `localhost`; never a user name or password,
+  never one of Jarvis's ports (`config.control_ports()`, 8403 and the
+  configured workshop port, and the daemon's own HUD, API and preview ports
+  as bound); the query and fragment dropped (a Jupyter `?token=` never
+  travels); the path percent-encoded; at most 512 characters. The window
+  judges it again (WP-E's Preview judge) before opening anything.
+- **How often**: once per origin per terminal among the last four sent, with
+  loopback hosts folded (`localhost:3000`, `127.0.0.1:3000` and
+  `[::1]:3000` are one server: Puma prints two of them); at most one frame a
+  second and four a minute per terminal.
+- **The switch: `GET /browser/settings`** → `{"auto_open": bool}` and
+  **`PATCH /browser/settings`** with exactly `{auto_open: bool}` →
+  `{"auto_open": bool}`. **Owner-only** (`projects.is_owner`: the HUD
+  listener and the HUD's Origin, or a same-origin GET) with a strict
+  loopback Host — 403 on the API listener, from another Origin, with no
+  Origin on a write or a rebinding Host; 400 for any other field, a
+  non-boolean, an empty body or a query; 404 for any other `/browser/…`
+  path or method. Stored in `browser.json` (`config.BROWSER_SETTINGS_PATH`,
+  `~/.config/jarvis/browser.json`, env `JARVIS_BROWSER_SETTINGS`): gate
+  state, refused to every agent write tool and v2 grant, kept mode 600,
+  every key the daemon does not know left as it was. **On by default**; a
+  missing, unreadable or malformed file reads as the default, and an edit
+  by hand lands within a second. While it is off, no byte of terminal
+  output reaches the sniffer. An embedded or test daemon keeps the switch in
+  memory and never reads or writes the owner's file.

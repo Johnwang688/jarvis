@@ -61,7 +61,9 @@ it. A ring replay never reaches here: only live output is fed.
 
 **The limits, stated.** A server started in the background (`npm run dev &`)
 in bash whose banner arrives while the prompt is up is skipped (it lands
-between `B` and `C`); run it in the foreground. A line a program draws with
+between `B` and `C`); run it in the foreground. Input typed ahead while a
+command runs is echoed by the tty inside that command's output, and read as
+output. A line a program draws with
 cursor addressing (a TUI, tmux) is read row by row, as far as its moves end
 lines. Text that only *looks* like a banner (`cat` of a log holding `Local:
 http://localhost:3000`) is read as one: the window then judges the URL again
