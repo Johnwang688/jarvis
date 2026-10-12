@@ -30,7 +30,9 @@ What it pins:
   - **under a card every VEX control is disabled and inert**;
   - the brain terminal opens in the panel, **reattaches after a reload**,
     and is paused for a download and opened again after it;
-  - device info is drawn as text: markup in it is characters;
+  - device info (`vexcom --json`) and the programs list (`vexcom --programs`)
+    each ask their own read and are drawn as text: markup in them is
+    characters;
   - a device action this window did not start is said;
   - the review round (one check per finding): **one download chain per
     window** — refused for another project while one runs, shown in every
@@ -372,7 +374,7 @@ def _card_checks(page, mock, check, until, fake):
     until(lambda: page.locator(_tid("approval-card")).count() > 0, timeout=4)
     time.sleep(0.3)
     controls = ["vex-build-btn", "vex-rebuild-btn", "vex-clean-btn", "vex-download-btn", "vex-slot-pick",
-                "vex-name-input", "vex-brain-btn", "vex-info-btn", "vex-error-0"]
+                "vex-name-input", "vex-brain-btn", "vex-info-btn", "vex-programs-btn", "vex-error-0"]
     off = {t: page.locator(_view(V, _tid(t))).is_disabled() for t in controls}
     check("under a card every VEX control is disabled", all(off.values()), str(off))
     picker = page.locator(_tid("pane-2-vex-project"))
@@ -430,22 +432,42 @@ def _brain_checks(page, mock, check, until, fake):
 def _info_checks(page, mock, check, until, fake):
     _reset(page, mock, until)
     check("setup: the view draws", _ready(page, until))
+    # What `vexcom --json` answers, pretty-printed by the daemon, with markup in a string.
     mock_vex.state(mock)["info"] = {
-        "text": "brain: <b>bold</b> <img src=x onerror=\"window.__pwned=1\">\nVEXos 1.1.5\nbattery 87%",
+        "text": '{\n  "name": "<b>bold</b> <img src=x onerror=\\"window.__pwned=1\\">",\n'
+                '  "vexos": "1.1.5",\n  "battery": 87\n}',
         "exit_code": 0}
     page.locator(_view(V, _tid("vex-info-btn"))).click()
     pre = page.locator(_view(V, _tid("vex-info-text")))
     until(lambda: pre.count() > 0, timeout=4)
-    check("device info is drawn as text", "VEXos 1.1.5" in pre.inner_text() and "<b>bold</b>" in pre.inner_text(),
+    check("device info asks for the system read", mock_vex.state(mock)["info_reads"] == ["system"],
+          str(mock_vex.state(mock)["info_reads"]))
+    check("device info is drawn as text, its lines kept",
+          '"vexos": "1.1.5",\n  "battery": 87' in pre.inner_text() and "<b>bold</b>" in pre.inner_text(),
           pre.inner_text())
     check("markup in it is characters: no element, nothing run",
           pre.locator("b, img").count() == 0 and not page.evaluate("window.__pwned || false"))
-    mock_vex.state(mock)["info_refuse"] = ("Device info waits on one step of the setup spike: run `vexcom --help` "
-                                           "once and record its device-info option (design §18)")
+    what = page.locator(_view(V, _tid("vex-info-what")))
+    check("it says what it is", what.get_attribute("data-read") == "system" and "Device info" in what.inner_text(),
+          what.inner_text())
+    # What `vexcom --programs` answers (a brain with nothing on it exits non-zero).
+    mock_vex.state(mock)["info"] = {"text": "slot 1: <script>window.__pwned=2</script>override\nslot 3: skills",
+                                    "exit_code": 2}
+    page.locator(_view(V, _tid("vex-programs-btn"))).click()
+    until(lambda: what.get_attribute("data-read") == "programs", timeout=4)
+    check("List programs asks for the programs read",
+          mock_vex.state(mock)["info_reads"] == ["system", "programs"], str(mock_vex.state(mock)["info_reads"]))
+    check("the programs list is drawn as text",
+          "<script>window.__pwned=2</script>override" in pre.inner_text()
+          and pre.locator("script").count() == 0 and not page.evaluate("window.__pwned || false"),
+          pre.inner_text())
+    check("a non-zero exit is said beside it", "Programs on the brain" in what.inner_text()
+          and "exited 2" in what.inner_text(), what.inner_text())
+    mock_vex.state(mock)["info_refuse"] = "A download is running. One device action at a time."
     page.locator(_view(V, _tid("vex-info-btn"))).click()
     note = page.locator(_view(V, _tid("vex-info-note")))
     check("a refusal is said in the daemon's words", bool(until(lambda: note.count() > 0, timeout=4))
-          and "setup spike" in note.inner_text())
+          and "One device action at a time" in note.inner_text())
 
 
 def _notice_checks(page, mock, check, until, fake):
@@ -501,7 +523,8 @@ def _one_chain_checks(page, mock, check, until, fake):
     check("M1: another project's Download is off while it runs", other.is_disabled())
     check("M1: so are the brain terminal and device info",
           page.locator(_view(3, _tid("vex-brain-btn"))).is_disabled()
-          and page.locator(_view(3, _tid("vex-info-btn"))).is_disabled())
+          and page.locator(_view(3, _tid("vex-info-btn"))).is_disabled()
+          and page.locator(_view(3, _tid("vex-programs-btn"))).is_disabled())
     check("M1: and every VEX pane's project picker",
           page.locator(_tid("pane-2-vex-project")).is_disabled()
           and page.locator(_tid("pane-3-vex-project")).is_disabled())
