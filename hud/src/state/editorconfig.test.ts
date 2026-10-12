@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  applyEditorConfig, editorConfigFor, forgetEditorConfig, overrideFor, reapplyEditorConfig, resolveFor, TIMEOUT_MS,
-  type EditorConfigDeps,
+  applyEditorConfig, editorConfigFor, forgetEditorConfig, overrideFor, reapplyEditorConfig, resolutionStats,
+  resolveFor, TIMEOUT_MS, type EditorConfigDeps,
 } from "./editorconfig";
+import { deadline } from "../lib/editorconfig";
 import { Buffers, type BufferDeps, type TextModel } from "./buffers";
 import type { FileRead } from "../types";
 
@@ -66,7 +67,7 @@ describe("finding a file's .editorconfig (ED-8)", () => {
     expect(w.stats.flat().some((p) => p.includes(".."))).toBe(false);
   });
 
-  it("reads nearest first, stops at root = true, and nearer wins", async () => {
+  it("stops at root = true, and nearer wins", async () => {
     const w = world({
       ".editorconfig": "[*]\nindent_size = 8\n",
       "a/.editorconfig": "root = true\n[*]\nindent_style = space\nindent_size = 4\n",
@@ -75,7 +76,9 @@ describe("finding a file's .editorconfig (ED-8)", () => {
     expect(await editorConfigFor(w.deps, "p1", "a/b/c.py")).toEqual({
       indent_style: "space", indent_size: "2", tab_width: "2",
     });
-    expect(w.reads).toEqual(["a/b/.editorconfig", "a/.editorconfig"]); // the root's never read
+    // Each config on the walk is read (once per etag) before the queued
+    // judgement parses them; the one above `root = true` is never applied.
+    expect(w.reads.sort()).toEqual([".editorconfig", "a/.editorconfig", "a/b/.editorconfig"]);
   });
 
   it("a folder's answer is kept a moment: a tab restore asks once per folder", async () => {
@@ -243,14 +246,15 @@ describe("caching by content, and the size cap before a read", () => {
     expect(w.reads).toEqual([]);
   });
 
-  it("an over-budget resolution is said once, by path, and configures nothing", async () => {
+  it("a path left with no configuration is said once, by path, never with content", async () => {
     const heavy = Array.from({ length: 123 }, (_, n) => `[${"{a,b}".repeat(6)}${"*x".repeat(27)}y${n}]\nindent_size = 2`);
     const w = world2({ ".editorconfig": { text: `root = true\n${heavy.join("\n")}`, etag: "d".repeat(32) } });
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
       const path = `src/${"robot_drive_subsystem_controller_".repeat(8)}.py`;
       const r = await resolveFor(w.deps, "p1", path, 1000);
-      expect(r).toMatchObject({ over: "budget", props: {} });
+      expect(r).toMatchObject({ over: "time", props: {} });
+      await resolveFor(w.deps, "p1", path, 1000);
       await resolveFor(w.deps, "p1", path, 1000);
       expect(warn).toHaveBeenCalledTimes(1);
       expect(String(warn.mock.calls[0][0])).toContain(path);
@@ -258,5 +262,109 @@ describe("caching by content, and the size cap before a read", () => {
     } finally {
       warn.mockRestore();
     }
+  });
+});
+
+// The lead's structural backstop (review of PR #59, round 3): a real clock,
+// poison, and one resolution per macrotask.
+describe("the window is never held", () => {
+  /** A config of 123 sections as heavy as the caps allow (the review's shape). */
+  const heavyText = (salt: string) => Array.from({ length: 123 }, (_, n) =>
+    `[${"{a,b}".repeat(6)}${"*x".repeat(27)}y${salt}${n}]\nindent_size = 2`).join("\n");
+  /** 32 folders deep, a heavy config in each, and `count` files at the bottom. */
+  function deepWorld(count: number) {
+    const dirs = Array.from({ length: 31 }, (_, i) => `d${i + 1}`);
+    const files: Record<string, string> = {};
+    for (let i = 0; i <= dirs.length; i++) {
+      const dir = dirs.slice(0, i).join("/");
+      files[dir ? `${dir}/.editorconfig` : ".editorconfig"] = heavyText(String(i));
+    }
+    const paths = Array.from({ length: count }, (_, i) => `${dirs.join("/")}/robot_drive_subsystem_${i}.cpp`);
+    const w = world(files);
+    return { ...w, paths };
+  }
+  const quiet = () => vi.spyOn(console, "warn").mockImplementation(() => {});
+
+  it("32 configs deep and 40 tabs at once: every resolution its own task, none long", async () => {
+    const w = deepWorld(40);
+    const warn = quiet();
+    try {
+      const t = performance.now();
+      const results = await Promise.all(w.paths.map((p) => resolveFor(w.deps, "p1", p, 1000)));
+      const total = performance.now() - t;
+      expect(results.every((r) => r.over !== null && Object.keys(r.props).length === 0)).toBe(true);
+      const s = resolutionStats();
+      expect(s.longestMs).toBeLessThan(16);
+      // Poison: two time-outs blame the config that spent the time, and the
+      // other 38 tabs are judged in O(1) — the whole batch is a few deadlines,
+      // not 40.
+      expect(results.filter((r) => r.over === "time").length).toBeLessThanOrEqual(2);
+      expect(total).toBeLessThan(500);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("a poisoned config: a later resolution touching it, for any path, does no work", async () => {
+    const w = deepWorld(3);
+    const warn = quiet();
+    try {
+      // A fake clock that is always past its deadline: each judgement times out at its first look.
+      let t = 0;
+      const late = () => deadline(5, () => (t += 100));
+      await resolveFor(w.deps, "p1", w.paths[0], 1000, late);
+      await resolveFor(w.deps, "p1", w.paths[1], 1000, late); // the second strike poisons
+      const before = resolutionStats().jobs;
+      const r = await resolveFor(w.deps, "p1", w.paths[2], 1000, late);
+      expect(r).toMatchObject({ over: "poisoned", props: {}, steps: 0 });
+      expect(resolutionStats().jobs).toBe(before); // never even queued
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("a poisoned config comes back when its content changes", async () => {
+    const files: Record<string, string> = { ".editorconfig": `root = true\n[${"{a,b}".repeat(7)}]\nindent_size = 4\n` };
+    let etag = "1".repeat(32);
+    const reads: string[] = [];
+    const deps: EditorConfigDeps = {
+      stat: async (_id, paths) => ({ files: Object.fromEntries(paths.map((p) => [p, p in files ? { etag, kind: "text" } : { gone: true }])) }),
+      read: async (_id, path) => {
+        reads.push(path);
+        return { path, content: files[path], kind: "text", protected: false };
+      },
+    };
+    const warn = quiet();
+    try {
+      expect((await resolveFor(deps, "p1", "a.c", 1000)).over).toBe("cap"); // a cap poisons at once
+      expect((await resolveFor(deps, "p1", "b.c", 1000)).over).toBe("poisoned");
+      files[".editorconfig"] = "root = true\n[*.c]\nindent_size = 4\n";
+      etag = "2".repeat(32);
+      expect((await resolveFor(deps, "p1", "b.c", 9000)).props).toMatchObject({ indent_size: "4" });
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("the number-range shape: each open a task under the deadline", async () => {
+    const nums = ["root = true"];
+    for (let n = 0; n < 123; n++) nums.push(`[${"{0..999999999}".repeat(30)}${n}x]`, "indent_size = 2");
+    const w = world({ ".editorconfig": nums.join("\n") });
+    const warn = quiet();
+    try {
+      const names = Array.from({ length: 40 }, (_, i) => `${"9".repeat(202)}${i}.c`);
+      await Promise.all(names.map((p) => resolveFor(w.deps, "p1", p, 1000)));
+      expect(resolutionStats().longestMs).toBeLessThan(16);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("an ordinary config is not slowed: it resolves in its own task, fast", async () => {
+    const w = world({ ".editorconfig": "root = true\n[*]\nindent_style = space\n[*.c]\nindent_size = 2\n" });
+    const paths = Array.from({ length: 40 }, (_, i) => `src/f${i}.c`);
+    const results = await Promise.all(paths.map((p) => resolveFor(w.deps, "p1", p, 1000)));
+    expect(results.every((r) => r.props.indent_size === "2")).toBe(true);
+    expect(resolutionStats().longestMs).toBeLessThan(5);
   });
 });

@@ -15,13 +15,17 @@
 // last matching section wins.
 //
 // **An `.editorconfig` is project content an agent can write**, and it is
-// judged on the main thread of the window that gates approvals. So every part
-// of it is bounded, and **one resolution has one work budget**
-// (`MATCH_BUDGET`, review of PR #59): compiling and matching every section of
-// every file on the walk is charged to it, and past it the file being opened
-// has no configuration at all (said once, by the caller). Per glob: 64
-// alternatives, 512 tokens each and 4,096 in all, braces 16 deep; per file:
-// 128 sections; per path: 1,024 characters.
+// judged on the main thread of the window that gates approvals. So the guard
+// is **a real clock, not a cost model** (the lead's decision on PR #59's
+// second review: a model can always be out-counted by a shape nobody thought
+// of). The parser, the compiler and the matcher all spend their work through
+// one `Deadline`, which reads `performance.now()` every `CHECK_STEPS` steps
+// and throws `OutOfTime` past `RESOLVE_MS` (5 ms); the caller then gives the
+// file no configuration at all — never a partial one — and poisons the config
+// file that spent the time (`state/editorconfig.ts`). The caps below stay, as
+// limits on what a real config needs: per glob 64 alternatives, 512 tokens each
+// and 4,096 in all, braces 16 deep; per file 128 sections; per path 1,024
+// characters. A config over one of them configures nothing.
 
 /** Spec limits (0.17): longer names, keys and values are ignored. */
 export const SECTION_MAX = 4096;
@@ -36,6 +40,48 @@ export const SECTIONS_MAX = 128;
 /** Braces nested deeper than this make a glob that matches nothing. */
 const BRACE_DEPTH_MAX = 16;
 
+// ---- the clock --------------------------------------------------------------
+
+/** One resolution's time: compile, match and parse together, at most. */
+export const RESOLVE_MS = 5;
+/** Steps of work between two looks at the clock (a step is a few nanoseconds). */
+export const CHECK_STEPS = 256;
+
+/** Raised from inside the parser, the compiler or the matcher when the time is up. */
+export class OutOfTime extends Error {
+  constructor() {
+    super("out of time");
+  }
+}
+
+export interface Deadline {
+  now(): number;
+  /** The clock reading past which `tick` throws. */
+  until: number;
+  /** Steps since the clock was last read. */
+  steps: number;
+  /** Every step spent through it (tests: "did no work"). */
+  total: number;
+}
+
+/** A deadline `ms` from now (`Infinity`: none), read through `now` (tests pass a fake clock). */
+export function deadline(ms: number = RESOLVE_MS, now: () => number = () => performance.now()): Deadline {
+  return { now, until: ms === Infinity ? Infinity : now() + ms, steps: 0, total: 0 };
+}
+
+/** Spend `n` steps of work; every `CHECK_STEPS`, look at the clock. */
+function tick(d: Deadline, n: number) {
+  d.total += n;
+  d.steps += n;
+  if (d.steps < CHECK_STEPS) return;
+  d.steps = 0;
+  if (d.until !== Infinity && d.now() > d.until) throw new OutOfTime();
+}
+
+const unbounded = () => deadline(Infinity);
+
+// ---- parsing ----------------------------------------------------------------
+
 export interface Section {
   glob: string;
   props: Record<string, string>;
@@ -47,6 +93,12 @@ export interface ConfigFile {
   sections: Section[];
   /** More than `SECTIONS_MAX` sections: it configures nothing. */
   tooMany?: boolean;
+  /**
+   * Each section's glob as compiled, kept with the file (the caller keeps the
+   * file by its etag), filled as resolutions need them: a cache that holds
+   * exactly one file's globs, so it can never thrash (review of PR #59).
+   */
+  compiled?: (Compiled | null | undefined)[];
 }
 
 /** The properties whose values the spec says are case-insensitive. */
@@ -61,14 +113,16 @@ const LOWER_VALUES = new Set([
  * Keys are case-insensitive, and so are the values of the spec's own
  * properties. A line that is none of these is ignored, as is a pair in the
  * preamble other than `root`. Past `SECTIONS_MAX` sections it stops and says
- * so (`tooMany`).
+ * so (`tooMany`). Its work goes through `d`.
  */
-export function parseEditorConfig(text: string): ConfigFile {
+export function parseEditorConfig(text: string, d: Deadline = unbounded()): ConfigFile {
   const out: ConfigFile = { root: false, sections: [] };
   if (typeof text !== "string") return out;
   let current: Section | null = null;
   const body = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+  tick(d, body.length >> 4);
   for (const rawLine of body.split(/\r\n|\r|\n/)) {
+    tick(d, 1 + (rawLine.length >> 4));
     const line = rawLine.trim();
     if (!line || line[0] === "#" || line[0] === ";") continue;
     if (line[0] === "[") {
@@ -105,10 +159,9 @@ export function parseEditorConfig(text: string): ConfigFile {
 //
 // A section's glob is matched by a table over (glob token, path position) —
 // never a backtracking regular expression: `[*a*a*a*a*a*a*a*a*b]` as a regex
-// takes minutes against a long file name. The glob is read in one linear
-// pass (each bracket's and brace's end found once, `scan`), and its cost —
-// the characters read, the tokens made, tokens × path for the match — is
-// counted, so the caller can hold all of a file open to one budget.
+// takes minutes against a long file name. The glob is read in one linear pass
+// (each bracket's and brace's end found once, `scan`), and every loop spends
+// through the deadline.
 
 /** A brace alternative longer than this (in tokens), or a path longer than this, matches nothing. */
 export const GLOB_TOKENS_MAX = 512;
@@ -117,13 +170,15 @@ export const GLOB_TOTAL_MAX = 4096;
 export const PATH_MAX = 1024;
 /** Brace alternatives multiply (`{a,b}{c,d}` is four): past this, the glob matches nothing. */
 export const ALTERNATIVES_MAX = 64;
-/**
- * The work one resolution may do (`resolveProps`): characters read and tokens
- * made while compiling, plus each alternative's weight × (path + 1) to match.
- * About 10 ms on the owner's machine; a real `.editorconfig` spends a few
- * thousand.
- */
-export const MATCH_BUDGET = 2_000_000;
+
+interface ClassTok {
+  k: "class";
+  neg: boolean;
+  singles: Set<string>;
+  spans: [string, string][];
+  /** Each character's answer, once worked out: a class of many spans costs its spans once per character. */
+  memo: Map<string, boolean>;
+}
 
 type Tok =
   | { k: "lit"; c: string }
@@ -131,7 +186,7 @@ type Tok =
   | { k: "globstar" } // `**`: anything
   | { k: "dirstar" } // `**/` at a folder's start: no folder, or any folders
   | { k: "any" } // `?`: one character, not a slash
-  | { k: "class"; neg: boolean; spans: number; test: (c: string) => boolean }
+  | ClassTok
   | { k: "num"; lo: number; hi: number }; // `{lo..hi}`: a whole number in range
 
 /** A glob read once: which characters are escaped, and where each bracket and brace ends. */
@@ -145,8 +200,9 @@ interface Scan {
   brace: Int32Array;
 }
 
-function scan(g: string): Scan {
+function scan(g: string, d: Deadline): Scan {
   const n = g.length;
+  tick(d, 4 * n);
   const esc = new Uint8Array(n);
   for (let i = 0; i < n; i++) if (g[i] === "\\" && !esc[i] && i + 1 < n) esc[i + 1] = 1;
   // The first unescaped `]` and `/` at or after each position, right to left.
@@ -179,7 +235,8 @@ function scan(g: string): Scan {
   return { g, esc, bracket, brace };
 }
 
-function classOf(g: string, start: number, end: number, esc: Uint8Array): Tok {
+function classOf(g: string, start: number, end: number, esc: Uint8Array, d: Deadline): ClassTok {
+  tick(d, end - start + 1);
   let i = start;
   let neg = false;
   if (i < end && (g[i] === "!" || g[i] === "^")) {
@@ -201,28 +258,23 @@ function classOf(g: string, start: number, end: number, esc: Uint8Array): Tok {
       singles.add(chars[j]);
     }
   }
-  return {
-    k: "class", neg, spans: spans.length,
-    test: (c) => singles.has(c) || spans.some(([a, b]) => c >= a && c <= b),
-  };
+  return { k: "class", neg, singles, spans, memo: new Map() };
 }
 
-/** What a glob compiled to: its alternatives, their match weight, and the work it took. */
-interface Compiled {
+/** What a glob compiled to: its alternatives, and their match weight per path position. */
+export interface Compiled {
   alts: Tok[][];
-  /** Σ over alternatives of each token's per-position cost (a class's spans, a number's digits). */
+  /** Σ over alternatives of tokens (a class counts its spans, a number its digits). */
   weight: number;
-  /** Characters read and tokens made compiling it. */
-  work: number;
 }
 
-const tokWeight = (t: Tok) => (t.k === "num" ? 13 : t.k === "class" ? 1 + t.spans : 1);
+const tokWeight = (t: Tok) => (t.k === "num" ? 13 : t.k === "class" ? 1 + t.spans.length : 1);
 
 /**
  * Every alternative's tokens for `g[start, end)` (braces expanded), or null:
- * too many alternatives, too many tokens, too deep. `work` counts what it read.
+ * too many alternatives, too many tokens, too deep.
  */
-function expand(sc: Scan, start: number, end: number, depth: number, work: { n: number }): Tok[][] | null {
+function expand(sc: Scan, start: number, end: number, depth: number, d: Deadline): Tok[][] | null {
   if (depth > BRACE_DEPTH_MAX) return null;
   const { g, esc } = sc;
   let seqs: Tok[][] = [[]];
@@ -232,10 +284,10 @@ function expand(sc: Scan, start: number, end: number, depth: number, work: { n: 
     for (const s of seqs) s.push(t);
     longest += 1;
     total += seqs.length;
-    work.n += seqs.length;
+    tick(d, seqs.length);
   };
   for (let i = start; i < end; i++) {
-    work.n += 1;
+    tick(d, 1);
     const c = g[i];
     if (esc[i]) {
       push({ k: "lit", c });
@@ -260,8 +312,7 @@ function expand(sc: Scan, start: number, end: number, depth: number, work: { n: 
       const e = sc.bracket[i];
       if (e < 0 || e >= end) push({ k: "lit", c: "[" });
       else {
-        work.n += e - i;
-        push(classOf(g, i + 1, e, esc));
+        push(classOf(g, i + 1, e, esc, d));
         i = e;
       }
     } else if (c === "{") {
@@ -281,7 +332,7 @@ function expand(sc: Scan, start: number, end: number, depth: number, work: { n: 
         // The top-level commas split it; a nested brace or a bracket is jumped over.
         const cuts: number[] = [i];
         for (let j = i + 1; j < e; j++) {
-          work.n += 1;
+          tick(d, 1);
           if (esc[j]) continue;
           if (g[j] === "[" && sc.bracket[j] > 0 && sc.bracket[j] < e) j = sc.bracket[j];
           else if (g[j] === "{" && sc.brace[j] > 0 && sc.brace[j] < e) j = sc.brace[j];
@@ -294,7 +345,7 @@ function expand(sc: Scan, start: number, end: number, depth: number, work: { n: 
         } else {
           const options: Tok[][] = [];
           for (let a = 0; a + 1 < cuts.length; a++) {
-            const sub = expand(sc, cuts[a] + 1, cuts[a + 1], depth + 1, work);
+            const sub = expand(sc, cuts[a] + 1, cuts[a + 1], depth + 1, d);
             if (!sub) return null;
             options.push(...sub);
             if (options.length > ALTERNATIVES_MAX) return null;
@@ -309,8 +360,8 @@ function expand(sc: Scan, start: number, end: number, depth: number, work: { n: 
           // Checked before a token is copied: every alternative, never the first alone.
           const nextTotal = total * options.length + optTotal * seqs.length;
           if (nextTotal > GLOB_TOTAL_MAX || longest + optLongest > GLOB_TOKENS_MAX) return null;
+          tick(d, nextTotal);
           seqs = seqs.flatMap((s) => options.map((o) => [...s, ...o]));
-          work.n += nextTotal;
           total = nextTotal;
           longest += optLongest;
           i = e;
@@ -324,27 +375,14 @@ function expand(sc: Scan, start: number, end: number, depth: number, work: { n: 
   return seqs;
 }
 
-/** The length of each whole number (`[+-]?\d+`) starting at `i` whose value is in range. */
-function numberEnds(path: string, i: number, lo: number, hi: number): number[] {
-  let j = i;
-  if (path[j] === "+" || path[j] === "-") j++;
-  const digits = j;
-  const ends: number[] = [];
-  while (j < path.length && path[j] >= "0" && path[j] <= "9" && j - digits < 12) {
-    j++;
-    const n = parseInt(path.slice(i, j), 10);
-    if (n >= lo && n <= hi) ends.push(j);
-  }
-  return ends;
-}
-
 /** One alternative against the path: a table, last token first, one row at a time. */
-function matchTokens(toks: Tok[], path: string): boolean {
+function matchTokens(toks: Tok[], path: string, d: Deadline): boolean {
   const P = path.length;
   let next = new Uint8Array(P + 1);
   next[P] = 1; // no tokens left matches the end of the path
   for (let t = toks.length - 1; t >= 0; t--) {
     const tok = toks[t];
+    tick(d, P + 1);
     const row = new Uint8Array(P + 1);
     if (tok.k === "dirstar") {
       // nothing, or anything ending at a slash
@@ -352,6 +390,44 @@ function matchTokens(toks: Tok[], path: string): boolean {
       for (let i = P; i >= 0; i--) {
         if (i < P && path[i] === "/" && next[i + 1]) after = 1;
         row[i] = next[i] || after;
+      }
+    } else if (tok.k === "num") {
+      // A whole number from `i`, counted digit by digit (no slicing, no parsing).
+      tick(d, 12 * (P + 1));
+      for (let i = P; i >= 0; i--) {
+        let j = i;
+        let sign = 1;
+        if (j < P && (path[j] === "+" || path[j] === "-")) {
+          if (path[j] === "-") sign = -1;
+          j++;
+        }
+        const first = j;
+        let n = 0;
+        let ok = 0;
+        while (j < P && j - first < 12) {
+          const digit = path.charCodeAt(j) - 48;
+          if (digit < 0 || digit > 9) break;
+          n = n * 10 + digit;
+          j++;
+          const v = sign * n;
+          if (v >= tok.lo && v <= tok.hi && next[j]) {
+            ok = 1;
+            break;
+          }
+        }
+        row[i] = ok;
+      }
+    } else if (tok.k === "class") {
+      for (let i = P; i >= 0; i--) {
+        if (i >= P || path[i] === "/") continue;
+        const ch = path[i];
+        let hit = tok.memo.get(ch);
+        if (hit === undefined) {
+          tick(d, 1 + tok.spans.length);
+          hit = tok.singles.has(ch) || tok.spans.some(([a, b]) => ch >= a && ch <= b);
+          tok.memo.set(ch, hit);
+        }
+        row[i] = hit !== tok.neg ? next[i + 1] : 0;
       }
     } else {
       for (let i = P; i >= 0; i--) {
@@ -363,17 +439,11 @@ function matchTokens(toks: Tok[], path: string): boolean {
           case "any":
             row[i] = i < P && ch !== "/" ? next[i + 1] : 0;
             break;
-          case "class":
-            row[i] = i < P && ch !== "/" && tok.test(ch) !== tok.neg ? next[i + 1] : 0;
-            break;
           case "star":
             row[i] = next[i] || (i < P && ch !== "/" ? row[i + 1] : 0);
             break;
           case "globstar":
             row[i] = next[i] || (i < P ? row[i + 1] : 0);
-            break;
-          case "num":
-            row[i] = numberEnds(path, i, tok.lo, tok.hi).some((j) => next[j]) ? 1 : 0;
             break;
         }
       }
@@ -383,15 +453,11 @@ function matchTokens(toks: Tok[], path: string): boolean {
   return next[0] === 1;
 }
 
-const compiled = new Map<string, Compiled | null>();
-const COMPILED_MAX = 512;
-
-/** A section's glob, relative to its file's folder; null if unusable. */
-function compileGlob(glob: string): Compiled | null {
-  if (compiled.has(glob)) return compiled.get(glob)!;
+/** A section's glob, relative to its file's folder; null if over a cap. Its work goes through `d`. */
+export function compileGlob(glob: string, d: Deadline = unbounded()): Compiled | null {
   // A glob with a slash (outside brackets) is relative to the file's folder;
   // one without matches at any depth below it.
-  const first = scan(glob);
+  const first = scan(glob, d);
   let hasSlash = false;
   for (let j = 0; j < glob.length; j++) {
     if (first.esc[j]) continue;
@@ -402,31 +468,25 @@ function compileGlob(glob: string): Compiled | null {
     }
   }
   const g = !hasSlash ? `**/${glob}` : glob[0] === "/" ? glob.slice(1) : glob;
-  const work = { n: 2 * glob.length };
-  const alts = expand(scan(g), 0, g.length, 0, work);
-  let result: Compiled | null = null;
-  if (alts) {
-    let weight = 0;
-    for (const a of alts) for (const t of a) weight += tokWeight(t);
-    result = { alts, weight, work: work.n };
-  }
-  if (compiled.size >= COMPILED_MAX) compiled.clear();
-  compiled.set(glob, result);
-  return result;
+  const alts = expand(scan(g, d), 0, g.length, 0, d);
+  if (!alts) return null;
+  let weight = 0;
+  for (const a of alts) for (const t of a) weight += tokWeight(t);
+  return { alts, weight };
 }
 
-/** Tests: what a glob compiles to — its alternatives, match weight and compile work — or null. */
-export function globCost(glob: string): { alts: number; weight: number; work: number } | null {
+/** Tests: what a glob compiles to — its alternatives and match weight — or null. */
+export function globCost(glob: string): { alts: number; weight: number } | null {
   const c = compileGlob(glob);
-  return c ? { alts: c.alts.length, weight: c.weight, work: c.work } : null;
+  return c ? { alts: c.alts.length, weight: c.weight } : null;
 }
 
 /** Does `glob` (a section of an `.editorconfig`) match `rel`, a path relative to that file's folder? */
-export function matchGlob(glob: string, rel: string): boolean {
+export function matchGlob(glob: string, rel: string, d: Deadline = unbounded()): boolean {
   if (rel.length > PATH_MAX) return false;
-  const c = compileGlob(glob);
+  const c = compileGlob(glob, d);
   if (!c) return false;
-  return c.alts.some((toks) => matchTokens(toks, rel));
+  return c.alts.some((toks) => matchTokens(toks, rel, d));
 }
 
 // ---- resolving --------------------------------------------------------------
@@ -446,10 +506,16 @@ export const configPath = (dir: string) => (dir ? `${dir}/.editorconfig` : ".edi
 /** What a resolution came to: the properties, or why there are none. */
 export interface Resolved {
   props: Record<string, string>;
-  /** Null, or why the file has no configuration: a file of too many sections, or the budget spent. */
-  over: null | "sections" | "budget";
-  /** The work it did (for tests and the caller's note). */
-  work: number;
+  /**
+   * Null, or why the file has no configuration: a config file of too many
+   * sections, a glob over a cap, the time spent, or a config file poisoned
+   * by an earlier resolution (`state/editorconfig.ts`).
+   */
+  over: null | "sections" | "cap" | "time" | "poisoned";
+  /** When `over`: which of the files (by index) is to blame — the one over a cap, or the one that spent the most time. */
+  culprit: number | null;
+  /** The steps of work it did (tests: "did no work"). */
+  steps: number;
 }
 
 /**
@@ -458,45 +524,64 @@ export interface Resolved {
  * files and later sections win; `unset` removes a property; and the spec's
  * indent rules fill `indent_size` and `tab_width` from each other.
  *
- * **One budget for all of it** (`budget`, review of PR #59): every section's
- * compile and match is charged before it runs, and the first that would pass
- * the budget ends the resolution with no configuration — never a partial one
- * (later sections win, so a cut-off answer would be a wrong one).
+ * Every compile and match spends through `d` (`RESOLVE_MS` by default); out of
+ * time, or with a file over a cap, the file has **no configuration at all —
+ * never a partial one** (later sections win, so a cut-off answer would be a
+ * wrong one), and `culprit` names the file to blame. A section's compiled glob
+ * is kept on its file (`ConfigFile.compiled`).
  */
 export function resolveProps(
-  files: { dir: string; file: ConfigFile }[], path: string, budget = MATCH_BUDGET,
+  files: { dir: string; file: ConfigFile }[], path: string, d: Deadline = deadline(),
 ): Resolved {
   const props: Record<string, string> = {};
-  let work = 0;
-  const none = (over: "sections" | "budget"): Resolved => ({ props: {}, over, work });
-  for (const { dir, file } of files) {
-    if (file.tooMany) return none("sections");
-    const prefix = dir ? `${dir}/` : "";
-    if (prefix && !path.startsWith(prefix)) continue;
-    const rel = path.slice(prefix.length);
-    if (rel.length > PATH_MAX) continue;
-    for (const s of file.sections) {
-      // A compile is bounded by the glob's caps; it is charged as it is done.
-      const c = compileGlob(s.glob);
-      work += c ? c.work : 2 * s.glob.length;
-      if (work > budget) return none("budget");
-      if (!c) continue;
-      const cost = (c.weight + c.alts.length) * (rel.length + 1);
-      if (work + cost > budget) return none("budget");
-      work += cost;
-      if (!c.alts.some((toks) => matchTokens(toks, rel))) continue;
-      for (const [k, v] of Object.entries(s.props)) {
-        if (v === "unset") delete props[k];
-        else props[k] = v;
+  const start = d.total;
+  const spent = files.map(() => 0);
+  const none = (over: Exclude<Resolved["over"], null>, culprit: number): Resolved =>
+    ({ props: {}, over, culprit, steps: d.total - start });
+  let f = 0;
+  let mark = d.now();
+  try {
+    for (; f < files.length; f++) {
+      const { dir, file } = files[f];
+      if (file.tooMany) return none("sections", f);
+      const prefix = dir ? `${dir}/` : "";
+      if (!prefix || path.startsWith(prefix)) {
+        const rel = path.slice(prefix.length);
+        if (rel.length <= PATH_MAX) {
+          const compiled = (file.compiled ??= []);
+          for (let i = 0; i < file.sections.length; i++) {
+            const s = file.sections[i];
+            let c = compiled[i];
+            if (c === undefined) {
+              c = compileGlob(s.glob, d);
+              compiled[i] = c;
+            }
+            if (!c) return none("cap", f);
+            if (!c.alts.some((toks) => matchTokens(toks, rel, d))) continue;
+            for (const [k, v] of Object.entries(s.props)) {
+              if (v === "unset") delete props[k];
+              else props[k] = v;
+            }
+          }
+        }
       }
+      const now = d.now();
+      spent[f] += now - mark;
+      mark = now;
     }
+  } catch (e) {
+    if (!(e instanceof OutOfTime)) throw e;
+    spent[Math.min(f, files.length - 1)] += d.now() - mark;
+    let culprit = 0;
+    for (let i = 1; i < spent.length; i++) if (spent[i] > spent[culprit]) culprit = i;
+    return none("time", culprit);
   }
   if (props.indent_style === "tab" && props.indent_size === undefined) props.indent_size = "tab";
   if (props.indent_size !== undefined && props.indent_size !== "tab" && props.tab_width === undefined) {
     props.tab_width = props.indent_size;
   }
   if (props.indent_size === "tab" && props.tab_width !== undefined) props.indent_size = props.tab_width;
-  return { props, over: null, work };
+  return { props, over: null, culprit: null, steps: d.total - start };
 }
 
 /** What the editor takes from the properties: a model's indentation, and a new file's line ending. */

@@ -73,6 +73,26 @@ indent_size = 3
 # rewriting save would change.
 TABBED = "int main(void) {\n    return 0;   \n}"
 
+# Long tasks, as the browser reports them (the Long Tasks API: any task over
+# 50 ms), from the first script on: what the owner would feel as a frozen window.
+LONGTASK_PROBE = """
+if (!window.__longTasks) {
+  window.__longTasks = [];
+  try {
+    new PerformanceObserver((list) => {
+      for (const e of list.getEntries()) window.__longTasks.push({ start: e.startTime, ms: e.duration });
+    }).observe({ type: 'longtask', buffered: true });
+  } catch (e) { window.__longTasks = null; }
+}
+"""
+DEEP_DIRS = [f"d{i}" for i in range(1, 32)]  # 31 folders below the root: 32 configs on every walk
+
+
+def _heavy_config(salt: str) -> str:
+    """123 sections as heavy as the editor's caps allow (the review's shape)."""
+    rows = [f"[{'{a,b}' * 6}{'*x' * 27}y{salt}{n}]\nindent_size = 2" for n in range(123)]
+    return "\n".join(rows) + "\n"
+
 
 def _probe(page) -> dict:
     return page.evaluate("window.__hud.editorSettings()")
@@ -115,7 +135,7 @@ def settings_checks(browser, mock, base, check, until, guard, init_script, only:
     try:
         _boot(page, mock, base, until)
         for section in (_apply_checks, _garbage_checks, _editorconfig_checks, _card_checks, _vim_checks,
-                        _vim_review_checks):
+                        _vim_review_checks, _long_task_checks):
             if only and only not in section.__name__:
                 continue
             _store(page, None)
@@ -447,6 +467,58 @@ def _vim_review_checks(page, mock, check, until):
     page.locator('[data-testid="es-vim"]').uncheck()
     page.keyboard.press("Escape")
     page.evaluate("localStorage.removeItem('jarvis.dictation')")
+
+
+def _open_tabs_at_once(page, mock, until, paths) -> tuple[list, float]:
+    """Monaco already loaded (calc.py in pane 2), switch pane 3 — pinned to p1
+    with these tabs stored — to Files: every tab's buffer opens at once, as a
+    reload restores them. Returns the long tasks from the switch on, and how
+    long until every tab's buffer was made (its `.editorconfig` judged)."""
+    ws = json.dumps({"preset": "cols3", "focused": 2, "panes": [
+        {"view": "chat"}, {"view": "file"},
+        {"view": "task", "projectId": "p1", "editors": {"paths": paths, "active": paths[0]}},
+        {"view": "task"}]})
+    _fresh(page, mock, until, ws=ws)
+    if not _open(page, until, 2, "calc.py"):
+        raise RuntimeError("calc.py did not open in pane 2")
+    t0 = page.evaluate("performance.now()")
+    page.locator(_pane(3, '[data-testid="tab-file"]')).click()
+    want = set(paths)
+    if not until(lambda: want <= {b["path"] for b in page.evaluate("window.__hud.buffers()")}, timeout=30):
+        raise RuntimeError("the tabs' buffers were never made")
+    done = page.evaluate("performance.now()") - t0
+    time.sleep(0.5)  # anything still queued settles
+    tasks = page.evaluate("t0 => (window.__longTasks || []).filter(e => e.start >= t0).map(e => Math.round(e.ms))", t0)
+    return tasks, done
+
+
+def _long_task_checks(page, mock, check, until):
+    """The review of PR #59, round 3, in Chromium: 32 `.editorconfig`s on every
+    walk, each as heavy as the caps allow, and 20 tabs opened at once — no
+    long task of 100 ms or more (it was one of 1,517 ms)."""
+    page.add_init_script(LONGTASK_PROBE)
+    w = mock.world
+    paths = [f"{'/'.join(DEEP_DIRS)}/robot_drive_subsystem_controller_for_the_left_side_{i}.py" for i in range(20)]
+    configs = ["/".join(DEEP_DIRS[:i] + [".editorconfig"]) for i in range(len(DEEP_DIRS) + 1)]
+    for p in paths:
+        w["files"][p] = {"content": "x = 1\n", "mtime": 1757900500}
+    try:
+        base, base_ms = _open_tabs_at_once(page, mock, until, paths)
+        check("setup: the browser reports long tasks", page.evaluate("Array.isArray(window.__longTasks)"))
+        for i, c in enumerate(configs):
+            w["files"][c] = {"content": _heavy_config(str(i)), "mtime": 1757900600}
+        tasks, ms = _open_tabs_at_once(page, mock, until, paths)
+        print(f"    long tasks without configs {base}, with 32 heavy configs {tasks}; "
+              f"tabs ready in {base_ms:.0f} ms without, {ms:.0f} ms with")
+        check("32 heavy configs deep and 20 tabs at once: no task of 100 ms or more",
+              max(tasks, default=0) < 100, f"long tasks {tasks}; without configs {base}")
+        check("and the tabs are not visibly late (under a second more than without configs)",
+              ms < base_ms + 1000, f"{ms:.0f} ms vs {base_ms:.0f} ms")
+        bufs = [b for b in page.evaluate("window.__hud.buffers()") if b["path"] in set(paths)]
+        check("every tab opened, clean", len(bufs) == 20 and not any(b["dirty"] for b in bufs))
+    finally:
+        for p in paths + configs:
+            w["files"].pop(p, None)
 
 
 def main():

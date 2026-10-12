@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
-  candidateDirs, configPath, globCost, GLOB_TOKENS_MAX, GLOB_TOTAL_MAX, MATCH_BUDGET, matchGlob, overrideOf,
-  parseEditorConfig, resolveProps, SECTIONS_MAX, type ConfigFile,
+  candidateDirs, configPath, deadline, globCost, GLOB_TOKENS_MAX, GLOB_TOTAL_MAX, matchGlob, overrideOf,
+  parseEditorConfig, RESOLVE_MS, resolveProps, SECTIONS_MAX, type ConfigFile,
 } from "./editorconfig";
 
 describe("parsing an .editorconfig (the spec's INI)", () => {
@@ -169,10 +169,11 @@ describe("where it looks", () => {
   });
 });
 
-// The review of PR #59 (MED): an agent-written `.editorconfig` must never
-// freeze the window. One resolution — every section of every file on the
-// walk — has one work budget, and past it the file has no configuration.
-describe("a whole .editorconfig is held to one budget", () => {
+// The review of PR #59: an agent-written `.editorconfig` must never freeze the
+// window. The guard is a real clock (the lead's structural backstop): one
+// resolution spends through one deadline, checked inside the parser, the
+// compiler and the matcher, and stops at RESOLVE_MS with no configuration.
+describe("a resolution is held to the clock", () => {
   /** The heaviest glob the per-glob caps allow: 64 alternatives, the most tokens each. */
   const heaviest = (n: number) => {
     const brace = "{a,b}".repeat(6);
@@ -185,42 +186,72 @@ describe("a whole .editorconfig is held to one budget", () => {
   // The review's shape: 123 sections, each as heavy as the caps allow.
   const lines = ["root = true"];
   for (let n = 0; n < 123; n++) lines.push(`[${heaviest(n)}]`, "indent_size = 2");
-  const file = parseEditorConfig(lines.join("\n"));
+  /** A fresh copy: compiled globs are kept on the file. */
+  const heavy = () => parseEditorConfig(lines.join("\n"));
   const PATH = `src/${"robot_drive_subsystem_controller_for_the_left_side_".repeat(5)}.py`;
+  /** A clock that moves one millisecond each time it is read: a time-out that does not depend on the machine. */
+  const fake = () => {
+    const c = { reads: 0 };
+    return { c, d: deadline(RESOLVE_MS, () => c.reads++) };
+  };
 
   it("the shape is what the review built: 123 sections of 64 alternatives", () => {
+    const file = heavy();
     expect(file.sections).toHaveLength(123);
     expect(globCost(file.sections[0].glob)).toMatchObject({ alts: 64 });
   });
 
-  it("is stopped by the budget: no configuration, bounded work and time", () => {
+  it("stops at the deadline: no configuration, and the file to blame named", () => {
     const t = performance.now();
-    const r = resolveProps([{ dir: "", file }], PATH);
+    const r = resolveProps([{ dir: "", file: heavy() }], PATH);
     const ms = performance.now() - t;
-    expect(r.over).toBe("budget");
-    expect(r.props).toEqual({}); // never a partial answer
-    expect(r.work).toBeLessThanOrEqual(MATCH_BUDGET);
-    expect(ms).toBeLessThan(100);
+    expect(r).toMatchObject({ over: "time", props: {}, culprit: 0 });
+    expect(ms).toBeLessThan(16);
   });
 
-  it("without a budget it is many budgets' worth of work (what the budget saves)", () => {
-    const r = resolveProps([{ dir: "", file }], PATH, Infinity);
+  it("with a fake clock the stop does not depend on the machine: a handful of looks at the clock", () => {
+    const { c, d } = fake();
+    const r = resolveProps([{ dir: "", file: heavy() }], PATH, d);
+    expect(r.over).toBe("time");
+    expect(c.reads).toBeLessThanOrEqual(RESOLVE_MS + 3);
+    expect(r.steps).toBeGreaterThan(0);
+  });
+
+  it("without the clock the same file is many deadlines of work (what the clock saves)", () => {
+    const t = performance.now();
+    const r = resolveProps([{ dir: "", file: heavy() }], PATH, deadline(Infinity));
     expect(r.over).toBeNull();
-    expect(r.work).toBeGreaterThan(20 * MATCH_BUDGET);
+    expect(performance.now() - t).toBeGreaterThan(4 * RESOLVE_MS);
   });
 
-  it("the walk's files share the one budget", () => {
-    const sub = parseEditorConfig(lines.slice(0, 13).join("\n")); // 6 heavy sections each
-    const walk = Array.from({ length: 12 }, (_, i) => ({ dir: i ? `d${i}` : "", file: sub }));
-    const deep = `${Array.from({ length: 11 }, (_, i) => `d${i + 1}`).join("/")}/main.cpp`;
-    // Each folder's file applies only to paths below it: nest them.
-    const nested = walk.map((w, i) => ({ dir: i ? deep.split("/").slice(0, i).join("/") : "", file: w.file }));
-    const r = resolveProps(nested, deep);
-    expect(r.over).toBe("budget");
-    expect(r.work).toBeLessThanOrEqual(MATCH_BUDGET);
+  it("32 configs deep stop in time too (the review's walk)", () => {
+    const deep = `${Array.from({ length: 31 }, (_, i) => `d${i + 1}`).join("/")}/main.cpp`;
+    const walk = Array.from({ length: 32 }, (_, i) => ({
+      dir: deep.split("/").slice(0, i).join("/"),
+      file: parseEditorConfig(lines.slice(1).join("\n")), // no root: every one applies
+    }));
+    const t = performance.now();
+    const r = resolveProps(walk, deep);
+    expect(performance.now() - t).toBeLessThan(16);
+    expect(r).toMatchObject({ over: "time", props: {} });
   });
 
-  it("a real-world .editorconfig is well inside it", () => {
+  it("the number-range shape stops in time, its digits counted without slicing", () => {
+    const nums = ["root = true"];
+    for (let n = 0; n < 123; n++) nums.push(`[${"{0..999999999}".repeat(30)}${n}x]`, "indent_size = 2");
+    const file = parseEditorConfig(nums.join("\n"));
+    const name = "9".repeat(1000);
+    const t = performance.now();
+    const r = resolveProps([{ dir: "", file }], name);
+    expect(performance.now() - t).toBeLessThan(16);
+    expect(r.over).toBe("time");
+    // And a range still matches as the spec says.
+    expect(matchGlob("file{1..300}.c", "file250.c")).toBe(true);
+    expect(matchGlob("file{1..300}.c", "file301.c")).toBe(false);
+    expect(matchGlob("v{-5..5}", "v-3")).toBe(true);
+  });
+
+  it("a real-world .editorconfig resolves well inside the deadline", () => {
     const real = parseEditorConfig([
       "root = true", "[*]", "indent_style = space", "indent_size = 4", "end_of_line = lf",
       "[*.{c,h,cpp,hpp,cc}]", "indent_size = 2", "[{Makefile,makefile,*.mk}]", "indent_style = tab",
@@ -230,7 +261,15 @@ describe("a whole .editorconfig is held to one budget", () => {
     const r = resolveProps([{ dir: "", file: real }], `src/${"deep/".repeat(40)}robot.cpp`);
     expect(r.over).toBeNull();
     expect(r.props).toMatchObject({ indent_style: "space", indent_size: "2" });
-    expect(r.work).toBeLessThan(MATCH_BUDGET / 20);
+    // A few thousand steps of a few nanoseconds: nowhere near the deadline, on any machine.
+    expect(r.steps).toBeLessThan(100_000);
+  });
+
+  it("a glob over a cap configures nothing, and names its file (the caller poisons it)", () => {
+    const ok = parseEditorConfig("[*.c]\nindent_size = 2\n");
+    const capped = parseEditorConfig(`[*.c]\nindent_size = 3\n[${"{a,b}".repeat(7)}]\nindent_size = 4\n`);
+    const r = resolveProps([{ dir: "", file: ok }, { dir: "", file: capped }], "x.c");
+    expect(r).toMatchObject({ over: "cap", props: {}, culprit: 1 });
   });
 
   it(`a file of more than ${SECTIONS_MAX} sections configures nothing`, () => {
@@ -241,6 +280,15 @@ describe("a whole .editorconfig is held to one budget", () => {
     expect(r).toMatchObject({ over: "sections", props: {} });
     const fits = parseEditorConfig(Array.from({ length: SECTIONS_MAX }, (_, i) => `[f${i}.c]\nindent_size = 2`).join("\n"));
     expect(resolveProps([{ dir: "", file: fits }], "f0.c").props).toMatchObject({ indent_size: "2" });
+  });
+
+  it("a section's glob is compiled once and kept with its file", () => {
+    const file = parseEditorConfig("[*.c]\nindent_size = 2\n");
+    resolveProps([{ dir: "", file }], "a.c");
+    const kept = file.compiled?.[0];
+    expect(kept).toBeTruthy();
+    resolveProps([{ dir: "", file }], "b.c");
+    expect(file.compiled?.[0]).toBe(kept);
   });
 });
 
