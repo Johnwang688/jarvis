@@ -2933,6 +2933,41 @@ Free checks: `workspace.test.ts` (the migration, the grant, the label table,
 a stored `"file"` pane) and `tests/face/hud_v2_browser_check.py` (was
 `hud_v2_preview_check.py`; its `_rename_checks` seed a pre-rename layout).
 
+**The Diff pane shows the project's uncommitted changes (2026-10-12, the
+owner: "the Diff doesn't work right now it just says to select a Task", and
+yes to VS Code's Source Control view).** With no task to show, a Diff pane
+lists what changed in its project since HEAD — modified, added, untracked,
+renamed, deleted and conflicted files, and untracked folders, each with its
+letter (M, A, U, R, D, C) in the explorer's colours and the editor's file
+icon; ignored files never — headed "Uncommitted changes in <project>". A
+click shows HEAD's text on the left and, on the right, the file as the
+editor shows it: **the open buffer itself** when the file is open in a File
+pane, so an unsaved edit is there and the diff follows typing, else the file
+as read; a deleted file's right side is empty, and a binary, too-large or
+non-regular file says so. **An env file is listed and never diffed** — the
+pane says so and offers Open, and nothing about it is asked of the daemon.
+Open puts the file in the editor where every other open does (a drawn File
+pane on the project, else a split beside — never over this view or a VEX
+view). It is **read-only**: no staging, reverting or committing here. Which
+it shows: **never another task than a drawn Task pane** — while one is drawn
+and shows a task, the Diff shows that task's diff, even after a thread is
+picked, and its picker is off; else a task picked more recently than a
+thread shows the task's diff, exactly as before (so a task click always
+shows in a drawn Diff pane); else the project the pane is pinned to (its
+header's picker, as the File pane's; a File pane that opened a file keeps its
+pin when it becomes a Diff pane); else the chat's project. The caption says
+which and why ("the Task pane's task", "the task picked last", "this pane's
+project", "the chat's project"). Picking a project in that picker takes the
+window off the task, as picking a thread does. Under a card its picker, Open
+and ↻ are disabled. The list
+is ED-9's status poll (only while the pane is drawn), and typing anywhere
+else in the window never redraws it; HEAD's text is ED-9's
+base route, which now also answers for a file deleted from the working tree.
+A file opened and edited while its diff is still being computed swaps to the
+buffer quietly (the computation is cancelled first), and a buffer that goes
+away while shown reads "…" until the file is read again, never as an empty
+side.
+
 **The Browser's action rules and reviewer (2026-10-12, BR-9a; amendment 1 to
 the Browser plan, §B.3–§B.5).** Before an agent's click, keystroke or
 navigation in a Browser pane runs, fixed rules refuse what no model may allow

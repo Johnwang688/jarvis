@@ -3219,6 +3219,86 @@ tasks) and poison removed (three vitests). Not
 done: a buffer renamed later keeps the `.editorconfig` it opened with, and an
 edit to `.editorconfig` reaches files opened after it (3 s), not those open.
 
+**The Diff pane shows the project's uncommitted changes (2026-10-12; the
+owner: "the Diff doesn't work right now it just says to select a Task", and
+yes to VS Code's Source Control view; design §18; contract in
+`docs/hud-api.md`).** No new route: ED-9's `git/status` and `git/base` and
+ED-2's read. **The mode** is `lib/scm.ts` `diffMode`: **a Diff pane never
+shows another task than a drawn Task pane** (review of PR #67, L3) — while
+one is drawn and shows the window's task, the Diff shows that task's diff,
+over a pin and after a thread is picked, and its picker is off, saying why;
+else a task picked more
+recently than a thread (`taskFocus`, the rule Editor and Browser panes follow) shows
+the task's diff exactly as before (`DiffTab`) — **the task beats the pin**,
+because a pane's `projectId` is shared by its views (a File pane pins its
+project when it opens a file, and keeps the pin when switched to Diff; with
+the pin first, `hud_v2_csp_check`'s task click showed uncommitted changes),
+and `workspace.show("task")` relies on a drawn Diff pane following the task;
+else the pane's pinned live project (its header's `pane-N-diff-project`
+picker, E-13's shape) shows that project's uncommitted changes; else the
+chat's project's; else a sentence. **Picking a project in that picker sets
+`taskFocus` false** (as picking a thread does), so the choice shows at once;
+the picker reads Follow while a task is shown. The caption (`diff-mode`,
+`data-mode`, `data-why`) says what and why — `diff-mode-what` and
+`diff-mode-why`: the Task pane's task, the task picked last, this pane's
+project or the chat's project (`diffWhy`). **The list** (`components/ProjectDiff.tsx`, `scmRows`): ED-9's
+one status poller, subscribed only while the pane is drawn; **`ProjectDiff`
+is `memo(...)` with a comparator that reads its callbacks through a ref**
+(App hands it fresh closures every render) and its rows follow the status's
+version, never the answer object — unmemoized, a chat keystroke redrew the
+list, 17 ms at 2,000 changed files and 132 ms at the 20,000 cap (review M1;
+`ProjectDiff.test.ts` counts row renders); modified/added/
+untracked/renamed/deleted/conflict files and untracked folders, each with
+its letter (M A U R D C) in the explorer's `data-git` colours and
+`FileIcon`; `ignored` never; truncation and no repository/no changes said
+in a sentence. **The sides**: HEAD from `git/base` in a `jarvis-diff:`
+model this view makes and disposes; the right side **is the open buffer's
+own model** when one holds the file (found by project and path, by
+`root_real`, or by the read's `abs`) — borrowed, never copied, held or
+disposed here, released on the model's `onWillDispose` so a File pane that
+lets the buffer go never leaves a disposed model on screen (the view falls
+back to a read, saying "…" meanwhile — and one disposed before Monaco
+loaded is "…" too, never an empty side that reads as a deletion) — else
+ED-2's read in a `jarvis-diff:` model; a deletion's
+right side is empty; binary/too_large/not_a_file say so. **No diff
+computation outlives its models** (review L1): the editor's view model is
+the view's own (`createViewModel`) and is disposed — cancelling a diff the
+worker is still computing — before any model goes. Handed `{original,
+modified}`, Monaco 0.57 keeps a reference to the view model it makes that
+nothing releases, so its computation was never cancelled, and a row picked
+then opened and edited at once threw `no diff result available`, uncaught.
+The task `DiffEditor` and `CompareEditor` in `Editor.tsx` still pass
+`{original, modified}`; not changed here. Both sides
+read-only, side by side even in a narrow pane; ↻ reads again; the right
+side of an unopened file is re-read when the status moves. **Env files are
+listed and never diffed**: `rowShows` sends a `.env*` row (fileIcons'
+`isEnvName`) to a sentence with Open — no `git/base`, no read, no model;
+`git/base` runs before any read, so an env file by resolution is refused
+there (a 403 naming an env file shows the same sentence) and never read;
+and a live buffer of kind `env` is never put in a diff. **`git/base` now
+answers a file deleted from the working tree** (`deleted: true`; nothing at
+the path, not even a broken link; judged exactly as before, before git runs;
+not in HEAD either is still 404). **Open** is `toFilePane` → `placeFile` →
+`askFile(open)` — never over the Diff pane or a VEX view. Read-only: no
+staging, reverting, committing or discarding (SCM actions are out of
+scope). Under a card the picker, Open and ↻ are disabled and a row click
+does nothing. Free checks: `lib/scm.test.ts` (19), `components/ProjectDiff.test.ts`
+(M1's render counts), `tests/v2/editor_git_check.py`
+(deletions answered, judged and 404 when absent from HEAD),
+`hud_v2_csp_check`'s single-pane task diff and `tests/face/hud_v2_scm_check.py`
+(65, a `MockDaemon(0)` of its own after the git section of `hud_v2_check`;
+the mock's `git/base` answers deletions and `states`; L1's swap with no wait,
+L2's `link.txt` whose HEAD text is refused as an env file and is never read,
+L3's chat · Task · Diff layout). Guard removals, each shown to bite: with
+`rowShows`' env rule dropped, the headless check sees a `git/base?path=.env`
+request and the vitest fails; `memo(` dropped or callbacks compared, 63 row
+renders where 3 are right; the owned view model dropped, `no diff result
+available`; `baseOk` dropped from the read's condition, a `/file?path=link.txt`
+read; the Task pane left out of the mode, the Diff follows the chat. Not
+done: SCM actions; a file not open in the
+editor that changes on disk while the project's git states stay the same is
+re-read only on ↻ or a click; the list is flat (no staged/unstaged groups).
+
 **The effort is a slider, not pills (2026-10-10, owner's ask: "like Claude's").**
 `components/EffortSlider.tsx`, rules in `lib/effortSlider.ts`: "Effort
 <level> · default (?)", Faster … Smarter, a dot per stop, a tick with
