@@ -1335,8 +1335,12 @@ capture handler, beside `terminalTakesKey`'s — and **a lone modifier is never
 sent** (review of PR #66: push-to-talk's Ctrl, pressed before its D, reached the
 page and paused a driving agent; `modifiers` carries the state), `HeldKeys`
 and `HeldButtons` (a keyup only where its keydown went; nothing released under
-a card — they wait for `releaseAll(false)`), `pasteMessages` (`cleanPaste`,
-then ≤ 16 KiB per `{t:"text"}` once JSON-escaped), the remote viewport (the canvas's CSS size at DPR × zoom, capped at
+a card — they wait for `releaseAll(false)`; **a press a card cut off is let
+go off the page, never as a click**: a held-button move to `OFF_PAGE` (-1,-1),
+then the release there, every event `clickCount: 0` — released where it was
+pressed, Chrome would click what the owner never finished pressing),
+`pasteMessages` (`cleanPaste`, then ≤ 16 KiB per `{t:"text"}` once
+JSON-escaped, never between a CR and its LF), the remote viewport (the canvas's CSS size at DPR × zoom, capped at
 16 Mpx), pointer positions **divided by the zoom** (`toCss`) before they are
 page points, wheel deltas (screen px ÷ zoom, lines 40 px, pages a viewport,
 Shift sideways, capped), a **generation-tagged, latest-only `FramePipe`** (a

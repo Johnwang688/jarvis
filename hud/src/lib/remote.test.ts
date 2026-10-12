@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  FRAME_MAX_BYTES, FramePipe, HeldButtons, HeldKeys, LINE_PX, MAX_DEVICE_PIXELS, MOD, PASTE_CHUNK, VIEW_MAX,
+  FRAME_MAX_BYTES, FramePipe, HeldButtons, HeldKeys, LINE_PX, MAX_DEVICE_PIXELS, MOD, OFF_PAGE, PASTE_CHUNK, VIEW_MAX,
   WHEEL_MAX, backingSize, browserTakesKey, cdpKey, cdpMouse, cdpWheel, cleanTitle, clientToPage, clipKey, frameDest,
   isAltGraph, normalizeWheel, pageToCanvas, paneKeyAction, pasteMessages, placeFrame, routeKeyDown, routeMouse,
   viewportFor, virtualKeyOf, type Frame, type InputMsg, type KeyEventLike,
@@ -293,29 +293,40 @@ describe("a HUD chord pressed the usual way, modifier first (review of PR #66, M
 describe("held mouse buttons (review of PR #66, LOW 2)", () => {
   const m = (over = {}) => ({ button: 0, buttons: 1, detail: 1, ...over });
 
-  it("a drag a card cut off is released when the card goes, at the last point the page saw", () => {
+  // Delta review of PR #66: a press a card cut off must never become a click when the card goes.
+  it("a press a card cut off is let go off the page, never as a click where it was pressed", () => {
     const held = new HeldButtons();
-    held.sent(cdpMouse("down", m(), { x: 10, y: 10 }));
-    held.sent(cdpMouse("move", m(), { x: 40, y: 25 }));
+    held.sent(cdpMouse("down", m(), { x: 50, y: 60 }));
     held.sent(cdpWheel({ deltaX: 0, deltaY: 100, deltaMode: 0, ...m() }, { x: 99, y: 99 }, 100, 600)!);
     // The card came up: the release was dropped under it, and the blur releases nothing.
-    expect(routeMouse("up", m({ buttons: 0 }), { x: 40, y: 25, inside: true }, true)).toEqual({ kind: "held" });
+    expect(routeMouse("up", m({ buttons: 0 }), { x: 50, y: 60, inside: true }, true)).toEqual({ kind: "held" });
     expect(held.releaseAll(true)).toEqual([]);
     expect(held.size).toBe(1);
-    expect(held.releaseAll(false)).toEqual([{
-      type: "mouseReleased", x: 40, y: 25, modifiers: 0, button: "left", buttons: 0, clickCount: 1, pointerType: "mouse",
-    }]);
+    const out = held.releaseAll(false);                         // the card went
+    expect(out).toEqual([
+      { type: "mouseMoved", x: OFF_PAGE.x, y: OFF_PAGE.y, modifiers: 0, button: "left", buttons: 1, clickCount: 0,
+        pointerType: "mouse" },
+      { type: "mouseReleased", x: OFF_PAGE.x, y: OFF_PAGE.y, modifiers: 0, button: "left", buttons: 0, clickCount: 0,
+        pointerType: "mouse" },
+    ]);
+    // Off the viewport, and not where it was pressed; no event of it counts as a click.
+    expect(OFF_PAGE.x < 0 && OFF_PAGE.y < 0).toBe(true);
+    expect(out.some((e) => e.x === 50 && e.y === 60)).toBe(false);
+    expect(out.every((e) => e.clickCount === 0)).toBe(true);
     expect(held.releaseAll(false)).toEqual([]);
   });
 
-  it("a release the page got lets the button go; two buttons come up one by one", () => {
+  it("a release the page got lets the button go; two held buttons move off together, then come up one by one", () => {
     const held = new HeldButtons();
     held.sent(cdpMouse("down", m(), { x: 1, y: 1 }));
     held.sent(cdpMouse("up", m({ buttons: 0 }), { x: 1, y: 1 }));
     expect(held.size).toBe(0);
+    expect(held.releaseAll(false)).toEqual([]);                 // nothing held: no move either
     held.sent(cdpMouse("down", m(), { x: 2, y: 2 }));
     held.sent(cdpMouse("down", m({ button: 2, buttons: 3 }), { x: 2, y: 2 }));
-    expect(held.releaseAll(false).map((e) => [e.button, e.buttons])).toEqual([["left", 2], ["right", 0]]);
+    expect(held.releaseAll(false).map((e) => [e.type, e.button, e.buttons, e.clickCount])).toEqual([
+      ["mouseMoved", "left", 3, 0], ["mouseReleased", "left", 2, 0], ["mouseReleased", "right", 0, 0],
+    ]);
   });
 });
 
@@ -327,6 +338,22 @@ describe("pasteMessages (review of PR #66, LOW 3)", () => {
     expect(pasteMessages("")).toEqual([]);
     expect(pasteMessages("\u{1b}")).toEqual([]);
     expect(pasteMessages(42)).toEqual([]);
+  });
+
+  // Delta review of PR #66: a CRLF is one line break; a chunk never ends between its CR and LF.
+  it("never cuts between a CR and its LF", () => {
+    const text = "a".repeat(16_382) + "\r\n" + "b".repeat(10);
+    const out = pasteMessages(text);
+    expect(out.map((m) => m.text).join("")).toBe(text);
+    expect(out.length).toBe(2);
+    expect(out[0].text).toBe("a".repeat(16_382));
+    expect(out[1].text.startsWith("\r\n")).toBe(true);
+    for (let i = 0; i + 1 < out.length; i++) {
+      expect(out[i].text.endsWith("\r") && out[i + 1].text.startsWith("\n")).toBe(false);
+    }
+    // A CR that is not before an LF is cut like any other character.
+    const lone = pasteMessages("a".repeat(16_382) + "\rx");
+    expect(lone.map((m) => m.text)).toEqual(["a".repeat(16_382) + "\r", "x"]);
   });
 
   it("100 KiB goes as 7 messages, in order, nothing lost", () => {

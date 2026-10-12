@@ -19,7 +19,9 @@
 //   - a lone modifier (Ctrl, Alt, Shift, Meta, AltGr): never sent. The Ctrl
 //     of push-to-talk, pressed before its D, would otherwise reach the page
 //     and pause a driving agent; every key and pointer event carries the
-//     modifiers' state anyway;
+//     modifiers' state anyway. **The limit, stated**: a page that reacts to
+//     a modifier pressed on its own — a double-Shift search, an overlay shown
+//     while Alt is held, a game's Shift to run — never sees it here;
 //   - everything else, forwarded as CDP key events. Copy and cut are
 //     forwarded too (a page's own handlers run) and marked, so the pane can
 //     ask the daemon for the selection (§8.7).
@@ -448,38 +450,66 @@ export function routeMouse(kind: "down" | "up" | "move", e: MouseLike, at: PageP
 }
 
 /**
+ * Where the page is told a cut-off gesture ended: just outside its viewport,
+ * above and left of it (CSS px of the remote viewport, as every page point).
+ */
+export const OFF_PAGE = { x: -1, y: -1 } as const;
+
+/**
  * The mouse buttons the page holds down (review of PR #66): a press it got and
  * no release yet. A drag a card cut off — its release dropped under the card —
  * or one whose release landed outside the window would leave the page's
- * button down. `releaseAll(false)` sends a release for each, at the last point
- * the page saw; under a card it sends nothing and keeps them, as `HeldKeys`
- * does. BR-3b calls it when the card goes, and on blur.
+ * button down. `releaseAll(false)` lets each go; under a card it sends nothing
+ * and keeps them, as `HeldKeys` does. BR-3b calls it when the card goes, and
+ * on blur.
+ *
+ * **The release it sends can never finish a click** (delta review of PR #66).
+ * The owner pressed and never let go — the card came, and input under a card
+ * is dropped, never delivered later (plan §8.3) — so the press must not become
+ * a click on whatever was under it. Released where it was pressed, with
+ * `clickCount: 1`, Chrome would fire `click` there: a button the owner never
+ * finished pressing would act. So the gesture ends the way a drag that leaves
+ * the window ends in any browser: first the pointer moves, button still held,
+ * to `OFF_PAGE`, then each button is released there. A click needs its press
+ * and its release on the same element, and nothing is under a point outside
+ * the viewport; and every one of these events carries `clickCount: 0`, which
+ * Chrome does not count as a click either — two independent reasons, since
+ * neither can be checked without a real Chrome (BR-1b's fixture must assert
+ * that no `click` fires from a press a card cut off). The cost, stated: a
+ * page tracking the drag sees it end at the corner (a slider dragged when the
+ * card came may jump toward its minimum), exactly as if the owner had dragged
+ * out of the window — a visible, ordinary outcome, where a click is an action.
  */
 export class HeldButtons {
   private down = new Set<CdpMouseEvent["button"]>();
-  private at = { x: 0, y: 0 };
 
   /** Every mouse event the page was sent. */
   sent(ev: CdpMouseEvent) {
-    if (ev.type === "mouseWheel") return;
-    this.at = { x: ev.x, y: ev.y };
-    if (ev.button === "none") return;
+    if (ev.type === "mouseWheel" || ev.button === "none") return;
     if (ev.type === "mousePressed") this.down.add(ev.button);
     else if (ev.type === "mouseReleased") this.down.delete(ev.button);
   }
 
-  /** A release for every button still down, and forget them — or, under a card, nothing (they wait). */
+  /**
+   * A move off the page with every held button, then a release of each there,
+   * none of them a click — and forget them. Under a card: nothing (they wait).
+   */
   releaseAll(blocked: boolean): CdpMouseEvent[] {
-    if (blocked) return [];
+    if (blocked || this.down.size === 0) return [];
     const bit = { none: 0, left: 1, right: 2, middle: 4, back: 8, forward: 16 } as const;
-    let buttons = [...this.down].reduce((n, b) => n | bit[b], 0);
-    const out = [...this.down].map((button) => {
+    const held = [...this.down];
+    let buttons = held.reduce((n, b) => n | bit[b], 0);
+    const out: CdpMouseEvent[] = [{
+      type: "mouseMoved", x: OFF_PAGE.x, y: OFF_PAGE.y, modifiers: 0, button: heldButton(buttons), buttons,
+      clickCount: 0, pointerType: "mouse",
+    }];
+    for (const button of held) {
       buttons &= ~bit[button];
-      return {
-        type: "mouseReleased" as const, x: this.at.x, y: this.at.y, modifiers: 0, button, buttons,
-        clickCount: 1, pointerType: "mouse" as const,
-      };
-    });
+      out.push({
+        type: "mouseReleased", x: OFF_PAGE.x, y: OFF_PAGE.y, modifiers: 0, button, buttons,
+        clickCount: 0, pointerType: "mouse",
+      });
+    }
     this.down.clear();
     return out;
   }
@@ -530,9 +560,19 @@ export function pasteMessages(text: unknown): { t: "text"; text: string }[] {
   for (const cp of clean) {
     const n = jsonBytes(cp);
     if (size + n > PASTE_CHUNK && cur) {
-      out.push({ t: "text", text: cur });
-      cur = "";
-      size = 0;
+      // Never between a CR and its LF (delta review of PR #66): a page that
+      // reads each insertText as it lands would see a lone CR and then a lone
+      // LF — two line breaks where the owner pasted one. The CR goes on to
+      // the next chunk with its LF.
+      if (cp === "\n" && cur.endsWith("\r") && cur.length > 1) {
+        out.push({ t: "text", text: cur.slice(0, -1) });
+        cur = "\r";
+        size = jsonBytes("\r");
+      } else {
+        out.push({ t: "text", text: cur });
+        cur = "";
+        size = 0;
+      }
     }
     cur += cp;
     size += n;
