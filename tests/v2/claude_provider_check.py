@@ -1124,6 +1124,75 @@ def hook_checks() -> None:
         provider.close(handle)
 
 
+def env_hook_checks() -> None:
+    """ENV-1: the owner's `.env*` rule reaches Claude through the PreToolUse
+    hook — the real `build_permit`, layer 1. On main every Read, Grep, Glob
+    and NotebookRead of a credential env file was allowed (no read tool was
+    judged), and so was a Write to `.env.production`."""
+    print("\n-- ENV-1: the hook refuses a credential env file to every file tool")
+    from jarvis.v2.permissions import PermitContext, build_permit
+
+    class Owner:
+        human_backed = True
+        asked: list = []
+
+        def ask(self, request):
+            self.asked.append(request.tool)
+            return "allow"
+
+    with _temp_config() as root:
+        project = root / "app"
+        project.mkdir()
+        (project / ".env.production").write_text("API_KEY=FAKE-ENV1-HOOK\n")
+        (project / ".env.example").write_text("API_KEY=\n")
+        (project / "settings.txt").symlink_to(".env.production")
+        prod, example = str(project / ".env.production"), str(project / ".env.example")
+        denied = [
+            ("Read", {"file_path": prod}),
+            ("Read", {"file_path": str(project / "settings.txt")}),
+            ("Read", {"file_path": str(project / ".ENV.Staging")}),
+            ("NotebookRead", {"notebook_path": str(project / ".env.dev")}),
+            ("Grep", {"pattern": "API_KEY", "path": prod}),
+            ("Grep", {"pattern": "API_KEY", "path": str(project), "glob": ".env*"}),
+            ("Grep", {"pattern": "API_KEY", "glob": "**/*.production"}),
+            ("Glob", {"pattern": "**/.env.*"}),
+            ("Glob", {"pattern": ".env.p*", "path": str(project)}),
+            ("Write", {"file_path": prod, "content": "X=1"}),
+            ("Write", {"file_path": str(project / "deep" / ".env.local"), "content": "X=1"}),
+            ("Edit", {"file_path": prod, "old_string": "a", "new_string": "b"}),
+            ("MultiEdit", {"file_path": str(project / ".env.sample"), "edits": []}),
+            ("Bash", {"command": "cat .env.production"}),
+            ("Bash", {"command": "echo X=1 > .env.staging"}),
+            ("Bash", {"command": "echo X=1 > settings.txt"}),
+        ]
+        allowed = [
+            ("Read", {"file_path": example}),
+            ("Write", {"file_path": str(project / ".env.local.example"), "content": "X="}),
+            ("Edit", {"file_path": example, "old_string": "=", "new_string": "=x"}),
+            ("Glob", {"pattern": "**/*.ts"}),
+            ("Grep", {"pattern": "API_KEY", "path": str(project)}),   # a folder: the stated limit
+            ("Bash", {"command": "cat .env.example"}),
+        ]
+        script = [Hook(n, a, f"c{i}") for i, (n, a) in enumerate(denied + allowed)]
+        provider = claude.ClaudeProvider()
+        b = brief(cwd=str(project))
+        owner = Owner()
+        permit = build_permit(PermitContext(thread_id="t1", brief=b, provider="claude"), owner)
+        with fake(script + [result_message()]):
+            handle = provider.start(thread(), b, permit)
+            drain(provider, handle)
+            results = FakeClient.instances[0].hook_results
+            for (name, args), out in zip(denied, results):
+                decision = (out.get("hookSpecificOutput") or {}).get("permissionDecision")
+                eq(decision, "deny", f"{name} {args} is refused by the hook")
+            for (name, args), out in zip(allowed, results[len(denied):]):
+                eq(out, {}, f"{name} {args} goes on to Claude's classifier (AUTO)")
+            eq(owner.asked, [], "a refusal is never put to the owner")
+            provider.close(handle)
+        eq((project / ".env.production").read_text(), "API_KEY=FAKE-ENV1-HOOK\n",
+           "the credential env file is untouched")
+
+
 def answer_checks() -> None:
     print("\n-- answer() resolves a blocked question out of band")
     provider = claude.ClaudeProvider()
@@ -2190,6 +2259,7 @@ def main() -> int:
     options_checks()
     sequence_checks()
     hook_checks()
+    env_hook_checks()
     answer_checks()
     daemon_answer_route_checks()
     reviewer_declined_checks()

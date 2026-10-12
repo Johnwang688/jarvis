@@ -191,6 +191,112 @@ def run_checks(root: Path) -> None:
     assert scrub("port 1 and DEBUG=1") == "port 1 and DEBUG=1"
     print("ok  scrub: short values (DEBUG=1) do not mangle unrelated output")
 
+    env_rule_checks(root)
+
+
+# --- ENV-1: every credential env file, not only .env and .env.local --------------
+#
+# The owner's `.env*` rule (docs/plans/2026-10-11-env-files.md): Jarvis reads
+# none of `.env` / `.env.<anything>` at any depth, except names ending
+# `.example`. Each check below names a file main let through.
+
+STAGING = "sk-staging-FAKEVALUEFORTESTSONLY-777777"
+PROD = "postgres://app:FAKEPRODPASS999@db.example/app"
+
+
+def env_rule_checks(root: Path) -> None:
+    from jarvis.tools import search as search_mod
+    from jarvis.tools.secrets import env_credential_in_text, glob_reaches, is_credential
+
+    (root / ".env.staging").write_text(f"API_KEY={STAGING}\n", encoding="utf-8")
+    (root / ".env.production").write_text(f"DATABASE_URL={PROD}\nPORT=8080\n", encoding="utf-8")
+    (root / ".env.local.example").write_text("API_KEY=put-yours-here\n", encoding="utf-8")
+    (root / "link-to-prod").symlink_to(".env.production")
+    (root / "fake.env.example").write_text("x\n", encoding="utf-8")
+
+    # 7. the name rule, through `is_protected` (by name) and `is_credential`
+    # (symlinks too) — every listed name, case variants, the templates.
+    for name in (".env.production", ".env.staging", ".env.development.local", ".env.prod.bak",
+                 ".env.sample", ".env.template", ".ENV.Production", ".env.example.bak",
+                 "x/.env.test", "~/app/.env.staging.local", ".env.2"):
+        assert is_protected(name), name
+    for name in (".env.example", ".env.local.example", ".envrc", "myapp.env", "env.production",
+                 ".env-cmdrc"):
+        assert not is_protected(name), name
+    assert is_credential(root / "link-to-prod") and not is_protected(root / "link-to-prod")
+    print("ok  names: every .env.<anything> is protected (case-insensitive), .example names are not")
+
+    # 8. read_file, every credential env file — and the symlink — refused.
+    for path in (".env.production", ".env.staging", str(root / "link-to-prod")):
+        out = read_file(path)
+        assert out.startswith("Error:") and "protected" in out, (path, out)
+        assert PROD not in out and STAGING not in out, path
+    assert "put-yours-here" in read_file(".env.local.example")
+    print("ok  read_file: refuses .env.production/.env.staging and a symlink to one; "
+          "reads .env.local.example")
+
+    # 9. the shells, every smuggled spelling of the old list with the new names.
+    smuggled = [
+        "cat .env.production", "cat<.env.staging", "sh -c 'cat .env.production'",
+        'bash -c "cat .env.staging"', "env sh -c 'cat .env.production'",
+        "python -c \"print(open('.env.staging').read())\"", "F=.env.production; cat $F",
+        "cat $(echo .env.staging)", "cat .ENV.PRODUCTION", "cat .env.p*", "cat .env.[sp]*",
+        "head -1 ./x/../.env.staging", "node --env-file=.env.production -p 1",
+        "docker compose --env-file .env.production up", "grep -r KEY --include=*.production .",
+        "cp .env.production notes.txt", "cat .env.sample", "cat .env.example.bak",
+        "cat .e\\\nnv.production",
+    ]
+    for command in smuggled:
+        assert protected_in_command(command), command
+        for tool in (run_readonly, run_command):
+            out = tool(command) if tool is run_readonly else tool(command, reason="test")
+            assert out.startswith(("Error:", "Refused:")), (command, out)
+            assert PROD not in out and STAGING not in out, command
+    for command in ("cat .env.example", "cat .env.local.example", "cp .env.example .env.local.example",
+                    "ls *.py", "grep -r KEY --include=*.py .", "cat .envrc", "ls -la ~/.*rc",
+                    "cat .env.*.example", "cat myapp.env.production", "echo env.production"):
+        assert protected_in_command(command) is None, command
+    assert env_credential_in_text("x .env.local.example y") is None
+    assert env_credential_in_text("--env-file=.env.prod") == ".env.prod"
+    assert glob_reaches(".env.p*") and glob_reaches("*.production") and glob_reaches(".e??")
+    assert not glob_reaches("*.py") and not glob_reaches(".env.*.example") and not glob_reaches("*")
+    print(f"ok  shell: {len(smuggled)} spellings of a credential env file refused in both tools")
+
+    # 10. grep_files, both backends, every mode: .env.staging is never searched.
+    real_which = search_mod.shutil.which
+    for kwargs in (dict(pattern="API_KEY", path=str(root)),
+                   dict(pattern="API_KEY", path=str(root), context_lines=2),
+                   dict(pattern="API_KEY", path=str(root), mode="files"),
+                   dict(pattern="API_KEY", path=str(root / ".env.staging"), mode="count"),
+                   dict(pattern="DATABASE", path=str(root / "link-to-prod"))):
+        outs = [dispatch("grep_files", json.dumps(kwargs)).text]
+        search_mod.shutil.which = lambda name: None
+        try:
+            outs.append(dispatch("grep_files", json.dumps(kwargs)).text)
+        finally:
+            search_mod.shutil.which = real_which
+        for out in outs:
+            body = "" if out.startswith("No matches") else out
+            assert STAGING not in body and PROD not in body, (kwargs, out)
+            assert ".env.staging" not in body and ".env.production" not in body, (kwargs, out)
+    print("ok  grep_files: .env.staging and a symlink to .env.production filtered on both backends")
+
+    # 11. the scrub reads every credential env file in the folder chain: a
+    # value copied anywhere is redacted, and a grep line attributed to one is
+    # dropped — through real dispatch().
+    (root / "copied.md").write_text(f"stray: {STAGING} and {PROD}\n", encoding="utf-8")
+    copied = dispatch("read_file", '{"path": "copied.md"}')
+    assert STAGING not in copied.text and PROD not in copied.text, copied.text
+    assert copied.text.count(REDACTED) == 2, copied.text
+    leak = dispatch("run_readonly", json.dumps({"command": f"grep -rn -C1 API_KEY {root}"}))
+    assert STAGING not in leak.text and ".env.staging" not in leak.text, leak.text
+    assert "were withheld" in leak.text, leak.text
+    # A FIFO named like one cannot hang the scrub (it is now read by listing).
+    os.mkfifo(root / ".env.fifo")
+    assert scrub("nothing secret here") == "nothing secret here"
+    print("ok  scrub: values from .env.staging/.env.production redacted; a FIFO named .env.* "
+          "does not hang it")
+
 
 if __name__ == "__main__":
     # dispatch() refuses when no toolset is bound (PR #34's follow-up), so

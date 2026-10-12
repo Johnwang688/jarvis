@@ -297,6 +297,9 @@ PRINTERS = [
     "find . -name '.env*' -exec grep KEY {} +", "ls .env* | xargs cat", "xargs -a .env echo",
     "git show HEAD:.env", "git diff .env.production", "python3 -c 'print(open(\".env\").read())'",
     "cat .env.production", "less ~/app/.env.staging.local", "ps eww", "ps axe",
+    # ENV-1: the owner's `.env*` rule, one definition — only `.example` names
+    # are open, so the templates WP-F kept readable are credential now (Q-1).
+    "cat .env.sample", "cat .env.template", "cat .ENV.Production", "cat .env.example.bak",
     "terraform output -raw private_key", "systemctl show-environment", "docker inspect c",
     "aws secretsmanager get-secret-value --secret-id x", "time env", "{ cat .env; }",
     "f() { cat .env; }; f",
@@ -325,8 +328,8 @@ NOT_PRINTERS = [
     "set -e", "echo hello", "grep -r token src", "git status", "gh pr list", "aws s3 ls",
     "ENV FOO=bar", "echo $HOME", "sudo -k", "sudo apt update", "vim notes.txt", "",
     "declare -x FOO=bar", "git log --oneline", "make test 2>&1", "find . -name env",
-    "ls | xargs grep env", "docker build -t env .", "cat .env.example", "cat .env.sample",
-    "cat .env.template", "ls -la", "ps aux", "ps -o pid,user", "for f in *.py; do cat \"$f\"; done",
+    "ls | xargs grep env", "docker build -t env .", "cat .env.example", "cat .env.local.example",
+    "ls -la", "ps aux", "ps -o pid,user", "for f in *.py; do cat \"$f\"; done",
     "if [ -f x ]; then make; fi", "x=ls; $x", "$(npm bin)/eslint .", "echo $(date)",
     # 2026-10-11 review (finding 1): ordinary commands that were refused —
     # an --env-file loads the file, a counter does not print it, and a format
@@ -1088,10 +1091,13 @@ class ThirdReview(unittest.TestCase):
 
 
 class FolderValues(unittest.TestCase):
-    def test_env_variants_are_credential_files_here_but_templates_are_not(self):
-        for name in (".env.production", ".env.staging.local", ".env.test", "dir/.env.prod"):
+    def test_env_variants_are_credential_files_here_but_example_names_are_not(self):
+        # ENV-1: the owner's `.env*` rule, asked through `secrets.is_protected`
+        # — `.env.sample` and `.env.template` are credential (Q-1).
+        for name in (".env.production", ".env.staging.local", ".env.test", "dir/.env.prod",
+                     ".env.sample", ".env.template", ".ENV.PROD", ".env.example.bak"):
             self.assertTrue(G.protected_name(name), name)
-        for name in (".env.example", ".env.sample", ".env.template", ".envrc", "my.env"):
+        for name in (".env.example", ".env.local.example", ".envrc", "my.env"):
             self.assertFalse(G.protected_name(name), name)
 
     def test_a_url_with_a_password_is_withheld(self):

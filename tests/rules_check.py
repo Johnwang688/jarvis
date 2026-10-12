@@ -1490,6 +1490,159 @@ def gate_state_checks() -> None:
           "paths read per call")
 
 
+# ENV-1 (2026-10-12): the owner's `.env*` rule. A shell write onto a credential
+# env file (`.env`, `.env.<anything>`, any depth, any case — not `*.example`)
+# is DENY in `rules.decide` itself, judged by name: never run, never asked,
+# under an allowlist entry for the stem, under mode "all" and with no
+# approver. Every one of these was ALLOW or ASK on main.
+ENV_DENY = [
+    "echo x > .env.production",
+    "echo x>.env.staging",
+    "printf 'A=1' >> .env.local",
+    "cp .env.example .env",
+    "cp .env.example .env.production",
+    "cp -t . /tmp/x/.env.production",
+    "cp /tmp/x/.env.production config/",
+    "install -m 600 /dev/null .env.development.local",
+    "mv notes.txt .env.staging",
+    "mv .env.production /tmp/gone",
+    "ln -sf /etc/hosts .env.prod",
+    "tee .env.test < notes.txt",
+    "sed -i s/a/b/ .env.local",
+    "sed -i.bak s/a/b/ config/.env.production",
+    "sed -n 'w .env.prod' notes.txt",
+    "touch .ENV.Production",
+    "rm -f .env.staging",
+    "truncate -s0 .env.production",
+    "dd if=/dev/zero of=.env.production bs=1 count=1",
+    "curl -o .env.production https://example.com/x",
+    "bash -c 'echo X=1 > .env.production'",
+    "sh -lc \"cp notes.txt .env.prod\"",
+    "env -S 'cp notes.txt .env.prod'",
+    "timeout 5 cp notes.txt .env.prod",
+    "rm .env.*",
+    "cp notes.txt .env.example.bak",
+    "cp notes.txt ~/app/.env.sample",
+    "echo x > .e''nv.production",
+    "echo x > .e\\\nnv.production",
+    "git status && echo x > .env.production",
+    "echo $(cp notes.txt .env.qa)",
+]
+# The folder is known here (`static_verdict(command, cwd)`, run_command's
+# own check): a write whose target is a symlink to a credential env file is
+# refused though no env name is on the line. `rules.decide` judges by name.
+ENV_LINK_DENY = ["echo x > settings.txt", "cp notes.txt settings.txt", "tee -a settings.txt < notes.txt"]
+# Writes that only may land on one: asked, never covered by an allowlist entry.
+ENV_ASK = ["cp notes.txt .env.$STAGE", "rm *.production", "cp notes.txt $JARVIS_ENV1_UNSET.env"]
+# Ordinary work around env files: the verdict main gave, unchanged.
+ENV_ORDINARY = [
+    ("cp .env.example .env.local.example", rules.ALLOW),
+    ("sed -i s/a/b/ .env.example", rules.ASK),
+    ("echo x >> .env.example", rules.ASK),
+    ("touch .envrc", rules.ALLOW),
+    ("cat .env.example", rules.ALLOW),
+    ("cp config.example config.json", rules.ALLOW),
+    ("mv a.txt b.txt", rules.ALLOW),
+    ("rm -f build/out.o", rules.ASK),
+    ("cp .env.production backup.txt", rules.ALLOW),     # a read: the secrets layer refuses it
+    ("node --env-file=.env.production server.js", rules.ALLOW),   # ditto, never "writes"
+    ("echo .env.production >> .gitignore", rules.ASK),  # a mention, refused by the secrets layer
+]
+
+
+def env_write_checks() -> None:
+    from jarvis import config, permissions
+
+    with gate_home() as home:
+        project = Path.cwd()
+        (project / "notes.txt").write_text("A=1\n")
+        (project / "config").mkdir()
+        prod = project / ".env.production"
+        prod.write_text("API_KEY=FAKE-ENV1-VALUE\n")
+        (project / "settings.txt").symlink_to(".env.production")
+        before = prod.read_bytes()
+        asked: list[str] = []
+
+        def says_yes(tool, args):
+            asked.append(args.get("command", ""))
+            return True
+
+        entries = json.loads(config.ALLOWLIST_PATH.read_text())
+        entries += [{"tool": "run_command", "prefix": s}
+                    for s in ("printf", "install", "truncate", "dd", "tee")]
+        config.ALLOWLIST_PATH.write_text(json.dumps(entries))
+
+        for command in ENV_DENY:
+            v = rules.decide(command)
+            assert v.decision == rules.DENY, (command, v)
+            assert "credential env file" in v.reason, (command, v.reason)
+            assert permissions.static_verdict(command).decision == rules.DENY, command
+            assert not permissions.allows("run_command", {"command": command}), command
+            for mode in ("ask", "all"):
+                permissions.set_mode(mode)
+                try:
+                    with recorded() as ran:
+                        asked.clear()
+                        out = tools.dispatch(
+                            "run_command", json.dumps({"command": command, "reason": "r"}),
+                            approve=permissions.gate(says_yes))
+                finally:
+                    permissions.set_mode("ask")
+                assert not ran, f"[{mode}] a write onto a credential env file ran: {command}"
+                assert not asked, f"[{mode}] a write onto a credential env file was asked: {command}"
+                assert "Refused" in out.text or "Error" in out.text, (command, out.text)
+            with recorded() as ran:
+                tools.dispatch("run_command", json.dumps({"command": command, "reason": "r"}))
+            assert not ran, f"run_command itself ran: {command}"
+        print(f"ok  env files: {len(ENV_DENY)} shell writes onto a credential env file DENY in "
+              "rules.decide — never asked, never run (allowlisted stem, mode all, no approver)")
+
+        for command in ENV_LINK_DENY:
+            assert rules.decide(command).decision != rules.DENY, command
+            v = permissions.static_verdict(command, str(project))
+            assert v.decision == rules.DENY and "credential env file" in v.reason, (command, v)
+            for approve in (permissions.gate(says_yes), None):
+                with recorded() as ran:
+                    asked.clear()
+                    kwargs = {"approve": approve} if approve else {}
+                    out = tools.dispatch(
+                        "run_command", json.dumps({"command": command, "reason": "r"}), **kwargs)
+                assert not ran and not asked, (command, out.text)
+                assert "Refused" in out.text, (command, out.text)
+        print(f"ok  env files: {len(ENV_LINK_DENY)} writes onto a symlink to one refused where "
+              "the folder is known (static_verdict, run_command)")
+
+        def says_no(tool, args):
+            asked.append(args.get("command", ""))
+            return False
+
+        for command in ENV_ASK:
+            v = permissions.static_verdict(command)
+            assert v.decision == rules.ASK, (command, v)
+            assert not permissions.allows("run_command", {"command": command}), command
+            with recorded() as ran:
+                asked.clear()
+                tools.dispatch("run_command", json.dumps({"command": command, "reason": "r"}),
+                               approve=permissions.gate(says_no))
+            assert asked == [command] and not ran, (command, asked, ran)
+        print(f"ok  env files: {len(ENV_ASK)} writes that only may land on one asked "
+              "whatever the allowlist says, and not run on a no")
+
+        for command, verdict in ENV_ORDINARY:
+            assert rules.decide(command).decision == verdict, (command, rules.decide(command))
+            assert permissions.static_verdict(command).decision == verdict, command
+        # `.env.example` is still Jarvis's to write, by shell too.
+        with recorded() as ran:
+            tools.dispatch("run_command", json.dumps(
+                {"command": "cp .env.example .env.local.example", "reason": "r"}),
+                approve=permissions.gate(says_yes))
+        assert ran == ["cp .env.example .env.local.example"], ran
+        assert prod.read_bytes() == before
+        assert str(home) in str(project)
+    print(f"ok  env files: {len(ENV_ORDINARY)} ordinary lines keep main's verdict; "
+          "cp onto .env.local.example still runs")
+
+
 # The quoting and separator exploits this file's history paid for, re-run as
 # verdicts against the new layer: each must be refused or asked exactly where it
 # was before — `static_verdict` may only ever be stricter than `rules.decide` —
@@ -2523,6 +2676,7 @@ def main() -> int:
     prompt_hygiene_checks()
     protection_checks()
     gate_state_checks()
+    env_write_checks()
     gate_state_edge_checks()
     gate_state_complexity_checks()
     daemon_and_rebuild_ops_checks()
