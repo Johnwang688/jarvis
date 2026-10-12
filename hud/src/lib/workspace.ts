@@ -581,6 +581,15 @@ export function forgetTerminal(ws: Workspace, id: string): Workspace {
 }
 
 /**
+ * A terminal continued after a restart under a new id (components/Terminal.tsx,
+ * `continueHere`): every pane holding the old one holds the new one, shown or not.
+ */
+export function renameTerminal(ws: Workspace, from: string, to: string): Workspace {
+  if (from === to || !ws.panes.some((p) => p.terminalId === from)) return ws;
+  return { ...ws, panes: ws.panes.map((p) => (p.terminalId === from ? { ...p, terminalId: to } : p)) as Panes };
+}
+
+/**
  * The URL a Browser pane loaded. A keep-origin grant survives only while the
  * new URL has the origin it was given for: another port, host or scheme turns
  * it off (W-4).

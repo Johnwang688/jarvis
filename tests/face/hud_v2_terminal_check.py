@@ -45,6 +45,16 @@ The checks worth keeping, each written to bite:
     to take it back, and a refused newcomer says so;
   - exit offers Restart and Close; Jarvis's restart offers "New terminal
     here"; a busy terminal is asked about before it closes;
+  - a terminal that ended with Jarvis continues where it was (2026-10-12,
+    the owner's option (a)): a typed key, a paste or "Continue here" makes
+    one new shell in the same folder, same place, same xterm, under the old
+    text and a separator; what was typed reaches it only after its replay,
+    typed but never run (no held Enter, no held paste with a line break),
+    and not at all after any refusal while held or once it left the screen;
+    a later reattach keeps the old text and answers nothing; never under a
+    card, on a load, for another window's terminal, an exited shell or a
+    program terminal; an unreadable one (or one whose switch is unknown)
+    continues unreadable;
   - an attach this window did not make is said, quietly; its own never are;
   - an OSC title never reaches `document.title` and renders as text; a
     `javascript:` link is inert, an http link opens only on Ctrl+click;
@@ -520,7 +530,7 @@ def terminal_checks(browser, mock, base, check, until, guard, init_script):
                         _read_note_checks, _integration_checks, _osc_link_checks, _browser_link_checks,
                         _menu_edge_checks, _pane_checks, _zoom_checks, _ended_checks,
                         _flood_checks, _chat_panes_checks, _split_close_terminal_checks,
-                        _rv47b_copy_readable_checks, _crash_checks):
+                        _rv47b_copy_readable_checks, _continue_checks, _crash_checks):
             if only and section.__name__.strip("_") not in only:
                 continue
             try:
@@ -2133,6 +2143,360 @@ def _rv47b_copy_readable_checks(page, mock, base, check, until, fake):
     n = len(posts())
     page.locator(_sel(tid, '[data-testid="term-new-here"]')).click()
     made_unreadable("'New terminal here'", n)
+
+
+SEPARATOR = re.compile(r"── restarted \d\d:\d\d ──")
+
+
+def _next_id(mock) -> str:
+    """The id the mock gives the next terminal it makes."""
+    return f"{0xa0000000 + mock.__dict__.get('terminal_seq', 0) + 1:08x}"
+
+
+def _continue_checks(page, mock, base, check, until, fake):
+    """A terminal that ended with Jarvis continues where it was (the owner's
+    option (a), 2026-10-12): a typed key, a paste or "Continue here" starts
+    a new shell in the same folder, in the same place and the same xterm,
+    under the old text and a separator; what was typed reaches the new shell
+    only after its replay has been parsed. Never under a card, never on a
+    load, never for another window's terminal, a shell that exited on its
+    own or a program terminal; never wider for Jarvis to read."""
+    posts = lambda: [b for (m, p, b) in mock.calls if m == "POST" and p == "/terminals"]  # noqa: E731
+    tid = _fresh(page, mock, base, until, fake)
+    spec = next(s for (i, s) in _created(mock) if i == tid)
+    fake.output(tid, b"\x1b[1;32mold-marker\x1b[0m\r\n" + QUERIES + b"\r\n$ ")
+    until(lambda: "old-marker" in _text(page, tid), timeout=3)
+    page.wait_for_timeout(200)
+    fake.line[tid] = ""
+    page.evaluate("id => { document.querySelector(`[data-testid='terminal-${id}'] .xterm`).dataset.same = 'yes'; }", tid)
+    fake.end(tid)
+    until(lambda: _state(page, tid) == "ended", timeout=4)
+    strip = page.locator(_sel(tid, '[data-testid="term-ended"]'))
+    check("an ended terminal says typing continues it, and offers Continue here beside New terminal here",
+          "Jarvis restarted; this terminal ended. Type to continue in a new shell here." in strip.inner_text()
+          and _visible(page, _sel(tid, '[data-testid="term-continue"]'))
+          and _visible(page, _sel(tid, '[data-testid="term-new-here"]')), strip.inner_text())
+    nxt = _next_id(mock)
+    fake.ring[nxt] = bytearray(QUERIES + b"new-banner\r\n$ ")
+    fake.hold.add(nxt)                          # the new socket waits: no replay yet
+    n = len(posts())
+    _focus_term(page, tid)
+    page.keyboard.type("echo hi")
+    until(lambda: _state(page, nxt) == "waiting", timeout=4)
+    page.wait_for_timeout(300)
+    check("a typed key continues it: one new shell, in the same folder, the switch as it was (on)",
+          len(posts()) == n + 1 and posts()[-1] == {"in": spec} and _created(mock)[-1][0] == nxt, str(posts()[n:]))
+    check("and nothing typed reaches the new shell before its replay", fake.sent(nxt) == b"", repr(fake.sent(nxt)))
+    page.keyboard.press("Enter")                # joins what is held
+    fake.finish_waiting(nxt, allow=True)
+    until(lambda: fake.sent(nxt) == b"echo hi", timeout=5)
+    page.wait_for_timeout(400)
+    note = page.locator(_sel(nxt, '[data-testid="term-paste-notice"]'))
+    check("once the replay is parsed, the line goes typed but not run: no Enter, none of the replay's answers "
+          "(PR #64 L6: the prompt it was typed at is gone)",
+          fake.sent(nxt) == b"echo hi" and "\nhi" not in _text(page, nxt), repr(fake.sent(nxt)))
+    check("and the notice says so: a new local shell, check the prompt, then press Enter",
+          note.count() == 1 and note.get_attribute("data-kind") == "continued"
+          and "typed but not run" in note.inner_text() and "press Enter" in note.inner_text(),
+          note.inner_text()[:160] if note.count() else "no notice")
+    page.keyboard.press("Enter")
+    until(lambda: "\nhi" in _text(page, nxt), timeout=4)
+    check("the owner's own Enter then runs it, and the notice goes",
+          fake.sent(nxt) == b"echo hi\r" and note.count() == 0, repr(fake.sent(nxt)))
+    text = _text(page, nxt)
+    sep = SEPARATOR.search(text)
+    check("the old text stays above a separator, the new shell below it",
+          sep is not None and text.index("old-marker") < sep.start() < text.index("new-banner"), text[-300:])
+    check("in the same place and the same xterm: the panel's one tab is the new terminal, focus still in it",
+          page.locator(f'[data-testid="panel-tab-{nxt}"]').count() == 1
+          and page.locator(f'[data-testid="panel-tab-{tid}"]').count() == 0
+          and page.evaluate("id => document.querySelector(`[data-testid='terminal-${id}'] .xterm`).dataset.same", nxt)
+          == "yes" and _in_term(page))
+    stored = page.evaluate("""() => [JSON.parse(localStorage.getItem('jarvis.hud.terminals') || '{}'),
+                                     JSON.parse(sessionStorage.getItem('jarvis.hud.terminals.mine') || '{}')]""")
+    check("the window tracks it under its new id: the remembered folder, the selected tab and this tab's own list",
+          stored[0].get("specs", {}).get(nxt) == spec and tid not in stored[0].get("specs", {})
+          and stored[0].get("active") == nxt and nxt in stored[1].get("ids", []) and tid not in stored[1].get("ids", []),
+          json.dumps(stored)[:300])
+    # Later reattaches of the new terminal keep the old text — drawn once, never answered.
+    sockets = len(fake.of(nxt))
+    fake.drop(nxt)
+    until(lambda: len(fake.of(nxt)) > sockets and _state(page, nxt) == "attached", timeout=8)
+    page.wait_for_timeout(800)
+    text = _text(page, nxt)
+    check("a dropped socket's reattach still shows the old text above the separator, each once",
+          text.count("old-marker") == 1 and len(SEPARATOR.findall(text)) == 1
+          and text.index("old-marker") < SEPARATOR.search(text).start() < text.index("new-banner"), text[-300:])
+    check("and answers nothing: no old query, no replayed one", fake.of(nxt)[-1]["frames"] == [],
+          repr(b"".join(fake.of(nxt)[-1]["frames"])[:80]))
+
+    # A paste continues it, cleaned, bracketed as the *new* shell asks.
+    fake.end(nxt)
+    until(lambda: _state(page, nxt) == "ended", timeout=4)
+    nxt2 = _next_id(mock)
+    fake.ring[nxt2] = bytearray(b"\x1b[?2004h$ ")
+    _paste(page, nxt, "echo pasted\x1b[201~\x9bX")
+    until(lambda: _state(page, nxt2) == "attached" and fake.sent(nxt2), timeout=5)
+    page.wait_for_timeout(200)
+    check("a paste continues it, made inert (no ESC, no C1) and bracketed as the new shell asked",
+          fake.sent(nxt2) == b"\x1b[200~echo pasted[201~X\x1b[201~", repr(fake.sent(nxt2)))
+    check("and the text from before both restarts is still above two separators",
+          "old-marker" in _text(page, nxt2) and len(SEPARATOR.findall(_text(page, nxt2))) == 2)
+    # A held paste with a line break is never sent (L6): it would run at a prompt nobody has seen.
+    fake.end(nxt2)
+    until(lambda: _state(page, nxt2) == "ended", timeout=4)
+    nl = _next_id(mock)
+    _paste(page, nxt2, "make deploy\n")
+    until(lambda: _state(page, nl) == "attached", timeout=5)
+    page.wait_for_timeout(500)
+    note = page.locator(_sel(nl, '[data-testid="term-paste-notice"]'))
+    check("a paste with a line break continues it but is not sent at all; the notice says to paste it again",
+          fake.sent(nl) == b"" and note.count() == 1 and note.get_attribute("data-kind") == "continued"
+          and "paste it again" in note.inner_text(), f"{fake.sent(nl)!r} {note.inner_text()[:160] if note.count() else ''}")
+    # Any refusal while held drops the whole hold (M1): `make deploy⏎` then Ctrl+C runs nothing.
+    fake.end(nl)
+    until(lambda: _state(page, nl) == "ended", timeout=4)
+    m1 = _next_id(mock)
+    fake.hold.add(m1)
+    _focus_term(page, nl)
+    page.keyboard.type("make deploy")
+    page.keyboard.press("Enter")
+    page.keyboard.press("Control+c")
+    until(lambda: _state(page, m1) == "waiting", timeout=4)
+    fake.finish_waiting(m1, allow=True)
+    until(lambda: _state(page, m1) == "attached", timeout=5)
+    page.wait_for_timeout(600)
+    note = page.locator(_sel(m1, '[data-testid="term-paste-notice"]'))
+    check("review M1: a refused key while held (Ctrl+C after Enter) sends nothing at all, and all of it is said",
+          fake.sent(m1) == b"" and note.count() == 1 and note.get_attribute("data-kind") == "unsent"
+          and "(13 bytes)" in note.inner_text(),
+          f"{fake.sent(m1)!r} {note.inner_text()[:160] if note.count() else 'no notice'}")
+    # Nobody can see it any more (L1): the panel closed while it starts, nothing held goes.
+    fake.end(m1)
+    until(lambda: _state(page, m1) == "ended", timeout=4)
+    l1 = _next_id(mock)
+    fake.hold.add(l1)
+    _focus_term(page, m1)
+    page.keyboard.type("ls")
+    until(lambda: _state(page, l1) == "waiting", timeout=4)
+    page.keyboard.press("Control+Backquote")
+    until(lambda: not _visible(page, '[data-testid="panel"]'), timeout=3)
+    fake.finish_waiting(l1, allow=True)
+    until(lambda: fake.of(l1)[-1].get("replayed_at") is not None, timeout=5)
+    page.wait_for_timeout(600)
+    check("review L1: the panel closed while it started — nothing held reaches the hidden shell",
+          fake.sent(l1) == b"", repr(fake.sent(l1)))
+    page.locator('[data-testid="toggle-panel"]').click()
+    until(lambda: _visible(page, _sel(l1)), timeout=4)
+    note = page.locator(_sel(l1, '[data-testid="term-paste-notice"]'))
+    check("and reopened, the terminal says what was not sent",
+          note.count() == 1 and note.get_attribute("data-kind") == "unsent" and fake.sent(l1) == b"",
+          note.inner_text()[:160] if note.count() else "no notice")
+    nxt2 = l1
+
+    # Under a card nothing continues: keys and a paste go to the card, the button is off.
+    fake.end(nxt2)
+    until(lambda: _state(page, nxt2) == "ended", timeout=4)
+    n = len(posts())
+    _approval(mock, "tcn1")
+    until(lambda: page.locator('[data-testid="approval-card"]').count() > 0, timeout=4)
+    page.wait_for_timeout(150)
+    page.evaluate(f"document.querySelector('{_sel(nxt2)} .xterm-helper-textarea').focus()")
+    page.keyboard.type("ls")
+    page.keyboard.press("Enter")
+    _paste(page, nxt2, "rm -rf ~/scratch\n")
+    page.wait_for_timeout(400)
+    check("under a card, keys and a paste in an ended terminal start nothing, and Continue here is off",
+          len(posts()) == n and _state(page, nxt2) == "ended"
+          and page.locator(_sel(nxt2, '[data-testid="term-continue"]')).is_disabled(), str(posts()[n:]))
+    page.keyboard.press("Escape")
+    until(lambda: page.locator('[data-testid="approval-card"]').count() == 0, timeout=4)
+    page.wait_for_timeout(600)
+    check("and once it is answered, nothing typed under it continues late", len(posts()) == n and
+          _state(page, nxt2) == "ended")
+
+    # Ctrl+D (end of input) and the HUD's own keys never start a shell.
+    _focus_term(page, nxt2)
+    page.keyboard.press("Control+d")
+    page.keyboard.press("Control+Equal")
+    page.wait_for_timeout(300)
+    page.keyboard.press("Control+0")
+    page.wait_for_timeout(200)
+    check("Ctrl+D and a zoom key in an ended terminal start nothing", len(posts()) == n and _state(page, nxt2) == "ended")
+
+    # Six already open: the refusal in the strip, nothing held.
+    mock.terminal_refuse = "6 terminals are open; close one first"
+    n0 = len(posts())
+    page.keyboard.type("ab")
+    until(lambda: page.locator(_sel(nxt2, '[data-testid="term-continue-error"]')).count() > 0, timeout=4)
+    check("six already open: the refusal is said in the strip, and it stays ended",
+          "6 terminals are open" in page.locator(_sel(nxt2, '[data-testid="term-continue-error"]')).inner_text()
+          and _state(page, nxt2) == "ended")
+    page.keyboard.type("cd")
+    page.wait_for_timeout(500)
+    strip = page.locator(_sel(nxt2, '[data-testid="term-ended"]')).inner_text()
+    check("review L5: after a refusal typing asks no more — one request for the whole line — and the strip "
+          "says only Continue here tries again", len(posts()) == n0 + 1 and "Continue here tries again" in strip
+          and "Type to continue" not in strip, f"{len(posts()) - n0} posts; {strip}")
+    mock.__dict__.pop("terminal_refuse", None)
+    n = len(posts())
+    nxt3 = _next_id(mock)
+    page.locator(_sel(nxt2, '[data-testid="term-continue"]')).dblclick()
+    until(lambda: _state(page, nxt3) == "attached", timeout=5)
+    page.wait_for_timeout(500)
+    check("Continue here, double-clicked, is one new shell — and nothing of the refused try was kept to send",
+          len(posts()) == n + 1 and fake.sent(nxt3) == b"", f"{len(posts()) - n} posts, sent {fake.sent(nxt3)!r}")
+
+    # A card raised while the new shell starts: what was typed before it never goes, and that is said.
+    fake.end(nxt3)
+    until(lambda: _state(page, nxt3) == "ended", timeout=4)
+    held = _next_id(mock)
+    fake.hold.add(held)
+    _focus_term(page, nxt3)
+    page.keyboard.type("ls")
+    until(lambda: _state(page, held) == "waiting", timeout=4)
+    _approval(mock, "tcn2")
+    until(lambda: page.locator('[data-testid="approval-card"]').count() > 0, timeout=4)
+    page.wait_for_timeout(150)
+    page.keyboard.press("Escape")
+    until(lambda: page.locator('[data-testid="approval-card"]').count() == 0, timeout=4)
+    fake.finish_waiting(held, allow=True)
+    until(lambda: _state(page, held) == "attached", timeout=5)
+    page.wait_for_timeout(600)
+    note = page.locator(_sel(held, '[data-testid="term-paste-notice"]'))
+    check("a card raised while the new shell starts: what was typed before it is never sent, and that is said",
+          fake.sent(held) == b"" and note.count() == 1 and note.get_attribute("data-kind") == "unsent",
+          f"{fake.sent(held)!r} {note.inner_text()[:120] if note.count() else 'no notice'}")
+
+    # Auto-repeat is one continuation; what repeats joins what is held.
+    fake.end(held)
+    until(lambda: _state(page, held) == "ended", timeout=4)
+    n = len(posts())
+    nxt4 = _next_id(mock)
+    _focus_term(page, held)
+    for _ in range(3):
+        page.keyboard.down("q")
+    page.keyboard.up("q")
+    until(lambda: _state(page, nxt4) == "attached" and fake.sent(nxt4), timeout=5)
+    page.wait_for_timeout(200)
+    check("a held key's auto-repeat is one continuation, every repeat sent after the replay",
+          len(posts()) == n + 1 and fake.sent(nxt4) == b"qqq", f"{len(posts()) - n} posts, {fake.sent(nxt4)!r}")
+
+    # Past 4 KiB what is held is dropped and said.
+    fake.end(nxt4)
+    until(lambda: _state(page, nxt4) == "ended", timeout=4)
+    nxt5 = _next_id(mock)
+    _paste(page, nxt4, "y" * 5000)
+    until(lambda: _state(page, nxt5) == "attached", timeout=5)
+    page.wait_for_timeout(400)
+    note = page.locator(_sel(nxt5, '[data-testid="term-paste-notice"]'))
+    check("a paste past 4 KiB still continues it, but is dropped whole, and that is said",
+          fake.sent(nxt5) == b"" and note.count() == 1 and note.get_attribute("data-kind") == "unsent",
+          f"{fake.sent(nxt5)[:20]!r} {note.inner_text()[:120] if note.count() else 'no notice'}")
+
+    # An unreadable terminal continues unreadable, made that way from its first byte.
+    sw = page.locator(_sel(nxt5, '[data-testid="term-readable"]'))
+    sw.click()
+    until(lambda: sw.get_attribute("aria-pressed") == "false", timeout=3)
+    fake.end(nxt5)
+    until(lambda: _state(page, nxt5) == "ended", timeout=4)
+    nxt6 = _next_id(mock)
+    _focus_term(page, nxt5)
+    page.keyboard.type("x")
+    until(lambda: _state(page, nxt6) == "attached", timeout=5)
+    check("an unreadable terminal continues unreadable: POST {readable: false}, never PATCHed",
+          posts()[-1] == {"in": spec, "readable": False} and fake._row(nxt6)["readable"] is False
+          and mock.sent("PATCH", f"/terminals/{nxt6}") == []
+          and page.locator(_sel(nxt6, '[data-testid="term-readable"]')).get_attribute("aria-pressed") == "false",
+          str(posts()[-1]))
+
+    # On a load nothing continues — and a pane holding one from before the
+    # reload, typed into, continues there, unreadable (its switch is not known).
+    fake.end(nxt6)
+    until(lambda: _state(page, nxt6) == "ended", timeout=4)
+    stale = json.dumps({"preset": "cols2", "focused": 2,
+                        "panes": [{"view": "chat"}, {"view": "terminal", "terminalId": nxt6},
+                                  {"view": "file"}, {"view": "task"}]})
+    page.set_viewport_size({"width": 1600, "height": 900})
+    _store(page, ws=stale)
+    n = len(posts())
+    _boot(page, mock, base, until, reload=True)
+    until(lambda: _state(page, nxt6) == "ended", timeout=6)
+    page.wait_for_timeout(800)
+    check("a reload starts no shell, though the pane shows a terminal of this tab's that ended",
+          len(posts()) == n and "Type to continue" in page.locator(_sel(nxt6, '[data-testid="term-ended"]')).inner_text())
+    nxt7 = _next_id(mock)
+    _focus_term(page, nxt6)
+    page.keyboard.type("z")
+    until(lambda: _state(page, nxt7) == "attached", timeout=5)
+    page.wait_for_timeout(300)
+    ws_pane = page.evaluate("() => JSON.parse(localStorage.getItem('jarvis.hud.workspace')).panes[1].terminalId")
+    check("typed into, it continues in its pane; the stored pane holds the new id",
+          page.locator(_sel(nxt7)).get_attribute("data-where") == "pane-2" and ws_pane == nxt7
+          and fake.sent(nxt7) == b"z", f"{ws_pane} {fake.sent(nxt7)!r}")
+    check("and with its switch unknown after the reload, it is made unreadable (fail closed)",
+          posts()[-1].get("readable") is False, str(posts()[-1]))
+    page.set_viewport_size({"width": 1280, "height": 800})
+    _store(page, ws=None)
+
+    # Never: a shell that exited on its own, another window's, a program terminal.
+    tid = _fresh(page, mock, base, until, fake)
+    fake.exit(tid, 0)
+    until(lambda: _state(page, tid) == "exited", timeout=3)
+    n = len(posts())
+    _focus_term(page, tid)
+    page.keyboard.type("ls")
+    page.wait_for_timeout(500)
+    check("a shell that exited on its own is not continued by typing: Restart and Close, as before",
+          len(posts()) == n and _state(page, tid) == "exited"
+          and _visible(page, _sel(tid, '[data-testid="term-restart"]'))
+          and page.locator(_sel(tid, '[data-testid="term-continue"]')).count() == 0)
+    tid = _new_terminal(page, mock, until, fake)
+    fake.ask_takeover(tid, "tk09")
+    until(lambda: _visible(page, '[data-testid="term-let"]'), timeout=3)
+    page.locator('[data-testid="term-let"]').click()
+    until(lambda: _state(page, tid) == "taken", timeout=3)
+    fake.end(tid)
+    n = len(posts())
+    _focus_term(page, tid)
+    page.keyboard.type("ls")
+    page.wait_for_timeout(500)
+    check("a terminal another window holds is not continued by typing here", len(posts()) == n
+          and _state(page, tid) == "taken" and page.locator(_sel(tid, '[data-testid="term-continue"]')).count() == 0)
+    _reset(page, mock, base, until, fake)
+    prog = "0c0d0e0f"
+    mock.world["terminals"].append(mock_terminals.row(prog, "vex build · robot", program="vex-build", input=False))
+    page.locator('[data-testid="toggle-panel"]').click()
+    _attached(page, until, prog)
+    fake.end(prog)
+    until(lambda: _state(page, prog) == "ended", timeout=4)
+    n = len(posts())
+    _focus_term(page, prog)
+    page.keyboard.type("ls")
+    page.wait_for_timeout(500)
+    strip = page.locator(_sel(prog, '[data-testid="term-ended"]')).inner_text()
+    check("a program terminal never continues: its strip as before, typing starts nothing",
+          len(posts()) == n and "Type to continue" not in strip
+          and page.locator(_sel(prog, '[data-testid="term-continue"]')).count() == 0
+          and page.locator(_sel(prog, '[data-testid="term-new-here"]')).count() == 0, strip)
+    # After a reload its row is forgotten: where it was opened is not known, so still never.
+    stale = json.dumps({"preset": "cols2", "focused": 2,
+                        "panes": [{"view": "chat"}, {"view": "terminal", "terminalId": prog},
+                                  {"view": "file"}, {"view": "task"}]})
+    page.set_viewport_size({"width": 1600, "height": 900})
+    _store(page, ws=stale)
+    _boot(page, mock, base, until, reload=True)
+    until(lambda: _state(page, prog) == "ended", timeout=6)
+    n = len(posts())
+    _focus_term(page, prog)
+    page.keyboard.type("ls")
+    page.wait_for_timeout(500)
+    strip = page.locator(_sel(prog, '[data-testid="term-ended"]')).inner_text()
+    check("and after a reload, its row forgotten, still never: where it was opened is not known",
+          len(posts()) == n and "Type to continue" not in strip, strip)
+    page.set_viewport_size({"width": 1280, "height": 800})
+    _store(page, ws=None)
+    _reset(page, mock, base, until, fake)
 
 
 def _flood_checks(page, mock, base, check, until, fake):

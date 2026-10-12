@@ -60,6 +60,7 @@ function useTerminalBridge(v: LayoutControl, place: Map<string, number>, termina
     terminals.defaultIn = () => latest.current.terminalIn?.() ?? "home";
     terminals.setPaneTerminal = (pane, id) => latest.current.v.setTerminal(pane, id);
     terminals.forgetTerminal = (id) => latest.current.v.forgetTerminal(id);
+    terminals.renameTerminal = (from, to) => latest.current.v.renameTerminal(from, to);
     terminals.focusPane = (pane) => {
       latest.current.v.focus(pane);
       requestAnimationFrame(() =>
