@@ -538,7 +538,8 @@ def terminal_checks(browser, mock, base, check, until, guard, init_script):
         for section in (_open_checks, _autoopen_reload_checks, _autoopen_pane_checks, _autoopen_menu_checks,
                         _autoopen_click_checks, _autoopen_card_checks, _autoopen_refusal_checks,
                         _typing_checks, _card_checks, _paste_checks, _reload_checks,
-                        _takeover_checks, _elsewhere_checks, _exit_checks, _busy_checks, _readable_checks,
+                        _takeover_checks, _elsewhere_checks, _exit_checks, _busy_checks,
+                        _closed_while_ticketing_checks, _readable_checks,
                         _hold_checks,
                         _read_note_checks, _integration_checks, _osc_link_checks, _browser_link_checks,
                         _menu_edge_checks, _pane_checks, _zoom_checks, _ended_checks,
@@ -1445,6 +1446,32 @@ def _exit_checks(page, mock, base, check, until, fake):
     until(lambda: _visible(page, '[data-testid="panel"]'), timeout=2)
     check("opening the panel shows it, and the dot goes",
           page.locator('[data-testid="toggle-panel-dot"]').count() == 0 and _state(page, tid) == "exited")
+
+
+def _closed_while_ticketing_checks(page, mock, base, check, until, fake):
+    """A terminal the owner closes while its ticket is on its way is never
+    attached: the HUD looks again once the ticket lands (review of PR #72,
+    LOW 2). Such a socket would count against the HUD in the fresh-ticket
+    check, never in the bucket kept for terminals the test removed."""
+    tid = _fresh(page, mock, base, until, fake)
+
+    def asked():
+        return [p for (m, p, _) in mock.calls if m == "POST" and p == f"/terminals/{tid}/ticket"]
+
+    def socks():
+        return [s for s in fake.sockets if s["tid"] == tid]
+    n_asked, n_socks, refused = len(asked()), len(socks()), fake.refused_tickets
+    mock.terminal_ticket_delay = 1.5      # the next ticket is minted at once, answered 1.5 s late
+    fake._close(fake.holders[tid], 1011, "the daemon went away")
+    fake.flush()                          # the HUD reconnects: a new ticket first
+    until(lambda: len(asked()) > n_asked, timeout=4)
+    page.locator(f'[data-testid="panel-close-{tid}"]').click()
+    until(lambda: any(m == "DELETE" and p == f"/terminals/{tid}" for (m, p, _) in mock.calls), timeout=3)
+    page.wait_for_timeout(2500)           # the late ticket lands meanwhile
+    fake.flush()
+    check("a terminal closed while its ticket was on its way is never attached",
+          len(socks()) == n_socks and fake.refused_tickets == refused and tid not in fake.removed,
+          f"{len(socks()) - n_socks} socket(s) after the close, {fake.refused_tickets - refused} refused")
 
 
 def _busy_checks(page, mock, base, check, until, fake):
