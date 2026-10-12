@@ -58,6 +58,13 @@ def main() -> int:
         protected = query_sqlite(str(Path(tmp) / "google_token.json"), "SELECT 1")
         assert "refus" in protected.lower() or "credential" in protected.lower(), protected
         assert "no database file" in query_sqlite(str(Path(tmp) / "nope.db"), "SELECT 1")
+        # ENV-1: a credential env file is refused by name, and through a
+        # symlink under an innocent name (`secrets.is_credential`).
+        (Path(tmp) / ".env.production").write_text("API_KEY=FAKE-SQLITE-ENV1\n")
+        (Path(tmp) / "data.db").symlink_to(".env.production")
+        for name in (".env.production", "data.db"):
+            refused = query_sqlite(str(Path(tmp) / name), "SELECT 1")
+            assert "credential" in refused.lower() and "FAKE-SQLITE" not in refused, (name, refused)
 
     print("ok  sqlite: read-only enforced by engine, caps, protected names, dispatch")
     print("\nall sqlite checks passed")

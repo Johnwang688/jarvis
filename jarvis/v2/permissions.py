@@ -5,9 +5,12 @@ handed. The layers are evaluated in order and the first to answer wins:
 
 1. **DENY** — v1 `rules.decide()`'s never-approvable verdicts, v1
    `secrets.protected_in_command`, and, for file tools, any target that is
-   SELF_PROTECTED, the persistent allowlist, a credential bundle, or the v2
-   `allowlist.json` / `models.json` / `routing.json` trio. Never asked of
-   anyone, and unreachable through the escape hatch (§6.1).
+   SELF_PROTECTED, the persistent allowlist, a credential bundle, a
+   credential env file (ENV-1: `*.example` only), or the v2
+   `allowlist.json` / `models.json` / `routing.json` trio; for read tools
+   (Claude's Read, Grep, Glob, NotebookRead), a credential file or a glob onto
+   one; for a sandbox grant, one that is or holds a credential env file.
+   Never asked of anyone, and unreachable through the escape hatch (§6.1).
 2. **ALWAYS-ASK** — `config.V2_ALWAYS_ASK_DEFAULTS` plus the additions in
    `config.V2_ALWAYS_ASK` and `Brief.always_ask` / `Project.always_ask`. A
    match goes to the owner regardless of what any reviewer thought.
@@ -101,6 +104,26 @@ FILE_TOOLS = frozenset({
 })
 _PATH_KEYS = ("file_path", "notebook_path", "path", "filename", "file")
 _PATHS_KEYS = ("paths", "files", "file_paths")
+
+# Tools that read a file or search a tree (Claude's), judged at layer 1 for a
+# credential env file (ENV-1: the owner's `.env*` rule — Jarvis never reads
+# one). The fast path's and jarvis-mcp's `read_file`/`grep_files` are v1's
+# own tools, which refuse inside; they are listed so a permit asked about
+# them answers the same.
+READ_TOOLS = frozenset({
+    "Read", "NotebookRead", "Grep", "Glob", "LS",     # Claude
+    "read_file", "grep_files",                        # fast path / jarvis-mcp
+})
+# The arguments that hold a glob over file names (Glob's `pattern`, Grep's
+# `glob` filter): judged by the glob rule, never as a path. Grep's `pattern`
+# is a regular expression over contents and is not a file name at all.
+# The file-name globs of a read tool that reads what it selects (ENV-1).
+# Claude's Glob is not here: it returns names, never contents (delta review
+# NIT), so `**/.*` and `**/*.env*` list files and are allowed, as on main.
+_GLOB_KEYS = {"Grep": ("glob",), "grep_files": ("glob",)}
+# Tools whose glob and path also get the raw-line check the shell gets
+# (delta review LOW-B: `glob: "*.env*"` as `--include='*.env*'`).
+_RAW_CHECKED = frozenset({"Grep", "grep_files"})
 
 _PROTECTED_BRANCHES = ("main", "master", "prod*", "production*", "release*")
 _PROD_MARKER = re.compile(r"(?<![A-Za-z])(prod|production|live)(?![A-Za-z])", re.I)
@@ -235,10 +258,26 @@ def file_targets(tool: str, args: dict) -> list[str]:
     return found
 
 
-def denied_file(target: str) -> str | None:
-    """The reason this path may not be written, or None."""
+def _placed(target: str, cwd: str | None) -> Path:
+    """`target` as a path, a relative one placed in the folder the tool runs
+    in (the brief's), never the daemon's own cwd."""
     path = Path(target).expanduser()
-    if v1_secrets.is_protected(path):
+    if not path.is_absolute() and cwd:
+        path = Path(cwd).expanduser() / path
+    return path
+
+
+def denied_file(target: str, cwd: str | None = None, *, folder: bool = False) -> str | None:
+    """The reason this path may not be written, or None. `folder`: the path
+    is a folder (a grant's), so its own name is not judged as a file's."""
+    path = _placed(target, cwd)
+    if not folder and v1_secrets.is_env_credential(path):
+        # The owner's `.env*` rule (ENV-1): `*.example` only, symlinks
+        # followed both ways (`secrets.is_env_credential`).
+        return (f"{path.name} is (or leads to) a credential env file; Jarvis never writes "
+                "one. The owner edits it in the HUD; only names ending in .example "
+                "(.env.example) are Jarvis's to write.")
+    if not folder and v1_secrets.is_protected(path):
         return (f"{path.name} holds live credentials; Jarvis never writes it. "
                 "Ask the owner to change it by hand.")
     resolved = _resolve(path)
@@ -260,17 +299,130 @@ def denied_file(target: str) -> str | None:
     return None
 
 
-def denied_grant(target: str, access: str = "write") -> str | None:
+def denied_read(tool: str, args: dict, cwd: str | None = None) -> str | None:
+    """Why a read tool's call may not run, or None (ENV-1): a path it reads
+    that is, or leads to, a credential file — a bundle or a credential env
+    file, by `secrets.is_credential` — or, for Grep (which reads what it
+    selects), a file-name glob judged as the shell's `rg --hidden -g` value
+    is (`secrets.pattern_reaches`, plus the raw-line check on the glob and
+    the path: `**/*test*` and `*.custom` are allowed, `**/.env*`, `*.env*`
+    and `*.local` are not). Claude's Glob returns names only, so its pattern
+    is not judged (its `path` is). What a search over a whole folder then
+    reads is beyond what a pre-tool
+    hook sees: Jarvis never sees Claude's tool results, so there is no scrub
+    on that side (the plan's stated limit) — the class of `grep -r foo .`."""
+    for key in ("file_path", "notebook_path", "path"):
+        value = args.get(key)
+        if isinstance(value, str) and value.strip():
+            path = _placed(value, cwd)
+            if v1_secrets.is_credential(path):
+                return v1_secrets.refusal(path.name)
+            if v1_secrets.env_glob_reaches(path.name):
+                return v1_secrets.refusal(path.name)
+            if tool in _RAW_CHECKED:
+                named = v1_secrets.raw_names_in(value)
+                if named:
+                    return v1_secrets.refusal(named)
+    for key in _GLOB_KEYS.get(tool, ()):
+        value = args.get(key)
+        if isinstance(value, str) and value.strip():
+            # Judged as `rg --hidden -g VALUE` is in the shell (Claude's Grep
+            # runs ripgrep over hidden files and reads what it selects):
+            # the raw-line check on the whole value, then every component of
+            # a pattern like `**/.env.*` or `{a,b}/.env` as a file-name
+            # pattern a program expands — main's floor, the dot-led exact
+            # test, or naming `env` and able to match (`*.env*`). Brace lists
+            # are expanded first (bash's reading,
+            # `protected_state._brace_expand`), and one too large to expand
+            # is refused.
+            named = v1_secrets.raw_names_in(value)
+            if named:
+                return v1_secrets.refusal(named)
+            variants = protected_state._brace_expand(value)
+            if variants is None:
+                return v1_secrets.refusal(value[:80])
+            for variant in variants:
+                for part in variant.split("/"):
+                    if part and (v1_secrets.is_protected(part)
+                                 or v1_secrets.pattern_reaches(part, True)):
+                        return v1_secrets.refusal(part)
+    return None
+
+
+# A grant over a folder is judged by what is in it (ENV-1): a credential env
+# file anywhere under a grant is a file that grant opens. The walk is
+# bounded, and past the bound the grant is refused — a guard that cannot
+# tell refuses.
+GRANT_SCAN_ENTRIES = 50_000
+GRANT_SCAN_SECONDS = 2.0
+
+
+def _is_folder(path: Path) -> bool:
+    try:
+        return path.is_dir()
+    except OSError:
+        return False
+
+
+def _env_file_within(path: Path, raw: Path) -> tuple[str | None, str | None]:
+    """(why a grant on `path` would reach a credential env file, why it could
+    not be checked) — each None when it does not apply. `path` is resolved,
+    `raw` as given. A file is judged by name and through its symlinks; a
+    folder by what it holds at any depth (symlinked folders inside are not
+    followed; a symlinked file is judged where it leads), within
+    `GRANT_SCAN_ENTRIES` entries and `GRANT_SCAN_SECONDS`. A folder named
+    `.env` (a virtualenv) is a folder, judged by what it holds."""
+    if not _is_folder(path):
+        if v1_secrets.is_env_credential(raw) or v1_secrets.is_env_credential(path):
+            return f"{raw} is a credential env file", None
+        return None, None
+    import time as _time
+    deadline = _time.monotonic() + GRANT_SCAN_SECONDS
+    seen = 0
+    stack = [path]
+    while stack:
+        folder = stack.pop()
+        try:
+            with os.scandir(folder) as entries:
+                for entry in entries:
+                    seen += 1
+                    if seen > GRANT_SCAN_ENTRIES or _time.monotonic() > deadline:
+                        return None, (f"could not check {path} for credential env files "
+                                      f"(over {GRANT_SCAN_ENTRIES} entries or "
+                                      f"{GRANT_SCAN_SECONDS:g}s)")
+                    try:
+                        is_dir = entry.is_dir(follow_symlinks=False)
+                        is_link = entry.is_symlink()
+                    except OSError:
+                        is_dir, is_link = False, False
+                    if is_dir:
+                        stack.append(Path(entry.path))
+                    elif v1_secrets.is_env_credential_name(entry.name) or (
+                            is_link and v1_secrets.is_env_credential(entry.path)):
+                        return f"{path} holds {entry.path}, a credential env file", None
+        except OSError:
+            continue  # a folder we cannot list: nothing in it is reachable by us either
+    return None, None
+
+
+def denied_grant(target: str, access: str = "write",
+                 unchecked: list[str] | None = None) -> str | None:
     """Why a sandbox grant on `target` may not be approved by anyone, or None.
 
     A grant opens a whole subtree, so the test is ancestry, not equality:
     "write /" or "write ~/.config" covers the allowlist as surely as naming
     it. Any grant touching a credential directory (on it, inside it, or
-    above it) is refused, reads included — a read is how a key leaves. A
-    write grant that is or contains Jarvis's own permission state
+    above it) is refused, reads included — a read is how a key leaves. So is
+    any grant that is or holds a credential env file (ENV-1; a bounded walk).
+    A write grant that is or contains Jarvis's own permission state
     (`protected_paths()`, `files._protected_state()`), a SELF_PROTECTED file,
     or a credential bundle is refused too. Approving a grant is not consent
     to what it lets through.
+
+    A folder too large to walk in time cannot be judged for env files. With
+    `unchecked` (the permit, whose widening always reaches a human) the
+    sentence is appended there and the grant goes to the owner, as on main;
+    without it the grant is refused (ENV-1 review, NIT 2).
     """
     if not isinstance(target, str) or not target.strip():
         target = "/"
@@ -279,6 +431,16 @@ def denied_grant(target: str, access: str = "write") -> str | None:
         if path == directory or directory in path.parents or path in directory.parents:
             return (f"a grant on {path} would reach {directory}, which holds "
                     "credentials; no approval can open it")
+    # The owner's `.env*` rule (ENV-1): a grant that is or holds a credential
+    # env file opens it — to read or to write, and Jarvis may do neither.
+    env, could_not = _env_file_within(path, Path(target).expanduser())
+    if env:
+        return (f"a grant on {path} would reach a credential env file ({env}); "
+                "Jarvis never reads or writes one, so no approval can open it")
+    if could_not:
+        if unchecked is None:
+            return f"a grant on {path}: {could_not}; refused"
+        unchecked.append(could_not)
     if access == "read":
         return None
     try:
@@ -299,7 +461,10 @@ def denied_grant(target: str, access: str = "write") -> str | None:
         if path == item or path in item.parents:
             return (f"a grant on {path} would cover {item}, part of Jarvis's own "
                     "permission state; only the owner edits it, by hand")
-    return denied_file(str(path))
+    # A folder is judged by what it holds (above), never by its own name: a
+    # virtualenv named `.env` is not a credential env file (ENV-1 review,
+    # NIT 1; ED-7's rule). Its git internals and the safety layer still count.
+    return denied_file(str(path), folder=_is_folder(path))
 
 
 def _command_of(args: dict) -> str:
@@ -330,9 +495,13 @@ def denied_command(command: str, cwd: str | None = None) -> str | None:
     name = v1_secrets.protected_in_command(command)
     if name:
         return v1_secrets.refusal(name)
-    touched = _command_writes_protected_state(command, cwd)
-    if touched:
-        return (f"{touched} is Jarvis's own permission state; a command that "
+    touch = protected_state.command_touch(command, cwd)
+    if touch is not None and touch.certain:
+        if touch.env:
+            # A write onto a credential env file, judged in the brief's folder
+            # so a symlink to one counts (ENV-1).
+            return protected_state.refusal(touch)
+        return (f"{touch.name} is Jarvis's own permission state; a command that "
                 "writes it would widen what runs without anyone being asked.")
     return None
 
@@ -631,17 +800,32 @@ def build_permit(ctx: PermitContext, asker) -> PermissionCallback:
                 return finish(Decision.DENY, L_DENY, refusal)
         if tool in FILE_TOOLS:
             for target in file_targets(tool, args):
-                refusal = denied_file(target)
+                refusal = denied_file(target, cwd)
                 if refusal:
                     return finish(Decision.DENY, L_DENY, refusal)
+        if tool in READ_TOOLS:
+            # A credential file read or searched for by name (ENV-1).
+            refusal = denied_read(tool, args, cwd)
+            if refusal:
+                return finish(Decision.DENY, L_DENY, refusal)
         for extra in also_commands:
-            refusal = denied_command(extra) if isinstance(extra, str) and extra.strip() else None
+            # Judged where it runs, the brief's folder (ENV-1 review, NIT 5).
+            refusal = (denied_command(extra, cwd)
+                       if isinstance(extra, str) and extra.strip() else None)
             if refusal:
                 return finish(Decision.DENY, L_DENY, refusal)
+        unchecked: list[str] = []
         for access, target in grants:
-            refusal = denied_grant(target, access)
+            refusal = denied_grant(target, access, unchecked)
             if refusal:
                 return finish(Decision.DENY, L_DENY, refusal)
+        if unchecked:
+            # A grant on a folder too large to walk for env files goes to the
+            # owner, saying so — never refused unasked, as on main (ENV-1
+            # review, NIT 2). Only a widening is sure to reach a human.
+            if not widening:
+                return finish(Decision.DENY, L_DENY, "; ".join(unchecked) + "; refused")
+            widening = widening + " · " + "; ".join(unchecked)
 
         # --- sandbox widening: a human, every time ------------------------
         # A Codex approval reaches us only after its own reviewer passed it,
@@ -687,7 +871,8 @@ def build_permit(ctx: PermitContext, asker) -> PermissionCallback:
             # every profile.
             touch = protected_state.command_touch(command, cwd)
             if touch is not None:
-                match = ("gate-state", protected_state.ask_reason(touch))
+                match = ("env-file" if touch.env else "gate-state",
+                         protected_state.ask_reason(touch))
         if match is None and command.strip():
             # A line that may run VEX's device tool (the robot's download)
             # and cannot be told — a program that is only an expansion, read
@@ -785,6 +970,7 @@ def deny_all(reason: str = "nobody is watching this thread") -> DenyAll:
 
 __all__ = [
     "ApprovalRecord", "PermitContext", "always_ask_for", "always_ask_match",
-    "build_permit", "denied_command", "denied_file", "denied_grant", "deny_all", "file_targets",
-    "log_decision", "protected_paths", "COMMAND_TOOLS", "FILE_TOOLS",
+    "build_permit", "denied_command", "denied_file", "denied_grant", "denied_read", "deny_all",
+    "file_targets",
+    "log_decision", "protected_paths", "COMMAND_TOOLS", "FILE_TOOLS", "READ_TOOLS",
 ]
