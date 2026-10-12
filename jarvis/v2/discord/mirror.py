@@ -43,7 +43,11 @@ from <#old>"), says "Moved to …" in the old one and renames it
 `↪ moved to <project> · <name>` (O-C5); the old thread keeps working and its
 replies point at the new one. Archive posts a note and archives the Discord
 thread as its creator (a 403 is reported, O-P1); restore says "Restored.";
-a permanent delete posts a note and unlinks. **Nothing is ever deleted.**
+a permanent delete posts a note and unlinks. **Nothing is ever deleted.** A
+title change (a rename, or `titles.py`'s automatic title) renames the
+Discord thread — except while the chat or its project is archived in the
+HUD, when only the stored name changes and the restore applies it (a rename
+there would unarchive the Discord thread; review of PR #62).
 
 Nothing here logs a URL, a token or a message body: failures are the
 operation, the HTTP status and Discord's code (`rest.describe`).
@@ -86,7 +90,7 @@ FORBIDDEN = frozenset({MISSING_ACCESS, MISSING_PERMISSIONS})
 KINDS = frozenset({"user_message", "turn_finished", "question", "question_answered",
                    "thread_updated", "queued_started", "queue_cleared", "steer_queued",
                    "thread_moved", "thread_archived", "thread_restored", "thread_deleted",
-                   "proposal_reply"})
+                   "proposal_reply", "project_restored"})
 # Records of a turn the walk composes into posts; anything else is skipped.
 # A provider's gate consultations are logged as gate_requested/gate_resolved
 # (daemon.GATE_KINDS, 2026-10-08); they belong to the turn but post nothing.
@@ -750,6 +754,10 @@ class ChatMirror:
         kind = record.get("kind")
         chat_id = record.get("thread_id") or (record.get("data") or {}).get("thread_id")
         data = record.get("data") or {}
+        if kind == "project_restored":
+            if record.get("project_id") or data.get("project_id"):
+                self._project_restored(record.get("project_id") or data.get("project_id"))
+            return
         if kind == "_wake" or not chat_id:
             return
         if kind == "thread_deleted":
@@ -792,6 +800,7 @@ class ChatMirror:
             self._archived(thread)
         elif kind == "thread_restored":
             self._say(chat_id, "Restored.")
+            self._rename_if_pending(thread)
 
     def _process_dirty(self) -> None:
         with self._lock:
@@ -1191,8 +1200,16 @@ class ChatMirror:
     # -- lifecycle (§4.4) -------------------------------------------------------------
 
     def _renamed(self, thread) -> None:
-        """The owner's HUD rename. The current thread takes the new name; each
-        old one keeps its "↪ moved to" header with the new name after it."""
+        """A chat's title changed — the owner's rename or an automatic title
+        (`titles.py`). The current thread takes the new name; each old one
+        keeps its "↪ moved to" header with the new name after it.
+
+        **Never for a chat archived in the HUD** (the thread or its project):
+        Discord refuses a rename on an archived thread (50083), the poster
+        then unarchives it to retry, and nothing archives it again — the
+        start-up title backfill would have reopened every archived chat on
+        Discord (review of PR #62, M1). Then only the stored name changes,
+        marked `rename_pending`, and the restore applies it."""
         with self._lock:
             state = self._chats.get(thread.id)
         if not state:
@@ -1200,9 +1217,16 @@ class ChatMirror:
         name = chat_name(thread)
         side = read_sidecar(self.stores, thread.id)
         side["name"] = name
+        archived = self._hud_archived(thread)
+        if archived:
+            side["rename_pending"] = True
+        else:
+            side.pop("rename_pending", None)
         self._save(thread.id, side)
         with self._lock:
             state["name"] = name
+        if archived:
+            return
         posts = []
         current = surface_id(state.get("surface"))
         if current:
@@ -1213,6 +1237,27 @@ class ChatMirror:
                 posts.append(_Post(thread.id, old, action="rename",
                                    name=moved_name(project, name)))
         self._enqueue(posts)
+
+    def _hud_archived(self, thread) -> bool:
+        if thread.archived:
+            return True
+        try:
+            project = self.stores.projects.get(thread.project_id)
+        except StoreError:
+            return False
+        return bool(project and project.archived)
+
+    def _rename_if_pending(self, thread) -> None:
+        """A restore (the chat's or its project's): a name the chat took while
+        archived reaches Discord now, after the restore's own post."""
+        if read_sidecar(self.stores, thread.id).get("rename_pending"):
+            self._renamed(thread)
+
+    def _project_restored(self, project_id) -> None:
+        from ..daemon import safe_list
+        for thread in safe_list(self.stores.threads, project_id=project_id):
+            if _is_chat(thread) and not thread.archived:
+                self._rename_if_pending(thread)
 
     def _moved(self, thread, data) -> None:
         with self._lock:

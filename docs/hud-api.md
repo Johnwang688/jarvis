@@ -1898,3 +1898,33 @@ folds are computed in that worker from the tree it already holds. No new
 `.wasm`, no policy change. `window.__hudSyntax.states()` gains `folds`: how
 many fold answers from the tree were handed to Monaco for that model (every
 other answer is indentation folding).
+
+## Additions 2026-10-12 (chat titles)
+
+The owner: "right now each chat just displays its id … keep the id in the
+three dots but have the main display be the title". No new route.
+
+- **Threads carry `title_source`**: `""` (nobody named it yet, or a v1
+  migration's title), `"auto"` (the daemon's titler) or `"owner"` (a
+  rename). `PATCH /threads/{id}` `{title}` sets `"owner"` — a rename to the
+  title it already has does too. Absent from an older daemon; the HUD reads
+  absent as `""`.
+- **Chat titles are generated** (`jarvis/v2/titles.py`): at a chat
+  thread's first owner message, and at start-up for untitled chats with an
+  owner message (archived ones included), the daemon names the chat from the
+  owner's typed words — Codex `gpt-6-luna` (`JARVIS_TITLE_CODEX_MODEL`) when
+  Codex is healthy and the account lists it, else the default OpenRouter
+  model. Never a task's thread. An automatic title is written only onto an
+  empty title (a rename always wins), unique in the project like a rename's.
+- **`thread_updated`** for a title, from a rename or the titler, is
+  `{thread_id, title, title_source, changed: ["title"]}` (no record: the HUD
+  re-reads `/threads`). `title_source` is new on it. The Discord mirror
+  renames the chat's Discord thread on it, **except while the chat or its
+  project is archived**: then the new name waits and is applied on
+  `thread_restored` / `project_restored` (a rename would unarchive the
+  Discord thread).
+- **The Archive view** names an archived chat by its title (or "Untitled"),
+  its id as the tooltip (`archived-thread-name-<id>`).
+- **The HUD** never shows a chat's id as its name: an untitled row reads
+  "New thread" (`turns` 0) or "Untitled", and the id is the ⋯ menu's "Copy
+  id" (`tmenu-copyid`, the id shown in `tmenu-id`). A title is text.

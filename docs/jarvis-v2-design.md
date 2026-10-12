@@ -2817,6 +2817,27 @@ an env file, which never reaches the worker — Monaco folds by indentation, as
 before; and the fold query has the colour queries' 250 ms budget (twice over
 it, that file folds by indentation from then on).
 
+**Chat titles (2026-10-12).** The owner: "right now each chat just displays
+its id. we should keep the id in the three dots but have the main display be
+the title and have the title wrap after a certain length." A chat names
+itself from the owner's first message (`jarvis/v2/titles.py`): Codex
+`gpt-6-luna` at effort low when Codex is healthy and the account lists it,
+in a tool-less, read-only, one-turn app-server that never waits on the login
+lock (a busy lock is tried again over ~90 s, then OpenRouter); else the
+default OpenRouter model. The Codex turn has no environment
+(`environments: []`), which no live run has verified: if a ChatGPT-auth turn
+ignores it, a read-only command can run before the turn is refused; its
+output is discarded, and the title comes from OpenRouter. Chats from before are titled by a backfill at
+start-up. A title is written only onto an empty one, so **a rename always
+wins**, before or during generation, and it follows to the chat's Discord
+thread like a rename — except for a chat archived in the HUD, whose Discord
+thread keeps its name (and stays archived) until the chat or its project is
+restored. The Archive view names archived chats by title as well. In the sidebar the title **wraps**, clamped at three
+lines with the whole title as its tooltip; an untitled chat reads "New
+thread" (or "Untitled" for an older one the backfill has not reached), muted
+and italic, never its id — the id is "Copy id" in the row's ⋯ menu. A split's
+chat header names it the same way. No agent can set or regenerate a title.
+
 **The git gutter and the explorer's git colours (2026-10-12, ED-9 of the
 editor plan, §2.5 and §2.8).** Beside the line numbers each open file shows
 what changed since HEAD, as VS Code does: a bar in sage (`--syn-string`) on

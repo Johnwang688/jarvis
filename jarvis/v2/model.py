@@ -105,6 +105,10 @@ class Thread:
     provider_session_id: str | None = None      # Claude session id, "codex:<id>", or None for fast
     task_id: str | None = None
     title: str = ""
+    # Who named it (chat titles, 2026-10-12): "" (nobody yet, or a v1
+    # migration's title), "auto" (titles.py, only ever onto an empty title) or
+    # "owner" (a rename). Nothing automatic writes over a title of any source.
+    title_source: str = ""
     created: str = field(default_factory=utcnow)
     updated: str = field(default_factory=utcnow)
     turns: int = 0

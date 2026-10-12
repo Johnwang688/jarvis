@@ -265,6 +265,7 @@ class ProjectStore(_Store[model.Project]):
 
 
 SURFACE = re.compile(r"^(?:dm|dm:retired|discord:[0-9]{1,24})$")
+TITLE_SOURCES = ("", "auto", "owner")
 
 
 class ThreadStore(_Store[model.Thread]):
@@ -279,14 +280,37 @@ class ThreadStore(_Store[model.Thread]):
         session's in-memory copy of a thread on every usage event and turn
         end, and that copy was read before the Discord mirror gave the chat a
         thread — the lost-update class of bug 1. So a save keeps whatever
-        surface is stored, None or not; only `set_surface` changes it."""
+        surface is stored, None or not; only `set_surface` changes it.
+
+        **`title` and `title_source` are the same** (chat titles, review of
+        PR #62, L1): a save keeps the stored ones whatever the caller holds,
+        and only `set_title` changes them. A session copy read before a title
+        changed — the window between `resume_thread`'s read and its session
+        being registered, where neither a rename nor `titles.py` can reach the
+        copy — used to put an older automatic title back over the owner's
+        rename on its next save."""
         with _lock:
             previous = self.get(obj.id)
             if previous is not None:
                 obj.surface = previous.surface
+                obj.title, obj.title_source = previous.title, previous.title_source
             elif obj.surface is not None:
                 raise StoreError("A thread's surface is set with set_surface()")
+            if obj.title_source not in TITLE_SOURCES:
+                raise StoreError(f"Thread {obj.id}: invalid title_source {obj.title_source!r}")
             super().save(obj)
+
+    def set_title(self, thread_id: str, title: str, source: str) -> model.Thread:
+        """The one writer of `Thread.title` and `title_source`, under the store
+        lock (`projects._write_title` for a rename and an automatic title, and
+        a restore's renumbering). Uniqueness is the caller's."""
+        if not isinstance(title, str) or source not in TITLE_SOURCES:
+            raise StoreError(f"Thread {thread_id}: invalid title or title_source {source!r}")
+        with _lock:
+            thread = self._require(thread_id)
+            thread.title, thread.title_source = title, source
+            self._write(thread)
+            return thread
 
     def set_surface(self, thread_id: str, value: str | None) -> model.Thread:
         """The one writer of `Thread.surface`, under the store lock."""
