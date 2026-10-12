@@ -1153,16 +1153,26 @@ What the HUD does with the terminal contract above (code in
   rebuilt from xterm's cells (characters and SGR colours only, at most
   1 MiB, never the old bytes, so nothing in it is a query, a mode or an
   alternate screen) — and a separator, `── restarted HH:MM ──`, plain
-  text. Keys and pastes made while it starts are held (4 KiB, a paste that
-  does not fit is dropped whole, and nothing after a refused part is kept)
-  and sent once the new replay has been parsed; a card raised meanwhile
-  drops them, said with the `unsent` notice. Never under a card, after a
-  crash, on a load, a restored panel or a reattach, for a terminal this tab
-  did not show (another window's), a shell that exited on its own (Restart
-  and Close as before) or a program terminal; Ctrl+D and the HUD's own keys
-  never continue one. Six already open: the daemon's 409 sentence in the
-  strip, nothing held. **The old text is memory only**: a page reload
-  loses it, and nothing of it is written to disk or sent anywhere.
+  text (the old text walked from the bottom, stopped at the cap; one longer
+  line keeps its tail). Keys and pastes made while it starts are held
+  (4 KiB, a paste that does not fit is dropped whole) and, once the new
+  replay has been parsed, **typed, never run** (PR #64 review L6): keys up
+  to the first Enter, never it nor anything after, and no paste holding a
+  line break — the notice says the line waits at a new local shell's
+  prompt (check it, then press Enter, or paste again). **Any refusal drops
+  the whole hold** (a key that does not type, past 4 KiB, a card raised
+  meanwhile, the terminal no longer on screen — the panel closed, another
+  tab, its pane switched away), said with the `unsent` notice. Never under
+  a card, after a crash, on a load, a restored panel or a reattach, for a
+  terminal this tab did not show (another window's), one whose `in` is not
+  remembered (never guessed from its row), a shell that exited on its own
+  (Restart and Close as before) or a program terminal; Ctrl+D and the HUD's
+  own keys never continue one. Six already open: the daemon's 409 sentence
+  in the strip, nothing held, and from then on only Continue here tries
+  again. **The old text is memory only**: a page reload loses it, and
+  nothing of it is written to disk or sent anywhere. The switch comes from
+  this window's last-seen row, which another window can leave stale (a
+  limit that predates this; it needs a daemon event).
 - **`busy`**: × reads a `GET /terminals` sent after the click (never one
   already on its way) and, when the foreground process is not the shell,
   asks before `DELETE`; if the listing fails it asks anyway, saying it could

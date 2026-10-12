@@ -45,7 +45,8 @@
 // switch, in the same place and the same xterm, under the old text and a
 // separator line. Only the owner's gesture in that terminal does it — never a
 // load, a restored panel, a reattach, a card or a crashed window — and what
-// was typed waits until the new shell's replay has been parsed. The old text
+// was typed waits until the new shell's replay has been parsed, then is typed
+// but never run (no held Enter: the prompt it was typed at is gone). The old text
 // is kept in memory only (rebuilt from xterm's cells, never the old bytes) and
 // written back after the RIS of every later attach.
 

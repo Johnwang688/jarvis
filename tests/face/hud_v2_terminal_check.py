@@ -48,7 +48,9 @@ The checks worth keeping, each written to bite:
   - a terminal that ended with Jarvis continues where it was (2026-10-12,
     the owner's option (a)): a typed key, a paste or "Continue here" makes
     one new shell in the same folder, same place, same xterm, under the old
-    text and a separator; what was typed reaches it only after its replay;
+    text and a separator; what was typed reaches it only after its replay,
+    typed but never run (no held Enter, no held paste with a line break),
+    and not at all after any refusal while held or once it left the screen;
     a later reattach keeps the old text and answers nothing; never under a
     card, on a load, for another window's terminal, an exited shell or a
     program terminal; an unreadable one (or one whose switch is unknown)

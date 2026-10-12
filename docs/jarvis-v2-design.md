@@ -2129,9 +2129,15 @@ typing key there, a paste or **Continue here** starts a new shell in the same
 folder, with the same "Jarvis can read" switch (off when unknown), in the
 same place and the same xterm, under the old text and a `── restarted HH:MM
 ──` line; what was typed waits (4 KiB) until the new shell's replay has been
-parsed. The old text is rebuilt from xterm's cells (characters and colours,
-1 MiB), kept in this page's memory only, and written back after the RIS of
-every later attach of the new terminal. Running programs do not survive —
+parsed, and is then **typed, never run** (the lead's decision on review):
+the keys up to the first Enter, and no paste with a line break, because the
+line was typed at the old context's prompt (a robot's shell, `>>>`, a root
+shell) and must not run in a fresh local one; the window says so. Any
+refusal while held — a key that does not type, past 4 KiB, a card, the
+terminal leaving the screen — drops all of it. The old text is rebuilt from
+xterm's cells (characters and colours, the last 1 MiB, read from the bottom),
+kept in this page's memory only, and written back after the RIS of every
+later attach of the new terminal. Running programs do not survive —
 only their text — and a page reload loses the text: real survival would need
 a pty host outside the daemon, which would reverse W-3 (option (b), not
 taken). Only the owner's gesture in that terminal continues it: never a
