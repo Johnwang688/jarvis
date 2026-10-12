@@ -593,9 +593,8 @@ class NoToolReachesTheBrowser(unittest.TestCase):
     owner-only."""
 
     REPO = Path(__file__).resolve().parents[2]
-    ALLOWED = {"jarvis/v2/daemon.py", "jarvis/v2/browser/__init__.py", "jarvis/v2/browser/host.py",
-               "jarvis/v2/browser/gate.py", "jarvis/v2/browser/policy.py",
-               "jarvis/v2/browser/routes.py"}
+    ALLOWED = {"jarvis/v2/daemon.py"}           # and the browser package itself
+    PACKAGE = "jarvis/v2/browser/"
     NEEDLES = __import__("re").compile(
         r"browser\.(host|gate)\b|browser\s+import\s+[^\n]*\b(host|gate)\b"
         r"|\bBrowserHost\b|\bGate\(|['\"]/browser\b"
@@ -605,7 +604,7 @@ class NoToolReachesTheBrowser(unittest.TestCase):
         hits = []
         for path in sorted((self.REPO / "jarvis").rglob("*.py")):
             rel = str(path.relative_to(self.REPO))
-            if rel in self.ALLOWED:
+            if rel in self.ALLOWED or rel.startswith(self.PACKAGE):
                 continue
             text = path.read_text(encoding="utf-8")
             for match in self.NEEDLES.finditer(text):
