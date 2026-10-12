@@ -29,6 +29,17 @@ What it pins:
     does nothing;
   - **no repository** and **no changes** are said in a sentence.
 
+The review of PR #67 added:
+  - **L1**: a row picked and the file opened and edited at once, with no
+    wait — the diff swaps from the read copy to the buffer while Monaco may
+    still be computing — raises no page error (`no diff result available`);
+  - **L2**: HEAD is asked before the file is read: `link.txt`, a name no env
+    rule catches whose HEAD text the daemon refuses as an env file (a link to
+    `.env`), is never read and no model holds it;
+  - **L3**: a Diff pane never shows another task than a drawn Task pane: a
+    thread picked leaves both on the task, the caption says why and the
+    picker is off; the Task pane switched away gives the chat's project back.
+
 Run: PYTHONPATH=. .venv/bin/python tests/face/hud_v2_scm_check.py
 """
 from __future__ import annotations
@@ -43,12 +54,17 @@ if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
 from tests.face.hud_v2_editor_check import WIDE, _fresh, _open, _tab, _type  # noqa: E402
-from tests.face.hud_v2_layout_check import _boot, _pane, expand  # noqa: E402
+from tests.face.hud_v2_layout_check import _boot, _pane, _show, expand  # noqa: E402
 
 WS = json.dumps({"preset": "cols3", "focused": 2,
                  "panes": [{"view": "chat"}, {"view": "file"}, {"view": "diff"}]})
+# L3: a Task pane beside the Diff pane.
+WS_TASK = json.dumps({"preset": "cols3", "focused": 2,
+                      "panes": [{"view": "chat"}, {"view": "task"}, {"view": "diff"}]})
 CALC_HEAD = "def add(a, b):\n    return a - b\n"
 D = 3  # the Diff pane
+# The run's page errors, for the checks that look at their own window of them.
+ERRORS: list[str] = []
 
 
 def _tid(t: str) -> str:
@@ -82,31 +98,37 @@ def scm_checks(browser, mock, base, check, until, guard, init_script):
     guard(ctx)
     ctx.add_init_script(init_script)
     page = ctx.new_page()
-    errors: list[str] = []
-    page.on("pageerror", lambda e: errors.append(str(e)))
+    ERRORS.clear()
+    page.on("pageerror", lambda e: ERRORS.append(str(e)))
     requests: list[str] = []
     page.on("request", lambda r: requests.append(r.url))
     page.set_default_timeout(5000)
     w = mock.world
     keep_files = {k: dict(v) for k, v in w["files"].items()}
+    keep_kinds = dict(w["kinds"])
     try:
         w["files"]["renamed.py"] = {"content": "def new():\n    pass\n", "mtime": 1757900050}
         w["files"]["blob.bin"] = {"content": "ab\x00cd", "mtime": 1757900051}
+        # L2: a name no env rule catches whose target the daemon judges an env
+        # file (a link to `.env`): its HEAD text is refused, and it is never read.
+        w["files"]["link.txt"] = {"content": "MOCK_LINKED=fake-not-a-secret\n", "mtime": 1757900052}
+        w["kinds"]["link.txt"] = "env"
         w["git"] = {
             "head": "c0ffee1", "branch": "main",
             "base": {"calc.py": CALC_HEAD, ".env": "MOCK_KEY=old\n", "gone.txt": "an old line\n",
-                     "renamed.py": "def old():\n    pass\n", "blob.bin": ""},
+                     "renamed.py": "def old():\n    pass\n", "blob.bin": "", "link.txt": "MOCK_LINKED=old\n"},
             "files": {"calc.py": "modified", "notes.txt": "untracked", "gone.txt": "deleted",
                       "renamed.py": "renamed", "blob.bin": "modified", ".env": "modified",
-                      "debug.log": "ignored"},
+                      "link.txt": "modified", "debug.log": "ignored"},
             "dirs": {"newdir": "untracked", "build": "ignored"},
             "states": {"blob.bin": "binary"},
         }
         keep = {k: dict(v) for k, v in w["files"].items()}
         _boot(page, mock, base, until)
-        for section in (_list_checks, _sides_checks, _env_checks, _live_checks, _open_checks,
-                        _mode_checks, _card_checks, _empty_checks):
-            _fresh(page, mock, until, ws=WS, keep_files=keep)
+        for section, ws in ((_list_checks, WS), (_sides_checks, WS), (_env_checks, WS), (_link_checks, WS),
+                            (_live_checks, WS), (_swap_checks, WS), (_open_checks, WS), (_mode_checks, WS),
+                            (_task_pane_checks, WS_TASK), (_card_checks, WS), (_empty_checks, WS)):
+            _fresh(page, mock, until, ws=ws, keep_files=keep)
             try:
                 section(page, mock, check, until, requests)
             except Exception as e:  # a section that cannot run is a failure; the rest still run
@@ -115,29 +137,43 @@ def scm_checks(browser, mock, base, check, until, guard, init_script):
                     page.keyboard.press("Escape")
                 except Exception:
                     pass
-        check("no page errors in the Diff pane section", not errors, "; ".join(errors[:3]))
+        check("no page errors in the Diff pane section", not ERRORS, "; ".join(ERRORS[:3]))
     finally:
         ctx.close()
         w.pop("git", None)
         w["files"].clear()
         w["files"].update(keep_files)
+        w["kinds"].clear()
+        w["kinds"].update(keep_kinds)
 
 
 # ---------------------------------------------------------------------------
+
+def _what(page) -> str:
+    """The caption's first half: what the Diff pane shows."""
+    loc = page.locator(_in("diff-mode-what"))
+    return loc.inner_text().strip() if loc.count() else ""
+
+
+def _why(page) -> str:
+    loc = page.locator(_in("diff-mode-why"))
+    return loc.inner_text().strip(" ·") if loc.count() else ""
+
 
 def _list_checks(page, mock, check, until, requests):
     mode = page.locator(_in("diff-mode"))
     until(lambda: mode.count() > 0 and mode.get_attribute("data-mode") == "project", timeout=6)
     check("with no task, the Diff pane shows its project's uncommitted changes",
           mode.get_attribute("data-mode") == "project"
-          and mode.inner_text().strip() == "Uncommitted changes in jarvis", mode.inner_text())
+          and _what(page) == "Uncommitted changes in jarvis", mode.inner_text())
+    check("…and the caption says why: the chat's project", _why(page) == "the chat's project", _why(page))
     check("…not the old 'pick a task'", "Pick a task" not in page.locator(_pane(D)).inner_text())
     summary = page.locator(_in("scm-summary"))
     until(lambda: "uncommitted" in summary.inner_text(), timeout=6)
     check("the line above the list says how many, and on which branch",
-          summary.inner_text().strip() == "7 uncommitted changes on main", summary.inner_text())
+          summary.inner_text().strip() == "8 uncommitted changes on main", summary.inner_text())
     letters = {"calc.py": "M", "notes.txt": "U", "gone.txt": "D", "renamed.py": "R", "blob.bin": "M",
-               ".env": "M", "newdir": "U"}
+               ".env": "M", "link.txt": "M", "newdir": "U"}
     got = {p: (page.locator(_in(f"scm-letter-{p}")).inner_text().strip()
                if page.locator(_in(f"scm-letter-{p}")).count() else None) for p in letters}
     check("each changed file wears its letter: modified, untracked, deleted, renamed, binary, env, a folder",
@@ -204,6 +240,25 @@ def _env_checks(page, mock, check, until, requests):
     check("…and no model holds it", not any("/.env" in u for u in models), str(models))
 
 
+def _link_checks(page, mock, check, until, requests):
+    """L2 (review of PR #67): HEAD is asked before the file is read. `link.txt`
+    passes every name rule; the daemon judges where it leads (an env file)
+    and refuses its HEAD text — so the file is never read, nor put in a model.
+    With the read no longer waiting on HEAD's answer (`baseOk` dropped), the
+    read goes out first and this fails."""
+    start = len(requests)
+    _pick(page, until, "link.txt")
+    until(lambda: page.locator(_in("scm-env")).count() > 0, timeout=4)
+    check("L2: a file the daemon refuses as an env file says so, and is not diffed",
+          page.locator(_in("scm-env")).count() == 1 and page.locator(_in("scm-editor")).count() == 0)
+    time.sleep(0.8)
+    based = [u for u in requests[start:] if "/git/base" in u and "path=link.txt" in u]
+    read = [u for u in requests[start:] if "/file?" in u and "path=link.txt" in u]
+    check("L2: HEAD was asked, and the file was never read", bool(based) and not read, str(read or based))
+    models = page.evaluate("window.__hud.monacoModels()")
+    check("L2: …and no model holds it", not any("link.txt" in u for u in models), str(models))
+
+
 def _live_checks(page, mock, check, until, requests):
     _pick(page, until, "calc.py")
     host = page.locator(_in("scm-editor"))
@@ -248,6 +303,31 @@ def _live_checks(page, mock, check, until, requests):
           _side(page, "modified"))
 
 
+def _swap_checks(page, mock, check, until, requests):
+    """L1 (review of PR #67): pick a row, then at once open the file and edit
+    it — the diff swaps from the read copy to the buffer while Monaco may
+    still be computing the first one. Monaco never released the view model it
+    made from `{original, modified}`, so that computation was never cancelled
+    and threw `no diff result available`, uncaught (3/3 in review). Twice,
+    nothing waited for, page errors watched."""
+    before = len(ERRORS)
+    for path in ("calc.py", "notes.txt"):
+        row = page.locator(_in(f"scm-{path}"))
+        until(lambda: row.count() > 0, timeout=6)
+        row.click()
+        page.locator(_pane(2, _tid(f"file-{path}"))).click()
+        until(lambda: page.locator(_pane(2, '[data-testid="editor"] .view-lines')).count() > 0, timeout=4)
+        page.locator(_pane(2, '[data-testid="editor"] .view-lines')).first.click()
+        page.keyboard.press("Control+End")
+        page.keyboard.type("\n# swapped")
+        until(lambda: page.locator(_in("scm-editor")).get_attribute("data-live") == "true", timeout=4)
+    time.sleep(1.5)
+    new = ERRORS[before:]
+    check("L1: a diff swapped to the buffer mid-computation throws nothing", not new, "; ".join(new[:3]))
+    check("L1: …and ends on the live buffer, the edit shown", "swapped" in _side(page, "modified"),
+          _side(page, "modified"))
+
+
 def _open_checks(page, mock, check, until, requests):
     _pick(page, until, "notes.txt")
     page.locator(_in("scm-open")).click()
@@ -274,16 +354,18 @@ def _mode_checks(page, mock, check, until, requests):
     check("a task picked still shows the task's diff, as before",
           mode.get_attribute("data-mode") == "task" and page.locator(_in("difflist")).count() == 1
           and page.locator(_in("diff-test_calc.py")).count() == 1 and page.locator(_in("scm")).count() == 0)
-    check("…and the heading names the task", mode.inner_text().startswith("Task k1"), mode.inner_text())
+    check("…and the heading names the task", _what(page).startswith("Task k1"), mode.inner_text())
+    check("…and why: the task picked last (no Task pane is drawn)",
+          _why(page) == "the task picked last" and mode.get_attribute("data-why") == "focus", _why(page))
     picker = page.locator(_tid("pane-3-diff-project"))
     check("the pane's picker offers Follow (the task) and every project",
           "task" in picker.locator("option").first.inner_text() and picker.locator("option").count() >= 3)
     picker.select_option("p2")
     until(lambda: mode.get_attribute("data-mode") == "project", timeout=4)
     check("a project picked in the pane shows its uncommitted changes (the window leaves the task)",
-          mode.inner_text().strip() == "Uncommitted changes in schoolwork"
+          _what(page) == "Uncommitted changes in schoolwork"
           and page.locator(_in("scm")).get_attribute("data-project") == "p2"
-          and picker.input_value() == "p2")
+          and picker.input_value() == "p2" and _why(page) == "this pane's project")
     page.locator(_tid("task-k1")).click()
     until(lambda: mode.get_attribute("data-mode") == "task", timeout=4)
     check("a task picked again beats the pin: its diff, Follow shown",
@@ -292,11 +374,46 @@ def _mode_checks(page, mock, check, until, requests):
     page.locator(_tid("thread-t1")).click()
     until(lambda: mode.get_attribute("data-mode") == "project", timeout=4)
     check("a thread picked: the pinned project's uncommitted changes again",
-          mode.inner_text().strip() == "Uncommitted changes in schoolwork" and picker.input_value() == "p2")
+          _what(page) == "Uncommitted changes in schoolwork" and picker.input_value() == "p2")
     picker.select_option("")
-    until(lambda: mode.inner_text().strip() == "Uncommitted changes in jarvis", timeout=4)
+    until(lambda: _what(page) == "Uncommitted changes in jarvis", timeout=4)
     check("Follow: the chat's project's uncommitted changes",
-          mode.inner_text().strip() == "Uncommitted changes in jarvis" and picker.input_value() == "")
+          _what(page) == "Uncommitted changes in jarvis" and picker.input_value() == ""
+          and _why(page) == "the chat's project")
+
+
+def _task_pane_checks(page, mock, check, until, requests):
+    """L3 (review of PR #67): a Diff pane never shows another task than a
+    drawn Task pane. Chat, Task and Diff side by side: a task picked shows in
+    both; a thread picked since leaves the Task pane on the task, and the Diff
+    with it — the caption says it is the Task pane's task and the picker is
+    off; the Task pane switched away, the Diff follows the chat again."""
+    mode = page.locator(_in("diff-mode"))
+    until(lambda: mode.count() > 0, timeout=6)
+    expand(page, until, "p1", "task-k1")
+    page.locator(_tid("task-k1")).click()
+    until(lambda: mode.get_attribute("data-mode") == "task", timeout=4)
+    until(lambda: page.locator(_pane(2, _tid("task-view"))).count() > 0, timeout=4)
+    until(lambda: page.locator(_in("diff-calc.py")).count() > 0, timeout=4)
+    check("L3: a task picked shows in the Task pane and its diff in the Diff pane",
+          mode.get_attribute("data-mode") == "task" and page.locator(_in("diff-calc.py")).count() > 0)
+    expand(page, until, "p1", "thread-t1")
+    page.locator(_tid("thread-t1")).click()
+    time.sleep(0.6)
+    check("L3: a thread picked since: the Task pane still shows the task — and so does the Diff",
+          page.locator(_pane(2, _tid("task-view"))).count() > 0 and mode.get_attribute("data-mode") == "task"
+          and page.locator(_in("diff-calc.py")).count() > 0 and page.locator(_in("scm")).count() == 0,
+          mode.inner_text())
+    check("L3: …and the caption says it is the Task pane's task",
+          mode.get_attribute("data-why") == "pane" and _why(page) == "the Task pane's task", _why(page))
+    picker = page.locator(_tid("pane-3-diff-project"))
+    check("L3: …and the picker is off while the Task pane holds the task, saying why",
+          picker.is_disabled() and "Task pane" in (picker.get_attribute("title") or ""))
+    _show(page, until, 2, "file")
+    until(lambda: mode.get_attribute("data-mode") == "project", timeout=4)
+    check("L3: the Task pane switched away, the Diff follows the chat's project again",
+          _what(page) == "Uncommitted changes in jarvis" and _why(page) == "the chat's project"
+          and picker.is_enabled(), mode.inner_text())
 
 
 def _card_checks(page, mock, check, until, requests):
