@@ -608,6 +608,8 @@ label.iconbtn.attach:hover { background: var(--bg-3); border-color: var(--border
 .edtab-mark { font-size: 10px; }
 .edtab-dot { flex: 0 0 7px; width: 7px; height: 7px; border-radius: 50%; }
 .edtab-dot.on { background: var(--text-2); }
+/* A save on its way (a slow disk): a hollow ring until it answers. */
+.edtab-dot.saving { box-sizing: border-box; background: transparent; border: 1.5px solid var(--text-2); }
 .edtab-x { padding: 0 4px; line-height: 14px; border: none; background: none; color: var(--text-muted); }
 .edtab-x:hover { color: var(--text); background: var(--bg-3); }
 .edtab:not(.on):not(:hover) .edtab-x { visibility: hidden; }

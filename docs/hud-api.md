@@ -162,7 +162,9 @@ every one of these routes asks (`kind`):
 - **What it refuses (403)**: a credential file (`hud_api.protected`: env
   files, withheld files, credential bundles), **any path with a hidden
   component inside the project** (a name starting with `.`) **except
-  `.well-known`** — as written and where it resolves — and **anything under
+  `.well-known`** — as written and where it resolves; its 403 says "hidden
+  path: not served on the preview origin", every other one "protected file" —
+  and **anything under
   Jarvis's own config and data folders** (`~/.config/jarvis`,
   `~/.local/share/jarvis`, `V2_DATA_DIR`, the sessions, spill, goals and
   voices folders; `editor_policy.jarvis_dirs`). It has no owner check by

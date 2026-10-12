@@ -1301,26 +1301,34 @@ def check_origin(handler, *, preview=False):
                 fail(400, "expected application/json")
 
 
-def _not_a_page(project, raw, target) -> bool:
+PROTECTED_PAGE = "protected file"
+# A hidden path is refused for what it is, not called a credential: a
+# `.vitepress/dist/index.html` is an ordinary build, and "protected file" sent
+# the owner looking for a secret that is not there (review of PR #49, NIT-1).
+HIDDEN_PAGE = "hidden path: not served on the preview origin"
+
+
+def _not_a_page(project, raw, target) -> str | None:
     """What the preview origin refuses beyond `protected` (review of PR #49,
-    LOW3). The preview listener has no owner check by design — the HUD frames
-    it — and it answers any loopback client, v1's `fetch_page` included
-    (loopback is allowed and 8403 is not a control port), while the Inbox is
-    rooted at `~`. So: no path with a hidden component inside the project
-    (`.docker/config.json`, `.kube/config`, `.npmrc`, a tool's dotfolder),
-    except `.well-known`; and nothing under Jarvis's own config and data
-    folders (session carriers, transcripts), wherever the project is."""
+    LOW3), as the refusal's sentence; None when it may be served. The preview
+    listener has no owner check by design — the HUD frames it — and it answers
+    any loopback client, v1's `fetch_page` included (loopback is allowed and
+    8403 is not a control port), while the Inbox is rooted at `~`. So: no path
+    with a hidden component inside the project (`.docker/config.json`,
+    `.kube/config`, `.npmrc`, a tool's dotfolder), except `.well-known`; and
+    nothing under Jarvis's own config and data folders (session carriers,
+    transcripts), wherever the project is."""
     roots = [Path(project.root).resolve()] + [Path(p).expanduser().resolve() for p in project.extra_dirs]
     for path in (Path(raw), Path(target)):
         rel = next((path.relative_to(r) for r in roots if path.is_relative_to(r)), None)
         if rel is None:
-            return True
-        if any(part.startswith(".") and part != ".well-known" for part in rel.parts):
-            return True
+            return PROTECTED_PAGE
         lexical = Path(os.path.abspath(path))
         if any(p == d or p.is_relative_to(d) for d in editor_policy.jarvis_dirs() for p in (lexical, path.resolve())):
-            return True
-    return False
+            return PROTECTED_PAGE
+        if any(part.startswith(".") and part != ".well-known" for part in rel.parts):
+            return HIDDEN_PAGE
+    return None
 
 
 def preview_route(handler, daemon, parts, query):
@@ -1331,8 +1339,11 @@ def preview_route(handler, daemon, parts, query):
     raw, target = scope(project, name)
     if target.is_dir():
         raw, target = scope(project, str(target / "index.html"))
-    if protected(raw, target) or _not_a_page(project, raw, target):
-        fail(403, "protected file")
+    if protected(raw, target):
+        fail(403, PROTECTED_PAGE)
+    refused = _not_a_page(project, raw, target)
+    if refused:
+        fail(403, refused)
     data, _ = read_file(target, 32 * 1024 * 1024)
     return binary(handler, data, mimetypes.guess_type(target.name)[0] or "application/octet-stream")
 

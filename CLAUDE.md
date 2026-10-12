@@ -1522,7 +1522,19 @@ The rules the two reviews left, in one place:
   (`applying`, L4 — it used to read dirty for a moment and pin a preview
   tab). A save's late answer lands only on its own buffer; a 409 whose etag
   is not one asks the poll route and, still unknown, tells the owner; one
-  save at a time per buffer (a double Ctrl+S sends one PUT).
+  write at a time per buffer (a double Ctrl+S sends one PUT).
+- **A Ctrl+S during a save is never dropped** (delta review, LOW-2; the
+  owner's VEX projects live on `/mnt/c`, where writes are slow): it waits for
+  the first, then **exactly one** follow-up save runs against the etag *that
+  answer returned* — further presses join it, a first 409 or error runs none
+  (the bar), and nothing new since the first means no second PUT. The tab's
+  dot is a hollow ring and the status says **saving…** (`editor-saving`,
+  `data-saving`) until the last answers; Save stays pressable meanwhile. A
+  poll whose stat crossed a save (sent while saving, or the etag moved under
+  it) is ignored — it read the disk before the write landed. The preview
+  origin refuses a hidden path in its own words, "hidden path: not served on
+  the preview origin" (NIT-1); a credential and Jarvis's own folders stay
+  "protected file".
 Checks: `editor_files_check`'s `Review*` classes, the `review of PR #49`
 blocks in `state/buffers.test.ts` and `lib/buffers.test.ts`, and the
 `_rv49_*` sections of `hud_v2_editor_check` (the mock serves `editable`,

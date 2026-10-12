@@ -696,6 +696,23 @@ class ReviewGateSymlink(Daemonised):
         self.assertEqual(self.read(".config/jarvis/allowlist.json")["kind"], "gate")
         self.assertIn("not attached", H.assemble_turn(self.project, dict(text="@.config/jarvis/allowlist.json")).text)
 
+    def test_a_gate_file_symlinked_within_its_own_folder_exempts_nothing(self):
+        """LOW-1: only `real != path` stops this one. The target sits in the
+        gate's own folder, has no protected name and is in no other credential
+        folder, so every other rule of `_readable_gate` lets it through."""
+        cj = self.home / ".config" / "jarvis"
+        target = cj / "scratch.json"
+        target.write_text('{"note": "FAKE SIDE FILE"}\n')
+        (cj / "models.json").symlink_to(target)
+        self.assertNotIn(target.resolve(), EP.Policy().gate)
+        for name in (".config/jarvis/scratch.json", ".config/jarvis/models.json"):
+            with self.subTest(name=name):
+                got = self.read(name)
+                self.assertEqual((got["kind"], got["protected"]), ("withheld", True))
+                self.assertNotIn("content", got)
+        # The real gate file beside it is still the gate.
+        self.assertEqual(self.read(".config/jarvis/allowlist.json")["kind"], "gate")
+
     def test_a_gate_path_configured_into_a_credential_folder_is_no_gate(self):
         (self.home / ".ssh" / "routing.json").write_text("{}\n")
         with patch.object(config, "ROUTING_PATH", self.home / ".ssh" / "routing.json"):
@@ -769,6 +786,22 @@ class ReviewCredentialStores(Daemonised):
         self.assertEqual(self.raw("GET", f"/p/{self.project.id}/page-link.html", port=port)[0], 403)
         self.assertEqual(self.raw("GET", f"/p/{self.project.id}/site/.well-known/security.txt", port=port)[0], 200)
         self.assertEqual(self.raw("GET", f"/p/{self.project.id}/site/", port=port)[0], 200)
+
+    def test_a_hidden_path_is_refused_in_its_own_words(self):
+        """NIT-1: a hidden build folder is not a credential, and the refusal
+        says so; a credential keeps its own word, and so do Jarvis's folders."""
+        (self.home / "docs" / ".vitepress" / "dist").mkdir(parents=True)
+        (self.home / "docs" / ".vitepress" / "dist" / "index.html").write_text("<p>docs</p>")
+        port = self.daemon.workshop_port
+        for name in ("docs/.vitepress/dist/index.html", "docs/.vitepress/dist/"):
+            with self.subTest(name=name):
+                status, payload = self.raw("GET", f"/p/{self.project.id}/{name}", port=port)
+                self.assertEqual((status, payload.get("error")), (403, "hidden path: not served on the preview origin"))
+        status, payload = self.raw("GET", f"/p/{self.project.id}/.ssh/id_test", port=port)
+        self.assertEqual((status, payload.get("error")), (403, "protected file"))
+        (self.home / ".config" / "jarvis" / "page.html").write_text("<p>x</p>")
+        status, payload = self.raw("GET", f"/p/{self.project.id}/.config/jarvis/page.html", port=port)
+        self.assertEqual((status, payload.get("error")), (403, "protected file"))
 
     def test_a_dropped_store_is_never_attached(self):
         import base64

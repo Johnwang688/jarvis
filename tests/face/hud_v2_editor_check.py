@@ -172,7 +172,8 @@ def editor_checks(browser, mock, base, check, until, guard, init_script):
                         _unmount_checks, _card_checks,
                         # The review of PR #49, each failing on f869543.
                         _rv49_env_not_utf8_checks, _rv49_project_gone_checks, _rv49_compare_loop_checks,
-                        _rv49_two_projects_checks, _rv49_crash_save_checks, _rv49_double_save_checks):
+                        _rv49_two_projects_checks, _rv49_crash_save_checks, _rv49_double_save_checks,
+                        _rv49_save_again_checks):
             _fresh(page, mock, until, keep_files=keep)
             try:
                 section(page, mock, check, until)
@@ -856,6 +857,42 @@ def _rv49_double_save_checks(page, mock, check, until):
         check("a second Ctrl+S during a save sends no second PUT, and raises no conflict bar",
               len(sent) == 1 and page.locator(_pane(2, '[data-testid="editor-conflict"]')).count() == 0,
               f"{len(sent)} PUTs")
+    finally:
+        mock.world.pop("put_delays", None)
+
+
+def _rv49_save_again_checks(page, mock, check, until):
+    """LOW-2: on a slow write (/mnt/c), type A, Ctrl+S, type B, Ctrl+S — both
+    reach the disk. The second waits for the first and then saves once against
+    the etag the first answer returned; "saving…" shows meanwhile."""
+    check("setup: calc.py open in pane 2", _open(page, until, 2, "calc.py"))
+    check("setup: an edit A", _type(page, until, 2, "\n#editA"))
+    mock.world["put_delays"] = [3.0]
+    try:
+        puts = len(mock.sent("PUT", "/projects/p1/file"))
+        page.keyboard.press("Control+s")
+        status = page.locator(_pane(2, '[data-testid="editor-saving"]'))
+        tab = page.locator(_tab(2, "calc.py"))
+        check("saving… shows on the tab and the status while the write is out",
+              until(lambda: status.count() == 1 and tab.get_attribute("data-saving") == "true", timeout=1.5))
+        check("setup: an edit B while the first save is out", _type(page, until, 2, "\n#editB"))
+        out = len(mock.sent("PUT", "/projects/p1/file")) - puts == 1 and tab.get_attribute("data-saving") == "true"
+        page.keyboard.press("Control+s")
+        check("setup: the second Ctrl+S lands while the first save is still out", out)
+        until(lambda: len(mock.sent("PUT", "/projects/p1/file")) - puts >= 2
+              and tab.get_attribute("data-dirty") == "false" and tab.get_attribute("data-saving") == "false",
+              timeout=6)
+        time.sleep(0.3)
+        sent = mock.sent("PUT", "/projects/p1/file")[puts:]
+        disk = mock.world["files"]["calc.py"]["content"]
+        check("Ctrl+S during a save is not dropped: one follow-up, against the etag the first answer returned",
+              len(sent) == 2 and sent[1].get("expected_etag") == etag_of(sent[0].get("content", ""))
+              and "#editA" in sent[0].get("content", "") and "#editB" not in sent[0].get("content", "")
+              and sent[1].get("content") == disk and "#editA" in disk and "#editB" in disk,
+              f"{len(sent)} PUTs")
+        check("…and it ends clean, with no conflict bar and no saving… left",
+              tab.get_attribute("data-dirty") == "false" and status.count() == 0
+              and page.locator(_pane(2, '[data-testid="editor-conflict"]')).count() == 0)
     finally:
         mock.world.pop("put_delays", None)
 
