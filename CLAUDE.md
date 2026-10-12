@@ -2879,12 +2879,23 @@ one (`npx jarvis hud install`, `npm exec -c 'cp … <allowlist>'`), and layer
 4 no longer auto-allows `uv run rm -rf build`. A reader hazard is a certain
 write only of what it writes (PR #24's follow-ups). gitops: `ls-remote -o`
 and pull's `--cleanup` take the next word (PR #65's round-3 leftovers).
-Free checks: `rules_check` `runner_checks` (19 refused by `decide`, 11 gate
-writes refused, 48 asked that main allowed, 37 of main's verdicts kept —
-through `decide`, `static_verdict` and real `dispatch` under an allowlist
-entry for every stem, modes ask and all, never run) and
-`hazard_certainty_checks`; v2 `permissions_check` `runner_checks`;
-`gitops_check` `unnamed_repository_checks`. 16 guard removals each bite.
+**The review of #75** added one work budget per line (a line past it is too
+complex to judge: ASK, never covered, always-ask in v2 — `npx --x ` sixty
+times took 139 s in the gate detector, and a thousand nested runners raised
+`RecursionError` on main), every hazard on a reader's line kept (an
+exec-only option no longer hides a write behind it), the table's reading of
+wrapper options in `rules.unwrap` itself (`env -u ls rm -rf build` ran in
+`run_readonly` on main), writers/shells/interpreters behind a runner asked,
+yarn workspaces and corepack in the table. Free checks: `rules_check`
+`runner_checks` (25 refused by `decide`, 11 gate writes refused, 60 asked
+that main allowed, 41 of main's verdicts kept — through `decide`,
+`static_verdict` and real `dispatch` under an allowlist entry for every
+stem, modes ask and all, never run), `hazard_certainty_checks` (40 writes
+onto the allowlist and 4 onto a credential env file DENY), `unwrap_checks`
+and `cost_checks` (42 forms, 60 and 1,000 deep, seven readers, each under
+100 ms); v2 `permissions_check` `runner_checks`; `gitops_check`
+`unnamed_repository_checks`. 16 guard removals each bite in round 1, and 16
+more in the review round.
 
 **The Browser's action rules and reviewer, BR-9a (2026-10-12; amendment 1 to
 the Browser plan, §B.3–§B.5, decisions BD-1..BD-4). Pure, and not wired yet:
@@ -5066,37 +5077,72 @@ jarvis/
   its own `_RUNNERS` copy is gone, and it knew neither npx, npm, pnpm, yarn nor
   bun, so `npx jarvis hud install` was ALLOW), the gate-state write detector
   (`_started_touches`) and v2's always-ask stems (`rules.started_commands`:
-  `npx vercel --prod` is a production deploy). The rules in `decide`, judged
-  beside the old `unwrap` reading with the worse winning, so the table can
-  only add a refusal there:
+  `npx vercel --prod` is a production deploy) — and, since the review of
+  #75 (HIGH 3, older than the PR), `rules.unwrap` itself, so the allowlist's
+  stems and `run_readonly` read wrapper options from the table too. The
+  rules in `decide`, judged beside the stem-by-stem reading with the worse
+  winning:
   - a **wrapper** (`env`, `nohup`, `timeout`, `xargs` …) is judged by what it
-    runs, its options now read from the table — `env -u NAME`, `exec -a
-    NAME` and `xargs -a FILE` take a value, and `env -u ls rm -rf ~` used to be
-    the ALLOW of `ls` (and `env -u ls cp x <allowlist>` ran unasked);
+    runs, its options read from the table — `env -u NAME`, `env -C`/`-a`/
+    `-f`, `exec -a NAME`, `xargs -a FILE` and `time -f FMT` take a value.
+    `env -u ls rm -rf build` used to be the ALLOW of `ls`, which
+    `run_readonly` — **ungated, held by workflows and sub-agents** — then
+    *ran*, rm and all; `env -u python3 rm …` was covered by a `python3`
+    allowlist entry (on main a v1 gate ran it with nobody asked). A line whose
+    program cannot be told (`rules.unwrap_sure` is None: an unknown option,
+    `env -S` past its bound) is neither run by `run_readonly` nor covered by
+    an entry, and `run_readonly` refuses `xargs` outright (its `-a FILE`
+    names programs' arguments no check sees);
   - a **runner** keeps its own verdict unless what it starts is refused or
     asks **for a reason of its own** (`rm`, `git push`, `python -c`, a reader
-    in a writing form, Jarvis's CLI); a program that is merely unknown asks
-    nothing more, so `npx create-vite` and `npx some-package` stay as main
-    judged them (`rules._UNLISTED` is the identity-compared verdict for
-    "unknown");
+    in a writing form, Jarvis's CLI, and — MED 1 of the review — any writer,
+    shell or interpreter off the allow list: `tee`, `awk`, `sh x.sh`, `perl`,
+    `crontab`, `powershell.exe`, which were the ALLOW of `uv` behind it); a
+    program that is merely unknown asks nothing more, so `npx create-vite`
+    and `npx some-package` stay as main judged them (`rules._UNLISTED` is
+    the identity-compared verdict for "unknown");
   - a **command line** a runner hands a shell (`npm exec -c`/`--call`, `bun
     exec`, pnpm's shell mode) is judged as a line by the same rule
     (`_line_verdict`);
   - a program word only known when it runs (`uv run ${CC}foo`), or an option
     the table does not know that leaves the program unclear (`uv run
     --frobnicate x pytest`), **asks, never allows**.
-  **The allowlist's stem rule is unchanged**: `command_targets` still uses
-  `unwrap`, so an entry for `uv` or `npx` is a yes to whatever it runs
-  (`uv run rm -rf build` is covered by a `uv` entry) — DENY still wins first.
-  `python -m runpy` runs a *module*, not a program: `decide` has no per-module
-  rule but Jarvis's own (`runs_jarvis`, which peels it), so nothing moved
-  there. Differential against 481eb35 over 32,480 strings (the usual corpus
-  from both trees plus a runner × command cross-product): of main's own
-  29,023 corpus strings, 5 moved — 3 stricter and the 2 below; every other
-  move is a runner line, ALLOW→ASK where the program asks on its own, or
-  ALLOW/ASK→DENY for an owner op, a credential env write or a gate write
-  behind one; of 25 unknown programs behind npx, 24 kept main's verdict (the
-  25th is `${X}y`).
+  **The allowlist's stem rule is unchanged**: `command_targets` peels only
+  `_WRAPPERS`, never a runner, so an entry for `uv` or `npx` is a yes to
+  whatever it runs (`uv run rm -rf build` is covered by a `uv` entry) — DENY
+  still wins first. The table also knows yarn's `workspace <x> exec`,
+  `workspaces foreach … exec` and `corepack <pm> …` (MED 2). `python -m
+  runpy` runs a *module*, not a program: `decide` has no per-module rule but
+  Jarvis's own (`runs_jarvis`, which peels it), so nothing moved there.
+
+  **One work budget per line bounds all of it** (review of #75, HIGH 1).
+  Each option the table does not know doubles where a program may stand, and
+  every reading was judged again, runners inside runners: `npx --x ` forty
+  times took 7.5 s in `decide` and 17 s in `command_touch`, sixty times 52 s
+  and 139 s — synchronously, in dispatch and v2's permit. Now every reader
+  charges `rules.work_scope`'s budget (`WORK_CAP` 20,000 words: a starts()
+  walk costs its words, judging a reading costs its words; nested scopes
+  share the outermost, so `decide`'s owner ops and gate-state reading spend
+  the same one), each reading is judged once (`_Work.memo`, the gate
+  detector's `walked`, the vex walk's `seen`), `starts()` refuses more than
+  `STARTS_READINGS` (32) places, the vex walk passes `depth + 1` per wrapper
+  or runner (L1: a thousand nested `npx`, `uv run`, `env` or `nohup` raised
+  `RecursionError` out of `decide`, on main as on 16675fb) and has its own
+  words cap (its reading is cached per
+  line), `_peel_runner` raises past its caps instead of stopping (L2), and
+  `protected_state` resolves and judges each name once per line. **Past any
+  of it the line is too complex to judge**: ASK, never ALLOW, never covered
+  by an allowlist entry (`rules.runners_unsure`, which `permissions.allows`
+  reads), always-ask in v2 (`too-complex`, or the gate detector's opaque
+  touch). `cost_checks` judges 42 runner and wrapper forms nested 60 and
+  1,000 deep, and four wide ones, through seven readers in under 100 ms
+  each. Differential (review round, the reviewer's harness over 37,011
+  strings: every gate layer, `run_readonly` and v2's layers 1 and 2) — every
+  verdict looser than main or than 16675fb is one of the by-design reads: a
+  wrapper option's value no longer read as the program (`env -u FOO pytest`
+  is ALLOW, `env -u FOO cat README.md` runs in `run_readonly`), or a reader
+  that only reads a gate file (below); no write onto a gate file or a
+  credential env file is looser than main.
 
   **A reader hazard is a certain write only of what it writes** (same day,
   PR #24's follow-up 1). Any hazard used to make every operand a certain
@@ -5108,12 +5154,31 @@ jarvis/
   (a named output: `sort -o F`, `tree -o F`, `ss -D F`, `less -o F`, `find
   -fprint F`, ugrep's `--save-config=F`, a sed `w F`, `uniq`/`xxd`'s output
   operand; a long option abbreviated below three letters is not one); the
-  rest is an uncertain touch, asked and never covered. The two loosenings the
-  differential found are this: `find . -name .env -exec cat {} \;` and `find
-  . -name '.env*' -exec grep KEY {} +` were DENY as "writes onto a credential
-  env file" and are ASK; the secrets layer still refuses both in `run_command`
-  and at v2's layer 1. `ug`'s `--no-config` counts only before `--`
+  rest is an uncertain touch, asked and never covered. **Every hazard on the
+  line counts, the strongest kept** (`rules._merged`; review of #75, HIGH 2:
+  each reader returned the first danger it met, so an exec-only option
+  before a real write — `sort --compress-program=gzip -o <G>`, `find <G>
+  -exec cat {} + -delete`, `less -k k -o <G>`, `tree -R -o <G>`, `ss -K -D
+  <G>`, `grep --pager=less --save-config=<G>` — dropped a write onto the
+  allowlist from DENY to ASK, run on a yes). A find's `-exec`/`-ok` program
+  is judged through the table (`_execs_a_writer`): `-exec env|nohup|timeout
+  5|uv run|xargs rm`, `-exec sed -i`, `-exec sort -o {}` and any program not
+  known only to read write what they are handed. `sed -i 'w <G>'` keeps both
+  its in-place edit and the `w` file (LOW 3). The loosenings the
+  differential found are reads: `find . -name .env -exec cat {} \;` and
+  `find . -name '.env*' -exec grep KEY {} +` were DENY as "writes onto a
+  credential env file" and are ASK — the secrets layer still refuses both in
+  `run_command` and at v2's layer 1 — and `grep --pager x <G>`, `less
+  --save-marks <G>`, `rg --pre cat x <G>`, `sort -o out.txt <G>` read the
+  allowlist and are ASK. `ug`'s `--no-config` counts only before `--`
   (follow-up 3).
+
+  **Not seen, said plainly:** a runner's own configuration can run
+  something the line never names — `npx --node-options=--require=x.js`,
+  `NODE_OPTIONS` in the environment, an `.npmrc` `script-shell`, `npm exec
+  --package=git+https://…` (a package from anywhere), a `pyproject.toml`
+  `[tool.uv]` source — and none of it is read here; neither are
+  package.json scripts (`npm run x`, `yarn x`).
 - **Desktop control is confined to an app allowlist** (2026-07-31).
   `config.DESKTOP_APPS` is the whole door: no desktop tool accepts a window
   title, handle, or executable path, only a registered app name, so the model
