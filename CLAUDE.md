@@ -440,7 +440,7 @@ from nothing — `HOME` is `BROWSER_DIR/home`, so Chrome's NSS store and font
 cache stay in the credential folder; locale variables only, no `JARVIS_*`,
 key, display, `PULSE_SERVER` or D-Bus. `TMPDIR` is left alone on purpose:
 Chrome's singleton socket lives there and a long path crashed it (measured).
-Downloads are off until BR-1b. **Routes** (`browser/routes.py`): every one
+Downloads are BR-1b's (below). **Routes** (`browser/routes.py`): every one
 `projects.owner_only` plus a strict loopback Host (its own copy — a module
 importing `terminals` fails `terminal_check`) and no query, checked before a
 body is read or Chrome started; a load reports a failure by its `net::ERR_…`
@@ -511,6 +511,117 @@ follow-up for BR-1c: count the panes per port and close it when the last one
 leaves). No idle stop or
 instance cap yet (BR-1c), and **BD-10's memory ceiling is not set** (BR-1c's):
 one tab ~365 MiB PSS, ~490 MiB after the attack pages, Private ~470 MiB.
+
+**The Browser's stream, input, hold, dialogs, tabs and files, BR-1b
+(2026-10-12; plan §2 "The stream", §3, §8, §11; amendment 1 §B.3 H3/H8,
+§B.4, §B.8–§B.9; contract in `docs/hud-api.md`).** Backend only; BR-3b draws
+it with BR-2's `remote.ts`/`drive.ts`. `browser/stream.py` (the socket, its
+messages, tickets, `TabStream`), `browser/files.py` (downloads, uploads) and
+the host's CDP half. **A socket per tab per window**, the terminal's pattern
+on `ws.py`: owner-only routes, a **single-use 30 s ticket bound to one tab**
+(`POST /browser/tabs/<id>/ticket`; the attach's `?ticket=` is the one query a
+`/browser` route takes), a tab another window shows taken only on its yes
+(20 s, else refused), and **every attach publishes `browser_attached` with
+exactly `{tab_id, at}`**. **Frames** are binary messages (an 8-byte header:
+uint32 id, uint16 CSS width and height, big-endian; then the JPEG,
+quality 70), **one in flight**: the next goes only after the window's `ack`
+("up to here", BR-2's `FramePipe`), and what Chrome sends meanwhile
+replaces one waiting slot — Chrome's own frames are acked at once, so it
+keeps capturing at the page's repaint rate and the newest picture is what
+goes next (a slow window costs Chrome's encoding, never a backlog); a window
+that attaches gets the current picture at once (`_last`, forgotten whenever
+the screencast stops, since an unwatched page can change); a tab no window
+streams, or a window that says `visible: false`, is not cast. **Every message
+is validated in the daemon** (`stream.parse`: exact fields, types, bounds —
+BR-2's `CdpKeyEvent`/`CdpMouseEvent`, text ≤ 16 KiB with no control but tab
+and line ends, x/y from BR-2's `OFF_PAGE` (-1) to 4096, wheel ±5000; a bad
+one is `{t:"bad", reason}`, a fixed sentence, and acts on nothing).
+**The hold** (H3): with any `daemon.approvals.pending()`, input is dropped on
+arrival and again on the Browser's thread immediately before each CDP event
+(`_pump`, one event at a time), `held` is sent, and **the moment a card is
+raised every tab's queue is dropped** (`BrowserHost._observe`, a bus observer
+on `approval_requested`, synchronous before the broker waits), with a
+`_drop_through` mark so a message received before the card is never sent
+after it — a dispatch-time check alone would have replayed input that sat in
+the queue through a card no input arrived during. The owner's `navigate`,
+`history`, `POST /browser/tabs` with a URL and `files` answer 409 under a
+card; Resume is refused (`held`). **A press a card cut off never clicks**, the
+daemon's rule and not only the window's: BR-2 assumed a release at
+`OFF_PAGE` with `clickCount: 0` fires no click, and **Chrome 155 fires
+`click` on `<html>`** (the common ancestor of the press and the release),
+`detail: 1`, whatever `clickCount` says — measured by the fixture BR-2 asked
+for. So a release of a button pressed before a hold (`tab.pressed` keeps the
+stream's `hold_count` at the press), and any release off the page, is sent
+as a pointer move with no button down (`_let_go`, Blink's own reset): no
+`mouseup`, no `click`, and the next click is ordinary; a socket that drops
+mid-press is let go the same way (never under a card). Keys also record
+the hold count before dispatch; a keyup or char from before a later card
+is dropped, so Space never activates after the card. **Owner input
+stamps** every tab it reaches (keys but a lone modifier, text, wheel, press,
+release, drag, dialog and chooser answers — never a plain move), and while
+an agent holds the tab pauses it **before** the event is queued
+(`{t:"agent", kind:"paused", by:"owner"}`); the `{t:"agent"}` channel
+(`driver`, `action` capped at 60, `paused`, `list` of 50, replayed on attach)
+and `owner_state(tab_id)` are BR-9b's to drive. **Dialogs** go to the window
+(`{t:"dialog", id, kind, message, default}`, cleaned to 1000) and are
+answered there; dismissed after `DIALOG_TIMEOUT_S` (60), and at once with no
+window attached, with automatic dismissal waiting under a card. An open
+dialog drops further input to that tab on arrival, and in the pump so does an
+earlier event Chrome has not answered within `DELIVER_WAIT_S` (never on
+arrival: every event of an ordinary burst finds its predecessor in flight,
+which dropped 190 of 200 keys — PR #77 delta review), with one
+`input_dropped` notice; nothing is banked for later. **Pop-ups** open as tabs and the
+opener's window hears
+`{t:"popup", tab_id}` (the listing carries `opener`); **the cap stays 12 in
+all** (decision B-13 "12 in all", which also bounds each profile's Chrome;
+the brief said per instance) and **past it the pop-up is refused**
+(`popup_refused`), never an older tab closed: an older tab may hold the
+owner's work, and a page could otherwise evict the owner's tabs one by one.
+`POST …/activate` brings a tab to the front. **Downloads**: Chrome writes
+into `downloads/<profile>/incoming/`; a finished one is copied by fd to
+`downloads/<profile>/<id>/<cleaned name>` (the folder 0700, made fresh, the
+file 0600 `O_EXCL|O_NOFOLLOW`; `files.clean_name`: last
+component, invisible and Windows-reserved characters out, no leading dot,
+200 UTF-8 bytes keeping the extension) and Playwright's copy deleted;
+listed and served
+owner-only (`GET /browser/downloads[/<id>]`, `application/octet-stream`,
+attachment, `nosniff`, the policy narrowed to `default-src 'none'`, and
+**refused for any `Sec-Fetch-Dest` but `document`/`empty`** — a downloaded
+HTML or script must never run on the HUD's origin, where it could POST
+`/approvals`); **an executable is held** (`act_rules.executable_download`, or
+its first bytes `MZ`/ELF/`#!`), 409 until BR-9b's card, deletable; executable
+suffixes also cover scripts and launchers (`.js`, `.py`, `.com`, `.url`,
+`.desktop` …), ignoring case and including `x.pdf.exe`; a Private
+download lives in `downloads/private/<ctx>/` and goes with its context or
+Private Chrome. **`set_files`**: a page's file
+chooser (`page.on("filechooser")`, so Playwright intercepts every one) is
+answered only by `POST …/files {chooser, files: [{project, path}]}`, each
+judged by **`act_rules.upload_refusal` (H8), called**, then read through an
+`O_NOFOLLOW` fd whose realpath and device/inode must match H8's judgment,
+and handed to Chrome
+as bytes (≤ 16 files, 50 MB in all). Ctrl+C's `{t:"selection"}` reads the
+selection in an isolated world (`jarvis-copy`; a password field gives "").
+`/status` → `browser` gains counts only (`streams`, `downloading`,
+`popups_refused`). Free suite: **`tests/v2/browser_routes_check.py`** (35:
+13 pure — every BR-2 shape parses, ~50 wrong shapes and bounds refused, names,
+tickets, a `../` name kept in its folder — and 22 on one real headless Chrome
+at 3 tabs, its resolver answering nothing and its connector loopback only:
+ticket and takeover, frames under a slow reader, keys/text/mouse/wheel at a
+logging page, the hold and no replay, the cut-off press, the agent channel,
+selection, dialogs with beforeunload, pop-ups and the cap, downloads, uploads,
+a Private tab, nothing on the bus or in the log, stop); `frame_check` walks
+the new routes and a served download's headers. Guard removals in scratch
+copies, 10 of 10 bite with a passing control: no hold, held input replayed,
+an unbounded backlog, a `../` name, no card-raised drop, a cut-off press
+released as is, a reusable ticket, downloads not owner-only, H8 not asked, a
+bad message delivered. Measured (Chrome 155, 1280×800 at DPR 1, quality 70):
+60 fps with an immediate ack on an animated page, ~6 KB a frame there; the
+tree's PSS 270–400 MiB through the suite. **Stated limits:** Chrome encodes
+at the repaint rate however slow the window (the M1 spike's question); no
+download size cap (a page can fill the disk the profile is on); the window's
+`takeover` answer is not in BR-2's `isTakeover`
+control list (BR-3b adds it); a page tracking a drag sees no `mouseup` for a
+press a card cut off.
 
 **A message sent while a turn runs is never a dead end (2026-10-08, design
 §5.1/§11.8/§18; free suite `tests/v2/steer_check.py`).** It used to 409, and
@@ -1772,6 +1883,107 @@ mutations bite: dropping the migration fails four `workspace.test.ts` cases
 and the headless section, carrying `keepOrigin` across an origin mismatch
 fails the grant case. A stored seed in any suite may still say `"preview"`
 (it migrates); new ones should not.
+
+**Dev servers an agent started, AO-1a (2026-10-12; plan
+`docs/plans/2026-10-12-hud-browser-plan-amendment-2.md` §B and §D.4, review
+decisions R-2 and R-7; the decisions file wins).** Pure and **not wired yet**:
+AO-1b's watcher (`devservers.py`), routes and daemon hooks use it.
+`jarvis/v2/devlisten.py`:
+- **Rows.** `parse_rows` reads `/proc/net/tcp`/`tcp6`: LISTEN rows only, the
+  kernel's native word order, binds on `127.0.0.1`, `0.0.0.0`, `::1`, `::` and
+  `::ffff:127.0.0.1`. Another 127/8 address is kept as `odd_loopback`, to be
+  counted and refused; a LAN bind is dropped.
+- **Ports first.** `cheap_refusal` (rules 1-2) runs before anything about a
+  process is read. `port_rules` is `policy.refused_ports` plus the daemon's
+  HUD, API, workshop, gate and bound ports; then the seven service ports, and
+  the ephemeral range read from `ip_local_port_range` (inclusive; fallback
+  32768-60999). A socket owned by another uid (the daemon's uid is passed in)
+  and a bind class that is neither loopback nor wildcard are refused there too.
+- **Facts.** `ProcReader` reads over an injectable `/proc` and cgroup root and
+  counts every read in `Work` (counts only, for `/status`). **It never reads
+  `cwd`, `cmdline` or `exe`.** It fails closed on EACCES, a vanished pid, a
+  start time that changed, or a parent younger than its child.
+  - **The ancestor walk** reads `stat` only, at most `ANCESTRY_MAX` = 64. A
+    chain still going past that is `truncated`, and rule 6 refuses it as a
+    terminal's: fail closed, never attributed.
+  - **The fd scan is bounded.** `socket_owners` makes at most `FD_SCAN_MAX` =
+    50,000 readlinks a scan (a pid's folder is walked lazily, so a process
+    with a million fds costs no more). Past it the scan stops, counts the pids
+    it left in `Work.fd_skipped`, and answers `complete` False;
+    `attribute(scan_complete=False)` then answers pending ("scan") and
+    attributes nothing this poll. `scan_complete` has no default, so a
+    caller that forgets the scan's answer fails rather than trusting it.
+  - **A shared socket fails closed:** if any holder is Jarvis's own, a
+    terminal's, or a pid whose facts could not be read (it could be either),
+    the listener is refused, whatever another holder's tag says.
+- **The origin tag is the attribution (R-2).** There is no folder rule, and an
+  untagged process is refused. `/proc/<pid>/environ` is read only for the
+  owning pid (the earliest-started pid passing rules 4-7), only after rules
+  1-7, `O_NONBLOCK`, at most 128 KiB. The bytes go into a bytearray searched
+  raw for `JARVIS_ORIGIN_TAG=` at an entry's start (exactly 32 lowercase hex,
+  NUL-ended), which is zeroed in a `finally`. They are never decoded, logged
+  or raised with: a read error is `unreadable` with no message, and **the
+  module logs nothing**. A found tag and `untagged` are cached per `(pid,
+  start)`; **a failed read (`unreadable`) is never cached**, so the next poll
+  reads again. **Limit, stated: a cached tag outlives an `exec` of the same
+  pid** — `exec` keeps the start time, so a process that execs a program with
+  another environment is still judged by the one first read. A pid reused by
+  another process has another start time and is read afresh.
+- **Turn windows.** `Sessions` holds the tags (live, then `GRACE_S` 600 s
+  after close) and the turn windows, which only Claude and Codex turns open: a
+  listener counts if first seen in `[start, end + 600 s]` from a process
+  started at or after `start − 2 s`.
+- **`attribute()`** applies rules 1-11 in order. It answers attributed, a
+  refusal class, or pending: `scan` for an incomplete fd scan, `life` for
+  rule 10's two sightings 2 s apart, `probe` for rule 11.
+  - **A socket several processes hold fails closed.** If any holder is
+    refused as Jarvis's own (rule 5) or as a terminal's (rule 6), the listener
+    is refused with that class, even when another holder carries a live tag.
+    Only with no such holder does the earliest-started pid passing rules 4-7
+    own it (this replaced "earliest passing pid owns it" in all cases).
+  - Rules 7 and 9 are judged at the listener's first sighting, so a verdict
+    waiting on its probe cannot turn `stale_tag` as the clock passes the
+    session's grace.
+- **The probe's rules.** `parse_response` judges at most 4 KiB, and only the
+  status class and booleans survive:
+  - a page is a 3xx; a 2xx that is `text/html`, or untyped with markup; any
+    other status only `text/html` with markup;
+  - `X-Frame-Options` DENY/SAMEORIGIN (any token of a comma list), or an
+    enforced `frame-ancestors` without `*` or `http://localhost:*` in any
+    comma-joined policy, is `no_frame` (a 3xx too); the last `Content-Type`
+    wins;
+  - the header block ends at the earlier of CRLF-CRLF and LF-LF, an obs-fold
+    continuation (a line starting with a space or tab) is joined onto the
+    previous header with one space, and markup needs a tag name that ends
+    (`<header` and `<htmlx` are not `<head` or `<html`);
+  - a silent close or a TLS alert asks for one TLS probe.
+
+  `probe_address` (127.0.0.1 or `::1`, with the port judged again) and
+  `probe_request` (one plain `GET /`) are its other rules.
+- **`arbitrate()`** takes the claims within 600 ms of the first: the
+  earliest that `shows` the source, else the newest `focused_at`, ties to the
+  earliest. A later claim, or a window's second, loses. A malformed claim (a
+  field of the wrong type or out of range, or not a `Claim`) is dropped, never
+  raised on and never the one that opens the window.
+
+Free suite: `tests/v2/devlisten_check.py`, 258 checks over fixture `/proc`
+trees, plus a read-only parse of the real `/proc/net` tables.
+- A fake key in a fixture `environ` appears in no return value, exception,
+  log record or counter.
+- A monitor shows that the module opens no `cmdline`, `cwd` or `exe`, and no
+  real `environ`.
+- Work is counted, not timed: a steady poll reads 2 files, and one candidate
+  costs one fd scan.
+
+All 24 mutations bite: every one in §H's AO-1a table, plus the review's
+guards. The review round (PR #76) ran 53 guard removals against the fixed
+module, each failing the suite: the review's own 20 (13 already bit; the seven
+it had survived are the buffer zeroing, a read cut at the cap reported
+whole, the tag-cache key's start, rule 7's per-window conjunction,
+comma-joined CSPs, X-Frame-Options lists and the last `Content-Type`),
+`environ` opened following a symlink, `find_tag` taking a later occurrence,
+and every guard of the fixes above. A grep pin allows only `daemon`,
+`hud_api`, `terminals` and `devservers` to name the module.
 
 **VEX backend, VX-1 (2026-10-11; editor plan
 `docs/plans/2026-10-09-hud-editor-plan.md` §2.9/§3, decisions file beside it

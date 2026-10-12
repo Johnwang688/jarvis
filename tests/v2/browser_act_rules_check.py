@@ -618,6 +618,12 @@ class Floors(World):
         for name, mime in (("report.pdf", "application/pdf"), ("photo.png", ""), ("", "")):
             self.assertFalse(R.executable_download(name, mime))
 
+    def test_review_executable_extensions(self):
+        for ext in "js jse wsf wsh vbe vbs chm url scf msc appref-ms com py pyw desktop command hta lnk ps1 psm1 reg jar msi msp scr cpl bat cmd exe dll sh run appimage deb rpm pkg dmg".split():
+            for name in ("x." + ext.upper(), "x.pdf." + ext.upper()):
+                with self.subTest(name=name):
+                    self.assertTrue(R.executable_download(name))
+
     def test_the_floors_are_asks_even_under_the_budget(self):
         self.assertKind(facts("navigate", nav_url="https://x.test/login", judged_this_turn=39), R.ASK, R.LOGIN)
         self.assertRefused(facts("navigate", nav_url="https://x.test/login", judged_this_turn=40),
