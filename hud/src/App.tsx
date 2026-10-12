@@ -49,6 +49,7 @@ import { diffMode, diffWhy, type DiffMode } from "./lib/scm";
 import { BrowserTab, type BrowserRequest } from "./components/BrowserTab";
 import { judgeBrowserUrl } from "./lib/browser";
 import { daemonPortsNow } from "./state/daemonPorts";
+import { installFrameGuard } from "./state/frameguard";
 import { ApprovalQueue, ApprovalVeil } from "./components/Approvals";
 import { CrashProbe, DialogBoundary, WorkspaceBoundary } from "./components/Boundary";
 import { DecisionsLog, DiscordPanel, SchedulesButton, UsagePanel } from "./components/Panels";
@@ -212,6 +213,10 @@ export default function App() {
   // refuses while a card is up, and a download's chain a card came into is
   // dropped (state/vex.ts) — said from here for the same reason.
   useLayoutEffect(() => vex.setBlocked(blocked), [blocked]);
+  // And no Browser page takes the keyboard on its own (R-1, state/frameguard):
+  // the window-level listeners, installed from here, above the boundary, in a
+  // layout effect so they are on before any frame can load.
+  useLayoutEffect(() => installFrameGuard(), []);
   useSyncExternalStore(vex.subscribe, vex.getVersion);
   // Whether each drawn pane's project is a VEX project: the strip offers the
   // VEX view only then (lib/vex.ts `offersVex`). Asked once per project.
@@ -2878,6 +2883,9 @@ export default function App() {
       case "browser":
         return (
           <BrowserTab
+            pane={n}
+            slot={info.slot}
+            drawn={info.drawn}
             projectId={paneProject(spec, n)}
             url={spec.browserUrl}
             keepOrigin={spec.keepOrigin}

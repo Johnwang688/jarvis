@@ -26,11 +26,23 @@
 // because it was once allowed. Loading the project root pins the pane to that
 // project (`onProjectRoot`), as opening a file pins a File pane. A terminal's
 // "Open in Browser" arrives as a `request` (WP-E), judged like a typed URL.
+//
+// **A framed page never takes the keyboard on its own** (R-1, amendment 2
+// §E.8). The iframe is FrameHost's, made imperatively, and the frame guard
+// (state/frameguard.ts) removes it the moment it gains focus without the
+// owner's gesture: the pane then says "This page took the keyboard · Reload".
+// The owner's own load — Load, Enter in the URL box, Project root, the
+// keep-origin switch, Reload — is a gesture for that frame until 2 s after
+// its `load`; a stored URL restored at mount and a terminal's "Open in
+// Browser" are not. Reload loads the same URL again, judged again.
 
 import { useEffect, useRef, useState } from "react";
 import { judgeBrowserUrl, judgeKeepOrigin, keptOrigin, originOf, sandboxFor, workshopUrl } from "../lib/browser";
+import { frameKey } from "../lib/frameguard";
 import { noPointerFocus } from "../lib/talkkey";
 import { useDaemonPorts } from "../state/daemonPorts";
+import { cancelLoad, ownLoad } from "../state/frameguard";
+import { FrameHost } from "./FrameHost";
 
 /** "Open in Browser" from a terminal link: a URL, and a number so the same URL twice loads twice. */
 export interface BrowserRequest {
@@ -39,6 +51,10 @@ export interface BrowserRequest {
 }
 
 export function BrowserTab(props: {
+  /** The pane's id, its slot (what the owner reads) and whether this render draws it. */
+  pane: number;
+  slot: number;
+  drawn: boolean;
   projectId: string | null;
   /** The URL this pane last loaded (stored), loaded again at mount if it still passes. */
   url?: string;
@@ -62,12 +78,19 @@ export function BrowserTab(props: {
   const [typed, setTyped] = useState(props.url || "");
   const [src, setSrc] = useState("");
   const [reason, setReason] = useState("");
+  // The frame guard removed this tab's page: it took the keyboard (memory
+  // only, never stored — the tab and its URL stay).
+  const [stolen, setStolen] = useState(false);
+  // Every load asked for is a fresh frame (FrameHost), the same URL included.
+  const [load, setLoad] = useState(0);
   const restored = useRef(false);
   const handled = useRef<number | null>(null);
   const latest = useRef(props);
   latest.current = props;
+  const key = frameKey(props.pane, 0);
 
-  const go = (raw: string) => {
+  /** Load `raw`, judged; `own` when it is the owner's own action on this pane (a gesture for its frame). */
+  const go = (raw: string, own = false) => {
     const p = latest.current;
     const v = judgeBrowserUrl(raw, ports);
     if (!v.ok) {
@@ -75,7 +98,11 @@ export function BrowserTab(props: {
       setReason(v.reason);
       return false;
     }
+    if (own) ownLoad(key);
+    else cancelLoad(key);
     setReason("");
+    setStolen(false);
+    setLoad((n) => n + 1);
     setSrc(v.url);
     p.onLoaded?.(v.url);
     // Another port, host or scheme: the grant stays with the origin it was given for.
@@ -126,10 +153,10 @@ export function BrowserTab(props: {
           onChange={(e) => setTyped(e.target.value)}
           onKeyDown={(e) => {
             e.stopPropagation();
-            if (e.key === "Enter" && known) go(typed);
+            if (e.key === "Enter" && known) go(typed, true);
           }}
         />
-        <button type="button" data-testid="browser-go" disabled={!known} onClick={() => go(typed)}>
+        <button type="button" data-testid="browser-go" disabled={!known} onClick={() => go(typed, true)}>
           Load
         </button>
         <button
@@ -140,7 +167,7 @@ export function BrowserTab(props: {
             if (!props.projectId || workshopPort === null) return;
             const u = workshopUrl(props.projectId, "index.html", workshopPort);
             setTyped(u);
-            if (go(u)) props.onProjectRoot?.(props.projectId);
+            if (go(u, true)) props.onProjectRoot?.(props.projectId);
           }}
         >
           Project root
@@ -163,7 +190,11 @@ export function BrowserTab(props: {
               data-origin={offer.origin}
               checked={!!grant}
               disabled={!!props.blocked}
-              onChange={(e) => props.onKeepOrigin?.(e.target.checked ? offer.origin : null)}
+              onChange={(e) => {
+                // The page reloads under the new sandbox: the owner's own load.
+                if (!stolen) ownLoad(key);
+                props.onKeepOrigin?.(e.target.checked ? offer.origin : null);
+              }}
               onKeyDown={(e) => e.stopPropagation()}
               onKeyUp={(e) => e.stopPropagation()}
             />
@@ -176,17 +207,35 @@ export function BrowserTab(props: {
           {reason}
         </div>
       ) : null}
-      {src ? (
-        // Keyed by the sandbox: its flags apply when the frame navigates, so a
-        // change reloads the page under the new ones.
-        <iframe
-          key={grant ? "keep" : "opaque"}
-          className="browserframe"
-          data-testid="browser-frame"
-          data-keep-origin={grant ? "true" : "false"}
-          title="Browser"
+      {src && stolen ? (
+        // HUD chrome, React text only: never the page's words, never a card's
+        // colours or buttons. Under a card it is disabled (and inert).
+        <div className="pad stolen" data-testid="browser-stolen" role="status">
+          <span>This page took the keyboard</span>
+          <span aria-hidden="true">·</span>
+          <button
+            type="button"
+            className="quiet"
+            data-testid="browser-stolen-reload"
+            disabled={!!props.blocked || !known}
+            title="Load this page again"
+            onClick={() => go(src, true)}
+          >
+            Reload
+          </button>
+        </div>
+      ) : src ? (
+        // The sandbox's flags apply when the frame navigates, so a change of
+        // them makes a fresh frame (FrameHost), reloading the page under them.
+        <FrameHost
+          pane={props.pane}
+          slot={props.slot}
+          drawn={props.drawn}
           src={src}
           sandbox={sandboxFor(!!grant)}
+          keepOrigin={!!grant}
+          load={load}
+          onStolen={() => setStolen(true)}
         />
       ) : (
         <div className="pad muted">Nothing loaded.</div>

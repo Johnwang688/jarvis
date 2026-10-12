@@ -1782,7 +1782,11 @@ def _card_focus_checks(page, mock, check, until):
     page.locator(_pane(2, '[data-testid="browser-project"]')).click()
     until(lambda: page.locator(_pane(2, "iframe")).count() > 0, timeout=4)
     time.sleep(0.3)
-    page.locator(_pane(2, "iframe")).click()
+    # A click as a hand makes it: the pointer moves over the frame first (its
+    # shield steps aside, R-1), then presses. Playwright's own locator click
+    # checks the hit target before it moves, and reads the shield as covering.
+    box = page.locator(_pane(2, "iframe")).bounding_box()
+    page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
     until(lambda: page.evaluate("document.activeElement && document.activeElement.tagName") == "IFRAME", timeout=2)
     check("setup: keys are going into the preview frame",
           page.evaluate("document.activeElement.tagName") == "IFRAME")
