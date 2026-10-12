@@ -555,6 +555,31 @@ def _chat_only(thread, verb):
         raise DaemonError(f"task threads cannot be {verb} on their own; they go with their task's project")
 
 
+def _write_title(daemon, thread, title: str, source: str) -> None:
+    """Under `daemon._lock`: a thread's title, made unique in its project, on
+    the record, on the live session's copy and on disk. The one write path
+    for a rename and an automatic title (titles.py)."""
+    stores = daemon.stores
+    thread.title = unique_name(title, thread_titles_taken(stores, thread.project_id, but=thread.id))
+    thread.title_source = source
+    session = daemon._sessions.get(thread.id)
+    if session is not None:
+        # The live session writes its own Thread on usage and finish; a
+        # title it did not hear would be undone by the next turn.
+        session.thread.title = thread.title
+        session.thread.title_source = source
+    stores.threads.save(thread)
+
+
+def _title_changed(daemon, thread) -> None:
+    """After the lock: every surface hears it the same way (the HUD re-reads
+    the list, the Discord mirror renames the chat's Discord thread)."""
+    daemon.bus.publish({"kind": "thread_updated", "thread_id": thread.id,
+                        "project_id": thread.project_id,
+                        "data": {"thread_id": thread.id, "title": thread.title,
+                                 "title_source": thread.title_source, "changed": ["title"]}})
+
+
 def rename_thread(daemon, thread_id: str, title) -> dict:
     from .daemon import APIError, DaemonError
     if not isinstance(title, str) or not title.strip():
@@ -567,19 +592,36 @@ def rename_thread(daemon, thread_id: str, title) -> dict:
         if thread.archived or is_archived(stores, thread.project_id):
             raise DaemonError("restore the thread before renaming it")
         title = unique_name(title, thread_titles_taken(stores, thread.project_id, but=thread.id))
-        if title == thread.title:
+        if title == thread.title and thread.title_source == "owner":
             return daemon.thread_json(thread)
-        thread.title = title
-        session = daemon._sessions.get(thread.id)
-        if session is not None:
-            # The live session writes its own Thread on usage and finish; a
-            # rename it did not hear would be undone by the next turn.
-            session.thread.title = title
-        stores.threads.save(thread)
-    daemon.bus.publish({"kind": "thread_updated", "thread_id": thread.id,
-                        "project_id": thread.project_id,
-                        "data": {"thread_id": thread.id, "title": thread.title, "changed": ["title"]}})
+        # The owner's: an automatic title never replaces it (titles.py).
+        _write_title(daemon, thread, title, "owner")
+    _title_changed(daemon, thread)
     return daemon.thread_json(thread)
+
+
+def auto_title(daemon, thread_id: str, title: str) -> bool:
+    """titles.py's write: `title` onto a chat thread **only if, under the
+    daemon lock, it still has none** — on disk and on the live session's
+    copy — so a rename that landed while the title was being generated wins.
+    Archived threads included (the backfill titles them too). False when
+    nothing was written. Never a tool: nothing an agent holds reaches it."""
+    title = " ".join((title or "").split())[:TITLE_CAP]
+    if not title:
+        return False
+    stores = daemon.stores
+    with daemon._lock:
+        if daemon._stopping:
+            return False
+        thread = stores.threads.get(thread_id)
+        if thread is None or thread.task_id is not None or thread.role != Role.CHAT:
+            return False
+        session = daemon._sessions.get(thread.id)
+        if thread.title or (session is not None and session.thread.title):
+            return False
+        _write_title(daemon, thread, title, "auto")
+    _title_changed(daemon, thread)
+    return True
 
 
 def archive_thread(daemon, thread_id: str) -> dict:

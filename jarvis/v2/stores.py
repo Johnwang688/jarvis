@@ -265,6 +265,7 @@ class ProjectStore(_Store[model.Project]):
 
 
 SURFACE = re.compile(r"^(?:dm|dm:retired|discord:[0-9]{1,24})$")
+TITLE_SOURCES = ("", "auto", "owner")
 
 
 class ThreadStore(_Store[model.Thread]):
@@ -279,11 +280,21 @@ class ThreadStore(_Store[model.Thread]):
         session's in-memory copy of a thread on every usage event and turn
         end, and that copy was read before the Discord mirror gave the chat a
         thread — the lost-update class of bug 1. So a save keeps whatever
-        surface is stored, None or not; only `set_surface` changes it."""
+        surface is stored, None or not; only `set_surface` changes it.
+
+        A save never blanks a stored title either (chat titles, 2026-10-12):
+        nothing clears one (a rename refuses ""), and a session copy read
+        before a title landed — the window between `resume_thread`'s read and
+        its session being registered, where neither a rename nor `titles.py`
+        can reach the copy — would otherwise undo it on its next save."""
+        if obj.title_source not in TITLE_SOURCES:
+            raise StoreError(f"Thread {obj.id}: invalid title_source {obj.title_source!r}")
         with _lock:
             previous = self.get(obj.id)
             if previous is not None:
                 obj.surface = previous.surface
+                if not obj.title and previous.title:
+                    obj.title, obj.title_source = previous.title, previous.title_source
             elif obj.surface is not None:
                 raise StoreError("A thread's surface is set with set_surface()")
             super().save(obj)

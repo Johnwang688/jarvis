@@ -232,6 +232,10 @@ class Daemon:
         # reads it. None means no Discord on this daemon.
         self.discord = None
         self.discord_error: str | None = None   # why start_discord failed (class name)
+        # Chat titles (titles.py): attached and started by daemon2's `main()`,
+        # never by `start()`, so no test or embedded daemon calls a model.
+        # Stopped here by `stop()`.
+        self.titles = None
         self._lock = threading.RLock()
         self._worktree_lock = threading.Lock()
         self._sessions: dict[str, _Session] = {}
@@ -1447,6 +1451,9 @@ class Daemon:
         # session from here on (plan §1.4).
         self.callers.revoke_all()
         self.schedules.stop()
+        titles = self.titles
+        if titles is not None:
+            titles.stop()                       # its Codex session ends with the metadata cancel
         deadline = time.monotonic() + STOP_TIMEOUT
         with self._lock:
             if self._stopping:
@@ -1479,6 +1486,8 @@ class Daemon:
                     job.start()
                     jobs.append(job)
         self._stop_codex_metadata(deadline)
+        if titles is not None and not titles.join(min(3.0, max(0, deadline - time.monotonic()))):
+            LOG.warning("Chat titler still running at shutdown; it writes nothing now")
         for job in jobs:
             job.join(max(0, deadline - time.monotonic()))
         with self._lock:
@@ -2262,6 +2271,11 @@ def main() -> int:
             # Reporter subscribes, then the runner serves, then the gateway.
             discord = start_discord(daemon)
         daemon.runner.serve()                   # idempotent if Discord served it
+        # Chat titles: after the surfaces, so the Discord mirror hears every
+        # `thread_updated` a title publishes (titles.py).
+        from .titles import Titler
+        daemon.titles = Titler(daemon)
+        daemon.titles.start()
         purger.start()
         LOG.info("Jarvis v2 listening on 127.0.0.1:%s", daemon.port)
         _log_hud_served()
