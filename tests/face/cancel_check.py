@@ -37,8 +37,10 @@ from jarvis import agent as agent_mod  # noqa: E402
 from jarvis import config, llm  # noqa: E402
 from jarvis.face import server as face_server  # noqa: E402
 
-PORT = 8476
-BASE = f"http://127.0.0.1:{PORT}"
+# Set once the face server has bound port 0: a fixed port (8476, which
+# attach_check also used) failed when another run held it.
+PORT = 0
+BASE = ""
 
 
 def reply(content=None, tool_calls=None) -> llm.Reply:
@@ -223,7 +225,11 @@ def agent_checks() -> None:
 
 
 def route_checks() -> None:
-    server = face_server.create_server(PORT)
+    global PORT, BASE
+    server = face_server.create_server(0)
+    PORT = server.server_address[1]
+    assert PORT not in (8402, 8403, 8405), "never the live ports"
+    BASE = f"http://127.0.0.1:{PORT}"
     try:
         face_server._cancel.clear()
         assert _post("/cancel", origin="https://evil.example") == 403

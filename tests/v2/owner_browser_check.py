@@ -526,6 +526,11 @@ class OwnerBrowser(unittest.TestCase):
 
         cls.daemon = Daemon(Stores(), {name: Fake(name) for name in PN},
                             lambda *_: (lambda *_: None), 0)
+        # `browser.json` is read and written only by the daemon's
+        # `BrowserSettings` (settings.py), in memory unless attached: this
+        # suite attaches its temp file, as daemon2's `main()` attaches the
+        # owner's.
+        cls.daemon.browser_settings.attach(config.BROWSER_SETTINGS_PATH)
         cls.daemon.browser = H.BrowserHost(cls.daemon, resolver=suite_resolve, connector=loopback_only)
         cls.daemon.bus.observe(cls.records.append)
         cls.daemon.start()
@@ -842,7 +847,7 @@ class OwnerBrowser(unittest.TestCase):
         # The owner's own same-origin read (Chromium sends no Origin on it).
         status, _ = self.ask("GET", "/browser", origin=False, headers={"Sec-Fetch-Site": "same-origin"})
         self.assertEqual(status, 200)
-        self.assertFalse(H.load_settings()["lan"], "a refused PATCH changed nothing")
+        self.assertFalse(self.daemon.browser_settings.value("lan"), "a refused PATCH changed nothing")
         self.assertIn(self.main_tab, [t["tab_id"] for t in self.owner("GET", "/browser/tabs")])
 
     # -- 3: the twelve ways (typed above) ----------------------------------------------
@@ -1079,14 +1084,15 @@ class OwnerBrowser(unittest.TestCase):
     # -- 6: settings -------------------------------------------------------------------
 
     def test_15_settings_are_the_owners_and_protected(self):
-        self.assertEqual(self.owner("GET", "/browser/settings"), {"lan": False, "local_servers": False})
+        self.assertEqual(self.owner("GET", "/browser/settings"),
+                         {"lan": False, "local_servers": False, "auto_open": True})
         self.assertEqual(self.ask("PATCH", "/browser/settings", {"lan": "yes"})[0], 400)
         self.assertEqual(self.ask("PATCH", "/browser/settings", {})[0], 400)
         # An unknown key is counted, never echoed (review of PR #69, NIT).
         status, payload = self.ask("PATCH", "/browser/settings", {"sound": True, f"{MARK}key": 1})
         self.assertEqual((status, payload), (400, {"error": "unknown fields (2)"}))
         self.assertEqual(self.owner("PATCH", "/browser/settings", {"lan": True}),
-                         {"lan": True, "local_servers": False})
+                         {"lan": True, "local_servers": False, "auto_open": True})
         path = config.BROWSER_SETTINGS_PATH
         self.assertEqual(oct(path.stat().st_mode & 0o777), "0o600")
         self.assertTrue(self.ask("GET", "/status", listener="api")[1]["browser"]["lan"])

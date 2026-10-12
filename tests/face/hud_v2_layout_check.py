@@ -2808,15 +2808,23 @@ def _crash_checks(page, mock, check, until):
         errors.clear()
         page.locator('[data-testid="open-settings"]').click()
         until(lambda: page.locator('[data-testid="picker"]').count() > 0, timeout=3)
-        page.evaluate("window.__hudCrashProbe = 'dialog'")
-        page.evaluate("window.__hud.dispatch({type: 'patch', patch: {error: 'dialog probe render'}})")
+        # The probe and the render that trips it in one evaluate: set apart, a
+        # render of the window's own on a slow machine tripped it first, its
+        # "dialog hit an error" was then overwritten by this patch's text, and
+        # "and says so" below failed (20x CPU throttling: 3 of 3).
+        page.evaluate("window.__hudCrashProbe = 'dialog';"
+                      " window.__hud.dispatch({type: 'patch', patch: {error: 'dialog probe render'}})")
         until(lambda: page.locator('[data-testid="picker"]').count() == 0, timeout=3)
         time.sleep(0.2)
         ok, why = _window_whole(page)
         check("a dialog that throws is closed and the window stays drawn",
               page.locator('[data-testid="picker"]').count() == 0 and ok, why)
-        check("and says so", "dialog hit an error" in (page.evaluate(
-            "document.querySelector('[data-testid=\"error\"]')?.textContent") or ""))
+        # The sentence is drawn a render after the dialog goes (the boundary's
+        # onCrash patches it in): under load one read 0.2 s later missed it.
+        line = lambda: page.evaluate(  # noqa: E731
+            "document.querySelector('[data-testid=\"error\"]')?.textContent") or ""
+        until(lambda: "dialog hit an error" in line(), timeout=4)
+        check("and says so", "dialog hit an error" in line(), repr(line()))
         check("and is caught: no page error", not errors, "; ".join(errors[:2]))
         page.evaluate("delete window.__hudCrashProbe")
         page.locator('[data-testid="open-settings"]').click()

@@ -156,9 +156,11 @@ def _protected_state_paths() -> set[Path]:
     # `vex.json` (VX-1, 2026-10-10) names the executables the HUD's VEX
     # Build, Download and brain terminal run when the owner clicks: an agent
     # that could repoint it could choose what runs on that click.
-    # `browser.json` (BR-1a, 2026-10-12) holds the Browser's LAN switch: an
-    # agent that could flip it could open the owner's home network to every
-    # page his Browser loads.
+    # `browser.json` (BR-1a, BR-8a, 2026-10-12) holds the owner's Browser
+    # switches: the LAN and every loopback server (an agent that could flip
+    # them could open the owner's home network, or every server on this
+    # machine, to the pages his Browser loads) and "open dev servers
+    # automatically".
     names = ("allowlist.json", "models.json", "routing.json", "discord_guild.json",
              "provider_defaults.json", "vex.json", "browser.json")
     allow = config.ALLOWLIST_PATH.expanduser()
