@@ -658,13 +658,18 @@ class Tables(Base):
         with self.assertRaises(ValueError):
             vex.build_argv(cfg, project, "download")
 
-    def test_exact_argv_for_download_and_the_brain(self):
+    def test_exact_argv_for_download_the_brain_and_the_device_reads(self):
         cfg = vex.load_config()
         self.assertEqual(vex.download_argv(cfg, "auton_1", 3, "C:\\x\\build\\b.bin"),
                          [str(self.world.vexcom), "--name", "auton_1", "--slot", "3",
                           "--write", "C:\\x\\build\\b.bin", "--progress"])
         self.assertEqual(vex.brain_argv(cfg), [str(self.world.vexcom), "--user"])
-        self.assert_refused(lambda: vex.info_argv(cfg), "spike")
+        self.assertEqual(vex.info_argv(cfg), [str(self.world.vexcom), "--json"])
+        self.assertEqual(vex.info_argv(cfg, "system"), [str(self.world.vexcom), "--json"])
+        self.assertEqual(vex.info_argv(cfg, "programs"), [str(self.world.vexcom), "--programs"])
+        for read in ("--json", "--erase", "erase", "", None, ["system"], "System"):
+            with self.subTest(read=read), self.assertRaises(ValueError):
+                vex.info_argv(cfg, read)
 
     def test_slot_and_name_refusals(self):
         for slot in (0, 9, -1, "3", 3.0, True, None):
