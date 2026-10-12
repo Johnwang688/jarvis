@@ -74,6 +74,19 @@ def assemble_checks(tmp: Path) -> None:
     assert "holds live credentials — not attached" in text, text
     assert "super-secret-value-123" not in text
 
+    # ENV-1: an `.example` name that is a symlink to a credential env file is
+    # refused too (`secrets.is_credential` follows it; the name alone is open).
+    viadir = tmp / "viadir"
+    viadir.mkdir()
+    (viadir / ".env.example").symlink_to(tmp / ".env")
+    text, _ = face_server._assemble_turn("", f"show me @{viadir / '.env.example'}", [])
+    assert "holds live credentials — not attached" in text, text
+    assert "super-secret-value-123" not in text and "API_KEY" not in text, text
+    (viadir / "real.example").write_text("ok\n", encoding="utf-8")
+    (viadir / ".env.local.example").write_text("API_KEY=\n", encoding="utf-8")
+    text, _ = face_server._assemble_turn("", f"show me @{viadir / '.env.local.example'}", [])
+    assert "[attached file:" in text and "holds live credentials" not in text, text
+
     # Scrub: an attachment that *contains* a known credential value is
     # redacted (value learned from the Onshape bundle path, like dispatch()).
     old_onshape = config.ONSHAPE_TOKEN_PATH

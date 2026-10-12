@@ -3388,6 +3388,13 @@ def _general_verdict(command: str) -> Verdict:
     why, unsure = protected_state.owner_reading(command)
     if why:
         return Verdict(DENY, why)
+    # A write onto a credential env file, judged by name (ENV-1, the owner's
+    # `.env*` rule: Jarvis writes only `*.example`): DENY, so v1's gate and
+    # v2's layer 1 — both of which start here — refuse it unasked. One
+    # parse of where a line writes, `protected_state`'s, not a copy.
+    env = protected_state.env_write_refusal(command)
+    if env:
+        return Verdict(DENY, env)
 
     # Command substitution runs a command this function never sees. There is no
     # honest verdict except "a human should look".

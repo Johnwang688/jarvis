@@ -1106,8 +1106,9 @@ past it), and **a C0 control inside a sequence is executed and the sequence
 goes on**, as in xterm. `jarvis/v2/terminal_guard.py` (pure) **refuses the
 whole read** with exactly "possible credential in this output" — never what,
 where or which rule — for (1) a `secret_values()` value, or one from the
-terminal folder chain's `.env`, `.env.local` and `.env.*` files (not the
-`.example`/`.sample`/`.template` ones; read `O_NOFOLLOW|O_NONBLOCK`, regular
+terminal folder chain's credential env files (`secrets.env_files_in`, the
+owner's `.env*` rule — since ENV-1 `.sample`/`.template` count, only
+`.example` names are open; read `O_NOFOLLOW|O_NONBLOCK`, regular
 files only, capped — a FIFO named `.env` used to hang the read), its base64
 at any alignment or its URL-encoding; (2) a format in
 `jarvis/credential_patterns.py` (one list; a private key's END footer too),
@@ -2323,6 +2324,214 @@ card close, the key guards (both), FileTab's blocked effect.
 Not done: replace in files (cut), a "dev servers" list, symbol search (cut),
 Ctrl+PageUp/Down as keys (palette only), and a tab on the same file through
 *another* project's pane that never mounted keeps its old path.
+
+**Jarvis's half of the owner's `.env*` rule, ENV-1 (2026-10-12; plan
+`docs/plans/2026-10-11-env-files.md`, its Status section is the list).**
+Jarvis reads no **credential env file** (`.env`, `.env.<anything>`, any
+depth, any case, a Windows-trimmed name both ways — not a name ending
+`.example`) and writes only `*.example`, and **every layer asks the one rule,
+`secrets.is_env_credential(_name)`; nothing keeps a copy.** By layer:
+- **Names.** `secrets.is_protected` (name only, no filesystem) asks the rule,
+  so every v1 caller that judges a name covers every credential env file;
+  `secrets.is_credential` adds `is_env_credential`'s symlink hops for a real
+  path. `PROTECTED_NAMES` is the bundles plus `.env`/`.env.local`.
+- **v1 file tools.** `read_file` refuses through `is_credential` (path and
+  resolved target); `write_file`/`edit_file` refuse a credential env file
+  with "only `*.example` is Jarvis's to write" (`secrets.write_refusal`), an
+  `.example` name that leads to one included, and create, read and edit
+  `.env.example`/`.env.local.example` as ordinary files. `grep_files` was
+  ED-7's (`search.refused`), confirmed on both backends. sqlite and the
+  face's `@path` ask `is_credential`.
+- **The shells' read layer** (`protected_in_command`): a word, or an
+  option's value (`--include=.env.*`), that is one; a glob that could expand
+  onto one; and anywhere in the raw line (`env_credential_in_text`: `.env`,
+  then `.` and the rest of the word up to whitespace, a quote, an operator,
+  `/`, `:`, `,`, `=` or `}`, judged by the rule — never right after a glob
+  character, so `find -name '*.env.ts'` passes). **Mentions are refused as
+  `.env`'s always were** (the accepted cost): a commit message or a
+  `.gitignore` echo naming `.env.production` is refused.
+  **Globs are judged structurally** (PR #60 review, MED-1;
+  `secrets.env_glob_reaches`). Only a **dot-led** pattern can reach one,
+  because bash does not expand `*`, `?` or `[…]` onto a leading dot
+  unless the line turns dotglob on (below). A
+  dot-led pattern is then intersected **exactly** with the name rule (a
+  small automaton: the `.env` prefix, Windows' trim, a `.example` ending
+  watched by KMP, over the characters that matter plus one stand-in), so
+  `cat .e?v.custom`, `.[e]nv.custom`, `.*.custom` and `cp x .e*.custom` are
+  caught and `ls *.local`, `*test*`, `*.py` are not. Braces are expanded
+  first (`protected_state._brace_expand`; one too large refuses), and a
+  pattern past 512 characters refuses. The bundles keep main's glob match
+  on every word (`_bundle_glob`). **The delta review of 4043ad1** (PR #60,
+  every spelling pinned in `secrets_check`'s `DELTA_REFUSED`/
+  `DELTA_ALLOWED`) set the rule **nothing main refused is let through**, and
+  filled the gaps by context (`_judge_segment`, per command of the line):
+  - **A word bash does not expand** (quoted) keeps main's glob rule over
+    `.env`/`.env.local` (`main_env_glob`: `echo '*.local'`). Only an
+    unquoted bash word is held to the dot-led argument, so `ls *.local`
+    (bash cannot expand it onto `.env.local`) is the one line main refused
+    that this allows — deliberately, in the review's own ordinary list.
+  - **A line that turns dotglob on** — `shopt -s dotglob`, `bash -O
+    dotglob`, `GLOBIGNORE`, zsh's `globdots` (any case or underscores) or a
+    `(D)` qualifier glued to a glob — has every glob word judged by the
+    exact test alone (`shopt -s dotglob; cat *.local`, `ls *(D)`) (fix 1).
+  - **A pattern a program expands itself** matches a leading dot with `*`:
+    a name-pattern option's value, quoted or not (`find -name/-iname/-path/
+    -ipath/-wholename/-lname`, `rg -g/--glob/--iglob` and a glued
+    `-g.e?v*`, `grep --include/--exclude`, fd's `-g`), a git pathspec after
+    `--`, a `tar --wildcards` (bsdtar always), `zip -i/-x`, `unzip` or `7z`
+    member (fix 4, the lead's option A: these, not every quoted word). It
+    is refused by `pattern_reaches`: main's rule over the two names
+    (`find . -name '*.local' -exec cat`, `*env*`), the dot-led exact test,
+    or — when it names `env` and the command reads what it selects (an
+    `-exec`/`-ok`/fd `-x` action, `xargs` on the line, a content search, an
+    archiver) — the exact test alone (`find -name '*.env.production' -exec
+    cat`) (fix 2). **"Reads content" alone does not refuse**, against the
+    lead's wording: it would refuse `grep -r foo --include='*.py' .` and
+    `find -name '*.py' -exec grep`, which read no more than `grep -r foo .`
+    (the stated limit) — so `find . -name '*.custom' -exec cat` stays
+    allowed, as on main.
+  - **A string another program runs as a command line** — `-c` (any
+    cluster), `eval`, `env -S` (glued too), `watch`, `ssh host`, a
+    here-string to a shell — is judged piece by piece and then as a line of
+    its own (up to 3 deep); an interpreter's inline program (`node -e`/`-p`/
+    `--eval`, `perl -e`/`-ne`, `ruby -e`, `php -r`, a here-string to one) by
+    its string literals that hold a command line, never its regexes (fix 5).
+  **A quoted regex is not a glob** (`grep '.*error'`, `pkill -f
+  '.*daemon2'`, a jq filter) unless main's rule over the two names catches
+  it, as on main (`grep '.*env.*' log`). The exact test's cost, measured: a
+  dot-led glob that *can* spell a credential env name is refused even when
+  no such file is meant — `ls -la ~/.*rc.d` (`.env.rc.d`), `rm -f
+  .*.swp.bak.txt`, Grep's `glob: "**/.*rc.json"`. Not refused, as on main:
+  `cat ?env.custom` (bash's `?` never matches a leading dot), a remote
+  `rsync h:'.e?v*'`, `find -regex`, fd's regex positional, `find -name "$P"`.
+- **Shell writes are DENY in `rules.decide`** — never run, never asked, under
+  an allowlist entry and mode "all" — through `protected_state`'s own parse
+  of where a line writes, not a copy: a redirect target, a `_WRITERS` stem's
+  operands, a reader hazard's files (`sed -i`, a sed `w FILE`), and a copy
+  of a source named like one into a folder (`cp /tmp/.env.production
+  dir/`). `rules.decide` judges **by name only** (`env_write_refusal`: cwd
+  `/`, `_Budget.follow_links` off, a cheap `.env` prefilter on the
+  quote-stripped line), so the same line gets the same verdict anywhere;
+  where the folder is known (`static_verdict(command, cwd)`, `run_command`'s
+  `protected_state.refused`, v2's layer 1 with the brief's cwd) a target that
+  is a symlink to one is DENY too. `protected_state.denies(touch)` is the one
+  test (the allowlist or an env file, certain). An interpreter or an unknown
+  program handed one is not judged its writer — the read layer refuses the
+  line, and "writes" would misdescribe `node --env-file=.env.production`.
+  **What only may land on one asks** (`Touch.env`, uncertain): a glob the
+  structural test says can reach one but not spelled from `.env` (`cp x
+  .e*.custom`, `mv x .e?v.prod`; one spelled from `.env`, `.env.*`, is
+  DENY), a name whose ending is an unknown variable (`.env.$STAGE`,
+  `$X.env`) — never covered by an allowlist entry, always-ask in v2 (rule id
+  `env-file`). `rm *.production` is plain `rm` again (ASK, as on main).
+  Also DENY since the review (NIT 3): `git checkout -- .env.x` and `git
+  restore .env.x` (`_git_subcommand` reads past `-C`/`-c`/`--git-dir`…), a
+  bare redirect (`>.env.x`, `X=1 >.env.x`, `{ …; } > .env.x` —
+  `_redirect_touches` runs at every early return of `_segment`), `perl -pi`/
+  `-i.bak` and `awk|gawk -i inplace` (`_edits_in_place`). Reads stay the
+  secrets layer's: `cp .env.production notes.txt` is ALLOW to the rules and
+  refused in the tool.
+- **The scrub** (`secret_values`) reads every credential env file in the
+  working folder, its parents up to home, home and the checkout
+  (`secrets.env_files_in`, a fresh `scandir` each call); **nothing is cached
+  by mtime any more** — a listing keyed on the folder's mtime missed a file
+  made within one timestamp tick (measured), and so would a value cache —
+  and each file is read non-blocking, regular files only, capped
+  (`_read_regular`; a FIFO named `.env.x` hung the old blocking read). A grep
+  line attributed to one is dropped (`is_protected`). **What is taken from a
+  file is the lead's decision (PR #60 review, MED-2)**: `.env` and
+  `.env.local` give every value of 8+ characters, exactly as before; every
+  other credential env file gives only (a) the value of a **secret-named
+  key** — a whole word or an `_`/camelCase part of KEY, TOKEN, SECRET,
+  PASS/PASSWD/PASSWORD/PWD, CREDENTIAL, PRIVATE, SALT or DSN (plurals too,
+  any case) — at 4+ characters and not a boolean; AUTH, SESSION and COOKIE
+  parts count only for a value that is not plain (`SESSION_DRIVER=file`
+  stays); and (b) a **secret-looking value** under any key: a URL carrying
+  userinfo, a query or a fragment, or 16+ characters that are not plain
+  words, a number, a boolean, a path, a host or an email
+  (`secrets._secret_entry`). The cost it removes: `NODE_ENV=production` in
+  `.env.production` used to redact the word "production" from every tool
+  result; a README that mentions it comes back whole now, while
+  `STRIPE_SECRET_KEY`, a `DATABASE_URL` with a password and a 40-character
+  token under a plain key are still redacted. **The delta review (LOW-C)
+  widened it**: a joined key name counts — a part ending in KEY, SECRET,
+  PASS, TOKEN, PW, PWD, PIN or SEED, or starting with SECRET, PASS, SEED or
+  PRIVATE (`APIKEY`, `SECRETKEY`, `PASSPHRASE`, `SMTP_PW`, `ADMIN_PIN`,
+  `OTP_SEED`, `SEEDPHRASE`; never a middle: `MAPPING`, `KEYBOARD`,
+  `TOKENIZER` are settings), and under a secret-named key a number counts;
+  **a key ending in a setting's suffix** (`_TTL`, `_TIMEOUT`, `_EXPIRES`,
+  `_EXPIRY`, `_LENGTH`, `_SIZE`, `_COUNT`, `_URL`, `_HOST`, `_PORT`,
+  `_PATH`, `_ENABLED`, `_DRIVER`, `_TYPE`, `_NAME`) with a plain value is a
+  setting (`AUTH_TOKEN_TTL=3600` used to redact every "3600"); and **a
+  webhook URL is a secret** — a known webhook host (`hooks.slack.com`,
+  Discord's `/api/webhooks/`, `hooks.zapier.com`, Office's webhook hosts,
+  Telegram's `/bot…`) or a path segment of 16+ characters mixing letters and
+  digits.
+- **v2 layer 1.** `READ_TOOLS` (Claude's Read, NotebookRead, Grep, Glob, LS;
+  `read_file`/`grep_files`) are judged by `denied_read`: a path that is or
+  leads to a credential file, and **Grep's `glob`** (each brace variant and
+  `/` component) judged as the shell judges `rg --hidden -g` — Claude's Grep
+  reads hidden files — by `secrets.pattern_reaches`, plus the shell's
+  raw-line check (`secrets.raw_names_in`) on the glob and the path, so the
+  layers agree (delta review LOW-B: `glob: "*.env*"`, `*.local`,
+  `!.env.production`, `**/.e?v.*` refused; `**/*test*`, `*.custom`,
+  `*.json` allowed). **Claude's Glob pattern is not judged** (delta review
+  NIT): Glob returns names, never contents, so `**/.*` and `**/*.env*` are
+  allowed, as on main; its `path` is. Relative paths are placed in the
+  brief's folder.
+  `denied_file` refuses a credential env file through its symlinks (so
+  Write/Edit/MultiEdit/NotebookEdit, Codex's `apply_patch` paths and the
+  fast path's write tools). Bash goes through `rules.decide` +
+  `protected_in_command` + the symlink write check, and so does a Codex
+  approval's `also_commands`, now judged in the brief's folder (NIT 5).
+  **A Codex grant that is or holds one is `denied_grant`**, read or write: a
+  bounded walk (`GRANT_SCAN_ENTRIES` 50,000 entries, `GRANT_SCAN_SECONDS`
+  2 s, symlinked folders not followed, a symlinked file judged where it
+  leads). **A folder is judged by what it holds, never by its name** (NIT 1:
+  a write grant on a virtualenv named `.env` passes unless it holds a
+  credential file; `denied_file(folder=True)` skips the name checks, keeping
+  SELF_PROTECTED, `.git` and the HUD build). **Past the bound the grant goes
+  to the owner** (NIT 2): the widening card's headline gains "could not check
+  <folder> for credential env files", no Always, declined with no human; a
+  grant past the bound on an approval that is not a widening is refused.
+- **terminal_read** asks the same rule: `terminal_guard.protected_name` is
+  `is_protected` plus `CREDENTIAL_FILE`, `protected_in` uses
+  `env_credential_in_text`, `terminals._folder_env_files` is
+  `env_files_in`, and `ENV_TEMPLATES` is gone — **`.env.sample` and
+  `.env.template` are credential there now**, per the owner's Q-1. Its
+  cheap filters are case-folded (LOW-2: the `_HINTS` prefilter and
+  `last_hazard_end` read the casefolded text, `_ENV_VARIANT` is
+  `IGNORECASE`, so `cat .ENV.PROD` is refused like `cat .env.prod`), a
+  dot-led glob (`_DOT_GLOB`) always reaches the full check, and a reader's
+  operands are judged by `glob_reaches` directly (the guard re-quotes them,
+  which would otherwise hide a glob from the quote-aware read layer).
+  **Tests the review asked for** (NIT 4): an `@path` through a symlinked
+  folder (`@viadir/.env.example` leading to `.env`) refused in the face's
+  attachments, and sqlite refusing `.env.production` and a `data.db` symlink
+  to it.
+- **The trash** (ED-7) keeps a credential env name inside
+  `jarvis-deleted.<n>/` on a second delete, and every older numbered name
+  (`.env.2`, `.env.production.3`, even `.env.example.2`) is a credential env
+  name by the rule, so v1 protects them all.
+**N-1, measured without a turn:** codex 0.161.0's protocol has
+`FileSystemAccessMode` `deny` with `glob_pattern` paths and named permission
+profiles (`[permissions.<id>]`, `default_permissions`), and its binary has a
+requirements-level `[permissions.filesystem] deny_read`. So Codex *can* be
+told to deny reads; **not wired**: whether it confines on this WSL2 and the
+exact per-session TOML need a `codex sandbox` measurement, and a `.env*` deny
+glob would also deny `.env.example`. Codex keeps the plan's stated limit.
+**Limits, kept as limits:** none of this binds a program running as the
+owner (a dev server loading its `.env`, a script Jarvis writes); Claude's and
+Codex's tool *results* are never seen, so a folder-wide Grep or a shell `cat`
+inside Codex's sandbox is unscrubbed; a hard link or an 8.3 short name to an
+env file under another name, a path assembled at run time, a `cd` into a
+folder followed by a relative glob the samples miss — none is seen. The real
+boundary is still filesystem permissions. Free checks: `secrets_check`
+(`env_rule_checks`), `files_check` (`env_file_checks`), `rules_check`
+(`env_write_checks`: 31 DENY spellings, 3 symlinked, 3 asked, 11 ordinary),
+v2 `permissions_check` (`env_file_checks`), `claude_provider_check`
+(`env_hook_checks`, the real `build_permit` behind the hook) and
+`terminal_text_check`; all fail on 283d45c, and 17 guard removals each bite.
 
 **The tree's unsaved-changes dot and file icons (2026-10-11, the owner's ask
 for the robotics lab: "like VS Code").** A dirty file's tree row wears a light
@@ -4572,15 +4781,18 @@ jarvis/
   and no cad_ tool accepts a document id for a write target — so no CAD
   tool needs `dangerous=True`. Parts libraries are read-only sources.
   `tests/onshape_check.py` asserts both properties stay true.
-- **`.env` / `.env.local` are unreadable** (`tools/secrets.py`, added
-  2026-07-30 after a real leak — see below). Three layers: `read_file` refuses
-  them by name; both shell tools refuse a command naming one, including a
-  dotted glob (`cat .env*`) and *including approved* `run_command`, because
-  approving a command is not consent to what it prints; and `dispatch()`
-  scrubs every tool result before it becomes a `tool` message. Covered
-  names: `.env`, `.env.local`, `google_token.json`, and `onshape_keys.json`
-  (JSON values pulled by sensitive key names) — `.env.example` stays
-  readable on purpose.
+- **Credential env files are unreadable** (`tools/secrets.py`, added
+  2026-07-30 after a real leak — see below — for `.env`/`.env.local`, and
+  since ENV-1, 2026-10-12, for every credential env file). Three layers:
+  `read_file` refuses them by name; both shell tools refuse a command naming
+  one, including a glob that could expand onto one (`cat .env*`) and
+  *including approved* `run_command`, because approving a command is not
+  consent to what it prints; and `dispatch()` scrubs every tool result
+  before it becomes a `tool` message. Covered: every credential env file
+  (below) and the bundles in `PROTECTED_NAMES` — `google_token.json`,
+  `onshape_keys.json`, `discord_token.json`, `spotify_token.json` (JSON
+  values pulled by sensitive key names). `.env.example` and
+  `.env.local.example` stay readable on purpose.
 
   **The owner's `.env*` rule (2026-10-11, `docs/plans/2026-10-11-env-files.md`):
   the owner edits every `.env*` file in the HUD, Jarvis reads none of them
@@ -4596,10 +4808,20 @@ jarvis/
   serve and save such a file only to the owner (`editor_policy` kind `env`,
   owner-only routes, the API listener 403), and `hud_api.protected` — what a
   diff, the preview origin and an `@path` or dropped attachment refuse — asks
-  it too. **ENV-1 owes Jarvis's half on the same function**: v1's
-  `read_file`/`grep_files`/write tools, the shells (DENY for a write), the
-  scrub's search for values, Claude's hook and Codex's grants — until it
-  lands, `PROTECTED_NAMES` still covers only `.env` and `.env.local` for v1.
+  it too. **ENV-1 built Jarvis's half on the same function (2026-10-12; the
+  v2 section's ENV-1 paragraph has the detail).** `secrets.is_protected`
+  asks the name rule, so every v1 caller that judges a name — the shells,
+  the scrub's attribution drop, sqlite, gitops' commit guard, Discord and
+  `@path` attachments — covers every credential env file; `is_credential`
+  adds the symlink hops for a real path (`read_file`, `write_file`,
+  `edit_file`, the face's `@path`). `PROTECTED_NAMES` is now the bundles plus
+  the two env names that were there first, not the whole of what is
+  protected. The write tools refuse a credential env file and write
+  `*.example`; a shell write onto one is **DENY** in `rules.decide`; the
+  scrub reads values from every credential env file in the folder chain;
+  Claude's read and write tools and Codex's grants are refused at v2's
+  layer 1; terminal_read's guard asks the same rule (its own
+  `.sample`/`.template` exception is gone, per the owner's Q-1).
 
 ## Testing
 
