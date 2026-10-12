@@ -27,6 +27,8 @@ import {
 } from "../state/editorSettings";
 import { reapplyEditorConfig } from "../state/editorconfig";
 import { attachVim, type VimHandle } from "../state/vim";
+import { gitGutter } from "../state/gitGutter";
+import { gutterDecorations } from "../lib/linediff";
 
 /**
  * Every File pane's live editor (ED-7): the palette lists the actions of the
@@ -72,6 +74,8 @@ export function PaneEditor(props: {
   onAddToChat?: () => void;
   /** Where vim's status line goes (ED-8): its mode and `:` command line. Vim attaches only with one. */
   vimStatus?: HTMLElement | null;
+  /** The git gutter (ED-9): the buffer's project and path there; null draws none. */
+  git?: { projectId: string; path: string } | null;
 }) {
   const host = useRef<HTMLDivElement>(null);
   const markdown = useRef(isMarkdown(props.path));
@@ -260,6 +264,28 @@ export function PaneEditor(props: {
       ed.updateOptions(editorOptions(editorSettings(), { markdown: markdown.current }));
     };
   }, [ready, vimOn, vimNode]);
+
+  // The git gutter (ED-9, state/gitGutter.ts): this buffer's lines against
+  // HEAD's, drawn in this editor's own decorations. The diff is the
+  // buffer's, shared by every pane showing it.
+  const gitProject = props.git?.projectId ?? null;
+  const gitPath = props.git?.path ?? null;
+  useEffect(() => {
+    const ed = editor.current;
+    const model = props.model;
+    const abs = props.viewKey;
+    if (!ed || !gitProject || !gitPath || !abs || !isMonacoModel(model)) return;
+    const shown = ed.getModel();
+    if (shown !== model) return;
+    const coll = ed.createDecorationsCollection();
+    const stop = gitGutter.watch({ abs, projectId: gitProject, path: gitPath }, model as any, (marks) => {
+      if (ed.getModel() === model) coll.set(gutterDecorations(marks));
+    });
+    return () => {
+      stop();
+      if (ed.getModel() === model) coll.clear();
+    };
+  }, [ready, props.model, props.viewKey, gitProject, gitPath]);
 
   // The fallback textarea redraws when its shim model changes.
   useEffect(() => {

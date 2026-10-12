@@ -2811,6 +2811,28 @@ an env file, which never reaches the worker — Monaco folds by indentation, as
 before; and the fold query has the colour queries' 250 ms budget (twice over
 it, that file folds by indentation from then on).
 
+**The git gutter and the explorer's git colours (2026-10-12, ED-9 of the
+editor plan, §2.5 and §2.8).** Beside the line numbers each open file shows
+what changed since HEAD, as VS Code does: a bar in sage (`--syn-string`) on
+added lines, in glacier (`--syn-fn`) on modified ones, and a small red wedge
+at 60% where lines were removed — the diff's "removed" colour, the only red,
+never amber. It is diffed against the **buffer**, not the disk, so it follows
+an unsaved edit as it is typed (after a short pause) and is clean again once
+the edit is undone; a file HEAD does not hold, a binary one or one past
+100,000 lines has none, and an env file never has one. The File pane's tree
+colours names the same way — modified glacier, added and untracked sage, a
+merge conflict lavender, ignored dimmed — and a folder takes the strongest
+state inside it. HEAD's text and the status come from two owner-only routes
+(`docs/hud-api.md`) that refuse what the editor withholds, every env file and
+the gate's state, by path and by the name git has for a renamed file (which
+must also lie in the project), and that refuse a repository whose own config
+names a program; the status never goes into a submodule. The status is polled
+every 3 s per project while something shows it (the daemon caches it 2 s); a
+poll that sees nothing new redraws nothing, and typing never redraws the
+tree. A file in another repository than the project's — a nested robot repo,
+a file reached through the Inbox — checks its own HEAD every 10 s while the
+window is visible, so a commit there clears its marks.
+
 **Editor settings, `.editorconfig` and vim (2026-10-12, ED-8 of the editor
 plan, §2.8; decisions E-9, E-11).** A File pane's ⚙, or "Editor Settings…" in
 the palette, opens one dialog for every editor in the window: font family
@@ -2825,7 +2847,11 @@ file's folder up to the project's root and never above, stopping at `root =
 true` — sets a matching file's indentation and the line ending a file with
 no line break takes for its new lines; it never touches a file's existing
 line endings and **never rewrites anything on save**, whatever its
-`trim_trailing_whitespace` or `insert_final_newline` say. Vim (E-11) is
+`trim_trailing_whitespace` or `insert_final_newline` say. An `.editorconfig`
+is project content an agent can write, so judging one **never holds the
+window**: one file's judgement is one task, stopped by a 5 ms clock, and a
+config that runs out of time twice, or is past a limit no real config
+reaches, configures nothing until its content changes. Vim (E-11) is
 `monaco-vim` 0.4.4, loaded only when switched on, with its mode and `:`
 command line under the editor; `:w` saves that editor's buffer through ED-2's
 guarded save. **Push-to-talk keeps Ctrl+D in the editor in vim mode too —
