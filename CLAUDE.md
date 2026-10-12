@@ -1800,7 +1800,11 @@ AO-1b's watcher (`devservers.py`), routes and daemon hooks use it.
     with a million fds costs no more). Past it the scan stops, counts the pids
     it left in `Work.fd_skipped`, and answers `complete` False;
     `attribute(scan_complete=False)` then answers pending ("scan") and
-    attributes nothing this poll.
+    attributes nothing this poll. `scan_complete` has no default, so a
+    caller that forgets the scan's answer fails rather than trusting it.
+  - **A shared socket fails closed:** if any holder is Jarvis's own, a
+    terminal's, or a pid whose facts could not be read (it could be either),
+    the listener is refused, whatever another holder's tag says.
 - **The origin tag is the attribution (R-2).** There is no folder rule, and an
   untagged process is refused. `/proc/<pid>/environ` is read only for the
   owning pid (the earliest-started pid passing rules 4-7), only after rules

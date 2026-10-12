@@ -342,7 +342,7 @@ def port_checks(fake: Fake) -> None:
             # Facts that would pass every other rule, and none at all (rule 3):
             # the port still decides first, and nothing is read.
             for facts in ([], [_passing_facts()]):
-                v = dl.attribute(dl.Listener(row, 1002.0, 1005.0), facts, sessions, 1006.0, known,
+                v = attribute(dl.Listener(row, 1002.0, 1005.0), facts, sessions, 1006.0, known,
                                  tag_of=calls, probe=PAGE)
                 if v.refusal != want:
                     fails.append((port, family, bind, "attribute", v.refusal))
@@ -352,7 +352,7 @@ def port_checks(fake: Fake) -> None:
     check(calls.calls == 0 and reader.work.environ_reads == 0 and reader.work.files == 0,
           "a refused port reads no environ and no file")
     odd = dl.Row(4, dl.ODD_LOOPBACK, 5173, 5, UID)
-    v = dl.attribute(dl.Listener(odd, 1002.0, 1005.0), [_passing_facts()], sessions, 1006.0, known,
+    v = attribute(dl.Listener(odd, 1002.0, 1005.0), [_passing_facts()], sessions, 1006.0, known,
                      tag_of=calls, probe=PAGE)
     check(v.refusal == dl.ODD_LOOPBACK and calls.calls == 0, "a 127.0.0.5 bind is odd_loopback, unread")
 
@@ -384,6 +384,13 @@ def port_checks(fake: Fake) -> None:
           "the fallback's ends are inclusive")
 
 
+
+def attribute(*args, **kwargs):
+    """`dl.attribute` with a complete fd scan unless a check says otherwise:
+    `scan_complete` is required, so a caller that forgets the scan's answer fails."""
+    kwargs.setdefault("scan_complete", True)
+    return dl.attribute(*args, **kwargs)
+
 def _passing_facts() -> dl.PidFacts:
     return dl.PidFacts(4242, 100100, 1001.0, 1, 4242, UID, 100100, ())
 
@@ -399,7 +406,7 @@ def attribution_checks(fake: Fake) -> None:
     check(facts is not None and facts.started_at == 1001.0 and facts.uid == UID
           and facts.sid == 4242 and facts.leader_start == 100100,
           "facts: start in seconds since boot, uid, session and leader start")
-    v = dl.attribute(listener(), [facts], sessions, 1006.0, known, tag_of=reader.tag, probe=PAGE)
+    v = attribute(listener(), [facts], sessions, 1006.0, known, tag_of=reader.tag, probe=PAGE)
     check(v.attributed and v.thread_id == "th-1" and v.task_id is None and v.pid == 4242,
           "a tagged process in th-1's turn is attributed to th-1")
 
@@ -407,7 +414,7 @@ def attribution_checks(fake: Fake) -> None:
     fake.process(4300, ppid=1, start=100050, cwd="/tmp")
     fake.process(4301, ppid=4300, sid=4300, start=100150, environ=tagged(T1), cwd="/tmp")
     f = reader.facts(4301)
-    v = dl.attribute(listener(), [f], sessions, 1006.0, known, tag_of=reader.tag, probe=PAGE)
+    v = attribute(listener(), [f], sessions, 1006.0, known, tag_of=reader.tag, probe=PAGE)
     check(v.attributed and v.thread_id == "th-1" and f.ancestors == ((4300, 100050),),
           "no folder rule: a tagged process working in /tmp, its parent too, is attributed")
 
@@ -416,7 +423,7 @@ def attribution_checks(fake: Fake) -> None:
             (4401, "an environment without the tag", env(b"PATH=/usr/bin", b"OPENROUTER_API_KEY=" + SECRET))):
         fake.process(pid, start=100100, environ=environ, cwd="/home/project")
         f = reader.facts(pid)
-        v = dl.attribute(listener(), [f], sessions, 1006.0, known, tag_of=reader.tag, probe=PAGE)
+        v = attribute(listener(), [f], sessions, 1006.0, known, tag_of=reader.tag, probe=PAGE)
         check(v.refusal == dl.UNTAGGED, f"tag required: {name} is untagged whatever its folder and turn")
 
     print("\n-- rule 7: the turn window")
@@ -427,19 +434,19 @@ def attribution_checks(fake: Fake) -> None:
     ]
     for label, start, first, want in cases:
         f = dataclasses.replace(_passing_facts(), start=start, started_at=start / TCK, leader_start=start)
-        v = dl.attribute(listener(first=first, last=first + 3), [f], sessions, first + 4, known,
+        v = attribute(listener(first=first, last=first + 3), [f], sessions, first + 4, known,
                          tag_of=lambda _f: T1.encode(), probe=PAGE)
         check((v.refusal == want) if want else v.attributed, label)
     ended, _k = world()
     ended.turn_ended("th-1", at=1100.0)
     f = _passing_facts()
-    v = dl.attribute(listener(first=1700.0, last=1703.0), [f], ended, 1704.0, known,
+    v = attribute(listener(first=1700.0, last=1703.0), [f], ended, 1704.0, known,
                      tag_of=lambda _f: T1.encode(), probe=PAGE)
     check(v.attributed, "first seen at end + 600 s: inside the grace")
-    v = dl.attribute(listener(first=1701.0, last=1704.0), [f], ended, 1705.0, known,
+    v = attribute(listener(first=1701.0, last=1704.0), [f], ended, 1705.0, known,
                      tag_of=lambda _f: T1.encode(), probe=PAGE)
     check(v.refusal == dl.NO_TURN, "first seen at end + 601 s: no_turn")
-    v = dl.attribute(listener(first=999.0, last=1003.0), [f], sessions, 1004.0, known,
+    v = attribute(listener(first=999.0, last=1003.0), [f], sessions, 1004.0, known,
                      tag_of=lambda _f: T1.encode(), probe=PAGE)
     check(v.refusal == dl.NO_TURN, "first seen before the turn started: no_turn")
     fast = dl.Sessions()
@@ -447,90 +454,90 @@ def attribution_checks(fake: Fake) -> None:
     check(fast.turn_started("th-3", "fast", at=1000.0) is False
           and fast.turn_started("th-3", ProviderName.FAST, at=1000.0) is False,
           "a fast-path turn opens no window")
-    v = dl.attribute(listener(), [f], fast, 1006.0, known, tag_of=lambda _f: T3.encode(), probe=PAGE)
+    v = attribute(listener(), [f], fast, 1006.0, known, tag_of=lambda _f: T3.encode(), probe=PAGE)
     check(v.refusal == dl.NO_TURN, "a tagged process during a fast-path turn is no_turn")
     codex = dl.Sessions()
     codex.open(T3, "th-3", at=999.0)
     check(codex.turn_started("th-3", ProviderName.CODEX, at=1000.0) is True, "a Codex turn opens one")
-    v = dl.attribute(listener(), [f], codex, 1006.0, known, tag_of=lambda _f: T3.encode(), probe=PAGE)
+    v = attribute(listener(), [f], codex, 1006.0, known, tag_of=lambda _f: T3.encode(), probe=PAGE)
     check(v.attributed and v.thread_id == "th-3", "a tagged process in a Codex turn is attributed")
 
     print("\n-- rule 9: the tag must name a live session whose window holds it")
-    v = dl.attribute(listener(), [f], sessions, 1006.0, known, tag_of=lambda _f: T2.encode(), probe=PAGE)
+    v = attribute(listener(), [f], sessions, 1006.0, known, tag_of=lambda _f: T2.encode(), probe=PAGE)
     check(v.refusal == dl.STALE_TAG, "a tag naming another thread (th-2, no turn) is stale_tag")
-    v = dl.attribute(listener(), [f], sessions, 1006.0, known, tag_of=lambda _f: T4.encode(), probe=PAGE)
+    v = attribute(listener(), [f], sessions, 1006.0, known, tag_of=lambda _f: T4.encode(), probe=PAGE)
     check(v.refusal == dl.STALE_TAG, "a tag naming no session is stale_tag")
     closing, _k = world()
     closing.open(T4, "th-1", at=999.0)
     closing.close(T4, at=1001.0)
-    v = dl.attribute(listener(), [f], closing, 1500.0, known, tag_of=lambda _f: T4.encode(), probe=PAGE)
+    v = attribute(listener(), [f], closing, 1500.0, known, tag_of=lambda _f: T4.encode(), probe=PAGE)
     check(v.attributed, "a closed session inside its grace still attributes")
     # Rule 9 is judged at the first sighting (closed at 1001; the grace ends at 1601).
-    v = dl.attribute(listener(first=1601.0, last=1604.0), [f], closing, 1605.0, known,
+    v = attribute(listener(first=1601.0, last=1604.0), [f], closing, 1605.0, known,
                      tag_of=lambda _f: T4.encode(), probe=PAGE)
     check(v.attributed, "first seen exactly at the close + 600 s: the session is still inside its grace")
-    v = dl.attribute(listener(first=1602.0, last=1605.0), [f], closing, 1606.0, known,
+    v = attribute(listener(first=1602.0, last=1605.0), [f], closing, 1606.0, known,
                      tag_of=lambda _f: T4.encode(), probe=PAGE)
     check(v.refusal == dl.STALE_TAG, "first seen after the session's grace: stale_tag")
     pend = listener(first=1002.0, last=1004.0)
-    v1 = dl.attribute(pend, [f], closing, 1005.0, known, tag_of=lambda _f: T4.encode())
-    v2 = dl.attribute(pend, [f], closing, 1700.0, known, tag_of=lambda _f: T4.encode(), probe=PAGE)
+    v1 = attribute(pend, [f], closing, 1005.0, known, tag_of=lambda _f: T4.encode())
+    v2 = attribute(pend, [f], closing, 1700.0, known, tag_of=lambda _f: T4.encode(), probe=PAGE)
     check(v1.pending == "probe" and v2.attributed,
           "a verdict waiting on its probe does not turn stale_tag as the clock passes the grace (judged at first_seen)")
     two = dl.Sessions()
     two.open(T2, "th-2", "tk-2", at=999.0)
     two.turn_started("th-2", "codex", at=1000.0)
-    v = dl.attribute(listener(), [f], two, 1006.0, known, tag_of=lambda _f: T2.encode(), probe=PAGE)
+    v = attribute(listener(), [f], two, 1006.0, known, tag_of=lambda _f: T2.encode(), probe=PAGE)
     check(v.attributed and (v.thread_id, v.task_id) == ("th-2", "tk-2"), "a task's session carries its task id")
 
     print("\n-- rules 3-6")
-    v = dl.attribute(listener(), [], sessions, 1006.0, known, tag_of=reader.tag, probe=PAGE)
+    v = attribute(listener(), [], sessions, 1006.0, known, tag_of=reader.tag, probe=PAGE)
     check(v.refusal == dl.OUTSIDE, "no owning pid in the daemon's cgroup: outside")
-    v = dl.attribute(listener(), [_passing_facts()], sessions, 1006.0, dataclasses.replace(known, uid=UID + 1),
+    v = attribute(listener(), [_passing_facts()], sessions, 1006.0, dataclasses.replace(known, uid=UID + 1),
                      tag_of=reader.tag, probe=PAGE)
     check(v.refusal == dl.UID, "another uid: uid")
     before = reader.work.kinds["environ"]
     for pid in (100, 101, 102):
         fake.process(pid, start=100100, environ=tagged(T1))
-        v = dl.attribute(listener(), [reader.facts(pid)], sessions, 1006.0, known, tag_of=reader.tag, probe=PAGE)
+        v = attribute(listener(), [reader.facts(pid)], sessions, 1006.0, known, tag_of=reader.tag, probe=PAGE)
         check(v.refusal == dl.JARVIS, f"pid {pid} (the daemon, a provider root, Chrome) is jarvis")
     check(reader.work.kinds["environ"] == before, "Jarvis's pids are refused before their environ is read")
 
     # Terminal 600 (start 60000 ticks).
     fake.process(600, start=60000, comm="bash")
     fake.process(4500, sid=600, start=100100, environ=tagged(T1))
-    v = dl.attribute(listener(), [reader.facts(4500)], sessions, 1006.0, known, tag_of=reader.tag, probe=PAGE)
+    v = attribute(listener(), [reader.facts(4500)], sessions, 1006.0, known, tag_of=reader.tag, probe=PAGE)
     check(v.refusal == dl.TERMINAL, "a process in a live terminal's session is terminal")
     fake.process(4501, ppid=600, sid=4501, start=100100, environ=tagged(T1))
-    v = dl.attribute(listener(), [reader.facts(4501)], sessions, 1006.0, known, tag_of=reader.tag, probe=PAGE)
+    v = attribute(listener(), [reader.facts(4501)], sessions, 1006.0, known, tag_of=reader.tag, probe=PAGE)
     check(v.refusal == dl.TERMINAL, "a setsid child of a terminal leader is terminal")
     fake.process(4502, sid=650, start=100100, environ=tagged(T1))
     known_650 = dataclasses.replace(known, terminal_leaders=frozenset({(650, 65000)}))
-    v = dl.attribute(listener(), [reader.facts(4502)], sessions, 1006.0, known_650, tag_of=reader.tag, probe=PAGE)
+    v = attribute(listener(), [reader.facts(4502)], sessions, 1006.0, known_650, tag_of=reader.tag, probe=PAGE)
     check(v.refusal == dl.TERMINAL, "a terminal session whose leader exited still counts")
     fake.process(700, start=99000, comm="sh")                  # number 700 reused
     fake.process(4503, sid=700, start=100100, environ=tagged(T1))
     known_700 = dataclasses.replace(known, terminal_leaders=frozenset({(700, 50000)}))
     f503 = reader.facts(4503)
-    v = dl.attribute(listener(), [f503], sessions, 1006.0, known_700, tag_of=reader.tag, probe=PAGE)
+    v = attribute(listener(), [f503], sessions, 1006.0, known_700, tag_of=reader.tag, probe=PAGE)
     check(f503.leader_start == 99000 and v.attributed,
           "a reused session number with another leader start is not a terminal")
     fake.process(4504, ppid=700, sid=4504, start=100100, environ=tagged(T1))
-    v = dl.attribute(listener(), [reader.facts(4504)], sessions, 1006.0, known_700, tag_of=reader.tag, probe=PAGE)
+    v = attribute(listener(), [reader.facts(4504)], sessions, 1006.0, known_700, tag_of=reader.tag, probe=PAGE)
     check(v.attributed, "an ancestor whose number was reused is not the terminal's leader")
 
     print("\n-- several pids on one inode")
     fake.process(4600, start=100100, environ=tagged(T1))
     fake.process(4601, start=100200, environ=tagged(T1))
     fs = [reader.facts(4601), reader.facts(4600)]
-    v = dl.attribute(listener(), fs, sessions, 1006.0, known, tag_of=reader.tag, probe=PAGE)
+    v = attribute(listener(), fs, sessions, 1006.0, known, tag_of=reader.tag, probe=PAGE)
     check(v.attributed and v.pid == 4600, "the earliest-started passing pid owns it")
     fake.process(4602, start=100300, environ=env(b"A=1"))      # untagged, later
-    v = dl.attribute(listener(), [reader.facts(4602), reader.facts(4600)], sessions, 1006.0, known,
+    v = attribute(listener(), [reader.facts(4602), reader.facts(4600)], sessions, 1006.0, known,
                      tag_of=reader.tag, probe=PAGE)
     check(v.attributed and v.pid == 4600, "a later pid with no tag is no obstacle: the earliest owns it")
     fake.process(4603, start=99000, environ=tagged(T1))         # started before the turn: no_turn
-    v = dl.attribute(listener(), [reader.facts(4603), reader.facts(4600)], sessions, 1006.0, known,
+    v = attribute(listener(), [reader.facts(4603), reader.facts(4600)], sessions, 1006.0, known,
                      tag_of=reader.tag, probe=PAGE)
     check(v.attributed and v.pid == 4600, "a holder outside the turn window is passed over (no Jarvis or terminal)")
 
@@ -539,14 +546,14 @@ def attribution_checks(fake: Fake) -> None:
     fake.process(4900, ppid=102, sid=4900, start=100100, environ=tagged(T1))    # a tagged child
     jarvis_first = [reader.facts(102), reader.facts(4900)]
     calls = Counting(reader)
-    v = dl.attribute(listener(), jarvis_first, sessions, 1006.0, known, tag_of=calls, probe=PAGE)
+    v = attribute(listener(), jarvis_first, sessions, 1006.0, known, tag_of=calls, probe=PAGE)
     check(v.refusal == dl.JARVIS and not v.attributed and calls.calls == 0,
           "a Jarvis pid first and a tagged child sharing the socket: jarvis, and no environ read")
-    v = dl.attribute(listener(), list(reversed(jarvis_first)), sessions, 1006.0, known,
+    v = attribute(listener(), list(reversed(jarvis_first)), sessions, 1006.0, known,
                      tag_of=calls, probe=PAGE)
     check(v.refusal == dl.JARVIS, "the order the facts arrive in does not matter")
     fake.process(101, start=100400, environ=tagged(T1))        # Jarvis's own, started AFTER the agent
-    v = dl.attribute(listener(), [reader.facts(4900), reader.facts(101)], sessions, 1006.0, known,
+    v = attribute(listener(), [reader.facts(4900), reader.facts(101)], sessions, 1006.0, known,
                      tag_of=calls, probe=PAGE)
     check(v.refusal == dl.JARVIS and calls.calls == 0,
           "a Jarvis pid that started after the tagged holder still refuses the listener")
@@ -554,34 +561,43 @@ def attribution_checks(fake: Fake) -> None:
     fake.process(4910, sid=600, start=100050, environ=env(b"A=1"))             # a terminal's process, first
     fake.process(4911, sid=4911, start=100200, environ=tagged(T1))             # an agent's tagged process
     term_first = [reader.facts(4910), reader.facts(4911)]
-    v = dl.attribute(listener(), term_first, sessions, 1006.0, known, tag_of=calls, probe=PAGE)
+    v = attribute(listener(), term_first, sessions, 1006.0, known, tag_of=calls, probe=PAGE)
     check(v.refusal == dl.TERMINAL and not v.attributed and calls.calls == 0,
           "a terminal's process first and a tagged agent process sharing the socket: terminal")
-    v = dl.attribute(listener(), list(reversed(term_first)), sessions, 1006.0, known, tag_of=calls, probe=PAGE)
+    v = attribute(listener(), list(reversed(term_first)), sessions, 1006.0, known, tag_of=calls, probe=PAGE)
     check(v.refusal == dl.TERMINAL, "a terminal holder refuses in either order")
     fake.process(4912, ppid=600, sid=4912, start=100500, environ=env(b"A=1"))  # a setsid child of the leader, later
-    v = dl.attribute(listener(), [reader.facts(4600), reader.facts(4912)], sessions, 1006.0, known,
+    v = attribute(listener(), [reader.facts(4600), reader.facts(4912)], sessions, 1006.0, known,
                      tag_of=calls, probe=PAGE)
     check(v.refusal == dl.TERMINAL, "a terminal leader's child that started after the owner still refuses it")
-    v = dl.attribute(listener(), [reader.facts(4600), reader.facts(102), reader.facts(4910)], sessions, 1006.0,
+    v = attribute(listener(), [reader.facts(4600), reader.facts(102), reader.facts(4910)], sessions, 1006.0,
                      known, tag_of=calls, probe=PAGE)
     check(v.refusal in (dl.JARVIS, dl.TERMINAL), "with both kinds of holder, one of the two classes")
     other_uid = dataclasses.replace(reader.facts(4600), pid=4605, uid=UID + 1)
-    v = dl.attribute(listener(), [other_uid, reader.facts(4601)], sessions, 1006.0, known,
+    v = attribute(listener(), [other_uid, reader.facts(4601)], sessions, 1006.0, known,
                      tag_of=reader.tag, probe=PAGE)
     check(v.attributed and v.pid == 4601, "a holder of another uid is not Jarvis's or a terminal's: it is passed over")
-    v = dl.attribute(listener(), [None, reader.facts(102)], sessions, 1006.0, known, tag_of=reader.tag, probe=PAGE)
+    calls = Counting(reader)
+    v = attribute(listener(), [None, reader.facts(4600)], sessions, 1006.0, known, tag_of=calls, probe=PAGE)
+    check(v.refusal == dl.UNREADABLE and not v.attributed and calls.calls == 0,
+          "an unreadable co-holder beside a tagged agent refuses the listener (it could be a terminal's)")
+    try:
+        dl.attribute(listener(), [reader.facts(4600)], sessions, 1006.0, known, tag_of=reader.tag, probe=PAGE)
+        check(False, "scan_complete is required")
+    except TypeError:
+        check(True, "scan_complete is required: a caller that forgets the fd scan's answer fails")
+    v = attribute(listener(), [None, reader.facts(102)], sessions, 1006.0, known, tag_of=reader.tag, probe=PAGE)
     check(v.refusal == dl.JARVIS, "with none passing, the earliest readable pid's refusal is reported")
-    v = dl.attribute(listener(), [None], sessions, 1006.0, known, tag_of=reader.tag, probe=PAGE)
+    v = attribute(listener(), [None], sessions, 1006.0, known, tag_of=reader.tag, probe=PAGE)
     check(v.refusal == dl.UNREADABLE, "a lone unreadable holder is unreadable")
 
     print("\n-- rules 10 and 11 wait")
-    v = dl.attribute(listener(first=1002.0, last=1003.5), [facts], sessions, 1004.0, known, tag_of=reader.tag)
+    v = attribute(listener(first=1002.0, last=1003.5), [facts], sessions, 1004.0, known, tag_of=reader.tag)
     check(v.outcome == "pending" and v.pending == "life", "seen for under 2 s: pending life")
-    v = dl.attribute(listener(first=1002.0, last=1004.0), [facts], sessions, 1005.0, known, tag_of=reader.tag)
+    v = attribute(listener(first=1002.0, last=1004.0), [facts], sessions, 1005.0, known, tag_of=reader.tag)
     check(v.outcome == "pending" and v.pending == "probe", "two sightings 2 s apart, not yet probed: pending probe")
     for refusal in (dl.NOT_HTTP, dl.NOT_PAGE, dl.NO_FRAME):
-        v = dl.attribute(listener(), [facts], sessions, 1006.0, known, tag_of=reader.tag,
+        v = attribute(listener(), [facts], sessions, 1006.0, known, tag_of=reader.tag,
                          probe=dl.Probe(refusal))
         check(v.refusal == refusal, f"a probe answering {refusal} refuses")
 
@@ -598,7 +614,7 @@ def fail_closed_checks(fake: Fake) -> None:
         if euid_root:
             print("note: running as root, EACCES cannot be produced")
         else:
-            v = dl.attribute(listener(), [f], sessions, 1006.0, known, tag_of=reader.tag, probe=PAGE)
+            v = attribute(listener(), [f], sessions, 1006.0, known, tag_of=reader.tag, probe=PAGE)
             check(v.refusal == dl.UNREADABLE and not v.attributed, "an EACCES environ is unreadable, never a match")
     finally:
         os.chmod(fake.proc / "4700" / "environ", 0o600)
@@ -607,7 +623,7 @@ def fail_closed_checks(fake: Fake) -> None:
     try:
         if not euid_root:
             f2 = reader.facts(4701)
-            v = dl.attribute(listener(), [f2], sessions, 1006.0, known, tag_of=reader.tag, probe=PAGE)
+            v = attribute(listener(), [f2], sessions, 1006.0, known, tag_of=reader.tag, probe=PAGE)
             check(f2 is None and v.refusal == dl.UNREADABLE, "an EACCES stat gives no facts: unreadable")
     finally:
         os.chmod(fake.proc / "4701" / "stat", 0o600)
@@ -625,7 +641,7 @@ def fail_closed_checks(fake: Fake) -> None:
     fake.process(4702, start=100100, environ=tagged(T1))
     f3 = reader.facts(4702)
     fake.restart(4702, 100900)                                 # the pid now names another process
-    v = dl.attribute(listener(), [f3], sessions, 1006.0, known, tag_of=reader.tag, probe=PAGE)
+    v = attribute(listener(), [f3], sessions, 1006.0, known, tag_of=reader.tag, probe=PAGE)
     check(v.refusal == dl.UNREADABLE, "a start time changed before the environ read: unreadable")
     fake.process(4703, start=100100, environ=tagged(T1))
     f4 = reader.facts(4703)
@@ -685,18 +701,18 @@ def fail_closed_checks(fake: Fake) -> None:
     calls = Counting(reader)
     known25 = dataclasses.replace(known, terminal_leaders=known.terminal_leaders | {(7000, 100000)})
     f25 = reader.facts(7025)
-    v = dl.attribute(listener(), [f25], sessions, 1006.0, known, tag_of=calls, probe=PAGE)
+    v = attribute(listener(), [f25], sessions, 1006.0, known, tag_of=calls, probe=PAGE)
     check(len(f25.ancestors) == 25 and v.attributed,
           "control: 25 levels below a process that is not a terminal's, a tagged server is attributed")
-    v = dl.attribute(listener(), [f25], sessions, 1006.0, known25, tag_of=calls, probe=PAGE)
+    v = attribute(listener(), [f25], sessions, 1006.0, known25, tag_of=calls, probe=PAGE)
     check(v.refusal == dl.TERMINAL and not v.attributed,
           "a process 25 levels below a terminal's leader is refused as terminal's (16 levels used to stop short)")
     f70 = reader.facts(7170)
     calls = Counting(reader)
-    v = dl.attribute(listener(), [f70], sessions, 1006.0, known, tag_of=calls, probe=PAGE)
+    v = attribute(listener(), [f70], sessions, 1006.0, known, tag_of=calls, probe=PAGE)
     check(f70.truncated and v.refusal == dl.TERMINAL and not v.attributed and calls.calls == 0,
           "a process 70 levels deep, however it is tagged, is refused (fail closed) with no environ read")
-    v = dl.attribute(listener(), [f70, reader.facts(7025)], sessions, 1006.0, known, tag_of=calls, probe=PAGE)
+    v = attribute(listener(), [f70, reader.facts(7025)], sessions, 1006.0, known, tag_of=calls, probe=PAGE)
     check(v.refusal == dl.TERMINAL,
           "a truncated holder refuses the listener even when another holder would pass")
     fake.process(5100, ppid=5101, start=1000)
@@ -794,16 +810,16 @@ def tag_checks(fake: Fake, records: list) -> None:
         (listener(), [reader.facts(4811)], known),                             # 7 no_turn
         (listener(), [None], known),                                           # unreadable facts
     ]
-    out = [dl.attribute(lst, fs, sessions, 1006.0, k, tag_of=reader.tag, probe=PAGE).refusal
+    out = [attribute(lst, fs, sessions, 1006.0, k, tag_of=reader.tag, probe=PAGE).refusal
            for lst, fs, k in refusals]
     check(out == [dl.JARVIS_PORT, dl.SERVICE_PORT, dl.EPHEMERAL, dl.ODD_LOOPBACK, dl.OUTSIDE, dl.UID,
                   dl.JARVIS, dl.TERMINAL, dl.NO_TURN, dl.UNREADABLE] and reader.work.environ_reads == 0,
           f"rules 1-7 refuse with no environ read ({reader.work.environ_reads} reads; {out})")
-    v = dl.attribute(listener(), [reader.facts(4811), good], sessions, 1006.0, known, tag_of=reader.tag, probe=PAGE)
+    v = attribute(listener(), [reader.facts(4811), good], sessions, 1006.0, known, tag_of=reader.tag, probe=PAGE)
     check(v.attributed and reader.work.environ_reads == 1 and reader.work.kinds["environ"] == 1,
           "a passing pid: exactly one environ read, the owning pid's (not the earlier refused one's)")
     for _ in range(3):
-        dl.attribute(listener(), [good], sessions, 1006.0, known, tag_of=reader.tag, probe=PAGE)
+        attribute(listener(), [good], sessions, 1006.0, known, tag_of=reader.tag, probe=PAGE)
     check(reader.work.environ_reads == 1, "judging it again on later polls reads nothing more")
 
     print("\n-- the fake secret goes nowhere")
@@ -1024,16 +1040,16 @@ def fd_budget_checks(base: Path) -> None:
     sessions, known = world()
     calls = Counting(reader)
     facts = [reader.facts(tail)]
-    v = dl.attribute(listener(), facts, sessions, 1006.0, known, tag_of=calls, probe=PAGE,
+    v = attribute(listener(), facts, sessions, 1006.0, known, tag_of=calls, probe=PAGE,
                      scan_complete=out.complete)
     check(v.outcome == "pending" and v.pending == "scan" and not v.attributed and calls.calls == 0,
           "an incomplete scan attributes nothing this poll: pending (scan), no environ read")
-    v = dl.attribute(listener(), facts, sessions, 1006.0, known, tag_of=calls, probe=PAGE)
+    v = attribute(listener(), facts, sessions, 1006.0, known, tag_of=calls, probe=PAGE)
     check(v.attributed, "(the same facts from a complete scan do attribute)")
-    v = dl.attribute(listener(port=8405), facts, sessions, 1006.0, known, tag_of=calls, probe=PAGE,
+    v = attribute(listener(port=8405), facts, sessions, 1006.0, known, tag_of=calls, probe=PAGE,
                      scan_complete=False)
     check(v.refusal == dl.JARVIS_PORT, "a refused port is still refused on an incomplete scan, not left pending")
-    v = dl.attribute(listener(), [], sessions, 1006.0, known, tag_of=calls, probe=PAGE, scan_complete=False)
+    v = attribute(listener(), [], sessions, 1006.0, known, tag_of=calls, probe=PAGE, scan_complete=False)
     check(v.pending == "scan", "no holder found on an incomplete scan is pending, not `outside`")
 
     old = dl.FD_SCAN_MAX
@@ -1082,10 +1098,10 @@ def window_checks() -> None:
     sessions.turn_ended("th-1", at=1100.0)
     sessions.turn_started("th-1", "claude", at=2000.0)
     f = dataclasses.replace(_passing_facts(), start=150000, started_at=1500.0, leader_start=150000)
-    v = dl.attribute(listener(first=2100.0, last=2103.0), [f], sessions, 2104.0, known,
+    v = attribute(listener(first=2100.0, last=2103.0), [f], sessions, 2104.0, known,
                      tag_of=lambda _f: T1.encode(), probe=PAGE)
     check(v.refusal == dl.NO_TURN, "attribute(): that process is no_turn")
-    v = dl.attribute(listener(first=1650.0, last=1653.0), [f], sessions, 1654.0, known,
+    v = attribute(listener(first=1650.0, last=1653.0), [f], sessions, 1654.0, known,
                      tag_of=lambda _f: T1.encode(), probe=PAGE)
     check(v.attributed, "attribute(): the same process seen inside window 1's grace is attributed")
 
@@ -1109,8 +1125,8 @@ def nit_checks() -> None:
     sessions, known = world()
     calls = Counting(dl.ProcReader())
     row = dl.Listener(other, 1002.0, 1005.0)
-    v = dl.attribute(row, [_passing_facts()], sessions, 1006.0, known, tag_of=calls, probe=PAGE)
-    v2 = dl.attribute(row, [], sessions, 1006.0, known, tag_of=calls, probe=PAGE)
+    v = attribute(row, [_passing_facts()], sessions, 1006.0, known, tag_of=calls, probe=PAGE)
+    v2 = attribute(row, [], sessions, 1006.0, known, tag_of=calls, probe=PAGE)
     check(v.refusal == dl.UID and v2.refusal == dl.UID and calls.calls == 0,
           "attribute(): another uid's socket is uid before rule 3 and before any process is judged")
     check(dl.probe_address(other, ports, UID) is None and dl.probe_address(mine, ports, UID) == ("127.0.0.1", 5173)

@@ -808,7 +808,7 @@ def _identity_refusal(f: PidFacts | None, known: Known) -> str | None:
 
 
 def attribute(listener: Listener, facts, sessions: Sessions, now: float, known: Known, *,
-              tag_of, probe: Probe | None = None, scan_complete: bool = True) -> Verdict:
+              tag_of, probe: Probe | None = None, scan_complete: bool) -> Verdict:
     """Rules 1-11 in order (§B.5). `facts` holds one entry per pid found
     holding the listener among the daemon cgroup's processes (None for a pid
     whose facts could not be read); empty is rule 3. `scan_complete` is the fd
@@ -818,7 +818,9 @@ def attribute(listener: Listener, facts, sessions: Sessions, now: float, known: 
     **A socket several processes hold fails closed.** If any holder is refused
     as Jarvis's own (rule 5) or as a terminal's (rule 6), the listener is
     refused with that class, even when another holder carries a live tag: a
-    shared socket is as much the terminal's or Jarvis's as the agent's. With
+    shared socket is as much the terminal's or Jarvis's as the agent's. A
+    holder whose facts could not be read might be either, so it refuses the
+    listener too (`unreadable`; nothing is cached, the next poll asks again). With
     no such holder the earliest-started pid passing rules 4-7 is the owning
     pid, and `tag_of(facts)` — its `environ`, read only now — is consulted for
     it alone. Rules 7 and 9 are judged at the listener's first sighting
@@ -846,7 +848,7 @@ def attribute(listener: Listener, facts, sessions: Sessions, now: float, known: 
         if refusal is None:
             continue                                          # a later passing pid: not the owner
         first = first or refusal
-        if refusal in (JARVIS, TERMINAL):
+        if refusal in (JARVIS, TERMINAL) or f is None:     # an unreadable holder could be either
             shared = shared or refusal
     if shared is not None:
         return _refused(shared)
