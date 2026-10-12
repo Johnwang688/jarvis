@@ -163,6 +163,47 @@ class Base(Repo):
         git(self.proj, "mv", "plain.txt", "moved.txt")
         got = self.base("moved.txt")
         self.assertEqual((got["state"], got["text"], got["renamed"]), ("ok", "one\ntwo\nthree\n", True))
+        # A staged copy is no rename (`-M` reports none): it is new.
+        (self.proj / "copy.txt").write_text("int main() {\n  return 0;\n}\n")
+        git(self.proj, "add", "copy.txt")
+        self.assertEqual(self.base("copy.txt")["state"], "new")
+
+    # Review of PR #61, LOW 1: a rename's source is held to the project.
+    def test_a_rename_from_outside_the_project_is_new(self):
+        r = self.proj
+        (r / "outside_secret.md").write_text("OUTSIDE-THE-PROJECT\n")
+        git(r, "add", "outside_secret.md")
+        git(r, "commit", "-qm", "outside")
+        git(r, "mv", "outside_secret.md", "src/notes.md")
+        url = self.project_at(r / "src", "Src")
+        got = self.base("notes.md", url=url)
+        self.assertEqual((got["state"], got["text"]), ("new", None))
+        self.assertNotIn("OUTSIDE-THE-PROJECT", json.dumps(got))
+        self.assertNotIn("outside_secret", json.dumps(got))
+        # Control: the same rename seen from the repository's own project.
+        self.assertEqual(self.base("src/notes.md")["text"], "OUTSIDE-THE-PROJECT\n")
+
+    def test_a_rename_out_of_a_skipped_folder_is_new(self):
+        r = self.proj
+        (r / "node_modules" / "pkg").mkdir(parents=True)
+        (r / "node_modules" / "pkg" / "lib.js").write_text("FROM-NODE-MODULES\n")
+        git(r, "add", "-f", "node_modules/pkg/lib.js")
+        git(r, "commit", "-qm", "vendored")
+        git(r, "mv", "node_modules/pkg/lib.js", "lib.js")
+        got = self.base("lib.js")
+        self.assertEqual((got["state"], got["text"]), ("new", None))
+        self.assertNotIn("FROM-NODE-MODULES", json.dumps(got))
+
+    # NIT 4: a U+FFFD the file holds is text; bytes that are not UTF-8 are not.
+    def test_text_is_decoded_strictly(self):
+        r = self.proj
+        (r / "fffd.txt").write_text("a�b\r\nc\n", newline="")
+        (r / "latin1.txt").write_bytes("caf\xe9\n".encode("latin-1"))
+        git(r, "add", "fffd.txt", "latin1.txt")
+        git(r, "commit", "-qm", "encodings")
+        got = self.base("fffd.txt")
+        self.assertEqual((got["state"], got["text"]), ("ok", "a�b\r\nc\n"))
+        self.assertEqual(self.base("latin1.txt")["state"], "binary")
 
 
 class Refusals(Repo):

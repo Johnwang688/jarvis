@@ -13,13 +13,20 @@ HTTP client uses. No tool, MCP tool or fast-path tool reaches this module.
   every credential env file (`secrets.is_env_credential`) are refused — and
   so is a file whose **name in git** is one of those (a staged rename: `git
   mv .env notes.txt` must not serve `.env`'s HEAD text as `notes.txt`'s). A
-  repository whose own config names a program for git to run is refused
+  rename's source must also be **in the project** as `hud_api.scope` places
+  a path (under one of its roots, no `SKIP_DIRS` or `.git` component): a
+  file moved in from outside the project, or out of `node_modules`, answers
+  `new` — no gutter, nothing of the source sent (review of PR #61, LOW 1).
+  `diff-index -M` reports renames only, so a staged copy answers `new` too.
+  A repository whose own config names a program for git to run is refused
   (`gitops._risky_config`, as `gitops` refuses it everywhere). HEAD's blob is
   read by its object id (`cat-file blob`), so no path-based attribute —
   textconv, a filter, an eol conversion — applies; it is capped at
   `BASE_CAP` (the editor's own read cap) before it is read, and a blob that
-  is not text answers `binary`: no gutter. A file HEAD does not hold
-  (untracked or newly added) answers `new`: no gutter either.
+  is not text by the editor's own rule (`editor_policy.is_text`: a NUL in
+  the first 8 KiB, or bytes that are not UTF-8) answers `binary`: no gutter.
+  A file HEAD does not hold (untracked or newly added) answers `new`: no
+  gutter either.
 - `GET /projects/{id}/git/status`: `git status --porcelain=v2 -z` at the
   project's root, cached for `STATUS_TTL` (2 s, or three times what the
   status took when that is longer) per root and run once at a time per
@@ -31,7 +38,9 @@ HTTP client uses. No tool, MCP tool or fast-path tool reaches this module.
 Git runs only through `gitops._git` — the hardened runner: an absolute system
 git, every `GIT_*` variable dropped, hooks, fsmonitor, the pager and auto-gc
 off, `GIT_OPTIONAL_LOCKS=0` (a status never rewrites the index) — and a
-repository's own config is read for programs first. Not covered, as for
+repository's own config is read for programs first. The one read that needs
+bytes (the blob, so it can be decoded strictly) uses `gitops`' own binary,
+hardening and environment in bytes mode (`_git_blob`). Not covered, as for
 `gitops`: the owner's own global git configuration (a filter driver set
 globally, such as git-lfs's, still runs on `git status`).
 
@@ -57,8 +66,6 @@ BASE_SECONDS = 5.0
 STATUS_TTL = 2.0
 STATUS_SECONDS = 5.0
 STATUS_CAP = 20_000
-# How much of a blob the not-text test looks at for a NUL (git's own rule).
-NUL_PROBE = editor_policy.NUL_PROBE
 _CACHE_MAX = 256
 REGULAR_MODES = frozenset({"100644", "100755"})
 
@@ -70,6 +77,33 @@ REFUSED_ENV = "an env file: its committed text is not served here (the gutter is
 
 def fail(status, text):
     H.fail(status, text)
+
+
+def _git_blob(cwd: Path, oid: str, timeout: float) -> bytes | None:
+    """A blob's bytes by object id, or None: `gitops._git` in bytes mode —
+    its own git binary, its hardening options and its scrubbed environment —
+    because that runner decodes with replacement, and a strict decode is the
+    only way to tell a U+FFFD the file holds from bytes that are not UTF-8."""
+    import subprocess
+    from jarvis import gitops
+    try:
+        proc = subprocess.run([gitops.git_binary(), *gitops._HARDENING, "cat-file", "blob", oid],
+                              cwd=str(cwd), env=gitops._env(), stdin=subprocess.DEVNULL,
+                              capture_output=True, timeout=timeout)
+    except (subprocess.TimeoutExpired, OSError, ValueError):
+        return None
+    return proc.stdout if proc.returncode == 0 else None
+
+
+def _in_project(project, where: Path) -> bool:
+    """Whether `hud_api.scope` places this path in the project: under one of
+    its roots, lexically and resolved, with no `SKIP_DIRS` component."""
+    from .daemon import APIError
+    try:
+        H.scope(project, str(where))
+    except APIError:
+        return False
+    return True
 
 
 def _git(cwd: Path, args, timeout: float):
@@ -125,8 +159,9 @@ def _answer(name: str, state: str, head: str | None = None, **extra) -> dict:
 
 
 def _renamed_from(toplevel: Path, rel: str) -> str | None | bool:
-    """Where a staged rename (or copy) of `rel` came from in HEAD, None when
-    it is not one, False when git could not say (fail closed)."""
+    """Where a staged rename of `rel` came from in HEAD, None when it is not
+    one, False when git could not say (fail closed). `-M` reports renames
+    only; a copy record, were one ever listed, is skipped: a copy is `new`."""
     code, out, _ = _git(toplevel, ["diff-index", "--cached", "-M", "-z", "--name-status",
                                    "--no-ext-diff", "--no-textconv", "HEAD", "--"], BASE_SECONDS)
     if code != 0:
@@ -142,7 +177,7 @@ def _renamed_from(toplevel: Path, rel: str) -> str | None | bool:
             if i + 2 >= len(fields):
                 return False
             orig, new = fields[i + 1], fields[i + 2]
-            if new == rel:
+            if status[0] == "R" and new == rel:
                 return orig
             i += 3
         else:
@@ -178,7 +213,10 @@ def base(project, name: str) -> dict:
     if not head:
         return _answer(name, "no_head")
     # The name in git: a staged rename serves its source's HEAD text, so the
-    # source is judged as the file itself is.
+    # source is placed and judged as the file itself is — in the project, as
+    # `hud_api.scope` places a path (a source outside it, or under a
+    # SKIP_DIRS folder, is `new`: nothing of it is sent), then not a
+    # credential, an env file or the gate's state (403).
     origin = _renamed_from(toplevel, rel)
     if origin is False:
         return _answer(name, "unavailable", head)
@@ -187,7 +225,9 @@ def base(project, name: str) -> dict:
         parts = PurePosixPath(origin).parts
         if origin.startswith("/") or ".." in parts or ".git" in parts:
             fail(403, "a rename git reports from outside the repository")
-        where = toplevel / origin
+        where = toplevel.joinpath(*parts)
+        if not _in_project(project, where):
+            return _answer(name, "new", head)
         why = refused(policy, where, _resolve(where), gate)
         if why:
             fail(403, why)
@@ -213,12 +253,14 @@ def base(project, name: str) -> dict:
     if nbytes > BASE_CAP:
         return _answer(name, "too_large", head, size=nbytes)
     # By object id: no path, so no attribute (textconv, a filter, eol) applies.
-    code, text, _ = _git(toplevel, ["cat-file", "blob", oid], BASE_SECONDS)
-    if code != 0:
+    data = _git_blob(toplevel, oid, BASE_SECONDS)
+    if data is None or len(data) > BASE_CAP:
         return _answer(name, "unavailable", head)
-    if "\x00" in text[:NUL_PROBE] or "�" in text:
+    # The editor's own rule: a NUL in the first 8 KiB, or not UTF-8 (strictly:
+    # a U+FFFD the file really holds is text).
+    if not editor_policy.is_text(data):
         return _answer(name, "binary", head, size=nbytes)
-    return {"path": name, "state": "ok", "head": head, "text": text, "size": nbytes,
+    return {"path": name, "state": "ok", "head": head, "text": data.decode("utf-8"), "size": nbytes,
             "renamed": bool(origin)}
 
 
@@ -260,7 +302,9 @@ def status(project) -> dict:
     if not root.is_dir():
         fail(404, "the project folder is not there")
     from .editor_nav import _policy_for
-    policy = _policy_for(root)
+    # Narrowed to the credential folders that can matter under the root, as
+    # resolved and as written: the status judges names under it, lexically.
+    policy = _policy_for(root, Path(os.path.abspath(raw_root)))
     if policy.is_withheld(raw_root, root):
         fail(403, "a credential folder: its contents are never listed")
     key = str(root)
