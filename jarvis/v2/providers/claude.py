@@ -821,6 +821,8 @@ class ClaudeProvider:
             "extra_args": {"replay-user-messages": None},
         }
         cli_path = resolve_cli()
+        if brief.origin_tag is not None:
+            kwargs["env"] = {"JARVIS_ORIGIN_TAG": brief.origin_tag}
         if cli_path is not None:
             # The owner's own install, never the SDK's bundled copy, which
             # lags it and refuses newer models. None leaves the SDK to its

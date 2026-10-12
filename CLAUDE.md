@@ -1985,6 +1985,31 @@ comma-joined CSPs, X-Frame-Options lists and the last `Content-Type`),
 and every guard of the fixes above. A grep pin allows only `daemon`,
 `hud_api`, `terminals` and `devservers` to name the module.
 
+**Dev-server daemon wiring, AO-1b-i (2026-10-12; amendment 2 §B–§D).**
+`devservers.DevServers`, attached to the daemon, calls AO-1a's rules with
+the fd scan's `complete` answer. A lazy `jarvis-devwatch` polls only during
+Claude/Codex turns and their 600-second grace, or for live registry entries;
+`auto_open` comes only through `devservers.enabled()` → `BrowserSettings`.
+Off means no watcher work. `main()` supplies the real proc/cgroup roots;
+embedded/test daemons must explicitly supply fixture roots to watch.
+An initial baseline is old. Transient missing facts retry three polls;
+before publication the same `(pid, start)` must still hold the inode.
+Two bounded loopback probes send only GET /, never follow redirects, and
+retry TLS once after a silent close or alert. Responses are never retained.
+The memory registry de-dups ports for 60 seconds after down and publishes
+only `{kind: dev_server, data: {id, state, source, at}}`; no port or URL,
+no thread-log record, and no Discord delivery. Owner-only `/dev-servers`
+routes return URLs, arbitrate claims for 600 ms, and renew/complete/dismiss
+90-second leases. An owner HUD `/events?window=` disconnect lapses leases;
+the API listener's parameter has no effect. `/status.dev_watch` is counts.
+`Brief.origin_tag` is hidden from repr, exists only in the session run copy,
+and reaches Claude's SDK env and Codex's app-server env, never argv or
+brief.json. Close retains attribution for the grace. Stop ends terminals,
+then the watcher and probes, then the bus. Terminal announcement support is
+in the registry; AO-1b-ii wires its sniffer. `devservers_check` uses fixture
+proc trees, fake CLIs and fixed free loopback ports; `frame_check` walks the
+new family. No tool or Discord verb reaches either dev module.
+
 **VEX backend, VX-1 (2026-10-11; editor plan
 `docs/plans/2026-10-09-hud-editor-plan.md` §2.9/§3, decisions file beside it
 wins: V-1..V-5; design §18; contract in `docs/hud-api.md`).**
