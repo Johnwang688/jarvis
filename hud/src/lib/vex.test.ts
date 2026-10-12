@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
-  BUILD_FIRST_CODE, DOWNLOAD_NAME, DeviceLedger, SETUP_COMMAND, STILL_STALE, buildLine, chainCancellable, chainLine,
+  BUILD_FIRST_CODE, BUILD_FIRST_STEPS, DOWNLOAD_NAME, DeviceLedger, SETUP_COMMAND, buildLine, chainCancellable, chainLine,
+  stillStale,
   defaultName, downloadLabel, errorTarget, isExplicitClick, nameRefusal, needsBuildFirst, offersVex, parseBuild, parseDetection, parseDeviceRecord, parseLastBuilds,
   parseStatus, setupNote, slotRefusal, type BuildError, type BuildView,
 } from "./vex";
@@ -85,8 +86,11 @@ describe("download is the owner's click", () => {
     expect(needsBuildFirst("Build_First")).toBe(false);
   });
 
-  it("a build-first that still ends stale says Rebuild, never loops", () => {
-    expect(STILL_STALE).toMatch(/Rebuild/);
+  it("Build first is a build, then one rebuild — never a third (delta review MED-1)", () => {
+    expect(BUILD_FIRST_STEPS).toEqual(["build", "rebuild"]);
+    const said = stillStale("build/override.bin is older than the sources; Build first, then download");
+    expect(said).toMatch(/^Nothing was downloaded/);
+    expect(said).toContain("older than the sources; Build first, then download");
   });
 });
 
@@ -100,6 +104,8 @@ describe("one chain per window (M1)", () => {
     expect(chainLine(c({ phase: "pause" }))).toMatch(/^Pausing the brain terminal, then downloading override to slot 3/);
     expect(chainLine(c({ cancelled: true }))).toMatch(/^Cancelling/);
     expect(chainLine(c({ label: "" }))).toBe("Building this project, then downloading to slot 3");
+    expect(chainLine(c({ phase: "rebuild" }))).toBe("Rebuilding override from scratch, then downloading to slot 3");
+    expect(chainCancellable(c({ phase: "rebuild" }))).toBe(true);
   });
 
   it("cancels until the download is sent, never mid-write", () => {

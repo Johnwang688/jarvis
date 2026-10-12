@@ -541,8 +541,31 @@ def _one_chain_checks(page, mock, check, until, fake):
           note.inner_text() if note.count() else "")
 
 
+def _header_rebuild_checks(page, mock, check, until, fake):
+    """Delta review MED-1: make found nothing to do after a header it does not list
+    changed, so the daemon still says Build first — one rebuild, then the download."""
+    _reset(page, mock, until)
+    base = len(mock.calls)
+    check("MED-1 setup: the view draws", _ready(page, until))
+    v = mock_vex.state(mock)
+    v["bin_fresh"] = False
+    v["stale_until_rebuild"] = True
+    v["build_auto"] = {"state": "succeeded"}
+    page.locator(_view(V, _tid("vex-download-btn"))).click()
+    check("MED-1: a build that leaves it stale is followed by one rebuild, on the one click",
+          bool(until(lambda: _posted_since(mock, base, "/projects/p3/vex/build") == [{"action": "build"},
+                                                                                      {"action": "rebuild"}],
+                     timeout=8)),
+          str(_posted_since(mock, base, "/projects/p3/vex/build")))
+    check("MED-1: then the download goes", bool(until(lambda: _sent_downloads(mock), timeout=8))
+          and len(v["downloads"]) == 3, str(v["downloads"]))
+    done = page.locator(_view(V, _tid("vex-downloaded")))
+    check("MED-1: and the view says it is in the slot",
+          bool(until(lambda: done.count() > 0 and "slot 1" in done.inner_text(), timeout=6)))
+
+
 def _still_stale_checks(page, mock, check, until, fake):
-    """M2: a build-first that still ends stale says Rebuild; nothing loops."""
+    """M2 and MED-1: still stale after a build and a rebuild — stops, never loops."""
     _reset(page, mock, until)
     base = len(mock.calls)
     check("M2 setup: the view draws", _ready(page, until))
@@ -552,13 +575,14 @@ def _still_stale_checks(page, mock, check, until, fake):
     v["build_auto"] = {"state": "succeeded"}
     page.locator(_view(V, _tid("vex-download-btn"))).click()
     note = page.locator(_view(V, _tid("vex-note")))
-    check("M2: a build that leaves the program stale says Rebuild",
-          bool(until(lambda: note.count() > 0 and "Rebuild" in note.inner_text(), timeout=8)),
+    check("M2: still stale after a build and a rebuild, it says so and sends nothing",
+          bool(until(lambda: note.count() > 0 and "after a build and a rebuild" in note.inner_text(), timeout=10)),
           note.inner_text() if note.count() else "")
     time.sleep(1.0)
-    check("M2: one build and two tries, never a loop",
-          len(_posted_since(mock, base, "/projects/p3/vex/build")) == 1 and len(v["downloads"]) == 2 and not _sent_downloads(mock),
-          f"{len(_posted_since(mock, base, '/projects/p3/vex/build'))} builds, {v['downloads']}")
+    check("M2: one build, one rebuild and three tries, never a loop",
+          _posted_since(mock, base, "/projects/p3/vex/build") == [{"action": "build"}, {"action": "rebuild"}]
+          and len(v["downloads"]) == 3 and not _sent_downloads(mock),
+          f"{_posted_since(mock, base, '/projects/p3/vex/build')}, {v['downloads']}")
 
 
 def _answer_card_checks(page, mock, check, until, fake):
@@ -706,7 +730,8 @@ def _gone_project_checks(page, mock, check, until, fake):
 
 
 SECTIONS = (_offer_checks, _setup_checks, _build_checks, _explicit_click_checks, _chain_checks, _card_checks,
-            _brain_checks, _info_checks, _notice_checks, _one_chain_checks, _still_stale_checks,
+            _brain_checks, _info_checks, _notice_checks, _one_chain_checks, _header_rebuild_checks,
+            _still_stale_checks,
             _answer_card_checks, _passing_card_checks, _first_click_checks, _detect_again_checks,
             _lone_pane_checks, _gone_project_checks)
 

@@ -1031,28 +1031,29 @@ class Device(DaemonBase):
         self.assertIn("older than the sources", self.download(status=409)["error"])
         self.assertEqual(self.world.calls("vexcom"), [])
 
-    # -- VX-2 review, M2: a make with nothing to do never loops "Build first" ---------------
+    # -- VX-2 review M2 and its delta review (MED-1, LOW-1..3): what may be sent ------------
 
-    def _stale_behind_a_header(self):
-        """A built binary, then a newer header make never compiles: stale by mtime alone."""
+    def _built_then_older(self):
+        """A built binary, made older than its sources (as if built a while ago)."""
         self.build()
         binary = self.folder / "build" / "override.bin"
         old = time.time() - 600
         os.utime(binary, (old, old))
-        (self.folder / "include").mkdir(exist_ok=True)
-        (self.folder / "include" / "notes.hpp").write_text("// a header no rule names\n")
         return binary
+
+    def _header(self, name="pid.hpp", text="// edited\n"):
+        (self.folder / "include").mkdir(exist_ok=True)
+        (self.folder / "include" / name).write_text(text)
 
     def test_the_build_first_refusal_carries_a_code(self):
         body = self.download(status=409)
         self.assertEqual(body.get("code"), "build_first", body)
-        self._stale_behind_a_header()
+        self._built_then_older()
         body = self.download(status=409)
         self.assertEqual((body.get("code"), "older than the sources" in body["error"]),
                          ("build_first", True), body)
         # Other refusals carry no code: the HUD never builds on them.
         hold = self.world.vexcom_dir / "HOLD"
-        (self.folder / "NOOP").write_text("")
         self.build()
         hold.write_text("")
         first = self.download()["terminal_id"]
@@ -1062,29 +1063,77 @@ class Device(DaemonBase):
         hold.unlink()
         self.ended(first)
 
-    def test_a_successful_build_with_nothing_to_do_makes_the_binary_current(self):
-        binary = self._stale_behind_a_header()
-        self.assertIn("Build first", self.download(status=409)["error"])
+    def test_files_a_build_never_reads_make_nothing_stale(self):
+        """M2: a notes file or an editor backup beside the sources never asks for a build."""
+        self._built_then_older()
+        self.build()                      # a fresh binary
+        for name in ("NOTES.txt", "main.cpp~", ".main.cpp.swp", "todo.md"):
+            (self.folder / "src" / name).write_text("x\n")
+            later = time.time() + 30
+            os.utime(self.folder / "src" / name, (later, later))
+        self.ended(self.download()["terminal_id"])
+
+    def test_a_make_with_nothing_to_do_proves_nothing_a_rebuild_does(self):
+        """MED-1, the reviewer's repro: VEX's makefile lists only include/*.h, so an edited
+        include/pid.hpp leaves make nothing to do — and the old binary must not be sent."""
+        binary = self._built_then_older()
+        self._header()
+        self.assertEqual(self.download(status=409).get("code"), "build_first")
         (self.folder / "NOOP").write_text("")
         result = self.build()
         self.assertEqual(result["state"], "succeeded", result)
         self.assertLess(binary.stat().st_mtime, time.time() - 500, "make touched nothing")
-        tid = self.download()["terminal_id"]
-        self.ended(tid)
+        self.assertEqual(self.download(status=409).get("code"), "build_first",
+                         "a make that wrote nothing vouched for the old binary")
+        # The chain's next step: one rebuild (make -B), which writes it.
+        self.assertEqual(self.build("rebuild")["state"], "succeeded")
+        self.assertGreater(binary.stat().st_mtime, time.time() - 60)
+        self.ended(self.download()["terminal_id"])
         self.assertEqual(len(self.world.calls("vexcom")), 1)
 
-    def test_a_source_changed_after_that_build_is_stale_again(self):
-        self._stale_behind_a_header()
-        (self.folder / "NOOP").write_text("")
+    def test_a_noop_make_after_a_written_build_still_needs_the_edit(self):
+        """MED-1 through the known-binary branch: the last build wrote it, then a header is
+        edited; a no-op make keeps what is known, and the edit still asks for a build."""
         self.build()
+        self._header()
         later = time.time() + 5
-        (self.folder / "src" / "auton.cpp").write_text("int auton() { return 1; }\n")
-        os.utime(self.folder / "src" / "auton.cpp", (later, later))
+        os.utime(self.folder / "include" / "pid.hpp", (later, later))
+        (self.folder / "NOOP").write_text("")
+        self.assertEqual(self.build()["state"], "succeeded")
         self.assertEqual(self.download(status=409).get("code"), "build_first")
+        self.assertEqual(self.world.calls("vexcom"), [])
+
+    def test_a_future_dated_source_hides_no_edit(self):
+        """LOW-1, the reviewer's repro: a teammate's file dated a year ahead keeps the binary
+        'older than the sources' forever; the digest lets a build vouch for it, and an edit
+        after that build is never hidden by the future date."""
+        ahead = time.time() + 365 * 86400
+        (self.folder / "src" / "teammate.cpp").write_text("int t() { return 1; }\n")
+        os.utime(self.folder / "src" / "teammate.cpp", (ahead, ahead))
+        self.build()
+        first = self.download()["terminal_id"]          # just built: may be sent
+        self.ended(first)
+        (self.folder / "src" / "main.cpp").write_text("int main() { return 2; }\n")
+        body = self.download(status=409)
+        self.assertEqual(body.get("code"), "build_first", body)
+        # A deletion, a rename and an older-mtime copy change the digest too.
+        self.build()
+        self.ended(self.download()["terminal_id"])
+        older = time.time() - 3600
+        (self.folder / "src" / "copied.cpp").write_text("int c() { return 3; }\n")
+        os.utime(self.folder / "src" / "copied.cpp", (older, older))
+        self.assertEqual(self.download(status=409).get("code"), "build_first")
+        self.build()
+        self.ended(self.download()["terminal_id"])
+        (self.folder / "src" / "copied.cpp").rename(self.folder / "src" / "moved.cpp")
+        self.assertEqual(self.download(status=409).get("code"), "build_first")
+        self.build()
+        (self.folder / "src" / "moved.cpp").unlink()
+        self.assertEqual(self.download(status=409).get("code"), "build_first")
+        self.assertEqual(len(self.world.calls("vexcom")), 3)
 
     def test_a_source_saved_while_it_built_is_never_made_current(self):
-        self._stale_behind_a_header()
-        (self.folder / "NOOP").write_text("")
+        self._built_then_older()
         hold = self.folder / "HOLD"
         hold.write_text("")
         started = self.build(wait=False)
@@ -1098,29 +1147,99 @@ class Device(DaemonBase):
         self.assertEqual(self.download(status=409).get("code"), "build_first")
         self.assertEqual(self.world.calls("vexcom"), [])
 
-    def test_only_the_last_build_counts(self):
-        binary = self._stale_behind_a_header()
-        (self.folder / "NOOP").write_text("")
+    def test_a_rename_during_a_build_records_nothing(self):
+        """LOW-2: the binary make wrote is the `P=` name it started with; an old binary of
+        the new name is never vouched for."""
+        ahead = time.time() + 365 * 86400
+        (self.folder / "src" / "teammate.cpp").write_text("int t() { return 1; }\n")
+        os.utime(self.folder / "src" / "teammate.cpp", (ahead, ahead))
+        (self.folder / "build").mkdir(exist_ok=True)
+        stale = self.folder / "build" / "renamed.bin"
+        stale.write_bytes(b"\x00OLDBIN" * 8)
+        hold = self.folder / "HOLD"
+        hold.write_text("")
+        started = self.build(wait=False)
+        eventually(lambda: self.world.calls("make"), what="the build started")
+        self.assertIn("P=override", self.world.calls("make")[-1]["argv"])
+        settings = self.folder / ".vscode" / "vex_project_settings.json"
+        doc = json.loads(settings.read_text())
+        doc["project"]["name"] = "renamed"
+        settings.write_text(json.dumps(doc))
+        hold.unlink()
+        ended = eventually(lambda: (lambda b: b if b["state"] != "running" else None)(
+            self.owner("GET", f"/vex/builds/{started['build_id']}")), what="the build ended")
+        self.assertEqual(ended["state"], "succeeded")
+        self.assertEqual((ended["bin"] or {}).get("path"), "build/override.bin", ended)
+        self.assertEqual(self.download(status=409).get("code"), "build_first")
+        self.assertEqual(self.world.calls("vexcom"), [])
+
+    def test_an_unfinished_build_refuses_until_one_succeeds(self):
+        """LOW-3: make killed while writing leaves a truncated binary with a fresh mtime —
+        a cancelled, timed-out or failed build refuses the download until a success, across
+        a restart too (the mark is on disk, written before make runs)."""
+        binary = self.folder / "build" / "override.bin"
         self.build()
-        # A failed build after it forgets it.
+        fresh = time.time() + 60
+
+        def truncated():
+            binary.write_bytes(b"\x00VEX")
+            os.utime(binary, (fresh, fresh))
+
+        # Cancelled: its terminal closed mid-build.
+        (self.folder / "src" / "SLOW").write_text("")
+        running = self.build(wait=False)
+        eventually(lambda: len(self.world.calls("make")) == 2, what="the slow build started")
+        self.assertTrue(vex.is_unfinished(self.folder), "marked before make ran")
+        self.owner("DELETE", f"/terminals/{running['terminal_id']}")
+        (self.folder / "src" / "SLOW").unlink()
+        truncated()
+        body = self.download(status=409)
+        self.assertEqual(body.get("code"), "build_first", body)
+        self.assertIn("did not finish", body["error"])
+        # A failed one too.
+        self.build()
         (self.folder / "src" / "FAIL").write_text("src/main.cpp:1:1: error: x\n")
         self.assertEqual(self.build()["state"], "failed")
         (self.folder / "src" / "FAIL").unlink()
+        truncated()
         self.assertEqual(self.download(status=409).get("code"), "build_first")
-        # So does a clean, and a binary replaced since the success.
+        # A timed-out one too.
+        (self.folder / "src" / "SLOW").write_text("")
+        with patch.object(vex, "BUILD_TIMEOUT_S", 1.0), patch.object(vex, "KILL_GRACE_S", 0.3):
+            self.assertEqual(self.build()["state"], "timed_out")
+        (self.folder / "src" / "SLOW").unlink()
+        truncated()
+        self.assertEqual(self.download(status=409).get("code"), "build_first")
+        # A daemon that never saw it end (a restart) still refuses: the mark is a file.
+        self.assertTrue(vex.unfinished_path(self.folder).is_file())
+        # vexbuild keeps the same mark: a success clears it, a failure sets it.
+        self.assertEqual(vex.cli(["build"], cwd=str(self.folder), out=io.StringIO()), 0)
+        self.assertFalse(vex.is_unfinished(self.folder))
+        (self.folder / "src" / "FAIL").write_text("src/main.cpp:1:1: error: x\n")
+        self.assertEqual(vex.cli(["build"], cwd=str(self.folder), out=io.StringIO()), 2)
+        (self.folder / "src" / "FAIL").unlink()
+        self.assertTrue(vex.is_unfinished(self.folder))
+        truncated()
+        self.assertEqual(self.download(status=409).get("code"), "build_first")
+        self.assertEqual(vex.cli(["build"], cwd=str(self.folder), out=io.StringIO()), 0)
+        self.assertFalse(vex.is_unfinished(self.folder))
+        self.ended(self.download()["terminal_id"])
+        self.assertEqual(len(self.world.calls("vexcom")), 1)
+
+    def test_only_the_last_build_counts(self):
+        binary = self._built_then_older()
+        ahead = time.time() + 365 * 86400
+        (self.folder / "src" / "teammate.cpp").write_text("int t() { return 1; }\n")
+        os.utime(self.folder / "src" / "teammate.cpp", (ahead, ahead))
         self.build()
+        self.ended(self.download()["terminal_id"])      # vouched for by the build that wrote it
+        # A clean forgets it, and so does a binary replaced since.
         self.assertEqual(self.build("clean")["state"], "succeeded")
         self.assertEqual(self.download(status=409).get("code"), "build_first")
-        (self.folder / "NOOP").unlink()
-        self.build()
-        (self.folder / "NOOP").write_text("")
-        old = time.time() - 600
-        os.utime(binary, (old, old))
         self.build()
         binary.write_bytes(b"\x00OTHER" * 8)
-        os.utime(binary, (old, old))
         self.assertEqual(self.download(status=409).get("code"), "build_first")
-        self.assertEqual(self.world.calls("vexcom"), [])
+        self.assertEqual(len(self.world.calls("vexcom")), 1)
 
     def test_one_device_action_at_a_time(self):
         self.build()

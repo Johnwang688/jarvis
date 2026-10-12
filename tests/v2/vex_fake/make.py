@@ -10,7 +10,8 @@ what the test planted in the project:
 * `src/FAIL`: prints that file's text (a fixture build log) and exits 2;
 * `HOLD` (beside the makefile): waits until the test removes it;
 * `NOOP` (beside the makefile): make found nothing to do — touches nothing,
-  exits 0 (the binary keeps its old time);
+  exits 0 (the binary keeps its old time); `-B` (a rebuild) ignores it, as
+  make -B rebuilds everything;
 * otherwise writes `build/<P>.bin` and exits 0.
 
 `src/MARKER`, if present, is printed as `OUTPUT-<MARKER upper-cased>`, so the
@@ -45,7 +46,7 @@ if (src / "FAIL").is_file():
     sys.stdout.write((src / "FAIL").read_text())
     sys.stdout.flush()
     sys.exit(2)
-if Path("NOOP").is_file():
+if Path("NOOP").is_file() and "-B" not in args:
     print("make: Nothing to be done for 'all'.", flush=True)
     sys.exit(0)
 Path("build").mkdir(exist_ok=True)

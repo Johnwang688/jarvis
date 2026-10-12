@@ -94,6 +94,14 @@ SETTINGS_CAP = 64 * 1024
 MAKEFILE_CAP = 256 * 1024
 MAKEFILE_LIMIT = 32
 SOURCE_LIMIT = 10_000
+# What a build compiles or obeys: C/C++ sources and headers (a header is
+# compiled wherever it is included, whatever the makefile lists), assembly,
+# and make files. Only these count when "is the program older than its
+# sources" is asked — a notes file or an editor backup never does (VX-2
+# review: those used to make "Build first" loop). Compared lower-cased.
+SOURCE_SUFFIXES = frozenset((".c", ".cc", ".cpp", ".cxx", ".c++", ".h", ".hh", ".hpp", ".hxx",
+                             ".h++", ".inl", ".ipp", ".tpp", ".inc", ".s", ".mk"))
+MAKEFILE_NAMES = frozenset(("makefile", "gnumakefile"))
 BUILD_TIMEOUT_S = 300.0
 DOWNLOAD_TIMEOUT_S = 180.0
 INFO_TIMEOUT_S = 10.0
@@ -768,43 +776,119 @@ def binary(root, name: str) -> dict | None:
         return None
     if not stat.S_ISREG(info.st_mode) or os.path.islink(Path(root) / "build"):
         return None
-    return {"path": rel, "size": info.st_size, "mtime": _iso(info.st_mtime), "_ts": info.st_mtime}
+    return {"path": rel, "size": info.st_size, "mtime": _iso(info.st_mtime), "_ts": info.st_mtime,
+            "_id": (info.st_mtime_ns, info.st_size)}
 
 
-def newest_source(root) -> float:
-    """The newest mtime among what a build reads: `src/`, `include/`, the
-    makefile and `vex/*.mk` (bounded)."""
+def is_source_name(name: str) -> bool:
+    """A file name a build compiles or obeys (`SOURCE_SUFFIXES`, a makefile)."""
+    low = name.lower()
+    return low in MAKEFILE_NAMES or os.path.splitext(low)[1] in SOURCE_SUFFIXES
+
+
+@dataclass(frozen=True)
+class Sources:
+    """What a build reads, as it stands: the newest mtime, and a digest of
+    every scanned file's (relative path, mtime_ns, size), sorted — so an
+    edit, a deletion, a rename or a copy with an older mtime all change it,
+    and a source dated in the future hides nothing. `digest` is None when the
+    scan was cut short (more than `SOURCE_LIMIT` files)."""
+    newest: float
+    digest: str | None
+
+
+def scan_sources(root) -> Sources:
+    """`src/` and `include/` (recursively, never through a symlinked folder),
+    the makefile and `vex/*.mk`: only `is_source_name` files."""
     root = Path(root)
-    newest, count = 0.0, 0
-    tops = [root / "makefile", root / "Makefile"] + sorted((root / "vex").glob("*.mk"))
-    for path in tops:
-        if _regular(path):
-            newest = max(newest, os.lstat(path).st_mtime)
+    rows: list[tuple[str, int, int]] = []
+    newest, complete = 0.0, True
+
+    def take(path: Path) -> None:
+        nonlocal newest
+        try:
+            info = os.lstat(path)
+        except OSError:
+            return
+        if not stat.S_ISREG(info.st_mode):
+            return
+        newest = max(newest, info.st_mtime)
+        rows.append((os.path.relpath(path, root).replace(os.sep, "/"), info.st_mtime_ns, info.st_size))
+
+    for path in [root / "makefile", root / "Makefile", root / "GNUmakefile"] + sorted((root / "vex").glob("*.mk")):
+        take(path)
     for top in (root / "src", root / "include"):
         if not top.is_dir() or top.is_symlink():
             continue
         for folder, dirs, files in os.walk(top):
             dirs[:] = [d for d in dirs if not os.path.islink(os.path.join(folder, d))]
             for name in files:
-                count += 1
-                if count > SOURCE_LIMIT:
-                    return newest
-                try:
-                    newest = max(newest, os.lstat(os.path.join(folder, name)).st_mtime)
-                except OSError:
+                if not is_source_name(name):
                     continue
-    return newest
+                if len(rows) >= SOURCE_LIMIT:
+                    complete = False
+                    break
+                take(Path(folder) / name)
+            if not complete:
+                break
+        if not complete:
+            break
+    digest = None
+    if complete:
+        h = hashlib.sha256()
+        for rel, mtime_ns, size in sorted(set(rows)):
+            h.update(f"{rel}\0{mtime_ns}\0{size}\n".encode("utf-8", "surrogateescape"))
+        digest = h.hexdigest()
+    return Sources(newest=newest, digest=digest)
+
+
+def newest_source(root) -> float:
+    """The newest mtime among what a build reads (`scan_sources`)."""
+    return scan_sources(root).newest
 
 
 def _public(binary_info: dict | None) -> dict | None:
-    return None if binary_info is None else {k: v for k, v in binary_info.items() if k != "_ts"}
+    return None if binary_info is None else {k: v for k, v in binary_info.items()
+                                             if not k.startswith("_")}
 
 
 # -- the build lock (shared with vexbuild) ------------------------------------------------------
 
+def _root_key(root) -> str:
+    return hashlib.sha256(os.path.realpath(str(root)).encode("utf-8", "surrogateescape")).hexdigest()[:20]
+
+
 def lock_path(root) -> Path:
-    key = hashlib.sha256(os.path.realpath(str(root)).encode("utf-8", "surrogateescape")).hexdigest()
-    return Path(config.V2_DATA_DIR) / "vex" / f"build-{key[:20]}.lock"
+    return Path(config.V2_DATA_DIR) / "vex" / f"build-{_root_key(root)}.lock"
+
+
+def unfinished_path(root) -> Path:
+    return Path(config.V2_DATA_DIR) / "vex" / f"unfinished-{_root_key(root)}"
+
+
+def mark_unfinished(root) -> None:
+    """A build of this project has started: until one ends successfully the
+    binary is not to be trusted (make killed while writing it leaves a
+    truncated file with a fresh mtime). Written before make runs, removed only
+    by a successful build, so a cancel, a failure, a timeout or a crash of the
+    daemon itself all leave it — on disk, so a restart keeps it too."""
+    path = unfinished_path(root)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.close(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600))
+    except OSError as exc:
+        raise VexError(f"could not record that a build is starting ({type(exc).__name__})") from None
+
+
+def clear_unfinished(root) -> None:
+    try:
+        os.unlink(unfinished_path(root))
+    except FileNotFoundError:
+        pass
+
+
+def is_unfinished(root) -> bool:
+    return os.path.lexists(unfinished_path(root))
 
 
 class BuildLock:
@@ -1078,9 +1162,14 @@ class Build:
     lock: BuildLock | None = None
     timer: threading.Timer | None = None
     started_ts: float = 0.0
-    # `newest_source(root)` just before make started: a successful build makes
-    # the binary current for every source no newer than this (`Vex._current`).
-    sources_ts: float | None = None
+    # The `P=` name make was started with: the binary this build writes is
+    # `build/<name>.bin`, whatever the settings say by its end.
+    name: str = ""
+    # `scan_sources(root).digest` just before make started, and the binary's
+    # (mtime_ns, size) then: a successful build that wrote the binary (or a
+    # rebuild) makes it current for exactly those sources (`Vex._current`).
+    sources_digest: str | None = None
+    bin_before: tuple | None = None
 
     def view(self) -> dict:
         return {"id": self.id, "project_id": self.project_id, "action": self.action,
@@ -1126,13 +1215,17 @@ class Vex:
         # One device action at a time: {"kind": "download"|"info"|"brain", "terminal_id"}.
         self._device: dict | None = None
         self._last: dict[tuple, str] = {}
-        # The last successful build per (project realpath, program name): the
-        # sources' newest mtime when it started and the binary it left
-        # (mtime, size). A make that found nothing to do leaves the binary
-        # older than a header or a notes file it never compiles, so "older
-        # than the sources" alone would say Build first forever (VX-2 review,
-        # M2). Both sides are file times, so WSL's clock never enters.
-        self._current: dict[tuple, dict] = {}
+        # The last build per project realpath, when it succeeded **and wrote
+        # the binary** (or was a rebuild): its `P=` name, the sources' digest
+        # when it started and the binary it left (mtime_ns, size). A download
+        # trusts it only for exactly those sources and that binary — so a
+        # source dated in the future, which keeps the binary "older than the
+        # sources" forever, does not make Build first loop, and hides no edit
+        # (VX-2 delta review, LOW-1). A make that found nothing to do proves
+        # nothing: a header it does not list (`SRC_H` is `include/*.h`) is
+        # still compiled wherever it is included (MED-1). In memory: a
+        # restart asks for one build again.
+        self._current: dict[str, dict] = {}
         self._timers: set[threading.Timer] = set()
         self._held: set[BuildLock] = set()
         self._stopped = False
@@ -1314,15 +1407,20 @@ class Vex:
         if not lock.acquire():
             raise VexError("a build of this project is already running (here or through "
                            "vexbuild); wait for it to finish")
-        # Read before make starts: a source saved while it runs is newer than
-        # this, so that build never makes it current.
+        # Read before make starts: a source saved while it runs changes the
+        # digest, so that build never makes it current. And until a build ends
+        # successfully the binary is not trusted (`mark_unfinished`).
         try:
-            sources_ts = newest_source(root)
-        except OSError:
-            sources_ts = None                   # unknown: this build makes nothing current
+            sources = scan_sources(root)
+            mark_unfinished(root)
+        except (OSError, VexError):
+            lock.release()
+            raise
+        before = binary(root, detected.name)
         record = Build(id="", project_id=project.id, project=project.name, action=action,
                        root=root, root_windows=root_windows, started=_utcnow(), lock=lock,
-                       started_ts=time.time(), sources_ts=sources_ts)
+                       started_ts=time.time(), name=detected.name, sources_digest=sources.digest,
+                       bin_before=before["_id"] if before else None)
         with self._lock:
             record.id = self._id(self._builds)
             self._keep(self._builds, record.id, record)
@@ -1361,13 +1459,16 @@ class Vex:
     def _build_ended(self, record: Build, terminal) -> None:
         errors = parse_errors(plain(terminal.history().data), record.root_windows)
         found = current = None
-        detected_name = None
+        renamed = True
         if record.action != "clean":
+            # The binary this build wrote is the one named when it started
+            # (`P=`); a rename during the build makes it no proof of anything
+            # (VX-2 delta review, LOW-2).
+            found = current = binary(record.root, record.name)
             try:
-                detected_name = parse_settings(read_settings(record.root)).name
-                found = current = binary(record.root, detected_name)
+                renamed = parse_settings(read_settings(record.root)).name != record.name
             except (NotVex, OSError):
-                found = current = None
+                renamed = True
             if found is not None and found["_ts"] + 1 < record.started_ts:
                 found = None                     # an old binary, not this build's
         with self._lock:
@@ -1380,21 +1481,35 @@ class Vex:
             record.ended = _utcnow()
             record.state = ("timed_out" if record.timed_out
                             else "succeeded" if terminal.exit_code == 0 else "failed")
-            # Only the last build counts: a clean, a failure or a timeout
-            # forgets what an earlier success made current.
+            # What is known of the binary (`_current`): replaced only by a
+            # successful build that wrote it (or a rebuild) — then it was made
+            # from the sources as they were when that build started; kept by a
+            # successful make that found nothing to do while the binary is
+            # still the one it describes (that make proves nothing new, MED-1);
+            # forgotten on a clean, a failure, a timeout or a rename.
             real = os.path.realpath(record.root)
-            for key in [k for k in self._current if k[0] == real]:
-                del self._current[key]
-            if (record.state == "succeeded" and record.action != "clean" and current is not None
-                    and record.sources_ts is not None):
-                self._current[(real, detected_name)] = {
-                    "sources": record.sources_ts, "bin": (current["_ts"], current["size"])}
+            succeeded = record.state == "succeeded"
+            last = self._current.get(real)
+            if not succeeded or record.action == "clean" or renamed or current is None:
+                self._current.pop(real, None)
+            elif current["_id"] != record.bin_before or record.action == "rebuild":
+                if record.sources_digest is not None:
+                    self._current[real] = {"name": record.name, "sources": record.sources_digest,
+                                           "bin": current["_id"]}
+                else:
+                    self._current.pop(real, None)
+            elif last is not None and last["bin"] != current["_id"]:
+                self._current.pop(real, None)
             timer, lock = record.timer, record.lock
             record.timer = record.lock = None
             if lock is not None:
                 self._held.discard(lock)
         if timer is not None:
             timer.cancel()
+        # Cleared only by a success, and while the build lock is still held, so
+        # it never clears the mark of a build that started after this one.
+        if succeeded:
+            clear_unfinished(record.root)
         if lock is not None:
             lock.release()
         LOG.info("vex %s for project %s ended (%s, exit %s)", record.action, record.project,
@@ -1424,22 +1539,23 @@ class Vex:
                            "download here; rename it in .vscode/vex_project_settings.json")
         cfg = load_config()
         root = project.root
-        found = binary(root, detected.name)
-        if found is None:
-            raise BuildFirst(f"there is no build/{detected.name}.bin yet; Build first")
-        newest = newest_source(root)
-        if found["_ts"] < newest and not self._built_since(root, detected.name, found, newest):
-            raise BuildFirst(f"build/{detected.name}.bin is older than the sources; Build first, "
-                             "then download")
-        argv = download_argv(cfg, name, slot, to_windows(str(Path(root) / found["path"])))
         # The device first (one device action at a time, said as such), then
         # the project's build lock, held for the download so no build rewrites
-        # the binary while it is being sent.
+        # the binary while it is being sent — and the binary judged under it,
+        # so a build running now is said as such and one that ended a moment
+        # ago is judged by how it ended.
         release, bind = self._reserve_device("download")
         lock = BuildLock(root)
         if not lock.acquire():
             release()
             raise VexError("a build of this project is running; download when it has finished")
+        try:
+            found = self._fresh(root, detected.name)
+            argv = download_argv(cfg, name, slot, to_windows(str(Path(root) / found["path"])))
+        except BaseException:
+            release()
+            lock.release()
+            raise
         with self._lock:
             self._held.add(lock)
 
@@ -1469,15 +1585,37 @@ class Vex:
         self._timer(DOWNLOAD_TIMEOUT_S, self._device_timeout, terminal)
         return {"terminal_id": terminal.id}
 
-    def _built_since(self, root, name, found, newest) -> bool:
-        """Whether the last build of this project succeeded with every source
-        no newer than now, and left exactly this binary: then the binary is
-        current for what make compiles, even when make found nothing to do
-        and never touched it. Forgotten on a restart (Build first once more)."""
+    def _fresh(self, root, name) -> dict:
+        """`build/<name>.bin` if it may be sent, else `BuildFirst`.
+
+        Never while a build of the project is unfinished (`mark_unfinished`:
+        one started and has not ended successfully — a truncated binary has a
+        fresh mtime; LOW-3). When this daemon's last build wrote exactly this
+        binary under this `P=` name, it may only if the sources are exactly as
+        they were when that build started (the digest: no edit, deletion,
+        rename or older-mtime copy since — and a source dated in the future
+        hides nothing; LOW-1). Otherwise — a restart, a binary `vexbuild` or
+        VS Code wrote — make's own rule: newer than every source
+        (`scan_sources`, which counts only what a build compiles or obeys). A
+        make that found nothing to do never vouches for a binary (MED-1); the
+        HUD's chain then rebuilds once."""
+        found = binary(root, name)
+        if found is None:
+            raise BuildFirst(f"there is no build/{name}.bin yet; Build first")
+        if is_unfinished(root):
+            raise BuildFirst(f"the last build of build/{name}.bin did not finish successfully; "
+                             "Build first, then download")
+        sources = scan_sources(root)
         with self._lock:
-            last = self._current.get((os.path.realpath(root), name))
-        return (last is not None and last["bin"] == (found["_ts"], found["size"])
-                and newest <= last["sources"])
+            last = self._current.get(os.path.realpath(root))
+        if last is not None and last["name"] == name and last["bin"] == found["_id"]:
+            if sources.digest is not None and last["sources"] == sources.digest:
+                return found
+            raise BuildFirst(f"the sources changed since build/{name}.bin was built; Build first, "
+                             "then download")
+        if found["_ts"] >= sources.newest:
+            return found
+        raise BuildFirst(f"build/{name}.bin is older than the sources; Build first, then download")
 
     def _device_timeout(self, terminal) -> None:
         if not terminal.exited:
@@ -1776,6 +1914,7 @@ def cli(argv=None, *, cwd=None, out=None) -> int:
     try:
         try:
             verify_tools(cfg, "make", BUILD_TOOLS)          # immediately before the spawn
+            mark_unfinished(root)          # the HUD's download trusts no binary until a success
         except VexError as exc:
             say(str(exc))
             return 2
@@ -1812,6 +1951,8 @@ def cli(argv=None, *, cwd=None, out=None) -> int:
             return 124
         reader.join(KILL_GRACE_S)
         proc.stdout.close()
+        if code == 0:
+            clear_unfinished(root)          # under the lock, as the daemon's build does
     finally:
         lock.release()
     errors = parse_errors(plain(bytes(captured)), root_windows)

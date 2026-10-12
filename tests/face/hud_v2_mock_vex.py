@@ -17,8 +17,10 @@ The world's `vex` section (`state(mock)`):
   - `bin_fresh`: whether a download finds a program built after its
     sources — false answers the daemon's 409 "…; Build first" (a build that
     succeeds sets it);
-  - `stays_stale`: a build that succeeds leaves the program "older than its
-    sources" all the same (the HUD then says Rebuild instead of looping);
+  - `stays_stale`: a build or rebuild that succeeds leaves the program "older
+    than its sources" all the same (the HUD stops after one rebuild);
+    `stale_until_rebuild`: a build that succeeds leaves it stale (make found
+    nothing to do, a header it does not list changed) and a rebuild does not;
   - `download_refuse`: sentences the next downloads answer 409 with, in order
     (no `code`); `download_exit`: the download program's exit code;
     `download_delay`: seconds each download waits before it answers;
@@ -57,6 +59,7 @@ def state(mock) -> dict:
         "build_auto": None,
         "bin_fresh": True,
         "stays_stale": False,
+        "stale_until_rebuild": False,
         "download_delay": 0,
         "download_refuse": [],
         "download_exit": 0,
@@ -113,7 +116,8 @@ def finish_build(mock, build_id: str, state_: str = "succeeded", errors=None, ex
     rec["ended"] = "2026-10-11T12:00:09+00:00"
     if state_ == "succeeded" and rec["action"] != "clean":
         rec["bin"] = {"path": "build/override.bin", "size": 56288, "mtime": "2026-10-11T12:00:09+00:00"}
-        v["bin_fresh"] = not v.get("stays_stale")
+        v["bin_fresh"] = not v.get("stays_stale") and (
+            rec["action"] == "rebuild" or not v.get("stale_until_rebuild"))
     for r in _rows(mock):
         if r["id"] == rec["terminal_id"]:
             r["exited"], r["exit_code"] = True, rec["exit_code"]

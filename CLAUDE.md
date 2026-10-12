@@ -1292,8 +1292,10 @@ Enter/Space on a focused button and `el.click()` have `detail` 0),
 `tabIndex=-1`, no focus from a press; **no key and no palette entry
 downloads, and nothing else calls `vex.download`**. One click is one chain:
 pause the brain terminal if it holds the port, build first on VX-1's 409
-`code: "build_first"` (never its wording; a build-first that still ends
-stale says Rebuild), download, reopen the brain terminal. **One chain per
+`code: "build_first"` (never its wording; still `build_first` after that
+build, one rebuild; still after that, it stops and says so), download,
+reopen the brain terminal (not after a chain a card, a crash or Cancel
+dropped, nor after a card that came and went during the download). **One chain per
 window** (review M1): no other download, for any project, while one runs;
 every VEX view shows it ("Building override, then downloading to slot 1")
 with a **Cancel** that closes the build's program terminal and never sends
@@ -1312,13 +1314,27 @@ without a reload. **A VEX view never follows the chat**: a pane whose pinned
 project is gone says "Pick a project". **A lone VEX pane survives a reload**
 (the boot never puts the chat over a VEX view; a window with no chat drawn is
 WP-B's refused-with-a-sentence case). `vex_device` records this window did
-not start are said in the view. **The daemon's freshness rule** (`vex.py`,
-review M2): a download is fresh when `build/<name>.bin` is newer than the
-sources, **or** the project's last build succeeded with no source newer than
-when it started and left exactly this binary (mtime and size) — a make with
-nothing to do (a newer `.hpp` it never compiles, a notes file) no longer
-loops "Build first"; a clean, a failure or a timeout forgets it, and so does
-a daemon restart (one more build). Its 409 is `BuildFirst`, `{error, code:
+not start are said in the view. **The daemon's freshness rule** (`vex.py`
+`Vex._fresh`, review M2 and its delta review): **sources** are only what a
+build compiles or obeys (`SOURCE_SUFFIXES`: C/C++ sources and headers,
+assembly, make files — a notes file or an editor backup never counts, which
+was M2's loop). **Never while a build is unfinished**: a build marks the
+project before make runs (`mark_unfinished`, a file under `V2_DATA_DIR/vex/`,
+`vexbuild` too) and only a success clears it, so a cancelled, failed or
+timed-out build — or a daemon that died mid-build — refuses the download
+(a truncated binary has a fresh mtime). **When this daemon's last build wrote
+exactly this binary** (its `P=` name; mtime_ns and size changed, or a
+rebuild), the binary may be sent only if the sources' digest — sorted
+(path, mtime_ns, size) — is exactly what it was when that build started: an
+edit, deletion, rename or older-mtime copy since asks for a build, and a
+teammate's file dated in the future hides nothing. Otherwise (a restart, a
+binary `vexbuild` wrote) make's own rule: newer than every source. **A make
+that found nothing to do never vouches for a binary**: a header is compiled
+wherever it is included, and VEX's makefile lists only `include/*.h`, so an
+edited `include/pid.hpp` leaves make nothing to do — the daemon still says
+Build first, and the click's chain then runs **one rebuild** (make -B) and
+downloads; still stale after that, it stops and says so (never a loop). A
+rename mid-build records nothing. Its 409 is `BuildFirst`, `{error, code:
 "build_first"}`. Build errors' `./` is dropped so they stay clickable. Free
 checks: `lib/vex.test.ts`, `tests/face/hud_v2_vex_check.py` (its own
 `MockDaemon(0)`; VX-1's routes in `hud_v2_mock_vex.py`, builds and downloads

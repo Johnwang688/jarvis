@@ -26,9 +26,9 @@
 import { api } from "../api";
 import { terminals } from "../components/Terminal";
 import {
-  DeviceLedger, LAST_BUILDS_KEY, STILL_STALE, chainCancellable, isVexId, needsBuildFirst, nameRefusal,
-  parseDeviceRecord, parseLastBuilds, slotRefusal, type BuildView, type ChainView, type Detection, type DeviceAction,
-  type VexStatus,
+  BUILD_FIRST_STEPS, DeviceLedger, LAST_BUILDS_KEY, chainCancellable, isVexId, needsBuildFirst, nameRefusal,
+  parseDeviceRecord, parseLastBuilds, slotRefusal, stillStale, type BuildView, type ChainView, type Detection,
+  type DeviceAction, type VexStatus,
 } from "../lib/vex";
 
 const POLL_MS = 600;
@@ -366,12 +366,19 @@ export class VexStore {
     const cards = this.cards;
     const holds = () => !this.blocked && !this.crashed && this.cards === cards && !chain.cancelled;
     let droppedBy = "";
+    // Said by what really stopped it (delta review NIT): the owner's Cancel,
+    // the window's crash, or an approval card (`blocked` is only ever a card).
     const dropped = (what: string) => {
-      droppedBy = chain.cancelled ? "the download was cancelled" : "an approval card came up";
-      this.say(projectId, chain.cancelled
-        ? "Cancelled: nothing was downloaded."
-        : `An approval card came up ${what}: nothing was downloaded. Click Download again when you are ready.`,
-      chain.cancelled ? "info" : "bad");
+      if (chain.cancelled) {
+        droppedBy = "the download was cancelled";
+        this.say(projectId, "Cancelled: nothing was downloaded.", "info");
+      } else if (this.crashed) {
+        droppedBy = "the window hit an error";
+        this.say(projectId, `The window hit an error ${what}: nothing was downloaded. Reload it, then click Download again.`);
+      } else {
+        droppedBy = "an approval card came up";
+        this.say(projectId, `An approval card came up ${what}: nothing was downloaded. Click Download again when you are ready.`);
+      }
     };
     const phase = (p: Chain["phase"]) => {
       chain.phase = p;
@@ -414,29 +421,36 @@ export class VexStore {
       // until the daemon says Build first.
       phase("download");
       let sent = await this.sendDownload(projectId, slot, name);
-      if (sent.refused && needsBuildFirst(sent.code)) {
+      // "Build first": a build, then — when that build found nothing to do and
+      // the daemon still says Build first (a header the makefile does not
+      // list, VX-2 delta review MED-1) — one rebuild. Never a third.
+      for (const action of BUILD_FIRST_STEPS) {
+        if (!(sent.refused && needsBuildFirst(sent.code))) break;
         // Nothing builds behind a card that came up while the daemon answered (L1).
-        if (!holds()) return dropped("before it built");
-        phase("build");
-        this.say(projectId, "Building first…", "info");
-        const b = await this.runBuild(projectId, "build", (tid) => {
+        if (!holds()) return dropped(action === "build" ? "before it built" : "before it rebuilt");
+        phase(action);
+        this.say(projectId, action === "build" ? "Building first…"
+          : "Rebuilding from scratch: make found nothing to do, but the sources changed (a header it does not list)…",
+        "info");
+        const b = await this.runBuild(projectId, action, (tid) => {
           chain.buildTerminal = tid;
           if (chain.cancelled && tid) void this.stopBuild(tid);
         });
-        if (!holds()) return dropped("while it built");
+        if (!holds()) return dropped(action === "build" ? "while it built" : "while it rebuilt");
         if (!b) return;
         if (b.state !== "succeeded") {
-          this.say(projectId, "The build did not succeed, so nothing was downloaded.");
+          this.say(projectId, `The ${action} did not succeed, so nothing was downloaded.`);
           return;
         }
+        chain.buildTerminal = null;
         phase("download");
         this.say(projectId, "Downloading…", "info");
         sent = await this.sendDownload(projectId, slot, name);
-        if (sent.refused && needsBuildFirst(sent.code)) {
-          // Still "older than its sources" after a build: said, never a loop.
-          this.say(projectId, STILL_STALE);
-          return;
-        }
+      }
+      if (sent.refused && needsBuildFirst(sent.code)) {
+        // Still "Build first" after a build and a rebuild: said, never a loop.
+        this.say(projectId, stillStale(sent.refused));
+        return;
       }
       phase("download");
       if (sent.refused || !sent.terminal) {
@@ -462,7 +476,9 @@ export class VexStore {
             + "Click \u201cOpen the brain terminal\u201d when you want it.";
           this.changed();
         } else {
-          void this.resumeBrain();
+          // The card count from the click: a card that came and went while
+          // the download ran still keeps the brain terminal closed (NIT).
+          void this.resumeBrain(cards);
         }
       }
     }
@@ -519,8 +535,7 @@ export class VexStore {
    * card. The download's program may have ended a moment before the daemon
    * frees the device, so a "one device action at a time" is asked again.
    */
-  private async resumeBrain(): Promise<void> {
-    const cards = this.cards;
+  private async resumeBrain(cards: number): Promise<void> {
     const closed = `${BRAIN_CLOSED} and could not be opened again by itself. `
       + "Click \u201cOpen the brain terminal\u201d when you want it.";
     for (let i = 0; i < 10; i++) {

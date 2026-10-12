@@ -228,15 +228,25 @@ export function needsBuildFirst(code: unknown): boolean {
   return code === BUILD_FIRST_CODE;
 }
 
-/** What the view says when a build-first still ends in a staleness refusal: never a loop. */
-export const STILL_STALE =
-  "The program still counts as older than its sources after that build. Click Rebuild, then Download.";
+/**
+ * What one click does on "Build first", in order (VX-2 delta review, MED-1):
+ * a build; and if the daemon still says Build first — make found nothing to
+ * do, while a header it does not list changed — one rebuild (make -B). Never
+ * a third: the click's chain then stops and says so.
+ */
+export const BUILD_FIRST_STEPS: readonly ("build" | "rebuild")[] = ["build", "rebuild"];
+
+/** What the view says when even a rebuild leaves "Build first": the daemon's own sentence, nothing sent. */
+export function stillStale(sentence: string): string {
+  return `Nothing was downloaded: after a build and a rebuild the daemon still says “${sentence}”. `
+    + "The build's terminal shows what make did.";
+}
 
 /** One click's download chain, as every VEX view shows it (VX-2 review, M1: one per window). */
 export interface ChainView {
   label: string;
   slot: number;
-  phase: "start" | "pause" | "build" | "download";
+  phase: "start" | "pause" | "build" | "rebuild" | "download";
   cancelled: boolean;
 }
 
@@ -249,6 +259,8 @@ export function chainLine(c: ChainView): string {
       return `Pausing the brain terminal, then downloading ${who} to slot ${c.slot}…`;
     case "build":
       return `Building ${who}, then downloading to slot ${c.slot}`;
+    case "rebuild":
+      return `Rebuilding ${who} from scratch, then downloading to slot ${c.slot}`;
     default:
       return `Downloading ${who} to slot ${c.slot}…`;
   }

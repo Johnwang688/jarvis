@@ -2340,10 +2340,14 @@ a Cancel that stops its build and sends nothing; the VEX pickers are off.
 **Under an approval card every VEX control is disabled and inert, and the
 store refuses; a card that comes up between the click and a step drops the
 rest of the chain** — nothing is built or sent behind it, the brain terminal
-is not reopened — and the view says so. The daemon counts a binary current
-when the project's last build succeeded with no source newer than when it
-started and left exactly that binary, so a make with nothing to do never
-loops "Build first" (review round, M2). With no `vex.json` the view says the one command to
+is not reopened — and the view says so. The daemon counts only C/C++
+sources, headers, assembly and make files as sources (a notes file never
+asks for a build), refuses while a build is unfinished (a mark on disk only a
+success clears), trusts a binary its last build wrote only while the
+sources' digest is unchanged since that build started, and never lets a make
+that found nothing to do vouch for one: an edited header the makefile does
+not list makes the click's chain run one rebuild, then download (review
+rounds M2 and MED-1). With no `vex.json` the view says the one command to
 run, `jarvis vex setup`, and checks again every few seconds and on focus. Device
 info and every error message are drawn as text. A `vex_device` record this
 window cannot match to its own click is said in the view. Not yet: a Python
