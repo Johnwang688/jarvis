@@ -3172,6 +3172,16 @@ def main():
             finally:
                 vex_mock.stop()
 
+            # The tree's unsaved-changes dots and file icons: a mock of their
+            # own, whose world gains a nested C++ folder for the run.
+            from tests.face.hud_v2_editor_marks_check import marks_checks
+            marks_mock = MockDaemon(0).start()
+            try:
+                marks_checks(browser, marks_mock, f"http://127.0.0.1:{marks_mock.port}", check, until,
+                             guard, FAKE_RECOGNIZER)
+            finally:
+                marks_mock.stop()
+
             ctx = browser.new_context(permissions=["microphone"])
             guard(ctx)
             guard_loopback(ctx)

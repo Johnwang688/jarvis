@@ -713,7 +713,11 @@ class MockDaemon:
                         status["frame_hardened"] = True
                     return self._json(status)
                 if path == "/projects":
-                    return self._json(w["projects"])
+                    # The daemon's `project_view`: each root beside where it
+                    # resolves (#50). A world project may say `root_real`
+                    # itself (a root through a symlink); else it is the root.
+                    return self._json([{**p, "root_real": p.get("root_real") or p["root"]}
+                                       for p in w["projects"]])
                 if path == "/threads":
                     pid = q.get("project", [None])[0]
                     return self._json([t for t in w["threads"] if not pid or t["project_id"] == pid])

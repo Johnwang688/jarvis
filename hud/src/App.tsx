@@ -35,6 +35,7 @@ import { offersVex } from "./lib/vex";
 import { makeModel, monacoEditors, monacoLanguage, monacoModels, setEditorsBlocked } from "./lib/monaco";
 import { buffers, PlainModel } from "./state/buffers";
 import { NO_TABS, openTab, writtenPaths } from "./lib/buffers";
+import { treeRoot } from "./lib/dirtyMarks";
 import { DiffTab } from "./components/DiffTab";
 import { PreviewTab, type PreviewRequest } from "./components/PreviewTab";
 import { judgePreviewUrl } from "./lib/preview";
@@ -2490,6 +2491,7 @@ export default function App() {
             onAddToChat={addToChat}
             goto={fileGoto[n] ?? null}
             onGotoDone={(k) => gotoDone(n, k)}
+            root={pid ? treeRoot(state.projects.find((p) => p.id === pid)) : null}
           />
         );
       }

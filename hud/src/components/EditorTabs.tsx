@@ -48,7 +48,7 @@ export function EditorTabs(props: {
             data-saving={String(!!i.saving)}
             data-preview={String(preview)}
             data-active={String(active)}
-            title={path + (i.mark === "env" ? " · Jarvis can't read this file" : "")}
+            title={path + (i.mark === "env" ? " · Jarvis can't read this file" : "") + (i.saving ? " · saving…" : i.dirty ? " · unsaved changes" : "")}
             onClick={() => props.onActivate(path)}
             onDoubleClick={() => props.onPin(path)}
             onAuxClick={(e) => {
@@ -70,9 +70,16 @@ export function EditorTabs(props: {
           >
             {i.mark === "env" ? <span className="edtab-mark" aria-label="Jarvis can't read this file">🔒</span> : null}
             <span className="edtab-name">{label}</span>
-            <span className={"edtab-dot" + (i.dirty ? " on" : "") + (i.saving ? " saving" : "")}
-                  title={i.saving ? "saving…" : undefined}
-                  aria-label={i.saving ? "saving" : i.dirty ? "unsaved" : undefined} />
+            {/* Dirty: the dot stands where × is, and hovering or focusing the
+                tab brings × back (VS Code's; theme.css swaps them). Saving
+                (ED-2): the same slot holds a hollow ring until the write
+                answers, dirty or not. */}
+            <span
+              className={"edtab-dot" + (i.dirty ? " on" : "") + (i.saving ? " saving" : "")}
+              role={i.dirty || i.saving ? "img" : undefined}
+              aria-label={i.saving ? "saving" : i.dirty ? "unsaved changes" : undefined}
+              title={i.saving ? "saving…" : i.dirty ? "Unsaved changes" : undefined}
+            />
             <button
               type="button"
               className="edtab-x quiet"

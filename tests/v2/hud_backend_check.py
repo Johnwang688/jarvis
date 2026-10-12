@@ -680,6 +680,44 @@ class Backend(unittest.TestCase):
         self.assertEqual(platform["platform"], "windows")
         self.assertIn("9p", platform["note"])
 
+    def test_projects_say_where_their_root_resolves(self):
+        """`root_real` (#50's review, LOW): a project whose root goes through a
+        symlink still finds its files' `abs` under where the root resolves, so
+        a File pane's tree marks a file opened through another project."""
+        link = self.root / "link"
+        link.symlink_to(self.project_root, target_is_directory=True)
+        linked = self.request("POST", "/projects", dict(name="Linked", root=str(link)), status=201)
+        real = str(self.project_root.resolve())
+        self.assertEqual((linked["root"], linked["root_real"]), (str(link), real))
+        rows = {row["id"]: row for row in self.request("GET", "/projects")}
+        self.assertEqual(rows[linked["id"]]["root_real"], real)
+        self.assertEqual(rows[self.project.id]["root_real"], real)
+        self.assertEqual(rows[self.second.id]["root_real"], str(self.other.resolve()))
+        self.assertEqual(self.request("GET", f"/projects/{linked['id']}")["root_real"], real)
+        # The read route's `abs` sits under root_real, not under the root as
+        # written — and is the same file (one buffer) through either project.
+        through_link = self.owner("GET", f"/projects/{linked['id']}/file?" + urlencode({"path": "hello.txt"}))
+        direct = self.getfile("hello.txt")
+        self.assertEqual(through_link["abs"], direct["abs"])
+        self.assertTrue(through_link["abs"].startswith(real + "/"), through_link["abs"])
+        self.assertFalse(through_link["abs"].startswith(str(link) + "/"), through_link["abs"])
+        # Display data only: never stored, never on the bus, refused if sent back.
+        self.events_all()
+        renamed = self.request("PATCH", f"/projects/{linked['id']}", dict(name="Linked 2"))
+        self.assertEqual(renamed["root_real"], real)
+        updated = [e for e in self.events_all() if e.get("kind") == "project_updated"]
+        self.assertTrue(updated and all("root_real" not in e["data"]["project"] for e in updated), updated)
+        self.assertNotIn("root_real", json.loads(
+            next((self.root / "data").rglob(f"{linked['id']}.json")).read_text()))
+        self.request("PATCH", f"/projects/{linked['id']}", dict(root_real="/elsewhere"), status=400)
+        self.request("POST", "/projects", dict(name="X", root=str(link), root_real="/elsewhere"), status=400)
+        # Nothing to resolve, or a loop: null, never a raise (the HUD falls back to root).
+        from jarvis.v2.projects import resolved_root
+        loop = self.root / "loop"
+        loop.symlink_to(loop)
+        self.assertIsNone(resolved_root(""))
+        self.assertIn(resolved_root(str(loop)), (None, str(loop)))
+
     def test_file_read_write_conflict_and_caps(self):
         value = self.getfile("hello.txt")
         self.assertEqual(set(value), {"path", "abs", "content", "etag", "mtime", "mtime_ns", "size", "encoding",
