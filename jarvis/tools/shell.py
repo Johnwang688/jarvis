@@ -89,6 +89,8 @@ def run_readonly(
     # ran one (2026-10-09), because the substitution scan below looked for
     # `$(` in text that only contained it once joined.
     command = rules.join_continuations(command)
+    if "\x00" in command:
+        return "Error: the command holds a NUL byte, which no shell can be handed."
     try:
         tokens = shlex.split(command)
     except ValueError as exc:
@@ -116,10 +118,17 @@ def run_readonly(
     # HIGH 3): `env -u ls rm -rf build` used to be judged as `ls` and run
     # here — rm and all. A line whose program cannot be told is not run.
     peeled: list[str] = []
-    sure = rules.unwrap_sure(tokens, peeled)
+    written: list[str] = []
+    sure = rules.unwrap_sure(tokens, peeled, written)
     if sure is None:
         return ("Error: which program this runs cannot be told from its wrappers' options. "
                 "Use run_command.")
+    # A wrapper that writes a file of its own — `time -o FILE` (delta review
+    # of PR #75, H-B: `time -o <allowlist> -f '<entries>' ls` ran here) — is
+    # not a read, whatever it runs.
+    if written:
+        return ("Error: a wrapper on this line writes a file it names "
+                f"({written[0][:80]}), so it is not a read. Use run_command.")
     # xargs hands its program arguments from a file (`-a list`) this check
     # never sees: `xargs -a list cat` reads whatever `list` names. Here,
     # with no pipe and no input, that is the only thing xargs adds.

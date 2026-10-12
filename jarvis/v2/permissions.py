@@ -654,9 +654,25 @@ def _kind_matches(kind: str, segment: str, tokens: list[str], stems: list[str]) 
         return (any(_phrase_ordered(p, tokens) for p in _CREDENTIAL_PHRASES)
                 or any(stem in _CREDENTIAL_STEMS for stem in stems))
     if kind == "credential_path":
-        return any(_under_credential_dir(token) for token in tokens)
+        return any(_under_credential_dir(token) for token in tokens + _path_words(segment))
     LOG.warning("Ignoring always-ask rule with unknown kind %r", kind)
     return False
+
+
+def _path_words(segment: str) -> list[str]:
+    """Words of the segment a path rule reads besides the unwrapped command's:
+    every word as written (a wrapper's option values — `env -C DIR`, `time -o
+    FILE` — are not the command's), the value of each `--name=VALUE`, and the
+    files the wrappers at its front write themselves (`time -oFILE`,
+    `script FILE`; delta review of PR #75, H-B)."""
+    raw = rules._tokens(segment)
+    words = raw + [t.split("=", 1)[1] for t in raw if t.startswith("--") and "=" in t]
+    written: list[str] = []
+    try:
+        rules.unwrap_sure(raw, None, written)
+    except Exception:     # noqa: BLE001 — a parse failure adds nothing here
+        pass
+    return words + written
 
 
 def _credential_dirs() -> list[Path]:

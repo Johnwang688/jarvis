@@ -369,8 +369,8 @@ def _keyword_vars(text: str):
     """Each `$VARIABLE` in `text` whose name holds a heuristic keyword."""
     return (m for m in _VAR_WORD.finditer(text) if _VAR_KEYWORD.search(m.group()))
 
-SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh", "mksh", "ash", "fish", "yash", "posh",
-                    "busybox", "rbash"})
+# rules' one list of shells (delta review of PR #75, M-B), and busybox.
+SHELLS = rules.SHELLS | frozenset({"busybox"})
 # Programs that run a command they are handed after their own arguments: any
 # of the first RUNNER_TAILS tails of their arguments may be that command.
 # (Not `find`, `xargs`, `fd`, `parallel`: they append file names to the

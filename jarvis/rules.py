@@ -470,8 +470,14 @@ _INLINE_CODE_FLAGS = {"-c", "-e", "--eval", "--command", "-"}
 # The comment above says allowing the stem must not allow the language; without
 # this, one deleted space allowed the language.
 _INLINE_ATTACHED = ("-c", "-e")
-_INTERPRETERS = {"python", "python3", "node", "deno", "bun", "perl", "ruby", "php",
-                 "sh", "bash", "zsh", "ksh", "dash"}
+# Every shell this module knows by name — the one list (delta review of PR
+# #75, M-B): `_INTERPRETERS`, the inline-source tables, the vex walk
+# (`_SHELL_STEMS`) and `protected_state._SHELLS` read it. Each runs the
+# string after `-c` (fish's `--command`, nu's `--commands` too).
+SHELLS = frozenset({"sh", "bash", "rbash", "dash", "zsh", "ksh", "ksh93", "lksh", "oksh", "mksh",
+                    "posh", "ash", "sash", "yash", "fish", "csh", "tcsh", "nu", "xonsh",
+                    "elvish", "ion", "osh", "ysh"})
+_INTERPRETERS = {"python", "python3", "node", "deno", "bun", "perl", "ruby", "php"} | SHELLS
 
 _URL = re.compile(r"https?://[^\s'\"|;&)]+")
 
@@ -968,20 +974,23 @@ def _unwrap(tokens: list[str]) -> list[str]:
     return _unwrap_reading(tokens)[0]
 
 
-def unwrap_sure(tokens: list[str], peeled: list | None = None) -> list[str] | None:
+def unwrap_sure(tokens: list[str], peeled: list | None = None,
+                writes: list | None = None) -> list[str] | None:
     """`unwrap`, or None when which program runs cannot be told: an option the
     table does not know may or may not take the next word, `env -S` splits
     past its bound, or the wrappers nest past `PROGRAM_DEPTH`. `run_readonly`
     runs nothing it cannot tell, and `command_targets` covers nothing.
-    `peeled`, when given, receives the stem of each wrapper taken off."""
-    tokens, sure = _unwrap_reading(list(tokens), peeled)
+    `peeled`, when given, receives the stem of each wrapper taken off;
+    `writes`, the files those wrappers write themselves (`time -o FILE`)."""
+    tokens, sure = _unwrap_reading(list(tokens), peeled, writes)
     return tokens if sure else None
 
 
 _SIMPLE_ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*", re.S)
 
 
-def _unwrap_reading(tokens: list[str], peeled: list | None = None) -> tuple[list[str], bool]:
+def _unwrap_reading(tokens: list[str], peeled: list | None = None,
+                    writes: list | None = None) -> tuple[list[str], bool]:
     """(the command inside its wrappers, whether it is the only reading).
 
     **The wrappers' options are read from the one table** (`_WRAPPER_OPTS`,
@@ -1009,6 +1018,8 @@ def _unwrap_reading(tokens: list[str], peeled: list | None = None) -> tuple[list
             started = starts(tokens)
         except _TooComplex:
             return tokens, False
+        if started is not None and writes is not None:
+            writes.extend(started.writes)
         if started is None or not started.programs:
             return tokens, sure and not (started and started.strings)
         if not started.sure:
@@ -1932,12 +1943,12 @@ def writes_anyway(tokens: list[str]) -> str:
 # argument (`deno eval …`). python and node are auto-ALLOW stems, so each of
 # those was arbitrary code with nobody asked.
 _INLINE_LETTERS = {"python": "c", "python3": "c", "node": "ep", "bun": "ep",
-                   "perl": "eE", "ruby": "e", "php": "r",
-                   "sh": "c", "bash": "c", "zsh": "c", "ksh": "c", "dash": "c"}
+                   "perl": "eE", "ruby": "e", "php": "r", **{s: "c" for s in SHELLS}}
 # Letters that take a value end a cluster: `python -mcProfile` names a module.
 _VALUE_LETTERS = {"python": "mWXQ", "python3": "mWXQ", "node": "rC", "bun": "r",
-                  "sh": "oO", "bash": "oO", "zsh": "oO", "ksh": "oO", "dash": "oO"}
-_INLINE_LONGS = {"node": ("eval", "print"), "bun": ("eval", "print")}
+                  **{s: "oO" for s in SHELLS}}
+_INLINE_LONGS = {"node": ("eval", "print"), "bun": ("eval", "print"),
+                 "fish": ("command",), "nu": ("commands",)}
 _INLINE_SUBCOMMANDS = {"deno": frozenset({"eval", "repl"}), "bun": frozenset({"repl"})}
 # Given no program, these read one from standard input — a pipe, a here-string
 # or a here-document is inline source by another route (`… | python3`).
@@ -2078,6 +2089,8 @@ WORK_CAP = 20_000          # words a line's wrappers and runners may make the re
 RUNNERS_TOO_COMPLEX = ("what its wrappers and runners start is too complex to judge (past the "
                        "work budget or a nesting cap), so it is asked, and no allowlist entry "
                        "covers it")
+NUL_TOO_COMPLEX = ("the line holds a NUL byte, which no shell can be handed: too complex to "
+                   "judge, so it is asked, and no allowlist entry covers it")
 
 
 @dataclass
@@ -2141,13 +2154,24 @@ class _Opts:
     assignments: bool = False           # NAME=VALUE words before the program (env)
     dash: bool = False                  # a lone `-` is an option (env)
     program: bool = True                # False: no operand is a program (script)
+    # Options whose value is a file the wrapper itself writes (`time -o FILE`,
+    # `script -O FILE`; review of PR #75's delta review, H-B), short letters
+    # and long names alike; `operand_writes`: its first operand is one
+    # (`script FILE`); `property_writes`: options whose `KEY=VALUE` value may
+    # point standard output or error at a file (`systemd-run -p
+    # StandardOutput=file:PATH`).
+    writes: frozenset = frozenset()
+    operand_writes: bool = False
+    property_writes: frozenset = frozenset()
 
 
 def _opts(flags="", values="", optional="", lflags="", lvalues="", strings="", module="",
-          shell="", positionals=0, assignments=False, dash=False, program=True) -> _Opts:
+          shell="", positionals=0, assignments=False, dash=False, program=True, writes="",
+          operand_writes=False, property_writes="") -> _Opts:
     return _Opts(flags, values, optional, frozenset(lflags.split()), frozenset(lvalues.split()),
                  frozenset(strings.split()), frozenset(module.split()), frozenset(shell.split()),
-                 positionals, assignments, dash, program)
+                 positionals, assignments, dash, program, frozenset(writes.split()),
+                 operand_writes, frozenset(property_writes.split()))
 
 
 # Wrappers: run their operand as a program. **This table and `_RUNNER_SPECS`
@@ -2174,8 +2198,9 @@ _WRAPPER_OPTS = {
                     lvalues="class classdata pid pgid uid"),
     "command": _opts("p"),
     "exec": _opts("cl", "a"),
+    # GNU time 1.9: `-o FILE`/`--output=FILE` writes FILE (with `-a`, appends).
     "time": _opts("pavq", "fo", lflags="portability verbose quiet append help version",
-                  lvalues="format output"),
+                  lvalues="format output", writes="o output"),
     "xargs": _opts("0prtxo", "adEILnPs", optional="eil",
                    lflags="null interactive no-run-if-empty verbose exit open-tty show-limits "
                    "help version eof replace max-lines",
@@ -2191,14 +2216,31 @@ _WRAPPER_OPTS = {
                          lvalues="unit property description slice service-type uid gid nice "
                          "working-directory setenv host machine on-active on-boot on-startup "
                          "on-unit-active on-unit-inactive on-calendar timer-property "
-                         "path-property socket-property json expand-environment"),
+                         "path-property socket-property json expand-environment",
+                         property_writes="p property"),
     "flock": _opts("sxeunoFhV", "wEc", lflags="shared exclusive unlock nonblock nb close no-fork "
                    "verbose help version", lvalues="timeout wait conflict-exit-code command",
                    strings="c command", positionals=1),
+    # util-linux script 2.41: its file operand (default `typescript`), `-I`,
+    # `-O`, `-B`, `-T` and their long names, and `-t[FILE]`/`--timing=FILE`
+    # each write a log file.
     "script": _opts("aefqhV", "cEIOBTmo", optional="t", lflags="append return flush quiet help "
-                    "version", lvalues="command echo log-in log-out log-io log-timing "
-                    "logging-format output-limit", strings="c command", program=False),
+                    "version force timing", lvalues="command echo log-in log-out log-io "
+                    "log-timing logging-format output-limit", strings="c command", program=False,
+                    writes="I O B T t log-in log-out log-io log-timing timing",
+                    operand_writes=True),
 }
+# The rest of this table writes no file it is told of (the audit of review of
+# PR #75's delta review, H-B, from each tool's own `--help`): env's `-f FILE`
+# and xargs' `-a FILE` read; stdbuf's `-o MODE` is a buffering mode; nohup
+# writes only `nohup.out` (in the working folder or HOME, when its output is a
+# terminal) — a fixed name, never a gate file; flock opens its lock file
+# read-only (`O_RDONLY|O_CREAT`): it may create an empty one, never write or
+# truncate it. The runners' options name folders they cache into
+# (`--cache-dir`) or files they read (`--config-file`, `--env-file`,
+# `--userconfig`); none writes a file it names.
+
+_STD_FILE = re.compile(r"Standard(?:Output|Error)=(?:file|append|truncate):(.+)", re.S)
 
 _UV_FLAGS = ("quiet verbose native-tls offline no-cache no-progress no-config preview no-preview "
              "managed-python no-managed-python no-python-downloads show-settings help version")
@@ -2297,8 +2339,7 @@ _RUNNER_SPECS = {
     "corepack": (_PLAIN, {"yarn": _YARN_SPEC, "yarnpkg": _YARN_SPEC, "npm": _NPM_SPEC,
                           "pnpm": _PNPM_SPEC, "npx": _NPX, "pnpx": _PNPM_DLX}),
 }
-_SHELL_STEMS = frozenset({"sh", "bash", "dash", "zsh", "ksh", "mksh", "ash", "yash", "posh",
-                          "fish"})
+_SHELL_STEMS = SHELLS
 _FIND_EXEC = frozenset({"-exec", "-execdir", "-ok", "-okdir"})
 # Words that open or close a compound command rather than name a program.
 _LEAD_WORDS = frozenset({"if", "then", "else", "elif", "do", "while", "until", "!", "{", "(",
@@ -2306,12 +2347,32 @@ _LEAD_WORDS = frozenset({"if", "then", "else", "elif", "do", "while", "until", "
 _ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(\[[^\]]*\])?\+?=.*", re.S)
 
 
-def _option_walk(tokens: list[str], start: int, opts: _Opts):
+def _wrote(opts: _Opts, name: str, value: str, writes: list | None, long: bool) -> None:
+    """Record the file an option's value names, when that option writes one:
+    by name, or — for a long option this table does not know — as a unique
+    prefix of one that does (getopt_long reads `--out=F` as `--output=F`)."""
+    if writes is None or not name:
+        return
+
+    def named(options: frozenset) -> bool:
+        return name in options or (long and any(
+            w.startswith(name) and len(w) > 1 for w in options))
+
+    if named(opts.property_writes):
+        match = _STD_FILE.fullmatch(value.strip())
+        if match:
+            writes.append(match.group(1))
+    if named(opts.writes):
+        writes.append(value)
+
+
+def _option_walk(tokens: list[str], start: int, opts: _Opts, writes: list | None = None):
     """(indices where the program may stand, command-line strings, whether
     the program is a module, whether the rest is one command line). An
     index of `len(tokens)` means no program. An unknown option is followed
     both ways — taking the next word, and not — so the set is every place
-    the program could be."""
+    the program could be. `writes`, when given, receives every value of an
+    option that writes a file (`_Opts.writes`), in any reading."""
     n = len(tokens)
     found: set[int] = set()
     strings: list[str] = []
@@ -2335,17 +2396,29 @@ def _option_walk(tokens: list[str], start: int, opts: _Opts):
             continue
         if token.startswith("--") and len(token) > 2:
             name, eq, value = token[2:].partition("=")
+            if (name not in opts.long_values and name not in opts.long_flags
+                    and (opts.writes or opts.property_writes)):
+                # getopt_long (GNU time, util-linux script, systemd-run) takes
+                # a unique prefix: `--outp F` is `--output F`, a certain write.
+                full = [w for w in opts.long_values | opts.long_flags if w.startswith(name)]
+                if len(full) == 1 and full[0] in opts.writes | opts.property_writes:
+                    name = full[0]
             module = module or name in opts.module
             shell = shell or name in opts.shell
+            following = tokens[i + 1] if i + 1 < n else ""
             if name in opts.long_values:
                 if name in opts.strings:
-                    strings.append(value if eq else (tokens[i + 1] if i + 1 < n else ""))
+                    strings.append(value if eq else following)
+                _wrote(opts, name, value if eq else following, writes, True)
                 todo.append((i + (1 if eq else 2), left))
             elif name in opts.long_flags or eq:
                 if name in opts.strings and eq:
                     strings.append(value)
+                if eq:
+                    _wrote(opts, name, value, writes, True)
                 todo.append((i + 1, left))
             else:
+                _wrote(opts, name, following, writes, True)
                 todo += [(i + 1, left), (i + 2, left)]
             continue
         if token.startswith("-") and len(token) > 1:
@@ -2357,9 +2430,13 @@ def _option_walk(tokens: list[str], start: int, opts: _Opts):
                     glued = letters[k + 1:]
                     if letter in opts.strings:
                         strings.append(glued or (tokens[i + 1] if i + 1 < n else ""))
+                    _wrote(opts, letter, glued or (tokens[i + 1] if i + 1 < n else ""), writes,
+                           False)
                     todo.append((i + (1 if glued else 2), left))
                     break
                 if letter in opts.optional:
+                    if letters[k + 1:]:
+                        _wrote(opts, letter, letters[k + 1:], writes, False)
                     todo.append((i + 1, left))
                     break
                 if letter in opts.flags:
@@ -2462,13 +2539,18 @@ class Started:
     (`npm exec -c`/`--call`, `bun exec`, `flock -c`, `script -c`).
     `appends`: its input is added as more arguments (xargs). `module`: the
     program is a Python module (`uv run -m`). `open_end`: one reading leaves
-    it no program at all (an unknown option took the last word)."""
+    it no program at all (an unknown option took the last word). `writes`:
+    files the wrapper itself writes (`time -o FILE`, `script FILE`,
+    `systemd-run -p StandardOutput=file:FILE`) — `writes_certain` is False
+    when an option this table does not know leaves the parse in doubt."""
     programs: tuple = ()
     strings: tuple = ()
     joined: bool = False
     module: bool = False
     appends: bool = False
     open_end: bool = False
+    writes: tuple = ()
+    writes_certain: bool = True
 
     @property
     def sure(self) -> bool:
@@ -2493,16 +2575,22 @@ def starts(tokens: list[str], *, remote: bool = False) -> Started | None:
             return Started()                    # `command -v x` looks x up
         if stem == "env":
             tokens = _env_splice(tokens)
-        places, strings, _module, _shell = _option_walk(tokens, 1, opts)
+        writes: list[str] = []
+        places, strings, _module, _shell = _option_walk(tokens, 1, opts, writes)
         if len(places) > STARTS_READINGS or len(strings) > STARTS_READINGS:
             raise _TooComplex
+        if opts.operand_writes:
+            writes += [tokens[p] for p in sorted(places) if p < len(tokens)]
+        writes_certain = len(places) <= 1
         if not opts.program:
-            return Started(strings=tuple(strings))
+            return Started(strings=tuple(strings), writes=tuple(dict.fromkeys(writes)),
+                           writes_certain=writes_certain)
         joined = stem in _REMOTE_OPTS or (
             stem == "watch" and not any(t in ("-x", "--exec") for t in tokens[1:]))
         return Started(tuple(tuple(tokens[p:]) for p in sorted(places) if p < len(tokens)),
                        tuple(strings), joined=joined, appends=stem == "xargs",
-                       open_end=len(tokens) in places)
+                       open_end=len(tokens) in places, writes=tuple(dict.fromkeys(writes)),
+                       writes_certain=writes_certain)
     spec = _RUNNER_SPECS.get(stem)
     if spec is None:
         return None
@@ -2595,7 +2683,7 @@ def _shell_command(tokens: list[str]) -> tuple[list[str], bool]:
             break
         if token.startswith("--"):
             name, eq, value = token[2:].partition("=")
-            if name == "command":
+            if name in ("command", "commands"):         # fish; nu
                 return ([value] if eq else tokens[i:i + 1]), False
             if name in ("rcfile", "init-file", "init-command") and not eq:
                 i += 1
@@ -3760,13 +3848,20 @@ def _judge_started(words: list[str], redirects: list, depth: int) -> Verdict | N
     transparent = stem in _WRAPPERS
     worst = Verdict(ALLOW)
     work = _WORK.get()
-    shape = tuple(r.op for r in redirects)
+    # Everything a reading's verdict reads from outside its own words is in
+    # its memo key: the redirections, targets included (delta review of PR
+    # #75, H-A, where the gate detector's key missed a here-string).
+    shape = tuple((r.op, r.word) for r in redirects)
 
     def worse(verdict: Verdict) -> None:
         nonlocal worst
         if _ORDER[verdict.decision] < _ORDER[worst.decision]:
             worst = verdict
 
+    if started.writes:
+        # `time -o FILE` writes FILE, as `tee FILE` does (delta review of PR
+        # #75, H-B); the gate-state detector refuses it onto the allowlist.
+        worse(Verdict(ASK, f"{stem} writes {started.writes[0][:60]}, the file its option names"))
     for text in started.strings:
         verdict = _line_verdict(text, depth + 1)
         if verdict.decision == DENY:
@@ -3795,6 +3890,23 @@ def _judge_started(words: list[str], redirects: list, depth: int) -> Verdict | N
         if not started.joined and _UNTOLD.search(program[0]):
             worse(Verdict(ASK, f"the program {stem} starts ({program[0][:60]}) is only known "
                           "when it runs"))
+        own = list(program)
+        while own and _ASSIGNMENT.fullmatch(own[0]):
+            own.pop(0)
+        if not started.joined and own and not known_program(_basename(own[0])):
+            # A program no table knows, handed `-c`/`-e`/`--command STRING`,
+            # may be a shell: its string is judged as a command line (M-B).
+            for text in command_strings(own):
+                try:
+                    line = _line_verdict(text, depth + 1)
+                except _TooComplex:
+                    exhaust()
+                    return Verdict(ASK, RUNNERS_TOO_COMPLEX)
+                if line.decision == DENY:
+                    return line
+                if line.decision != ALLOW and line is not _UNLISTED:
+                    worse(Verdict(ASK, f"{inner} is handed a command line that asks: "
+                                  f"{line.reason or text[:60]}"))
         if verdict.decision == ALLOW or (verdict is _UNLISTED and not transparent):
             continue
         if transparent:
@@ -3844,6 +3956,45 @@ _ASKS_ON_ITS_OWN = frozenset({"tee", "awk", "gawk", "mawk", "nawk", "crontab", "
                               "powershell", "powershell.exe", "pwsh", "pwsh.exe", "cmd",
                               "cmd.exe", "wsl", "wsl.exe", "fish", "mksh", "ash", "yash", "csh",
                               "tcsh"})
+
+
+def known_program(stem: str) -> bool:
+    """Whether some table here, or in `protected_state`, knows the program
+    `stem`: one this check can say what it does with its arguments."""
+    from . import protected_state
+    return (stem in _ALLOW_STEMS or stem in _NEVER_AUTO_STEMS or stem in _INTERPRETERS
+            or stem in _ASKS_ON_ITS_OWN or stem in _ESCALATION or stem in _DESTRUCTION
+            or stem in READER_HAZARDS or stem in _NO_HAZARD or stem in _WRAPPER_OPTS
+            or stem in _RUNNER_SPECS or stem in _REMOTE_OPTS or stem in _WRAPPERS
+            or stem in protected_state._WRITERS or stem in protected_state._READERS
+            or stem in protected_state._INTERPRETERS or stem in protected_state._SHELLS)
+
+
+def command_strings(tokens: list[str]) -> list[str]:
+    """The strings a program is handed with `-c`, `-e` or `--command` (or
+    `--command=…`, or glued to `-c`/`-e` when they hold a space, which no
+    cluster of flags does) — what a shell this check does not know by name
+    would run as a command line (delta review of PR #75, M-B: behind a
+    runner, an unknown program is judged only as unknown, so `uv run myshell
+    -c '<an owner op>'` was the ALLOW of `uv`). Read only for a program no
+    table knows (`known_program`); options end at `--`. A value that is one
+    plain word naming no program a table knows is a value, not a command
+    line (`npx prettier -c src/`, `npx webpack -c webpack.config.js`)."""
+    out: list[str] = []
+    for i, token in enumerate(tokens[1:], 1):
+        if token == "--":
+            break
+        if token in ("-c", "-e", "--command") and i + 1 < len(tokens):
+            out.append(tokens[i + 1])
+        elif token.startswith("--command="):
+            out.append(token.split("=", 1)[1])
+        elif token[:2] in ("-c", "-e") and len(token) > 2 and any(c.isspace() for c in token):
+            out.append(token[2:])
+    return [text for text in out
+            if _COMMAND_CHARS.search(text) or known_program(_basename(text.strip()))]
+
+
+_COMMAND_CHARS = re.compile(r"[\s;|&$`<>(){}]")
 
 
 def _judge_plain(tokens: list[str], bare: list[str], redirects: list,
@@ -3943,6 +4094,17 @@ def _decide(command: str) -> Verdict:
     vex = _vex_line(raw)
     if vex.deny:
         return Verdict(DENY, vex.deny)
+    if "\x00" in raw:
+        # No shell can be handed a NUL byte (the line could not run as
+        # written), and the readers that resolve paths raise on one: too
+        # complex to judge — asked, never covered by an allowlist entry
+        # (`runners_unsure`, or `vex_uncoverable` when the vex reading said
+        # so first), always-ask in v2; never a ValueError out of the gate
+        # (delta review of PR #75, LOW).
+        if vex.unsure:
+            return Verdict(ASK, vex.unsure)
+        exhaust(NUL_TOO_COMPLEX)
+        return Verdict(ASK, NUL_TOO_COMPLEX)
 
     worst = _general_verdict(command)
     # A line that may run vexcom and cannot be told, or is too complex to
