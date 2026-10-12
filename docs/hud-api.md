@@ -1850,3 +1850,13 @@ against the **buffer** (Myers, bounded), only for a `text` or `safety`
 buffer — never an env file — and asks for HEAD's text again only when the
 status poll's `head` moves; the status is polled every 3 s per project while
 a tree or a gutter shows it. Rules in CLAUDE.md's ED-9 paragraph.
+
+## Additions 2026-10-12 (folding from the tree — ED-6)
+
+Editor plan §2.6, "Folding from the tree". No route and nothing on the wire
+changes: the fold queries (nvim-treesitter's `folds.scm`, vendored at ED-5's
+pin) are bundled text inside the syntax worker's own `/assets/` script, and
+folds are computed in that worker from the tree it already holds. No new
+`.wasm`, no policy change. `window.__hudSyntax.states()` gains `folds`: how
+many fold answers from the tree were handed to Monaco for that model (every
+other answer is indentation folding).

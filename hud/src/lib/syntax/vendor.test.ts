@@ -1,18 +1,24 @@
 // @vitest-environment node
-// What tree-sitter colour bundles (ED-5, editor plan §2.6): every query
-// compiles against its own grammar with the pinned runtime; the bundled
-// queries are exactly what the vendoring script makes of the vendored nvim
-// files; every shipped .wasm is the one the manifest names; every pin agrees.
+// What tree-sitter colour and folding bundle (ED-5, ED-6; editor plan §2.6):
+// every query (highlights, injections, folds) compiles against its own
+// grammar with the pinned runtime; the bundled queries are exactly what the
+// vendoring script makes of the vendored nvim files, each of which is the one
+// its manifest names; every shipped .wasm is the one its manifest names;
+// every pin agrees.
 
 import { createHash } from "node:crypto";
+import { readdirSync } from "node:fs";
 import { Query } from "web-tree-sitter";
 import { buildQuery } from "./translate";
 import { GRAMMARS, GRAMMAR_NAMES, RUNTIME, type GrammarName } from "./grammars";
 import { MARKDOWN, NVIM } from "./pins";
-import { bundledQuery, bytes, exists, language, read } from "./testkit";
+import { bundledQuery, bytes, exists, HUD, language, read } from "./testkit";
 import { typeOf } from "./legend";
 
-const KINDS = ["highlights", "injections"] as const;
+const KINDS = ["highlights", "injections", "folds"] as const;
+
+/** The one bundled query with no patterns: nvim has no folds for Markdown's inline grammar (never a host). */
+const EMPTY = new Set(["markdown_inline/folds"]);
 
 /** The capture names a query uses, outside its strings and comments. */
 function captureNames(query: string): Set<string> {
@@ -39,10 +45,13 @@ describe("every bundled query compiles against its bundled grammar", () => {
         const lang = await language(g);
         const text = bundledQuery(g, kind);
         const q = new Query(lang, text);
-        expect(q.patternCount()).toBeGreaterThan(0);
+        if (EMPTY.has(`${g}/${kind}`)) expect(q.patternCount()).toBe(0);
+        else expect(q.patternCount()).toBeGreaterThan(0);
         // Only predicates web-tree-sitter or the worker evaluate are left.
         const left = new Set(q.predicates.flat().map((p) => p.operator));
-        for (const op of left) expect(["has-ancestor?", "not-has-ancestor?", "has-parent?", "not-has-parent?", "offset!"]).toContain(op);
+        for (const op of left) expect(["has-ancestor?", "not-has-ancestor?", "has-parent?", "not-has-parent?", "offset!", "trim!"]).toContain(op);
+        // A folds query captures only what folds.ts reads.
+        if (kind === "folds") expect(q.captureNames.filter((n) => !n.startsWith("_"))).toEqual(q.patternCount() ? ["fold"] : []);
         q.delete();
       });
     }
@@ -106,6 +115,44 @@ describe("the bundled queries are the vendoring script's output, exactly", () =>
       }
     }
     expect([...missing]).toEqual([]);
+  });
+});
+
+describe("every vendored nvim-treesitter file is the one its manifest names (ED-6)", () => {
+  const manifest = JSON.parse(read("vendor/nvim-treesitter/manifest.json")) as {
+    repo: string; commit: string; files: Record<string, { bytes: number; sha256: string }>;
+  };
+  /** What is vendored: the LICENSE and `queries/<language>/<kind>.scm` (anything deeper or stray fails to list). */
+  const vendored = () => {
+    const root = `${HUD}vendor/nvim-treesitter`;
+    const out = readdirSync(root).filter((n) => n !== "queries" && n !== "manifest.json");
+    for (const lang of readdirSync(`${root}/queries`)) {
+      for (const f of readdirSync(`${root}/queries/${lang}`)) out.push(`queries/${lang}/${f}`);
+    }
+    return out.sort();
+  };
+
+  it("at the pinned commit, listing exactly the files vendored (a file added by hand, or dropped, fails)", () => {
+    expect(manifest).toMatchObject({ repo: NVIM.repo, commit: NVIM.commit });
+    expect(Object.keys(manifest.files).sort()).toEqual(vendored());
+  });
+
+  it("each file's size and SHA-256 as recorded", () => {
+    for (const [rel, want] of Object.entries(manifest.files)) {
+      const b = bytes(`vendor/nvim-treesitter/${rel}`);
+      expect(b.length, rel).toBe(want.bytes);
+      expect(sha256(b), rel).toBe(want.sha256);
+    }
+  });
+
+  it("folds.scm for every language a bundled folds query is built from, and none for the inline grammar", () => {
+    const report = JSON.parse(read("src/syntax/queries/dropped.json")) as Record<string, Record<string, { files: string[] }>>;
+    for (const g of GRAMMAR_NAMES) {
+      for (const f of report[g].folds.files) expect(manifest.files[`queries/${f}/folds.scm`], `${g}: ${f}`).toBeDefined();
+    }
+    expect(report.markdown_inline.folds.files).toEqual([]);
+    expect(manifest.files["queries/markdown_inline/folds.scm"]).toBeUndefined();
+    expect(Object.keys(manifest.files).filter((p) => p.endsWith("/folds.scm")).length).toBe(15);
   });
 });
 

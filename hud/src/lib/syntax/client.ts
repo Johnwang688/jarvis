@@ -9,6 +9,10 @@
 //    the provider asks the syntax worker and hands back its tokens. Monarch
 //    stays underneath: until the worker answers, and wherever it does not,
 //    Monarch's colour is what shows;
+//  - registers a `FoldingRangeProvider` for the same languages (ED-6): folds
+//    from nvim's `folds.scm` (lib/syntax/folds.ts), which Monaco's sticky
+//    scroll follows too; wherever tree-sitter is not serving a model it
+//    answers null, and Monaco folds by indentation as before;
 //  - sends each covered model's text to the worker the first time Monaco asks
 //    for its colour, then every content change, as `{offset, length, text}`
 //    with the model's version;
@@ -28,6 +32,7 @@
 import type * as MonacoNS from "monaco-editor/editor";
 import { BUDGETS, type BasicReason, type DocState } from "./budgets";
 import { COVERED_LANGUAGES, grammarFor, type GrammarName } from "./grammars";
+import type { FoldRange } from "./folds";
 import { legend } from "./legend";
 
 type Monaco = typeof MonacoNS;
@@ -47,6 +52,8 @@ export interface SyntaxStatus {
    * guard, which the worker's would otherwise hide).
    */
   opens: number;
+  /** Fold answers from the tree handed to Monaco (ED-6); every other answer is null: indentation. */
+  folds: number;
 }
 
 interface Track extends SyntaxStatus {
@@ -67,6 +74,16 @@ type Reply = {
   stale?: boolean;
 };
 
+type FoldsReply = {
+  req: number;
+  id: string;
+  version: number;
+  ranges: FoldRange[] | null;
+  state: DocState;
+  reason?: BasicReason;
+  stale?: boolean;
+};
+
 /**
  * A token request the worker has not answered in this long means the worker
  * is wedged (it answers in order, so every later request would wait too): it
@@ -83,6 +100,7 @@ export function applySyntax(monaco: Monaco, makeWorker: () => Worker) {
   const tracks = new Map<string, Track>();
   const byId = new Map<string, Track>();
   const waiting = new Map<number, (r: Reply | null) => void>();
+  const foldsWaiting = new Map<number, (r: FoldsReply | null) => void>();
   const probes = new Map<number, (r: { ok: boolean; error?: string }) => void>();
   const asks = new Map<number, (names: string[]) => void>();
   const changed = new monaco.Emitter<void>();
@@ -99,6 +117,8 @@ export function applySyntax(monaco: Monaco, makeWorker: () => Worker) {
     }
     waiting.forEach((resolve) => resolve(null));
     waiting.clear();
+    foldsWaiting.forEach((resolve) => resolve(null));
+    foldsWaiting.clear();
     probes.forEach((resolve) => resolve({ ok: false, error: "no syntax worker" }));
     probes.clear();
     asks.forEach((resolve) => resolve([]));
@@ -129,6 +149,12 @@ export function applySyntax(monaco: Monaco, makeWorker: () => Worker) {
       const resolve = waiting.get(m.req);
       waiting.delete(m.req);
       resolve?.(m as Reply);
+      const t = byId.get(m.id);
+      if (t && m.state === "basic" && t.state !== "basic") setState(t, "basic", m.reason);
+    } else if (m.t === "folds") {
+      const resolve = foldsWaiting.get(m.req);
+      foldsWaiting.delete(m.req);
+      resolve?.(m as FoldsReply);
       const t = byId.get(m.id);
       if (t && m.state === "basic" && t.state !== "basic") setState(t, "basic", m.reason);
     } else if (m.t === "state") {
@@ -175,7 +201,7 @@ export function applySyntax(monaco: Monaco, makeWorker: () => Worker) {
     const grammar = grammarFor(language, model.uri.path);
     if (!grammar) return null;
     const t: Track = {
-      id: `m${++ids}`, uri, language, grammar, model, state: "loading", served: 0, opens: 0, opened: false, subs: [],
+      id: `m${++ids}`, uri, language, grammar, model, state: "loading", served: 0, opens: 0, folds: 0, opened: false, subs: [],
     };
     tracks.set(uri, t);
     byId.set(t.id, t);
@@ -256,6 +282,56 @@ export function applySyntax(monaco: Monaco, makeWorker: () => Worker) {
   };
   for (const id of COVERED_LANGUAGES) monaco.languages.registerDocumentRangeSemanticTokensProvider(id, provider);
 
+  // ---- folds from the tree (ED-6) -----------------------------------------
+  //
+  // A `FoldingRangeProvider` for the same languages, so Monaco folds `{ … }`,
+  // functions and Markdown sections rather than indentation — and its sticky
+  // scroll, which reads folding providers when no language has an outline,
+  // follows the same ranges. **null means indentation**: Monaco's folding
+  // (and sticky scroll) fall back to the indentation provider whenever a
+  // provider answers null, so every way tree-sitter is not serving a model
+  // answers null — on Monarch (large file, slow parse or edits, grammar
+  // failed, no worker), a worker that never answers (the reply timeout, as
+  // for tokens), the folds query over its budget, or an answer for a version
+  // the model has moved past (Monaco has cancelled that request anyway).
+  // An uncovered language — `dotenv` among them — has no provider at all, so
+  // it never reaches the worker this way either.
+  const kinds = monaco.languages.FoldingRangeKind;
+  // Told whenever the colour is (a state change, a dead worker, a retried reparse).
+  const foldsChanged = new monaco.Emitter<MonacoNS.languages.FoldingRangeProvider>();
+  const foldProvider: MonacoNS.languages.FoldingRangeProvider = {
+    onDidChange: foldsChanged.event,
+    async provideFoldingRanges(model, _context, token) {
+      const t = track(model);
+      if (!t || t.state === "basic" || !t.opened) return null;
+      const req = ++seq;
+      const version = model.getVersionId();
+      const reply = new Promise<FoldsReply | null>((resolve) => {
+        foldsWaiting.set(req, resolve);
+        setTimeout(() => {
+          if (!foldsWaiting.delete(req)) return;
+          resolve(null);
+          fail(); // no answer: the worker is wedged, as for tokens
+        }, REPLY_TIMEOUT_MS);
+      });
+      if (!post({ t: "folds", id: t.id, req, version })) {
+        foldsWaiting.delete(req);
+        return null;
+      }
+      const r = await reply;
+      if (!r || model.isDisposed() || token.isCancellationRequested) return null;
+      if (r.state === "basic" || !r.ranges || model.getVersionId() !== r.version) return null;
+      t.folds++;
+      return r.ranges.map((f) => ({
+        start: f.start,
+        end: f.end,
+        ...(f.kind === "comment" ? { kind: kinds.Comment } : f.kind === "imports" ? { kind: kinds.Imports } : {}),
+      }));
+    },
+  };
+  changed.event(() => foldsChanged.fire(foldProvider));
+  for (const id of COVERED_LANGUAGES) monaco.languages.registerFoldingRangeProvider(id, foldProvider);
+
   // ---- every editor: semantic colour on, and the status corner -----------
 
   const enable = (ed: { updateOptions(o: object): void }) => {
@@ -278,8 +354,8 @@ export function applySyntax(monaco: Monaco, makeWorker: () => Worker) {
   (window as any).__hudSyntax = {
     /** Every model tree-sitter has been asked about: its grammar and state. */
     states: (): SyntaxStatus[] =>
-      [...tracks.values()].map(({ uri, language, grammar, state, reason, served, opens }) =>
-        ({ uri, language, grammar, state, reason, served, opens })),
+      [...tracks.values()].map(({ uri, language, grammar, state, reason, served, opens, folds }) =>
+        ({ uri, language, grammar, state, reason, served, opens, folds })),
     /**
      * The worker's loader asked to fetch `url`: a shipped grammar's URL loads,
      * any other is refused before a request is made.
